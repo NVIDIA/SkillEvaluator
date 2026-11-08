@@ -68,6 +68,18 @@ All notable changes to SkillEvaluator are documented in this file.
   confirm a guess for the masked part. Redaction now removes a digest that no
   longer matches the reported value.
 
+- Tier 3 HTML evaluator cards now say when a judge metric's lift left out cases
+  whose arms were scored by different judge models, for example after a judge
+  fallback in one arm. The arm scores keep those cases, so a card could show
+  Baseline 0.20 and With skill 0.50 next to a -0.40 lift with nothing
+  explaining the gap. The card now notes `Lift leaves out 1 case scored by
+  different judge models; the arm scores include it.`, or says that no
+  comparable result remains when the card has no lift, and labels those cases
+  `Left out of lift: different judge models` in its per-trial evidence. In the
+  canonical JSON the evaluator records the count in `lift_excluded_cases`, its
+  card lists the cases in `comparison_basis`, and the matching evidence entries
+  carry `comparison_excluded: true`. Scores and lift are unchanged.
+
 - Tier 2 context deduplication now numbers `SHARED CONTENT n` blocks from the
   most repeated text, ties in first-seen order, instead of in first-seen order
   alone. In 0.8.0 a text repeated hundreds of times could get block 10 or later,
@@ -109,17 +121,6 @@ All notable changes to SkillEvaluator are documented in this file.
   no whitespace after its limit now keeps a masked prefix, cut at punctuation
   such as `,` or `}` but never inside a URL's user info or host, so `Error: `
   followed by minified JSON no longer arrives as `Error: ...<truncated>`.
-
-- Tier 3 HTML evaluator cards now say when a judge metric's lift left out cases
-  whose arms were scored by different judge models, for example after a judge
-  fallback in one arm. The arm scores keep those cases, so a card could show
-  Baseline 0.20 and With skill 0.50 next to a -0.40 lift with nothing
-  explaining the gap. The card now notes `Lift leaves out 1 case scored by
-  different judge models; the arm scores include it.` and labels those cases
-  `Left out of lift: different judge models` in its per-trial evidence. In the
-  canonical JSON the evaluator records the count in `lift_excluded_cases`, its
-  card lists the cases in `comparison_basis`, and the matching evidence entries
-  carry `comparison_excluded: true`. Scores and lift are unchanged.
 
 - Tier 3 security grading again warns about network exfiltration, lowering
   the Security score to 0.5, for an HTTPie method word after a capitalized

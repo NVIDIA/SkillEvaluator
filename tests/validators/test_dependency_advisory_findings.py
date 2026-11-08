@@ -254,6 +254,37 @@ def test_policy_overlay_can_change_one_advisory(tmp_path, pip_audit):
     assert overlaid.findings[0].severity == Severity.LOW
 
 
+def test_policy_overlay_keeps_fail_on_medium_for_advisories_it_does_not_name(tmp_path, pip_audit, safety):
+    """Rebuilding a result after an override still fails on medium pip-audit advisories, not on Safety's."""
+    advisories, _ = pip_audit
+    advisories["pyyaml"] = [PYYAML_ADVISORY]
+    advisories["idna"] = [{"id": "GHSA-med-1", "fix_versions": ["3.7"], "severity": "medium"}]
+    safety["report"] = {
+        "vulnerabilities": [
+            {"package_name": "idna", "analyzed_version": "3.6", "vulnerability_id": "70001", "severity": "medium"}
+        ]
+    }
+    skill = _skill(tmp_path, {"requirements.txt": "idna==3.6\npyyaml==5.3\n"})
+    result = DependencySecurityValidator(fail_on_medium=True).validate(skill)
+    medium = "[DEPENDENCY-MEDIUM] idna==3.6: GHSA-med-1 -> upgrade to 3.7 in requirements.txt:1"
+    safety_medium = "[DEPENDENCY-MEDIUM] idna: SAFETY-70001 in requirements.txt:1"
+    assert not result.passed
+    assert medium in result.errors and safety_medium in result.warnings
+
+    policy = ValidationPolicy(profile="reviewed", severity_overrides={"DEPENDENCY.PYSEC-2020-176": Severity.LOW})
+    (overlaid,) = apply_policy([result], policy)
+
+    assert not overlaid.passed
+    assert overlaid.errors == [medium]
+    assert overlaid.warnings == [
+        "[DEPENDENCY-LOW] pyyaml==5.3: PYSEC-2020-176 -> upgrade to 5.4 in requirements.txt:2",
+        safety_medium,
+    ]
+    by_id = {finding.check_name: finding.metadata for finding in overlaid.findings}
+    assert by_id["GHSA-med-1"]["fail_on_medium"] is True
+    assert "fail_on_medium" not in by_id["SAFETY-70001"]
+
+
 def test_policy_overlay_keeps_the_incomplete_reason(tmp_path, pip_audit):
     """Rebuilding a result from changed findings keeps warnings that no finding mirrors."""
     advisories, _ = pip_audit

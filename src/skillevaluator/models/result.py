@@ -525,6 +525,8 @@ class ValidationResult:
         Call after mutating finding severities (e.g. LLM verification downgrade)
         so that result state is consistent with the actual finding objects.
         Independent gate failures remain errors regardless of those severities.
+        HIGH and CRITICAL findings are errors, and so is a MEDIUM finding whose
+        metadata sets ``fail_on_medium`` (a dependency audit with that option).
         """
         self.errors.clear()
         self.warnings.clear()
@@ -540,7 +542,8 @@ class ValidationResult:
             )
             self.summary.tally_severity(sev)
 
-            is_error = sev in (Severity.CRITICAL, Severity.HIGH)
+            fail_on_medium = isinstance(finding.metadata, dict) and finding.metadata.get("fail_on_medium") is True
+            is_error = sev.is_error(fail_on_medium=fail_on_medium)
             legacy_msg = finding.to_legacy_string()
             if is_error:
                 self.errors.append(legacy_msg)

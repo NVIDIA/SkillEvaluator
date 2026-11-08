@@ -469,7 +469,10 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
       `affected_range` (Safety only; `null` for pip-audit), `fixed_versions`,
       and `aliases`.
 
-    A `high` or `critical` advisory fails the run. Safety's severity is its
+    A `high` or `critical` advisory fails the run. A Python caller that builds
+    `DependencySecurityValidator(fail_on_medium=True)` also fails on a `medium`
+    pip-audit advisory; those findings record `fail_on_medium: true` in their
+    metadata, so a policy overlay keeps that rule. Safety's severity is its
     level word or, when Safety runs with an API key, its CVSS object: the
     CVSS v3 level, then the v3 score, then the v2 score and level. A Safety
     advisory with none of these is `medium`. When pip-audit already reported

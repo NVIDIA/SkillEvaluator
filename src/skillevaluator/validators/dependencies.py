@@ -106,7 +106,10 @@ class DependencySecurityValidator(ValidatorBase):
 
         Args:
             use_safety: Run Safety check for additional coverage
-            fail_on_medium: Treat MEDIUM severity as errors
+            fail_on_medium: Treat MEDIUM pip-audit advisories as errors. Safety
+                advisories stay supplementary. Each pip-audit finding records
+                ``fail_on_medium`` in its metadata, so a policy overlay that
+                rebuilds the result keeps this gate.
         """
         self.use_safety = use_safety
         self.fail_on_medium = fail_on_medium
@@ -870,6 +873,22 @@ class DependencySecurityValidator(ValidatorBase):
             return
 
         declaration = self._declared_pin(declared, pkg_name, pkg_version)
+        metadata = self._advisory_metadata(
+            pkg_name=pkg_name,
+            pkg_version=pkg_version,
+            advisory_id=vuln_id,
+            advisory_source="pip-audit",
+            # pip-audit JSON names fixed versions, not the affected range.
+            affected_range=None,
+            fix_versions=fix_versions,
+            aliases=aliases,
+            declaration=declaration,
+            source=source,
+        )
+        if self.fail_on_medium:
+            # Recorded on the finding, so a policy overlay that rebuilds the
+            # result (recalculate_from_findings) still fails a medium advisory.
+            metadata["fail_on_medium"] = True
         result.add_finding(
             Finding(
                 category="DEPENDENCY",
@@ -879,18 +898,7 @@ class DependencySecurityValidator(ValidatorBase):
                 file_path=source,
                 line_number=declaration.line_number if declaration else None,
                 suggestion=self._upgrade_suggestion(pkg_name, fix_versions),
-                metadata=self._advisory_metadata(
-                    pkg_name=pkg_name,
-                    pkg_version=pkg_version,
-                    advisory_id=vuln_id,
-                    advisory_source="pip-audit",
-                    # pip-audit JSON names fixed versions, not the affected range.
-                    affected_range=None,
-                    fix_versions=fix_versions,
-                    aliases=aliases,
-                    declaration=declaration,
-                    source=source,
-                ),
+                metadata=metadata,
             ),
             fail_on_medium=self.fail_on_medium,
         )

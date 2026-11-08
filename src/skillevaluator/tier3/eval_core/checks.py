@@ -2662,7 +2662,8 @@ _FINDING_EVIDENCE_CUT_URL_RE = re.compile(
 # keeps the two in step). The separator accepts shell, JSON, JSON-escaped and
 # Python subscript forms. Any Authorization scheme other than Bearer, Basic,
 # Token and Digest (ApiKey, Bot, SSWS, ...) is masked with its value, up to the
-# closing quote or the end of the line.
+# closing quote or the end of the line. An unquoted Authorization value is
+# masked to the end of its word instead (see _mask_authorization_headers).
 _FINDING_EVIDENCE_HEADER_SEPARATOR = r"\\?[\"']?\]?[ \t]{0,8}[:=][ \t]{0,8}(?:[bfru]{0,2}\\?[\"'])?"
 _FINDING_EVIDENCE_DIGEST_AUTH_HEADER_RE = re.compile(
     r"(\bauthorization" + _FINDING_EVIDENCE_HEADER_SEPARATOR + r"digest[ \t]{1,8})[^'`\r\n]{1,512}",
@@ -2675,6 +2676,16 @@ _FINDING_EVIDENCE_AUTH_HEADER_RE = re.compile(
     r"[^\s'\"`,;\\][^'\"`\r\n\\]*",
     re.IGNORECASE,
 )
+# An unquoted Authorization value ("curl -H Authorization:$TOKEN -d @.env URL",
+# HTTPie "Authorization:$TOKEN") is one shell word, which may hold escaped
+# spaces ("Authorization:Bearer\ VALUE"), and the command after it carries no
+# header. After any scheme other than Bearer, Basic, Token and Digest, a word
+# of letters such as "SSWS" or "Klaviyo-API-Key" also takes the next word, its
+# credential, as prose writes it ("Authorization: SSWS VALUE").
+_FINDING_EVIDENCE_UNQUOTED_WORD_RE = re.compile(r"(?:\\.|[^\s'\"`;|&\\])+")
+_FINDING_EVIDENCE_KNOWN_SCHEME_RE = re.compile(r"(?:bearer|basic|token|digest)[ \t]+$", re.IGNORECASE)
+_FINDING_EVIDENCE_SCHEME_WORD_RE = re.compile(r"[a-z]{2,24}(?:-[a-z0-9]{1,24}){0,4}", re.IGNORECASE)
+_FINDING_EVIDENCE_SCHEME_CREDENTIAL_RE = re.compile(r"[ \t]{1,8}(?![-<>])(?:\\.|[^\s'\"`;|&\\])+")
 _FINDING_EVIDENCE_KEY_HEADER_RE = re.compile(
     r"(\b(?:api-key|auth-token|access-token|private-token)" + _FINDING_EVIDENCE_HEADER_SEPARATOR + r")"
     r"[^\s'\"`,;\\]+",
@@ -2793,9 +2804,9 @@ def _redact_finding_evidence(text: Any, limit: int = 500) -> str:
     # its first word; <redacted> is one word to every rule.
     redacted = _redact_network_evidence(redacted).replace("[redacted secret exposure]", "<redacted>")
     redacted = _FINDING_EVIDENCE_URL_USERINFO_RE.sub(r"\1<redacted>@", redacted)
+    redacted = _FINDING_EVIDENCE_DIGEST_AUTH_HEADER_RE.sub(r"\1<redacted>", redacted)
+    redacted = _mask_authorization_headers(redacted)
     for pattern in (
-        _FINDING_EVIDENCE_DIGEST_AUTH_HEADER_RE,
-        _FINDING_EVIDENCE_AUTH_HEADER_RE,
         _FINDING_EVIDENCE_KEY_HEADER_RE,
         _FINDING_EVIDENCE_COOKIE_HEADER_RE,
         _FINDING_EVIDENCE_CREDENTIAL_FLAG_RE,
@@ -2812,6 +2823,29 @@ def _redact_finding_evidence(text: Any, limit: int = 500) -> str:
     if cut:
         redacted += _FINDING_EVIDENCE_TRUNCATED
     return redacted[:limit]
+
+
+def _mask_authorization_headers(text: str) -> str:
+    """Mask Authorization header values: to the closing quote when quoted, else one word (two after a scheme)."""
+    parts: list[str] = []
+    pos = 0
+    while (match := _FINDING_EVIDENCE_AUTH_HEADER_RE.search(text, pos)) is not None:
+        head = match.group(1)
+        end = match.end()
+        if not ((match.start() and text[match.start() - 1] in "'\"") or "'" in head or '"' in head):
+            word = _FINDING_EVIDENCE_UNQUOTED_WORD_RE.match(text, match.end(1))
+            if word is not None:
+                end = word.end()
+                if not _FINDING_EVIDENCE_KNOWN_SCHEME_RE.search(head) and _FINDING_EVIDENCE_SCHEME_WORD_RE.fullmatch(
+                    word.group()
+                ):
+                    credential = _FINDING_EVIDENCE_SCHEME_CREDENTIAL_RE.match(text, end)
+                    end = credential.end() if credential else end
+        parts.append(text[pos : match.end(1)])
+        parts.append("<redacted>")
+        pos = end
+    parts.append(text[pos:])
+    return "".join(parts)
 
 
 def _mask_credential_assignments(text: str) -> str:

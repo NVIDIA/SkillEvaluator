@@ -256,14 +256,55 @@ def _passing_dimensions(**overrides: object) -> dict[str, object]:
     return {**dict.fromkeys(DIMENSION_MAPPING, 0.9), **overrides}
 
 
-@pytest.mark.parametrize("security", [0.3, 0.0])
-def test_agent_quality_failure_takes_precedence_over_missing_dimension(security: float) -> None:
+def _missing_correctness_agent(*, security: float) -> dict:
+    """Return a succeeded agent with no Correctness dimension, as when no case defines ground_truth."""
     scores = _passing_dimensions(security=security)
     del scores["correctness"]
-    agent = _dimension_agent(**scores)
+    return _dimension_agent(**scores)
+
+
+@pytest.mark.parametrize("security", [0.3, 0.0])
+def test_agent_quality_failure_takes_precedence_over_missing_dimension(security: float) -> None:
+    agent = _missing_correctness_agent(security=security)
 
     assert _agent_quality_verdict(agent) == VERDICT_FAIL
     assert _overall_verdict_from_agents({"codex": agent}) == VERDICT_FAIL
+
+
+@pytest.mark.parametrize(
+    ("security", "expected"),
+    [
+        pytest.param(DIMENSION_VERDICT_NEUTRAL_THRESHOLD, VERDICT_NEUTRAL, id="at-threshold"),
+        pytest.param(DIMENSION_VERDICT_NEUTRAL_THRESHOLD - 1e-4, VERDICT_FAIL, id="just-below"),
+    ],
+)
+def test_missing_dimension_keeps_the_neutral_threshold_exclusive(security: float, expected: str) -> None:
+    agent = _missing_correctness_agent(security=security)
+
+    assert _agent_quality_verdict(agent) == expected
+    assert _overall_verdict_from_agents({"codex": agent}) == expected
+
+
+@pytest.mark.parametrize(
+    ("peer_scores", "expected"),
+    [
+        pytest.param(_passing_dimensions(security=0.45), VERDICT_NEUTRAL, id="neutral-peer"),
+        pytest.param(_passing_dimensions(security=0.1), VERDICT_FAIL, id="failing-peer"),
+        pytest.param(_passing_dimensions(), VERDICT_PASS, id="passing-peer"),
+    ],
+)
+def test_missing_dimension_failure_combines_with_other_agents(peer_scores: dict[str, object], expected: str) -> None:
+    agents = {"codex": _missing_correctness_agent(security=0.0), "claude-code": _dimension_agent(**peer_scores)}
+
+    assert _overall_verdict_from_agents(agents) == expected
+
+
+def test_missing_dimension_failure_beside_a_never_activated_agent_fails_the_run() -> None:
+    never_activated = _dimension_agent(**_passing_dimensions())
+    never_activated["skill_activation"] = {"status": "never_activated"}
+    agents = {"codex": _missing_correctness_agent(security=0.0), "claude-code": never_activated}
+
+    assert _overall_verdict_from_agents(agents) == VERDICT_FAIL
 
 
 @pytest.mark.parametrize("correctness", [None, math.nan, math.inf, True])
@@ -286,9 +327,7 @@ def test_missing_dimension_never_passes(correctness: object) -> None:
 
 
 def test_never_activated_agent_stays_inconclusive_beside_a_failing_dimension() -> None:
-    scores = _passing_dimensions(security=0.0)
-    del scores["correctness"]
-    agent = _dimension_agent(**scores)
+    agent = _missing_correctness_agent(security=0.0)
     agent["skill_activation"] = {"status": "never_activated"}
 
     assert _agent_quality_verdict(agent) == VERDICT_INCONCLUSIVE

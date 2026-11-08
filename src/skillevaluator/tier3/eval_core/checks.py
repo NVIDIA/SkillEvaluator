@@ -2642,6 +2642,7 @@ def _security_finding(
 # ends at its closing quote or at the end of its line.
 _FINDING_EVIDENCE_SCAN_CHARS = 2000
 _FINDING_EVIDENCE_TRUNCATED = "<truncated>"
+_FINDING_EVIDENCE_PRIVATE_KEY_MARKER = "<redacted private key>"
 _FINDING_EVIDENCE_PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN [A-Z ]{0,32}PRIVATE KEY(?: BLOCK)?-----.*?"
     r"(?:-----END [A-Z ]{0,32}PRIVATE KEY(?: BLOCK)?-----|\Z)",
@@ -2684,8 +2685,11 @@ _FINDING_EVIDENCE_COOKIE_HEADER_RE = re.compile(
     r"[^\s'\"`,;\\]+(?:;[ \t]{0,8}[^\s'\"`,;\\]+){0,64}",
     re.IGNORECASE,
 )
-# A flag value: quoted (to its closing quote or the end of the line) or one word.
-_FINDING_EVIDENCE_FLAG_VALUE = r"(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^\s'\"`]+)"
+# A flag value: quoted (to its closing quote or the end of the line) or one
+# word. A masked private key is one value, although its marker holds spaces.
+_FINDING_EVIDENCE_FLAG_VALUE = (
+    "(?:" + _FINDING_EVIDENCE_PRIVATE_KEY_MARKER + r"|\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^\s'\"`]+)"
+)
 # Any long flag whose name holds a credential word ("--password", "--db-password",
 # "--client-secret", "--github-token", "--oauth2-bearer", "--cookie"), and the
 # short "-password", "-token" and "-secret" forms. A space-separated value that
@@ -2757,7 +2761,8 @@ _FINDING_EVIDENCE_SECRET_NAME_RE = re.compile(
     r"secret|passw(?:or)?d|passphrase|private[_-]?key|credential", re.IGNORECASE
 )
 _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE = re.compile(
-    r"\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^\s'\"`;|&]+"
+    _FINDING_EVIDENCE_PRIVATE_KEY_MARKER
+    + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^\s'\"`;|&]+"
 )
 # A word stuck to the quote that closes a string around an empty assignment
 # ('"PASSWORD="hunter2' is PASSWORD=hunter2 to a shell).
@@ -2783,8 +2788,10 @@ def _redact_finding_evidence(text: Any, limit: int = 500) -> str:
             end -= 1
         url = _FINDING_EVIDENCE_CUT_URL_RE.match(raw, end)
         raw = raw[: url.end() if url else end]
-    redacted = _FINDING_EVIDENCE_PRIVATE_KEY_RE.sub("<redacted private key>", raw)
-    redacted = _redact_network_evidence(redacted)
+    redacted = _FINDING_EVIDENCE_PRIVATE_KEY_RE.sub(_FINDING_EVIDENCE_PRIVATE_KEY_MARKER, raw)
+    # The network marker holds spaces, so a value rule below would mask only
+    # its first word; <redacted> is one word to every rule.
+    redacted = _redact_network_evidence(redacted).replace("[redacted secret exposure]", "<redacted>")
     redacted = _FINDING_EVIDENCE_URL_USERINFO_RE.sub(r"\1<redacted>@", redacted)
     for pattern in (
         _FINDING_EVIDENCE_DIGEST_AUTH_HEADER_RE,

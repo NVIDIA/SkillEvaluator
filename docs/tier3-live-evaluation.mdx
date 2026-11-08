@@ -1042,8 +1042,10 @@ Security findings keep credentials out of their `evidence`, which is saved in
 the verifier's `skill_evaluator_reward.json`, the collected results, and the
 reports. A sensitive-path or sensitive-file-write finding records only the
 protected entry it matched, such as `~/.bashrc` or `/root/.ssh`, never the
-command or tool input. The without-skill baseline comparison therefore matches
-these findings by entry: a with-skill write to `~/.bashrc` is attributed to the
+command or tool input. When the text holds more than one entry, the longest
+wins, so a write to `/etc/profile.d/npm.sh` records `/etc/profile.d`, not
+`/etc/profile`. The without-skill baseline comparison therefore matches these
+findings by entry: a with-skill write to `~/.bashrc` is attributed to the
 baseline prompt or environment when the baseline run also wrote to
 `~/.bashrc`, whatever each command wrote there.
 
@@ -1057,22 +1059,28 @@ best effort over these forms:
 - `Authorization` header values (the `Bearer`, `Basic`, `Token`, or `Digest`
   word stays, and any other scheme, such as `ApiKey` or `SSWS`, is masked with
   its value), API-key and token headers such as `X-API-Key`, and `Cookie`
-  header values;
+  header values. A quoted header value is masked to its closing quote; an
+  unquoted one, as in `curl -H Authorization:$TOKEN -d @.env URL`, is masked to
+  the end of its word, so the rest of the command stays readable;
 - the values of long flags whose name holds a credential word, such as
-  `--password`, `--token`, `--client-secret`, `--db-password`, or `--cookie`;
+  `--password`, `--token`, `--client-secret`, `--db-password`, or `--cookie`,
+  and a `curl -b name=value` cookie (`-b cookies.txt` is left alone);
 - a `-u`, `-U`, `--user`, or `--proxy-user` value that holds a colon, such as
   `user:password` or an API key with an empty password (`KEY:`), also attached
-  (`-uuser:password`); `python -u` and `pip --user` are left alone;
-- `-p` after a `login` command (`docker login -u bot -p ...`) or `sshpass`, and
-  attached to a MySQL client (`mysql -p...`); `mkdir -p` and `ssh -p 2222` are
-  left alone;
-- credentials set with `aws configure set`, and a `.netrc` `password` value;
+  (`-uuser:password`); `python -u`, `pip --user`, and a URL such as
+  `pip install -U git+https://...` are left alone;
+- `-p` after a login subcommand (`docker login -u bot -p ...`, also attached as
+  `-p...`) or `sshpass`, and attached to a MySQL client (`mysql -p...`);
+  `mkdir -p`, `ssh -p 2222`, and `git log --author=login -p` are left alone;
+- credentials set with `aws configure set`, and a `.netrc` `password` value,
+  also when the entry spans lines in a here-document or a `printf` string;
 - values assigned to a credential name, such as `_authToken=...`,
-  `aws_secret_access_key = ...`, or `"password": "..."`, also JSON-escaped inside
-  a shell string. A name that ends in `_URL`, `_DIR`, `_PATH`, `_FILE`, or a
-  similar location word keeps its value unless it also names a secret or
-  password, and `grep "token=" ...` keeps the rest of the command, because that
-  quote closes the pattern;
+  `aws_secret_access_key = ...`, `"password": "..."`, or `DB_PASS=...`, also
+  JSON-escaped inside a shell string, and `password= ...` inside a quoted
+  string. A name that ends in `_URL`, `_DIR`, `_PATH`, `_FILE`, or a similar
+  location word keeps its value unless it also names a secret or password, and
+  `grep "token=" ...` keeps the rest of the command, because that quote closes
+  the pattern;
 - `ghp_`-style, `github_pat_`, `glpat-`, `npm_`, `xox*-`, and `hf_` tokens.
 
 A credential in another form, such as a `.pgpass` line, can still appear. A

@@ -2634,12 +2634,13 @@ def _security_finding(
 # masked first. This is a best effort over the forms below: private key blocks
 # and the key shapes _redact_network_evidence masks; URL userinfo; the values
 # of Authorization, API-key, token and Cookie headers; credential flags such as
-# --client-secret, -u with user:password, -p after a login command or sshpass,
-# and an attached mysql -p; credentials set with aws configure set; .netrc
-# passwords; values assigned to a credential name (_authToken=..., api_key: ...);
-# and common token prefixes. Only the first _FINDING_EVIDENCE_SCAN_CHARS
-# characters are scanned, which bounds the cost of every pattern. A quoted value
-# ends at its closing quote or at the end of its line.
+# --client-secret, -u with user:password, -p after a login subcommand or
+# sshpass, an attached mysql -p, and curl's -b NAME=VALUE; credentials set with
+# aws configure set; .netrc passwords; values assigned to a credential name
+# (_authToken=..., api_key: ..., DB_PASS=...); and common token prefixes. Only
+# the first _FINDING_EVIDENCE_SCAN_CHARS characters are scanned, and each pass
+# reads that text in linear time. A quoted value ends at its closing quote or
+# at the end of its line.
 _FINDING_EVIDENCE_SCAN_CHARS = 2000
 _FINDING_EVIDENCE_TRUNCATED = "<truncated>"
 _FINDING_EVIDENCE_PRIVATE_KEY_MARKER = "<redacted private key>"

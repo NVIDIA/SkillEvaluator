@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ from skillevaluator.tier3 import case_summary, commands
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 
 RUN_ID = "20261027_120000"
+HARBOR_JOB_URL = "https://harbor.example.test/jobs/run"
 SAVED_VERDICT = "per-case result: skill hurts (saved by the run)."
 # What a run saves since the case findings exist: the per-case verdict leads the conclusions.
 SAVED_FEEDBACK = {
@@ -111,7 +113,12 @@ def llm_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 
 def test_view_reuses_saved_feedback_when_report_is_missing(tmp_path: Path, llm_calls: list[str]) -> None:
-    skill, results_root, run = _completed_run(tmp_path, tier3_feedback=SAVED_FEEDBACK)
+    skill, results_root, run = _completed_run(
+        tmp_path,
+        tier3_feedback=SAVED_FEEDBACK,
+        duration_seconds=4321.5,
+        harbor_viewer={"job_url": HARBOR_JOB_URL},
+    )
     saved_result = (run / "result.json").read_bytes()
     saved_fixes = (run / "what_to_fix.json").read_bytes()
 
@@ -126,6 +133,9 @@ def test_view_reuses_saved_feedback_when_report_is_missing(tmp_path: Path, llm_c
     assert html.count("per-case result:") == html.count(SAVED_VERDICT)
     assert "Fresh judge conclusion" not in html
     assert "Fresh fix from a second pass" not in html
+    # result.json is the report's engine result, so its runtime and Harbor links come back too.
+    assert re.search(r'"runtime_seconds":\s*4321\.5', html)
+    assert f'href="{HARBOR_JOB_URL}"' in html
     # Rebuilding the report writes nothing else into the run.
     assert (run / "result.json").read_bytes() == saved_result
     assert (run / "what_to_fix.json").read_bytes() == saved_fixes

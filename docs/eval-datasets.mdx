@@ -162,7 +162,10 @@ top of the selected grounding source.
 
 Generated datasets include a `generation` record with the mode, grounding
 source, relative input paths and SHA-256 digests, generation time, and review
-state. Cases whose authored expectations conflict with an observed answer, or
+state. The mode is `llm`, `template_requested`, or `template_fallback`.
+Fallback records include a safe reason. Trace-refined datasets keep their
+selected grounding and set `refined: true`. Autopilot records `llm` or
+`template_fallback` with `skill` grounding. Cases whose authored expectations conflict with an observed answer, or
 whose authored behavior is not present in the trace, include
 `review.status: needs_review` and reasons. A proposed ground truth based on an
 observed answer is also flagged for review; inspect these cases before relying

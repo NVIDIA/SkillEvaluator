@@ -92,6 +92,7 @@ from skillevaluator.reporting.tier3_scope import completed_agent_result, validat
 from skillevaluator.reporting.trial_charts import steps_by_case_chart
 from skillevaluator.skillspector_provenance import skillspector_provenance_records
 from skillevaluator.source_identity import recorded_evaluated_source
+from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
@@ -2995,6 +2996,9 @@ class HTMLReporter(ReporterBase):
         tier2_summary = self._compute_tier_summary(tier2_results, presentation=context.tiers[2])
         tier3_summary = self._compute_tier_summary(tier3_results, presentation=context.tiers[3])
         tier3_preview, tier3_preview_notice = _bounded_tier3_preview(tier3_data)
+        tier3_dataset_provenance_line, tier3_dataset_provenance_warning = dataset_provenance_display(
+            tier3_preview.get("dataset_provenance") if isinstance(tier3_preview, dict) else None
+        )
         tier3_canonical_data, tier3_canonical_encoding = _canonical_tier3_embed(tier3_data)
         tier3_truncation = tier3_data.get("report_truncation", {}) if isinstance(tier3_data, dict) else {}
 
@@ -3334,6 +3338,8 @@ class HTMLReporter(ReporterBase):
             content_label_plural=cl + "s",
             quality_scores=quality_scores_by_skill,
             tier3=tier3_preview,
+            tier3_dataset_provenance_line=tier3_dataset_provenance_line,
+            tier3_dataset_provenance_warning=tier3_dataset_provenance_warning,
             chart_assets=_load_chart_assets,
             tier3_canonical_data=tier3_canonical_data,
             tier3_canonical_encoding=tier3_canonical_encoding,

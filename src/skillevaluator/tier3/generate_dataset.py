@@ -424,7 +424,8 @@ async def _generate_with_llm(
     except ProviderConfigurationError as exc:
         if not fallback_to_template:
             raise RuntimeError("LLM dataset generation requires a configured provider") from exc
-        skill["_generation_mode"] = "template"
+        skill["_generation_mode"] = "template_fallback"
+        skill["_generation_fallback_reason"] = "public LLM provider is not configured"
         print("Public LLM provider is not configured. Using deterministic template mode.")
         return _generate_full(skill) if full else _generate_simple(skill)
 
@@ -581,12 +582,18 @@ No other fields."""
         diagnostic = llm_failure_diagnostic(exc)
         if not fallback_to_template:
             raise DatasetGenerationError(f"LLM dataset generation failed: {diagnostic}") from exc
-        skill["_generation_mode"] = "template"
+        skill["_generation_mode"] = "template_fallback"
+        skill["_generation_fallback_reason"] = diagnostic
         print(f"Warning: LLM generation failed: {diagnostic} Using deterministic template mode.")
         return _generate_full(skill) if full else _generate_simple(skill)
 
 
-def generate_one_case(skill_path: Path, *, use_llm: bool) -> Path:
+def generate_one_case(
+    skill_path: Path,
+    *,
+    use_llm: bool,
+    fallback_reason: str | None = None,
+) -> Path:
     """Create exactly one new eval case without overwriting an existing dataset."""
     skill_path = skill_path.resolve()
     evals_dir = skill_path / "evals"
@@ -596,16 +603,27 @@ def generate_one_case(skill_path: Path, *, use_llm: bool) -> Path:
     if output_path.exists():
         raise FileExistsError(f"Dataset already exists: {output_path}")
     skill = _parse_skill(skill_path)
-    cases = (
-        asyncio.run(_generate_with_llm(skill, fallback_to_template=False, announce_provider=False))
-        if use_llm
-        else _generate_simple(skill)
-    )
+    if use_llm:
+        cases = asyncio.run(_generate_with_llm(skill, fallback_to_template=False, announce_provider=False))
+        skill["_generation_mode"] = "llm"
+    else:
+        cases = _generate_simple(skill)
+        skill["_generation_mode"] = "template_fallback"
+        skill["_generation_fallback_reason"] = fallback_reason or "LLM generation was unavailable"
     if len(cases) != 1:
         raise RuntimeError("one-case generation did not return exactly one case")
+    generation = _generation_record(
+        skill_path,
+        mode=str(skill["_generation_mode"]),
+        grounding="skill",
+        skill=skill,
+        prompt_path=None,
+        trajectory_paths={},
+        cases=cases,
+    )
     evals_dir.mkdir(parents=True, exist_ok=True)
     with output_path.open("x", encoding="utf-8") as output:
-        json.dump(_to_agentskills_dataset(skill["name"], cases), output, indent=2, ensure_ascii=False)
+        json.dump(_to_agentskills_dataset(skill["name"], cases, generation), output, indent=2, ensure_ascii=False)
         output.write("\n")
     return output_path
 
@@ -1181,13 +1199,19 @@ def _generation_record(
         if record is not None:
             inputs.append(record)
     review_state = "needs_review" if any(_case_needs_review(case) for case in cases) else "unreviewed"
-    return {
+    record = {
         "mode": mode,
         "grounding": grounding,
         "inputs": inputs,
         "generated_at": datetime.now(UTC).isoformat(),
         "review_state": review_state,
+        "needs_review_count": sum(1 for case in cases if _case_needs_review(case)),
     }
+    if skill.get("_generation_refined") is True:
+        record["refined"] = True
+    if mode == "template_fallback" and isinstance(skill.get("_generation_fallback_reason"), str):
+        record["fallback_reason"] = skill["_generation_fallback_reason"]
+    return record
 
 
 def main(argv: Sequence[str] | None = None) -> DatasetGenerationResult:
@@ -1290,7 +1314,7 @@ Agent-refined mode (--refine):
     if skill is None:
         skill = _parse_skill(skill_path, prompt_file=args.prompt)
     skill["grounding"] = args.grounding
-    skill["_generation_mode"] = "template" if args.no_llm else "llm"
+    skill["_generation_mode"] = "template_requested" if args.no_llm else "llm"
     print(f"Skill: {skill['name']}")
     print(f"  Description: {skill['description'][:80]}")
     print(f"  Scripts: {skill['scripts'] or ['none']}")
@@ -1369,6 +1393,7 @@ Agent-refined mode (--refine):
             else:
                 cases = asyncio.run(_refine_with_llm(skill, cases, trajectories))
                 print(f"  Refined {len(cases)} case(s) with LLM + trajectory")
+            skill["_generation_refined"] = True
         else:
             _abort(
                 "Trace grounding requires at least one trajectory. Provide --from-results or --results-dir, "
@@ -1377,7 +1402,7 @@ Agent-refined mode (--refine):
 
     generation = _generation_record(
         skill_path,
-        mode=str(skill.get("_generation_mode", "template")),
+        mode=str(skill.get("_generation_mode", "template_requested")),
         grounding=args.grounding,
         skill=skill,
         prompt_path=Path(args.prompt) if args.prompt else None,

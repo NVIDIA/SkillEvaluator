@@ -1064,30 +1064,47 @@ best effort over these forms:
   the end of its word, so the rest of the command stays readable;
 - the values of long flags whose name holds a credential word, such as
   `--password`, `--token`, `--client-secret`, `--db-password`, or `--cookie`,
-  and a `curl -b name=value` cookie (`-b cookies.txt` is left alone);
+  and a `curl -b name=value` cookie. A flag that takes a file or nothing, such
+  as `--password-stdin`, `--token-file`, or `--cookie-jar`, and
+  `-b cookies.txt` keep the word after them;
 - a `-u`, `-U`, `--user`, or `--proxy-user` value that holds a colon, such as
   `user:password` or an API key with an empty password (`KEY:`), also attached
-  (`-uuser:password`); `python -u`, `pip --user`, and a URL such as
-  `pip install -U git+https://...` are left alone;
+  (`-uuser:password`) or at the end of a flag group (`curl -su user:password`);
+  `python -u`, `pip --user`, a URL such as `pip install -U git+https://...`,
+  and a remote path such as `rsync -u host:/data` are left alone;
 - `-p` after a login subcommand (`docker login -u bot -p ...`, also attached as
-  `-p...`) or `sshpass`, and attached to a MySQL client (`mysql -p...`);
-  `mkdir -p`, `ssh -p 2222`, and `git log --author=login -p` are left alone;
-- credentials set with `aws configure set`, and a `.netrc` `password` value,
-  also when the entry spans lines in a here-document or a `printf` string;
+  `-p...`) or `sshpass`, and attached to a MySQL client run by name or from a
+  `bin` directory (`mysql -p...`); `mkdir -p`, `ssh -p 2222`,
+  `git log --author=login -p`, and `find /var/lib/mysql -path ...` are left
+  alone;
+- the same flags as elements of an argument list, as in
+  `subprocess.run(["tool", "--password", "..."])`;
+- credentials set with `aws configure set`, `npm config set`,
+  `yarn config set`, or `git config` (`_authToken`, `npmAuthToken`,
+  `github.token`), and a `.netrc` `password` value, also when the entry spans
+  lines in a here-document or a `printf` string;
 - values assigned to a credential name, such as `_authToken=...`,
-  `aws_secret_access_key = ...`, `"password": "..."`, or `DB_PASS=...`, also
-  JSON-escaped inside a shell string, and `password= ...` inside a quoted
-  string. A name that ends in `_URL`, `_DIR`, `_PATH`, `_FILE`, or a similar
-  location word keeps its value unless it also names a secret or password, and
-  `grep "token=" ...` keeps the rest of the command, because that quote closes
-  the pattern;
-- `ghp_`-style, `github_pat_`, `glpat-`, `npm_`, `xox*-`, and `hf_` tokens.
+  `aws_secret_access_key = ...`, `"password": "..."`, `token := "..."`,
+  `os.environ["API_KEY"] = "..."`, `PASS=...`, `DB_PASS=...`, or
+  `MYSQLPWD=...`, also JSON-escaped inside a shell string. Inside a quoted
+  string the value runs to the closing quote, so
+  `echo 'password: correct horse battery staple'` is masked whole; inside a
+  `sh -c` command string a shell assignment's value is one word. A name that
+  ends in `_URL`, `_DIR`, `_PATH`, `_FILE`, or a similar location word keeps
+  its value unless it also names a secret or password, as do `token_type` and
+  a count such as `max_tokens=100`. `grep "token=" ...` keeps the rest of the
+  command, because that quote closes the pattern;
+- `ghp_`-style, `github_pat_`, `glpat-`, `npm_`, `xox*-`, and `hf_` tokens. An
+  identifier such as `hf_hub_download` or `npm_config_registry` is left alone.
 
-A credential in another form, such as a `.pgpass` line, can still appear. A
-quoted value ends at its closing quote or at the end of its line. Only the first
-2,000 characters are scanned. A word that this limit cuts in half is replaced
-with `<truncated>`, keeping a URL's scheme and host. The evidence is then cut to
-500 characters, or 300 for prompt and response text.
+A credential in another form, such as a `.pgpass` line or a password after an
+unknown flag, can still appear, and some ordinary words are masked, such as the
+path in `grep -r token: /etc` or the words after a `.netrc`-like
+`login NAME password` phrase in prose. A quoted value ends at its closing quote
+or at the end of its line. Only the first 2,000 characters are scanned. A word
+that this limit cuts in half is replaced with `<truncated>`, keeping a URL's
+scheme and host. The evidence is then cut to 500 characters, or 300 for prompt
+and response text.
 
 `token_efficiency` is a standalone report signal, not a dimension source. It
 never changes a dimension score or the overall verdict.

@@ -136,12 +136,11 @@ All notable changes to SkillEvaluator are documented in this file.
   and `Cookie` header values, credential flags and assignments, `.netrc`
   passwords, and common token prefixes, and keep the rest of the command
   readable; a credential in another form, such as a `.pgpass` line, can still
-  appear. Scores are
-  unchanged. Because path findings name the entry, the without-skill baseline
-  comparison now matches them by entry: a with-skill write to `~/.bashrc` is
-  attributed to the baseline prompt or environment when the baseline also
-  wrote to `~/.bashrc`, whatever each command wrote. Both the host checker and
-  the bundled Harbor verifier apply the fix.
+  appear. Scores are unchanged. Because path findings name the entry, the
+  without-skill baseline comparison now matches them by entry: a with-skill
+  write to `~/.bashrc` is attributed to the baseline prompt or environment when
+  the baseline also wrote to `~/.bashrc`, whatever each command wrote. Both the
+  host checker and the bundled Harbor verifier apply the fix.
 
 ## 0.8.0 - 2026-11-05
 

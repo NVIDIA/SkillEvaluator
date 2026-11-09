@@ -1623,3 +1623,45 @@ def test_excess_rollouts_are_reported_and_not_collected(tmp_path: Path) -> None:
     )
     assert errors == ["NeMo Gym returned 2/1 rollouts for case case-1; the 1 extra rollout(s) were not collected"]
     assert sorted(path.name for path in job.iterdir() if path.is_dir()) == ["t1__gym001"]
+
+
+def test_memory_override_replaces_a_legacy_memory_key(tmp_path: Path) -> None:
+    import tomllib
+
+    task = tmp_path / "arm" / "t1"
+    task.mkdir(parents=True)
+    (task / "task.toml").write_text('[environment]\ncpus = 2\nmemory = "4G"\n')
+    stage_for_gym(task.parent, resource_overrides={"memory_mb": 8192})
+    environment = tomllib.loads((task / "task.toml").read_text())["environment"]
+    assert environment == {"cpus": 2, "memory_mb": 8192}
+
+
+def test_stop_failure_during_an_interrupt_keeps_the_interrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    from skillevaluator.tier3.harbor import runner as harbor_runner
+    from skillevaluator.tier3.nemo_gym.runner import _run_gym
+
+    def failing_terminate(process, **_kwargs) -> None:
+        process.kill()
+        process.wait()
+        raise RuntimeError("Harbor parent process could not be reaped")
+
+    class _InterruptOnce(_RecordingReporter):
+        pass
+
+    monkeypatch.setattr(harbor_runner, "_terminate_harbor_process_tree", failing_terminate)
+    import signal
+    import threading
+
+    threading.Timer(0.5, lambda: os.kill(os.getpid(), signal.SIGINT)).start()
+    with (tmp_path / "gym.log").open("w") as log, pytest.raises(KeyboardInterrupt) as raised:
+        _run_gym(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            cwd=tmp_path,
+            env=dict(os.environ),
+            log=log,
+            timeout_s=30,
+            reporter=_InterruptOnce(),
+        )
+    assert isinstance(raised.value.__cause__, RuntimeError)

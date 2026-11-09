@@ -629,7 +629,9 @@ class RichProgressReporter(PlainProgressReporter):
             self._live.update(self._build_live_table(), refresh=True)
 
     def _write_line(self, line: str) -> None:
-        self._console.print(line, markup=False, highlight=False, soft_wrap=True)
+        # Printed as is: model IDs and providers can contain ":name:", which
+        # Rich would otherwise replace with an emoji.
+        self._console.print(line, markup=False, highlight=False, emoji=False, soft_wrap=True)
 
 
 class NullProgressReporter:

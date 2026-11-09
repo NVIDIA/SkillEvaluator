@@ -488,6 +488,33 @@ def test_rich_progress_prints_the_full_plan_above_the_fixed_frame(monkeypatch: p
     assert len(frame_heights) == 1
 
 
+def test_rich_progress_prints_colon_delimited_plan_values_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
+    import rich.live
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+    output = _TTYBuffer()
+    reporter = progress.RichProgressReporter(stream=output, refresh_interval=60)
+    # Rich would read ":llama:" and ":rocket:" as emoji codes.
+    reporter.start(
+        progress.Tier3RunPlan(
+            skill_name="demo",
+            environment="docker",
+            agents=("opencode",),
+            agent_models=(("opencode", "ollama:llama:3.1-8b"),),
+            provider="custom:rocket:proxy",
+        )
+    )
+    printed = output.getvalue().splitlines()
+    reporter.close()
+
+    assert printed == [
+        "Agents / models: opencode=ollama:llama:3.1-8b",
+        "Provider: custom:rocket:proxy",
+    ]
+
+
 def test_rich_final_frame_marks_a_plan_that_never_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
     import rich.live
 

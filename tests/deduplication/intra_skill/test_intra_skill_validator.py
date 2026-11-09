@@ -98,6 +98,14 @@ class TestEffectiveChunkLimit:
         [
             pytest.param({"SKILL_EVAL_EMBEDDING_PROVIDER": "openai", "OPENAI_API_KEY": "test-key"}, id="openai"),
             pytest.param({"SKILL_EVAL_EMBEDDING_PROVIDER": "nv_build", "NVIDIA_API_KEY": "nvapi-test"}, id="nv-build"),
+            pytest.param(
+                {
+                    "SKILL_EVAL_EMBEDDING_PROVIDER": "openai-compatible",
+                    "SKILL_EVAL_EMBEDDING_API_KEY": "test-key",
+                    "SKILL_EVAL_EMBEDDING_BASE_URL": "https://gateway.example/v1",
+                },
+                id="openai-compatible",
+            ),
         ],
     )
     def test_docs_give_the_chunk_limit_of_each_default_embedding_model(self, environ: dict[str, str]) -> None:
@@ -105,7 +113,11 @@ class TestEffectiveChunkLimit:
         from skillevaluator.provider_config import resolve_embedding_provider
 
         # Native output width of each default model; the embedding client requests no other width.
-        default_model_widths = {"text-embedding-3-small": 1536, "nvidia/nemotron-3-embed-1b": 2048}
+        default_model_widths = {
+            "text-embedding-3-small": 1536,
+            "nvidia/nemotron-3-embed-1b": 2048,
+            "nvidia/nvidia/nemotron-3-embed-1b": 2048,
+        }
         model = resolve_embedding_provider(environ).model
         vector_dimension = default_model_widths[model]
         guide = Path(__file__).resolve().parents[3] / "docs" / "tier2-deduplication.mdx"

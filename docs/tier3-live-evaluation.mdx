@@ -484,8 +484,10 @@ skillevaluator tier3 evaluate ./my-skill --backend nemo-gym --agents codex --mod
 `tier3 doctor --backend nemo-gym` checks the Gym CLI interface and its version, that the Docker
 daemon answers, the `SKILL_EVAL_NEMO_GYM_*` settings, each selected agent's policy model
 endpoint, and the selected agents and `--env-mode`. The CLI check runs
-`gym eval run --help` with a 15-second timeout, without policy credentials or server
-startup. It rejects missing task-folder arguments and required flags before dataset
+`gym eval run --help` with a 15-second timeout and a combined stdout/stderr limit of
+256 KiB, without policy credentials or server startup. Timeout, interruption, or output
+overflow stops its isolated process group with bounded TERM/KILL cleanup. It rejects
+missing task-folder arguments and required flags before dataset
 generation or task staging. Passing this necessary check does not certify live runtime
 compatibility. A Gym run reports
 the same progress stages as a Harbor run.

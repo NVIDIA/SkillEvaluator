@@ -445,18 +445,100 @@ def test_gym_cli_probe_handles_unreadable_help(tmp_path: Path) -> None:
     assert "incompatible" in (nemo_gym_cli_error(str(gym)) or "")
 
 
-def test_gym_cli_probe_timeout_does_not_echo_subprocess_output(monkeypatch: pytest.MonkeyPatch) -> None:
-    import subprocess
+@pytest.mark.parametrize("descriptor", [1, 2])
+def test_gym_cli_probe_bounds_stdout_and_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, descriptor: int
+) -> None:
+    import sys
 
     from skillevaluator.tier3.nemo_gym import backend
 
-    def timeout(*_args, **_kwargs):
-        raise subprocess.TimeoutExpired("gym", 15, output="policy-secret")
-
-    monkeypatch.setattr(backend.subprocess, "run", timeout)
-    error = backend.nemo_gym_cli_error("/missing/gym")
-    assert error is not None and "15s" in error
+    gym = tmp_path / "gym"
+    gym.write_text(f"#!{sys.executable}\nimport os\nos.write({descriptor}, b'policy-secret' * 100000)\n")
+    gym.chmod(0o755)
+    monkeypatch.setattr(backend, "_GYM_HELP_MAX_OUTPUT_BYTES", 4096)
+    error = backend.nemo_gym_cli_error(str(gym))
+    assert error is not None and "output limit" in error
     assert "policy-secret" not in error
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups and signals")
+@pytest.mark.parametrize("failure_mode", ["timeout", "overflow", "interrupt"])
+def test_gym_cli_probe_failure_contains_descendants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_mode: str
+) -> None:
+    import contextlib
+    import signal
+    import sys
+    import threading
+    import time
+
+    from skillevaluator.tier3.nemo_gym import backend
+
+    child_ready = tmp_path / "child-ready"
+    pid_file = tmp_path / "pids.json"
+    child_code = (
+        "import pathlib, signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"pathlib.Path({str(child_ready)!r}).touch()\n"
+        "time.sleep(30)\n"
+    )
+    gym = tmp_path / "gym"
+    gym.write_text(
+        f"#!{sys.executable}\nimport json, os, pathlib, subprocess, sys, time\n"
+        f"child = subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
+        f"while not pathlib.Path({str(child_ready)!r}).exists(): time.sleep(0.005)\n"
+        f"pathlib.Path({str(pid_file)!r}).write_text(json.dumps([os.getpid(), child.pid]))\n"
+        "print('policy-secret', flush=True)\n"
+        + ("os.write(1, b'a' * 3000); os.write(2, b'b' * 3000)\n" if failure_mode == "overflow" else "")
+        + "time.sleep(30)\n"
+    )
+    gym.chmod(0o755)
+    monkeypatch.setattr(backend, "_GYM_HELP_TIMEOUT_S", 2.0)
+    monkeypatch.setattr(backend, "_GYM_HELP_MAX_OUTPUT_BYTES", 4096)
+    stop_interrupter = threading.Event()
+
+    def interrupt_once_ready() -> None:
+        deadline = time.monotonic() + 4
+        while not pid_file.exists() and time.monotonic() < deadline:
+            if stop_interrupter.wait(0.005):
+                return
+        if pid_file.exists() and not stop_interrupter.is_set():
+            os.kill(os.getpid(), signal.SIGINT)
+
+    interrupter = None
+    if failure_mode == "interrupt":
+        interrupter = threading.Thread(target=interrupt_once_ready, daemon=True)
+        interrupter.start()
+    started = time.monotonic()
+    try:
+        if failure_mode == "interrupt":
+            with pytest.raises(KeyboardInterrupt):
+                backend.nemo_gym_cli_error(str(gym))
+        else:
+            error = backend.nemo_gym_cli_error(str(gym))
+            assert error is not None and ("timed out" if failure_mode == "timeout" else "output limit") in error
+            assert "policy-secret" not in error
+        assert time.monotonic() - started < 4
+        pids = json.loads(pid_file.read_text())
+        for pid in pids:
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.01)
+            else:
+                pytest.fail(f"Gym help {failure_mode} left process {pid} alive")
+    finally:
+        stop_interrupter.set()
+        if interrupter is not None:
+            interrupter.join(timeout=3)
+        if pid_file.exists():
+            for pid in json.loads(pid_file.read_text()):
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
 
 
 def test_gym_cli_probe_omits_policy_credentials_and_ignores_raw_error_output(

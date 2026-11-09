@@ -22,6 +22,8 @@ MODEL_API_KEY_ENV = "SKILL_EVAL_NEMO_GYM_MODEL_API_KEY"
 MODEL_URL_ENV = "SKILL_EVAL_NEMO_GYM_MODEL_URL"
 RUN_TIMEOUT_ENV = "SKILL_EVAL_NEMO_GYM_TIMEOUT_S"
 DEFAULT_RUN_TIMEOUT_S = 21600.0
+_GYM_HELP_TIMEOUT_S = 15.0
+_GYM_HELP_MAX_OUTPUT_BYTES = 256 * 1024
 NEMO_GYM_AGENTS = {
     "codex": "codex_agent",
     "claude-code": "claude_code_agent",
@@ -111,24 +113,34 @@ def nemo_gym_cli_error(gym_bin: str) -> str | None:
     JSONL inputs and lacks the task-folder / sandbox command this adapter requires.
     This necessary interface check does not certify an installation's runtime support.
     """
-    from skillevaluator.tier3.nemo_gym.runner import gym_launch_environment
+    from skillevaluator.tier3.harbor.runner import _HarborRunTimeoutError, _run_bounded_harbor_process
+    from skillevaluator.tier3.nemo_gym.runner import _signals_raise_keyboard_interrupt, gym_launch_environment
 
     try:
-        completed = subprocess.run(
-            [gym_bin, "eval", "run", "--help"],
-            cwd=Path(gym_bin).resolve().parent,
-            env=gym_launch_environment({}),
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=15,
-            check=False,
+        # Reuse bounded streaming and isolated process-group cleanup, not Harbor execution.
+        # Both output streams share one raw byte budget; no subprocess output enters errors.
+        with _signals_raise_keyboard_interrupt():
+            completed = _run_bounded_harbor_process(
+                [gym_bin, "eval", "run", "--help"],
+                cwd=Path(gym_bin).resolve().parent,
+                env=gym_launch_environment({}),
+                stdin_text=None,
+                timeout_seconds=_GYM_HELP_TIMEOUT_S,
+                max_output_bytes=_GYM_HELP_MAX_OUTPUT_BYTES,
+                diagnostic_tail_chars=_GYM_HELP_MAX_OUTPUT_BYTES,
+                secret_values=set(),
+            )
+    except _HarborRunTimeoutError:
+        return (
+            f"NeMo Gym CLI compatibility check failed: `gym eval run --help` timed out after {_GYM_HELP_TIMEOUT_S:g}s"
         )
-    except (OSError, subprocess.SubprocessError):
-        return "NeMo Gym CLI compatibility check failed: `gym eval run --help` could not complete within 15s"
+    except (OSError, subprocess.SubprocessError, RuntimeError):
+        return "NeMo Gym CLI compatibility check failed: `gym eval run --help` could not complete safely"
+    if completed.output_exceeded:
+        return "NeMo Gym CLI compatibility check failed: `gym eval run --help` exceeded its combined output limit"
     if completed.returncode:
         return f"NeMo Gym CLI compatibility check failed: `gym eval run --help` exited {completed.returncode}"
-    help_text = completed.stdout
+    help_text = completed.output_tail
     flags = ("--sandbox", "--agent", "--model-type", "--model", "--model-url", "--output", "--concurrency")
     missing = [flag for flag in flags if not re.search(rf"(?<![\w-]){re.escape(flag)}(?=[\s,=]|$)", help_text)]
     if not re.search(r"(?im)^\s+(?:tasks|task_dir|tasks_dir|task_folder)\s+", help_text):

@@ -12,9 +12,9 @@ permissions:
   pull-requests: write
 jobs:
   feedback:
-    uses: NVIDIA/SkillEvaluator/.github/workflows/feedback-all-tiers.yml@86f1a1f05bc5f73e1c0ee3e8bff0b5ff062913f4
+    uses: NVIDIA/SkillEvaluator/.github/workflows/feedback-all-tiers.yml@c3b298c2b1a1a89d520bb22009f2668520127931
     with:
       tools-repository: NVIDIA/SkillEvaluator
-      tools-ref: 86f1a1f05bc5f73e1c0ee3e8bff0b5ff062913f4
-      trusted-workflow-ref: NVIDIA/SkillEvaluator/.github/workflows/evaluate-all-tiers.yml@86f1a1f05bc5f73e1c0ee3e8bff0b5ff062913f4
-      trusted-caller-blobs: 4f4edd584ef710a27e0ed64ad49c3215e9128df3
+      tools-ref: c3b298c2b1a1a89d520bb22009f2668520127931
+      trusted-workflow-ref: NVIDIA/SkillEvaluator/.github/workflows/evaluate-all-tiers.yml@c3b298c2b1a1a89d520bb22009f2668520127931
+      trusted-caller-blobs: 66c8f37c7987ec680d66b8365fde8557208b5257

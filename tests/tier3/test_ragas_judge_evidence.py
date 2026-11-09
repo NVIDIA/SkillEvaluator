@@ -7,7 +7,8 @@ The RAGAS modules are fakes, but their requests go through the real OpenAI SDK
 and httpx client; a stubbed httpx transport answers them. The stub fails the
 test if the SDK's async client is not an httpx client, and DNS lookups and
 connections beyond loopback are refused, so a request the stub misses fails
-instead of reaching the provider.
+instead of reaching the provider. Proxy settings are cleared, so a developer's
+proxy changes neither result.
 """
 
 from __future__ import annotations
@@ -31,6 +32,14 @@ from tests.conftest import load_harbor_eval_template
 
 _OPENAI_TEST_KEY = "test-key-fake"
 _CHAT_URL = "https://api.openai.com/v1/chat/completions"
+# Both spellings are deleted. NO_PROXY is listed so that a lower-case no_proxy,
+# which urllib prefers, cannot override the NO_PROXY=* that no_network sets.
+_PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
+# Proxies a developer's shell may set. The SOCKS one fails to build without socksio.
+_PROXY_SETTINGS = [
+    pytest.param("HTTPS_PROXY", "http://proxy.invalid:3128", id="https-proxy"),
+    pytest.param("ALL_PROXY", "socks5://proxy.invalid:1080", id="socks-proxy"),
+]
 _JUDGE_MESSAGES = [{"role": "user", "content": "judge"}]
 _ACCURACY_REPLY = json.dumps(
     {
@@ -65,8 +74,16 @@ def no_network(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[Any]]:
     """Refuse DNS lookups and connections beyond loopback, and fail the test if one was tried.
 
     The provider stub answers httpx requests only. A request it misses must fail
-    here, not reach the real provider with the fake key.
+    here, not reach the real provider with the fake key. The verifier's client
+    reads proxy settings like any httpx client, so they are cleared and
+    NO_PROXY=* makes httpx ignore the system proxy too: a developer's proxy must
+    not change which host the guard sees, and a SOCKS proxy must not make the
+    client fail to build.
     """
+    for name in _PROXY_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.lower(), raising=False)
+    monkeypatch.setenv("NO_PROXY", "*")
     blocked: list[Any] = []
     getaddrinfo = socket.getaddrinfo
     connect = socket.socket.connect
@@ -191,17 +208,20 @@ def _sdk_transport_class() -> type[httpx.AsyncBaseTransport]:
             f"openai.DefaultAsyncHttpxClient is {client_class!r}, not an httpx.AsyncClient; "
             "update the provider stub for this SDK's HTTP stack"
         )
-    return type(client_class()._transport)
+    # trust_env=False: a proxy setting must not change or break the class this finds.
+    return type(client_class(trust_env=False)._transport)
 
 
 def _stub_provider(monkeypatch: pytest.MonkeyPatch, replies: list[Any]) -> list[httpx.Request]:
-    """Answer the SDK's async httpx requests in order: an error status, "cut-off", or a 200 JSON body."""
+    """Answer the SDK's async httpx requests in order: a response, an error status, "cut-off", or a 200 JSON body."""
     transport_class = _sdk_transport_class()
     received: list[httpx.Request] = []
 
     async def handle_async_request(_transport, request: httpx.Request) -> httpx.Response:
         received.append(request)
         reply = replies[min(len(received) - 1, len(replies) - 1)]
+        if isinstance(reply, httpx.Response):
+            return reply
         if reply == "cut-off":
             return httpx.Response(200, headers={"content-type": "application/json"}, stream=_CutOffBody())
         if isinstance(reply, int):
@@ -310,6 +330,46 @@ def test_failed_ragas_provider_replies_are_saved_with_their_prompt(
     assert [exchange["status"], outcome["status"]] == ["replied", "accepted"]
 
 
+def test_long_error_body_is_redacted_before_it_is_shortened(
+    verifier: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A key that straddles the 2000th character is masked whole, not cut in two and saved in part."""
+    cut = 2000
+    body = "x" * (cut - len(_OPENAI_TEST_KEY) + 1) + _OPENAI_TEST_KEY + "x" * 100
+    assert body[:cut].endswith(_OPENAI_TEST_KEY[:-1])
+    _install_ragas(monkeypatch)
+    received = _stub_provider(
+        monkeypatch, [httpx.Response(503, headers={"retry-after-ms": "1"}, text=body), _chat_reply("ok")]
+    )
+
+    with _judge_evidence(verifier):
+        result = verifier.judge_goal_accuracy("question", "expected", "agent answer")
+
+    assert (result["score"], result["method"]) == (1.0, "ragas")
+    assert len(received) == 2
+    failed, exchange, outcome = _attempts(verifier)
+    assert failed["status"] == "error"
+    assert failed["problem"].startswith("HTTP 503: xxx")
+    # The shortened problem keeps the end of the body, where the key was.
+    assert failed["problem"].endswith("[REDACTED]" + "x" * 100)
+    saved = (verifier.VERIFIER_DIR / "judge_attempts.json").read_text(encoding="utf-8")
+    assert _OPENAI_TEST_KEY[:-1] not in saved
+    assert [exchange["status"], outcome["status"]] == ["replied", "accepted"]
+
+
+def test_ragas_exchange_with_an_unreadable_request_names_the_selected_judge_model(verifier: ModuleType) -> None:
+    """A request body that is not a chat request names no model, so the entry names the selected judge model."""
+    request = httpx.Request("POST", _CHAT_URL, content=b"not a chat request")
+    response = httpx.Response(200, json=_chat_reply("ok"), request=request)
+
+    with _judge_evidence(verifier):
+        verifier._record_ragas_exchange(response)
+
+    (exchange,) = _attempts(verifier)
+    assert (exchange["status"], exchange["prompt"], exchange["reply"]) == ("replied", "not a chat request", "ok")
+    assert exchange["model"] == "gpt-4.1"
+
+
 def test_ragas_evidence_reads_every_request_message_and_tool_call_replies(verifier: ModuleType) -> None:
     request = {
         "model": "judge-model",
@@ -395,25 +455,32 @@ def test_ragas_evidence_write_failure_is_logged_like_the_other_judges(
     assert not (verifier.VERIFIER_DIR / "judge_attempts.json").exists()
 
 
-def test_ragas_evidence_helper_reraises_the_judge_deadline(
-    verifier: ModuleType, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("helper", ["exchange", "http-client"])
+def test_ragas_evidence_helpers_reraise_the_judge_deadline(
+    verifier: ModuleType, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, helper: str
 ) -> None:
-    """Pins the helper only: it re-raises the deadline alarm instead of logging it as an evidence failure.
+    """Pins the helpers only: they re-raise the deadline alarm instead of logging it as an evidence failure.
 
     In a real request the alarm leaves the httpx hook into the OpenAI SDK, which
     treats it as a connection error and retries; the RAGAS time budget
-    (asyncio.wait_for) still bounds the run.
+    (asyncio.wait_for) still bounds the run. An alarm while the HTTP client is
+    built must leave _judge_goal_accuracy_ragas, not be logged while RAGAS runs
+    on past the deadline.
     """
 
     def deadline(*_args: Any, **_kwargs: Any):
         raise TimeoutError("LLM judge time budget exhausted")
 
-    monkeypatch.setattr(verifier, "_record_judge_attempt", deadline)
-    request = httpx.Request("POST", _CHAT_URL, json={"model": "gpt-4.1", "messages": _JUDGE_MESSAGES})
-    response = httpx.Response(200, json=_chat_reply("ok"), request=request)
+    with caplog.at_level(logging.WARNING, logger=verifier.logger.name), pytest.raises(TimeoutError):
+        if helper == "exchange":
+            monkeypatch.setattr(verifier, "_record_judge_attempt", deadline)
+            request = httpx.Request("POST", _CHAT_URL, json={"model": "gpt-4.1", "messages": _JUDGE_MESSAGES})
+            verifier._record_ragas_exchange(httpx.Response(200, json=_chat_reply("ok"), request=request))
+        else:
+            monkeypatch.setattr(openai, "DefaultAsyncHttpxClient", deadline)
+            verifier._ragas_evidence_http_client(openai)
 
-    with pytest.raises(TimeoutError):
-        verifier._record_ragas_exchange(response)
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
 
 
 def test_verifier_run_saves_ragas_exchanges_with_the_other_judges(
@@ -448,6 +515,27 @@ def test_verifier_run_saves_ragas_exchanges_with_the_other_judges(
     ]
 
 
+@pytest.mark.parametrize(("variable", "proxy"), _PROXY_SETTINGS)
+def test_proxy_settings_leave_the_provider_stub_answering(
+    verifier: ModuleType, monkeypatch: pytest.MonkeyPatch, variable: str, proxy: str
+) -> None:
+    """A proxy setting must not break the stub or route the verifier's request around it."""
+    # no_network's NO_PROXY=* stays set, as it does when the proxy comes from the developer's shell.
+    monkeypatch.setenv(variable, proxy)
+    _install_ragas(monkeypatch)
+    received = _stub_provider(monkeypatch, [_chat_reply("ok")])
+
+    with _judge_evidence(verifier):
+        result = verifier.judge_goal_accuracy("question", "expected", "agent answer")
+
+    assert (result["score"], result["method"]) == (1.0, "ragas")
+    assert [str(request.url) for request in received] == [_CHAT_URL]
+    assert [(attempt["method"], attempt["status"]) for attempt in _attempts(verifier)] == [
+        ("ragas", "replied"),
+        ("ragas", "accepted"),
+    ]
+
+
 def test_provider_stub_fails_before_any_request_when_the_sdk_client_is_not_httpx(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -460,9 +548,18 @@ def test_provider_stub_fails_before_any_request_when_the_sdk_client_is_not_httpx
         _stub_provider(monkeypatch, [_chat_reply("ok")])
 
 
-def test_requests_the_stub_misses_never_reach_the_network(no_network: list[Any]) -> None:
+@pytest.mark.parametrize(("variable", "proxy"), [pytest.param(None, None, id="no-proxy"), *_PROXY_SETTINGS])
+def test_requests_the_stub_misses_never_reach_the_network(
+    no_network: list[Any], monkeypatch: pytest.MonkeyPatch, variable: str | None, proxy: str | None
+) -> None:
+    if variable:
+        # Undo no_network's NO_PROXY=* and set a proxy: only trust_env=False keeps it out of this client.
+        monkeypatch.delenv("NO_PROXY")
+        monkeypatch.setenv(variable, proxy)
+
     async def send_unstubbed_request() -> None:
-        async with openai.DefaultAsyncHttpxClient() as client:
+        # trust_env=False keeps any proxy out of the way, so the guard sees the provider host.
+        async with openai.DefaultAsyncHttpxClient(trust_env=False) as client:
             await client.post(_CHAT_URL, json={"model": "gpt-4.1", "messages": _JUDGE_MESSAGES})
 
     with pytest.raises(httpx.ConnectError, match="network access is blocked"):

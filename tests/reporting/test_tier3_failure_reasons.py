@@ -645,12 +645,21 @@ def test_saved_html_defaults_only_add_unavailable_reasons_to_eligible_agent_card
         "checks": [],
         "evidence_refs": [],
     }
-    security_card = {"id": "security", "with_skill": 0.0, "evidence": [evidence]}
+    security_card = {
+        "id": "security",
+        "with_skill": 0.0,
+        "evidence": [{**evidence, "evidence_unavailable_reason": "old security label"}],
+    }
     accuracy_card = {"id": "accuracy", "with_skill": 0.0, "evidence": [evidence]}
+    top_level_accuracy_card = {
+        "id": "accuracy",
+        "with_skill": 0.0,
+        "evidence": [{**evidence, "evidence_unavailable_reason": "old top-level label"}],
+    }
 
     security_agent = html_module._sanitize_tier3_agent({"evaluator_cards": [security_card]})
     accuracy_agent = html_module._sanitize_tier3_agent({"evaluator_cards": [accuracy_card]})
-    top_level_accuracy = html_module._sanitize_tier3_evaluator_card(accuracy_card)
+    top_level_accuracy = html_module._sanitize_tier3_evaluator_card(top_level_accuracy_card)
 
     assert "evidence_unavailable_reason" not in security_agent["evaluator_cards"][0]["evidence"][0]
     assert accuracy_agent["evaluator_cards"][0]["evidence"][0]["evidence_unavailable_reason"] == (

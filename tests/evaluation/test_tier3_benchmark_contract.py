@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from skillevaluator import __version__
 from skillevaluator.constants import (
     DEFAULT_SCORE_POLICY,
@@ -187,6 +189,39 @@ def test_dataset_truth_counts_unique_task_identities() -> None:
         "source": "dataset",
     }
     assert len(payload["dataset"]) == 2
+
+
+@pytest.mark.parametrize(
+    ("routing_fields", "positive", "negative", "unclassified"),
+    [
+        pytest.param({"expected_skill": "demo"}, 1, 0, 0, id="legacy-positive"),
+        pytest.param({"expected_skill": "demo", "should_trigger": False}, 0, 1, 0, id="explicit-negative"),
+        pytest.param({"expected_skill": None, "should_trigger": True}, 1, 0, 0, id="explicit-positive"),
+        pytest.param({"should_trigger": True}, 1, 0, 0, id="positive-label-only"),
+        pytest.param({"should_trigger": False}, 0, 1, 0, id="negative-label-only"),
+        pytest.param({"expected_skill": None}, 0, 1, 0, id="legacy-negative"),
+        pytest.param({}, 0, 0, 1, id="unlabeled"),
+    ],
+)
+def test_dataset_truth_respects_explicit_routing_intent(
+    routing_fields: dict, positive: int, negative: int, unclassified: int
+) -> None:
+    dataset = [{"id": "case-1", **routing_fields}]
+    expected_summary = {
+        "total_tasks": 1,
+        "positive_tasks": positive,
+        "negative_tasks": negative,
+        "unclassified_tasks": unclassified,
+        "source": "dataset",
+    }
+
+    snapshot = build_dataset_snapshot(dataset, evaluator_version=__version__)
+    payload = build_agent_eval_payload("demo", _agents(), dataset=dataset, use_llm_judge=False)
+
+    assert snapshot["dataset_summary"] == expected_summary
+    assert payload is not None
+    assert payload["dataset_summary"] == expected_summary
+    assert payload["summary"]["dataset_summary"] == expected_summary
 
 
 def test_dataset_snapshot_rejects_duplicate_or_tampered_dataset(tmp_path: Path) -> None:

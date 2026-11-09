@@ -499,6 +499,60 @@ def test_conclusions_without_case_grounding_do_not_receive_positional_evidence()
     assert "evidence" not in conclusions[0]
 
 
+@pytest.mark.parametrize("has_threshold_miss", [False, True])
+def test_conclusions_separate_unavailable_trials_from_threshold_misses(has_threshold_miss: bool) -> None:
+    rewards = [
+        {"entry_id": "unscored", "metric_set": "skill-evaluator-default-v2", "overall": None},
+        {
+            "entry_id": "at-threshold",
+            "metric_set": "skill-evaluator-default-v2",
+            **dict.fromkeys(DEFAULT_METRICS, 0.5),
+        },
+    ]
+    if has_threshold_miss:
+        rewards.append(
+            {
+                "entry_id": "zero-score",
+                "metric_set": "skill-evaluator-default-v2",
+                **dict.fromkeys(DEFAULT_METRICS, 0.0),
+            }
+        )
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": len(rewards),
+                "scored_attempts": len(rewards) - 1,
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.8),
+                "rewards": rewards,
+                "rewards_complete": False,
+            }
+        },
+        attempt_policy={"pass_threshold": 0.5},
+        use_llm_judge=False,
+    )
+
+    assert payload is not None
+    assert payload["overall_score"] == 0.8
+    assert payload["agents"]["codex"]["trials"][0]["overall"] is None
+    conclusions = {item["title"]: item["message"] for item in payload["conclusions"]}
+    assert "Unscored trials" in conclusions
+    assert conclusions["Unscored trials"] == (
+        "1 trial(s) have unavailable overall scores; examples: codex/unscored"
+    )
+    html = _render_agent_payload(payload)
+    assert "1 trial(s) have unavailable overall scores; examples: codex/unscored" in html
+    if has_threshold_miss:
+        assert conclusions["Cases needing review"] == (
+            "1 trial(s) missed the pass threshold; examples: codex/zero-score"
+        )
+        assert "1 trial(s) missed the pass threshold; examples: codex/zero-score" in html
+    else:
+        assert "Cases needing review" not in conclusions
+        assert "missed the pass threshold" not in html
+
+
 def test_package_loader_reads_template_resources_as_utf8(monkeypatch: pytest.MonkeyPatch) -> None:
     class TemplateResource:
         def joinpath(self, _path: str) -> TemplateResource:

@@ -21,6 +21,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
+from skillevaluator.tier3.eval_core.checks import resolve_should_trigger
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
@@ -124,8 +125,9 @@ def deduplicate_dataset_entries(entries: list[dict[str, Any]]) -> list[dict[str,
 def summarize_dataset_entries(entries: list[dict[str, Any]]) -> dict[str, Any]:
     """Summarize unique task identities and their activation intent."""
     unique = deduplicate_dataset_entries(entries)
-    positive = sum(1 for case in unique if case.get("expected_skill") is not None)
-    negative = sum(1 for case in unique if "expected_skill" in case and case.get("expected_skill") is None)
+    routing_intents = [resolve_should_trigger(case) for case in unique]
+    positive = routing_intents.count(True)
+    negative = routing_intents.count(False)
     return {
         "total_tasks": len(unique),
         "positive_tasks": positive,

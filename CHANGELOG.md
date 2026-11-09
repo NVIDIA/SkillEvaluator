@@ -164,24 +164,31 @@ All notable changes to SkillEvaluator are documented in this file.
 - A Tier 1 security scan with SkillSpector v2.12.0 or later no longer stops as
   `INCOMPLETE` ("Security Scan didn't run") with
   `hooks/hooks.json [static; opaque_content; analyzers=bundled_execution_surface]`
-  when the scanned skill, folder or hooks-only plugin has a command hook.
-  SkillSpector cannot model what such a hook does with its input, so it
-  reports the analysis as `partial` although the scan finished, and its
-  findings cannot show that the hook is safe: a hook script that sends its
-  input over a socket, `nc` or `/dev/tcp` gets no blocking finding. The scan
-  now fails with the Critical `skillspector_hook_payload_unverified`, which
-  names the manifest, such as `hooks/hooks.json` or `.claude/settings.json`,
-  and a gate failure that neither a `--policy` severity override nor
-  `--llm-verify` clears. The other findings and the `--llm` stage are reported
-  as for any complete scan. This applies only to SkillSpector's nonfatal,
-  whole-file row on a manifest whose BH1 finding says its hook payload is
-  `unmodeled`, also under a baseline, and only when the report accounts for
-  the row exactly. The rest of the report is judged as before, and its error
-  names only its own rows: missing references and referenced images are still
-  accepted with their warnings, and any other gap leaves the scan `INCOMPLETE`
-  next to the Critical. With SkillSpector v2.13.4, a hook with a `"timeout"`
-  key also gets a `static_parse_limit` row on the manifest, so that scan stays
-  `INCOMPLETE`.
+  when the scanned skill, folder or hooks-only plugin has an ordinary command
+  or HTTP hook, one SkillSpector does not report as sending hook content to a
+  remote host (BH2). SkillSpector cannot model what such a hook does with its
+  input, so it reports the analysis as `partial` although the scan finished,
+  and its findings cannot show that the hook is safe: a hook script that sends
+  its input over a socket, `nc` or `/dev/tcp` gets no blocking finding. The
+  scan now fails with the Critical `skillspector_hook_payload_unverified`,
+  which names the manifest, such as `hooks/hooks.json` or
+  `.claude/settings.json`, and a gate failure that neither a `--policy`
+  severity override nor `--llm-verify` clears. Only removing the hooks passes
+  the check. The other findings and the `--llm` stage are reported as for any
+  complete scan, and a folder scan goes on to the next skill. This applies
+  only to SkillSpector's nonfatal, whole-file row on a manifest whose BH1
+  finding says its hook payload is `unmodeled`, also under a baseline, and
+  only when the report accounts for the row exactly. SkillSpector records the
+  same row for a manifest it read only in part: with v2.13.4, whose row counts
+  the records it read, a manifest with a record that is not a parsed hook
+  declaration, such as a skipped handler or a permission rule, stays
+  `INCOMPLETE`; with v2.13.3, only a BH1 with 2,048 or more declarations does,
+  and a partly parsed manifest gets the Critical. The rest of the report is
+  judged as before, and its error names only its own gaps: missing references
+  and referenced images are still accepted with their warnings, and any other
+  gap leaves the scan `INCOMPLETE` next to the Critical. With SkillSpector
+  v2.13.4, a hook with a `"timeout"` key also gets a `static_parse_limit` row
+  on the manifest, so that scan stays `INCOMPLETE`.
 
 ## 0.8.0 - 2026-11-05
 

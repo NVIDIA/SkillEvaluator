@@ -3126,6 +3126,15 @@
                                     {% if attempts_recovered and not recovered_ordinals %}
                                         <span class="t3-attempt-chip muted" title="Agent timeouts that later scored attempts recovered. Not scored.">{{ attempts_recovered }} timed out, recovered</span>
                                     {% endif %}
+                                    {# Published attempt rows are capped per run, so a recovered case can arrive with no
+                                       rows; say so instead of letting the recovered chip read as the whole history. #}
+                                    {% if not attempts %}
+                                        {% if attempts_used > 0 %}
+                                            <span class="t3-attempt-chip muted" title="The report keeps details for a limited number of attempts; this case's {{ attempts_used }} scored attempt{{ 's' if attempts_used != 1 else '' }} still count{{ 's' if attempts_used == 1 else '' }} but {{ 'is' if attempts_used == 1 else 'are' }} not listed.">scored attempt details omitted</span>
+                                        {% else %}
+                                            <span class="t3-attempt-chip muted">no attempts recorded</span>
+                                        {% endif %}
+                                    {% endif %}
                                 </div>
                                 {% else %}
                                 <span class="t3-attempt-chip muted">no attempts recorded</span>

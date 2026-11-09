@@ -470,6 +470,24 @@ def test_attempt_details_read_recovered_attempt_numbers_from_the_rows_own_arm(tm
     ]
 
 
+@pytest.mark.parametrize(
+    ("attempts_used", "notice"),
+    [(1, "scored attempt details omitted"), (0, "no attempts recorded")],
+)
+def test_attempt_details_say_when_a_recovered_case_has_no_attempt_rows(tmp_path, attempts_used, notice):
+    result, agent = recovered_run_report(tmp_path)
+    # The collector publishes a bounded number of attempt rows per run, so a later case keeps
+    # its counts and recovery but can arrive without rows.
+    agent["pass_at_k"]["with_skill"]["cases"]["case-a"].update(attempts=[], attempts_used=attempts_used)
+
+    html = HTMLReporter(report_scope="tier3").render(result)
+
+    assert attempt_details_rows(html) == [
+        f"opencode With skill case-a A1: timed out, recovered {notice} "
+        f"{attempts_used} of {attempts_used + 2} scored 1.00 passed on attempt 2"
+    ]
+
+
 @pytest.mark.parametrize("attempts_recovered", ["1", -3, True])
 def test_attempt_details_ignore_an_invalid_recovered_count(tmp_path, attempts_recovered):
     result, agent = recovered_run_report(tmp_path)

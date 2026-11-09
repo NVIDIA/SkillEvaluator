@@ -668,23 +668,30 @@ _SKILL_NAMING_DESCRIPTIONS = [
     "Loads SKILL.md files and checks their frontmatter",
     "Follows the SKILL.md format to scaffold new agent skills",
     "Runs review.py on release manifests",
+    "Runs review.sh on release manifests",
 ]
+# A Python script and a shell script: `tier3 validate` checks graded text against both.
+_SCRIPT_FILES = ("review.py", "review.sh")
 
 
 @pytest.mark.parametrize("description", _SKILL_NAMING_DESCRIPTIONS)
 @pytest.mark.parametrize("generate", [generate_dataset._generate_simple, generate_dataset._generate_full])
 def test_template_cases_stay_fair_when_the_description_names_the_skill(generate, description):
-    for case in generate(_skill(description=description, scripts=["review.py"])):
-        assert _baseline_fairness_warnings(case, skill_scripts=["review.py"]) == [], case
+    skill = _skill(description=description, scripts=["review.py"], script_files=_SCRIPT_FILES)
+    for case in generate(skill):
+        assert _baseline_fairness_warnings(case, skill_scripts=_SCRIPT_FILES) == [], case
 
 
-def _write_skill(tmp_path: Path, description: str, eval_md: str | None = None) -> Path:
+def _write_skill(
+    tmp_path: Path, description: str, eval_md: str | None = None, scripts: tuple[str, ...] = ("review.py",)
+) -> Path:
     skill = tmp_path / "release-review"
     (skill / "scripts").mkdir(parents=True)
     (skill / "SKILL.md").write_text(
         f"---\nname: release-review\ndescription: {json.dumps(description)}\n---\n# Body\n", encoding="utf-8"
     )
-    (skill / "scripts" / "review.py").write_text("print('ok')\n", encoding="utf-8")
+    for script in scripts:
+        (skill / "scripts" / script).write_text("echo ok\n", encoding="utf-8")
     if eval_md is not None:
         (skill / "evals").mkdir()
         (skill / "evals" / "EVAL.md").write_text(eval_md, encoding="utf-8")
@@ -693,7 +700,7 @@ def _write_skill(tmp_path: Path, description: str, eval_md: str | None = None) -
 
 @pytest.mark.parametrize("description", _SKILL_NAMING_DESCRIPTIONS)
 def test_starter_case_passes_strict_validate(tmp_path: Path, description):
-    skill = _write_skill(tmp_path, description)
+    skill = _write_skill(tmp_path, description, scripts=_SCRIPT_FILES)
     generate_dataset.generate_one_case(skill, use_llm=False)
 
     result = CliRunner().invoke(cli, ["tier3", "validate", str(skill), "--strict", "--json"])
@@ -799,8 +806,12 @@ def test_create_eval_dataset_warns_about_cases_that_grade_skill_use(tmp_path: Pa
     assert "The agent reads SKILL.md before acting" in result.dataset["evals"][0]["assertions"]
 
 
-def test_create_eval_dataset_prints_no_warning_for_outcome_cases(tmp_path: Path, capsys):
-    skill = _write_skill(tmp_path, "Reviews release manifests for policy problems.")
+@pytest.mark.parametrize(
+    "description", ["Reviews release manifests for policy problems.", "Runs review.sh on release manifests."]
+)
+def test_create_eval_dataset_prints_no_warning_for_outcome_cases(tmp_path: Path, capsys, description):
+    # A description that names a skill script is not quoted in graded text, whatever the script's language.
+    skill = _write_skill(tmp_path, description, scripts=_SCRIPT_FILES)
 
     generate_dataset.main([str(skill), "--no-llm", "--full", "--dry-run"])
 
@@ -820,6 +831,31 @@ def test_template_refine_ignores_non_string_skill_fields():
 
     assert "The agent read release.yaml" in with_skill["expected_behavior"]
     assert "The agent read release.yaml" in case_only["expected_behavior"]
+
+
+def test_template_refine_drops_runs_of_a_shell_skill_script(tmp_path: Path):
+    skill = generate_dataset._parse_skill(_write_skill(tmp_path, "Reviews release manifests.", scripts=_SCRIPT_FILES))
+    cases = generate_dataset._generate_simple(skill)
+    trajectory = {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {"function_name": "bash", "arguments": {"command": "bash scripts/review.sh release.yaml"}}
+                ],
+            },
+            {
+                "source": "agent",
+                "tool_calls": [{"function_name": "bash", "arguments": {"command": "grep -n image release.yaml"}}],
+            },
+        ]
+    }
+
+    (refined,) = generate_dataset._refine_from_trajectory_template(cases, {cases[0]["id"]: trajectory}, skill=skill)
+
+    assert "The agent executed: grep -n image release.yaml" in refined["expected_behavior"]
+    assert not [item for item in refined["expected_behavior"] if "review.sh" in item]
+    assert _baseline_fairness_warnings(refined, skill_scripts=_SCRIPT_FILES) == []
 
 
 @pytest.mark.parametrize("command", ["init-custom-grader", "init-harbor-task"])

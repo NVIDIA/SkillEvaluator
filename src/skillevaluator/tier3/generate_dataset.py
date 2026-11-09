@@ -172,6 +172,8 @@ def _parse_skill(skill_path: Path, prompt_file: str | None = None) -> dict[str, 
         "name": name,
         "description": description,
         "scripts": scripts,
+        # Every script file `tier3 validate` lists, not only the Python ones in "scripts".
+        "script_files": _skill_script_names(skill_path),
         "interactive_scripts": interactive_scripts,
         "content": content[:4000],
         "eval_prompt": eval_prompt,
@@ -321,8 +323,15 @@ def _description_lower(skill: dict[str, Any]) -> str:
 
 
 def _script_file_names(skill: dict[str, Any]) -> tuple[str, ...]:
-    """File names of the parsed skill's scripts."""
-    return tuple(Path(script).name for script in skill.get("scripts", []) if isinstance(script, str) and script)
+    """File names of the parsed skill's scripts, the list `tier3 validate` checks graded text against.
+
+    "scripts" holds only the Python scripts the generator can name as
+    expected_script; "script_files" adds the shell, JavaScript and other
+    script files in scripts/ and tools/.
+    """
+    names = {Path(script).name for script in skill.get("scripts", []) if isinstance(script, str) and script}
+    names.update(name for name in skill.get("script_files", ()) if isinstance(name, str) and name)
+    return tuple(sorted(names))
 
 
 def _outcome_subject(skill: dict[str, Any], desc_lower: str) -> str | None:
@@ -610,7 +619,7 @@ def generate_one_case(skill_path: Path, *, use_llm: bool) -> Path:
     )
     if len(cases) != 1:
         raise RuntimeError("one-case generation did not return exactly one case")
-    cases = [_without_skill_use(cases[0], skill, _skill_script_names(skill_path))]
+    cases = [_without_skill_use(cases[0], skill, _script_file_names(skill))]
     evals_dir.mkdir(parents=True, exist_ok=True)
     with output_path.open("x", encoding="utf-8") as output:
         json.dump(_to_agentskills_dataset(skill["name"], cases), output, indent=2, ensure_ascii=False)
@@ -1056,7 +1065,7 @@ def _refine_from_trajectory_template(
 
         case = dict(case)
         skill_name = (skill or {}).get("name") or case.get("expected_skill")
-        skill_scripts = [*(skill or {}).get("scripts", []), case.get("expected_script")]
+        skill_scripts = [*_script_file_names(skill or {}), case.get("expected_script")]
 
         # --- Refine expected_behavior ---
         traj_behaviors: list[str] = []
@@ -1280,7 +1289,7 @@ Agent-refined mode (--refine):
             print("  No trajectory available — using initial cases as-is.")
 
     dataset = _to_agentskills_dataset(skill["name"], cases)
-    _print_baseline_fairness_warnings(dataset, _skill_script_names(skill_path))
+    _print_baseline_fairness_warnings(dataset, _script_file_names(skill))
 
     if args.dry_run:
         print("\nDry run — not saved.")

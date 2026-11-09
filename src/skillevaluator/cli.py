@@ -3377,6 +3377,7 @@ def evaluate(
 @click.option("--dry-run", is_flag=True, help="Preview without writing.")
 @click.option("--force", is_flag=True, help="Overwrite existing evals/evals.json.")
 @click.option("--prompt", type=click.Path(exists=True, path_type=Path), default=None)
+@click.option("--grounding", type=click.Choice(["skill", "intent", "trace"]), default="skill")
 @click.option("--refine", is_flag=True, help="Refine cases using existing or collected trajectories.")
 @click.option("--from-results", type=click.Path(exists=True, path_type=Path), default=None)
 @click.option("--results-dir", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=None)
@@ -3387,6 +3388,7 @@ def create_dataset(
     dry_run: bool,
     force: bool,
     prompt: Path | None,
+    grounding: str,
     refine: bool,
     from_results: Path | None,
     results_dir: Path | None,
@@ -3403,6 +3405,7 @@ def create_dataset(
                 dry_run=dry_run,
                 force=force,
                 prompt=prompt,
+                grounding=grounding,
                 refine=refine,
                 from_results=from_results,
                 results_dir=results_dir,

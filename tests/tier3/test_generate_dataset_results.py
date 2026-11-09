@@ -298,26 +298,19 @@ def test_to_agentskills_dataset_preserves_aces_metadata():
     assert dataset["evals"][0]["expected_script"] == "main.py"
 
 
-def test_dry_run_refine_does_not_write_dataset_when_no_trajectory(tmp_path, monkeypatch):
+def test_dry_run_refine_requires_a_trajectory(tmp_path):
+    from skillevaluator.evaluation import DatasetGenerationError
+
     skill = tmp_path / "my-skill"
     skill.mkdir()
     (skill / "SKILL.md").write_text(
         "---\nname: my-skill\ndescription: Does useful work\n---\n",
         encoding="utf-8",
     )
-    result = generate_dataset.main(
-        [
-            str(skill),
-            "--no-llm",
-            "--dry-run",
-            "--refine",
-        ]
-    )
+    with pytest.raises(DatasetGenerationError, match="Trace grounding requires at least one trajectory"):
+        generate_dataset.main([str(skill), "--no-llm", "--dry-run", "--refine"])
 
     assert not (skill / "evals" / "evals.json").exists()
-    assert result.status == "preview"
-    assert result.cases_count == 1
-    assert result.dataset is not None
 
 
 def test_main_invalid_skill_raises_domain_error_without_printing(tmp_path, capsys):
@@ -433,10 +426,10 @@ def test_command_uses_explicit_argv_without_mutating_process_state(tmp_path, mon
     original_argv = sys.argv[:]
     monkeypatch.setattr(generate_dataset, "main", lambda argv=None: observed.append(list(argv or ())) or sentinel)
 
-    result = commands.create_dataset(tmp_path, no_llm=True, dry_run=True)
+    result = commands.create_dataset(tmp_path, no_llm=True, dry_run=True, grounding="intent")
 
     assert result is sentinel
-    assert observed == [[str(tmp_path.resolve()), "--no-llm", "--dry-run"]]
+    assert observed == [[str(tmp_path.resolve()), "--no-llm", "--dry-run", "--grounding", "intent"]]
     assert sys.argv == original_argv
 
 
@@ -531,7 +524,6 @@ def test_parse_skill_falls_back_to_defaults_on_malformed_frontmatter(tmp_path):
     parsed = _parse(tmp_path, "name: [unclosed\ndescription: broken")
     assert parsed["name"] == "my-skill"
     assert parsed["description"] == ""
-
 
 
 def test_no_llm_negative_case_does_not_name_the_skill():

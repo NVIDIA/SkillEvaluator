@@ -149,6 +149,25 @@ require an existing source instead of generating one.
   overwrite too — it produces the final version of the dataset.
 </Warning>
 
+### Choose a grounding source
+
+`create-eval-dataset --grounding skill|intent|trace` selects the primary
+source used to generate and refine cases. The default, `skill`, preserves the
+existing behavior and grounds cases in `SKILL.md`. `intent` requires author
+guidance in `evals/EVAL.md` or a file passed with `--prompt`; that guidance is
+the primary source, with `SKILL.md` as context. `trace` refines cases from
+observed agent trajectories and accepts `--from-results` and `--results-dir`.
+The existing `--refine` flag remains available as a trace-refinement alias on
+top of the selected grounding source.
+
+Generated datasets include a `generation` record with the mode, grounding
+source, relative input paths and SHA-256 digests, generation time, and review
+state. Cases whose authored expectations conflict with an observed answer, or
+whose authored behavior is not present in the trace, include
+`review.status: needs_review` and reasons. A proposed ground truth based on an
+observed answer is also flagged for review; inspect these cases before relying
+on them as authored expectations.
+
 ### The four case buckets
 
 `--full` with an LLM provider targets one case per bucket, including a negative

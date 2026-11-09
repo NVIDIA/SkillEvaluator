@@ -539,9 +539,10 @@ skillevaluator create-eval-dataset ./my-skill --full
 | `--dry-run` | off | Preview without writing. |
 | `--force` | off | Overwrite existing `evals/evals.json`. |
 | `--prompt PATH` | none | Developer eval-guidance file for generation (default: auto-detects `evals/EVAL.md`). |
-| `--refine` | off | Refine cases using existing or collected trajectories. Reading trajectories from existing results does not require the `tier3` extra; when none exist, collecting one runs `claude-code` through Harbor and needs the `tier3` extra, Docker, and a configured provider (see [Eval Datasets](eval-datasets.mdx)). |
-| `--from-results PATH` | none | With `--refine`: results path containing agent trajectories (default: latest results). |
-| `--results-dir DIRECTORY` | unset | With `--refine`: external results root to search for trajectories. |
+| `--grounding {skill,intent,trace}` | `skill` | Choose `SKILL.md`, author guidance (`evals/EVAL.md` or `--prompt`), or agent trajectories as the primary grounding source. |
+| `--refine` | off | Refine cases with trajectories on top of the selected grounding source; equivalent to trace refinement. If none exist, collection runs `claude-code` through Harbor and needs the `tier3` extra, Docker, and a configured provider (see [Eval Datasets](eval-datasets.mdx)). |
+| `--from-results PATH` | none | With `--grounding trace` or `--refine`: results path containing agent trajectories (default: latest results). |
+| `--results-dir DIRECTORY` | unset | With `--grounding trace` or `--refine`: external results root to search for trajectories. |
 
 ## init-custom-grader
 

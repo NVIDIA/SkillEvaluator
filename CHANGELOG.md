@@ -22,6 +22,15 @@ All notable changes to SkillEvaluator are documented in this file.
   `--custom-dockerfile-mode preserve`, `harbor.base_image_mode` and native
   `evals/harbor/` tasks work as on Harbor, and
   `tier3 doctor --backend nemo-gym` checks Gym readiness.
+- Run SkillEvaluator's own `skills/` through the pinned three-tier GitHub
+  callers, retaining Tier 1 as required and Tier 2/3 as advisory. A separate
+  consumer feedback listener preserves the reusable publisher's public path;
+  onboarding and status recognize this filename collision without replacing
+  reusable workflow definitions. Automatic comments activate after the
+  listener reaches the default branch.
+  Document the shared chat/judge/agent model input and model-availability
+  troubleshooting for provider-backed CI.
+
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI
   command, and ships Tier 3 evaluation cases for itself. A test keeps every

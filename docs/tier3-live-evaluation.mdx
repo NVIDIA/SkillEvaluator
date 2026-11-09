@@ -599,11 +599,13 @@ one line, and a long value ends in an ellipsis instead of wrapping. The agent
 models, provider and run plan are also printed in full above the table
 whenever they change. The table shows the most recently updated stages in a
 fixed number of rows, at least six and at least one per agent. When the run
-ends, the table left on screen lists every stage with its full detail. The
-view redraws only when a stage changes or a heartbeat updates elapsed times. If
-drawing fails, including a terminal write that would block, the table stops
-updating with its stages as they were, a line says that the run continues, and
-no further progress is shown for that run; the final results still print.
+ends, the table left on screen lists every stage. Its details wrap in full
+when the terminal leaves the Detail column at least 20 columns; in a narrower
+terminal each row stays on one line. The view redraws only when a stage
+changes or a heartbeat updates elapsed times. If drawing fails, including a
+terminal write that would block, the table stops updating with its stages as
+they were, a line says that the run continues, and no further progress is
+shown for that run; the final results still print.
 
 Every `tier3 evaluate` flag, including resource overrides and Dockerfile
 modes, is in the [CLI Reference](cli-reference.mdx).

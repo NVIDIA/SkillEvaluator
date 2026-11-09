@@ -128,17 +128,17 @@ All notable changes to SkillEvaluator are documented in this file.
   ellipsis when its value is too long, and stages fill a fixed number of rows,
   at least six and one per agent, showing the most recently updated. The agent
   models, provider and run plan are printed in full above the table whenever
-  they change, and the table left on screen when the run ends lists every stage
-  with its full detail. A stopping agent's detail now starts with the second
-  Ctrl+C hint, so a cut row still shows it. The view redraws only on progress
-  events and heartbeats, no longer also from Rich's own refresh thread. If
-  drawing fails, including a terminal write that would block, the table keeps
-  its last frame with running stages still shown as running, a line says that
-  the run continues, and no further progress is shown for that run; the final
-  results still print. Before, a failure on the heartbeat thread ended that
-  thread with a traceback and left the view active without updating elapsed
-  times, and a failure on the caller's thread marked the running stages as
-  failed.
+  they change, and the table left on screen when the run ends lists every
+  stage, with its full detail when the Detail column is at least 20 columns
+  wide. A stopping agent's detail now starts with the second Ctrl+C hint, so a
+  cut row still shows it. The view redraws only on progress events and
+  heartbeats, no longer also from Rich's own refresh thread. If drawing fails,
+  including a terminal write that would block, the table keeps its last frame
+  with running stages still shown as running, a line says that the run
+  continues, and no further progress is shown for that run; the final results
+  still print. Before, a failure on the heartbeat thread ended that thread with
+  a traceback and left the view active without updating elapsed times, and a
+  failure on the caller's thread marked the running stages as failed.
 
 ## 0.8.0 - 2026-11-05
 

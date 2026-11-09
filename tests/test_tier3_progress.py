@@ -616,6 +616,45 @@ def test_rich_final_frame_wraps_details_the_running_frame_cuts(monkeypatch: pyte
     assert _row_detail(final_frame, "Agent codex") == reason
 
 
+def test_rich_final_frame_keeps_rows_on_one_line_where_the_detail_column_is_narrow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import rich.live
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+    reporter = progress.RichProgressReporter(stream=_TTYBuffer(), refresh_interval=60)
+    reporter.start(_plan(progress))
+    reporter.emit(
+        progress.ProgressEvent(
+            stage="agent-runtime-preflight",
+            state="skipped",
+            detail="disabled by default; enable with --agent-runtime-preflight",
+        )
+    )
+    reason = "one or more Harbor jobs failed; inspect the retained artifacts and the trial logs"
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="failed", detail=reason))
+    live = _FakeLive.instances[0]
+    reporter.close()
+    final = live.renderables[-1]
+
+    # Stage (23 characters for Agent Runtime Preflight), State and Elapsed leave
+    # the Detail column 20 characters wide at 76 columns, so the details wrap.
+    wide = _render(final, width=76)
+    assert _row_detail(wide, "Agent codex") == reason
+    assert max(len(line.split("│")[3]) - 2 for line in wide.splitlines() if line.count("│") == 5) == 20
+    # One column narrower, folding every detail into a tall stack of short
+    # pieces would leave the frame unreadable, so each row stays on one line.
+    for width in (75, 60):
+        narrow = _render(final, width=width)
+        rows = [line for line in narrow.splitlines() if line.count("│") == 5]
+        # The header, four plan rows and two stages.
+        assert len(rows) == 7, (width, narrow)
+        assert _row_detail(narrow, "Agent codex").endswith("…")
+        assert all(len(line) == width for line in narrow.splitlines() if line.strip())
+
+
 def _stopping_frame_reporter(progress: Any, output: io.StringIO, agents: tuple[str, ...], stopping_detail: str) -> Any:
     """Return a Rich reporter whose stage sequence matches a run stopped by Ctrl+C."""
     reporter = progress.RichProgressReporter(stream=output, refresh_interval=60)

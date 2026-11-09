@@ -93,6 +93,32 @@ top-level object with `skill_name` and an `evals` array.
 The dataset file can be named `evals.json`, `evals.jsonl`, `evals.yaml`, or
 `evals.yml` — `tier3 evaluate` accepts all four.
 
+### Deterministic checks
+
+Use the optional `checks` list for requirements that can be evaluated without
+a custom grader or language-model judge. Each check contributes one item to
+`behavior_check`; checks without the required evidence are reported as not
+checked and are excluded from its mean.
+
+```json
+{
+  "checks": [
+    {"type": "script_invoked", "script": "scripts/build.py"},
+    {"type": "command_succeeded", "script": "scripts/build.py"},
+    {"type": "file_exists", "path": "out/report.md"},
+    {"type": "output_matches", "pattern": "Report [0-9]+"},
+    {"type": "output_contains", "text": "Build complete"}
+  ]
+}
+```
+
+`script_invoked` checks command evidence in the trajectory. `command_succeeded`
+also requires recorded success; an invocation without an exit result is not
+checked. `file_exists` inspects the post-run workspace, not a path merely
+mentioned in the response. `output_matches` uses a regular expression and
+`output_contains` uses a literal substring; both inspect the final response.
+Unknown check types and invalid fields are dataset-validation errors.
+
 <AccordionGroup>
   <Accordion title="Legacy flat format">
     Older datasets are a flat array of entries with `question` instead of

@@ -435,6 +435,11 @@ def _collect_fail_reasons(metric: str, trials: list[dict[str, Any]]) -> list[str
                     continue
                 if reason := _bounded_reason_text(result.get("reason")):
                     reasons.append(reason)
+            declarative_checks = detail.get("declarative_checks")
+            if isinstance(declarative_checks, dict) and (
+                summary := _bounded_reason_text(declarative_checks.get("summary"))
+            ):
+                reasons.append(summary)
 
         elif metric == "accuracy":
             criteria = _applicable_accuracy_criteria(detail)

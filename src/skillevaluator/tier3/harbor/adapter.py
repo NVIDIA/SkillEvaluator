@@ -2398,6 +2398,7 @@ def _copy_verifier(task_dir: Path) -> None:
         (_EVAL_CORE_DIR / "atif_helpers.py", "ATIF evidence helpers"),
         (_EVAL_CORE_DIR / "shell_lexing.py", "Shell lexical helper"),
         (_EVAL_CORE_DIR / "script_invocation.py", "Shell invocation helper"),
+        (_EVAL_CORE_DIR / "declarative_checks.py", "Declarative checks helper"),
         (_EVAL_CORE_DIR / "checks.py", "Deterministic grading checks"),
         (_EVAL_CORE_DIR / "secret_redaction.py", "Deterministic redaction helper"),
         (_EVAL_CORE_DIR / "codex_tool_call_normalizer.py", "Codex tool-call normalizer"),

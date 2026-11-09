@@ -6,6 +6,7 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Tier 3 datasets can declare deterministic behavior checks for script invocation and success, workspace files, and final-response text.
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI
   command, and ships Tier 3 evaluation cases for itself. A test keeps every

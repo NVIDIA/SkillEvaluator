@@ -112,6 +112,17 @@ if _CHECKS_PATH.is_file():
 else:  # Source-tree template: the canonical module lives in the package.
     from skillevaluator.tier3.eval_core import checks as _shared_checks
 
+_DECLARATIVE_CHECKS_PATH = _SCRIPT_TESTS_DIR / "declarative_checks.py"
+if _DECLARATIVE_CHECKS_PATH.is_file():
+    _declarative_spec = importlib.util.spec_from_file_location(
+        "_skillevaluator_shared_declarative_checks", _DECLARATIVE_CHECKS_PATH
+    )
+    assert _declarative_spec and _declarative_spec.loader
+    _shared_declarative_checks = importlib.util.module_from_spec(_declarative_spec)
+    _declarative_spec.loader.exec_module(_shared_declarative_checks)
+else:
+    from skillevaluator.tier3.eval_core import declarative_checks as _shared_declarative_checks
+
 AMBIGUOUS_OUTER_EXEC_OBSERVATION = _shared_checks.AMBIGUOUS_OUTER_EXEC_OBSERVATION
 UNOBSERVED_INNER_CALL = _shared_checks.UNOBSERVED_INNER_CALL
 UNSUPPORTED_NATIVE_CODEX_EXEC = _shared_checks.UNSUPPORTED_NATIVE_CODEX_EXEC
@@ -581,6 +592,13 @@ logger = logging.getLogger(__name__)
 
 def _env_path(name, default):
     return Path(os.environ.get(name, str(default)))
+
+
+def _declarative_workspace_roots():
+    roots = [Path.cwd(), Path("/workspace"), Path("/workspace/output")]
+    if artifact_root := os.environ.get("HARBOR_ARTIFACTS_DIR"):
+        roots.append(Path(artifact_root))
+    return list(dict.fromkeys(roots))
 
 
 LOGS_DIR = _env_path("HARBOR_LOGS_DIR", "/logs")
@@ -3737,6 +3755,7 @@ def main():
     evaluated_skill = entry.get("evaluated_skill") or ""
     acceptable_skills = _resolve_acceptable_skills(entry, expected_skill)
     expected_behavior = entry.get("expected_behavior", [])
+    declarative_checks = entry.get("checks", [])
     question = entry.get("question", "")
     ground_truth = entry.get("ground_truth", "")
     workspace_mode = entry.get("skill_workspace_mode", "isolated")
@@ -3782,6 +3801,31 @@ def main():
             "trajectory_source": traj_meta.get("source"),
             "trajectory_detail": traj_meta.get("warning") or traj_meta.get("note"),
         }
+        if declarative_checks:
+            direct_results = _shared_declarative_checks.evaluate_declarative_checks(
+                declarative_checks,
+                tool_calls=[],
+                final_response="",
+                workspace_roots=_declarative_workspace_roots(),
+            )
+            judged_count = len(expected_behavior) if _has_judge_reference(expected_behavior) else 0
+            base_behavior = {
+                "score": judge_scores["behavior_check"],
+                "status": "accepted" if judged_count else "not_applicable",
+                "reason": "No trajectory or reconstructible agent log"
+                if judged_count
+                else _NO_EXPECTED_BEHAVIOR_REASON,
+                "results": [
+                    {"step": index + 1, "passed": False, "reason": "No trajectory or reconstructible agent log"}
+                    for index in range(judged_count)
+                ],
+            }
+            behavior_result = _shared_declarative_checks.combine_behavior_check(
+                base_behavior, direct_results, judged_count
+            )
+            judge_scores["behavior_check"] = behavior_result["score"]
+            judge_details["behavior_check"] = behavior_result
+            result["behavior_check"] = behavior_result["score"]
         if judge_details:
             result["details"] = judge_details
         write_reward_outputs(result, 0.0)
@@ -3890,13 +3934,33 @@ def main():
         details["goal_accuracy"] = ga_result
 
         # ── Eval 6: behavior_check (LLM judge) ───────────────────────────
-        bc_result = _call_required_judge(
-            "behavior_check",
-            judge_behavior_check,
-            bundles["behavior_check"]["prompt_evidence"],
-            expected_behavior,
-            allow_not_applicable=not _has_judge_reference(expected_behavior),
-        )
+        if declarative_checks:
+            if _has_judge_reference(expected_behavior):
+                bc_result = _call_required_judge(
+                    "behavior_check",
+                    judge_behavior_check,
+                    bundles["behavior_check"]["prompt_evidence"],
+                    expected_behavior,
+                )
+            else:
+                bc_result = _judge_not_applicable(_NO_EXPECTED_BEHAVIOR_REASON, results=[])
+        else:
+            bc_result = _call_required_judge(
+                "behavior_check",
+                judge_behavior_check,
+                bundles["behavior_check"]["prompt_evidence"],
+                expected_behavior,
+                allow_not_applicable=not _has_judge_reference(expected_behavior),
+            )
+        if declarative_checks:
+            direct_results = _shared_declarative_checks.evaluate_declarative_checks(
+                declarative_checks,
+                tool_calls=tool_calls,
+                final_response=_get_final_response(traj),
+                workspace_roots=_declarative_workspace_roots(),
+            )
+            judged_count = len(expected_behavior) if _has_judge_reference(expected_behavior) else 0
+            bc_result = _shared_declarative_checks.combine_behavior_check(bc_result, direct_results, judged_count)
         bc_score = bc_result["score"]
         details["behavior_check"] = bc_result
     finally:

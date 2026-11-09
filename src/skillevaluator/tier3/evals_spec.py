@@ -621,6 +621,7 @@ def _check_dataset(skill_path: Path, results: list[CheckResult]) -> bool:
 def _validate_dataset_contents(path: Path, results: list[CheckResult]) -> None:
     """Validate the contents of a dataset file."""
     from .dataset_utils import load_dataset_entries_with_format
+    from .eval_core.declarative_checks import validate_declarative_checks
 
     try:
         entries, dataset_format = load_dataset_entries_with_format(path)
@@ -672,6 +673,9 @@ def _validate_dataset_contents(path: Path, results: list[CheckResult]) -> None:
                     f"Missing required fields: {', '.join(sorted(missing_required))}",
                 )
             )
+        if "checks" in entry:
+            for error in validate_declarative_checks(entry["checks"]):
+                results.append(CheckResult(f"entry {entry_id}", "error", error))
         missing_recommended = DATASET_RECOMMENDED_FIELDS - set(entry.keys())
         if dataset_format == "legacy" and missing_recommended:
             results.append(

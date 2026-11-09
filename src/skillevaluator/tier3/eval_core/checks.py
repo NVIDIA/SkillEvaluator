@@ -2927,9 +2927,11 @@ _FINDING_EVIDENCE_QUOTED_REST_RES = {
 }
 # A name need not open its quoted string ('  password: VALUE',
 # "username=bob&password=VALUE", "export DB_PASSWORD=VALUE"). Quotes are read
-# from the start of each line, as a shell reads them, in one pass over the
-# text: a backslash escapes the next character outside single quotes, a line
-# break ends any string, and an apostrophe inside a word ("don't") opens none.
+# forward from the start of each line in one pass over the text: a backslash
+# escapes the next character outside single quotes, and an apostrophe inside a
+# word ("don't") opens no string, but one right after a short flag
+# ("curl -d'user=bob&password=VALUE'") does. Unlike in a shell, a line break
+# ends any string here.
 _FINDING_EVIDENCE_QUOTE_CHAR_RE = re.compile(r"[\\'\"\r\n]")
 # A quoted shell command holds shell assignments, whose value is one word: a
 # "-c" string ("sh -c 'TOKEN=x make deploy'"), an eval string and a remote
@@ -3251,7 +3253,14 @@ def _scan_quotes(text: str, pos: int, end: int, opening: int | None) -> tuple[in
             if opening is None or text[opening] == '"':
                 pos += 1
         elif opening is None:
-            if char == '"' or index == 0 or not text[index - 1].isalnum():
+            # An apostrophe inside a word opens no string, but one right after
+            # a short flag does ("-d'user=bob&password=VALUE'").
+            if (
+                char == '"'
+                or index == 0
+                or not text[index - 1].isalnum()
+                or (index >= 2 and text[index - 2] == "-" and (index == 2 or text[index - 3].isspace()))
+            ):
                 opening = index
         elif char == text[opening]:
             opening = None

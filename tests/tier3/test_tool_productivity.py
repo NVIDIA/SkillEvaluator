@@ -157,6 +157,7 @@ def test_wasted_session_input_is_labelled_with_its_text():
         (_call("mcp__filesystem__list_directory", path="/"), "wasted"),
         (_call("mcp__filesystem__directory_tree", path="//"), "wasted"),
         (_call("mcp__workspace__list", dir_path="/"), "wasted"),
+        (_call("mcp__my_filesystem__stat", path="/"), "wasted"),
         (_call("mcp__filesystem__search_files", path="/workspace", pattern="SKILL.md"), "productive"),
         (_call("mcp__filesystem__list_directory", path="/workspace/src"), "productive"),
         (_call("mcp__github__search_code", query="path:/ release"), "productive"),
@@ -165,6 +166,23 @@ def test_wasted_session_input_is_labelled_with_its_text():
 )
 def test_mcp_calls_rooted_at_filesystem_root_are_wasted(module, call, kind):
     assert _classify(module, call) == kind
+
+
+@pytest.mark.parametrize("module", _MODULES)
+@pytest.mark.parametrize(
+    "call",
+    [
+        _call("mcp__github__get_file_contents", owner="o", repo="r", path="/"),
+        _call("mcp__github__get_file_contents", owner="o", repo="r", path="src/"),
+        _call("mcp__docs__get_page", path="/"),
+        _call("mcp__wiki__read_page", dir_path="/"),
+    ],
+    ids=lambda call: f"{call['action']}:{call['action_input']}",
+)
+def test_mcp_path_root_of_other_servers_is_productive(module, call):
+    # Other servers use path for something other than the local filesystem:
+    # path "/" on the GitHub server lists a repository root, not the disk.
+    assert _classify(module, call) == "productive"
 
 
 @pytest.mark.parametrize("module", _MODULES)

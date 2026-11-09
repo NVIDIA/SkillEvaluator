@@ -5344,6 +5344,8 @@ _PRODUCTIVE_TOOL_NAMES = frozenset(
 # Without text they only poll or watch and are neutral; with text they run it,
 # and it is classified like any other command.
 _SESSION_INPUT_TOOL_ARGS = {"write_stdin": "chars", "monitor": "command"}
+# Words in an MCP tool's own name that mark a filesystem search or listing.
+_MCP_FILESYSTEM_SEARCH_WORDS = ("search", "list", "tree", "find", "glob", "grep", "directory")
 
 
 def _tool_efficiency_args(tool_call: dict[str, Any]) -> dict[str, Any]:
@@ -5397,8 +5399,19 @@ def _session_input_is_text(value: Any) -> bool:
 
 
 def _mcp_call_targets_root(name: str, args: dict[str, Any]) -> bool:
-    """An MCP call whose path or dir_path is "/" searches or lists the whole filesystem."""
-    return name.startswith("mcp__") and any(
+    """Whether an MCP call searches or lists the whole filesystem.
+
+    Only filesystem tools count: a tool of a server whose name contains
+    ``filesystem``, or a tool whose own name says it searches or lists
+    (``_MCP_FILESYSTEM_SEARCH_WORDS``). Other servers use ``path`` for other
+    things, such as a file in a repository, where "/" is the repository root.
+    """
+    if not name.startswith("mcp__"):
+        return False
+    server, _, tool = name[len("mcp__") :].partition("__")
+    if "filesystem" not in server and not any(word in tool for word in _MCP_FILESYSTEM_SEARCH_WORDS):
+        return False
+    return any(
         isinstance(args.get(key), str) and _search_path_is_root(args[key].strip()) for key in ("path", "dir_path")
     )
 

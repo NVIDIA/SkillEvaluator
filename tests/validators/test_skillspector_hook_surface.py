@@ -30,6 +30,8 @@ set to ``/fixture/<name>``:
   v2.13.3;
 - a skill with a ``.claude/settings.json`` command hook, with v2.13.3, and the
   same skill with a referenced PNG;
+- that skill with a SKILL.md line that names a file it does not bundle, with
+  v2.13.3 and v2.13.4;
 - that skill with 2,050 command hooks, with a second handler whose command is
   a list, and with an ``env`` value that is a list, with v2.13.3 and v2.13.4;
   and with a permission rule beside the hook, with v2.13.4.
@@ -68,6 +70,7 @@ _TIMEOUT_REPORT = "skillspector-2.13.4-bundled-script-hooks-timeout-no-llm.json"
 _UPLOAD_REPORT = "skillspector-2.13.3-upload-hooks-no-llm.json"
 _SETTINGS_REPORT = "skillspector-2.13.3-settings-hook-no-llm.json"
 _SETTINGS_IMAGE_REPORT = "skillspector-2.13.3-settings-hook-image-no-llm.json"
+_MISSING_REFERENCE_VERSIONS = ("2.13.3", "2.13.4")
 
 
 def _settings_variant_report(version: str, case: str) -> str:
@@ -135,6 +138,17 @@ _SETTINGS_VARIANTS = {
 _SETTINGS_IMAGE_SKILL_MD = (
     "---\nname: skill-settings\ndescription: Formats notes after each edit using a bundled helper script.\n"
     "---\n# Skill settings\n\n![Logo](assets/logo.png)\n\nRun the formatter after edits.\n"
+)
+# The same skill whose SKILL.md line 7 names output/notes.md, which it does not bundle.
+_SETTINGS_MISSING_REFERENCE_SKILL_MD = (
+    "---\nname: skill-settings\ndescription: Formats notes after each edit using a bundled helper script.\n"
+    "---\n# Skill settings\n\nRun the formatter after edits. It writes output/notes.md for you.\n"
+)
+_MISSING_REFERENCE_WARNING = (
+    "SkillSpector reported 1 reference(s) to files the skill does not bundle (SKILL.md:7 [reference_resolution; "
+    "reference_missing]); SkillSpector reported no other gap for them, and those lines name no file left out of "
+    "the scan, so they do not mark the scan incomplete. Files not in the scan, including any outside the scanned "
+    "path, were not inspected"
 )
 # Hook scripts that send their input to a remote host; the plugin is otherwise unchanged.
 _UPLOAD_SCRIPTS = {
@@ -233,6 +247,16 @@ def _settings_image_skill(tmp_path: Path) -> Path:
     return root
 
 
+def _settings_missing_reference_skill(tmp_path: Path) -> Path:
+    root = _settings_skill(tmp_path)
+    _write(root, {"SKILL.md": _SETTINGS_MISSING_REFERENCE_SKILL_MD})
+    return root
+
+
+def _settings_missing_reference_report(version: str) -> str:
+    return _settings_variant_report(version, "missing-reference")
+
+
 _CAPTURES: list[tuple[str, Callable[[Path], Path], str]] = [
     (_PLUGIN_REPORT, _plugin, "hooks/hooks.json"),
     (_PLUGIN_REPORT_2_13_4, _plugin, "hooks/hooks.json"),
@@ -240,6 +264,10 @@ _CAPTURES: list[tuple[str, Callable[[Path], Path], str]] = [
     (_UPLOAD_REPORT, _upload_plugin, "hooks/hooks.json"),
     (_SETTINGS_REPORT, _settings_skill, ".claude/settings.json"),
     (_SETTINGS_IMAGE_REPORT, _settings_image_skill, ".claude/settings.json"),
+    *[
+        (_settings_missing_reference_report(version), _settings_missing_reference_skill, ".claude/settings.json")
+        for version in _MISSING_REFERENCE_VERSIONS
+    ],
     *[
         (_settings_variant_report(version, case), _settings_variant(case), ".claude/settings.json")
         for version, cases in (
@@ -568,6 +596,30 @@ class TestUnmodeledHooks:
         assert result.status == "failed"
         _assert_hook_critical(result, root, ".claude/settings.json")
         assert any("1 referenced image file(s) (assets/logo.png)" in warning for warning in result.warnings)
+
+    @pytest.mark.parametrize("content_type", ["skill", None])
+    @pytest.mark.parametrize("version", _MISSING_REFERENCE_VERSIONS)
+    @patch("skillevaluator.validators.security.Tools")
+    def test_hooks_beside_a_missing_reference_keep_the_reference_warning(
+        self, mock_tools, tmp_path: Path, version: str, content_type: str | None
+    ) -> None:
+        """The reference gate gets the report without its hook row, so the reference is still only a warning."""
+        root = _settings_missing_reference_skill(tmp_path)
+        report = _report(_settings_missing_reference_report(version))
+        assert [(row["path"], row["reason_code"]) for row in report["analysis_completeness"]["ledger_exceptions"]] == [
+            (".claude/settings.json", "opaque_content"),
+            ("SKILL.md", "reference_missing"),
+        ]
+
+        result = _validate(mock_tools, root, report, SecurityValidator(use_llm=False, content_type=content_type))
+
+        assert result.status == "failed"
+        assert not result.is_incomplete
+        assert result.incomplete_scans == []
+        assert not [error for error in result.errors if "did not complete" in error]
+        _assert_hook_critical(result, root, ".claude/settings.json")
+        assert result.summary.critical_count == 1
+        assert result.warnings.count(_MISSING_REFERENCE_WARNING) == 1
 
 
 class TestFolderScans:

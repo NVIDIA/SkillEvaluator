@@ -77,4 +77,3 @@ Files: existing onboarding, GitHub/GitLab, reports and benchmark guides; changel
 - [ ] Run focused tests, Ruff, formatting, benchmark lints and Fern checks.
 - [ ] Review each task and the final diff; fix findings before opening the implementation PR.
 - [ ] Exercise candidate configuration with real provider credentials in dedicated fixtures, verify native completion and exact model routing, and report any remaining release/runtime dependency honestly.
-

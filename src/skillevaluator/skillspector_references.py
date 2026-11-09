@@ -38,7 +38,6 @@ __all__ = [
     "combine_reference_summaries",
     "diagnostic_text",
     "index_legacy_reference_reasons",
-    "is_reference_summary_message",
     "issue_diagnostics",
     "reference_suggestion",
     "reference_summary",
@@ -427,8 +426,3 @@ def reference_summary_message(summary: object) -> str | None:
         f"{_SUMMARY_MESSAGE_PREFIX}{record['affected_artifacts']} referenced artifact(s) across {count} "
         "reference occurrence(s); each AE1 finding names the artifact and why its analysis stopped"
     )
-
-
-def is_reference_summary_message(message: object) -> bool:
-    """Whether *message* is a :func:`reference_summary_message`."""
-    return isinstance(message, str) and message.startswith(_SUMMARY_MESSAGE_PREFIX)

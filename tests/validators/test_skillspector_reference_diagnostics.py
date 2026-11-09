@@ -30,7 +30,6 @@ from tests.validators.test_security import _jpeg_bytes, _png_bytes
 from skillevaluator.skillspector_references import (
     AE1_PATTERN,
     index_legacy_reference_reasons,
-    is_reference_summary_message,
     issue_diagnostics,
     report_path,
 )
@@ -71,6 +70,11 @@ def _report(name: str = _LEGACY_REPORT) -> dict:
 
 def _ae1(result: ValidationResult) -> list:
     return [finding for finding in result.findings if finding.check_name.endswith("(AE1)")]
+
+
+def _count_messages(result: ValidationResult) -> list[str]:
+    """Result messages with the count line, which reporters would list as passed checks."""
+    return [message for message in result.messages if "could not completely inspect" in message]
 
 
 def _process(report: dict, source_root: Path | None = None) -> ValidationResult:
@@ -151,10 +155,8 @@ class TestCapturedReports:
             "reference_occurrences": 2,
             "reference_occurrences_truncated": False,
         }
-        assert [message for message in result.messages if is_reference_summary_message(message)] == [
-            "skillspector could not completely inspect 1 referenced artifact(s) across 2 reference occurrence(s); "
-            "each AE1 finding names the artifact and why its analysis stopped"
-        ]
+        # Reporters show the count from the metadata, and only for a failed result.
+        assert _count_messages(result) == []
 
     def test_structured_evidence_names_every_reason_and_keeps_the_scanner_remedy(self) -> None:
         report = _report(_HOST_LANGUAGE_REPORT)
@@ -215,7 +217,7 @@ class TestCapturedReports:
 
     @patch("skillevaluator.validators.security.Tools")
     def test_llm_stage_counts_each_reference_once(self, mock_tools, tmp_path: Path) -> None:
-        """Both stages report the AE1 findings of an accepted image gap; the count and message appear once."""
+        """Both stages report the AE1 findings of an accepted image gap; each reference line counts once."""
         root = tmp_path / "raster-demo"
         (root / "assets").mkdir(parents=True)
         (root / "SKILL.md").write_text("See `assets/logo.png` and `assets/photo.jpg`.\n", encoding="utf-8")
@@ -246,7 +248,7 @@ class TestCapturedReports:
             "reference_occurrences": 2,
             "reference_occurrences_truncated": False,
         }
-        assert sum(is_reference_summary_message(message) for message in result.messages) == 1
+        assert _count_messages(result) == []
 
 
 class TestRuleName:
@@ -617,7 +619,7 @@ class TestTruncatedReasons:
 
 
 class TestSummaryRecord:
-    def test_a_later_record_replaces_the_count_and_message(self) -> None:
+    def test_a_later_record_replaces_the_count(self) -> None:
         result = _process(_report(_HOST_LANGUAGE_REPORT))
         result.findings = [
             finding
@@ -627,17 +629,17 @@ class TestSummaryRecord:
 
         _record_skillspector_reference_summary(result)
 
-        assert result.metadata["skillspector_reference_summary"]["affected_artifacts"] == 1
-        assert [message for message in result.messages if is_reference_summary_message(message)] == [
-            "skillspector could not completely inspect 1 referenced artifact(s) across 2 reference occurrence(s); "
-            "each AE1 finding names the artifact and why its analysis stopped"
-        ]
+        assert result.metadata["skillspector_reference_summary"] == {
+            "affected_artifacts": 1,
+            "reference_occurrences": 2,
+            "reference_occurrences_truncated": False,
+        }
 
         result.findings = []
         _record_skillspector_reference_summary(result)
 
         assert "skillspector_reference_summary" not in result.metadata
-        assert not any(is_reference_summary_message(message) for message in result.messages)
+        assert _count_messages(result) == []
 
     def test_reports_without_ae1_evidence_have_no_summary(self) -> None:
         report = _report()
@@ -648,4 +650,4 @@ class TestSummaryRecord:
 
         assert len(_ae1(result)) == 2
         assert "skillspector_reference_summary" not in result.metadata
-        assert not any(is_reference_summary_message(message) for message in result.messages)
+        assert _count_messages(result) == []

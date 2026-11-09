@@ -62,11 +62,9 @@ from skillevaluator.skillspector_references import (
     REFERENCE_SUMMARY_KEY,
     combine_reference_summaries,
     index_legacy_reference_reasons,
-    is_reference_summary_message,
     issue_diagnostics,
     reference_suggestion,
     reference_summary,
-    reference_summary_message,
     report_path,
 )
 from skillevaluator.spdx import is_spdx_only_html_comment
@@ -1077,21 +1075,20 @@ def _combine_skillspector_applicability(blocks: list[dict]) -> dict:
 
 
 def _record_skillspector_reference_summary(result: ValidationResult) -> None:
-    """Count the referenced artifacts behind *result*'s AE1 evidence in its metadata and one message.
+    """Count the referenced artifacts behind *result*'s AE1 evidence in its metadata.
 
     The counts come from the findings
     (:func:`~skillevaluator.skillspector_references.reference_summary`), so a
-    second call after the ``--llm`` stage is merged replaces the first count
-    and its message.
+    second call after the ``--llm`` stage is merged replaces the first count.
+    They are not added to the result's messages: reporters list a passing
+    result's messages as passed checks, and they show the counts only for a
+    failed result.
     """
-    result.messages = [message for message in result.messages if not is_reference_summary_message(message)]
     summary = reference_summary(result.findings)
     if summary is None:
         result.metadata.pop(REFERENCE_SUMMARY_KEY, None)
         return
     result.metadata[REFERENCE_SUMMARY_KEY] = summary
-    if message := reference_summary_message(summary):
-        result.add_message(message)
 
 
 def _issue_field(issue: dict):

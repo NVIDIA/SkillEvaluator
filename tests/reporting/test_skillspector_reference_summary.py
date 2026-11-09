@@ -12,8 +12,10 @@ SkillSpector v2.11.2 report names ``scripts/helper.pl`` at two lines of
 import json
 import re
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
+from tests.validators.test_security import _jpeg_bytes, _png_bytes
 
 from skillevaluator.reporting.cli import CLIReporter
 from skillevaluator.reporting.console_ui import summarize_tier1
@@ -25,10 +27,15 @@ from skillevaluator.skillspector_references import (
     reference_summary_message,
     reference_summary_record,
 )
-from skillevaluator.validators.base import ValidationResult
+from skillevaluator.utils.tool_runner import ToolResult
+from skillevaluator.validators.base import Severity, ValidationResult
+from skillevaluator.validators.policy import ValidationPolicy, apply_policy
 from skillevaluator.validators.security import SecurityValidator
 
 _REPORT = Path(__file__).parents[1] / "fixtures" / "skillspector-2.11.2-perl-help-text-ae1-no-llm.json"
+# A complete v2.12.0 scan whose two AE1 findings name image files it does not analyze.
+_IMAGE_REPORT = Path(__file__).parents[1] / "fixtures" / "skillspector-2.12.0-image-path-reference-no-llm.json"
+_AE1_OVERRIDE = "SECURITY.Incomplete referenced artifact analysis (AE1)"
 
 
 def _write_skill(root: Path) -> None:
@@ -70,7 +77,7 @@ def _rendered(result: ValidationResult) -> dict[str, str]:
         "CLI": re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render(result)),
         "terminal summary": "\n".join("".join(text for text, _style in row.segments) for row in rows),
         "Markdown": MarkdownReporter(include_timestamp=False).render(result),
-        # The visible line; the page's embedded data also carries the result messages.
+        # The line above the Tier 1 results.
         "HTML": "\n".join(
             re.findall(
                 r'<p class="reference-analysis-summary"[^>]*>([^<]*)</p>',
@@ -119,6 +126,58 @@ def test_a_cut_occurrence_list_is_a_lower_bound(tmp_path: Path, monkeypatch: pyt
     }
     for reporter, rendered in _rendered(result).items():
         assert _phrase(2, "at least 256") in rendered, reporter
+
+
+@patch("skillevaluator.validators.security.Tools")
+def _scan_images(root: Path, mock_tools, *, pattern: object = "keep") -> ValidationResult:
+    """Scan a skill that names two images with the captured v2.12.0 report; *pattern* replaces each AE1's."""
+    (root / "assets").mkdir(parents=True)
+    (root / "SKILL.md").write_text("See `assets/logo.png` and `assets/photo.jpg`.\n", encoding="utf-8")
+    (root / "assets" / "logo.png").write_bytes(_png_bytes())
+    (root / "assets" / "photo.jpg").write_bytes(_jpeg_bytes())
+    report = json.loads(_IMAGE_REPORT.read_text(encoding="utf-8"))
+    if pattern != "keep":
+        for issue in report["issues"]:
+            issue["pattern"] = pattern
+    mock_tools.skillspector.is_available = True
+    mock_tools.skillspector.run.return_value = ToolResult(
+        success=True, stdout=json.dumps(report), stderr="", exit_code=0
+    )
+    return SecurityValidator(use_llm=False).validate_security_only(root)
+
+
+def test_a_downgraded_passing_scan_does_not_show_the_counts(tmp_path: Path) -> None:
+    """A policy that lowers the AE1 findings of a complete scan passes it; no report lists the count line."""
+    result = _scan_images(tmp_path / "raster-demo")
+    assert not result.passed
+    assert result.incomplete_scans == []
+
+    apply_policy([result], ValidationPolicy(severity_overrides={_AE1_OVERRIDE: Severity.LOW}))
+
+    assert result.passed
+    for reporter, rendered in _rendered(result).items():
+        assert "could not completely inspect" not in rendered, reporter
+    # A passing result lists its messages as passed checks in the full page.
+    assert "could not completely inspect" not in HTMLReporter(include_timestamp=False).render(result)
+    # JSON records the counts for every result, but not as a message.
+    exported = JSONReporter(include_timestamp=False).render(result)
+    assert json.loads(exported)["skillspector_reference_summary"] == {
+        "affected_artifacts": 2,
+        "reference_occurrences": 2,
+        "reference_occurrences_truncated": False,
+    }
+    assert "could not completely inspect" not in exported
+
+
+@pytest.mark.parametrize(("override", "passes"), [(_AE1_OVERRIDE, True), ("SECURITY.Unknown (AE1)", False)])
+def test_overrides_match_the_rule_name_of_reports_before_v2_12(tmp_path: Path, override: str, passes: bool) -> None:
+    """Before v2.12.0 an AE1 has no pattern; a severity override uses the rule's name, not ``Unknown``."""
+    result = _scan_images(tmp_path / "raster-demo", pattern=None)
+    assert {finding.check_name for finding in result.findings} == {"Incomplete referenced artifact analysis (AE1)"}
+
+    apply_policy([result], ValidationPolicy(severity_overrides={override: Severity.LOW}))
+
+    assert result.passed is passes
 
 
 def test_passing_results_do_not_show_the_counts() -> None:

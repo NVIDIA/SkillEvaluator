@@ -111,8 +111,8 @@ def _skill(path: Path) -> ContentEntry:
     entry = extract_from_skill(path)
     if entry is None or not (path / "SKILL.md").is_file():
         raise ValueError(
-            "Decoy selection requires a skill with a root SKILL.md whose frontmatter has a string name "
-            f"and description: {path}"
+            "Decoy selection requires a skill with a root SKILL.md whose frontmatter is a valid YAML mapping "
+            f"with a non-empty string name and description: {path}"
         )
     _validate_catalog_string(entry.name, "Skill name")
     return entry

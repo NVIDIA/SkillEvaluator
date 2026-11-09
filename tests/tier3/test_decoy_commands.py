@@ -295,9 +295,15 @@ def test_distinct_case_sensitive_directory_can_hold_output(tmp_path: Path, monke
     [
         pytest.param(
             "name: yes\ndescription: Target.",
-            "Error: Decoy selection requires a skill with a root SKILL.md whose frontmatter has a string name and "
-            "description:",
+            "Error: Decoy selection requires a skill with a root SKILL.md whose frontmatter is a valid YAML mapping "
+            "with a non-empty string name and description:",
             id="boolean-name",
+        ),
+        pytest.param(
+            "name: target\ndescription: Use when: debugging logs",
+            "Error: Decoy selection requires a skill with a root SKILL.md whose frontmatter is a valid YAML mapping "
+            "with a non-empty string name and description:",
+            id="invalid-yaml",
         ),
         pytest.param(
             "name: target\ndescription: Target.\nextra: " + "[" * 150 + "x" + "]" * 150,

@@ -586,11 +586,21 @@ def test_rejects_mixed_content_catalog_before_model_calls(selection: SimpleNames
 
 
 # Decoy selection and group-mode loading read SKILL.md frontmatter as similarity-check does.
-_STRING_FIELDS_REQUIRED = r"requires a skill with a root SKILL\.md whose frontmatter has a string name and description"
+_STRING_FIELDS_REQUIRED = (
+    r"requires a skill with a root SKILL\.md whose frontmatter is a valid YAML mapping "
+    r"with a non-empty string name and description: "
+)
 NON_STRING_FRONTMATTER = [
     pytest.param("name: yes\ndescription: Help with target.", id="boolean-name"),
     pytest.param("name: 2048\ndescription: Help with target.", id="integer-name"),
     pytest.param("name: target\ndescription: [Draft]", id="list-description"),
+]
+# Each value reads as a string to the author, but the frontmatter is invalid YAML or the value is empty.
+UNUSABLE_FRONTMATTER = [
+    pytest.param("name: target\ndescription: Use when: debugging logs", id="unquoted-colon"),
+    pytest.param("name: target\n\tdescription: Help with target.", id="tab-indent"),
+    pytest.param("name: ''\ndescription: Help with target.", id="empty-name"),
+    pytest.param("- name: target\n- description: Help with target.", id="list-root"),
 ]
 
 
@@ -610,6 +620,25 @@ def test_target_name_or_description_that_is_not_a_string_is_rejected(
     selection: SimpleNamespace, frontmatter: str
 ) -> None:
     _write_manifest(selection.target, frontmatter)
+
+    with pytest.raises(ValueError, match=_STRING_FIELDS_REQUIRED):
+        _select(selection)
+    selection.client.embed_single.assert_not_called()
+
+
+@pytest.mark.parametrize("frontmatter", UNUSABLE_FRONTMATTER)
+def test_target_with_invalid_yaml_or_an_empty_value_gets_the_whole_rule(
+    selection: SimpleNamespace, frontmatter: str
+) -> None:
+    _write_manifest(selection.target, frontmatter)
+
+    with pytest.raises(ValueError, match=_STRING_FIELDS_REQUIRED):
+        _select(selection)
+    selection.client.embed_single.assert_not_called()
+
+
+def test_target_without_skill_md_gets_the_whole_rule(selection: SimpleNamespace) -> None:
+    (selection.target / "SKILL.md").unlink()
 
     with pytest.raises(ValueError, match=_STRING_FIELDS_REQUIRED):
         _select(selection)

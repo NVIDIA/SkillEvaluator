@@ -149,10 +149,12 @@ All notable changes to SkillEvaluator are documented in this file.
   (`skill_workspace.decoy_manifest`) read the target's and each selected
   skill's frontmatter the same way. A `name` or `description` that is not a
   string, such as `name: yes`, now fails them with `Decoy selection requires a
-  skill with a root SKILL.md whose frontmatter has a string name and
-  description` instead of being converted to text. Frontmatter over a limit, or
-  a value longer than 16,384 characters, fails them with an error that names
-  the manifest.
+  skill with a root SKILL.md whose frontmatter is a valid YAML mapping with a
+  non-empty string name and description` instead of being converted to text;
+  invalid YAML, such as an unquoted `description: Use when: debugging logs`, and
+  an empty value get the same message. Frontmatter over a limit, or a value
+  longer than 16,384 characters, fails them with an error that names the
+  manifest.
 
 ## 0.8.0 - 2026-11-05
 

@@ -480,7 +480,7 @@ handling terms before sending confidential skill content to a hosted endpoint.
     | Direct collection has fewer than two skills | Returns an actionable input error |
     | Catalog source collection is empty | Refuses to save an empty catalog |
     | Catalog path is missing | Returns an error and does not rebuild it silently |
-    | Candidate lacks a root `SKILL.md`, or its frontmatter has no string name and description | Rejects the catalog query |
+    | Candidate lacks a root `SKILL.md`, or its frontmatter is not a valid YAML mapping with a non-empty string name and description | Rejects the catalog query and says what the frontmatter needs |
     | A manifest's frontmatter exceeds a structure limit, or its name or description is longer than 16,384 characters | Fails with an error that names the manifest, before any embedding request |
     | A manifest's name or description is not a string, such as `name: 2048`, or its frontmatter is not a mapping | Skips the manifest, as for invalid YAML |
     | A skill contains an exactly named, single-link regular `AGENTS.md` plus `CLAUDE.md -> AGENTS.md` | Validates and skips the unrelated compatibility alias while discovering `SKILL.md` |

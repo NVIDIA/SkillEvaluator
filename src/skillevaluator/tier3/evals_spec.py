@@ -639,12 +639,15 @@ _READ_VERB_RE = (
 )
 _SKILL_MD_QUALIFIER_RE = r"(?:the|its|this|that|own|skill['\u2019]s)"
 # Nouns after SKILL.md that make it the file format or other skills' files
-# ("SKILL.md files", "the SKILL.md frontmatter format"), not this skill's
-# instructions. One modifier may come between; a connective may not ("read
-# SKILL.md and files in references/" still reads the skill's own SKILL.md).
+# ("SKILL.md files", "the SKILL.md frontmatter format", "following SKILL.md best
+# practices"), not this skill's instructions. Skills that write skills use this
+# wording in ordinary prompts. One modifier may come between; a connective may
+# not ("read SKILL.md and files in references/" still reads the skill's own
+# SKILL.md).
 _SKILL_MD_GENERIC_NOUN_RE = (
     r"(?:(?!(?:and|or|then|but|before|after|to|for|with)\b)[\w-]+\s+)?"
-    r"(?:files|format|conventions|spec|specification|standard|template|schema)\b"
+    r"(?:files|format|conventions|spec|specification|standard|template|schema"
+    r"|guidelines|practices|structure|rules|requirements|layout)\b"
 )
 _SKILL_USE_VERB_RE = (
     r"(?:use|used|uses|using|invok(?:e|ed|es|ing)|activat(?:e|ed|es|ing)|load(?:s|ed|ing)?"

@@ -51,14 +51,18 @@ def emit_plugin_run_reports(
     """Normalize existing score artifacts and attach retained plugin observations."""
     from skillevaluator.cli import _attach_plugin_report
     from skillevaluator.cli_core import resolve_plugin_path
-    from skillevaluator.evaluation.tier3_report import agent_eval_result_from_run
-    from skillevaluator.tier3.results_location import plugin_results_directory
+    from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory
 
     source = resolve_plugin_path(source)
-    results_dir = plugin_results_directory(source, results_dir)
-    result = agent_eval_result_from_run(
-        source, results_dir=results_dir, env_mode=env_mode, engine_result=engine_result, use_llm_judge=False
-    )
+    # Another execution may publish latest before these requested formats are
+    # written. Only the returned run owns this command's canonical score data.
+    run_dir_value = engine_result.get("run_dir") if isinstance(engine_result, dict) else None
+    run_dir = Path(run_dir_value) if isinstance(run_dir_value, (str, Path)) and run_dir_value else None
+    result = None
+    if run_dir is not None and run_dir.is_dir():
+        result = agent_eval_result_from_directory(
+            source, run_dir, env_mode=env_mode, engine_result=engine_result, use_llm_judge=False
+        )
     if result is None:
         result = ValidationResult(validator_name="AGENT_EVAL")
         result.mark_scan_incomplete("canonical-score-summary")

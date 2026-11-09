@@ -199,6 +199,10 @@ class LocalCatalog:
         """
         validate_max_entries(max_entries)
         validate_max_scalar_comparisons(max_scalar_comparisons)
+        source = root
+        located = locate_plugin_manifest(source)
+        if located is not None:
+            root = located.root
         roots = _catalog_roots(root, max_entries=max_entries)
         pending_skills = []
         pending_plugins = []
@@ -206,7 +210,7 @@ class LocalCatalog:
         for candidate in roots:
             prefix = candidate.relative_to(root).as_posix()
             try:
-                profile = load_plugin_profile(candidate)
+                profile = load_plugin_profile(source if candidate == root else candidate)
             except SecurePathError:
                 raise
             except ValueError:

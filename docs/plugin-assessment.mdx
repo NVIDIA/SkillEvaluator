@@ -26,10 +26,15 @@ Automatic detection recognizes these profiles, in selection order:
 | Agent Plugins v1 | `plugin.json` with an Agent Plugins schema declaration |
 | Codex | `.codex-plugin/plugin.json` |
 | Cursor | `.cursor-plugin/plugin.json` |
+| OpenClaw | `openclaw.plugin.json` |
 
 A plugin root takes precedence over nested skills. Additional manifests remain
 audit sources; conflicting names or versions are reported. `--type plugin`
 forces the content type.
+
+OpenClaw uses only its declared skill roots. Portable skill checks do not certify
+its native tools, hooks, channels, providers, or services; those runtime components
+remain explicitly unsupported.
 
 Static checks cover bounded parsing, member paths and dependencies, MCP policy,
 pinning, endpoint safety, hooks, privileges, settings, and supported member types.

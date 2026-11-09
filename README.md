@@ -10,8 +10,7 @@
 
 > 📺 **Livestream:** [Ask the Experts: Evaluating Agent Skills](https://www.youtube.com/watch?v=4rI0zATFxYI)
 
-SkillEvaluator is an open-source tool that checks AI agent skills and measures their effect on task results:
-start with quality checks, then compare live runs with and without a skill.
+SkillEvaluator checks AI agent skills and compares task results with and without them.
 
 Agent skills are folders of instructions and supporting files defined by the
 [Agent Skills specification](https://agentskills.io/). SkillEvaluator is part of
@@ -19,9 +18,8 @@ the [NVIDIA Verified Skills pipeline](https://github.com/NVIDIA/skills).
 
 ## Bring skill evaluation to your repository
 
-Check changed skills in GitHub or GitLab with Tier 1 quality checks, SkillSpector
-security scanning and reports. Choose folders and thresholds; no evaluator code
-to import.
+Check changed skills in GitHub or GitLab with Tier 1 checks, SkillSpector
+security scanning and reports. Configure folders and thresholds.
 
 **GitHub guided setup:** run inside your checked-out repository:
 
@@ -103,8 +101,7 @@ The command sends skill documentation to the model and saves feedback in
 `reports/first-build/skillevaluator-rubric.json`. No agent runtime or Docker is
 needed. Completed evaluations can still fail rubric thresholds.
 
-The same key supports Tier 2 embeddings and supported Tier 3 agents. See the
-[Build walkthrough](docs/quickstart.mdx#use-nvidia-build) or [provider configuration](docs/configuration.mdx).
+The same key supports Tier 2 and Tier 3. See [provider configuration](docs/configuration.mdx).
 
 ## Three-tier overview
 
@@ -157,8 +154,7 @@ uv run --python 3.13 --extra tier3 skillevaluator tier3 create-eval-dataset ./my
 
 ## Run from a source checkout
 
-Use `uv run --python 3.13` with the relevant extra. See
-[Installation](docs/installation.mdx#choosing-extras) for extras and standalone upgrades.
+See [Installation](docs/installation.mdx#choosing-extras) for extras and standalone upgrades.
 
 ## Research and citation
 
@@ -215,12 +211,10 @@ Release changes are recorded in [CHANGELOG.md](CHANGELOG.md) and
 
 ## Assess plugins
 
-Use `skillevaluator validate ./my-plugin --tiers 1` for static checks and
-`skillevaluator tier3 evaluate-plugin ./my-plugin --agents claude-code` for
-runtime comparisons. `tier3 report-plugin RUN_DIR` replays retained evidence
-without the original source or runtime dependencies.
-See the [plugin assessment guide](docs/plugin-assessment.mdx) for supported
-formats, loading modes, comparison arms, and evidence limits.
+Run static checks with `skillevaluator validate ./my-plugin --tiers 1` or runtime
+comparisons with `skillevaluator tier3 evaluate-plugin ./my-plugin --agents claude-code`.
+Replay saved evidence with `tier3 report-plugin RUN_DIR`.
+See [supported formats, loading modes and evidence limits](docs/plugin-assessment.mdx).
 
 ## License
 

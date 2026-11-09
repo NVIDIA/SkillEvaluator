@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import unicodedata
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -413,6 +413,408 @@ def test_context_leaves_url_path_values_unchanged_while_scrubbing_other_paths(tm
         "localhost-file": f"file://localhost/{scrubbed_skill_path.as_posix()}",
     }
     assert context["agents"]["codex"]["execution_errors"] == [f"Failed at {scrubbed_skill_path}; URL: {query_url}"]
+
+
+def test_context_masks_paths_that_follow_a_url_in_minified_json(tmp_path: Path) -> None:
+    # The URL ends at its closing quote, so the run, skill and home paths after
+    # it in the same unbroken JSON text are still masked; the URL is kept.
+    home = tmp_path / "home" / "alice"
+    skill = home / "work" / "acme-skill"
+    run_dir = skill / "evals" / "results" / RUN_ID
+    error = json.dumps(
+        {
+            "doc": "https://docs.example.test/errors/e1",
+            "log": str(run_dir / "agent.log"),
+            "skill": str(skill / "SKILL.md"),
+            "cache": str(home / ".cache"),
+        },
+        separators=(",", ":"),
+    )
+    payload = {"agents": {"codex": {"execution_errors": [f"Error: {error}"]}}}
+
+    context = compact_run_context(payload, run_dir=run_dir, skill_dir=skill, home=home)
+
+    [sent] = context["agents"]["codex"]["execution_errors"]
+    assert json.loads(sent.removeprefix("Error: ")) == {
+        "doc": "https://docs.example.test/errors/e1",
+        "log": str(Path(RUN_ID) / "agent.log"),
+        "skill": str(Path("acme-skill") / "SKILL.md"),
+        "cache": str(Path("~") / ".cache"),
+    }
+    assert str(home) not in sent
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # A character a URL never holds unencoded, or a quote, ends it.
+        ('"https://h.test/a","/home/alice/x"', '"https://h.test/a","~/x"'),
+        ("'https://h.test/a','/home/alice/x'", "'https://h.test/a','~/x'"),
+        ("`https://h.test/a`/home/alice/x", "`https://h.test/a`~/x"),
+        ("<https://h.test/a>/home/alice/x", "<https://h.test/a>~/x"),
+        ("https://h.test/a|/home/alice/x", "https://h.test/a|~/x"),
+        ("{https://h.test/a}/home/alice/x", "{https://h.test/a}~/x"),
+        ("https://h.test/a^/home/alice/x", "https://h.test/a^~/x"),
+        ("https://h.test/a</home/alice/x", "https://h.test/a<~/x"),
+        ("https://h.test/a{/home/alice/x", "https://h.test/a{~/x"),
+        # So does an ANSI escape, raw or escaped as in JSON or repr text.
+        (f"https://h.test/e\x1b[0m/srv/ci/runs/{RUN_ID}/a", f"https://h.test/e\x1b[0m{RUN_ID}/a"),
+        (f'"https://h.test/e\\u001b[0m/srv/ci/runs/{RUN_ID}/a"', f'"https://h.test/e\\u001b[0m{RUN_ID}/a"'),
+        # A `,` or `;` that an absolute-path root follows starts a path list.
+        (
+            f"fetch https://h.test/a,/home/bob/ci/results/{RUN_ID}/x",
+            f"fetch https://h.test/a,{RUN_ID}/x",
+        ),
+        ("https://h.test/a;/home/alice/x", "https://h.test/a;~/x"),
+        (f"https://h.test/a,~/ci/results/{RUN_ID}/x", f"https://h.test/a,{RUN_ID}/x"),
+        # So do a `,` or `;` with an option or variable name and `=`, and a
+        # Markdown `](`, each before a root; the path is masked.
+        ("DOC=https://h.test/e;LOG=/home/alice/x", "DOC=https://h.test/e;LOG=~/x"),
+        ("OPTS=https://h.test/e;--log-dir=/home/alice/x", "OPTS=https://h.test/e;--log-dir=~/x"),
+        ("DOC=https://h.test/e,log-file=/home/alice/x", "DOC=https://h.test/e,log-file=~/x"),
+        ("[https://h.test/e](/home/alice/x)", "[https://h.test/e](~/x)"),
+        # A `\n` `\r` or `\t` escape (JSON or repr text) ends a URL, so the
+        # next line of an env dump or stderr is masked; the escape is kept.
+        ('"https://h.test/a\\n/home/alice/x"', '"https://h.test/a\\n~/x"'),
+        (f'"https://h.test/a\\n/home/alice/runs/{RUN_ID}/x"', f'"https://h.test/a\\n{RUN_ID}/x"'),
+        (f'"https://h.test/a\\t/home/bob/ci/results/{RUN_ID}/x"', f'"https://h.test/a\\t{RUN_ID}/x"'),
+        ("line1\\n/home/alice/x", "line1\\n~/x"),
+        (
+            f'"URL=https://h.test/e\\nHOME=/home/alice\\nLOG=/home/alice/runs/{RUN_ID}/a.log"',
+            f'"URL=https://h.test/e\\nHOME=~\\nLOG={RUN_ID}/a.log"',
+        ),
+        (
+            f'"GET https://h.test/e\\nERROR:/home/bob/ci/results/{RUN_ID}/a.log"',
+            f'"GET https://h.test/e\\nERROR:{RUN_ID}/a.log"',
+        ),
+        ('"https://h.test/e\\r\\n--log=/home/alice/x"', '"https://h.test/e\\r\\n--log=~/x"'),
+        ('"https://h.test/e\\r/home/alice/x"', '"https://h.test/e\\r~/x"'),
+        ('"https://h.test/e\\nfile://localhost/home/alice/x"', '"https://h.test/e\\nfile://localhost/~/x"'),
+        # Another escape right after it, such as an ANSI color code at the
+        # start of the next line, does not make it a folder.
+        (
+            f'"https://h.test/e\\n\\u001b[2m/home/alice/runs/{RUN_ID}/a.log\\u001b[0m"',
+            f'"https://h.test/e\\n\\u001b[2m{RUN_ID}/a.log\\u001b[0m"',
+        ),
+        (f"'https://h.test/e\\t\\x1b[1m/home/bob/ci/{RUN_ID}/a'", f"'https://h.test/e\\t\\x1b[1m{RUN_ID}/a'"),
+        (f'"https://h.test/e\\r\\u001b[K/srv/ci/runs/{RUN_ID}/a.log"', f'"https://h.test/e\\r\\u001b[K{RUN_ID}/a.log"'),
+        (f'"https://h.test/e\\n\\u2502/srv/ci/runs/{RUN_ID}/a"', f'"https://h.test/e\\n{RUN_ID}/a"'),
+        # A URL starts right after an escape, so its query is kept.
+        (
+            '"https://h.test/a\\nhttps://h.test/b?p=/home/alice/x"',
+            '"https://h.test/a\\nhttps://h.test/b?p=/home/alice/x"',
+        ),
+        ('"x\\nhttps://h.test/?path=/home/alice/x"', '"x\\nhttps://h.test/?path=/home/alice/x"'),
+        ('"https://h.test/e\\nfile:///home/alice/x"', '"https://h.test/e\\nfile://~/x"'),
+        ('"https://h.test/e\\tgit+file:///home/alice/x"', '"https://h.test/e\\tgit+file://~/x"'),
+        # In JSON inside JSON the escape's backslash is doubled.
+        (
+            '{"s":"{\\"e\\":\\"https://h.test/e\\\\n/home/alice/x\\"}"}',
+            '{"s":"{\\"e\\":\\"https://h.test/e\\\\n~/x\\"}"}',
+        ),
+        (
+            f'{{"s":"{{\\"e\\":\\"https://h.test/e\\\\nLOG=/home/bob/ci/results/{RUN_ID}/a\\"}}"}}',
+            f'{{"s":"{{\\"e\\":\\"https://h.test/e\\\\nLOG={RUN_ID}/a\\"}}"}}',
+        ),
+        # Another scheme after a `,` `;` (with or without a name and `=`) or
+        # `](` starts its own URL, so a `file:` or `+file:` one there is
+        # masked like one on its own.
+        ("pip install git+file:///home/alice/x", "pip install git+file://~/x"),
+        ("links=https://h.test/e,file:///home/alice/x", "links=https://h.test/e,file://~/x"),
+        ("[a](https://h.test/e)[b](git+file:///home/alice/x)", "[a](https://h.test/e)[b](git+file://~/x)"),
+        ("https://h.test/e,FIND_LINKS=file:///home/alice/x", "https://h.test/e,FIND_LINKS=file://~/x"),
+        ("https://h.test/e;--find-links=git+file:///home/alice/x", "https://h.test/e;--find-links=git+file://~/x"),
+        ("pip install git+https://h.test/x", "pip install git+https://h.test/x"),
+        # A copied run's path after a list separator and an escape keeps both.
+        (f"PATH=/usr/bin:\\n/srv/runs/{RUN_ID}", f"PATH=/usr/bin:\\n{RUN_ID}"),
+        (f"x\\tD:\\runs\\{RUN_ID}\\a.log", f"x\\t{RUN_ID}\\a.log"),
+        # A relative path after an escape is kept, with or without a URL. So is
+        # the rest of a Windows path in a URL when a folder name that starts
+        # with n, r or t has a character outside `_FOLDER_NAME_TAIL` and so
+        # reads as an escape that ends the URL.
+        (
+            f"vscode://file/C:\\Users\\bob\\node@18\\runs\\{RUN_ID}\\a.log",
+            f"vscode://file/C:\\Users\\bob\\node@18\\runs\\{RUN_ID}\\a.log",
+        ),
+        (
+            f'{{"stderr":"see https://docs.test/e\\nevals/results/{RUN_ID}/agent.log"}}',
+            f'{{"stderr":"see https://docs.test/e\\nevals/results/{RUN_ID}/agent.log"}}',
+        ),
+        (f'"\\nevals/results/{RUN_ID}/a"', f'"\\nevals/results/{RUN_ID}/a"'),
+        (f'"\\n\\u001b[2mevals/results/{RUN_ID}/a"', f'"\\n\\u001b[2mevals/results/{RUN_ID}/a"'),
+        # Line breaks in a row before a code are escapes too, so the relative path is kept.
+        (f'"\\r\\n\\u001b[2mevals/results/{RUN_ID}/a"', f'"\\r\\n\\u001b[2mevals/results/{RUN_ID}/a"'),
+        (
+            '"' + "\\n" * 12 + f'\\u001b[2mevals/results/{RUN_ID}/a"',
+            '"' + "\\n" * 12 + f'\\u001b[2mevals/results/{RUN_ID}/a"',
+        ),
+        # Also with JSON-escaped backslashes: the second of a pair is not a root.
+        (f'"\\nevals\\\\results\\\\{RUN_ID}\\\\a.log"', f'"\\nevals\\\\results\\\\{RUN_ID}\\\\a.log"'),
+        (f'"\\n\\u001b[2mevals\\\\results\\\\{RUN_ID}"', f'"\\n\\u001b[2mevals\\\\results\\\\{RUN_ID}"'),
+        (f'"x evals\\\\results\\\\{RUN_ID}"', f'"x evals\\\\results\\\\{RUN_ID}"'),
+        (
+            f'"\\n\\u001b[1;38;2;255;255;255mevals/results/{RUN_ID}/a"',
+            f'"\\n\\u001b[1;38;2;255;255;255mevals/results/{RUN_ID}/a"',
+        ),
+        (f'"\\n\\u001b[38:5:208mevals/results/{RUN_ID}/a"', f'"\\n\\u001b[38:5:208mevals/results/{RUN_ID}/a"'),
+        # An odd run of backslashes before n is a literal backslash and an escape
+        # (`\\` and `\n` in JSON), not a UNC server.
+        (f'"see \\\\\\\\\\nevals\\\\results\\\\{RUN_ID}"', f'"see \\\\\\\\\\nevals\\\\results\\\\{RUN_ID}"'),
+        # A path may start right after an ANSI code, escaped or raw: a color
+        # code, or another one such as erase line or cursor up.
+        (f'"\\nERROR\\u001b[K/srv/ci/runs/{RUN_ID}/a.log"', f'"\\nERROR\\u001b[K{RUN_ID}/a.log"'),
+        (f"\r\x1b[K\\\\nas01\\share\\runs\\{RUN_ID}\\a.log", f"\r\x1b[K{RUN_ID}\\a.log"),
+        (f"\x1b[1A\x1b[2K/srv/ci/runs/{RUN_ID}/a.log", f"\x1b[1A\x1b[2K{RUN_ID}/a.log"),
+        (f"\x1b[?25l\\\\srv\\share\\{RUN_ID}", f"\x1b[?25l{RUN_ID}"),
+        (f'"\\n\\u001b[?25levals/results/{RUN_ID}/a"', f'"\\n\\u001b[?25levals/results/{RUN_ID}/a"'),
+        # A root after ANSI codes that follow a line escape or a separator
+        # starts a new path, so an earlier path and the codes are kept.
+        (f'"/opt/app/a.py\\r\\u001b[K/srv/ci/runs/{RUN_ID}/a.log"', f'"/opt/app/a.py\\r\\u001b[K{RUN_ID}/a.log"'),
+        (f'"/opt/app\\n\\u001b[2m/srv/ci/runs/{RUN_ID}/a"', f'"/opt/app\\n\\u001b[2m{RUN_ID}/a"'),
+        (f"PATH=/usr/bin:\x1b[1m/srv/ci/runs/{RUN_ID}", f"PATH=/usr/bin:\x1b[1m{RUN_ID}"),
+        (
+            f'"/opt/app/a.py\\n\\u001b[1A\\u001b[2K/srv/ci/runs/{RUN_ID}/a.log"',
+            f'"/opt/app/a.py\\n\\u001b[1A\\u001b[2K{RUN_ID}/a.log"',
+        ),
+        # A path that ends in a backslash before a color code is not a folder `t`.
+        (f'"C:\\\\work\\\\t\\\\\\u001b[0m/srv/ci/{RUN_ID}"', f'"C:\\\\work\\\\t\\\\\\u001b[0m{RUN_ID}"'),
+        (f'"\\r\\u001b[K\\/srv\\/ci\\/{RUN_ID}"', f'"\\r\\u001b[K{RUN_ID}"'),
+        # A folder named n, r or t before a color code that is not escaped like
+        # it (a raw ESC after `\t`, or `\u001b` after `\\t`) is a folder, so
+        # the whole copied path is masked.
+        (f"\x1b[2mD:\\ci\\bob\\t\x1b[0m\\{RUN_ID}\\a.log", f"\x1b[2m{RUN_ID}\\a.log"),
+        (f'"\\u001b[2mD:\\\\ci\\\\bob\\\\t\\u001b[0m\\\\{RUN_ID}\\\\a.log"', f'"\\u001b[2m{RUN_ID}\\\\a.log"'),
+        (f"\x1b[2m\\\\nas01\\share\\r\x1b[0m\\{RUN_ID}", f"\x1b[2m{RUN_ID}"),
+        # A drive letter right after an ANSI code starts the path.
+        (f"\r\x1b[KC:\\ci\\runs\\{RUN_ID}\\a.log", f"\r\x1b[K{RUN_ID}\\a.log"),
+        (f'"\\u001b[31mC:\\\\ci\\\\bob\\\\{RUN_ID}"', f'"\\u001b[31m{RUN_ID}"'),
+        (f'"\\nERROR\\u001b[0m/srv/ci/runs/{RUN_ID}/a.log"', f'"\\nERROR\\u001b[0m{RUN_ID}/a.log"'),
+        (f"ERROR\x1b[0m/srv/ci/runs/{RUN_ID}/a.log", f"ERROR\x1b[0m{RUN_ID}/a.log"),
+        (
+            f'"ERROR\\u001b[1;38;2;255;255;255m/srv/ci/runs/{RUN_ID}/a.log"',
+            f'"ERROR\\u001b[1;38;2;255;255;255m{RUN_ID}/a.log"',
+        ),
+        (f"ERROR\x1b[38:5:208m/srv/ci/runs/{RUN_ID}/a.log", f"ERROR\x1b[38:5:208m{RUN_ID}/a.log"),
+        (
+            f'"ERROR\\u001b[38;2;255;255;255;48;2;10;10;10m/srv/ci/runs/{RUN_ID}/a.log"',
+            f'"ERROR\\u001b[38;2;255;255;255;48;2;10;10;10m{RUN_ID}/a.log"',
+        ),
+        # Line breaks before a color code are all escapes, so they are kept too.
+        (f'"\\r\\n\\u001b[2m/srv/ci/runs/{RUN_ID}/a.log"', f'"\\r\\n\\u001b[2m{RUN_ID}/a.log"'),
+        (f'"Error: \\r\\n\\u001b[31m/srv/ci/runs/{RUN_ID}/a.log"', f'"Error: \\r\\n\\u001b[31m{RUN_ID}/a.log"'),
+        (f'"\\n\\n\\n\\u001b[2m/srv/ci/runs/{RUN_ID}/a.log"', f'"\\n\\n\\n\\u001b[2m{RUN_ID}/a.log"'),
+        ('"' + "\\n" * 12 + f'\\u001b[2m/srv/ci/runs/{RUN_ID}/a"', '"' + "\\n" * 12 + f'\\u001b[2m{RUN_ID}/a"'),
+        # Bold with truecolor foreground and background, as Rich writes it.
+        (
+            f'"ERROR\\u001b[1;38;2;255;255;255;48;2;255;255;255m/srv/ci/runs/{RUN_ID}/a.log"',
+            f'"ERROR\\u001b[1;38;2;255;255;255;48;2;255;255;255m{RUN_ID}/a.log"',
+        ),
+        (
+            f"ERROR\x1b[1;38;2;255;255;255;48;2;255;255;255m/srv/ci/runs/{RUN_ID}/a.log",
+            f"ERROR\x1b[1;38;2;255;255;255;48;2;255;255;255m{RUN_ID}/a.log",
+        ),
+        # A path colored in parts is still one path.
+        (f'"\\u001b[34m/srv/ci\\u001b[0m/runs/{RUN_ID}/a"', f'"\\u001b[34m{RUN_ID}/a"'),
+        # A Windows folder named n, r or t is not an escape: its name is
+        # followed by as many backslashes as precede it. So the whole copied
+        # path is masked.
+        (f"C:\\Users\\bob\\t\\runs\\{RUN_ID}\\agent.log", f"{RUN_ID}\\agent.log"),
+        (
+            f'{{"log":"C:\\\\Users\\\\bob\\\\t\\\\runs\\\\{RUN_ID}\\\\agent.log"}}',
+            f'{{"log":"{RUN_ID}\\\\agent.log"}}',
+        ),
+        (f"\\\\srv\\share\\n\\{RUN_ID}\\a.log", f"{RUN_ID}\\a.log"),
+        (f"C:\\Users\\t~1\\runs\\{RUN_ID}", RUN_ID),
+        (f"C:\\Users\\bob\\t\\x64\\runs\\{RUN_ID}\\a.log", f"{RUN_ID}\\a.log"),
+        (f"C:\\Users\\bob\\t\\n\\runs\\{RUN_ID}\\a.log", f"{RUN_ID}\\a.log"),
+        # More backslashes after the name than before it do not make a folder.
+        (
+            f'"https://h.test/e\\n\\\\\\\\srv\\\\share\\\\{RUN_ID}\\\\a.log"',
+            f'"https://h.test/e\\n{RUN_ID}\\\\a.log"',
+        ),
+        (f'"x\\n\\\\\\\\srv\\\\share\\\\{RUN_ID}\\\\a.log"', f'"x\\n{RUN_ID}\\\\a.log"'),
+        # A UNC server whose name starts with n, r or t has half as many
+        # backslashes after it, so it is not an escape either.
+        (f"\\\\nas01\\share\\runs\\{RUN_ID}\\a.log", f"{RUN_ID}\\a.log"),
+        (f"x \\\\tsclient\\C\\Users\\bob\\{RUN_ID}", f"x {RUN_ID}"),
+        (f"--out=\\\\nas01\\ci\\{RUN_ID}", f"--out={RUN_ID}"),
+        (f"\\\\n\\share\\{RUN_ID}", RUN_ID),
+        (f'"\\\\\\\\nas01\\\\share\\\\{RUN_ID}\\\\a.log"', f'"{RUN_ID}\\\\a.log"'),
+        (f'"log:\\n\\\\\\\\nas01\\\\share\\\\{RUN_ID}"', f'"log:\\n{RUN_ID}"'),
+        # A UNC share named like an escape is still a share.
+        (f"\\\\nas01\\x64\\builds\\{RUN_ID}\\a.log", f"{RUN_ID}\\a.log"),
+        (f'"\\\\\\\\nas01\\\\x64\\\\builds\\\\{RUN_ID}\\\\a.log"', f'"{RUN_ID}\\\\a.log"'),
+        # A doubled `\n` escape and a doubled `\u001b` escape are not a UNC server.
+        (f'"\\\\n\\\\u001b[2m/srv/ci/runs/{RUN_ID}/a"', f'"\\\\n\\\\u001b[2m{RUN_ID}/a"'),
+        # A folder named like an escape after a folder named n, r or t is a
+        # folder too when a name and as many backslashes follow it.
+        (f"C:\\Users\\bob\\t\\u1234\\runs\\{RUN_ID}\\a.log", f"{RUN_ID}\\a.log"),
+        (f'"C:\\\\Users\\\\bob\\\\n\\\\uabcd\\\\{RUN_ID}"', f'"{RUN_ID}"'),
+        (f'"\\n\\ud83d\\udcc1/srv/ci/runs/{RUN_ID}/a"', f'"\\n{RUN_ID}/a"'),
+        # Inside a URL, `,` `;` `(` `)` `=` and the like do not end it.
+        ("https://h.test/a,b;c=d/e(f)!*+$&@:%20~[0]", "https://h.test/a,b;c=d/e(f)!*+$&@:%20~[0]"),
+        ("https://h.test/a;jsessionid=abc/x?v=1,2&w=3;z", "https://h.test/a;jsessionid=abc/x?v=1,2&w=3;z"),
+        # Other backslashes stay in the URL, so a Windows path in one is kept,
+        # with folders named n, r or t and JSON-escaped backslashes too.
+        (
+            f"http://localhost:8080/runs\\{RUN_ID}\\agent.html?log=/home/alice/x",
+            f"http://localhost:8080/runs\\{RUN_ID}\\agent.html?log=/home/alice/x",
+        ),
+        (f"https://h.test/dir\\t\\runs\\{RUN_ID}/log", f"https://h.test/dir\\t\\runs\\{RUN_ID}/log"),
+        (f"smb://srv/share\\n\\{RUN_ID}", f"smb://srv/share\\n\\{RUN_ID}"),
+        (
+            f'"vscode://file/C:\\\\Users\\\\bob\\\\new\\\\{RUN_ID}\\\\a"',
+            f'"vscode://file/C:\\\\Users\\\\bob\\\\new\\\\{RUN_ID}\\\\a"',
+        ),
+        (
+            f'"vscode://file/C:\\\\Users\\\\bob\\\\t\\\\runs\\\\{RUN_ID}"',
+            f'"vscode://file/C:\\\\Users\\\\bob\\\\t\\\\runs\\\\{RUN_ID}"',
+        ),
+        # `\X1B` and `\U001B` are not escapes, so they stay in the URL.
+        (f"vscode://file/C:\\work\\X1Bcache\\{RUN_ID}\\a.log", f"vscode://file/C:\\work\\X1Bcache\\{RUN_ID}\\a.log"),
+        (f"https://h.test/x\\t\\UBEEF\\{RUN_ID}\\a.log", f"https://h.test/x\\t\\UBEEF\\{RUN_ID}\\a.log"),
+        (f"https://h.test/x\\t\\x64\\runs\\{RUN_ID}\\a.log", f"https://h.test/x\\t\\x64\\runs\\{RUN_ID}\\a.log"),
+        (f"https://h.test/x\\t\\x64\\U1234\\{RUN_ID}\\a.log", f"https://h.test/x\\t\\x64\\U1234\\{RUN_ID}\\a.log"),
+        # An escaped character after `\\n` makes it an escape, so the URL ends there.
+        (f"'https://h.test/e\\n\\xa0/srv/ci/runs/{RUN_ID}/a'", f"'https://h.test/e\\n{RUN_ID}/a'"),
+        (f"https://ci.example.test/runs/{RUN_ID}/log", f"https://ci.example.test/runs/{RUN_ID}/log"),
+        ("https://h.test/?path=/home/alice/x", "https://h.test/?path=/home/alice/x"),
+        # A file name that starts with n, r or t and has no backslash after it
+        # reads as an escape, so the URL ends there and a path after it is masked.
+        (
+            f"http://localhost:8080/runs\\{RUN_ID}\\report.html?log=/home/alice/x",
+            f"http://localhost:8080/runs\\{RUN_ID}\\report.html?log=~/x",
+        ),
+    ],
+)
+def test_a_url_ends_where_a_path_after_it_can_start(text: str, expected: str) -> None:
+    scrub = _Scrubber.for_run(Path("/home/alice/runs") / RUN_ID, home=Path("/home/alice"))
+
+    assert scrub.paths(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # JSON around repr text, or JSON or repr around JSON written with
+        # ensure_ascii=False: a doubled `\\n` or `\\t` before an escaped
+        # character such as `\u201c` or `\xa0` is two escapes, not a UNC
+        # server named n or t.
+        json.dumps({"message": "retry: " + repr(f"upload failed\n\u201c/srv/ci/bob/{RUN_ID}/result.json\u201d")}),
+        json.dumps(json.dumps({"m": f"run dir\n\u201c/srv/ci/bob/{RUN_ID}\u201d"}, ensure_ascii=False)),
+        json.dumps(json.dumps(f"x\n\U0001f4c1/srv/ci/bob/{RUN_ID}/a", ensure_ascii=False)),
+        json.dumps(repr(f"col1\t\u2022\\\\fs01\\ci\\bob\\{RUN_ID}")),
+        repr(json.dumps({"m": f"saved\n\xa0/srv/ci/bob/{RUN_ID}/out.json"}, ensure_ascii=False)),
+        json.dumps(repr(f"saved\n\xa0/srv/ci/bob/{RUN_ID}/out.json")),
+        repr(f"saved\n\xa0/srv/ci/bob/{RUN_ID}/out.json"),
+        repr(f"saved\n\u201c/srv/ci/bob/{RUN_ID}/out.json\u201d".encode()),
+        repr("saved\n" + "\xa0" * 9 + f"/srv/ci/bob/{RUN_ID}/out.json"),
+    ],
+)
+def test_a_copied_run_after_a_line_escape_and_an_escaped_character_is_masked(text: str) -> None:
+    scrub = _Scrubber.for_run(Path("/home/alice/runs") / RUN_ID, home=Path("/home/alice"))
+
+    masked = scrub.paths(text)
+
+    assert RUN_ID in masked
+    assert "bob" not in masked
+    assert "srv" not in masked
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            json.dumps({"stderr": f"/opt/app/a.py\r\x1b[K/opt/app/b.py\r\x1b[K/srv/ci/bob/{RUN_ID}/agent.log"}),
+            json.dumps({"stderr": f"/opt/app/a.py\r\x1b[K/opt/app/b.py\r\x1b[K{RUN_ID}/agent.log"}),
+        ),
+        (
+            repr(f"see https://h.test/e\n\u201c/srv/ci/runs/{RUN_ID}/a".encode()),
+            repr(f"see https://h.test/e\n{RUN_ID}/a".encode()),
+        ),
+        (repr(f"saved\n\xa0\xa0/srv/ci/bob/{RUN_ID}"), f"'saved\\n{RUN_ID}'"),
+        (repr(f"saved\n\u201c/srv/ci/bob/{RUN_ID}".encode()), f"b'saved\\n{RUN_ID}'"),
+        # A folder named n, r or t before a non-ASCII one, in JSON or ascii().
+        (json.dumps(f"C:\\Users\\bob\\t\\\u00e9cole\\{RUN_ID}"), json.dumps(RUN_ID)),
+        (ascii(f"D:\\data\\n\\\u00e9cole\\{RUN_ID}"), repr(RUN_ID)),
+    ],
+)
+def test_encoded_text_keeps_escapes_and_codes_around_a_masked_path(text: str, expected: str) -> None:
+    scrub = _Scrubber.for_run(Path("/home/alice/runs") / RUN_ID, home=Path("/home/alice"))
+
+    assert scrub.paths(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Folders named like escapes after a folder named n, r or t are
+        # folders when a name and as many backslashes follow the last one.
+        f"Saved to C:\\Users\\bob\\t\\x64\\x86\\{RUN_ID}",
+        json.dumps({"cwd": f"C:\\Users\\bob\\t\\x64\\x86\\{RUN_ID}"}),
+        repr({"cwd": f"C:\\Users\\bob\\t\\x64\\x86\\{RUN_ID}"}),
+        f"\\\\fs01\\builds\\bob\\r\\x64\\x64\\{RUN_ID}",
+        f"C:\\Users\\bob\\t\\x86_64\\x64\\{RUN_ID}\\a.log",
+        # A folder named like an escape may hold characters a name tail does not.
+        f"workspace D:\\ci\\bob\\n\\x64@2\\{RUN_ID}",
+        f"C:\\Users\\bob\\t\\x64+arm64\\{RUN_ID}",
+        f"C:\\Users\\bob\\t\\x64(1)\\{RUN_ID}",
+    ],
+)
+def test_escape_named_folders_after_a_folder_named_n_r_or_t_are_folders(text: str) -> None:
+    scrub = _Scrubber.for_run(PureWindowsPath(r"C:\Users\alice\runs") / RUN_ID)
+
+    masked = scrub.paths(text)
+
+    assert RUN_ID in masked
+    assert "bob" not in masked
+
+
+def test_this_machines_unc_run_dir_after_a_doubled_line_escape_is_masked() -> None:
+    scrub = _Scrubber.for_run(PureWindowsPath(r"\\NAS01\share\runs") / RUN_ID)
+    text = json.dumps(json.dumps({"m": f"run dir\n\u201c\\\\nas01\\share\\runs\\{RUN_ID}\u201d"}, ensure_ascii=False))
+
+    assert "nas01" not in scrub.paths(text)
+
+
+def test_url_matching_stays_linear_on_long_dotted_text() -> None:
+    # An unbounded scheme was rescanned from every word boundary, so 300,000
+    # characters of `a.a.a` took minutes. The regex holds the GIL, so a thread
+    # cannot time it out; a child process is killed instead. The budget is far
+    # above the linear time (well under a second).
+    import subprocess
+    import sys
+
+    code = (
+        "from pathlib import Path\n"
+        "from skillevaluator.evaluation.tier3_feedback_chat import _Scrubber\n"
+        "text = 'a.' * 150_000\n"
+        "assert _Scrubber.for_run(Path('/runs') / 'run-1').paths(text) == text\n"
+    )
+
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=60)
+
+
+def test_path_masking_stays_linear_on_long_backslash_runs() -> None:
+    # A long run of backslashes, inside a URL or glued to a name before a
+    # copied run's ID, is scanned once, not again from each of its backslashes.
+    # See test_url_matching_stays_linear_on_long_dotted_text for the budget.
+    import subprocess
+    import sys
+
+    code = (
+        "from pathlib import Path\n"
+        "from skillevaluator.evaluation.tier3_feedback_chat import _Scrubber\n"
+        "scrub = _Scrubber.for_run(Path('/runs') / 'run-1')\n"
+        "text = 'https://h.test/a' + '\\\\' * 200_000 + 'x'\n"
+        "assert scrub.paths(text) == text\n"
+        "text = 'a' + '\\\\' * 200_000 + '\\\\run-1'\n"
+        "assert scrub.paths(text) == text\n"
+        "assert 'run-1' in scrub.paths('C:' + '\\\\t' * 50_000 + '\\\\run-1')\n"
+        "assert 'run-1' in scrub.paths('\\\\n' * 50_000 + '\\\\srv\\\\run-1')\n"
+    )
+
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=60)
 
 
 def test_context_redacts_credentials_but_keeps_measurements() -> None:

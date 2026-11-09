@@ -36,7 +36,7 @@ def _load_config(root: Path) -> tuple[dict[str, Any], dict[str, bytes]]:
                         raise EvalsConfigError("Plugin eval config must be a nonempty mapping")
                     config = _validate_config(parsed, root / relative)
                     break
-            for name in ("grader.py", "grader.sh"):
+            for name in ("grader.py", "grader.sh", "tests/grader.py", "tests/grader.sh"):
                 relative = Path("evals") / name
                 if os.path.lexists(root / relative):
                     controls[name], _ = reader.read_bytes(relative, MAX_CONFIG_BYTES)
@@ -116,9 +116,11 @@ def evaluate_plugin(
         env_grants=plugin_options.probe_mcp_env,
         allowed_private_hosts=plugin_options.allowed_private_hosts,
     )
-    # Resolve authored include paths against their original source before staging.
+    # Match the engine's source-parent resolution before moving to the wrapper.
     if include := config.get("skill_workspace", {}).get("include"):
-        config["skill_workspace"]["include"] = [str((inventory.root / path).absolute()) for path in include]
+        config["skill_workspace"]["include"] = [
+            str((inventory.root.parent / Path(path).expanduser()).absolute()) for path in include
+        ]
     staged_config = yaml.safe_dump(config).encode("utf-8") if config else None
 
     def run_prepared(prepared: EvaluationOptions) -> dict[str, Any]:
@@ -126,6 +128,7 @@ def evaluate_plugin(
             (prepared.skill_path / "evals" / "config.yml").write_bytes(staged_config)
         for name, raw in controls.items():
             target = prepared.skill_path / "evals" / name
+            target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(raw)
             if name.endswith(".sh"):
                 target.chmod(0o700)

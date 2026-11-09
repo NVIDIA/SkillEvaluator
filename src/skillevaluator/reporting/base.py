@@ -2312,20 +2312,31 @@ def assess_publication(
 
     peer_skill_names: dict[str, str] = {}
     for result in results:
-        if not is_tier3_result(result) and result_publication_evidence(result) is None:
+        producer = result_publication_evidence(result)
+        if not is_tier3_result(result) and producer is None:
             continue
         metadata = result.metadata if isinstance(result.metadata, dict) else {}
         candidates: list[object] = [metadata.get("skill_name"), metadata.get("target_skill_name")]
-        quality = metadata.get("quality_scores")
-        if isinstance(quality, dict):
-            candidates.append(quality.get("skill_name"))
-        quality_all = metadata.get("quality_scores_all")
-        if isinstance(quality_all, list):
-            candidates.extend(item.get("skill_name") for item in quality_all if isinstance(item, dict))
+        result_target = _result_publication_target(result)
+        member_quality = bool(
+            producer is not None
+            and producer.tier == 1
+            and producer.check_id == "quality"
+            and isinstance(metadata.get("plugin_member"), str)
+            and metadata["plugin_member"]
+            and result_target is not None
+        )
+        if not member_quality:
+            quality = metadata.get("quality_scores")
+            if isinstance(quality, dict):
+                candidates.append(quality.get("skill_name"))
+            quality_all = metadata.get("quality_scores_all")
+            if isinstance(quality_all, list):
+                candidates.extend(item.get("skill_name") for item in quality_all if isinstance(item, dict))
         agent_eval_payload = metadata.get("agent_eval")
         if isinstance(agent_eval_payload, dict):
             candidates.append(_agent_eval_consistent_text_field(agent_eval_payload, "skill_name"))
-        if (result_target := _result_publication_target(result)) is not None:
+        if result_target is not None:
             candidates.append(result_target.skill_name)
         for candidate in candidates:
             if (key := _publication_identity_key(candidate)) is not None:

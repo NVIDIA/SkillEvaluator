@@ -2,6 +2,7 @@
 """Public runtime options and the shared service boundary."""
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -49,7 +50,7 @@ def test_public_workflow_uses_real_preparation_and_cleans_up(tmp_path, monkeypat
 
     def engine(self, options, *, progress_reporter=None):
         seen.update(root=options.skill_path, results=options.results_dir, hooks=plugin_execution.active_runtime())
-        seen["cases"] = json.loads((options.skill_path / "evals/evals.json").read_text())
+        seen["cases"] = json.loads((options.skill_path / "evals/evals.json").read_text(encoding="utf-8"))
         return {"execution_status": "succeeded"}
 
     monkeypatch.setattr(EvaluationService, "evaluate", engine)
@@ -69,18 +70,19 @@ def test_root_dataset_and_authored_config_survive_staging(tmp_path, monkeypatch)
 
     root = _plugin(tmp_path / "plugin")
     (root / "evals").mkdir()
-    (root / "evals/evals.json").write_text('[{"id":"root-case","prompt":"Do root task."}]')
+    (root / "evals/evals.json").write_text('[{"id":"root-case","prompt":"Do root task."}]', encoding="utf-8")
     (root / "evals/config.yml").write_text(
         "schema_version: 1\nharbor:\n  n_attempts: 3\n  trial_retries: 1\nplugin:\n  load: auto\n"
-        "  lift_mode: both\ngrading:\n  mode: custom_only\n"
+        "  lift_mode: both\ngrading:\n  mode: custom_only\n",
+        encoding="utf-8",
     )
-    (root / "evals/grader.py").write_text("print('fixture')\n")
+    (root / "evals/grader.py").write_text("print('fixture')\n", encoding="utf-8")
     seen = {}
 
     def engine(self, options, *, progress_reporter=None):
-        seen["config"] = yaml.safe_load((options.skill_path / "evals/config.yml").read_text())
-        seen["grader"] = (options.skill_path / "evals/grader.py").read_text()
-        seen["cases"] = json.loads((options.skill_path / "evals/evals.json").read_text())
+        seen["config"] = yaml.safe_load((options.skill_path / "evals/config.yml").read_text(encoding="utf-8"))
+        seen["grader"] = (options.skill_path / "evals/grader.py").read_text(encoding="utf-8")
+        seen["cases"] = json.loads((options.skill_path / "evals/evals.json").read_text(encoding="utf-8"))
         return {"execution_status": "succeeded"}
 
     monkeypatch.setattr(EvaluationService, "evaluate", engine)
@@ -96,6 +98,96 @@ def test_root_dataset_and_authored_config_survive_staging(tmp_path, monkeypatch)
     assert result["plugin_provenance"]["lift_mode"] == "effectiveness"
 
 
+@pytest.mark.parametrize(
+    "graders,selected",
+    [
+        (("tests/grader.py",), "tests/grader.py"),
+        (("tests/grader.sh",), "tests/grader.sh"),
+        (("tests/grader.py", "tests/grader.sh"), "tests/grader.py"),
+        (("grader.sh", "tests/grader.py", "tests/grader.sh"), "grader.sh"),
+        (("grader.py", "grader.sh", "tests/grader.py", "tests/grader.sh"), "grader.py"),
+    ],
+)
+def test_custom_graders_preserve_engine_selection(tmp_path, monkeypatch, graders, selected):
+    from skillevaluator.tier3.harbor.adapter import _copy_custom_grader
+
+    root = _plugin(tmp_path / "plugin")
+    (root / "evals").mkdir()
+    (root / "evals/config.yml").write_text("schema_version: 1\ngrading:\n  mode: custom_only\n", encoding="utf-8")
+    for relative in graders:
+        path = root / "evals" / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"fixture {relative}\n", encoding="utf-8")
+    task = tmp_path / "task"
+
+    def engine(self, options, *, progress_reporter=None):
+        assert _copy_custom_grader(task, options.skill_path, "custom_only")
+        return {"execution_status": "succeeded"}
+
+    monkeypatch.setattr(EvaluationService, "evaluate", engine)
+    EvaluationService().evaluate_plugin(EvaluationOptions(root, agents="claude-code"))
+    staged = task / "tests" / Path(selected).name
+    assert staged.read_text(encoding="utf-8") == f"fixture {selected}\n"
+    if os.name == "posix" and staged.suffix == ".sh":
+        assert staged.stat().st_mode & 0o111
+
+
+@pytest.mark.parametrize("mode", ["custom_only", "default_plus_custom"])
+def test_missing_custom_grader_preserves_engine_policy(tmp_path, monkeypatch, mode):
+    from skillevaluator.tier3.harbor.adapter import _copy_custom_grader
+
+    root = _plugin(tmp_path / "plugin")
+    (root / "evals").mkdir()
+    (root / "evals/config.yml").write_text(f"schema_version: 1\ngrading:\n  mode: {mode}\n", encoding="utf-8")
+
+    def engine(self, options, *, progress_reporter=None):
+        assert _copy_custom_grader(tmp_path / "task", options.skill_path, mode) is False
+        return {"execution_status": "succeeded"}
+
+    monkeypatch.setattr(EvaluationService, "evaluate", engine)
+    if mode == "custom_only":
+        with pytest.raises(FileNotFoundError, match="requires evals/grader"):
+            EvaluationService().evaluate_plugin(EvaluationOptions(root, agents="claude-code"))
+    else:
+        EvaluationService().evaluate_plugin(EvaluationOptions(root, agents="claude-code"))
+
+
+@pytest.mark.parametrize("link", ["file", "directory", "broken"])
+def test_nested_grader_links_are_refused(tmp_path, link):
+    from skillevaluator.tier3.evals_config import EvalsConfigError
+    from skillevaluator.tier3.plugin_workflow import _load_config
+
+    root = _plugin(tmp_path / "plugin")
+    nested = root / "evals/tests"
+    nested.parent.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "grader.py").write_text("fixture\n", encoding="utf-8")
+    try:
+        if link == "directory":
+            nested.symlink_to(outside, target_is_directory=True)
+        else:
+            nested.mkdir()
+            target = outside / ("missing.py" if link == "broken" else "grader.py")
+            (nested / "grader.py").symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    with pytest.raises(EvalsConfigError, match="Cannot read bounded"):
+        _load_config(root)
+
+
+def test_nested_graders_retain_the_bounded_read_limit(tmp_path):
+    from skillevaluator.tier3.evals_config import EvalsConfigError
+    from skillevaluator.tier3.plugin_workflow import MAX_CONFIG_BYTES, _load_config
+
+    root = _plugin(tmp_path / "plugin")
+    nested = root / "evals/tests"
+    nested.mkdir(parents=True)
+    (nested / "grader.py").write_bytes(b"x" * (MAX_CONFIG_BYTES + 1))
+    with pytest.raises(EvalsConfigError, match="Cannot read bounded"):
+        _load_config(root)
+
+
 def test_unsafe_mcp_refused_before_engine_call(tmp_path, monkeypatch):
     from skillevaluator.tier3.plugin_prepare import PreparationError
 
@@ -106,7 +198,8 @@ def test_unsafe_mcp_refused_before_engine_call(tmp_path, monkeypatch):
                 "name": "demo",
                 "mcpServers": {"unsafe": {"command": "npx", "args": ["dangerous@latest"]}},
             }
-        )
+        ),
+        encoding="utf-8",
     )
 
     def never(*args, **kwargs):

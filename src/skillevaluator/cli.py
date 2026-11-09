@@ -2526,7 +2526,7 @@ def validate(
             _print_tier_banner(_TIER_BANNERS["tier2"])
         view.tier_start(tier2_index)
         view.tier_progress(tier2_index, [stage_hint_row("stages", "chunk · embed · cluster · llm-judge")])
-        tier2_results = _run_dedup_or_skip(target_path)
+        tier2_results = _run_dedup_or_skip(plugin_source_path if resolved_type == CONTENT_TYPE_PLUGIN else target_path)
         results.extend(tier2_results)
         tier2_gate_results.extend(tier2_results)
         if quiet:

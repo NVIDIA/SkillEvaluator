@@ -11,6 +11,14 @@ All notable changes to SkillEvaluator are documented in this file.
   the dataset-size status in evaluation, validation, HTML, and BENCHMARK output;
   validation coverage notes remain informational.
 
+- Run SkillEvaluator's own `skills/` through the pinned three-tier GitHub
+  callers, retaining Tier 1 as required and Tier 2/3 as advisory. A separate
+  consumer feedback listener preserves the reusable publisher's public path;
+  onboarding and status recognize this filename collision without replacing
+  reusable workflow definitions. Automatic comments activate after the
+  listener reaches the default branch.
+  Document the shared chat/judge/agent model input and model-availability
+  troubleshooting for provider-backed CI.
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI
   command, and ships Tier 3 evaluation cases for itself. A test keeps every
@@ -55,6 +63,11 @@ All notable changes to SkillEvaluator are documented in this file.
   plugin sources without executing plugin code.
 
 ### Changed
+
+- Run GitLab Tier 2 without Docker-in-Docker while keeping TLS-protected Docker
+  for Tier 3. Both native tiers retain shared caller timeout and runner-tag
+  overrides, advisory outcomes, and aggregate artifacts; local mode still
+  disables the Tier 3 Docker service.
 
 - Align terminal grade and lift colors across compact, full, and direct Tier 3
   reports; displayed zero lift is neutral. Narrow terminals stack complete
@@ -141,6 +154,8 @@ All notable changes to SkillEvaluator are documented in this file.
   pinned evaluation and feedback configuration before reporting readiness,
   including malformed YAML and missing approval inputs. Candidate onboarding
   pins include the reviewed CI fixes and matching runtime metadata.
+  Use the verified released Tier 1 image so valid multi-valued `metadata.domain`
+  fields also work in new all-tier consumers.
 
 - Private native Claude Code staging keeps the source client's skill
   declarations: Codex paths that Codex ignores are no longer copied into the

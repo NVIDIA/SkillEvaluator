@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Validate the security boundaries of the opt-in three-tier pipeline."""
 
+import json
 from pathlib import Path
 
 import yaml
@@ -10,6 +11,14 @@ ROOT = Path(__file__).parents[2]
 
 def load(path):
     return list(yaml.load_all((ROOT / path).read_text(), Loader=yaml.BaseLoader))[-1]
+
+
+def test_candidate_onboarding_uses_the_released_tier1_image():
+    candidate = json.loads((ROOT / "src/skillevaluator/ci-release-all-tiers.json").read_text())
+    released = json.loads((ROOT / "src/skillevaluator/ci-release.json").read_text())
+    # Released schema capabilities, such as multi-valued metadata.domain,
+    # must also work for new all-tier consumers of the same package.
+    assert candidate["image"] == released["image"]
 
 
 def test_required_tier1_reuses_hardened_workflow_and_parallel_paid_tiers():
@@ -123,7 +132,8 @@ def test_gitlab_feedback_token_is_confined_to_trusted_default_branch_job():
     evaluation = load("ci/gitlab/all-tiers.yml")
     assert "SKILLEVALUATOR_GITLAB_TOKEN" not in str(evaluation)
     paid = evaluation["skill-evaluation-native"]
-    assert paid["parallel"]["matrix"] == [{"SKILL_EVAL_TIER": ["2", "3"]}]
+    assert paid["parallel"]["matrix"] == [{"SKILL_EVAL_TIER": ["3"]}]
+    assert evaluation["skill-evaluation-native-tier2"]["parallel"]["matrix"] == [{"SKILL_EVAL_TIER": ["2"]}]
     assert paid["environment"]["name"] == "$SKILL_EVAL_ENVIRONMENT"
     assert evaluation["skill-evaluation-aggregate"]["when"] == "always"
     feedback = load("ci/gitlab/feedback.yml")["skill-evaluation-feedback"]
@@ -254,6 +264,43 @@ def test_gitlab_aggregate_enforces_required_gates_for_all_matrix_outcomes():
     assert jobs["skill-evaluation-native"]["allow_failure"] == "true"
     assert jobs["skill-evaluation-aggregate"].get("allow_failure", "false") == "false"
     assert jobs["skill-evaluation-aggregate"]["when"] == "always"
+
+
+def test_gitlab_tier2_has_no_docker_service_or_tls_settings():
+    jobs = load("ci/gitlab/all-tiers.yml")
+    tier2 = jobs["skill-evaluation-native-tier2"]
+    assert tier2["extends"] == "skill-evaluation-native"
+    assert tier2["services"] == []
+    assert tier2["variables"] == {
+        "DOCKER_HOST": "",
+        "DOCKER_TLS_CERTDIR": "",
+        "DOCKER_TLS_VERIFY": "",
+        "DOCKER_CERT_PATH": "",
+    }
+
+
+def test_gitlab_native_caller_overrides_and_advisory_policy_apply_to_both_tiers():
+    from skillevaluator._ci_onboarding_all_tiers import _gitlab_inherited
+
+    jobs = load("ci/gitlab/all-tiers.yml")
+    jobs["skill-evaluation-native"].update({"timeout": "45 minutes", "tags": ["native-linux"], "services": []})
+    for name in ("skill-evaluation-native", "skill-evaluation-native-tier2"):
+        job = jobs[name]
+        assert _gitlab_inherited(jobs, job, "timeout") == "45 minutes"
+        assert _gitlab_inherited(jobs, job, "tags") == ["native-linux"]
+        assert _gitlab_inherited(jobs, job, "services") == []
+        assert _gitlab_inherited(jobs, job, "allow_failure") == "true"
+        assert _gitlab_inherited(jobs, job, "environment") == {"name": "$SKILL_EVAL_ENVIRONMENT", "action": "prepare"}
+        assert _gitlab_inherited(jobs, job, "rules")[0] == {"if": '$SKILL_EVAL_FEEDBACK == "true"', "when": "never"}
+
+
+def test_gitlab_aggregate_downloads_evidence_from_both_advisory_tiers():
+    needs = load("ci/gitlab/all-tiers.yml")["skill-evaluation-aggregate"]["needs"]
+    assert needs == [
+        {"job": "skill-evaluation", "artifacts": "true", "optional": "true"},
+        {"job": "skill-evaluation-native", "artifacts": "true", "optional": "true"},
+        {"job": "skill-evaluation-native-tier2", "artifacts": "true", "optional": "true"},
+    ]
 
 
 def test_trusted_native_workflow_entrypoints_and_pip_ignore_consumer_import_paths():
@@ -404,6 +451,7 @@ def test_gitlab_evaluator_budget_ends_before_the_native_job_timeout():
 
 def test_gitlab_dind_daemon_requires_tls_client_certificates():
     job = load("ci/gitlab/all-tiers.yml")["skill-evaluation-native"]
+    assert job["services"] == [{"name": "docker:28.5.1-dind", "alias": "docker"}]
     variables = job["variables"]
     assert variables["DOCKER_HOST"] == "tcp://docker:2376"
     assert variables["DOCKER_TLS_CERTDIR"] == "/certs"

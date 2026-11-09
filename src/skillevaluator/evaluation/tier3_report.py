@@ -623,6 +623,8 @@ def render_agent_eval_html_report(
     canonical_payload = result.metadata.get("agent_eval")
     if isinstance(canonical_payload, dict):
         _apply_case_findings(canonical_payload, engine_result, run_dir, skill_path, use_llm=use_llm_judge)
+        # The case findings joined after the size budget; token usage makes room for them.
+        fit_token_usage(canonical_payload)
     if engine_result is not None and isinstance(canonical_payload, dict):
         # Persist only the compact feedback contract needed by the CLI. The
         # complete canonical payload remains in the HTML report and can be much
@@ -1085,9 +1087,9 @@ def build_agent_eval_payload(
     payload = _sanitize_json_numbers(payload)
     _enforce_report_payload_budget(payload, report_budget, enforce_size=enforce_embedded_size)
     if token_usage:
-        _add_token_usage(
-            payload, _sanitize_json_numbers(token_usage), report_budget, enforce_size=enforce_embedded_size
-        )
+        payload["token_usage"] = _sanitize_json_numbers(token_usage)
+        if enforce_embedded_size:
+            fit_token_usage(payload)
     return payload
 
 
@@ -1475,53 +1477,87 @@ def _enforce_report_payload_budget(
     refresh_signal()
 
 
-def _add_token_usage(
-    payload: dict[str, Any], token_usage: dict[str, Any], report_budget: _ReportBudget, *, enforce_size: bool
-) -> None:
-    """Add measured token usage to a payload the budget already bounded, within what it has left.
+# ``report_truncation.omitted`` keys that only token usage adds.
+_TOKEN_USAGE_OMISSIONS = ("token_usage", "token_usage_case_rows")
 
-    Token usage is unscored, so it may never change which evidence the payload
-    keeps, push it past the embedded size budget, or make it fail the report
-    serialization limits (nodes, depth and text) that every reporter checks.
-    Its per-case rows go first, then the sums, and ``report_truncation`` records
-    each drop. If not even that record fits, the payload stays as the budget
-    left it. Read-only payloads (``enforce_size=False``) keep everything.
+
+def fit_token_usage(payload: dict[str, Any]) -> None:
+    """Keep measured token usage from costing a bounded payload its report limits.
+
+    Token usage is unscored, so it may never push a payload past the embedded
+    size budget or make it fail the report serialization limits (nodes, depth
+    and text) that every reporter checks. It joins the payload last, after the
+    size budget, so it gives way first: its per-case rows, then its sums, each
+    drop recorded in ``report_truncation``. If not even that record fits, the
+    token usage and its records go, which leaves the payload as it is without
+    token usage. Code that adds fields to a built payload, such as case findings
+    or ``validate``'s applicability keys, calls this again.
     """
-    payload["token_usage"] = token_usage
-    if not enforce_size:
+    omitted = _report_omissions(payload)
+    if "token_usage" not in payload and not (omitted and any(key in omitted for key in _TOKEN_USAGE_OMISSIONS)):
         return
+    if _token_usage_fits(payload):
+        return
+    if "token_usage" in payload:
+        from skillevaluator.tier3.token_usage import drop_token_usage_cases
+
+        dropped = drop_token_usage_cases(payload["token_usage"])
+        if (
+            dropped
+            and _record_token_usage_omission(payload, "token_usage_case_rows", dropped)
+            and _token_usage_fits(payload)
+        ):
+            return
+        del payload["token_usage"]
+        if _record_token_usage_omission(payload, "token_usage", 1) and _token_usage_fits(payload):
+            return
+    _remove_token_usage_omissions(payload)
+
+
+def _report_omissions(payload: dict[str, Any]) -> dict[str, Any] | None:
+    truncation = payload.get("report_truncation")
+    omitted = truncation.get("omitted") if isinstance(truncation, dict) else None
+    return omitted if isinstance(omitted, dict) else None
+
+
+def _token_usage_fits(payload: dict[str, Any]) -> bool:
     from skillevaluator.reporting.base import agent_eval_report_serialization_issue
-    from skillevaluator.tier3.token_usage import drop_token_usage_cases
 
-    def fits() -> bool:
-        # The minimal last-resort payload carries no details.
-        return (
-            "payload_sections" not in report_budget.omitted
-            and _serialized_payload_size(payload) <= _MAX_EMBEDDED_REPORT_BYTES
-            and agent_eval_report_serialization_issue(payload) is None
-        )
+    # The minimal last-resort payload carries no details.
+    if "payload_sections" in (_report_omissions(payload) or {}):
+        return False
+    try:
+        size = _serialized_payload_size(payload)
+    except (TypeError, ValueError):
+        return False
+    return size <= _MAX_EMBEDDED_REPORT_BYTES and agent_eval_report_serialization_issue(payload) is None
 
-    def omit(section: str, count: int) -> None:
-        report_budget.omit(section, count)
-        if report_budget.truncated:
-            payload["report_truncation"] = report_budget.signal()
 
-    if fits():
+def _record_token_usage_omission(payload: dict[str, Any], section: str, count: int) -> bool:
+    """Count a token usage drop in ``report_truncation``; ``False`` when its record cannot take it."""
+    if "report_truncation" not in payload:
+        payload["report_truncation"] = _ReportBudget(omitted={section: count}).signal()
+        return True
+    omitted = _report_omissions(payload)
+    if omitted is None:
+        return False
+    previous = omitted.get(section)
+    total = count + (previous if isinstance(previous, int) and not isinstance(previous, bool) else 0)
+    payload["report_truncation"]["omitted"] = dict(sorted({**omitted, section: total}.items()))
+    return True
+
+
+def _remove_token_usage_omissions(payload: dict[str, Any]) -> None:
+    """Take token usage's keys out of ``report_truncation``, and the record when only they made it."""
+    omitted = _report_omissions(payload)
+    if omitted is None or not any(key in omitted for key in _TOKEN_USAGE_OMISSIONS):
         return
-    omitted_before = dict(report_budget.omitted)
-    truncation_before = payload.get("report_truncation")
-    omit("token_usage_case_rows", drop_token_usage_cases(token_usage))
-    if fits():
-        return
-    del payload["token_usage"]
-    omit("token_usage", 1)
-    if fits():
-        return
-    report_budget.omitted = omitted_before
-    if truncation_before is None:
-        payload.pop("report_truncation", None)
+    remaining = {key: value for key, value in omitted.items() if key not in _TOKEN_USAGE_OMISSIONS}
+    truncation = payload["report_truncation"]
+    if remaining or truncation.get("artifact_loading"):
+        truncation["omitted"] = remaining
     else:
-        payload["report_truncation"] = truncation_before
+        del payload["report_truncation"]
 
 
 def _serialized_payload_size(payload: dict[str, Any]) -> int:

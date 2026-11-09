@@ -706,10 +706,11 @@ or gate.
   `agent_scope_mismatch` for the sum over all agents.
 
 Token usage joins the payload after the report size budget, so it never
-displaces trials or other score evidence and never pushes the payload past the
-embedded size budget or the report limits that every report checks, such as
-100,000 JSON values. When it does not fit, its case rows go first:
-`token_usage.case_rows_omitted` and
+displaces trials or other score evidence. It also never pushes the payload past
+the embedded size budget or the report limits that every report checks, such as
+100,000 JSON values, including after `tier3 evaluate` adds its case findings
+and `validate` adds its applicability fields. When it does not fit, its case
+rows go first: `token_usage.case_rows_omitted` and
 `report_truncation.omitted.token_usage_case_rows` count them, and every report
 says so. If the agent sums do not fit either, `token_usage` is left out and
 `report_truncation.omitted.token_usage` is 1.

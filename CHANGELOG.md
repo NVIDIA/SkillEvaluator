@@ -22,8 +22,10 @@ All notable changes to SkillEvaluator are documented in this file.
   as usage. Missing counters leave a partial total and are never estimated.
   The with-skill change needs complete counts for the same attempts in both
   arms, and both arms must have succeeded. Token usage never displaces score
-  evidence: it joins the report payload last, and its case rows are left out
-  first, with a note, when the payload would pass its size or node limits.
+  evidence: it joins the report payload last, and its case rows, then its sums,
+  are left out, with a note, when the payload would pass its size or node
+  limits, also after `tier3 evaluate` adds its case findings and `validate` its
+  applicability fields.
 
 ### Changed
 

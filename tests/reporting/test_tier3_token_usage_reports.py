@@ -19,9 +19,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from click.testing import CliRunner
 from rich.console import Console
 from scripts.ci import check_public_benchmarks as benchmark_gate
 
+from skillevaluator import cli as cli_module
 from skillevaluator.evaluation import tier3_report
 from skillevaluator.evaluation.tier3_report import (
     _validation_result_from_payload,
@@ -38,6 +40,7 @@ from skillevaluator.reporting.base import (
 )
 from skillevaluator.reporting.dashboard_data import comparison_rows, parse_dashboard_report
 from skillevaluator.reporting.tier3_token_usage import EVALUATE_CASE_POINTER, VALIDATE_CASE_POINTER
+from skillevaluator.tier3 import token_usage as token_usage_module
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 from skillevaluator.tier3.harbor.report_data import load_agent_data
 from skillevaluator.tier3.result_display import render_result
@@ -339,6 +342,140 @@ def test_token_usage_never_pushes_a_payload_over_the_report_node_limit(
         assert bounded == base
 
 
+def _failed_case_findings(agent: str, cases: int) -> dict[str, Any]:
+    """An engine result whose with-skill attempts of ``agent`` fail, so the report step lists fixes."""
+
+    def attempt(passed: bool) -> dict[str, Any]:
+        return {"attempts": [{"attempt": 1, "passed": passed, "score": 0.9 if passed else 0.1}]}
+
+    return {
+        "execution_status": "succeeded",
+        "agents": {
+            agent: {
+                "pass_at_k": {
+                    "with_skill": {"cases": {f"case-{index:03d}": attempt(False) for index in range(cases)}},
+                    "without_skill": {"cases": {f"case-{index:03d}": attempt(True) for index in range(cases)}},
+                }
+            }
+        },
+    }
+
+
+def _verdict(html: str) -> str:
+    text = " ".join(re.sub(r"<[^>]+>", " ", html).split())
+    return text.split("Tier 3 verdict:", 1)[1][:60].strip()
+
+
+def test_case_findings_after_the_budget_never_cost_a_payload_with_token_usage_its_report_limits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    run = _cases_run(tmp_path, agents=2, cases=6)
+    full = agent_eval_result_from_directory(
+        skill, run, engine_result=_failed_case_findings("agent-1", 3), use_llm_judge=False
+    )
+    assert full is not None and "report_truncation" not in full.metadata["agent_eval"]
+    # Token usage fits with one value to spare; the case findings that the report step adds do not.
+    monkeypatch.setattr(reporting_base, "AGENT_EVAL_REPORT_MAX_NODES", _nodes(full.metadata["agent_eval"]) + 1)
+    rendered: list[dict[str, Any]] = []
+    apply_case_findings = tier3_report._apply_case_findings
+
+    def keep_payload(payload: dict[str, Any], *args: Any, **kwargs: Any) -> None:
+        apply_case_findings(payload, *args, **kwargs)
+        rendered.append(payload)
+
+    monkeypatch.setattr(tier3_report, "_apply_case_findings", keep_payload)
+
+    def render(name: str) -> tuple[dict[str, Any], str]:
+        engine_result = _failed_case_findings("agent-1", 3)
+        report = render_agent_eval_html_report(
+            skill, run, output_path=tmp_path / name, engine_result=engine_result, use_llm_judge=False
+        )
+        return rendered[-1], report.read_text(encoding="utf-8")
+
+    payload, html = render("with-token-usage.html")
+    monkeypatch.setattr(token_usage_module, "build_token_usage", lambda *_args, **_kwargs: None)
+    plain, plain_html = render("without-token-usage.html")
+
+    assert len(payload["recommendations"]) == 3
+    assert agent_eval_report_serialization_issue(payload) is None
+    assert payload["report_truncation"]["omitted"] == {"token_usage_case_rows": 12}
+    assert payload["token_usage"]["case_rows_omitted"] == 12
+    assert "token_usage" not in plain and "report_truncation" not in plain
+    assert _without_token_usage(payload) == plain
+    assert _verdict(html) == _verdict(plain_html)
+    assert _verdict(html).startswith("Passed")
+
+
+def test_validate_applicability_keys_never_cost_a_payload_with_token_usage_its_report_limits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    skill = REPO_ROOT / "tests" / "fixtures" / "skills" / "simple"
+    run = _cases_run(tmp_path, agents=2, cases=6)
+    full = agent_eval_result_from_directory(skill, run, use_llm_judge=False)
+    assert full is not None
+    # Token usage fits with one value to spare; validate's three applicability keys do not.
+    monkeypatch.setattr(reporting_base, "AGENT_EVAL_REPORT_MAX_NODES", _nodes(full.metadata["agent_eval"]) + 1)
+    result = agent_eval_result_from_directory(skill, run, use_llm_judge=False)
+    assert result is not None
+    payload = result.metadata["agent_eval"]
+    assert "applicability" not in payload and "report_truncation" not in payload
+    monkeypatch.setattr(cli_module, "_run_agent_eval_or_skip", lambda *_args, **_kwargs: result)
+
+    outcome = CliRunner().invoke(
+        cli_module.cli,
+        [
+            "validate",
+            "--no-autopilot",
+            str(skill),
+            "--no-llm",
+            "--no-tier2",
+            "--tier3",
+            "--checks",
+            "schema",
+            "--output-dir",
+            str(tmp_path / "reports"),
+        ],
+    )
+
+    assert outcome.exit_code == 0, outcome.output
+    reports = sorted((tmp_path / "reports").iterdir())
+    assert {report.suffix for report in reports} == {".html", ".json", ".md"}
+    for report in reports:
+        assert "Tier 3 payload exceeds" not in report.read_text(encoding="utf-8"), report.name
+    assert (payload["applicability"], payload["reason_code"]) == ("required", "tier3_source_present")
+    assert agent_eval_report_serialization_issue(payload) is None
+    assert payload["report_truncation"]["omitted"] == {"token_usage_case_rows": 12}
+    assert _without_token_usage(payload) == {
+        **_without_token_usage(full.metadata["agent_eval"]),
+        "applicability": "required",
+        "reason_code": "tier3_source_present",
+        "source_kind": payload["source_kind"],
+    }
+
+
+def test_a_payload_over_the_limits_without_token_usage_keeps_no_token_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    agents = load_agent_data(_cases_run(tmp_path, agents=2, cases=6))
+    full = build_agent_eval_payload("demo", copy.deepcopy(agents), use_llm_judge=False)
+    assert full is not None
+    base = _without_token_usage(full)
+    # Token usage fits, then a later writer pushes the payload past the limit with or without it.
+    monkeypatch.setattr(reporting_base, "AGENT_EVAL_REPORT_MAX_NODES", _nodes(full) + 1)
+    bounded = build_agent_eval_payload("demo", agents, use_llm_judge=False)
+    assert bounded is not None and "token_usage" in bounded
+    extra = ["x"] * (_nodes(full) + 2 - _nodes({**base, "suggestions": []}))
+    bounded["suggestions"] = extra
+
+    tier3_report.fit_token_usage(bounded)
+
+    assert bounded == {**base, "suggestions": extra}
+    assert agent_eval_report_serialization_issue(bounded) is not None
+    assert agent_eval_report_serialization_issue({**base, "suggestions": extra}) is not None
+
+
 def test_dashboards_do_not_read_dropped_token_rows_as_missing_trials(run_result: tuple[Path, Any]) -> None:
     _run_dir, result = run_result
     report = copy.deepcopy(result.metadata["agent_eval"])
@@ -561,6 +698,8 @@ def test_docs_and_changelog_describe_the_token_usage_contract() -> None:
         "tier3-benchmark.md",
         "first 50 case rows",
         "at most 64 per agent",
+        "case findings",
+        "applicability fields",
     ):
         assert field in section, field
     unreleased = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8").split("\n## ", 2)[1]

@@ -406,7 +406,7 @@ def test_docs_and_changelog_describe_the_token_usage_contract() -> None:
         "agent_scope_mismatch",
         "validate --verbose",
         "tier3 evaluate --verbose",
-        "first 50 cases",
+        "first 50 case rows",
     ):
         assert field in section, field
     unreleased = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8").split("\n## ", 2)[1]

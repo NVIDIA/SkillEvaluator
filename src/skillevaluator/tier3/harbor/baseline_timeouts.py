@@ -33,8 +33,8 @@ calls the pure rules here. Every rule must hold:
 A tolerated run is still not complete publication evidence: its attempt
 coverage stays short, so publication and required-gate checks treat it as
 incomplete. Reports rank a tolerated agent below every agent with a complete
-baseline (:func:`kept_with_failed_baseline`), so the run's best agent and
-headline score always come from complete evidence.
+baseline (:func:`kept_with_failed_baseline`), so the run's best agent,
+headline score and verdict always come from complete evidence.
 """
 
 from __future__ import annotations

@@ -630,6 +630,12 @@ def test_other_launch_errors_keep_the_run_failed(tmp_path: Path, extra: str) -> 
 
 def _render_reports(tmp_path: Path, results: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
     """Write ``result.json`` and render the canonical payload, ``tier3-benchmark.md`` and ``report.html``."""
+    payload, benchmark, html, _message = _render_reports_and_message(tmp_path, results)
+    return payload, benchmark, html
+
+
+def _render_reports_and_message(tmp_path: Path, results: dict[str, Any]) -> tuple[dict[str, Any], str, str, str]:
+    """Like :func:`_render_reports`, and also return the Tier 3 result's ``agent_eval`` message."""
     from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory, render_agent_eval_html_report
 
     run_dir = tmp_path / "results"
@@ -649,14 +655,15 @@ def _render_reports(tmp_path: Path, results: dict[str, Any]) -> tuple[dict[str, 
     skill = tmp_path / SKILL
     skill.mkdir()
     (skill / "SKILL.md").write_text("---\nname: demo\ndescription: demo skill\n---\nbody\n", encoding="utf-8")
-    payload = agent_eval_result_from_directory(
+    result = agent_eval_result_from_directory(
         skill, run_dir, env_mode="docker", engine_result=results, use_llm_judge=False
-    ).metadata["agent_eval"]
+    )
+    messages = [detail.message for detail in result.success_details if detail.check_name == "agent_eval"]
     report = render_agent_eval_html_report(
         skill, run_dir, env_mode="docker", engine_result=results, include_benchmark=True, use_llm_judge=False
     )
     benchmark = (run_dir / "tier3-benchmark.md").read_text(encoding="utf-8")
-    return payload, benchmark, report.read_text(encoding="utf-8")
+    return result.metadata["agent_eval"], benchmark, report.read_text(encoding="utf-8"), "\n".join(messages)
 
 
 def _tolerated_line(agent: str) -> str:
@@ -725,6 +732,7 @@ def test_reports_never_fall_back_to_a_tolerated_agent(tmp_path: Path) -> None:
     # The canonical report ranks the complete agent first, then prefers activation.
     assert payload["best_agent"] == "codex"
     assert payload["agents"]["codex"]["skill_activation"]["status"] == "never_activated"
+    assert payload["verdict"] == "inconclusive"
     # The findings panel has nothing to show for a never-activated best agent,
     # as on main, and never picks the tolerated agent instead.
     loaded = load_agent_data(tmp_path / "results")
@@ -734,6 +742,49 @@ def test_reports_never_fall_back_to_a_tolerated_agent(tmp_path: Path) -> None:
     assert _tolerated_line("opencode") in benchmark
     assert "<strong>Inconclusive: skill never activated.</strong>" in html
     assert "Baseline incomplete for <strong>opencode</strong> (1 of 2 attempts scored)" in html
+
+
+@pytest.mark.parametrize(
+    ("peer", "verdict", "lead"),
+    [
+        ("failing", "fail", "<strong>Completed-agent result: FAIL.</strong>"),
+        ("never-activated", "inconclusive", "<strong>Inconclusive: skill never activated.</strong>"),
+    ],
+    ids=["failing-peer", "never-activated-peer"],
+)
+def test_verdict_comes_from_the_complete_peer_not_a_tolerated_agent(
+    tmp_path: Path, peer: str, verdict: str, lead: str
+) -> None:
+    from skillevaluator.evaluation.tier3_report import _agent_quality_verdict
+
+    # opencode activates the skill and passes every dimension, but its baseline
+    # timed out. codex completes both arms and fails its dimensions or never
+    # activates the skill.
+    failing = {**dict.fromkeys(SCORES, 0.3), "security": 1.0}
+    jobs = tmp_path / "jobs"
+    _arm(jobs, "opencode", "with", [(case, "scored") for case in CASES], details=_activation(True))
+    _arm(jobs, "opencode", "without", [("case-001", "scored"), ("case-002", "timeout")])
+    peer_scores = failing if peer == "failing" else None
+    peer_activation = _activation(peer != "never-activated")
+    _arm(jobs, "codex", "with", [(case, "scored") for case in CASES], scores=peer_scores, details=peer_activation)
+    _arm(jobs, "codex", "without", [(case, "scored") for case in CASES], scores=peer_scores)
+    results = _collect(tmp_path, [LAUNCH_ERROR.format(agent="opencode", count=1)])
+    assert results["execution_status"] == "succeeded"
+
+    payload, benchmark, html, message = _render_reports_and_message(tmp_path, results)
+    assert _agent_quality_verdict(payload["agents"]["opencode"]) == "pass"
+    # The verdict comes from the same agent as the best agent and every headline.
+    assert payload["best_agent"] == payload["summary"]["best_agent"] == "codex"
+    assert payload["verdict"] == payload["summary"]["verdict"] == verdict
+    assert message == f"Tier 3 evaluation complete: verdict {verdict.upper()}; best agent codex"
+    assert f"> **Tier 3 completed-agent result: {verdict.upper()}**" in benchmark
+    assert f"| Tier 3 | Live agent evaluation | **{verdict.upper()}** |" in benchmark
+    assert lead in html
+    if verdict == "inconclusive":
+        # The tolerated agent did activate the skill, so Insights names whose trials never did.
+        assert payload["conclusions"][0]["message"].startswith(
+            "The skill was never activated in any positive with-skill trial of an agent with a complete baseline."
+        )
 
 
 @pytest.mark.parametrize(

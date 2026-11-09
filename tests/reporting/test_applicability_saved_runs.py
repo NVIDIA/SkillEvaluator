@@ -550,9 +550,13 @@ def test_all_negative_dataset_scores_discoverability_but_cannot_pass_without_eff
             has_skill=True,
             na=("skill_efficiency",),
             reason="N/A: negative case, so there is no skill use to measure",
-            **dict.fromkeys(DEFAULT_METRICS, 0.9),
+            # Goals met and no security finding, so only the N/A dimension can stop a PASS.
+            security=1.0,
+            accuracy=0.9,
+            skill_execution=1.0,
+            goal_accuracy=1.0,
+            behavior_check=0.9,
         )
-        row["skill_execution"] = 1.0
         row["details"]["skill_execution"] = {"negative_check": {"passed": True, "score": 1.0}, "should_trigger": False}
         with_skill.append(row)
     _write_job(tmp_path / "jobs" / "demo-codex-with", with_skill)

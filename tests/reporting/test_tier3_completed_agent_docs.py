@@ -79,6 +79,23 @@ def _agent(score: float, *, baseline_scored: int = 1, recovered: int = 0) -> dic
     }
 
 
+def _write_scored_run(run: Path) -> None:
+    """Write one complete opencode agent's arm summaries into a run directory."""
+    for arm in ("with-skill", "without-skill"):
+        directory = run / "opencode" / arm
+        directory.mkdir(parents=True, exist_ok=True)
+        summary = {
+            "scores": dict.fromkeys(DEFAULT_METRICS, 0.8),
+            "metrics": list(DEFAULT_METRICS),
+            "num_trials": 1,
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "expected_attempts": 1,
+            "scored_attempts": 1,
+        }
+        (directory / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+
+
 def _three_agent_run(*, best_baseline_scored: int, peer_recovered: int) -> ValidationResult:
     """opencode scores best, claude-code finishes lower, and codex fails."""
     agents = {
@@ -209,19 +226,7 @@ def test_view_regenerates_only_the_html_report(monkeypatch, tmp_path: Path) -> N
     skill = tmp_path / "demo"
     skill.mkdir()
     run = tmp_path / "results" / "demo" / "20260709_120002"
-    for arm in ("with-skill", "without-skill"):
-        directory = run / "opencode" / arm
-        directory.mkdir(parents=True)
-        summary = {
-            "scores": dict.fromkeys(DEFAULT_METRICS, 0.8),
-            "metrics": list(DEFAULT_METRICS),
-            "num_trials": 1,
-            "execution_status": "succeeded",
-            "execution_errors": [],
-            "expected_attempts": 1,
-            "scored_attempts": 1,
-        }
-        (directory / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    _write_scored_run(run)
     (run / "run_config.json").write_text("{}", encoding="utf-8")
     (run / "result.json").write_text(json.dumps({"run_id": run.name}), encoding="utf-8")
     render = commands.render_agent_eval_html_report
@@ -243,12 +248,107 @@ def test_view_regenerates_only_the_html_report(monkeypatch, tmp_path: Path) -> N
     assert "[`view`](#view) regenerates only a missing `report.html`" in _plain(_reports_page())
 
 
+def test_validate_tier3_writes_the_same_report_pair(monkeypatch, tmp_path: Path) -> None:
+    # validate runs Tier 3 on the same engine as tier3 evaluate, so it writes the
+    # report pair into the results tree and degrades the same way.
+    from skillevaluator import cli as cli_module
+    from skillevaluator.evaluation import tier3_report
+    from skillevaluator.provider_config import ProviderConfig
+    from skillevaluator.tier3 import commands
+    from skillevaluator.tier3.harbor import runner, runtime_preflight
+
+    skill = tmp_path / "demo"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "evals" / "config.yml").write_text(
+        "schema_version: 1\nharbor:\n  task_source: evals_json\n", encoding="utf-8"
+    )
+    provider = ProviderConfig(
+        provider="nv_build",
+        model="test-model",
+        api_key="provider-key",
+        base_url="https://provider.example/v1",
+        litellm_model="openai/test-model",
+    )
+
+    def stage(_skill: Path, target: Path, **_kwargs) -> list[Path]:
+        task = target / "case-a"
+        (task / "tests").mkdir(parents=True)
+        (task / "tests" / "entry.json").write_text(json.dumps({"id": "case-a"}), encoding="utf-8")
+        return [task]
+
+    def collect(**_kwargs) -> dict:
+        return {"execution_status": "succeeded", "execution_errors": [], "metrics": [], "agents": {}}
+
+    render = runner.render_agent_eval_html_report
+    calls: list[tuple[Path, dict]] = []
+
+    def offline_render(skill_path: Path, run_dir: Path, **kwargs) -> Path:
+        calls.append((run_dir, kwargs))
+        _write_scored_run(run_dir)
+        return render(skill_path, run_dir, use_llm_judge=False, **kwargs)
+
+    def unwritable(*_args, **_kwargs) -> None:
+        raise OSError("tier3-benchmark.md is not writable")
+
+    monkeypatch.setattr(commands, "resolve_llm_provider", lambda: provider)
+    monkeypatch.setattr(runner, "resolve_llm_provider", lambda: provider)
+    monkeypatch.setattr(runner, "find_evals_file", lambda _path: skill / "evals" / "evals.json")
+    monkeypatch.setattr(runner, "_check_prerequisites", lambda **_kwargs: [])
+    monkeypatch.setattr(runner, "generate_harbor_tasks", stage)
+    monkeypatch.setattr(runner, "_run_agent_pair", lambda **_kwargs: [])
+    monkeypatch.setattr(runner, "collect_harbor_results", collect)
+    monkeypatch.setattr(runner, "render_agent_eval_html_report", offline_render)
+    monkeypatch.setattr(BenchmarkReporter, "save", unwritable)
+    monkeypatch.setattr(
+        runtime_preflight,
+        "probe_model",
+        lambda selected: runtime_preflight.ModelProbeResult(True, selected.provider, selected.model, "available"),
+    )
+    # Normalizing the run for the combined report is not under test here.
+    monkeypatch.setattr(
+        tier3_report, "agent_eval_result_from_run", lambda *_a, **_kw: ValidationResult(validator_name="AGENT_EVAL")
+    )
+
+    cli_module._run_agent_eval_or_skip(
+        skill,
+        agents="opencode",
+        env_mode="docker",
+        skip_baseline=False,
+        n_concurrent=1,
+        max_agents=1,
+        results_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+        validate_source=False,
+    )
+
+    assert calls
+    run_dir, kwargs = calls[-1]
+    assert kwargs["include_benchmark"] is True
+    assert run_dir.resolve().parent == (tmp_path / "results" / "demo").resolve()
+    assert not (run_dir / "report.html").exists()
+    assert not (run_dir / "tier3-benchmark.md").exists()
+    saved = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    assert saved["report_status"] == "degraded"
+    assert any("tier3-benchmark.md is not writable" in warning for warning in saved["warnings"])
+
+
+def test_tier3_benchmark_gives_its_own_reason_for_not_assessed() -> None:
+    scoped = _plain(BenchmarkReporter(report_scope="tier3").render(result_with_completed_peer()))
+    page = _plain(_reports_page())
+
+    assert "Publication: NOT ASSESSED. This report covers Tier 3 only" in scoped
+    reason = "publication as NOT ASSESSED, because it covers Tier 3 only, even when it comes from a `validate` run"
+    assert reason in page
+    assert "because Tiers 1 and 2 did not run" not in page
+
+
 def test_results_tree_and_tier3_guide_point_to_the_section() -> None:
     page = _reports_page()
     guide = (REPO / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
 
     assert "      - tier3-benchmark.md\n" in page
-    assert "At the end of a `tier3 evaluate` run, the two files are written as a pair" in _plain(page)
+    every_run = "At the end of every Tier 3 run, from `tier3 evaluate` or a `validate` run that includes Tier 3"
+    assert every_run in _plain(page)
     assert f"(#{ANCHOR})" in page
     assert f"(reports.mdx#{ANCHOR})" in guide
     assert "The verdict table above applies only when the run succeeds." in guide

@@ -83,9 +83,10 @@ All notable changes to SkillEvaluator are documented in this file.
   attention, while the run stays failed and has no whole-run score. The new
   section says when an agent qualifies, how recovered timeout attempts are
   shown, and that the HTML lift card still shows the best agent's lift. The
-  results tree now lists `tier3-benchmark.md`, which a `tier3 evaluate` run
-  writes as a pair with `report.html`, and the live evaluation guide says when
-  its verdict table applies and links to the new section.
+  results tree now lists `tier3-benchmark.md`, which every Tier 3 run, from
+  `tier3 evaluate` or a `validate` run that includes Tier 3, writes as a pair
+  with `report.html`, and the live evaluation guide says when its verdict
+  table applies and links to the new section.
 
 ### Fixed
 

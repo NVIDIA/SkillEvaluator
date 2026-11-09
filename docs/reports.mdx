@@ -473,13 +473,14 @@ completed run directly:
 - **`tier3-benchmark.md`** — a Tier 3-only benchmark written with
   `report.html`. It leads with the
   [completed agent's result](#completed-agents-in-an-incomplete-run) and shows
-  publication as **NOT ASSESSED**, because Tiers 1 and 2 did not run; its name
-  keeps publication tooling from reading it as a `BENCHMARK.md` card. At the
-  end of a `tier3 evaluate` run, the two files are written as a pair: if
-  `tier3-benchmark.md` cannot be written, `report.html` is removed too, and
-  `result.json` records the reason in `warnings` with
-  `report_status: "degraded"`. [`view`](#view) regenerates only a missing
-  `report.html`, never `tier3-benchmark.md`.
+  publication as **NOT ASSESSED**, because it covers Tier 3 only, even when it
+  comes from a `validate` run that also ran Tiers 1 and 2; its name keeps
+  publication tooling from reading it as a `BENCHMARK.md` card. At the end of
+  every Tier 3 run, from `tier3 evaluate` or a `validate` run that includes
+  Tier 3, the two files are written as a pair: if `tier3-benchmark.md` cannot
+  be written, `report.html` is removed too, and `result.json` records the
+  reason in `warnings` with `report_status: "degraded"`. [`view`](#view)
+  regenerates only a missing `report.html`, never `tier3-benchmark.md`.
 - **`comparison.json`** — the cross-agent comparison table; written only when
   you ran more than one agent.
 - **`<agent>/lift.json`** and **`<agent>/pass_at_k_lift.json`** — per-metric

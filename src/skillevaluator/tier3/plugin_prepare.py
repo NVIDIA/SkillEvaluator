@@ -25,9 +25,10 @@ from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_FILE_BYTES,
     CONTENT_DEDUP_MAX_TOTAL_BYTES,
     PLUGIN_CURSOR_MANIFEST_TYPE,
+    PLUGIN_OPENCLAW_MANIFEST_TYPE,
 )
 from skillevaluator.plugin_config_risk import _nested_hook_groups
-from skillevaluator.plugin_formats import profile_for
+from skillevaluator.plugin_formats import manifest_identity, profile_for
 from skillevaluator.plugin_markdown import parse_markdown
 from skillevaluator.plugin_mcp import _server_launch_files
 from skillevaluator.plugin_paths import PluginRootReader
@@ -41,6 +42,17 @@ if TYPE_CHECKING:
     from skillevaluator.plugin_inventory import PluginInventory
 
 _FRONTMATTER_HOOKS = "#hooks"
+OPENCLAW_STDIO_CWD_REASON = (
+    "OpenClaw stdio MCP servers are not supported in Tier 3 because their plugin-root working directory cannot be "
+    "preserved"
+)
+OPENCLAW_ROOT_SKILL_REASON = (
+    "inventory only: the plugin root is never copied as a portable member skill; declare a separate skill directory"
+)
+# Manifest fields a native OpenClaw source forwards to staged manifests. Other
+# host metadata (configSchema defaults, channels, providers, future credential
+# fields) is not inventoried and never reaches an agent.
+_OPENCLAW_FORWARDED_FIELDS = ("id", "name", "description", "version", "skills", "mcpServers")
 _TEXT_TYPES = frozenset({"agent", "command", "output_style"})
 _RUNTIME_TYPES = frozenset({"skill", "rule", "mcp"})
 
@@ -149,9 +161,23 @@ def prepare_runtime_package(
     manifest = inventory.selected_manifest.parse_for_audit()
     if not isinstance(manifest, dict):
         raise PreparationError(f"selected manifest is unreadable: {identity.manifest}")
+    openclaw = inventory.selected_manifest.manifest_type == PLUGIN_OPENCLAW_MANIFEST_TYPE
+    if openclaw:
+        # The id is the only identity a native OpenClaw plugin has; never stage a
+        # package whose identity or declarations the client would reject.
+        from skillevaluator.plugin_format_schema import validate_manifest_fields
+
+        errors = [
+            issue
+            for issue in validate_manifest_fields(PLUGIN_OPENCLAW_MANIFEST_TYPE, manifest)
+            if issue.level == "error"
+        ]
+        if errors:
+            raise PreparationError(f"invalid OpenClaw manifest: {errors[0].message}")
     selected = inventory.selected_components
     selected_ids = {id(member) for member in selected}
     audit = [_audit_row(member) for member in inventory.components if id(member) not in selected_ids]
+    incomplete = [] if inventory.complete else ["plugin inventory is incomplete"]
     skills: list[PluginMember] = []
     rules: list[PluginMember] = []
     mcp: list[Mapping[str, Any]] = []
@@ -159,18 +185,46 @@ def prepare_runtime_package(
         if member.problem is not None:
             audit.append(AuditRow(member.type, member.name, member.path, f"unresolved: {member.problem}"))
         elif member.type == "skill" and member.path:
-            skills.append(member)
+            if openclaw and member.path == ".":
+                audit.append(AuditRow("skill", member.name, member.path, OPENCLAW_ROOT_SKILL_REASON))
+            else:
+                skills.append(member)
         elif member.type == "rule":
             rules.append(member)
         elif member.type == "mcp" and member.mcp is not None:
-            if member.mcp.runnable:
-                mcp.append({"name": member.mcp.name, **member.mcp.config})
+            if openclaw and member.mcp.kind == "command":
+                # The launch has an implicit plugin-root working directory (or an
+                # explicit one) that no adapter preserves; rewriting paths cannot
+                # make it faithful, so it is never started elsewhere.
+                audit.append(AuditRow("mcp", member.name, member.path, f"{OPENCLAW_STDIO_CWD_REASON}; not started"))
+                incomplete.append(f"OpenClaw stdio MCP server '{member.mcp.name}' was not started")
+            elif member.mcp.runnable:
+                config = dict(member.mcp.config)
+                if openclaw:
+                    # A working directory does not apply to a URL transport.
+                    config.pop("cwd", None)
+                    config.pop("workingDirectory", None)
+                mcp.append({"name": member.mcp.name, **config})
+                if openclaw and member.mcp.unapplied:
+                    unapplied = ", ".join(member.mcp.unapplied)
+                    audit.append(AuditRow("mcp", member.name, member.path, f"unapplied configuration: {unapplied}"))
+                    incomplete.append(
+                        f"MCP server '{member.mcp.name}' declares configuration the runtime does not apply: {unapplied}"
+                    )
             else:
                 audit.append(
                     AuditRow("mcp", member.name, member.path, f"not runnable: {member.mcp.kind or 'no launch'}")
                 )
-    plugin_name = str(manifest.get("name") or inventory.root.name)
-    incomplete = [] if inventory.complete else ["plugin inventory is incomplete"]
+        elif openclaw and member.type == "extension":
+            audit.append(AuditRow(member.type, member.name, member.path, native.OPENCLAW_RUNTIME_NOT_LOADED))
+    # OpenClaw's name is a display label; its id is the stable plugin identity.
+    declared_identity = manifest_identity(inventory.selected_manifest.manifest_type, manifest)
+    plugin_name = str(declared_identity or inventory.root.name)
+    if openclaw and not (skills or rules or mcp):
+        incomplete.append(
+            "native OpenClaw runtime evaluation is unavailable; no portable skills or runnable MCP servers can be "
+            "evaluated"
+        )
     source = build_native_source(
         inventory, manifest, plugin_name=plugin_name, excluded_paths=excluded_paths, mcp_servers=mcp
     )
@@ -343,6 +397,7 @@ def build_native_source(
     """
     reader = PluginRootReader(inventory.root)
     manifest_rel = inventory.selected_manifest.manifest_filename
+    openclaw = inventory.selected_manifest.manifest_type == PLUGIN_OPENCLAW_MANIFEST_TYPE
     texts: list[native.NativeTextComponent] = []
     hooks: list[native.NativeHookSource] = []
     other: list[tuple[str, str]] = []
@@ -440,9 +495,17 @@ def build_native_source(
         description=str(manifest.get("description") or ""),
         contained=True,
         plugin_root=inventory.root,
-        manifest=dict(manifest),
+        manifest=(
+            {key: manifest[key] for key in _OPENCLAW_FORWARDED_FIELDS if key in manifest}
+            if openclaw
+            else dict(manifest)
+        ),
         manifest_rel=manifest_rel,
-        member_skills=tuple(inventory.root / member.path for member in inventory.selected_skills if member.path),
+        member_skills=tuple(
+            inventory.root / member.path
+            for member in inventory.selected_skills
+            if member.path and not (openclaw and member.path == ".")
+        ),
         rules=tuple(
             (member.name, member.text or "")
             for member in inventory.selected_components

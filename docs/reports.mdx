@@ -21,6 +21,92 @@ The status is sufficient only when coverage, pass-rate reliability, and paired
 lift-comparison requirements are met; otherwise it is provisional and does not
 change the evaluation verdict.
 
+## Retained three-tier CI evidence
+
+The opt-in all-tier workflows retain one aggregate artifact for 14 days. GitHub
+names it `skill-evaluator-results-attempt-N`; GitLab retains the aggregate job's
+`skill-evaluator-results/` directory. The trusted feedback comment links the
+actual artifact download for that run. Authentication and artifact expiry still
+apply; this link does not imply publicly hosted HTML.
+
+The PR or MR comment presents one summary table with a row for each skill.
+Each row shows a one-line status, issue count and the most important available
+finding or blocker for **Tier 1 — Static and Security Validation**,
+**Tier 2 — Deduplication** and **Tier 3 — Live Agent Evaluation**. A single
+**Report** link per skill opens the combined report artifact for that run;
+download and extract it, then open `index.html` to inspect the detailed aggregate
+and native reports. The comment keeps tier details in those reports rather
+than adding separate tier sections or report links.
+
+This schematic shows the information in a row; real results supply the statuses,
+counts, findings and authenticated **Report** link:
+
+| Skill | Tier 1 — Static and Security Validation | Tier 2 — Deduplication | Tier 3 — Live Agent Evaluation | Combined report |
+| --- | --- | --- | --- | --- |
+| `skills/example` | Passed · 0 issues | Failed · 1 issue · duplicate content found | Incomplete · issues unknown · paired evidence missing | Report |
+
+Issue counts summarize unique actionable findings plus independent validation
+errors and warnings from retained native evidence; informational notes and
+configuration-only scope notices are excluded. Incomplete or missing evidence
+shows an unknown count; it cannot imply zero findings or a completed check.
+The Tier 1 gate and each advisory tier's status stay separate, so this example
+can pass the required CI gate while still needing review of Tier 2 and Tier 3.
+Every tier selects the same skills: the changed skills, or every skill when
+the pull request changes CI setup under `.github/`, `.gitlab/`,
+`.skillevaluator/ci` or `.gitlab-ci.yml` (on GitHub, also when it changes more
+files than the API can list). A cell for a skill that its tier did not select
+reads `Skipped · issues unknown · Not selected for this tier`.
+
+```text
+ci-results.json
+index.html
+source-attempts.json   # GitHub: run attempt whose artifact supplied each tier
+summary.md
+tier1/                 # hardened scanner reports, including summary.json
+tier2/ci-tier.json
+tier2/skill-001/       # native retained JSON and HTML
+tier3/ci-tier.json
+tier3/skill-001/       # native retained JSON and HTML
+  diagnostics/        # redacted worker logs when execution failed or is incomplete
+```
+
+`ci-results.json` uses report contract `skillevaluator-ci-v1` and records the
+repository, exact commit, platform, run ID, attempt, environment, and each
+tier's required/advisory policy: Tier 1 has `required: true`, while Tier 2 and
+Tier 3 have `required: false`. On GitHub, each tier with retained evidence
+records `source_attempt`, the run attempt that produced it; after **Re-run
+failed jobs** it can be earlier than the aggregate's own attempt. A tier can be
+`passed`, `failed`, `incomplete`, `skipped`, `not_run`, `needs_action`, or
+`neutral`. `neutral` means Tier 3 paired execution completed with a neutral
+dimension-based verdict; Skill Lift has its own independent diagnostic band.
+Like every Tier 3 status, it is advisory. Failed,
+incomplete or missing Tier 1 evidence fails the aggregate. Tier 2/3 failures and
+incomplete results remain advisory and retain their native status; a passing CI
+gate does not mean those tiers passed. A check that never executed cannot become an empty success.
+The deprecated Tier 3 required settings are ignored in CI. Standalone validation
+and benchmark publication retain their separate policies.
+
+Tier 2 reports retain deduplication and catalog-similarity findings;
+Tier 3 reports retain paired scores and coverage, Skill Lift, attempts,
+latency/resource metrics and available trial links. Download and extract the
+artifact, then open `index.html` to inspect the aggregate and native reports.
+Detailed files remain available even when a tier fails or needs configuration.
+When a native skill's execution fails or is incomplete, or its worker exits
+abnormally, the skill retains bounded, redacted worker, Docker and
+agent-installation diagnostics under `diagnostics/`, even if no canonical report
+was produced or its verdict is failed. A complete run with a failed or neutral
+verdict retains none. The worker's `command.log` comes first, then logs from
+one trial of each Harbor job (a failing trial when there is one), at most four
+trials per skill, with failing trials chosen before passing ones. All
+skills of one tier share a limit of 1000 diagnostic files and 16 MiB. Each
+`index.json` records retained, omitted and truncated files, including those
+omitted at a limit.
+Catalog failures retain diagnostics under `tier2/catalog/diagnostics/`.
+Agent trajectories, credentials and runtime configuration are excluded.
+The publisher renders validated retained JSON; it does not execute artifacts
+or trust candidate-provided HTML in its privileged feedback job. Optional
+report hosting is independent from these private artifact links.
+
 ## Report formats
 
 Every Tier 1 and Tier 2 command accepts `-r`/`--report` and `-o`/`--output-dir`.

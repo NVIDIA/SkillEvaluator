@@ -60,6 +60,8 @@ def test_prompt_pointing_at_skill_files_warns(prompt):
         "Identified release-review as the right skill",
         "The agent invoked release-review before checking the manifest",
         "The agent activated `release-review`.",
+        "The agent followed the SKILL.md workflow step by step",
+        "Follows SKILL.md step by step",
     ],
 )
 def test_assertion_grading_skill_use_warns(assertion):
@@ -590,6 +592,8 @@ def test_tier3_validate_strict_fails_on_a_skill_script_assertion(tmp_path: Path,
     ("skill_name", "text"),
     [
         ("skill-creator", "The new file follows the SKILL.md frontmatter format"),
+        ("skill-creator", "Follows the SKILL.md conventions for the new skill"),
+        ("skill-linter", "Fix the frontmatter of the following SKILL.md"),
         ("skill-linter", "Loads SKILL.md files and checks their frontmatter"),
         ("python", "Ranks the python developers by skill level"),
         ("release-review", "The agent did not read SKILL.md"),
@@ -608,6 +612,7 @@ def test_format_wording_and_negated_checks_do_not_warn(skill_name, text):
         "Reads SKILL.md in the skill directory",
         "Reads SKILL.md from the installed skill",
         "Did not ask questions, and read SKILL.md first",
+        "Reads SKILL.md and files under references/",
     ],
 )
 def test_skill_md_in_the_skill_itself_still_warns(assertion):
@@ -723,6 +728,7 @@ def test_autopilot_llm_case_does_not_grade_skill_use(tmp_path: Path, llm_reply):
                     "ground_truth": "The agent used the release-review skill and listed the blockers",
                     "expected_behavior": [
                         "The agent read the release-review SKILL.md first",
+                        "The agent followed the SKILL.md workflow step by step",
                         "The agent ran review.py on release.yaml",
                         "The agent lists each blocker with its manifest line",
                     ],

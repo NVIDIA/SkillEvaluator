@@ -101,11 +101,11 @@ Template cases from `create-eval-dataset` are outcome-only, and its LLM prompts
 ask for outcome checks. It prints a warning for each generated case that still
 grades skill use, and the autopilot starter case leaves such text out.
 `tier3 validate` warns when a prompt points at `skills/<name>`,
-`<name>/SKILL.md` or reading `SKILL.md`, or when the expected output or an
-assertion names those files, calls `<name>` a skill, says the agent used,
-invoked or identified `<name>`, or runs one of the skill's scripts. It is a
-wording heuristic: it skips negated checks such as "did not read `SKILL.md`"
-and can miss skill use phrased another way.
+`<name>/SKILL.md` or reading or following `SKILL.md`, or when the expected
+output or an assertion names those files, calls `<name>` a skill, says the
+agent used, invoked or identified `<name>`, or runs one of the skill's scripts.
+It is a wording heuristic: it skips negated checks such as "did not read
+`SKILL.md`" and can miss skill use phrased another way.
 
 The dataset file can be named `evals.json`, `evals.jsonl`, `evals.yaml`, or
 `evals.yml` — `tier3 evaluate` accepts all four.

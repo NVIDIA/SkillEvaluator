@@ -631,12 +631,21 @@ def _check_dataset(skill_path: Path, results: list[CheckResult]) -> bool:
 # Reading a SKILL.md that names no other location ("read SKILL.md", "reads the
 # skill's SKILL.md") means the skill's own instructions. A SKILL.md the task is
 # about, such as one the agent writes or one in the user's project, is not.
-# "follow" is not a read verb here: "follows the SKILL.md format" means conforms to it.
-_READ_VERB_RE = r"(?:read|reads|reading|load|loads|loaded|loading|open|opens|opened|consult(?:s|ed)?)"
+# "Followed the SKILL.md workflow" counts; "follows the SKILL.md format" names
+# the file format (see below), and "the following SKILL.md" is the task's file.
+_READ_VERB_RE = (
+    r"(?:read|reads|reading|load|loads|loaded|loading|open|opens|opened|consult(?:s|ed)?"
+    r"|(?<!the\s)follow(?:s|ed|ing)?)"
+)
 _SKILL_MD_QUALIFIER_RE = r"(?:the|its|this|that|own|skill['\u2019]s)"
 # Nouns after SKILL.md that make it the file format or other skills' files
-# ("SKILL.md files", "the SKILL.md format"), not this skill's instructions.
-_SKILL_MD_GENERIC_NOUN_RE = r"(?:files|format|conventions|spec|specification|standard|template|schema)\b"
+# ("SKILL.md files", "the SKILL.md frontmatter format"), not this skill's
+# instructions. One modifier may come between; a connective may not ("read
+# SKILL.md and files in references/" still reads the skill's own SKILL.md).
+_SKILL_MD_GENERIC_NOUN_RE = (
+    r"(?:(?!(?:and|or|then|but|before|after|to|for|with)\b)[\w-]+\s+)?"
+    r"(?:files|format|conventions|spec|specification|standard|template|schema)\b"
+)
 _SKILL_USE_VERB_RE = (
     r"(?:use|used|uses|using|invok(?:e|ed|es|ing)|activat(?:e|ed|es|ing)|load(?:s|ed|ing)?"
     r"|identif(?:y|ied|ies|ying))"

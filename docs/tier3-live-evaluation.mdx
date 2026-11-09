@@ -632,10 +632,12 @@ grades each trial after the agent finishes. `security`, `skill_execution`, and
 evaluator provider. `custom_only` runs none of them.
 
 `skill_efficiency` averages skill routing with tool efficiency, the share of
-scored tool calls that did productive work. Reading, searching, writing,
-editing or patching files, running commands, activating a skill and calling
-MCP tools named `mcp__server__tool` (Claude Code) are productive. Help, version
-and install commands and searches rooted at `/` are wasted. Planning and
+scored tool calls that did productive work. For Claude Code, Codex and OpenCode
+tool names, reading, searching, listing, writing, editing or patching files,
+running commands and activating a skill are productive, and so are MCP tools
+named `mcp__server__tool` (Claude Code). Codex and OpenCode MCP calls are not
+recognized as MCP calls yet, so most of them count as wasted. Help, version and
+install commands and searches rooted at `/` are wasted. Planning and
 bookkeeping calls, such as `TodoWrite`, `update_plan`, task lists,
 background-shell polling and sub-agent calls, are not counted, and a trial with
 only such calls scores 0.0. [Reports](reports.mdx) lists the tool classes.

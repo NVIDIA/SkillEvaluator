@@ -53,20 +53,25 @@ All notable changes to SkillEvaluator are documented in this file.
   direct agent links on their named panels.
 
 - Tier 3 tool efficiency counts writing, editing and patching files, scoped
-  native searches (`Grep`, `Glob`, `LS`, Codex `list_dir` and `grep_files`)
-  and MCP tools named `mcp__server__tool` (Claude Code) as productive, unless
-  the MCP call's `path` is `/`. Most of these counted as wasted before, so a
-  with-skill trial that read the skill, edited four files and ran the tests
-  scored tool efficiency 0.33. Codex MCP calls, which are recorded under the
-  bare tool name, are not recognized as MCP calls yet. Codex names with a
-  namespace, such as `functions.apply_patch`, are classified by the bare name.
-  Planning and bookkeeping calls (`TodoWrite`, `update_plan`, `TaskCreate` and
+  native searches and listings (`Grep`, `Glob`, `LS`, OpenCode `list`, Codex
+  `list_dir` and `grep_files`) and MCP tools named `mcp__server__tool` (Claude
+  Code) as productive. An MCP filesystem search or listing whose `path` or
+  `dir_path` is `/` is a root search and counts as waste. Most of these
+  counted as wasted before, so a with-skill trial that read the skill, edited
+  four files and ran the tests scored tool efficiency 0.33. Codex and OpenCode
+  MCP calls, which are recorded under the bare tool name or as `server_tool`,
+  are not recognized as MCP calls yet. Codex names with a namespace, such as
+  `functions.apply_patch`, are classified by the bare name. Planning and
+  bookkeeping calls (`TodoWrite`, `update_plan`, `TaskCreate` and
   `TaskUpdate`, background-shell polling such as `BashOutput`, and sub-agent
   calls) are left out of the score, and the reason says how many were not
-  counted; a trial with only such calls still scores 0.0. Polling a background
-  shell no longer counts as running a command, while a command typed into a
-  Codex `write_stdin` session or run by `Monitor` is classified like any other
-  command. Efficiency scores rise for write-, edit-, patch-, search- and
+  counted. A trial with only such calls scores 0.0, so a trial that only
+  polled or stopped a background shell drops from 1.0 to 0.0. Polling a
+  background shell no longer counts as running a command, while a command
+  typed into a Codex `write_stdin` session or run by `Monitor` is classified
+  like any other command. Help, version and install words are matched in
+  commands only, so a file path or patch text that mentions `pip install` is
+  not waste. Efficiency scores rise for write-, edit-, patch-, search- and
   MCP-heavy runs. Root searches in commands recorded as an argument list, such
   as Codex `["bash", "-lc", "find / -name x"]`, now count as waste, and so do
   help, version and install commands recorded that way, like the same command

@@ -83,6 +83,27 @@ def _make_mock_client(vectors: list[list[float]]) -> EmbeddingClient:
     return client
 
 
+def test_build_explicit_paths_preserves_cross_root_identity(tmp_path: Path, write_skill) -> None:
+    first = write_skill(tmp_path / "skills", "alpha", description="First distinct fixture")
+    second = write_skill(tmp_path / ".agents/skills", "alpha", description="Second distinct fixture")
+    registry = EmbeddingRegistry(_make_mock_client([[1.0, 0.0], [0.0, 1.0]]))
+    assert registry.build_from_paths(tmp_path, [first, second]) == 2
+    catalog = tmp_path / "catalog.json"
+    registry.save_catalog(catalog)
+    data = json.loads(catalog.read_text())
+    assert {entry["path"] for entry in data["entries"]} == {"skills/alpha", ".agents/skills/alpha"}
+
+
+def test_build_explicit_paths_rejects_outside_root_before_embedding(tmp_path: Path, write_skill) -> None:
+    outside = write_skill(tmp_path / "outside", "alpha", description="Outside fixture")
+    root = tmp_path / "workspace"
+    root.mkdir()
+    client = _make_mock_client([[1.0, 0.0]])
+    with pytest.raises(ValueError, match="outside"):
+        EmbeddingRegistry(client).build_from_paths(root, [outside])
+    client.embed.assert_not_called()
+
+
 class TestBuildFromDirectory:
     def test_empty_collection_debug_logs_use_label_without_host_path(self, tmp_path: Path, monkeypatch) -> None:
         collection = tmp_path / "nested" / "external-skills"

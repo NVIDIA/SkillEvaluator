@@ -222,6 +222,45 @@ class EmbeddingRegistry:
             Number of entries successfully indexed.
         """
         content_entries = discover_and_extract(root, content_type, max_entries=self._max_entries)
+        return self._build_entries(root, content_entries, minimum_entries, for_pairwise_scan)
+
+    def build_from_paths(self, root: Path, skills: list[Path]) -> int:
+        """Index explicit skills across multiple roots under one trusted checkout.
+
+        Paths retain their checkout-relative identity, avoiding collisions when
+        separate skill roots contain folders with the same name. Validate every
+        input before the first credential-bearing embedding call.
+        """
+        root = root.resolve(strict=True)
+        unique = sorted(set(skills))
+        if not unique or len(unique) > self._max_entries:
+            raise ValueError("Explicit skill collection exceeds its supported entry count")
+        entries = []
+        for path in unique:
+            try:
+                relative = path.absolute().relative_to(root)
+            except ValueError as exc:
+                raise ValueError("An explicit skill is outside the checkout root") from exc
+            current = root
+            for part in relative.parts:
+                current /= part
+                if part == ".." or is_link_or_reparse(current):
+                    raise ValueError("Explicit skill paths must not contain links or parent traversal")
+            if not current.resolve(strict=True).is_relative_to(root):
+                raise ValueError("An explicit skill is outside the checkout root")
+            entry = extract_from_skill(current)
+            if entry is None:
+                raise ValueError("Each explicit path must contain a valid SKILL.md")
+            entries.append(entry)
+        return self._build_entries(root, entries, 1, False)
+
+    def _build_entries(
+        self,
+        root: Path,
+        content_entries: list[ContentEntry],
+        minimum_entries: int,
+        for_pairwise_scan: bool,
+    ) -> int:
         if not content_entries:
             logger.debug("No content entries found in %s", safe_path_label(root))
             return 0

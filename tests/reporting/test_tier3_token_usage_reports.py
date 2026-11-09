@@ -362,8 +362,9 @@ def _failed_case_findings(agent: str, cases: int) -> dict[str, Any]:
 
 
 def _verdict(html: str) -> str:
-    text = " ".join(re.sub(r"<[^>]+>", " ", html).split())
-    return text.split("Tier 3 verdict:", 1)[1][:60].strip()
+    """The HTML hero's Tier 3 verdict chip, the reason for an incomplete verdict, and the score."""
+    hero = html.split('class="verdict-chip', 1)[1].split(">", 1)[1].split('<div class="agent-hero-detail"', 1)[0]
+    return " ".join(re.sub(r"<[^>]+>", " ", hero).split())
 
 
 def test_case_findings_after_the_budget_never_cost_a_payload_with_token_usage_its_report_limits(
@@ -405,7 +406,8 @@ def test_case_findings_after_the_budget_never_cost_a_payload_with_token_usage_it
     assert "token_usage" not in plain and "report_truncation" not in plain
     assert _without_token_usage(payload) == plain
     assert _verdict(html) == _verdict(plain_html)
-    assert _verdict(html).startswith("Passed")
+    assert "Passed" in _verdict(html)
+    assert "Incomplete" not in _verdict(html)
 
 
 def test_validate_applicability_keys_never_cost_a_payload_with_token_usage_its_report_limits(

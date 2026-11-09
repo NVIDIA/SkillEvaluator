@@ -113,6 +113,8 @@ NOT_APPLICABLE_REASONS = {
     ),
     "behavior_check": "No assertions (legacy expected_behavior) defined, so there is no workflow to check",
 }
+# A reason carried over from a verifier sidecar is cut to this length.
+NOT_APPLICABLE_REASON_MAX_CHARS = 512
 # With the skill under test installed, a skill metric is N/A only because of the eval case.
 WITH_SKILL_NOT_APPLICABLE_REASONS = {
     "skill_execution": "No expected_skill defined, so the eval case names no skill to discover or run",
@@ -373,8 +375,36 @@ def not_applicable_counts(
     return counts
 
 
-def mark_not_applicable(reward: dict[str, Any], metric: str) -> None:
-    """Record *metric* as N/A on *reward* using the verifier's marker shape."""
+def _bounded_reason(value: object) -> str | None:
+    """Return a non-empty reason string cut to ``NOT_APPLICABLE_REASON_MAX_CHARS``, or ``None``."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()[:NOT_APPLICABLE_REASON_MAX_CHARS]
+
+
+def recorded_not_applicable_reason(reward: dict[str, Any], metric: str) -> str | None:
+    """Return the reason *reward* records for its N/A *metric*, or ``None`` when it records none."""
+    details = reward.get("details")
+    detail = details.get(metric) if isinstance(details, dict) else None
+    if not isinstance(detail, dict) or detail.get("status") != NOT_APPLICABLE_STATUS:
+        return None
+    return _bounded_reason(detail.get("reason"))
+
+
+def shared_not_applicable_reason(rewards: list[dict[str, Any]], metric: str) -> str | None:
+    """Return the distinct reasons *rewards* record for their N/A *metric*, joined, or ``None``."""
+    reasons = [reason for reward in rewards if (reason := recorded_not_applicable_reason(reward, metric))]
+    return _bounded_reason("; ".join(dict.fromkeys(reasons)))
+
+
+def mark_not_applicable(reward: dict[str, Any], metric: str, reason: str | None = None) -> None:
+    """Record *metric* as N/A on *reward* using the verifier's marker shape.
+
+    A reason the reward already records for its N/A metric is kept. Otherwise
+    *reason*, such as the one the verifier recorded for the eval case, is used,
+    and without one the generic reason for the metric.
+    """
+    kept = recorded_not_applicable_reason(reward, metric) or _bounded_reason(reason)
     reward[metric] = None
     details = reward.get("details")
     if not isinstance(details, dict):
@@ -386,7 +416,7 @@ def mark_not_applicable(reward: dict[str, Any], metric: str) -> None:
         {
             "score": None,
             "status": NOT_APPLICABLE_STATUS,
-            "reason": NOT_APPLICABLE_REASONS.get(metric, "Not applicable to this eval case"),
+            "reason": kept or NOT_APPLICABLE_REASONS.get(metric, "Not applicable to this eval case"),
         }
     )
     details[metric] = detail

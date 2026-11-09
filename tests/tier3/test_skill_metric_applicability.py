@@ -329,3 +329,70 @@ def test_arm_with_some_na_efficiency_trials_stays_scored(tmp_path):
     assert agent["lift"]["accuracy"]["delta"] == pytest.approx(0.2)
     assert agent["lift"]["basis"]["metrics"]["accuracy"]["cases"] == 2
 
+
+# ── Collection: the N/A reason the verifier recorded survives ──────────
+
+
+def _negative_step_row(name: str, reason: str = NEGATIVE) -> dict[str, Any]:
+    row = _reward("neg", skill_efficiency=None)
+    row["details"]["skill_efficiency"]["reason"] = reason
+    return dict(row, _trial_root_name="trial", _trial_name=f"trial/{name}", _step_name=name)
+
+
+def test_mark_not_applicable_keeps_the_reason_the_verifier_recorded():
+    recorded = _reward("neg", skill_efficiency=None)
+    recorded["details"]["skill_efficiency"]["reason"] = NEGATIVE
+    metrics.mark_not_applicable(recorded, "skill_efficiency", "Some other reason")
+    assert recorded["details"]["skill_efficiency"]["reason"] == NEGATIVE
+
+    given: dict[str, Any] = {"skill_efficiency": 0.5}
+    metrics.mark_not_applicable(given, "skill_efficiency", NEGATIVE)
+    assert given["skill_efficiency"] is None
+    assert given["details"]["skill_efficiency"] == {"score": None, "status": "not_applicable", "reason": NEGATIVE}
+
+    # A scored detail's text is no N/A reason; without a given one the metric's own reason applies.
+    scored: dict[str, Any] = {"details": {"skill_efficiency": {"score": 0.5, "reason": "Two redundant reads"}}}
+    metrics.mark_not_applicable(scored, "skill_efficiency")
+    assert scored["details"]["skill_efficiency"]["reason"] == metrics.NOT_APPLICABLE_REASONS["skill_efficiency"]
+
+    long: dict[str, Any] = {}
+    metrics.mark_not_applicable(long, "skill_efficiency", "x" * 5000)
+    assert len(long["details"]["skill_efficiency"]["reason"]) == metrics.NOT_APPLICABLE_REASON_MAX_CHARS
+
+
+def test_logical_multistep_reward_keeps_the_negative_case_reason():
+    from skillevaluator.tier3.harbor.collector import _logical_attempt_rewards
+
+    [logical] = _logical_attempt_rewards([_negative_step_row("first"), _negative_step_row("second")])
+
+    assert metrics.metric_is_not_applicable(logical, "skill_efficiency")
+    assert logical["details"]["skill_efficiency"]["reason"] == NEGATIVE
+
+    # Steps that record different reasons keep each of them.
+    [mixed] = _logical_attempt_rewards([_negative_step_row("first"), _negative_step_row("second", UNLABELED)])
+    assert mixed["details"]["skill_efficiency"]["reason"] == f"{NEGATIVE}; {UNLABELED}"
+
+
+def test_restored_multistep_na_keeps_the_reason_each_step_recorded(tmp_path):
+    from skillevaluator.tier3.harbor.collector import _restore_constituent_not_applicable
+
+    rich = _negative_step_row("step")
+    numeric = {key: value for key, value in rich.items() if isinstance(value, float)}
+    result: dict[str, Any] = {"verifier_result": {"rewards": dict(numeric)}, "step_results": []}
+    for name in ("first", "second"):
+        directory = tmp_path / "steps" / name / "verifier"
+        directory.mkdir(parents=True)
+        (directory / "skill_evaluator_reward.json").write_text(json.dumps(rich), encoding="utf-8")
+        result["step_results"].append({"step_name": name, "verifier_result": {"rewards": dict(numeric)}})
+    data = dict(numeric)
+
+    restored = _restore_constituent_not_applicable(data, result, tmp_path)
+
+    rewards = [
+        data,
+        restored["verifier_result"]["rewards"],
+        *(step["verifier_result"]["rewards"] for step in restored["step_results"]),
+    ]
+    for reward in rewards:
+        assert metrics.metric_is_not_applicable(reward, "skill_efficiency")
+        assert reward["details"]["skill_efficiency"]["reason"] == NEGATIVE

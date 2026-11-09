@@ -59,10 +59,12 @@ from skillevaluator.tier3.harbor.metrics import (
     not_applicable_metrics,
     overall_score,
     overall_score_from_metrics,
+    recorded_not_applicable_reason,
     rewards_have_mixed_metric_contracts,
     score_definition,
     score_policy_for_metrics,
     score_value,
+    shared_not_applicable_reason,
 )
 from skillevaluator.tier3.output_provenance import write_output_file_atomically
 from skillevaluator.tier3.toml_utils import extract_toml_metadata_entry_id
@@ -3404,7 +3406,7 @@ def _restore_constituent_not_applicable(
         return result
     root_rewards = dict(original)
     steps = []
-    for _name, step in zip(names, result["step_results"], strict=True):
+    for name, step in zip(names, result["step_results"], strict=True):
         verifier = step.get("verifier_result")
         rewards = verifier.get("rewards") if isinstance(verifier, dict) else None
         if not isinstance(rewards, dict):
@@ -3414,12 +3416,14 @@ def _restore_constituent_not_applicable(
             # A conflicting numeric value remains authoritative and prevents restoration.
             if metric in rewards and not metric_is_not_applicable(rewards, metric):
                 return result
-            mark_not_applicable(rewards, metric)
+            # Keep the reason the step's verifier recorded, such as a negative eval case.
+            mark_not_applicable(rewards, metric, recorded_not_applicable_reason(by_name[name], metric))
         steps.append({**step, "verifier_result": {**verifier, "rewards": rewards}})
     for metric in restored:
-        mark_not_applicable(root_rewards, metric)
+        reason = shared_not_applicable_reason([by_name[name] for name in names], metric)
+        mark_not_applicable(root_rewards, metric, reason)
         if metric not in data:
-            mark_not_applicable(data, metric)
+            mark_not_applicable(data, metric, reason)
     return {**result, "verifier_result": {**root_verifier, "rewards": root_rewards}, "step_results": steps}
 
 
@@ -4635,7 +4639,7 @@ def _logical_attempt_rewards(rewards: list[dict[str, Any]]) -> list[dict[str, An
             if metric in standard_scores:
                 logical_reward[metric] = standard_scores[metric]
         for metric in not_applicable_metrics(rows, metrics):
-            mark_not_applicable(logical_reward, metric)
+            mark_not_applicable(logical_reward, metric, shared_not_applicable_reason(rows, metric))
         logical_reward.update(custom_scores)
         if custom_scores:
             logical_reward["custom_metrics"] = custom_scores

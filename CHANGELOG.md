@@ -172,6 +172,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Read JSON, JSONL and YAML evaluation datasets as UTF-8 so Unicode prompts and
   answers load correctly on hosts with a non-UTF-8 default text encoding.
 
+- Estimate Tier 1 instruction tokens from the parsed Markdown body, so `---`
+  inside YAML values or comments does not count frontmatter as instructions.
+  Body separators without valid frontmatter no longer produce a spurious estimate.
+
 - A PII finding no longer keeps its `evidence_sha256` after CI redaction masks
   a credential inside the value the finding reports. In 0.8.0 the finding kept
   the digest of the unmasked value, so anyone holding the redacted report could

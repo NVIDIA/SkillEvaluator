@@ -9538,6 +9538,21 @@ class TestSkillspectorMissingReferences:
         assert alone.incomplete_scans == []
         assert alone.warnings == [_missing_reference_warning("SKILL.md:8 [reference_resolution; reference_missing]")]
 
+    @patch("skillevaluator.validators.security.Tools")
+    def test_folder_without_skills_is_scanned_as_a_whole(self, mock_tools, tmp_path: Path) -> None:
+        """A folder that holds no skill is scanned as one target, so it is its own reference root."""
+        rules = _write_skill(
+            tmp_path / "rules",
+            {"AGENTS.md": _NOTES_WRITER_FILES["SKILL.md"], "scripts/summarize.py": "print(1)\n"},
+        )
+        payload = json.loads(json.dumps(_reference_report("2.13.3")).replace('"SKILL.md"', '"AGENTS.md"'))
+
+        result = _validate_skillspector_payload(mock_tools, rules, payload)
+
+        assert mock_tools.skillspector.run.call_args.args[0][1] == str(rules.resolve())
+        assert result.incomplete_scans == []
+        assert result.warnings == [_missing_reference_warning("AGENTS.md:10 [reference_resolution; reference_missing]")]
+
     @pytest.mark.parametrize("case", ["evidence-elsewhere", "no-evidence", "line-out-of-range"])
     @patch("skillevaluator.validators.security.Tools")
     def test_row_line_must_match_the_references_list(self, mock_tools, tmp_path: Path, case: str) -> None:

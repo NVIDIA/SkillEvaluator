@@ -538,6 +538,8 @@ def test_uses_skill_files_matches_whole_names_only(text, uses):
         "The agent executed convert.py or explained how to run it",
         "Ran `python3 ./convert.py report.docx`.",
         "Saved the output of tools/convert.py next to the input",
+        "Used convert.py to convert report.docx",
+        "Converted the file using convert.py --format pdf",
     ],
 )
 def test_assertion_running_a_skill_script_warns(assertion):
@@ -557,6 +559,9 @@ def test_assertion_running_a_skill_script_warns(assertion):
         "Converted the file without running convert.py",
         "Ran preconvert.py on the input",
         "Attached convert.py.txt to the answer",
+        # "uses" or "called" before a file name that does not end the clause names the file.
+        "The fix uses convert.py's existing parser",
+        "Writes a file called convert.py with the fixed checks",
     ],
 )
 def test_text_that_does_not_run_a_skill_script_does_not_warn(assertion):

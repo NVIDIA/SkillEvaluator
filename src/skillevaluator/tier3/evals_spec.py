@@ -655,10 +655,16 @@ _SKILL_USE_VERB_RE = (
 # ("the input PDF") mean the CLI or file the skill is named after.
 _SKILL_NAME_END_RE = r"(?=\s*(?:$|[.,;:!?)]|(?:and|to|for|before|after|then|first)\b))"
 # Verbs and interpreters before a script name that mean the script was run.
+# "called" is not one: "a file called review.py" names the file.
 _RUN_VERB_RE = (
-    r"(?:ran|run|runs|running|execut(?:e|ed|es|ing)|invok(?:e|ed|es|ing)|call(?:s|ed|ing)?"
-    r"|us(?:e|ed|es|ing)|python3?|bash|sh|node)"
+    r"(?:ran|run|runs|running|execut(?:e|ed|es|ing)|invok(?:e|ed|es|ing)|call(?:s|ing)?"
+    r"|python3?|bash|sh|node)"
 )
+# "Used review.py" means it ran only when the name ends the clause or CLI
+# arguments follow ("used review.py to check", "using review.py --all"). "Uses
+# main.py's parser" or "uses utils.py helpers" names a file, maybe the user's.
+_SCRIPT_USE_VERB_RE = r"us(?:e|ed|es|ing)"
+_SCRIPT_ARGS_RE = r"(?=\s+(?:-{1,2}\w|[\w.~-]*/|[\w~-]+\.[a-z]\w*\b))"
 # Script file types listed from the skill's scripts/ and tools/ directories.
 _SKILL_SCRIPT_SUFFIXES = frozenset({".py", ".sh", ".bash", ".js", ".mjs", ".cjs", ".ts", ".rb", ".pl", ".ps1"})
 # A match is skipped when its clause is negated ("did not read SKILL.md",
@@ -703,7 +709,8 @@ def _skill_use_assertion_re(skill_name: str, skill_scripts: tuple[str, ...] = ()
     when CLI arguments or a noun follow it ("listed using glab mr list") or
     "the" comes before it ("loaded the PDF"). "the <name> skill" is still caught.
     A skill script counts when a run verb or interpreter comes before its name
-    ("ran review.py", "python3 ./review.py") or the text names it under
+    ("ran review.py", "python3 ./review.py"), when "used" does and the name
+    ends the clause or CLI arguments follow it, or when the text names it under
     scripts/ or tools/.
     """
     name = re.escape(skill_name)
@@ -715,9 +722,11 @@ def _skill_use_assertion_re(skill_name: str, skill_scripts: tuple[str, ...] = ()
     ]
     for script in skill_scripts:
         script_name = rf"{re.escape(script)}(?![\w-]|\.\w)"
+        script_ref = rf"(?:the\s+)?[`'\"]?(?:[\w.~-]*/)*{script_name}"
         alternatives += [
             rf"(?<![\w.-])(?:scripts|tools)/{script_name}",
-            rf"\b{_RUN_VERB_RE}\s+(?:the\s+)?[`'\"]?(?:[\w.~-]*/)*{script_name}",
+            rf"\b{_RUN_VERB_RE}\s+{script_ref}",
+            rf"\b{_SCRIPT_USE_VERB_RE}\s+{script_ref}[`'\"]?(?:{_SKILL_NAME_END_RE}|{_SCRIPT_ARGS_RE})",
         ]
     return re.compile("|".join(alternatives), re.IGNORECASE)
 

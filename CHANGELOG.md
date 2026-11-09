@@ -133,14 +133,20 @@ All notable changes to SkillEvaluator are documented in this file.
   Each row must be in a regular, single-link file that the report lists once
   and that is inside the skill and not reached through a symlink, and the
   report's `references` list must record a `missing` reference on that line.
-  The line must not name a symlink, a file the report does not list, or a
+  The line must not name a symlink, a file the report does not list, a
   directory left out of the scanned copy, such as `evals/` or `node_modules/`,
-  or any file in it. A reference that matches several bundled files
-  (`reference_unresolved` from v2.12.0), a fatal or other ledger row, an
-  uninspected file, a degraded analyzer, or a limitation still leaves the scan
-  `INCOMPLETE`. SkillSpector v2.13.4 and later report a scan whose only gaps
-  are missing references as `complete_with_caveats`, which is not accepted
-  yet.
+  anything in it, or a directory that holds any of these. Inside `.git`, only
+  `.git` itself and hooks other than `*.sample` templates count. A lone file
+  such as `SKILL.md` is scanned on its own, so a line that names a file beside
+  it keeps the scan `INCOMPLETE`, and so does every missing reference in a
+  skill scanned on its own inside a plugin. A reference that matches several
+  bundled files (`reference_unresolved` from v2.12.0), a fatal or other ledger
+  row, an uninspected file, a degraded analyzer, a limitation, or a finding
+  filtered out, for example by a `--skillspector-baseline`, still leaves the
+  scan `INCOMPLETE`. When one check covers several skills, such as
+  `security-scan` on a folder, a skill that passes is listed without the
+  warning. SkillSpector v2.13.4 and later report a scan whose only gaps are
+  missing references as `complete_with_caveats`, which is not accepted yet.
 
 ## 0.8.0 - 2026-11-05
 

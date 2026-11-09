@@ -42,7 +42,6 @@ from skillevaluator.reporting.harbor_viewer import (
     safe_url,
 )
 from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
-from skillevaluator.skillspector_references import reference_summary_message
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
@@ -522,11 +521,7 @@ class MarkdownReporter(ReporterBase):
                 lines.append(f"| {dname.title()} | {ddata.get('score', 0):.1f} | {ddata.get('weight', 0) * 100:.0f}% |")
             lines.append("")
 
-        if not result.passed and (
-            reference_summary := reference_summary_message(result.metadata.get("skillspector_reference_summary"))
-        ):
-            lines.append(f"- {reference_summary}")
-            lines.append("")
+        self._render_reference_summary(result, lines)
 
         if result.is_incomplete:
             self._render_incomplete(result, lines)
@@ -609,6 +604,16 @@ class MarkdownReporter(ReporterBase):
                 lines.append("")
 
             lines.append("</details>")
+            lines.append("")
+
+    @staticmethod
+    def _render_reference_summary(result: ValidationResult, lines: list[str]) -> None:
+        """List how many referenced artifacts SkillSpector did not completely inspect in a failed result."""
+        from skillevaluator.skillspector_references import reference_summary_message
+
+        summary = reference_summary_message(result.metadata.get("skillspector_reference_summary"))
+        if summary and not result.passed:
+            lines.append(f"- {summary}")
             lines.append("")
 
     def _render_incomplete(self, result: ValidationResult, lines: list[str]) -> None:

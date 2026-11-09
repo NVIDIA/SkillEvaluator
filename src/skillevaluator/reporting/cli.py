@@ -53,7 +53,6 @@ from skillevaluator.reporting.harbor_viewer import (
 from skillevaluator.reporting.presentation import FinalRenderContext, build_final_render_context, trial_coverage
 from skillevaluator.reporting.run_status import Status, result_status
 from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, RED, TEXT, grade_style, lift_style
-from skillevaluator.skillspector_references import reference_summary_message
 from skillevaluator.utils.rich_markup import escape_markup
 
 if TYPE_CHECKING:
@@ -273,6 +272,8 @@ class CLIReporter(ReporterBase):
     @staticmethod
     def _print_reference_summary(result: ValidationResult, console: Console) -> None:
         """Print how many referenced artifacts SkillSpector did not completely inspect in a failed result."""
+        from skillevaluator.skillspector_references import reference_summary_message
+
         summary = reference_summary_message(result.metadata.get("skillspector_reference_summary"))
         if summary and not result.passed:
             console.print(f"  {escape_markup(summary)}", soft_wrap=True, highlight=False)

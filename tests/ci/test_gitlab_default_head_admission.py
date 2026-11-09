@@ -172,3 +172,12 @@ def test_live_branch_cannot_override_pipeline_constraints(gate, monkeypatch, cha
     )
     assert not gate.eligible(gate.os.environ, BRANCH)
     assert gate.main() == 2
+
+
+def test_refused_branch_read_names_the_read_token_remedy(gate, monkeypatch, capsys):
+    fake_api(monkeypatch, gate, urllib.error.HTTPError("https://gitlab.example.test", 403, "Forbidden", {}, None))
+    assert gate.main() == 2
+    output = capsys.readouterr().out
+    assert "default-branch head could not be verified (HTTP 403)" in output
+    assert "SKILLEVALUATOR_GITLAB_READ_TOKEN" in output
+    assert "job-secret" not in output

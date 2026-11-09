@@ -102,6 +102,11 @@ def main() -> int:
                 print(
                     "GitLab before 18.4 requires a separate SKILLEVALUATOR_GITLAB_READ_TOKEN with project Reporter/read_api access."
                 )
+            else:
+                print(
+                    "Default-branch admission reads the protected branch with CI_JOB_TOKEN; if the job token cannot "
+                    "read it, set a separate SKILLEVALUATOR_GITLAB_READ_TOKEN with project Reporter/read_api access."
+                )
             return 2
         except urllib.error.URLError as error:
             print(f"Current {kind} head could not be verified (transport {type(error.reason).__name__}).")

@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Shared CI wiring for enriched security and independent live-agent models."""
 
+import importlib.util
+import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).parents[2]
@@ -65,6 +68,56 @@ def test_gitlab_enrichment_is_protected_and_does_not_need_docker_in_docker():
     assert "CI_MERGE_REQUEST_SOURCE_PROJECT_ID != $CI_PROJECT_ID" in rules
     needs = document["skill-evaluation-aggregate"]["needs"]
     assert any(item["job"] == "skill-evaluation-tier1-llm" for item in needs)
+
+
+def _aggregate_selects_enriched(env):
+    document = yaml.safe_load((ROOT / "ci/gitlab/all-tiers.yml").read_text())
+    script = "\n".join(document["skill-evaluation-aggregate"]["script"])
+    selection = script[script.index("enriched=false") : script.index('if [ "$enriched" = true ]')]
+    result = subprocess.run(
+        ["sh", "-c", "set -eu\n" + selection + 'printf %s "$enriched"'],
+        env={"PATH": "/usr/bin:/bin", **env},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout == "true"
+
+
+@pytest.mark.parametrize(
+    ("source", "admitted"),
+    [("push", True), ("web", True), ("schedule", False), ("api", False), ("trigger", False), ("pipeline", False)],
+)
+def test_gitlab_enriched_tier1_matches_default_branch_admission(source, admitted):
+    """Sources that admission rejects keep the keyless baseline instead of failing Tier 1."""
+    env = {
+        "SKILL_EVAL_TIER1_LLM": "true",
+        "CI_PIPELINE_SOURCE": source,
+        "CI_PROJECT_ID": "42",
+        "CI_COMMIT_BRANCH": "main",
+        "CI_DEFAULT_BRANCH": "main",
+        "CI_COMMIT_REF_PROTECTED": "true",
+    }
+    assert _aggregate_selects_enriched(env) is admitted
+    spec = importlib.util.spec_from_file_location("gate_sources", ROOT / "ci/eligible_gitlab.py")
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    assert gate._default_branch_candidate({**env, "CI_COMMIT_SHA": "a" * 40}) is admitted
+    document = yaml.safe_load((ROOT / "ci/gitlab/all-tiers.yml").read_text())
+    default_rule = document["skill-evaluation-tier1-llm"]["rules"][-1]["if"]
+    assert '$CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web"' in default_rule
+
+
+def test_gitlab_same_project_mr_still_selects_enriched_tier1():
+    env = {
+        "SKILL_EVAL_TIER1_LLM": "true",
+        "CI_PIPELINE_SOURCE": "merge_request_event",
+        "CI_PROJECT_ID": "42",
+        "CI_MERGE_REQUEST_SOURCE_PROJECT_ID": "42",
+        "CI_DEFAULT_BRANCH": "main",
+    }
+    assert _aggregate_selects_enriched(env)
+    assert not _aggregate_selects_enriched({**env, "CI_MERGE_REQUEST_SOURCE_PROJECT_ID": "7"})
 
 
 def test_benchmark_publisher_is_separate_from_read_only_pr_feedback():

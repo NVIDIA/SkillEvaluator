@@ -199,7 +199,9 @@ and the Maintainer role, stored as a scoped, protected
 environment. GitLab before 18.4 also needs a separate project Reporter/read_api
 `SKILLEVALUATOR_GITLAB_READ_TOKEN`, scoped to the protected execution environment
 (`skillevaluator` by default). The read credential is removed before provider work.
-Newer servers use `CI_JOB_TOKEN` by default. Online init/status report the server
+Newer servers use `CI_JOB_TOKEN` by default. Default-branch admission uses the same
+credential choice to read the protected branch, so set the read token too if the
+job token cannot read repository branches. Online init/status report the server
 version prerequisite; offline preview/save leave admission readiness unverified.
 The MR jobs receive no comment token. GitLab's feedback request uses its
 short-lived job token; the initiating user needs permission to create a pipeline

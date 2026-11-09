@@ -155,12 +155,10 @@ def test_only_regenerated_cards_written_and_reviewable_pr(trusted, monkeypatch):
     assert SHA in pr["body"] and "/actions/runs/123/artifacts/21" in pr["body"]
 
 
-@pytest.mark.parametrize("change", ["head", "fork", "attempt", "event", "archive"])
+@pytest.mark.parametrize("change", ["fork", "attempt", "event", "archive"])
 def test_rejects_unauthorized_evidence_without_writes(trusted, monkeypatch, change):
     module = documents(monkeypatch)
-    if change == "head":
-        trusted.current_sha = "9" * 40
-    elif change == "fork":
+    if change == "fork":
         trusted.run["head_repository"]["full_name"] = "foreign/repo"
     elif change == "attempt":
         trusted.run["run_attempt"] = 2
@@ -171,6 +169,23 @@ def test_rejects_unauthorized_evidence_without_writes(trusted, monkeypatch, chan
     with pytest.raises(ValueError):
         module.github_benchmark_publish(trusted, REPO, 123, 1)
     assert trusted.writes == []
+
+
+def test_superseded_default_head_skips_without_writes(trusted, monkeypatch):
+    # A newer default-branch push during a long run is routine, not a failure.
+    module = documents(monkeypatch)
+    trusted.current_sha = "9" * 40
+    assert module.github_benchmark_publish(trusted, REPO, 123, 1)["benchmark_action"] == "skipped"
+    assert trusted.writes == []
+
+
+def test_unrelated_repository_paths_do_not_block_publication(trusted, monkeypatch):
+    module = documents(monkeypatch)
+    trusted.entries[:0] = [
+        {"path": "docs", "mode": "040000", "type": "tree", "sha": "c" * 40},
+        {"path": "docs/c#-notes 100%.md", "mode": "100644", "type": "blob", "sha": "d" * 40},
+    ]
+    assert module.github_benchmark_publish(trusted, REPO, 123, 1)["benchmark_action"] == "created"
 
 
 def test_ineligible_noop(trusted, monkeypatch):
@@ -372,6 +387,32 @@ def test_owned_pr_updated_without_touching_source_pr(trusted, monkeypatch):
     assert all("/pulls/7" not in path for _, path, _ in trusted.writes)
     branch = next(payload for method, path, payload in trusted.writes if method == "patch" and "/git/refs/" in path)
     assert branch["force"] is False
+
+
+def test_owned_pr_update_ignores_live_repository_metadata(trusted, monkeypatch):
+    # GitHub returns base.repo as the live repository; the branch push changes pushed_at.
+    module = documents(monkeypatch)
+    module.github_benchmark_publish(trusted, REPO, 123, 1)
+    monkeypatch.setattr(
+        module,
+        "benchmark_documents",
+        lambda _manifest, _native: [{"path": "skills/demo", "eligible": True, "benchmark_content": "new card\n"}],
+    )
+    trusted.pull["body"] = module.MARKER + "\nOld evaluation report"
+    trusted.pull["base"]["repo"]["pushed_at"] = "2026-11-10T00:00:00Z"
+    trusted.writes.clear()
+    original_get = trusted.get
+
+    def get(path):
+        result = original_get(path)
+        if path.endswith("/pulls/8"):
+            result["base"]["repo"]["pushed_at"] = "2026-11-10T00:05:00Z"
+            result["base"]["sha"] = "b" * 40
+        return result
+
+    monkeypatch.setattr(trusted, "get", get)
+    assert module.github_benchmark_publish(trusted, REPO, 123, 1)["benchmark_action"] == "updated"
+    assert any(method == "patch" and path.endswith("/pulls/8") for method, path, _ in trusted.writes)
 
 
 def test_changed_pr_body_before_patch_is_not_overwritten(trusted, monkeypatch):

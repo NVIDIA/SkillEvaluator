@@ -138,11 +138,14 @@ def model_environment(env: dict[str, str], tier: int) -> dict[str, str]:
         validation.setdefault(key, "ci-validation-placeholder")
     try:
         resolve_llm_provider(validation)
-        resolve_embedding_provider(validation)
+        # Only Tier 2 executes embeddings. A chat-only job (for example the
+        # Tier 1 image job, which receives no embedding settings) must not fail
+        # on an embedding route it never uses.
+        if tier == 2:
+            resolve_embedding_provider(validation)
     except (ProviderConfigurationError, ValueError):
         raise ValueError("Selected provider configuration is incomplete or invalid.") from None
-    # Only Tier 2 executes embeddings. Chat-only tiers retain configuration
-    # validation above, but never expose credentials used only by embeddings.
+    # Chat-only tiers never receive credentials used only by embeddings.
     for key in CREDENTIAL_KEYS - required_credentials(child, tier):
         child.pop(key, None)
     return child

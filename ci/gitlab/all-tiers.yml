@@ -301,7 +301,9 @@ skill-evaluation-tier1-llm:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID != $CI_PROJECT_ID'
       when: never
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"'
+    # Match eligible_gitlab.py: only push and web default-branch pipelines are
+    # admitted. Scheduled, API and trigger pipelines keep the keyless baseline.
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true" && ($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web")'
 
 skill-evaluation-aggregate:
   extends: .skill-evaluation-tools
@@ -332,7 +334,10 @@ skill-evaluation-aggregate:
         if [ "${CI_PIPELINE_SOURCE:-}" = merge_request_event ] && [ "${CI_MERGE_REQUEST_SOURCE_PROJECT_ID:-}" = "$CI_PROJECT_ID" ]; then
           enriched=true
         elif [ "${CI_COMMIT_BRANCH:-}" = "$CI_DEFAULT_BRANCH" ] && [ "${CI_COMMIT_REF_PROTECTED:-}" = true ]; then
-          enriched=true
+          # Same sources as the enriched job's rules and default-branch admission.
+          case "${CI_PIPELINE_SOURCE:-}" in
+            push|web) enriched=true ;;
+          esac
         fi
       fi
       if [ "$enriched" = true ]; then

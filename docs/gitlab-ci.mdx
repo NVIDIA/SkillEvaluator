@@ -94,7 +94,8 @@ Tier 1 image job runs in the protected execution environment, rechecks current
 MR/default-branch eligibility, and uses no Docker-in-Docker service. Its
 enriched evidence determines the Tier 1 gate for an eligible run; missing
 evidence cannot fall back to a passing static baseline. Forks retain the
-keyless baseline.
+keyless baseline, as do scheduled, API and trigger pipelines on the default
+branch, which default-branch admission does not accept.
 
 Use `SKILL_EVAL_TIER3_PROVIDER`, `SKILL_EVAL_TIER3_BASE_URL` and
 `SKILL_EVAL_TIER3_MODEL` for a separate live-agent/judge route, and
@@ -147,7 +148,9 @@ checks. The current same-project MR head is checked before model execution;
 fork MRs do not receive provider-backed jobs.
 
 GitLab 17.0–18.3 requires a separate project access token with **Reporter** role
-and **read_api** scope for current-MR admission. Store it as masked
+and **read_api** scope for current-MR admission. Default-branch admission reads
+the protected branch through the same credential choice, so set this token too
+if `CI_JOB_TOKEN` cannot read the project's repository branches. Store it as masked
 `SKILLEVALUATOR_GITLAB_READ_TOKEN`, scoped only to the configured execution
 environment (`skillevaluator` by default). Protect that environment to approved CI maintainers. For ordinary
 unprotected MR branches, the variable must be available on those refs; enabling

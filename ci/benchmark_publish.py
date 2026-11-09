@@ -61,7 +61,9 @@ def _tree(api, root, commit):
     entries = {}
     for entry in result["tree"]:
         path = entry.get("path")
-        _require(feedback._safe_path(path) and path not in entries, "The repository tree has an invalid path.")
+        # Unrelated repository paths are only compared, never written; written
+        # card and receipt paths get their own _safe_path checks.
+        _require(isinstance(path, str) and path and path not in entries, "The repository tree has an invalid path.")
         _sha(entry.get("sha"))
         entries[path] = entry
     return sha, entries
@@ -81,6 +83,20 @@ def _regular_targets(entries, targets):
             entry is None or (entry.get("mode") in {"100644", "100755"} and entry.get("type") == "blob"),
             "An existing benchmark target is not a regular file.",
         )
+
+
+def _pull_identity(pull):
+    base, user = pull.get("base") or {}, pull.get("user") or {}
+    return (
+        pull.get("number"),
+        pull.get("state"),
+        pull.get("title"),
+        pull.get("body"),
+        base.get("ref"),
+        (base.get("repo") or {}).get("full_name"),
+        user.get("login"),
+        user.get("type"),
+    )
 
 
 def _blob(content):
@@ -127,7 +143,13 @@ def github_benchmark_publish(api, repository: str, run_id: int, attempt: int) ->
             and latest.get("head_repository", {}).get("full_name") == repository
         )
 
-    _require(current(), "The producer is no longer the current default-branch attempt.")
+    if not current():
+        # A newer default-branch push or attempt supersedes this producer; that
+        # is routine on an active branch, not a publication failure.
+        return {
+            "benchmark_action": "skipped",
+            "benchmark_reason": "The source head, producer attempt or bot branch changed.",
+        }
     targets = {}
     for document in benchmark_documents(evidence["manifest"], native):
         if not document["eligible"]:
@@ -317,10 +339,9 @@ def github_benchmark_publish(api, repository: str, run_id: int, attempt: int) ->
                 "benchmark_pr_url": f"https://github.com/{repository}/pull/{pull['number']}",
             }
         check = api.get(f"{root}/pulls/{pull['number']}")
-        _require(
-            all(check.get(key) == pull.get(key) for key in ("number", "body", "title", "base", "user", "state")),
-            "The benchmark PR changed before update.",
-        )
+        # base.repo is the live repository object (pushed_at, counters), and the
+        # branch update above is itself a push. Compare only stable PR identity.
+        _require(_pull_identity(check) == _pull_identity(pull), "The benchmark PR changed before update.")
         _require(
             check.get("head", {}).get("ref") == BRANCH
             and check.get("head", {}).get("repo", {}).get("full_name") == repository

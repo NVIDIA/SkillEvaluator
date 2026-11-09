@@ -6,7 +6,7 @@ from io import StringIO
 import pytest
 from rich.console import Console
 
-from skillevaluator.evaluation.tier3_report import _build_agent
+from skillevaluator.evaluation.tier3_report import _build_agent, build_agent_eval_payload
 from skillevaluator.models import ValidationResult
 from skillevaluator.reporting import BenchmarkReporter, CLIReporter, HTMLReporter
 from skillevaluator.tier3.evidence_volume import (
@@ -134,30 +134,50 @@ def _agent_eval(volume: dict) -> dict:
     }
 
 
+def _provisional_agent_eval() -> dict:
+    conditions = {
+        "with_skill": _condition(cases=3, planned=30, scored=27, judge_failures=1),
+        "without_skill": _condition(cases=3, planned=30, scored=30),
+    }
+    for condition in conditions.values():
+        condition["execution_status"] = "succeeded"
+    payload = build_agent_eval_payload(
+        "test-skill",
+        {
+            "test-agent": {
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.8),
+                "without_skill": dict.fromkeys(DEFAULT_METRICS, 0.7),
+                "conditions": conditions,
+                "execution_status": "succeeded",
+                "expected_attempts": 60,
+                "scored_attempts": 57,
+                "rewards": [],
+                "rewards_baseline": [],
+                "rewards_complete": True,
+                "rewards_baseline_complete": True,
+            }
+        },
+        attempt_policy={"max_attempts": 10, "stop_on_pass": False},
+        persisted_dataset_summary={"total_tasks": 3, "negative_tasks": 1, "unclassified_tasks": 0},
+    )
+    assert payload is not None
+    return payload
+
+
 @pytest.mark.parametrize("status", ("provisional", "sufficient"))
 def test_evidence_volume_is_rendered_on_all_report_surfaces(status):
-    volume = _volume(status)
+    ae = _provisional_agent_eval() if status == "provisional" else _agent_eval(_volume(status))
+    volume = ae["evidence_volume"]
     expected = format_evidence_volume(volume)
-    ae = _agent_eval(volume)
     assert expected.startswith("Limited evidence:") == (status == "provisional")
 
     cli = StringIO()
     CLIReporter._print_agent_eval_tables(ae, Console(file=cli, force_terminal=False))
     assert expected in " ".join(cli.getvalue().split())
 
-    evaluate_output = render_result(
-        {
-            "execution_status": "succeeded",
-            "best_agent": "test-agent",
-            "agents": {
-                "test-agent": {
-                    "conditions": ae["conditions"],
-                    "trial_failures": {},
-                }
-            },
-        }
-    )
+    evaluate_output = render_result(ae)
     assert expected in " ".join(evaluate_output.split())
+    assert "test-agent: " not in evaluate_output
 
     result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Live evaluation")
     result.metadata["agent_eval"] = ae
@@ -167,6 +187,133 @@ def test_evidence_volume_is_rendered_on_all_report_surfaces(status):
 
     benchmark = BenchmarkReporter(include_timestamp=False, report_scope="tier3").render_all([result])
     assert f"Evidence volume: {expected}." in benchmark
+
+
+def test_default_benchmark_publication_scope_renders_evidence_volume_once():
+    ae = _agent_eval(_volume("sufficient"))
+    result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Live evaluation")
+    result.metadata["agent_eval"] = ae
+    output = BenchmarkReporter(include_timestamp=False).render_all([result])
+    expected = f"- Evidence volume: {format_evidence_volume(ae['evidence_volume'])}."
+    assert expected in output
+    assert output.count(expected) == 1
+
+
+def test_evidence_volume_case_fallbacks_and_unknown_case_counts():
+    from_summary = evidence_volume_for_conditions(
+        {"with_skill": {"expected_attempts": 2, "scored_attempts": 2}},
+        dataset_summary={"total_tasks": 4},
+    )
+    assert from_summary["cases"] == 4
+    assert from_summary["by_arm"]["with_skill"]["cases"] == 4
+
+    from_rewards = evidence_volume_for_conditions(
+        {"with_skill": {"expected_attempts": 2, "scored_attempts": 2}},
+        rewards_by_arm={"with_skill": [{"entry_id": "case-1"}, {"entry_id": "case-2"}]},
+    )
+    assert from_rewards["cases"] == 2
+
+    unknown = evidence_volume_for_conditions({"with_skill": {"expected_attempts": 2, "scored_attempts": 2}})
+    assert unknown["cases"] is None
+    assert unknown["limited"] is False
+    assert "0 cases" not in format_evidence_volume(unknown)
+
+
+def test_attempt_policy_marks_nonuniform_evidence_in_agent_payload():
+    conditions = {
+        "with_skill": _condition(cases=3, planned=5, scored=5),
+        "without_skill": _condition(cases=3, planned=5, scored=5),
+    }
+    for condition in conditions.values():
+        condition["execution_status"] = "succeeded"
+    payload = build_agent_eval_payload(
+        "test-skill",
+        {
+            "test-agent": {
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.8),
+                "without_skill": dict.fromkeys(DEFAULT_METRICS, 0.7),
+                "conditions": conditions,
+                "execution_status": "succeeded",
+                "rewards": [],
+                "rewards_baseline": [],
+                "rewards_complete": True,
+                "rewards_baseline_complete": True,
+            }
+        },
+        attempt_policy={"max_attempts": 2, "stop_on_pass": True},
+        persisted_dataset_summary={"total_tasks": 3, "negative_tasks": 1, "unclassified_tasks": 0},
+    )
+    assert payload is not None
+    evidence = payload["evidence_volume"]
+    assert evidence["uniform_attempts"] is False
+    assert evidence["attempts_per_case"] == 2
+    assert "Based on 3 cases, 5 attempts (up to 2 per case)" in evidence["display"]
+
+
+def test_any_incomplete_non_skipped_arm_marks_evidence_limited():
+    volume = evidence_volume_for_conditions(
+        {
+            "with_skill": _condition(cases=10, planned=10, scored=10),
+            "without_skill": _condition(cases=10, planned=10, scored=9),
+        }
+    )
+    assert volume["limited"] is True
+    assert format_evidence_volume(volume).startswith("Limited evidence:")
+
+
+def test_failure_case_ids_do_not_inflate_known_case_count():
+    volume = evidence_volume_for_conditions(
+        {
+            "with_skill": {
+                **_condition(cases=1, planned=2, scored=1),
+                "failure_cases": 8,
+            }
+        },
+        trial_failures={
+            "with_skill": [
+                {"trial": "case-001__0IgxLd6", "reason": "execution failure"},
+                {"trial": "case-002__0IgxLd6", "reason": "execution failure"},
+            ]
+        },
+    )
+    assert volume["cases"] == 1
+
+
+def test_nonuniform_attempts_use_per_case_maximum():
+    volume = evidence_volume(
+        cases=3,
+        attempts_planned=5,
+        attempts_scored=5,
+        execution_failures=0,
+        judge_failures=0,
+        uniform_attempts=False,
+        attempts_per_case=2,
+    )
+    assert "Based on 3 cases, 5 attempts (up to 2 per case)" in format_evidence_volume(volume)
+
+
+def test_html_evidence_volume_survives_bounded_large_payload():
+    ae = _provisional_agent_eval()
+    ae["trials"] = [{"trial_id": f"case-{index}", "output": "x" * 300} for index in range(1200)]
+    expected = format_evidence_volume(ae["evidence_volume"])
+    result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Live evaluation")
+    result.metadata["agent_eval"] = ae
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    assert expected in html
+
+
+def test_result_display_labels_each_agent_evidence_line():
+    result = {
+        "execution_status": "succeeded",
+        "attempt_policy": {"max_attempts": 2, "stop_on_pass": False},
+        "agents": {
+            "codex": {"conditions": {"with_skill": _condition(cases=10, planned=20, scored=18)}},
+            "opencode": {"conditions": {"with_skill": _condition(cases=10, planned=20, scored=20)}},
+        },
+    }
+    output = render_result(result)
+    assert "codex: Limited evidence:" in output
+    assert "opencode: Based on" in output
 
 
 def test_evidence_volume_counts_cases_once_and_separates_failures_by_arm():

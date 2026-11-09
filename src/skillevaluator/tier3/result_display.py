@@ -888,20 +888,26 @@ def render_evaluation_result(
         style = "yellow" if sufficiency.get("status") == "provisional" else "dim"
         console.print(Text(safe(sufficiency["coverage_summary"]), style=style))
     if isinstance(agents, Mapping) and agents:
-        best_name = result.get("best_agent")
-        best_data = agents.get(best_name) if isinstance(best_name, str) else None
-        if not isinstance(best_data, Mapping):
-            best_data = next((value for value in agents.values() if isinstance(value, Mapping)), None)
-        if isinstance(best_data, Mapping):
+        agent_entries = [(str(name), value) for name, value in agents.items() if isinstance(value, Mapping)]
+        attempt_policy = result.get("attempt_policy") if isinstance(result.get("attempt_policy"), Mapping) else {}
+        for agent_name, best_data in agent_entries:
             volume = evidence_volume_for_conditions(
                 best_data.get("conditions"),
                 trial_failures=best_data.get("trial_failures"),
                 baseline_only=result.get("mode") == "baseline_only",
+                dataset_summary=result.get("dataset_summary"),
+                rewards_by_arm={
+                    "with_skill": best_data.get("rewards"),
+                    "without_skill": best_data.get("rewards_baseline"),
+                },
+                uniform_attempts=not bool(attempt_policy.get("stop_on_pass")),
+                attempts_per_case=attempt_policy.get("max_attempts"),
             )
             evidence_line = format_evidence_volume(volume)
             if evidence_line:
                 style = "yellow" if evidence_line.startswith("Limited evidence:") else "dim"
-                console.print(Text(safe(evidence_line), style=style))
+                label = f"{agent_name}: " if len(agent_entries) > 1 else ""
+                console.print(Text(safe(label + evidence_line), style=style))
     detailed = verbose or not has_cases
     if isinstance(agents, Mapping) and agents and not incomplete and detailed:
         metrics = _display_metrics(result, agents)

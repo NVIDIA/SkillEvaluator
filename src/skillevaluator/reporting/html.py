@@ -1006,6 +1006,10 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
         def counter(value: object) -> int:
             return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 2**53 - 1 else 0
 
+        def case_counter(value: object) -> int | None:
+            result = counter(value)
+            return result or None
+
         safe_evidence: dict[str, Any] = {
             key: counter(evidence.get(key))
             for key in (
@@ -1016,19 +1020,22 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
                 "judge_failures",
             )
         }
+        safe_evidence["cases"] = case_counter(evidence.get("cases"))
+        safe_evidence["attempts_per_case"] = case_counter(evidence.get("attempts_per_case"))
+        safe_evidence["uniform_attempts"] = evidence.get("uniform_attempts") is not False
         safe_evidence["limited"] = evidence.get("limited") is True
         safe_evidence["by_arm"] = (
             {
                 arm: {
                     key: counter(arm_value.get(key))
                     for key in (
-                        "cases",
                         "attempts_planned",
                         "attempts_scored",
                         "execution_failures",
                         "judge_failures",
                     )
                 }
+                | {"cases": case_counter(arm_value.get("cases"))}
                 for arm, arm_value in evidence.get("by_arm", {}).items()
                 if arm in {"with_skill", "without_skill"} and isinstance(arm_value, dict)
             }
@@ -3057,6 +3064,8 @@ class HTMLReporter(ReporterBase):
         ):
             tier3_dataset_sufficiency = None
         tier3_preview, tier3_preview_notice = _bounded_tier3_preview(tier3_data)
+        if isinstance(tier3_preview, dict) and isinstance(tier3_preview.get("evidence_volume"), dict):
+            tier3_preview["evidence_volume"]["display"] = format_evidence_volume(tier3_preview["evidence_volume"]) or ""
         tier3_canonical_data, tier3_canonical_encoding = _canonical_tier3_embed(tier3_data)
         tier3_truncation = tier3_data.get("report_truncation", {}) if isinstance(tier3_data, dict) else {}
 

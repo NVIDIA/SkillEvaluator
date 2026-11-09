@@ -886,7 +886,7 @@ def test_condition_summary_counts_judge_failures_beyond_bounded_detail_sample() 
     summary = _condition_execution_summary(
         [],
         expected_case_ids=[],
-        expected_cases=0,
+        expected_cases=sample_limit + 4,
         n_attempts=1,
         job_failure="",
         reward_failures=failures,
@@ -895,6 +895,37 @@ def test_condition_summary_counts_judge_failures_beyond_bounded_detail_sample() 
     assert summary["judge_failures"] == 4
     assert summary["reward_failure_details_total"] == sample_limit + 4
     assert summary["reward_failure_details_truncated"] is True
+
+
+def test_condition_summary_counts_step_judge_failures_once_per_logical_attempt() -> None:
+    rewards = [
+        {
+            "_trial_root_name": "case-001__attempt1",
+            "_step_name": f"step{step}",
+            "entry_id": "case-001",
+        }
+        for step in range(1, 4)
+    ]
+    failures = [
+        {
+            "trial": f"case-001__attempt1__step{step}",
+            "reason": "Required judge evaluation failed: accuracy",
+        }
+        for step in range(1, 4)
+    ]
+
+    summary = _condition_execution_summary(
+        rewards,
+        expected_case_ids=["case-001"],
+        expected_cases=1,
+        n_attempts=1,
+        job_failure="",
+        reward_failures=failures,
+    )
+
+    assert summary["expected_attempts"] == 1
+    assert summary["scored_attempts"] == 0
+    assert summary["judge_failures"] == 1
 
 
 @pytest.mark.parametrize(

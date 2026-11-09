@@ -6667,7 +6667,9 @@ def _condition_execution_summary(
     ]
     reward_failures = [item for item in (reward_failures or []) if item["trial"] not in recovered_names]
     judge_failure_trials = {
-        str(failure.get("trial") or "")
+        str(failure.get("_trial_root_name") or failure.get("trial_root_name") or failure.get("trial") or "").split(
+            "__step", 1
+        )[0]
         for failure in [*runtime_failures, *reward_failures]
         if str(failure.get("reason") or "").startswith("Required judge evaluation failed:")
     }
@@ -6819,7 +6821,7 @@ def _condition_execution_summary(
         "scored_cases": len(expected_set.intersection(by_case)) if expected_ids else len(by_case),
         "expected_attempts": expected_attempts,
         "scored_attempts": scored_attempts,
-        "judge_failures": len(judge_failure_trials),
+        "judge_failures": min(len(judge_failure_trials), max(0, expected_attempts - scored_attempts)),
         **(
             {
                 "physical_expected_attempts": physical_expected_attempts,

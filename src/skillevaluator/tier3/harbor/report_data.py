@@ -738,7 +738,6 @@ def load_agent_data(
                         condition_errors.append(f"{label} aggregate job: {job_failure}")
                     trial_failures = data.get("trial_failures")
                     judge_failure_trials: set[str] = set()
-                    failure_case_ids: set[str] = set()
                     if isinstance(trial_failures, list):
                         for failure in trial_failures:
                             if not isinstance(failure, dict):
@@ -747,14 +746,22 @@ def load_agent_data(
                             reason = failure.get("reason") or "Unknown Harbor trial failure"
                             condition_errors.append(f"{label} trial {trial}: {reason}")
                             trial_id = str(trial)
-                            failure_case_ids.add(trial_id.split("__attempt", 1)[0])
                             if str(reason).startswith("Required judge evaluation failed:"):
-                                judge_failure_trials.add(trial_id)
+                                judge_failure_trials.add(
+                                    str(
+                                        failure.get("_trial_root_name") or failure.get("trial_root_name") or trial_id
+                                    ).split("__step", 1)[0]
+                                )
                     raw_judge_failures = data.get("judge_failures")
-                    judge_failures = (
-                        _nonnegative_counter(raw_judge_failures)
-                        if isinstance(raw_judge_failures, int) and not isinstance(raw_judge_failures, bool)
-                        else len(judge_failure_trials)
+                    planned_attempts = _nonnegative_counter(data.get("expected_attempts"))
+                    scored_attempts = _nonnegative_counter(data.get("scored_attempts"))
+                    judge_failures = min(
+                        (
+                            _nonnegative_counter(raw_judge_failures)
+                            if isinstance(raw_judge_failures, int) and not isinstance(raw_judge_failures, bool)
+                            else len(judge_failure_trials)
+                        ),
+                        max(0, planned_attempts - scored_attempts),
                     )
                     condition_execution[key] = {
                         "execution_status": status,
@@ -765,7 +772,6 @@ def load_agent_data(
                         "expected_attempts": _nonnegative_counter(data.get("expected_attempts")),
                         "scored_attempts": _nonnegative_counter(data.get("scored_attempts")),
                         "judge_failures": judge_failures,
-                        "failure_cases": len(failure_case_ids),
                         "recovered_attempts_total": _nonnegative_counter(data.get("recovered_attempts_total")),
                         "recovered_attempts": data.get("recovered_attempts", []),
                         "recovered_trial_failures": data.get("recovered_trial_failures", []),

@@ -235,9 +235,6 @@ class BenchmarkReporter(ReporterBase):
                 lines.append(
                     f"Same-agent comparable lift: **{completed['lift']:+.4f}** ({completed['lift'] * 100:+.2f} percentage points)."
                 )
-            evidence_line = format_evidence_volume((ae or {}).get("evidence_volume"))
-            if evidence_line:
-                lines.append(f"Evidence volume: {evidence_line}.")
             if completed["needs_attention"]:
                 lines.append(
                     "**Needs attention:** other execution failures remain. This completed-agent result does not certify the whole run."
@@ -392,6 +389,9 @@ class BenchmarkReporter(ReporterBase):
                 )
         else:
             lines.append("- Tasks: not recorded (legacy or non-live result)")
+        evidence_line = format_evidence_volume((ae or {}).get("evidence_volume"))
+        if evidence_line:
+            lines.append(f"- Evidence volume: {evidence_line}.")
 
         dataset_provenance = agent_eval_publication_dataset_provenance(ae)
         if dataset_provenance is not None:

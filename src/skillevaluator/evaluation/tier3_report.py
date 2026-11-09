@@ -862,7 +862,20 @@ def build_agent_eval_payload(
     )
     from skillevaluator.tier3.dataset_sufficiency import assess_dataset_sufficiency
 
-    for agent_payload in agent_payloads.values():
+    for agent_name, agent_payload in agent_payloads.items():
+        agent_info = agents.get(agent_name, {})
+        agent_payload["evidence_volume"] = evidence_volume_for_conditions(
+            agent_info.get("conditions"),
+            trial_failures=agent_info.get("trial_failures"),
+            baseline_only=baseline_only,
+            dataset_summary=dataset_summary,
+            rewards_by_arm={
+                "with_skill": agent_info.get("rewards"),
+                "without_skill": agent_info.get("rewards_baseline"),
+            },
+            uniform_attempts=not bool(policy.get("stop_on_pass")),
+            attempts_per_case=_as_nonnegative_int(policy.get("max_attempts")) or None,
+        )
         pass_summary = agent_payload.get("pass_at_k") if isinstance(agent_payload.get("pass_at_k"), dict) else {}
         with_pass = pass_summary.get("with_skill") if isinstance(pass_summary.get("with_skill"), dict) else {}
         without_pass = pass_summary.get("without_skill")

@@ -412,6 +412,45 @@ def test_setup_noise_in_an_argv_command_is_wasted(module, argv):
     assert _classify(module, _call("Bash", command=" ".join(argv))) == "wasted"
 
 
+_README_PATCH = (
+    "*** Begin Patch\n*** Update File: README.md\n@@\n-Install it.\n"
+    "+Run `pip install -e .`, then pick the parser which matches the input.\n"
+    "+See `--help` to adapt the defaults, or `apt-get` and `brew ` for system packages.\n"
+    "*** End Patch"
+)
+
+
+@pytest.mark.parametrize("module", _MODULES)
+@pytest.mark.parametrize("action", ["apply_patch", "functions.apply_patch", "applypatch"])
+def test_patch_text_is_not_read_as_a_command(module, action):
+    # The converter records a non-object tool input under "raw". A patch that
+    # mentions an install or help command is still a patch, so it scores the
+    # same under every patch argument.
+    for key in ("input", "raw", "patch", "patchText"):
+        assert _classify(module, _call(action, **{key: _README_PATCH})) == "productive", key
+
+
+@pytest.mark.parametrize("module", _MODULES)
+@pytest.mark.parametrize(
+    "call",
+    [
+        _call("Edit", raw=_README_PATCH),
+        _call("Write", file_path="docs/which version.md", content="pip install -e ."),
+        _call("Read", file_path="docs/brew install.md"),
+        _call("mcp__docs__search", query="pip install --help"),
+    ],
+    ids=lambda call: f"{call['action']}:{sorted(call['action_input'])}",
+)
+def test_install_words_in_file_text_are_not_commands(module, call):
+    assert _classify(module, call) == "productive"
+
+
+@pytest.mark.parametrize("module", _MODULES)
+def test_a_command_recorded_under_raw_is_still_checked(module):
+    assert _classify(module, _call("exec_command", raw="pip install requests")) == "wasted"
+    assert _classify(module, _call("exec_command", raw="pytest -q")) == "productive"
+
+
 @pytest.mark.parametrize("module", _MODULES)
 def test_neutral_calls_are_left_out_of_the_score(module):
     calls = [

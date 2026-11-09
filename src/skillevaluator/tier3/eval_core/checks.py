@@ -5439,8 +5439,9 @@ def _tool_call_productivity(tc: dict[str, Any], expected_skill: Any, expected_sc
         runs_command and expected_script and expected_script in cmd
     ):
         return "productive"
-    full_text = f"{name} {cmd}".lower()
-    if any(waste in full_text for waste in WASTE_INDICATORS):
+    # Help, version and install commands are waste. Only a command is checked:
+    # the path, content or patch text of any other tool is data, not a command.
+    if runs_command and any(waste in f"{name} {cmd}".lower() for waste in WASTE_INDICATORS):
         return "wasted"
     if "read" in name or name in _PRODUCTIVE_TOOL_NAMES or name.startswith("mcp__") or runs_command:
         return "productive"

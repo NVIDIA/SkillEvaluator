@@ -660,16 +660,41 @@ def _usage_tokens(counters: dict[str, Any]) -> dict[str, int] | None:
     return tokens
 
 
+def _harbor_task_directory(trial_dir: Path) -> str | None:
+    """Return the task directory a Harbor trial ran, from its copied ``result.json`` or ``config.json``.
+
+    A generated task's directory is named after its case. The files are
+    optional, so an unreadable or oversized one only gives ``None``.
+    """
+    for artifact, keys in (("result", (("task_id",), ("config", "task"))), ("config", (("task",),))):
+        path = trial_dir / f"{artifact}.json"
+        data = _load_bounded_json(path, [], artifact=artifact) if path.is_file() else None
+        for key_path in keys if isinstance(data, dict) else ():
+            task: Any = data
+            for key in key_path:
+                task = task.get(key) if isinstance(task, dict) else None
+            task_path = task.get("path") if isinstance(task, dict) else None
+            if not isinstance(task_path, str):
+                continue
+            # The run may have used either path separator.
+            directory = task_path.replace("\\", "/").strip().rstrip("/").rsplit("/", 1)[-1]
+            if directory:
+                return directory
+    return None
+
+
 def _unscored_attempt_usage(trial_dir: Path) -> dict[str, Any]:
     """Read the token counters of an attempt that has no usable reward.
 
-    The attempt is not scored, but it ran and used tokens. The case is the
-    trial name's prefix, as for a reward without one. Its trajectory is
-    optional telemetry, so an unreadable or oversized file only leaves the
-    counters out and does not mark score evidence truncated.
+    The attempt is not scored, but it ran and used tokens. Its case is the task
+    directory its Harbor result or config names. Without one, it is the trial
+    name before Harbor's ``__<id>`` suffix, which never contains ``__`` while a
+    case ID may. Its trajectory is optional telemetry, so an unreadable or
+    oversized file only leaves the counters out and does not mark score
+    evidence truncated.
     """
     attempt: dict[str, Any] = {
-        "entry_id": trial_dir.name.split("__", 1)[0] or "unknown",
+        "entry_id": _harbor_task_directory(trial_dir) or trial_dir.name.rsplit("__", 1)[0] or "unknown",
         "trial_id": trial_dir.name,
         "scored": False,
     }

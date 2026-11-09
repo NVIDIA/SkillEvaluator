@@ -172,6 +172,29 @@ def test_a_failed_attempt_with_a_cut_harbor_trial_name_is_matched_to_its_case() 
     assert row["with_skill"]["totals"]["total_tokens"] == 175
 
 
+def test_a_stop_on_pass_trial_name_is_matched_to_its_case() -> None:
+    def timed_out(arm: str) -> dict[str, Any]:
+        # Without a Harbor result, the loader keeps the trial name before Harbor's ``__<id>``.
+        name = f"demo-codex-{arm}-case-1-attempt001__case-1"
+        return {"entry_id": name, "trial_id": f"{name}__a", "tokens": {"prompt": 40, "completion": 4}}
+
+    usage = build_token_usage(
+        {
+            "codex": _agent(
+                [_trial("case-1", 100, 20)],
+                [_trial("case-1", 90, 10)],
+                unscored=[timed_out("with")],
+                unscored_baseline=[timed_out("without")],
+            )
+        }
+    )
+
+    assert usage is not None
+    codex = usage["agents"]["codex"]
+    assert [row["entry_id"] for row in codex["cases"]] == ["case-1"]
+    assert codex["delta"]["status"] == "available"
+
+
 def test_partial_coverage_sums_only_measured_attempts_and_never_estimates() -> None:
     missing = {"entry_id": "case-2", "trial_id": "case-2__a"}
     invalid = {"entry_id": "case-3", "trial_id": "case-3__a", "tokens": {"prompt": -5, "completion": 9}}
@@ -379,6 +402,66 @@ def test_a_failed_baseline_arm_keeps_its_usage_but_gets_no_change() -> None:
         assert delta["status"] == "unavailable"
         assert delta["reason_codes"] == ["baseline_failed"]
         assert delta["reason"] == "No change: baseline incomplete (1 of 2 attempts scored)."
+
+
+@pytest.mark.parametrize("status", ["unknown", "interrupted", None])
+def test_an_arm_without_a_known_run_status_gets_no_change(status: str | None) -> None:
+    agent = _agent([_trial("case-1", 100, 20)], [_trial("case-1", 500, 20)], baseline_status="succeeded")
+    agent["conditions"]["without_skill"]["execution_status"] = status
+
+    usage = build_token_usage({"codex": agent})
+
+    assert usage is not None
+    codex = usage["agents"]["codex"]
+    # The usage is still measured, but the report withholds this arm's scores.
+    assert codex["baseline"]["coverage"]["status"] == "complete"
+    for delta in (codex["delta"], *(case["delta"] for case in codex["cases"]), usage["dataset"]["delta"]):
+        assert delta["status"] == "unavailable"
+        assert delta["total_tokens"] is None
+    assert codex["delta"]["reason_codes"] == ["baseline_status_unknown"]
+    assert codex["delta"]["reason"] == "No change: baseline status unknown."
+
+
+def test_a_sum_above_the_exact_json_range_is_not_reported() -> None:
+    # Each counter is valid, but each arm's sum is above 2**53 - 1.
+    half = 2**52
+    usage = build_token_usage(
+        {
+            "codex": _agent(
+                [_trial("case-1", half + 2, 0), _trial("case-1", half + 2, 0)],
+                [_trial("case-1", half, 0), _trial("case-1", half, 0)],
+            )
+        }
+    )
+
+    assert usage is not None
+    codex = usage["agents"]["codex"]
+    for scope in (usage["dataset"], codex, codex["cases"][0]):
+        for arm in ("with_skill", "baseline"):
+            assert scope[arm]["totals"] is None
+            assert scope[arm]["coverage"]["status"] == "unavailable"
+            assert "total_out_of_range" in scope[arm]["coverage"]["reason_codes"]
+        assert scope["delta"]["status"] == "unavailable"
+        assert scope["delta"]["total_tokens"] is None
+    assert codex["delta"]["reason_codes"] == ["with_skill_total_out_of_range", "baseline_total_out_of_range"]
+    assert "largest integer JSON keeps exact" in codex["delta"]["reason"]
+
+
+def test_agent_sums_within_range_can_still_pass_it_over_all_agents() -> None:
+    half = 2**52
+    usage = build_token_usage(
+        {
+            "codex": _agent([_trial("case-1", half, 0)], [_trial("case-1", half, 0)]),
+            "opencode": _agent([_trial("case-1", half, 0)], [_trial("case-1", half, 0)]),
+        }
+    )
+
+    assert usage is not None
+    assert usage["agents"]["codex"]["with_skill"]["totals"]["total_tokens"] == half
+    dataset = usage["dataset"]
+    assert dataset["with_skill"]["totals"] is None
+    assert dataset["with_skill"]["coverage"]["reason_codes"] == ["total_out_of_range"]
+    assert "with_skill_total_out_of_range" in dataset["delta"]["reason_codes"]
 
 
 def test_no_measured_attempt_gives_no_token_usage() -> None:

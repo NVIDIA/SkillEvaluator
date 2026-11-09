@@ -71,7 +71,8 @@ def _arm(
         trial = directory / "trials" / name
         trial.mkdir(parents=True)
         if rewarded:
-            reward = {"entry_id": name.split("__", 1)[0], "trial_id": name, **scores}
+            # Harbor's ``__<id>`` suffix never contains ``__``; a case ID may.
+            reward = {"entry_id": name.rsplit("__", 1)[0], "trial_id": name, **scores}
             (trial / "reward.json").write_text(json.dumps(reward), encoding="utf-8")
         else:
             failure = {"status": "unscored", "trial": name, "error": {"type": "AgentTimeoutError"}}
@@ -112,6 +113,12 @@ def run_result(tmp_path: Path) -> tuple[Path, Any]:
     result = agent_eval_result_from_directory(skill, run, use_llm_judge=False)
     assert result is not None
     return run, result
+
+
+def _set_reward_case(run: Path, agent: str, variant: str, trial: str, case: str) -> None:
+    reward_file = run / agent / variant / "trials" / trial / "reward.json"
+    reward = json.loads(reward_file.read_text(encoding="utf-8"))
+    reward_file.write_text(json.dumps({**reward, "entry_id": case}), encoding="utf-8")
 
 
 def _cli_output(result: Any) -> str:
@@ -160,6 +167,50 @@ def test_loader_keeps_usage_of_attempts_that_scores_never_read(tmp_path: Path) -
     assert agents["claude-code"]["rewards_baseline_complete"] is False
     assert agents["claude-code"]["usage_only_attempts"] == []
     assert agents["codex"]["usage_only_attempts_baseline"] == []
+
+
+def test_an_unscored_attempt_of_a_case_id_with_double_underscores_keeps_its_case(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    _arm(run, "codex", "with-skill", [("auth__login__a1b2c3d", (100, 10, 0), True)])
+    _arm(
+        run,
+        "codex",
+        "without-skill",
+        [("auth__login__a1b2c3d", (90, 10, 0), True), ("auth__login__e4f5g6h", (400, 40, 0), False)],
+        status="failed",
+    )
+
+    agents = load_agent_data(run)
+    usage = build_agent_eval_payload("demo", agents, use_llm_judge=False)["token_usage"]["agents"]["codex"]
+
+    [case] = usage["cases"]
+    assert case["entry_id"] == "auth__login"
+    assert case["baseline"]["coverage"]["observed_attempts"] == 2
+    assert case["baseline"]["coverage"]["unscored_attempts"] == 1
+    assert case["baseline"]["totals"]["total_tokens"] == 540
+
+
+def test_a_stop_on_pass_unscored_attempt_takes_its_case_from_its_harbor_files(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    task_files = {
+        "with-skill": ("result.json", {"task_id": {"path": "/runs/x/tasks/codex/with/case-1"}}),
+        "without-skill": ("config.json", {"task": {"path": "C:\\runs\\x\\tasks\\codex\\without\\case-1"}}),
+    }
+    for variant, arm in (("with-skill", "with"), ("without-skill", "without")):
+        timed_out = f"demo-codex-{arm}-case-1-attempt001__case-1__a1b2c3d"
+        scored = f"demo-codex-{arm}-case-1-attempt002__case-1__e4f5g6h"
+        _arm(run, "codex", variant, [(timed_out, (400, 40, 0), False), (scored, (100, 10, 0), True)])
+        _set_reward_case(run, "codex", variant, scored, "case-1")
+        name, content = task_files[variant]
+        (run / "codex" / variant / "trials" / timed_out / name).write_text(json.dumps(content), encoding="utf-8")
+
+    usage = build_agent_eval_payload("demo", load_agent_data(run), use_llm_judge=False)["token_usage"]
+
+    codex = usage["agents"]["codex"]
+    assert [case["entry_id"] for case in codex["cases"]] == ["case-1"]
+    assert codex["with_skill"]["coverage"]["unscored_attempts"] == 1
+    assert codex["delta"]["status"] == "available"
+    assert codex["delta"]["total_tokens"] == 0
 
 
 def test_payload_counts_the_failed_attempt_and_keeps_resources_complete_only(run_result: tuple[Path, Any]) -> None:

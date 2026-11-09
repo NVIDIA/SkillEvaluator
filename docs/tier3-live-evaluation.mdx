@@ -1084,7 +1084,8 @@ best effort over these forms:
   credential flag, after `-u`, `--user`, or `--proxy-user` when it holds a
   colon, after `-b` when it holds `=`, and after `-p` that follows a `login`
   element or comes right after an `sshpass` element, and an attached `-p...`
-  element after a `login` or MySQL client element;
+  element after a `login` or MySQL client element, also when each element is
+  on its own line;
 - credentials set with `aws configure set`, `npm config set` (or `npm set`),
   `pnpm config set`, `yarn config set`, or `git config`, also after options
   such as `--location=global` (`_authToken`, `npmAuthToken`, `github.token`);
@@ -1095,27 +1096,33 @@ best effort over these forms:
   `aws_secret_access_key = ...`, `"password": "..."`, `token := "..."`,
   `os.environ["API_KEY"] = "..."`, `PASS=...`, `DB_PASS=...`, or
   `MYSQLPWD=...`, also JSON-escaped inside a shell string. A bare `PASS` is
-  masked only as `PASS=` with a value that is not a number or `$((...))`, so
-  test output such as `PASS: 3` and a counter such as `PASS=0` stay readable.
-  Inside a quoted string, wherever the name sits in it, the value runs to the
-  closing quote, a `\n` escape, or the `&` before the next field of a form
-  body, so the values in `echo '  password: correct horse battery staple'`
-  and `curl -d "username=bob&password=..."` are masked whole. Inside a `sh -c`
-  or `eval` string or a remote `ssh` command, a shell assignment's value is
-  one word, so the command after it stays readable. A name that ends in
-  `_URL`, `_DIR`, `_PATH`, `_FILE`, or a similar location word keeps its value
-  unless it also names a secret or password, as do `token_type` and a count
-  such as `max_tokens=100`. `grep "token=" ...` keeps the rest of the command,
-  because that quote closes the pattern;
+  left alone as test output or a counter, such as `PASS: 3`,
+  `--- PASS: TestName`, `PASS=0`, or `"pass": true`, but OpenSSL's `pass:...`
+  and a quoted `"pass"` key or value are masked. Inside a quoted string,
+  wherever the name sits in it, the value runs to the closing quote, a `\n`
+  escape, or the `&` before the next field of a form body, so the values in
+  `echo '  password: correct horse battery staple'`,
+  `curl -d "username=bob&password=..."`, and
+  `curl -d'username=bob&password=...'` are masked whole. Inside a `sh -c` or
+  `eval` string, a remote `ssh` command, or a `node`, `perl`, or `ruby` `-e`
+  program, a value is one word, so the command after it stays readable. A
+  name that ends in `_URL`, `_DIR`, `_PATH`, `_FILE`, or a similar location
+  word keeps its value unless it also names a secret or password, as do
+  `token_type` and a count such as `max_tokens=100`. `grep "token=" ...`
+  keeps the rest of the command, because that quote closes the pattern;
 - `ghp_`-style, `github_pat_`, `glpat-`, `npm_`, `xox*-`, and `hf_` tokens. An
   identifier such as `hf_hub_download` or `npm_config_registry` is left alone.
 
-A credential in another form, such as a `.pgpass` line or a password after an
-unknown flag, can still appear, and some ordinary words are masked, such as the
+A credential in another form can still appear, such as a `.pgpass` line, a
+password after an unknown flag, an unquoted `PASS: value`, an `npm config set`
+option with a separate value (`--location global`), or all but the first word
+of a value with spaces on an unquoted here-document line or inside a `sh -c`
+or `ssh` command string. Some ordinary words are masked, such as the
 path in `grep -r token: /etc`, the words after a `.netrc`-like
 `login NAME password` phrase in prose, or, after an unmatched quote, the rest
 of the line after a credential name. Quotes are read from the start of each
-line, and a quoted value ends at its closing quote or at the end of its line.
+line, and unlike in a shell, a line break ends a quoted string here, so a
+quoted value ends at its closing quote or at the end of its line.
 Only the first 2,000 characters are scanned. A word that this limit cuts in
 half is replaced with `<truncated>`, keeping a URL's scheme and host. The
 evidence is then cut to 500 characters, or 300 for prompt and response text.

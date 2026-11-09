@@ -27,6 +27,7 @@ from skillevaluator.validators.security import (
     SecurityValidator,
     _is_jpeg,
     _is_png,
+    _skillspector_bundled_file_bytes,
     _skillspector_child_env,
     _skillspector_incomplete_analysis_error,
     _skillspector_llm_env,
@@ -9960,8 +9961,7 @@ class TestSkillspectorCompleteWithCaveats:
             ("error-class", _caveat_error("SKILL.md:10 [reference_resolution; reference_missing]")),
             ("multi-line", _caveat_error("SKILL.md:10 [reference_resolution; reference_missing]")),
             ("unconfirmed-reference", _caveat_error("SKILL.md:10 [reference_resolution; reference_missing]")),
-            # The label quotes the absolute path, which differs per run and platform.
-            ("absolute-path", None),
+            ("absolute-path", _caveat_error("/SKILL.md:10 [reference_resolution; reference_missing]")),
             ("escaping-path", _caveat_error("../notes-writer/SKILL.md:10 [reference_resolution; reference_missing]")),
             ("backslash-path", _caveat_error("scripts\\summarize.py:10 [reference_resolution; reference_missing]")),
             ("control-character-path", _caveat_error("SKILL.md:10 [reference_resolution; reference_missing]")),
@@ -9987,14 +9987,31 @@ class TestSkillspectorCompleteWithCaveats:
         ],
     )
     @patch("skillevaluator.validators.security.Tools")
-    def test_near_misses_stay_incomplete(self, mock_tools, tmp_path: Path, case: str, error: str | None) -> None:
-        """Each near miss is rejected by the check named in its error, not by an unknown status."""
+    def test_near_misses_stay_incomplete(self, mock_tools, tmp_path: Path, case: str, error: str) -> None:
+        """Each near miss is rejected by the check named in its error, not by an unknown status.
+
+        A path near miss moves the ``missing`` reference with its row, so the row
+        passes the reference check and the bundled-file rules reject its path.
+        Where the platform allows it, the file that the path would name without
+        those rules holds the reference's line, so dropping a rule accepts it.
+        """
         skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
         payload = _reference_report("2.13.4")
         completeness = payload["analysis_completeness"]
         row = completeness["ledger_exceptions"][0]
         if case == "symlinked-file" and os.name == "nt":
             pytest.skip("POSIX symlink semantics")
+
+        def move_row(path: str, component: int | None = None, *, write: bool = False) -> None:
+            row["path"] = path
+            for reference in completeness["references"]:
+                if reference["status"] == "missing":
+                    reference["source_path"] = path
+            if component is not None:
+                payload["components"][component]["path"] = path
+            if write:
+                (skill / path).write_text(_NOTES_WRITER_FILES["SKILL.md"], encoding="utf-8", newline="\n")
+
         if case == "no-caveat":
             completeness["ledger_exceptions"] = []
         elif case == "static-parse-limit":
@@ -10018,18 +10035,21 @@ class TestSkillspectorCompleteWithCaveats:
                 reference for reference in completeness["references"] if reference["status"] != "missing"
             ]
         elif case == "absolute-path":
-            row["path"] = str((skill / "SKILL.md").resolve())
+            # Split at "/", the path names SKILL.md under the scan root.
+            move_row("/SKILL.md", 0)
         elif case == "escaping-path":
-            row["path"] = "../notes-writer/SKILL.md"
+            # SecureRoot also refuses "..".
+            move_row("../notes-writer/SKILL.md", 0)
         elif case == "backslash-path":
-            row["path"] = payload["components"][1]["path"] = "scripts\\summarize.py"
+            # A file name on POSIX, scripts/summarize.py on Windows.
+            move_row("scripts\\summarize.py", 1, write=True)
         elif case == "control-character-path":
-            row["path"] = payload["components"][0]["path"] = "SKILL.md\u0007"
+            # Windows does not allow control characters in file names.
+            move_row("SKILL.md\u0007", 0, write=os.name != "nt")
         elif case == "unlisted-path":
-            row["path"] = "README.md"
-            (skill / "README.md").write_text(_NOTES_WRITER_FILES["SKILL.md"], encoding="utf-8")
+            move_row("README.md", write=True)
         elif case == "directory-path":
-            row["path"] = payload["components"][1]["path"] = "scripts"
+            move_row("scripts", 1)
         elif case == "missing-file":
             (skill / "SKILL.md").unlink()
         elif case == "symlinked-file":
@@ -10078,19 +10098,26 @@ class TestSkillspectorCompleteWithCaveats:
                 {"outcome": "out_of_scope", "path": ".git", "reason_code": "vcs_metadata", "fatal": True}
             )
 
-        result = _validate_skillspector_payload(mock_tools, skill, payload)
+        refused: list[object] = []
+
+        def bundled_file_bytes(path: object, components: object, scanned_root: Path | None) -> bytes | None:
+            data = _skillspector_bundled_file_bytes(path, components, scanned_root)
+            if data is None:
+                refused.append(path)
+            return data
+
+        with patch(
+            "skillevaluator.validators.security._skillspector_bundled_file_bytes", side_effect=bundled_file_bytes
+        ):
+            result = _validate_skillspector_payload(mock_tools, skill, payload)
 
         assert result.is_incomplete
         assert result.incomplete_scans == ["skillspector"]
         assert not result.warnings
         assert not any("is not recognized" in message for message in result.errors)
-        if error is None:
-            prefix, suffix = _caveat_error("<path>:10 [reference_resolution; reference_missing]").split("<path>")
-            assert len(result.errors) == 1
-            assert result.errors[0].startswith(prefix)
-            assert result.errors[0].endswith(suffix)
-        else:
-            assert result.errors == [error]
+        assert result.errors == [error]
+        if case.endswith(("-path", "-file")):
+            assert refused == [row["path"]]
 
     def test_caveats_need_a_scan_root(self) -> None:
         payload = _reference_report("2.13.4")

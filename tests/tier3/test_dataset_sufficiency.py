@@ -85,7 +85,7 @@ def test_skipped_baseline_makes_lift_comparison_unavailable():
     )
 
     assert result["checks"][2]["met"] is None
-    assert result["checks"][2]["reason"] == "baseline not run; lift comparison unavailable"
+    assert result["checks"][2]["reason"] == "baseline not run, so lift has no paired cases"
     assert result["coverage_summary"] == (
         "Dataset size: provisional — 12 cases (policy needs 10), 2 negative cases (needs 1); "
         "baseline not run, so lift has no paired cases (policy dataset-sufficiency-v1)"

@@ -474,10 +474,12 @@ completed run directly:
   `report.html`. It leads with the
   [completed agent's result](#completed-agents-in-an-incomplete-run) and shows
   publication as **NOT ASSESSED**, because Tiers 1 and 2 did not run; its name
-  keeps publication tooling from reading it as a `BENCHMARK.md` card. The two
-  files are written as a pair: if `tier3-benchmark.md` cannot be written,
-  `report.html` is removed too, and `result.json` records the reason in
-  `warnings` with `report_status: "degraded"`.
+  keeps publication tooling from reading it as a `BENCHMARK.md` card. At the
+  end of a `tier3 evaluate` run, the two files are written as a pair: if
+  `tier3-benchmark.md` cannot be written, `report.html` is removed too, and
+  `result.json` records the reason in `warnings` with
+  `report_status: "degraded"`. [`view`](#view) regenerates only a missing
+  `report.html`, never `tier3-benchmark.md`.
 - **`comparison.json`** — the cross-agent comparison table; written only when
   you ran more than one agent.
 - **`<agent>/lift.json`** and **`<agent>/pass_at_k_lift.json`** — per-metric
@@ -795,12 +797,17 @@ score.
   baseline is comparable, its lift, followed by **Needs attention: other
   execution failures remain**. In a `validate` run, `BENCHMARK.md` shows the
   same lines under its unchanged overall verdict.
-- When `--stop-on-pass` recovered an agent timeout with a later scored attempt,
-  both reports give the number of recovered attempts. The timed-out attempts
-  stay in the failure history and are not scored.
+- When `--stop-on-pass` recovered a timeout of that agent with a later scored
+  attempt, the HTML report (in the collapsed **Run details & provenance**
+  panel), `tier3-benchmark.md` and, in a `validate` run, `BENCHMARK.md` give
+  its number of recovered attempts. Timeouts that other agents recovered are
+  not counted. The timed-out attempts stay in the failure history and are not
+  scored. The HTML report and `tier3-benchmark.md` also give this count when
+  every agent finished.
 
-In a standalone report, the Tier 3 verdict chip and the **Quality Verdict** card
-show that agent's own dimension verdict. They describe one agent, not the run.
+In a standalone report, the **Tier 3 quality** chip and the **Quality Verdict**
+card show that agent's own dimension verdict. They describe one agent, not the
+run, and the command status in the same hero still reads **Changes required**.
 
 The evidence is complete when the agent succeeded with no execution errors, has
 a with-skill score from 0 to 1, and scored every expected attempt of every case
@@ -810,8 +817,17 @@ score without a baseline or lift. If the best agent's evidence is incomplete,
 the reports do not fall back to another agent. When no agent qualifies, for
 example because every agent failed or the agents were scored on different
 metric sets, no completed-agent score is shown and `tier3-benchmark.md` reads
-**Tier 3: No complete agent result**. To get a whole-run result, fix and rerun
-the failed agent.
+**Tier 3: No complete agent result**.
+
+When the run has a best agent, the HTML report names it as **Best performing
+agent**, and its **Skill Lift** card and the **Best-agent lift** line under
+**Run details & provenance** show that agent's lift when it has one, even when
+its evidence is incomplete. The payload keeps this lift in
+`summary.overall_lift` and records the failed run's `verdict` as `neutral`.
+The lift is diagnostic evidence for one agent, not a whole-run lift.
+
+To get a whole-run result, fix the failed agent and rerun the evaluation with
+every agent.
 
 ## Browse results
 

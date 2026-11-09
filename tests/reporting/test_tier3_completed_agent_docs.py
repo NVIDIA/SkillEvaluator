@@ -4,21 +4,28 @@
 
 from __future__ import annotations
 
+import json
 import re
+from html import unescape
 from pathlib import Path
 
+import pytest
 from tests.reporting.test_tier3_scoped_reports import result_with_completed_peer
 
+from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
+from skillevaluator.models import ValidationResult
 from skillevaluator.reporting import BenchmarkReporter, HTMLReporter
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 
 REPO = Path(__file__).resolve().parents[2]
 HEADING = "### Completed agents in an incomplete run"
 ANCHOR = "completed-agents-in-an-incomplete-run"
+NEEDS_ATTENTION = "Needs attention: other execution failures remain"
 
 
 def _plain(text: str) -> str:
-    """Drop HTML tags and Markdown emphasis, and collapse whitespace."""
-    return " ".join(re.sub(r"<[^>]+>", " ", text).replace("*", "").split())
+    """Drop HTML tags, entities and Markdown emphasis, and collapse whitespace."""
+    return " ".join(unescape(re.sub(r"<[^>]+>", " ", text)).replace("*", "").split())
 
 
 def _reports_page() -> str:
@@ -31,42 +38,209 @@ def _section() -> str:
     return _plain(page[start : page.index("\n## ", start)])
 
 
+def _run_details(raw_html: str) -> str:
+    """Return the text of the collapsed Run details & provenance panel."""
+    start = raw_html.index('<details class="run-metadata"')
+    return _plain(raw_html[start : raw_html.index("</details>", start)])
+
+
+def _hero_command_status(raw_html: str) -> str:
+    match = re.search(r'<p class="hero-command-status[^"]*">([^<]*)</p>', raw_html)
+    assert match is not None
+    return match.group(1).strip()
+
+
+def _agent(score: float, *, baseline_scored: int = 1, recovered: int = 0) -> dict:
+    conditions = {
+        "with_skill": {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "expected_attempts": 1,
+            "scored_attempts": 1,
+            "recovered_attempts_total": recovered,
+        },
+        "without_skill": {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "expected_attempts": 1,
+            "scored_attempts": baseline_scored,
+        },
+    }
+    return {
+        "with_skill": dict.fromkeys(DEFAULT_METRICS, score),
+        "without_skill": dict.fromkeys(DEFAULT_METRICS, 0.4),
+        "execution_status": "succeeded",
+        "execution_errors": [],
+        "expected_attempts": 2,
+        "scored_attempts": 1 + baseline_scored,
+        "conditions": conditions,
+        "num_trials": 1,
+        "num_trials_baseline": 1,
+    }
+
+
+def _three_agent_run(*, best_baseline_scored: int, peer_recovered: int) -> ValidationResult:
+    """opencode scores best, claude-code finishes lower, and codex fails."""
+    agents = {
+        "opencode": _agent(0.8, baseline_scored=best_baseline_scored),
+        "claude-code": _agent(0.6, recovered=peer_recovered),
+        "codex": {
+            "execution_status": "failed",
+            "execution_errors": ["Agent setup failed"],
+            "with_skill": {},
+            "without_skill": {},
+        },
+    }
+    payload = build_agent_eval_payload(
+        "demo",
+        agents,
+        dataset=[{"id": "case-a"}],
+        attempt_policy={"max_attempts": 1, "stop_on_pass": False, "pass_threshold": 0.5},
+        use_llm_judge=False,
+    )
+    assert payload["execution_status"] == "failed"
+    assert payload["best_agent"] == "opencode"
+    result = ValidationResult(validator_name="AGENT_EVAL")
+    result.metadata["agent_eval"] = payload
+    result.add_error("Agent setup failed")
+    return result
+
+
 def test_documented_labels_match_a_run_with_a_failed_peer() -> None:
     result = result_with_completed_peer()
     payload = result.metadata["agent_eval"]
     payload["agents"]["opencode"]["conditions"]["with_skill"]["recovered_attempts_total"] = 1
     section = _section()
-    html = _plain(HTMLReporter(report_scope="tier3").render(result))
+    raw = HTMLReporter(report_scope="tier3").render(result)
+    html = _plain(raw)
+    details = _run_details(raw)
     scoped = _plain(BenchmarkReporter(report_scope="tier3").render(result))
     card = _plain(BenchmarkReporter().render(result))
 
     assert payload["execution_status"] == "failed"
     assert payload["summary"]["overall_score"] is None
+    assert payload["summary"]["overall_lift"] == pytest.approx(0.4)
+    assert payload["summary"]["verdict"] == payload["verdict"] == "neutral"
+    for text in ("summary.overall_score", "summary.overall_lift", "`neutral`"):
+        assert text in section
     for label in (
         "Completed-agent result. Other execution failures need attention",
         "Completed Agent Score",
         "Quality Verdict",
+        "Tier 3 quality",
+        "Run details & provenance",
+        "Best performing agent",
+        "Skill Lift",
+        "Best-agent lift",
     ):
         assert label in section
         assert label in html
-    assert "1 timeout attempt(s) recovered" in html
-    needs_attention = "Needs attention: other execution failures remain"
-    assert needs_attention in section
-    assert needs_attention in scoped
+    # The standalone hero: the quality chip shows the agent, the command status the run.
+    assert "Tier 3 quality: Passed" in html
+    assert "Changes required" in section
+    assert _hero_command_status(raw) == "Changes required"
+    assert "Skill Lift +0.40" in html
+    assert "1 timeout attempt(s) recovered" in details
+    assert "Best-agent lift: +0.40" in details
+    assert NEEDS_ATTENTION in section
+    assert NEEDS_ATTENTION in scoped
     assert "Recovered timeout attempts: 1" in scoped
     # A validate card shows the same lines under its unchanged verdict.
-    assert needs_attention in card
+    assert NEEDS_ATTENTION in card
+    assert "Recovered timeout attempts: 1" in card
     assert "Overall verdict: FAIL" in card
 
 
-def test_documented_line_when_no_agent_qualifies() -> None:
-    result = result_with_completed_peer()
-    # The best agent's coverage is incomplete; the report does not fall back.
-    result.metadata["agent_eval"]["agents"]["opencode"]["scored_attempts"] = 1
+def test_recovered_count_is_the_shown_agents_own() -> None:
+    # claude-code recovered two timeouts, but the reports show opencode.
+    result = _three_agent_run(best_baseline_scored=1, peer_recovered=2)
+    raw = HTMLReporter(report_scope="tier3").render(result)
+    scoped = _plain(BenchmarkReporter(report_scope="tier3").render(result))
+
+    assert "Timeouts that other agents recovered are not counted" in _section()
+    assert "Completed agent: opencode" in scoped
+    assert "Recovered timeout attempts" not in scoped
+    assert "timeout attempt(s) recovered" not in _plain(raw)
+
+
+def test_recovered_count_when_every_agent_finished() -> None:
+    result = result_with_completed_peer(peer_failed=False)
+    payload = result.metadata["agent_eval"]
+    payload["agents"]["opencode"]["conditions"]["with_skill"]["recovered_attempts_total"] = 1
+    raw = HTMLReporter(report_scope="tier3").render(result)
+
+    assert payload["execution_status"] == "succeeded"
+    assert "also give this count when every agent finished" in _section()
+    assert "1 timeout attempt(s) recovered" in _run_details(raw)
+    assert "Recovered timeout attempts: 1" in _plain(BenchmarkReporter(report_scope="tier3").render(result))
+    # A validate card shows the completed-agent lines only when the run failed.
+    assert "Recovered timeout attempts" not in _plain(BenchmarkReporter().render(result))
+
+
+def test_no_fallback_to_a_lower_complete_agent() -> None:
+    # The best agent's baseline is one attempt short. claude-code is complete
+    # but scored lower, so it never stands in for opencode.
+    result = _three_agent_run(best_baseline_scored=0, peer_recovered=2)
+    payload = result.metadata["agent_eval"]
+    section = _section()
+    raw = HTMLReporter(report_scope="tier3").render(result)
+    html = _plain(raw)
+    scoped_md = BenchmarkReporter(report_scope="tier3").render(result)
     line = "Tier 3: No complete agent result"
 
-    assert line in _section()
-    assert line in _plain(BenchmarkReporter(report_scope="tier3").render(result))
+    assert "the reports do not fall back to another agent" in section
+    assert line in section
+    assert line in _plain(scoped_md)
+    assert [row for row in scoped_md.splitlines() if "Completed agent" in row or "claude-code" in row] == []
+    assert "Recovered timeout attempts" not in scoped_md
+    assert "Completed Agent Score" not in html
+    assert "Completed-agent result" not in html
+    # The HTML still names the best agent and shows its lift.
+    assert "even when its evidence is incomplete" in section
+    assert payload["summary"]["overall_lift"] == pytest.approx(0.4)
+    assert "Best performing agent: opencode" in html
+    assert "Skill Lift +0.40" in html
+    assert "Best-agent lift: +0.40" in _run_details(raw)
+
+
+def test_view_regenerates_only_the_html_report(monkeypatch, tmp_path: Path) -> None:
+    from skillevaluator.tier3 import commands
+
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    run = tmp_path / "results" / "demo" / "20260709_120002"
+    for arm in ("with-skill", "without-skill"):
+        directory = run / "opencode" / arm
+        directory.mkdir(parents=True)
+        summary = {
+            "scores": dict.fromkeys(DEFAULT_METRICS, 0.8),
+            "metrics": list(DEFAULT_METRICS),
+            "num_trials": 1,
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "expected_attempts": 1,
+            "scored_attempts": 1,
+        }
+        (directory / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    (run / "run_config.json").write_text("{}", encoding="utf-8")
+    (run / "result.json").write_text(json.dumps({"run_id": run.name}), encoding="utf-8")
+    render = commands.render_agent_eval_html_report
+    calls: list[dict] = []
+
+    def offline_render(skill_path: Path, target: Path, **kwargs) -> Path:
+        calls.append(kwargs)
+        return render(skill_path, target, use_llm_judge=False, **kwargs)
+
+    monkeypatch.setattr(commands, "render_agent_eval_html_report", offline_render)
+    monkeypatch.setattr(commands.webbrowser, "open", lambda _uri: True)
+
+    report = commands.view_results(skill, results_dir=tmp_path / "results")
+
+    assert calls == [{}]
+    assert report.resolve() == (run / "report.html").resolve()
+    assert report.is_file()
+    assert not (run / "tier3-benchmark.md").exists()
+    assert "[`view`](#view) regenerates only a missing `report.html`" in _plain(_reports_page())
 
 
 def test_results_tree_and_tier3_guide_point_to_the_section() -> None:
@@ -74,5 +248,7 @@ def test_results_tree_and_tier3_guide_point_to_the_section() -> None:
     guide = (REPO / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
 
     assert "      - tier3-benchmark.md\n" in page
+    assert "At the end of a `tier3 evaluate` run, the two files are written as a pair" in _plain(page)
     assert f"(#{ANCHOR})" in page
     assert f"(reports.mdx#{ANCHOR})" in guide
+    assert "The verdict table above applies only when the run succeeds." in guide

@@ -143,9 +143,9 @@ All notable changes to SkillEvaluator are documented in this file.
   skills or `validate` on a plugin, also keeps that skill's scan `INCOMPLETE`.
   A reference that matches several bundled files (`reference_unresolved` from
   v2.12.0), a fatal or other ledger row, an uninspected file, a degraded
-  analyzer, a limitation, or a finding filtered out, for example by a
-  `--skillspector-baseline`, still leaves the scan `INCOMPLETE`. SkillSpector
-  v2.13.4 and later report a scan whose only gaps are missing references as
+  analyzer, a limitation, or fewer findings counted after filtering than
+  before still leaves the scan `INCOMPLETE`. SkillSpector v2.13.4 and later
+  report a scan whose only gaps are missing references as
   `complete_with_caveats`, which is not accepted yet.
 
 ## 0.8.0 - 2026-11-05

@@ -13,7 +13,7 @@ permissions:
   actions: read
 jobs:
   skills:
-    uses: NVIDIA/SkillEvaluator/.github/workflows/evaluate-all-tiers.yml@472e8becc289a2dc1131e550ebd335c08249918d
+    uses: NVIDIA/SkillEvaluator/.github/workflows/evaluate-all-tiers.yml@86f1a1f05bc5f73e1c0ee3e8bff0b5ff062913f4
     with:
       tiers: 1,2,3
       paths: skills
@@ -27,7 +27,7 @@ jobs:
       agents: ''
       runner: ubuntu-24.04
       tools-repository: NVIDIA/SkillEvaluator
-      tools-ref: 472e8becc289a2dc1131e550ebd335c08249918d
+      tools-ref: 86f1a1f05bc5f73e1c0ee3e8bff0b5ff062913f4
       image: ghcr.io/nvidia/skillevaluator-tier1@sha256:9d5483243918937be4f2178f74cf7c622a531dee41e3176906994d52fa14950a
       n-attempts: 1
       n-concurrent: 1

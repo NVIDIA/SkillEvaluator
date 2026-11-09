@@ -40,10 +40,11 @@ publisher at `.github/workflows/feedback-all-tiers.yml`. The CLI selects this
 alternate filename when the conventional feedback file already defines a
 reusable workflow, and `ci status --tiers 1,2,3` recognizes it.
 
-The repository callers use the reviewed all-tier descriptor, Docker, NVIDIA Build,
+The repository callers pin a reviewed `main` commit for the evaluator workflows
+and tools, and the verified released Tier 1 image. They use Docker, NVIDIA Build,
 one attempt and one concurrent task, and the committed native datasets. Add
-`NVIDIA_API_KEY` to the `skillevaluator` execution environment or repository CI
-secrets before expecting provider-backed results. Without it, Tier 2 and Tier 3
+`NVIDIA_API_KEY` as a repository Actions secret before expecting provider-backed
+results. Without it, Tier 2 and Tier 3
 remain incomplete/advisory; a passing Tier 1 gate is not an all-tier evaluation
 pass. Forks retain keyless Tier 1 checks. On PRs, ordinary software changes
 select no skills, skill changes select the affected skills, and CI configuration

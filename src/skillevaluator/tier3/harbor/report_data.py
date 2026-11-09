@@ -829,6 +829,9 @@ def load_agent_data(
                     if not isinstance(reward, dict):
                         rewards_complete = False
                         continue
+                    # Derive links from the bounded, admitted on-disk layout rather
+                    # than accepting verifier-authored paths as provenance.
+                    reward["_activation_artifacts"] = {"reward": reward_file.relative_to(results_dir).as_posix()}
                     if not reward.get("entry_id"):
                         reward["entry_id"] = trial_dir.name.split("__", 1)[0] if trial_dir.name else "unknown"
                     result_file = trial_dir / "result.json"
@@ -848,6 +851,9 @@ def load_agent_data(
                             artifact="trajectory",
                         )
                         if isinstance(trajectory, dict):
+                            reward["_activation_artifacts"]["trajectory"] = trajectory_file.relative_to(
+                                results_dir
+                            ).as_posix()
                             final_metrics = trajectory.get("final_metrics", {})
                             if not isinstance(final_metrics, dict):
                                 final_metrics = {}

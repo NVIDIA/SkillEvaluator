@@ -6137,7 +6137,7 @@ def _add_trusted_invocation_evidence(
     """Replace verifier-authored routing evidence on standard rewards only."""
     if not _is_standard_skill_execution_reward(source_reward):
         return
-    for key in ("skill_invoked", "routing_passed", "invocation_evidence_source"):
+    for key in ("skill_invoked", "routing_passed", "invocation_evidence_source", "invocation_evidence_scope"):
         clean_reward.pop(key, None)
     if trial_root is None:
         return
@@ -6155,6 +6155,7 @@ def _add_trusted_invocation_evidence(
     else:
         return
     clean_reward["invocation_evidence_source"] = "trajectory"
+    clean_reward["invocation_evidence_scope"] = "step" if source_reward.get("_step_name") else "logical_trial"
 
 
 def _can_restore_custom_metric_name(value: str) -> bool:

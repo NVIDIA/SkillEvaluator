@@ -6,6 +6,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Repeatable Tier 3 activation-validation recipe and offline acceptance suite.
+  Canonical trials separate expected target-skill use, trusted observed use or
+  unknown traces, task correctness, workflow diagnostics, resources and retained
+  evidence links. Fallback multi-step rows retain scoped observations without
+  claiming complete logical-trial activation or changing numeric grading.
+
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI
   command, and ships Tier 3 evaluation cases for itself. A test keeps every

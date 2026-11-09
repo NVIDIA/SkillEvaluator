@@ -136,12 +136,17 @@ class BenchmarkReporter(ReporterBase):
         max_findings_shown: int = 5,
         skill_name: str | None = None,
         report_scope: str = "publication",
+        evaluator_version: str | None = None,
     ) -> None:
         self.include_timestamp = include_timestamp
         self.max_findings_shown = max_findings_shown
         validate_report_scope(report_scope, [])
         self.report_scope = report_scope
         self.skill_name = skill_name
+        # The version of the evaluator writing this card. A version recorded in
+        # the Tier 3 payload still wins, because that is the build that ran the
+        # live evaluation; this fills in a run without one, such as Tier 1 only.
+        self.evaluator_version = evaluator_version
 
     @property
     def name(self) -> str:
@@ -325,7 +330,7 @@ class BenchmarkReporter(ReporterBase):
 
         summary = _mapping((ae or {}).get("summary"))
         version = _first_publication_safe_label(
-            ((ae or {}).get("evaluator_version"), summary.get("evaluator_version")),
+            ((ae or {}).get("evaluator_version"), summary.get("evaluator_version"), self.evaluator_version),
         )
         lines.append(
             f"- Evaluator version: `{version}`"

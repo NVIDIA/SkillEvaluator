@@ -13,6 +13,14 @@ All notable changes to SkillEvaluator are documented in this file.
   Your Agent" docs page shows how to install it in Codex, Claude Code, OpenCode,
   OpenClaw, and other skill-aware agents.
 
+- JSON reports record the SkillEvaluator `version` that wrote them, the
+  validated `target_path` (`null` from single-check commands such as
+  `security-scan`), and `top_issues`, the grouped issue rows of the HTML
+  report's summary without its page anchors. Each `gating.tiers` entry adds
+  `validator_policies`, which says for each check whether it gates the exit
+  code; the tier's `blocking` is `true` when any one of them does. The keys
+  are additive; no existing key changes.
+
 ### Changed
 
 - Align terminal grade and lift colors across compact, full, and direct Tier 3
@@ -135,6 +143,16 @@ All notable changes to SkillEvaluator are documented in this file.
   `agent_plugin.yaml`/`.yml`, or `.claude-plugin/plugin.json` is mis-cased
   (such as `Skill.md`) or a dangling symlink still fails its manifest checks,
   and `--type skill` still validates the target as a skill.
+
+- The JSON report of `skillevaluator validate` on one skill folder lists that
+  skill in `skills`. A clean run with a narrowed check list, such as
+  `--checks schema`, has no finding path or quality score to name the skill
+  by, so the report listed one skill per check ID (`manifest_exists`,
+  `frontmatter_valid` and so on). It now uses the folder's name. The
+  `BENCHMARK.md` of a run without a recorded Tier 3 version, such as
+  `--tiers 1`, now records the evaluator version instead of
+  `Evaluator version: not recorded (legacy or non-live result)`; a version
+  recorded by a Tier 3 run still wins.
 
 ## 0.8.0 - 2026-11-05
 

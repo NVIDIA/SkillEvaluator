@@ -18,6 +18,7 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from skillevaluator import __version__
 from skillevaluator.publication_evidence import result_publication_evidence_dict
 from skillevaluator.reporting.base import (
     ReporterBase,
@@ -75,16 +76,26 @@ class JSONReporter(ReporterBase):
         indent: int | None = 2,
         include_timestamp: bool = True,
         expected_skill_name: str | None = None,
+        target_path: str | None = None,
+        explicit_skill_name: str | None = None,
     ) -> None:
         """Initialize JSON reporter.
 
         Args:
             indent: JSON indentation level (None for compact)
             include_timestamp: Whether to include generation timestamp
+            expected_skill_name: Publication target name the evidence must bind to
+            target_path: Display path or Git remote URL of the validated target
+            explicit_skill_name: Name of the one skill a single-skill run
+                validated. It names the ``skills`` entry, which is otherwise
+                inferred from finding paths and quality metadata and so falls
+                back to one entry per check ID for a clean run without them.
         """
         self.indent = indent
         self.include_timestamp = include_timestamp
         self.expected_skill_name = expected_skill_name
+        self.target_path = target_path
+        self.explicit_skill_name = explicit_skill_name
 
     @property
     def name(self) -> str:
@@ -116,10 +127,24 @@ class JSONReporter(ReporterBase):
         result_finding_summaries = [summarize_findings([result]) for result in results]
         finding_summary = merge_finding_summaries(result_finding_summaries)
 
-        # Reuse HTML reporter's skill reorganization and contributor extraction
-        html_reporter = HTMLReporter()
+        # Reuse HTML reporter's skill reorganization and contributor extraction.
+        # The explicit name keeps a single-skill run to one ``skills`` entry
+        # when no finding path or quality score names the skill, and the
+        # target path is the same fallback the HTML report uses.
+        html_reporter = HTMLReporter(
+            target_path=self.target_path,
+            explicit_skill_name=self.explicit_skill_name,
+            expected_skill_name=self.expected_skill_name,
+        )
         skills_by_name = html_reporter._reorganize_by_skill(results)
         contributors = HTMLReporter._extract_contributors(skills_by_name, results)
+        # The HTML executive summary's issue rows, without ``issue_key``: that
+        # is an HTML anchor hashed from the finding text, and CI redaction
+        # masks the text in this report but cannot refresh a hash it never sees.
+        top_issues = [
+            {key: value for key, value in issue.items() if key != "issue_key"}
+            for issue in html_reporter._compute_top_issues(skills_by_name)
+        ]
 
         # Build per-skill summary
         skills_summary = []
@@ -135,6 +160,8 @@ class JSONReporter(ReporterBase):
             )
 
         data: dict[str, Any] = {
+            "version": __version__,
+            "target_path": self.target_path,
             "overall_passed": all_passed,
             "overall_status": overall_status,
             "incomplete_scans": incomplete_scans,
@@ -156,6 +183,7 @@ class JSONReporter(ReporterBase):
             "message_counts": summarize_messages(results),
             "skills": skills_summary,
             "contributors": contributors,
+            "top_issues": top_issues,
             "results": [
                 self._result_to_dict(result, finding_summary=result_summary)
                 for result, result_summary in zip(results, result_finding_summaries, strict=True)
@@ -233,9 +261,18 @@ class JSONReporter(ReporterBase):
             if not isinstance(gating, dict) or gating.get("tier") is None:
                 continue
             tier = str(gating["tier"])
-            tier_entry = gating_by_tier.setdefault(tier, {"blocking": False, "validators": []})
+            tier_entry = gating_by_tier.setdefault(
+                tier,
+                {"blocking": False, "validators": [], "validator_policies": []},
+            )
             tier_entry["blocking"] = bool(tier_entry["blocking"] or gating.get("blocking"))
             tier_entry["validators"].append(result.validator_name)
+            # ``blocking`` above is true when any validator of the tier blocks;
+            # this records each validator's own policy, so an advisory Tier 2
+            # check is not read as blocking because another one is.
+            tier_entry["validator_policies"].append(
+                {"validator": result.validator_name, "blocking": bool(gating.get("blocking"))}
+            )
         if gating_by_tier:
             data["gating"] = {"tiers": gating_by_tier}
 

@@ -505,6 +505,100 @@ class TestJSONReporter:
         assert data["total_validators"] == 2
         assert len(data["results"]) == 2
 
+    @staticmethod
+    def _clean_schema_result() -> ValidationResult:
+        """A single-skill schema result with no finding, as a clean skill gives."""
+        result = ValidationResult(
+            validator_name="Schema & Repository Governance",
+            validator_description="Validate SKILL.md frontmatter and repository structure",
+        )
+        result.add_success("manifest_exists", "Found skill manifest: SKILL.md")
+        result.add_success("frontmatter_valid", "Valid frontmatter for skill 'simple'")
+        result.add_success("naming_convention", "Folder name 'simple' follows kebab-case convention")
+        return result
+
+    def test_render_all_names_the_explicit_skill_of_a_clean_single_skill_run(self) -> None:
+        data = json.loads(
+            JSONReporter(
+                include_timestamp=False,
+                target_path="https://github.com/example/skills/tree/main/skills/simple",
+                explicit_skill_name="simple",
+            ).render_all([self._clean_schema_result()])
+        )
+
+        assert data["skills"] == [{"name": "simple", "passed": True, "issue_count": 0}]
+
+    def test_render_all_names_the_skill_at_a_local_target_path(self, tmp_path: Path) -> None:
+        skill = tmp_path / "simple"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("---\nname: simple\n---\n", encoding="utf-8")
+
+        data = json.loads(
+            JSONReporter(include_timestamp=False, target_path=str(skill)).render_all([self._clean_schema_result()])
+        )
+
+        assert [entry["name"] for entry in data["skills"]] == ["simple"]
+        assert data["target_path"] == str(skill)
+
+    def test_render_all_records_the_evaluator_version_and_target(self, success_result: ValidationResult) -> None:
+        from skillevaluator import __version__
+
+        target = "https://github.com/example/skills/tree/main/skills/test-skill"
+        data = json.loads(JSONReporter(include_timestamp=False, target_path=target).render_all([success_result]))
+        programmatic = json.loads(JSONReporter(include_timestamp=False).render_all([success_result]))
+
+        assert data["version"] == __version__
+        assert data["target_path"] == target
+        assert programmatic["version"] == __version__
+        assert programmatic["target_path"] is None
+
+    def test_render_all_lists_the_html_top_issues_without_the_html_anchor(
+        self, mixed_results: list[ValidationResult]
+    ) -> None:
+        output = JSONReporter(include_timestamp=False).render_all(mixed_results)
+        data = json.loads(output)
+        html_rows = _html_report_data(HTMLReporter(include_timestamp=False).render_all(mixed_results))["top_issues"]
+
+        assert [(row["message"], row["severity"], row["total_count"]) for row in data["top_issues"]] == [
+            ("AWS Access Key ID detected", "critical", 1),
+            ("Generic API key pattern detected", "high", 1),
+        ]
+        assert all(
+            set(row) == {"message", "severity", "total_count", "skills_affected", "category", "suggestion"}
+            for row in data["top_issues"]
+        )
+        assert data["top_issues"] == [
+            {key: value for key, value in row.items() if key != "issue_key"} for row in html_rows
+        ]
+        # The anchor hashes finding text, which CI redaction cannot refresh.
+        assert all(row["issue_key"] not in output for row in html_rows)
+
+    def test_gating_tiers_record_each_validator_policy(self) -> None:
+        schema = ValidationResult(validator_name="Schema & Repository Governance")
+        schema.metadata["gating"] = {"tier": 1, "blocking": True}
+        blocking_dedup = ValidationResult(validator_name="Context Deduplication")
+        blocking_dedup.metadata["gating"] = {"tier": 2, "blocking": True}
+        advisory_dedup = ValidationResult(validator_name="Inter-Skill Deduplication")
+        advisory_dedup.metadata["gating"] = {"tier": 2, "blocking": False}
+
+        data = json.loads(JSONReporter(include_timestamp=False).render_all([schema, blocking_dedup, advisory_dedup]))
+
+        assert data["gating"]["tiers"] == {
+            "1": {
+                "blocking": True,
+                "validators": ["Schema & Repository Governance"],
+                "validator_policies": [{"validator": "Schema & Repository Governance", "blocking": True}],
+            },
+            "2": {
+                "blocking": True,
+                "validators": ["Context Deduplication", "Inter-Skill Deduplication"],
+                "validator_policies": [
+                    {"validator": "Context Deduplication", "blocking": True},
+                    {"validator": "Inter-Skill Deduplication", "blocking": False},
+                ],
+            },
+        }
+
     def test_render_all_persists_typed_rubric_execution_metadata(self) -> None:
         result = ValidationResult(
             validator_name="RUBRIC_EVAL",

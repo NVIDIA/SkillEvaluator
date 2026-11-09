@@ -260,7 +260,8 @@ skill-evaluation-tier1-llm:
   stage: test
   allow_failure: true
   timeout: 1 hour
-  tags: [$SKILL_EVAL_RUNNER]
+  # Use the same untagged image runner as static Tier 1; the native local
+  # runner selected for Tier 3 may have no Docker executor.
   image:
     name: "$SKILL_EVAL_IMAGE"
     entrypoint: [""]

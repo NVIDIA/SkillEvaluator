@@ -185,6 +185,11 @@ certificates. Local mode needs a compatible native runner with Node/npm;
 the generated GitLab local configuration removes the Docker service. Cloud
 sandbox backends are outside this onboarding path.
 
+`--runner` selects the native Tier 2/3 runner. Static and LLM-enriched Tier 1
+keep their separate image-capable runner: GitHub uses `ubuntu-24.04`, and
+GitLab uses an untagged image runner. Choosing a local Tier 3 runner therefore
+does not add a Docker prerequisite to that native runner.
+
 Merge both generated files onto the default branch **before opening the demo**.
 The first setup PR/MR can show evaluation checks, but automatic comments need
 the trusted feedback entrypoint to exist on the default branch. GitLab also

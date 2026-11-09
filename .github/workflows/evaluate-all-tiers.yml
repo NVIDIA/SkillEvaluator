@@ -344,7 +344,8 @@ jobs:
   tier1-llm:
     needs: eligibility
     if: ${{ inputs.tier1-llm && needs.eligibility.outputs.allowed == 'true' && contains(format(',{0},', inputs.tiers), ',1,') }}
-    runs-on: ${{ inputs.runner }}
+    # Match the keyless image job even when native Tier 3 uses a local runner.
+    runs-on: ubuntu-24.04
     environment: ${{ inputs.environment }}
     permissions:
       contents: read

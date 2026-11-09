@@ -21,6 +21,9 @@ def test_enriched_tier1_requires_admission_and_keeps_the_keyless_path():
     assert "needs.eligibility.outputs.allowed" in baseline["with"]["artifact-name"]
     assert baseline["with"]["artifact-name"].endswith("|| 'skill-evaluator-tier1' }}")
     enriched = document["jobs"]["tier1-llm"]
+    # A native local Tier 3 runner need not have Docker. Tier 1 keeps the
+    # separate image-capable runner used by its keyless baseline.
+    assert enriched["runs-on"] == "ubuntu-24.04"
     assert "inputs.tier1-llm" in enriched["if"]
     assert "needs.eligibility.outputs.allowed == 'true'" in enriched["if"]
     assert enriched["environment"] == "${{ inputs.environment }}"
@@ -53,6 +56,7 @@ def test_gitlab_enrichment_is_protected_and_does_not_need_docker_in_docker():
     job = document["skill-evaluation-tier1-llm"]
     assert job["environment"]["name"] == "$SKILL_EVAL_ENVIRONMENT"
     assert job["services"] == []
+    assert "tags" not in job  # Use the existing untagged Tier 1 image runner.
     script = "\n".join(job["script"])
     assert script.index("eligible_gitlab.py") < script.index("run_tier1_image.py")
     assert "--in-image" in script

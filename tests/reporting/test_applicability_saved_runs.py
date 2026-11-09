@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
+from skillevaluator.evaluation.tier3_report import VERDICT_NEUTRAL, VERDICT_PASS, build_agent_eval_payload
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRIC_SET,
     DEFAULT_METRICS,
@@ -311,3 +311,67 @@ def test_saved_run_does_not_renormalize_a_missing_metric_without_validated_na(tm
     assert agent["evaluators"]["behavior_check"]["with_skill_status"] == "missing"
     assert agent["with_skill"] is None
     assert not any(row["id"] == "effectiveness" and row["with_skill"] is not None for row in agent["dimensions"])
+
+
+def _uniform_run(root, *, with_na=(), baseline_na=()):
+    """Write a two-case saved run scoring 0.95 with the skill and 0.50 without it on every metric not N/A."""
+    for condition, value, na_metrics in (("with-skill", 0.95, with_na), ("without-skill", 0.5, baseline_na)):
+        rows = []
+        for case in ("a", "b"):
+            row = dict.fromkeys(DEFAULT_METRICS, value)
+            row.update(
+                entry_id=case,
+                trial_id=f"{case}-trial",
+                metric_set=DEFAULT_METRIC_SET,
+                score_policy=DEFAULT_SCORE_POLICY,
+                details={},
+            )
+            for metric in na_metrics:
+                row[metric] = None
+                row["details"][metric] = {"score": None, "status": "not_applicable", "reason": "No reference"}
+            rows.append(row)
+        scores = average_metrics(rows)[0]
+        na = not_applicable_metrics(rows)
+        directory = root / "codex" / condition
+        directory.mkdir(parents=True)
+        summary = {
+            "scores": scores,
+            "metrics": list(DEFAULT_METRICS),
+            "metric_set": DEFAULT_METRIC_SET,
+            "score_policy": DEFAULT_SCORE_POLICY,
+            "not_applicable_metrics": na,
+            "dimensions": dimension_scores(scores, na),
+            "num_trials": 2,
+            "num_reward_rows": 2,
+            "execution_status": "succeeded",
+            "overall_score": sum(overall_score(row) for row in rows) / 2,
+        }
+        (directory / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+        for row in rows:
+            trial = directory / "trials" / row["entry_id"]
+            trial.mkdir(parents=True)
+            (trial / "reward.json").write_text(json.dumps(row), encoding="utf-8")
+    return root
+
+
+@pytest.mark.parametrize(
+    ("with_na", "verdict", "with_skill_na_dimension"),
+    [
+        ((), VERDICT_PASS, None),
+        (("accuracy", "goal_accuracy"), VERDICT_NEUTRAL, "correctness"),
+    ],
+    ids=["baseline-only-na-dimensions", "with-skill-na-correctness"],
+)
+def test_verdict_reads_only_with_skill_na_dimensions(tmp_path, with_na, verdict, with_skill_na_dimension):
+    # Discoverability and Efficiency are N/A in a baseline with no skill it could activate.
+    root = _uniform_run(tmp_path, with_na=with_na, baseline_na=("skill_execution", "skill_efficiency"))
+
+    payload = _report(root)
+
+    dimensions = {row["id"]: row for row in payload["agents"]["codex"]["dimensions"]}
+    for dimension in ("discoverability", "efficiency"):
+        assert dimensions[dimension]["baseline"] is None
+        assert dimensions[dimension]["with_skill"] == pytest.approx(0.95)
+    for dimension_id, row in dimensions.items():
+        assert (row["with_skill"] is None) is (dimension_id == with_skill_na_dimension)
+    assert payload["verdict"] == verdict

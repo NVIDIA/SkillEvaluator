@@ -900,15 +900,20 @@ In `skill_evaluator_reward.json` an N/A metric's value is `null`, and
 `details.<metric>` records `status: "not_applicable"` and a `reason`.
 Harbor's numeric `reward.json` leaves the metric out. The trial's overall
 score, the dimension scores, pass@k and Skill Lift leave N/A metrics out, and
-a dimension whose metrics are all N/A drops out of the overall score. That
-dimension has no score, and the verdict needs a with-skill score in every
-dimension, so the agent's verdict is NEUTRAL, never PASS. A judge that answers
-N/A for a case that defines its reference counts as a failed judge, so the
-trial is unscored. Each arm's
-`summary.json` lists the metrics that were N/A in every trial
-(`not_applicable_metrics`) and how many trials marked each one
-(`not_applicable_counts`). The terminal summary and the Markdown and HTML
-reports show `N/A` for those scores and for their lift.
+a dimension whose metrics are all N/A drops out of the overall score. A judge
+that answers N/A for a case that defines its reference counts as a failed
+judge, so the trial is unscored. Each arm's `summary.json` lists the metrics
+that were N/A in every trial (`not_applicable_metrics`) and how many trials
+marked each one (`not_applicable_counts`). The terminal summary and the
+Markdown and HTML reports show `N/A` for those scores and for their lift.
+
+An agent's verdict reads only the with-skill arm, and it needs a with-skill
+score in every dimension. When a dimension's metrics are N/A in every with-skill
+trial, for example Correctness when no case defines `expected_output` (legacy
+`ground_truth`), that dimension has no with-skill score, so the agent's verdict
+is NEUTRAL, never PASS. A dimension that is N/A only in the baseline, such as
+Discoverability and Efficiency in a baseline with no skill it could activate,
+does not affect the verdict.
 
 | Dimension | Key question | Maps to | Weights | Source |
 | --- | --- | --- | --- | --- |

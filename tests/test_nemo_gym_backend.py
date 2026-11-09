@@ -272,13 +272,16 @@ import json, os, sys
 from pathlib import Path
 
 args = sys.argv[1:]
+if args == ["eval", "run", "--help"]:
+    print("usage: gym eval run tasks --sandbox docker --agent AGENT --model-type TYPE --model MODEL --model-url URL --output OUTPUT --concurrency N\\n\\npositional arguments:\\n  tasks  Harbor task directory")
+    sys.exit(0)
 tasks = Path(args[2])
 output = Path(args[args.index("--output") + 1])
 repeats = int(next(a for a in args if a.startswith("+num_repeats=")).split("=", 1)[1])
 Path(os.environ["FAKE_GYM_ENV_LOG"]).open("a").write(json.dumps({{"arm": tasks.name, "repeats": repeats, "env": sorted(os.environ), "argv": args}}) + "\\n")
 with output.open("w") as rows:
     for task in sorted(p for p in tasks.iterdir() if (p / "task.toml").is_file()):
-        for attempt in range(repeats):
+        for attempt in range(repeats + int(bool(os.environ.get("FAKE_GYM_EXTRA_ROLLOUT")))):
             logs = output.parent / "logs" / f"{{task.name}}-{{attempt}}"
             logs.mkdir(parents=True)
             if os.environ.get("FAKE_GYM_REWARD_TXT"):
@@ -299,6 +302,10 @@ def _fake_gym_skill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: str
 
     from skillevaluator import provider_config
     from skillevaluator.provider_config import ProviderConfig
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    # Keep report rendering real while replacing its unrelated remote advice request.
+    monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_args, **_kwargs: ("[]", None))
 
     skill = tmp_path / "calc"
     (skill / "evals").mkdir(parents=True)
@@ -332,7 +339,8 @@ def _fake_gym_skill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: str
     monkeypatch.setattr(
         gym_runner,
         "_GYM_HOST_ENV_VARS",
-        gym_runner._GYM_HOST_ENV_VARS | {"FAKE_GYM_ENV_LOG", "FAKE_GYM_REWARD_TXT", "FAKE_GYM_FAILURE"},
+        gym_runner._GYM_HOST_ENV_VARS
+        | {"FAKE_GYM_ENV_LOG", "FAKE_GYM_REWARD_TXT", "FAKE_GYM_FAILURE", "FAKE_GYM_EXTRA_ROLLOUT"},
     )
     monkeypatch.setenv("GITHUB_TOKEN", "host-only-token")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "host-only-key")
@@ -365,6 +373,115 @@ def _run_fake_gym(skill: Path, tmp_path: Path, **overrides) -> dict:
     return run_nemo_gym_eval(**kwargs)
 
 
+@pytest.fixture
+def incompatible_gym(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    gym = tmp_path / "released-gym"
+    gym.write_text("#!/bin/sh\necho 'usage: gym eval run [--input INPUT] [--agent AGENT] [--output OUTPUT]'\n")
+    gym.chmod(0o755)
+    monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_BIN", str(gym))
+    return gym
+
+
+def test_incompatible_gym_is_rejected_before_dataset_generation(incompatible_gym: Path, tmp_path: Path) -> None:
+    from skillevaluator.tier3.workflow import nemo_gym_preflight_errors
+
+    errors = nemo_gym_preflight_errors(tmp_path, {"agents": "codex", "env_mode": "docker"})
+    assert any("incompatible" in error and "--sandbox" in error for error in errors)
+    assert not (tmp_path / "evals").exists()
+
+
+@pytest.mark.parametrize("command", [["evaluate", "--autopilot"], ["tier3"]])
+def test_cli_rejects_incompatible_gym_before_generating_a_dataset(
+    incompatible_gym: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: list[str]
+) -> None:
+    from click.testing import CliRunner
+
+    from skillevaluator.cli import cli
+    from skillevaluator.evaluation import EvaluationService
+    from skillevaluator.tier3 import workflow
+
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: calc\ndescription: Adds numbers.\n---\n# Calc\n")
+    monkeypatch.setattr(
+        EvaluationService, "create_autopilot_dataset", lambda *_args, **_kwargs: pytest.fail("must not generate")
+    )
+    monkeypatch.setattr(workflow, "_prepare_dataset", lambda *_args, **_kwargs: pytest.fail("must not generate"))
+    result = CliRunner().invoke(cli, [*command, str(skill), "--backend", "nemo-gym", "--agents", "codex"])
+    assert result.exit_code == 2, result.output
+    assert "incompatible" in result.output
+    assert not (skill / "evals").exists()
+
+
+def test_direct_run_rejects_incompatible_gym_before_staging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch)
+    gym = Path(os.environ["SKILL_EVAL_NEMO_GYM_BIN"])
+    gym.write_text("#!/bin/sh\necho 'usage: gym eval run [--input INPUT]'\n")
+    result = _run_fake_gym(skill, tmp_path)
+    assert any("incompatible" in error for error in result.get("error", []))
+    assert not (tmp_path / "results").exists()
+
+
+def test_doctor_rejects_incompatible_gym_despite_readable_version(
+    incompatible_gym: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skillevaluator.tier3 import commands
+    from skillevaluator.tier3.nemo_gym import backend
+
+    monkeypatch.setattr(backend, "nemo_gym_version", lambda _gym: "0.7.0")
+    monkeypatch.setattr(commands, "_docker_daemon_error", lambda _env: None)
+    rows = commands._nemo_gym_doctor_rows(["codex"], "docker", {})
+    assert rows[0][0:2] == ("NeMo Gym CLI", "fail")
+    assert "incompatible" in rows[0][2]
+    assert not any(status == "pass" for _name, status, _detail in rows)
+
+
+def test_gym_cli_probe_handles_unreadable_help(tmp_path: Path) -> None:
+    from skillevaluator.tier3.nemo_gym.backend import nemo_gym_cli_error
+
+    gym = tmp_path / "gym"
+    gym.write_bytes(b"#!/bin/sh\nprintf '\\377'\n")
+    gym.chmod(0o755)
+    assert "incompatible" in (nemo_gym_cli_error(str(gym)) or "")
+
+
+def test_gym_cli_probe_timeout_does_not_echo_subprocess_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    from skillevaluator.tier3.nemo_gym import backend
+
+    def timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired("gym", 15, output="policy-secret")
+
+    monkeypatch.setattr(backend.subprocess, "run", timeout)
+    error = backend.nemo_gym_cli_error("/missing/gym")
+    assert error is not None and "15s" in error
+    assert "policy-secret" not in error
+
+
+def test_gym_cli_probe_omits_policy_credentials_and_ignores_raw_error_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+
+    from skillevaluator.tier3.nemo_gym.backend import nemo_gym_cli_error
+
+    gym = tmp_path / "gym"
+    gym.write_text(
+        f"#!{sys.executable}\nimport os, sys\n"
+        "assert 'SKILL_EVAL_NEMO_GYM_MODEL_API_KEY' not in os.environ\n"
+        "assert 'OPENAI_API_KEY' not in os.environ\n"
+        "assert sys.argv[1:] == ['eval', 'run', '--help']\n"
+        "print('policy-secret', file=sys.stderr)\nsys.exit(7)\n"
+    )
+    gym.chmod(0o755)
+    monkeypatch.setenv(MODEL_API_KEY_ENV, "policy-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "judge-secret")
+    error = nemo_gym_cli_error(str(gym))
+    assert error is not None and "exited 7" in error
+    assert "policy-secret" not in error
+
+
 def test_fake_gym_run_honors_arm_case_limit_config_and_is_discoverable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep_staged_tasks: None
 ) -> None:
@@ -385,6 +502,21 @@ def test_fake_gym_run_honors_arm_case_limit_config_and_is_discoverable(
     assert result["agents"]["codex"]["num_trials_with"] == 0
     assert ordered_run_directories(tmp_path / "results", completed_only=True) == [run_dir]
     assert json.loads((run_dir / "run_config.json").read_text()) == result["run_config"]
+
+
+def test_excess_rollouts_fail_the_run_and_rerendered_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory
+
+    skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch)
+    monkeypatch.setenv("FAKE_GYM_EXTRA_ROLLOUT", "1")
+    result = _run_fake_gym(skill, tmp_path, n_attempts=1, max_cases=1)
+    assert result["execution_status"] == "failed"
+    assert result["agents"]["codex"]["num_trials_with"] == 1
+    assert result["agents"]["codex"]["num_trials_without"] == 1
+    assert any("2/1 rollouts" in error for error in result["execution_errors"])
+    validation = agent_eval_result_from_directory(skill, Path(result["run_dir"]))
+    assert validation is not None and not validation.passed
+    assert validation.metadata["agent_eval"]["summary"]["execution_status"] == "failed"
 
 
 def test_fake_gym_run_rejects_config_options_gym_cannot_honor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -557,7 +689,7 @@ def test_rerendered_report_keeps_a_failed_gym_launch(tmp_path: Path, monkeypatch
     skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch)
     gym = Path(os.environ["SKILL_EVAL_NEMO_GYM_BIN"])
     wrapper = tmp_path / "gym-then-exit-3"
-    wrapper.write_text(f'#!/bin/sh\n"{gym}" "$@"\nexit 3\n')
+    wrapper.write_text(f'#!/bin/sh\n"{gym}" "$@"\ncase "$*" in *--help*) exit 0;; esac\nexit 3\n')
     wrapper.chmod(0o755)
     monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_BIN", str(wrapper))
     result = _run_fake_gym(skill, tmp_path)
@@ -911,7 +1043,9 @@ def test_doctor_reports_nemo_gym_readiness(tmp_path: Path, monkeypatch: pytest.M
     from skillevaluator.tier3.nemo_gym import runner as gym_runner
 
     gym = tmp_path / "gym"
-    gym.write_text("#!/bin/sh\n")
+    import sys
+
+    gym.write_text(_FAKE_GYM.format(python=sys.executable))
     gym.chmod(0o755)
     monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_BIN", str(gym))
     monkeypatch.setattr(backend, "nemo_gym_version", lambda _bin: "0.7.0")
@@ -1353,7 +1487,9 @@ def test_doctor_fails_without_a_policy_endpoint_or_docker_daemon(
     from skillevaluator.tier3.nemo_gym import runner as gym_runner
 
     gym = tmp_path / "gym"
-    gym.write_text("#!/bin/sh\n")
+    import sys
+
+    gym.write_text(_FAKE_GYM.format(python=sys.executable))
     gym.chmod(0o755)
     monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_BIN", str(gym))
     monkeypatch.setattr(backend, "nemo_gym_version", lambda _bin: "0.7.0")

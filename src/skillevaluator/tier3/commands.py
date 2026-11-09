@@ -1056,6 +1056,7 @@ def _nemo_gym_doctor_rows(
         model_url_credential_error,
         nemo_gym_bin,
         nemo_gym_capability_errors,
+        nemo_gym_cli_error,
         nemo_gym_settings_errors,
         nemo_gym_version,
     )
@@ -1068,10 +1069,12 @@ def _nemo_gym_doctor_rows(
             (
                 "NeMo Gym CLI",
                 "fail",
-                f"not found: install nemo-gym (Python >=3.13.14) in its own environment and set "
-                f"{NEMO_GYM_BIN_ENV} to its `gym` executable",
+                f"not found: set {NEMO_GYM_BIN_ENV} to a verified, pinned Gym task-folder CLI; "
+                "public nemo-gym 0.7.0 is incompatible and no compatible public pin has been verified",
             )
         )
+    elif cli_error := nemo_gym_cli_error(gym):
+        rows.append(("NeMo Gym CLI", "fail", cli_error))
     elif version := nemo_gym_version(gym):
         rows.append(("NeMo Gym CLI", "pass", f"{gym} (nemo-gym {version})"))
     else:
@@ -1080,6 +1083,8 @@ def _nemo_gym_doctor_rows(
         agents=agents, env_mode=env_mode, grading_mode=None, environment_kwargs=dict(environment_kwargs)
     )
     errors += nemo_gym_settings_errors()
+    if gym is None or rows[0][1] == "fail":
+        errors.append("NeMo Gym execution is unavailable until its CLI compatibility check passes")
     url = os.environ.get(MODEL_URL_ENV, "").strip()
     if url and (url_error := model_url_credential_error(url)):
         errors.append(url_error)

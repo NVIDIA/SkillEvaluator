@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -100,6 +101,44 @@ def nemo_gym_version(gym_bin: str) -> str | None:
         version = completed.stdout.strip().splitlines()
         if completed.returncode == 0 and version:
             return version[-1]
+    return None
+
+
+def nemo_gym_cli_error(gym_bin: str) -> str | None:
+    """Check the task-folder CLI contract without starting servers or passing policy credentials.
+
+    A version string alone does not identify this interface: public Gym 0.7.0 uses
+    JSONL inputs and lacks the task-folder / sandbox command this adapter requires.
+    This necessary interface check does not certify an installation's runtime support.
+    """
+    from skillevaluator.tier3.nemo_gym.runner import gym_launch_environment
+
+    try:
+        completed = subprocess.run(
+            [gym_bin, "eval", "run", "--help"],
+            cwd=Path(gym_bin).resolve().parent,
+            env=gym_launch_environment({}),
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "NeMo Gym CLI compatibility check failed: `gym eval run --help` could not complete within 15s"
+    if completed.returncode:
+        return f"NeMo Gym CLI compatibility check failed: `gym eval run --help` exited {completed.returncode}"
+    help_text = completed.stdout
+    flags = ("--sandbox", "--agent", "--model-type", "--model", "--model-url", "--output", "--concurrency")
+    missing = [flag for flag in flags if not re.search(rf"(?<![\w-]){re.escape(flag)}(?=[\s,=]|$)", help_text)]
+    if not re.search(r"(?im)^\s+(?:tasks|task_dir|tasks_dir|task_folder)\s+", help_text):
+        missing.append("positional tasks directory")
+    if missing:
+        return (
+            f"NeMo Gym CLI is incompatible with this experimental task-folder adapter; missing: {', '.join(missing)}. "
+            "Public nemo-gym 0.7.0 is incompatible; a compatible Gym source revision must be verified and pinned. "
+            "No Harbor fallback was started."
+        )
     return None
 
 

@@ -6,7 +6,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
-- `tier3 evaluate --backend nemo-gym` runs the Tier 3 cases on NeMo Gym instead
+- Experimental `tier3 evaluate --backend nemo-gym` targets a native Gym task-folder
+  interface. Public `nemo-gym==0.7.0` is incompatible; no compatible public source pin
+  has been verified. CLI compatibility is checked before dataset generation or task
+  staging, and doctor no longer treats an installed version as runtime readiness.
+  Live Codex, Claude Code and OpenCode support remains unverified. The adapter's
+  intended contract runs the Tier 3 cases on NeMo Gym instead
   of Harbor (`--backend harbor`, the default, is unchanged). The same
   `evals.json` cases are generated as task folders, and NeMo Gym's own
   orchestrator, agent harness (Codex, Claude Code, OpenCode) and Docker sandbox

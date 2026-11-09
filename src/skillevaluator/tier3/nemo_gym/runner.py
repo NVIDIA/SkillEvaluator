@@ -46,6 +46,7 @@ from skillevaluator.tier3.nemo_gym.backend import (
     native_mcp_servers_declared,
     nemo_gym_bin,
     nemo_gym_capability_errors,
+    nemo_gym_cli_error,
     nemo_gym_sandbox_error,
     nemo_gym_timeout_s,
     nemo_gym_version,
@@ -663,11 +664,13 @@ def run_nemo_gym_eval(
     gym = nemo_gym_bin()
     if gym is None:
         raise ValueError(
-            f"--backend nemo-gym needs the NeMo Gym CLI: install nemo-gym (Python >=3.13.14) in its own "
-            f"environment and set {NEMO_GYM_BIN_ENV} to its `gym` executable"
+            f"--backend nemo-gym needs a verified, pinned Gym task-folder CLI: set {NEMO_GYM_BIN_ENV} "
+            "to its `gym` executable; public nemo-gym 0.7.0 is incompatible and no compatible public pin is verified"
         )
     if skip_baseline and skip_with_skill:
         return _config_failure("skip_baseline and skip_with_skill are mutually exclusive (no arm would run)")
+    if cli_error := nemo_gym_cli_error(gym):
+        return _config_failure(cli_error)
     try:
         provider = resolve_llm_provider()
         config, config_path = load_evals_config(skill_path)

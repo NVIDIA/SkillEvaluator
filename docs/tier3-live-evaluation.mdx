@@ -454,16 +454,26 @@ explicit models — see [Agents & Sandboxes](agents-and-sandboxes.mdx).
 
 ## Execution backends
 
-`--backend` chooses what executes the cases. Both backends read the same
-`evals.json`, stage the same task folders and grade with the same verifier, so the
-scores, Skill Lift, pass@k and report are produced the same way.
+`--backend` chooses what executes the cases. The default is Harbor. The experimental
+NeMo Gym adapter stages the same task folders and uses the shared verifier and result
+collector, but requires a Gym interface that is not available in the checked public
+`nemo-gym==0.7.0` release.
 
 | Backend | What runs the cases |
 | --- | --- |
 | `harbor` (default) | Harbor orchestrates the trials, runs the agent and the sandbox. Every `--env-mode` is available. |
-| `nemo-gym` | NeMo Gym runs the cases: `gym eval run` starts its Harbor-format environment server, model server and agent harness, runs each case in a Gym sandbox and grades it with the SkillEvaluator verifier. Only `--env-mode docker` is supported. |
+| `nemo-gym` | Experimental native Gym task-folder adapter, restricted to `--env-mode docker`. Public Gym 0.7.0 is incompatible and fails preflight. A compatible Gym source revision and independent live validation are still required. |
+
+**Compatibility status:** installing `nemo-gym==0.7.0` does not enable this backend.
+That release's `gym eval run` takes JSONL inputs and configured environments; it has
+neither the positional task-directory argument nor `--sandbox` used by this adapter.
+Removing that flag alone does not provide the required execution or verifier contract.
+No compatible public release or source revision has been verified for this adapter;
+there is currently no supported installation pin to recommend. Codex, Claude Code and
+OpenCode mappings are experimental and do not establish end-to-end agent support.
 
 ```bash
+# Requires a separately verified, pinned Gym task-folder implementation.
 export SKILL_EVAL_NEMO_GYM_BIN=/opt/nemo-gym/.venv/bin/gym
 export SKILL_EVAL_NEMO_GYM_MODEL_URL=https://integrate.api.nvidia.com/v1
 export SKILL_EVAL_NEMO_GYM_MODEL_API_KEY="$NVIDIA_API_KEY"
@@ -471,20 +481,34 @@ skillevaluator tier3 doctor --backend nemo-gym --agents codex
 skillevaluator tier3 evaluate ./my-skill --backend nemo-gym --agents codex --model <model>
 ```
 
-`tier3 doctor --backend nemo-gym` checks the Gym CLI and its version, that the Docker
+`tier3 doctor --backend nemo-gym` checks the Gym CLI interface and its version, that the Docker
 daemon answers, the `SKILL_EVAL_NEMO_GYM_*` settings, each selected agent's policy model
-endpoint, and whether the selected agents and `--env-mode` run on Gym. A Gym run reports
+endpoint, and the selected agents and `--env-mode`. The CLI check runs
+`gym eval run --help` with a 15-second timeout, without policy credentials or server
+startup. It rejects missing task-folder arguments and required flags before dataset
+generation or task staging. Passing this necessary check does not certify live runtime
+compatibility. A Gym run reports
 the same progress stages as a Harbor run.
 
-NeMo Gym requires Python 3.13.14 or later, so it runs as its own pinned install
+Public Gym 0.7.0 requires Python 3.13.14 or later. Gym runs as its own pinned install
 rather than a SkillEvaluator dependency. Point `SKILL_EVAL_NEMO_GYM_BIN` at that
 install's `gym` executable. The run records `execution_backend` (name, Gym version,
 sandbox) in `result.json`; keep Harbor and NeMo Gym scores apart unless the model,
 harness and judge match.
 
-The `nemo-gym` backend supports `--env-mode docker`, the `codex`, `claude-code` and
-`opencode` agents, and the `default`, `default_plus_custom` and `custom_only` grading
-modes. Every other `--env-mode` (including `local`, `daytona`, `e2b` and `singularity`) is
+The adapter's required Gym contract is `gym eval run TASKS --sandbox docker`, with
+`--agent`, `--model-type openai_model`, `--model`, `--model-url`, `--output`, and
+`--concurrency`, plus Hydra overrides for repeats, credentials and cache disabling.
+Its help must describe a positional `tasks`, `task_dir`, `tasks_dir` or `task_folder`
+argument. Each rollout must identify its task and provide `verifier_return_code` and
+`verifier_logs_dir`, where the SkillEvaluator verifier's rewards and trajectory can
+be collected. The Gym implementation must execute inside Docker and resolve task
+environment templates; a host-only agent harness does not meet this contract.
+
+Subject to that unverified runtime contract, the adapter maps `codex`, `claude-code`
+and `opencode` and accepts `default`, `default_plus_custom` and `custom_only` grading
+modes. These are adapter capabilities, not independently validated live combinations.
+Every other `--env-mode` (including `local`, `daytona`, `e2b` and `singularity`) is
 not supported on the NeMo Gym path and is rejected before the run starts; use
 `--backend harbor` for those modes. Unset flags fall back to these `evals/config.yml` keys, as on Harbor:
 `harbor.n_attempts`, `pass_threshold`, `n_concurrent`, `max_cases`, `agents.<agent>.model`,
@@ -517,7 +541,9 @@ credentials; relative Docker and TLS paths are made absolute first. Judge overri
 (`LLM_JUDGE_MODEL`, `SKILL_EVAL_JUDGE_*`) reach Gym's verifier as on Harbor, and Vertex
 AI ADC tokens are refreshed before every `gym eval run`. Every agent and arm is staged
 from one skill snapshot before the first launch. A missing or failed attempt counts as a
-failed trial, and the arm keeps its other scored trials; any launch failure marks the
+failed trial, and the arm keeps its other scored trials. Excess rollouts are reported
+as execution errors and scoring remains bounded by the planned attempts. Any launch
+or rollout-count failure marks the
 run, the agent's progress row and the report as failed. A finished run updates `latest`
 and records the same dataset snapshot and publication target as a Harbor run. As on
 Harbor without `--harbor-keep-jobs`, the staged tasks and per-trial files are removed at

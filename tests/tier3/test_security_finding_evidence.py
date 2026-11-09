@@ -466,6 +466,33 @@ def test_digest_authorization_evidence_in_findings(copy: str, command: str, expe
             'eval "TOKEN=<redacted> make && rm -rf /srv/app"',
             id="assignment-inside-eval",
         ),
+        # Any value further inside such a string is one word, whatever its
+        # separator, and so is a value in a Node, Perl or Ruby -e program.
+        pytest.param(
+            'ssh host.example "grep -r token: /etc/app && rm -rf /srv/app"',
+            'ssh host.example "grep -r token: <redacted> && rm -rf /srv/app"',
+            id="colon-inside-ssh-command",
+        ),
+        pytest.param(
+            'sh -c "echo api_key: none > cfg && rm -rf /srv/app"',
+            'sh -c "echo api_key: <redacted> > cfg && rm -rf /srv/app"',
+            id="colon-inside-sh-c",
+        ),
+        pytest.param(
+            "python3 -c \"import os; token = os.environ['GH_TOKEN']; os.system('rm -rf /srv/app')\"",
+            "python3 -c \"import os; token = <redacted>'GH_TOKEN']; os.system('rm -rf /srv/app')\"",
+            id="spaced-assignment-inside-python-c",
+        ),
+        pytest.param(
+            "node -e \"const token=process.env.T; require('child_process').execSync('rm -rf /srv/app')\"",
+            "node -e \"const token=<redacted>; require('child_process').execSync('rm -rf /srv/app')\"",
+            id="assignment-inside-node-e",
+        ),
+        pytest.param(
+            "perl -e 'my $token = $ENV{T}; system(\"rm -rf /srv/app\")'",
+            "perl -e 'my $token = <redacted>; system(\"rm -rf /srv/app\")'",
+            id="assignment-inside-perl-e",
+        ),
     ],
 )
 def test_quoted_credential_values_are_masked_whole(text: str, expected: str) -> None:
@@ -475,15 +502,28 @@ def test_quoted_credential_values_are_masked_whole(text: str, expected: str) -> 
 
 
 @pytest.mark.parametrize("copy", ["template", "eval_core"])
-def test_assignment_in_a_remote_command_keeps_the_destructive_command(copy: str) -> None:
-    # A remote ssh command holds shell assignments, so the rm that caused the
-    # finding stays in its evidence.
-    command = f'ssh deploy@host.example "TOKEN={_API_TOKEN} ./deploy.sh && rm -rf /srv/app"'
-
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        pytest.param(
+            f'ssh deploy@host.example "TOKEN={_API_TOKEN} ./deploy.sh && rm -rf /srv/app"',
+            'ssh deploy@host.example "TOKEN=<redacted> ./deploy.sh && rm -rf /srv/app"',
+            id="assignment",
+        ),
+        pytest.param(
+            'ssh deploy@host.example "grep -r token: /etc/app && rm -rf /srv/app"',
+            'ssh deploy@host.example "grep -r token: <redacted> && rm -rf /srv/app"',
+            id="name-further-inside",
+        ),
+    ],
+)
+def test_assignment_in_a_remote_command_keeps_the_destructive_command(copy: str, command: str, expected: str) -> None:
+    # A value inside a remote ssh command is one word, so the rm that caused
+    # the finding stays in its evidence.
     result = _security(copy, {"action": "Bash", "action_input": {"command": command}})
 
     assert [(finding["type"], finding["evidence"]) for finding in result["findings"]] == [
-        ("destructive_command", 'ssh deploy@host.example "TOKEN=<redacted> ./deploy.sh && rm -rf /srv/app"')
+        ("destructive_command", expected)
     ]
 
 

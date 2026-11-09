@@ -2929,9 +2929,14 @@ _FINDING_EVIDENCE_QUOTED_REST_RES = {
 _FINDING_EVIDENCE_QUOTE_CHAR_RE = re.compile(r"[\\'\"\r\n]")
 # A quoted shell command holds shell assignments, whose value is one word: a
 # "-c" string ("sh -c 'TOKEN=x make deploy'"), an eval string and a remote
-# ssh command ('ssh host "TOKEN=x ./deploy.sh && rm -rf /srv/app"').
+# ssh command ('ssh host "TOKEN=x ./deploy.sh && rm -rf /srv/app"'). Any
+# other value in such a string is one word too, whatever its separator
+# ('ssh host "grep -r token: /etc/app && rm -rf /srv/app"'), and so is a value
+# in a Node, Perl or Ruby "-e" program ("perl -e 'my $token = $ENV{T};
+# system(...)'"), so the command after it stays readable.
 _FINDING_EVIDENCE_SHELL_STRING_RE = re.compile(
-    r"(?:(?:^|[\s;&|(])(?:-[A-Za-z]{0,4}c|eval)|(?<![\w.-])ssh(?:[ \t]+[^\s'\"`;&|()<>]+){1,12})[ \t]{1,4}$"
+    r"(?:(?:^|[\s;&|(])(?:-[A-Za-z]{0,4}c|eval)|(?<![\w.-])ssh(?:[ \t]+[^\s'\"`;&|()<>]+){1,12}"
+    r"|(?<![\w.-])(?:node|perl|ruby)[ \t]+-[A-Za-z]{0,3}[eE])[ \t]{1,4}$"
 )
 _FINDING_EVIDENCE_SHELL_STRING_LOOKBACK = 160
 # A word or quoted word stuck to the quote that closes a string around an
@@ -3180,9 +3185,9 @@ def _mask_credential_assignments(text: str) -> str:
             if scan_open is not None:
                 in_quotes, quote_start, opening = True, scan_open, text[scan_open]
                 closers = (opening,)
+        # In a shell command string or a "-e" program a value is one word.
         shell_string = (
             in_quotes
-            and separator == "="
             and _FINDING_EVIDENCE_SHELL_STRING_RE.search(
                 text[max(0, quote_start - _FINDING_EVIDENCE_SHELL_STRING_LOOKBACK) : quote_start]
             )

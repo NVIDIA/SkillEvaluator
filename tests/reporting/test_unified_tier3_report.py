@@ -2652,6 +2652,37 @@ def test_rerender_preserves_legacy_snapshot_dataset_with_corrected_summary(
         assert json.loads((run_dir / "result.json").read_text(encoding="utf-8"))["dataset_snapshot"] == manifest
 
 
+@pytest.mark.parametrize("schema_version", [[], {}, "9.9"], ids=["array", "object", "unknown"])
+def test_rerender_falls_back_from_invalid_snapshot_schema(tmp_path: Path, schema_version: object) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    run_dir = tmp_path / "results" / "historical-run"
+    _write_summary(run_dir)
+    snapshot = build_dataset_snapshot([{"id": "invalid-snapshot-case"}], evaluator_version="0.8.0")
+    snapshot["schema_version"] = schema_version
+    snapshot_path = run_dir / "dataset_snapshot.json"
+    original = json.dumps(snapshot).encode("utf-8")
+    snapshot_path.write_bytes(original)
+    fallback = {"id": "fallback-case", "expected_skill": "demo", "should_trigger": False}
+    staged = run_dir / "_harbor-tasks" / "fallback-case" / "tests"
+    staged.mkdir(parents=True)
+    (staged / "entry.json").write_text(json.dumps(fallback), encoding="utf-8")
+
+    tier3 = agent_eval_result_from_directory(skill, run_dir, use_llm_judge=False)
+
+    assert tier3 is not None
+    payload = tier3.metadata["agent_eval"]
+    assert payload["dataset"] == [fallback]
+    assert payload["dataset_summary"] == {
+        "total_tasks": 1,
+        "positive_tasks": 0,
+        "negative_tasks": 1,
+        "unclassified_tasks": 0,
+        "source": "dataset",
+    }
+    assert snapshot_path.read_bytes() == original
+
+
 def test_rerender_uses_persisted_publication_identity_after_live_source_changes(tmp_path: Path) -> None:
     from skillevaluator.publication_identity import publication_target_from_path
 

@@ -203,7 +203,10 @@ def load_dataset_snapshot(run_dir: Path) -> dict[str, Any] | None:
     path = run_dir / "dataset_snapshot.json"
     diagnostics: list[dict[str, Any]] = []
     snapshot = _load_bounded_json(path, diagnostics, artifact="dataset_snapshot")
-    if not isinstance(snapshot, dict) or snapshot.get("schema_version") not in {"1.0", DATASET_SNAPSHOT_SCHEMA_VERSION}:
+    if not isinstance(snapshot, dict):
+        return None
+    schema_version = snapshot.get("schema_version")
+    if not isinstance(schema_version, str) or schema_version not in {"1.0", DATASET_SNAPSHOT_SCHEMA_VERSION}:
         return None
     try:
         encode_dataset_snapshot(snapshot)

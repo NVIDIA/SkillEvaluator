@@ -300,6 +300,15 @@ def test_new_dataset_snapshot_versions_corrected_routing_summary() -> None:
     assert snapshot["dataset_summary"]["negative_tasks"] == 1
 
 
+@pytest.mark.parametrize("schema_version", [[], {}, "9.9"], ids=["array", "object", "unknown"])
+def test_dataset_snapshot_rejects_invalid_schema(tmp_path: Path, schema_version: object) -> None:
+    snapshot = build_dataset_snapshot([{"id": "case-1", "expected_skill": "demo"}], evaluator_version=__version__)
+    snapshot["schema_version"] = schema_version
+    (tmp_path / "dataset_snapshot.json").write_text(json.dumps(snapshot), encoding="utf-8")
+
+    assert load_dataset_snapshot(tmp_path) is None
+
+
 def test_overall_verdict_requires_every_dimension_even_with_passing_lift() -> None:
     agents = _agents()
     agents["codex"]["with_skill"]["goal_accuracy"] = 0.3

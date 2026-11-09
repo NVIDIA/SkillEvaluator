@@ -663,13 +663,13 @@ the run warning names the rule that did not hold:
 
 For a tolerated agent, the baseline condition stays `failed` with its errors,
 and its baseline scores, Skill Lift, pass@k lift and security attribution are
-not reported. The reports, including the findings that `tier3 view` prints,
-rank it below every agent with a complete baseline, so the best agent, overall
-score and lift come from complete evidence. When that best agent never
-activated the skill, `tier3 view` shows no findings rather than a tolerated
-agent's. `BENCHMARK.md` and `report.html` keep the "Needs attention" note and
-name each tolerated agent on its own line, for example
-`Baseline incomplete for opencode (1 of 2 attempts scored)`.
+not reported. The reports, and the findings panel that `tier3 evaluate` prints
+with `--verbose`, rank it below every agent with a complete baseline, so the
+best agent, overall score and lift come from complete evidence. When that best
+agent never activated the skill, the findings panel is left out rather than
+showing a tolerated agent's findings. `BENCHMARK.md` and `report.html` keep the
+"Needs attention" note and name each tolerated agent on its own line, for
+example `Baseline incomplete for opencode (1 of 2 attempts scored)`.
 
 `result.json` records the timed-out attempts under the agent's
 `baseline_timeout_tolerance` (also written to

@@ -4,14 +4,19 @@
 """RAGAS goal_accuracy requests and replies are saved as judge evidence, like the prompt judges' attempts.
 
 The RAGAS modules are fakes, but their requests go through the real OpenAI SDK
-and httpx client; a stubbed httpx transport answers them, so nothing leaves the
-machine.
+and httpx client; a stubbed httpx transport answers them. The stub fails the
+test if the SDK's async client is not an httpx client, and DNS lookups and
+connections beyond loopback are refused, so a request the stub misses fails
+instead of reaching the provider.
 """
 
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import json
 import logging
+import socket
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -39,6 +44,49 @@ _ACCURACY_REPLY = json.dumps(
         "reason": "judged from evidence",
     }
 )
+
+
+def _host_text(host: Any) -> Any:
+    # anyio passes the IDNA-encoded host name as bytes.
+    return host.decode("ascii", "replace") if isinstance(host, bytes) else host
+
+
+def _is_loopback(host: Any) -> bool:
+    if _host_text(host) == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(_host_text(host)).is_loopback
+    except (TypeError, ValueError):
+        return False
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[Any]]:
+    """Refuse DNS lookups and connections beyond loopback, and fail the test if one was tried.
+
+    The provider stub answers httpx requests only. A request it misses must fail
+    here, not reach the real provider with the fake key.
+    """
+    blocked: list[Any] = []
+    getaddrinfo = socket.getaddrinfo
+    connect = socket.socket.connect
+
+    def local_getaddrinfo(host: Any, *args: Any, **kwargs: Any) -> Any:
+        if not _is_loopback(host):
+            blocked.append(_host_text(host))
+            raise OSError(f"network access is blocked in this test: {_host_text(host)!r}")
+        return getaddrinfo(host, *args, **kwargs)
+
+    def local_connect(sock: socket.socket, address: Any) -> Any:
+        if isinstance(address, tuple) and not _is_loopback(address[0]):
+            blocked.append(_host_text(address[0]))
+            raise OSError(f"network access is blocked in this test: {_host_text(address[0])!r}")
+        return connect(sock, address)
+
+    monkeypatch.setattr(socket, "getaddrinfo", local_getaddrinfo)
+    monkeypatch.setattr(socket.socket, "connect", local_connect)
+    yield blocked
+    assert not blocked, f"the test tried to reach the network: {blocked}"
 
 
 @pytest.fixture
@@ -130,8 +178,25 @@ class _CutOffBody(httpx.AsyncByteStream):
         raise httpx.RemoteProtocolError("peer closed connection without sending complete message body")
 
 
+def _sdk_transport_class() -> type[httpx.AsyncBaseTransport]:
+    """Return the transport class behind the OpenAI SDK's default async client, or fail the test.
+
+    The stub answers httpx requests only. If the SDK builds its client on another
+    HTTP stack, patching httpx would miss the verifier's requests, so fail before
+    any is sent.
+    """
+    client_class = openai.DefaultAsyncHttpxClient
+    if not (isinstance(client_class, type) and issubclass(client_class, httpx.AsyncClient)):
+        pytest.fail(
+            f"openai.DefaultAsyncHttpxClient is {client_class!r}, not an httpx.AsyncClient; "
+            "update the provider stub for this SDK's HTTP stack"
+        )
+    return type(client_class()._transport)
+
+
 def _stub_provider(monkeypatch: pytest.MonkeyPatch, replies: list[Any]) -> list[httpx.Request]:
-    """Answer async httpx requests in order: an error status, "cut-off", or a 200 JSON body."""
+    """Answer the SDK's async httpx requests in order: an error status, "cut-off", or a 200 JSON body."""
+    transport_class = _sdk_transport_class()
     received: list[httpx.Request] = []
 
     async def handle_async_request(_transport, request: httpx.Request) -> httpx.Response:
@@ -145,7 +210,7 @@ def _stub_provider(monkeypatch: pytest.MonkeyPatch, replies: list[Any]) -> list[
             return httpx.Response(reply, headers={"retry-after-ms": "1"}, json=error)
         return httpx.Response(200, json=reply)
 
-    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", handle_async_request)
+    monkeypatch.setattr(transport_class, "handle_async_request", handle_async_request)
     return received
 
 
@@ -207,13 +272,14 @@ def test_ragas_request_and_reply_are_saved_redacted(verifier: ModuleType, monkey
 
 def test_ragas_reply_behind_a_rejected_score_is_saved(verifier: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     _install_ragas(monkeypatch, score=0.5)
-    _stub_provider(monkeypatch, [_chat_reply("ok")])
+    received = _stub_provider(monkeypatch, [_chat_reply("ok")])
     custom = {"score": 0.0, "reason": "custom judgment", "method": "custom"}
     monkeypatch.setattr(verifier, "_judge_goal_accuracy_custom", lambda *_args, **_kwargs: custom)
 
     with _judge_evidence(verifier):
         assert verifier.judge_goal_accuracy("question", "expected", "agent answer") == custom
 
+    assert len(received) == 1
     exchange, failure = _attempts(verifier)
     assert (exchange["status"], exchange["prompt"], exchange["reply"]) == ("replied", "[user]\njudge", "ok")
     assert (failure["method"], failure["status"], failure["model"]) == ("ragas", "error", "gpt-4.1")
@@ -302,9 +368,43 @@ def test_ragas_evidence_failure_never_changes_the_score(
     assert (outcome["method"], outcome["status"], outcome["score"]) == ("ragas", "accepted", 1.0)
 
 
-def test_judge_deadline_is_not_swallowed_by_the_ragas_evidence_hook(
+def test_ragas_evidence_write_failure_is_logged_like_the_other_judges(
+    verifier: ModuleType, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """_record_judge_attempt logs a failed judge_attempts.json write itself, so the RAGAS warning is not logged."""
+    _install_ragas(monkeypatch)
+    received = _stub_provider(monkeypatch, [_chat_reply("ok")])
+    write_text = Path.write_text
+
+    def refuse_evidence_write(path: Path, *args: Any, **kwargs: Any) -> int:
+        if path.name == "judge_attempts.json.tmp":
+            raise PermissionError("read-only verifier directory")
+        return write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", refuse_evidence_write)
+
+    with caplog.at_level(logging.WARNING, logger=verifier.logger.name), _judge_evidence(verifier):
+        result = verifier.judge_goal_accuracy("question", "expected", "agent answer")
+        kept = list(verifier._ACTIVE_JUDGE_EVIDENCE.get())
+
+    assert (result["score"], result["method"]) == (1.0, "ragas")
+    assert len(received) == 1
+    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert warnings == ["Could not save judge evidence: PermissionError"] * 2
+    assert [(attempt["method"], attempt["status"]) for attempt in kept] == [("ragas", "replied"), ("ragas", "accepted")]
+    assert not (verifier.VERIFIER_DIR / "judge_attempts.json").exists()
+
+
+def test_ragas_evidence_helper_reraises_the_judge_deadline(
     verifier: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Pins the helper only: it re-raises the deadline alarm instead of logging it as an evidence failure.
+
+    In a real request the alarm leaves the httpx hook into the OpenAI SDK, which
+    treats it as a connection error and retries; the RAGAS time budget
+    (asyncio.wait_for) still bounds the run.
+    """
+
     def deadline(*_args: Any, **_kwargs: Any):
         raise TimeoutError("LLM judge time budget exhausted")
 
@@ -327,7 +427,7 @@ def test_verifier_run_saves_ragas_exchanges_with_the_other_judges(
         encoding="utf-8",
     )
     _install_ragas(monkeypatch)
-    _stub_provider(monkeypatch, [_chat_reply("ok")])
+    received = _stub_provider(monkeypatch, [_chat_reply("ok")])
     verifier.call_public_llm = lambda _prompt, **_kwargs: (_ACCURACY_REPLY, None)
     verifier._call_public_llm_with_provenance = lambda _prompt, **_kwargs: (
         _ACCURACY_REPLY,
@@ -337,6 +437,7 @@ def test_verifier_run_saves_ragas_exchanges_with_the_other_judges(
 
     verifier.main()
 
+    assert len(received) == 1
     rich = json.loads(verifier.SKILL_EVALUATOR_REWARD_JSON.read_text(encoding="utf-8"))
     assert rich["goal_accuracy"] == 1.0
     assert rich["details"]["goal_accuracy"]["method"] == "ragas"
@@ -345,3 +446,34 @@ def test_verifier_run_saves_ragas_exchanges_with_the_other_judges(
         ("goal_accuracy", "ragas", "replied"),
         ("goal_accuracy", "ragas", "accepted"),
     ]
+
+
+def test_provider_stub_fails_before_any_request_when_the_sdk_client_is_not_httpx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class OtherStackClient:
+        """Stands in for an SDK whose default async client is built on another HTTP library."""
+
+    monkeypatch.setattr(openai, "DefaultAsyncHttpxClient", OtherStackClient)
+
+    with pytest.raises(pytest.fail.Exception, match=r"not an httpx\.AsyncClient"):
+        _stub_provider(monkeypatch, [_chat_reply("ok")])
+
+
+def test_requests_the_stub_misses_never_reach_the_network(no_network: list[Any]) -> None:
+    async def send_unstubbed_request() -> None:
+        async with openai.DefaultAsyncHttpxClient() as client:
+            await client.post(_CHAT_URL, json={"model": "gpt-4.1", "messages": _JUDGE_MESSAGES})
+
+    with pytest.raises(httpx.ConnectError, match="network access is blocked"):
+        asyncio.run(send_unstubbed_request())
+    with pytest.raises(OSError, match="network access is blocked"):
+        socket.getaddrinfo("192.0.2.1", 443)
+    with socket.socket() as sock, pytest.raises(OSError, match="network access is blocked"):
+        sock.connect(("192.0.2.1", 443))
+    assert socket.getaddrinfo("127.0.0.1", 443)
+
+    # Clear the record so the guard's own teardown check passes.
+    blocked = list(no_network)
+    no_network.clear()
+    assert blocked == ["api.openai.com", "192.0.2.1", "192.0.2.1"]

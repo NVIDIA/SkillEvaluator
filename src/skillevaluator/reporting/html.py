@@ -1271,6 +1271,9 @@ def _bounded_tier3_preview(payload: dict[str, Any] | None) -> tuple[dict[str, An
     """
     if not payload:
         return payload, {}
+    # The token usage table reads the full payload, so ``token_usage`` neither
+    # triggers the preview nor spends its budget.
+    payload = {key: value for key, value in payload.items() if key != "token_usage"}
     serialized = _compact_json(payload)
     if len(serialized.encode("utf-8")) <= _TIER3_HTML_PREVIEW_TRIGGER_BYTES:
         return payload, {}
@@ -3005,13 +3008,7 @@ class HTMLReporter(ReporterBase):
         tier1_skillspector_provenance = _skillspector_provenance(tier1_results)
         tier2_summary = self._compute_tier_summary(tier2_results, presentation=context.tiers[2])
         tier3_summary = self._compute_tier_summary(tier3_results, presentation=context.tiers[3])
-        # The token usage table reads the full payload below, so the bounded
-        # preview leaves ``token_usage`` out and stays as it is without it.
-        tier3_preview, tier3_preview_notice = _bounded_tier3_preview(
-            {key: value for key, value in tier3_data.items() if key != "token_usage"}
-            if isinstance(tier3_data, dict)
-            else tier3_data
-        )
+        tier3_preview, tier3_preview_notice = _bounded_tier3_preview(tier3_data)
         tier3_canonical_data, tier3_canonical_encoding = _canonical_tier3_embed(tier3_data)
         tier3_truncation = tier3_data.get("report_truncation", {}) if isinstance(tier3_data, dict) else {}
 

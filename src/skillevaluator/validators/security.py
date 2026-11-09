@@ -5820,17 +5820,19 @@ class SecurityValidator(ValidatorBase):
         """Run LLM second-pass verification on all findings.
 
         Findings the LLM classifies as false_positive with high confidence
-        are downgraded to INFO severity and annotated in metadata. Checks in
-        :data:`_LLM_VERIFY_EXEMPT_CHECKS` keep their severity.
+        are downgraded to INFO severity and annotated in metadata. Findings of
+        checks in :data:`_LLM_VERIFY_EXEMPT_CHECKS` are not sent to the
+        verifier: they keep their severity and get no verdict.
         """
-        if not result.findings:
+        findings = [finding for finding in result.findings if finding.check_name not in _LLM_VERIFY_EXEMPT_CHECKS]
+        if not findings:
             return
 
         from skillevaluator.inference import FindingVerifier
 
-        logger.info(f"Running LLM verification on {len(result.findings)} finding(s)")
+        logger.info(f"Running LLM verification on {len(findings)} finding(s)")
         verifier = FindingVerifier()
-        verdicts = verifier.verify(result.findings, skill_path)
+        verdicts = verifier.verify(findings, skill_path)
 
         if not verdicts:
             result.mark_scan_incomplete("llm-verification")
@@ -5840,7 +5842,7 @@ class SecurityValidator(ValidatorBase):
 
         suppressed = 0
         verified = 0
-        for idx, finding in enumerate(result.findings):
+        for idx, finding in enumerate(findings):
             verdict_data = verdicts.get(idx)
             if not isinstance(verdict_data, dict) or not verdict_data:
                 continue
@@ -5863,11 +5865,7 @@ class SecurityValidator(ValidatorBase):
             finding.metadata["llm_confidence"] = confidence
             finding.metadata["llm_reasoning"] = reasoning
 
-            if (
-                finding.check_name not in _LLM_VERIFY_EXEMPT_CHECKS
-                and verdict == "false_positive"
-                and confidence == "high"
-            ):
+            if verdict == "false_positive" and confidence == "high":
                 finding.severity = Severity.INFO
                 finding.metadata["downgraded"] = True
                 finding.metadata["confidence"] = "low"
@@ -5877,14 +5875,14 @@ class SecurityValidator(ValidatorBase):
             result.recalculate_from_findings()
             result.add_message(f"LLM verification downgraded {suppressed} finding(s) to INFO (false positives)")
 
-        unverified = len(result.findings) - verified
+        unverified = len(findings) - verified
         if unverified:
             result.mark_scan_incomplete("llm-verification")
             noun = "finding" if unverified == 1 else "findings"
             verb = "was" if unverified == 1 else "were"
             cause = f": {verifier.last_failure}" if verifier.last_failure else ""
             result.add_message(
-                f"LLM verification returned verdicts for {verified} of {len(result.findings)} findings; "
+                f"LLM verification returned verdicts for {verified} of {len(findings)} findings; "
                 f"{unverified} {noun} {verb} not verified{cause}"
             )
         elif not suppressed:

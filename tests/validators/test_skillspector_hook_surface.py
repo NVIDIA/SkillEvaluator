@@ -428,27 +428,47 @@ class TestUnmodeledHooks:
 
     @patch("skillevaluator.validators.security.Tools")
     def test_llm_verification_cannot_downgrade_the_hook_critical(self, mock_tools, tmp_path: Path) -> None:
+        """The verifier never sees the Critical, so it gets no verdict and needs none."""
         root = _plugin(tmp_path)
         result = _validate(mock_tools, root, _report(_PLUGIN_REPORT))
-        count = len(result.findings)
+        [finding] = _unverified(result)
+        others = [other for other in result.findings if other is not finding]
 
         with patch("skillevaluator.inference.FindingVerifier") as verifier_cls:
             verifier_cls.return_value.verify.return_value = {
                 index: {"verdict": "false_positive", "confidence": "high", "rationale": "Benign hooks."}
-                for index in range(count)
+                for index in range(len(others))
             }
             verifier_cls.return_value.last_failure = None
             SecurityValidator(use_llm=False, verify_llm=True)._verify_findings_with_llm(result, root)
 
-        [finding] = _unverified(result)
+        assert verifier_cls.return_value.verify.call_args.args[0] == others
         assert finding.severity == Severity.CRITICAL
-        assert finding.metadata["llm_verdict"] == "false_positive"
-        assert "downgraded" not in finding.metadata
-        others = [other for other in result.findings if other is not finding]
-        assert [other.severity for other in others] == [Severity.INFO] * (count - 1)
+        assert not [key for key in finding.metadata if key.startswith("llm_") or key == "downgraded"]
+        assert [other.severity for other in others] == [Severity.INFO] * len(others)
         assert not result.is_incomplete
         assert result.status == "failed"
         assert result.errors == [_gate("hooks/hooks.json"), finding.to_legacy_string()]
+        assert f"LLM verification downgraded {len(others)} finding(s) to INFO (false positives)" in result.messages
+
+    def test_llm_verification_skips_a_scan_whose_only_finding_is_the_critical(self, tmp_path: Path) -> None:
+        root = _settings_skill(tmp_path)
+        report = _report(_SETTINGS_REPORT)
+        bh1 = _bh1(report)
+        report["issues"] = []
+        report["suppressed"] = [{**bh1, "suppressed": True, "suppression_reason": "Reviewed hook surface"}]
+        report["suppressed_count"] = 1
+        report["risk_assessment"].update(score=0, max_issue_severity="NONE")
+        result = _replay(root, report, baseline_requested=True)
+
+        with patch("skillevaluator.inference.FindingVerifier") as verifier_cls:
+            verifier_cls.return_value.verify.return_value = {}
+            verifier_cls.return_value.last_failure = None
+            SecurityValidator(use_llm=False, verify_llm=True)._verify_findings_with_llm(result, root)
+
+        verifier_cls.assert_not_called()
+        assert not result.is_incomplete
+        _assert_hook_critical(result, root, ".claude/settings.json")
 
     @patch("skillevaluator.validators.security.Tools")
     def test_static_and_llm_stages_report_one_critical(self, mock_tools, tmp_path: Path) -> None:

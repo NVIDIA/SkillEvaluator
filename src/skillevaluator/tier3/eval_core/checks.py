@@ -4632,7 +4632,7 @@ def check_error_recovery(
             return None
         if exit_status_re.sub("", observation[end:]).strip():
             return None  # text after the record may be a diagnostic
-        while isinstance(record, dict) and "output" not in record:
+        while isinstance(record, dict) and not isinstance(record.get("output"), str):
             nested = [item for item in record.values() if isinstance(item, dict)]
             record = nested[0] if len(nested) == 1 else None
         return record["output"] if isinstance(record, dict) and isinstance(record["output"], str) else None

@@ -1695,7 +1695,7 @@ def test_wrapper_that_javascript_rejects_stays_unsupported(extractor, source):
 
 
 @pytest.mark.parametrize("extractor", _EXTRACTORS)
-@pytest.mark.parametrize("field", ["result", "outcome", "settled"])
+@pytest.mark.parametrize("field", ["result", "outcome", "settled", "output"])
 def test_quiet_probe_exemption_does_not_depend_on_the_settled_field_name(extractor, field):
     calls = 'tools.exec_command({cmd:"grep -q foo README.md"}),tools.exec_command({cmd:"pwd"})'
     source = f"const results=await Promise.allSettled([{calls}]);results.forEach((r,i)=>text({{i,{field}:r}}));"
@@ -1854,3 +1854,18 @@ def test_upstream_grammar_form_with_a_finite_number_still_decodes(extractor, num
     calls = extractor(_trajectory(source, "outer observation"))
 
     assert [call["action"] for call in calls] == ["exec_command"]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize("source", _LONE_SOURCES)
+@pytest.mark.parametrize("prefix", ["\n", "\n\n", " ", "\t", "\n  "], ids=["blank-line", "two-blank-lines", "space", "tab", "blank-and-indent"])
+def test_lone_call_record_after_leading_whitespace_is_graded(extractor, source, prefix):
+    # The header check and the record decoder must agree: whitespace before a complete record is not
+    # an incomplete record.
+    record = '{"exit_code":2,"output":"make: *** Error 2\\n"}'
+    trajectory = _trajectory(source, _RECORD_FRAME[0] + prefix + record)
+    calls = extractor(trajectory)
+
+    assert "normalization_status" not in calls[0]
+    assert calls[0]["is_error"] is True
+    assert _error_recovery(trajectory, extractor)["score"] == 0.0

@@ -1192,7 +1192,7 @@ def _codex_exec_records(observation: str, record_format: tuple, count: int) -> l
         return None
     body = observation[header.end() :]
     decoder = json.JSONDecoder(object_pairs_hook=_unique_keys)
-    position = 0
+    position = len(body) - len(body.lstrip())  # `raw_decode` does not skip the whitespace before a record
     records: list[tuple[str, bool | None]] = []
     for record_index in range(count):
         if record_index:

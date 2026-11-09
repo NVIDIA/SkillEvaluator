@@ -1516,7 +1516,7 @@ def test_tier3_html_renders_plain_accuracy_reason_and_unavailable_evidence() -> 
 
     agents_html = unescape(_tier3_page(_render_agent_payload(payload), "agents", "dataset"))
 
-    assert "The answer's facts do not match the expected answer (criterion FACTUALLY_ACCURATE)" in agents_html
+    assert "Failed criteria: FACTUALLY_ACCURATE" in agents_html
     assert "Expected: correct result; observed: wrong result" in agents_html
     assert "Evidence unavailable — No trajectory evidence was recorded for this metric" in agents_html
 
@@ -1554,6 +1554,7 @@ def test_canonical_payload_deduplicates_repeated_metric_evidence() -> None:
             "checks": [],
             "evidence_refs": [],
             "evidence_unavailable_reason": "No trajectory evidence was recorded for this metric",
+            "reason": "same representative evidence",
             "occurrences": 2,
         }
     ]

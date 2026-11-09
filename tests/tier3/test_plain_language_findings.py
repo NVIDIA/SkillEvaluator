@@ -89,18 +89,59 @@ def test_failed_finding_and_json_include_evidence_unavailable_reason():
 
 
 def test_trajectory_load_failure_replaces_default_evidence_reason():
-    reward = _goal_reward(
-        {
-            "_trajectory_load": {"warning": "trajectory could not be read"},
-            "goal_accuracy": {"reason": "goal missed"},
-        }
-    )
+    reward = _goal_reward({"goal_accuracy": {"reason": "goal missed"}})
+    reward["trajectory_detail"] = "trajectory could not be read"
     [finding] = report._extract_findings([reward], canonical_scores={"goal_accuracy": 0.2})
 
     assert (
         finding["evidence_unavailable_reason"]
         == "Trajectory evidence could not be loaded: trajectory could not be read"
     )
+
+
+def test_trajectory_load_metadata_is_not_reported_as_a_load_failure():
+    reward = _goal_reward(
+        {
+            "_trajectory_load": {
+                "source": "claude-code.txt",
+                "note": "Synthetic ATIF from Claude Code stream JSONL",
+                "warning": "trajectory.json has no steps[]",
+            },
+            "goal_accuracy": {"reason": "goal missed"},
+        }
+    )
+    [finding] = report._extract_findings([reward], canonical_scores={"goal_accuracy": 0.2})
+
+    assert finding["evidence_unavailable_reason"] == "No trajectory evidence was recorded for this metric"
+
+
+def test_evidence_unavailable_labels_are_limited_to_evidence_ref_metrics():
+    reward = _goal_reward(
+        {
+            "security": {"reason": "unsafe action"},
+            "goal_accuracy": {"reason": "goal missed"},
+        }
+    )
+    reward["security"] = 0.0
+    findings = report._extract_findings(
+        [reward],
+        canonical_scores={"security": 0.0, "goal_accuracy": 0.2},
+    )
+    by_metric = {finding["metric"]: finding for finding in findings}
+
+    assert "evidence_unavailable_reason" not in by_metric["security"]
+    assert by_metric["goal_accuracy"]["evidence_unavailable_reason"] == (
+        "No trajectory evidence was recorded for this metric"
+    )
+    security_payload = report._bounded_findings_payload(
+        skill_name="demo",
+        agent="agent",
+        findings=[by_metric["security"]],
+        suggestions=[],
+        suggestion_mode="remediation",
+        suggestions_v2=None,
+    )
+    assert "evidence_unavailable_reason" not in security_payload["findings"][0]
 
 
 def test_evidence_reason_is_absent_when_refs_are_present_or_finding_is_ok():

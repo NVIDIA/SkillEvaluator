@@ -251,6 +251,8 @@ def _extract_findings(
     rewards_complete: bool = True,
 ) -> list[dict[str, Any]]:
     """Extract actionable findings from reward.json details across trials."""
+    from skillevaluator.tier3.eval_core.atif_helpers import _METRIC_EVIDENCE_REF_METRICS
+
     findings: list[dict[str, Any]] = []
 
     metric_names = _finding_metric_names(rewards)
@@ -335,7 +337,7 @@ def _extract_findings(
                 "reasons": reasons[:4],
                 "evidence_refs": _refs[:_MAX_FINDING_EVIDENCE_REFS],
             }
-            if not finding["evidence_refs"]:
+            if metric in _METRIC_EVIDENCE_REF_METRICS and not finding["evidence_refs"]:
                 finding["evidence_unavailable_reason"] = _evidence_unavailable_reason(trials)
             findings.append(finding)
 
@@ -602,6 +604,8 @@ def _accuracy_criterion_failure_reason(criterion: Any) -> str:
 
 
 def _expected_observed_suffix(detail: dict[str, Any], reward: dict[str, Any] | None = None) -> str:
+    from skillevaluator.evaluation.tier3_findings import sanitize_grader_text
+
     sources: list[dict[str, Any]] = [detail]
     reward = reward if isinstance(reward, dict) else {}
     reward_details = reward.get("details")
@@ -616,21 +620,27 @@ def _expected_observed_suffix(detail: dict[str, Any], reward: dict[str, Any] | N
                     return source[key]
         return None
 
-    expected = _bounded_reason_text(value_for(("ground_truth", "expected_answer")), max_len=160)
-    observed = _bounded_reason_text(value_for(("final_answer",)), max_len=160)
+    expected = sanitize_grader_text(
+        _bounded_reason_text(value_for(("ground_truth", "expected_answer")), max_len=160),
+        160,
+    )
+    observed = sanitize_grader_text(_bounded_reason_text(value_for(("final_answer",)), max_len=160), 160)
     if not expected or not observed:
         return ""
     return f"Expected: {expected}; observed: {observed}"
 
 
 def _evidence_unavailable_reason(trials: list[dict[str, Any]]) -> str:
+    from skillevaluator.evaluation.tier3_findings import sanitize_grader_text
+
     for trial in trials:
         reward = trial.get("reward")
-        details = reward.get("details") if isinstance(reward, dict) else None
-        trajectory_load = details.get("_trajectory_load") if isinstance(details, dict) else None
-        if not isinstance(trajectory_load, dict):
+        if not isinstance(reward, dict):
             continue
-        failure = _bounded_reason_text(trajectory_load.get("warning") or trajectory_load.get("note"))
+        failure = sanitize_grader_text(
+            reward.get("trajectory_detail") or reward.get("error"),
+            _REPORT_REASON_LIMIT,
+        )
         if failure:
             return f"Trajectory evidence could not be loaded: {failure}"
     return "No trajectory evidence was recorded for this metric"
@@ -1014,6 +1024,8 @@ def _bounded_findings_payload(
     suggestions_v2: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
     """Project a findings artifact into a fixed, browser-loadable schema."""
+    from skillevaluator.tier3.eval_core.atif_helpers import _METRIC_EVIDENCE_REF_METRICS
+
     bounded_findings: list[dict[str, Any]] = []
     for finding in findings[:_MAX_FINDINGS]:
         if not isinstance(finding, dict):
@@ -1046,7 +1058,11 @@ def _bounded_findings_payload(
                 ],
             }
         )
-        if bounded_findings[-1]["severity"] != "ok" and not bounded_findings[-1]["evidence_refs"]:
+        if (
+            bounded_findings[-1]["severity"] != "ok"
+            and bounded_findings[-1]["metric"] in _METRIC_EVIDENCE_REF_METRICS
+            and not bounded_findings[-1]["evidence_refs"]
+        ):
             unavailable_reason = finding.get("evidence_unavailable_reason") or (
                 "No trajectory evidence was recorded for this metric"
             )

@@ -799,8 +799,13 @@ def _sanitize_tier3_pass_at_k(value: object) -> dict[str, Any]:
     return pass_at_k
 
 
-def _sanitize_tier3_evaluator_card(value: dict[str, Any]) -> dict[str, Any] | None:
+def _sanitize_tier3_evaluator_card(
+    value: dict[str, Any],
+    *,
+    include_evidence_unavailable_default: bool = False,
+) -> dict[str, Any] | None:
     from skillevaluator.evaluation.tier3_findings import FAILURE_REASON_EVIDENCE_KEYS
+    from skillevaluator.tier3.eval_core.atif_helpers import _METRIC_EVIDENCE_REF_METRICS
 
     card = dict(value)
     card["with_skill"] = _finite_number(card.get("with_skill"), minimum=0.0, maximum=1.0)
@@ -828,7 +833,13 @@ def _sanitize_tier3_evaluator_card(value: dict[str, Any]) -> dict[str, Any] | No
             entry["evidence_unavailable_reason"] = unavailable_reason[:512]
         else:
             entry.pop("evidence_unavailable_reason", None)
-        if entry["score"] is not None and entry["score"] < 0.8 and not entry["evidence_refs"]:
+        if (
+            include_evidence_unavailable_default
+            and card.get("id") in _METRIC_EVIDENCE_REF_METRICS
+            and entry["score"] is not None
+            and entry["score"] < 0.8
+            and not entry["evidence_refs"]
+        ):
             entry.setdefault("evidence_unavailable_reason", "No trajectory evidence was recorded for this metric")
         evidence.append(entry)
     card["evidence"] = evidence
@@ -868,7 +879,7 @@ def _sanitize_tier3_agent(value: dict[str, Any]) -> dict[str, Any]:
     agent["evaluator_cards"] = [
         card
         for item in _dict_list(agent.get("evaluator_cards"))
-        if (card := _sanitize_tier3_evaluator_card(item)) is not None
+        if (card := _sanitize_tier3_evaluator_card(item, include_evidence_unavailable_default=True)) is not None
     ]
     agent["findings"] = [_sanitize_tier3_dimension(item) for item in _dict_list(agent.get("findings"))]
     agent["pass_at_k"] = _sanitize_tier3_pass_at_k(agent.get("pass_at_k"))

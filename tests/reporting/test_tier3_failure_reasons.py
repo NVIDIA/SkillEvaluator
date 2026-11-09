@@ -22,6 +22,7 @@ from skillevaluator.evaluation import tier3_report
 from skillevaluator.evaluation.tier3_findings import (
     _MAX_SCAN_CHARS,
     MAX_REASON_CHARS,
+    evidence_unavailable_reason,
     failure_excerpt,
     failure_reason,
     failure_reason_text_slots,
@@ -34,6 +35,7 @@ from skillevaluator.reporting import HTMLReporter
 from skillevaluator.reporting import html as html_module
 from skillevaluator.reporting.dashboard_data import _trial_coverage_truncated
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+from skillevaluator.tier3.harbor.report import _expected_observed_suffix
 
 METRICS = list(DEFAULT_METRICS)
 DESTRUCTIVE_REASON = "Agent executed potentially destructive command: rm -rf"
@@ -378,7 +380,7 @@ def test_message_only_detail_explains_failing_score() -> None:
     assert card["evidence"][0]["notes"] == []
     assert card["evidence"][0]["reason"] == "No tool calls in trajectory"
     cards_html = _render(payload).split('class="t3-eval-card', 1)[1]
-    assert re.search(r'<span class="t3-ev-notes">\s*No tool calls in trajectory', cards_html)
+    assert re.search(r'<div class="t3-ev-reason">\s*No tool calls in trajectory', cards_html)
 
 
 def test_passing_attempt_does_not_hide_failing_attempt_reason() -> None:
@@ -522,10 +524,26 @@ def test_reason_names_failed_checks_criteria_and_attribution() -> None:
     )
 
     assert reason == (
-        "The answer does not address what the user asked (criterion TASK_ADDRESSED); "
-        "The answer does not give the user a result they can act on (criterion ACTIONABLE); "
-        "Check `command injection check` did not pass; no reason was recorded"
+        "Failed criteria: TASK_ADDRESSED, ACTIONABLE; "
+        "Check `command injection check` did not pass; no reason was recorded; "
+        "The skill instructions requested the command."
     )
+
+
+def test_reason_retains_all_failed_criteria_compactly() -> None:
+    reason = failure_reason(
+        {
+            "reason": "Ran the right command but reported the wrong installed version.",
+            "criteria": {"FACTUALLY_ACCURATE": False, "ACTIONABLE": False},
+        },
+        metric="accuracy",
+    )
+
+    assert reason == (
+        "Ran the right command but reported the wrong installed version.; "
+        "Failed criteria: FACTUALLY_ACCURATE, ACTIONABLE"
+    )
+    assert len(reason) <= MAX_REASON_CHARS
 
 
 def test_reason_is_bounded_and_marks_truncation() -> None:
@@ -551,11 +569,94 @@ def test_reason_ignores_criteria_excluded_from_the_score() -> None:
         "excluded_criteria": ["SKILL_IDENTIFIED"],
     }
 
-    assert failure_reason(detail) == (
-        "Answer omitted the retry limit.; The answer's facts do not match the expected answer "
-        "(criterion FACTUALLY_ACCURATE)"
-    )
+    assert failure_reason(detail) == ("Answer omitted the retry limit.; Failed criteria: FACTUALLY_ACCURATE")
     assert failure_reason({"criteria": {"SKILL_IDENTIFIED": False}, "excluded_criteria": ["SKILL_IDENTIFIED"]}) == ""
+
+
+def test_expected_observed_suffix_redacts_command_line_credentials() -> None:
+    suffix = _expected_observed_suffix(
+        {
+            "ground_truth": "expected",
+            "final_answer": (
+                "mysql -u root -pS3cr3tPassw0rdXYZ prod; curl -u admin:hunter2Passw0rd https://h --token abcdef123456"
+            ),
+        }
+    )
+
+    assert "S3cr3tPassw0rdXYZ" not in suffix
+    assert "hunter2Passw0rd" not in suffix
+    assert "abcdef123456" not in suffix
+    assert "-p<redacted>" in suffix
+    assert "-u <redacted>" in suffix
+    assert "--token <redacted>" in suffix
+
+
+def test_unavailable_reason_uses_reward_load_error_not_trajectory_provenance() -> None:
+    reward = {
+        "trajectory_detail": "trajectory.json could not be read",
+        "details": {
+            "_trajectory_load": {
+                "source": "claude-code.txt",
+                "note": "Synthetic ATIF from Claude Code stream JSONL",
+                "warning": "trajectory.json has no steps[]",
+            }
+        },
+    }
+
+    assert evidence_unavailable_reason(reward) == (
+        "Trajectory evidence could not be loaded: trajectory.json could not be read"
+    )
+    assert evidence_unavailable_reason({"details": reward["details"]}) == (
+        "No trajectory evidence was recorded for this metric"
+    )
+
+
+def test_accuracy_card_keeps_built_reason_outside_bounded_notes() -> None:
+    detail = {
+        "reason": "Ran the right command but reported the wrong installed version.",
+        "criteria": {
+            "FACTUALLY_ACCURATE": False,
+            "ACTIONABLE": False,
+            "ACTION_CORRECT": False,
+            "TASK_ADDRESSED": False,
+            "SKILL_IDENTIFIED": False,
+        },
+        "ground_truth": "version 1.4.0",
+        "final_answer": "version 1.2.3",
+    }
+    payload = _payload([_reward(accuracy=0.2, details={"accuracy": detail})])
+    card = next(card for card in payload["agents"]["codex"]["evaluator_cards"] if card["id"] == "accuracy")
+    entry = card["evidence"][0]
+
+    assert entry["notes"] == [detail["reason"]]
+    assert entry["reason"].startswith("Ran the right command")
+    assert "Failed criteria: FACTUALLY_ACCURATE, ACTIONABLE" in entry["reason"]
+    assert "Failed criteria" not in entry["notes"][0]
+    assert "Expected: version 1.4.0; observed: version 1.2.3" in entry["reason"]
+    assert '<div class="t3-ev-reason">' in _render(payload)
+
+
+def test_saved_html_defaults_only_add_unavailable_reasons_to_eligible_agent_cards() -> None:
+    evidence = {
+        "entry_id": "case-1",
+        "score": 0.0,
+        "notes": [],
+        "failures": [],
+        "checks": [],
+        "evidence_refs": [],
+    }
+    security_card = {"id": "security", "with_skill": 0.0, "evidence": [evidence]}
+    accuracy_card = {"id": "accuracy", "with_skill": 0.0, "evidence": [evidence]}
+
+    security_agent = html_module._sanitize_tier3_agent({"evaluator_cards": [security_card]})
+    accuracy_agent = html_module._sanitize_tier3_agent({"evaluator_cards": [accuracy_card]})
+    top_level_accuracy = html_module._sanitize_tier3_evaluator_card(accuracy_card)
+
+    assert "evidence_unavailable_reason" not in security_agent["evaluator_cards"][0]["evidence"][0]
+    assert accuracy_agent["evaluator_cards"][0]["evidence"][0]["evidence_unavailable_reason"] == (
+        "No trajectory evidence was recorded for this metric"
+    )
+    assert "evidence_unavailable_reason" not in top_level_accuracy["evidence"][0]
 
 
 def test_render_drops_malformed_reasons_and_excerpts() -> None:
@@ -752,10 +853,10 @@ def test_html_preview_does_not_report_unrendered_top_level_card_reasons() -> Non
     preview, notice = html_module._bounded_tier3_preview(data)
 
     assert preview is not None
-    assert notice == {"failure_reasons": 5}
-    assert _rendered_reason_count(preview) == _rendered_reason_count(data) - notice["failure_reasons"]
+    assert notice == {}
+    assert _rendered_reason_count(preview) == _rendered_reason_count(data)
     html = _render(payload)
-    assert "HTML preview left out 5 failure reasons or excerpts" in html
+    assert "HTML preview left out" not in html
     assert "HTML preview omitted" not in html
 
 

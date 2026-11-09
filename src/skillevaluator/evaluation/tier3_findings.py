@@ -172,7 +172,6 @@ def _reason_candidates(
 ) -> Iterator[str]:
     """Yield candidate reason strings across the known grader detail shapes."""
     from skillevaluator.tier3.harbor.report import (
-        _accuracy_criterion_failure_reason,
         _applicable_accuracy_criteria,
         _expected_observed_suffix,
     )
@@ -201,13 +200,9 @@ def _reason_candidates(
     # excluded from the score (such as skill identification when no skill is
     # expected) did not fail it.
     criteria = _applicable_accuracy_criteria(detail)
-    failed_criteria = [
-        _accuracy_criterion_failure_reason(name)
-        for name, passed in islice(criteria.items(), _MAX_DETAIL_ITEMS)
-        if passed is False
-    ]
+    failed_criteria = [str(name) for name, passed in islice(criteria.items(), _MAX_DETAIL_ITEMS) if passed is False]
     if failed_criteria:
-        yield from failed_criteria
+        yield f"Failed criteria: {', '.join(failed_criteria)}"
 
     if metric in ("accuracy", "goal_accuracy"):
         suffix = _expected_observed_suffix(detail, reward)
@@ -264,12 +259,9 @@ def failure_reason(
 
 
 def evidence_unavailable_reason(reward: dict[str, Any]) -> str:
-    details = reward.get("details")
-    trajectory_load = details.get("_trajectory_load") if isinstance(details, dict) else None
-    if isinstance(trajectory_load, dict):
-        failure = sanitize_grader_text(trajectory_load.get("warning") or trajectory_load.get("note"), MAX_REASON_CHARS)
-        if failure:
-            return f"Trajectory evidence could not be loaded: {failure}"
+    failure = sanitize_grader_text(reward.get("trajectory_detail") or reward.get("error"), MAX_REASON_CHARS)
+    if failure:
+        return f"Trajectory evidence could not be loaded: {failure}"
     return "No trajectory evidence was recorded for this metric"
 
 

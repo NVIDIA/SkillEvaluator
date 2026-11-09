@@ -143,7 +143,7 @@ def nemo_gym_cli_error(gym_bin: str) -> str | None:
     help_text = completed.output_tail
     flags = ("--sandbox", "--agent", "--model-type", "--model", "--model-url", "--output", "--concurrency")
     missing = [flag for flag in flags if not re.search(rf"(?<![\w-]){re.escape(flag)}(?=[\s,=]|$)", help_text)]
-    if not re.search(r"(?im)^\s+(?:tasks|task_dir|tasks_dir|task_folder)\s+", help_text):
+    if not re.search(r"(?im)^\s+(?:tasks|task_dir|tasks_dir|task_folder|TARGET)\s+", help_text):
         missing.append("positional tasks directory")
     if missing:
         return (

@@ -436,6 +436,55 @@ def test_doctor_rejects_incompatible_gym_despite_readable_version(
     assert not any(status == "pass" for _name, status, _detail in rows)
 
 
+@pytest.mark.parametrize(
+    ("positional", "omitted_flag", "missing"),
+    [
+        ("TARGET", None, None),
+        ("tasks", None, None),
+        ("task_dir", None, None),
+        ("tasks_dir", None, None),
+        ("task_folder", None, None),
+        ("TARGETED", None, "positional tasks directory"),
+        ("TARGET", "--sandbox", "--sandbox"),
+        ("TARGET", "--agent", "--agent"),
+        ("TARGET", "--model-type", "--model-type"),
+        ("TARGET", "--model", "--model"),
+        ("TARGET", "--model-url", "--model-url"),
+        ("TARGET", "--output", "--output"),
+        ("TARGET", "--concurrency", "--concurrency"),
+    ],
+)
+def test_gym_cli_probe_accepts_source_shaped_argparse_help_and_requires_all_flags(
+    tmp_path: Path, positional: str, omitted_flag: str | None, missing: str | None
+) -> None:
+    import sys
+
+    from skillevaluator.tier3.nemo_gym.backend import nemo_gym_cli_error
+
+    # NVIDIA-NeMo/Gym@792fa142f58277aecff05d402061d647e9a92acf,
+    # nemo_gym/cli/main.py:846-857 declares target with nargs="?", metavar="TARGET".
+    # Exercise argparse's actual help layout through the executable boundary.
+    gym = tmp_path / "gym"
+    gym.write_text(
+        f"#!{sys.executable}\n"
+        "import argparse, sys\n"
+        "assert sys.argv[1:] == ['eval', 'run', '--help']\n"
+        "parser = argparse.ArgumentParser(prog='gym eval run')\n"
+        f"parser.add_argument('target', nargs='?', metavar={positional!r}, "
+        "help='Harbor task folder, folder of task folders')\n"
+        "for flag in ['--sandbox', '--agent', '--model-type', '--model', '--model-url', '--output', '--concurrency']:\n"
+        f"    if flag != {omitted_flag!r}: parser.add_argument(flag)\n"
+        "parser.print_help()\n"
+    )
+    gym.chmod(0o755)
+    error = nemo_gym_cli_error(str(gym))
+    if missing is None:
+        assert error is None
+    else:
+        assert error is not None
+        assert f"missing: {missing}." in error
+
+
 def test_gym_cli_probe_handles_unreadable_help(tmp_path: Path) -> None:
     from skillevaluator.tier3.nemo_gym.backend import nemo_gym_cli_error
 

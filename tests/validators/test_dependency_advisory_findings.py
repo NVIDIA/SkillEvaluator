@@ -7,6 +7,8 @@ from __future__ import annotations
 import io
 import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -310,6 +312,52 @@ def test_policy_overlay_keeps_the_incomplete_reason(tmp_path, pip_audit):
     # apply_policy runs more than once in a CLI run; a second pass changes nothing.
     apply_policy([overlaid], policy)
     assert overlaid.warnings[1:] == [reason]
+
+
+_POLICY_WITHOUT_REPORTING = """
+import json
+import sys
+
+from skillevaluator.models.result import Finding, Severity, ValidationResult
+from skillevaluator.validators.policy import ValidationPolicy, apply_policy
+
+result = ValidationResult()
+result.add_finding(
+    Finding("DEPENDENCY", Severity.HIGH, "PYSEC-2020-176", "pyyaml==5.3: PYSEC-2020-176", "requirements.txt", 1)
+)
+result.add_warning("requirements.txt: line 2 requires an exact package version")
+policy = ValidationPolicy(profile="reviewed", severity_overrides={"DEPENDENCY.PYSEC-2020-176": Severity.LOW})
+apply_policy([result], policy)
+print(json.dumps({
+    "reporting": sorted(name for name in sys.modules if name.startswith("skillevaluator.reporting")),
+    "errors": result.errors,
+    "warnings": result.warnings,
+}))
+"""
+
+
+def test_policy_overlay_keeps_warnings_without_loading_the_reporting_package():
+    """A caller that only applies a policy does not import the report writers.
+
+    A fresh interpreter is used, since this test session has already imported them.
+    """
+    completed = subprocess.run(
+        [sys.executable, "-c", _POLICY_WITHOUT_REPORTING],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "reporting": [],
+        "errors": [],
+        "warnings": [
+            "[DEPENDENCY-LOW] pyyaml==5.3: PYSEC-2020-176 in requirements.txt:1",
+            "requirements.txt: line 2 requires an exact package version",
+        ],
+    }
 
 
 def test_safety_findings_use_the_common_applicability_metadata(tmp_path, pip_audit, safety):

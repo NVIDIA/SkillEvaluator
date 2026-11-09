@@ -343,9 +343,6 @@ def apply_policy(
     results = list(results)
     if policy is None:
         return results
-    # Imported here to avoid an import cycle: the reporting package imports validators.
-    from skillevaluator.reporting.base import additional_warnings
-
     for result in results:
         independent_warnings: list[str] | None = None
         for finding in result.findings:
@@ -356,7 +353,7 @@ def apply_policy(
             if new_severity != current:
                 if independent_warnings is None:
                     # Read before any change: a mirrored line names the old severity.
-                    independent_warnings = additional_warnings(result)
+                    independent_warnings = result.independent_warnings()
                 finding.severity = new_severity
         if independent_warnings is not None:
             result.recalculate_from_findings()

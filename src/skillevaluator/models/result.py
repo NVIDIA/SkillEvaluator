@@ -553,6 +553,30 @@ class ValidationResult:
                 self.warnings.append(legacy_msg)
                 self.summary.warnings += 1
 
+    def _finding_legacy_lines(self) -> set[str]:
+        """Return the legacy error and warning lines that only repeat a structured finding."""
+        represented = {finding.to_legacy_string() for finding in self.findings}
+        for finding in self.findings:
+            # merge_with_prefix puts skill labels before legacy messages but inside
+            # structured finding paths. Recognize both forms, including nested merges.
+            location = finding.location
+            prefix = ""
+            while location.startswith("[") and "] " in location:
+                label, _, location = location.partition("] ")
+                prefix += label + "] "
+                represented.add(f"{prefix}{finding.tag} {finding.message} in {location}")
+        return represented
+
+    def independent_errors(self) -> list[str]:
+        """Return errors no structured finding repeats, such as execution diagnostics."""
+        represented = self._finding_legacy_lines()
+        return [error for error in self.errors if error not in represented]
+
+    def independent_warnings(self) -> list[str]:
+        """Return warnings no structured finding repeats, such as why a scanner did not complete."""
+        represented = self._finding_legacy_lines()
+        return [warning for warning in self.warnings if warning not in represented]
+
     def add_error(self, message: str) -> None:
         """Add a legacy error string and mark validation as failed.
 

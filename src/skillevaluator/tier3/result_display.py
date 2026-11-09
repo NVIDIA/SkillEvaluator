@@ -869,6 +869,13 @@ def render_evaluation_result(
     duration = result.get("duration_seconds")
     if _finite_number(duration) is not None:
         console.print(f"Time: {float(duration):.1f}s")
+    budget = result.get("budget")
+    if isinstance(budget, Mapping) and (
+        budget.get("status") == "exhausted" or any(value is not None for value in (budget.get("limits") or {}).values())
+    ):
+        from skillevaluator.tier3.harbor.run_budget import budget_line
+
+        console.print(budget_line(dict(budget)))
 
     agents = result.get("agents")
     incomplete = status in {"failed", "incomplete"} and not any(

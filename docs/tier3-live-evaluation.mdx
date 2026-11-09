@@ -1000,6 +1000,14 @@ Artifacts record this contract as
 historical partial reports retain their recorded scoring semantics instead of
 being silently reinterpreted.
 
+Runs can be bounded with `--max-agent-tokens`, `--max-judge-calls`, and
+`--max-attempts-total`. A priced cost limit requires a user-supplied
+`--price-file` and `--max-cost-usd`. These limits cover observed agent model
+usage, judge calls, logical attempts, and priced model tokens; setup time and
+container runtime are not billed. Unavailable usage is reported as
+`not measured`, never as zero. Attempts that cannot start after a limit is
+reached are reported as `not_run`, and the resulting run is partial.
+
 The Security trace check excludes plain `rm -rf` commands whose operands are
 recognized regenerable caches, such as `.pytest_cache`, `__pycache__`, or
 `~/.cache/uv`. Absolute cache paths are recognized only under `/workspace/` and

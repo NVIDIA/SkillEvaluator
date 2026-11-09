@@ -2178,6 +2178,7 @@
         {% set t3_max_attempts = (t3_attempt_policy.max_attempts or 1) | int %}
         {% set t3_dataset = tier3.dataset or [] %}
         {% set t3_provenance = tier3.provenance or {} %}
+        {% set t3_budget = tier3.budget or {} %}
         {% set t3_source_errors = t3_provenance.get('source_validation') or [] %}
         {% set t3_harbor = tier3.get('harbor_viewer') or t3_summary.get('harbor_viewer') or {} %}
         {% set t3_harbor_job_url = t3_harbor.get('job_url') %}
@@ -2185,6 +2186,9 @@
         {% set t3_evidence_links = t3_harbor.get('evidence_links') or [] %}
         {% set t3_agent_anchor_ids = {} %}
         {% set t3_agent_panel_ids = {} %}
+        {% if t3_budget.status == 'exhausted' and tier3.budget_summary %}
+            <p class="warning">{{ tier3.budget_summary }}</p>
+        {% endif %}
         {% for name, _agent in t3_agents.items() %}
             {% set _ = t3_agent_anchor_ids.update({name: 'tier3-agent-anchor-' ~ loop.index0}) %}
             {% set _ = t3_agent_panel_ids.update({name: 'tier3-agent-panel-' ~ loop.index0}) %}

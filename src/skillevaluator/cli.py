@@ -2014,6 +2014,16 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help_group=_TIER3_GROUP,
     help="Attempts per eval case (pass@k).",
 )
+@click.option("--max-agent-tokens", type=click.IntRange(min=0), default=None, help="Maximum observed agent tokens.")
+@click.option("--max-judge-calls", type=click.IntRange(min=0), default=None, help="Maximum required judge calls.")
+@click.option(
+    "--max-attempts-total",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Maximum logical attempts across cases, arms, and agents.",
+)
+@click.option("--max-cost-usd", type=click.FloatRange(min=0), default=None, help="Maximum priced model cost in USD.")
+@click.option("--price-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None)
 @click.option(
     "--pass-threshold",
     type=float,
@@ -2151,6 +2161,11 @@ def validate(
     max_agents: int | None,
     max_cases: int | None,
     n_attempts: int | None,
+    max_agent_tokens: int | None,
+    max_judge_calls: int | None,
+    max_attempts_total: int | None,
+    max_cost_usd: float | None,
+    price_file: Path | None,
     pass_threshold: float | None,
     stop_on_pass: bool | None,
     model: str | None,
@@ -3140,6 +3155,11 @@ def _tier2_workflow(
     help="Skip the with-skill arm and run only the without-skill baseline (no lift analysis).",
 )
 @click.option("--n-attempts", type=int, default=None)
+@click.option("--max-agent-tokens", type=click.IntRange(min=0), default=None)
+@click.option("--max-judge-calls", type=click.IntRange(min=0), default=None)
+@click.option("--max-attempts-total", type=click.IntRange(min=0), default=None)
+@click.option("--max-cost-usd", type=click.FloatRange(min=0), default=None)
+@click.option("--price-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None)
 @click.option("--pass-threshold", type=float, default=None)
 @click.option(
     "--stop-on-pass/--no-stop-on-pass",
@@ -3218,6 +3238,11 @@ def evaluate(
     skip_baseline: bool,
     skip_with_skill: bool,
     n_attempts: int | None,
+    max_agent_tokens: int | None,
+    max_judge_calls: int | None,
+    max_attempts_total: int | None,
+    max_cost_usd: float | None,
+    price_file: Path | None,
     pass_threshold: float | None,
     stop_on_pass: bool | None,
     n_concurrent: int | None,
@@ -3251,6 +3276,8 @@ def evaluate(
     if skip_baseline and skip_with_skill:
         # Reject before --autopilot can spend a generation call on a run that cannot start.
         raise click.UsageError("--skip-baseline and --skip-with-skill are mutually exclusive (no arm would run)")
+    if max_cost_usd is not None and price_file is None:
+        raise click.UsageError("--max-cost-usd requires --price-file")
     service = EvaluationService()
     # Resolved before the service is built so a non-canonical value is refused
     # at the boundary rather than after a long live run has already started.
@@ -3272,6 +3299,11 @@ def evaluate(
         skip_baseline=skip_baseline,
         skip_with_skill=skip_with_skill,
         n_attempts=n_attempts,
+        max_agent_tokens=max_agent_tokens,
+        max_judge_calls=max_judge_calls,
+        max_attempts_total=max_attempts_total,
+        max_cost_usd=max_cost_usd,
+        price_file=price_file,
         pass_threshold=pass_threshold,
         stop_on_pass=stop_on_pass,
         n_concurrent=n_concurrent,

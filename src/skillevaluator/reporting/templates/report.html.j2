@@ -3001,6 +3001,23 @@
                 <p class="t3-section-hint">{{ name }} timing source: with skill {{ t3_timing_source_text(t3_timing_sources.with_skill or []) }}; baseline {{ t3_timing_source_text(t3_timing_sources.baseline or []) }}.{% if 'mixed_timing_sources' in (agent.resources.caveats or []) %} The measurements mix native and inferred timing, so LLM and tool seconds are not like-for-like.{% endif %}</p>
                 {% endif %}
                 {% endfor %}
+                {% if tier3_token_usage %}
+                <div id="t3-token-usage">
+                <p class="t3-section-hint"><strong>Token usage by case.</strong> {{ tier3_token_usage.note }}</p>
+                <div class="table-scroll"><table class="summary-table">
+                    <thead><tr><th>Agent</th><th>Case</th><th>With skill</th><th>Baseline</th><th>Change</th><th>Measured attempts</th></tr></thead>
+                    <tbody>
+                    {% for row in tier3_token_usage.rows %}
+                    <tr{% if not row.is_case %} style="font-weight:600"{% endif %}><td>{{ row.agent if row.agent is not none else 'All agents' }}</td><td>{{ row.case }}</td><td>{{ row.with_skill }}</td><td>{{ row.baseline }}</td><td>{{ row.change }}</td><td>{{ row.coverage }}</td></tr>
+                    {% endfor %}
+                    </tbody>
+                </table></div>
+                <p class="t3-section-hint">{{ tier3_token_usage.coverage_note }}</p>
+                {% for row in tier3_token_usage.rows if row.note %}
+                <p class="t3-section-hint">{{ row.agent if row.agent is not none else 'All agents' }}: {{ row.note }}</p>
+                {% endfor %}
+                </div>
+                {% endif %}
                 </div>
             </details>
             {% endif %}

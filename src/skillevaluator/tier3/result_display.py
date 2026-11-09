@@ -897,6 +897,11 @@ def render_evaluation_result(
 
         _render_dimensions(console=console, agents=agents, safe=safe)
 
+        from skillevaluator.reporting.tier3_token_usage import render_token_usage_table
+
+        # Measured, not scored: per-agent token sums the report step recorded.
+        render_token_usage_table(console, result.get("token_usage"), text=safe)
+
         # The per-evaluator findings report — evaluator reasonings, evidence
         # pointers, and next-step suggestions — is the feedback surface that
         # follows the score tables.

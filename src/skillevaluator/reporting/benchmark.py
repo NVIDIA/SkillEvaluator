@@ -52,6 +52,7 @@ from skillevaluator.reporting.base import (
 from skillevaluator.reporting.run_status import resolve_run_status
 from skillevaluator.reporting.tier3_coverage import IncompleteArm, incomplete_arms
 from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
+from skillevaluator.reporting.tier3_token_usage import token_usage_markdown_lines
 from skillevaluator.source_identity import evaluated_source_revision, recorded_evaluated_source
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
 
@@ -62,6 +63,8 @@ if TYPE_CHECKING:
 # These fields are empty because the orchestration input did not supply them,
 # which is a different cause from the legacy/non-live wording used elsewhere.
 _SOURCE_UNRECORDED = "not recorded (not supplied by the orchestration input)"
+# Case rows of the token usage table. The card has a size limit; the HTML report keeps every case.
+_MAX_TOKEN_USAGE_CASE_ROWS = 50
 
 _SIGNAL_DESCRIPTIONS = {
     "security": "unsafe operations, secret leakage, and unauthorized access",
@@ -256,6 +259,7 @@ class BenchmarkReporter(ReporterBase):
         self._render_report_purpose(lines)
         self._render_results_at_a_glance(lines, ae, private_labels)
         lines.extend(_agent_coverage_lines(ae, private_labels))
+        lines.extend(_token_usage_lines(ae, private_labels))
         self._render_tier_status(
             lines,
             results,
@@ -1007,6 +1011,24 @@ def _agent_coverage_lines(ae: dict[str, Any] | None, private_labels: tuple[str, 
     if not notes:
         return []
     return ["### Agent coverage", "", *(f"- {_publication_safe_inline(note, private_labels)}" for note in notes), ""]
+
+
+def _token_usage_lines(ae: dict[str, Any] | None, private_labels: tuple[str, ...]) -> list[str]:
+    """Show measured token usage per agent and per case; it is not scored."""
+    agents = _mapping(ae.get("agents")) if ae else {}
+
+    def agent_label(name: str | None) -> str:
+        if name is None:
+            return "All agents"
+        return _md_cell(_agent_display_label(name, _mapping(agents.get(name)), private_labels), private_labels)
+
+    return token_usage_markdown_lines(
+        (ae or {}).get("token_usage"),
+        heading="## Token Usage",
+        agent_label=agent_label,
+        cell=lambda value: _md_cell(value, private_labels),
+        max_case_rows=_MAX_TOKEN_USAGE_CASE_ROWS,
+    )
 
 
 def _incomplete_arm_evidence(ae: dict[str, Any] | None, private_labels: tuple[str, ...]) -> str:

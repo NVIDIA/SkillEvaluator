@@ -87,6 +87,7 @@ from skillevaluator.reporting.presentation import (
 )
 from skillevaluator.reporting.run_status import Status, result_status, result_tier
 from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
+from skillevaluator.reporting.tier3_token_usage import token_usage_table
 from skillevaluator.reporting.trial_charts import steps_by_case_chart
 from skillevaluator.skillspector_provenance import skillspector_provenance_records
 
@@ -3349,6 +3350,8 @@ class HTMLReporter(ReporterBase):
             tier3_canonical_encoding=tier3_canonical_encoding,
             tier3_truncation=tier3_truncation,
             tier3_preview_notice=tier3_preview_notice,
+            # Measured, not scored. Built from the bounded preview, like the other Tier 3 tables.
+            tier3_token_usage=token_usage_table((tier3_preview or {}).get("token_usage")),
             # From the full display payload: the bounded preview can cap rows
             # unevenly per condition and blank identity fields of late rows.
             steps_by_case_chart=steps_by_case_chart(

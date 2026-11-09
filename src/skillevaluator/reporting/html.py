@@ -1724,6 +1724,7 @@ class HTMLReporter(ReporterBase):
 
         loader = PackageLoader("skillevaluator.reporting", "templates")
         environment = Environment(loader=loader, autoescape=True)
+        environment.filters["skillspector_reference_summary"] = reference_summary_message
         environment.filters["cleanly_skipped"] = is_cleanly_skipped
         environment.filters["execution_status"] = _result_display_status
         environment.filters["related_paths"] = _related_paths
@@ -1731,7 +1732,6 @@ class HTMLReporter(ReporterBase):
         environment.filters["adaptive_percent"] = _adaptive_percent
         environment.filters["adaptive_interval_percent"] = _adaptive_interval_percent
         environment.filters["skip_reason"] = get_skip_reason
-        environment.filters["skillspector_reference_summary"] = reference_summary_message
         return environment
 
     @staticmethod

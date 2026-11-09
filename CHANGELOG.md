@@ -6,6 +6,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Show per-agent evidence volume next to Tier 3 scores: distinct cases, planned
+  and scored attempts, execution and judge failures, and per-arm counts when a
+  baseline ran. Flag limited case coverage or incomplete attempt coverage.
+
 - Report dataset sufficiency as sufficient or provisional using distinct-case,
   negative-case, Wilson interval, and paired-case coverage requirements. Show
   the dataset-size status in evaluation, validation, HTML, and BENCHMARK output;

@@ -743,6 +743,12 @@ mixes standard-metric and custom-only rewards, its overall score and lift use
 that logical-attempt overall rather than the mean of the standard dimensions,
 which would cover only the standard rows.
 
+Tier 3 score summaries also show the evidence volume behind the headline:
+distinct cases, planned and scored attempts, and execution or judge failures.
+When a baseline ran, the report includes the same counts for each arm. A
+`Limited evidence:` warning appears when there are fewer than 10 distinct cases
+or fewer attempts were scored than planned.
+
 Case identifiers used as JSON keys must be printable, free of credential
 material, and no larger than 512 UTF-8 bytes. A reward with an unsafe identity
 is retained as a failed diagnostic but is not scored. For large evaluations,

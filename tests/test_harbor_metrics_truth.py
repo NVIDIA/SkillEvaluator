@@ -877,6 +877,26 @@ def test_large_failure_sets_publish_bounded_samples_with_exact_counts(failure_ki
     assert len(encoded) < collector_module.GENERATED_JSON_MAX_BYTES
 
 
+def test_condition_summary_counts_judge_failures_beyond_bounded_detail_sample() -> None:
+    sample_limit = collector_module.PUBLISHED_FAILURE_DETAILS_MAX
+    failures = [{"trial": f"trial-{index:05d}", "reason": "execution failure"} for index in range(sample_limit + 4)]
+    for failure in failures[sample_limit:]:
+        failure["reason"] = "Required judge evaluation failed: accuracy"
+
+    summary = _condition_execution_summary(
+        [],
+        expected_case_ids=[],
+        expected_cases=0,
+        n_attempts=1,
+        job_failure="",
+        reward_failures=failures,
+    )
+
+    assert summary["judge_failures"] == 4
+    assert summary["reward_failure_details_total"] == sample_limit + 4
+    assert summary["reward_failure_details_truncated"] is True
+
+
 @pytest.mark.parametrize(
     ("successes", "total", "expected"),
     [

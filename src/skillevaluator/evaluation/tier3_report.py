@@ -49,6 +49,7 @@ from skillevaluator.evaluation.tier3_findings import (
 from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.source_identity import resolve_evaluated_source
+from skillevaluator.tier3.evidence_volume import evidence_volume_for_conditions
 
 logger = logging.getLogger(__name__)
 
@@ -910,6 +911,7 @@ def build_agent_eval_payload(
         "evaluator_version": evaluator_version,
         "dataset_summary": dataset_summary,
         "dataset_sufficiency": best.get("dataset_sufficiency"),
+        "evidence_volume": best.get("evidence_volume"),
         "dataset_digest": effective_dataset_digest,
         "dataset_digest_algorithm": effective_dataset_digest_algorithm,
         "score_policy": policy["score_policy"],
@@ -1001,6 +1003,7 @@ def build_agent_eval_payload(
         "evaluator_version": evaluator_version,
         "dataset_summary": dataset_summary,
         "dataset_sufficiency": best.get("dataset_sufficiency"),
+        "evidence_volume": best.get("evidence_volume"),
         "dataset_digest": effective_dataset_digest,
         "dataset_digest_algorithm": effective_dataset_digest_algorithm,
         "score_policy": policy["score_policy"],
@@ -1497,6 +1500,7 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
             "execution_error_details_truncated",
             "expected_attempts",
             "scored_attempts",
+            "evidence_volume",
         }
     }
     compact_summary["skill_name"] = str(summary.get("skill_name") or payload.get("skill_name") or "")[:256]
@@ -1524,6 +1528,7 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
         "overall_score": payload.get("overall_score"),
         "overall_lift": payload.get("overall_lift"),
         "composite_lift": payload.get("composite_lift"),
+        "evidence_volume": payload.get("evidence_volume"),
         "execution_status": payload.get("execution_status"),
         "execution_errors": compact_summary["execution_errors"],
         "execution_error_details_total": compact_summary.get("execution_error_details_total", 0),
@@ -2146,6 +2151,11 @@ def _build_agent(
             "without_skill": info.get("pass_without_skill") or {},
             "lift": (info.get("pass_lift") or {}) if comparable_scores else {},
         },
+        "evidence_volume": evidence_volume_for_conditions(
+            info.get("conditions"),
+            trial_failures=info.get("trial_failures"),
+            baseline_only=baseline_only,
+        ),
         "cases": _cases(info),
     }
 

@@ -22,6 +22,7 @@ from rich.text import Text
 
 from skillevaluator.reporting.harbor_viewer import harbor_job_links, normalize_harbor_viewer_for_display
 from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, RED, TEXT, lift_style
+from skillevaluator.tier3.evidence_volume import evidence_volume_for_conditions, format_evidence_volume
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
@@ -886,6 +887,21 @@ def render_evaluation_result(
     if isinstance(sufficiency, Mapping) and isinstance(sufficiency.get("coverage_summary"), str):
         style = "yellow" if sufficiency.get("status") == "provisional" else "dim"
         console.print(Text(safe(sufficiency["coverage_summary"]), style=style))
+    if isinstance(agents, Mapping) and agents:
+        best_name = result.get("best_agent")
+        best_data = agents.get(best_name) if isinstance(best_name, str) else None
+        if not isinstance(best_data, Mapping):
+            best_data = next((value for value in agents.values() if isinstance(value, Mapping)), None)
+        if isinstance(best_data, Mapping):
+            volume = evidence_volume_for_conditions(
+                best_data.get("conditions"),
+                trial_failures=best_data.get("trial_failures"),
+                baseline_only=result.get("mode") == "baseline_only",
+            )
+            evidence_line = format_evidence_volume(volume)
+            if evidence_line:
+                style = "yellow" if evidence_line.startswith("Limited evidence:") else "dim"
+                console.print(Text(safe(evidence_line), style=style))
     detailed = verbose or not has_cases
     if isinstance(agents, Mapping) and agents and not incomplete and detailed:
         metrics = _display_metrics(result, agents)

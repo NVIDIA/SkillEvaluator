@@ -6653,6 +6653,7 @@ def _condition_execution_summary(
             "scored_cases": 0,
             "expected_attempts": 0,
             "scored_attempts": 0,
+            "judge_failures": 0,
             **_failure_list_metadata("runtime_failure_details", runtime_failures),
             **_failure_list_metadata("reward_failure_details", reward_failures),
         }
@@ -6665,6 +6666,11 @@ def _condition_execution_summary(
         if item["trial"] not in recovered_names or not item.get("reason", "").startswith("AgentTimeoutError:")
     ]
     reward_failures = [item for item in (reward_failures or []) if item["trial"] not in recovered_names]
+    judge_failure_trials = {
+        str(failure.get("trial") or "")
+        for failure in [*runtime_failures, *reward_failures]
+        if str(failure.get("reason") or "").startswith("Required judge evaluation failed:")
+    }
     errors: list[str] = [job_failure] if job_failure else []
     public_runtime_failures = _public_failure_list(runtime_failures)
     public_reward_failures = _public_failure_list(reward_failures)
@@ -6813,6 +6819,7 @@ def _condition_execution_summary(
         "scored_cases": len(expected_set.intersection(by_case)) if expected_ids else len(by_case),
         "expected_attempts": expected_attempts,
         "scored_attempts": scored_attempts,
+        "judge_failures": len(judge_failure_trials),
         **(
             {
                 "physical_expected_attempts": physical_expected_attempts,

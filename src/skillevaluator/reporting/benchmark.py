@@ -52,6 +52,7 @@ from skillevaluator.reporting.base import (
 from skillevaluator.reporting.run_status import resolve_run_status
 from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
 from skillevaluator.source_identity import evaluated_source_revision, recorded_evaluated_source
+from skillevaluator.tier3.evidence_volume import format_evidence_volume
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
 
 if TYPE_CHECKING:
@@ -234,6 +235,9 @@ class BenchmarkReporter(ReporterBase):
                 lines.append(
                     f"Same-agent comparable lift: **{completed['lift']:+.4f}** ({completed['lift'] * 100:+.2f} percentage points)."
                 )
+            evidence_line = format_evidence_volume((ae or {}).get("evidence_volume"))
+            if evidence_line:
+                lines.append(f"Evidence volume: {evidence_line}.")
             if completed["needs_attention"]:
                 lines.append(
                     "**Needs attention:** other execution failures remain. This completed-agent result does not certify the whole run."

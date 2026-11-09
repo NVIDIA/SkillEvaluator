@@ -4434,7 +4434,10 @@ class SecurityValidator(ValidatorBase):
         hooks are safe: a hook script that sends its input over a socket gets
         no blocking SkillSpector finding. Each manifest gets a Critical and a
         gate failure, so neither a ``--policy`` severity override nor
-        ``--llm-verify`` can clear it. The finding records the manifest's
+        ``--llm-verify`` can clear it; SkillEvaluator has no way to record a
+        review of the hooks, so only removing them passes the check. The
+        Critical does not stop a folder scan at this skill
+        (:attr:`_FAIL_FAST_EXEMPT_CHECKS`). The finding records the manifest's
         SHA-256 when it is a bundled file
         (:func:`_skillspector_bundled_file_bytes`), else ``None``.
         """
@@ -4449,13 +4452,13 @@ class SecurityValidator(ValidatorBase):
                     check_name=_SKILLSPECTOR_HOOK_UNVERIFIED_CHECK,
                     message=(
                         f"SkillSpector could not fully model the hooks in {manifest} (analyzer "
-                        f"{_SKILLSPECTOR_HOOK_ANALYZER} could not verify what they do with hook input), so they "
-                        "need a recorded review before this artifact can pass."
+                        f"{_SKILLSPECTOR_HOOK_ANALYZER} could not verify what they do with hook input), so this "
+                        "check cannot pass while these hooks are present."
                     ),
                     file_path=manifest,
                     suggestion=(
-                        f"Review {manifest} and every file its hooks run, or remove the hooks. Neither a --policy "
-                        "severity override nor --llm-verify lets this check pass."
+                        f"Review {manifest} and every file its hooks run. Only removing the hooks lets this check "
+                        "pass: neither a --policy severity override nor --llm-verify clears it."
                     ),
                     metadata={
                         "ledger_exceptions": [dict(row)],
@@ -4466,7 +4469,9 @@ class SecurityValidator(ValidatorBase):
                 ),
                 is_error=True,
             )
-            result.fail_gate(f"{manifest}: SkillSpector could not model these hooks; they need a recorded review")
+            result.fail_gate(
+                f"{manifest}: SkillSpector could not model these hooks; this check cannot pass while they are present"
+            )
             manifests.append(manifest)
         return manifests
 

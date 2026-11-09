@@ -111,12 +111,12 @@ _UPLOAD_SCRIPTS = {
 def _unverified_message(manifest: str) -> str:
     return (
         f"SkillSpector could not fully model the hooks in {manifest} (analyzer bundled_execution_surface could not "
-        "verify what they do with hook input), so they need a recorded review before this artifact can pass."
+        "verify what they do with hook input), so this check cannot pass while these hooks are present."
     )
 
 
 def _gate(manifest: str) -> str:
-    return f"{manifest}: SkillSpector could not model these hooks; they need a recorded review"
+    return f"{manifest}: SkillSpector could not model these hooks; this check cannot pass while they are present"
 
 
 def _report(name: str) -> dict:
@@ -253,8 +253,8 @@ def _assert_hook_critical(result: ValidationResult, root: Path, manifest: str = 
     assert finding.file_path == manifest
     assert finding.message == _unverified_message(manifest)
     assert finding.suggestion == (
-        f"Review {manifest} and every file its hooks run, or remove the hooks. Neither a --policy severity "
-        "override nor --llm-verify lets this check pass."
+        f"Review {manifest} and every file its hooks run. Only removing the hooks lets this check pass: neither a "
+        "--policy severity override nor --llm-verify clears it."
     )
     [row] = finding.metadata["ledger_exceptions"]
     assert {key: row[key] for key in _HOOK_ROW} == {**_HOOK_ROW, "path": manifest}

@@ -85,6 +85,34 @@ def _json_report(output_dir: Path) -> dict:
     return json.loads(next(output_dir.glob("*.json")).read_text(encoding="utf-8"))
 
 
+# The code-integrity validators run Bandit and Gitleaks, which a unit test
+# cannot rely on: CI installs no Gitleaks, and the managed install would
+# download it. Tests that select code-integrity replace them with this stub.
+EXTERNAL_SCANNER_VALIDATORS = ("CodeRiskValidator", "SecretsValidator", "HygieneValidator")
+
+
+class _PassingValidator:
+    name = "Built-in validator"
+    description = "Built-in validation"
+
+    def __init__(self, **_kwargs: object) -> None:
+        pass
+
+    @staticmethod
+    def validate(_target: Path) -> ValidationResult:
+        result = ValidationResult(validator_name="Built-in validator")
+        result.add_success("built_in", "Built-in validation completed")
+        return result
+
+    validate_security_only = validate
+    validate_pii_only = validate
+
+
+def _stub_validators(monkeypatch: pytest.MonkeyPatch, *validator_names: str) -> None:
+    for validator_name in validator_names:
+        monkeypatch.setattr(tier1_commands, validator_name, _PassingValidator)
+
+
 def test_unknown_content_records_manifest_checks_as_not_applicable(tmp_path: Path) -> None:
     repository = _ordinary_repository(tmp_path / "repository")
     ran: list[str] = []
@@ -222,13 +250,9 @@ def test_unknown_content_records_applicability_for_any_check_selection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checks: str, skip: str | None
 ) -> None:
     repository = _ordinary_repository(tmp_path / "repository")
-
-    def fake_security_scan(_self, _target: Path) -> ValidationResult:
-        result = ValidationResult(validator_name="Security Scan")
-        result.add_success("skillspector", "No security issues found")
-        return result
-
-    monkeypatch.setattr(tier1_commands.SecurityValidator, "validate_security_only", fake_security_scan)
+    # Only the PII scan runs for real: the security and code-integrity scans
+    # need SkillSpector, Bandit and Gitleaks, which CI does not provide.
+    _stub_validators(monkeypatch, "SecurityValidator", *EXTERNAL_SCANNER_VALIDATORS)
 
     results = run_validation(
         repository, checks=checks, skip=skip, content_type=CONTENT_TYPE_UNKNOWN, on_check=lambda _name: None
@@ -276,32 +300,14 @@ def test_validate_ordinary_repository_narrowed_to_content_scans_records_applicab
 def test_not_applicable_results_never_certify_publication(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repository = _ordinary_repository(tmp_path / "repository")
 
-    class PassingValidator:
-        name = "Built-in validator"
-        description = "Built-in validation"
-
-        def __init__(self, **_kwargs: object) -> None:
-            pass
-
-        @staticmethod
-        def validate(_target: Path) -> ValidationResult:
-            result = ValidationResult(validator_name="Built-in validator")
-            result.add_success("built_in", "Built-in validation completed")
-            return result
-
-        validate_security_only = validate
-        validate_pii_only = validate
-
-    for validator_name in (
+    _stub_validators(
+        monkeypatch,
         "SecurityValidator",
-        "CodeRiskValidator",
-        "SecretsValidator",
-        "HygieneValidator",
+        *EXTERNAL_SCANNER_VALIDATORS,
         "UnicodeSmuggleValidator",
         "ScriptLintValidator",
         "LicenseValidator",
-    ):
-        monkeypatch.setattr(tier1_commands, validator_name, PassingValidator)
+    )
 
     results = run_validation(repository, content_type=CONTENT_TYPE_UNKNOWN)
 

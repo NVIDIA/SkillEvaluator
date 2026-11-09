@@ -654,16 +654,20 @@ def test_rich_progress_at_80_columns_shows_the_ctrl_c_hint_and_the_full_plan(
     stream = _TTYBuffer()
     reporter = _stopping_frame_reporter(progress, stream, agents, runner._HARBOR_RUN_STOPPING_DETAIL)
     output = stream.getvalue()
-    frame = _render(_FakeLive.instances[0].renderables[-1], width=80)
+    table = _FakeLive.instances[0].renderables[-1]
     reporter.close()
 
-    agent_rows = [line for line in frame.splitlines() if line.startswith("│ Agent ") and "running" in line]
-    assert len(agent_rows) == len(agents)
     # The frame cuts each row to the terminal width; the second Ctrl+C hint
-    # comes first in the detail and is short, so it is still readable.
+    # comes first in the detail and is short, so it is still readable. It
+    # still fits two columns narrower: a legacy Windows console uses one
+    # column less, and one is to spare.
     hint = runner._HARBOR_RUN_STOPPING_DETAIL.split(";")[0]
-    assert hint.startswith("Ctrl+C again")
-    assert all(hint in row for row in agent_rows)
+    assert "Ctrl+C" in hint
+    for width in (80, 78):
+        frame = _render(table, width=width)
+        agent_rows = [line for line in frame.splitlines() if line.startswith("│ Agent ") and "running" in line]
+        assert len(agent_rows) == len(agents)
+        assert all(hint in row for row in agent_rows), (width, agent_rows)
     # Every plan value is printed in full above the frame.
     assert all(f"{agent}=provider/{agent}-large-model" in output for agent in agents)
     for value in (
@@ -3610,7 +3614,7 @@ def test_second_interrupt_forces_running_agents_to_stop(
     events = [(event.stage, event.state, event.detail) for event in reporter.events]
     stopping = [detail for stage, state, detail in events if stage == "agent:codex" and state == "running"]
     assert stopping[-1] == runner._HARBOR_RUN_STOPPING_DETAIL
-    assert stopping[-1].startswith("Ctrl+C again skips wait; stopping Harbor jobs")
+    assert stopping[-1].startswith("2nd Ctrl+C skips wait; stopping Harbor jobs")
     assert stopping[-1].endswith("up to 30s of environment cleanup")
     assert ("agent:codex", "failed", "interrupted before completion") in events
     assert events[-1] == ("run-finished", "failed", "Tier 3 evaluation interrupted")

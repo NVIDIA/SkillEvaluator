@@ -134,6 +134,43 @@ def test_activation_expectation_is_independent_of_perfect_task_score(
     assert validation["evidence_scopes"][0]["workflow"]["workflow_order"] == {"passed": False, "score": 0.0}
 
 
+@pytest.mark.parametrize("expected_skill", ["DEMO", " Demo "])
+@pytest.mark.parametrize(("skill", "status"), [("demo", "matched"), (None, "mismatched")])
+def test_primary_activation_identity_is_case_insensitive(
+    tmp_path: Path, expected_skill: str, skill: str | None, status: str
+) -> None:
+    trial = _payload([_collected(tmp_path, _trajectory(skill))], expected_skill)["trials"][0]
+    validation = trial["activation_validation"]
+    assert validation["expected_activation"] is True
+    assert validation["expectation_status"] == status
+    assert trial["overall"] == 1.0
+
+
+@pytest.mark.parametrize("alias", ["acceptable_skills", "acceptable_alternates"])
+@pytest.mark.parametrize("skill", ["demo", None])
+def test_allowed_alternate_activation_is_optional(tmp_path: Path, alias: str, skill: str | None) -> None:
+    entry = {"id": "case", "expected_skill": "other", alias: [" DEMO "]}
+    trial = _payload([_collected(tmp_path, _trajectory(skill))], entry=entry)["trials"][0]
+    validation = trial["activation_validation"]
+    assert validation["expected_activation"] is None
+    assert validation["expectation_status"] == "unknown"
+    assert validation["observed_activation"] == ("invoked" if skill else "not_invoked")
+    assert trial["overall"] == 1.0
+
+
+@pytest.mark.parametrize("alias", ["acceptable_skills", "acceptable_alternates"])
+@pytest.mark.parametrize(("skill", "status"), [("demo", "mismatched"), (None, "matched")])
+def test_explicit_negative_overrides_allowed_alternate(
+    tmp_path: Path, alias: str, skill: str | None, status: str
+) -> None:
+    entry = {"id": "case", "expected_skill": "other", alias: ["DEMO"], "should_trigger": False}
+    validation = _payload([_collected(tmp_path, _trajectory(skill))], entry=entry)["trials"][0][
+        "activation_validation"
+    ]
+    assert validation["expected_activation"] is False
+    assert validation["expectation_status"] == status
+
+
 @pytest.mark.parametrize(
     ("skill", "trace_present", "observed", "status"),
     [

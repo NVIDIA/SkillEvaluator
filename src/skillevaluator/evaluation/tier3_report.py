@@ -3064,7 +3064,7 @@ def _attach_activation_expectations(
     skill_name: str,
 ) -> None:
     """Compare authored expectations with observed use, independently of correctness."""
-    from skillevaluator.tier3.eval_core.checks import resolve_should_trigger
+    from skillevaluator.tier3.eval_core.checks import resolve_acceptable_skills, resolve_should_trigger
 
     entries: dict[str, list[dict[str, Any]]] = {}
     for entry in dataset:
@@ -3083,7 +3083,12 @@ def _attach_activation_expectations(
                     elif should_trigger is True:
                         expected_skill = entry.get("expected_skill")
                         if isinstance(expected_skill, str) and expected_skill.strip():
-                            expected = expected_skill == skill_name
+                            target = skill_name.strip().lower()
+                            if expected_skill.strip().lower() == target:
+                                expected = True
+                            elif target not in {name.lower() for name in resolve_acceptable_skills(entry)}:
+                                expected = False
+                            # Allowed alternate use is optional, so neither use nor non-use is required.
                 validation = trial["activation_validation"]
                 validation["expected_activation"] = expected
                 observed = validation["observed_activation"]

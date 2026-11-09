@@ -13,6 +13,10 @@ All notable changes to SkillEvaluator are documented in this file.
   claiming complete logical-trial activation or changing numeric grading.
   Explicit `should_trigger` precedence is preserved, and standard baselines
   retain trusted trajectory observations independently of null/N/A skill scores.
+  Primary skill identities match case-insensitively; accepted alternate use remains
+  optional, including the legacy alternate field, without changing numeric grades.
+  Unrendered activation diagnostics remain in canonical exports without consuming
+  HTML overview or failure-reason preview budgets.
 
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI

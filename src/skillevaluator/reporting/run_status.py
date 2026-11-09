@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from skillevaluator.models.result import ValidationResult
+    from skillevaluator.reporting.base import PublicationAssessment
 from skillevaluator.reporting.base import (
     assess_publication,
     is_cleanly_skipped,
@@ -56,12 +57,22 @@ class RunStatus:
     missing: tuple[str, ...]
     advisory: tuple[str, ...]
     _outcomes: Mapping[int, Status] = field(repr=False)
-    _publication: Callable[[], Status] = field(repr=False, compare=False)
+    _publication: Callable[[], PublicationAssessment] = field(repr=False, compare=False)
+
+    @cached_property
+    def publication_assessment(self) -> PublicationAssessment:
+        """Cache the existing assessment for final presentation consumers."""
+        return self._publication()
 
     @cached_property
     def publication(self) -> Status:
         """Assess publication once, only on surfaces that need its stricter verdict."""
-        return self._publication()
+        return {
+            "pass": Status.PASSED,
+            "neutral": Status.NEUTRAL,
+            "fail": Status.FAILED,
+            "incomplete": Status.INCOMPLETE,
+        }[self.publication_assessment.status]
 
     def of(self, result: ValidationResult) -> Status:
         outcome = self._outcomes.get(id(result))
@@ -104,7 +115,7 @@ def result_status(result: ValidationResult) -> Status:
     return Status.PASSED if result.passed else Status.FAILED
 
 
-def _tier(result: ValidationResult) -> int:
+def result_tier(result: ValidationResult) -> int:
     gate = result.metadata.get("gating")
     if isinstance(gate, dict) and type(gate.get("tier")) is int and gate["tier"] in (1, 2, 3):
         return gate["tier"]
@@ -136,7 +147,7 @@ def resolve_run_status(results: Iterable[ValidationResult], *, agent_eval=None, 
     )
     tiers = {}
     for number in (1, 2, 3):
-        members = tuple(result for result in results if _tier(result) == number)
+        members = tuple(result for result in results if result_tier(result) == number)
         blocking = [
             r.metadata["gating"].get("blocking", True) for r in members if isinstance(r.metadata.get("gating"), dict)
         ]
@@ -144,14 +155,8 @@ def resolve_run_status(results: Iterable[ValidationResult], *, agent_eval=None, 
             number, _combined(outcomes[id(r)] for r in members), any(blocking) if blocking else None, members
         )
 
-    def publication_status() -> Status:
-        assessment = assess_publication(list(results), agent_eval, expected_skill_name=expected_skill_name)
-        return {
-            "pass": Status.PASSED,
-            "neutral": Status.NEUTRAL,
-            "fail": Status.FAILED,
-            "incomplete": Status.INCOMPLETE,
-        }[assessment.status]
+    def publication_assessment() -> PublicationAssessment:
+        return assess_publication(list(results), agent_eval, expected_skill_name=expected_skill_name)
 
     return RunStatus(
         headline,
@@ -165,5 +170,5 @@ def resolve_run_status(results: Iterable[ValidationResult], *, agent_eval=None, 
             and outcomes[id(r)] != Status.PASSED
         ),
         MappingProxyType(outcomes),
-        publication_status,
+        publication_assessment,
     )

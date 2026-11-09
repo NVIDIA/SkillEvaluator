@@ -32,8 +32,9 @@ from skillevaluator.publication_identity import (
     publication_target_from_path,
 )
 from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter, SARIFReporter
-from skillevaluator.reporting.html import is_tier2_validator_name
 from skillevaluator.reporting.naming import DEFAULT_REPORT_BASENAME
+from skillevaluator.reporting.presentation import FinalRenderContext, build_final_render_context
+from skillevaluator.reporting.run_status import result_tier
 from skillevaluator.utils.rich_markup import escape_markup
 from skillevaluator.validators.base import continue_on_failure_scope
 from skillevaluator.validators.code_risk import CodeRiskValidator
@@ -476,26 +477,15 @@ def run_lint_scripts(target_path: Path) -> list[ValidationResult]:
     ]
 
 
-def _is_dedup_result(result: ValidationResult) -> bool:
-    """Return True when a result came from a Tier 2 deduplication validator."""
-    return is_tier2_validator_name(result.validator_name)
-
-
 def _derive_html_tabs(results: list[ValidationResult]) -> list[dict[str, str]]:
-    """Build the HTML navigation tabs from the tiers present in *results*.
-
-    Tier 1 is included only when a non-Tier-2 result is present; this keeps
-    standalone similarity and deduplication reports in their actual tier.
-    Tier 3 is added when a live agent-evaluation payload is attached.
-    """
-    tabs: list[dict[str, str]] = []
-    if not results or any(not _is_dedup_result(result) for result in results):
-        tabs.append({"id": "tier1", "label": "Tier 1: Security and Static Validation"})
-    if any(_is_dedup_result(r) for r in results):
-        tabs.append({"id": "tier2", "label": "Tier 2: Deduplication"})
-    if any((getattr(r, "metadata", None) or {}).get("agent_eval") for r in results):
-        tabs.append({"id": "tier3", "label": "Tier 3: Live Agent Evaluation"})
-    return tabs
+    """Build populated tabs with the same tier classifier as the HTML evidence."""
+    tiers = {result_tier(result) for result in results} if results else {1}
+    labels = {
+        1: "Tier 1: Security and Static Validation",
+        2: "Tier 2: Deduplication",
+        3: "Tier 3: Live Agent Evaluation",
+    }
+    return [{"id": f"tier{tier}", "label": labels[tier]} for tier in sorted(tiers)]
 
 
 def emit_reports(
@@ -511,6 +501,9 @@ def emit_reports(
     announce_paths: bool = True,
     sarif_scan_root: Path | None = None,
     sarif_repository_root: Path | None = None,
+    requested_tiers: tuple[int, ...] | None = None,
+    displayed_tiers: tuple[int, ...] | None = None,
+    presentation_context: FinalRenderContext | None = None,
 ) -> bool:
     """Render reports and return whether every result passed.
 
@@ -525,9 +518,15 @@ def emit_reports(
     """
     if policy is not None:
         apply_policy(results, policy)
+    context = presentation_context or build_final_render_context(
+        results,
+        requested_tiers=requested_tiers,
+        displayed_tiers=displayed_tiers,
+        expected_skill_name=expected_skill_name,
+    )
     if "cli" in report_formats:
         # The CLI report previews failed Tier 3 source checks only when a file written below lists them all.
-        CLIReporter(console=console, report_formats=report_formats).print_all(results)
+        CLIReporter(console=console, report_formats=report_formats, presentation_context=context).print_all(results)
 
     html_tabs = _derive_html_tabs(results)
     for fmt in report_formats:
@@ -539,6 +538,9 @@ def emit_reports(
                 target_path=target_path,
                 content_label=content_label,
                 tabs=html_tabs,
+                presentation_context=context,
+                requested_tiers=requested_tiers,
+                displayed_tiers=displayed_tiers,
                 expected_skill_name=expected_skill_name,
             )
         elif fmt == "sarif":

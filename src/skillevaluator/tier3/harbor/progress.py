@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from time import monotonic
 from typing import Literal, Protocol, TextIO, runtime_checkable
 
+from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, MUTED, RED, TEXT
 from skillevaluator.tier3.harbor.secret_redaction import redact_secrets_in_log_line
 from skillevaluator.utils.redaction import credential_uri_secret_values
 from skillevaluator.utils.rich_markup import strip_terminal_controls
@@ -177,15 +178,19 @@ class PlainProgressReporter:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._plan_rendered = False
+        self._last_progress_at: float | None = None
+        self._last_events: dict[str, tuple[str, str]] = {}
 
     @property
     def is_active(self) -> bool:
         return self._started_at is not None and not self._stop.is_set()
 
-    def start(self, plan: Tier3RunPlan) -> None:
+    def start_progress(self) -> None:
+        """Start the shared lifecycle before a plan (for the validation tiers)."""
         with self._lock:
             if self._started_at is None:
                 self._started_at = monotonic()
+                self._last_progress_at = self._started_at
                 self._stop.clear()
                 self._thread = threading.Thread(
                     target=self._heartbeat_loop,
@@ -193,6 +198,10 @@ class PlainProgressReporter:
                     daemon=True,
                 )
                 self._thread.start()
+
+    def start(self, plan: Tier3RunPlan) -> None:
+        self.start_progress()
+        with self._lock:
             self._render_plan(plan)
 
     def set_secret_values(self, values: list[str] | tuple[str, ...] | set[str]) -> None:
@@ -202,17 +211,26 @@ class PlainProgressReporter:
     def emit(self, event: ProgressEvent) -> None:
         with self._lock:
             detail = self._event_detail(event)
+            stage = self._safe_text(event.stage)
+            current = (event.state, detail)
+            if self._last_events.get(stage) == current:
+                return
+            self._last_events[stage] = current
+            self._last_progress_at = monotonic()
             if event.state == "running":
-                self._active[event.stage] = detail
+                self._active[stage] = detail
             elif event.state in _TERMINAL_STATES:
-                self._active.pop(event.stage, None)
+                self._active.pop(stage, None)
             suffix = f" - {detail}" if detail else ""
-            self._write_line(f"[{self._elapsed()}] {event.stage}: {event.state}{suffix}")
+            self._write_line(f"[{self._elapsed()}] {stage}: {event.state}{suffix}")
 
     def heartbeat(self) -> None:
         with self._lock:
-            if not self._active:
+            if not self._active or self._stop.is_set():
                 return
+            if self._last_progress_at is not None and monotonic() - self._last_progress_at < self._refresh_interval:
+                return
+            self._last_progress_at = monotonic()
             stages = ", ".join(sorted(self._active))
             self._write_line(f"[{self._elapsed()}] still running: {stages}")
 
@@ -237,6 +255,8 @@ class PlainProgressReporter:
                 self._thread = None
                 self._started_at = None
                 self._plan_rendered = False
+                self._last_events.clear()
+                self._last_progress_at = None
 
     def _render_plan(self, plan: Tier3RunPlan) -> None:
         first_plan = not self._plan_rendered
@@ -288,7 +308,13 @@ class PlainProgressReporter:
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
     def _heartbeat_loop(self) -> None:
-        while not self._stop.wait(self._refresh_interval):
+        while True:
+            delay = self._refresh_interval
+            with self._lock:
+                if self._active and self._last_progress_at is not None:
+                    delay = max(MIN_REFRESH_INTERVAL_SECONDS, delay - (monotonic() - self._last_progress_at))
+            if self._stop.wait(delay):
+                return
             self.heartbeat()
 
     def _safe_text(self, value: object) -> str:
@@ -298,8 +324,14 @@ class PlainProgressReporter:
         return self._safe_text(event.detail) if event.detail else ""
 
     def _write_line(self, line: str) -> None:
-        self._stream.write(f"{line}\n")
-        self._stream.flush()
+        if self._stop.is_set():
+            return
+        try:
+            self._stream.write(f"{line}\n")
+            self._stream.flush()
+        except (OSError, ValueError):
+            # A closed pipe must stop the heartbeat without gating evaluation.
+            self._stop.set()
 
 
 class RichProgressReporter(PlainProgressReporter):
@@ -340,6 +372,7 @@ class RichProgressReporter(PlainProgressReporter):
 
     def heartbeat(self) -> None:
         with self._lock:
+            self._last_progress_at = monotonic()
             if self._active:
                 self._refresh_live()
 
@@ -386,19 +419,19 @@ class RichProgressReporter(PlainProgressReporter):
         else:
             mode_label = "Skill-lift evaluation" if plan.baseline is not False else "Agent evaluation"
         title = Text.assemble(
-            ("Harbor Run Configuration", "bold cyan"),
+            ("Harbor Run Configuration", f"bold {TEXT}"),
             "  ·  ",
             (self._safe_text(plan.skill_name), "bold"),
             "  ·  ",
-            (mode_label, "magenta"),
+            (mode_label, MUTED),
         )
-        table = Table(title=title, box=box.ROUNDED, expand=True, show_lines=False)
+        table = Table(title=title, box=box.ROUNDED, border_style=FAINT, expand=True, show_lines=False)
         table.add_column("Stage", style="bold", no_wrap=True)
         table.add_column("State", width=12, no_wrap=True)
         table.add_column("Detail", ratio=1)
         table.add_column("Elapsed", justify="right", no_wrap=True)
 
-        table.add_row("Environment", Text("configured", style="cyan"), Text(self._safe_text(plan.environment)), "")
+        table.add_row("Environment", Text("configured", style=TEXT), Text(self._safe_text(plan.environment)), "")
         model_map = dict(plan.agent_models)
         agents = ", ".join(
             f"{self._safe_text(agent)}={self._safe_text(model_map[agent])}"
@@ -406,11 +439,11 @@ class RichProgressReporter(PlainProgressReporter):
             else self._safe_text(agent)
             for agent in plan.agents
         )
-        table.add_row("Agents / models", Text("configured", style="cyan"), Text(agents or "none"), "")
+        table.add_row("Agents / models", Text("configured", style=TEXT), Text(agents or "none"), "")
         if plan.provider:
             table.add_row(
                 "Provider",
-                Text("configured", style="cyan"),
+                Text("configured", style=TEXT),
                 Text(self._safe_text(plan.provider)),
                 "",
             )
@@ -433,13 +466,13 @@ class RichProgressReporter(PlainProgressReporter):
         )
         known = " · ".join(f"{label} {value}" for label, value in values if value is not None)
         if known:
-            table.add_row("Run plan", Text("configured", style="cyan"), Text(known), "")
+            table.add_row("Run plan", Text("configured", style=TEXT), Text(known), "")
         state_styles = {
-            "ready": "green",
-            "complete": "green",
-            "failed": "bold red",
-            "degraded": "bold yellow",
-            "delegated": "yellow",
+            "ready": GREEN,
+            "complete": GREEN,
+            "failed": f"bold {RED}",
+            "degraded": f"bold {AMBER}",
+            "delegated": AMBER,
             "skipped": "dim",
         }
         for stage, (event, finished_at) in self._live_events.items():
@@ -449,7 +482,7 @@ class RichProgressReporter(PlainProgressReporter):
                 else stage.replace("-", " ").title()
             )
             state = (
-                Spinner("dots", text=Text("running", style="cyan"))
+                Spinner("dots", text=Text("running", style=TEXT))
                 if event.state == "running"
                 else Text(event.state, style=state_styles.get(event.state, "white"))
             )

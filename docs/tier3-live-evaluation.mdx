@@ -11,6 +11,25 @@ Docker or another sandbox. NVIDIA Build in Docker, Kata, or local mode uses one 
 for both roles; OpenAI with Codex can also share its key. This guide takes you from a skill directory to a
 finished with-skill vs. without-skill comparison.
 
+## Paired Tier 3 in automatic CI
+
+The [all-tier CI setup](cli-onboarding.mdx#opt-in-to-three-tier-ci) consumes
+committed native `evals/` datasets with full coverage. It runs each selected
+case both with and without the skill; it does not use autopilot, generate new
+cases, or skip the baseline. Docker is the default, with native local mode as
+the other supported CI environment. Cloud backends remain available through
+the expert CLI but are outside this onboarding path.
+
+Tier 3 and Tier 2 are advisory; only Tier 1 gates CI. Onboarding's
+`--tier3-required`, GitHub's `tier3-required` input and GitLab's
+`SKILL_EVAL_TIER3_REQUIRED` variable are deprecated and ignored, even when true;
+they cannot make Tier 3 block CI. CI preserves native
+reports for missing credentials, readiness failures and partial runs as well
+as completed scores. Native reports include coverage and paired arm evidence,
+Skill Lift, attempts, available latency/resource metrics and trial links. An
+incomplete advisory result is visible and never described as a completed pass.
+See [retained CI evidence](reports.mdx#retained-three-tier-ci-evidence).
+
 ## What a live eval measures
 
 SkillEvaluator runs a real agent (`codex`, `claude-code`, or `opencode` —
@@ -88,10 +107,11 @@ using Harbor 0.24:
   `tier3 evaluate` fail the prerequisite check until you reinstall the extra.
 - Codex runs with `reasoning_effort=high`, the effort Harbor 0.22 used by
   default, so results stay comparable across Harbor upgrades.
-- Harbor installs Codex 0.161.0 and Claude Code 2.1.292 rather than the latest
-  release, so a new CLI release does not change results. Claude Code runs
-  Claude 5.5 and later models with `reasoning_effort=medium`. Local mode uses
-  your installed CLIs and checks that they are new enough for the model.
+- Harbor installs Codex 0.161.0, Claude Code 2.1.292 and OpenCode 1.19.5
+  rather than the latest release, so a new CLI release does not change
+  results. Claude Code runs Claude 5.5 and later models with
+  `reasoning_effort=medium`. Local mode uses your installed CLIs and checks
+  that they are new enough for the model.
 - Installed Codex adapters merge existing user and MCP configuration before the
   selected runtime provider and endpoint take precedence over conflicting route
   keys.
@@ -908,15 +928,34 @@ Linux finds a command by its exact name, so a later bare word spelled `HTTP`,
 not read as an upload, while a body item, piped or redirected input, or `--raw`
 after it still warns. Its method word still warns when a `name:@file` item
 follows, because that item may send a file as a header. The shell removes
-quotes and backslashes first, so a quoted or escaped item such as
-`X-Data:"@.env"` or `X-Data:\@.env` counts, and so does a `$VAR` word, which
-may hold one. A word with a slash or backslash, such as `./HTTP`,
-`/usr/local/bin/HTTP`, or the prose `HTTP/HTTPS`, and a word that ends in
-`.exe` in any case, such as `HTTP.exe` or `http.EXE`, are read as a path or a
-Windows program name, which a host may find in any case, so their method word
-still warns. A command word keeps the case-insensitive match, so
-`HTTP POST URL` still warns, and so does a here-document line or Markdown table
-cell that starts with `HTTP POST`, because each line is read as a command.
+quotes and backslashes and expands braces first, so a quoted, escaped, or brace
+item such as `X-Data:"@.env"`, `X-Data:\@.env`, or `X-Data:{@,}.env` counts,
+and so does a `$VAR` or backtick word, which may hold one. A word with a
+slash or backslash, such as `./HTTP`, `/usr/local/bin/HTTP`, or the prose
+`HTTP/HTTPS`, and a word that ends in `.exe` in any case, such as `HTTP.exe` or
+`http.EXE`, are read as a path or a Windows program name, which a host may find
+in any case, so their method word still warns. A command word keeps the
+case-insensitive match, so `HTTP POST URL` still warns. A word that a
+pass-through wrapper runs, a printer pipes on, or a `$VAR` command word may
+start keeps it too, so `strace -f HTTP POST URL`, `echo HTTP POST URL | sh`,
+and `$RUN HTTP POST URL` still warn. Another command that runs a later word,
+such as `find -exec`, does not keep it, so on a host that finds a command in
+any case, such as macOS or Windows, `find . -exec HTTP POST URL \;` with no
+body item does not warn; a method word alone sends no file or variable.
+
+Each here-document line is read as a command, and `|` and `;` start a new
+command, so some prose with a capitalized `HTTP` word still warns:
+
+- a line that starts with `HTTP POST`, as in `HTTP POST creates an item.`;
+- a method word followed by a `$VAR` or backtick word, such as an inline code
+  span, as in ``Use HTTP POST on `/api/items` to create an item.``, because
+  that word may hold a `name:@file` item;
+- a Markdown table row with an `HTTP` word in any cell, as in
+  `| Create | Send an HTTP request |`, because `|` reads as a pipe, so the
+  cell's `HTTP` word gets piped input;
+- `HTTP` and a method word right after a `;`, as in
+  `The HTTP POST method is not idempotent; HTTP PUT is.`, because `HTTP` is the
+  command word there.
 
 A fixed set of runners that start a command in another host, container, root,
 user, or network namespace, such as `ssh`, `docker`, `docker-compose`,
@@ -1030,6 +1069,10 @@ with-skill total minus baseline total: negative values indicate less observed
 use. A delta requires complete telemetry, complete successful arms, and matching
 case counts including repeated attempts. Missing measurements, skipped baselines,
 partial runs, and unsupported multi-step timing remain `N/A`; they are not zero.
+The same table splits each trial's trajectory time into LLM seconds and tool
+seconds, from native ATIF timing or inferred from step timestamps and Codex
+tool wall times, and says which source each arm used. See
+[Reports & Results](reports.mdx) for the timing rules.
 These are observations for this run, not a graded efficiency or cost claim.
 
 Each dimension receives a score and a diagnostic band: **PASS** at 0.50 or
@@ -1110,12 +1153,17 @@ machine-readable JSON contract, and how to judge whether a given lift is good.
     (`CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1` in every staged task), so the
     attempt ends on the selected model instead of retrying on another one.
     Like any other failed trial, the attempt is not scored, so the arm no
-    longer has complete attempt coverage: after one refusal in 20 cases with 3
-    attempts each, it reports `Scored attempt coverage is 59/60` and its
-    execution fails. `tier3 evaluate` then exits 1, and so does
-    `validate --block-on-agent-eval`. Review the case prompt and the skill
-    content that the agent read, then rerun, or evaluate the case with another
-    model. See [Agents & Sandboxes](agents-and-sandboxes.mdx#supported-agents).
+    longer has complete attempt coverage and its execution fails: after one
+    refusal in 20 cases with 3 attempts each, the run's `result.json` records
+    `Scored attempt coverage is 59/60`. `tier3 evaluate` then exits 1, and so
+    does `validate --block-on-agent-eval`. `tier3 evaluate --verbose` lists the
+    refused trial and its `AgentSafetyRefusalError` in the terminal. The
+    execution errors in `result.json` call it an `Unscoreable reward`, not an
+    agent runtime failure, because a refusal is the model's response to the
+    case rather than an infrastructure failure. Review the case prompt and the
+    skill content that the agent read, then rerun, or run the arm with another
+    model through `--agent-model claude-code=MODEL`. See
+    [Agents & Sandboxes](agents-and-sandboxes.mdx#supported-agents).
   </Accordion>
   <Accordion title="Results look wrong or a case is hard to diagnose">
     Re-run with `--harbor-keep-jobs` — Harbor artifacts are transient and

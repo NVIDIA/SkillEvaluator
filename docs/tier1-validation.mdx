@@ -22,6 +22,20 @@ The two-variable [provider setup](configuration.mdx) is enough to configure the
 LLM stages for NVIDIA Build or OpenAI. Calling `skillevaluator tier1` without a
 path shows help; expert subcommands remain available below.
 
+## Tier 1 in automatic CI
+
+The [all-tier CI setup](cli-onboarding.mdx#opt-in-to-three-tier-ci) keeps Tier 1
+as a required gate. GitHub calls the hardened legacy scanner workflow at the
+same evaluator commit; GitLab runs the same digest-pinned scanner image.
+Static CI checks receive no model key. Tier 2 and Tier 3 execute independently
+and retain their own native evidence, so one tier's failure does not erase the
+other reports. Changes to onboarding configuration trigger a full Tier 1 scan
+so the setup review exercises actual skills.
+
+Existing released Tier 1-only consumers keep their current workflow and
+bundled image pins. See [GitHub Actions](github-actions.mdx) or
+[GitLab CI/CD](gitlab-ci.mdx) to choose either path.
+
 ## What Tier 1 checks
 
 The direct `tier1 PATH` workflow runs Tier 1 only, as does

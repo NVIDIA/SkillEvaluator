@@ -66,6 +66,18 @@ The `dev` extra includes pytest-xdist, so you can parallelize any of these runs:
 pytest -n auto
 ```
 
+### Check the HTML report in a browser
+
+`tests/reporting/browser_navigation_checks.py` opens the HTML report in a headless browser and checks navigation, focus, themes, print view and layout at three screen widths. pytest doesn't collect it, and it needs Playwright:
+
+```bash title="Run the HTML report browser checks"
+pip install playwright
+python -m playwright install chromium
+python tests/reporting/browser_navigation_checks.py browser-checks
+```
+
+The script renders its own fixture reports, then writes screenshots and `navigation-results.json` to `browser-checks/`. To use an installed Chrome instead of Playwright's Chromium, set `SKILLEVALUATOR_TEST_BROWSER` to the browser's executable or pass `--browser`.
+
 ## Code style and dependencies
 
 Ruff owns linting — `make lint` is the project's lint gate. CI runs `ruff check` over the whole repository, so lint the files you touch even outside `src` and `tests`.
@@ -146,7 +158,7 @@ SkillEvaluator version you used for reproducibility:
 cff-version: 1.2.0
 title: "SkillEvaluator"
 type: software
-version: "0.7.2"
+version: "0.8.0"
 preferred-citation:
   type: article
   title: "Evaluating Skills, Not Just Agents: Agentic Continuous Evaluation of Skills"

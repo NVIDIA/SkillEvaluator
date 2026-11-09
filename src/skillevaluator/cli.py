@@ -13,7 +13,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import click
 
@@ -76,6 +76,10 @@ from skillevaluator.validators.pii_waivers import (
     load_pii_waivers,
     today_utc,
 )
+
+if TYPE_CHECKING:
+    from skillevaluator.reporting.presentation import FinalRenderContext
+
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
@@ -1635,9 +1639,24 @@ def _finish_pipeline_view(
     report_formats: tuple[str, ...],
     target_path: Path,
     agent_eval: bool,
+    presentation_context: FinalRenderContext | None = None,
 ) -> None:
     """Render the quiet-mode verdict panel and report footer."""
     from skillevaluator.reporting.console_ui import MUTED, Verdict, _is_skipped, first_fix
+    from skillevaluator.reporting.harbor_viewer import harbor_job_links
+    from skillevaluator.reporting.presentation import build_final_render_context
+    from skillevaluator.reporting.run_status import Status
+
+    context = presentation_context or build_final_render_context(
+        [
+            *tier_gate_results,
+            *([tier3_result] if tier3_result is not None and tier3_result not in tier_gate_results else []),
+        ]
+    )
+    details = tuple(f"Tier {number}: {tier.summary}" for number, tier in context.tiers.items() if tier.displayed)
+    if context.tiers[3].status != Status.NOT_RUN:
+        details += (context.coverage.text, *context.coverage.details)
+    details += (f"Publication eligibility: {context.publication_label}",)
 
     ext = {"html": ".html", "json": ".json", "markdown": ".md", "sarif": ".sarif.json"}
     links: list[tuple[str, str]] = [
@@ -1647,23 +1666,19 @@ def _finish_pipeline_view(
     ]
     payload = ((tier3_result.metadata or {}).get("agent_eval") or {}) if tier3_result is not None else {}
     summary = payload.get("summary") or payload
+    for job in harbor_job_links(payload):
+        for key, label in (("url", "Results"), ("analysis_url", "Analysis")):
+            if job.get(key):
+                links.append((f"{job['name']} {label}", job[key]))
 
     if not gate_failed:
-        ran = sum(1 for block in view.blocks if block.status not in ("pending", "skip"))
         advisory_failed = any(block.status == "fail" and block.number in {2, 3} for block in view.blocks)
         if advisory_failed:
-            headline = "gating tiers passed · advisory tier reported findings (see report)"
-        else:
-            headline = f"all {ran} tier{'s' if ran != 1 else ''} passed"
-            skipped = sum(
-                1 for r in tier_gate_results if isinstance(r.metadata, dict) and r.metadata.get("skipped_by_user")
-            )
-            if skipped:
-                headline += f"  ·  {skipped} check{'s' if skipped != 1 else ''} skipped"
-            lift = summary.get("overall_lift")
-            if agent_eval and isinstance(lift, (int, float)):
-                headline += f"  ·  skill lift {lift:+.2f}"
-        view.finish(Verdict(passed=True, headline=headline), links)
+            details += ("advisory tier reported findings (see report)",)
+        lift = summary.get("overall_lift")
+        if agent_eval and isinstance(lift, int | float) and not isinstance(lift, bool) and math.isfinite(lift):
+            details += (f"skill lift {lift:+.2f}",)
+        view.finish(Verdict(passed=True, headline=context.command_label, details=details), links)
         return
 
     failed = [result for result in tier_gate_results if not result.passed and not _is_skipped(result)]
@@ -1689,7 +1704,17 @@ def _finish_pipeline_view(
         headline = " · ".join(parts) or "validation failed"
     rerun = _rerun_hint(target_path, agent_eval)
     fix = [("see what to fix above, then rerun", MUTED)] if failed else first_fix(tier_gate_results)
-    view.finish(Verdict(passed=False, headline=headline, fix=fix, rerun=rerun), links)
+    view.finish(
+        Verdict(
+            passed=False,
+            headline=f"{context.command_label}: {headline}",
+            fix=fix,
+            rerun=rerun,
+            incomplete=context.command_status == Status.INCOMPLETE,
+            details=details,
+        ),
+        links,
+    )
 
 
 def _print_tier_banner(title: str) -> None:
@@ -2443,7 +2468,12 @@ def validate(
             _show_tier3_progress()
 
         reporter = (
-            ViewProgressReporter(_on_engine_tail, on_cases=_on_case_rows, pass_threshold=pass_threshold)
+            ViewProgressReporter(
+                _on_engine_tail,
+                on_cases=_on_case_rows,
+                pass_threshold=pass_threshold,
+                progress_reporter=view.progress_reporter,
+            )
             if quiet
             else None
         )
@@ -2553,8 +2583,17 @@ def validate(
     # "cli", which renders the full Rich report below the pipeline view.
     effective_formats = _effective_report_formats(report_formats, quiet=quiet)
     report_basename_value = make_timestamped_basename(f"{REPORT_PREFIX}-output")
+    from skillevaluator.reporting.presentation import build_final_render_context
+
+    presentation_context = build_final_render_context(
+        results,
+        requested_tiers=tuple(number for number, enabled in ((1, True), (2, dedup), (3, agent_eval)) if enabled),
+        displayed_tiers=(1, 2, 3),
+        expected_skill_name=publication_name,
+    )
     emit_reports(
         results,
+        presentation_context=presentation_context,
         report_formats=effective_formats,
         output_dir=output_dir,
         basename=report_basename_value,
@@ -2611,6 +2650,7 @@ def validate(
             report_formats=effective_formats,
             target_path=target_path,
             agent_eval=agent_eval,
+            presentation_context=presentation_context,
         )
     if gate_failed:
         raise click.ClickException("validation failed")
@@ -2943,7 +2983,9 @@ def _workflow_report_options(func):
     help="Override the packaged quality-default.yaml with a custom YAML file.",
 )
 @click.option("--pii-waivers", type=PII_WAIVERS_PATH, default=None, help=_PII_WAIVERS_HELP)
-@click.option("--profile", default=None, help="Validation policy [default: default; external is a compatibility alias].")
+@click.option(
+    "--profile", default=None, help="Validation policy [default: default; external is a compatibility alias]."
+)
 @click.option("--previous-version", default=None, help="Previous version for version checks.")
 @click.option(
     "--skillspector-baseline", type=SKILLSPECTOR_BASELINE_PATH, default=None, help=_SKILLSPECTOR_BASELINE_HELP

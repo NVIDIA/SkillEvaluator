@@ -24,7 +24,7 @@ SkillEvaluator selects the provider-native default: `opencode` for NVIDIA Build,
 | --- | --- |
 | `claude-code` | Anthropic's Claude Code CLI. `claude` is an accepted alias. Harbor installs Claude Code 2.1.292. Claude 5.5 and later models run with `reasoning_effort=medium`; older models keep Claude Code's default effort. |
 | `codex` | OpenAI's Codex CLI. The OpenAI-provider default. Harbor installs Codex 0.161.0. Runs with `reasoning_effort=high` so scores and cost stay comparable across Harbor releases. |
-| `opencode` | The OpenCode CLI. |
+| `opencode` | The OpenCode CLI. Harbor installs OpenCode 1.19.5. |
 
 The pinned CLI releases apply wherever Harbor installs the agent: Docker and
 the remote environments. [Local mode](#local-mode) runs the CLI already on your
@@ -73,12 +73,12 @@ keeps the fallback off only if that release honors the variable. Neither
 fallback back on, and other agents ignore the variable.
 
 Like any other failed trial, a refused attempt is not scored, so the arm no
-longer has complete attempt coverage: after one refusal in 20 cases with 3
-attempts each, it reports `Scored attempt coverage is 59/60` and its
-execution fails. `tier3 evaluate` then exits 1, and so does
-`validate --block-on-agent-eval`. On a route that serves the fallback model,
-such as the Anthropic API, the retry used to finish such an attempt and the
-arm succeeded, so a run that completed before can now fail. See
+longer has complete attempt coverage and its execution fails: after one
+refusal in 20 cases with 3 attempts each, the run's `result.json` records
+`Scored attempt coverage is 59/60`. `tier3 evaluate` then exits 1, and so
+does `validate --block-on-agent-eval`. On a route that serves the fallback
+model, such as the Anthropic API, the retry used to finish such an attempt,
+and the attempt was scored, so a run that completed before can now fail. See
 [Troubleshooting](tier3-live-evaluation.mdx#troubleshooting) for what to do.
 
 The `claude` alias is canonicalized to `claude-code` everywhere an agent

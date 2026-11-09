@@ -50,7 +50,6 @@ __all__ = [
 AE1_RULE_ID = "AE1"
 AE1_PATTERN = "Incomplete referenced artifact analysis"
 REFERENCE_SUMMARY_KEY = "skillspector_reference_summary"
-_SUMMARY_MESSAGE_PREFIX = "skillspector could not completely inspect "
 # The generic remediation of SkillSpector releases before v2.12.0. It suggests
 # that the file is absent, which is wrong for a file the scan read in part.
 _LEGACY_REMEDIATION = "Make the referenced artifact locally available and fully analyzable, or remove the reference."
@@ -461,13 +460,17 @@ def combine_reference_summaries(summaries: Iterable[object]) -> dict | None:
 
 
 def reference_summary_message(summary: object) -> str | None:
-    """The one-line text of a valid *summary*, the same in every report, else ``None``."""
+    """The one-line text of a valid *summary*, the same in every report, else ``None``.
+
+    It says only that each finding names its file and any reasons, because a
+    finding counts even when SkillSpector gave no reason for its file.
+    """
     record = reference_summary_record(summary)
     if record is None:
         return None
     occurrences = record["reference_occurrences"]
     count = f"at least {occurrences}" if record["reference_occurrences_truncated"] else str(occurrences)
     return (
-        f"{_SUMMARY_MESSAGE_PREFIX}{record['affected_artifacts']} referenced artifact(s) across {count} "
-        "reference occurrence(s); each AE1 finding names the artifact and why its analysis stopped"
+        f"skillspector could not completely inspect {record['affected_artifacts']} referenced artifact(s) across "
+        f"{count} reference occurrence(s); each AE1 finding names the artifact and any reasons SkillSpector gave"
     )

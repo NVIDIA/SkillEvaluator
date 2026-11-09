@@ -90,7 +90,7 @@ def _rendered(result: ValidationResult) -> dict[str, str]:
 def _phrase(artifacts: int, occurrences: str) -> str:
     return (
         f"skillspector could not completely inspect {artifacts} referenced artifact(s) across {occurrences} "
-        "reference occurrence(s); each AE1 finding names the artifact and why its analysis stopped"
+        "reference occurrence(s); each AE1 finding names the artifact and any reasons SkillSpector gave"
     )
 
 

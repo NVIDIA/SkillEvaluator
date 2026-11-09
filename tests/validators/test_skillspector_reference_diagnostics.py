@@ -34,6 +34,7 @@ from skillevaluator.skillspector_references import (
     AE1_PATTERN,
     index_legacy_reference_reasons,
     issue_diagnostics,
+    reference_summary_message,
     report_path,
 )
 from skillevaluator.utils.tool_runner import ToolResult
@@ -689,6 +690,32 @@ class TestSummaryRecord:
 
         assert "skillspector_reference_summary" not in result.metadata
         assert _count_messages(result) == []
+
+    def test_a_finding_without_reasons_counts_without_claiming_one(self) -> None:
+        """A named file with no reasons and no ledger rows is counted; the line claims no reason for it."""
+        report = _report(_PARSE_LIMIT_REPORT)
+        for issue in report["issues"]:
+            if issue["id"] == "AE1":
+                issue["evidence"] = {
+                    "target_path": "scripts/helper.pl",
+                    "target_disposition": "uninspected",
+                    "reasons": [],
+                }
+        report["analysis_completeness"]["ledger_exceptions"] = []
+
+        result = _process(report)
+
+        findings = _ae1(result)
+        assert len(findings) == 2
+        for finding in findings:
+            assert finding.metadata["skillspector_evidence"]["reasons"] == []
+            assert finding.suggestion.startswith(
+                "Referenced artifact scripts/helper.pl was not completely inspected (uninspected). Review "
+            )
+        assert reference_summary_message(result.metadata["skillspector_reference_summary"]) == (
+            "skillspector could not completely inspect 1 referenced artifact(s) across 2 reference occurrence(s); "
+            "each AE1 finding names the artifact and any reasons SkillSpector gave"
+        )
 
     def test_reports_without_ae1_evidence_have_no_summary(self) -> None:
         report = _report()

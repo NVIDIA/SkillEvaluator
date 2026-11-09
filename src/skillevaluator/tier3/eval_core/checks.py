@@ -537,19 +537,37 @@ _PARENT_CLIMB_RE = re.compile(r"^(?:.*/)?\.\.(?=/)")
 #   - the command line has a write target neither reading can resolve: a
 #     variable other than $HOME, a command substitution, "{}", or a word xargs
 #     supplies, such as the $RC of an append after RC=~/.bashrc or the files
-#     of "grep -l x ~/.bashrc | xargs sed -i s/x/y/";
-#   - or a command that names the path is one the parse does not read in full
-#     (a variable assignment, a for loop, interpreter code, a command xargs
-#     runs, any other program), and the text has a redirection, tee, or sed -i
-#     (_SHELL_WRITE_HINT_RE, the earlier rule's test).
+#     of "grep -l x ~/.bashrc | xargs sed -i s/x/y/". A destination matched on
+#     a path-component boundary (cp, mv, ...) whose literal end after its last
+#     unresolved part is a backup suffix, such as "$f.bak" or "{}.orig", names
+#     a backup, as "~/.bashrc.bak" does, so it is not unresolved;
+#   - or the text has a redirection, tee, or sed -i (_SHELL_WRITE_HINT_RE, the
+#     earlier rule's test), and a command the parse does not read in full (a
+#     variable assignment, a for loop, interpreter code, any other program)
+#     names the path, or gets a file operand the parse cannot resolve: a
+#     variable, a command substitution, or a word xargs supplies, as in
+#     `xargs dos2unix`, `while read f; do dos2unix "$f"; done`, or
+#     `bash -c 'dos2unix "$@"' _ ~/.bashrc`.
 # Commands that only read the files they name, the writers whose targets the
-# parse reads in full, sed without a "w" command, and a shell -c or eval whose
-# script was read are exempt from the second case, so "cat ~/.bashrc
-# 2>/dev/null" and "sed -n 1p ~/.bashrc | tee /tmp/x" are not writes. Text the
-# tokenizer cannot read, or longer than _WRITE_PARSE_MAX_CHARS, keeps the
-# earlier rule as a whole.
+# parse reads in full, and sed whose script names no protected file are exempt
+# from the second case, also when xargs runs them, so "cat ~/.bashrc
+# 2>/dev/null", "sed -n 1p ~/.bashrc | tee /tmp/x", and "xargs cat > /tmp/out"
+# are not writes. The script of a shell -c, su -c, or eval is read as commands
+# of its own, so the second case reads the shell's other words: its options and
+# the positional parameters after the script. Text the tokenizer cannot read, or
+# longer than _WRITE_PARSE_MAX_CHARS, keeps the earlier rule as a whole.
 _SHELL_WRITE_HINT_RE = re.compile(r"(>>|>\s*|tee\b|sed\s+-i|cat\s+>|printf\s+.*>)")
 _UNRESOLVED_WRITE_TARGET_RE = re.compile(r"[$`]|\{\}")
+# The literal end of a target after its last unresolved part ($name, $1, $@,
+# ${...}, $( ... ), `...`, or {}), and the backup suffixes that end may be. A
+# file with one of these suffixes is not read as a shell startup file, a sudoers
+# drop-in (sudo skips names with a "." or a trailing "~"), or a profile.d script.
+_UNRESOLVED_TAIL_RE = re.compile(r"(?:\$[a-z_][a-z0-9_]*|\$[0-9@*#?!$-]|[})`])([^$`{}()]*)\Z")
+_BACKUP_SUFFIX_RE = re.compile(r"\.(?:bak|backup|orig|old|save|sav|prev)(?:\.?[0-9]+)?~?|~")
+# A file operand the parse cannot resolve: one that holds "{}", or that starts
+# with, or has after "=", a variable other than $HOME or a command
+# substitution. A "$" inside other text, as in awk '{print $1}', is not one.
+_UNRESOLVED_OPERAND_RE = re.compile(r"\{\}|(?:^|=)(?:`|\$(?!\{?home\b))")
 _FILE_READER_COMMANDS = frozenset(
     {
         ".",
@@ -609,7 +627,12 @@ _FILE_READER_COMMANDS = frozenset(
     }
 )
 _PARSED_WRITE_COMMANDS = frozenset({"cp", "mv", "ln", "install", "dd", "touch", "truncate", "tee"})
-_SED_WRITE_COMMAND_RE = re.compile(r"(?:^|[;{}0-9$/gpIiMme])\s*[wW](?:\s|$)")
+# A sed script writes a file with w, W, or the w flag of s, and runs a command
+# with e or the e flag of s. The file name may follow the letter directly, as
+# in "1w/home/agent/.bashrc", so a space is put after a w, W, or e that starts
+# the script or follows an address, a separator, or the last "/" of an s
+# command, before the script is matched against the entries.
+_SED_GLUED_OPERAND_RE = re.compile(r"(?:^|(?<=[\s;{}!$0-9/]))([wWe])(?=[/~$%])")
 
 # A force-only rm deletes the same files as a plain rm, so it is destructive
 # only when a target lies under one of these top-level system or home
@@ -1015,6 +1038,11 @@ def _sensitive_path_match(text: Any, paths: list[str]) -> str | None:
     return next((entry for entry in paths if _path_entry_in(entry, raw) or _path_entry_in(entry, normalized)), None)
 
 
+def _home_anchored_text(text: Any) -> str:
+    """Lowercase *text* and rewrite its home directories to ``~``, leaving ``..`` and variables as written."""
+    return _HOME_ANCHOR_RE.sub("~", str(text).lower().replace("\\", "/"))
+
+
 def _shell_write_targets(command: str) -> list[str]:
     """Return the files *command* writes, as written, through a redirection, tee, or sed -i."""
     text = str(command).lower()
@@ -1127,17 +1155,17 @@ def _write_command(words: list[str]) -> tuple[str, list[str], bool] | None:
     return None
 
 
-def _shell_command_script(name: str, args: list[str]) -> str | None:
-    """Return the command string a shell -c, su -c, or eval command runs."""
+def _shell_command_script(name: str, args: list[str]) -> tuple[str, int, int] | None:
+    """Return the command string a shell -c, su -c, or eval command runs, and the slice of *args* that holds it."""
     if name in ("su", "runuser"):
         for index, word in enumerate(args):
             if word.startswith("--command="):
-                return word.partition("=")[2]
+                return word.partition("=")[2], index, index + 1
             if word in ("-c", "--command") and index + 1 < len(args):
-                return args[index + 1]
+                return args[index + 1], index + 1, index + 2
         return None
     if name == "eval":
-        return " ".join(args)
+        return " ".join(args), 0, len(args)
     if name not in _SHELL_COMMAND_INTERPRETERS:
         return None
     command_string = False
@@ -1154,7 +1182,7 @@ def _shell_command_script(name: str, args: list[str]) -> str | None:
             index += 1
         else:
             break
-    return args[index] if command_string and index < len(args) else None
+    return (args[index], index, index + 1) if command_string and index < len(args) else None
 
 
 def _find_exec_commands(args: list[str]) -> list[list[str]]:
@@ -1176,11 +1204,12 @@ def _shell_commands(text: str, depth: int = 0) -> list[tuple[str, list[str], lis
     """Return each simple command in shell *text*, or None when the text does not tokenize.
 
     Each command is ``(name, args, words, exempt)``. ``exempt`` marks a command
-    whose writes the parse reads in full: one that only reads the files it
-    names, a writer in _PARSED_WRITE_COMMANDS, sed without a ``w`` command, or a
-    shell -c or eval whose script was read, unless xargs runs it. The commands
-    of a -c or eval script, a find -exec, and a command substitution follow the
-    command they are in.
+    whose writes the parse reads in full (_writes_read_in_full) and that holds
+    no command substitution. The commands of a -c or eval script, a find
+    -exec, and a command substitution follow the command they are in. A
+    script that was read is left out of its shell's ``args`` and ``words``,
+    unless xargs runs the shell, so they keep the shell's options and the
+    positional parameters after the script.
     """
     word_lists = _shell_command_word_lists(text)
     if word_lists is None:
@@ -1198,18 +1227,21 @@ def _simple_write_commands(words: list[str], depth: int) -> list[tuple[str, list
         return [("", [], words, False)]
     name, args, xargs = parsed
     joined = " ".join(words)
-    # A command xargs runs gets operands the parse cannot see, so it is never exempt.
-    exempt = not xargs and (
-        name in _FILE_READER_COMMANDS
-        or name in _PARSED_WRITE_COMMANDS
-        or (name == "sed" and not any(_SED_WRITE_COMMAND_RE.search(arg) for arg in args))
-    )
+    # The words xargs adds to a reader are files it reads, and those it adds to
+    # a parsed writer are in its targets as _XARGS_INPUT_MARKER.
+    exempt = _writes_read_in_full(name, args)
     nested: list[tuple[str, list[str], list[str], bool]] = []
     if depth < _WRITE_PARSE_MAX_DEPTH:
-        script = _shell_command_script(name, args)
-        if script is not None and (inner := _shell_commands(script, depth + 1)) is not None:
+        found = _shell_command_script(name, args)
+        if found is not None and (inner := _shell_commands(found[0], depth + 1)) is not None:
             nested.extend(inner)
-            exempt = True
+            # The script's commands are read on their own. Without xargs, args
+            # are the last words, so the script's place in words follows.
+            if not xargs:
+                _, start, end = found
+                offset = len(words) - len(args)
+                words = [*words[: offset + start], *words[offset + end :]]
+                args = [*args[:start], *args[end:]]
         if name == "find":
             for exec_words in _find_exec_commands(args):
                 nested.extend(_simple_write_commands(exec_words, depth + 1))
@@ -1221,10 +1253,51 @@ def _simple_write_commands(words: list[str], depth: int) -> list[tuple[str, list
     return [(name, args, words, exempt), *nested]
 
 
+def _writes_read_in_full(name: str, args: list[str]) -> bool:
+    """Return whether the program *name* writes no file but the targets the parse reads from *args*.
+
+    That is a program that only reads the files it names, a writer in
+    _PARSED_WRITE_COMMANDS, or a sed none of whose scripts names a protected
+    file (a w command or an e command writes or runs one).
+    """
+    if name in _FILE_READER_COMMANDS or name in _PARSED_WRITE_COMMANDS:
+        return True
+    return name == "sed" and _sed_script_entry(args) is None
+
+
+def _sed_script_entry(args: list[str]) -> str | None:
+    """Return the protected entry a script of the sed command with *args* names, if any."""
+    for script in _sed_arguments(_command_operand_words(args))[1]:
+        for text in (script, _SED_GLUED_OPERAND_RE.sub(r"\1 ", script)):
+            if (entry := _sensitive_path_match(text, _SENSITIVE_WRITE_PATHS)) is not None:
+                return entry
+    return None
+
+
+def _unresolved_write_target(target: str, destination: bool = False) -> bool:
+    """Return whether the write *target* holds a part the parse cannot resolve, so it may be any file.
+
+    A variable other than $HOME, a command substitution, "{}", and a word
+    xargs adds are unresolved. A *destination*, which matches an entry on a
+    path-component boundary, is not unresolved when its literal end after its
+    last unresolved part is a backup suffix: "$f.bak" names a backup, as
+    "~/.bashrc.bak" does.
+    """
+    text = _home_anchored_text(target)
+    if not _UNRESOLVED_WRITE_TARGET_RE.search(text):
+        return False
+    if not destination:
+        return True
+    tail = _UNRESOLVED_TAIL_RE.search(text)
+    return tail is None or _BACKUP_SUFFIX_RE.fullmatch(tail.group(1).replace('"', "").replace("'", "")) is None
+
+
 def _may_hold_protected_file(directory: str) -> bool:
     """Return whether a file of any name inside *directory*, or below it, may be a protected file."""
+    if _unresolved_write_target(directory):
+        return _unresolved_write_target(directory, destination=True)
     text = _normalize_sensitive_path_text(directory).rstrip("/") + "/"
-    if text[0] not in "/~" or _UNRESOLVED_WRITE_TARGET_RE.search(text):
+    if text[0] not in "/~":
         return True
     return text.startswith(("/home/", "/users/")) or any(
         entry.startswith(text) or text.startswith(entry + "/") for entry in _SENSITIVE_WRITE_PATHS
@@ -1376,9 +1449,14 @@ def _in_place_edit_targets(args: list[str]) -> list[str]:
     return operands if in_place else []
 
 
-def _sed_in_place_targets(args: list[str]) -> list[str]:
-    """Return the files a sed -i or --in-place command edits."""
+def _sed_arguments(args: list[str]) -> tuple[bool, list[str], list[str]]:
+    """Split the arguments of a sed command.
+
+    Return whether it edits in place (-i, --in-place), its scripts (the -e
+    and -f values, or else the first operand), and its file operands.
+    """
     in_place = False
+    scripts: list[str] = []
     script_given = False
     operands: list[str] = []
     options = True
@@ -1391,12 +1469,16 @@ def _sed_in_place_targets(args: list[str]) -> list[str]:
         elif word == "--":
             options = False
         elif word.startswith("--"):
-            option, equals, _ = word.partition("=")
+            option, equals, value = word.partition("=")
             if option == "--in-place":
                 in_place = True
             elif option in _SED_VALUE_LONG_OPTIONS:
-                script_given |= option != "--line-length"
-                index += not equals
+                if not equals and index < len(args):
+                    value = args[index]
+                    index += 1
+                if option != "--line-length":
+                    script_given = True
+                    scripts.append(value)
         else:
             # -i takes the rest of the cluster as its suffix; -e, -f, and -l
             # take the rest of it, or the next word when they end it.
@@ -1405,12 +1487,23 @@ def _sed_in_place_targets(args: list[str]) -> list[str]:
                     in_place = True
                     break
                 if letter in _SED_VALUE_LETTERS:
-                    script_given |= letter != "l"
-                    index += position == len(word)
+                    value = word[position:]
+                    if not value and index < len(args):
+                        value = args[index]
+                        index += 1
+                    if letter != "l":
+                        script_given = True
+                        scripts.append(value)
                     break
-    if not in_place:
-        return []
-    return operands if script_given else operands[1:]
+    if not script_given and operands:
+        scripts, operands = [operands[0]], operands[1:]
+    return in_place, scripts, operands
+
+
+def _sed_in_place_targets(args: list[str]) -> list[str]:
+    """Return the files a sed -i or --in-place command edits."""
+    in_place, _, operands = _sed_arguments(args)
+    return operands if in_place else []
 
 
 def _command_operand_words(args: list[str]) -> list[str]:
@@ -1485,16 +1578,37 @@ def _sensitive_write_target(command: str) -> str | None:
         if (entry := _protected_write_destination(target)) is not None:
             return entry
     if named is None:
+        # A sed w or e command may name the file right after its letter, as
+        # in "1w/home/agent/.bashrc", where no home spelling starts a word.
+        named = next(
+            (
+                entry
+                for name, args, _, _ in commands
+                if name == "sed" and (entry := _sed_script_entry(args)) is not None
+            ),
+            None,
+        )
+    if named is None:
         return None
-    if any(
-        _UNRESOLVED_WRITE_TARGET_RE.search(_normalize_sensitive_path_text(target))
-        for target in [*text_targets, *edit_targets, *command_targets]
+    if any(_unresolved_write_target(target) for target in [*text_targets, *edit_targets]) or any(
+        _unresolved_write_target(target, destination=True) for target in command_targets
     ):
         return named
     if _SHELL_WRITE_HINT_RE.search(lowered):
-        for _, _, words, exempt in commands:
-            if not exempt and (entry := _sensitive_path_match(" ".join(words), _SENSITIVE_WRITE_PATHS)) is not None:
+        for name, args, words, exempt in commands:
+            if exempt:
+                continue
+            entry = _sensitive_path_match(" ".join(words), _SENSITIVE_WRITE_PATHS)
+            if entry is None and name == "sed":
+                entry = _sed_script_entry(args)
+            if entry is not None:
                 return entry
+            # A program the parse does not read may write a file it gets from
+            # a variable, a command substitution, or xargs.
+            if not _writes_read_in_full(name, args) and any(
+                _UNRESOLVED_OPERAND_RE.search(_home_anchored_text(word)) for word in _command_operand_words(args)
+            ):
+                return named
     return None
 
 

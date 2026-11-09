@@ -21,7 +21,9 @@ All notable changes to SkillEvaluator are documented in this file.
   the prompt and are not added again. Attempts that failed before scoring count
   as usage. Missing counters leave a partial total and are never estimated.
   The with-skill change needs complete counts for the same attempts in both
-  arms.
+  arms, and both arms must have succeeded. Token usage never displaces score
+  evidence: it joins the report payload last, and its case rows are left out
+  first, with a note, when the payload would pass its size or node limits.
 
 ### Changed
 

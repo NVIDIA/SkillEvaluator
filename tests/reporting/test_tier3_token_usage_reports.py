@@ -552,9 +552,15 @@ def test_docs_and_changelog_describe_the_token_usage_contract() -> None:
         "baseline_failed",
         "case_scope_mismatch",
         "agent_scope_mismatch",
+        "baseline_status_unknown",
+        "total_out_of_range",
+        "case_rows_omitted",
+        "token_usage_case_rows",
         "validate --verbose",
         "tier3 evaluate --verbose",
+        "tier3-benchmark.md",
         "first 50 case rows",
+        "at most 64 per agent",
     ):
         assert field in section, field
     unreleased = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8").split("\n## ", 2)[1]

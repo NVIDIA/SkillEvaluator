@@ -19,9 +19,13 @@ from skillevaluator.constants import (
     CONTENT_TYPE_SKILL,
     CONTENT_TYPE_UNKNOWN,
     CONTENT_TYPE_WORKFLOWS,
+    PLUGIN_CONTAINED_MANIFEST_DIR,
+    PLUGIN_CONTAINED_MANIFEST_FILE,
+    PLUGIN_MANIFEST_FILES,
     SCAN_EXCLUDED_DIRS,
     SCAN_EXCLUDED_FILES,
     SKILL_MANIFEST_FILE,
+    WORKFLOWS_MANIFEST_FILE,
 )
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.publication_evidence import (
@@ -117,9 +121,15 @@ _SKIPPED_VALIDATORS = {
 }
 # Checks that read a skill manifest (SKILL.md frontmatter, its version, its
 # quality). A target that ``--type auto`` detects as ``unknown`` and that holds
-# no ``SKILL.md`` entry has no manifest, so these are recorded as not
+# no artifact manifest entry has no manifest, so these are recorded as not
 # applicable rather than run.
 _MANIFEST_CHECKS = ("schema", "version", "quality")
+# Root manifests that auto-detection looks for, compared in any letter case.
+# Detection matches them by exact name with ``exists()``, so a mis-cased name
+# or a dangling symlink leaves the target ``unknown``.
+_ROOT_MANIFEST_NAMES = frozenset(
+    name.casefold() for name in (SKILL_MANIFEST_FILE, WORKFLOWS_MANIFEST_FILE, *PLUGIN_MANIFEST_FILES)
+)
 UNKNOWN_CONTENT_SKIP_REASON = (
     "not applicable: no supported skill, rules, workflows or plugin artifact detected; use --type to force"
 )
@@ -147,25 +157,49 @@ def _stamp_tier1_scan_scope(results: list[ValidationResult], target: Path) -> No
         result.metadata[TIER1_UNSCANNED_PATHS_KEY] = list(skipped)
 
 
-def _has_skill_manifest_entry(target: Path) -> bool:
-    """Return whether *target* is, or directly holds, an entry named ``SKILL.md`` in any letter case.
+def _entry_names(folder: Path) -> list[str] | None:
+    """Return the entry names of *folder*, or ``None`` when it cannot be listed."""
+    try:
+        with os.scandir(folder) as entries:
+            return [entry.name for entry in entries]
+    except OSError:
+        return None
 
-    Entry names are compared instead of calling ``exists()``, so a dangling
-    ``SKILL.md`` symlink and a mis-cased ``Skill.md`` count on every
-    filesystem: such a folder is a broken skill, not a target without one. A
-    directory that cannot be listed also counts, so the manifest checks run
-    and report the problem instead of being recorded as not applicable.
+
+def _has_manifest_entry(target: Path) -> bool:
+    """Return whether *target* is, or directly holds, an artifact manifest entry in any letter case.
+
+    The manifests are ``SKILL.md``, ``workflow-rules.mdc``,
+    ``agent_plugin.yaml``/``.yml`` and ``.claude-plugin/plugin.json``. Entry
+    names are compared instead of calling ``exists()``, so a dangling symlink
+    and a mis-cased name such as ``Skill.md`` count on every filesystem: such
+    a folder is a broken artifact, not a target without one. A directory that
+    cannot be listed also counts, and so does a ``.claude-plugin`` entry that
+    is not a listable directory, so the manifest checks run and report the
+    problem instead of being recorded as not applicable. A ``.claude-plugin``
+    folder without a ``plugin.json``, such as a marketplace's, does not count.
     """
-    manifest = SKILL_MANIFEST_FILE.casefold()
-    if target.name.casefold() == manifest and os.path.lexists(target):
+    contained_dir = PLUGIN_CONTAINED_MANIFEST_DIR.casefold()
+    contained_file = PLUGIN_CONTAINED_MANIFEST_FILE.casefold()
+    name = target.name.casefold()
+    if os.path.lexists(target) and (
+        name in _ROOT_MANIFEST_NAMES or (name == contained_file and target.parent.name.casefold() == contained_dir)
+    ):
         return True
     if not target.is_dir():
         return False
-    try:
-        with os.scandir(target) as entries:
-            return any(entry.name.casefold() == manifest for entry in entries)
-    except OSError:
+    names = _entry_names(target)
+    if names is None:
         return True
+    for entry in names:
+        folded = entry.casefold()
+        if folded in _ROOT_MANIFEST_NAMES:
+            return True
+        if folded == contained_dir:
+            contained = _entry_names(target / entry)
+            if contained is None or any(item.casefold() == contained_file for item in contained):
+                return True
+    return False
 
 
 def _stamp_tier1_applicability(results: list[ValidationResult]) -> None:
@@ -227,10 +261,10 @@ def _schema_validator_for(content_type: str | None, policy: ValidationPolicy | N
     """Return the schema validator matching the (forced or detected) content type.
 
     Rules, workflows, and plugins use their dedicated schema validators; skill
-    content, ``None`` and an ``unknown`` folder that holds a ``SKILL.md``
-    entry fall back to the skill :class:`SchemaValidator` (the historical
-    default). ``run_validation`` records the schema check as not applicable for
-    any other ``unknown`` target instead of calling this.
+    content, ``None`` and an ``unknown`` folder that holds an artifact
+    manifest entry fall back to the skill :class:`SchemaValidator` (the
+    historical default). ``run_validation`` records the schema check as not
+    applicable for any other ``unknown`` target instead of calling this.
     """
     if content_type == CONTENT_TYPE_RULES:
         return RulesSchemaValidator()
@@ -286,8 +320,10 @@ def run_validation(
     manifest checks ``schema``, ``version`` and ``quality`` are recorded as not
     applicable instead of run, and every result carries the
     ``tier1_applicability`` record, while the content scans still run. A target
-    that holds a ``SKILL.md`` entry in any letter case, including a dangling
-    symlink, is a broken skill, so its manifest checks still run and fail.
+    that holds an artifact manifest entry (``SKILL.md``, ``workflow-rules.mdc``,
+    ``agent_plugin.yaml``/``.yml`` or ``.claude-plugin/plugin.json``) in any
+    letter case, including a dangling symlink, is a broken artifact, so its
+    manifest checks still run and fail.
     ``None`` keeps the historical skill behavior. When *fail_fast* is set, the
     run stops after the first failing check. *continue_on_failure* overrides
     *fail_fast* and also keeps batch folder validation scanning every skill past
@@ -306,7 +342,7 @@ def run_validation(
     results: list[ValidationResult] = []
     initial_target = publication_target_from_path(target_path)
     skill_like = content_type in (None, CONTENT_TYPE_SKILL, CONTENT_TYPE_UNKNOWN)
-    manifest_not_applicable = content_type == CONTENT_TYPE_UNKNOWN and not _has_skill_manifest_entry(target_path)
+    manifest_not_applicable = content_type == CONTENT_TYPE_UNKNOWN and not _has_manifest_entry(target_path)
 
     def _run_result(
         check_id: str,

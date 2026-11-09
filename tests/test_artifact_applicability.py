@@ -6,8 +6,10 @@
 The skill-manifest checks (schema, version, quality) are recorded as not
 applicable instead of failing with "No skills found"; the content scans still
 run with their unrestricted scope, and such a run never certifies Tier 1. A
-folder that holds a ``SKILL.md`` entry in any letter case, or a dangling
-``SKILL.md`` symlink, is a broken skill and still fails the manifest checks.
+folder that holds an artifact manifest entry (``SKILL.md``,
+``workflow-rules.mdc``, ``agent_plugin.yaml``/``.yml`` or
+``.claude-plugin/plugin.json``) in any letter case, or a dangling symlink by
+one of those names, is a broken artifact and still fails the manifest checks.
 """
 
 from __future__ import annotations
@@ -70,7 +72,7 @@ def _row_text(row) -> str:
 
 
 def _broken_skill(root: Path) -> Path:
-    """A folder that is meant to be a skill but whose manifest the checks cannot read."""
+    """A folder that is meant to be an artifact but whose manifest the checks cannot read."""
     root.mkdir(parents=True)
     (root / "README.md").write_text("# Example tool\n", encoding="utf-8")
     return root
@@ -205,29 +207,82 @@ def test_unknown_content_with_a_mis_cased_manifest_still_fails_the_manifest_chec
     assert data["overall_status"] == "failed"
 
 
-def test_unknown_content_with_a_dangling_manifest_symlink_still_fails_schema(tmp_path: Path) -> None:
-    folder = _broken_skill(tmp_path / "my-tool")
+def _dangling_symlink(link: Path) -> None:
+    link.parent.mkdir(parents=True, exist_ok=True)
     try:
-        (folder / "SKILL.md").symlink_to("missing-target.md")
+        link.symlink_to("missing-target")
     except (OSError, NotImplementedError) as exc:
         pytest.skip(f"symlinks unavailable: {exc}")
 
-    results = run_validation(
-        folder, checks="schema,quality,pii", content_type=CONTENT_TYPE_UNKNOWN, on_check=lambda _name: None
-    )
 
+def _assert_manifest_check_failed(results: list[ValidationResult]) -> None:
     schema = _by_name(results)["Schema & Repository Governance"]
     assert not schema.metadata.get("skipped")
     assert not schema.passed
     assert not any("tier1_applicability" in result.metadata for result in results)
 
 
-def test_validate_folder_with_a_dangling_manifest_symlink_still_fails(tmp_path: Path) -> None:
+# Every manifest auto-detection looks for. A dangling symlink by one of these
+# names is not detected, so the target is ``unknown``, but it is a broken
+# artifact rather than a target without one.
+DANGLING_MANIFESTS = [
+    "SKILL.md",
+    "workflow-rules.mdc",
+    "agent_plugin.yaml",
+    "agent_plugin.yml",
+    ".claude-plugin/plugin.json",
+    ".claude-plugin",
+]
+
+
+@pytest.mark.parametrize("manifest", DANGLING_MANIFESTS)
+def test_unknown_content_with_a_dangling_manifest_symlink_still_fails_schema(tmp_path: Path, manifest: str) -> None:
     folder = _broken_skill(tmp_path / "my-tool")
-    try:
-        (folder / "SKILL.md").symlink_to("missing-target.md")
-    except (OSError, NotImplementedError) as exc:
-        pytest.skip(f"symlinks unavailable: {exc}")
+    _dangling_symlink(folder / manifest)
+
+    results = run_validation(
+        folder, checks="schema,quality,pii", content_type=CONTENT_TYPE_UNKNOWN, on_check=lambda _name: None
+    )
+
+    _assert_manifest_check_failed(results)
+
+
+@pytest.mark.parametrize("manifest", ["Workflow-Rules.mdc", "Agent_Plugin.YAML", ".Claude-Plugin/Plugin.JSON"])
+def test_unknown_content_with_a_mis_cased_artifact_manifest_still_fails_schema(tmp_path: Path, manifest: str) -> None:
+    # Auto-detection matches these names exactly, so case-sensitive
+    # filesystems report such a folder as unknown.
+    folder = _broken_skill(tmp_path / "my-tool")
+    path = folder / manifest
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("name: my-tool\n", encoding="utf-8")
+
+    results = run_validation(
+        folder, checks="schema,quality,pii", content_type=CONTENT_TYPE_UNKNOWN, on_check=lambda _name: None
+    )
+
+    _assert_manifest_check_failed(results)
+
+
+def test_unknown_content_with_only_a_marketplace_manifest_is_not_applicable(tmp_path: Path) -> None:
+    # A marketplace repository lists plugins; its .claude-plugin folder holds
+    # no plugin.json, so it is not a broken plugin.
+    repository = _ordinary_repository(tmp_path / "repository")
+    marketplace = repository / ".claude-plugin" / "marketplace.json"
+    marketplace.parent.mkdir()
+    marketplace.write_text('{"name": "example", "plugins": []}\n', encoding="utf-8")
+
+    results = run_validation(
+        repository, checks="schema,pii", content_type=CONTENT_TYPE_UNKNOWN, on_check=lambda _name: None
+    )
+
+    assert is_cleanly_skipped(_by_name(results)["Schema & Repository Governance"])
+    assert all(result.metadata["tier1_applicability"] == APPLICABILITY for result in results)
+
+
+@pytest.mark.parametrize("manifest", ["SKILL.md", ".claude-plugin/plugin.json"])
+def test_validate_folder_with_a_dangling_manifest_symlink_still_fails(tmp_path: Path, manifest: str) -> None:
+    folder = _broken_skill(tmp_path / "my-tool")
+    _dangling_symlink(folder / manifest)
     reports = tmp_path / "reports"
 
     exit_code, output = _validate(

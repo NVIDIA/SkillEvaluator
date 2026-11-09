@@ -815,7 +815,7 @@ For CI and tooling, two JSON entry points matter:
   `--skip` is then `skipped`, with a `skip_reason` that starts with
   `not applicable`. The key is absent when Tier 1 ran those checks, as it
   does for a detected artifact, a forced `--type`, or a folder with a
-  mis-cased or dangling `SKILL.md`.
+  mis-cased or dangling manifest such as `SKILL.md`.
 
 Both paths speak the same dialect: standalone `tier3 evaluate` and
 `validate --tier3` share one HTML renderer for `report.html`, and both embed

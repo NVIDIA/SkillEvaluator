@@ -40,8 +40,10 @@
     {
       "id": "calculator-dataset",
       "artifact": "src/skillevaluator/tier3/reference_skills/calculator/evals/evals.json",
+      "repository_commit": "86f1a1f05bc5f73e1c0ee3e8bff0b5ff062913f4",
+      "url": "https://github.com/NVIDIA/SkillEvaluator/blob/86f1a1f05bc5f73e1c0ee3e8bff0b5ff062913f4/src/skillevaluator/tier3/reference_skills/calculator/evals/evals.json",
       "sha256": "a614af8bc2e464b7e9e764c8591b2469b511450d897834d8a8edd73f34033ff2",
-      "availability": "Bundled public source in this repository."
+      "availability": "Historical public source at the pinned repository commit; hash and JSON pointers describe the input used by the actual run, before dataset migration."
     }
   ],
   "examples": [

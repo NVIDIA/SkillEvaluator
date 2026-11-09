@@ -829,8 +829,11 @@ retained evidence when assessing an explanation:
 | Next action | State the action justified by the evidence, the evidence needed to verify it, and whether a skill change is warranted. |
 | Provenance and review | Distinguish the execution agent, judge/model and assessment author/model. Record unknown provenance explicitly, review findings and outstanding signoff. |
 
-Source IDs in the worksheet identify retained artifacts by hash, not public
-download links. The original run directories are not distributed here. The
+Source IDs in the worksheet identify retained artifacts by hash. The public
+calculator dataset includes an immutable repository commit, path and source URL
+for the historical input used by the run; its original hash and JSON pointers
+remain tied to that revision, even after the bundled dataset migrates. The
+original run directories are not distributed here. The
 bounded excerpts make this review inspectable, but do not allow readers to
 independently reproduce every source claim. Keep originals under their existing
 access policy; remove credentials, host paths and private task content before

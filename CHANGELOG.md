@@ -25,10 +25,15 @@ All notable changes to SkillEvaluator are documented in this file.
   three rows. With SkillSpector before v2.12.0 the finding was titled
   `Unknown (AE1)` and told the user to make the file available although
   SkillSpector had read part of it. It now carries the rule's name and the
-  reasons from the report's ledger rows for the file. A failed check also counts
-  the files and the lines that name them in one line of the terminal, Markdown
-  and HTML reports, and in the JSON field `skillspector_reference_summary`.
-  Severities, scan completeness and gates are unchanged.
+  reasons from the report's ledger rows for the file. Its check name, and so its
+  SARIF rule ID, changes: a `severity_overrides` entry keyed on
+  `SECURITY.Unknown (AE1)` must now use
+  `SECURITY.Incomplete referenced artifact analysis (AE1)`. The JSON field
+  `skillspector_reference_summary` counts the files and the lines that name
+  them for every result, and a failed check shows the counts in one line of
+  the terminal, Markdown and HTML reports. Severities and scan completeness are
+  unchanged; a gate changes only where an override of `SECURITY.Unknown (AE1)`
+  was what let the check pass.
 
 ### Changed
 

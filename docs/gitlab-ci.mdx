@@ -74,7 +74,8 @@ pipeline, so a merged file must keep this shape:
    reports whether the root is recognized and warns about unguarded root jobs.
 
 The shared configuration runs the pinned Tier 1 image plus parallel native
-Tier 2 and Tier 3 jobs. Only Tier 1 is required; Tier 2 and Tier 3 are advisory,
+Tier 2 and Tier 3 jobs. Tier 2 runs without a Docker service. Only Tier 1 is
+required; Tier 2 and Tier 3 are advisory,
 including failed or incomplete outcomes. The deprecated
 `SKILL_EVAL_TIER3_REQUIRED` variable is ignored, including when set to `'true'`;
 it cannot make Tier 3 block CI. Native execution jobs retain failed outcomes
@@ -109,7 +110,7 @@ Do not add deployment approval rules to these environments. Depending on the
 GitLab version and its `prevent_blocking_non_deployment_jobs` feature flag,
 approval rules either do not gate these jobs or turn them into manual jobs
 that wait to be run. Restrict who can run them with the protected
-environments' deploy access. The default Docker
+environments' deploy access. The Tier 3 Docker
 service needs a privileged runner with Docker-in-Docker enabled. The daemon accepts only TLS clients on
 port 2376 (`DOCKER_TLS_CERTDIR: /certs`), so agent containers cannot use the
 Docker API. Configure the runner with `volumes = ["/certs/client"]` so the job
@@ -199,6 +200,13 @@ variables:
 skill-evaluation-native:
   timeout: 45 minutes
 ```
+
+Timeout and runner-tag overrides on `skill-evaluation-native` apply to both
+native tiers. The
+`skill-evaluation-native-tier2` job extends that public job and clears its
+Docker service and TLS client variables; a caller's `services` override applies
+to Tier 3. The generated local-mode caller sets `services: []` on
+`skill-evaluation-native` to disable Tier 3's Docker service too.
 
 Keep a manual tier selection quoted, for example `SKILL_EVAL_TIERS: '1,2,3'`.
 GitLab's YAML parser reads the unquoted value as the number `123`. The CLI

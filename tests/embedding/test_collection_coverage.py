@@ -174,3 +174,127 @@ def test_provider_failure_retains_selection_coverage(tmp_path: Path, monkeypatch
     assert result.is_incomplete
     assert any(detail.check_name == "collection_coverage" for detail in result.success_details)
     assert any("broken-000/SKILL.md: invalid_yaml" in error for error in result.errors)
+
+
+def _single_skill(root: Path, name: str) -> Path:
+    path = root / name
+    path.mkdir(parents=True)
+    (path / "SKILL.md").write_text(f"---\nname: {name}\ndescription: Task {name}\n---\n")
+    return path
+
+
+@pytest.mark.parametrize("initial_malformed", [0, 1])
+@pytest.mark.parametrize("failure", ["provider", "preflight", "minimum", "vector", "input"])
+def test_failed_build_preserves_committed_index_and_coverage(
+    tmp_path: Path, initial_malformed: int, failure: str
+) -> None:
+    first = tmp_path / "first"
+    _collection(first, initial_malformed)
+    second = tmp_path / "second"
+    _single_skill(second, "gamma")
+    _single_skill(second, "delta")
+    if not initial_malformed:
+        invalid = _single_skill(second, "broken")
+        (invalid / "SKILL.md").write_text("No valid frontmatter")
+    client = _client()
+    client.embed_single.return_value = [1.0, 0.0]
+    registry = EmbeddingRegistry(client, max_scalar_comparisons=1)
+    registry.build_from_directory(first, "skill")
+    committed_coverage = registry.coverage
+    original = {key: entry.embedding[:] for key, entry in registry._entries.items()}
+    if failure == "provider":
+        client.embed.side_effect = SimilarityConfigError("synthetic failure")
+    elif failure == "vector":
+        client.embed.side_effect = lambda texts: [[float("nan"), 0.0] for _ in texts]
+    elif failure == "input":
+        (second / "gamma" / "SKILL.md").write_text("---\nname: gamma\ndescription: " + "x" * 17000 + "\n---\n")
+    with pytest.raises((ValueError, SimilarityConfigError)):
+        registry.build_from_directory(
+            second, "skill", minimum_entries=3 if failure == "minimum" else 1, for_pairwise_scan=failure == "preflight"
+        )
+    assert registry.coverage is committed_coverage
+    assert registry.latest_attempt_coverage.skipped_count == (not initial_malformed)
+    assert registry._vector_dimension == 2
+    assert {key: entry.embedding for key, entry in registry._entries.items()} == original
+    # Query behavior must continue to describe the committed index.
+    registry._max_scalar_comparisons = 128000000
+    assert [match.entry_b for match in registry.query("target", 0.75)] == ["alpha"]
+    destination = tmp_path / "retained.json"
+    if initial_malformed:
+        with pytest.raises(ValueError, match="incomplete"):
+            registry.save_catalog(destination)
+        assert not destination.exists()
+    else:
+        registry.save_catalog(destination)
+        assert {entry["name"] for entry in json.loads(destination.read_text())["entries"]} == {"alpha", "beta"}
+
+
+@pytest.mark.parametrize("selection", ["strict_subset", "disjoint_explicit", "disjoint_directory", "clean_refresh"])
+def test_successful_build_replaces_partial_index_completely(tmp_path: Path, selection: str) -> None:
+    first = tmp_path / "first"
+    _collection(first)
+    client = _client()
+    client.embed_single.return_value = [1.0, 0.0]
+    registry = EmbeddingRegistry(client)
+    registry.build_from_directory(first, "skill")
+    expected = "alpha" if selection in {"strict_subset", "clean_refresh"} else "gamma"
+    if selection == "strict_subset":
+        count = registry.build_from_paths(first, [first / "alpha"])
+    elif selection == "clean_refresh":
+        (first / "beta" / "SKILL.md").unlink()
+        (first / "broken-000" / "SKILL.md").unlink()
+        count = registry.build_from_directory(first, "skill")
+    else:
+        second = tmp_path / "second"
+        path = _single_skill(second, "gamma")
+        count = (
+            registry.build_from_paths(second, [path])
+            if selection == "disjoint_explicit"
+            else registry.build_from_directory(second, "skill")
+        )
+    assert count == 1
+    assert registry.size == 1
+    client.embed_single.return_value = [1.0, 0.0] if expected == "alpha" else [0.0, 1.0]
+    assert [match.entry_b for match in registry.query("target", 0.75)] == [expected]
+    destination = tmp_path / "replacement.json"
+    registry.save_catalog(destination)
+    assert [entry["name"] for entry in json.loads(destination.read_text())["entries"]] == [expected]
+    if selection in {"strict_subset", "disjoint_explicit"}:
+        assert registry.coverage is None
+    else:
+        assert registry.coverage.selected_count == 1
+        assert registry.coverage.indexed_count == 1
+        assert registry.coverage.skipped_count == 0
+        assert registry.latest_attempt_coverage is registry.coverage
+
+
+def test_empty_directory_replacement_does_not_retain_previous_entries(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    _collection(first)
+    registry = EmbeddingRegistry(_client())
+    registry.build_from_directory(first, "skill")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert registry.build_from_directory(empty, "skill") == 0
+    assert registry.size == 0
+    assert registry._vector_dimension is None
+    with pytest.raises(ValueError, match="empty"):
+        registry.save_catalog(tmp_path / "empty.json")
+
+
+def test_complete_replacement_can_change_vector_width(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    _collection(first)
+    client = _client()
+    registry = EmbeddingRegistry(client)
+    registry.build_from_directory(first, "skill")
+    second = tmp_path / "second"
+    _single_skill(second, "gamma")
+    client.embed.side_effect = lambda texts: [[0.0, 0.0, 1.0] for _ in texts]
+    assert registry.build_from_directory(second, "skill") == 1
+    assert registry._vector_dimension == 3
+    destination = tmp_path / "three-dimensional.json"
+    registry.save_catalog(destination)
+    saved = json.loads(destination.read_text())
+    assert saved["vector_dimension"] == 3
+    assert [entry["name"] for entry in saved["entries"]] == ["gamma"]

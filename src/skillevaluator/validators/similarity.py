@@ -232,7 +232,7 @@ class SimilarityValidator(ValidatorBase):
 
     @staticmethod
     def _record_coverage(registry: EmbeddingRegistry, result: ValidationResult) -> None:
-        coverage = registry.coverage
+        coverage = registry.latest_attempt_coverage
         if not isinstance(coverage, ExtractionResult):
             return
         if any(detail.check_name == "collection_coverage" for detail in result.success_details):

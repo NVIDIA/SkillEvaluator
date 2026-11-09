@@ -9,7 +9,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Collection similarity reports selected, indexed and skipped manifests with bounded
   exclusion reasons. Malformed selected manifests now make the scan incomplete and
   block catalog writes. A standalone synthetic scale benchmark records limits and
-  stage measurements without provider requests.
+  stage measurements without provider requests. Reused Python registries now
+  replace the complete selection on successful builds and preserve committed
+  entries, vector dimensions and coverage together on failure; callers that
+  relied on undocumented merging must pass their complete intended selection.
 
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI

@@ -200,6 +200,7 @@ class EmbeddingRegistry:
         self._entries: dict[str, RegistryEntry] = {}
         self._vector_dimension: int | None = None
         self._coverage: ExtractionResult | None = None
+        self._latest_attempt_coverage: ExtractionResult | None = None
 
     @property
     def size(self) -> int:
@@ -207,8 +208,13 @@ class EmbeddingRegistry:
 
     @property
     def coverage(self) -> ExtractionResult | None:
-        """Coverage of the most recent directory selection, if any."""
+        """Coverage committed with the current index, if built from a directory."""
         return self._coverage
+
+    @property
+    def latest_attempt_coverage(self) -> ExtractionResult | None:
+        """Last directory selection for diagnostics, including a failed build."""
+        return self._latest_attempt_coverage
 
     def build_from_directory(
         self,
@@ -218,7 +224,10 @@ class EmbeddingRegistry:
         minimum_entries: int = 1,
         for_pairwise_scan: bool = False,
     ) -> int:
-        """Discover content items, embed them, and populate the index.
+        """Discover and embed a complete replacement selection.
+
+        Successful builds replace prior entries, dimensions and coverage, even
+        for an empty selection. Failures retain the previously committed index.
 
         Set ``for_pairwise_scan`` when the caller will compare all entries.
         The first validated response then checks the pairwise work budget
@@ -228,16 +237,19 @@ class EmbeddingRegistry:
         Returns:
             Number of entries successfully indexed.
         """
-        self._coverage = discover_and_extract_detailed(root, content_type, max_entries=self._max_entries)
-        return self._build_entries(root, self._coverage.entries, minimum_entries, for_pairwise_scan)
+        self._latest_attempt_coverage = None
+        coverage = discover_and_extract_detailed(root, content_type, max_entries=self._max_entries)
+        self._latest_attempt_coverage = coverage
+        return self._build_entries(root, coverage.entries, minimum_entries, for_pairwise_scan, coverage=coverage)
 
     def build_from_paths(self, root: Path, skills: list[Path]) -> int:
-        """Index explicit skills across multiple roots under one trusted checkout.
+        """Replace the index with explicit skills under one trusted checkout.
 
         Paths retain their checkout-relative identity, avoiding collisions when
         separate skill roots contain folders with the same name. Validate every
         input before the first credential-bearing embedding call.
         """
+        self._latest_attempt_coverage = None
         root = root.resolve(strict=True)
         unique = sorted(set(skills))
         if not unique or len(unique) > self._max_entries:
@@ -259,9 +271,7 @@ class EmbeddingRegistry:
             if entry is None:
                 raise ValueError("Each explicit path must contain a valid SKILL.md")
             entries.append(entry)
-        count = self._build_entries(root, entries, 1, False)
-        self._coverage = None
-        return count
+        return self._build_entries(root, entries, 1, False)
 
     def _build_entries(
         self,
@@ -269,8 +279,13 @@ class EmbeddingRegistry:
         content_entries: list[ContentEntry],
         minimum_entries: int,
         for_pairwise_scan: bool,
+        *,
+        coverage: ExtractionResult | None = None,
     ) -> int:
         if not content_entries:
+            self._entries = {}
+            self._vector_dimension = None
+            self._coverage = coverage
             logger.debug("No content entries found in %s", safe_path_label(root))
             return 0
         if len(content_entries) < minimum_entries:
@@ -303,9 +318,9 @@ class EmbeddingRegistry:
                 )
             )
 
-        entry_count = len(self._entries.keys() | {entry.entry_id for entry in pending_entries})
+        entry_count = len({entry.entry_id for entry in pending_entries})
         comparison_count = entry_count * (entry_count - 1) // 2
-        vector_dimension = self._vector_dimension
+        vector_dimension: int | None = None
         validated_vectors: list[list[float]] = []
         batch_size = 1 if self._full_body else EMBEDDING_BATCH_SIZE
         for start in range(0, len(texts), batch_size):
@@ -323,8 +338,9 @@ class EmbeddingRegistry:
 
         for entry, vector in zip(pending_entries, validated_vectors, strict=True):
             entry.embedding = vector
-        self._entries.update((entry.entry_id, entry) for entry in pending_entries)
+        self._entries = {entry.entry_id: entry for entry in pending_entries}
         self._vector_dimension = vector_dimension
+        self._coverage = coverage
 
         logger.debug("Indexed %d entries from %s", len(self._entries), safe_path_label(root))
         return len(self._entries)
@@ -663,6 +679,7 @@ class EmbeddingRegistry:
         self._entries = loaded
         self._vector_dimension = vector_dimension
         self._coverage = None
+        self._latest_attempt_coverage = None
         logger.debug("Loaded %d entries from local catalog %s", len(self._entries), safe_path_label(catalog_path))
 
     def save_cache(self, cache_path: Path) -> None:

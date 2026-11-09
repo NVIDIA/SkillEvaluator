@@ -2863,8 +2863,8 @@ _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE = re.compile(
 )
 # "auth" also starts author and authority, which name no credential. A name
 # that ends in a "_pass", "_pwd" or "pw" part ("DB_PASS", "MYSQL_PWD", "PW")
-# names a password too, as do "PASS" (only as "PASS=VALUE", see
-# _FINDING_EVIDENCE_COUNTER_VALUE_RE), a database, mail or account name joined
+# names a password too, as do "PASS" (not as a test result word or counter,
+# see _FINDING_EVIDENCE_COUNTER_VALUE_RE), a database, mail or account name joined
 # to "pass" ("DBPASS", "SMTPPASS", "ROOTPASS") and any name joined to "pwd"
 # ("MYSQLPWD"). A bare "PWD" or "OLDPWD" is a working directory, and words
 # such as BYPASS and COMPASS are not passwords.
@@ -2891,10 +2891,16 @@ _FINDING_EVIDENCE_TYPE_NAME_RE = re.compile(r"(?:^|[_.-])type$", re.IGNORECASE)
 _FINDING_EVIDENCE_COUNT_NAME_RE = re.compile(r"tokens$", re.IGNORECASE)
 _FINDING_EVIDENCE_COUNT_VALUE_RE = re.compile(r"[0-9]{1,12}(?![\w.-])")
 # A bare "PASS" is also a test result word ("echo PASS: 3", "grep PASS:
-# out.txt") and a counter ("PASS=0", "PASS=$((PASS+1))"), so it names a
-# password only with "=" and a value that is not a number or an arithmetic
-# expansion.
-_FINDING_EVIDENCE_COUNTER_VALUE_RE = re.compile(r"[0-9]{1,12}(?![\w.-])|\$\(\(")
+# out.txt", "--- PASS: TestName") and a counter or flag ("PASS=0",
+# "PASS=$((PASS+1))", "pass": true). So it is kept with a number, an
+# arithmetic expansion, true, false, null or None, and when an unquoted
+# "PASS" and an unquoted value are joined by any separator but "=" or a bare
+# ":" ("PASS: TestName"). OpenSSL's "pass:VALUE", a quoted key
+# ('"pass": "VALUE"') and a quoted value ("pass => 'VALUE'") still name a
+# password.
+_FINDING_EVIDENCE_COUNTER_VALUE_RE = re.compile(
+    r"[0-9]{1,12}(?![\w.-])|\$\(\(|(?:true|false|null|none)(?![\w.-])", re.IGNORECASE
+)
 # A value: a masked private key, a JSON-escaped or quoted string, a
 # parenthesized tuple (auth=("bob", "...")), or one word, which may hold
 # escaped spaces ("correct\ horse").
@@ -3151,7 +3157,13 @@ def _mask_credential_assignments(text: str) -> str:
             or (
                 name.lower() == "pass"
                 and (
-                    separator.strip() != "=" or _FINDING_EVIDENCE_COUNTER_VALUE_RE.match(text, match.end()) is not None
+                    _FINDING_EVIDENCE_COUNTER_VALUE_RE.match(text, match.end()) is not None
+                    or (
+                        separator.strip() != "="
+                        and separator != ":"
+                        and not name_quote
+                        and not text.startswith(("'", '"'), match.end())
+                    )
                 )
             )
         ):

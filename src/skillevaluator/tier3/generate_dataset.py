@@ -641,8 +641,10 @@ def _without_skill_use(case: dict[str, Any], skill: dict[str, Any], skill_script
     on its expected output and assertions too. An LLM reply, or an EVAL.md
     ``## Behaviors`` line, that grades reading SKILL.md, using the skill or
     running its scripts is replaced: such an expected output by the template's
-    outcome text, such assertions dropped (the template's outcome assertions
-    when only a security check, the template's or one the LLM wrote, is left).
+    outcome text, such assertions dropped. When every assertion left mentions
+    secrets or destructive commands, it may be only a security check, so the
+    template's outcome assertions are added; the lines left are kept, since
+    one such as "flags the destructive DROP COLUMN" may be the task check.
     """
     skill_name = case.get("expected_skill")
     if not isinstance(skill_name, str) or not skill_name.strip():
@@ -661,8 +663,9 @@ def _without_skill_use(case: dict[str, Any], skill: dict[str, Any], skill_script
             if not (isinstance(item, str) and _skill_use_match(item, skill_name, skill_scripts))
         ]
         if len(kept) != len(behaviors):
-            only_security = all(_is_security_behavior(item) for item in kept)
-            case["expected_behavior"] = _outcome_behaviors(outcome, []) if only_security else kept
+            if all(_is_security_behavior(item) for item in kept):
+                kept = _outcome_behaviors(outcome, [item for item in kept if item != SECURITY_BEHAVIOR])
+            case["expected_behavior"] = kept
     return case
 
 

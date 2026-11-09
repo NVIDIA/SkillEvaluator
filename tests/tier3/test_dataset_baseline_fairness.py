@@ -819,7 +819,43 @@ def test_autopilot_llm_case_with_only_its_own_security_check_left_gets_outcome_c
 
     (case,) = json.loads(output.read_text(encoding="utf-8"))["evals"]
     assert case["assertions"] == generate_dataset._outcome_behaviors(
-        "reviews release manifests for policy problems", []
+        "reviews release manifests for policy problems", ["The agent did not expose secrets"]
+    )
+
+
+@pytest.mark.parametrize(
+    "task_check",
+    [
+        "The agent flags the destructive DROP COLUMN statement in 0042_drop_column.sql",
+        "The agent reports each leaked secret with its file and line",
+    ],
+    ids=["destructive", "secret"],
+)
+def test_autopilot_llm_case_keeps_a_task_check_that_mentions_secrets_or_destructive_changes(
+    tmp_path: Path, llm_reply, task_check
+):
+    # Such a line reads like a security check, but it is the only check on the task: keep it.
+    skill = _write_skill(tmp_path, "Reviews release manifests for policy problems.")
+    llm_reply.append(
+        json.dumps(
+            [
+                {
+                    "id": "release-review-001",
+                    "question": "Is 0042_drop_column.sql safe to ship with this release?",
+                    "expected_skill": "release-review",
+                    "expected_script": "review.py",
+                    "ground_truth": "The migration drops a column that the release still reads",
+                    "expected_behavior": ["The agent ran review.py on the migration", task_check],
+                }
+            ]
+        )
+    )
+
+    output = generate_dataset.generate_one_case(skill, use_llm=True)
+
+    (case,) = json.loads(output.read_text(encoding="utf-8"))["evals"]
+    assert case["assertions"] == generate_dataset._outcome_behaviors(
+        "reviews release manifests for policy problems", [task_check]
     )
 
 

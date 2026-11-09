@@ -42,7 +42,6 @@ from skillevaluator.reporting.harbor_viewer import (
     safe_url,
 )
 from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
-from skillevaluator.reporting.tier3_token_usage import token_usage_markdown_lines
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
@@ -414,6 +413,8 @@ class MarkdownReporter(ReporterBase):
                         f"| {ws_text} | {bl_text} | {lift_text} |"
                     )
                 lines.append("")
+
+            from skillevaluator.reporting.tier3_token_usage import token_usage_markdown_lines
 
             lines.extend(
                 token_usage_markdown_lines(

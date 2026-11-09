@@ -89,13 +89,12 @@ def model_environment(env: dict[str, str], tier: int) -> dict[str, str]:
     embedding = env.get("SKILL_EVAL_EMBEDDING_PROVIDER") or (
         "openai" if base_provider == "anthropic" else base_provider
     )
-    if provider not in PROVIDER_KEYS or embedding not in {"openai", "nv_build", "openai-compatible"}:
+    if provider not in PROVIDER_KEYS or (tier == 2 and embedding not in {"openai", "nv_build", "openai-compatible"}):
         raise ValueError("Select supported chat and embedding providers.")
     child = {key: value for key, value in env.items() if key in SAFE_ENV}
     child.update(
         {
             "SKILL_EVAL_LLM_PROVIDER": provider,
-            "SKILL_EVAL_EMBEDDING_PROVIDER": embedding,
             "PYTHON_DOTENV_DISABLED": "1",
             "PYTHONUNBUFFERED": "1",
             "NO_COLOR": "1",
@@ -103,7 +102,11 @@ def model_environment(env: dict[str, str], tier: int) -> dict[str, str]:
             "SKILLEVALUATOR_HARBOR_VIEWER_UPLOAD": "false",
         }
     )
-    for selected in {provider, embedding} - {"openai-compatible"}:
+    selected_providers = {provider}
+    if tier == 2:
+        child["SKILL_EVAL_EMBEDDING_PROVIDER"] = embedding
+        selected_providers.add(embedding)
+    for selected in selected_providers - {"openai-compatible"}:
         key = PROVIDER_KEYS[selected]
         if env.get(key):
             child[key] = env[key]
@@ -120,17 +123,18 @@ def model_environment(env: dict[str, str], tier: int) -> dict[str, str]:
     base_url = base_url or (env.get("SKILL_EVAL_BASE_URL") if same_provider else None)
     if base_url and provider != "nv_build":
         child["SKILL_EVAL_LLM_BASE_URL"] = _api_root(base_url)
-    if embedding == "openai-compatible":
-        embedding_key = env.get("SKILL_EVAL_EMBEDDING_API_KEY") or env.get("SKILL_EVAL_LLM_API_KEY")
-        if embedding_key:
-            child["SKILL_EVAL_EMBEDDING_API_KEY"] = embedding_key
-        embedding_url = env.get("SKILL_EVAL_EMBEDDING_BASE_URL") or env.get("SKILL_EVAL_BASE_URL")
-        if embedding_url:
-            child["SKILL_EVAL_EMBEDDING_BASE_URL"] = _api_root(embedding_url)
-    elif embedding == "openai" and env.get("SKILL_EVAL_EMBEDDING_BASE_URL"):
-        child["SKILL_EVAL_EMBEDDING_BASE_URL"] = _api_root(env["SKILL_EVAL_EMBEDDING_BASE_URL"])
-    if env.get("SKILL_EVAL_EMBEDDING_MODEL"):
-        child["SKILL_EVAL_EMBEDDING_MODEL"] = _model(env["SKILL_EVAL_EMBEDDING_MODEL"])
+    if tier == 2:
+        if embedding == "openai-compatible":
+            embedding_key = env.get("SKILL_EVAL_EMBEDDING_API_KEY") or env.get("SKILL_EVAL_LLM_API_KEY")
+            if embedding_key:
+                child["SKILL_EVAL_EMBEDDING_API_KEY"] = embedding_key
+            embedding_url = env.get("SKILL_EVAL_EMBEDDING_BASE_URL") or env.get("SKILL_EVAL_BASE_URL")
+            if embedding_url:
+                child["SKILL_EVAL_EMBEDDING_BASE_URL"] = _api_root(embedding_url)
+        elif embedding == "openai" and env.get("SKILL_EVAL_EMBEDDING_BASE_URL"):
+            child["SKILL_EVAL_EMBEDDING_BASE_URL"] = _api_root(env["SKILL_EVAL_EMBEDDING_BASE_URL"])
+        if env.get("SKILL_EVAL_EMBEDDING_MODEL"):
+            child["SKILL_EVAL_EMBEDDING_MODEL"] = _model(env["SKILL_EVAL_EMBEDDING_MODEL"])
     # Validate through the native runtime with non-secret placeholders so absent
     # credentials remain a handled CI precondition rather than an exception.
     validation = dict(child)
@@ -138,11 +142,11 @@ def model_environment(env: dict[str, str], tier: int) -> dict[str, str]:
         validation.setdefault(key, "ci-validation-placeholder")
     try:
         resolve_llm_provider(validation)
-        resolve_embedding_provider(validation)
+        if tier == 2:
+            resolve_embedding_provider(validation)
     except (ProviderConfigurationError, ValueError):
         raise ValueError("Selected provider configuration is incomplete or invalid.") from None
-    # Only Tier 2 executes embeddings. Chat-only tiers retain configuration
-    # validation above, but never expose credentials used only by embeddings.
+    # Only the selected tier's routes are validated or receive credentials.
     for key in CREDENTIAL_KEYS - required_credentials(child, tier):
         child.pop(key, None)
     return child

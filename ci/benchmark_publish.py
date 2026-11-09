@@ -61,7 +61,11 @@ def _tree(api, root, commit):
     entries = {}
     for entry in result["tree"]:
         path = entry.get("path")
-        _require(feedback._safe_path(path) and path not in entries, "The repository tree has an invalid path.")
+        # Unrelated Git filenames are dictionary keys, never URL or write targets.
+        _require(
+            isinstance(path, str) and 0 < len(path) <= 4096 and path not in entries,
+            "The repository tree has an invalid path.",
+        )
         _sha(entry.get("sha"))
         entries[path] = entry
     return sha, entries
@@ -127,7 +131,11 @@ def github_benchmark_publish(api, repository: str, run_id: int, attempt: int) ->
             and latest.get("head_repository", {}).get("full_name") == repository
         )
 
-    _require(current(), "The producer is no longer the current default-branch attempt.")
+    if not current():
+        return {
+            "benchmark_action": "skipped",
+            "benchmark_reason": "The source head or producer attempt changed.",
+        }
     targets = {}
     for document in benchmark_documents(evidence["manifest"], native):
         if not document["eligible"]:
@@ -318,7 +326,10 @@ def github_benchmark_publish(api, repository: str, run_id: int, attempt: int) ->
             }
         check = api.get(f"{root}/pulls/{pull['number']}")
         _require(
-            all(check.get(key) == pull.get(key) for key in ("number", "body", "title", "base", "user", "state")),
+            all(check.get(key) == pull.get(key) for key in ("number", "body", "title", "state"))
+            and check.get("base", {}).get("ref") == pull["base"]["ref"]
+            and check.get("base", {}).get("repo", {}).get("full_name") == pull["base"]["repo"]["full_name"]
+            and all(check.get("user", {}).get(key) == pull["user"].get(key) for key in ("login", "type")),
             "The benchmark PR changed before update.",
         )
         _require(

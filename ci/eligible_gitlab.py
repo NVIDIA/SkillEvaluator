@@ -98,9 +98,11 @@ def main() -> int:
                     raise ValueError("Invalid admission response")
         except urllib.error.HTTPError as error:
             print(f"Current {kind} head could not be verified (HTTP {error.code}).")
-            if is_mr:
+            if is_mr or error.code in {401, 403, 404}:
                 print(
-                    "GitLab before 18.4 requires a separate SKILLEVALUATOR_GITLAB_READ_TOKEN with project Reporter/read_api access."
+                    "Configure or verify SKILLEVALUATOR_GITLAB_READ_TOKEN with project Reporter/read_api access. "
+                    "This separate read token is required for MR admission before GitLab 18.4 and whenever "
+                    "CI_JOB_TOKEN cannot read the current-head endpoint."
                 )
             return 2
         except urllib.error.URLError as error:

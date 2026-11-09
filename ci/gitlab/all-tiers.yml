@@ -301,7 +301,7 @@ skill-evaluation-tier1-llm:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID != $CI_PROJECT_ID'
       when: never
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"'
+    - if: '($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web") && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"'
 
 skill-evaluation-aggregate:
   extends: .skill-evaluation-tools
@@ -331,7 +331,8 @@ skill-evaluation-aggregate:
       if [ "$SKILL_EVAL_TIER1_LLM" = true ]; then
         if [ "${CI_PIPELINE_SOURCE:-}" = merge_request_event ] && [ "${CI_MERGE_REQUEST_SOURCE_PROJECT_ID:-}" = "$CI_PROJECT_ID" ]; then
           enriched=true
-        elif [ "${CI_COMMIT_BRANCH:-}" = "$CI_DEFAULT_BRANCH" ] && [ "${CI_COMMIT_REF_PROTECTED:-}" = true ]; then
+        elif { [ "${CI_PIPELINE_SOURCE:-}" = push ] || [ "${CI_PIPELINE_SOURCE:-}" = web ]; } &&
+          [ "${CI_COMMIT_BRANCH:-}" = "$CI_DEFAULT_BRANCH" ] && [ "${CI_COMMIT_REF_PROTECTED:-}" = true ]; then
           enriched=true
         fi
       fi

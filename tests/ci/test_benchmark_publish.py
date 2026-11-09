@@ -155,12 +155,10 @@ def test_only_regenerated_cards_written_and_reviewable_pr(trusted, monkeypatch):
     assert SHA in pr["body"] and "/actions/runs/123/artifacts/21" in pr["body"]
 
 
-@pytest.mark.parametrize("change", ["head", "fork", "attempt", "event", "archive"])
+@pytest.mark.parametrize("change", ["fork", "attempt", "event", "archive"])
 def test_rejects_unauthorized_evidence_without_writes(trusted, monkeypatch, change):
     module = documents(monkeypatch)
-    if change == "head":
-        trusted.current_sha = "9" * 40
-    elif change == "fork":
+    if change == "fork":
         trusted.run["head_repository"]["full_name"] = "foreign/repo"
     elif change == "attempt":
         trusted.run["run_attempt"] = 2
@@ -170,6 +168,23 @@ def test_rejects_unauthorized_evidence_without_writes(trusted, monkeypatch, chan
         trusted.payload = b"not zip"
     with pytest.raises(ValueError):
         module.github_benchmark_publish(trusted, REPO, 123, 1)
+    assert trusted.writes == []
+
+
+def test_initial_stale_default_head_is_successful_no_write_skip(trusted, monkeypatch, capsys):
+    module = documents(monkeypatch)
+    trusted.current_sha = "9" * 40
+    monkeypatch.setenv("GITHUB_TOKEN", "publisher-token")
+    monkeypatch.setattr(module.publish_reports, "GitHubAPI", lambda *_args: trusted)
+
+    def unexpected_documents(*_args):
+        pytest.fail("A stale producer must skip before regenerating cards.")
+
+    monkeypatch.setattr(module, "benchmark_documents", unexpected_documents)
+    assert module.main(["--repository", REPO, "--run-id", "123", "--run-attempt", "1"]) == 0
+    output = capsys.readouterr()
+    assert json.loads(output.out)["benchmark_action"] == "skipped"
+    assert output.err == ""
     assert trusted.writes == []
 
 
@@ -374,7 +389,58 @@ def test_owned_pr_updated_without_touching_source_pr(trusted, monkeypatch):
     assert branch["force"] is False
 
 
-def test_changed_pr_body_before_patch_is_not_overwritten(trusted, monkeypatch):
+def test_existing_pr_update_tolerates_live_repository_and_user_metadata(trusted, monkeypatch):
+    module = documents(monkeypatch)
+    module.github_benchmark_publish(trusted, REPO, 123, 1)
+    trusted.pull["body"] = module.MARKER + "\nOld evaluation report"
+    trusted.pull["base"]["repo"].update(
+        pushed_at="2026-11-09T20:30:00Z", updated_at="2026-11-09T20:30:00Z", open_issues_count=8
+    )
+    trusted.pull["user"]["avatar_url"] = "https://avatars.githubusercontent.com/u/old"
+    monkeypatch.setattr(
+        module,
+        "benchmark_documents",
+        lambda _manifest, _native: [{"path": "skills/demo", "eligible": True, "benchmark_content": "new card\n"}],
+    )
+    original_patch = trusted.patch
+
+    def patch(path, payload):
+        response = original_patch(path, payload)
+        if "/git/refs/" in path:
+            # A push updates live repository metadata included in a fresh PR response.
+            trusted.pull["base"]["repo"].update(
+                pushed_at="2026-11-09T20:34:00Z", updated_at="2026-11-09T20:34:00Z", open_issues_count=9
+            )
+            trusted.pull["user"]["avatar_url"] = "https://avatars.githubusercontent.com/u/current"
+        return response
+
+    monkeypatch.setattr(trusted, "patch", patch)
+    trusted.writes.clear()
+    result = module.github_benchmark_publish(trusted, REPO, 123, 1)
+    assert result["benchmark_action"] == "updated"
+    assert SHA in trusted.pull["body"] and "attempt 1" in trusted.pull["body"]
+    assert trusted.writes[-1][0:2] == ("patch", "/repos/" + REPO + "/pulls/8")
+    branch = next(payload for _, path, payload in trusted.writes if "/git/refs/" in path)
+    assert branch["force"] is False
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        (("number",), 9),
+        (("body",), "Human edit"),
+        (("title",), "Human title"),
+        (("state",), "closed"),
+        (("base", "ref"), "other"),
+        (("base", "repo", "full_name"), "foreign/repo"),
+        (("user", "login"), "another[bot]"),
+        (("user", "type"), "User"),
+        (("head", "ref"), "other"),
+        (("head", "repo", "full_name"), "foreign/repo"),
+        (("head", "sha"), "9" * 40),
+    ],
+)
+def test_changed_pr_before_patch_is_not_overwritten(trusted, monkeypatch, field, value):
     module = documents(monkeypatch)
     module.github_benchmark_publish(trusted, REPO, 123, 1)
     trusted.pull["body"] = module.MARKER + "\nOld evaluation report"
@@ -384,13 +450,66 @@ def test_changed_pr_body_before_patch_is_not_overwritten(trusted, monkeypatch):
     def get(path):
         result = original_get(path)
         if path.endswith("/pulls/8"):
-            result["body"] = "Human edit"
+            target = result
+            for part in field[:-1]:
+                target = target[part]
+            target[field[-1]] = value
         return result
 
     monkeypatch.setattr(trusted, "get", get)
-    with pytest.raises(ValueError, match="PR changed"):
+    with pytest.raises(ValueError, match=r"PR (head )?changed"):
         module.github_benchmark_publish(trusted, REPO, 123, 1)
     assert all("/pulls/" not in path for _, path, _ in trusted.writes)
+
+
+def test_unrelated_repository_filenames_are_preserved_during_publication(trusted, monkeypatch):
+    module = documents(monkeypatch)
+    unrelated = [
+        {"path": "docs", "mode": "040000", "type": "tree", "sha": "7" * 40},
+        *[
+            {"path": path, "mode": "100644", "type": "blob", "sha": BLOB}
+            for path in (
+                "docs/c#-notes.md",
+                "docs/100%-notes.md",
+                "docs/why?.md",
+                "docs/colon:notes.md",
+                r"docs/back\slash.md",
+            )
+        ],
+    ]
+    trusted.entries.extend(copy.deepcopy(unrelated))
+    assert module.github_benchmark_publish(trusted, REPO, 123, 1)["benchmark_action"] == "created"
+    monkeypatch.setattr(
+        module,
+        "benchmark_documents",
+        lambda _manifest, _native: [{"path": "skills/demo", "eligible": True, "benchmark_content": "new card\n"}],
+    )
+    trusted.writes.clear()
+    assert module.github_benchmark_publish(trusted, REPO, 123, 1)["benchmark_action"] == "updated"
+    assert all(entry in trusted.generated_entries for entry in unrelated)
+    tree = next(payload for _, path, payload in trusted.writes if path.endswith("/git/trees"))
+    assert tree == {
+        "base_tree": "1" * 40,
+        "tree": [{"path": "skills/demo/BENCHMARK.md", "mode": "100644", "type": "blob", "content": "new card\n"}],
+    }
+    assert all("/heads/main" not in path and "/pulls/7" not in path for _, path, _ in trusted.writes)
+
+
+@pytest.mark.parametrize("path", [None, "", "x" * 4097, "skills/demo/SKILL.md"])
+def test_invalid_or_duplicate_repository_tree_paths_rejected(trusted, monkeypatch, path):
+    module = documents(monkeypatch)
+    trusted.entries.append({"path": path, "mode": "100644", "type": "blob", "sha": BLOB})
+    with pytest.raises(ValueError, match="invalid path"):
+        module.github_benchmark_publish(trusted, REPO, 123, 1)
+    assert trusted.writes == []
+
+
+def test_unrelated_tree_entry_still_requires_git_object_identity(trusted, monkeypatch):
+    module = documents(monkeypatch)
+    trusted.entries.append({"path": "notes.md", "mode": "100644", "type": "blob", "sha": "invalid"})
+    with pytest.raises(ValueError, match="object identity"):
+        module.github_benchmark_publish(trusted, REPO, 123, 1)
+    assert trusted.writes == []
 
 
 def previous_source_branch(trusted, monkeypatch, *, unrelated=False, trailer=None):

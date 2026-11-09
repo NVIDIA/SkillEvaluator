@@ -30,7 +30,7 @@ def test_gateway_chat_and_build_embeddings_use_only_selected_credentials():
     assert child["LLM_JUDGE_MODEL"] == "gateway/judge"
     assert child["SKILL_EVAL_LLM_BASE_URL"] == "https://gateway.example/api/v1"
     assert child["SKILL_EVAL_LLM_API_KEY"] == "gateway-secret"
-    assert child["SKILL_EVAL_EMBEDDING_PROVIDER"] == "nv_build"
+    assert not any(key.startswith("SKILL_EVAL_EMBEDDING_") for key in child)
     assert "NVIDIA_API_KEY" not in child
     assert not set(child) & {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_BASE_URL", "GITHUB_TOKEN", "CI_JOB_TOKEN"}
 
@@ -76,11 +76,11 @@ def test_empty_overrides_inherit_same_provider_and_models(tier):
     )
     assert child["SKILL_EVAL_LLM_MODEL"] == "catalog/exact-model"
     assert child["SKILL_EVAL_LLM_BASE_URL"] == "https://gateway.example/v1"
-    assert child["SKILL_EVAL_EMBEDDING_BASE_URL"] == "https://embedding.example/v1"
     if tier == 2:
+        assert child["SKILL_EVAL_EMBEDDING_BASE_URL"] == "https://embedding.example/v1"
         assert child["SKILL_EVAL_EMBEDDING_API_KEY"] == "embedding-secret"
     else:
-        assert "SKILL_EVAL_EMBEDDING_API_KEY" not in child
+        assert not any(key.startswith("SKILL_EVAL_EMBEDDING_") for key in child)
     assert "SKILL_EVAL_LLM_API_KEY" not in child
 
 
@@ -169,6 +169,46 @@ def test_tier1_specific_provider_uses_its_default_model():
     )
     assert child["SKILL_EVAL_LLM_PROVIDER"] == "openai"
     assert "SKILL_EVAL_LLM_MODEL" not in child
+
+
+@pytest.mark.parametrize("tier", [1, 3])
+@pytest.mark.parametrize(
+    "embedding_settings",
+    [
+        {},
+        {"SKILL_EVAL_EMBEDDING_PROVIDER": "unsupported"},
+        {
+            "SKILL_EVAL_EMBEDDING_PROVIDER": "openai-compatible",
+            "SKILL_EVAL_EMBEDDING_BASE_URL": "invalid-unused-url",
+            "SKILL_EVAL_EMBEDDING_MODEL": "invalid unused model",
+            "SKILL_EVAL_EMBEDDING_API_KEY": "embedding-only-secret",
+        },
+    ],
+)
+def test_chat_only_tiers_do_not_require_or_forward_unused_embedding_routes(tier, embedding_settings):
+    from ci.model_config import model_environment
+
+    child = model_environment(
+        {
+            "SKILL_EVAL_PROVIDER": "openai-compatible",
+            f"SKILL_EVAL_TIER{tier}_PROVIDER": "openai",
+            f"SKILL_EVAL_TIER{tier}_MODEL": "",
+            "OPENAI_API_KEY": "selected-chat-secret",
+            **embedding_settings,
+        },
+        tier,
+    )
+    assert child["SKILL_EVAL_LLM_PROVIDER"] == "openai"
+    assert child["OPENAI_API_KEY"] == "selected-chat-secret"
+    assert not any(key.startswith("SKILL_EVAL_EMBEDDING_") for key in child)
+    assert "SKILL_EVAL_LLM_API_KEY" not in child
+
+
+def test_tier2_still_requires_a_valid_selected_embedding_route():
+    from ci.model_config import model_environment
+
+    with pytest.raises(ValueError, match="Selected provider configuration is incomplete or invalid"):
+        model_environment({"SKILL_EVAL_PROVIDER": "openai", "SKILL_EVAL_EMBEDDING_PROVIDER": "openai-compatible"}, 2)
 
 
 @pytest.mark.parametrize("tier", [1, 3])

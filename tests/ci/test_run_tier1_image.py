@@ -200,6 +200,21 @@ def test_supported_provider_selects_its_own_credential(launch, provider, key):
     assert calls[-1][1]["env"]["LLM_API_KEY"] == "provider-credential"
 
 
+def test_native_tier1_launch_does_not_require_the_tier2_gateway_route(launch):
+    runner, args, calls, env, *_ = launch
+    # The GitHub Tier 1 job intentionally does not receive Tier 2's gateway URL.
+    env.update(
+        SKILL_EVAL_PROVIDER="openai-compatible",
+        SKILL_EVAL_TIER1_PROVIDER="openai",
+        SKILL_EVAL_TIER1_MODEL="",
+        OPENAI_API_KEY="selected-tier1-secret",
+    )
+    assert runner.main(args) == 0
+    child = calls[-1][1]["env"]
+    assert child["LLM_PROVIDER"] == "openai"
+    assert child["LLM_API_KEY"] == "selected-tier1-secret"
+
+
 @pytest.mark.parametrize("mutation", ["dirty", "missing-base", "untrusted-image"])
 def test_unverified_inputs_fail_before_credential_launch(launch, mutation):
     runner, args, calls, env, workspace, *_ = launch

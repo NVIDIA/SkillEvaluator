@@ -93,8 +93,10 @@ A reviewed `ci-model-routing-v1` candidate can opt into
 Tier 1 image job runs in the protected execution environment, rechecks current
 MR/default-branch eligibility, and uses no Docker-in-Docker service. Its
 enriched evidence determines the Tier 1 gate for an eligible run; missing
-evidence cannot fall back to a passing static baseline. Forks retain the
-keyless baseline.
+evidence cannot fall back to a passing static baseline. Default-branch enrichment
+is limited to `push` and `web` pipelines, matching provider admission. Scheduled,
+API, trigger and downstream default-branch pipelines retain the keyless Tier 1
+baseline, as do forks.
 
 Use `SKILL_EVAL_TIER3_PROVIDER`, `SKILL_EVAL_TIER3_BASE_URL` and
 `SKILL_EVAL_TIER3_MODEL` for a separate live-agent/judge route, and
@@ -156,8 +158,14 @@ uses this read credential once, refuses HTTP redirects, and the job removes it
 before runtime installation, doctor or provider execution.
 
 GitLab 18.4 and later support the default short-lived `CI_JOB_TOKEN` path for
-this MR endpoint; the separate read token remains optional. `ci init --mode pr`
-and `ci status` check the server version through the local authenticated API.
+this MR endpoint. Admission also verifies the current protected default-branch
+head through the repository branches API. If a job token cannot read either
+endpoint, such as an HTTP 403 response, configure or verify the same separate
+`SKILLEVALUATOR_GITLAB_READ_TOKEN` with project Reporter/read_api access. This
+default-branch prerequisite can apply on newer GitLab versions too; use the
+execution environment's read credential, never the feedback publisher token.
+`ci init --mode pr` and `ci status` check the server version through the local
+authenticated API.
 Offline preview/save keep the version unverified. These local commands report
 the prerequisite and do not claim to validate a stored CI secret's privileges.
 The setup still consists of two consumer files.

@@ -279,16 +279,16 @@ def test_arm_with_some_na_efficiency_trials_stays_scored(tmp_path):
 
     baseline_na = {"skill_execution": None, "skill_efficiency": None}
     arms = {
-        # A positive case scores Efficiency; the negative case leaves it N/A. Its other
-        # metrics are low, so counting the N/A as 0.0 would fail it (0.4) instead of passing (0.5).
+        # A positive case scores Efficiency; the negative case leaves it N/A. Counting that N/A as
+        # 0.0 would fail the negative case (0.48) instead of passing it (0.6).
         "with": [
             _reward("pos", skill_efficiency=0.6),
             _reward(
                 "neg",
                 security=1.0,
-                accuracy=0.2,
-                skill_execution=0.6,
-                goal_accuracy=0.2,
+                accuracy=0.4,
+                skill_execution=0.4,
+                goal_accuracy=1.0,
                 behavior_check=0.2,
                 skill_efficiency=None,
             ),
@@ -319,11 +319,11 @@ def test_arm_with_some_na_efficiency_trials_stays_scored(tmp_path):
     # The arm mean is the positive case's score alone.
     assert summary["scores"]["skill_efficiency"] == 0.6
     assert summary["dimensions"]["efficiency"]["score"] == 0.6
-    # pass@k scores each attempt without its N/A metric: (1.0 + 0.2 + 0.6 + 0.2) / 4.
+    # pass@k scores each attempt without its N/A metric: (1.0 + 0.4 + 0.4 + 0.6) / 4.
     neg = summary["pass_at_k"]["cases"]["neg"]
-    assert neg["best_score"] == 0.5
+    assert neg["best_score"] == 0.6
     assert neg["passed"] is True
     # Lift pairs Efficiency on no case: the baseline never has a skill to use.
     assert "skill_efficiency" not in agent["lift"]
-    assert agent["lift"]["accuracy"]["delta"] == 0.0
+    assert agent["lift"]["accuracy"]["delta"] == pytest.approx(0.1)
     assert agent["lift"]["basis"]["metrics"]["accuracy"]["cases"] == 2

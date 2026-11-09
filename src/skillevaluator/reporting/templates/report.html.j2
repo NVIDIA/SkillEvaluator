@@ -3044,12 +3044,13 @@
                 <div class="t3-details-body">
                 <p class="t3-section-hint">
                     Each row is one eval case for one agent under one condition. Attempt Scores
-                    lists the scored attempts only; a score at or above
+                    lists the scored attempts {% if t3_recovered_rows.any %}and any recovered timeouts{% else %}only{% endif %}; a score at or above
                     {{ "%.2f" | format(t3_pass_threshold) }} counts as passed for Pass@{{ t3_max_attempts }}.
                     "Not scored" means no reward was found for that expected attempt; it is excluded from pass/fail.
                     {% if t3_recovered_rows.any %}"Timed out, recovered" marks an agent timeout that a later scored
                     attempt of the same case recovered. It is not scored, but it used one of the case's attempts,
-                    so it keeps its attempt number and counts in the Scored Attempts total.{% endif %}
+                    so it keeps its attempt number and counts in the attempt total under Scored Attempts (the
+                    second number), not in the scored count.{% endif %}
                 </p>
                 <div class="t3-filter-bar">
                     <input class="t3-filter-input" type="search" placeholder="Filter by agent, case, condition, score..." oninput="tier3FilterTable(this, 't3-attempts-table')" aria-label="Filter attempt details">

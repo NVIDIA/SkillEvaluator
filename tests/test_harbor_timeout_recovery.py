@@ -407,7 +407,13 @@ def test_attempt_details_show_recovered_timeout_in_the_attempt_budget(tmp_path):
         "opencode With skill case-a A1: timed out, recovered A2: 1.00 pass 1 of 3 scored 1.00 passed on attempt 2"
     ]
     assert "passed on scored attempt" not in html
-    assert '"Timed out, recovered" marks an agent timeout that a later scored' in html
+    # The hint lists the recovered chip among the attempt scores and counts it only in the second number.
+    assert attempt_details_hint(html) == (
+        f"{HINT_START} and any recovered timeouts; {HINT_THRESHOLD} "
+        '"Timed out, recovered" marks an agent timeout that a later scored attempt of the same case recovered. '
+        "It is not scored, but it used one of the case's attempts, so it keeps its attempt number and counts in "
+        "the attempt total under Scored Attempts (the second number), not in the scored count."
+    )
     assert 'title="Includes 1 recovered agent timeout, which is not scored"' in html
 
 

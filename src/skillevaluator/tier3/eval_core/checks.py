@@ -2713,10 +2713,14 @@ _FINDING_EVIDENCE_COOKIE_HEADER_RE = re.compile(
     r"[^\s'\"`,;\\]+(?:;[ \t]{0,8}[^\s'\"`,;\\]+){0,64}",
     re.IGNORECASE,
 )
-# A flag value: quoted (to its closing quote or the end of the line) or one
-# word. A masked private key is one value, although its marker holds spaces.
+# A flag value: quoted (to its closing quote or the end of the line, also
+# JSON-escaped inside a shell string) or one word, which may hold escaped
+# spaces ("correct\ horse"). A masked private key is one value, although its
+# marker holds spaces.
 _FINDING_EVIDENCE_FLAG_VALUE = (
-    "(?:" + _FINDING_EVIDENCE_PRIVATE_KEY_MARKER + r"|\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^\s'\"`]+)"
+    "(?:"
+    + _FINDING_EVIDENCE_PRIVATE_KEY_MARKER
+    + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\"[^\"\r\n]*\"?|'[^'\r\n]*'?|(?:\\.|[^\s'\"`\\])+)"
 )
 # Any long flag whose name holds a credential word ("--password", "--db-password",
 # "--client-secret", "--github-token", "--oauth2-bearer", "--cookie"), and the
@@ -2770,7 +2774,9 @@ _FINDING_EVIDENCE_MYSQL_PASSWORD_RE = re.compile(
 # "aws configure set aws_secret_access_key VALUE" and a .netrc entry
 # ("machine HOST login USER password VALUE"). A .netrc entry may span lines,
 # written as real line breaks (a here-document) or as "\n" inside a printf or
-# echo string, and a netrc word never holds a "\n".
+# echo string, and a netrc word never holds a "\n". The password runs over the
+# words after it up to the next netrc keyword, quote, shell operator or line
+# end, so a passphrase with spaces inside a quoted echo string is masked whole.
 _FINDING_EVIDENCE_AWS_CONFIGURE_SET_RE = re.compile(
     r"(\baws[ \t]+configure[ \t]+set[ \t]+[\w.-]{0,64}?(?:secret|token|key)[\w.-]{0,64}[ \t]+(?!-))"
     + _FINDING_EVIDENCE_FLAG_VALUE,
@@ -2778,6 +2784,7 @@ _FINDING_EVIDENCE_AWS_CONFIGURE_SET_RE = re.compile(
 )
 _FINDING_EVIDENCE_NETRC_SEPARATOR = r"(?:[ \t\r\n]|\\n)+"
 _FINDING_EVIDENCE_NETRC_WORD = r"(?:(?!\\n)[^\s'\"`])+"
+_FINDING_EVIDENCE_NETRC_VALUE_WORD = r"(?:(?!\\n)[^\s'\"`<>|;&])+"
 _FINDING_EVIDENCE_NETRC_PASSWORD_RE = re.compile(
     r"((?:\b|(?<=\\n))(?:machine|login|account)"
     + _FINDING_EVIDENCE_NETRC_SEPARATOR
@@ -2787,7 +2794,9 @@ _FINDING_EVIDENCE_NETRC_PASSWORD_RE = re.compile(
     + _FINDING_EVIDENCE_NETRC_SEPARATOR
     + r")(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|"
     + _FINDING_EVIDENCE_NETRC_WORD
-    + ")"
+    + r"(?:[ \t]+(?!(?:machine|login|account|password|macdef|default)\b)"
+    + _FINDING_EVIDENCE_NETRC_VALUE_WORD
+    + ")*)"
 )
 # curl's "-b NAME=VALUE" sends a cookie; "-b FILE" reads a cookie jar and is
 # kept. This follows the report excerpts' _CLI_COOKIE_FLAG_RE.
@@ -2830,10 +2839,24 @@ _FINDING_EVIDENCE_SECRET_NAME_RE = re.compile(
 _FINDING_EVIDENCE_TYPE_NAME_RE = re.compile(r"(?:^|[_.-])type$", re.IGNORECASE)
 _FINDING_EVIDENCE_COUNT_NAME_RE = re.compile(r"tokens$", re.IGNORECASE)
 _FINDING_EVIDENCE_COUNT_VALUE_RE = re.compile(r"[0-9]{1,12}(?![\w.-])")
+# A value: a masked private key, a JSON-escaped or quoted string, or one
+# word, which may hold escaped spaces ("correct\ horse").
 _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE = re.compile(
     _FINDING_EVIDENCE_PRIVATE_KEY_MARKER
-    + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^\s'\"`;|&]+"
+    + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\"[^\"\r\n]*\"?|'[^'\r\n]*'?|(?:\\.|[^\s'\"`;|&\\])+"
 )
+# Inside a quoted string a value that does not open its own quote runs to the
+# string's closing quote ('password: correct horse battery staple'), or to the
+# closing escaped quote when the string itself is JSON-escaped.
+_FINDING_EVIDENCE_QUOTED_REST_RES = {
+    "'": re.compile(r"[^'\r\n]+"),
+    '"': re.compile(r"(?:\\.|[^\"\\\r\n])+"),
+    "\\'": re.compile(r"(?:\\(?!')|[^'\\\r\n])+"),
+    '\\"': re.compile(r"(?:\\(?!\")|[^\"\\\r\n])+"),
+}
+# A quoted shell command ("sh -c 'TOKEN=x make deploy'") holds shell
+# assignments, whose value is one word.
+_FINDING_EVIDENCE_SHELL_STRING_RE = re.compile(r"(?:^|[\s;&|(])-[A-Za-z]{0,4}c[ \t]{1,4}$")
 # A word stuck to the quote that closes a string around an empty assignment
 # ('"PASSWORD="hunter2' is PASSWORD=hunter2 to a shell).
 _FINDING_EVIDENCE_STUCK_VALUE_RE = re.compile(r"[^\s'\"`;|&()<>]+")
@@ -2995,7 +3018,13 @@ def _mask_credential_assignments(text: str) -> str:
         start = match.end()
         opening = text[match.start() - 1] if match.start() else ""
         in_quotes = opening in ("'", '"') and not name_quote
-        if in_quotes and separator == "=":
+        quote_start = match.start() - 1
+        shell_string = (
+            in_quotes
+            and separator == "="
+            and _FINDING_EVIDENCE_SHELL_STRING_RE.search(text[max(0, quote_start - 16) : quote_start]) is not None
+        )
+        if in_quotes and separator == "=" and not shell_string:
             # Inside a quoted string "name= value" is not a shell assignment,
             # so the value may follow spaces ("echo 'password= VALUE' >> f").
             start = _FINDING_EVIDENCE_SPACES_RE.match(text, start).end()
@@ -3012,6 +3041,11 @@ def _mask_credential_assignments(text: str) -> str:
             and _FINDING_EVIDENCE_PORT_RE.match(text, start)
         ):
             continue
+        elif in_quotes and not shell_string and not text.startswith(("'", '"', "\\'", '\\"'), start):
+            # The value is the rest of the quoted string, which may hold
+            # spaces ('password: correct horse battery staple').
+            escaped = quote_start > 0 and text[quote_start - 1] == "\\"
+            value = _FINDING_EVIDENCE_QUOTED_REST_RES[("\\" if escaped else "") + opening].match(text, start)
         else:
             value = _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE.match(text, start)
         if value is None:

@@ -18,7 +18,11 @@ pytest.importorskip("harbor")
 from harbor.models.job.result import JobResult, JobStats
 from harbor.models.trial.result import TrialResult
 
-from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory, render_agent_eval_html_report
+from skillevaluator.evaluation.tier3_report import (
+    _compact_agent_conditions,
+    agent_eval_result_from_directory,
+    render_agent_eval_html_report,
+)
 from skillevaluator.reporting import HTMLReporter
 from skillevaluator.tier3.harbor.collector import (
     _pass_summary,
@@ -390,6 +394,13 @@ HINT_THRESHOLD = (
     "a score at or above 0.50 counts as passed for Pass@3. "
     '"Not scored" means no reward was found for that expected attempt; it is excluded from pass/fail.'
 )
+RECOVERED_HINT = (
+    f"{HINT_START} and any recovered timeouts; {HINT_THRESHOLD} "
+    '"Timed out, recovered" marks an agent timeout that a later scored attempt of the same case recovered; '
+    "the chip shows the attempt number when the report has it, and otherwise a count. "
+    "It is not scored, but it used one of the case's attempts, so it counts in "
+    "the attempt total under Scored Attempts (the second number), not in the scored count."
+)
 
 
 def test_attempt_details_show_recovered_timeout_in_the_attempt_budget(tmp_path):
@@ -408,12 +419,7 @@ def test_attempt_details_show_recovered_timeout_in_the_attempt_budget(tmp_path):
     ]
     assert "passed on scored attempt" not in html
     # The hint lists the recovered chip among the attempt scores and counts it only in the second number.
-    assert attempt_details_hint(html) == (
-        f"{HINT_START} and any recovered timeouts; {HINT_THRESHOLD} "
-        '"Timed out, recovered" marks an agent timeout that a later scored attempt of the same case recovered. '
-        "It is not scored, but it used one of the case's attempts, so it keeps its attempt number and counts in "
-        "the attempt total under Scored Attempts (the second number), not in the scored count."
-    )
+    assert attempt_details_hint(html) == RECOVERED_HINT
     assert 'title="Includes 1 recovered agent timeout, which is not scored"' in html
 
 
@@ -468,6 +474,22 @@ def test_attempt_details_read_recovered_attempt_numbers_from_the_rows_own_arm(tm
         "opencode With skill case-a A2: 1.00 pass 1 timed out, recovered 1 of 3 scored 1.00 passed on attempt 2",
         "opencode Without skill case-a A1: timed out, recovered A2: 1.00 pass 1 of 3 scored 1.00 passed on attempt 2",
     ]
+
+
+def test_attempt_details_hint_does_not_promise_an_attempt_number_for_a_recovered_count(tmp_path):
+    result, agent = recovered_run_report(tmp_path)
+    # Compacting a non-best agent's conditions for a large multi-agent report keeps the
+    # per-case count but drops the arm's recovery list, so the row can only show a count.
+    assert _compact_agent_conditions(agent)
+    assert "recovered_attempts" not in agent["conditions"]["with_skill"]
+
+    html = HTMLReporter(report_scope="tier3").render(result)
+
+    assert attempt_details_rows(html) == [
+        "opencode With skill case-a A2: 1.00 pass 1 timed out, recovered 1 of 3 scored 1.00 passed on attempt 2"
+    ]
+    assert attempt_details_hint(html) == RECOVERED_HINT
+    assert "keeps its attempt number" not in html
 
 
 @pytest.mark.parametrize(

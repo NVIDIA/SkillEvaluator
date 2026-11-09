@@ -3048,9 +3048,9 @@
                     {{ "%.2f" | format(t3_pass_threshold) }} counts as passed for Pass@{{ t3_max_attempts }}.
                     "Not scored" means no reward was found for that expected attempt; it is excluded from pass/fail.
                     {% if t3_recovered_rows.any %}"Timed out, recovered" marks an agent timeout that a later scored
-                    attempt of the same case recovered. It is not scored, but it used one of the case's attempts,
-                    so it keeps its attempt number and counts in the attempt total under Scored Attempts (the
-                    second number), not in the scored count.{% endif %}
+                    attempt of the same case recovered; the chip shows the attempt number when the report has it,
+                    and otherwise a count. It is not scored, but it used one of the case's attempts, so it counts
+                    in the attempt total under Scored Attempts (the second number), not in the scored count.{% endif %}
                 </p>
                 <div class="t3-filter-bar">
                     <input class="t3-filter-input" type="search" placeholder="Filter by agent, case, condition, score..." oninput="tier3FilterTable(this, 't3-attempts-table')" aria-label="Filter attempt details">

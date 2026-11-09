@@ -63,7 +63,7 @@ if TYPE_CHECKING:
 # These fields are empty because the orchestration input did not supply them,
 # which is a different cause from the legacy/non-live wording used elsewhere.
 _SOURCE_UNRECORDED = "not recorded (not supplied by the orchestration input)"
-# Case rows of the token usage table. The card has a size limit; the HTML report keeps every case.
+# Case rows of the token usage table. The card has a size limit; the JSON payload keeps every case.
 _MAX_TOKEN_USAGE_CASE_ROWS = 50
 
 _SIGNAL_DESCRIPTIONS = {

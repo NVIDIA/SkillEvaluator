@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 
 
 _SKIP_REASON_MAX_CHARS = 1024
-# Case rows of the Tier 3 token usage table; the HTML report and JSON payload keep every case.
+# Case rows of the Tier 3 token usage table; the JSON payload keeps every case.
 _MAX_TOKEN_USAGE_CASE_ROWS = 50
 
 

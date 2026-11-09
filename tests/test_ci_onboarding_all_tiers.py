@@ -1211,3 +1211,17 @@ def test_gitlab_status_warns_about_root_jobs_without_feedback_guard(repository, 
     assert "also run deploy, test." in normalized
     assert "SKILL_EVAL_FEEDBACK" in normalized and ".skill-evaluation-not-feedback" in normalized
     assert "a job without rules, only or except can extend" in normalized
+
+
+def test_gitlab_status_recognizes_tier2_job_overrides(repository, all_release, monkeypatch):
+    subprocess.run(
+        ["git", "-C", str(repository), "remote", "set-url", "origin", "https://gitlab.example.test/group/consumer.git"],
+        check=True,
+    )
+    assert invoke(repository, all_release, "--mode", "save").exit_code == 0
+    generated = (repository / ".gitlab-ci.yml").read_text()
+    output, _calls = _gitlab_status(
+        repository, monkeypatch, generated + "skill-evaluation-native-tier2:\n  tags: [cpu]\n"
+    )
+    assert "All-tier checks: configured" in output
+    assert "Warning" not in output

@@ -60,6 +60,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Run GitLab Tier 2 without Docker-in-Docker while keeping TLS-protected Docker
+  for Tier 3. Both native tiers retain shared caller timeout and runner-tag
+  overrides, advisory outcomes, and aggregate artifacts; local mode still
+  disables the Tier 3 Docker service.
+
 - Align terminal grade and lift colors across compact, full, and direct Tier 3
   reports; displayed zero lift is neutral. Narrow terminals stack complete
   condition score/bar groups. Full-report Details retain successful quality and

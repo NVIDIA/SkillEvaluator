@@ -156,8 +156,11 @@ def _reasons(rows: object) -> list[dict]:
             limits = {}
             for key, accepts_float in _LIMIT_FIELDS:
                 value = metrics.get(key)
-                numeric = type(value) is int or (accepts_float and type(value) is float)
-                if numeric and math.isfinite(value) and 0 <= value <= _MAX_COUNT:
+                # The range is checked before any float conversion, so an
+                # integer too large for a float is dropped, not raised.
+                if (type(value) is int and 0 <= value <= _MAX_COUNT) or (
+                    accepts_float and type(value) is float and math.isfinite(value) and 0 <= value <= _MAX_COUNT
+                ):
                     limits[key] = value
             if limits:
                 reason["limits"] = limits

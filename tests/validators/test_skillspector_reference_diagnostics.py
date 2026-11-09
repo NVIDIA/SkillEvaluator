@@ -335,6 +335,39 @@ class TestEvidenceProjection:
             {"file": "SKILL.md"},
         ]
 
+    @pytest.mark.parametrize("field", ["observed_characters", "observed_seconds"])
+    @pytest.mark.parametrize(
+        "value",
+        [10**400, -(10**400), 1 << 63, float("nan"), -1.0],
+        ids=["beyond-float", "below-float", "beyond-count", "nan", "negative"],
+    )
+    def test_out_of_range_limits_are_dropped(self, field: str, value: object) -> None:
+        """A limit beyond the count range, even an integer too large for a float, is left out."""
+        issue = _report(_PARSE_LIMIT_REPORT)["issues"][0]
+        issue["evidence"]["reasons"][0]["limits"] = {field: value, "limit_characters": 8000}
+
+        finding, is_error = SecurityValidator._convert_skillspector_issue(issue)
+
+        assert is_error
+        assert finding.metadata["skillspector_evidence"]["reasons"][0]["limits"] == {"limit_characters": 8000}
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_an_oversized_limit_does_not_stop_the_scan(self, mock_tools, tmp_path: Path) -> None:
+        root = _parse_limit_skill(tmp_path / "perl-parse-limit")
+        report = _report(_PARSE_LIMIT_REPORT)
+        report["issues"][0]["evidence"]["reasons"][0]["limits"] = {"observed_characters": 10**400}
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True, stdout=json.dumps(report), stderr="", exit_code=0
+        )
+
+        result = SecurityValidator(use_llm=False).validate_security_only(root)
+
+        assert not result.passed
+        assert result.incomplete_scans == ["skillspector"]
+        assert result.summary.high_count == 2
+        assert result.metadata["skillspector_reference_summary"]["affected_artifacts"] == 1
+
     def test_occurrence_list_is_bounded(self) -> None:
         issue = _report(_PARSE_LIMIT_REPORT)["issues"][0]
         issue["occurrences"] = [{"file": "SKILL.md", "start_line": line} for line in range(1, 130)]

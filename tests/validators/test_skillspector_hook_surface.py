@@ -667,6 +667,14 @@ class TestOtherGapsStayIncomplete:
             pytest.param(lambda report: _row(report).update(observed_records=2), id="one-count"),
             pytest.param(lambda report: _row(report).update(path="./hooks/hooks.json"), id="dot-path"),
             pytest.param(lambda report: _row(report).update(path="hooks\\hooks.json"), id="backslash-path"),
+            # A row and BH1 on a path outside the scan root.
+            pytest.param(
+                lambda report: (
+                    _row(report).update(path="../hooks.json"),
+                    _bh1(report)["location"].update(file="../hooks.json"),
+                ),
+                id="unsafe-path",
+            ),
             # It also records the same row for a manifest it could not parse, with no BH1.
             pytest.param(lambda report: report["issues"].remove(_bh1(report)), id="no-bh1"),
             pytest.param(lambda report: _bh1(report)["evidence"].update(payload_analysis_level="direct"), id="modeled"),
@@ -782,8 +790,12 @@ class TestHookRowHelpers:
 
         assert _skillspector_ledger_exception_is_hook_surface_limitation(_HOOK_ROW, manifests)
         assert not _skillspector_ledger_exception_is_hook_surface_limitation(_HOOK_ROW, {})
+        assert not _skillspector_ledger_exception_is_hook_surface_limitation({**_HOOK_ROW, "fatal": True}, manifests)
         assert not _skillspector_ledger_exception_is_hook_surface_limitation(
             {**_HOOK_ROW, "path": "/hooks/hooks.json"}, {"/hooks/hooks.json": 2}
+        )
+        assert not _skillspector_ledger_exception_is_hook_surface_limitation(
+            {**_HOOK_ROW, "path": "../hooks.json"}, {"../hooks.json": 2}
         )
 
     @pytest.mark.parametrize(

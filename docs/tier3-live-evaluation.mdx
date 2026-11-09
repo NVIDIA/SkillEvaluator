@@ -894,6 +894,16 @@ A metric can also be N/A (not applicable) for an eval case. It never counts as
   `ground_truth` make `accuracy` and `goal_accuracy` N/A.
 - `skill_execution` and `skill_efficiency` are N/A in a baseline arm that has
   no skill it could activate.
+- `skill_efficiency` is N/A for a negative case (`should_trigger: false`, or a
+  `null` or empty `expected_skill` without `should_trigger`, which is how
+  `create-eval-dataset` writes one), because the case expects no skill use to
+  measure. `skill_execution` still scores a negative case: it checks that the
+  agent left the skill under test alone.
+- Both are N/A for a case that names no `expected_skill`: a legacy case without
+  `expected_skill` and `should_trigger`, or one with `should_trigger: true` and
+  no `expected_skill`. If no case names one, Discoverability and Efficiency have
+  no with-skill score, so the agent cannot PASS (see below).
+- A positive case whose agent made no tool calls still scores `0.0` on both.
 - Security is never N/A.
 
 In `skill_evaluator_reward.json` an N/A metric's value is `null`, and

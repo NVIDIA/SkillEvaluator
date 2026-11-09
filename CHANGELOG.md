@@ -112,6 +112,23 @@ All notable changes to SkillEvaluator are documented in this file.
   reasons for an N/A Accuracy, Goal Accuracy or Behavior Check now name the
   dataset fields `expected_output` and `assertions` before their legacy names.
 
+- Tier 3 no longer scores a with-skill skill metric `1.0` when the eval case
+  gives it nothing to score. `skill_efficiency` (Efficiency) is now N/A for a
+  negative case, such as the one `create-eval-dataset --full` writes, and both
+  `skill_execution` (Discoverability) and `skill_efficiency` are N/A for a case
+  that names no `expected_skill`, such as a legacy case without
+  `expected_skill` and `should_trigger`. The trial overall, pass@k and the
+  arm's averages leave N/A metrics out, so absolute with-skill scores of these
+  cases change: a negative case scoring 1.0 on Security and Discoverability and
+  0.8 on Correctness and Effectiveness now has an overall of 0.90, not 0.92. If
+  no case names an `expected_skill`, Discoverability and Efficiency have no
+  with-skill score and the agent cannot PASS. A trial without a trajectory
+  keeps these metrics N/A too. A positive case with no tool calls still scores
+  `0.0`, and Skill Lift is unchanged when the baseline has no skill it could
+  activate, because both metrics are already N/A there. The HTML report now
+  explains a with-skill N/A skill metric by the eval case, not by a missing
+  skill.
+
 - `skillevaluator tier3 feedback` now writes the evaluated skill's directory
   (known from `--skill` or a run in the skill's `evals/results`) as its name
   and the home directory as `~` in the evidence it sends to the LLM, so an

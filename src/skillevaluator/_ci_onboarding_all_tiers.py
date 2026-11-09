@@ -43,6 +43,7 @@ _GL_GLOBAL_KEYS = {
 _GL_EVALUATOR_JOBS = {
     "skill-evaluation",
     "skill-evaluation-native",
+    "skill-evaluation-native-tier2",
     "skill-evaluation-aggregate",
     "skill-evaluation-request-feedback",
     "skill-evaluation-feedback",

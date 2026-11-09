@@ -48,7 +48,8 @@ from skillevaluator.embedding.client import (
 from skillevaluator.embedding.extractor import (
     MAX_MANIFEST_BYTES,
     ContentEntry,
-    discover_and_extract,
+    ExtractionResult,
+    discover_and_extract_detailed,
     extract_from_skill,
 )
 from skillevaluator.embedding.limits import validate_max_entries, validate_max_scalar_comparisons
@@ -198,10 +199,16 @@ class EmbeddingRegistry:
         self._max_scalar_comparisons = max_scalar_comparisons
         self._entries: dict[str, RegistryEntry] = {}
         self._vector_dimension: int | None = None
+        self._coverage: ExtractionResult | None = None
 
     @property
     def size(self) -> int:
         return len(self._entries)
+
+    @property
+    def coverage(self) -> ExtractionResult | None:
+        """Coverage of the most recent directory selection, if any."""
+        return self._coverage
 
     def build_from_directory(
         self,
@@ -221,8 +228,8 @@ class EmbeddingRegistry:
         Returns:
             Number of entries successfully indexed.
         """
-        content_entries = discover_and_extract(root, content_type, max_entries=self._max_entries)
-        return self._build_entries(root, content_entries, minimum_entries, for_pairwise_scan)
+        self._coverage = discover_and_extract_detailed(root, content_type, max_entries=self._max_entries)
+        return self._build_entries(root, self._coverage.entries, minimum_entries, for_pairwise_scan)
 
     def build_from_paths(self, root: Path, skills: list[Path]) -> int:
         """Index explicit skills across multiple roots under one trusted checkout.
@@ -252,7 +259,9 @@ class EmbeddingRegistry:
             if entry is None:
                 raise ValueError("Each explicit path must contain a valid SKILL.md")
             entries.append(entry)
-        return self._build_entries(root, entries, 1, False)
+        count = self._build_entries(root, entries, 1, False)
+        self._coverage = None
+        return count
 
     def _build_entries(
         self,
@@ -514,6 +523,10 @@ class EmbeddingRegistry:
 
     def save_catalog(self, catalog_path: Path) -> None:
         """Persist a validated, versioned local embedding catalog."""
+        if self._coverage is not None and self._coverage.skipped_count:
+            raise ValueError(
+                "Cannot save a catalog with incomplete collection coverage; fix excluded manifests and rebuild"
+            )
         if not self._entries:
             raise ValueError("Cannot save an empty catalog")
         if len(self._entries) > MAX_CATALOG_ENTRIES:
@@ -649,6 +662,7 @@ class EmbeddingRegistry:
 
         self._entries = loaded
         self._vector_dimension = vector_dimension
+        self._coverage = None
         logger.debug("Loaded %d entries from local catalog %s", len(self._entries), safe_path_label(catalog_path))
 
     def save_cache(self, cache_path: Path) -> None:

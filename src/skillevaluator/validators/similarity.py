@@ -19,7 +19,7 @@ from skillevaluator.constants import (
     SIMILARITY_DEFAULT_THRESHOLD,
 )
 from skillevaluator.embedding.client import EmbeddingClient, SimilarityConfigError
-from skillevaluator.embedding.extractor import extract_from_skill
+from skillevaluator.embedding.extractor import ExtractionResult, extract_from_skill
 from skillevaluator.embedding.limits import validate_max_entries, validate_max_scalar_comparisons
 from skillevaluator.embedding.registry import EmbeddingRegistry, SimilarityMatch
 from skillevaluator.logging_config import get_logger
@@ -163,6 +163,7 @@ class SimilarityValidator(ValidatorBase):
                     minimum_entries=minimum_entries,
                     for_pairwise_scan=True,
                 )
+                self._record_coverage(registry, result)
                 if count == 0:
                     if self._save_catalog_path:
                         result.add_error(f"Cannot save a catalog from an empty {content_type} collection")
@@ -176,13 +177,14 @@ class SimilarityValidator(ValidatorBase):
                     entry_count=count,
                 )
                 matches = registry.find_duplicates(self._threshold)
-                if self._save_catalog_path:
+                if self._save_catalog_path and not result.is_incomplete:
                     registry.save_catalog(self._save_catalog_path)
                     result.add_success(
                         "catalog_saved",
                         f"Saved local catalog to {self._catalog_display_name(self._save_catalog_path)}",
                     )
         except SimilarityConfigError as exc:
+            self._record_coverage(registry, result)
             result.mark_scan_incomplete("embedding-provider")
             result.add_error(
                 sanitize_path_text(
@@ -192,6 +194,7 @@ class SimilarityValidator(ValidatorBase):
             )
             return result
         except (ValueError, OSError) as exc:
+            self._record_coverage(registry, result)
             result.add_error(
                 sanitize_path_text(
                     str(exc),
@@ -206,7 +209,7 @@ class SimilarityValidator(ValidatorBase):
             catalog_comparison=self._catalog_path is not None,
         )
 
-        if not matches:
+        if not matches and not result.is_incomplete:
             result.add_success(
                 "similarity_check",
                 f"No duplicates detected (threshold: {self._threshold})",
@@ -226,6 +229,29 @@ class SimilarityValidator(ValidatorBase):
         from skillevaluator.cli_core import detect_content_type
 
         return detect_content_type(path)
+
+    @staticmethod
+    def _record_coverage(registry: EmbeddingRegistry, result: ValidationResult) -> None:
+        coverage = registry.coverage
+        if not isinstance(coverage, ExtractionResult):
+            return
+        if any(detail.check_name == "collection_coverage" for detail in result.success_details):
+            return
+        result.add_success(
+            "collection_coverage",
+            f"Selected {coverage.selected_count}; indexed {coverage.indexed_count}; skipped {coverage.skipped_count} manifests",
+            **coverage.to_metadata(),
+        )
+        if coverage.skipped_count:
+            result.mark_scan_incomplete("collection-coverage")
+            excluded = "; ".join(f"{item['path']}: {item['reason']}" for item in coverage.exclusions)
+            omitted = coverage.skipped_count - len(coverage.exclusions)
+            if omitted:
+                excluded += f"; {omitted} additional exclusions omitted"
+            result.add_error(
+                f"Incomplete collection coverage: {coverage.skipped_count} selected manifests were excluded; "
+                f"fix the reported frontmatter errors and rerun. Any matches cover only indexed entries; no catalog saved. {excluded}"
+            )
 
     @staticmethod
     def _catalog_display_name(path: Path) -> str:

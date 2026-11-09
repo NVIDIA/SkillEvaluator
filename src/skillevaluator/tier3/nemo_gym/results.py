@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import re
 import shutil
 from collections import defaultdict
@@ -86,6 +87,30 @@ def rollout_task_name(row: dict[str, Any]) -> str | None:
     return task_id if isinstance(task_id, str) and task_id else None
 
 
+def read_verifier_rewards(verifier_dir: Path) -> dict[str, Any] | None:
+    """Return a trial's rewards from ``reward.json``, else a numeric ``reward.txt``, as Harbor reads them."""
+    reward_json = verifier_dir / "reward.json"
+    if reward_json.is_file() and not reward_json.is_symlink():
+        try:
+            loaded = json.loads(reward_json.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return loaded if isinstance(loaded, dict) else None
+    reward_txt = verifier_dir / "reward.txt"
+    if reward_txt.is_file() and not reward_txt.is_symlink():
+        try:
+            value = float(reward_txt.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            return None
+        return {"reward": value} if math.isfinite(value) else None
+    return None
+
+
+def rollout_failure_text(row: dict[str, Any]) -> str:
+    """Return why a Gym rollout failed, or an empty string when its verifier ran."""
+    return _failure_text(row)
+
+
 def _failure_text(row: dict[str, Any]) -> str:
     failure = row.get("failure") or row.get("failure_reason") or row.get("failure_kind")
     if isinstance(failure, dict):
@@ -158,22 +183,20 @@ def write_job_from_rollouts(
             reward_path = trial_dir / "verifier" / "reward.json"
             failure = _failure_text(row)
             rewards: dict[str, Any] | None = None
-            if not failure and reward_path.is_file():
-                try:
-                    loaded = json.loads(reward_path.read_text(encoding="utf-8"))
-                except ValueError:
-                    loaded = None
-                if isinstance(loaded, dict):
-                    rewards = {"entry_id": case_id, **loaded}
+            loaded = None if failure else read_verifier_rewards(trial_dir / "verifier")
+            if loaded is not None:
+                rewards = {"entry_id": case_id, **loaded}
+                if reward_path.is_file():
                     reward_path.write_text(json.dumps(rewards, indent=2), encoding="utf-8")
             if rewards is None:
-                failure = failure or "SkillEvaluator verifier wrote no reward.json"
+                failure = failure or "the task verifier wrote no reward.json or numeric reward.txt"
                 n_errors += 1
                 if not row.get(_MISSING_ROLLOUT):
                     errors.append(f"case {case_id} attempt {attempt}: {failure}")
             else:
                 n_scored += 1
-                rewarded[str(rewards.get("overall", row.get("reward", 0.0)))].append(trial_name)
+                score = rewards.get("overall", rewards.get("reward", row.get("reward", 0.0)))
+                rewarded[str(score)].append(trial_name)
             (trial_dir / "result.json").write_text(
                 json.dumps(
                     {

@@ -222,10 +222,17 @@ def test_live_case_marks_reads_nemo_gym_rollouts(tmp_path):
     arm = tmp_path / "_nemo-gym" / "codex-with"
     arm.mkdir(parents=True)
     task = {"taskset": "with", "task_id": "case-1"}
+    # Scored from the verifier logs, with the same rules as the final Gym result normalizer.
+    logs = []
+    for index, overall in enumerate((0.9, 0.1)):
+        log_dir = tmp_path / "gym-logs" / str(index)
+        log_dir.mkdir(parents=True)
+        (log_dir / "reward.json").write_text(json.dumps({"overall": overall}))
+        logs.append(str(log_dir))
     rows = [
-        {"_ng_task_id": task, "verifier_rewards": {"overall": 0.9}},
-        {"_ng_task_id": task, "verifier_rewards": {"overall": 0.1}},
-        {"_ng_task_id": task, "failure_reason": "sandbox died", "verifier_rewards": None},
+        {"_ng_task_id": task, "verifier_return_code": 0, "verifier_logs_dir": logs[0]},
+        {"_ng_task_id": task, "verifier_return_code": 0, "verifier_logs_dir": logs[1]},
+        {"_ng_task_id": task, "failure_reason": "sandbox died", "verifier_return_code": None},
     ]
     (arm / "rollouts.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + '\n{"_ng_task_id": {"ta')
     marks, running = live_case_marks(tmp_path, ["codex"], pass_threshold=0.5)

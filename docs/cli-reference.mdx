@@ -718,11 +718,12 @@ An option for a tier that is not selected exits with a usage error before any ch
 | `--timeout FLOAT` | `60` | Tier 1, and Tier 2 with `--verify-models`. Seconds allowed for each scanner version probe and each Tier 2 live request, including a Bedrock chat request; must be finite, greater than 0 and at most 3600. |
 | `-a, --agents TEXT` | provider-native | Comma-separated agents to check. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. |
 | `--env-mode` | `docker` | Backend to check (same 27 modes as [tier3 evaluate](#tier3-evaluate)). |
+| `--backend [harbor\|nemo-gym]` | `harbor` | Execution backend to check, as in [tier3 evaluate](#tier3-evaluate). `nemo-gym` checks the Gym CLI, the Docker daemon, the `SKILL_EVAL_NEMO_GYM_*` settings and each agent's policy endpoint. |
 | `--environment-kwarg`, `--ek` | none | `KEY=VALUE` non-secret constructor option for a Harbor-native non-Docker backend (repeatable). Pass the same values intended for evaluation. Docker and local reject all kwargs, and Kata accepts only `kata_runtime` and `kata_dns`; policy-owned fields are rejected for every eligible backend. |
 | `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable) — check readiness with the model each agent will actually run. |
 | `--verify-models` | off | Tier 3: live per-agent catalog probe. Prints pass for verified access, warn for an inconclusive or non-authoritative result (success or failure), and fail only for a definitive credential, model, or configuration rejection. Tier 2: one embedding and one chat request. |
 
-`-a`, `--env-mode`, `--environment-kwarg` and `--agent-model` apply to Tier 3 only. `skillevaluator tier3 doctor` checks only Tier 3. It takes the Tier 3 flags, including `--agent-model` and `--verify-models`, and has no `--tier`, `--checks` or `--timeout`.
+`-a`, `--env-mode`, `--backend`, `--environment-kwarg` and `--agent-model` apply to Tier 3 only. `skillevaluator tier3 doctor` checks only Tier 3. It takes the Tier 3 flags, including `--agent-model` and `--verify-models`, and has no `--tier`, `--checks` or `--timeout`.
 
 ## health-check
 

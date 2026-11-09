@@ -36,14 +36,17 @@ from skillevaluator.tier3.nemo_gym.backend import (
     MCP_SERVERS_ERROR,
     MODEL_API_KEY_ENV,
     MODEL_URL_ENV,
+    NATIVE_MCP_SERVERS_ERROR,
     NEMO_GYM_AGENTS,
     NEMO_GYM_BACKEND,
     NEMO_GYM_BIN_ENV,
     RUN_TIMEOUT_ENV,
     mcp_servers_declared,
     model_url_credential_error,
+    native_mcp_servers_declared,
     nemo_gym_bin,
     nemo_gym_capability_errors,
+    nemo_gym_sandbox_error,
     nemo_gym_timeout_s,
     nemo_gym_version,
     uses_native_harbor_tasks,
@@ -60,7 +63,11 @@ _SKILLS_DIR_LINE = re.compile(r"^skills_dir\s*=.*\n?", re.MULTILINE)
 
 
 def stage_for_gym(
-    arm_dir: Path, verifier_env: dict[str, str] | None = None, *, timeout_multiplier: float = 1.0
+    arm_dir: Path,
+    verifier_env: dict[str, str] | None = None,
+    *,
+    timeout_multiplier: float = 1.0,
+    resource_overrides: dict[str, int] | None = None,
 ) -> None:
     """Adapt Harbor-format tasks for Gym's agents and verifier.
 
@@ -70,10 +77,14 @@ def stage_for_gym(
     still has none. Adds ``verifier_env`` (``${NAME}`` templates) to ``[verifier.env]``: Harbor
     passes the judge overrides at job level, and Gym has no job-level verifier env. Scales the
     agent, verifier and environment-build timeouts by ``timeout_multiplier``, as Harbor's
-    ``--timeout-multiplier`` does, because Gym enforces the task's own timeouts.
+    ``--timeout-multiplier`` does, because Gym enforces the task's own timeouts. Writes the
+    ``--override-cpus``/``--override-memory-mb`` values into ``[environment]``, which Harbor
+    applies at job level. Raises ``ValueError`` for a task that declares MCP servers.
     """
     for task_toml in arm_dir.glob("*/task.toml"):
         text = task_toml.read_text(encoding="utf-8")
+        if (tomllib.loads(text).get("environment") or {}).get("mcp_servers"):
+            raise ValueError(f"{task_toml.parent.name}: {NATIVE_MCP_SERVERS_ERROR}")
         staged = _SKILLS_DIR_LINE.sub("", text)
         existing = set((tomllib.loads(staged).get("verifier") or {}).get("env") or {})
         lines = "".join(
@@ -89,6 +100,16 @@ def stage_for_gym(
                 staged = staged.rstrip("\n") + "\n\n[verifier.env]\n" + lines
         if timeout_multiplier != 1.0:
             staged = _scaled_task_timeouts(staged, timeout_multiplier, task_file=task_toml)
+            # Harbor's multiplier also scales the verifier's 600 s default.
+            staged = _set_table_numbers(
+                staged,
+                "verifier",
+                {"timeout_sec": _DEFAULT_VERIFIER_TIMEOUT_SEC * timeout_multiplier},
+                only_missing=True,
+                task_file=task_toml,
+            )
+        if resource_overrides:
+            staged = _set_table_numbers(staged, "environment", resource_overrides, task_file=task_toml)
         if staged != text:
             task_toml.write_text(staged, encoding="utf-8")
 
@@ -102,6 +123,9 @@ _TIMEOUT_FIELDS = {
 }
 # Harbor's default environment build timeout, which its multiplier also scales when a task names none.
 _DEFAULT_BUILD_TIMEOUT_SEC = 600.0
+# Harbor's VerifierConfig.timeout_sec default.
+_DEFAULT_VERIFIER_TIMEOUT_SEC = 600.0
+_TRIPLE_QUOTES = ('"' * 3, "'" * 3)
 _TABLE_RE = re.compile(r"^[ \t]*\[{1,2}[ \t]*([A-Za-z0-9_.-]+)[ \t]*\]{1,2}[ \t]*(?:#.*)?$")
 _NUMBER_RE = re.compile(r"^([ \t]*)([A-Za-z_]+)([ \t]*=[ \t]*)([0-9][0-9_.eE+-]*)([ \t]*(?:#.*)?)$")
 
@@ -146,6 +170,59 @@ def _scaled_task_timeouts(text: str, multiplier: float, *, task_file: Path) -> s
     staged = "\n".join(lines)
     if tomllib.loads(staged) != expected:
         raise ValueError(f"{task_file}: could not apply --timeout-multiplier to the task timeouts")
+    return staged
+
+
+def _set_table_numbers(
+    text: str, table_name: str, values: dict[str, Any], *, only_missing: bool = False, task_file: Path
+) -> str:
+    """Set numeric keys of one top-level task.toml table, adding the keys or the table when absent."""
+    lines = text.split("\n")
+    table = ""
+    open_string: str | None = None
+    seen: set[str] = set()
+    table_end: int | None = None
+    for index, line in enumerate(lines):
+        if open_string is not None:
+            if line.count(open_string) % 2:
+                open_string = None
+            continue
+        header = _TABLE_RE.match(line)
+        if header:
+            if table == table_name and table_end is None:
+                table_end = index
+            table = header.group(1)
+            continue
+        number = _NUMBER_RE.match(line)
+        if table == table_name and number and number.group(2) in values:
+            seen.add(number.group(2))
+            if not only_missing:
+                value = values[number.group(2)]
+                lines[index] = f"{number.group(1)}{number.group(2)}{number.group(3)}{value!r}{number.group(5)}"
+            continue
+        open_string = next((quote for quote in _TRIPLE_QUOTES if line.count(quote) % 2), None)
+    if table == table_name and table_end is None:
+        table_end = len(lines)
+    expected = tomllib.loads(text)
+    current = expected.setdefault(table_name, {})
+    if not isinstance(current, dict):
+        raise ValueError(f"{task_file}: [{table_name}] is not a table")
+    missing = {key: value for key, value in values.items() if key not in current and key not in seen}
+    for key, value in values.items():
+        if key in missing or not only_missing:
+            current[key] = value
+    added = [f"{key} = {value!r}" for key, value in missing.items()]
+    if added:
+        if table_end is None:
+            body = lines[:-1] if lines and lines[-1] == "" else lines
+            lines = [*body, "", f"[{table_name}]", *added, ""]
+        else:
+            while table_end > 0 and not lines[table_end - 1].strip():
+                table_end -= 1
+            lines[table_end:table_end] = added
+    staged = "\n".join(lines)
+    if tomllib.loads(staged) != expected:
+        raise ValueError(f"{task_file}: could not set [{table_name}] {', '.join(values)} in the task")
     return staged
 
 
@@ -342,7 +419,6 @@ def _run_gym(
 
     from skillevaluator.tier3.harbor.runner import (
         _HARBOR_RUN_CANCEL_POLL_SECONDS,
-        _signal_harbor_process_group,
         _terminate_harbor_process_tree,
     )
     from skillevaluator.tier3.harbor.stream_redaction import StreamingLogRedactor
@@ -376,22 +452,35 @@ def _run_gym(
     reader = threading.Thread(target=_pump, name="nemo-gym-log", daemon=True)
     reader.start()
 
+    def _kill_group() -> None:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
+
     def _stop() -> None:
-        if reporter is not None:
-            reporter.emit(
-                ProgressEvent(
-                    stage="cleanup",
-                    state="running",
-                    detail="Stopping NeMo Gym; press Ctrl+C again to skip up to 30s of sandbox cleanup",
-                )
-            )
-        # Let a leader that is already exiting be reaped, so macOS reports ESRCH rather than EPERM.
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            process.wait(timeout=_HARBOR_RUN_CANCEL_POLL_SECONDS)
+        # A second interrupt anywhere in here still SIGKILLs the group before it propagates.
         try:
-            _terminate_harbor_process_tree(process, grace_seconds=_GYM_SHUTDOWN_GRACE_SECONDS)
+            if reporter is not None:
+                reporter.emit(
+                    ProgressEvent(
+                        stage="cleanup",
+                        state="running",
+                        detail="Stopping NeMo Gym; press Ctrl+C again to skip up to 30s of sandbox cleanup",
+                    )
+                )
+            # Let a leader that is already exiting be reaped, so macOS reports ESRCH rather than EPERM.
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=_HARBOR_RUN_CANCEL_POLL_SECONDS)
+            try:
+                _terminate_harbor_process_tree(process, grace_seconds=_GYM_SHUTDOWN_GRACE_SECONDS)
+            except PermissionError:
+                # macOS EPERM race: the leader was exiting while its group was signalled.
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    process.wait(timeout=_HARBOR_RUN_CANCEL_POLL_SECONDS)
+                if process.poll() is None:
+                    raise
+                _kill_group()
         except KeyboardInterrupt:
-            _signal_harbor_process_group(process, signal.SIGKILL)
+            _kill_group()
             process.wait()
             raise
 
@@ -407,6 +496,21 @@ def _run_gym(
                 raise
     finally:
         reader.join(timeout=_GYM_LOG_DRAIN_SECONDS)
+
+
+def _redacted_row(row: dict[str, Any], secrets: set[str]) -> dict[str, Any]:
+    """Redact the failure text a rollout row carries before it reaches trial and result files."""
+    redacted = dict(row)
+    for name in ("failure", "failure_reason", "failure_kind"):
+        value = redacted.get(name)
+        if isinstance(value, dict):
+            redacted[name] = {
+                key: redact_progress_detail(item, secret_values=secrets) if isinstance(item, str) else item
+                for key, item in value.items()
+            }
+        elif isinstance(value, str):
+            redacted[name] = redact_progress_detail(value, secret_values=secrets)
+    return redacted
 
 
 def gym_launch_environment(credentials: dict[str, str]) -> dict[str, str]:
@@ -435,12 +539,12 @@ def gym_launch_environment(credentials: dict[str, str]) -> dict[str, str]:
 
 
 def _refresh_adc_credentials(
-    credentials: dict[str, str], policy_key: str, timeout_s: float
+    credentials: dict[str, str], *, policy_uses_provider_key: bool, timeout_s: float
 ) -> tuple[dict[str, str], float]:
     """Mint a fresh Vertex ADC token for one Gym launch and cap the launch to its lifetime.
 
     Mirrors the Harbor runner: the token is refreshed before every launch, reused as the
-    policy key only when the policy uses the provider key, and the launch timeout is
+    policy key when the policy has no key of its own, and the launch timeout is
     capped by ``compute_adc_job_timeout``. Raises ``RuntimeError``/``ValueError`` on failure.
     """
     from skillevaluator.provider_config import (
@@ -457,13 +561,12 @@ def _refresh_adc_credentials(
     from skillevaluator.tier3.harbor.runner import VERTEX_ADC_JOB_TIMEOUT_ENV
 
     refreshed = dict(credentials)
-    previous = refreshed.get("OPENAI_API_KEY")
     fresh = refresh_host_vertex_adc_environment(
         refreshed, fallback_env=os.environ, fail_on_expired=True, token_getter=_get_google_access_token
     )
     if fresh:
         refreshed["OPENAI_API_KEY"] = fresh
-        if previous and policy_key == previous:
+        if policy_uses_provider_key:
             refreshed[MODEL_API_KEY_ENV] = fresh
     source = refreshed.get(CREDENTIAL_SOURCE_ENV) or os.environ.get(CREDENTIAL_SOURCE_ENV)
     base_url = refreshed.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
@@ -519,12 +622,14 @@ def run_nemo_gym_eval(
     from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
     from skillevaluator.tier3.harbor.adapter import (
         build_eval_base_image,
+        find_evals_file,
         generate_harbor_tasks,
         stage_native_harbor_tasks,
     )
     from skillevaluator.tier3.harbor.artifact_retention import HarborArtifactLifecycle
     from skillevaluator.tier3.harbor.collector import _score_definition_for_policy, collect_harbor_results
     from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, score_policy_for_metrics
+    from skillevaluator.tier3.harbor.progress import Tier3RunPlan
     from skillevaluator.tier3.harbor.report_data import dataset_snapshot_manifest
     from skillevaluator.tier3.harbor.runner import (
         _VERIFIER_JUDGE_CONTROL_ENV_VARS,
@@ -611,8 +716,12 @@ def run_nemo_gym_eval(
     task_source = "native_harbor" if uses_native_harbor_tasks(skill_path, configured_task_source) else "evals_json"
     if task_source == "native_harbor" and not (skill_path / "evals" / "harbor").is_dir():
         errors.append("No native Harbor task source found at evals/harbor.")
+    if task_source == "evals_json" and find_evals_file(skill_path) is None:
+        errors.append("No evals/evals.json found. Run create-eval-dataset or add a dataset.")
     if mcp_servers_declared(skill_path):
         errors.append(MCP_SERVERS_ERROR)
+    if task_source == "native_harbor" and native_mcp_servers_declared(skill_path):
+        errors.append(NATIVE_MCP_SERVERS_ERROR)
     pre_agent_setup = list(harbor_config.get("pre_agent_setup") or [])
     if pre_agent_setup and not skip_baseline:
         if skip_with_skill:
@@ -641,12 +750,14 @@ def run_nemo_gym_eval(
         errors.append("include_skills requires skill_workspace.mode=group")
     for name, value in (("cpus", override_cpus), ("memory_mb", override_memory_mb)):
         if value is not None and value <= 0:
-            errors.append(f"--{name.replace('_', '-')} must be greater than 0")
+            errors.append(f"--override-{name.replace('_', '-')} must be greater than 0")
     timeout_s = DEFAULT_RUN_TIMEOUT_S
     try:
         timeout_s = nemo_gym_timeout_s()
     except ValueError as exc:
         errors.append(str(exc))
+    if sandbox_error := nemo_gym_sandbox_error():
+        errors.append(sandbox_error)
     if errors:
         return _config_failure("; ".join(errors))
     try:
@@ -670,6 +781,8 @@ def run_nemo_gym_eval(
     execution_backend = {"name": NEMO_GYM_BACKEND, "version": gym_version, "sandbox": sandbox}
     resolved_models: dict[str, dict[str, str]] = {}
     endpoints: dict[str, tuple[str, str, str]] = {}
+    # _model_endpoint falls back to the provider key exactly when the policy has none of its own.
+    policy_uses_provider_key = not os.environ.get(MODEL_API_KEY_ENV, "").strip()
     config_agents = harbor_config.get("agents") or {}
     for agent in agents:
         cli_model = (agent_models or {}).get(agent) or model
@@ -681,6 +794,8 @@ def run_nemo_gym_eval(
             return _config_failure(url_error)
 
     run_dir = _reserve_run_dir(output_dir, datetime.now(UTC).strftime("%Y%m%d_%H%M%S"))
+    # As on Harbor, the results root never enters a --copy-repo or base-image build context.
+    repo_context_exclude_paths = (Path(output_dir), *(Path(path) for path in repo_context_exclude_paths))
     tasks_root = run_dir / "_harbor-tasks"
     jobs_dir = run_dir / "_harbor-jobs"
     gym_root = run_dir / "_nemo-gym"
@@ -740,8 +855,15 @@ def run_nemo_gym_eval(
                 excluded_roots=repo_context_exclude_paths,
                 force_rebuild=base_image_mode == "rebuild",
             )
-            detail = f"eval base image ready: {base_image}" if base_image else "using full per-task Dockerfiles"
-            reporter.emit(ProgressEvent(stage="docker-images", state="complete", detail=detail))
+            reporter.emit(
+                ProgressEvent(stage="docker-images", state="complete", detail=f"eval base image ready: {base_image}")
+                if base_image
+                else ProgressEvent(
+                    stage="docker-images",
+                    state="degraded",
+                    detail="base image build failed; falling back to per-task Dockerfiles",
+                )
+            )
         # Every arm stages the same verified decoy bytes, as on Harbor.
         with (
             _private_decoy_workspace_snapshot(selected_decoys, decoy_manifest)
@@ -781,11 +903,39 @@ def run_nemo_gym_eval(
                             task_paths,
                             max_cases=max_cases,
                         )
-                    stage_for_gym(arm_dir, judge_job_env, timeout_multiplier=effective_timeout)
+                    stage_for_gym(
+                        arm_dir,
+                        judge_job_env,
+                        timeout_multiplier=effective_timeout,
+                        # Generated tasks already carry them; native tasks get Harbor's job-level override.
+                        resource_overrides={
+                            key: value
+                            for key, value in (("cpus", override_cpus), ("memory_mb", override_memory_mb))
+                            if value is not None and task_source == "native_harbor"
+                        },
+                    )
                     task_case_ids = _task_case_ids(arm_dir)
                     case_ids = case_ids or sorted(set(task_case_ids.values()))
                     staged_task_paths += [task for task in task_paths if task.is_dir()]
                     planned.append((agent, arm, arm_dir, task_case_ids))
+        # The same plan a Harbor run starts its reporter with; output_dir lets a case view poll the rollouts.
+        reporter.start(
+            Tier3RunPlan(
+                skill_name=skill_path.name,
+                environment=env_mode,
+                agents=tuple(agents),
+                agent_models=tuple((agent, endpoints[agent][0]) for agent in agents),
+                provider=provider.provider,
+                case_count=len(case_ids),
+                attempts=attempts,
+                baseline=not skip_baseline,
+                with_skill=not skip_with_skill,
+                concurrency=concurrency,
+                timeout_multiplier=float(effective_timeout),
+                matrix_trials=len(case_ids) * attempts * len(planned),
+                output_dir=str(run_dir),
+            )
+        )
         runtime_context_bound = _runtime_context_is_bound_to_publication_target(
             skill_path,
             staged_task_paths,
@@ -814,7 +964,9 @@ def run_nemo_gym_eval(
                 log_path = rollouts_path.with_name("gym.log")
                 try:
                     credentials, arm_timeout = _refresh_adc_credentials(
-                        {**judge_process_env, MODEL_API_KEY_ENV: api_key}, api_key, timeout_s
+                        {**judge_process_env, MODEL_API_KEY_ENV: api_key},
+                        policy_uses_provider_key=policy_uses_provider_key,
+                        timeout_s=timeout_s,
                     )
                 except (RuntimeError, ValueError) as exc:
                     arm_errors.append(f"Vertex AI ADC credentials could not be refreshed: {exc}")
@@ -837,9 +989,7 @@ def run_nemo_gym_eval(
                         n_attempts=attempts,
                         n_concurrent=concurrency,
                         sandbox=sandbox,
-                        inherit_sandbox_environment=agent == "codex"
-                        and bool(agent_runtime_env)
-                        and sandbox == "docker",
+                        inherit_sandbox_environment=agent == "codex" and sandbox == "docker",
                     )
                     reporter.emit(
                         ProgressEvent(stage=f"agent:{agent}", state="running", detail=f"NeMo Gym {arm}-skill arm")
@@ -857,12 +1007,14 @@ def run_nemo_gym_eval(
                             )
                         except GymLaunchError as exc:
                             arm_errors.append(f"gym eval run could not start: {exc}")
+                        except (OSError, RuntimeError) as exc:
+                            arm_errors.append(f"gym eval run could not be stopped cleanly: {exc}")
                         else:
                             if returncode is None:
                                 arm_errors.append(f"gym eval run timed out after {arm_timeout:.0f}s")
                             elif returncode != 0:
                                 arm_errors.append(f"gym eval run exited {returncode}; see {log_path}")
-                rows = read_rollouts(rollouts_path, arm_errors)
+                rows = [_redacted_row(row, secrets) for row in read_rollouts(rollouts_path, arm_errors)]
                 failures = {
                     task: [redact_progress_detail(reason, secret_values=secrets) for reason in reasons]
                     for task, reasons in read_rollout_failures(rollouts_path, arm_errors).items()

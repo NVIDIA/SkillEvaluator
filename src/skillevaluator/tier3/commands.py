@@ -949,7 +949,7 @@ def doctor(
     if kwarg_parse_error is not None:
         prereq_errors = [kwarg_parse_error]
     elif gym_backend:
-        rows.extend(_nemo_gym_doctor_rows(agent_list, env_mode, merged_cli_kwargs))
+        rows.extend(_nemo_gym_doctor_rows(agent_list, env_mode, merged_cli_kwargs, agent_model=agent_model))
         prereq_errors = None
     else:
         prerequisite_subprocess_env = dict(next(iter(runtime_plans.values())).subprocess_env) if runtime_plans else None
@@ -1014,10 +1014,42 @@ def doctor(
     return 1 if any(row[1] == "fail" for row in rows) else 0
 
 
+def _docker_daemon_error(env: Mapping[str, str]) -> str | None:
+    """Return why the Docker daemon Gym would use is unreachable, or None when it answers."""
+    docker = shutil.which("docker")
+    if docker is None:
+        return "NeMo Gym's docker sandbox needs the docker CLI on PATH"
+    try:
+        probe = subprocess.run(
+            [docker, "info", "--format", "{{.ServerVersion}}"],
+            env=dict(env),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=_DOCKER_PROBE_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"NeMo Gym's docker sandbox could not reach the Docker daemon: {type(exc).__name__}"
+    if probe.returncode != 0:
+        reason = (probe.stderr or probe.stdout).strip().splitlines()
+        detail = reason[-1][:200] if reason else f"docker info exited {probe.returncode}"
+        return f"NeMo Gym's docker sandbox could not reach the Docker daemon: {detail}"
+    return None
+
+
+_DOCKER_PROBE_TIMEOUT_S = 15.0
+
+
 def _nemo_gym_doctor_rows(
-    agents: list[str], env_mode: str, environment_kwargs: Mapping[str, Any]
+    agents: list[str],
+    env_mode: str,
+    environment_kwargs: Mapping[str, Any],
+    *,
+    agent_model: tuple[str, ...] = (),
 ) -> list[tuple[str, str, str]]:
-    """Readiness rows for ``--backend nemo-gym``: the Gym CLI, its sandbox, and the options it can run."""
+    """Readiness rows for ``--backend nemo-gym``: the Gym CLI, its sandbox, the policy endpoint and options."""
+    from skillevaluator.provider_config import ProviderConfigurationError
     from skillevaluator.tier3.nemo_gym.backend import (
         MODEL_URL_ENV,
         NEMO_GYM_BIN_ENV,
@@ -1027,6 +1059,7 @@ def _nemo_gym_doctor_rows(
         nemo_gym_settings_errors,
         nemo_gym_version,
     )
+    from skillevaluator.tier3.nemo_gym.runner import _model_endpoint, gym_launch_environment
 
     rows: list[tuple[str, str, str]] = []
     gym = nemo_gym_bin()
@@ -1050,8 +1083,22 @@ def _nemo_gym_doctor_rows(
     url = os.environ.get(MODEL_URL_ENV, "").strip()
     if url and (url_error := model_url_credential_error(url)):
         errors.append(url_error)
-    if env_mode == "docker" and shutil.which("docker") is None:
-        errors.append("NeMo Gym's docker sandbox needs the docker CLI on PATH")
+    if not errors:
+        # The same policy endpoint resolution the run uses, per agent and its --agent-model.
+        try:
+            overrides = parse_agent_model_overrides(agent_model)
+        except ValueError:
+            overrides = {}
+        for agent in agents:
+            try:
+                _model, endpoint_url, _key = _model_endpoint((overrides.get(agent) or [None])[0])
+            except (ValueError, ProviderConfigurationError) as exc:
+                errors.append(f"{agent}: {exc}")
+                continue
+            if (url_error := model_url_credential_error(endpoint_url)) and url_error not in errors:
+                errors.append(url_error)
+    if env_mode == "docker" and (docker_error := _docker_daemon_error(gym_launch_environment({}))):
+        errors.append(docker_error)
     rows += [("NeMo Gym backend", "fail", error) for error in errors] or [
         ("NeMo Gym backend", "pass", f"{env_mode} sandbox ready")
     ]

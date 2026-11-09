@@ -1201,13 +1201,21 @@ def _live_mark(trial: Path, run_dir: Path, pass_threshold: float) -> str | None:
 
 def _add_gym_live_marks(
     run_dir: Path, agents: list[str], marks: dict[str, dict[str, dict[str, list[str]]]], pass_threshold: float
-) -> None:
-    """Add the attempts a running NeMo Gym arm has appended to its ``rollouts.jsonl``."""
-    from skillevaluator.tier3.nemo_gym.results import read_rollouts, rollout_task_name
+) -> bool:
+    """Add the attempts a running NeMo Gym arm has appended to its ``rollouts.jsonl``; False for a non-Gym run.
+
+    Each attempt is scored from its verifier logs with the same rules the Gym result normalizer uses.
+    """
+    from skillevaluator.tier3.nemo_gym.results import (
+        read_rollouts,
+        read_verifier_rewards,
+        rollout_failure_text,
+        rollout_task_name,
+    )
 
     gym_root = run_dir / "_nemo-gym"
     if not gym_root.is_dir() or gym_root.is_symlink():
-        return
+        return False
     for agent in agents:
         for variant, key in _LIVE_VARIANTS.items():
             arm = gym_root / f"{agent}-{variant}"
@@ -1218,14 +1226,19 @@ def _add_gym_live_marks(
                 case_id = rollout_task_name(row)
                 if case_id is None or not _SAFE_TRIAL.match(case_id):
                     continue
-                rewards = row.get("verifier_rewards")
-                score = rewards.get("overall") if isinstance(rewards, Mapping) else None
-                failed = row.get("failure_kind") or row.get("failure_reason") or row.get("mask_sample")
-                if failed or not isinstance(score, int | float) or isinstance(score, bool):
+                logs_dir = row.get("verifier_logs_dir")
+                rewards = (
+                    read_verifier_rewards(Path(logs_dir))
+                    if not rollout_failure_text(row) and isinstance(logs_dir, str) and logs_dir
+                    else None
+                )
+                score = rewards.get("overall", rewards.get("reward")) if rewards else None
+                if not isinstance(score, int | float) or isinstance(score, bool):
                     mark = ERROR
                 else:
                     mark = PASS if score >= pass_threshold else FAIL
                 marks.setdefault(agent, {}).setdefault(key, {}).setdefault(case_id, []).append(mark)
+    return True
 
 
 def live_case_marks(
@@ -1247,9 +1260,10 @@ def live_case_marks(
                 for task in sorted(staged.iterdir()):
                     if task.is_dir() and not task.is_symlink() and _SAFE_TRIAL.match(task.name):
                         cases.setdefault(task.name, [])
-    _add_gym_live_marks(run_dir, agents, marks, pass_threshold)
+    # A Gym run's _harbor-jobs holds only finished, normalized trials; its rollouts are the live record.
+    is_gym_run = _add_gym_live_marks(run_dir, agents, marks, pass_threshold)
     jobs = run_dir / "_harbor-jobs"
-    if not jobs.is_dir() or jobs.is_symlink():
+    if is_gym_run or not jobs.is_dir() or jobs.is_symlink():
         return marks, running
     seen: set[tuple[str, str, str]] = set()
     for job in islice(sorted(jobs.iterdir()), _MAX_TRIAL_PATHS_SCANNED):

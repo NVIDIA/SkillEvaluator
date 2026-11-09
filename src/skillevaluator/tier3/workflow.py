@@ -240,8 +240,8 @@ def _preflight_environment(
         raise ValueError("; ".join(errors))
 
 
-def _preflight_nemo_gym(skill_path: Path, params: dict[str, Any]) -> None:
-    """Reject options and config the NeMo Gym backend cannot honor, before the dataset step."""
+def nemo_gym_preflight_errors(skill_path: Path, params: dict[str, Any]) -> list[str]:
+    """Return every option, config and setting error the NeMo Gym backend would reject, before any dataset work."""
     from skillevaluator.tier3.commands import parse_agents
     from skillevaluator.tier3.nemo_gym.backend import (
         MODEL_URL_ENV,
@@ -278,9 +278,15 @@ def _preflight_nemo_gym(skill_path: Path, params: dict[str, Any]) -> None:
     for name in ("override_cpus", "override_memory_mb"):
         value = params.get(name)
         if value is not None and value <= 0:
-            errors.append(f"--{name.removeprefix('override_').replace('_', '-')} must be greater than 0")
+            errors.append(f"--{name.replace('_', '-')} must be greater than 0")
     if nemo_gym_bin() is None:
         errors.append("--backend nemo-gym needs the NeMo Gym CLI: set SKILL_EVAL_NEMO_GYM_BIN to its `gym` executable")
+    return errors
+
+
+def _preflight_nemo_gym(skill_path: Path, params: dict[str, Any]) -> None:
+    """Reject options and config the NeMo Gym backend cannot honor, before the dataset step."""
+    errors = nemo_gym_preflight_errors(skill_path, params)
     if errors:
         raise click.UsageError("; ".join(errors))
     # The same backend-neutral checks Harbor runs, without Harbor's own agent runtime plan.

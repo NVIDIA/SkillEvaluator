@@ -163,9 +163,19 @@ def nemo_gym_timeout_s() -> float:
     return timeout_s
 
 
+def nemo_gym_sandbox_error() -> str | None:
+    """Return an error when ``SKILL_EVAL_NEMO_GYM_SANDBOX`` names a sandbox the backend does not support."""
+    sandbox = os.environ.get("SKILL_EVAL_NEMO_GYM_SANDBOX", "").strip()
+    if sandbox and sandbox not in NEMO_GYM_ENV_MODES:
+        return f"SKILL_EVAL_NEMO_GYM_SANDBOX={sandbox} is not supported; NeMo Gym runs Tier 3 cases in docker only"
+    return None
+
+
 def nemo_gym_settings_errors() -> list[str]:
     """Reject invalid ``SKILL_EVAL_NEMO_GYM_*`` settings, before any dataset work."""
     errors: list[str] = []
+    if sandbox_error := nemo_gym_sandbox_error():
+        errors.append(sandbox_error)
     try:
         nemo_gym_timeout_s()
     except ValueError as exc:
@@ -218,6 +228,23 @@ def mcp_servers_declared(skill_path: Path) -> bool:
 
 
 MCP_SERVERS_ERROR = "evals/environment/mcp_servers.toml is not supported with --backend nemo-gym yet"
+NATIVE_MCP_SERVERS_ERROR = (
+    "[[environment.mcp_servers]] in a native task.toml is not supported with --backend nemo-gym yet"
+)
+
+
+def native_mcp_servers_declared(skill_path: Path) -> bool:
+    """Return True when a native ``evals/harbor/*/task.toml`` declares ``[[environment.mcp_servers]]``."""
+    import tomllib
+
+    for task_toml in sorted((skill_path / "evals" / "harbor").glob("*/task.toml")):
+        try:
+            environment = tomllib.loads(task_toml.read_text(encoding="utf-8")).get("environment") or {}
+        except (OSError, ValueError):
+            continue
+        if isinstance(environment, dict) and environment.get("mcp_servers"):
+            return True
+    return False
 
 
 def nemo_gym_config_errors(
@@ -247,6 +274,10 @@ def nemo_gym_config_errors(
         errors.append("harbor.agent_runtime_preflight applies to the Harbor backend only")
     if mcp_servers_declared(skill_path):
         errors.append(MCP_SERVERS_ERROR)
+    if uses_native_harbor_tasks(skill_path, harbor.get("task_source", "auto")) and native_mcp_servers_declared(
+        skill_path
+    ):
+        errors.append(NATIVE_MCP_SERVERS_ERROR)
     if "storage_mb" in (harbor.get("resources") or {}):
         errors.append("harbor.resources.storage_mb is not supported with --backend nemo-gym")
     return errors

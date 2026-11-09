@@ -3268,39 +3268,30 @@ def evaluate(
         evaluator_container_revision,
     )
     if backend == "nemo-gym":
-        from skillevaluator.tier3.commands import parse_agents
-        from skillevaluator.tier3.nemo_gym.backend import (
-            nemo_gym_bin,
-            nemo_gym_capability_errors,
-            nemo_gym_config_errors,
-        )
+        from skillevaluator.tier3.workflow import nemo_gym_preflight_errors
 
-        capability_errors = nemo_gym_capability_errors(
-            agents=parse_agents(agents) if agents else [],
-            env_mode=env_mode,
-            grading_mode=grading_mode,
-            harbor_keep_jobs=harbor_keep_jobs,
-            stop_on_pass=bool(stop_on_pass),
-            custom_dockerfile_mode=custom_dockerfile_mode,
-            copy_repo=copy_repo,
-            environment_kwargs=dict.fromkeys(environment_kwarg, ""),
-            override_storage_mb=override_storage_mb,
-            agent_runtime_preflight=bool(agent_runtime_preflight),
-            timeout_multiplier=timeout_multiplier,
-        )
-        capability_errors += nemo_gym_config_errors(
+        # The same option, config and SKILL_EVAL_NEMO_GYM_* checks as `tier3 PATH`, so they are
+        # rejected before --autopilot can write a dataset for a run that cannot start.
+        capability_errors = nemo_gym_preflight_errors(
             skill_path,
-            stop_on_pass=stop_on_pass,
-            timeout_multiplier=timeout_multiplier,
-            agent_runtime_preflight=agent_runtime_preflight,
-            custom_dockerfile_mode=custom_dockerfile_mode,
+            {
+                "agents": agents,
+                "env_mode": env_mode,
+                "grading_mode": grading_mode,
+                "harbor_keep_jobs": harbor_keep_jobs,
+                "stop_on_pass": stop_on_pass,
+                "custom_dockerfile_mode": custom_dockerfile_mode,
+                "copy_repo": copy_repo,
+                "environment_kwarg": environment_kwarg,
+                "override_storage_mb": override_storage_mb,
+                "agent_runtime_preflight": agent_runtime_preflight,
+                "timeout_multiplier": timeout_multiplier,
+                "model": model,
+                "override_cpus": override_cpus,
+                "override_memory_mb": override_memory_mb,
+            },
         )
-        if nemo_gym_bin() is None:
-            capability_errors.append(
-                "--backend nemo-gym needs the NeMo Gym CLI: set SKILL_EVAL_NEMO_GYM_BIN to its `gym` executable"
-            )
         if capability_errors:
-            # Rejected before --autopilot can write a dataset for a run that cannot start.
             raise click.UsageError("; ".join(capability_errors))
     if autopilot:
         _ensure_autopilot_dataset(skill_path, progress=progress)

@@ -14,14 +14,16 @@ from pathlib import Path
 import pytest
 from scripts.ci import check_public_benchmarks as benchmark_gate
 
+from skillevaluator.evaluation import tier3_report
 from skillevaluator.evaluation.tier3_report import (
     _validation_result_from_payload,
     advisory_skip_result,
     build_agent_eval_payload,
+    render_agent_eval_html_report,
 )
 from skillevaluator.models import Finding, Severity, ValidationResult
 from skillevaluator.publication_evidence import stamp_publication_evidence
-from skillevaluator.reporting import BenchmarkReporter, HTMLReporter, JSONReporter
+from skillevaluator.reporting import BenchmarkReporter, HTMLReporter, JSONReporter, MarkdownReporter
 from skillevaluator.reporting.presentation import build_final_render_context
 from skillevaluator.reporting.run_status import Status
 
@@ -1310,6 +1312,7 @@ def test_no_ground_truth_destructive_command_reads_failed_in_tier3_status(
     report = json.loads(JSONReporter(include_timestamp=False).render_all(results))
     context = build_final_render_context(results)
     html = HTMLReporter(include_timestamp=False).render_all(results)
+    markdown = MarkdownReporter(include_timestamp=False).render_all(results)
 
     tier3_entries = [entry for entry in report["results"] if entry["validator"] == result.validator_name]
     assert [entry["status"] for entry in tier3_entries] == ["failed"]
@@ -1318,6 +1321,35 @@ def test_no_ground_truth_destructive_command_reads_failed_in_tier3_status(
     assert context.tiers[3].status == Status.FAILED
     assert context.publication_label == "Not eligible"
     assert re.findall(_TIER3_CARD_VERDICT, html) == [tier3_card]
+    assert "Completed-agent result: FAIL." in html
+    assert "Verdict at a glance:" not in html
+    # --format markdown
+    assert "**Publication status:** ❌ FAIL" in markdown
+    assert "| ❌ Failed | 1 |" in markdown
+    assert "**Verdict:** FAIL (composite lift" in markdown
+
+
+def test_no_ground_truth_destructive_command_fails_in_tier3_evaluate_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``tier3 evaluate`` report pair sets no gating, so the HTML card reads ``Changes required``."""
+    result = _validation_result_from_payload(_no_ground_truth_destructive_payload())
+    assert result is not None
+    assert "gating" not in result.metadata
+    monkeypatch.setattr(tier3_report, "agent_eval_result_from_directory", lambda *_args, **_kwargs: result)
+    skill_path = tmp_path / "demo-skill"
+    run_dir = tmp_path / "run"
+    skill_path.mkdir()
+    run_dir.mkdir()
+
+    report_path = render_agent_eval_html_report(skill_path, run_dir, include_benchmark=True)
+    html = report_path.read_text(encoding="utf-8")
+    benchmark = report_path.with_name("tier3-benchmark.md").read_text(encoding="utf-8")
+
+    assert re.findall(_TIER3_CARD_VERDICT, html) == ["Changes required"]
+    assert "Completed-agent result: FAIL." in html
+    assert "> **Tier 3 completed-agent result: FAIL**" in benchmark
+    assert "| Tier 3 | Live agent evaluation | **FAIL** |" in benchmark
 
 
 @pytest.mark.parametrize(

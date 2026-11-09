@@ -3108,6 +3108,7 @@ def test_runner_emits_truthful_stages_plan_and_per_agent_state(
         ("with-skill-tasks", "ready"),
         ("baseline-tasks", "running"),
         ("baseline-tasks", "ready"),
+        ("configuration", "complete"),
         ("docker-images", "delegated"),
         ("agent-runtime-preflight", "running"),
         ("agent-runtime-preflight", "complete"),

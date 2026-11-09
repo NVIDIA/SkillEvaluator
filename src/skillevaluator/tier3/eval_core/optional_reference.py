@@ -25,8 +25,8 @@ def normalize_expected_behaviors(value: Any) -> Any:
     behaviors = []
     for behavior in value:
         if isinstance(behavior, str):
-            normalized = normalize_optional_reference(behavior)
-            if normalized is not None:
+            normalized = behavior.strip(" \t\n\r\f\v")
+            if normalized and normalized.casefold() not in _EMPTY_REFERENCE_VALUES:
                 behaviors.append(normalized)
         elif behavior:
             behaviors.append(behavior)

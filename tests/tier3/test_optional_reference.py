@@ -6,7 +6,10 @@ import json
 import pytest
 
 from skillevaluator.tier3.dataset_utils import load_dataset_entries_with_format
-from skillevaluator.tier3.eval_core.optional_reference import normalize_optional_reference
+from skillevaluator.tier3.eval_core.optional_reference import (
+    normalize_expected_behaviors,
+    normalize_optional_reference,
+)
 
 
 @pytest.mark.parametrize(
@@ -30,6 +33,10 @@ from skillevaluator.tier3.eval_core.optional_reference import normalize_optional
 )
 def test_normalize_optional_reference(value, expected):
     assert normalize_optional_reference(value) == expected
+
+
+def test_expected_behavior_normalization_preserves_unicode_whitespace():
+    assert normalize_expected_behaviors(["  Reject \u202f  ", " None ", " \t "]) == ["Reject \u202f"]
 
 
 @pytest.mark.parametrize("dataset_format", ["agentskills", "legacy"])

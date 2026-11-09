@@ -284,6 +284,8 @@ _without_plain_patch_headers = _shared_checks._without_plain_patch_headers
 _without_redirections = _shared_checks._without_redirections
 check_error_recovery = _shared_checks.check_error_recovery
 check_script_execution = _shared_checks.check_script_execution
+normalize_optional_reference = _shared_checks.normalize_optional_reference
+normalize_expected_behaviors = _shared_checks.normalize_expected_behaviors
 resolve_should_trigger = _shared_checks.resolve_should_trigger
 score_skill_execution = _shared_checks.score_skill_execution
 
@@ -3389,6 +3391,7 @@ def _behavior_prompt_example(expected_count):
 
 
 def judge_behavior_check(conversation_text, expected_behaviors):
+    expected_behaviors = normalize_expected_behaviors(expected_behaviors)
     if not _has_judge_reference(expected_behaviors):
         return _judge_not_applicable(_NO_EXPECTED_BEHAVIOR_REASON, results=[])
 
@@ -3732,11 +3735,11 @@ def main():
     traj, traj_meta = load_trajectory_with_fallback(ATIF_PATH, ATIF_PATH.parent)
 
     expected_skill = entry.get("expected_skill") or ""
-    expected_script = entry.get("expected_script") or ""
+    expected_script = normalize_optional_reference(entry.get("expected_script"))
     should_trigger = resolve_should_trigger(entry)
     evaluated_skill = entry.get("evaluated_skill") or ""
     acceptable_skills = _resolve_acceptable_skills(entry, expected_skill)
-    expected_behavior = entry.get("expected_behavior", [])
+    expected_behavior = normalize_expected_behaviors(entry.get("expected_behavior", []))
     question = entry.get("question", "")
     ground_truth = entry.get("ground_truth", "")
     workspace_mode = entry.get("skill_workspace_mode", "isolated")

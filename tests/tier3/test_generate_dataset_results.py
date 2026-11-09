@@ -8,6 +8,7 @@ import stat
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -533,7 +534,6 @@ def test_parse_skill_falls_back_to_defaults_on_malformed_frontmatter(tmp_path):
     assert parsed["description"] == ""
 
 
-
 def test_no_llm_negative_case_does_not_name_the_skill():
     """Author-provided negatives must stay off-skill and must not name the skill."""
     skill = {
@@ -665,3 +665,41 @@ def test_refine_resolves_result_case_ids_without_the_tier3_extra(tmp_path: Path)
 
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout) == {"case_id": "case-007", "harbor_loaded": False}
+
+
+def test_llm_generation_writes_null_for_placeholder_expected_script(tmp_path, monkeypatch):
+    skill = tmp_path / "my-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: my-skill\ndescription: Does useful work\n---\n",
+        encoding="utf-8",
+    )
+    response = [
+        {
+            "id": "case-1",
+            "question": "Do useful work.",
+            "expected_skill": "my-skill",
+            "expected_script": "None",
+            "ground_truth": "The work is complete.",
+            "expected_behavior": ["None", "  "],
+        }
+    ]
+    monkeypatch.setattr(
+        "skillevaluator.provider_config.resolve_llm_provider",
+        lambda: SimpleNamespace(provider="test", model="test-model"),
+    )
+
+    class FakeLLMClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def completions(self, *_args, **_kwargs):
+            return json.dumps(response)
+
+    monkeypatch.setattr("skillevaluator.inference.client.LLMClient", FakeLLMClient)
+
+    dataset_path = generate_dataset.generate_one_case(skill, use_llm=True)
+
+    payload = json.loads(dataset_path.read_text(encoding="utf-8"))
+    assert payload["evals"][0]["expected_script"] is None
+    assert "assertions" not in payload["evals"][0]

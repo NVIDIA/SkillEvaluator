@@ -16,6 +16,8 @@ from typing import Any, Literal
 
 import yaml
 
+from skillevaluator.tier3.eval_core.optional_reference import normalize_expected_behaviors, normalize_optional_reference
+
 logger = logging.getLogger(__name__)
 
 DATASET_EXTENSIONS = (".json", ".jsonl", ".yaml", ".yml")
@@ -145,6 +147,10 @@ def _normalize_entry(entry: dict[str, Any], *, skill_name: Any | None = None) ->
         normalized["ground_truth"] = entry["expected_output"]
     if "expected_behavior" not in normalized and "assertions" in entry:
         normalized["expected_behavior"] = entry["assertions"]
+    if "expected_script" in normalized:
+        normalized["expected_script"] = normalize_optional_reference(normalized["expected_script"])
+    if "expected_behavior" in normalized:
+        normalized["expected_behavior"] = normalize_expected_behaviors(normalized["expected_behavior"])
     if "expected_skill" not in normalized and isinstance(skill_name, str) and skill_name:
         normalized["expected_skill"] = skill_name
     return normalized

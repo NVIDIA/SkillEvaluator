@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import json
+
+import pytest
+
+from skillevaluator.tier3.dataset_utils import load_dataset_entries_with_format
+from skillevaluator.tier3.eval_core.optional_reference import normalize_optional_reference
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, None),
+        ("", None),
+        (" \t\n ", None),
+        ("None", None),
+        (" none ", None),
+        ("NULL", None),
+        (" N/A ", None),
+        ("n/a", None),
+        ("-", None),
+        (0, None),
+        ([], None),
+        ("none.sh", "none.sh"),
+        (" None.sh ", "None.sh"),
+        ("scripts/main.py", "scripts/main.py"),
+    ],
+)
+def test_normalize_optional_reference(value, expected):
+    assert normalize_optional_reference(value) == expected
+
+
+@pytest.mark.parametrize("dataset_format", ["agentskills", "legacy"])
+def test_dataset_loaders_normalize_optional_references(tmp_path, dataset_format):
+    entry = {
+        "id": "case-1",
+        "expected_script": " nOnE ",
+        "expected_behavior": ["None", "  ", "n/A", None, "Keep this behavior"],
+    }
+    if dataset_format == "agentskills":
+        entry.update(
+            prompt="Use the skill.",
+            expected_output="None",
+            assertions=entry.pop("expected_behavior"),
+        )
+        payload = {"skill_name": "demo", "evals": [entry]}
+    else:
+        entry.update(question="Use the skill.", ground_truth="None")
+        payload = [entry]
+
+    dataset_path = tmp_path / "evals.json"
+    dataset_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    (normalized,), actual_format = load_dataset_entries_with_format(dataset_path)
+
+    assert actual_format == dataset_format
+    assert normalized["expected_script"] is None
+    assert normalized["expected_behavior"] == ["Keep this behavior"]
+    assert normalized["ground_truth"] == "None"

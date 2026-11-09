@@ -79,6 +79,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Treat empty and placeholder `expected_script` values as no script expectation,
+  and ignore placeholder-only expected behavior entries when grading datasets.
+
 - Read JSON, JSONL and YAML evaluation datasets as UTF-8 so Unicode prompts and
   answers load correctly on hosts with a non-UTF-8 default text encoding.
 

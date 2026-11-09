@@ -12,6 +12,9 @@ All notable changes to SkillEvaluator are documented in this file.
   GitHub can optionally propose eligible cards through a separate trusted
   benchmark-update PR. Tier 2/3 remain advisory for CI. Retained JSON preserves
   Tier 1 required-check and unscanned-content scope for publication decisions.
+  The repository's own candidate CI selects Build for Tier 1/2 and separate
+  gateway-backed Claude Code/Codex models for Tier 3, without changing upstream
+  provider defaults.
 
 - Run SkillEvaluator's own `skills/` through the pinned three-tier GitHub
   callers, retaining Tier 1 as required and Tier 2/3 as advisory. A separate
@@ -19,7 +22,7 @@ All notable changes to SkillEvaluator are documented in this file.
   onboarding and status recognize this filename collision without replacing
   reusable workflow definitions. Automatic comments activate after the
   listener reaches the default branch.
-  Document the shared chat/judge/agent model input and model-availability
+  Document independent chat, judge and agent model settings and model-availability
   troubleshooting for provider-backed CI.
 
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it

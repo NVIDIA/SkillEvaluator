@@ -40,15 +40,20 @@ publisher at `.github/workflows/feedback-all-tiers.yml`. The CLI selects this
 alternate filename when the conventional feedback file already defines a
 reusable workflow, and `ci status --tiers 1,2,3` recognizes it.
 
-The repository callers pin a reviewed `main` commit for the evaluator workflows
-and tools, and the verified released Tier 1 image. They use Docker, NVIDIA Build,
-one attempt and one concurrent task, and the committed native datasets. The
-caller's explicit `model` input selects chat, judging and the default live-agent
-model together; embeddings use the separate `embedding-model` input. Add
-`NVIDIA_API_KEY` as a repository Actions secret before expecting provider-backed
-results. Without it, Tier 2 and Tier 3
-remain incomplete/advisory; a passing Tier 1 gate is not an all-tier evaluation
-pass. Forks retain keyless Tier 1 checks. On PRs, ordinary software changes
+The repository callers pin reviewed evaluator workflows and tools, and the
+verified released Tier 1 image. They use Docker, one attempt and one concurrent
+task, and the committed native datasets. Tier 1 enables `--llm` and SkillSpector
+with its own NVIDIA Build model. Tier 2 uses a separate NVIDIA Build chat model
+and embeddings. Tier 3 selects both Codex and Claude Code through a configured
+gateway, with explicit agent models and a separate judge model.
+
+For this repository's profile, `NVIDIA_API_KEY` and `NVIDIA_INFERENCE_KEY` are
+repository Actions **secrets**. `SKILL_EVAL_TIER3_BASE_URL` is a repository Actions
+**variable** containing the gateway's versioned API root. The caller maps the
+Hub secret to the reusable workflow's generic `LLM_API_KEY`; other repositories
+can select their own gateway and secret names during local onboarding. Missing
+prerequisites remain visible in the reports. A passing Tier 1 gate is not an
+all-tier evaluation pass. Forks retain keyless Tier 1 checks. On PRs, ordinary software changes
 select no skills, skill changes select the affected skills, and CI configuration
 changes select the collection. Pushes to `main` and manual runs scan the collection.
 
@@ -110,7 +115,9 @@ preferring one whose marker verifies, and leaves any other report comments
 untouched. Report comments with unverifiable markers are never deferred to.
 Merge this feedback file onto the default branch before expecting the first
 automatic comment. Changes to the caller must refresh its approved Git blob in
-`trusted-caller-blobs`.
+`trusted-caller-blobs` in both trusted jobs. An upgrade that changes the approved
+caller or producer revision starts automatic feedback only after the updated
+listener reaches the default branch; earlier candidate runs retain their artifacts.
 
 A missing provider key, unavailable runtime, or missing committed native dataset
 must remain visible as an incomplete or needs-action result. Local `ci init`,

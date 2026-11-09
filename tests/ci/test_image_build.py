@@ -153,19 +153,31 @@ def test_pull_requests_read_but_never_write_the_layer_cache():
         triggers = [triggers] if isinstance(triggers, str) else triggers
         assert {"pull_request_target", "issue_comment"}.isdisjoint(triggers), path.name
         if "workflow_run" in triggers:
-            # The consumer listener calls only the immutable trusted publisher;
+            # The consumer listener calls only the immutable trusted publishers;
             # it has no local steps, candidate checkout or image build/cache job.
             assert path.name == "skill-feedback-all-tiers.yml"
             assert set(triggers) == {"workflow_run"}
-            assert set(document["jobs"]) == {"feedback"}
-            caller = document["jobs"]["feedback"]
-            assert set(caller) == {"uses", "with"}
-            assert re.fullmatch(
-                r"NVIDIA/SkillEvaluator/\.github/workflows/feedback-all-tiers\.yml@[0-9a-f]{40}", caller["uses"]
-            )
-            source = caller["uses"].rsplit("@", 1)[1]
-            assert caller["with"]["tools-repository"] == "NVIDIA/SkillEvaluator"
-            assert caller["with"]["tools-ref"] == source
+            publishers = {"feedback": "feedback-all-tiers.yml", "benchmarks": "publish-benchmarks.yml"}
+            assert set(document["jobs"]) == set(publishers)
+            feedback = document["jobs"]["feedback"]
+            source = feedback["uses"].rsplit("@", 1)[1]
+            for name, publisher in publishers.items():
+                caller = document["jobs"][name]
+                expected_keys = {"uses", "with", "permissions"} if name == "benchmarks" else {"uses", "with"}
+                assert set(caller) == expected_keys
+                assert re.fullmatch(
+                    rf"NVIDIA/SkillEvaluator/\.github/workflows/{re.escape(publisher)}@[0-9a-f]{{40}}",
+                    caller["uses"],
+                )
+                assert caller["uses"].rsplit("@", 1)[1] == source
+                assert caller["with"]["tools-repository"] == "NVIDIA/SkillEvaluator"
+                assert caller["with"]["tools-ref"] == source
+                assert caller["with"] == feedback["with"]
+            assert document["jobs"]["benchmarks"]["permissions"] == {
+                "contents": "write",
+                "actions": "read",
+                "pull-requests": "write",
+            }
 
 
 def test_release_builds_reuse_no_cached_layers():

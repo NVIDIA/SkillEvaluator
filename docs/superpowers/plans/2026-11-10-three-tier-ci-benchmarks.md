@@ -33,9 +33,9 @@
 
 Files: `src/skillevaluator/reporting/json_reporter.py`, `src/skillevaluator/reporting/retained.py`, reporting/publication regression tests.
 
-- [ ] Reproduce loss of `tier1_required_checks` and `tier1_unscanned_paths` through JSON -> retained results.
-- [ ] Preserve typed bounded string lists; reject malformed declarations.
-- [ ] Verify in-memory and retained publication outcomes agree for complete, omitted-check and unscanned-content cases.
+- [x] Reproduce loss of `tier1_required_checks` and `tier1_unscanned_paths` through JSON -> retained results.
+- [x] Preserve typed bounded string lists; reject malformed declarations.
+- [x] Verify in-memory and retained publication outcomes agree for complete, omitted-check and unscanned-content cases.
 
 ### Task 2: Compose combined skill reports and benchmark cards
 
@@ -43,10 +43,10 @@ Files: new `ci/benchmark_reports.py`, new `tests/ci/test_benchmark_reports.py`; 
 
 Interface: `write_benchmark_reports(reports: Path, manifest: dict) -> list[dict]`; output rows identify exact skill path, combined JSON, and `BENCHMARK.md` paths.
 
-- [ ] Test real retained Tier 1/2/3 composition, reordered/multiple skills, missing tiers, source conflicts, and advisory failures.
-- [ ] Reuse `retained_results`, `JSONReporter` and `BenchmarkReporter`; never read skill source or call a model while reporting.
-- [ ] Preserve source/policy/run provenance. Keep required tiers publication-required regardless of CI gate policy.
-- [ ] Retain honest non-PASS cards for incomplete evidence, and expose cards beside the existing combined report.
+- [x] Test real retained Tier 1/2/3 composition, reordered/multiple skills, missing tiers, source conflicts, and advisory failures.
+- [x] Reuse `retained_results`, `JSONReporter` and `BenchmarkReporter`; never read skill source or call a model while reporting.
+- [x] Preserve source/policy/run provenance. Keep required tiers publication-required regardless of CI gate policy.
+- [x] Retain honest non-PASS cards for incomplete evidence, and expose cards beside the existing combined report.
 
 ### Task 3: Support configurable gateway routing and per-tier models
 
@@ -54,26 +54,40 @@ Files: new `ci/model_config.py`, `ci/run_tiers.py` environment plumbing, `ci/boo
 
 Interface: `model_environment(env: dict[str, str], tier: int) -> dict[str, str]` provides only safe runtime settings and selected credentials. `child_environment(env, tier=2)` retains its existing API with a compatible optional tier argument.
 
-- [ ] Add generic `openai-compatible` chat/embedding support and explicit API root/key settings.
-- [ ] Add Tier 3 provider/model/base-URL overrides while preserving existing provider defaults and separate native agent model defaults.
-- [ ] Use the same sanitized selection for doctor and evaluation; preserve selected embedding credentials independently.
-- [ ] Test absent keys, malformed URLs, provider isolation, empty/inherited overrides, and absence of CI/publisher credentials.
+- [x] Add generic `openai-compatible` chat/embedding support and explicit API root/key settings.
+- [x] Add Tier 3 provider/model/base-URL overrides while preserving existing provider defaults and separate native agent model defaults.
+- [x] Use the same sanitized selection for doctor and evaluation; preserve selected embedding credentials independently.
+- [x] Test absent keys, malformed URLs, provider isolation, empty/inherited overrides, and absence of CI/publisher credentials.
 
 ### Task 4: Wire shared workflows, onboarding and Tier 1 LLM
 
 Files: shared GitHub/GitLab workflows, CLI/template/descriptor helpers, workflow/onboarding tests.
 
-- [ ] Expose opt-in Tier 1 LLM and generic gateway/per-tier inputs without invalidating old pinned callers.
-- [ ] Reuse the hardened Tier 1 image for LLM/SkillSpector execution with protected admission and a current-head recheck; retain keyless baseline for denied admission.
-- [ ] Keep native Tier 2/3 independent and advisory, preserve failure diagnostics and source-attempt reuse.
-- [ ] Integrate benchmark generation in credential-free aggregation and trusted feedback links.
-- [ ] Implement the chosen benchmark publication surface; only a trusted publisher may propose source-file updates from validated evidence.
+- [x] Expose opt-in Tier 1 LLM and generic gateway/per-tier inputs without invalidating old pinned callers.
+- [x] Reuse the hardened Tier 1 image for LLM/SkillSpector execution with protected admission and a current-head recheck; retain keyless baseline for denied admission.
+- [x] Keep native Tier 2/3 independent and advisory, preserve failure diagnostics and source-attempt reuse.
+- [x] Integrate benchmark generation in credential-free aggregation and trusted feedback links.
+- [x] Implement the chosen benchmark publication surface; only a trusted publisher may propose source-file updates from validated evidence.
 
 ### Task 5: Documentation, review and live validation
 
 Files: existing onboarding, GitHub/GitLab, reports and benchmark guides; changelog.
 
-- [ ] Explain local setup -> prerequisites -> merge setup -> test PR -> reports/cards, including separate chat/judge/agent settings and gateway APIs.
-- [ ] Run focused tests, Ruff, formatting, benchmark lints and Fern checks.
-- [ ] Review each task and the final diff; fix findings before opening the implementation PR.
+- [x] Explain local setup -> prerequisites -> merge setup -> test PR -> reports/cards, including separate chat/judge/agent settings and gateway APIs.
+- [x] Run focused tests, Ruff, formatting, benchmark lints and Fern checks.
+- [x] Review each task and the final diff; fix findings before opening the implementation PR.
 - [ ] Exercise candidate configuration with real provider credentials in dedicated fixtures, verify native completion and exact model routing, and report any remaining release/runtime dependency honestly.
+
+## Handoff status
+
+Implementation and local verification are complete. The repository callers pin
+the reviewed feature-source commit and retain the released Tier 1 image. Both
+feedback jobs approve the exact committed caller; API-created setup PRs also bind
+both jobs to the uploaded bytes when local Git filters differ.
+
+Live gateway model access and complete paired Tier 3 execution remain pending.
+The current released Tier 1 image predates required-check scope serialization;
+its incomplete publication evidence must not produce an eligible benchmark card.
+A compatible image release and a current default-branch run are required to
+verify an actual benchmark-update PR. Automatic feedback for the new caller
+requires the updated trusted listener on the default branch.

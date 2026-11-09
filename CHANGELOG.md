@@ -65,8 +65,8 @@ All notable changes to SkillEvaluator are documented in this file.
   bookkeeping calls (`TodoWrite`, `update_plan`, `TaskCreate` and
   `TaskUpdate`, background-shell polling such as `BashOutput`, and sub-agent
   calls) are left out of the score, and the reason says how many were not
-  counted. A trial with only such calls scores 0.0, so a trial that only
-  polled or stopped a background shell drops from 1.0 to 0.0. Polling a
+  counted. A trial with only such calls scores 0.0, so a trial whose only
+  calls were `BashOutput` or `KillShell` drops from 1.0 to 0.0. Polling a
   background shell no longer counts as running a command, while a command
   typed into a Codex `write_stdin` session or run by `Monitor` is classified
   like any other command. Help, version and install words are matched in

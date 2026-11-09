@@ -24,6 +24,45 @@ ALL_RELEASE = {
     "tools_ref": "f" * 40,
 }
 
+REUSABLE_FEEDBACK = """# Preserve this reusable interface.
+name: Trusted three-tier skill feedback
+on:
+  workflow_call:
+    inputs:
+      tools-ref:
+        type: string
+        required: true
+jobs:
+  feedback:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo reusable
+"""
+
+
+@pytest.fixture
+def reusable_feedback(repository):
+    path = repository / ".github/workflows/feedback-all-tiers.yml"
+    path.write_text(REUSABLE_FEEDBACK)
+    subprocess.run(["git", "-C", str(repository), "add", str(path)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+            "-C",
+            str(repository),
+            "commit",
+            "-m",
+            "Add reusable feedback workflow",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return path
+
 
 @pytest.fixture
 def all_release(tmp_path):
@@ -54,6 +93,58 @@ def test_all_tiers_save_github_is_minimal_pinned_and_idempotent(repository, all_
     assert feedback["jobs"]["feedback"]["uses"].endswith("@" + ALL_RELEASE["feedback_ref"])
     assert not (repository / ".github/workflows/publish-skill-reports.yml").exists()
     assert invoke(repository, all_release, "--mode", "save", "--paths", "skills").exit_code == 0
+
+
+def test_all_tiers_save_preserves_reusable_feedback_workflow(repository, all_release, reusable_feedback):
+    before = {path.relative_to(repository).as_posix() for path in repository.glob(".github/workflows/*")}
+    original = reusable_feedback.read_bytes()
+    result = invoke(repository, all_release, "--mode", "save", "--paths", "skills")
+    assert result.exit_code == 0, result.output
+    after = {path.relative_to(repository).as_posix() for path in repository.glob(".github/workflows/*")}
+    assert after - before == {
+        ".github/workflows/skill-checks-all-tiers.yml",
+        ".github/workflows/skill-feedback-all-tiers.yml",
+    }
+    assert reusable_feedback.read_bytes() == original
+    alternate = repository / ".github/workflows/skill-feedback-all-tiers.yml"
+    feedback = yaml.safe_load(alternate.read_text())
+    assert feedback["jobs"]["feedback"]["uses"].endswith("@" + ALL_RELEASE["feedback_ref"])
+    generated = alternate.read_bytes()
+    result = invoke(repository, all_release, "--mode", "save", "--paths", "skills")
+    assert result.exit_code == 0, result.output
+    assert reusable_feedback.read_bytes() == original
+    assert alternate.read_bytes() == generated
+
+
+def test_reusable_feedback_does_not_bypass_conflicting_alternate(repository, all_release, reusable_feedback):
+    alternate = repository / ".github/workflows/skill-feedback-all-tiers.yml"
+    alternate.write_text("name: Keep this unrelated workflow\n")
+    result = invoke(repository, all_release, "--mode", "save")
+    assert result.exit_code != 0
+    assert "skill-feedback-all-tiers.yml already exists" in " ".join(result.output.split())
+    assert not (repository / ".github/workflows/skill-checks-all-tiers.yml").exists()
+    assert reusable_feedback.read_text() == REUSABLE_FEEDBACK
+    assert alternate.read_text() == "name: Keep this unrelated workflow\n"
+
+
+def test_reusable_feedback_detection_does_not_read_symlinks(repository, all_release, tmp_path, monkeypatch):
+    from pathlib import Path
+
+    outside = tmp_path / "outside.yml"
+    outside.write_text(REUSABLE_FEEDBACK)
+    target = repository / ".github/workflows/feedback-all-tiers.yml"
+    target.symlink_to(outside)
+    original_read = Path.read_text
+
+    def read_text(path, *args, **kwargs):
+        assert path != target, "A workflow symlink must be rejected before its contents are read"
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    result = invoke(repository, all_release, "--mode", "preview")
+    assert result.exit_code != 0
+    assert "Symlink" in result.output
+    assert not (repository / ".github/workflows/skill-feedback-all-tiers.yml").exists()
 
 
 def test_all_tiers_preview_offline_and_local_options(repository, all_release, monkeypatch):
@@ -101,13 +192,15 @@ def test_unsupported_runtime_configuration_is_rejected_before_files(repository, 
     assert subprocess.check_output(["git", "-C", str(repository), "status", "--porcelain"]) == before
 
 
-def test_all_tiers_conflict_does_not_partially_save(repository, all_release):
+@pytest.mark.parametrize("content", ["name: Keep me\n", "true:\n  workflow_call:\n", "on:\n  workflow_dispatch:\n"])
+def test_all_tiers_conflict_does_not_partially_save(repository, all_release, content):
     target = repository / ".github/workflows/feedback-all-tiers.yml"
-    target.write_text("name: Keep me\n")
+    target.write_text(content)
     result = invoke(repository, all_release, "--mode", "save")
     assert result.exit_code != 0
+    assert ".github/workflows/feedback-all-tiers.yml already exists" in " ".join(result.output.split())
     assert not (repository / ".github/workflows/skill-checks-all-tiers.yml").exists()
-    assert target.read_text() == "name: Keep me\n"
+    assert target.read_text() == content
 
 
 def test_gitlab_feedback_bootstrap_pins_are_literal_inputs(repository, all_release):
@@ -170,9 +263,19 @@ def test_invalid_tier_selection_fails_before_writes(repository, all_release, tie
     assert not (repository / ".github/workflows/skill-checks-all-tiers.yml").exists()
 
 
-def test_github_setup_pr_is_api_only_and_preserves_checkout(repository, all_release, monkeypatch):
+@pytest.mark.parametrize("has_reusable_feedback", [False, True])
+def test_github_setup_pr_is_api_only_and_preserves_checkout(
+    repository, all_release, monkeypatch, request, has_reusable_feedback
+):
+    import base64
+
     from skillevaluator import ci_onboarding as wizard
 
+    if has_reusable_feedback:
+        request.getfixturevalue("reusable_feedback")
+    feedback_path = ".github/workflows/" + (
+        "skill-feedback-all-tiers.yml" if has_reusable_feedback else "feedback-all-tiers.yml"
+    )
     mutations = []
     before = subprocess.check_output(["git", "-C", str(repository), "status", "--porcelain"])
 
@@ -190,6 +293,8 @@ def test_github_setup_pr_is_api_only_and_preserves_checkout(repository, all_rele
             raise AssertionError(endpoint)
         if endpoint == "repos/example-org/consumer":
             return {"default_branch": "trunk"}
+        if has_reusable_feedback and "/contents/.github/workflows/feedback-all-tiers.yml?" in endpoint:
+            return {"encoding": "base64", "content": base64.b64encode(REUSABLE_FEEDBACK.encode()).decode()}
         if "/contents/" in endpoint or endpoint.endswith("/git/ref/heads/ci%2Fskillevaluator-all-tiers-setup"):
             return None
         if "/pulls?" in endpoint:
@@ -209,10 +314,10 @@ def test_github_setup_pr_is_api_only_and_preserves_checkout(repository, all_rele
     tree = next(payload for endpoint, payload in mutations if endpoint.endswith("/git/trees"))
     assert {entry["path"] for entry in tree["tree"]} == {
         ".github/workflows/skill-checks-all-tiers.yml",
-        ".github/workflows/feedback-all-tiers.yml",
+        feedback_path,
     }
     texts = {entry["path"]: entry["content"] for entry in tree["tree"]}
-    feedback = yaml.safe_load(texts[".github/workflows/feedback-all-tiers.yml"])
+    feedback = yaml.safe_load(texts[feedback_path])
     setup = next(payload for endpoint, payload in mutations if endpoint.endswith("/pulls"))
     assert "Tier 1 required" in setup["body"]
     assert "Tier 2 and Tier 3 advisory" in setup["body"]
@@ -220,6 +325,32 @@ def test_github_setup_pr_is_api_only_and_preserves_checkout(repository, all_rele
         texts[".github/workflows/skill-checks-all-tiers.yml"]
     )
     assert subprocess.check_output(["git", "-C", str(repository), "status", "--porcelain"]) == before
+
+
+@pytest.mark.parametrize("live_content", [None, "name: Existing consumer feedback\n"])
+def test_github_setup_pr_refuses_reusable_feedback_drift(
+    repository, all_release, reusable_feedback, monkeypatch, live_content
+):
+    import base64
+
+    from skillevaluator import ci_onboarding as wizard
+
+    def api(method, endpoint, payload=None, **kwargs):
+        assert method == "GET", "Conflicting default-branch feedback must stop before mutation"
+        if endpoint == "repos/example-org/consumer":
+            return {"default_branch": "trunk"}
+        if "/contents/.github/workflows/feedback-all-tiers.yml?" in endpoint and live_content is not None:
+            return {"encoding": "base64", "content": base64.b64encode(live_content.encode()).decode()}
+        if "/contents/" in endpoint:
+            return None
+        raise AssertionError(endpoint)
+
+    monkeypatch.setattr(wizard, "github_api", api)
+    result = invoke(repository, all_release, "--mode", "pr", "--paths", "skills")
+    assert result.exit_code != 0
+    assert "default branch" in result.output
+    assert not (repository / ".github/workflows/skill-checks-all-tiers.yml").exists()
+    assert reusable_feedback.read_text() == REUSABLE_FEEDBACK
 
 
 def test_gitlab_token_api_rejects_host_mismatch_before_network(monkeypatch):
@@ -350,6 +481,55 @@ def test_live_all_tier_status_recognizes_scan_and_approval(repository, all_relea
     assert result.exit_code == 0, result.output
     assert "matches exact workflow" in result.output
     assert "not a verified scan" in result.output
+
+
+@pytest.mark.parametrize("alternate", ["generated", None, "name: Unrelated alternate\n"])
+def test_github_status_recognizes_reusable_feedback_collision(repository, all_release, monkeypatch, alternate):
+    import base64
+
+    from skillevaluator import ci_onboarding as wizard
+
+    # The live default branch has a reusable workflow even though this local
+    # checkout has the ordinary consumer caller at the canonical feedback path.
+    assert invoke(repository, all_release, "--mode", "save").exit_code == 0
+    scan_path = ".github/workflows/skill-checks-all-tiers.yml"
+    alternate_path = ".github/workflows/skill-feedback-all-tiers.yml"
+    texts = {
+        scan_path: (repository / scan_path).read_text(),
+        ".github/workflows/feedback-all-tiers.yml": REUSABLE_FEEDBACK,
+    }
+    if alternate is not None:
+        texts[alternate_path] = (
+            (repository / ".github/workflows/feedback-all-tiers.yml").read_text()
+            if alternate == "generated"
+            else alternate
+        )
+
+    def api(method, endpoint, payload=None, **kwargs):
+        assert method == "GET"
+        if endpoint == "repos/example-org/consumer":
+            return {"default_branch": "trunk"}
+        for path, text in texts.items():
+            if "/contents/" + path + "?" in endpoint:
+                return {"encoding": "base64", "content": base64.b64encode(text.encode()).decode()}
+        if "/contents/" + alternate_path + "?" in endpoint:
+            return None
+        if "/runs?" in endpoint:
+            return {"workflow_runs": []}
+        raise AssertionError(endpoint)
+
+    monkeypatch.setattr(wizard, "github_api", api)
+    result = CliRunner().invoke(cli, ["ci", "status", "--repo", str(repository)])
+    assert result.exit_code == 0, result.output
+    assert alternate_path in " ".join(result.output.split())
+    if alternate == "generated":
+        assert "Trusted feedback: configured" in result.output
+        assert "Scan approval: matches exact workflow" in result.output
+    elif alternate is None:
+        assert "Trusted feedback: missing" in result.output
+    else:
+        assert "not a trusted feedback configuration" in " ".join(result.output.split())
+        assert "Trusted feedback: configured" not in result.output
 
 
 @pytest.mark.parametrize(
@@ -1031,3 +1211,17 @@ def test_gitlab_status_warns_about_root_jobs_without_feedback_guard(repository, 
     assert "also run deploy, test." in normalized
     assert "SKILL_EVAL_FEEDBACK" in normalized and ".skill-evaluation-not-feedback" in normalized
     assert "a job without rules, only or except can extend" in normalized
+
+
+def test_gitlab_status_recognizes_tier2_job_overrides(repository, all_release, monkeypatch):
+    subprocess.run(
+        ["git", "-C", str(repository), "remote", "set-url", "origin", "https://gitlab.example.test/group/consumer.git"],
+        check=True,
+    )
+    assert invoke(repository, all_release, "--mode", "save").exit_code == 0
+    generated = (repository / ".gitlab-ci.yml").read_text()
+    output, _calls = _gitlab_status(
+        repository, monkeypatch, generated + "skill-evaluation-native-tier2:\n  tags: [cpu]\n"
+    )
+    assert "All-tier checks: configured" in output
+    assert "Warning" not in output

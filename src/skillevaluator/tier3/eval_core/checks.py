@@ -2637,11 +2637,11 @@ def _security_finding(
 # --client-secret, -u with user:password, -p after a login subcommand or
 # sshpass, an attached mysql -p, and curl's -b NAME=VALUE, also as elements of
 # an argv list; credentials set with aws configure set, npm, pnpm or yarn
-# config set and git config; .netrc passwords; values assigned to a credential
-# name (_authToken=..., api_key: ..., DB_PASS=...); and common token prefixes.
-# Only the first _FINDING_EVIDENCE_SCAN_CHARS characters are scanned, and each
-# pass reads that text in linear time. A quoted value ends at its closing quote
-# or at the end of its line.
+# config set (and npm or pnpm set) and git config; .netrc passwords; values
+# assigned to a credential name (_authToken=..., api_key: ..., DB_PASS=...);
+# and common token prefixes. Only the first _FINDING_EVIDENCE_SCAN_CHARS
+# characters are scanned, and each pass reads that text in linear time. A
+# quoted value ends at its closing quote or at the end of its line.
 _FINDING_EVIDENCE_SCAN_CHARS = 2000
 _FINDING_EVIDENCE_TRUNCATED = "<truncated>"
 _FINDING_EVIDENCE_PRIVATE_KEY_MARKER = "<redacted private key>"
@@ -2717,11 +2717,13 @@ _FINDING_EVIDENCE_COOKIE_HEADER_RE = re.compile(
 # A flag value: quoted (to its closing quote or the end of the line, also
 # JSON-escaped inside a shell string) or one word, which may hold escaped
 # spaces ("correct\ horse"). A masked private key is one value, although its
-# marker holds spaces.
+# marker holds spaces. A word never starts at a shell operator: in
+# "git config --get github.token | curl ..." or "gh auth login --with-token <
+# token.txt" the flag or key has no value on the command line.
 _FINDING_EVIDENCE_FLAG_VALUE = (
     "(?:"
     + _FINDING_EVIDENCE_PRIVATE_KEY_MARKER
-    + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\"[^\"\r\n]*\"?|'[^'\r\n]*'?|(?:\\.|[^\s'\"`\\])+)"
+    + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\"[^\"\r\n]*\"?|'[^'\r\n]*'?|(?![|&;<>])(?:\\.|[^\s'\"`\\])+)"
 )
 # Any long flag whose name holds a credential word ("--password", "--db-password",
 # "--client-secret", "--github-token", "--oauth2-bearer", "--cookie"), and the
@@ -2747,12 +2749,13 @@ _FINDING_EVIDENCE_FLAG_VALUE_RE = re.compile(_FINDING_EVIDENCE_FLAG_VALUE)
 # ("-uadmin:password"), at the end of a short-flag cluster ("curl -su
 # user:password", "-fsSLu user:password") and as "--proxy-user". A value with
 # "://" is a URL ("pip install -U git+https://..."), whose userinfo is already
-# masked, and one whose first colon starts a "/" path is a remote path ("rsync
-# -u host:/data").
+# masked, one whose first colon starts a "/" path is a remote path ("rsync
+# -u host:/data"), and one that starts with "+" is a date format ("date -u
+# +%H:%M:%S").
 _FINDING_EVIDENCE_USER_FLAG_RE = re.compile(
     r"((?<![^\s'\"])(?:(?:-[A-Za-z]{0,8}?u|-U|--user|--proxy-user)(?:[ \t]+|=)"
     r"|-[A-Za-z]{0,8}?u(?=[^\s'\"`:=-][^\s'\"`:]*:)))"
-    r"(?![\"']?[^\s'\"`]*://)(?![\"']?[^\s'\"`:]*:/)"
+    r"(?![\"']?\+)(?![\"']?[^\s'\"`]*://)(?![\"']?[^\s'\"`:]*:/)"
     r"(?:\"[^\"\r\n:]*:[^\"\r\n]*\"?|'[^'\r\n:]*:[^'\r\n]*'?|[^\s'\"`:]*:[^\s'\"`]*)"
 )
 # "-p" is a password after a login subcommand ("docker login -u bot -p VALUE",
@@ -2786,12 +2789,16 @@ _FINDING_EVIDENCE_AWS_CONFIGURE_SET_RE = re.compile(
     + _FINDING_EVIDENCE_FLAG_VALUE,
     re.IGNORECASE,
 )
-# "npm config set NAME VALUE" (also pnpm and yarn) and "git config [OPTIONS]
-# NAME VALUE". The value is masked when the last part of NAME names a
-# credential ("//registry.npmjs.org/:_authToken", "npmAuthToken",
-# "github.token"), so "credential.helper store" and "always-auth true" are kept.
+# "npm config set [OPTIONS] NAME VALUE" (also pnpm and yarn, and npm's and
+# pnpm's "set" alias) and "git config [OPTIONS] NAME VALUE". An option may
+# carry its own value ("--location=global"). The value is masked when the last
+# part of NAME names a credential ("//registry.npmjs.org/:_authToken",
+# "npmAuthToken", "github.token"), so "credential.helper store" and
+# "always-auth true" are kept. "git config --get" and "--unset" read or remove
+# a key and take no value.
 _FINDING_EVIDENCE_CONFIG_SET_RE = re.compile(
-    r"(\b(?:(?:npm|pnpm|yarn)[ \t]+config[ \t]+set|git[ \t]+config)(?:[ \t]+-{1,2}[\w-]{1,32}){0,3}[ \t]+"
+    r"(\b(?:(?:npm|pnpm|yarn)[ \t]+config[ \t]+set|(?:npm|pnpm)[ \t]+set|git[ \t]+config)"
+    r"(?:[ \t]+--?(?!-|get|unset)[\w-]{1,32}(?:=[^\s'\"`]{1,64})?){0,3}[ \t]+"
     r"([^\s'\"`=-][^\s'\"`=]{0,255})[ \t]+(?!-))" + _FINDING_EVIDENCE_FLAG_VALUE
 )
 _FINDING_EVIDENCE_CONFIG_KEY_SPLIT_RE = re.compile(r"[./:]")
@@ -2819,14 +2826,25 @@ _FINDING_EVIDENCE_NETRC_PASSWORD_RE = re.compile(
 _FINDING_EVIDENCE_COOKIE_FLAG_RE = re.compile(r"((?<![^\s'\"])-b[ \t]+)(?=[^\s]*=)" + _FINDING_EVIDENCE_FLAG_VALUE)
 # The same flags as quoted elements of an argv list: the element after a
 # credential flag (subprocess.run(["tool", "--password", "VALUE"])), after
-# "-u" when it holds a colon, and after "-p" that follows a "login" element
-# (["docker", "login", "-u", "bot", "-p", "VALUE"]).
+# "-u", "-U", "--user" or "--proxy-user" when it holds a colon, after "-b" when
+# it holds "=" (a cookie), and after "-p" that follows a "login" element
+# (["docker", "login", "-u", "bot", "-p", "VALUE"]) or comes right after an
+# "sshpass" element. An attached "-pVALUE" element is masked after a "login"
+# element or a MySQL client element (["mysql", "-uroot", "-pVALUE"]); find's
+# "-path", "-perm", "-print" and "-prune" are kept. An attached
+# "-uUSER:PASSWORD" element is masked by the -u rule below.
 _FINDING_EVIDENCE_ARGV_FLAG_RE = re.compile(
-    r"([\"'])(" + _FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME + r"|-[pu])\1[ \t]*,[ \t]*(?=[\"'][^-\"'])",
+    r"([\"'])(" + _FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME + r"|-[pub])\1[ \t]*,[ \t]*(?=[\"'][^-\"'])",
     re.IGNORECASE,
 )
 _FINDING_EVIDENCE_ARGV_VALUE_RE = re.compile(r"\"[^\"\r\n]*\"?|'[^'\r\n]*'?")
 _FINDING_EVIDENCE_ARGV_LOGIN_RE = re.compile(r"[\"']login[\"'][ \t]*,")
+_FINDING_EVIDENCE_ARGV_SSHPASS_RE = re.compile(r"[\"'](?:[^\s'\"]{0,128}/)?sshpass[\"'][ \t]*,[ \t]*$")
+_FINDING_EVIDENCE_ARGV_MYSQL_RE = re.compile(
+    r"[\"'](?:[^\s'\"]{0,128}/s?bin/)?"
+    r"(?:mysql|mysqldump|mysqladmin|mysqlimport|mysqlshow|mysqlcheck|mariadb|mariadb-dump)[\"'][ \t]*,"
+)
+_FINDING_EVIDENCE_ARGV_ATTACHED_PASSWORD_RE = re.compile(r"([\"'])-p(?!ath\b|erm\b|rint|rune\b)([^\"'\r\n]+)\1")
 # Bearer, Basic, Token and Digest stay visible after a credential name too
 # ("Authorization: Bearer <redacted>").
 _FINDING_EVIDENCE_AUTH_SCHEME = r"(?:(?:bearer|basic|token|digest)[ \t]+)?"
@@ -2845,7 +2863,8 @@ _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE = re.compile(
 )
 # "auth" also starts author and authority, which name no credential. A name
 # that ends in a "_pass", "_pwd" or "pw" part ("DB_PASS", "MYSQL_PWD", "PW")
-# names a password too, as do "PASS", a database, mail or account name joined
+# names a password too, as do "PASS" (only as "PASS=VALUE", see
+# _FINDING_EVIDENCE_COUNTER_VALUE_RE), a database, mail or account name joined
 # to "pass" ("DBPASS", "SMTPPASS", "ROOTPASS") and any name joined to "pwd"
 # ("MYSQLPWD"). A bare "PWD" or "OLDPWD" is a working directory, and words
 # such as BYPASS and COMPASS are not passwords.
@@ -2871,6 +2890,11 @@ _FINDING_EVIDENCE_SECRET_NAME_RE = re.compile(
 _FINDING_EVIDENCE_TYPE_NAME_RE = re.compile(r"(?:^|[_.-])type$", re.IGNORECASE)
 _FINDING_EVIDENCE_COUNT_NAME_RE = re.compile(r"tokens$", re.IGNORECASE)
 _FINDING_EVIDENCE_COUNT_VALUE_RE = re.compile(r"[0-9]{1,12}(?![\w.-])")
+# A bare "PASS" is also a test result word ("echo PASS: 3", "grep PASS:
+# out.txt") and a counter ("PASS=0", "PASS=$((PASS+1))"), so it names a
+# password only with "=" and a value that is not a number or an arithmetic
+# expansion.
+_FINDING_EVIDENCE_COUNTER_VALUE_RE = re.compile(r"[0-9]{1,12}(?![\w.-])|\$\(\(")
 # A value: a masked private key, a JSON-escaped or quoted string, a
 # parenthesized tuple (auth=("bob", "...")), or one word, which may hold
 # escaped spaces ("correct\ horse").
@@ -2881,16 +2905,29 @@ _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE = re.compile(
 )
 # Inside a quoted string a value that does not open its own quote runs to the
 # string's closing quote ('password: correct horse battery staple'), or to the
-# closing escaped quote when the string itself is JSON-escaped.
+# closing escaped quote when the string itself is JSON-escaped. It also ends at
+# a "\n" escape, a line break to printf, and at "&" before the next field of a
+# form body ("username=bob&password=VALUE&next=1").
+_FINDING_EVIDENCE_NEXT_FORM_FIELD = r"|&(?![\w.-]{1,64}=)"
 _FINDING_EVIDENCE_QUOTED_REST_RES = {
-    "'": re.compile(r"[^'\r\n]+"),
-    '"': re.compile(r"(?:\\.|[^\"\\\r\n])+"),
-    "\\'": re.compile(r"(?:\\(?!')|[^'\\\r\n])+"),
-    '\\"': re.compile(r"(?:\\(?!\")|[^\"\\\r\n])+"),
+    "'": re.compile(r"(?:[^'\\&\r\n]|\\(?!n)" + _FINDING_EVIDENCE_NEXT_FORM_FIELD + ")+"),
+    '"': re.compile(r"(?:\\[^n\r\n]|[^\"\\&\r\n]" + _FINDING_EVIDENCE_NEXT_FORM_FIELD + ")+"),
+    "\\'": re.compile(r"(?:\\(?![n'])|[^'\\&\r\n]" + _FINDING_EVIDENCE_NEXT_FORM_FIELD + ")+"),
+    '\\"': re.compile(r"(?:\\(?![n\"])|[^\"\\&\r\n]" + _FINDING_EVIDENCE_NEXT_FORM_FIELD + ")+"),
 }
-# A quoted shell command ("sh -c 'TOKEN=x make deploy'") holds shell
-# assignments, whose value is one word.
-_FINDING_EVIDENCE_SHELL_STRING_RE = re.compile(r"(?:^|[\s;&|(])-[A-Za-z]{0,4}c[ \t]{1,4}$")
+# A name need not open its quoted string ('  password: VALUE',
+# "username=bob&password=VALUE", "export DB_PASSWORD=VALUE"). Quotes are read
+# from the start of each line, as a shell reads them, in one pass over the
+# text: a backslash escapes the next character outside single quotes, a line
+# break ends any string, and an apostrophe inside a word ("don't") opens none.
+_FINDING_EVIDENCE_QUOTE_CHAR_RE = re.compile(r"[\\'\"\r\n]")
+# A quoted shell command holds shell assignments, whose value is one word: a
+# "-c" string ("sh -c 'TOKEN=x make deploy'"), an eval string and a remote
+# ssh command ('ssh host "TOKEN=x ./deploy.sh && rm -rf /srv/app"').
+_FINDING_EVIDENCE_SHELL_STRING_RE = re.compile(
+    r"(?:(?:^|[\s;&|(])(?:-[A-Za-z]{0,4}c|eval)|(?<![\w.-])ssh(?:[ \t]+[^\s'\"`;&|()<>]+){1,12})[ \t]{1,4}$"
+)
+_FINDING_EVIDENCE_SHELL_STRING_LOOKBACK = 160
 # A word or quoted word stuck to the quote that closes a string around an
 # empty assignment ('"PASSWORD="hunter2' is PASSWORD=hunter2 to a shell, and
 # "'API_KEY='\"hunter2\"" is API_KEY=hunter2).
@@ -3035,12 +3072,17 @@ def _mask_argv_credentials(text: str) -> str:
         if match.start() < pos or value is None:
             continue
         if flag == "-p":
-            # A password only after a "login" element of the same list.
+            # A password only after a "login" element of the same list, or
+            # right after an "sshpass" element.
             masked = (
                 _FINDING_EVIDENCE_ARGV_LOGIN_RE.search(text, max(0, match.start() - 256), match.start()) is not None
+                or _FINDING_EVIDENCE_ARGV_SSHPASS_RE.search(text[max(0, match.start() - 160) : match.start()])
+                is not None
             )
-        elif flag.lower() == "-u":
+        elif flag.lower() in ("-u", "--user", "--proxy-user"):
             masked = ":" in value.group() and ":/" not in value.group()
+        elif flag == "-b":
+            masked = "=" in value.group()
         else:
             masked = _is_credential_flag_name(flag)
         if not masked:
@@ -3048,6 +3090,24 @@ def _mask_argv_credentials(text: str) -> str:
         parts.append(text[pos : value.start()])
         parts.append("<redacted>")
         pos = value.end()
+    parts.append(text[pos:])
+    return _mask_argv_attached_password("".join(parts))
+
+
+def _mask_argv_attached_password(text: str) -> str:
+    """Mask an attached "-pVALUE" element that follows a login or MySQL client element."""
+    parts: list[str] = []
+    pos = 0
+    for match in _FINDING_EVIDENCE_ARGV_ATTACHED_PASSWORD_RE.finditer(text):
+        window = max(0, match.start() - 256)
+        if (
+            _FINDING_EVIDENCE_ARGV_LOGIN_RE.search(text, window, match.start()) is None
+            and _FINDING_EVIDENCE_ARGV_MYSQL_RE.search(text, window, match.start()) is None
+        ):
+            continue
+        parts.append(text[pos : match.start(2)])
+        parts.append("<redacted>")
+        pos = match.end(2)
     parts.append(text[pos:])
     return "".join(parts)
 
@@ -3071,6 +3131,9 @@ def _mask_credential_assignments(text: str) -> str:
     """Mask the value of each assignment whose name holds a credential word ("_authToken=...", "api_key: ...")."""
     parts: list[str] = []
     pos = 0
+    # The quote state is read forward once, up to each name that needs it.
+    scan_pos = 0
+    scan_open: int | None = None
     for match in _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.finditer(text):
         name, name_quote, separator = match.group(1, 2, 3)
         if (
@@ -3085,22 +3148,39 @@ def _mask_credential_assignments(text: str) -> str:
                 _FINDING_EVIDENCE_COUNT_NAME_RE.search(name) is not None
                 and _FINDING_EVIDENCE_COUNT_VALUE_RE.match(text, match.end()) is not None
             )
+            or (
+                name.lower() == "pass"
+                and (
+                    separator.strip() != "=" or _FINDING_EVIDENCE_COUNTER_VALUE_RE.match(text, match.end()) is not None
+                )
+            )
         ):
             continue
         start = match.end()
         opening = text[match.start() - 1] if match.start() else ""
         in_quotes = opening in ("'", '"') and not name_quote
         quote_start = match.start() - 1
+        escaped = in_quotes and quote_start > 0 and text[quote_start - 1] == "\\"
+        closers = (opening, "\\" + opening)
+        if not in_quotes and not name_quote:
+            # The name may sit further inside a quoted string ("username=bob&password=VALUE").
+            scan_pos, scan_open = _scan_quotes(text, scan_pos, match.start(), scan_open)
+            if scan_open is not None:
+                in_quotes, quote_start, opening = True, scan_open, text[scan_open]
+                closers = (opening,)
         shell_string = (
             in_quotes
             and separator == "="
-            and _FINDING_EVIDENCE_SHELL_STRING_RE.search(text[max(0, quote_start - 16) : quote_start]) is not None
+            and _FINDING_EVIDENCE_SHELL_STRING_RE.search(
+                text[max(0, quote_start - _FINDING_EVIDENCE_SHELL_STRING_LOOKBACK) : quote_start]
+            )
+            is not None
         )
         if in_quotes and separator == "=" and not shell_string:
             # Inside a quoted string "name= value" is not a shell assignment,
             # so the value may follow spaces ("echo 'password= VALUE' >> f").
             start = _FINDING_EVIDENCE_SPACES_RE.match(text, start).end()
-        if in_quotes and text.startswith((opening, "\\" + opening), start):
+        if in_quotes and text.startswith(closers, start):
             # The value is empty and the quote after it closes the string that
             # opened before the name ('grep "token=" ...', "printf 'password: '"),
             # so it is not the opening quote of a value.
@@ -3116,7 +3196,6 @@ def _mask_credential_assignments(text: str) -> str:
         elif in_quotes and not shell_string and not text.startswith(("'", '"', "\\'", '\\"', "("), start):
             # The value is the rest of the quoted string, which may hold
             # spaces ('password: correct horse battery staple').
-            escaped = quote_start > 0 and text[quote_start - 1] == "\\"
             value = _FINDING_EVIDENCE_QUOTED_REST_RES[("\\" if escaped else "") + opening].match(text, start)
         else:
             value = _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE.match(text, start)
@@ -3127,6 +3206,31 @@ def _mask_credential_assignments(text: str) -> str:
         pos = value.end()
     parts.append(text[pos:])
     return "".join(parts)
+
+
+def _scan_quotes(text: str, pos: int, end: int, opening: int | None) -> tuple[int, int | None]:
+    """Read quotes from *pos* to *end*, starting inside the string that opens at *opening* (None: outside one).
+
+    Return where the next read starts, which an escape can put past *end*, and
+    where the string open at *end* starts.
+    """
+    while (match := _FINDING_EVIDENCE_QUOTE_CHAR_RE.search(text, pos, end)) is not None:
+        index = match.start()
+        char = text[index]
+        pos = index + 1
+        if char in "\r\n":
+            opening = None
+        elif char == "\\":
+            # Outside quotes and inside double quotes a backslash escapes the
+            # next character; inside single quotes it is literal.
+            if opening is None or text[opening] == '"':
+                pos += 1
+        elif opening is None:
+            if char == '"' or index == 0 or not text[index - 1].isalnum():
+                opening = index
+        elif char == text[opening]:
+            opening = None
+    return max(pos, end), opening
 
 
 def _secret_exposure_finding(

@@ -32,6 +32,7 @@ import zlib
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path, PurePosixPath
+from urllib.parse import unquote
 
 import yaml
 from yaml.events import ScalarEvent
@@ -56,7 +57,12 @@ from skillevaluator.skillspector_provenance import SKILLSPECTOR_LLM_ANALYZERS, s
 from skillevaluator.spdx import is_spdx_only_html_comment
 from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.utils.scanner_install import prepare_skillspector
-from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, stat_is_link_or_reparse
+from skillevaluator.utils.secure_fs import (
+    MAX_SECURE_DIRECTORY_DEPTH,
+    SecurePathError,
+    SecureRoot,
+    stat_is_link_or_reparse,
+)
 from skillevaluator.utils.tool_runner import Tools, parse_json_output
 from skillevaluator.validators.base import (
     Finding,
@@ -1552,20 +1558,29 @@ _SKILLSPECTOR_REFERENCE_MISSING_VERSION = (2, 12, 0)
 # SkillSpector inspects at most 1,000,000 bytes of a file, so a larger file
 # holding a reference is never fully inspected and is not accepted.
 _SKILLSPECTOR_REFERENCE_SOURCE_MAX_BYTES = 1_000_000
+# Entries listed under the skill, and characters of a reference's line, beyond
+# which a missing reference is no longer accepted.
+_SKILLSPECTOR_REFERENCE_TREE_MAX_ENTRIES = 50_000
+_SKILLSPECTOR_REFERENCE_LINE_MAX_CHARS = 10_000
+# SkillSpector removes these Markdown escapes from a link destination.
+_SKILLSPECTOR_MARKDOWN_ESCAPE_RE = re.compile(r"\\([\\()<>])")
+# Characters that continue a file name in SkillSpector's reference grammar.
+_SKILLSPECTOR_NAME_RUN_RE = re.compile(r"[\w.-]+")
 
 
-def _skillspector_report_path_is_bundled_file(path: object, components: object, scanned_root: Path | None) -> bool:
-    """Whether a SkillSpector report *path* names one scanned component that is a regular file.
+def _skillspector_bundled_file_bytes(path: object, components: object, scanned_root: Path | None) -> bytes | None:
+    """The bytes of the scanned file a SkillSpector report *path* names, else ``None``.
 
     The path must be relative POSIX text with no backslash, no empty, ``.`` or
     ``..`` part and no anchor, and exactly one ``components`` entry must carry
     it. Under a directory *scanned_root* it must name a regular, single-link
-    file reached without following a link at any component (:class:`SecureRoot`);
+    file of at most :data:`_SKILLSPECTOR_REFERENCE_SOURCE_MAX_BYTES` bytes,
+    reached without following a link at any component (:class:`SecureRoot`);
     a single-file *scanned_root* matches only its own name. Without a root
     nothing is accepted.
     """
     if scanned_root is None or not isinstance(path, str) or not isinstance(components, list):
-        return False
+        return None
     parts = path.split("/")
     if (
         "\\" in path
@@ -1573,16 +1588,28 @@ def _skillspector_report_path_is_bundled_file(path: object, components: object, 
         or any(part in {"", ".", ".."} or Path(part).anchor for part in parts)
         or [component.get("path") for component in components if isinstance(component, dict)].count(path) != 1
     ):
-        return False
+        return None
     try:
         root_metadata = scanned_root.lstat()
         if stat.S_ISREG(root_metadata.st_mode) and not stat_is_link_or_reparse(root_metadata):
-            return path == scanned_root.name
-        with SecureRoot(scanned_root) as root:
-            root.read_bytes(Path(*parts), _SKILLSPECTOR_REFERENCE_SOURCE_MAX_BYTES)
+            if path != scanned_root.name:
+                return None
+            directory, relative = scanned_root.parent, Path(path)
+        else:
+            directory, relative = scanned_root, Path(*parts)
+        with SecureRoot(directory) as root:
+            data, _metadata = root.read_bytes(relative, _SKILLSPECTOR_REFERENCE_SOURCE_MAX_BYTES)
     except (OSError, SecurePathError):
-        return False
-    return True
+        return None
+    return data
+
+
+def _skillspector_report_path_is_bundled_file(path: object, components: object, scanned_root: Path | None) -> bool:
+    """Whether a SkillSpector report *path* names one scanned component that is a regular file.
+
+    The rules are those of :func:`_skillspector_bundled_file_bytes`.
+    """
+    return _skillspector_bundled_file_bytes(path, components, scanned_root) is not None
 
 
 def _skillspector_reference_row_is_advisory(
@@ -1593,12 +1620,13 @@ def _skillspector_reference_row_is_advisory(
     """Whether a ledger row only records a reference to a file the skill does not bundle.
 
     The row must be a nonfatal ``partial`` row in phase ``reference_resolution``
-    that names no analyzer and no error class. SkillSpector 2.12.0 and later
-    report such a reference as ``reference_missing``; there
+    that names no analyzer and no error class and covers one line. SkillSpector
+    2.12.0 and later report such a reference as ``reference_missing``; there
     ``reference_unresolved`` means a reference that matches several bundled
     files, which is not advisory. Earlier releases report both cases as
-    ``reference_unresolved``, so that row is advisory only when the report's
-    ``references`` list records each reference on the row's line as ``missing``.
+    ``reference_unresolved``. Either way the report's ``references`` list must
+    corroborate the row: it records at least one reference on the row's line,
+    and every unresolved reference there is ``missing``, none ``ambiguous``.
     """
     if (
         row.get("fatal") is not False
@@ -1609,40 +1637,186 @@ def _skillspector_reference_row_is_advisory(
     ):
         return False
     reason = row.get("reason_code")
-    if reason == "reference_missing":
-        return True
-    line = row.get("start_line")
-    if (
+    if reason != "reference_missing" and (
         reason != "reference_unresolved"
         or skillspector_version is None
         or skillspector_version >= _SKILLSPECTOR_REFERENCE_MISSING_VERSION
-        or not isinstance(references, list)
+    ):
+        return False
+    line = row.get("start_line")
+    end_line = row.get("end_line")
+    if (
+        not isinstance(references, list)
         or isinstance(line, bool)
         or not isinstance(line, int)
+        or isinstance(end_line, bool)
+        or end_line != line
     ):
         return False
     statuses = {
         reference.get("status")
-        for reference in references
-        if isinstance(reference, dict)
-        and reference.get("source_path") == row.get("path")
-        and not isinstance(reference.get("line"), bool)
-        and reference.get("line") == line
-        and reference.get("status") in {"missing", "ambiguous"}
+        for reference in _skillspector_references_on_line(references, row.get("path"), line)
+        if reference.get("status") in {"missing", "ambiguous"}
     }
     return statuses == {"missing"}
 
 
+def _skillspector_references_on_line(references: list, path: object, line: int) -> list[dict]:
+    """The entries of a report's ``references`` list for line *line* of *path*."""
+    return [
+        reference
+        for reference in references
+        if isinstance(reference, dict)
+        and reference.get("source_path") == path
+        and not isinstance(reference.get("line"), bool)
+        and reference.get("line") == line
+    ]
+
+
+def _skillspector_unscanned_names(scanned_root: Path, components: object) -> set[str] | None:
+    """Names of the entries under *scanned_root* that SkillSpector did not inspect, else ``None``.
+
+    An entry is uninspected when it is a link, a junction or another
+    non-regular file, a regular file that no ``components`` entry lists, or the
+    outermost directory of a subtree that holds no listed file, such as an
+    artifact directory left out of a staged scan; files inside such a
+    directory are uninspected too. Links are not followed. ``None`` means the
+    tree could not be listed within :data:`_SKILLSPECTOR_REFERENCE_TREE_MAX_ENTRIES`
+    entries and :data:`MAX_SECURE_DIRECTORY_DEPTH` levels. A single-file root
+    has no other entries.
+    """
+    if not isinstance(components, list):
+        return None
+    listed = {
+        component["path"]
+        for component in components
+        if isinstance(component, dict) and isinstance(component.get("path"), str)
+    }
+    ancestors = {
+        "/".join(parts[:index]) for parts in (path.split("/") for path in listed) for index in range(1, len(parts))
+    }
+    try:
+        root_metadata = scanned_root.lstat()
+    except OSError:
+        return None
+    if stat.S_ISREG(root_metadata.st_mode) and not stat_is_link_or_reparse(root_metadata):
+        return set()
+    names: set[str] = set()
+    # Each pending directory carries its path relative to the root and whether it holds a listed file.
+    pending: list[tuple[Path, str, bool]] = [(scanned_root, "", True)]
+    seen = 0
+    while pending:
+        directory, prefix, holds_listed = pending.pop()
+        if prefix.count("/") > MAX_SECURE_DIRECTORY_DEPTH:
+            return None
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    seen += 1
+                    if seen > _SKILLSPECTOR_REFERENCE_TREE_MAX_ENTRIES:
+                        return None
+                    relative = prefix + entry.name
+                    metadata = entry.stat(follow_symlinks=False)
+                    linked = stat_is_link_or_reparse(metadata)
+                    if stat.S_ISDIR(metadata.st_mode) and not linked:
+                        holds = holds_listed and relative in ancestors
+                        if holds_listed and not holds:
+                            names.add(entry.name)
+                        pending.append((Path(entry.path), relative + "/", holds))
+                    elif linked or not stat.S_ISREG(metadata.st_mode) or relative not in listed:
+                        names.add(entry.name)
+        except OSError:
+            return None
+    return names
+
+
+def _skillspector_name_keys(names: Iterable[str]) -> frozenset[str]:
+    """Case-folded forms of *names*, as written and in NFC, for :func:`_skillspector_reference_line_avoids`."""
+    return frozenset(
+        form for name in names for form in (name.casefold(), unicodedata.normalize("NFC", name).casefold())
+    )
+
+
+def _skillspector_reference_line_avoids(
+    source: bytes, row: Mapping[str, object], references: list, keys: frozenset[str]
+) -> bool:
+    """Whether the line of a missing-reference *row* names no entry whose name key is in *keys*.
+
+    The line is taken from *source* as SkillSpector numbers it: UTF-8 with
+    replacement, split at ``\\n``. Every ``missing`` entry of *references* on
+    that line must quote part of it as ``evidence``, which confirms the line.
+    SkillSpector resolves a reference by its path, or by its file name alone
+    when it has no ``/``, so the line must not name an uninspected entry. A
+    name counts when no letter, digit, ``_``, ``-`` or ``.`` adjoins it, after
+    any dots that follow it, which Windows drops when it opens a file. It is
+    compared case-folded (:func:`_skillspector_name_keys`), as written and in
+    NFC, in the line as written, with Markdown escapes removed and with
+    percent-escapes decoded.
+    """
+    line_number = row.get("start_line")
+    lines = source.decode("utf-8", errors="replace").split("\n")
+    if isinstance(line_number, bool) or not isinstance(line_number, int) or not 1 <= line_number <= len(lines):
+        return False
+    line = lines[line_number - 1]
+    cleaned = " ".join(line.split())
+    evidence = [
+        reference.get("evidence")
+        for reference in _skillspector_references_on_line(references, row.get("path"), line_number)
+        if reference.get("status") == "missing"
+    ]
+    if (
+        len(line) > _SKILLSPECTOR_REFERENCE_LINE_MAX_CHARS
+        or not evidence
+        or any(not isinstance(text, str) or not text or text not in cleaned for text in evidence)
+    ):
+        return False
+    unescaped = _SKILLSPECTOR_MARKDOWN_ESCAPE_RE.sub(r"\1", line)
+    variants = {line, unescaped, unquote(line), unquote(unescaped)}
+    texts = {text.casefold() for text in variants} | {
+        unicodedata.normalize("NFC", text).casefold() for text in variants
+    }
+    # A key made only of name characters matches a whole run of them, less any trailing dots.
+    runs: set[str] = set()
+    for text in texts:
+        for run in _SKILLSPECTOR_NAME_RUN_RE.findall(text):
+            runs.add(run)
+            while run.endswith("."):
+                run = run[:-1]
+                runs.add(run)
+    for key in keys:
+        if _SKILLSPECTOR_NAME_RUN_RE.fullmatch(key):
+            if key in runs:
+                return False
+        elif any(_skillspector_text_names(text, key) for text in texts):
+            return False
+    return True
+
+
+def _skillspector_text_names(text: str, name: str) -> bool:
+    """Whether *name* appears in *text* with no name character around it, after any trailing dots."""
+    start = text.find(name)
+    while start >= 0:
+        end = start + len(name)
+        while end < len(text) and text[end] == ".":
+            end += 1
+        if (start == 0 or not _SKILLSPECTOR_NAME_RUN_RE.fullmatch(text[start - 1])) and (
+            end == len(text) or not _SKILLSPECTOR_NAME_RUN_RE.fullmatch(text[end])
+        ):
+            return True
+        start = text.find(name, start + 1)
+    return False
+
+
 def _skillspector_missing_reference_warning(rows: list[Mapping[str, object]]) -> str:
-    """Describe accepted missing-reference ledger rows, quoting up to three of them."""
+    """Describe accepted missing-reference ledger rows, naming the file and line of up to three of them."""
     shown = rows[:_SKILLSPECTOR_INCOMPLETE_EXAMPLES]
     labels = "; ".join(_skillspector_ledger_exception_label(row) for row in shown)
     if len(rows) > len(shown):
         labels = f"{labels}; and {len(rows) - len(shown)} more"
     return (
         f"SkillSpector reported {len(rows)} reference(s) to files the skill does not bundle ({labels}); "
-        "every bundled file was inspected, so the scan is not marked incomplete. "
-        "Files outside the skill were not scanned"
+        "every file SkillSpector scanned was inspected and those lines name no file left out of the scan, "
+        "so the scan is not marked incomplete. Files outside the skill were not scanned"
     )
 
 
@@ -1661,16 +1835,19 @@ def _skillspector_missing_reference_note(
     """A note for a ``partial`` analysis whose only gaps are references to files not bundled, else ``None``.
 
     SkillSpector records a path-like reference in the skill's instructions that
-    matches no bundled file, such as a file the skill writes at run time or a
-    repository source, as a nonfatal ``reference_resolution`` ledger row and
-    reports the analysis as ``partial``, although every bundled file was
+    matches no file it scanned, such as a file the skill writes at run time or
+    a repository source, as a nonfatal ``reference_resolution`` ledger row and
+    reports the analysis as ``partial``, although every file it scanned was
     inspected.
 
     That gap is accepted only when every ledger row passes
     :func:`_skillspector_reference_row_is_advisory` and names a bundled file
-    (:func:`_skillspector_report_path_is_bundled_file`), no file is partially
-    or entirely uninspected, no finding was filtered out, there is no
-    limitation and no fatal scope exclusion, every analyzer is ``completed``,
+    (:func:`_skillspector_bundled_file_bytes`) whose line names no entry of the
+    skill that SkillSpector did not inspect (:func:`_skillspector_unscanned_names`,
+    :func:`_skillspector_reference_line_avoids`), such as a link or a file in
+    an artifact directory left out of a staged scan; no file is partially or
+    entirely uninspected, no finding was filtered out, there is no limitation
+    and no fatal scope exclusion, every analyzer is ``completed``,
     ``not_applicable`` or ``disabled``, and each universal analyzer completed
     one work item per component. Anything else keeps the scan INCOMPLETE.
     """
@@ -1683,16 +1860,14 @@ def _skillspector_missing_reference_note(
         or counts["findings_before_filtering"] != counts["findings_after_filtering"]
         or not isinstance(scope_exclusions, list)
         or any(not isinstance(row, dict) or row.get("fatal") is not False for row in scope_exclusions)
+        or not isinstance(references, list)
     ):
         return None
-    paths: set[str] = set()
     for row in ledger_exceptions:
-        path = row.get("path")
-        if not isinstance(path, str) or not _skillspector_reference_row_is_advisory(
+        if not isinstance(row.get("path"), str) or not _skillspector_reference_row_is_advisory(
             row, skillspector_version, references
         ):
             return None
-        paths.add(path)
 
     total = counts["total_components"]
     universal = _SKILLSPECTOR_COMMON_UNIVERSAL_ANALYZERS | {"artifact_integrity"}
@@ -1712,10 +1887,26 @@ def _skillspector_missing_reference_note(
         ):
             return None
         accounted.add(analyzer_id)
-    if accounted != universal or not all(
-        _skillspector_report_path_is_bundled_file(path, components, scanned_root) for path in sorted(paths)
-    ):
+    if accounted != universal:
         return None
+    unscanned = _skillspector_unscanned_names(scanned_root, components)
+    if unscanned is None:
+        return None
+    keys = _skillspector_name_keys(unscanned)
+    sources: dict[str, bytes] = {}
+    checked: set[tuple[str, object]] = set()
+    for row in ledger_exceptions:
+        path = row["path"]
+        if (path, row.get("start_line")) in checked:
+            continue
+        if path not in sources:
+            source = _skillspector_bundled_file_bytes(path, components, scanned_root)
+            if source is None:
+                return None
+            sources[path] = source
+        if not _skillspector_reference_line_avoids(sources[path], row, references, keys):
+            return None
+        checked.add((path, row.get("start_line")))
     return _skillspector_missing_reference_warning(ledger_exceptions)
 
 

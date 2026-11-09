@@ -30,9 +30,12 @@ from skillevaluator.validators.security import (
     _skillspector_incomplete_analysis_error,
     _skillspector_llm_env,
     _skillspector_missing_reference_note,
+    _skillspector_name_keys,
+    _skillspector_reference_line_avoids,
     _skillspector_reference_row_is_advisory,
     _skillspector_report_path_is_bundled_file,
     _skillspector_timeout_seconds,
+    _skillspector_unscanned_names,
 )
 
 _SKILLSPECTOR_2_9_6_NO_LLM_REPORT = (
@@ -8894,7 +8897,7 @@ def _write_skill(root: Path, files: dict[str, str]) -> Path:
 
 
 def _reference_report(version: str, case: str = "missing") -> dict:
-    """Load a captured SkillSpector ``--no-llm`` report for :data:`_NOTES_WRITER_FILES` or the guide reader."""
+    """Load a captured SkillSpector ``--no-llm`` report of the notes writer, the guide reader or the setup helper."""
     name = f"skillspector-{version}-{case}-reference-no-llm.json"
     return json.loads((Path(__file__).parents[1] / "fixtures" / name).read_text(encoding="utf-8"))
 
@@ -8922,6 +8925,24 @@ def _missing_reference_note(payload: dict, scanned_root: Path | None) -> str | N
     )
 
 
+def _missing_reference_warning(labels: str, count: int = 1) -> str:
+    return (
+        f"SkillSpector reported {count} reference(s) to files the skill does not bundle ({labels}); "
+        "every file SkillSpector scanned was inspected and those lines name no file left out of the scan, "
+        "so the scan is not marked incomplete. Files outside the skill were not scanned"
+    )
+
+
+# The skill scanned for the captured staged report: SkillEvaluator scans a copy
+# without versions/, so SkillSpector sees only SKILL.md and records the script
+# on line 8 as reference_missing.
+_SETUP_HELPER_SKILL = (
+    "---\nname: setup-helper\n"
+    "description: Set up the project environment. Use when the user asks to set up the project.\n---\n\n"
+    "# Setup helper\n\nBefore anything else, run `versions/install.sh` to prepare the environment.\n"
+)
+
+
 class TestSkillspectorMissingReferences:
     """SkillSpector records a reference to a file the skill does not bundle as a ``partial`` analysis."""
 
@@ -8941,11 +8962,7 @@ class TestSkillspectorMissingReferences:
         assert result.status == "passed"
         assert not result.errors
         assert result.incomplete_scans == []
-        assert result.warnings == [
-            "SkillSpector reported 1 reference(s) to files the skill does not bundle "
-            f"(SKILL.md:10 [reference_resolution; {reason_code}]); every bundled file was inspected, "
-            "so the scan is not marked incomplete. Files outside the skill were not scanned"
-        ]
+        assert result.warnings == [_missing_reference_warning(f"SKILL.md:10 [reference_resolution; {reason_code}]")]
         assert any(detail.check_name == "skillspector" for detail in result.success_details)
 
     @patch("skillevaluator.validators.security.Tools")
@@ -8989,7 +9006,6 @@ class TestSkillspectorMissingReferences:
         skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
         payload = _reference_report("2.11.2")
         payload["analysis_completeness"]["ledger_exceptions"][0]["reason_code"] = "reference_missing"
-        payload["analysis_completeness"]["references"] = []
 
         result = _validate_skillspector_payload(mock_tools, skill, payload)
 
@@ -9142,6 +9158,18 @@ class TestSkillspectorMissingReferences:
         assert not _skillspector_reference_row_is_advisory(row, (2, 11, 2), None)
         assert not _skillspector_reference_row_is_advisory({**row, "start_line": None}, (2, 11, 2), [missing])
 
+    def test_missing_row_needs_a_missing_reference_on_its_line(self) -> None:
+        """SkillSpector 2.10 to 2.13.3 list every reference a row reports; a row they do not corroborate is rejected."""
+        row = _reference_report("2.13.3")["analysis_completeness"]["ledger_exceptions"][0]
+        missing = {"source_path": "SKILL.md", "line": 10, "status": "missing"}
+
+        assert _skillspector_reference_row_is_advisory(row, (2, 13, 3), [missing])
+        assert _skillspector_reference_row_is_advisory(row, (2, 11, 2), [missing, {**missing, "status": "resolved"}])
+        for references in ([], None, [{**missing, "line": 8}], [{**missing, "status": "ambiguous"}]):
+            assert not _skillspector_reference_row_is_advisory(row, (2, 13, 3), references), references
+        for end_line in (None, 11, True):
+            assert not _skillspector_reference_row_is_advisory({**row, "end_line": end_line}, (2, 13, 3), [missing])
+
     def test_bundled_file_path_is_contained_and_listed_once(self, tmp_path: Path) -> None:
         skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
         components = [{"path": "SKILL.md"}, {"path": "scripts/summarize.py"}]
@@ -9162,6 +9190,37 @@ class TestSkillspectorMissingReferences:
 
         assert _skillspector_report_path_is_bundled_file("AGENTS.md", [{"path": "AGENTS.md"}], rules)
         assert not _skillspector_report_path_is_bundled_file("SKILL.md", [{"path": "SKILL.md"}], rules)
+        large = tmp_path / "large.md"
+        large.write_bytes(b"x" * 1_000_001)
+        assert not _skillspector_report_path_is_bundled_file("large.md", [{"path": "large.md"}], large)
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link semantics")
+    def test_hard_linked_single_file_root_is_not_a_bundled_file(self, tmp_path: Path) -> None:
+        rules = tmp_path / "AGENTS.md"
+        rules.write_text("Write the summary to `output/notes.md`.\n", encoding="utf-8")
+        os.link(rules, tmp_path / "elsewhere.md")
+
+        assert not _skillspector_report_path_is_bundled_file("AGENTS.md", [{"path": "AGENTS.md"}], rules)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_lone_skill_file_passes_with_the_warning(self, mock_tools, tmp_path: Path) -> None:
+        """A lone SKILL.md is scanned as one file; SkillSpector reports every reference in it as missing."""
+        skill_file = tmp_path / "notes-writer" / "SKILL.md"
+        skill_file.parent.mkdir()
+        skill_file.write_text(_NOTES_WRITER_FILES["SKILL.md"], encoding="utf-8", newline="\n")
+        (skill_file.parent / "scripts").mkdir()
+        (skill_file.parent / "scripts" / "summarize.py").write_text("print(1)\n", encoding="utf-8")
+
+        result = _validate_skillspector_payload(mock_tools, skill_file, _reference_report("2.13.3", "lone-skill-file"))
+
+        assert result.incomplete_scans == []
+        assert result.warnings == [
+            _missing_reference_warning(
+                "SKILL.md:8 [reference_resolution; reference_missing]; "
+                "SKILL.md:10 [reference_resolution; reference_missing]",
+                count=2,
+            )
+        ]
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link semantics")
     def test_hard_linked_file_is_not_a_bundled_file(self, tmp_path: Path) -> None:
@@ -9170,12 +9229,17 @@ class TestSkillspectorMissingReferences:
 
         assert not _skillspector_report_path_is_bundled_file("SKILL.md", [{"path": "SKILL.md"}], skill)
 
-    def test_warning_quotes_three_rows(self, tmp_path: Path) -> None:
+    def test_warning_names_three_rows(self, tmp_path: Path) -> None:
         skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
         payload = _reference_report("2.13.3")
         row = payload["analysis_completeness"]["ledger_exceptions"][0]
         payload["analysis_completeness"]["ledger_exceptions"] = [
             {**row, "start_line": line, "end_line": line} for line in (2, 4, 6, 8, 10)
+        ]
+        lines = _NOTES_WRITER_FILES["SKILL.md"].split("\n")
+        payload["analysis_completeness"]["references"] = [
+            {"source_path": "SKILL.md", "line": line, "evidence": lines[line - 1], "status": "missing"}
+            for line in (2, 4, 6, 8, 10)
         ]
 
         note = _missing_reference_note(payload, skill)
@@ -9186,3 +9250,189 @@ class TestSkillspectorMissingReferences:
             "[reference_resolution; reference_missing]; SKILL.md:4 [reference_resolution; reference_missing]; "
             "SKILL.md:6 [reference_resolution; reference_missing]; and 2 more); "
         )
+
+    @pytest.mark.parametrize(
+        ("reference", "bundled"),
+        [
+            ("`versions/install.sh`", "versions/install.sh"),
+            ("`node_modules/.bin/install.sh`", "node_modules/.bin/install.sh"),
+            ("`evals/install.sh`", "evals/install.sh"),
+            ("`.venv/install.sh`", ".venv/install.sh"),
+            ("`install.sh`", "versions/install.sh"),
+            ("[the setup folder](versions/)", "versions/install.sh"),
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_reference_into_a_directory_left_out_of_the_scan_stays_incomplete(
+        self, mock_tools, tmp_path: Path, reference: str, bundled: str
+    ) -> None:
+        """SkillEvaluator scans a copy without artifact directories, so SkillSpector never sees a file there."""
+        skill = _write_skill(
+            tmp_path / "setup-helper",
+            {
+                "SKILL.md": _SETUP_HELPER_SKILL.replace("`versions/install.sh`", reference),
+                bundled: "#!/bin/sh\necho ready\n",
+            },
+        )
+        report = json.dumps(_reference_report("2.13.3", "staged-script"))
+        payload = json.loads(report.replace("`versions/install.sh`", json.dumps(reference)[1:-1]))
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert mock_tools.skillspector.run.call_args.args[0][1] != str(skill.resolve())
+        assert result.incomplete_scans == ["skillspector"]
+        assert result.errors == [
+            "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+            "SKILL.md:8 [reference_resolution; reference_missing]; security scan did not complete"
+        ]
+        assert not result.warnings
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
+    @pytest.mark.parametrize("linked", ["file", "directory"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_reference_through_a_symlink_stays_incomplete(self, mock_tools, tmp_path: Path, linked: str) -> None:
+        """SkillSpector leaves a symlink out of the scan with only a nonfatal scope exclusion."""
+        files = {
+            **_NOTES_WRITER_FILES,
+            "SKILL.md": _NOTES_WRITER_FILES["SKILL.md"].replace("output/notes.md", "notes/guide.md"),
+        }
+        skill = _write_skill(tmp_path / "notes-writer", files)
+        outside = _write_skill(tmp_path / "outside", {"guide.md": "# Guide\n"})
+        if linked == "file":
+            (skill / "notes").mkdir()
+            (skill / "notes" / "guide.md").symlink_to(outside / "guide.md")
+        else:
+            (skill / "notes").symlink_to(outside, target_is_directory=True)
+        payload = json.loads(json.dumps(_reference_report("2.13.3")).replace("output/notes.md", "notes/guide.md"))
+        payload["analysis_completeness"]["scope_exclusions"].append(
+            {
+                "outcome": "out_of_scope",
+                "phase": "discovery",
+                "reason_code": "not_regular_file",
+                "message": "Inventoried path is no longer a regular file.",
+                "path": "notes/guide.md" if linked == "file" else "notes",
+                "start_line": None,
+                "end_line": None,
+                "fatal": False,
+            }
+        )
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert result.incomplete_scans == ["skillspector"]
+        assert not result.warnings
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_reference_to_an_unlisted_file_on_disk_stays_incomplete(self, mock_tools, tmp_path: Path) -> None:
+        skill = _write_skill(tmp_path / "notes-writer", {**_NOTES_WRITER_FILES, "output/notes.md": "# Notes\n"})
+
+        result = _validate_skillspector_payload(mock_tools, skill, _reference_report("2.13.3"))
+
+        assert result.incomplete_scans == ["skillspector"]
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_directories_left_out_that_the_line_does_not_name_are_ignored(self, mock_tools, tmp_path: Path) -> None:
+        files = {
+            **_NOTES_WRITER_FILES,
+            "evals/evals.json": '{"evals": []}\n',
+            "evals/files/input.csv": "a,b\n",
+            ".git/HEAD": "ref: refs/heads/main\n",
+            ".git/description": "Unnamed repository\n",
+        }
+        skill = _write_skill(tmp_path / "notes-writer", files)
+
+        result = _validate_skillspector_payload(mock_tools, skill, _reference_report("2.13.3"))
+
+        assert mock_tools.skillspector.run.call_args.args[0][1] != str(skill.resolve())
+        assert result.incomplete_scans == []
+        assert result.warnings == [_missing_reference_warning("SKILL.md:10 [reference_resolution; reference_missing]")]
+
+    @pytest.mark.parametrize("case", ["evidence-elsewhere", "no-evidence", "line-out-of-range"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_row_line_must_match_the_references_list(self, mock_tools, tmp_path: Path, case: str) -> None:
+        skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
+        payload = _reference_report("2.13.3")
+        completeness = payload["analysis_completeness"]
+        reference = completeness["references"][1]
+        if case == "evidence-elsewhere":
+            reference["evidence"] = "Run `scripts/summarize.py` on the transcript."
+        elif case == "no-evidence":
+            del reference["evidence"]
+        else:
+            completeness["ledger_exceptions"][0].update({"start_line": 99, "end_line": 99})
+            reference["line"] = 99
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert result.incomplete_scans == ["skillspector"]
+
+    def test_unscanned_names_cover_links_unlisted_files_and_left_out_directories(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        files = {
+            "SKILL.md": "# Skill\n",
+            "scripts/run.py": "print(1)\n",
+            "scripts/extra.py": "print(2)\n",
+            "evals/files/input.csv": "a,b\n",
+            "docs/empty/.keep": "",
+        }
+        skill = _write_skill(tmp_path / "skill", files)
+        components = [{"path": "SKILL.md"}, {"path": "scripts/run.py"}]
+
+        assert _skillspector_unscanned_names(skill, components) == {"extra.py", "evals", "input.csv", "docs", ".keep"}
+        assert _skillspector_unscanned_names(skill / "SKILL.md", [{"path": "SKILL.md"}]) == set()
+        assert _skillspector_unscanned_names(tmp_path / "absent", components) is None
+        assert _skillspector_unscanned_names(skill, None) is None
+        monkeypatch.setattr("skillevaluator.validators.security._SKILLSPECTOR_REFERENCE_TREE_MAX_ENTRIES", 6)
+        assert _skillspector_unscanned_names(skill, components) is None
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
+    def test_unscanned_names_include_every_link(self, tmp_path: Path) -> None:
+        skill = _write_skill(tmp_path / "skill", {"SKILL.md": "# Skill\n"})
+        (skill / "link.md").symlink_to(skill / "SKILL.md")
+
+        assert _skillspector_unscanned_names(skill, [{"path": "SKILL.md"}, {"path": "link.md"}]) == {"link.md"}
+
+    @pytest.mark.parametrize(
+        ("line", "name", "named"),
+        [
+            ("Run `versions/install.sh` now.", "install.sh", True),
+            ("Run versions/install.sh́ now.", "install.sh", True),
+            ("Run `versions\\install.sh` now.", "install.sh", True),
+            ("Run [it](versions%2Finstall%2Esh) now.", "install.sh", True),
+            ("Open [it](inst\\(a\\)ll.sh) now.", "inst(a)ll.sh", True),
+            ("Run `Versions/Install.SH` now.", "install.sh", True),
+            ("Run [it](install.sh.) now.", "install.sh", True),
+            ("Read `résumé.md` first.", "résumé.md", True),
+            ("See [the setup folder](versions/).", "versions", True),
+            ("Run `install.sh.bak` now.", "install.sh", False),
+            ("Run `reinstall.sh` now.", "install.sh", False),
+            ("Run `install.shx` now.", "install.sh", False),
+            ("Write the summary to `output/notes.md`.", "evals", False),
+        ],
+    )
+    def test_reference_line_names_an_unscanned_entry(self, line: str, name: str, named: bool) -> None:
+        row = {"path": "SKILL.md", "start_line": 2, "end_line": 2}
+        references = [{"source_path": "SKILL.md", "line": 2, "status": "missing", "evidence": " ".join(line.split())}]
+
+        keys = _skillspector_name_keys({name})
+
+        avoids = _skillspector_reference_line_avoids(f"# Title\n{line}\n".encode(), row, references, keys)
+
+        assert avoids is not named
+
+    def test_reference_line_is_numbered_like_skillspector(self) -> None:
+        row = {"path": "SKILL.md", "start_line": 2, "end_line": 2}
+        reference = {"source_path": "SKILL.md", "line": 2, "status": "missing", "evidence": "Write `output/notes.md`."}
+        source = b"# Title\r`evals/install.sh`\nWrite `output/notes.md`.\n"
+
+        none: frozenset[str] = frozenset()
+        assert _skillspector_reference_line_avoids(source, row, [reference], _skillspector_name_keys({"install.sh"}))
+        for references in ([], [{**reference, "evidence": "# Title"}], [{**reference, "evidence": ""}]):
+            assert not _skillspector_reference_line_avoids(source, row, references, none), references
+        assert not _skillspector_reference_line_avoids(
+            source, {**row, "start_line": 9}, [{**reference, "line": 9}], none
+        )
+        long_line = "Write `output/notes.md`. " + "x" * 10_000
+        long_reference = {**reference, "evidence": "Write `output/notes.md`."}
+        assert not _skillspector_reference_line_avoids(f"# Title\n{long_line}\n".encode(), row, [long_reference], none)

@@ -637,22 +637,47 @@ the configured model. Type `exit` or press Ctrl-D to end the chat. Ctrl-C
 during an answer discards that question and returns to the prompt.
 
 The chat uses the provider and model configured for LLM checks
-(`SKILL_EVAL_LLM_PROVIDER` and `SKILL_EVAL_LLM_MODEL`; see
-[Environment Variables](environment-variables.mdx)). Each question sends the
-run's compact evidence to that provider. The evidence names the run by its ID
-instead of its local path. In every text field, such as errors, warnings, case
-questions and saved feedback, an absolute path that ends in the run's directory
-is replaced with that ID. This covers the path a copied run had on the machine
-where it ran, also when it starts with `~user/`, `$HOME/`, `${HOME}/` or
-`%USERPROFILE%\`, unless that path contains a space. A path joined to it, such as
-`/usr/bin` in `PATH=/usr/bin:/home/ci/results/RUN_ID`, is kept. A root right after
-`,` `;` `:` `=` `(` `[` or `{` starts a new path, so a directory name that ends in
-one of those characters before a `/` is read as two paths and only the second is
-replaced. The evaluated skill's directory
-is replaced with its name and your home directory with `~`; the skill directory
-is known when you pass `--skill` or the run is in the skill's `evals/results`
-directory. Credential-shaped text is redacted before the text is shortened, and
-a shortened field ends in `...<truncated>`. The command writes nothing to disk.
+(`SKILL_EVAL_LLM_PROVIDER` and `SKILL_EVAL_LLM_MODEL`; see [Environment
+Variables](environment-variables.mdx)). Each question sends the run's compact
+evidence to that provider. The evidence names the run by its ID instead of its
+local path. In every text field, such as errors, warnings, case questions and
+saved feedback, an absolute path that ends in the run's directory is replaced
+with that ID. This covers the path a copied run had on the machine where it ran,
+also when it starts with `~user/`, `$HOME/`, `${HOME}/` or `%USERPROFILE%\`,
+unless that path contains a space. A path joined to it, such as `/usr/bin` in
+`PATH=/usr/bin:/home/ci/results/RUN_ID`, is kept. A root right after `,` `;` `:`
+`=` `(` `[` or `{` starts a new path, so a directory name that ends in one of
+those characters before a `/` is read as two paths and only the second is
+replaced. So does a root right after a `\n`, `\r` or `\t` escape in JSON or repr
+text, such as the next line of an env dump, also with ANSI codes after the
+escape, as on a progress line (`\r\u001b[K`); a relative path after one is kept,
+and a UNC server name that starts with `n`, `r` or `t`, such as `\\nas01\share`,
+is not read as an escape. A path may also start right after an ANSI code, such
+as the color code `\u001b[0m` or the erase-line code `\u001b[K`, and a path
+colored in parts is replaced whole. The evaluated skill's directory is replaced
+with its name and your home directory with `~`; the skill directory is known
+when you pass `--skill` or the run is in the skill's `evals/results` directory.
+Path masking leaves a URL unchanged, even a path in its query or fragment,
+unless its scheme is `file:` or ends in `+file:`, such as `git+file:`. A URL
+ends at whitespace; at a quote, `<`, `>`, a backtick, `^`, `{`, `|`, `}` or an
+ANSI escape (raw, `\u001b` or `\x1b`); at a `\n`, `\r` or `\t` escape; and
+before an absolute path or another scheme that follows a `,` or `;` (also with
+an option or variable name and `=`, such as `LOG=` or `--find-links=`) or a
+Markdown `](`. So a path after a URL in JSON, on the next line of an escaped env
+dump or stderr, in a `,`- or `;`-separated list or in
+`DOC=https://host/e;LOG=/path`, and a `file:` URL listed after one, are still
+replaced. A path joined to a URL by any other character, such as `:`, `=`, `(`
+or `)`, is not. The escape may have a doubled backslash, as in JSON inside JSON.
+A backslash and `n`, `r` or `t` that start a Windows folder name made of
+letters, digits, `_`, `.`, `~`, `$`, `%` or `-` and followed by as many
+backslashes, such as `\runs\` or `\t\` (`\\runs\\` in JSON), are not an escape
+unless an escaped character such as `\u001b` or `\xa0` comes next and is not
+itself followed by a name and as many backslashes, so a Windows path with such
+folders, such as `\t\x64\runs\`, in a URL is kept. Any other folder or file name
+that starts with `n`, `r` or `t`, such as `\runs(old)\` or `\notes.txt`, ends
+the URL there. Credential-shaped text is redacted before the text is shortened,
+and a shortened field ends in `...<truncated>`. The command writes nothing to
+disk.
 
 No request is sent before the first question, so the command exits 0
 immediately when standard input is empty. Piped input sends each line as a

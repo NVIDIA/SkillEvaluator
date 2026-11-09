@@ -22,6 +22,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from skillevaluator import _ci_onboarding_all_tiers as all_tier_helpers
 from skillevaluator import _ci_onboarding_git as git_helpers
 from skillevaluator import _ci_onboarding_pages as pages_helpers
 from skillevaluator import _ci_onboarding_workflows as workflow_helpers
@@ -125,6 +126,8 @@ def show_test_pr(name: str, url: str, *, existing: bool = False, full: bool = Tr
 
 def load_release(path: Path) -> dict:
     data = json.loads(path.read_text())
+    if isinstance(data, dict) and data.get("schema_version") == 2:
+        return all_tier_helpers.validate_release(data)
     if not isinstance(data, dict) or data.get("schema_version") != 1:
         raise SetupError("The CI release descriptor must use schema_version 1.")
     if data.get("repository") != "NVIDIA/SkillEvaluator":
@@ -843,7 +846,40 @@ def ci():
     """Set up checks, HTML reports and PR comments."""
 
 
+ALL_TIER_ONLY_OPTIONS = (
+    "platform",
+    "env_mode",
+    "provider",
+    "embedding_provider",
+    "model",
+    "embedding_model",
+    "agents",
+    "runner",
+    "n_attempts",
+    "n_concurrent",
+    "timeout_minutes",
+    "environment",
+)
+
+
 @ci.command("init")
+@click.option("--tiers", default=None, help="Opt in with 1,2,3; requires a compatible candidate/release descriptor.")
+@click.option("--platform", type=click.Choice(["auto", "github", "gitlab"]), default="auto")
+@click.option("--env-mode", type=click.Choice(["docker", "local"]), default="docker")
+@click.option("--provider", type=click.Choice(["openai", "anthropic", "nv_build"]), default="openai")
+@click.option("--embedding-provider", type=click.Choice(["openai", "nv_build"]), default=None)
+@click.option("--model", default=None)
+@click.option("--embedding-model", default=None)
+@click.option("--agents", default=None)
+@click.option("--runner", default=None, help="GitHub runner label or GitLab runner tag.")
+@click.option(
+    "--tier3-required", is_flag=True, help="Deprecated and ignored; Tier 2 and Tier 3 CI results are advisory."
+)
+@click.option("--n-attempts", type=click.IntRange(1, 10), default=1)
+@click.option("--n-concurrent", type=click.IntRange(1, 16), default=1)
+# Ten minutes keeps a reserve of at least two between the evaluator budget and the job timeout.
+@click.option("--timeout-minutes", type=click.IntRange(10, 360), default=300)
+@click.option("--environment", default="skillevaluator")
 @click.option("--repo", type=click.Path(path_type=Path, exists=True, file_okay=False), default=Path.cwd)
 @click.option(
     "--release",
@@ -870,6 +906,20 @@ def ci():
     help="Optional new receipt outside the consumer checkout.",
 )
 def init(
+    tiers,
+    platform,
+    env_mode,
+    provider,
+    embedding_provider,
+    model,
+    embedding_model,
+    agents,
+    runner,
+    tier3_required,
+    n_attempts,
+    n_concurrent,
+    timeout_minutes,
+    environment,
     repo,
     release_path,
     paths,
@@ -884,7 +934,50 @@ def init(
     output,
 ):
     plan = None
+    if tier3_required:
+        console.print(
+            "Warning: --tier3-required is deprecated and ignored; Tier 1 is the only blocking CI tier.",
+            style="yellow",
+        )
     try:
+        if tiers is not None:
+            return all_tier_helpers.initialize(
+                sys.modules[__name__],
+                repo=repo,
+                release_path=release_path,
+                paths=paths,
+                min_score=min_score,
+                scan_mode=scan_mode,
+                default_branch=default_branch,
+                full=full,
+                custom_url=custom_url,
+                mode=mode,
+                no_input=no_input,
+                show_files=show_files,
+                output=output,
+                tiers=tiers,
+                platform=platform,
+                env_mode=env_mode,
+                provider=provider,
+                embedding_provider=embedding_provider,
+                model=model,
+                embedding_model=embedding_model,
+                agents=agents,
+                runner=runner,
+                tier3_required=False,
+                n_attempts=n_attempts,
+                n_concurrent=n_concurrent,
+                timeout_minutes=timeout_minutes,
+                environment=environment,
+            )
+        context = click.get_current_context()
+        ignored = [
+            "--" + parameter.replace("_", "-")
+            for parameter in ALL_TIER_ONLY_OPTIONS
+            if context.get_parameter_source(parameter) not in (None, click.core.ParameterSource.DEFAULT)
+        ]
+        if ignored:
+            raise SetupError(f"{', '.join(ignored)} applies only to all-tier onboarding; add --tiers 1,2,3.")
         repo = git_helpers.repository_root(repo)
         if output:
             output = output.resolve()
@@ -893,7 +986,9 @@ def init(
         if no_input and mode is None:
             raise SetupError("--no-input requires an explicit --mode.")
         release = load_release(release_path or Path(__file__).with_name("ci-release.json"))
-        name = git_helpers.parse_remote(git_helpers.git(repo, "remote", "get-url", "origin").strip())
+        if release["schema_version"] == 2:
+            raise SetupError("Use --tiers 1,2,3 with an all-tier release descriptor.")
+        name = git_helpers.parse_origin(repo, git_helpers.parse_remote)
         branch = git_helpers.infer_branch(repo, default_branch)
         roots = git_helpers.discover(repo)
         git_helpers.no_symlinks(repo, SCAN)
@@ -1036,7 +1131,7 @@ def init(
             if not no_input and not click.confirm("Configure GitHub and open the setup PR?", default=False):
                 plan["action"] = "cancelled"
                 console.print("Cancelled. No changes applied.")
-                return
+                return None
             console.print("Checking GitHub access…")
             state = remote_preflight(repo, name, branch, full)
             if full:
@@ -1082,12 +1177,16 @@ def init(
 
 
 @ci.command("status")
+@click.option("--platform", type=click.Choice(["auto", "github", "gitlab"]), default="auto")
+@click.option("--tiers", default=None)
 @click.option("--repo", type=click.Path(path_type=Path, exists=True, file_okay=False), default=Path.cwd)
-def status(repo):
+def status(repo, platform, tiers):
     """Read the live setup state without changing settings or starting scans."""
     try:
         repo = git_helpers.repository_root(repo)
-        name = git_helpers.parse_remote(git_helpers.git(repo, "remote", "get-url", "origin").strip())
+        if all_tier_helpers.is_all_tier(repo, platform, tiers):
+            return all_tier_helpers.inspect(sys.modules[__name__], repo, platform, tiers)
+        name = git_helpers.parse_origin(repo, git_helpers.parse_remote)
         info = github_api("GET", f"repos/{name}")
         branch = info["default_branch"]
         pages = github_api("GET", f"repos/{name}/pages", missing_ok=True)
@@ -1126,15 +1225,19 @@ def status(repo):
 
 
 @ci.command("demo")
+@click.option("--platform", type=click.Choice(["auto", "github", "gitlab"]), default="auto")
+@click.option("--tiers", default=None)
 @click.option("--repo", type=click.Path(path_type=Path, exists=True, file_okay=False), default=Path.cwd)
 @click.option("--no-input", is_flag=True, help="Authorize opening one small skill-change PR.")
-def demo(repo, no_input):
+def demo(repo, no_input, platform, tiers):
     """After merging setup, open a small skill PR to see automatic feedback."""
     try:
         console.print("Try your first skill check", style="bold green")
         repo = git_helpers.repository_root(repo)
         git_helpers.require_clean(repo)
-        name = git_helpers.parse_remote(git_helpers.git(repo, "remote", "get-url", "origin").strip())
+        if all_tier_helpers.is_all_tier(repo, platform, tiers):
+            return all_tier_helpers.demo(sys.modules[__name__], repo, platform, tiers, no_input)
+        name = git_helpers.parse_origin(repo, git_helpers.parse_remote)
         info = github_api("GET", f"repos/{name}")
         permissions = info.get("permissions", {})
         if info.get("archived") or not (permissions.get("push") or permissions.get("admin")):
@@ -1163,7 +1266,7 @@ def demo(repo, no_input):
         )
         if existing:
             show_test_pr(name, existing[0]["url"], existing=True, full=full)
-            return
+            return None
         canonical = f"https://github.com/{name}.git"
         if git_helpers.git(repo, "ls-remote", "--heads", canonical, f"refs/heads/{demo_branch}", network=True).strip():
             raise SetupError(
@@ -1182,7 +1285,7 @@ def demo(repo, no_input):
         )
         if not no_input and not click.confirm("Create test PR?", default=False):
             console.print("Cancelled. No changes applied.")
-            return
+            return None
         git_helpers.require_identity(repo)
         git_helpers.git(
             repo, "fetch", "--no-tags", canonical, f"refs/heads/{branch}:refs/remotes/origin/{branch}", network=True

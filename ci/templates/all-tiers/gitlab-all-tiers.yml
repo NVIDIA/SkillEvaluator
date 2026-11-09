@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: Apache-2.0
+# Root .gitlab-ci.yml; keep MR rules here even though jobs are included.
+# Tier 1 is required; Tier 2 and Tier 3 are advisory.
+# Merging into an existing root file: use exactly these two includes (remove
+# the Tier 1 skill-evaluation.yml include) and keep the file plain YAML.
+# If the root defines stages, keep test: every SkillEvaluator job uses it.
+# Start every other job's rules with the guard shown on build-example below and
+# merge those guards to the default branch first: feedback pipelines run that
+# branch's configuration.
+include:
+  - remote: https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/RELEASE_WORKFLOW_SHA/ci/gitlab/all-tiers.yml
+  - local: .gitlab/skill-feedback.yml
+    rules:
+      - if: '$CI_PIPELINE_SOURCE == "pipeline" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $SKILL_EVAL_FEEDBACK == "true"'
+variables:
+  SKILL_EVAL_IMAGE: ghcr.io/nvidia/skillevaluator-tier1@sha256:RELEASE_IMAGE_DIGEST
+  SKILL_EVAL_TOOLS_REPOSITORY: NVIDIA/SkillEvaluator
+  SKILL_EVAL_TOOLS_REF: RELEASE_WORKFLOW_SHA
+  SKILL_EVAL_PATHS: skills
+  SKILL_EVAL_TIERS: '1,2,3'
+  SKILL_EVAL_ENV_MODE: docker
+  SKILL_EVAL_PROVIDER: openai
+  SKILL_EVAL_RUNNER: docker
+  SKILL_EVAL_ENVIRONMENT: skillevaluator
+  # Job minutes minus min(20, minutes / 4): leave time to retain evidence.
+  SKILL_EVAL_TIMEOUT_SECONDS: '16800'
+skill-evaluation:
+  rules:
+    - if: '$SKILL_EVAL_FEEDBACK == "true"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+# Job duration must be a literal; GitLab 17.8 does not expand CI variables here.
+skill-evaluation-native:
+  timeout: 5 hours
+
+# Existing jobs: guard them so trusted feedback pipelines skip them. A job
+# without rules, only or except gets the guard followed by `- when: on_success`.
+# Write the guards as rules: the all-tiers include defines the hidden job, so
+# only a job added after this file is on the default branch, without rules,
+# only or except, can use `extends: .skill-evaluation-not-feedback` instead.
+# build-example:
+#   rules:
+#     - if: '$SKILL_EVAL_FEEDBACK == "true"'
+#       when: never
+#     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'

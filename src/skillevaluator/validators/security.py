@@ -2285,6 +2285,9 @@ class SecurityValidator(ValidatorBase):
     ``SecurityValidator`` per request (or pass an explicit ``submitter_usernames``).
     """
 
+    # A skill's unmodeled hooks say nothing about the next skill in a folder.
+    _FAIL_FAST_EXEMPT_CHECKS = frozenset({_SKILLSPECTOR_HOOK_UNVERIFIED_CHECK})
+
     def __init__(
         self,
         use_llm: bool = False,

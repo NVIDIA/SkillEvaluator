@@ -459,6 +459,29 @@ class TestUnmodeledHooks:
         assert any("1 referenced image file(s) (assets/logo.png)" in warning for warning in result.warnings)
 
 
+class TestFolderScans:
+    @pytest.mark.parametrize("method", ["validate_security_only", "validate"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_hooks_do_not_stop_a_folder_scan(self, mock_tools, tmp_path: Path, method: str) -> None:
+        """A CRITICAL stops a folder scan at that skill, but not this per-skill Critical."""
+        folder = tmp_path / "folder"
+        for name in ("a", "b"):
+            _write(folder / name, _SETTINGS_SKILL)
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True, stdout=json.dumps(_report(_SETTINGS_REPORT)), stderr="", exit_code=0
+        )
+
+        result = getattr(SecurityValidator(use_llm=False), method)(folder)
+
+        assert mock_tools.skillspector.run.call_count == 2
+        assert result.status == "failed"
+        assert result.gate_failures == [f"[{name}] {_gate('.claude/settings.json')}" for name in ("a", "b")]
+        assert [finding.file_path for finding in _unverified(result)] == [
+            f"[{name}] .claude/settings.json" for name in ("a", "b")
+        ]
+
+
 class TestOtherGapsStayIncomplete:
     @patch("skillevaluator.validators.security.Tools")
     def test_parse_limit_row_on_the_manifest_stays_incomplete(self, mock_tools, tmp_path: Path) -> None:

@@ -10151,27 +10151,38 @@ class TestSkillspectorCompleteWithCaveats:
             "SKILL.md:10 [static; static_parse_limit]; SKILL.md:10 [static; static_parse_limit]"
         )
 
-    @pytest.mark.parametrize(("recommendation", "accepted"), [("SAFE", True), ("CAUTION", False)])
+    @pytest.mark.parametrize(
+        ("recommendation", "exit_code", "error"),
+        [
+            ("SAFE", 0, None),
+            ("CAUTION", 0, "skillspector JSON field 'risk_assessment.recommendation' does not match the risk severity"),
+            ("SAFE", 1, "skillspector process exit code does not match the report risk score"),
+        ],
+    )
     @patch("skillevaluator.validators.security.Tools")
     def test_low_caveats_report_keeps_a_safe_recommendation(
-        self, mock_tools, tmp_path: Path, recommendation: str, accepted: bool
+        self, mock_tools, tmp_path: Path, recommendation: str, exit_code: int, error: str | None
     ) -> None:
-        """Unlike a partial report, SkillSpector keeps a LOW complete_with_caveats report SAFE."""
+        """Unlike a partial report, SkillSpector keeps a LOW complete_with_caveats report SAFE.
+
+        A report rejected by a later check carries no caveat warning.
+        """
         skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
         payload = _reference_report("2.13.4")
         payload["risk_assessment"]["recommendation"] = recommendation
 
-        result = _validate_skillspector_payload(mock_tools, skill, payload)
+        result = _validate_skillspector_payload(mock_tools, skill, payload, exit_code=exit_code)
 
-        if accepted:
+        if error is None:
             assert result.passed
             assert result.incomplete_scans == []
+            assert result.warnings == [
+                _missing_reference_warning("SKILL.md:10 [reference_resolution; reference_missing]")
+            ]
         else:
             assert result.incomplete_scans == ["skillspector"]
-            assert result.errors == [
-                "skillspector JSON field 'risk_assessment.recommendation' does not match the risk severity; "
-                "security scan did not complete"
-            ]
+            assert result.errors == [f"{error}; security scan did not complete"]
+            assert not result.warnings
 
     @patch("skillevaluator.validators.security.Tools")
     def test_caveats_keep_the_findings(self, mock_tools, tmp_path: Path) -> None:

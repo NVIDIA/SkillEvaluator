@@ -2664,9 +2664,9 @@ class SecurityValidator(ValidatorBase):
         From SkillSpector 2.13.4, an analysis whose only gaps are missing
         references is ``complete_with_caveats`` instead of ``partial``. Its
         caveats get the same warning when they pass the same rules
-        (:func:`_skillspector_reference_caveat_notes`). Otherwise the scan is
-        INCOMPLETE and, as for a ``partial`` report, the report's findings are
-        still checked and kept.
+        (:func:`_skillspector_reference_caveat_notes`) and the rest of the
+        report is accepted. Otherwise the scan is INCOMPLETE and, as for a
+        ``partial`` report, the report's findings are still checked and kept.
         A report with that status and no caveat, or with a caveat that is not
         a missing reference, contradicts itself and is not trusted, and neither
         is the status from an earlier release.
@@ -2676,6 +2676,8 @@ class SecurityValidator(ValidatorBase):
         # keeps a LOW complete_with_caveats report SAFE, so the recommendation
         # check reads the state the result had on entry.
         incomplete_before = result.is_incomplete
+        # Accepted caveats are reported only once every later check has passed.
+        caveat_warnings: list[str] = []
         if "error" in data and data["error"] is not None:
             result.add_error("skillspector reported an error; security scan did not complete")
             return False
@@ -3214,8 +3216,7 @@ class SecurityValidator(ValidatorBase):
                             result.add_error(_skillspector_reference_caveat_error(ledger_exceptions))
                             result.mark_scan_incomplete(stage_name)
                         else:
-                            for note in caveat_notes:
-                                result.add_warning(note)
+                            caveat_warnings = caveat_notes
                 elif not complete_by_applicability:
                     if not (
                         counts["partially_inspected_files"]
@@ -3621,6 +3622,8 @@ class SecurityValidator(ValidatorBase):
             )
             return False
 
+        for note in caveat_warnings:
+            result.add_warning(note)
         return True
 
     @staticmethod

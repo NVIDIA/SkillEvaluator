@@ -116,18 +116,21 @@ All notable changes to SkillEvaluator are documented in this file.
   gives it nothing to score. `skill_efficiency` (Efficiency) is now N/A for a
   negative case, such as the one `create-eval-dataset --full` writes, and both
   `skill_execution` (Discoverability) and `skill_efficiency` are N/A for a case
-  that names no `expected_skill`, such as a legacy case without
-  `expected_skill` and `should_trigger`. The trial overall, pass@k and the
-  arm's averages leave N/A metrics out, so absolute with-skill scores of these
-  cases change: a negative case scoring 1.0 on Security and Discoverability and
-  0.8 on Correctness and Effectiveness now has an overall of 0.90, not 0.92. If
-  no case names an `expected_skill`, Discoverability and Efficiency have no
-  with-skill score and the agent cannot PASS. A trial without a trajectory
-  keeps these metrics N/A too. A positive case with no tool calls still scores
-  `0.0`, and Skill Lift is unchanged when the baseline has no skill it could
-  activate, because both metrics are already N/A there. The HTML report now
-  explains a with-skill N/A skill metric by the eval case, not by a missing
-  skill.
+  that is not negative and names no `expected_skill`, such as a legacy case
+  without `expected_skill` and `should_trigger`. The trial overall, pass@k and
+  the arm's averages leave N/A metrics out, so absolute with-skill scores of
+  these cases change: a negative case scoring 1.0 on Security and
+  Discoverability and 0.8 on Correctness and Effectiveness now has an overall
+  of 0.90, not 0.92. If no case is a positive case that names an
+  `expected_skill`, for example when every case is negative, Efficiency has no
+  with-skill score and the agent cannot PASS; Discoverability has none either
+  unless some case is negative. A trial without a trajectory keeps these
+  metrics N/A too. A positive case with no tool calls still scores `0.0`, and
+  Skill Lift is unchanged when the baseline has no skill it could activate,
+  because both metrics are already N/A there. The HTML report now explains a
+  with-skill N/A skill metric by the eval case, not by a missing skill, and a
+  multi-step trial's collected reward keeps the N/A reason its steps' verifier
+  recorded.
 
 - `skillevaluator tier3 feedback` now writes the evaluated skill's directory
   (known from `--skill` or a run in the skill's `evals/results`) as its name

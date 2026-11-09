@@ -106,6 +106,12 @@ The dataset file can be named `evals.json`, `evals.jsonl`, `evals.yaml`, or
     | `expected_behavior` (recommended) | `assertions` |
     | `expected_skill` (recommended) | `expected_skill` (unchanged) |
     | `acceptable_alternates` | `acceptable_skills` |
+
+    A legacy entry without `expected_skill` and `should_trigger` has no skill
+    to discover or measure, so its Discoverability and Efficiency are N/A. If
+    no entry is a positive case that names an `expected_skill`, the agent
+    cannot PASS. See
+    [Reading results](tier3-live-evaluation.mdx#reading-results).
   </Accordion>
 </AccordionGroup>
 

@@ -899,11 +899,16 @@ A metric can also be N/A (not applicable) for an eval case. It never counts as
   `create-eval-dataset` writes one), because the case expects no skill use to
   measure. `skill_execution` still scores a negative case: it checks that the
   agent left the skill under test alone.
-- Both are N/A for a case that names no `expected_skill`: a legacy case without
-  `expected_skill` and `should_trigger`, or one with `should_trigger: true` and
-  no `expected_skill`. If no case names one, Discoverability and Efficiency have
-  no with-skill score, so the agent cannot PASS (see below).
+- Both are N/A for a case that is not negative and names no `expected_skill`: a
+  legacy case without `expected_skill` and `should_trigger`, or one with
+  `should_trigger: true` and no `expected_skill`. In the agentskills.io shape a
+  case without `expected_skill` gets the dataset's `skill_name`.
 - A positive case whose agent made no tool calls still scores `0.0` on both.
+- Efficiency has a with-skill score only when some case is positive and names
+  an `expected_skill`. Without such a case the agent cannot PASS (see below),
+  for example when every case is negative, as in a run filtered to the negative
+  cases, or when no case names an `expected_skill`. Discoverability then has no
+  with-skill score either, unless some case is negative.
 - Security is never N/A.
 
 In `skill_evaluator_reward.json` an N/A metric's value is `null`, and

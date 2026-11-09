@@ -47,6 +47,7 @@ from skillevaluator.reporting.base import (
     ReporterBase,
     additional_errors,
     additional_warnings,
+    agent_eval_publication_dataset_provenance,
     agent_eval_publication_evidence_complete,
     agent_eval_report_serialization_issue,
     agent_eval_report_serialization_limits,
@@ -77,7 +78,7 @@ from skillevaluator.reporting.finding_summary import (
     summarize_messages,
     total_issue_count,
 )
-from skillevaluator.reporting.harbor_viewer import normalize_agent_eval_harbor_links
+from skillevaluator.reporting.harbor_viewer import harbor_job_links, normalize_agent_eval_harbor_links
 from skillevaluator.reporting.presentation import (
     FinalRenderContext,
     TierPresentation,
@@ -86,9 +87,11 @@ from skillevaluator.reporting.presentation import (
     success_is_not_applicable,
 )
 from skillevaluator.reporting.run_status import Status, result_status, result_tier
+from skillevaluator.reporting.tier2_views import tier2_scope_views
 from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
 from skillevaluator.reporting.trial_charts import steps_by_case_chart
 from skillevaluator.skillspector_provenance import skillspector_provenance_records
+from skillevaluator.source_identity import recorded_evaluated_source
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
@@ -3382,6 +3385,10 @@ class HTMLReporter(ReporterBase):
             tier1_contributors=tier1_contributors,
             tier1_display_summary=tier1_display_summary,
             tier2_results=tier2_results,
+            tier2_scopes=tier2_scope_views(tier2_results),
+            harbor_jobs=harbor_job_links(tier3_data or {}),
+            dataset_provenance=agent_eval_publication_dataset_provenance(tier3_data),
+            evaluated_source=recorded_evaluated_source(result.metadata for result in results),
             tier3_lift_pass_threshold=TIER3_LIFT_PASS_THRESHOLD,
             tier3_lift_fail_threshold=TIER3_LIFT_FAIL_THRESHOLD,
             quality_min_score=quality_min_score,

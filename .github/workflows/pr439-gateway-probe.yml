@@ -1,0 +1,147 @@
+# SPDX-License-Identifier: Apache-2.0
+# Throwaway protocol diagnostic; no checkout, native evaluation, retries or artifacts.
+name: PR 439 gateway protocol probe
+on:
+  push:
+    branches: [naren/ci-gateway-probe-20261110]
+permissions:
+  contents: read
+jobs:
+  protocol-probe:
+    if: ${{ github.repository == 'NVIDIA/SkillEvaluator' && github.actor == 'rng1995' && github.event_name == 'push' && github.ref == 'refs/heads/naren/ci-gateway-probe-20261110' && github.event.after == github.sha && github.event.deleted == false && github.run_attempt == 1 }}
+    runs-on: ubuntu-24.04
+    environment: skillevaluator
+    timeout-minutes: 4
+    steps:
+      - name: Probe the three configured inference protocols once
+        env:
+          API_BASE: ${{ vars.SKILL_EVAL_TIER3_BASE_URL }}
+          API_KEY: ${{ secrets[vars.SKILL_EVAL_GATEWAY_SECRET] }}
+        shell: bash --noprofile --norc -e {0}
+        run: |
+          python3 -I - <<'PY'
+          import datetime, email.utils, http.client, json, os, re, socket, unicodedata
+          import urllib.error, urllib.parse, urllib.request
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *_args, **_kwargs):
+                  return None
+
+          base = os.environ.get('API_BASE', '').rstrip('/')
+          key = os.environ.get('API_KEY', '').strip()
+          labels = ('judge_chat', 'codex_responses', 'claude_messages')
+
+          def emit(label, status, code=None, kind=None, retry=None):
+              print(json.dumps(dict(label=label, status=status, error_code=code,
+                                    error_type=kind, retry_after=retry), sort_keys=True), flush=True)
+
+          def error_token(value):
+              if (isinstance(value, str) and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.-]{0,63}', value)
+                  and key not in value):
+                  return value
+              return None
+
+          def retry_seconds(headers):
+              value = headers.get('Retry-After', '')
+              if re.fullmatch(r'[0-9]{1,5}', value):
+                  return min(int(value), 86400)
+              try:
+                  when = email.utils.parsedate_to_datetime(value)
+                  if when.tzinfo is not None:
+                      return max(0, min(86400, int((when - datetime.datetime.now(datetime.timezone.utc)).total_seconds())))
+              except (TypeError, ValueError, OverflowError):
+                  pass
+              return None
+
+          try:
+              parsed = urllib.parse.urlsplit(base)
+              _ = parsed.port
+              if (not key or len(key) > 16384 or len(base) > 4096 or parsed.scheme != 'https'
+                  or not parsed.hostname or parsed.username is not None or parsed.password is not None
+                  or parsed.query or parsed.fragment or parsed.netloc.endswith(':') or '\\' in base
+                  or any(c.isspace() or unicodedata.category(c) in {'Cc', 'Cf', 'Cs'} for c in base + key)
+                  or any(part in {'.', '..'} for part in urllib.parse.unquote(parsed.path).split('/'))
+                  or '//' in parsed.path or parsed.path.endswith('/v1/messages')):
+                  raise ValueError
+          except (ValueError, UnicodeError):
+              for label in labels:
+                  emit(label, 'not_sent', 'invalid_configuration', 'ConfigurationError')
+              raise SystemExit(1)
+
+          # Match runner._gateway_anthropic_agent_credentials: one terminal /v1 is removed.
+          claude_root = base.removesuffix('/v1')
+          prompt = [{'role': 'user', 'content': 'Reply OK.'}]
+          probes = (
+              ('judge_chat', base + '/chat/completions', {'Authorization': 'Bearer ' + key},
+               {'model': 'us/aws/anthropic/eccn-claude-opus-4-8', 'messages': prompt, 'max_tokens': 32}),
+              ('codex_responses', base + '/responses', {'Authorization': 'Bearer ' + key},
+               {'model': 'openai/openai/eccn-gpt-6.1-sol', 'input': 'Reply OK.', 'max_output_tokens': 32}),
+              ('claude_messages', claude_root + '/v1/messages', {'x-api-key': key, 'anthropic-version': '2023-06-01'},
+               {'model': 'aws/anthropic/eccn-claude-opus-5-5', 'messages': prompt, 'max_tokens': 32}),
+          )
+
+          def protocol_content(label, body):
+              if not isinstance(body, dict) or body.get('error'):
+                  return False
+              if label == 'judge_chat':
+                  choices = body.get('choices')
+                  if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                      return False
+                  message = choices[0].get('message')
+                  return (isinstance(message, dict) and message.get('role') == 'assistant'
+                          and isinstance(message.get('content'), str) and bool(message['content'].strip()))
+              if label == 'claude_messages':
+                  blocks = body.get('content')
+                  return (body.get('type') == 'message' and body.get('role') == 'assistant'
+                          and isinstance(blocks, list) and any(isinstance(b, dict) and b.get('type') == 'text'
+                          and isinstance(b.get('text'), str) and bool(b['text'].strip()) for b in blocks))
+              output = body.get('output')
+              if body.get('object') != 'response' or not isinstance(body.get('id'), str) or not body['id'] or not isinstance(output, list):
+                  return False
+              # A valid budget-limited DTO proves acceptance even with an empty output list.
+              if (body.get('status') == 'incomplete' and isinstance(body.get('incomplete_details'), dict)
+                  and body['incomplete_details'].get('reason') == 'max_output_tokens'):
+                  return True
+              return any(isinstance(item, dict) and (
+                  (item.get('type') == 'reasoning' and isinstance(item.get('summary'), list)) or
+                  (item.get('type') == 'message' and item.get('role') == 'assistant'
+                   and isinstance(item.get('content'), list) and any(isinstance(b, dict)
+                       and b.get('type') == 'output_text' and isinstance(b.get('text'), str)
+                       and bool(b['text'].strip()) for b in item['content']))
+                  ) for item in output)
+
+          opener = urllib.request.build_opener(NoRedirect())
+          failed = False
+          for label, url, auth, payload in probes:
+              status, retry = 'not_sent', None
+              request = urllib.request.Request(url, method='POST', data=json.dumps(payload).encode('utf-8'),
+                  headers={'Content-Type': 'application/json', 'Accept': 'application/json', **auth})
+              try:
+                  try:
+                      response = opener.open(request, timeout=25)
+                  except urllib.error.HTTPError as error:
+                      response = error
+                  with response:
+                      status = response.code
+                      retry = retry_seconds(response.headers)
+                      raw = response.read(1024 * 1024 + 1)
+                  if len(raw) > 1024 * 1024:
+                      raise ValueError('oversized')
+                  body = json.loads(raw)
+                  if 200 <= status < 300 and protocol_content(label, body):
+                      accepted = label + ':accepted-budget-limited' if label == 'codex_responses' and body.get('status') == 'incomplete' else label
+                      emit(accepted, status, retry=retry)
+                      continue
+                  error = body.get('error', {}) if isinstance(body, dict) else {}
+                  error = error if isinstance(error, dict) else {}
+                  emit(label, status, error_token(error.get('code')) or 'invalid_protocol_response',
+                       error_token(error.get('type')) or 'ProtocolError', retry)
+              except (urllib.error.URLError, socket.timeout, TimeoutError, OSError, http.client.HTTPException):
+                  emit(label, status, 'request_failed', 'TransportError', retry)
+              except (ValueError, UnicodeError):
+                  emit(label, status, 'invalid_json_or_size', 'ProtocolError', retry)
+              except Exception:
+                  emit(label, status, 'probe_failed', 'ClientError', retry)
+              failed = True
+          raise SystemExit(int(failed))
+          PY

@@ -9977,6 +9977,8 @@ class TestSkillspectorCompleteWithCaveats:
             ("partially-inspected", _completeness_error("details contradict complete analysis")),
             ("entirely-uninspected", _completeness_error("details contradict complete analysis")),
             ("not-complete", _completeness_error("has contradictory status markers")),
+            # Only a "complete" report may keep its status after transitive truncation.
+            ("truncated-not-complete", _completeness_error("has contradictory status markers")),
             ("execution-failed", "skillspector reported execution_successful=false; security scan did not complete"),
             ("complete-status", _completeness_error("details contradict complete analysis")),
             (
@@ -10081,6 +10083,9 @@ class TestSkillspectorCompleteWithCaveats:
             completeness["coverage_percent"] = 50.0
         elif case == "not-complete":
             completeness["is_complete"] = False
+        elif case == "truncated-not-complete":
+            completeness["is_complete"] = False
+            completeness["limitations"].append("Transitive traversal truncated: target budget 1 reached")
         elif case == "execution-failed":
             payload["execution_successful"] = completeness["execution_successful"] = False
         elif case == "complete-status":

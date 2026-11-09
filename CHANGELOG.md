@@ -141,6 +141,8 @@ All notable changes to SkillEvaluator are documented in this file.
   pinned evaluation and feedback configuration before reporting readiness,
   including malformed YAML and missing approval inputs. Candidate onboarding
   pins include the reviewed CI fixes and matching runtime metadata.
+  Use the verified released Tier 1 image so valid multi-valued `metadata.domain`
+  fields also work in new all-tier consumers.
 
 - Private native Claude Code staging keeps the source client's skill
   declarations: Codex paths that Codex ignores are no longer copied into the

@@ -25,6 +25,17 @@ MAX_ROOTS = 100
 MAX_ROOTS_TEXT = 16384
 GIT_TIMEOUT = 30
 _SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
+# A pull request that changes CI setup evaluates every skill in every tier, so
+# the setup change is exercised. run_tiers uses this predicate directly; the
+# GitHub eligibility script and the GitLab Tier 1 job keep inline copies that
+# tests hold equal to these values.
+SETUP_PREFIXES = (".github/", ".gitlab/", ".skillevaluator/ci")
+SETUP_FILES = frozenset({".gitlab-ci.yml"})
+
+
+def setup_changed(paths: list[str]) -> bool:
+    """Return whether any changed path (both sides of a rename) is CI setup."""
+    return any(path.startswith(SETUP_PREFIXES) or path in SETUP_FILES for path in paths)
 
 
 class SelectionError(ValueError):

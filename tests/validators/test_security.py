@@ -29,7 +29,7 @@ from skillevaluator.validators.security import (
     _skillspector_child_env,
     _skillspector_incomplete_analysis_error,
     _skillspector_llm_env,
-    _skillspector_missing_reference_note,
+    _skillspector_missing_reference_notes,
     _skillspector_name_keys,
     _skillspector_reference_line_avoids,
     _skillspector_reference_row_is_advisory,
@@ -8902,7 +8902,7 @@ def _reference_report(version: str, case: str = "missing") -> dict:
     return json.loads((Path(__file__).parents[1] / "fixtures" / name).read_text(encoding="utf-8"))
 
 
-def _missing_reference_note(payload: dict, scanned_root: Path | None) -> str | None:
+def _missing_reference_notes(payload: dict, scanned_root: Path | None) -> list[str] | None:
     completeness = payload["analysis_completeness"]
     keys = (
         "total_components",
@@ -8912,7 +8912,7 @@ def _missing_reference_note(payload: dict, scanned_root: Path | None) -> str | N
         "findings_after_filtering",
     )
     version = tuple(int(part) for part in payload["metadata"]["skillspector_version"].split("."))
-    return _skillspector_missing_reference_note(
+    return _skillspector_missing_reference_notes(
         completeness["ledger_exceptions"],
         completeness["analyzer_statuses"],
         {key: completeness[key] for key in keys},
@@ -8940,6 +8940,15 @@ _SETUP_HELPER_SKILL = (
     "---\nname: setup-helper\n"
     "description: Set up the project environment. Use when the user asks to set up the project.\n---\n\n"
     "# Setup helper\n\nBefore anything else, run `versions/install.sh` to prepare the environment.\n"
+)
+
+# The skill scanned for the captured image-and-missing-reference report, with
+# assets/logo.png from _png_bytes(): SkillSpector cannot read the image, and
+# records `output/notes.md` on line 10 as reference_missing.
+_IMAGE_NOTES_SKILL = (
+    "---\nname: image-notes\n"
+    "description: Summarize meeting text into notes. Use when the user asks for meeting notes.\n---\n\n"
+    "# Notes writer\n\n![Logo](assets/logo.png)\n\nWrite the summary to `output/notes.md` and keep it short.\n"
 )
 
 
@@ -9123,13 +9132,13 @@ class TestSkillspectorMissingReferences:
 
     def test_report_accounting_must_match_a_fully_inspected_bundle(self, tmp_path: Path) -> None:
         skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
-        assert _missing_reference_note(_reference_report("2.13.3"), skill) is not None
+        assert _missing_reference_notes(_reference_report("2.13.3"), skill) is not None
 
-        assert _missing_reference_note(_reference_report("2.13.3"), None) is None
+        assert _missing_reference_notes(_reference_report("2.13.3"), None) is None
         for field in ("partially_inspected_files", "entirely_uninspected_files", "findings_before_filtering"):
             payload = _reference_report("2.13.3")
             payload["analysis_completeness"][field] = 1
-            assert _missing_reference_note(payload, skill) is None, field
+            assert _missing_reference_notes(payload, skill) is None, field
         payload = _reference_report("2.13.3")
         universal = next(
             status
@@ -9137,10 +9146,10 @@ class TestSkillspectorMissingReferences:
             if status["analyzer_id"] == "static_yara"
         )
         payload["analysis_completeness"]["analyzer_statuses"].append(dict(universal))
-        assert _missing_reference_note(payload, skill) is None
+        assert _missing_reference_notes(payload, skill) is None
         payload["analysis_completeness"]["analyzer_statuses"].remove(universal)
         payload["analysis_completeness"]["analyzer_statuses"].remove(universal)
-        assert _missing_reference_note(payload, skill) is None
+        assert _missing_reference_notes(payload, skill) is None
 
     def test_pre_2_12_unresolved_row_needs_a_missing_reference_on_its_line(self) -> None:
         row = _reference_report("2.11.2")["analysis_completeness"]["ledger_exceptions"][0]
@@ -9242,10 +9251,10 @@ class TestSkillspectorMissingReferences:
             for line in (2, 4, 6, 8, 10)
         ]
 
-        note = _missing_reference_note(payload, skill)
+        notes = _missing_reference_notes(payload, skill)
 
-        assert note is not None
-        assert note.startswith(
+        assert notes is not None
+        assert notes[0].startswith(
             "SkillSpector reported 5 reference(s) to files the skill does not bundle (SKILL.md:2 "
             "[reference_resolution; reference_missing]; SKILL.md:4 [reference_resolution; reference_missing]; "
             "SKILL.md:6 [reference_resolution; reference_missing]; and 2 more); "
@@ -9436,3 +9445,42 @@ class TestSkillspectorMissingReferences:
         long_line = "Write `output/notes.md`. " + "x" * 10_000
         long_reference = {**reference, "evidence": "Write `output/notes.md`."}
         assert not _skillspector_reference_line_avoids(f"# Title\n{long_line}\n".encode(), row, [long_reference], none)
+
+    @pytest.mark.parametrize(
+        "case", ["both", "image-only", "not-an-image", "ambiguous-reference", "line-names-a-left-out-file"]
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_missing_reference_with_a_referenced_image(self, mock_tools, tmp_path: Path, case: str) -> None:
+        """Each kind of gap must pass its own rule; the scan then carries both warnings."""
+        skill = _write_skill(
+            tmp_path / "image-notes",
+            {"SKILL.md": _IMAGE_NOTES_SKILL, **({"evals/notes.md": "# Notes\n"} if case.startswith("line") else {})},
+        )
+        (skill / "assets").mkdir()
+        (skill / "assets" / "logo.png").write_bytes(b"not an image" if case == "not-an-image" else _png_bytes())
+        payload = _reference_report("2.13.3", "image-and-missing")
+        completeness = payload["analysis_completeness"]
+        if case == "image-only":
+            completeness["ledger_exceptions"] = completeness["ledger_exceptions"][1:]
+        elif case == "ambiguous-reference":
+            completeness["ledger_exceptions"][0]["reason_code"] = "reference_unresolved"
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        image_warning = (
+            "SkillSpector's text pattern analyzers could not read 1 referenced image file(s) (assets/logo.png); "
+            "each is a regular, non-executable file with PNG or JPEG structure outside agent-control directories, "
+            "so the scan is not marked incomplete. The image content itself was not assessed"
+        )
+        if case == "both":
+            assert result.incomplete_scans == []
+            assert result.warnings == [
+                _missing_reference_warning("SKILL.md:10 [reference_resolution; reference_missing]"),
+                image_warning,
+            ]
+        elif case == "image-only":
+            assert result.incomplete_scans == []
+            assert result.warnings == [image_warning]
+        else:
+            assert result.incomplete_scans == ["skillspector"]
+            assert not result.warnings

@@ -1820,7 +1820,7 @@ def _skillspector_missing_reference_warning(rows: list[Mapping[str, object]]) ->
     )
 
 
-def _skillspector_missing_reference_note(
+def _skillspector_missing_reference_notes(
     ledger_exceptions: list[dict],
     analyzer_statuses: list[dict],
     counts: Mapping[str, int],
@@ -1831,8 +1831,8 @@ def _skillspector_missing_reference_note(
     *,
     references: object,
     skillspector_version: tuple[int, int, int] | None,
-) -> str | None:
-    """A note for a ``partial`` analysis whose only gaps are references to files not bundled, else ``None``.
+) -> list[str] | None:
+    """Warnings for a ``partial`` analysis whose gaps are references to files not bundled, else ``None``.
 
     SkillSpector records a path-like reference in the skill's instructions that
     matches no file it scanned, such as a file the skill writes at run time or
@@ -1840,54 +1840,51 @@ def _skillspector_missing_reference_note(
     reports the analysis as ``partial``, although every file it scanned was
     inspected.
 
-    That gap is accepted only when every ledger row passes
+    That gap is accepted only when every ``reference_resolution`` row passes
     :func:`_skillspector_reference_row_is_advisory` and names a bundled file
     (:func:`_skillspector_bundled_file_bytes`) whose line names no entry of the
     skill that SkillSpector did not inspect (:func:`_skillspector_unscanned_names`,
     :func:`_skillspector_reference_line_avoids`), such as a link or a file in
-    an artifact directory left out of a staged scan; no file is partially or
-    entirely uninspected, no finding was filtered out, there is no limitation
-    and no fatal scope exclusion, every analyzer is ``completed``,
-    ``not_applicable`` or ``disabled``, and each universal analyzer completed
-    one work item per component. Anything else keeps the scan INCOMPLETE.
+    an artifact directory left out of a staged scan, and there is no fatal
+    scope exclusion. Any other ledger rows must be referenced images that
+    :func:`_skillspector_passive_raster_note` accepts, which then accounts for
+    the counts, analyzers and limitations, and its note follows. Without them,
+    no file is partially or entirely uninspected, no finding was filtered out,
+    there is no limitation, every analyzer is ``completed``, ``not_applicable``
+    or ``disabled``, and each universal analyzer completed one work item per
+    component. Anything else keeps the scan INCOMPLETE.
     """
+    reference_rows = [row for row in ledger_exceptions if row.get("phase") == "reference_resolution"]
+    other_rows = [row for row in ledger_exceptions if row.get("phase") != "reference_resolution"]
     if (
         scanned_root is None
-        or not ledger_exceptions
-        or limitations
-        or counts["partially_inspected_files"]
-        or counts["entirely_uninspected_files"]
-        or counts["findings_before_filtering"] != counts["findings_after_filtering"]
+        or not reference_rows
         or not isinstance(scope_exclusions, list)
         or any(not isinstance(row, dict) or row.get("fatal") is not False for row in scope_exclusions)
         or not isinstance(references, list)
     ):
         return None
-    for row in ledger_exceptions:
+    for row in reference_rows:
         if not isinstance(row.get("path"), str) or not _skillspector_reference_row_is_advisory(
             row, skillspector_version, references
         ):
             return None
 
-    total = counts["total_components"]
-    universal = _SKILLSPECTOR_COMMON_UNIVERSAL_ANALYZERS | {"artifact_integrity"}
-    accounted: set[str] = set()
-    for status in analyzer_statuses:
-        analyzer_id = status.get("analyzer_id")
-        state = status.get("status")
-        if analyzer_id not in universal:
-            if state not in {"completed", "not_applicable", "disabled"}:
-                return None
-            continue
-        if (
-            analyzer_id in accounted
-            or state != "completed"
-            or status.get("planned_work") != total
-            or status.get("completed") != total
-        ):
+    notes = [_skillspector_missing_reference_warning(reference_rows)]
+    if other_rows:
+        image_note = _skillspector_passive_raster_note(
+            other_rows, analyzer_statuses, counts, limitations, scope_exclusions, components, scanned_root
+        )
+        if image_note is None:
             return None
-        accounted.add(analyzer_id)
-    if accounted != universal:
+        notes.append(image_note)
+    elif (
+        limitations
+        or counts["partially_inspected_files"]
+        or counts["entirely_uninspected_files"]
+        or counts["findings_before_filtering"] != counts["findings_after_filtering"]
+        or not _skillspector_universal_analyzers_completed(analyzer_statuses, counts["total_components"])
+    ):
         return None
     unscanned = _skillspector_unscanned_names(scanned_root, components)
     if unscanned is None:
@@ -1895,7 +1892,7 @@ def _skillspector_missing_reference_note(
     keys = _skillspector_name_keys(unscanned)
     sources: dict[str, bytes] = {}
     checked: set[tuple[str, object]] = set()
-    for row in ledger_exceptions:
+    for row in reference_rows:
         path = row["path"]
         if (path, row.get("start_line")) in checked:
             continue
@@ -1907,7 +1904,29 @@ def _skillspector_missing_reference_note(
         if not _skillspector_reference_line_avoids(sources[path], row, references, keys):
             return None
         checked.add((path, row.get("start_line")))
-    return _skillspector_missing_reference_warning(ledger_exceptions)
+    return notes
+
+
+def _skillspector_universal_analyzers_completed(analyzer_statuses: list[dict], total: int) -> bool:
+    """Whether each universal analyzer completed one work item per component and no other analyzer degraded."""
+    universal = _SKILLSPECTOR_COMMON_UNIVERSAL_ANALYZERS | {"artifact_integrity"}
+    accounted: set[str] = set()
+    for status in analyzer_statuses:
+        analyzer_id = status.get("analyzer_id")
+        state = status.get("status")
+        if analyzer_id not in universal:
+            if state not in {"completed", "not_applicable", "disabled"}:
+                return False
+            continue
+        if (
+            analyzer_id in accounted
+            or state != "completed"
+            or status.get("planned_work") != total
+            or status.get("completed") != total
+        ):
+            return False
+        accounted.add(analyzer_id)
+    return accounted == universal
 
 
 class SecurityValidator(ValidatorBase):
@@ -2474,10 +2493,11 @@ class SecurityValidator(ValidatorBase):
 
         A ``partial`` analysis makes the scan INCOMPLETE unless its only gaps are
         references to files the skill does not bundle
-        (:func:`_skillspector_missing_reference_note`) or referenced PNG or JPEG
-        images (:func:`_skillspector_passive_raster_note`), each confirmed by the
-        files under *scanned_root*; that is a warning instead. *scanned_root* is
-        the directory the report's relative paths start from.
+        (:func:`_skillspector_missing_reference_notes`), referenced PNG or JPEG
+        images (:func:`_skillspector_passive_raster_note`), or both, each
+        confirmed by the files under *scanned_root*; each kind of gap is then a
+        warning instead. *scanned_root* is the directory the report's relative
+        paths start from.
         """
         partial_reported = False
         if "error" in data and data["error"] is not None:
@@ -3002,7 +3022,7 @@ class SecurityValidator(ValidatorBase):
                         )
                         return False
                     partial_reported = True
-                    gap_note = _skillspector_missing_reference_note(
+                    gap_notes = _skillspector_missing_reference_notes(
                         ledger_exceptions,
                         analyzer_statuses,
                         counts,
@@ -3012,17 +3032,21 @@ class SecurityValidator(ValidatorBase):
                         scanned_root,
                         references=analysis_completeness.get("references"),
                         skillspector_version=skillspector_version,
-                    ) or _skillspector_passive_raster_note(
-                        ledger_exceptions,
-                        analyzer_statuses,
-                        counts,
-                        limitations,
-                        analysis_completeness.get("scope_exclusions", []),
-                        data.get("components"),
-                        scanned_root,
                     )
-                    if gap_note is not None:
-                        result.add_warning(gap_note)
+                    if gap_notes is None:
+                        raster_note = _skillspector_passive_raster_note(
+                            ledger_exceptions,
+                            analyzer_statuses,
+                            counts,
+                            limitations,
+                            analysis_completeness.get("scope_exclusions", []),
+                            data.get("components"),
+                            scanned_root,
+                        )
+                        gap_notes = None if raster_note is None else [raster_note]
+                    if gap_notes is not None:
+                        for note in gap_notes:
+                            result.add_warning(note)
                     else:
                         result.add_error(
                             _skillspector_incomplete_analysis_error(completeness_status, ledger_exceptions)

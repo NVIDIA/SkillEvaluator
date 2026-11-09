@@ -2750,12 +2750,14 @@ _FINDING_EVIDENCE_FLAG_VALUE_RE = re.compile(_FINDING_EVIDENCE_FLAG_VALUE)
 # user:password", "-fsSLu user:password") and as "--proxy-user". A value with
 # "://" is a URL ("pip install -U git+https://..."), whose userinfo is already
 # masked, one whose first colon starts a "/" path is a remote path ("rsync
-# -u host:/data"), and one that starts with "+" is a date format ("date -u
-# +%H:%M:%S").
+# -u host:/data"), and a "+" with a "%" conversion before the first colon is
+# a date format ("date -u +%H:%M:%S"); "-u +admin:VALUE" is still masked.
+_FINDING_EVIDENCE_DATE_FORMAT = r"[\"']?\+[^\s'\"`:]*%"
+_FINDING_EVIDENCE_DATE_FORMAT_RE = re.compile(_FINDING_EVIDENCE_DATE_FORMAT)
 _FINDING_EVIDENCE_USER_FLAG_RE = re.compile(
     r"((?<![^\s'\"])(?:(?:-[A-Za-z]{0,8}?u|-U|--user|--proxy-user)(?:[ \t]+|=)"
     r"|-[A-Za-z]{0,8}?u(?=[^\s'\"`:=-][^\s'\"`:]*:)))"
-    r"(?![\"']?\+)(?![\"']?[^\s'\"`]*://)(?![\"']?[^\s'\"`:]*:/)"
+    r"(?!" + _FINDING_EVIDENCE_DATE_FORMAT + r")(?![\"']?[^\s'\"`]*://)(?![\"']?[^\s'\"`:]*:/)"
     r"(?:\"[^\"\r\n:]*:[^\"\r\n]*\"?|'[^'\r\n:]*:[^'\r\n]*'?|[^\s'\"`:]*:[^\s'\"`]*)"
 )
 # "-p" is a password after a login subcommand ("docker login -u bot -p VALUE",
@@ -3091,7 +3093,11 @@ def _mask_argv_credentials(text: str) -> str:
                 is not None
             )
         elif flag.lower() in ("-u", "--user", "--proxy-user"):
-            masked = ":" in value.group() and ":/" not in value.group()
+            masked = (
+                ":" in value.group()
+                and ":/" not in value.group()
+                and _FINDING_EVIDENCE_DATE_FORMAT_RE.match(value.group()) is None
+            )
         elif flag == "-b":
             masked = "=" in value.group()
         else:

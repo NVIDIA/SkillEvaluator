@@ -2083,13 +2083,17 @@ def _skillspector_reference_caveat_error(ledger_exceptions: list[dict]) -> str:
 
 # SkillSpector 2.12.0 and later record a nonfatal ``partial`` ``opaque_content``
 # row from ``bundled_execution_surface`` on a hook manifest whenever they cannot
-# model what a hook does with hook input, which includes every ordinary command
-# hook (NVIDIA/SkillSpector#573). The scan itself completed, but its findings
-# cannot show that the hooks are safe, so the manifest gets a Critical gate
-# failure instead of an incomplete scan.
+# model what a hook does with hook input (NVIDIA/SkillSpector#573). That is every
+# command or HTTP hook unless SkillSpector recognizes each one in the manifest as
+# sending hook content to a remote host (BH2). The scan itself completed, but its
+# findings cannot show that the hooks are safe, so the manifest gets a Critical
+# gate failure instead of an incomplete scan.
 _SKILLSPECTOR_HOOK_ANALYZER = "bundled_execution_surface"
 _SKILLSPECTOR_HOOK_LIMITATION = f"Analyzer {_SKILLSPECTOR_HOOK_ANALYZER} status: degraded."
 _SKILLSPECTOR_HOOK_UNVERIFIED_CHECK = "skillspector_hook_payload_unverified"
+# SkillSpector reads at most this many hook, permission and settings records
+# from one manifest (``_MAX_DECLARATIONS`` in bundled_execution_surface.py).
+_SKILLSPECTOR_HOOK_DECLARATION_LIMIT = 2048
 # Gate failures that are facts about the scan, not judgments an LLM verifier
 # can overturn.
 _LLM_VERIFY_EXEMPT_CHECKS = frozenset({_SKILLSPECTOR_HOOK_UNVERIFIED_CHECK})
@@ -2107,48 +2111,73 @@ def _is_count(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _skillspector_unmodeled_hook_manifests(issues: object) -> frozenset[str]:
-    """The manifests whose BH1 finding says SkillSpector parsed the hooks but could not model their payload.
+def _skillspector_unmodeled_hook_manifests(issues: object) -> dict[str, int]:
+    """The manifests whose BH1 finding says SkillSpector parsed hooks but could not model their payload.
 
     Each manifest is the BH1 location's path when it passes
-    :func:`_skillspector_report_path_key`.
+    :func:`_skillspector_report_path_key`, mapped to the BH1
+    ``declaration_count``, which must be a positive count. A manifest whose
+    BH1 findings give different counts is left out.
     """
     if not isinstance(issues, list):
-        return frozenset()
-    manifests: set[str] = set()
+        return {}
+    manifests: dict[str, int] = {}
+    conflicting: set[str] = set()
     for issue in issues:
         if not isinstance(issue, dict) or issue.get("id") != "BH1":
             continue
         evidence = issue.get("evidence")
         location = issue.get("location")
-        if (
+        if not (
             isinstance(evidence, dict)
             and evidence.get("payload_analysis_level") == "unmodeled"
             and isinstance(location, dict)
             and (manifest := _skillspector_report_path_key(location.get("file"))) is not None
         ):
-            manifests.add(manifest)
-    return frozenset(manifests)
+            continue
+        declarations = evidence.get("declaration_count")
+        if (
+            not _is_count(declarations)
+            or declarations < 1
+            or manifests.setdefault(manifest, declarations) != declarations
+        ):
+            conflicting.add(manifest)
+    return {manifest: count for manifest, count in manifests.items() if manifest not in conflicting}
 
 
 def _skillspector_ledger_exception_is_hook_surface_limitation(
-    exception: Mapping[str, object], unmodeled_manifests: frozenset[str]
+    exception: Mapping[str, object], unmodeled_manifests: Mapping[str, int]
 ) -> bool:
     """Whether a ledger row is SkillSpector's limitation for hooks it parsed but could not model.
 
     The row must be a nonfatal, whole-file ``partial`` ``opaque_content`` row
     in phase ``static`` that names only ``bundled_execution_surface`` and no
     error class, on a manifest in *unmodeled_manifests*
-    (:func:`_skillspector_unmodeled_hook_manifests`). SkillSpector records the
-    same row for a manifest it could not parse, which has no such BH1, and for
-    a manifest with more hook declarations than it reads, which records more
-    ``observed_records`` than ``limit_records``; both stay ordinary analysis
-    limitations.
+    (:func:`_skillspector_unmodeled_hook_manifests`).
+
+    SkillSpector records the same row when it could not parse part of the
+    manifest or read only its first 2,048 hook, permission and settings
+    records. When the row carries ``observed_records`` and ``limit_records``
+    (SkillSpector 2.13.4), ``observed_records`` must equal the BH1
+    ``declaration_count`` and not exceed ``limit_records``: a skipped handler,
+    a permission or settings record, or a truncated manifest makes them
+    differ. Without them (SkillSpector 2.13.3 and 2.14.0), the BH1 must count
+    fewer than 2,048 declarations. Other partial parses cannot be told apart
+    from unmodeled hooks and get the same Critical.
     """
-    observed = exception.get("observed_records")
-    limit = exception.get("limit_records")
+    manifest = _skillspector_report_path_key(exception.get("path"))
+    declarations = unmodeled_manifests.get(manifest) if manifest is not None else None
+    if declarations is None:
+        return False
+    if "observed_records" in exception or "limit_records" in exception:
+        observed = exception.get("observed_records")
+        limit = exception.get("limit_records")
+        counted = _is_count(observed) and _is_count(limit) and observed == declarations and observed <= limit
+    else:
+        counted = declarations < _SKILLSPECTOR_HOOK_DECLARATION_LIMIT
     return (
-        exception.get("outcome") == "partial"
+        counted
+        and exception.get("outcome") == "partial"
         and exception.get("fatal") is False
         and exception.get("phase") == "static"
         and exception.get("reason_code") == "opaque_content"
@@ -2156,8 +2185,6 @@ def _skillspector_ledger_exception_is_hook_surface_limitation(
         and exception.get("error_class") is None
         and exception.get("start_line") is None
         and exception.get("end_line") is None
-        and not (_is_count(observed) and _is_count(limit) and observed > limit)
-        and _skillspector_report_path_key(exception.get("path")) in unmodeled_manifests
     )
 
 

@@ -13,6 +13,23 @@ All notable changes to SkillEvaluator are documented in this file.
   Your Agent" docs page shows how to install it in Codex, Claude Code, OpenCode,
   OpenClaw, and other skill-aware agents.
 
+- Tier 1 **Incomplete referenced artifact analysis (AE1)** findings from
+  SkillSpector now say why SkillSpector stopped inspecting the file that a skill
+  names. The suggestion names the file, its disposition and each reason
+  SkillSpector gives, such as
+  `static_parse_limit (static_patterns_tool_misuse)`, with any line and limits,
+  and the finding's metadata records them under `skillspector_evidence` and
+  `skillspector_occurrences`. Before, the finding said only
+  `Referenced artifact was not completely inspected`, and its reason had to be
+  matched by hand against the incomplete-analysis error, which lists at most
+  three rows. With SkillSpector before v2.12.0 the finding was titled
+  `Unknown (AE1)` and told the user to make the file available although
+  SkillSpector had read part of it. It now carries the rule's name and the
+  reasons from the report's ledger rows for the file. A failed check also counts
+  the files and the lines that name them in one line of the terminal, Markdown
+  and HTML reports, and in the JSON field `skillspector_reference_summary`.
+  Severities, scan completeness and gates are unchanged.
+
 ### Changed
 
 - Align terminal grade and lift colors across compact, full, and direct Tier 3

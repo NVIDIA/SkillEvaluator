@@ -6,6 +6,15 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Run SkillEvaluator's own `skills/` through the pinned three-tier GitHub
+  callers, retaining Tier 1 as required and Tier 2/3 as advisory. A separate
+  consumer feedback listener preserves the reusable publisher's public path;
+  onboarding and status recognize this filename collision without replacing
+  reusable workflow definitions. Automatic comments activate after the
+  listener reaches the default branch.
+  Document the shared chat/judge/agent model input and model-availability
+  troubleshooting for provider-backed CI.
+
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI
   command, and ships Tier 3 evaluation cases for itself. A test keeps every
@@ -136,6 +145,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 2 includes qualifying shell comment blocks at end of file in context
+  deduplication. Previously those blocks disappeared unless a blank line or
+  code followed them, which could hide repeated guidance across shell files.
 - Tier 3 decodes the native Codex `exec` wrappers that Codex 0.161.0 emits:
   inline `text(await tools.NAME(...))`, single-quoted string literals, and
   literal `Promise.allSettled` batches rendered by an indexed `for`, indexed
@@ -162,6 +174,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Read JSON, JSONL and YAML evaluation datasets as UTF-8 so Unicode prompts and
   answers load correctly on hosts with a non-UTF-8 default text encoding.
+
+- Estimate Tier 1 instruction tokens from the parsed Markdown body, so `---`
+  inside YAML values or comments does not count frontmatter as instructions.
+  Body separators without valid frontmatter no longer produce a spurious estimate.
 
 - A PII finding no longer keeps its `evidence_sha256` after CI redaction masks
   a credential inside the value the finding reports. In 0.8.0 the finding kept

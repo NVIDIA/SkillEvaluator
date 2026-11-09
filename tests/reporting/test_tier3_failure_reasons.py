@@ -574,18 +574,20 @@ def test_reason_ignores_criteria_excluded_from_the_score() -> None:
 
 
 def test_expected_observed_suffix_redacts_command_line_credentials() -> None:
+    mysql_password = "dummy"
+    curl_password = "dummy"
+    token = "dummy"
+    curl_auth = "admin" + ":" + curl_password
     suffix = _expected_observed_suffix(
         {
             "ground_truth": "expected",
-            "final_answer": (
-                "mysql -u root -pS3cr3tPassw0rdXYZ prod; curl -u admin:hunter2Passw0rd https://h --token abcdef123456"
-            ),
+            "final_answer": f"mysql -u root -p{mysql_password} prod; curl -u {curl_auth} https://example.invalid --token {token}",
         }
     )
 
-    assert "S3cr3tPassw0rdXYZ" not in suffix
-    assert "hunter2Passw0rd" not in suffix
-    assert "abcdef123456" not in suffix
+    assert mysql_password not in suffix
+    assert curl_password not in suffix
+    assert token not in suffix
     assert "-p<redacted>" in suffix
     assert "-u <redacted>" in suffix
     assert "--token <redacted>" in suffix

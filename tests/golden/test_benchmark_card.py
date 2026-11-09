@@ -450,7 +450,7 @@ def test_benchmark_keeps_the_recorded_tier3_evaluator_version() -> None:
     assert "9.9.9" not in rendered
 
 
-@pytest.mark.parametrize("retired_identity", ["SkillsEval", "SkillsÉval"])
+@pytest.mark.parametrize("retired_identity", ["SkillsEval", "SkillsE\u0301val"])
 def test_benchmark_writer_version_is_normalized_like_a_recorded_one(retired_identity: str) -> None:
     rendered = BenchmarkReporter(include_timestamp=False, evaluator_version=retired_identity).render_all(
         _deterministic_results()

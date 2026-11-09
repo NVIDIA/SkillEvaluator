@@ -547,6 +547,35 @@ def test_validate_json_names_a_clean_single_skill_and_records_the_evaluator(
     assert f"- Evaluator version: `{__version__}`" in benchmark
 
 
+def test_validate_json_keeps_one_skills_entry_per_rule_of_a_rules_folder(team_rule_dir: Path, tmp_path: Path) -> None:
+    """Only a skill directory names its one skill explicitly. A rules folder
+    groups its results per rule file, so naming the folder would fold both
+    rules into one entry."""
+    output_dir = tmp_path / "reports"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(team_rule_dir),
+            "--tiers",
+            "1",
+            "--checks",
+            "schema",
+            "--no-llm",
+            "--report",
+            "json",
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    report = json.loads(next(output_dir.glob("skillevaluator-output-*.json")).read_text(encoding="utf-8"))
+    assert sorted(entry["name"] for entry in report["skills"]) == ["error-handling", "testing"]
+    assert not (output_dir / "BENCHMARK.md").exists()
+
+
 def test_validate_default_reports_do_not_write_into_authored_sibling_skill(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

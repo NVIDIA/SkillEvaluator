@@ -325,12 +325,14 @@ transport = "stdio"
   `command = "npx ..."`, or `gcc`, `g++`, or `make` with any agent), install
   them in the image: list the packages in `scripts/apt-packages.txt`, one per
   line, for the auto-generated image, or install them in
-  `evals/environment/Dockerfile`. The auto-generated image and the
-  `init-harbor-task` starter Dockerfile also include `procps`, so Claude Code
-  setup no longer installs it (for `pgrep`) with `apt-get` in every trial. A
-  custom `evals/environment/Dockerfile` keeps its own base image, so it should
-  install `procps` too, unless `harbor.base_image_mode` is `reuse` or `rebuild`
-  and `harbor.custom_dockerfile_mode` is `rebase`. Then it is rebased onto the
+  `evals/environment/Dockerfile`.
+
+  The auto-generated image and the `init-harbor-task` starter Dockerfile also
+  include `procps`, so Claude Code setup no longer installs it (for `pgrep`)
+  with `apt-get` in every trial. A custom `evals/environment/Dockerfile` keeps
+  its own base image, so it should install `procps` too, unless
+  `harbor.base_image_mode` is `reuse` or `rebuild` and
+  `harbor.custom_dockerfile_mode` is `rebase`. Then it is rebased onto the
   shared base image, which has `procps`.
 </Note>
 

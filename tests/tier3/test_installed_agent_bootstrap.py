@@ -4,6 +4,7 @@
 """Exercise the inherited Harbor bootstrap, including package selection."""
 
 import asyncio
+import re
 import subprocess
 from pathlib import Path
 
@@ -445,12 +446,18 @@ def test_generated_images_satisfy_docker_agent_setup_dependencies(
         assert needed - image == set(), writer
 
 
-def _docker_setup_note() -> str:
-    """The eval-datasets note on Docker agent setup packages, with whitespace collapsed."""
+def _docker_setup_note_paragraphs() -> list[str]:
+    """The paragraphs of the eval-datasets note on Docker agent setup packages, whitespace collapsed."""
     docs = (Path(__file__).resolve().parents[2] / "docs" / "eval-datasets.mdx").read_text(encoding="utf-8")
     notes = [block.split("</Note>", 1)[0] for block in docs.split("<Note>")[1:]]
     (note,) = [note for note in notes if "`procps`" in note]
-    return " ".join(note.split())
+    paragraphs = re.split(r"\n[ \t]*\n", note.strip())
+    return [" ".join(paragraph.split()) for paragraph in paragraphs]
+
+
+def _docker_setup_note() -> str:
+    """The eval-datasets note on Docker agent setup packages, with whitespace collapsed."""
+    return " ".join(_docker_setup_note_paragraphs())
 
 
 def test_custom_dockerfiles_reach_procps_only_through_the_shared_base_image_rebase(tmp_path: Path) -> None:
@@ -488,6 +495,20 @@ def test_custom_dockerfiles_reach_procps_only_through_the_shared_base_image_reba
         "unless `harbor.base_image_mode` is `reuse` or `rebuild` and `harbor.custom_dockerfile_mode` is `rebase`"
         in note
     )
+
+
+def test_docker_setup_note_gives_procps_guidance_its_own_paragraph() -> None:
+    """Custom Dockerfile authors find the procps guidance without reading the Node.js scope first."""
+    node_scope, procps = _docker_setup_note_paragraphs()
+
+    assert "`nodejs` and `npm`" in node_scope
+    assert "`scripts/apt-packages.txt`" in node_scope
+    assert "procps" not in node_scope
+    assert procps.startswith(
+        "The auto-generated image and the `init-harbor-task` starter Dockerfile also include `procps`"
+    )
+    assert "nvm" not in procps
+    assert "`harbor.custom_dockerfile_mode` is `rebase`" in procps
 
 
 def test_docker_setup_note_scopes_the_npx_mcp_example_to_claude_code() -> None:

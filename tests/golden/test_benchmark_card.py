@@ -1227,6 +1227,10 @@ def test_benchmark_baseline_without_the_skill_can_pass(tmp_path: Path) -> None:
 
     assert "**Overall verdict: PASS" in rendered
     assert "| Tier 3 | Live agent evaluation | **PASS** |" in rendered
+    # The baseline ran, it just has no skill to discover or route to.
+    assert "| Discoverability | 100.0% — baseline N/A (no skill in the baseline arm) |" in rendered
+    assert "| Efficiency | 90.0% — baseline N/A (no skill in the baseline arm) |" in rendered
+    assert "baseline not run" not in rendered
     assert offenders == []
 
 

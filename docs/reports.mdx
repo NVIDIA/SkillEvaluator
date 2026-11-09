@@ -16,6 +16,92 @@ lift data that `view` and `compare` read back later.
 evaluation framework that runs those Tier 3 trials. SkillEvaluator collects its
 job artifacts into the results tree described on this page.
 
+## Retained three-tier CI evidence
+
+The opt-in all-tier workflows retain one aggregate artifact for 14 days. GitHub
+names it `skill-evaluator-results-attempt-N`; GitLab retains the aggregate job's
+`skill-evaluator-results/` directory. The trusted feedback comment links the
+actual artifact download for that run. Authentication and artifact expiry still
+apply; this link does not imply publicly hosted HTML.
+
+The PR or MR comment presents one summary table with a row for each skill.
+Each row shows a one-line status, issue count and the most important available
+finding or blocker for **Tier 1 — Static and Security Validation**,
+**Tier 2 — Deduplication** and **Tier 3 — Live Agent Evaluation**. A single
+**Report** link per skill opens the combined report artifact for that run;
+download and extract it, then open `index.html` to inspect the detailed aggregate
+and native reports. The comment keeps tier details in those reports rather
+than adding separate tier sections or report links.
+
+This schematic shows the information in a row; real results supply the statuses,
+counts, findings and authenticated **Report** link:
+
+| Skill | Tier 1 — Static and Security Validation | Tier 2 — Deduplication | Tier 3 — Live Agent Evaluation | Combined report |
+| --- | --- | --- | --- | --- |
+| `skills/example` | Passed · 0 issues | Failed · 1 issue · duplicate content found | Incomplete · issues unknown · paired evidence missing | Report |
+
+Issue counts summarize unique actionable findings plus independent validation
+errors and warnings from retained native evidence; informational notes and
+configuration-only scope notices are excluded. Incomplete or missing evidence
+shows an unknown count; it cannot imply zero findings or a completed check.
+The Tier 1 gate and each advisory tier's status stay separate, so this example
+can pass the required CI gate while still needing review of Tier 2 and Tier 3.
+Every tier selects the same skills: the changed skills, or every skill when
+the pull request changes CI setup under `.github/`, `.gitlab/`,
+`.skillevaluator/ci` or `.gitlab-ci.yml` (on GitHub, also when it changes more
+files than the API can list). A cell for a skill that its tier did not select
+reads `Skipped · issues unknown · Not selected for this tier`.
+
+```text
+ci-results.json
+index.html
+source-attempts.json   # GitHub: run attempt whose artifact supplied each tier
+summary.md
+tier1/                 # hardened scanner reports, including summary.json
+tier2/ci-tier.json
+tier2/skill-001/       # native retained JSON and HTML
+tier3/ci-tier.json
+tier3/skill-001/       # native retained JSON and HTML
+  diagnostics/        # redacted worker logs when execution failed or is incomplete
+```
+
+`ci-results.json` uses report contract `skillevaluator-ci-v1` and records the
+repository, exact commit, platform, run ID, attempt, environment, and each
+tier's required/advisory policy: Tier 1 has `required: true`, while Tier 2 and
+Tier 3 have `required: false`. On GitHub, each tier with retained evidence
+records `source_attempt`, the run attempt that produced it; after **Re-run
+failed jobs** it can be earlier than the aggregate's own attempt. A tier can be
+`passed`, `failed`, `incomplete`, `skipped`, `not_run`, `needs_action`, or
+`neutral`. `neutral` means Tier 3 paired execution completed with a neutral
+dimension-based verdict; Skill Lift has its own independent diagnostic band.
+Like every Tier 3 status, it is advisory. Failed,
+incomplete or missing Tier 1 evidence fails the aggregate. Tier 2/3 failures and
+incomplete results remain advisory and retain their native status; a passing CI
+gate does not mean those tiers passed. A check that never executed cannot become an empty success.
+The deprecated Tier 3 required settings are ignored in CI. Standalone validation
+and benchmark publication retain their separate policies.
+
+Tier 2 reports retain deduplication and catalog-similarity findings;
+Tier 3 reports retain paired scores and coverage, Skill Lift, attempts,
+latency/resource metrics and available trial links. Download and extract the
+artifact, then open `index.html` to inspect the aggregate and native reports.
+Detailed files remain available even when a tier fails or needs configuration.
+When a native skill's execution fails or is incomplete, or its worker exits
+abnormally, the skill retains bounded, redacted worker, Docker and
+agent-installation diagnostics under `diagnostics/`, even if no canonical report
+was produced or its verdict is failed. A complete run with a failed or neutral
+verdict retains none. The worker's `command.log` comes first, then logs from
+one trial of each Harbor job (a failing trial when there is one), at most four
+trials per skill, with failing trials chosen before passing ones. All
+skills of one tier share a limit of 1000 diagnostic files and 16 MiB. Each
+`index.json` records retained, omitted and truncated files, including those
+omitted at a limit.
+Catalog failures retain diagnostics under `tier2/catalog/diagnostics/`.
+Agent trajectories, credentials and runtime configuration are excluded.
+The publisher renders validated retained JSON; it does not execute artifacts
+or trust candidate-provided HTML in its privileged feedback job. Optional
+report hosting is independent from these private artifact links.
+
 ## Report formats
 
 Every Tier 1 and Tier 2 command accepts `-r`/`--report` and `-o`/`--output-dir`.
@@ -47,7 +133,20 @@ into unrelated content.
 
 For `validate`, that compact default is a pipeline view — a per-check ticker
 plus a summary. Pass `--verbose` to get the full per-check detail stream in
-the terminal instead.
+the terminal instead. Final panels are written to stdout. When output is
+redirected or running in CI, tier and check starts, stage changes, measured
+completion counts, and completion lines remain visible on stderr. Unchanged
+updates are omitted; a running stage emits a heartbeat after 60 seconds without
+progress. Counts describe observed work, without estimating a completion
+percentage. Interruption tears down the progress display and its worker.
+
+Terminal grades use green for A/B, amber for C, and red for D/F; failed,
+incomplete, and unavailable evidence retains its status treatment. Lift that
+rounds to zero is neutral. At narrow widths, condition labels, numeric scores,
+and their complete bars stack together. The full terminal summary includes
+successful quality and lift evidence in Details. Artifact paths use the emitted
+filenames and become clickable only on capable interactive terminals; plain,
+no-color, redirected, and string-rendered output retains readable paths.
 
 | Format | What it is | Reach for it when |
 | --- | --- | --- |
@@ -62,6 +161,66 @@ skillevaluator validate ./my-skill -r json,html,markdown,sarif -o reports
 ```
 
 For gating a pipeline on the JSON output, see [Gate Your CI](ci-integration.mdx).
+
+## Reading the final status
+
+The compact terminal summary, full terminal report, and HTML header describe the
+same command outcome: **Passed required checks**, **Changes required**, or
+**Incomplete**. A confirmed failure takes precedence over missing evidence.
+Advisory tiers retain their own findings and execution status without changing
+the required gate or process exit code.
+
+**Publication eligibility** is a separate, stricter assessment of the recorded
+policy, provenance, and evidence coverage. A passed required gate does not imply
+publication eligibility. Standalone Tier 3 reports show **Not assessed (Tier 3
+only)**. **Best agent score** describes one evaluated agent, rather than approval
+of the whole validation run.
+
+Each tier counts its own passed, failed, incomplete, skipped, and N/A results.
+Skipped and explicitly inapplicable checks are excluded from executed-check
+denominators. A tier that produced no results is **Not run**; presentation of an
+unrequested tier does not create evidence that it ran.
+
+Tier 3 summaries prefer recorded per-condition counters: for example,
+**188 scored trials: 101 with skill, 87 baseline**. Condition details retain
+expected counts and execution status, so partial execution and early stopping
+remain distinguishable. Missing or malformed counters are **unavailable**, and
+explicitly skipped arms remain **skipped**. Legacy reports with trial rows but
+no counters show **retained rows**, which are observations rather than complete
+scored totals. Preview limits and physical retry rows do not replace recorded
+attempt counts. These are display projections; canonical JSON and evaluation
+payloads are unchanged.
+
+### Tier 2 comparison scopes and evidence
+
+The HTML Tier 2 view separates **Within this skill** (redundant content among
+its files) from **Across skills** (catalog or collection comparisons). Each
+scope shows Checks completed, Duplicate findings, Affected files or skills,
+and Catalog entries compared. Completion uses recorded comparison
+evidence; a completed check can still fail its gate because it found duplicates.
+Refused LLM classifications and file safety errors remain visible findings,
+but do not count as confirmed duplicates within a skill.
+
+A completed comparison with no matches shows zero. A skipped catalog comparison,
+missing metadata, or an incomplete scan shows the recorded reason and unavailable
+counts. Target against catalog comparisons exclude the target's recorded self
+entry. Within-skill checks and recorded pairwise scans mark Catalog entries compared
+as not applicable. Pairwise scans identify the collection size separately. Affected counts use recorded file or skill paths,
+so equal display names do not merge distinct skills. Token or context savings
+are not estimated from duplicate counts.
+
+HTML, terminal, and Markdown reports link every recorded Harbor job to its
+**Results** and available **Analysis**, using the job's recorded name or
+`Job N` when no name is available. Legacy single-job and analysis-only links
+remain usable. Job names do not establish which agent or condition produced a
+job. Links use the existing URL validation and output escaping.
+
+HTML disclosures show recorded scanner versions and LLM provenance, plus
+sanitized model, evaluator, dataset digest, and evaluated source metadata under
+Tier 3 Diagnostics. Missing values remain unavailable. These views use existing
+report data and do not read the source tree or contact providers while rendering.
+Full downloads and preview omission counts remain available; with-skill token
+charts are labeled separately from the resource table's two-arm comparisons.
 
 ## File naming
 
@@ -105,6 +264,35 @@ the evidence below it:
   repeat a finding are folded away.
 - **Run details.** Scope, the target path, provenance and the gate policy.
 
+Use the sidebar or tier tiles to open a tier. A comprehensive `validate` report
+keeps all three tiers visible, including **Not run** and **Not run (not requested)**
+when evidence is absent. Targeted reports keep their narrower scope. On small
+screens, a sticky tier bar keeps navigation available while reading long evidence.
+Tier 3 retains Overview, Insights, Agent Details, Trials, Dataset and Diagnostics.
+For its tabs, Left/Right and Home/End move focus; Enter or Space opens the focused
+view. Finding links clear incompatible filters, open their evidence and move focus
+to the exact finding. Direct agent links open and focus the named agent panel;
+section links open at the start of the section.
+
+The **Theme** control offers System, Light and Dark. System follows live device
+changes; an explicit choice persists until System is selected again. Reports use
+native theme-aware scrollbars and respect reduced motion. Without JavaScript,
+all tier and agent evidence remains readable. Printing exposes supporting evidence
+and then restores disclosure and filter state when returning to the screen.
+
+Reports use 14-pixel body text with relaxed line spacing, distinct label/value
+gaps, and consistent space between cards, findings and table rows. Tier 3 view
+tabs wrap on narrow screens; wide evidence tables keep their own horizontal
+scroll area. The same reading rhythm applies in Light and Dark themes.
+
+Tier 3 charts include Chart.js 4.5.1 inside the HTML file and work offline;
+they make no CDN or source-map requests. Each chart describes its measurements
+and links to the underlying data table. If JavaScript or canvas initialization
+is unavailable, a visible message points readers to the data. Theme changes and
+printing redraw the charts. **Chart software notices** retains the full MIT
+licenses for Chart.js and its bundled color library. Tier 1 reports do not
+load or embed these chart resources.
+
 A finding is one problem a check reports, with a severity. The same problem
 reported on several lines, or in several files or skills, counts once at its
 highest severity; each location is an occurrence, including each line a
@@ -124,6 +312,8 @@ words: **Passed**, **Changes required**, **Incomplete**, **Skipped** and
 whose gate does not block, such as deduplication with `--no-block-on-dedup` or
 live evaluation without `--block-on-agent-eval`, shows **Failed (advisory)**
 when it fails, because it does not require changes. Publication eligibility is
+shown separately from the command result. Summary reasons count required and
+advisory checks individually, including when a tier contains both. Eligibility is
 shown next to the verdict, because a report can pass its checks and still not
 be eligible for publication. The report follows the system light or dark theme
 until you pick one, and always prints dark text on white paper.

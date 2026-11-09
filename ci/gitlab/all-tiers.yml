@@ -1,0 +1,302 @@
+# SPDX-License-Identifier: Apache-2.0
+# Include this at a reviewed commit. The legacy Tier 1 runner is unchanged.
+variables:
+  SKILL_EVAL_PATHS: skills
+  SKILL_EVAL_SCAN_MODE: auto
+  SKILL_EVAL_MIN_SCORE: '70'
+  SKILL_EVAL_RUNNER: docker
+  SKILL_EVAL_ENVIRONMENT: skillevaluator
+  SKILL_EVAL_TIERS: '1,2,3'
+  SKILL_EVAL_ENV_MODE: docker
+  SKILL_EVAL_PROVIDER: openai
+  SKILL_EVAL_MODEL: ''
+  SKILL_EVAL_EMBEDDING_PROVIDER: ''
+  SKILL_EVAL_EMBEDDING_MODEL: ''
+  SKILL_EVAL_AGENTS: ''
+  SKILL_EVAL_N_ATTEMPTS: '1'
+  SKILL_EVAL_N_CONCURRENT: '1'
+  # Ends min(20 minutes, a quarter) before the 5-hour native job timeout so
+  # setup and the evidence copy fit; the CLI renders the same formula.
+  SKILL_EVAL_TIMEOUT_SECONDS: '16800'
+  SKILL_EVAL_TOOLS_REPOSITORY: NVIDIA/SkillEvaluator
+  GIT_DEPTH: '0'
+  PYTHON_DOTENV_DISABLED: '1'
+
+skill-evaluation:
+  stage: test
+  image:
+    name: "$SKILL_EVAL_IMAGE"
+    entrypoint: [""]
+  variables:
+    GIT_DEPTH: "0"
+    LLM_ENABLED: "false"
+  script:
+    - |
+      set -eu
+      artifact_dir="$CI_PROJECT_DIR/skill-evaluator-report"
+      if [ -e "$artifact_dir" ] || [ -L "$artifact_dir" ]; then
+        echo "skill-evaluator-report already exists; choose a clean checkout for the report." >&2
+        exit 1
+      fi
+      reports_dir="$(mktemp -d /tmp/skillevaluator-reports.XXXXXX)"
+      trap 'rm -rf "$reports_dir"' EXIT
+      export SKILL_PATHS="$SKILL_EVAL_PATHS"
+      export MIN_SCORE="$SKILL_EVAL_MIN_SCORE"
+      # Report links must be HTTPS; an instance served over HTTP gets no job link.
+      case "${CI_JOB_URL:-}" in
+        https://*) export REPORT_RUN_URL="$CI_JOB_URL" ;;
+        *) export REPORT_RUN_URL="" ;;
+      esac
+      export REPORT_COMMIT="${CI_COMMIT_SHA:-}"
+      export REPORT_IMAGE="$SKILL_EVAL_IMAGE"
+      case "$SKILL_EVAL_SCAN_MODE" in
+        auto)
+          if [ "${CI_PIPELINE_SOURCE:-}" = "merge_request_event" ]; then
+            export SCAN_MODE=changed
+          else
+            export SCAN_MODE=all
+          fi
+          ;;
+        all|changed) export SCAN_MODE="$SKILL_EVAL_SCAN_MODE" ;;
+        *) echo "SKILL_EVAL_SCAN_MODE must be auto, all, or changed." >&2; exit 1 ;;
+      esac
+      if [ "$SCAN_MODE" = changed ]; then
+        if [ "${CI_PIPELINE_SOURCE:-}" != "merge_request_event" ] || [ "${CI_MERGE_REQUEST_EVENT_TYPE:-detached}" != detached ]; then
+          echo "Changed-skill selection requires a detached merge-request pipeline." >&2
+          exit 1
+        fi
+        export DIFF_BASE_SHA="${CI_MERGE_REQUEST_DIFF_BASE_SHA:-}"
+        export DIFF_HEAD_SHA="${CI_COMMIT_SHA:-}"
+      fi
+      # Changes to CI onboarding must exercise real skills on the setup MR. The
+      # inline check equals select_changed_skills.setup_changed, which Tiers 2
+      # and 3 use; it stays inline because the pinned image can predate it.
+      if [ "$SCAN_MODE" = changed ]; then
+        SCAN_MODE="$(python -I - <<'PYTHON'
+      import os, re, sys
+      from pathlib import Path
+      sys.path.insert(0, "/opt/skillevaluator/ci")
+      from select_changed_skills import _git
+      base, head = os.environ["DIFF_BASE_SHA"], os.environ["DIFF_HEAD_SHA"]
+      if any(not re.fullmatch(r"[0-9a-f]{40}", value) for value in (base, head)):
+          raise SystemExit("Changed mode requires exact base and head commits")
+      changed = _git(Path(os.environ["CI_PROJECT_DIR"]).resolve(), "diff", "--name-only", "-z", "--no-renames", base, head, "--").split(b"\0")
+      setup = any(path.startswith((b".github/", b".gitlab/", b".skillevaluator/ci")) or path == b".gitlab-ci.yml" for path in changed)
+      print("all" if setup else "changed")
+      PYTHON
+      )"
+        export SCAN_MODE
+      fi
+      set +e
+      python /opt/skillevaluator/ci/run_tier1.py --workspace "$CI_PROJECT_DIR" --reports "$reports_dir"
+      result=$?
+      set -e
+      mkdir "$artifact_dir"
+      cp -R "$reports_dir/." "$artifact_dir/"
+      exit "$result"
+  artifacts:
+    when: always
+    paths:
+      - skill-evaluator-report/
+    expire_in: 14 days
+  rules:
+    - if: '$SKILL_EVAL_FEEDBACK == "true"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+# Feedback pipelines run on the protected default branch. Root jobs outside this
+# include must not run there: start their rules with this guard, or extend this
+# job when they have no rules, only or except of their own.
+.skill-evaluation-not-feedback:
+  rules:
+    - if: '$SKILL_EVAL_FEEDBACK == "true"'
+      when: never
+    - when: on_success
+
+.skill-evaluation-tools:
+  image: python:3.12.12-slim
+  before_script:
+    - |
+      if ! command -v git >/dev/null 2>&1; then
+        if [ "$(id -u)" != 0 ] || ! command -v apt-get >/dev/null 2>&1; then
+          echo 'Install git on this native runner before retrying.' >&2; exit 1
+        fi
+        apt-get update -qq && apt-get install -y --no-install-recommends git ca-certificates
+      fi
+    - |
+      set -eu
+      case "$SKILL_EVAL_TOOLS_REF" in
+        *[!a-f0-9]*|'') echo 'SKILL_EVAL_TOOLS_REF must be an immutable commit' >&2; exit 1 ;;
+      esac
+      test "${#SKILL_EVAL_TOOLS_REF}" -eq 40
+      case "$SKILL_EVAL_TOOLS_REPOSITORY" in
+        *[!a-zA-Z0-9_./-]*|/*|*..*) exit 1 ;;
+      esac
+      tools_dir="$(mktemp -d /tmp/skillevaluator-tools.XXXXXX)"
+      export SKILL_EVAL_TOOLS_DIR="$tools_dir"
+      git -C "$tools_dir" init -q
+      git -C "$tools_dir" remote add origin "https://github.com/$SKILL_EVAL_TOOLS_REPOSITORY.git"
+      git -C "$tools_dir" fetch -q --depth 1 origin "$SKILL_EVAL_TOOLS_REF"
+      git -C "$tools_dir" checkout -q --detach FETCH_HEAD
+      export REPORT_COMMIT="$CI_COMMIT_SHA"
+      export REPORT_REPOSITORY="$CI_PROJECT_PATH"
+      export REPORT_RUN_URL="$CI_PIPELINE_URL"
+      export DIFF_BASE_SHA="${CI_MERGE_REQUEST_DIFF_BASE_SHA:-}"
+      export DIFF_HEAD_SHA="$CI_COMMIT_SHA"
+      export SKILLEVALUATOR_RUNTIME_DIR="$(mktemp -d /tmp/skillevaluator-runtimes.XXXXXX)"
+
+skill-evaluation-native:
+  # Both native tiers are advisory; the aggregate gates only on Tier 1.
+  # Execution failures must retain evidence.
+  allow_failure: true
+  extends: .skill-evaluation-tools
+  stage: test
+  timeout: 5 hours
+  tags: [$SKILL_EVAL_RUNNER]
+  # Environment-scoped secrets and protection still apply. `prepare` records no
+  # deployment, so "Prevent outdated deployment jobs" never drops an older MR.
+  environment:
+    name: $SKILL_EVAL_ENVIRONMENT
+    action: prepare
+  parallel:
+    matrix:
+      - SKILL_EVAL_TIER: ['3']
+  # Tier 3 Docker mode requires a privileged runner supporting Docker-in-Docker and
+  # sharing /certs/client (runner volumes = ["/certs/client"]). TLS client
+  # certificates stay in the job and service; agent containers cannot use the
+  # daemon. For local mode select a native runner and remove this service.
+  services:
+    - name: docker:28.5.1-dind
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: /certs
+    DOCKER_TLS_VERIFY: '1'
+    DOCKER_CERT_PATH: /certs/client
+  script:
+    - |
+      set -eu
+      case ",$SKILL_EVAL_TIERS," in
+        *",$SKILL_EVAL_TIER,"*) ;;
+        *) echo "Tier $SKILL_EVAL_TIER is not selected"; exit 0 ;;
+      esac
+      python -I "$SKILL_EVAL_TOOLS_DIR/ci/eligible_gitlab.py"
+      unset SKILLEVALUATOR_GITLAB_READ_TOKEN
+      if [ "$SKILL_EVAL_TIER" = 3 ]; then
+        if [ "$SKILL_EVAL_ENV_MODE" = docker ] && { ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1 || ! docker buildx version >/dev/null 2>&1; }; then
+          if [ "$(id -u)" != 0 ] || ! command -v apt-get >/dev/null 2>&1; then
+            echo 'Install the Docker CLI, Compose v2 and Buildx on this runner before retrying.' >&2; exit 1
+          fi
+          apt-get update -qq && apt-get install -y --no-install-recommends docker-cli docker-compose docker-buildx
+        elif [ "$SKILL_EVAL_ENV_MODE" = local ] && ! command -v npm >/dev/null 2>&1; then
+          if [ "$(id -u)" != 0 ] || ! command -v apt-get >/dev/null 2>&1; then
+            echo 'Install Node/npm on this native local runner before retrying.' >&2; exit 1
+          fi
+          apt-get update -qq && apt-get install -y --no-install-recommends nodejs npm
+        fi
+      fi
+      python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.11.27
+      env -i PATH="$PATH" python -I -m uv --no-config --cache-dir "$SKILL_EVAL_TOOLS_DIR/.uv-cache" sync --locked --no-dev --extra "tier$SKILL_EVAL_TIER" --project "$SKILL_EVAL_TOOLS_DIR" --python 3.12 --default-index https://pypi.org/simple
+      export PATH="$SKILL_EVAL_TOOLS_DIR/.venv/bin:$PATH"
+      if [ "$SKILL_EVAL_TIER" = 3 ]; then
+        python -I "$SKILL_EVAL_TOOLS_DIR/ci/bootstrap_tiers.py" || true
+      fi
+      reports_dir="$(mktemp -d /tmp/skillevaluator-reports.XXXXXX)"
+      trap 'rm -rf "$reports_dir"' EXIT
+      set +e
+      python -I "$SKILL_EVAL_TOOLS_DIR/ci/run_tiers.py" evaluate --tier "$SKILL_EVAL_TIER" --workspace "$CI_PROJECT_DIR" --reports "$reports_dir"
+      result=$?
+      set -e
+      artifact_dir="$CI_PROJECT_DIR/skill-evaluator-native"
+      if [ -e "$artifact_dir" ] || [ -L "$artifact_dir" ]; then
+        echo 'Use a clean checkout: skill-evaluator-native already exists.' >&2
+        exit 1
+      fi
+      mkdir "$artifact_dir"
+      cp -R "$reports_dir/." "$artifact_dir/"
+      exit "$result"
+  artifacts:
+    when: always
+    paths: [skill-evaluator-native/]
+    expire_in: 14 days
+  rules:
+    - if: '$SKILL_EVAL_FEEDBACK == "true"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID != $CI_PROJECT_ID'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+skill-evaluation-native-tier2:
+  # Inherit caller timeout/tags and the shared execution policy, without
+  # starting Tier 3's Docker service or retaining its client configuration.
+  extends: skill-evaluation-native
+  parallel:
+    matrix:
+      - SKILL_EVAL_TIER: ['2']
+  services: []
+  variables:
+    DOCKER_HOST: ''
+    DOCKER_TLS_CERTDIR: ''
+    DOCKER_TLS_VERIFY: ''
+    DOCKER_CERT_PATH: ''
+
+skill-evaluation-aggregate:
+  extends: .skill-evaluation-tools
+  stage: test
+  when: always
+  needs:
+    - job: skill-evaluation
+      artifacts: true
+      optional: true
+    - job: skill-evaluation-native
+      artifacts: true
+      optional: true
+    - job: skill-evaluation-native-tier2
+      artifacts: true
+      optional: true
+  script:
+    - |
+      set -eu
+      python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.11.27
+      env -i PATH="$PATH" python -I -m uv --no-config --cache-dir "$SKILL_EVAL_TOOLS_DIR/.uv-cache" sync --locked --no-dev --project "$SKILL_EVAL_TOOLS_DIR" --python 3.12 --default-index https://pypi.org/simple
+      export PATH="$SKILL_EVAL_TOOLS_DIR/.venv/bin:$PATH"
+      mkdir -p skill-evaluator-results/tier1
+      if [ -d skill-evaluator-report ]; then
+        cp -R skill-evaluator-report/. skill-evaluator-results/tier1/
+      fi
+      if [ -d skill-evaluator-native ]; then
+        cp -R skill-evaluator-native/. skill-evaluator-results/
+      fi
+      python -I "$SKILL_EVAL_TOOLS_DIR/ci/run_tiers.py" aggregate --reports "$CI_PROJECT_DIR/skill-evaluator-results" --tiers "$SKILL_EVAL_TIERS"
+  artifacts:
+    when: always
+    name: skill-evaluator-results-$CI_PIPELINE_ID-$CI_JOB_ID
+    paths: [skill-evaluator-results/]
+    expire_in: 14 days
+  rules:
+    - if: '$SKILL_EVAL_FEEDBACK == "true"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+skill-evaluation-request-feedback:
+  allow_failure: true
+  extends: .skill-evaluation-tools
+  stage: test
+  needs:
+    - job: skill-evaluation-aggregate
+      artifacts: false
+  when: always
+  variables:
+    GIT_STRATEGY: none
+  # The job-token API records the real source job/pipeline relationship and
+  # supports the same project's protected default branch. No provider work runs.
+  script:
+    - python -I "$SKILL_EVAL_TOOLS_DIR/ci/request_gitlab_feedback.py"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID'

@@ -1119,7 +1119,6 @@
         .tier-card.fail::before { background: var(--danger-color); }
         .tier-card.warn { background: linear-gradient(135deg, rgba(187, 128, 9, 0.10) 0%, var(--bg) 70%); }
         .tier-card.warn::before { background: var(--warning-color); }
-        .tier-card.skipped { opacity: 0.7; }
         .tier-card.skipped::before { background: var(--text-secondary); }
         .tier-card-head {
             display: flex;
@@ -1213,6 +1212,8 @@
             box-shadow: var(--shadow);
         }
         .chart-card h3 { font-size: 0.95rem; color: var(--text-secondary); margin-bottom: 0.75rem; }
+        .chart-description,.chart-fallback { font-size: 0.82rem; color: var(--text-secondary); }
+        .chart-notices pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.75rem; }
         .table-scroll { max-width: 100%; overflow-x: auto; margin: 1rem 0; border-radius: 10px; border: 1px solid var(--border-color); -webkit-overflow-scrolling: touch; }
         .table-scroll .summary-table { margin: 0; }
         .pass-at-k-table { min-width: 720px; }
@@ -1227,7 +1228,7 @@
         }
     </style>
 <style>{% include "report_ui.css.j2" %}</style>
-<noscript><style>.tab-content,.results-view,.skill-content,.validator-content,.top-issues-content,.contributor-content{display:block!important;max-height:none!important;overflow:visible!important}.filter-group,.view-toggle-section,.report-searchbar,.header-controls{display:none!important}</style></noscript>
+<noscript><style>.t3-page,.t3-agent-panel,.table-container,.tab-content,.results-view,.skill-content,.validator-content,.top-issues-content,.contributor-content{display:block!important;max-height:none!important;overflow:visible!important}.filter-group,.view-toggle-section,.report-searchbar,.header-controls{display:none!important}.table-container,.top-issues-content,.summary-table-container,.contributor-content{overflow-x:auto!important}</style></noscript>
 </head>
 <body>
     {% set ci = ci_context | default({}, true) %}
@@ -1242,17 +1243,9 @@
     {#- A failing tier whose gate does not block is "Failed (advisory)", never "Changes required". -#}
     {% set tier3_advisory_fail = tier3_verdict == 'fail' and 'tier3' in nonblocking_tiers %}
     {% set has_t12_tab = tabs | selectattr('id', 'in', ['tier1', 'tier2']) | list | length > 0 %}
-    {% if has_t12_tab %}
-    {#- The summary's rule: when no Tier 1 or Tier 2 check ran, the verdict is Skipped, not Passed. -#}
-    {% set t12_executed = tier1_summary.executed_count + tier2_summary.executed_count %}
-    {% set verdict_key = 'incomplete' if has_incomplete else ('fail' if not all_passed else ('pass' if t12_executed else 'skipped')) %}
-    {% elif has_tier3 %}
-    {% set verdict_key = 'skipped' if tier3_is_skipped else (tier3_verdict if tier3_verdict in ['pass', 'fail', 'neutral'] else 'incomplete') %}
-    {% else %}
-    {% set verdict_key = 'incomplete' %}
-    {% endif %}
+    {% set verdict_key = {'passed': 'pass', 'failed': 'fail'}.get(presentation.command_status.value, 'incomplete') %}
     {% set verdict_class = {'pass': 'pass', 'fail': 'fail'}.get(verdict_key, 'warn') %}
-    {% set verdict_label = advisory_fail_word if not has_t12_tab and verdict_key == 'fail' and tier3_advisory_fail else verdict_words[verdict_key] %}
+    {% set verdict_label = presentation.command_label %}
     {% set check_words = {'pass': 'Passed', 'fail': 'Failed', 'incomplete': 'Incomplete', 'skipped': 'Skipped', 'not_applicable': 'N/A'} %}
     <header class="main-header">
         <div class="header-content">
@@ -1266,9 +1259,7 @@
             <div class="header-meta">
                 <span class="header-status-badge verdict-badge {{ verdict_class }}" data-verdict="{{ verdict_key }}"><span class="verdict-dot" aria-hidden="true"></span><span class="sr-only">Verdict: </span>{{ verdict_label }}</span>
                 <div class="header-controls">
-                    <button type="button" class="theme-toggle" onclick="toggleTheme()" aria-pressed="false" title="Switch between the light and dark themes">
-                        <span id="theme-icon" aria-hidden="true">☾</span><span id="theme-text">Dark theme</span>
-                    </button>
+                    <label class="theme-control" for="report-theme">Theme <select id="report-theme" onchange="setReportTheme(this.value)"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
                     {% if ci.get('canonical_json_url') %}<a class="export-btn" href="{{ ci.canonical_json_url }}" download="skillevaluator-report.json">↓ Download JSON</a>{% else %}
                     <button type="button" class="export-btn" onclick="exportJSON()" title="Export report as JSON">
                         <span aria-hidden="true">↓</span><span>Download JSON</span>
@@ -1280,13 +1271,15 @@
     <aside class="report-sidebar" aria-label="Report navigation">
         <a class="sidebar-brand" href="#report-workspace">{{ se_logo("se-logo-sidebar", 28, "") }}<span class="sidebar-brand-text">SkillEvaluator<small>Evaluation report</small></span></a>
         <span class="sidebar-label">THIS REPORT</span>
-        <a href="#report-workspace" class="sidebar-current">Summary</a>
-        <a href="#report-evidence">Findings &amp; evidence</a>
-        <a href="#run-metadata">Run details</a>
+        <a href="#report-workspace" data-report-section="report-workspace" class="sidebar-current" aria-current="location">Summary</a>
+        {% for number, tier in presentation.tiers.items() if tier.displayed or (tabs | selectattr('id', 'equalto', 'tier' ~ number) | list) %}
+        <a href="#tab-tier{{ number }}" data-report-tier="tier{{ number }}">Tier {{ number }}</a>
+        {% endfor %}
+        <a href="#run-metadata" data-report-section="run-metadata">Run details</a>
         {% if ci.get('report_index_url') %}<a class="sidebar-index-link" href="{{ ci.report_index_url }}">← All skills</a>{% endif %}
         <div class="sidebar-footer">Evidence you can inspect.<br>Self-contained report.</div>
     </aside>
-    <main class="container" id="report-workspace">
+    <main class="container" id="report-workspace" tabindex="-1">
         {% if ci.get('report_index_url') %}<nav class="report-breadcrumb" aria-label="Breadcrumb"><a href="{{ ci.report_index_url }}">All skills</a> / <span aria-current="page">{{ content_label | default('Skill') }} report</span></nav>{% endif %}
         {% set has_tier1 = tabs | selectattr('id', 'equalto', 'tier1') | list | length > 0 %}
         {% set has_tier2 = tabs | selectattr('id', 'equalto', 'tier2') | list | length > 0 %}
@@ -1304,7 +1297,7 @@
         -#}
         {% set hero_title = explicit_skill_name | default(none) or friendly_label or (tier3.skill_name if has_tier3 and tier3.skill_name else (target_display or title)) %}
         {% set hero_score = completed_agent.score if completed_agent else (tier3.overall_score if has_tier3 and tier3.overall_score is not none else none) %}
-        {% set hero_trials = ((tier3.trials or []) | length) if has_tier3 else 0 %}
+        {% set hero_trials = presentation.coverage.text %}
         {% set hero_metric_count = ((tier3.metric_ids or tier3.evaluators or {}) | length) if has_tier3 else 0 %}
         {% set hero_harbor = (tier3.get('harbor_viewer') or tier3.get('summary', {}).get('harbor_viewer') or {}) if has_tier3 else {} %}
         {% set hero_harbor_job_url = hero_harbor.get('job_url') %}
@@ -1314,6 +1307,9 @@
                 <div class="agent-hero-title-block">
                     <span class="agent-hero-eyebrow">{{ content_label }} evaluation</span>
                     <h1 class="agent-hero-title" id="report-title">{{ hero_title }}</h1>
+                    <p class="hero-command-status verdict-chip {{ verdict_class }}">{{ presentation.command_label }}</p>
+                    {% if presentation.required_failed or presentation.required_incomplete %}<p class="hero-decision-reason">{{ presentation.required_failed }} failed · {{ presentation.required_incomplete }} incomplete required check(s). See tier evidence for reasons.</p>{% endif %}
+                    {% if presentation.advisory_unfavorable %}<p class="hero-decision-reason">{{ presentation.advisory_unfavorable }} advisory check(s) failed or incomplete; advisory checks do not change the required result.</p>{% endif %}
                     {#-
                         Show the *full* path/URL only when it actually adds
                         information (i.e. it differs from the friendly label).
@@ -1339,25 +1335,20 @@
                 {% if has_tier3 %}
                 {% set tier3_environment = (tier3.summary.environment if tier3.summary is defined and tier3.summary else None) or tier3.environment %}
                 {% if tier3_is_skipped %}
-                    <span class="verdict-chip warn"><span class="sr-only">Tier 3 verdict: </span>{{ verdict_words['skipped'] }}</span>
+                    <span class="verdict-chip warn">Tier 3 quality: {{ verdict_words['skipped'] }}</span>
                     <div class="agent-hero-detail">
                         <div><strong>Reason:</strong> {{ tier3_skip_message }}</div>
                         <div>Tier 3 is advisory and does not block required validation.</div>
                     </div>
                 {% else %}
                     {% set t3_key = tier3_verdict if tier3_verdict in ['pass', 'fail', 'neutral'] else 'incomplete' %}
-                    <span class="verdict-chip {{ {'pass': 'pass', 'fail': 'fail'}.get(t3_key, 'warn') }}"><span class="sr-only">Tier 3 verdict: </span>{{ advisory_fail_word if tier3_advisory_fail else verdict_words[t3_key] }}</span>
+                    <span class="verdict-chip {{ {'pass': 'pass', 'fail': 'fail'}.get(t3_key, 'warn') }}">Tier 3 quality: {{ advisory_fail_word if tier3_advisory_fail else verdict_words[t3_key] }}</span>
                     {% if t3_key == 'incomplete' and tier3_status_reason %}<p class="hero-reason">{{ tier3_status_reason }}</p>{% endif %}
-                    <div class="agent-hero-score {{ 'score-pass' if hero_score is not none and hero_score >= 0.8 else ('score-warn' if hero_score is not none and hero_score >= 0.6 else 'score-fail') }}">{{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}<span class="hero-score-label">{{ 'baseline score' if tier3.get('mode') == 'baseline_only' else 'overall score' }}</span></div>
+                    <div class="agent-hero-score {{ 'score-pass' if hero_score is not none and hero_score >= 0.8 else ('score-warn' if hero_score is not none and hero_score >= 0.6 else 'score-fail') }}">{{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}<span class="hero-score-label">{{ presentation.score_scope }}{{ ' (baseline)' if tier3.get('mode') == 'baseline_only' else '' }}</span></div>
                     <div class="agent-hero-detail">
                         <div><strong>Best performing agent:</strong> {{ tier3.best_agent or 'N/A' }}</div>
                         {% if tier3.get('mode') == 'baseline_only' %}<div>Baseline-only run (<code>--skip-with-skill</code>): no with-skill arm, so no skill lift was measured.</div>{% endif %}
                         {% if completed_agent and completed_agent.needs_attention %}<div class="score-warn">Completed-agent result. Other execution failures need attention; see agent details.</div>{% endif %}
-                        {% if completed_agent and completed_agent.recovered_attempts %}<div>{{ completed_agent.recovered_attempts }} timeout attempt(s) recovered; failed history retained.</div>{% endif %}
-                        <div><strong>Trials:</strong> {{ hero_trials }} across {{ (tier3.agents_run or []) | length }} agent(s)</div>
-                        <div><strong>Metrics:</strong> {{ hero_metric_count }} evaluators</div>
-                        {% if tier3_environment %}<div><strong>Environment:</strong> <code>{{ tier3_environment }}</code></div>{% endif %}
-                        {% if tier3.get('overall_lift') is not none %}<div><strong>Best-agent lift:</strong> {{ "%+.2f" | format(tier3.get('overall_lift')) }}</div>{% endif %}
                     </div>
                 {% endif %}
                 {% endif %}
@@ -1368,38 +1359,33 @@
                     {% endif %}
                 </div>
             </div>
-            {#-
-                Per-tier summary tiles. Each tier renders its own card iff its
-                tab exists in ``tabs`` (so an agent-eval-only run shows just
-                Tier 3, a Tier-1+2 run shows two cards, a full pipeline shows
-                three). Stats are sourced from per-tier summaries computed in
-                ``HTMLReporter.render_all`` rather than the global aggregate
-                counters, so each card reflects only its own tier.
-
-                Each card is also the *navigation control* for its tier — the
-                inline ``onclick``/keyboard handlers swap to the matching tab
-                immediately, replacing the previous secondary "nav-tabs" pill
-                row that lived below the hero. ``initial_tab`` matches the
-                first ``tab.id`` so the card's ``active`` styling lines up
-                with whichever tab content is rendered active by default.
-            -#}
+            {# Tiles retain populated tier summaries; presentation scope also exposes absent tiers truthfully. #}
             {% set initial_tab = tabs[0].id if tabs else 'tier1' %}
             {#- With one tier, the executive summary below carries the numbers. -#}
-            {% set single_tier = tabs | length < 2 %}
+            {% set single_tier = tabs | length < 2 and presentation.tiers.values() | selectattr('displayed') | list | length < 2 %}
+{% macro absent_tier_tile(number, tier) %}
+                <div class="tier-card skipped" role="button" tabindex="0" data-target-tab="tier{{ number }}" aria-controls="tab-tier{{ number }}" aria-pressed="false"
+                     data-report-tier-tile="true">
+                    <div class="tier-card-head"><span class="tier-card-label">Tier {{ number }}</span><span class="tier-card-verdict">{{ tier.summary }}</span></div>
+                    <p class="tier-card-title">{{ {1:'Security & Static Validation',2:'Deduplication',3:'Live Agent Evaluation'}[number] }}</p>
+                </div>
+{% endmacro %}
             <div class="tier-cards{{ ' single-tier' if single_tier else '' }}{{ ' tier-line' if single_tier and has_tier1 else '' }}">
                 {% if has_tier1 %}
-                {% set t1_class = 'warn' if tier1_summary.incomplete_count else ('skipped' if tier1_summary.executed_count == 0 else ('pass' if tier1_summary.all_passed else 'fail')) %}
+                {% set t1_class = 'fail' if tier1_summary.failed_count else ('warn' if tier1_summary.incomplete_count else ('skipped' if tier1_summary.executed_count == 0 else 'pass')) %}
                 <div class="tier-card {{ t1_class }}{% if initial_tab == 'tier1' %} active{% endif %}"
                      role="button"
                      tabindex="0"
                      data-target-tab="tier1"
+                     aria-controls="tab-tier1"
+                     aria-pressed="{{ 'true' if initial_tab == 'tier1' else 'false' }}"
                      onclick="showTab('tier1')"
                      onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();showTab('tier1');}"
                      aria-label="Open Tier 1: Security and Static Validation"
                      title="Open Tier 1: Security and Static Validation">
                     <div class="tier-card-head">
                         <span class="tier-card-label">Tier 1</span>
-                        {% if not single_tier %}<span class="tier-card-verdict">{{ verdict_words[{'pass': 'pass', 'fail': 'fail', 'warn': 'incomplete'}.get(t1_class, 'skipped')] }}</span>{% endif %}
+                        {% if not single_tier %}<span class="tier-card-verdict">{{ 'N/A' if presentation.tiers[1].display_status == 'not_applicable' else verdict_words[{'pass': 'pass', 'fail': 'fail', 'warn': 'incomplete'}.get(t1_class, 'skipped')] }}</span>{% endif %}
                     </div>
                     <p class="tier-card-title">Security &amp; Static Validation</p>
                     <div class="tier-card-stats">
@@ -1419,52 +1405,60 @@
                     </div>
                     {% endif %}
                 </div>
+                {% elif presentation.tiers[1].displayed %}{{ absent_tier_tile(1, presentation.tiers[1]) }}
                 {% endif %}
                 {% if has_tier2 %}
-                {% set t2_class = 'warn' if tier2_summary.incomplete_count else ('skipped' if tier2_summary.executed_count == 0 else ('pass' if tier2_summary.all_passed else 'fail')) %}
+                {% set t2_class = 'fail' if tier2_summary.failed_count else ('warn' if tier2_summary.incomplete_count else ('skipped' if tier2_summary.executed_count == 0 else 'pass')) %}
                 <div class="tier-card {{ t2_class }}{% if initial_tab == 'tier2' %} active{% endif %}"
                      role="button"
                      tabindex="0"
                      data-target-tab="tier2"
+                     aria-controls="tab-tier2"
+                     aria-pressed="{{ 'true' if initial_tab == 'tier2' else 'false' }}"
                      onclick="showTab('tier2')"
                      onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();showTab('tier2');}"
                      aria-label="Open Tier 2: Deduplication"
                      title="Open Tier 2: Deduplication">
                     <div class="tier-card-head">
                         <span class="tier-card-label">Tier 2</span>
-                        <span class="tier-card-verdict">{{ advisory_fail_word if t2_class == 'fail' and 'tier2' in nonblocking_tiers else verdict_words[{'pass': 'pass', 'fail': 'fail', 'warn': 'incomplete'}.get(t2_class, 'skipped')] }}</span>
+                        <span class="tier-card-verdict">{{ 'N/A' if presentation.tiers[2].display_status == 'not_applicable' else (advisory_fail_word if t2_class == 'fail' and 'tier2' in nonblocking_tiers else verdict_words[{'pass': 'pass', 'fail': 'fail', 'warn': 'incomplete'}.get(t2_class, 'skipped')]) }}</span>
                     </div>
                     <p class="tier-card-title">Deduplication</p>
                     <div class="tier-card-stats">
                         <span><strong>{{ tier2_summary.passed_count }}</strong> of {{ tier2_summary.executed_count }} checks passed</span>
+                        {% if tier2_summary.not_applicable_count %}<span><strong>{{ tier2_summary.not_applicable_count }}</strong> not applicable</span>{% endif %}
                         {% if tier2_summary.skipped_count %}<span><strong>{{ tier2_summary.skipped_count }}</strong> skipped</span>{% endif %}
-                        {% if tier2_summary.issue_count %}<span><strong>{{ tier2_summary.issue_count }}</strong> duplicate(s)</span>{% endif %}
+                        {% if tier2_summary.issue_count %}<span><strong>{{ tier2_summary.issue_count }}</strong> finding(s)</span>{% endif %}
                     </div>
                 </div>
+                {% elif presentation.tiers[2].displayed %}{{ absent_tier_tile(2, presentation.tiers[2]) }}
                 {% endif %}
                 {% if has_tier3 %}
-                {% set tier3_display_verdict = verdict_words['skipped'] if tier3_is_skipped else (advisory_fail_word if tier3_advisory_fail else verdict_words[tier3_verdict if tier3_verdict in ['pass', 'fail', 'neutral'] else 'incomplete']) %}
-                {% set t3_class = 'skipped' if tier3_is_skipped else ('warn' if completed_agent and completed_agent.needs_attention else ('pass' if tier3_verdict == 'pass' else ('fail' if tier3_verdict == 'fail' else 'warn'))) %}
+                {% set t3_tile_verdict = presentation.tiers[3].assessment_status or 'incomplete' %}
+                {% set tier3_display_verdict = verdict_words['skipped'] if tier3_is_skipped else (advisory_fail_word if t3_tile_verdict == 'fail' and 'tier3' in nonblocking_tiers else verdict_words[t3_tile_verdict if t3_tile_verdict in ['pass', 'fail', 'neutral'] else 'incomplete']) %}
+                {% set t3_class = 'fail' if t3_tile_verdict == 'fail' else ('skipped' if tier3_is_skipped else ('warn' if completed_agent and completed_agent.needs_attention else ('pass' if t3_tile_verdict == 'pass' else 'warn'))) %}
                 <div class="tier-card {{ t3_class }}{% if initial_tab == 'tier3' %} active{% endif %}"
                      role="button"
                      tabindex="0"
                      data-target-tab="tier3"
+                     aria-controls="tab-tier3"
+                     aria-pressed="{{ 'true' if initial_tab == 'tier3' else 'false' }}"
                      onclick="showTab('tier3')"
                      onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();showTab('tier3');}"
                      aria-label="Open Tier 3: Live Agent Evaluation"
                      title="Open Tier 3: Live Agent Evaluation">
                     <div class="tier-card-head">
                         <span class="tier-card-label">Tier 3</span>
-                        <span class="tier-card-verdict">{{ tier3_display_verdict }}{% if report_scope == 'tier3' and completed_agent %} · Quality{% if completed_agent.needs_attention %}; needs attention{% endif %}{% endif %}</span>
+                        <span class="tier-card-verdict">{{ tier3_display_verdict }}</span>
                     </div>
                     <p class="tier-card-title">Live Agent Evaluation</p>
                     <div class="tier-card-stats">
                         {% if tier3_is_skipped %}
                         <span>{{ tier3_skip_message }}</span>
                         {% else %}
-                        <span>score <strong>{{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}</strong></span>
+                        <span>Best agent score <strong>{{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}</strong></span>
                         {% if tier3.get('overall_lift') is not none %}<span>lift <strong>{{ "%+.2f" | format(tier3.get('overall_lift')) }}</strong></span>{% endif %}
-                        {% if hero_trials %}<span><strong>{{ hero_trials }}</strong> trial(s)</span>{% endif %}
+                        <span class="trial-coverage">{{ hero_trials }}</span>
                         {% endif %}
                     </div>
                     {% if hero_harbor_job_url or hero_harbor_analysis_url %}
@@ -1474,13 +1468,26 @@
                     </div>
                     {% endif %}
                 </div>
+                {% elif presentation.tiers[3].displayed %}{{ absent_tier_tile(3, presentation.tiers[3]) }}
                 {% endif %}
+
             </div>
         </section>
-        {% if not has_tier1 %}<div id="report-evidence" class="workspace-heading"><h2>Findings &amp; evidence</h2><p>Each check with its results and the evidence behind them.</p></div>{% endif %}
-        {% for tab in tabs %}
-        <div id="tab-{{ tab.id }}" class="tab-content {{ 'active' if loop.first else '' }}">
-        {% if tab.id == 'tier1' %}
+        <nav class="mobile-tier-nav" aria-label="Tier navigation">
+            {% for number, tier in presentation.tiers.items() if tier.displayed or (tabs | selectattr('id', 'equalto', 'tier' ~ number) | list) %}<a href="#tab-tier{{ number }}" data-report-tier="tier{{ number }}">Tier {{ number }}</a>{% endfor %}
+        </nav>
+        <div id="report-evidence" class="workspace-heading" tabindex="-1"><h2>Findings &amp; evidence</h2><p>Each check with its results and the evidence behind them.</p></div>
+        {% set workspace_tabs = [] %}
+        {% for number, tier in presentation.tiers.items() %}
+            {% set existing_tab = tabs | selectattr('id', 'equalto', 'tier' ~ number) | list %}
+            {% if existing_tab %}{% set _ = workspace_tabs.append(existing_tab[0]) %}
+            {% elif tier.displayed %}{% set _ = workspace_tabs.append({'id':'tier' ~ number,'label':'Tier ' ~ number,'empty':true,'number':number}) %}{% endif %}
+        {% endfor %}
+        {% for tab in workspace_tabs %}
+        <div id="tab-{{ tab.id }}" class="tab-content {{ 'active' if tab.id == initial_tab else '' }}" tabindex="-1" aria-label="{{ tab.label }}">
+        {% if tab.empty | default(false) %}
+            <section class="tier-empty"><h2>{{ tab.label }} · {{ presentation.tiers[tab.number].summary }}</h2><p>No check evidence was recorded for this tier.</p></section>
+        {% elif tab.id == 'tier1' %}
         {% set results = tier1_display_results %}
         {% set skills = tier1_skills %}
         {% set top_issues = tier1_top_issues %}
@@ -1497,7 +1504,7 @@
         {% set incomplete_skills = skills.values() | selectattr('status', 'defined') | selectattr('status', 'equalto', 'incomplete') | list | length %}
         {% set failed_skills = [tier1_display_summary.failed_skills - incomplete_skills, 0] | max %}
             {# ==================== EXECUTIVE SUMMARY ==================== #}
-            {% set t1_key = 'incomplete' if tier1_summary.incomplete_count else ('skipped' if tier1_summary.executed_count == 0 else ('pass' if tier1_summary.all_passed else 'fail')) %}
+            {% set t1_key = 'fail' if tier1_summary.failed_count else ('incomplete' if tier1_summary.incomplete_count else ('skipped' if tier1_summary.executed_count == 0 else 'pass')) %}
             {% set t1_class = {'pass': 'pass', 'fail': 'fail'}.get(t1_key, 'warn') %}
             {% set t1_all_checks = total_validators + ui_t1_na + (skipped_count or 0) %}
             {% set qualities = skills.values() | selectattr('quality', 'defined') | map(attribute='quality') | selectattr('overall_score', 'defined') | list %}
@@ -1512,7 +1519,7 @@
                     {%- elif t1_key == 'skipped' -%}
                         No Tier 1 check ran, so there is no result to report.
                     {%- else -%}
-                        All {{ total_validators }} checks that apply passed.{% if tier1_summary.issue_count %} {{ tier1_summary.issue_count }} advisory finding{{ 's do' if tier1_summary.issue_count != 1 else ' does' }} not block.{% endif %}
+                        All {{ tier1_summary.executed_count }} checks that apply passed.{% if tier1_summary.issue_count %} {{ tier1_summary.issue_count }} advisory finding{{ 's do' if tier1_summary.issue_count != 1 else ' does' }} not block.{% endif %}
                     {%- endif -%}
                     {%- if tier1_incomplete_scans -%}
                         {%- if tier1_scanners_missing %} Install or enable the scanner and run the evaluation again.
@@ -1569,7 +1576,7 @@
                 </div>
                 {% endif %}
             </section>
-            <div id="report-evidence" class="workspace-heading"><h2>Findings &amp; evidence</h2><p>Each check with its findings, evidence and suggested fixes.</p></div>
+
             {# ==================== FINDING TYPES ==================== #}
             {% if top_issues %}
             <div class="top-issues-section {{ 'advisory-findings' if all_passed and not has_incomplete else '' }}">
@@ -1615,6 +1622,12 @@
                     {% if top_issues | length > 10 %}<p class="findings-overflow-note">Showing 10 of {{ top_issues | length }} finding types. Full evidence and suggested fixes are included below.</p>{% endif %}
                 </div>
             </div>
+            {% endif %}
+            {% if skillspector_versions %}
+            <details class="t3-details">
+                <summary>Scanner provenance</summary>
+                <p>Recorded SkillSpector version{{ 's' if skillspector_versions | length != 1 else '' }}: {{ skillspector_versions | join(', ') }}</p>
+            </details>
             {% endif %}
             {# SkillSpector LLM provenance from --llm runs, validated by skillspector_provenance.py. #}
             {% if skillspector_provenance %}
@@ -2065,26 +2078,26 @@
         {% elif tab.id == 'tier2' %}
         {# ==================== TIER 2: SEMANTIC OVERLAP ==================== #}
 
-        {% set tier2_findings = [] %}{% for r in tier2_results %}{% for f in r.findings %}{% if tier2_findings.append(f) %}{% endif %}{% endfor %}{% endfor %}
-
-        <div class="dashboard">
-            <div class="dashboard-card">
-                <h3 class="dashboard-card-title">Checks Run</h3>
-                <p class="dashboard-card-value">{{ tier2_summary.executed_count }}</p>
-                <p class="dashboard-card-subtitle">Semantic overlap analysis</p>
+        <nav aria-label="Tier 2 comparison scopes" class="tier2-scope-nav">
+            {% for scope in tier2_scopes %}<a href="#tier2-{{ scope.id }}">{{ scope.label }}</a>{% endfor %}
+        </nav>
+        {% for scope in tier2_scopes %}
+        <section id="tier2-{{ scope.id }}" aria-labelledby="tier2-{{ scope.id }}-title">
+            <h2 id="tier2-{{ scope.id }}-title">{{ scope.label }}</h2>
+            <p>{{ 'Redundant content among files in the evaluated skill.' if scope.id == 'within' else 'Semantic overlap with catalog entries or among a collection of skills.' }}</p>
+            {% if not scope.not_run %}
+            <div class="dashboard">
+                {#- Across skills counts every similarity match, not only duplicates. -#}
+                {% for label, value in [('Checks completed', scope.completed), ('Duplicate findings' if scope.id == 'within' else 'Similarity matches', scope.duplicates), ('Affected files' if scope.id == 'within' else 'Affected skills', scope.affected), ('Catalog entries compared', scope.catalog_entries)] %}
+                <div class="dashboard-card">
+                    <h3 class="dashboard-card-title">{{ label }}</h3>
+                    <p class="dashboard-card-value">{{ 'Not applicable' if label == 'Catalog entries compared' and scope.catalog_not_applicable else (value if value is not none else 'Unavailable') }}</p>
+                </div>
+                {% endfor %}
             </div>
-            <div class="dashboard-card danger">
-                <h3 class="dashboard-card-title">Matches Found</h3>
-                <p class="dashboard-card-value">{{ tier2_findings | length }}</p>
-                <p class="dashboard-card-subtitle" style="font-size:0.8rem;">Within or across evaluated skills</p>
-            </div>
-        </div>
-
-        {% if tier2_results %}
-            <p style="color:var(--text-secondary);font-size:0.9rem;margin:0.75rem 0;">
-                Checks for redundant content within one skill and semantic overlap across skills or local catalog entries.
-            </p>
-            {% for result in tier2_results %}
+            {% endif %}
+            {% for note in scope.notes %}<p class="t3-section-hint">{{ note }}</p>{% endfor %}
+            {% for result in scope.results %}
                 {% set execution_errors = result | additional_errors %}
                 {% if execution_errors %}
                 <div style="background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:8px;padding:1rem;margin:0.75rem 0;">
@@ -2103,7 +2116,7 @@
                     <strong style="color:var(--warning-color);">Incomplete scanner evidence:</strong>
                     {{ result.incomplete_scans | join(', ') }} did not produce trustworthy evidence. Restore the scanner and rerun validation.
                 </div>
-                {% elif result.passed and not result.findings %}
+                {% elif result.passed and not result.findings and scope.completed == scope.results | length %}
                 <div style="background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:8px;padding:1rem;margin:0.75rem 0;">
                     {{ icons.checkmark | safe }} <strong style="color:var(--success-color);">No semantic overlaps detected.</strong>
                     {% if result.success_details %}
@@ -2139,9 +2152,8 @@
                 </details>
                 {% endfor %}
             {% endfor %}
-        {% else %}
-            <p style="color: var(--text-secondary); padding: 1rem;">No Tier 2 checks were run. Configure a public embedding provider, then run <code>similarity-check</code> or <code>dedup-scan</code>.</p>
-        {% endif %}
+        </section>
+        {% endfor %}
 
         {% elif tab.id == 'tier3' %}
         {# ==================== TIER 3: AGENT EVALUATION (dimensions-first, schema v2.0) ==================== #}
@@ -2150,6 +2162,12 @@
         {# Helpers / locals used across the Tier 3 sub-tabs #}
         {% set t3_summary = tier3.summary or {} %}
         {% set t3_agents = tier3.agents or {} %}
+        {% macro tier3_chart(id, title, description, reference, reference_label, height) %}
+            <h3>{{ title }}</h3>
+            <p class="chart-description" id="{{ id }}-description">{{ description }} <a href="#{{ reference }}" onclick="return openTier3Reference(this.getAttribute('href').slice(1))">{{ reference_label }}</a>.</p>
+            <canvas id="{{ id }}" height="{{ height }}" role="img" aria-label="{{ title }}" aria-describedby="{{ id }}-description" hidden></canvas>
+            <p class="chart-fallback" id="{{ id }}-fallback" role="status">Chart unavailable. Use the data link above to read the results.</p>
+        {% endmacro %}
         {% set t3_best_name = tier3.best_agent or t3_summary.best_agent %}
         {% set t3_best = t3_agents[t3_best_name] if t3_best_name and t3_agents[t3_best_name] is defined else None %}
         {% set t3_dim_ids = ["security", "correctness", "discoverability", "effectiveness", "efficiency"] %}
@@ -2428,13 +2446,13 @@
             }
         </style>
 
-        <nav class="t3-subtabs">
-            <button class="t3-subtab active" data-tier3-tab="overview" onclick="showTier3SubTab('overview', this)">Overview</button>
-            <button class="t3-subtab" data-tier3-tab="suggestions" onclick="showTier3SubTab('suggestions', this)">Insights</button>
-            <button class="t3-subtab" data-tier3-tab="agents" onclick="showTier3SubTab('agents', this)">Agent Details</button>
-            <button class="t3-subtab" data-tier3-tab="trials" onclick="showTier3SubTab('trials', this)">Trials</button>
-            <button class="t3-subtab" data-tier3-tab="dataset" onclick="showTier3SubTab('dataset', this)">Dataset</button>
-            <button class="t3-subtab" data-tier3-tab="provenance" onclick="showTier3SubTab('provenance', this)">Diagnostics</button>
+        <nav class="t3-subtabs" role="tablist" aria-label="Live evaluation views">
+            <button class="t3-subtab active" data-tier3-tab="overview" role="tab" id="tier3-tab-overview" aria-controls="tier3-page-overview" aria-selected="true" tabindex="0" onclick="showTier3SubTab('overview', this)">Overview</button>
+            <button class="t3-subtab" data-tier3-tab="suggestions" role="tab" id="tier3-tab-suggestions" aria-controls="tier3-page-suggestions" aria-selected="false" tabindex="-1" onclick="showTier3SubTab('suggestions', this)">Insights</button>
+            <button class="t3-subtab" data-tier3-tab="agents" role="tab" id="tier3-tab-agents" aria-controls="tier3-page-agents" aria-selected="false" tabindex="-1" onclick="showTier3SubTab('agents', this)">Agent Details</button>
+            <button class="t3-subtab" data-tier3-tab="trials" role="tab" id="tier3-tab-trials" aria-controls="tier3-page-trials" aria-selected="false" tabindex="-1" onclick="showTier3SubTab('trials', this)">Trials</button>
+            <button class="t3-subtab" data-tier3-tab="dataset" role="tab" id="tier3-tab-dataset" aria-controls="tier3-page-dataset" aria-selected="false" tabindex="-1" onclick="showTier3SubTab('dataset', this)">Dataset</button>
+            <button class="t3-subtab" data-tier3-tab="provenance" role="tab" id="tier3-tab-provenance" aria-controls="tier3-page-provenance" aria-selected="false" tabindex="-1" onclick="showTier3SubTab('provenance', this)">Diagnostics</button>
         </nav>
 
         {% if tier3_truncation or tier3_preview_notice %}
@@ -2467,7 +2485,7 @@
         {% endif %}
 
         {# ---------- Overview ---------- #}
-        <section class="t3-page active" id="tier3-page-overview">
+        <section class="t3-page active" id="tier3-page-overview" role="tabpanel" aria-labelledby="tier3-tab-overview" tabindex="0">
             {% set t3_effect = (tier3.conclusions or []) | selectattr('title', 'equalto', 'Skill effect') | first %}
             <div class="t3-overview-lead">
                 {% if tier3_is_skipped %}
@@ -2497,15 +2515,19 @@
                 {% endif %}
                 {% endif %}
             </div>
-            {% if t3_harbor_job_url or t3_harbor_analysis_url %}
+            {% if harbor_jobs %}
             <div class="t3-harbor-panel">
                 <div>
                     <strong>Harbor artifacts</strong>
                     <p>Open retained logs, raw trajectories, artifacts, and generated Harbor analysis for this Tier 3 run.</p>
                 </div>
                 <div class="t3-harbor-actions">
-                    {% if t3_harbor_job_url %}<a class="t3-harbor-link" href="{{ t3_harbor_job_url }}" target="_blank" rel="noopener">Open Harbor logs</a>{% endif %}
-                    {% if t3_harbor_analysis_url %}<a class="t3-harbor-link" href="{{ t3_harbor_analysis_url }}" target="_blank" rel="noopener">Open Harbor analysis</a>{% endif %}
+                    {% for job in harbor_jobs %}
+                    <div><strong>{{ job.name }}</strong>
+                    {% if job.url %}<a class="t3-harbor-link" href="{{ job.url }}" target="_blank" rel="noopener">Results</a>{% endif %}
+                    {% if job.analysis_url %}<a class="t3-harbor-link" href="{{ job.analysis_url }}" target="_blank" rel="noopener">Analysis</a>{% endif %}
+                    </div>
+                    {% endfor %}
                 </div>
             </div>
             {% endif %}
@@ -2604,7 +2626,7 @@
                     Consolidated evaluation dimensions. The Signals column shows which evaluator metrics feed each human-readable dimension.
                 </p>
                 <div class="table-scroll">
-                <table class="summary-table">
+                <table class="summary-table" id="tier3-dimension-table">
                     <thead><tr>
                         <th>Dimension</th><th>Score</th>
                         <th>Baseline</th><th>Skill Lift</th>
@@ -2670,7 +2692,7 @@
                     {% set _ = t3_mad_by_agent.update({name: dmap}) %}
                 {% endfor %}
                 <div class="table-scroll">
-                <table class="summary-table" style="width:100%;">
+                <table class="summary-table" id="tier3-multi-agent-dimension-table" style="width:100%;">
                     <thead><tr>
                         <th>Dimension</th>
                         {% for name, _agent in t3_agents.items() %}
@@ -2763,8 +2785,10 @@
                         </div>
                     {% endfor %}
                     </div>
-                    <div class="chart-card"><h3>Dimension Comparison (Radar)</h3><canvas id="tier3-radar" height="260"></canvas></div>
-                    <div class="chart-card"><h3>Dimension Scores by Agent</h3><canvas id="tier3-metric-bar" height="260"></canvas></div>
+                    {% set dimension_reference = ('tier3-multi-agent-dimension-table' if t3_agents | length > 1 else 'tier3-dimension-table') if tier3.dimensions else 'tier3-json-downloads' %}
+                    {% set dimension_reference_label = 'Read the dimension scores table' if tier3.dimensions else 'Read JSON Downloads (dimension scores unavailable)' %}
+                    <div class="chart-card">{{ tier3_chart('tier3-radar', 'Dimension Comparison (Radar)', 'Dimension scores for each agent, on a scale from 0 to 1; missing measurements are gaps.', dimension_reference, dimension_reference_label, 260) }}</div>
+                    <div class="chart-card">{{ tier3_chart('tier3-metric-bar', 'Dimension Scores by Agent', 'Dimension scores grouped by dimension and agent, on a scale from 0 to 1; missing measurements are gaps.', dimension_reference, dimension_reference_label, 260) }}</div>
                 </div>
                 </div>
             </details>
@@ -2773,7 +2797,7 @@
         </section>
 
         {# ---------- Trials ---------- #}
-        <section class="t3-page" id="tier3-page-trials">
+        <section class="t3-page" id="tier3-page-trials" role="tabpanel" aria-labelledby="tier3-tab-trials" tabindex="0">
             {# Drill-down rows for both conditions: with-skill rows come from the canonical
                top-level trials, baseline rows from each agent's trials_baseline. #}
             {% set t3_condition_trial_rows = [] %}
@@ -3004,8 +3028,8 @@
                 <summary>Trial Charts</summary>
                 <div class="t3-details-body">
                 <div class="chart-grid">
-                    {% if t3_token_coverage.all_agents_complete %}<div class="chart-card"><h3>With-Skill Token Usage by Agent</h3><canvas id="tier3-token-chart" height="250"></canvas></div>{% endif %}
-                    {% if t3_steps_chart.datasets %}<div class="chart-card"><h3>Steps per Eval Case by Agent and Condition</h3><canvas id="tier3-steps-chart" height="250"></canvas>{% if t3_steps_chart.get('omitted_cases') %}<p style="color:var(--text-secondary);font-size:0.82rem;">Showing the first {{ t3_steps_chart.labels | length }} eval cases; {{ t3_steps_chart['omitted_cases'] }} more are in the JSON Downloads.</p>{% endif %}</div>{% endif %}
+                    {% if t3_token_coverage.all_agents_complete %}<div class="chart-card">{{ tier3_chart('tier3-token-chart', 'With-Skill Token Usage by Agent', 'Prompt, completion and observed cached tokens summed across with-skill trials for each agent.', 't3-trials-table', 'Read token measurements in the trial table', 250) }}</div>{% endif %}
+                    {% if t3_steps_chart.datasets %}<div class="chart-card">{{ tier3_chart('tier3-steps-chart', 'Steps per Eval Case by Agent and Condition', 'Average measured steps per eval case, grouped by agent and with-skill or baseline condition; incomplete measurements are gaps.', 't3-trials-table', 'Read individual step measurements in the trial table', 250) }}{% if t3_steps_chart.get('omitted_cases') %}<p style="color:var(--text-secondary);font-size:0.82rem;">Showing the first {{ t3_steps_chart.labels | length }} eval cases; {{ t3_steps_chart['omitted_cases'] }} more are in the JSON Downloads.</p>{% endif %}</div>{% endif %}
                 </div>
                 </div>
             </details>
@@ -3292,7 +3316,7 @@
         </section>
 
         {# ---------- Agent Details ---------- #}
-        <section class="t3-page" id="tier3-page-agents">
+        <section class="t3-page" id="tier3-page-agents" role="tabpanel" aria-labelledby="tier3-tab-agents" tabindex="0">
             {% if t3_agents %}
             {% set t3_palette = ["#76b900","#8b5cf6","#ec4899","#06b6d4","#3b82f6","#f59e0b","#22c55e"] %}
             <nav class="t3-agent-tabs" role="tablist" aria-label="Agent details">
@@ -3301,7 +3325,7 @@
                 {% set agent_color = t3_palette[agent_idx % (t3_palette | length)] %}
                 {% set agent_score = agent.with_skill %}
                 <button class="t3-agent-tab-btn{% if loop.first %} active{% endif %}"
-                        role="tab"
+                        role="tab" id="tier3-agent-tab-{{ loop.index0 }}" aria-controls="{{ t3_agent_panel_ids[name] }}" aria-selected="{{ 'true' if loop.first else 'false' }}" tabindex="{{ '0' if loop.first else '-1' }}"
                         data-tier3-agent="{{ name }}"
                         data-tier3-agent-panel-id="{{ t3_agent_panel_ids[name] }}"
                         style="--accent: {{ agent_color }};"
@@ -3324,7 +3348,7 @@
                 {% if best_dim is none or dscore > (best_dim.score if best_dim.score is not none else best_dim.with_skill) %}{% set best_dim = d %}{% endif %}
                 {% if worst_dim is none or dscore < (worst_dim.score if worst_dim.score is not none else worst_dim.with_skill) %}{% set worst_dim = d %}{% endif %}
             {% endfor %}
-            <div class="t3-agent-panel{% if loop.first %} active{% endif %}" id="{{ t3_agent_panel_ids[name] }}" data-tier3-agent="{{ name }}" role="tabpanel">
+            <div class="t3-agent-panel{% if loop.first %} active{% endif %}" id="{{ t3_agent_panel_ids[name] }}" data-tier3-agent="{{ name }}" role="tabpanel" aria-labelledby="tier3-agent-tab-{{ loop.index0 }}" tabindex="0">
                 {# Stable, index-based scroll target for jumpToTier3Agent. Raw agent
                    names can contain characters that are unsafe in CSS/HTML IDs (slashes,
                    dots), so deep-links from Overview point at this anchor instead of
@@ -3516,7 +3540,7 @@
         </section>
 
         {# ---------- Dataset ---------- #}
-        <section class="t3-page" id="tier3-page-dataset">
+        <section class="t3-page" id="tier3-page-dataset" role="tabpanel" aria-labelledby="tier3-tab-dataset" tabindex="0">
             {% if t3_dataset %}
             <div class="t3-dataset-hero">
                 <h2>AgentSkills Dataset</h2>
@@ -3581,7 +3605,7 @@
         </section>
 
         {# ---------- Insights (Conclusions + Recommendations) ---------- #}
-        <section class="t3-page" id="tier3-page-suggestions">
+        <section class="t3-page" id="tier3-page-suggestions" role="tabpanel" aria-labelledby="tier3-tab-suggestions" tabindex="0">
             {% set t3_has_conclusions = tier3.conclusions and (tier3.conclusions | length) > 0 %}
             {% set t3_recommendations = tier3.recommendations or [] %}
             {% set t3_has_suggestions = (t3_recommendations | length) > 0 or (tier3.suggestions and (tier3.suggestions | length) > 0) %}
@@ -3713,13 +3737,31 @@
         </section>
 
         {# ---------- Diagnostics (raw SkillEvaluator data + downloads) ---------- #}
-        <section class="t3-page" id="tier3-page-provenance">
+        <section class="t3-page" id="tier3-page-provenance" role="tabpanel" aria-labelledby="tier3-tab-provenance" tabindex="0">
             <p style="color:var(--text-secondary);">
                 Diagnostics preserve raw evaluation artifacts for deep dives and troubleshooting.
                 The main report leads with human-readable dimensions; the blocks below show the
                 underlying evaluator scores, Harbor artifacts, and timing &mdash; each available as a
                 one-click download.
             </p>
+
+            <details class="t3-details">
+                <summary>Recorded evaluation provenance</summary>
+                <div class="t3-details-body">
+                    <p>Only metadata recorded for this evaluation is shown. Missing values are unavailable.</p>
+                    <dl class="t3-prov-grid">
+                        <dt>Evaluator version</dt><dd>{{ tier3.evaluator_version or t3_summary.evaluator_version or 'Unavailable' }}</dd>
+                        <dt>Dataset digest</dt><dd><code>{{ dataset_provenance[0] if dataset_provenance else 'Unavailable' }}</code></dd>
+                        <dt>Dataset digest algorithm</dt><dd><code>{{ dataset_provenance[1] if dataset_provenance else 'Unavailable' }}</code></dd>
+                        {% if evaluated_source %}
+                        {% for field, value in evaluated_source.items() %}<dt>Evaluated source {{ field | replace('_', ' ') }}</dt><dd><code>{{ value }}</code></dd>{% endfor %}
+                        {% else %}<dt>Evaluated source</dt><dd>Unavailable</dd>{% endif %}
+                        {% for name, agent in t3_agents.items() %}
+                        <dt>{{ name }} model</dt><dd>{{ agent.model or agent.model_name or agent.llm_model or 'Unavailable' }}</dd>
+                        {% endfor %}
+                    </dl>
+                </div>
+            </details>
 
             {# Attempt Policy is configuration/provenance: useful for reproducing a run but not
                an Overview decision signal. Keep it here so reviewers can confirm the exact
@@ -3732,7 +3774,7 @@
             </div>
             {% endif %}
 
-            <details class="t3-details" open>
+            <details class="t3-details" id="tier3-json-downloads" open>
                 <summary>JSON Downloads</summary>
                 <div class="t3-details-body">
                     <p style="color:var(--text-secondary);font-size:0.85rem;margin:0 0 0.75rem;">
@@ -3855,23 +3897,41 @@
         </section>
 
         {# Sub-tab switcher and Chart.js charts #}
-        <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"
-                integrity="sha384-jb8JQMbMoBUzgWatfe6COACi2ljcDdZQ2OxczGA3bGNeWe+6DChMTBJemed7ZnvJ"
-                crossorigin="anonymous"></script>
+        {% if t3_agents or (t3_steps_chart is defined and t3_steps_chart.datasets) %}
+        {% set chart_runtime, chart_notices = chart_assets() %}
+        {% if chart_runtime %}
+        <details class="chart-notices" id="tier3-chart-notices">
+            <summary>Chart software notices: Chart.js 4.5.1 and @kurkle/color 0.3.2 (MIT)</summary>
+            <pre>{{ chart_notices }}</pre>
+        </details>
+        <script id="tier3-chart-runtime">{{ chart_runtime | safe }}</script>
+        {% endif %}
+        {% endif %}
         <script>
+        // Chart data links may point into another Tier 3 sub-tab; reveal it before jumping.
+        function openTier3Reference(id) {
+            if (typeof openReportDestination === 'function') return openReportDestination(id);
+            var target = document.getElementById(id);
+            if (!target) return true;
+            var page = target.closest('.t3-page');
+            if (page && !page.classList.contains('active')) {
+                var tab = page.id.slice('tier3-page-'.length);
+                showTier3SubTab(tab, Array.from(document.querySelectorAll('.t3-subtab')).find(function(b){ return b.dataset.tier3Tab === tab; }));
+            }
+            for (var ancestor = target; ancestor; ancestor = ancestor.parentElement) {
+                if (ancestor.tagName === 'DETAILS') ancestor.open = true;
+            }
+            try { history.replaceState(null, '', '#' + id); } catch (err) { /* file:// history is optional. */ }
+            target.scrollIntoView({block: 'start'});
+            target.setAttribute('tabindex', '-1');
+            target.focus({preventScroll:true});
+            return false;
+        }
         function showTier3SubTab(id, btn) {
-            document.querySelectorAll('.t3-page').forEach(function(p){ p.classList.remove('active'); });
-            document.querySelectorAll('.t3-subtab').forEach(function(t){ t.classList.remove('active'); });
-            var page = document.getElementById('tier3-page-' + id);
-            if (page) page.classList.add('active');
-            if (btn) btn.classList.add('active');
+            activateReportTabs('.t3-subtab', '.t3-page', 'tier3-page-' + id, btn);
         }
         function showTier3Agent(panelId, btn) {
-            document.querySelectorAll('.t3-agent-panel').forEach(function(p){ p.classList.remove('active'); });
-            document.querySelectorAll('.t3-agent-tab-btn').forEach(function(t){ t.classList.remove('active'); });
-            var panel = document.getElementById(panelId);
-            if (panel) panel.classList.add('active');
-            if (btn) btn.classList.add('active');
+            activateReportTabs('.t3-agent-tab-btn', '.t3-agent-panel', panelId, btn);
         }
         // Deep-link from Overview's multi-agent table headers and Agent Scorecards
         // into Agent Details. Uses the index-based anchor so agent names with unsafe
@@ -3879,20 +3939,12 @@
         function jumpToTier3Agent(anchorId) {
             var anchor = document.getElementById(anchorId);
             if (!anchor) return;
-            var name = anchor.getAttribute('data-tier3-agent-name');
+            activateReportTier('tier3', {scroll:false, focus:false});
             var panelId = anchor.getAttribute('data-tier3-agent-panel-id');
-            var subTabBtn = document.querySelector('.t3-subtab[data-tier3-tab="agents"]');
+            var subTabBtn = document.getElementById('tier3-tab-agents');
             showTier3SubTab('agents', subTabBtn);
-            if (name) {
-                // CSS.escape() guards against agent names containing characters that are
-                // unsafe inside a CSS attribute selector (`"`, `]`, etc.). Without the
-                // escape, names like ``model"v2`` would produce a malformed selector and
-                // the per-agent panel would silently fail to activate. Fallback to the
-                // raw concatenation only on ancient browsers without CSS.escape.
-                var safeName = (typeof CSS !== 'undefined' && typeof CSS.escape === 'function')
-                    ? CSS.escape(name)
-                    : name;
-                var agentTabBtn = document.querySelector('.t3-agent-tab-btn[data-tier3-agent="' + safeName + '"]');
+            if (panelId) {
+                var agentTabBtn = Array.from(document.querySelectorAll('.t3-agent-tab-btn')).find(function(button) { return button.dataset.tier3AgentPanelId === panelId; });
                 showTier3Agent(panelId, agentTabBtn);
             }
             if (typeof anchor.scrollIntoView === 'function') {
@@ -3903,7 +3955,10 @@
                 // .t3-agent-panel could land the scroll on a transitional or
                 // off-screen position.
                 var scroll = function () {
-                    anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    reportScrollTo(anchor, 'start');
+                    // The anchor is aria-hidden; focus the named agent panel instead.
+                    var panel = panelId ? document.getElementById(panelId) : null;
+                    if (panel) panel.focus({preventScroll:true});
                 };
                 if (typeof requestAnimationFrame === 'function') {
                     requestAnimationFrame(scroll);
@@ -4122,6 +4177,25 @@
                 charts.forEach(function(chart){ chart.destroy(); });
                 charts = [];
             }
+            function createChart(canvas, config) {
+                var fallback = document.getElementById(canvas.id + "-fallback");
+                canvas.hidden = false;
+                var chart = null;
+                try {
+                    chart = new Chart(canvas, config);
+                    // Chart.js can return an instance without a context instead of throwing.
+                    if (!chart.ctx) throw new Error("Chart canvas unavailable");
+                    charts.push(chart);
+                    if (fallback) fallback.hidden = true;
+                } catch (error) {
+                    // A context-less instance is registered with canvas=null, so
+                    // Chart.getChart(canvas) cannot find it; destroy what was built.
+                    var partial = chart || (Chart.getChart && Chart.getChart(canvas));
+                    if (partial) partial.destroy();
+                    canvas.hidden = true;
+                    if (fallback) fallback.hidden = false;
+                }
+            }
             window.rebuildTier3Charts = function rebuildTier3Charts() {
                 if (typeof Chart === "undefined") return;
                 destroyCharts();
@@ -4130,7 +4204,7 @@
                 var dimensionLabelList = dimensionIds.map(labelForDimension);
                 var radar = document.getElementById("tier3-radar");
                 if (radar && agents.length) {
-                    charts.push(new Chart(radar, {
+                    createChart(radar, {
                         type: "radar",
                         data: {
                             labels: dimensionLabelList,
@@ -4151,11 +4225,11 @@
                             scales: { r: { min: 0, max: 1, ticks: { stepSize: 0.2, color: colors.tick, backdropColor: "transparent" }, grid: { color: colors.grid }, angleLines: { color: colors.grid }, pointLabels: { color: colors.label, font: { size: 11 } } } },
                             plugins: { legend: { labels: { color: colors.label } } }
                         })
-                    }));
+                    });
                 }
                 var metricBar = document.getElementById("tier3-metric-bar");
                 if (metricBar && agents.length) {
-                    charts.push(new Chart(metricBar, {
+                    createChart(metricBar, {
                         type: "bar",
                         data: {
                             labels: dimensionLabelList,
@@ -4168,13 +4242,13 @@
                             scales: { y: { min: 0, max: 1, ticks: { stepSize: 0.2, color: colors.tick }, grid: { color: colors.grid } }, x: { ticks: { color: colors.label, maxRotation: 45 }, grid: { display: false } } },
                             plugins: { legend: { labels: { color: colors.label } } }
                         })
-                    }));
+                    });
                 }
                 var tokenChart = document.getElementById("tier3-token-chart");
                 var tokenTotals = tokenTotalsByAgent();
                 var tokenAgents = Object.keys(tokenTotals);
                 if (tokenChart && tokenAgents.length) {
-                    charts.push(new Chart(tokenChart, {
+                    createChart(tokenChart, {
                         type: "bar",
                         data: {
                             labels: tokenAgents,
@@ -4189,13 +4263,13 @@
                             scales: { x: { ticks: { color: colors.tick }, grid: { color: colors.grid } }, y: { beginAtZero: true, ticks: { color: colors.label }, grid: { display: false } } },
                             plugins: { legend: { labels: { color: colors.label } } }
                         })
-                    }));
+                    });
                 }
                 var stepsChart = document.getElementById("tier3-steps-chart");
                 if (stepsChart) {
                     var stepsData = stepsByCaseDatasets();
                     if (stepsData.labels.length) {
-                        charts.push(new Chart(stepsChart, {
+                        createChart(stepsChart, {
                             type: "bar",
                             data: stepsData,
                             options: chartOptions({
@@ -4203,7 +4277,7 @@
                                 scales: { x: { ticks: { color: colors.tick, maxRotation: 45 }, grid: { color: colors.grid } }, y: { ticks: { color: colors.label }, grid: { display: false } } },
                                 plugins: { legend: { labels: { color: colors.label } } }
                             })
-                        }));
+                        });
                     }
                 }
             };
@@ -4240,6 +4314,12 @@
         <details class="run-metadata" id="run-metadata">
             <summary>Run details &amp; provenance</summary>
             <div class="metadata-grid">
+                {% if has_tier3 %}<div><strong>Agent evaluation</strong>                        {% if completed_agent and completed_agent.recovered_attempts %}<div>{{ completed_agent.recovered_attempts }} timeout attempt(s) recovered; failed history retained.</div>{% endif %}
+                        <div class="trial-coverage">{{ hero_trials }}</div>{% for detail in presentation.coverage.details %}<div>{{ detail }}</div>{% endfor %}
+                        <div><strong>Metrics:</strong> {{ hero_metric_count }} evaluators</div>
+                        {% if tier3_environment %}<div><strong>Environment:</strong> <code>{{ tier3_environment }}</code></div>{% endif %}
+                        {% if tier3.get('overall_lift') is not none %}<div><strong>Best-agent lift:</strong> {{ "%+.2f" | format(tier3.get('overall_lift')) }}</div>{% endif %}
+</div>{% endif %}
                 {% if target_path %}<p class="header-meta-item"><strong>Target:</strong> {% if target_path.startswith('https://') %}<a href="{{ target_path }}" target="_blank" class="header-target-link" title="{{ target_path }}">{{ target_display or target_path }}</a>{% else %}{{ target_path }}{% endif %}</p>{% endif %}
                 {% if profile %}<p class="header-meta-item"><strong>Profile:</strong> <span class="header-profile-badge profile-{{ profile }}">{{ profile }}</span></p>{% endif %}
                 {% if timestamp %}<p class="header-meta-item">Generated: {{ timestamp }}{% if version %} &middot; SkillEvaluator v{{ version }}{% endif %}</p>{% endif %}
@@ -4270,30 +4350,6 @@
     <button id="backToTop" onclick="scrollToTop()" title="Back to Top">↑ Top</button>
     {% if report_json is not none %}<script id="report-data" type="application/json">{{ report_json | safe }}</script>{% endif %}
     <script>
-        function toggleTheme() {
-            const html = document.documentElement;
-            const newTheme = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
-            html.setAttribute('data-theme', newTheme);
-            try { localStorage.setItem('skillevaluator-theme', newTheme); } catch (err) { /* Storage is optional for standalone files. */ }
-            updateThemeButton(newTheme);
-            if (window.rebuildTier3Charts) window.rebuildTier3Charts();
-        }
-        // The button is a "Dark theme" toggle: its name stays fixed and
-        // aria-pressed says whether the dark theme is on.
-        function updateThemeButton(theme) {
-            const toggle = document.querySelector('.theme-toggle');
-            if (toggle) toggle.setAttribute('aria-pressed', theme === 'dark' ? 'true' : 'false');
-        }
-        function initTheme() {
-            let savedTheme = null;
-            try { savedTheme = localStorage.getItem('skillevaluator-theme'); } catch (err) { /* Standalone reports work without storage. */ }
-            if (savedTheme !== 'dark' && savedTheme !== 'light') {
-                savedTheme = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-            }
-            document.documentElement.setAttribute('data-theme', savedTheme);
-            updateThemeButton(savedTheme);
-            if (window.rebuildTier3Charts) window.rebuildTier3Charts();
-        }
         function exportJSON() {
             let jsonData = document.getElementById('report-data').textContent;
             try {
@@ -4312,25 +4368,7 @@
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
         }
-        function showTab(tabId, btn) {
-            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-            const tab = document.getElementById('tab-' + tabId);
-            if (tab) tab.classList.add('active');
-            // Tier cards in the hero double as the top-level navigation, so
-            // sync their selected state to whichever tab is now active.
-            document.querySelectorAll('.tier-card[data-target-tab]').forEach(card => {
-                card.classList.toggle('active', card.dataset.targetTab === tabId);
-                card.setAttribute('aria-pressed', card.dataset.targetTab === tabId ? 'true' : 'false');
-            });
-            // Keep the legacy ``btn`` arg working for any caller that still
-            // passes a clicked element (e.g. older bookmarks/anchors).
-            if (btn && btn.classList) {
-                btn.classList.add('active');
-            }
-            if (tab) {
-                tab.scrollIntoView({behavior: 'smooth', block: 'start'});
-            }
-        }
+        function showTab(tabId, btn) { activateReportTier(tabId); }
         function filterValidators(status) {
             const cards = document.querySelectorAll('.validator-card');
             const rows = document.querySelectorAll('.summary-table tbody tr');
@@ -4372,18 +4410,25 @@
         }
         function scrollToValidator(idx) {
             const v = document.getElementById('validator-' + idx);
+            if (!v) return;
+            activateReportTier('tier1', {scroll:false, focus:false});
+            const query = document.getElementById('report-search');
+            if (query) query.value = '';
+            switchView('validator');
             const btn = v.querySelector('.validator-collapsible');
             if (!btn.classList.contains('active')) {
                 btn.classList.add('active');
                 btn.nextElementSibling.classList.add('active');
                 btn.querySelector('.expand-text').textContent = '▲ Collapse';
             }
-            v.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            v.scrollIntoView({ behavior: reportScrollBehavior(), block: 'start' });
+            v.tabIndex = -1;
+            v.focus({preventScroll:true});
         }
         window.onscroll = function() {
             document.getElementById('backToTop').style.display = window.scrollY > 300 ? 'flex' : 'none';
         };
-        function scrollToTop() { window.scrollTo({ top: 0, behavior: 'smooth' }); }
+        function scrollToTop() { window.scrollTo({ top: 0, behavior: reportScrollBehavior() }); }
         function switchView(view) {
             document.querySelectorAll('.view-toggle-btn').forEach(b => b.classList.remove('active'));
             document.getElementById('view-' + view).classList.add('active');
@@ -4437,7 +4482,7 @@
             });
         }
         function scrollToSkill(skillName) {
-            const card = Array.from(document.querySelectorAll('.skill-card')).find(card => card.dataset.skillName === skillName);
+            const card = _openSkillCard(skillName);
             if (!card) return;
             // Make sure it's visible (clear any active filter)
             card.style.display = '';
@@ -4448,7 +4493,9 @@
                 const arrow = card.querySelector('.expand-text');
                 if (arrow) arrow.textContent = '▲';
             }
-            card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            card.scrollIntoView({ behavior: reportScrollBehavior(), block: 'start' });
+            card.tabIndex = -1;
+            card.focus({preventScroll:true});
             // Brief highlight
             card.style.boxShadow = '0 0 0 3px var(--secondary-color)';
             setTimeout(() => { card.style.boxShadow = ''; }, 2000);
@@ -4488,13 +4535,15 @@
                 for (let parent = target.parentElement; parent && parent !== card; parent = parent.parentElement) {
                     if (parent.tagName === 'DETAILS') parent.open = true;
                 }
-                target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                target.scrollIntoView({ behavior: reportScrollBehavior(), block: 'center' });
+                target.tabIndex = -1;
+                target.focus({preventScroll:true});
                 target.style.boxShadow = '0 0 0 3px var(--secondary-color)';
                 setTimeout(() => { target.style.boxShadow = ''; }, 2000);
             } else {
                 // Fall back to the card itself (e.g. the issue rolls up a
                 // finding that has been filtered out of the rendered DOM).
-                card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                card.scrollIntoView({ behavior: reportScrollBehavior(), block: 'start' });
                 card.style.boxShadow = '0 0 0 3px var(--secondary-color)';
                 setTimeout(() => { card.style.boxShadow = ''; }, 2000);
             }
@@ -4507,11 +4556,13 @@
             if (!card) return;
             const block = card.querySelector('.quality-score-block');
             if (block) {
-                block.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                block.scrollIntoView({ behavior: reportScrollBehavior(), block: 'center' });
+                block.tabIndex = -1;
+                block.focus({preventScroll:true});
                 block.style.boxShadow = '0 0 0 3px var(--warning-color)';
                 setTimeout(() => { block.style.boxShadow = ''; }, 2000);
             } else {
-                card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                card.scrollIntoView({ behavior: reportScrollBehavior(), block: 'start' });
             }
         }
         function filterToAffectedSkills(row) {
@@ -4557,7 +4608,7 @@
             if (issueKey && affectedSkills.length > 0) {
                 scrollToFinding(affectedSkills[0], issueKey);
             } else {
-                banner.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                banner.scrollIntoView({ behavior: reportScrollBehavior(), block: 'start' });
             }
         }
         function clearSkillFilter() {
@@ -4607,7 +4658,7 @@
                 r.style.display = show ? '' : 'none';
             });
         }
-        document.addEventListener('DOMContentLoaded', initTheme);
+        document.addEventListener('DOMContentLoaded', initReportTheme);
         {% include "report_ui.js.j2" %}
     </script>
 </body>

@@ -81,6 +81,10 @@ _COVERAGE_ERROR = "Scored attempt coverage is"
 # The switch's CHANGELOG entry, found by its opening words so that a later entry
 # that names the variable does not change which entry the docs test reads.
 _CHANGELOG_ENTRY_LEAD = "- A Tier 3 `claude-code` trial that the model provider's safety classifier stops"
+# A released entry keeps the text it shipped with, so the later Documentation
+# entry that corrects where that entry said the coverage error appears is the
+# CHANGELOG text that must agree with the docs.
+_CHANGELOG_CORRECTION_LEAD = "- The 0.8.0 entry for refused `claude-code` attempts said"
 _SIMPLE_SKILL = Path(__file__).resolve().parent / "fixtures" / "skills" / "simple"
 _FAKE_CREDENTIAL = "test-key"
 _VERTEX_ENV = {
@@ -244,7 +248,11 @@ def _refusal_doc_texts() -> dict[str, str]:
     assert release.startswith("0.8.0 - "), release.splitlines()[0]
     entries = [block for block in release.split("\n\n") if " ".join(block.split()).startswith(_CHANGELOG_ENTRY_LEAD)]
     assert entries, "the 0.8.0 CHANGELOG entry for the refusal fallback switch is missing"
-    entry = entries[0]
+    corrections = [
+        block for block in changelog.split("\n\n") if " ".join(block.split()).startswith(_CHANGELOG_CORRECTION_LEAD)
+    ]
+    assert len(corrections) == 1, "the CHANGELOG correction of the 0.8.0 refusal entry is missing or repeated"
+    entry = corrections[0]
     blocks = (root / "docs" / "agents-and-sandboxes.mdx").read_text(encoding="utf-8").split("\n\n")
     [index] = [index for index, block in enumerate(blocks) if f"{_SWITCH}=1" in block]
     troubleshooting = (root / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")

@@ -275,7 +275,7 @@ def _tier_card_verdicts(html: str) -> list[tuple[str, str]]:
     return re.findall(r'tier-card-label">(Tier \d)</span>\s*<span class="tier-card-verdict">([^<]+)</span>', html)
 
 
-def test_header_says_skipped_when_no_check_ran() -> None:
+def test_header_keeps_required_gate_separate_from_skipped_execution() -> None:
     skipped = []
     for name in ("Secrets Detection", "PII Scan"):
         result = ValidationResult(validator_name=name)
@@ -285,10 +285,10 @@ def test_header_says_skipped_when_no_check_ran() -> None:
     html = _render(_gated(skipped, 1))
     summary = html.split('<section class="exec-summary', 1)[1].split("</section>", 1)[0]
 
-    # The header and the summary give the same verdict: nothing ran, so nothing passed.
-    assert _header_verdict(html) == [("skipped", "Skipped")]
+    # The command gate passed; the evidence summary still says nothing ran.
+    assert _header_verdict(html) == [("pass", "Passed required checks")]
     assert '<span class="verdict-chip warn">Skipped</span>' in summary
-    assert 'data-verdict="pass"' not in html
+    assert "0 of 0 checks passed" not in summary
 
 
 def test_failing_advisory_tier_is_labelled_advisory() -> None:
@@ -303,7 +303,7 @@ def test_failing_advisory_tier_is_labelled_advisory() -> None:
     blocking = _render(results(blocking=True))
 
     # A failing tier whose gate does not block never says "Changes required".
-    assert _header_verdict(advisory) == [("pass", "Passed")]
+    assert _header_verdict(advisory) == [("pass", "Passed required checks")]
     assert _tier_card_verdicts(advisory) == [("Tier 1", "Passed"), ("Tier 2", "Failed (advisory)")]
     assert _header_verdict(blocking) == [("fail", "Changes required")]
     assert _tier_card_verdicts(blocking) == [("Tier 1", "Passed"), ("Tier 2", "Changes required")]
@@ -316,7 +316,7 @@ def test_failing_advisory_tier3_is_labelled_advisory() -> None:
     html = HTMLReporter(include_timestamp=False).render_all(_gated([agent_eval], 3, blocking=False))
 
     assert _tier_card_verdicts(html) == [("Tier 3", "Failed (advisory)")]
-    assert '<span class="sr-only">Tier 3 verdict: </span>Failed (advisory)</span>' in html
+    assert "Tier 3 quality: Failed (advisory)</span>" in html
     assert "Changes required" not in html.split("<main", 1)[1].split('id="tab-tier3"', 1)[0]
 
 
@@ -373,15 +373,13 @@ def test_check_table_rows_are_keyboard_reachable_links() -> None:
     assert all(f'id="validator-{index}"' in html for index in links)
 
 
-def test_theme_toggle_has_a_fixed_name_and_reports_the_dark_state() -> None:
+def test_theme_selector_has_a_name_and_system_light_dark_choices() -> None:
     html = _render(_results())
-    button = html.split('class="theme-toggle"', 1)[1].split("</button>", 1)[0]
-
-    assert 'aria-pressed="false"' in button
-    assert '<span id="theme-text">Dark theme</span>' in button
-    assert "toggle.setAttribute('aria-pressed', theme === 'dark' ? 'true' : 'false')" in html
-    assert "getElementById('theme-text').textContent" not in html
+    assert '<label class="theme-control" for="report-theme">Theme' in html
+    assert '<select id="report-theme"' in html
+    assert all(f'<option value="{theme}">' in html for theme in ("system", "light", "dark"))
     assert "matchMedia('(prefers-color-scheme: dark)')" in html
+    assert "localStorage.removeItem('skillevaluator-theme')" in html
 
 
 def test_tier3_charts_are_redrawn_with_print_colors() -> None:
@@ -408,7 +406,8 @@ def test_tier3_charts_are_redrawn_with_print_colors() -> None:
     assert 'window.addEventListener("afterprint", function(){ redrawForPrint(false); });' in script
     assert 'window.matchMedia("print")' in script
     assert 'if (printing && theme === "dark") root.setAttribute("data-theme", "light");' in script
-    assert script.count("new Chart(") == script.count("options: chartOptions({") == 4
+    # All four chart types' print redraw, colors and theme restoration are
+    # executed in test_chart_dependency rather than counting constructor sites.
 
 
 def _rules(css: str):

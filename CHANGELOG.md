@@ -149,6 +149,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 2 includes qualifying shell comment blocks at end of file in context
+  deduplication. Previously those blocks disappeared unless a blank line or
+  code followed them, which could hide repeated guidance across shell files.
+
 - All-tier CI retains Tier 2's native reports as advisory while preserving
   failed and incomplete evaluation outcomes. GitHub `ci status` validates the
   pinned evaluation and feedback configuration before reporting readiness,

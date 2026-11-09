@@ -8913,6 +8913,7 @@ def _missing_reference_notes(payload: dict, scanned_root: Path | None, **options
         "findings_after_filtering",
     )
     version = tuple(int(part) for part in payload["metadata"]["skillspector_version"].split("."))
+    options.setdefault("reference_root", scanned_root)
     return _skillspector_missing_reference_notes(
         completeness["ledger_exceptions"],
         completeness["analyzer_statuses"],
@@ -9537,6 +9538,28 @@ class TestSkillspectorMissingReferences:
         alone = validator.validate_security_only(skill)
         assert alone.incomplete_scans == []
         assert alone.warnings == [_missing_reference_warning("SKILL.md:8 [reference_resolution; reference_missing]")]
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_scan_outside_a_validated_target_stays_incomplete(self, mock_tools, tmp_path: Path) -> None:
+        """A direct per-directory scan, such as one partition of a larger tree, does not know what was left out."""
+        skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
+        payload = _reference_report("2.13.3")
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True, stdout=json.dumps(payload), stderr="", exit_code=0
+        )
+        validator = SecurityValidator(use_llm=False)
+
+        result = validator._run_skillspector(skill)
+
+        assert result.incomplete_scans == ["skillspector"]
+        assert result.errors == [
+            "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+            "SKILL.md:10 [reference_resolution; reference_missing]; security scan did not complete"
+        ]
+        assert _missing_reference_notes(payload, skill, reference_root=None) is None
+        assert validator.validate_security_only(skill).incomplete_scans == []
+        assert validator._run_skillspector(skill).incomplete_scans == ["skillspector"]
 
     @patch("skillevaluator.validators.security.Tools")
     def test_folder_without_skills_is_scanned_as_a_whole(self, mock_tools, tmp_path: Path) -> None:

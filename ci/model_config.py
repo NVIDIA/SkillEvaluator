@@ -142,6 +142,9 @@ def model_environment(env: dict[str, str], tier: int) -> dict[str, str]:
         validation.setdefault(key, "ci-validation-placeholder")
     try:
         resolve_llm_provider(validation)
+        # Only Tier 2 executes embeddings. A chat-only job (for example the
+        # Tier 1 image job, which receives no embedding settings) must not fail
+        # on an embedding route it never uses.
         if tier == 2:
             resolve_embedding_provider(validation)
     except (ProviderConfigurationError, ValueError):

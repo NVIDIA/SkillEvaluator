@@ -226,3 +226,27 @@ def test_chat_only_tiers_keep_shared_chat_key_but_exclude_embedding_only_key(tie
     )
     assert child["NVIDIA_API_KEY"] == "chat-key"
     assert "OPENAI_API_KEY" not in child
+
+
+@pytest.mark.parametrize("tier", [1, 3])
+def test_chat_only_tiers_do_not_validate_an_unused_embedding_route(tier):
+    """The Tier 1 image job receives no embedding settings and must not fail on them."""
+    from ci.model_config import model_environment
+
+    gateway = {
+        "SKILL_EVAL_PROVIDER": "openai-compatible",
+        f"SKILL_EVAL_TIER{tier}_PROVIDER": "openai",
+        f"SKILL_EVAL_TIER{tier}_MODEL": "",
+        "OPENAI_API_KEY": "chat-key",
+    }
+    child = model_environment(gateway, tier)
+    assert child["SKILL_EVAL_LLM_PROVIDER"] == "openai"
+    assert child["OPENAI_API_KEY"] == "chat-key"
+    incomplete_embedding = {
+        "SKILL_EVAL_PROVIDER": "nv_build",
+        "SKILL_EVAL_EMBEDDING_PROVIDER": "openai-compatible",
+        "NVIDIA_API_KEY": "chat-key",
+    }
+    assert model_environment(incomplete_embedding, tier)["SKILL_EVAL_LLM_PROVIDER"] == "nv_build"
+    with pytest.raises(ValueError):
+        model_environment(incomplete_embedding, 2)

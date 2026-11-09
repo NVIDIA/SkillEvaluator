@@ -512,6 +512,68 @@ def test_unrelated_tree_entry_still_requires_git_object_identity(trusted, monkey
     assert trusted.writes == []
 
 
+def test_superseded_default_head_skips_without_writes(trusted, monkeypatch):
+    # A newer default-branch push during a long run is routine, not a failure.
+    module = documents(monkeypatch)
+    trusted.current_sha = "9" * 40
+    assert module.github_benchmark_publish(trusted, REPO, 123, 1)["benchmark_action"] == "skipped"
+    assert trusted.writes == []
+
+
+def test_unrelated_repository_paths_do_not_block_publication(trusted, monkeypatch):
+    module = documents(monkeypatch)
+    trusted.entries[:0] = [
+        {"path": "docs", "mode": "040000", "type": "tree", "sha": "c" * 40},
+        {"path": "docs/c#-notes 100%.md", "mode": "100644", "type": "blob", "sha": "d" * 40},
+    ]
+    assert module.github_benchmark_publish(trusted, REPO, 123, 1)["benchmark_action"] == "created"
+
+
+def test_owned_pr_update_ignores_live_repository_metadata(trusted, monkeypatch):
+    # GitHub returns base.repo as the live repository; the branch push changes pushed_at.
+    module = documents(monkeypatch)
+    module.github_benchmark_publish(trusted, REPO, 123, 1)
+    monkeypatch.setattr(
+        module,
+        "benchmark_documents",
+        lambda _manifest, _native: [{"path": "skills/demo", "eligible": True, "benchmark_content": "new card\n"}],
+    )
+    trusted.pull["body"] = module.MARKER + "\nOld evaluation report"
+    trusted.pull["base"]["repo"]["pushed_at"] = "2026-11-10T00:00:00Z"
+    trusted.writes.clear()
+    original_get = trusted.get
+
+    def get(path):
+        result = original_get(path)
+        if path.endswith("/pulls/8"):
+            result["base"]["repo"]["pushed_at"] = "2026-11-10T00:05:00Z"
+            result["base"]["sha"] = "b" * 40
+        return result
+
+    monkeypatch.setattr(trusted, "get", get)
+    assert module.github_benchmark_publish(trusted, REPO, 123, 1)["benchmark_action"] == "updated"
+    assert any(method == "patch" and path.endswith("/pulls/8") for method, path, _ in trusted.writes)
+
+
+def test_changed_pr_body_before_patch_is_not_overwritten(trusted, monkeypatch):
+    module = documents(monkeypatch)
+    module.github_benchmark_publish(trusted, REPO, 123, 1)
+    trusted.pull["body"] = module.MARKER + "\nOld evaluation report"
+    trusted.writes.clear()
+    original_get = trusted.get
+
+    def get(path):
+        result = original_get(path)
+        if path.endswith("/pulls/8"):
+            result["body"] = "Human edit"
+        return result
+
+    monkeypatch.setattr(trusted, "get", get)
+    with pytest.raises(ValueError, match="PR changed"):
+        module.github_benchmark_publish(trusted, REPO, 123, 1)
+    assert all("/pulls/" not in path for _, path, _ in trusted.writes)
+
+
 def previous_source_branch(trusted, monkeypatch, *, unrelated=False, trailer=None):
     module = documents(monkeypatch)
     old_source = "4" * 40

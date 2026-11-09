@@ -336,6 +336,22 @@ _DESTRUCTIVE_PATTERNS = [
 # directory or a path inside it ("tar czf a.tgz ~/.azure"), not a longer name
 # such as "~/.azure_notes.md"; every other entry matches as a substring.
 
+# Credential stores this rule adds to _UNAUTHORIZED_PATHS. Like
+# _HOME_SENSITIVE_WRITE_PATHS, they name home files a project often has too
+# (".npmrc"), so an apply_patch header matches them only from a known
+# directory (_protected_write_entry).
+_HOME_CREDENTIAL_PATHS = [
+    "~/.aws/config",
+    "~/.azure",
+    "~/.kube/config",
+    "~/.docker/config.json",
+    "~/.netrc",
+    "~/.git-credentials",
+    "~/.config/gh/hosts.yml",
+    "~/.pypirc",
+    "~/.npmrc",
+]
+
 # Credential stores: any read or command reference is a critical finding.
 _UNAUTHORIZED_PATHS = [
     "/etc/shadow",
@@ -347,15 +363,7 @@ _UNAUTHORIZED_PATHS = [
     "~/.ssh",
     ".aws/credentials",
     ".config/gcloud",
-    "~/.aws/config",
-    "~/.azure",
-    "~/.kube/config",
-    "~/.docker/config.json",
-    "~/.netrc",
-    "~/.git-credentials",
-    "~/.config/gh/hosts.yml",
-    "~/.pypirc",
-    "~/.npmrc",
+    *_HOME_CREDENTIAL_PATHS,
 ]
 
 # Shell startup and privilege files. A shell command that names one and has a
@@ -402,27 +410,31 @@ _HOME_ANCHOR_RE = re.compile(
     r"(?=/)"
 )
 _PATH_WORD_RE = re.compile(r"[^\s;|&<>()`]+")
-_PATH_COMPONENT_END = r"(?=/|$|[\s'\"`;|&<>()])"
+_PATH_COMPONENT_END = r"(?=/|$|[\s'\"`;|&<>(),:])"
 
 # The files a shell command writes, as _sensitive_write_target reads them: the
 # target word of an output redirection (">", ">>", ">|", "&>", "N>"), the
-# operands of tee, and the operands of a sed with -i or --in-place. Without an
-# option that may give the script (-e, -f, --expression, --file, or a short
-# option cluster or long option that may be one of them), the first sed operand
-# is the script and is left out; with one, every operand counts, the script too.
-# An empty operand is the suffix of BSD sed's "-i ''". A read such as
+# operands of tee, and the operands of a sed with -i or --in-place. A
+# redirection inside a quoted string (a "bash -c" script, or the arrow of
+# "echo 'a -> b'") has a target that ends with that string. Without an option
+# that gives the script (-e, -f, --expression, --file, or a short option
+# cluster in which e or f comes before i, whose attached text is the backup
+# suffix), the first sed operand is the script and is left out; with one, every
+# operand counts, the script too. sed options are read case-sensitively, so -E
+# is not -e. An empty operand is the suffix of BSD sed's "-i ''". A read such as
 # "cat ~/.gitconfig 2>/dev/null" writes /dev/null, and an fd duplication or
 # close ("2>&1", ">&2", "2>&-") has no file. An fd number is matched from the
 # start of its digits, so a long digit run is read once. A tee or sed argument
 # list ends at the end of its line; a backslash line continuation joins two
 # lines first.
 _SHELL_WORD = r"(?:\"[^\"]*\"|'[^']*'|[^\s;|&<>()'\"`])+"
+_QUOTED_STRING_RE = re.compile(r"\"[^\"]*\"|'[^']*'")
 _REDIRECT_TARGET_RE = re.compile(r"(?:&>>?|(?<![0-9])[0-9]*>>?[|&]?)\s*(" + _SHELL_WORD + ")")
 _FD_REDIRECT_TARGET_RE = re.compile(r"[0-9]*-?")
-_TEE_OPERANDS_RE = re.compile(r"(?<![\w.-])tee((?:[ \t]+" + _SHELL_WORD + r")+)")
-_SED_OPERANDS_RE = re.compile(r"(?<![\w.-])sed((?:[ \t]+" + _SHELL_WORD + r")+)")
-_SED_IN_PLACE_FLAG_RE = re.compile(r"--in-place\b.*|-[a-z]*i.*")
-_SED_SCRIPT_OPTION_RE = re.compile(r"--[ef].*|-[a-z]*[ef].*")
+_TEE_OPERANDS_RE = re.compile(r"(?<![\w.-])tee((?:[ \t]+" + _SHELL_WORD + r")+)", re.IGNORECASE)
+_SED_OPERANDS_RE = re.compile(r"(?<![\w.-])sed((?:[ \t]+" + _SHELL_WORD + r")+)", re.IGNORECASE)
+_SED_IN_PLACE_FLAG_RE = re.compile(r"--in-place\b.*|-[a-z]*i.*", re.IGNORECASE)
+_SED_SCRIPT_OPTION_RE = re.compile(r"--(?:e|fi)[a-z]*(?:=.*)?|-[A-HJ-Za-hj-z]*[ef].*")
 _LINE_CONTINUATION_RE = re.compile(r"\\\r?\n")
 
 # A force-only rm deletes the same files as a plain rm, so it is destructive
@@ -788,6 +800,15 @@ def _command_text(tool_call: dict[str, Any]) -> str:
     return str(args.get("command") or args.get("cmd") or args.get("code") or args.get("raw") or "")
 
 
+def _shell_action_text(tool_call: dict[str, Any]) -> str:
+    """Return ``_action_text`` with each argv-list argument quoted back into one shell command."""
+    args = {
+        key: shlex.join(str(part) for part in value) if isinstance(value, (list, tuple)) else value
+        for key, value in _action_args(tool_call).items()
+    }
+    return _action_text({"action_input": args})
+
+
 def _normpath_word(match: re.Match[str]) -> str:
     word = match.group()
     return posixpath.normpath(word) if "/" in word else word
@@ -822,15 +843,24 @@ def _sensitive_path_match(text: Any, paths: tuple[str, ...] | list[str]) -> str 
 
 def _shell_write_targets(command: str) -> list[str]:
     """Return the files *command* writes through a redirection, tee, or sed -i."""
-    text = _LINE_CONTINUATION_RE.sub(" ", str(command).lower())
+    text = _LINE_CONTINUATION_RE.sub(" ", str(command))
+    # The start and end offsets of each closed quoted string, in order.
+    quoted = [offset for quote in _QUOTED_STRING_RE.finditer(text) for offset in quote.span()]
+
+    def argument_text(match: re.Match[str]) -> str:
+        # A redirection, tee or sed inside a quoted string ends with that string.
+        index = bisect.bisect_right(quoted, match.start())
+        end = min(match.end(1), quoted[index] - 1) if index % 2 else match.end(1)
+        return text[match.start(1) : end]
+
     targets = [
-        match.group(1)
+        target
         for match in _REDIRECT_TARGET_RE.finditer(text)
-        if not _FD_REDIRECT_TARGET_RE.fullmatch(match.group(1))
+        if not _FD_REDIRECT_TARGET_RE.fullmatch(target := argument_text(match))
     ]
-    targets.extend(match.group(1) for match in _TEE_OPERANDS_RE.finditer(text))
+    targets.extend(argument_text(match) for match in _TEE_OPERANDS_RE.finditer(text))
     for match in _SED_OPERANDS_RE.finditer(text):
-        words = re.findall(_SHELL_WORD, match.group(1))
+        words = re.findall(_SHELL_WORD, argument_text(match))
         if any(_SED_IN_PLACE_FLAG_RE.fullmatch(word) for word in words):
             operands = [word for word in words if not word.startswith("-") and word not in ("''", '""')]
             scripted = any(_SED_SCRIPT_OPTION_RE.fullmatch(word) for word in words)
@@ -1065,13 +1095,19 @@ def _protected_write_entry(target: str, workdir: str | None) -> str | None:
     anchored = [workdir is not None or path in unknown for path in paths]
     paths += [f"/home/~{path[len(_UNKNOWN_CWD_ROOT) :]}" for path in unknown]
     anchored += [True] * len(unknown)
+    # Every path after the first resolves the target from a guessed home
+    # directory. The entries the home-path rule added (_HOME_CREDENTIAL_PATHS and
+    # _HOME_SENSITIVE_WRITE_PATHS) name files a project often has too, such as
+    # ".npmrc" or ".claude/settings.json", so they match only the first path.
     candidates = [
-        (candidate, is_anchored)
-        for path, is_anchored in zip(paths, anchored, strict=True)
+        (candidate, is_anchored, index > 0)
+        for index, (path, is_anchored) in enumerate(zip(paths, anchored, strict=True))
         for candidate in (path, _HOME_DIR_PREFIX_RE.sub("~", path, count=1))
     ]
-    for candidate, known in candidates:
+    for candidate, known, guessed in candidates:
         for entry in (*_SENSITIVE_WRITE_PATHS, *_UNAUTHORIZED_PATHS, *_HOME_SENSITIVE_WRITE_PATHS):
+            if guessed and (entry in _HOME_CREDENTIAL_PATHS or entry in _HOME_SENSITIVE_WRITE_PATHS):
+                continue
             anchor = f"~/{entry}" if entry.startswith(".") and known else entry
             if anchor.startswith(("/", "~")):
                 if candidate == anchor or candidate.startswith(f"{anchor}/"):
@@ -4166,7 +4202,8 @@ def check_security(
         # The command-text path checks below read a shell apply_patch without the
         # file headers that are only data for apply_patch, which
         # _apply_patch_protected_entry already checked.
-        path_text_lower = _apply_patch_path_text(tc, patch, patch_workdir).lower() if shell_patch else action_text_lower
+        path_text = _apply_patch_path_text(tc, patch, patch_workdir) if shell_patch else action_text
+        path_text_lower = path_text.lower()
 
         if is_exec_tool:
             rm_workdirs = _rm_call_workdirs(tc, rm_workdirs)
@@ -4239,7 +4276,8 @@ def check_security(
             # The keyword rule reads only the "~/" and "/root/" spellings of
             # _SENSITIVE_WRITE_PATHS. Where it finds nothing, a redirection, tee
             # or sed -i target is matched in every home spelling and against
-            # _HOME_SENSITIVE_WRITE_PATHS too.
+            # _HOME_SENSITIVE_WRITE_PATHS too, reading an argv-list command as
+            # the shell command it runs.
             if not patch_entry and (
                 (
                     any(path in path_text_lower for path in _SENSITIVE_WRITE_PATHS)
@@ -4248,7 +4286,7 @@ def check_security(
                         action_text_lower,
                     )
                 )
-                or _sensitive_write_target(path_text_lower) is not None
+                or _sensitive_write_target(path_text if shell_patch else _shell_action_text(tc)) is not None
             ):
                 findings.append(
                     _security_finding(

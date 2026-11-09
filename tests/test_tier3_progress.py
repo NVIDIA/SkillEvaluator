@@ -1361,6 +1361,35 @@ def test_credential_validation_includes_distinct_standard_grading_route(
     }
 
 
+def test_native_task_source_omits_evals_dataset_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner, skill = _stub_runner(monkeypatch, tmp_path)
+    (skill / "evals" / "evals.json").write_text(
+        json.dumps(
+            {
+                "skill_name": "demo-skill",
+                "generation": {"mode": "template_requested", "review_state": "needs_review"},
+                "evals": [{"id": "case-1", "prompt": "Q", "expected_output": "A"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _configure_native_task_source(monkeypatch, runner, skill)
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    assert "error" not in result
+    assert result["run_config"]["task_source"] == "native_harbor"
+    assert result["dataset_provenance"] is None
+
+
 def test_missing_native_task_source_stops_before_credential_probes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

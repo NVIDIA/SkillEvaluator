@@ -2997,7 +2997,7 @@ class HTMLReporter(ReporterBase):
         tier3_summary = self._compute_tier_summary(tier3_results, presentation=context.tiers[3])
         tier3_preview, tier3_preview_notice = _bounded_tier3_preview(tier3_data)
         tier3_dataset_provenance_line, tier3_dataset_provenance_warning = dataset_provenance_display(
-            tier3_preview.get("dataset_provenance") if isinstance(tier3_preview, dict) else None
+            tier3_data.get("dataset_provenance") if isinstance(tier3_data, dict) else None
         )
         tier3_canonical_data, tier3_canonical_encoding = _canonical_tier3_embed(tier3_data)
         tier3_truncation = tier3_data.get("report_truncation", {}) if isinstance(tier3_data, dict) else {}

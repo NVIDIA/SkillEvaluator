@@ -796,13 +796,18 @@ def _dataset_generation_provenance(skill_path: Path) -> dict[str, Any] | None:
         generation = dict(generation)
         eval_entries = document.get("evals")
         if isinstance(eval_entries, list):
-            generation["needs_review_count"] = sum(
+            needs_review_count = sum(
                 1
                 for entry in eval_entries
                 if isinstance(entry, dict)
                 and isinstance(entry.get("review"), dict)
                 and entry["review"].get("status") == "needs_review"
             )
+            generation["needs_review_count"] = needs_review_count
+            if needs_review_count > 0:
+                generation["review_state"] = "needs_review"
+            elif generation.get("review_state") == "needs_review":
+                generation["review_state"] = "unreviewed"
     return sanitize_generation_record(generation)
 
 
@@ -5342,7 +5347,6 @@ def _run_harbor_eval_impl(
     # Native Harbor tasks can select the standard-grader judge model at task or
     # step scope, so the provider fallback is not necessarily the runtime model.
     evals_exists = find_evals_file(evaluator_skill_path) is not None
-    dataset_provenance = _dataset_generation_provenance(evaluator_skill_path) if evals_exists else None
     native_exists = (evaluator_skill_path / "evals" / "harbor").exists()
     if task_source == "auto":
         task_source = "evals_json" if evals_exists else "native_harbor" if native_exists else ""
@@ -5355,6 +5359,7 @@ def _run_harbor_eval_impl(
     if task_source not in {"evals_json", "native_harbor"}:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="invalid task source"))
         return {"error": ["harbor.task_source must be auto, evals_json, or native_harbor"]}
+    dataset_provenance = _dataset_generation_provenance(evaluator_skill_path) if task_source == "evals_json" else None
 
     reporter.emit(ProgressEvent(stage="credential-validation", state="running"))
     if runtime_errors:

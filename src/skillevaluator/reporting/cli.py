@@ -214,6 +214,11 @@ class CLIReporter(ReporterBase):
             if id(result) not in rendered:
                 agent_eval = result.metadata.get("agent_eval")
                 if isinstance(agent_eval, dict):
+                    provenance_line, provenance_is_template = dataset_provenance_display(
+                        agent_eval.get("dataset_provenance")
+                    )
+                    if provenance_line:
+                        console.print(Text(f"  {provenance_line}", style="yellow" if provenance_is_template else "dim"))
                     self._print_harbor_artifacts(agent_eval, console)
 
         color = {Status.PASSED: "green", Status.FAILED: "red"}.get(context.command_status, "yellow")

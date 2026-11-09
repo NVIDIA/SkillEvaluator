@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from io import StringIO
 
 import pytest
@@ -10,6 +11,8 @@ from skillevaluator.models import ValidationResult
 from skillevaluator.reporting.benchmark import BenchmarkReporter
 from skillevaluator.reporting.cli import CLIReporter
 from skillevaluator.reporting.html import HTMLReporter
+from skillevaluator.reporting.markdown import MarkdownReporter
+from skillevaluator.tier3.dataset_provenance import dataset_provenance_display, sanitize_generation_record
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 from skillevaluator.tier3.result_display import render_result
 
@@ -134,3 +137,107 @@ def test_report_payload_preserves_paths_and_shortens_input_hashes() -> None:
     provenance = _result(generation).metadata["agent_eval"]["dataset_provenance"]
 
     assert provenance["inputs"] == [{"kind": "eval_md", "path": "evals/EVAL.md", "sha256": "a" * 12}]
+
+
+@pytest.mark.parametrize("mode", [[], {}, None, 7])
+def test_malformed_generation_mode_is_rejected(mode: object) -> None:
+    assert sanitize_generation_record({"mode": mode}) is None
+
+
+def test_legacy_template_generation_record_keeps_mode_and_review_warning() -> None:
+    record = sanitize_generation_record({"mode": "template", "needs_review_count": 2})
+
+    assert record == {"mode": "template", "needs_review_count": 2}
+    assert dataset_provenance_display(record) == (
+        "Dataset: generated from templates — cases are generic starters; review before relying on scores; "
+        "2 cases need review",
+        True,
+    )
+
+
+def test_fallback_reason_strips_terminal_escape_sequences() -> None:
+    record = sanitize_generation_record(
+        {
+            "mode": "template_fallback",
+            "fallback_reason": "\x1b[31mfailed\x1b[0m \x1b]8;;https://attacker.example\x1b\\click\x1b]8;;\x1b\\",
+        }
+    )
+
+    assert record is not None
+    assert record["fallback_reason"] == "failed click"
+    assert "attacker.example" not in json.dumps(record)
+
+
+def test_html_provenance_uses_unbounded_tier3_record() -> None:
+    generation = _generation("template_fallback")
+    result = _result(generation)
+    payload = result.metadata["agent_eval"]
+    result.metadata["agent_eval"] = {"large_payload": "x" * 300_000, **payload}
+
+    rendered = HTMLReporter(include_timestamp=False, report_scope="tier3").render_all([result])
+
+    assert len(json.dumps(result.metadata["agent_eval"])) > 256 * 1024
+    assert (
+        "Dataset: generated from templates (fallback: public LLM provider is not configured) — "
+        "cases are generic starters; review before relying on scores; 2 cases need review"
+    ) in rendered
+
+
+def test_cli_print_all_includes_passing_result_provenance_once() -> None:
+    result = _result(_generation("template_fallback"))
+    stream = StringIO()
+    reporter = CLIReporter(console=Console(file=stream, width=240, force_terminal=False, color_system=None))
+
+    reporter.print_all([result])
+
+    line = "Dataset: generated from templates (fallback: public LLM provider is not configured)"
+    assert stream.getvalue().count(line) == 1
+
+
+def test_markdown_renders_escaped_provenance_under_tier3_verdict() -> None:
+    generation = _generation("template_fallback")
+    generation["fallback_reason"] = "**untrusted**"
+    rendered = MarkdownReporter(include_timestamp=False).render_all([_result(generation)])
+
+    verdict_index = rendered.index("**Verdict:**")
+    provenance_index = rendered.index("Dataset:", verdict_index)
+    assert provenance_index > verdict_index
+    assert "&#42;&#42;untrusted&#42;&#42;" in rendered[provenance_index:]
+    assert "**untrusted**" not in rendered[provenance_index:]
+
+
+@pytest.mark.parametrize(
+    ("review_state", "review_entries", "expected_state", "expected_count"),
+    [
+        ("unreviewed", [{"review": {"status": "needs_review"}}], "needs_review", 1),
+        ("needs_review", [], "unreviewed", 0),
+        ("reviewed", [], "reviewed", 0),
+    ],
+)
+def test_runner_provenance_review_state_uses_live_review_count(
+    tmp_path,
+    review_state: str,
+    review_entries: list[dict],
+    expected_state: str,
+    expected_count: int,
+) -> None:
+    from skillevaluator.tier3.harbor.runner import _dataset_generation_provenance
+
+    skill = tmp_path / "sample-skill"
+    evals = skill / "evals"
+    evals.mkdir(parents=True)
+    (evals / "evals.json").write_text(
+        json.dumps(
+            {
+                "generation": {"mode": "template_requested", "review_state": review_state},
+                "evals": review_entries,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    provenance = _dataset_generation_provenance(skill)
+
+    assert provenance is not None
+    assert provenance["review_state"] == expected_state
+    assert provenance["needs_review_count"] == expected_count

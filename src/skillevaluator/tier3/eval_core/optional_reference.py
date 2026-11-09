@@ -14,7 +14,7 @@ def normalize_optional_reference(value: Any) -> str | None:
     if not isinstance(value, str):
         if not value:
             return None
-        value = str(value)
+        raise TypeError(f"expected_script must be a string or null, got {type(value).__name__}")
     normalized = value.strip()
     if not normalized or normalized.casefold() in _EMPTY_REFERENCE_VALUES:
         return None

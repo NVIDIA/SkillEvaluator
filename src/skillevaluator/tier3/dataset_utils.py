@@ -123,14 +123,20 @@ def normalize_dataset_entries(data: Any) -> list[dict[str, Any]]:
             for idx, entry in enumerate(data["evals"]):
                 if not isinstance(entry, dict):
                     raise ValueError(f"agentskills dataset evals[{idx}] must be an object, got {type(entry).__name__}")
-                entries.append(_normalize_entry(entry, skill_name=skill_name))
+                entries.append(_normalize_entry(entry, skill_name=skill_name, entry_index=idx))
             return entries
         if isinstance(data.get("cases"), list):
-            return [_normalize_entry(entry) for entry in data["cases"] if isinstance(entry, dict)]
+            return [
+                _normalize_entry(entry, entry_index=index)
+                for index, entry in enumerate(data["cases"])
+                if isinstance(entry, dict)
+            ]
         return [_normalize_entry(data)]
 
     if isinstance(data, list):
-        return [_normalize_entry(entry) for entry in data if isinstance(entry, dict)]
+        return [
+            _normalize_entry(entry, entry_index=index) for index, entry in enumerate(data) if isinstance(entry, dict)
+        ]
 
     return []
 
@@ -138,7 +144,12 @@ def normalize_dataset_entries(data: Any) -> list[dict[str, Any]]:
 # ── private helpers ──────────────────────────────────────────────────────────
 
 
-def _normalize_entry(entry: dict[str, Any], *, skill_name: Any | None = None) -> dict[str, Any]:
+def _normalize_entry(
+    entry: dict[str, Any],
+    *,
+    skill_name: Any | None = None,
+    entry_index: int = 0,
+) -> dict[str, Any]:
     """Map agentskills.io field names onto the existing runtime schema."""
     normalized = dict(entry)
     if "question" not in normalized and "prompt" in entry:
@@ -148,9 +159,14 @@ def _normalize_entry(entry: dict[str, Any], *, skill_name: Any | None = None) ->
     if "expected_behavior" not in normalized and "assertions" in entry:
         normalized["expected_behavior"] = entry["assertions"]
     if "expected_script" in normalized:
-        normalized["expected_script"] = normalize_optional_reference(normalized["expected_script"])
+        try:
+            normalized["expected_script"] = normalize_optional_reference(normalized["expected_script"])
+        except TypeError as exc:
+            raise ValueError(f"invalid eval dataset entry {entry_index}: {exc}") from exc
     if "expected_behavior" in normalized:
         normalized["expected_behavior"] = normalize_expected_behaviors(normalized["expected_behavior"])
+    if isinstance(normalized.get("assertions"), list):
+        normalized["assertions"] = normalize_expected_behaviors(normalized["assertions"])
     if "expected_skill" not in normalized and isinstance(skill_name, str) and skill_name:
         normalized["expected_skill"] = skill_name
     return normalized

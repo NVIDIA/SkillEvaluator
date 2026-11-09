@@ -517,7 +517,10 @@ No other fields."""
             for case in cases:
                 if isinstance(case, dict):
                     if "expected_script" in case:
-                        case["expected_script"] = normalize_optional_reference(case["expected_script"])
+                        try:
+                            case["expected_script"] = normalize_optional_reference(case["expected_script"])
+                        except TypeError as exc:
+                            raise DatasetGenerationError(str(exc)) from exc
                     if isinstance(case.get("expected_behavior"), list):
                         case["expected_behavior"] = normalize_expected_behaviors(case["expected_behavior"])
         required_fields = {

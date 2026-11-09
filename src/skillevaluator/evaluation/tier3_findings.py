@@ -18,7 +18,7 @@ inflate the artifact and could carry credentials an agent echoed.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from itertools import islice
 from typing import Any
 
@@ -226,6 +226,7 @@ def failure_reason(
     include_results: bool = True,
     metric: str | None = None,
     reward: dict[str, Any] | None = None,
+    omit: Collection[str] = (),
 ) -> str:
     """Return one short, deduplicated, redacted reason for a failing metric.
 
@@ -235,20 +236,26 @@ def failure_reason(
     if not isinstance(detail, dict):
         return ""
     parts: list[str] = []
+    omitted_texts: set[str] = set()
+    for text in omit:
+        cleaned = sanitize_grader_text(text)
+        if cleaned:
+            omitted_texts.add(cleaned)
+            omitted_texts.update(part for part in cleaned.split("; ") if part)
     # Only non-blank candidates count toward the cap, so entries without text
     # cannot crowd out the criteria, checks, or attribution that follow them.
     candidates = (
-        candidate
+        cleaned
         for candidate in _reason_candidates(
             detail,
             include_results=include_results,
             metric=metric,
             reward=reward,
         )
-        if candidate.strip()
+        if (cleaned := sanitize_grader_text(candidate))
+        and not any(cleaned == omitted or cleaned in omitted for omitted in omitted_texts)
     )
-    for candidate in islice(candidates, _MAX_REASON_CANDIDATES):
-        cleaned = sanitize_grader_text(candidate)
+    for cleaned in islice(candidates, _MAX_REASON_CANDIDATES):
         if cleaned and cleaned not in parts:
             parts.append(cleaned)
         if len(parts) >= _MAX_REASON_PARTS:

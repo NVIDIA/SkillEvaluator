@@ -2558,7 +2558,8 @@ def _metric_evidence(
         score_failed = raw_score is not None and raw_score < TRIAL_PASS_THRESHOLD
 
         notes: list[str] = []
-        reason = sanitize_grader_text(detail.get("reason"))
+        raw_grader_reason = detail.get("reason")
+        reason = sanitize_grader_text(raw_grader_reason)
         if reason:
             notes.append(reason[:512])
 
@@ -2612,11 +2613,18 @@ def _metric_evidence(
             output_truncated = True
             continue
         if score_failed:
-            # Graders that record only a message, findings, or failed criteria
-            # still explain a failing score. The built reason stays separate from
-            # the grader's own notes so size limits can drop it first, and leaves
-            # out failing results, which the card already lists as ``failures``.
-            if fallback_reason := failure_reason(detail, include_results=False, metric=metric, reward=reward):
+            # Graders that record only findings or failed criteria still explain
+            # a failing score. Notes already show the grader's own reason, so the
+            # separate built reason omits that text and leaves out failing
+            # results, which the card already lists as ``failures``.
+            omitted_reasons = (raw_grader_reason, *notes) if isinstance(raw_grader_reason, str) else tuple(notes)
+            if fallback_reason := failure_reason(
+                detail,
+                include_results=False,
+                metric=metric,
+                reward=reward,
+                omit=omitted_reasons,
+            ):
                 entry["reason"] = fallback_reason
             if excerpt := failure_excerpt(detail):
                 entry["excerpt"] = excerpt

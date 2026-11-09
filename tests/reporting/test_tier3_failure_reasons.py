@@ -380,7 +380,11 @@ def test_message_only_detail_explains_failing_score() -> None:
     assert card["evidence"][0]["notes"] == []
     assert card["evidence"][0]["reason"] == "No tool calls in trajectory"
     cards_html = _render(payload).split('class="t3-eval-card', 1)[1]
-    assert re.search(r'<div class="t3-ev-reason">\s*No tool calls in trajectory', cards_html)
+    reason_index = cards_html.index('<div class="t3-ev-detail t3-ev-reason">')
+    row_start = cards_html.rfind("<li>", 0, reason_index)
+    row_end = cards_html.index("</li>", reason_index)
+    row = cards_html[row_start:row_end]
+    assert row.index('<span class="t3-bar-value"') < row.index('<div class="t3-ev-detail t3-ev-reason">')
 
 
 def test_passing_attempt_does_not_hide_failing_attempt_reason() -> None:
@@ -631,11 +635,38 @@ def test_accuracy_card_keeps_built_reason_outside_bounded_notes() -> None:
     entry = card["evidence"][0]
 
     assert entry["notes"] == [detail["reason"]]
-    assert entry["reason"].startswith("Ran the right command")
-    assert "Failed criteria: FACTUALLY_ACCURATE, ACTIONABLE" in entry["reason"]
+    assert entry["reason"].startswith("Failed criteria: FACTUALLY_ACCURATE")
+    assert detail["reason"] not in entry["reason"]
     assert "Failed criteria" not in entry["notes"][0]
     assert "Expected: version 1.4.0; observed: version 1.2.3" in entry["reason"]
-    assert '<div class="t3-ev-reason">' in _render(payload)
+    rendered = _render(payload)
+    assert '<div class="t3-ev-detail t3-ev-reason">' in rendered
+
+
+def test_metric_evidence_omits_grader_reason_and_its_findings() -> None:
+    details = {
+        "security": {
+            "passed": False,
+            "score": 0.0,
+            "reason": "A; B",
+            "findings": [_finding("first", message="A"), _finding("second", message="B")],
+        }
+    }
+    payload = _payload([_reward(details=details)])
+    evidence = _security_card(payload)["evidence"][0]
+
+    assert evidence["notes"] == ["A; B"]
+    assert "reason" not in evidence
+    assert (
+        failure_reason(
+            {
+                "reason": "A; B",
+                "findings": [{"score_impact": True, "message": "A"}, {"score_impact": True, "message": "B"}],
+            },
+            omit=("A; B",),
+        )
+        == ""
+    )
 
 
 def test_saved_html_defaults_only_add_unavailable_reasons_to_eligible_agent_cards() -> None:

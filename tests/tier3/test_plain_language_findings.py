@@ -118,21 +118,50 @@ def test_trajectory_load_metadata_is_not_reported_as_a_load_failure():
 def test_evidence_unavailable_labels_are_limited_to_evidence_ref_metrics():
     reward = _goal_reward(
         {
-            "security": {"reason": "unsafe action"},
+            "security": {
+                "reason": "unsafe action",
+                "findings": [
+                    {
+                        "type": "destructive_command",
+                        "severity": "critical",
+                        "message": "unsafe action",
+                        "evidence": "rm -rf ~/work",
+                        "score_impact": True,
+                    }
+                ],
+            },
+            "skill_execution": {"reason": "script was not invoked"},
             "goal_accuracy": {"reason": "goal missed"},
         }
     )
     reward["security"] = 0.0
+    reward["skill_execution"] = 0.0
     findings = report._extract_findings(
         [reward],
-        canonical_scores={"security": 0.0, "goal_accuracy": 0.2},
+        canonical_scores={"security": 0.0, "skill_execution": 0.0, "goal_accuracy": 0.2},
     )
     by_metric = {finding["metric"]: finding for finding in findings}
 
     assert "evidence_unavailable_reason" not in by_metric["security"]
+    assert "evidence_unavailable_reason" not in by_metric["skill_execution"]
     assert by_metric["goal_accuracy"]["evidence_unavailable_reason"] == (
         "No trajectory evidence was recorded for this metric"
     )
+    renderer_findings = [
+        *findings,
+        {
+            "metric": "skill_execution",
+            "label": "SKILL EXECUTION",
+            "severity": "critical",
+            "score": 0.0,
+            "reasons": ["script was not invoked"],
+            "evidence_refs": [],
+        },
+    ]
+    rendered = report._render_findings_body(renderer_findings).plain
+    assert rendered.count("evidence: unavailable —") == 1
+    assert "skill execution" in rendered.casefold()
+    assert "goal accuracy" in rendered.casefold()
     security_payload = report._bounded_findings_payload(
         skill_name="demo",
         agent="agent",

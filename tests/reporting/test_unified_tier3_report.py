@@ -1554,7 +1554,6 @@ def test_canonical_payload_deduplicates_repeated_metric_evidence() -> None:
             "checks": [],
             "evidence_refs": [],
             "evidence_unavailable_reason": "No trajectory evidence was recorded for this metric",
-            "reason": "same representative evidence",
             "occurrences": 2,
         }
     ]

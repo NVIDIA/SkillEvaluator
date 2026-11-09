@@ -3518,13 +3518,13 @@
                                         {% if not ev.notes and not ev.failures and ev.checks %}{{ (ev.checks | length) }} checks{% endif %}
                                         {% if ev.evidence_refs %}<span class="t3-ev-refs">Evidence: {{ ev.evidence_refs[:3] | join('; ') }}</span>{% elif ev.evidence_unavailable_reason %}<span class="t3-ev-refs">Evidence unavailable — {{ ev.evidence_unavailable_reason }}</span>{% endif %}
                                     </span>
-                                    {% if ev.reason %}<div class="t3-ev-reason">{{ ev.reason }}</div>{% endif %}
                                     <span class="t3-ev-count">×{{ ev.count }}</span>
                                     {% if avg_score is not none %}
                                         <span class="t3-bar-value" style="color:{{ ev_color }};">{{ "%.2f" | format(avg_score) }}</span>
                                     {% else %}
                                         <span class="t3-bar-value" style="color:var(--text-secondary);">N/A</span>
                                     {% endif %}
+                                    {% if ev.reason %}<div class="t3-ev-detail t3-ev-reason">{{ ev.reason }}</div>{% endif %}
                                     {% if ev.excerpt %}<div class="t3-ev-detail"><code class="t3-ev-excerpt">{{ ev.excerpt }}</code></div>{% endif %}
                                 </li>
                             {% endfor %}

@@ -376,12 +376,9 @@ def _render_findings_body(findings: list[dict[str, Any]]) -> Any:
         for ref in (finding.get("evidence_refs") or [])[:3]:
             ref_text = ref if isinstance(ref, str) else _compact_evidence_ref(ref)
             body.append(f"      evidence: {strip_terminal_controls(ref_text)}\n", style="dim")
-        if finding["severity"] != "ok" and not finding.get("evidence_refs"):
-            unavailable_reason = finding.get("evidence_unavailable_reason") or (
-                "No trajectory evidence was recorded for this metric"
-            )
+        if finding["severity"] != "ok" and finding.get("evidence_unavailable_reason"):
             body.append(
-                f"      evidence: unavailable — {strip_terminal_controls(str(unavailable_reason))}\n",
+                f"      evidence: unavailable — {strip_terminal_controls(str(finding['evidence_unavailable_reason']))}\n",
                 style="dim",
             )
 

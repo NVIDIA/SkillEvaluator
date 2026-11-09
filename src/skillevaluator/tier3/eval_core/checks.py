@@ -2670,6 +2670,14 @@ _FINDING_EVIDENCE_DIGEST_AUTH_HEADER_RE = re.compile(
     r"(\bauthorization" + _FINDING_EVIDENCE_HEADER_SEPARATOR + r"digest[ \t]{1,8})[^'`\r\n]{1,512}",
     re.IGNORECASE,
 )
+# A Digest value holds double quotes (username="bob"), so the copied pattern
+# reads past them. Inside a double-quoted header the inner quotes are escaped,
+# and the value ends at the first unescaped quote (see _mask_digest_headers).
+_FINDING_EVIDENCE_DIGEST_AUTH_HEADER_START_RE = re.compile(
+    r"(\bauthorization" + _FINDING_EVIDENCE_HEADER_SEPARATOR + r"digest[ \t]{1,8})",
+    re.IGNORECASE,
+)
+_FINDING_EVIDENCE_DOUBLE_QUOTED_DIGEST_VALUE_RE = re.compile(r"(?:\\.|[^\"\\\r\n]){1,512}")
 _FINDING_EVIDENCE_AUTH_HEADER_HEAD = (
     r"(\bauthorization"
     + _FINDING_EVIDENCE_HEADER_SEPARATOR
@@ -2784,9 +2792,9 @@ _FINDING_EVIDENCE_NETRC_PASSWORD_RE = re.compile(
 # curl's "-b NAME=VALUE" sends a cookie; "-b FILE" reads a cookie jar and is
 # kept. This follows the report excerpts' _CLI_COOKIE_FLAG_RE.
 _FINDING_EVIDENCE_COOKIE_FLAG_RE = re.compile(r"((?<![^\s'\"])-b[ \t]+)(?=[^\s]*=)" + _FINDING_EVIDENCE_FLAG_VALUE)
-# Bearer, Basic and Token stay visible after a credential name too
+# Bearer, Basic, Token and Digest stay visible after a credential name too
 # ("Authorization: Bearer <redacted>").
-_FINDING_EVIDENCE_AUTH_SCHEME = r"(?:(?:bearer|basic|token)[ \t]+)?"
+_FINDING_EVIDENCE_AUTH_SCHEME = r"(?:(?:bearer|basic|token|digest)[ \t]+)?"
 # An assignment's name is matched as a whole word run, and checked for a
 # credential word afterwards, so a long run is read once. A name right after
 # "/" is a URL host or path segment. A name may close a JSON-escaped quote
@@ -2859,7 +2867,7 @@ def _redact_finding_evidence(text: Any, limit: int = 500) -> str:
     # its first word; <redacted> is one word to every rule.
     redacted = _redact_network_evidence(redacted).replace("[redacted secret exposure]", "<redacted>")
     redacted = _FINDING_EVIDENCE_URL_USERINFO_RE.sub(r"\1<redacted>@", redacted)
-    redacted = _FINDING_EVIDENCE_DIGEST_AUTH_HEADER_RE.sub(r"\1<redacted>", redacted)
+    redacted = _mask_digest_headers(redacted)
     redacted = _mask_authorization_headers(redacted)
     for pattern in (_FINDING_EVIDENCE_KEY_HEADER_RE, _FINDING_EVIDENCE_COOKIE_HEADER_RE):
         redacted = pattern.sub(r"\1<redacted>", redacted)
@@ -2879,6 +2887,29 @@ def _redact_finding_evidence(text: Any, limit: int = 500) -> str:
     if cut:
         redacted += _FINDING_EVIDENCE_TRUNCATED
     return redacted[:limit]
+
+
+def _mask_digest_headers(text: str) -> str:
+    """Mask Digest Authorization values: to the first unescaped quote inside double quotes, else as judge evidence."""
+    parts: list[str] = []
+    pos = 0
+    while (match := _FINDING_EVIDENCE_DIGEST_AUTH_HEADER_START_RE.search(text, pos)) is not None:
+        head = match.group(1)
+        quotes = [char for char in head if char in "'\""]
+        quote = quotes[-1] if quotes else (text[match.start() - 1] if match.start() else "")
+        if quote == '"':
+            value = _FINDING_EVIDENCE_DOUBLE_QUOTED_DIGEST_VALUE_RE.match(text, match.end())
+        else:
+            value = _FINDING_EVIDENCE_DIGEST_AUTH_HEADER_RE.match(text, match.start())
+        if value is None:
+            parts.append(text[pos : match.end()])
+            pos = match.end()
+            continue
+        parts.append(text[pos : match.end()])
+        parts.append("<redacted>")
+        pos = value.end()
+    parts.append(text[pos:])
+    return "".join(parts)
 
 
 def _mask_authorization_headers(text: str) -> str:

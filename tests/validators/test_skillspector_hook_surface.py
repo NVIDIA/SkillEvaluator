@@ -734,10 +734,25 @@ class TestOtherGapsStayIncomplete:
             "hooks/hooks.json [static; opaque_content; analyzers=bundled_execution_surface]"
         )
 
-    @pytest.mark.parametrize("case", ["extra-limitation", "uninspected-file", "fatal-scope-exclusion", "filtered"])
-    def test_other_gaps_without_rows_stay_incomplete_with_the_critical(self, case: str) -> None:
+    @pytest.mark.parametrize(
+        ("case", "gap"),
+        [
+            ("extra-limitation", "limitation 'Transitive traversal stopped early.'"),
+            ("uninspected-file", "1 partially inspected file(s)"),
+            ("fatal-scope-exclusion", "1 fatal scope exclusion(s)"),
+            ("filtered", "3 finding(s) before filtering and 2 after"),
+            (
+                "degraded-analyzer",
+                "limitation 'Analyzer behavioral_ast status: degraded.'; analyzer status behavioral_ast degraded",
+            ),
+            ("uncovered-component", "analyzer work that does not cover every component"),
+        ],
+    )
+    def test_other_gaps_without_rows_stay_incomplete_with_the_critical(self, case: str, gap: str) -> None:
+        """The error names the gaps that remain, since no row does."""
         report = _report(_PLUGIN_REPORT)
         completeness = report["analysis_completeness"]
+        statuses = {status["analyzer_id"]: status for status in completeness["analyzer_statuses"]}
         if case == "extra-limitation":
             completeness["limitations"].append("Transitive traversal stopped early.")
         elif case == "uninspected-file":
@@ -745,15 +760,20 @@ class TestOtherGapsStayIncomplete:
             completeness["coverage_percent"] = 60.0
         elif case == "fatal-scope-exclusion":
             completeness["scope_exclusions"] = [{"path": "vendor", "reason_code": "excluded", "fatal": True}]
-        else:
+        elif case == "filtered":
             completeness["findings_before_filtering"] = 3
+        elif case == "degraded-analyzer":
+            statuses["behavioral_ast"].update(status="degraded", completed=1, partial=1)
+            completeness["limitations"].append("Analyzer behavioral_ast status: degraded.")
+        else:
+            statuses["artifact_integrity"].update(planned_work=4, completed=4)
 
         result = _replay(PLUGIN, report)
 
         assert result.incomplete_scans == ["skillspector"]
         assert result.errors[0] == (
-            "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'); "
-            "security scan did not complete"
+            "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+            f"{gap}; security scan did not complete"
         )
         _assert_hook_critical(result, PLUGIN)
 

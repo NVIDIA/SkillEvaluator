@@ -2273,28 +2273,59 @@ def _skillspector_without_hook_surface(
     )
 
 
-def _skillspector_hook_surface_is_the_only_gap(
+def _skillspector_gaps_without_rows(
     analyzer_statuses: list[dict],
     counts: Mapping[str, int],
     limitations: list[str],
     scope_exclusions: object,
-) -> bool:
-    """Whether a report without its hook rows (:func:`_skillspector_without_hook_surface`) has no other gap.
+) -> list[str]:
+    """Describe the gaps a report without its hook rows (:func:`_skillspector_without_hook_surface`) shows outside its rows.
 
-    No file may be partially or entirely uninspected, there may be no
-    limitation and no fatal scope exclusion, the report must count as many
-    findings after filtering as before it, each universal analyzer must have
-    completed one work item per component, and every other analyzer must have
-    completed or be not applicable or disabled.
+    A gap is a limitation, a partially or entirely uninspected file, a fatal
+    scope exclusion, a finding count that changed in filtering, or analyzer
+    work that did not finish: each universal analyzer must complete one work
+    item per component, and every other analyzer must complete or be not
+    applicable or disabled. No gap gives an empty list.
     """
+    gaps = [
+        f"limitation '{_skillspector_report_text(limitation) or ''}'"
+        for limitation in limitations[:_SKILLSPECTOR_INCOMPLETE_EXAMPLES]
+    ]
+    if len(limitations) > _SKILLSPECTOR_INCOMPLETE_EXAMPLES:
+        gaps.append(f"{len(limitations) - _SKILLSPECTOR_INCOMPLETE_EXAMPLES} more limitation(s)")
+    if counts["partially_inspected_files"]:
+        gaps.append(f"{counts['partially_inspected_files']} partially inspected file(s)")
+    if counts["entirely_uninspected_files"]:
+        gaps.append(f"{counts['entirely_uninspected_files']} uninspected file(s)")
+    if not isinstance(scope_exclusions, list):
+        gaps.append("unreadable scope exclusions")
+    elif fatal := sum(not (isinstance(row, dict) and row.get("fatal") is False) for row in scope_exclusions):
+        gaps.append(f"{fatal} fatal scope exclusion(s)")
+    if counts["findings_before_filtering"] != counts["findings_after_filtering"]:
+        gaps.append(
+            f"{counts['findings_before_filtering']} finding(s) before filtering and "
+            f"{counts['findings_after_filtering']} after"
+        )
+    if not _skillspector_universal_analyzers_completed(analyzer_statuses, counts["total_components"]):
+        unfinished = [
+            f"{_skillspector_report_text(status.get('analyzer_id')) or 'unknown'} "
+            f"{_skillspector_report_text(status.get('status')) or 'unknown'}"
+            for status in analyzer_statuses
+            if status.get("status") not in {"completed", "not_applicable", "disabled"}
+        ]
+        gaps.append(
+            f"analyzer status {', '.join(unfinished[:_SKILLSPECTOR_INCOMPLETE_EXAMPLES])}"
+            if unfinished
+            else "analyzer work that does not cover every component"
+        )
+    return gaps
+
+
+def _skillspector_gaps_without_rows_error(status: str, gaps: list[str]) -> str:
+    """Describe a partial analysis whose only gaps outside the hook rows have no ledger row."""
     return (
-        isinstance(scope_exclusions, list)
-        and all(isinstance(row, dict) and row.get("fatal") is False for row in scope_exclusions)
-        and not limitations
-        and not counts["partially_inspected_files"]
-        and not counts["entirely_uninspected_files"]
-        and counts["findings_before_filtering"] == counts["findings_after_filtering"]
-        and _skillspector_universal_analyzers_completed(analyzer_statuses, counts["total_components"])
+        f"skillspector JSON field 'analysis_completeness' reports incomplete analysis (status '{status}'): "
+        f"{'; '.join(gaps)}; security scan did not complete"
     )
 
 
@@ -3507,23 +3538,25 @@ class SecurityValidator(ValidatorBase):
                             scanned_root,
                         )
                         gap_notes = None if raster_note is None else [raster_note]
-                    if (
-                        gap_notes is None
-                        and without_hooks is not None
-                        and not gap_rows
-                        and _skillspector_hook_surface_is_the_only_gap(
+                    other_gaps: list[str] = []
+                    if gap_notes is None and without_hooks is not None and not gap_rows:
+                        other_gaps = _skillspector_gaps_without_rows(
                             gap_statuses,
                             gap_counts,
                             gap_limitations,
                             analysis_completeness.get("scope_exclusions", []),
                         )
-                    ):
-                        gap_notes = []
+                        if not other_gaps:
+                            gap_notes = []
                     if gap_notes is not None:
                         for note in gap_notes:
                             result.add_warning(note)
                     else:
-                        result.add_error(_skillspector_incomplete_analysis_error(completeness_status, gap_rows))
+                        result.add_error(
+                            _skillspector_gaps_without_rows_error(completeness_status, other_gaps)
+                            if other_gaps
+                            else _skillspector_incomplete_analysis_error(completeness_status, gap_rows)
+                        )
                         result.mark_scan_incomplete(stage_name)
 
         status = data.get("status")

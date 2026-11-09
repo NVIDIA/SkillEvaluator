@@ -1,0 +1,187 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""A failed result counts the files SkillSpector did not completely inspect in every report.
+
+The counts come from the AE1 findings' evidence (see
+``tests/validators/test_skillspector_reference_diagnostics.py``). The real
+SkillSpector v2.11.2 report names ``scripts/helper.pl`` at two lines of
+``SKILL.md``.
+"""
+
+import json
+import re
+from pathlib import Path
+
+import pytest
+
+from skillevaluator.reporting.cli import CLIReporter
+from skillevaluator.reporting.console_ui import summarize_tier1
+from skillevaluator.reporting.html import HTMLReporter
+from skillevaluator.reporting.json_reporter import JSONReporter
+from skillevaluator.reporting.markdown import MarkdownReporter
+from skillevaluator.skillspector_references import (
+    combine_reference_summaries,
+    reference_summary_message,
+    reference_summary_record,
+)
+from skillevaluator.validators.base import ValidationResult
+from skillevaluator.validators.security import SecurityValidator
+
+_REPORT = Path(__file__).parents[1] / "fixtures" / "skillspector-2.11.2-perl-help-text-ae1-no-llm.json"
+
+
+def _write_skill(root: Path) -> None:
+    (root / "scripts").mkdir(parents=True)
+    (root / "SKILL.md").write_text(
+        "---\nname: perl-test\ndescription: Inspect a Perl helper.\n---\n\nRun `scripts/helper.pl`.\n\n"
+        "See `scripts/helper.pl`.\n",
+        encoding="utf-8",
+    )
+    (root / "scripts" / "helper.pl").write_text('print "Use rm to remove a project\\n";\n', encoding="utf-8")
+
+
+def _validate(
+    root: Path, monkeypatch: pytest.MonkeyPatch, *, skills: tuple[str, ...], lines: int = 0
+) -> ValidationResult:
+    """Scan *skills* under *root* with the captured report; *lines* lists that many reference lines in one AE1."""
+    for name in skills:
+        _write_skill(root / name)
+    validator = SecurityValidator(use_llm=False)
+
+    def scan(path: Path) -> ValidationResult:
+        report = json.loads(_REPORT.read_text(encoding="utf-8"))
+        if lines:
+            report["issues"][0]["occurrences"] = [
+                {"file": "SKILL.md", "start_line": line} for line in range(1, lines + 1)
+            ]
+        result = ValidationResult(validator_name="Security Scan")
+        validator._process_skillspector_cli_result(report, result, source_root=path)
+        return result
+
+    monkeypatch.setattr(validator, "_run_skillspector", scan)
+    return validator.validate_security_only(root)
+
+
+def _rendered(result: ValidationResult) -> dict[str, str]:
+    passed, rows = summarize_tier1([result], lineup=["security"])
+    assert passed == result.passed
+    return {
+        "CLI": re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render(result)),
+        "terminal summary": "\n".join("".join(text for text, _style in row.segments) for row in rows),
+        "Markdown": MarkdownReporter(include_timestamp=False).render(result),
+        # The visible line; the page's embedded data also carries the result messages.
+        "HTML": "\n".join(
+            re.findall(
+                r'<p class="reference-analysis-summary"[^>]*>([^<]*)</p>',
+                HTMLReporter(include_timestamp=False).render(result),
+            )
+        ),
+    }
+
+
+def _phrase(artifacts: int, occurrences: str) -> str:
+    return (
+        f"skillspector could not completely inspect {artifacts} referenced artifact(s) across {occurrences} "
+        "reference occurrence(s); each AE1 finding names the artifact and why its analysis stopped"
+    )
+
+
+@pytest.mark.parametrize("skills", [(".",), ("alpha", "beta")], ids=["skill", "folder"])
+def test_failed_reports_show_the_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, skills: tuple) -> None:
+    result = _validate(tmp_path, monkeypatch, skills=skills)
+
+    expected = {
+        "affected_artifacts": len(skills),
+        "reference_occurrences": 2 * len(skills),
+        "reference_occurrences_truncated": False,
+    }
+    assert not result.passed
+    assert result.metadata["skillspector_reference_summary"] == expected
+    assert sum(finding.check_name.endswith("(AE1)") for finding in result.findings) == 2 * len(skills)
+    phrase = _phrase(len(skills), str(2 * len(skills)))
+    for reporter, rendered in _rendered(result).items():
+        assert rendered.count(phrase) == 1, reporter
+    exported = json.loads(JSONReporter(include_timestamp=False).render(result))
+    assert exported["skillspector_reference_summary"] == expected
+    combined = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    assert combined["results"][0]["skillspector_reference_summary"] == expected
+
+
+def test_a_cut_occurrence_list_is_a_lower_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _validate(tmp_path, monkeypatch, skills=("alpha", "beta"), lines=129)
+
+    # Each skill: 128 kept lines of the first AE1, of which line 8 is the second AE1's.
+    assert result.metadata["skillspector_reference_summary"] == {
+        "affected_artifacts": 2,
+        "reference_occurrences": 256,
+        "reference_occurrences_truncated": True,
+    }
+    for reporter, rendered in _rendered(result).items():
+        assert _phrase(2, "at least 256") in rendered, reporter
+
+
+def test_passing_results_do_not_show_the_counts() -> None:
+    """Only a failed result gets the count line; JSON still records it."""
+    result = ValidationResult(validator_name="Security Scan")
+    result.metadata["skillspector_reference_summary"] = {
+        "affected_artifacts": 1,
+        "reference_occurrences": 2,
+        "reference_occurrences_truncated": False,
+    }
+
+    assert result.passed
+    for reporter, rendered in _rendered(result).items():
+        assert "referenced artifact(s)" not in rendered, reporter
+    exported = json.loads(JSONReporter(include_timestamp=False).render(result))
+    assert exported["skillspector_reference_summary"]["affected_artifacts"] == 1
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        None,
+        [],
+        {"affected_artifacts": 0, "reference_occurrences": 2},
+        {"affected_artifacts": True, "reference_occurrences": 2},
+        {"affected_artifacts": 1, "reference_occurrences": -1},
+        {"affected_artifacts": 1, "reference_occurrences": 1 << 63},
+        {"affected_artifacts": "1", "reference_occurrences": 2},
+        {"affected_artifacts": "<script>alert(1)</script>", "reference_occurrences": 2},
+    ],
+)
+def test_malformed_counts_are_neither_shown_nor_exported(summary: object) -> None:
+    result = ValidationResult(validator_name="Security Scan")
+    result.add_error("failed")
+    result.metadata["skillspector_reference_summary"] = summary
+
+    assert reference_summary_message(summary) is None
+    for reporter, rendered in _rendered(result).items():
+        assert "referenced artifact(s)" not in rendered, reporter
+    assert "skillspector_reference_summary" not in json.loads(JSONReporter(include_timestamp=False).render(result))
+
+
+def test_export_keeps_only_the_count_fields() -> None:
+    summary = {
+        "affected_artifacts": 2,
+        "reference_occurrences": 3,
+        "reference_occurrences_truncated": "yes",
+        "paths": ["scripts/helper.pl"],
+    }
+
+    assert reference_summary_record(summary) == {
+        "affected_artifacts": 2,
+        "reference_occurrences": 3,
+        "reference_occurrences_truncated": False,
+    }
+
+
+def test_folder_totals_skip_malformed_children() -> None:
+    assert combine_reference_summaries([]) is None
+    assert combine_reference_summaries(
+        [
+            {"affected_artifacts": 1, "reference_occurrences": 2, "reference_occurrences_truncated": False},
+            {"affected_artifacts": "1", "reference_occurrences": 2},
+            {"affected_artifacts": 3, "reference_occurrences": 0, "reference_occurrences_truncated": True},
+        ]
+    ) == {"affected_artifacts": 4, "reference_occurrences": 2, "reference_occurrences_truncated": True}

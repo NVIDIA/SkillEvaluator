@@ -53,6 +53,7 @@ from skillevaluator.reporting.harbor_viewer import (
 from skillevaluator.reporting.presentation import FinalRenderContext, build_final_render_context, trial_coverage
 from skillevaluator.reporting.run_status import Status, result_status
 from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, RED, TEXT, grade_style, lift_style
+from skillevaluator.skillspector_references import reference_summary_message
 from skillevaluator.utils.rich_markup import escape_markup
 
 if TYPE_CHECKING:
@@ -254,6 +255,7 @@ class CLIReporter(ReporterBase):
         elif result_status(result) == Status.INCOMPLETE:
             tools = ", ".join(result.incomplete_scans)
             console.print(f"[yellow][INCOMPLETE] {escape_markup(tools)} did not complete[/yellow]\n")
+            self._print_reference_summary(result, console)
             self._print_summary_stats(result, console)
             self._print_findings(result, console)
         elif result.passed:
@@ -264,8 +266,17 @@ class CLIReporter(ReporterBase):
                 self._print_findings(result, console)
         else:
             console.print("[red][FAIL] Validation failed[/red]\n")
+            self._print_reference_summary(result, console)
             self._print_summary_stats(result, console)
             self._print_findings(result, console)
+
+    @staticmethod
+    def _print_reference_summary(result: ValidationResult, console: Console) -> None:
+        """Print how many referenced artifacts SkillSpector did not completely inspect in a failed result."""
+        summary = reference_summary_message(result.metadata.get("skillspector_reference_summary"))
+        if summary and not result.passed:
+            console.print(f"  {escape_markup(summary)}", soft_wrap=True, highlight=False)
+            console.print()
 
     @staticmethod
     def _score_cell(dims: dict, dname: str) -> str:

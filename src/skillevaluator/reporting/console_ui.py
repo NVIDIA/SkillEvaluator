@@ -64,6 +64,7 @@ from skillevaluator.reporting.terminal_styles import (
     grade_style,
     lift_style,
 )
+from skillevaluator.skillspector_references import reference_summary_message
 from skillevaluator.utils.rich_markup import strip_terminal_controls
 
 if TYPE_CHECKING:
@@ -1183,6 +1184,9 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
                 [(f"{suppressed_security} scanner {noun} suppressed outside agent control paths", MUTED)],
             )
         )
+    for r in failed:
+        if reference_summary := reference_summary_message((r.metadata or {}).get("skillspector_reference_summary")):
+            rows.append(TierRow("references", [(reference_summary, MUTED)], fit="wrap"))
 
     quality = _quality_stats(results)
     if quality:

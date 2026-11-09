@@ -42,6 +42,7 @@ from skillevaluator.reporting.harbor_viewer import (
     safe_url,
 )
 from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
+from skillevaluator.skillspector_references import reference_summary_message
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
@@ -519,6 +520,12 @@ class MarkdownReporter(ReporterBase):
             lines.append("|-----------|-------|--------|")
             for dname, ddata in qs["dimensions"].items():
                 lines.append(f"| {dname.title()} | {ddata.get('score', 0):.1f} | {ddata.get('weight', 0) * 100:.0f}% |")
+            lines.append("")
+
+        if not result.passed and (
+            reference_summary := reference_summary_message(result.metadata.get("skillspector_reference_summary"))
+        ):
+            lines.append(f"- {reference_summary}")
             lines.append("")
 
         if result.is_incomplete:

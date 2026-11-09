@@ -131,10 +131,10 @@ All notable changes to SkillEvaluator are documented in this file.
   The JSON report of every such run adds a root `tier1_applicability` object.
   The content scans still run with their unrestricted scope, so a real
   finding still fails the run; such a run is never eligible for publication.
-  A folder whose `SKILL.md`, `workflow-rules.mdc`, `agent_plugin.yaml`/`.yml`,
-  or `.claude-plugin/plugin.json` is mis-cased (such as `Skill.md`) or a
-  dangling symlink still fails its manifest checks, and `--type skill` still
-  validates the target as a skill.
+  A target folder whose own `SKILL.md`, `workflow-rules.mdc`,
+  `agent_plugin.yaml`/`.yml`, or `.claude-plugin/plugin.json` is mis-cased
+  (such as `Skill.md`) or a dangling symlink still fails its manifest checks,
+  and `--type skill` still validates the target as a skill.
 
 ## 0.8.0 - 2026-11-05
 

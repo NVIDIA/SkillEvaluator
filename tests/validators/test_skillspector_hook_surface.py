@@ -491,6 +491,34 @@ class TestUnmodeledHooks:
         _assert_hook_critical(result, root)
         assert sum(error == _unverified(result)[0].to_legacy_string() for error in result.errors) == 1
 
+    @patch("skillevaluator.validators.security.Tools")
+    def test_incomplete_llm_stage_does_not_repeat_the_critical(self, mock_tools, tmp_path: Path) -> None:
+        """An incomplete enrichment stage keeps its error, and the hooks are still reported once."""
+        root = _plugin(tmp_path)
+        static = _report(_PLUGIN_REPORT)
+        enriched = _report(_PLUGIN_REPORT)
+        enriched["metadata"].update({"llm_requested": True, "llm_available": True})
+        for status in enriched["analysis_completeness"]["analyzer_statuses"]:
+            if status["status"] == "disabled":
+                status.update({"status": "completed", "planned_work": 1, "completed": 1, "reason_code": None})
+        enriched["analysis_completeness"]["limitations"].append("Transitive traversal stopped early.")
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.side_effect = [
+            ToolResult(success=True, stdout=json.dumps(report), stderr="", exit_code=0) for report in (static, enriched)
+        ]
+
+        result = SecurityValidator(use_llm=True).validate_security_only(root)
+
+        assert mock_tools.skillspector.run.call_count == 2
+        assert result.incomplete_scans == ["skillspector-llm"]
+        _assert_hook_critical(result, root)
+        assert result.errors.count(_unverified(result)[0].to_legacy_string()) == 1
+        assert result.summary.critical_count == 1
+        assert (
+            "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+            "limitation 'Transitive traversal stopped early.'; security scan did not complete"
+        ) in result.errors
+
     def test_baselined_bh1_still_marks_the_row_as_unmodeled_hooks(self) -> None:
         report = _report(_PLUGIN_REPORT)
         [bh1] = [issue for issue in report["issues"] if issue["id"] == "BH1"]

@@ -2731,6 +2731,7 @@ class SecurityValidator(ValidatorBase):
                 # suppressed; keep its block and record the LLM stage's apart.
                 static_applicability = result.metadata.get("skillspector_applicability")
                 llm_applicability = enrichment.metadata.pop("skillspector_applicability", None)
+                self._drop_repeated_hook_reports(result, enrichment)
                 result.merge(enrichment)
                 if static_applicability is not None:
                     result.metadata["skillspector_applicability"] = static_applicability
@@ -2887,7 +2888,7 @@ class SecurityValidator(ValidatorBase):
 
     @staticmethod
     def _deduplicate_skillspector_findings(result: ValidationResult) -> None:
-        """Deduplicate findings and gate failures repeated by static and enriched reports."""
+        """Deduplicate findings repeated by static and enriched reports."""
         unique = []
         seen: set[tuple[str, str, int | None, str]] = set()
         for finding in result.findings:
@@ -2897,10 +2898,47 @@ class SecurityValidator(ValidatorBase):
                 unique.append(finding)
         if len(unique) != len(result.findings):
             result.findings = unique
-            if result.gate_failures:
-                # A gate failure a repeated finding raised was repeated with it.
-                result.metadata["gate_failures"] = list(dict.fromkeys(result.gate_failures))
             result.recalculate_from_findings()
+
+    @staticmethod
+    def _drop_repeated_hook_reports(result: ValidationResult, enrichment: ValidationResult) -> None:
+        """Drop the hook Criticals and gate failures of *enrichment* that the static stage's *result* already holds.
+
+        Both stages run the same static analyzers, so each reports the same
+        manifests (:meth:`_report_unverified_hooks`). They are dropped before
+        the merge whether or not the enrichment stage completed:
+        :meth:`_deduplicate_skillspector_findings` runs only after a complete
+        stage, because its rebuild would drop an incomplete stage's error.
+        """
+        reported = {
+            (finding.file_path, finding.message)
+            for finding in result.findings
+            if finding.check_name == _SKILLSPECTOR_HOOK_UNVERIFIED_CHECK
+        }
+        kept: list[Finding] = []
+        for finding in enrichment.findings:
+            legacy = finding.to_legacy_string()
+            if (
+                finding.check_name == _SKILLSPECTOR_HOOK_UNVERIFIED_CHECK
+                and finding.severity == Severity.CRITICAL
+                and (finding.file_path, finding.message) in reported
+                and legacy in enrichment.errors
+            ):
+                enrichment.errors.remove(legacy)
+                enrichment.summary.errors -= 1
+                enrichment.summary.critical_count -= 1
+            else:
+                kept.append(finding)
+        enrichment.findings = kept
+        repeated = [message for message in enrichment.gate_failures if message in result.gate_failures]
+        for message in repeated:
+            if message in enrichment.errors:
+                enrichment.errors.remove(message)
+                enrichment.summary.errors -= 1
+        if repeated:
+            enrichment.metadata["gate_failures"] = [
+                message for message in enrichment.gate_failures if message not in repeated
+            ]
 
     @staticmethod
     def _validate_skillspector_report(

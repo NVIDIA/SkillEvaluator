@@ -42,6 +42,7 @@ with:
     skills
     .agents/skills
   min-score: 70
+  enforcement-mode: strict
   scan-mode: auto
   llm: false
 ```
@@ -49,6 +50,8 @@ with:
 Use your own skill folders. Keep `auto` to scan changed skills in PRs;
 `all` checks the configured collection. If your default branch is not `main`,
 update the template's push branch.
+Keep `enforcement-mode: strict` for merge gating, or switch to `advisory` for
+non-blocking visibility runs that still retain full Tier 1 artifacts.
 
 ### Commit the workflow and open a skill PR
 

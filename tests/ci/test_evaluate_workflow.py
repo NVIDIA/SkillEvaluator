@@ -53,6 +53,22 @@ def test_pr_history_mode_and_attempt_artifact_wiring():
     assert int(job["timeout-minutes"]) > 50
 
 
+def test_enforcement_mode_defaults_to_strict_and_advisory_is_non_blocking():
+    workflow = _workflow()
+    mode = workflow["on"]["workflow_call"]["inputs"]["enforcement-mode"]
+    assert (mode["type"], mode["default"]) == ("string", "strict")
+    validate = next(step for step in _job()["steps"] if step.get("name") == "Validate enforcement mode")
+    assert validate["env"]["ENFORCEMENT_MODE"] == "${{ inputs.enforcement-mode }}"
+    assert "strict or advisory" in validate["run"]
+    scan = next(step for step in _job()["steps"] if step.get("name") == "Evaluate selected skills")
+    assert scan["id"] == "evaluate"
+    assert scan["continue-on-error"] == "${{ inputs.enforcement-mode == 'advisory' }}"
+    advisory = next(step for step in _job()["steps"] if step.get("name") == "Advisory mode keeps findings non-blocking")
+    assert advisory["if"] == "${{ always() && inputs.enforcement-mode == 'advisory' && steps.evaluate.outcome != 'success' }}"
+    strict = next(step for step in _job()["steps"] if step.get("name") == "Strict mode enforces a passing Tier 1 result")
+    assert strict["if"] == "${{ always() && inputs.enforcement-mode == 'strict' && steps.evaluate.outcome != 'success' }}"
+
+
 @pytest.mark.parametrize("llm", ["true", "false"])
 def test_real_workflow_shell_preserves_container_boundary_and_secret_selection(tmp_path, llm):
     scan = next(step for step in _job()["steps"] if step.get("name") == "Evaluate selected skills")

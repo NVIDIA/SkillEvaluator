@@ -20,6 +20,10 @@ on:
         description: Minimum Tier 1 quality score from 0 to 100
         type: number
         default: 70
+      enforcement-mode:
+        description: strict fails on non-passing Tier 1 results; advisory uploads evidence without blocking on verdict
+        type: string
+        default: strict
       llm:
         description: Enable additional LLM security, verification, and rubric checks
         type: boolean
@@ -130,7 +134,19 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/anonymous-docker-config"
           docker --config "$RUNNER_TEMP/anonymous-docker-config" pull "$IMAGE"
+      - name: Validate enforcement mode
+        env:
+          ENFORCEMENT_MODE: ${{ inputs.enforcement-mode }}
+        run: |
+          python3 -I - <<'PY'
+          import os
+          mode = os.environ["ENFORCEMENT_MODE"]
+          if mode not in {"strict", "advisory"}:
+              raise SystemExit("enforcement-mode must be strict or advisory")
+          PY
       - name: Evaluate selected skills
+        id: evaluate
+        continue-on-error: ${{ inputs.enforcement-mode == 'advisory' }}
         env:
           IMAGE: ${{ inputs.image }}
           DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -172,6 +188,14 @@ jobs:
             --env CALLER_WORKFLOW_SHA \
             --env GITHUB_ACTIONS --env REPORT_IMAGE --env REPORT_URL --env REPORT_RUN_URL --env REPORT_COMMIT \
             "$IMAGE"
+      - name: Advisory mode keeps findings non-blocking
+        if: ${{ always() && inputs.enforcement-mode == 'advisory' && steps.evaluate.outcome != 'success' }}
+        run: |
+          echo "Tier 1 returned a non-passing result, but enforcement-mode=advisory keeps this workflow non-blocking."
+      - name: Strict mode enforces a passing Tier 1 result
+        if: ${{ always() && inputs.enforcement-mode == 'strict' && steps.evaluate.outcome != 'success' }}
+        run: |
+          exit 1
       - name: Add the result to the workflow summary
         if: always()
         run: |

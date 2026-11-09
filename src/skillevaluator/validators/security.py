@@ -16,6 +16,7 @@ import bisect
 import contextlib
 import getpass
 import hashlib
+import html
 import io
 import itertools
 import json
@@ -1562,8 +1563,14 @@ _SKILLSPECTOR_REFERENCE_SOURCE_MAX_BYTES = 1_000_000
 # which a missing reference is no longer accepted.
 _SKILLSPECTOR_REFERENCE_TREE_MAX_ENTRIES = 50_000
 _SKILLSPECTOR_REFERENCE_LINE_MAX_CHARS = 10_000
-# SkillSpector removes these Markdown escapes from a link destination.
-_SKILLSPECTOR_MARKDOWN_ESCAPE_RE = re.compile(r"\\([\\()<>])")
+# A Markdown backslash escape of an ASCII punctuation character, which a
+# renderer resolves in text and in a link destination alike. SkillSpector
+# itself removes only ``\\``, ``\(``, ``\)``, ``\<`` and ``\>``.
+_SKILLSPECTOR_MARKDOWN_ESCAPE_RE = re.compile(r"\\([!-/:-@\[-`{-~])")
+# Removing Markdown escapes, resolving HTML character references and decoding
+# percent-escapes can each reveal another; a reference's line is also read
+# after up to this many of them, in any order.
+_SKILLSPECTOR_REFERENCE_LINE_DECODINGS = 3
 # Characters that continue a file name in SkillSpector's reference grammar.
 _SKILLSPECTOR_NAME_RUN_RE = re.compile(r"[\w.-]+")
 
@@ -1773,8 +1780,10 @@ def _skillspector_reference_line_avoids(
     name counts when no letter, digit, ``_``, ``-`` or ``.`` adjoins it, after
     any dots that follow it, which Windows drops when it opens a file. It is
     compared case-folded (:func:`_skillspector_name_keys`), as written and in
-    NFC, in the line as written, with Markdown escapes removed and with
-    percent-escapes decoded.
+    NFC, in the line as written and as a Markdown renderer or a file path
+    reader may read it: with backslash escapes of ASCII punctuation removed,
+    HTML character references resolved and percent-escapes decoded, up to
+    :data:`_SKILLSPECTOR_REFERENCE_LINE_DECODINGS` of these steps in any order.
     """
     line_number = row.get("start_line")
     lines = source.decode("utf-8", errors="replace").split("\n")
@@ -1793,8 +1802,14 @@ def _skillspector_reference_line_avoids(
         or any(not isinstance(text, str) or not text or text not in cleaned for text in evidence)
     ):
         return False
-    unescaped = _SKILLSPECTOR_MARKDOWN_ESCAPE_RE.sub(r"\1", line)
-    variants = {line, unescaped, unquote(line), unquote(unescaped)}
+    decodings: tuple[Callable[[str], str], ...] = (
+        lambda text: _SKILLSPECTOR_MARKDOWN_ESCAPE_RE.sub(r"\1", text),
+        html.unescape,
+        unquote,
+    )
+    variants = {line}
+    for _step in range(_SKILLSPECTOR_REFERENCE_LINE_DECODINGS):
+        variants |= {decode(text) for text in variants for decode in decodings}
     texts = {text.casefold() for text in variants} | {
         unicodedata.normalize("NFC", text).casefold() for text in variants
     }

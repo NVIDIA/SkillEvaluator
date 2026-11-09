@@ -63,6 +63,9 @@ _LIVE_TABLE_CHROME_WIDTH = 5 + 4 * 2
 # this wide. In a narrower column every detail would fold into a tall stack of
 # short pieces, so there the rows stay cut on one line as while running.
 _FINAL_DETAIL_MIN_WIDTH = 20
+_DISPLAY_STOPPED_NOTICE = "Tier 3 progress display stopped after a drawing error; the run continues."
+# Printed when the run ends instead, when the terminal refused the line above.
+_DISPLAY_STOPPED_LATE_NOTICE = "Tier 3 progress display stopped after a drawing error; the run went on without it."
 
 
 @dataclass(frozen=True, slots=True)
@@ -423,6 +426,10 @@ class RichProgressReporter(PlainProgressReporter):
         self._live_events: dict[str, tuple[ProgressEvent, str | None]] = {}
         self._live_event_slots = _LIVE_MIN_EVENT_ROWS
         self._printed_plan_lines: dict[str, str] = {}
+        # Set when the terminal refused Live's stop, or the notice under the
+        # last frame, after a drawing failure: the thread that stopped Live and
+        # whether the notice reached Rich. close() finishes that stop.
+        self._unfinished_stop: tuple[threading.Thread, bool] | None = None
 
     def emit(self, event: ProgressEvent) -> None:
         with self._lock:
@@ -476,19 +483,50 @@ class RichProgressReporter(PlainProgressReporter):
                     self._live_events.clear()
                     self._live_event_slots = _LIVE_MIN_EVENT_ROWS
                     self._printed_plan_lines.clear()
+                    if not after_failure:
+                        unfinished, self._unfinished_stop = self._unfinished_stop, None
+                        if unfinished is not None:
+                            self._finish_refused_stop(*unfinished)
 
     def close_after_failure(self) -> None:
         """Stop the live view after a drawing failure and say that the run goes on."""
         with self._lock:
             had_live = self._live is not None
-        super().close_after_failure()
+        try:
+            super().close_after_failure()
+        except Exception:
+            # A terminal that refused the redraw can refuse Live's stop too,
+            # and with it the write that shows the cursor again.
+            if had_live:
+                with self._lock:
+                    self._unfinished_stop = (threading.current_thread(), False)
+            raise
         if had_live:
             try:
                 # The last frame Live drew stays on screen with its stages
                 # still running, so explain why it no longer updates.
-                self._write_line("Tier 3 progress display stopped after a drawing error; the run continues.")
+                self._write_line(_DISPLAY_STOPPED_NOTICE)
             except Exception:
                 logger.debug("Tier 3 progress stop notice failed", exc_info=True)
+                with self._lock:
+                    self._unfinished_stop = (threading.current_thread(), True)
+
+    def _finish_refused_stop(self, stopped_on: threading.Thread, notice_sent: bool) -> None:
+        """Show the cursor and the stop notice that the terminal refused after a drawing failure.
+
+        Runs on the thread that closes the run, once the terminal may take
+        writes again. Rich keeps a refused write for its thread and sends it
+        before that thread's next one; a thread that ended took its refused
+        writes with it.
+        """
+        try:
+            # Live hides the cursor while it draws and shows it again when it
+            # stops, so a refused stop leaves it hidden after the run.
+            self._console.show_cursor(True)
+            if not notice_sent or stopped_on is not threading.current_thread():
+                self._write_line(_DISPLAY_STOPPED_LATE_NOTICE)
+        except Exception:
+            logger.debug("Tier 3 progress terminal restore failed", exc_info=True)
 
     def _render_plan(self, plan: Tier3RunPlan) -> None:
         self._live_plan = plan

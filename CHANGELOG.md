@@ -112,9 +112,12 @@ All notable changes to SkillEvaluator are documented in this file.
   including a terminal write that would block, the table keeps its last frame
   with running stages still shown as running, a line says that the run
   continues, and no further progress is shown for that run; the final results
-  still print. Before, a failure on the heartbeat thread ended that thread with
-  a traceback and left the view active without updating elapsed times, and a
-  failure on the caller's thread marked the running stages as failed.
+  still print. When the terminal also refuses that line, or the write that
+  shows the cursor again, a line saying that the run went on is printed and
+  the cursor is shown when the run ends. Before, a failure on the heartbeat
+  thread ended that thread with a traceback and left the view active without
+  updating elapsed times, and a failure on the caller's thread marked the
+  running stages as failed.
 
 - `skillevaluator tier3 feedback` now writes the evaluated skill's directory
   (known from `--skill` or a run in the skill's `evals/results`) as its name

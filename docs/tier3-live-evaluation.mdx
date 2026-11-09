@@ -605,7 +605,9 @@ terminal each row stays on one line. The view redraws only when a stage
 changes or a heartbeat updates elapsed times. If drawing fails, including a
 terminal write that would block, the table stops updating with its stages as
 they were, a line says that the run continues, and no further progress is
-shown for that run; the final results still print.
+shown for that run; the final results still print. When the terminal also
+refuses that line, or the write that shows the cursor again, a line saying
+that the run went on is printed and the cursor is shown when the run ends.
 
 Every `tier3 evaluate` flag, including resource overrides and Dockerfile
 modes, is in the [CLI Reference](cli-reference.mdx).

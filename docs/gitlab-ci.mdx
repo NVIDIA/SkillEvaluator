@@ -14,7 +14,9 @@ This path requires **GitLab 17.0 or later** for validated include inputs.
 The unreleased [all-tier CLI path](cli-onboarding.mdx#opt-in-to-three-tier-ci)
 creates two thin files: `.gitlab-ci.yml` includes the pinned shared evaluation
 configuration, and `.gitlab/skill-feedback.yml` includes pinned trusted feedback.
-Use a schema-version 2 descriptor declaring `all-tiers-gitlab`; released 0.7.2
+Install a reviewed candidate build; `--tiers 1,2,3` selects its bundled
+schema-version 2 descriptor declaring `all-tiers-gitlab`. Use `--release` only
+to override it with an alternate reviewed descriptor. Released 0.8.0
 configurations below remain Tier 1 only. The CLI never replaces an existing,
 different `.gitlab-ci.yml`, such as a released Tier 1 setup: `--mode preview`
 prints the rendered files and the merge steps, and `--mode save` and `--mode pr`
@@ -93,7 +95,11 @@ link per skill downloads the combined aggregate artifact; extract it and open
 sections and per-tier links stay out of the comment. See the
 [comment and report contract](reports.mdx#retained-three-tier-ci-evidence).
 
-Configure a runner matching `SKILL_EVAL_RUNNER` (default `docker`), the protected
+Configure a native-job runner matching `SKILL_EVAL_RUNNER` (default `docker`).
+Tier 1, aggregation and feedback jobs have no runner tags and also need a
+compatible runner that accepts untagged jobs and supports their container
+images. This remains necessary when a Linux or macOS shell runner runs the
+native jobs in local mode. Configure the protected
 `SKILL_EVAL_ENVIRONMENT` (default `skillevaluator`) and provider secrets scoped
 to that execution environment. The native jobs and the trusted feedback job
 use `environment: action: prepare`: each receives its environment's scoped

@@ -131,6 +131,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- All-tier CI retains Tier 2's native reports as advisory while preserving
+  failed and incomplete evaluation outcomes. GitHub `ci status` validates the
+  pinned evaluation and feedback configuration before reporting readiness,
+  including malformed YAML and missing approval inputs. Candidate onboarding
+  pins include the reviewed CI fixes and matching runtime metadata.
+
 - Private native Claude Code staging keeps the source client's skill
   declarations: Codex paths that Codex ignores are no longer copied into the
   staged `plugin.json` (where Claude Code rejected or loaded them), and

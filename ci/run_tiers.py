@@ -380,7 +380,17 @@ def _retain(raw: Path, destination: Path, tier: int, tokens: set[str], skill: Pa
         raise ConfigurationError("The evaluator did not produce one canonical JSON report.")
     report = Redactor(tokens).object(read_json(documents[0]))
     results = retained_results(report, allowed_tiers={tier})
-    status = resolve_run_status(results).tiers[tier].status.value
+    if tier == 2:
+        # Standalone Tier 2 gates its CLI exit; CI keeps the same evidence and
+        # tier verdict while declaring that verdict advisory in every format.
+        for result, row in zip(results, report["results"], strict=True):
+            result.metadata["gating"] = {**result.metadata.get("gating", {}), "tier": 2, "blocking": False}
+            row["gating"] = result.metadata["gating"]
+        report["gating"] = {"tiers": {"2": {"blocking": False, "validators": [r.validator_name for r in results]}}}
+    run_status = resolve_run_status(results)
+    if tier == 2:
+        report.update(overall_passed=run_status.headline.value == "passed", overall_status=run_status.headline.value)
+    status = run_status.tiers[tier].status.value
     # A confirmed failure outranks incomplete evidence in the status, so record
     # completeness on its own: the caller keeps diagnostics for incomplete runs.
     complete = tier3_execution_complete(report) if tier == 3 else not any(result.is_incomplete for result in results)

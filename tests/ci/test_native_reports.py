@@ -432,6 +432,10 @@ def test_runtime_retains_public_json_and_regenerates_each_native_tier(tmp_path, 
     (raw / f"skillevaluator-tier{tier}.html").write_text("<script>ARTIFACT HTML</script>")
     output = tmp_path / f"reports/tier{tier}/skill-001"
     retained = _retain(raw, output, tier, set(), Path("skills/demo"), 0)
+    if tier == 2:
+        # CI supplies an advisory policy even for native JSON without gating.
+        payload["results"][0]["gating"] = {"tier": 2, "blocking": False}
+        payload["gating"] = {"tiers": {"2": {"blocking": False, "validators": ["Context Optimization"]}}}
     assert json.loads((output / f"skillevaluator-tier{tier}.json").read_text()) == payload
     document = (output / f"skillevaluator-tier{tier}.html").read_text()
     assert "ARTIFACT HTML" not in document

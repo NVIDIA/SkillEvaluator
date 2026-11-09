@@ -57,19 +57,25 @@ cannot make Tier 3 block CI. Docker is the default. `--env-mode local` runs nati
 agent CLIs on the selected CI runner. This setup supports these two modes only.
 
 <Note>
-  This is an unreleased capability. The bundled 0.7.2 descriptor and downloaded
-  0.7.2 templates remain Tier 1 only. Use an explicitly reviewed schema-version
-  2 descriptor declaring `all-tiers-github` or `all-tiers-gitlab`; every workflow,
-  feedback tool and image reference must be immutable. The CLI rejects a
-  Tier 1 descriptor when `--tiers 1,2,3` is requested.
+  This is an unreleased capability. Released 0.8.0 bundles and the default
+  `ci init` setup remain Tier 1 only. Install a reviewed candidate build that
+  includes the all-tier CLI and its bundled `ci-release-all-tiers.json`, then
+  opt in with `--tiers 1,2,3`. The CLI selects that descriptor automatically.
+  It must declare schema version 2 and `all-tiers-github` or `all-tiers-gitlab`,
+  with immutable workflow, feedback, tools and image references. A Tier 1
+  descriptor cannot enable all-tier setup.
 </Note>
 
 ```bash title="Preview, then open a setup PR or MR"
-skillevaluator ci init --tiers 1,2,3 --release /path/to/reviewed-ci-release.json \
+skillevaluator ci init --tiers 1,2,3 \
   --platform github --provider openai --paths skills --mode preview --no-input --show-files
-skillevaluator ci init --tiers 1,2,3 --release /path/to/reviewed-ci-release.json \
+skillevaluator ci init --tiers 1,2,3 \
   --platform github --provider openai --paths skills --mode pr --no-input
 ```
+
+To review an alternate candidate descriptor, add
+`--release ./reviewed-ci-release.json` to either command. Review its immutable
+references before using it; the option does not install the candidate CLI.
 
 For GitLab 17.0 or later, select `--platform gitlab`. GitHub uses your local
 `gh` login; GitLab uses only a process-scoped `SKILLEVALUATOR_GITLAB_TOKEN`

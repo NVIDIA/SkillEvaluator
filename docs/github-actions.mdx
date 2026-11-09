@@ -21,9 +21,17 @@ The shared image includes **Tier 1 and SkillSpector security scanning**.
 The opt-in [CLI setup](cli-onboarding.mdx#opt-in-to-three-tier-ci) creates
 `.github/workflows/skill-checks-all-tiers.yml` and
 `.github/workflows/feedback-all-tiers.yml`. This unreleased path needs a reviewed
-capability-bearing descriptor; the 0.7.2 downloads below remain Tier 1 only.
+candidate build and its bundled capability-bearing descriptor; the 0.8.0
+downloads below remain Tier 1 only. `--tiers 1,2,3` selects the candidate's
+bundled descriptor; `--release` can override it for an alternate reviewed candidate.
 The [candidate source templates](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/templates)
 contain placeholders and must be filled with reviewed immutable references.
+
+The shared `evaluate-all-tiers.yml` and `feedback-all-tiers.yml` files define
+reusable `workflow_call` workflows. Adding them to SkillEvaluator does not
+enable checks or comments on SkillEvaluator's own pull requests. Each repository,
+including SkillEvaluator itself, needs the generated caller pair committed
+there, with the trusted feedback caller on its default branch.
 
 The evaluation workflow calls the existing hardened Tier 1 container workflow
 at the same evaluator revision. Tier 2 and Tier 3 run independently with

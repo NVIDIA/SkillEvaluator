@@ -72,8 +72,9 @@ Tier 3 have `required: false`. On GitHub, each tier with retained evidence
 records `source_attempt`, the run attempt that produced it; after **Re-run
 failed jobs** it can be earlier than the aggregate's own attempt. A tier can be
 `passed`, `failed`, `incomplete`, `skipped`, `not_run`, `needs_action`, or
-`neutral`. `neutral` means Tier 3 paired execution completed but Skill Lift fell
-in the neutral band; like every Tier 3 status, it is advisory. Failed,
+`neutral`. `neutral` means Tier 3 paired execution completed with a neutral
+dimension-based verdict; Skill Lift has its own independent diagnostic band.
+Like every Tier 3 status, it is advisory. Failed,
 incomplete or missing Tier 1 evidence fails the aggregate. Tier 2/3 failures and
 incomplete results remain advisory and retain their native status; a passing CI
 gate does not mean those tiers passed. A check that never executed cannot become an empty success.

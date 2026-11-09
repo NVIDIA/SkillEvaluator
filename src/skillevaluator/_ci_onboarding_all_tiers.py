@@ -715,6 +715,37 @@ def trusted_blobs(raw) -> list[str] | None:
     return pins if 0 < len(pins) <= 32 and all(SHA.fullmatch(pin) for pin in pins) else None
 
 
+def _github_workflow_inputs(text: str, job_name: str, workflow: str) -> tuple[dict, str | None]:
+    """Recognize pinned all-tier callers without treating arbitrary YAML as setup."""
+    try:
+        document = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return {}, "invalid YAML"
+    jobs = document.get("jobs") if isinstance(document, dict) else None
+    job = jobs.get(job_name) if isinstance(jobs, dict) else None
+    expected = rf"NVIDIA/SkillEvaluator/\.github/workflows/{re.escape(workflow)}@[0-9a-f]{{40}}"
+    if not isinstance(job, dict) or not re.fullmatch(expected, str(job.get("uses", ""))):
+        return {}, "missing the immutable reusable workflow"
+    inputs = job.get("with")
+    if not isinstance(inputs, dict):
+        return {}, "missing reusable workflow inputs"
+    if job_name == "skills" and inputs.get("tiers", "1,2,3") != "1,2,3":
+        return {}, "not all three tiers are selected"
+    if not SHA.fullmatch(str(inputs.get("tools-ref", ""))):
+        return {}, "missing an immutable tools-ref"
+    if job_name == "skills":
+        if not re.fullmatch(r"ghcr\.io/nvidia/skillevaluator-tier1@sha256:[0-9a-f]{64}", str(inputs.get("image", ""))):
+            return {}, "missing the immutable Tier 1 image"
+    else:
+        producer = r"NVIDIA/SkillEvaluator/\.github/workflows/evaluate-all-tiers\.yml@[0-9a-f]{40}"
+        if not re.fullmatch(producer, str(inputs.get("trusted-workflow-ref", ""))):
+            return {}, "missing the immutable trusted-workflow-ref"
+        blobs = inputs.get("trusted-caller-blobs")
+        if not isinstance(blobs, str) or not blobs.strip():
+            return {}, "missing trusted-caller-blobs"
+    return inputs, None
+
+
 def gitlab_config_problem(text: str) -> str | None:
     """Mirror ci/feedback.py validate_gitlab_config for the default-branch root config."""
     try:
@@ -819,20 +850,37 @@ def inspect(wizard, repo, platform="auto", tiers=None):
     branch = info["default_branch"]
     scan_path, feedback_path = (SCAN, FEEDBACK) if platform == "github" else (GL_SCAN, GL_FEEDBACK)
     scan, feedback = client.file(scan_path, branch), client.file(feedback_path, branch)
-    problem = gitlab_config_problem(scan) if scan and platform == "gitlab" else None
+    problem, feedback_problem, feedback_inputs = None, None, {}
+    if platform == "github":
+        if scan is not None:
+            _, problem = _github_workflow_inputs(scan, "skills", "evaluate-all-tiers.yml")
+        if feedback is not None:
+            feedback_inputs, feedback_problem = _github_workflow_inputs(feedback, "feedback", "feedback-all-tiers.yml")
+    elif scan is not None:
+        problem = gitlab_config_problem(scan)
     wizard.console.print(f"{platform.title()} {name} | default branch: {branch}", markup=False)
     wizard.console.print(
         "All-tier checks: "
         + (
             "awaiting setup PR/MR merge"
-            if not scan
+            if scan is None
             else f"{scan_path} is present but not an all-tier configuration ({problem})"
             if problem
             else "configured"
         ),
         markup=False,
     )
-    wizard.console.print("Trusted feedback: " + ("configured" if feedback else "missing"))
+    wizard.console.print(
+        "Trusted feedback: "
+        + (
+            "missing"
+            if feedback is None
+            else f"{feedback_path} is present but not a trusted feedback configuration ({feedback_problem})"
+            if feedback_problem
+            else "configured"
+        ),
+        markup=False,
+    )
     # Advisory only; the trusted include check above keeps parity with feedback.
     unguarded = gitlab_unguarded_jobs(scan) if scan and platform == "gitlab" and not problem else []
     if unguarded:
@@ -847,9 +895,8 @@ def inspect(wizard, repo, platform="auto", tiers=None):
         )
     if platform == "gitlab":
         _print_gitlab_admission_prerequisite(wizard, gitlab_admission_prerequisite(origin, online=True))
-    if scan and feedback and platform == "github":
-        inputs = yaml.safe_load(feedback).get("jobs", {}).get("feedback", {}).get("with", {})
-        pins = trusted_blobs(inputs.get("trusted-caller-blobs"))
+    if scan is not None and feedback is not None and platform == "github" and not problem and not feedback_problem:
+        pins = trusted_blobs(feedback_inputs.get("trusted-caller-blobs"))
         wizard.console.print(
             "Scan approval: "
             + (

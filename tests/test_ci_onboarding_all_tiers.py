@@ -352,6 +352,82 @@ def test_live_all_tier_status_recognizes_scan_and_approval(repository, all_relea
     assert "not a verified scan" in result.output
 
 
+@pytest.mark.parametrize(
+    ("component", "content"),
+    [
+        (
+            "checks",
+            "jobs:\n  skills:\n    uses: NVIDIA/SkillEvaluator/.github/workflows/evaluate.yml@"
+            + "a" * 40
+            + "\n    with:\n      tiers: '1,2,3'\n",
+        ),
+        (
+            "checks",
+            "jobs:\n  skills:\n    uses: NVIDIA/SkillEvaluator/.github/workflows/evaluate-all-tiers.yml@main"
+            "\n    with:\n      tiers: '1,2,3'\n",
+        ),
+        (
+            "checks",
+            "jobs:\n  skills:\n    uses: NVIDIA/SkillEvaluator/.github/workflows/evaluate-all-tiers.yml@"
+            + "a" * 40
+            + "\n    with:\n      tiers: '1'\n",
+        ),
+        ("checks", "jobs: ["),
+        ("checks", {}),
+        ("feedback", {}),
+        ("feedback", "null\n"),
+        ("feedback", "- not a workflow\n"),
+        ("feedback", "jobs: ["),
+        (
+            "feedback",
+            "jobs:\n  feedback:\n    uses: NVIDIA/SkillEvaluator/.github/workflows/feedback-all-tiers.yml@"
+            + "a" * 40
+            + "\n    with: []\n",
+        ),
+    ],
+)
+def test_github_status_does_not_claim_invalid_workflows_are_configured(
+    repository, all_release, monkeypatch, component, content
+):
+    import base64
+
+    from skillevaluator import ci_onboarding as wizard
+
+    assert invoke(repository, all_release, "--mode", "save").exit_code == 0
+    texts = {
+        path: (repository / path).read_text()
+        for path in [".github/workflows/skill-checks-all-tiers.yml", ".github/workflows/feedback-all-tiers.yml"]
+    }
+    target = ".github/workflows/" + (
+        "skill-checks-all-tiers.yml" if component == "checks" else "feedback-all-tiers.yml"
+    )
+    if isinstance(content, dict):
+        document = yaml.safe_load(texts[target])
+        document["jobs"]["skills" if component == "checks" else "feedback"]["with"] = content
+        texts[target] = yaml.safe_dump(document)
+    else:
+        texts[target] = content
+
+    def api(method, endpoint, payload=None, **kwargs):
+        assert method == "GET"
+        if endpoint == "repos/example-org/consumer":
+            return {"default_branch": "trunk"}
+        for path, text in texts.items():
+            if "/contents/" + path + "?" in endpoint:
+                return {"encoding": "base64", "content": base64.b64encode(text.encode()).decode()}
+        if "/runs?" in endpoint:
+            return {"workflow_runs": []}
+        raise AssertionError(endpoint)
+
+    monkeypatch.setattr(wizard, "github_api", api)
+    result = CliRunner().invoke(cli, ["ci", "status", "--repo", str(repository), "--tiers", "1,2,3"])
+    assert result.exit_code == 0, result.output
+    label = "All-tier checks" if component == "checks" else "Trusted feedback"
+    assert label + ": configured" not in result.output
+    output = " ".join(result.output.split())
+    assert "not an all-tier configuration" in output or "not a trusted feedback configuration" in output
+
+
 def test_generated_github_caller_grants_every_reusable_job_permission(repository, all_release):
     from pathlib import Path
 

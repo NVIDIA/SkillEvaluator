@@ -73,8 +73,10 @@ The unreleased all-tier setup uses two thin consumer files per platform:
 
 These files contain placeholders. Use a reviewed schema-version 2 release
 with the platform's all-tier capability and immutable workflow, tools and
-image pins. Existing 0.7.2 downloads remain Tier 1 only. The all-tier CLI
-renders these references and approves the exact GitHub caller blob. See
+image pins. Released 0.8.0 downloads remain Tier 1 only. Install a reviewed
+candidate build and use `ci init --tiers 1,2,3` to select its bundled
+`ci-release-all-tiers.json`; use `--release` to review an alternate descriptor.
+The all-tier CLI renders these references and approves the exact GitHub caller blob. See
 [the onboarding guide](../../docs/cli-onboarding.mdx#opt-in-to-three-tier-ci).
 Merge the trusted feedback entrypoint onto the default branch before the
 first demo PR/MR. On GitLab, merging into an existing root `.gitlab-ci.yml`
@@ -90,3 +92,10 @@ The CLI's `--tier3-required`, GitHub's `tier3-required` input and GitLab's
 `SKILL_EVAL_TIER3_REQUIRED` variable are deprecated and ignored; they cannot
 make Tier 3 blocking. Reports expire after 14 days, Docker is the default, and
 native local mode is also supported.
+
+Maintainers must refresh the candidate descriptor's `workflow_ref`,
+`feedback_ref`, `gitlab_ref` and `tools_ref` together after workflow, runtime or
+feedback fixes, so new consumers receive the reviewed implementation.
+`evaluator_version` and `runtime_lock_sha256` must match the package version and
+`uv.lock` at `tools_ref`. Keep the image digest independently pinned to the
+reviewed Tier 1 image.

@@ -673,6 +673,104 @@ def _failed_tier2_report(output: Path, *, incomplete: bool = False) -> None:
 
 
 @pytest.mark.parametrize(
+    ("failed", "incomplete", "status"), [(True, False, "failed"), (False, True, "incomplete"), (True, True, "failed")]
+)
+def test_retained_tier2_reports_apply_ci_advisory_policy(consumer, tmp_path, failed, incomplete, status):
+    from skillevaluator.models import Finding, Severity, ValidationResult
+    from skillevaluator.publication_evidence import stamp_publication_evidence
+    from skillevaluator.publication_identity import finalize_publication_target, publication_target_from_path
+    from skillevaluator.reporting.json_reporter import JSONReporter
+    from skillevaluator.reporting.retained import retained_results
+    from skillevaluator.reporting.run_status import resolve_run_status
+    from skillevaluator.tier_workflows import _record_scope
+
+    skill = consumer / "skills/alpha"
+    result = ValidationResult(validator_name="Context Deduplication")
+    if failed:
+        result.add_finding(
+            Finding(
+                category="DEDUP",
+                severity=Severity.HIGH,
+                check_name="duplicate-instructions",
+                message="Duplicate deployment instructions",
+                file_path="SKILL.md",
+            )
+        )
+    if incomplete:
+        result.mark_scan_incomplete("LLM review")
+    stamp_publication_evidence([result], tier=2, check_id="context-optimization")
+    finalize_publication_target([result], skill, publication_target_from_path(skill))
+    _record_scope([result], 2, {"intra_skill": {"status": status}})
+    env = env_for(consumer)
+    source = {"repository": "example/consumer", "commit": env["REPORT_COMMIT"]}
+    result.metadata["evaluated_source"] = source
+    document = JSONReporter().render_all([result])
+    original = json.loads(document)
+    assert original["overall_passed"] is False
+    assert original["results"][0]["gating"] == {"tier": 2, "blocking": True}
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "skillevaluator-tier2.json").write_text(document)
+    reports = tmp_path / "reports"
+    destination = reports / "tier2/skill-001"
+
+    outcome = run_tiers._retain(raw, destination, 2, set(), skill, 1)
+
+    assert outcome == {"status": status, "metrics": {"findings": int(failed)}, "complete": not incomplete}
+    retained = json.loads((destination / "skillevaluator-tier2.json").read_text())
+    assert retained["gating"]["tiers"]["2"]["blocking"] is False
+    assert retained["overall_passed"] is True
+    assert retained["overall_status"] == "passed"
+    assert retained["results"][0]["gating"] == {"tier": 2, "blocking": False}
+    assert retained["results"][0]["status"] == status
+    assert retained["results"][0]["passed"] is False
+    assert retained["evaluated_source"] == source
+    for key in set(original) - {"gating", "overall_passed", "overall_status", "results"}:
+        assert retained[key] == original[key], key
+    for key in set(original["results"][0]) - {"gating"}:
+        assert retained["results"][0][key] == original["results"][0][key], key
+    restored = retained_results(retained, allowed_tiers={2})
+    assert resolve_run_status(restored).tiers[2].status.value == status
+    html = (destination / "skillevaluator-tier2.html").read_text()
+    assert "Advisory (Tier 2)" in html
+    assert "Blocking (Tier 2)" not in html
+    if failed:
+        assert "Failed (advisory)" in html
+    markdown = (destination / "skillevaluator-tier2.md").read_text()
+    assert "**Status:** ✅ PASSED" in markdown
+    assert f"| ❌ Failed | {int(failed)} |" in markdown
+    assert f"| ⚠️ Incomplete | {int(incomplete)} |" in markdown
+    assert (raw / "skillevaluator-tier2.json").read_text() == document
+    assert result.metadata["gating"] == {"tier": 2, "blocking": True}
+
+    tier2 = run_tiers.context(env)
+    tier2.update(
+        expected_tiers=[2],
+        tiers=[
+            {
+                "tier": 2,
+                "required": False,
+                "status": status,
+                "skills": [
+                    {
+                        "path": "skills/alpha",
+                        "status": status,
+                        "report_json": "tier2/skill-001/skillevaluator-tier2.json",
+                        "report_html": "tier2/skill-001/skillevaluator-tier2.html",
+                    }
+                ],
+            }
+        ],
+    )
+    run_tiers.write_json(reports / "tier2/ci-tier.json", tier2)
+    write_tier(reports, 1, env, "passed")
+    assert run_tiers.aggregate(reports, (1, 2), env) == 0
+    aggregate = json.loads((reports / "ci-results.json").read_text())
+    assert aggregate["overall_passed"] is True
+    assert aggregate["tiers"][1]["status"] == status
+
+
+@pytest.mark.parametrize(
     ("code", "incomplete", "retained"), [(1, False, False), (1, True, True), (2, False, True), (-9, False, True)]
 )
 def test_worker_diagnostics_are_kept_for_execution_problems_not_complete_verdicts(

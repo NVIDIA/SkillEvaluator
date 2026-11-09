@@ -46,4 +46,4 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-      LLM_API_KEY: ${{ secrets.NVIDIA_INFERENCE_KEY }}
+      LLM_API_KEY: ${{ secrets[vars.SKILL_EVAL_GATEWAY_SECRET] }}

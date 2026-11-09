@@ -57,7 +57,7 @@ def test_repository_skill_checks_use_reviewed_full_three_tier_configuration():
     assert inputs["n-attempts"] == inputs["n-concurrent"] == "1"
     assert "tier3-required" not in inputs
     secrets = {key: "${{ secrets." + key + " }}" for key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "NVIDIA_API_KEY")}
-    secrets["LLM_API_KEY"] = "${{ secrets.NVIDIA_INFERENCE_KEY }}"
+    secrets["LLM_API_KEY"] = "${{ secrets[vars.SKILL_EVAL_GATEWAY_SECRET] }}"
     assert job["secrets"] == secrets
     assert "steps" not in job
 

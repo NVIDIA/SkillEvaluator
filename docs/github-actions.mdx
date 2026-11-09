@@ -47,11 +47,14 @@ with its own NVIDIA Build model. Tier 2 uses a separate NVIDIA Build chat model
 and embeddings. Tier 3 selects both Codex and Claude Code through a configured
 gateway, with explicit agent models and a separate judge model.
 
-For this repository's profile, `NVIDIA_API_KEY` and `NVIDIA_INFERENCE_KEY` are
-repository Actions **secrets**. `SKILL_EVAL_TIER3_BASE_URL` is a repository Actions
-**variable** containing the gateway's versioned API root. The caller maps the
-Hub secret to the reusable workflow's generic `LLM_API_KEY`; other repositories
-can select their own gateway and secret names during local onboarding. Missing
+For this repository's profile, `NVIDIA_API_KEY` is a repository Actions
+**secret**. Set the repository Actions **variable** `SKILL_EVAL_TIER3_BASE_URL`
+to the gateway's versioned API root, and `SKILL_EVAL_GATEWAY_SECRET` to the name
+of the existing repository Actions secret holding the gateway key. The selector
+contains only a secret name, never the key itself. The caller resolves
+`secrets[vars.SKILL_EVAL_GATEWAY_SECRET]` into the reusable workflow's generic
+`LLM_API_KEY`; other repositories can select their own gateway and secret names
+during local onboarding. Missing
 prerequisites remain visible in the reports. A passing Tier 1 gate is not an
 all-tier evaluation pass. Forks retain keyless Tier 1 checks. On PRs, ordinary software changes
 select no skills, skill changes select the affected skills, and CI configuration

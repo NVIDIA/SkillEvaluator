@@ -323,6 +323,35 @@ class TestIntraSkillValidatorValidate:
 
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.build_clusters")
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_2048_dimensional_skill_at_the_chunk_ceiling_stops_after_the_first_batch(
+        self, mock_embed, mock_build_clusters, tmp_path: Path
+    ) -> None:
+        """Between the width's limit and the ceiling, the scan stops on comparison work, not chunk count."""
+        skill_dir = tmp_path / "default-width-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(_numbered_sections(1024), encoding="utf-8")
+        mock_embed.return_value.embed.side_effect = _unit_embeddings(2048)
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        pair_count = 1024 * 1023 // 2
+        self._assert_work_limit_incomplete(
+            result,
+            {
+                "check_name": "scalar_comparison_limit",
+                "pair_count": pair_count,
+                "vector_dimension": 2048,
+                "scalar_work": pair_count * 2048,
+                "limit": 536_346_624,
+                "effective_chunk_limit": 724,
+                "chunk_count": 1024,
+            },
+        )
+        assert [len(call.args[0]) for call in mock_embed.return_value.embed.call_args_list] == [64]
+        mock_build_clusters.assert_not_called()
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.build_clusters")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
     def test_explicit_budget_reports_its_own_effective_chunk_limit(
         self, mock_embed, mock_build_clusters, tmp_path: Path
     ) -> None:

@@ -1,0 +1,413 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Tier 3 token usage per case, per agent and over all agents.
+
+Each Tier 3 attempt records the agent's token counters in its ATIF trajectory.
+This module adds them up per case, per agent arm and over all agents, and says
+how many attempts the sums cover. It is a measurement only: it changes no
+metric, dimension, overall score, verdict or gate.
+
+- Prompt counters include cached tokens (ATIF ``total_prompt_tokens`` does), so
+  cached tokens are a part of the prompt and are never added again.
+  ``total_tokens`` is prompt plus completion, and ``uncached_prompt_tokens`` is
+  prompt minus cached.
+- Nothing is estimated. An attempt with a missing or invalid counter adds no
+  tokens. Its arm's coverage is then ``partial`` (other attempts were measured)
+  or ``unavailable`` (none were), and the totals cover only measured attempts.
+- An attempt that failed before it was scored still used tokens. It is counted
+  here as an unscored attempt and nowhere else: scores never include it.
+- A change (with skill minus baseline) needs complete counts in both arms for
+  the same cases and attempts, and neither arm may have failed.
+
+``resource_comparison`` keeps its own totals, which need every attempt of an
+arm scored and measured; this module does not change them.
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
+
+from skillevaluator.tier3.harbor.resource_usage import _is_measurement
+
+TOKEN_USAGE_SCHEMA_VERSION = "1"
+TOKEN_MEASURES = (
+    "prompt_tokens",
+    "cached_tokens",
+    "uncached_prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+)
+# Loaded agent data keeps attempts that have no usable reward under these keys;
+# see ``report_data.load_agent_data``.
+UNSCORED_ATTEMPT_KEYS = ("unscored_attempts", "unscored_attempts_baseline")
+# (payload arm, condition key, scored trials key, unscored attempts key)
+_ARMS = (
+    ("with_skill", "with_skill", "trials", "unscored_attempts"),
+    ("baseline", "without_skill", "trials_baseline", "unscored_attempts_baseline"),
+)
+_ARM_NAMES = {"with_skill": "with-skill run", "baseline": "baseline"}
+# Harbor names a trial after its task, cut to 32 characters, and the task after
+# its case. A failed attempt carries only that trial name.
+_HARBOR_TRIAL_NAME_CHARS = 32
+_ACCOUNTING = {
+    "prompt_includes_cached": True,
+    "total_tokens": "prompt_tokens + completion_tokens",
+    "uncached_prompt_tokens": "prompt_tokens - cached_tokens",
+    "change": "with_skill - baseline total_tokens; percent of the baseline total",
+}
+
+
+def _count(value: object) -> int | None:
+    """Return a non-negative whole token count; bools, strings, fractions and NaN are not counts."""
+    return int(value) if _is_measurement(value) and float(value).is_integer() else None
+
+
+def normalize_token_counts(raw: object) -> dict[str, Any] | None:
+    """Normalize one attempt's token counters, or return ``None`` when it recorded none.
+
+    ``raw`` is a report trial's ``tokens`` object (``prompt``, ``completion``,
+    ``cached``) or ATIF-style counters (``prompt_tokens`` and so on). Harbor
+    omits a zero cache counter, so a missing cached count is 0 once the prompt
+    count is present. ``complete`` is ``False`` when a counter is missing or
+    invalid, or when cached exceeds prompt; ``invalid_counters`` names the
+    rejected fields, never their values.
+    """
+    if not isinstance(raw, Mapping):
+        return None
+    counts: dict[str, int | None] = {}
+    invalid: list[str] = []
+    for field, short in (("prompt_tokens", "prompt"), ("completion_tokens", "completion"), ("cached_tokens", "cached")):
+        value = raw.get(short, raw.get(field))
+        counts[field] = _count(value)
+        if value is not None and counts[field] is None:
+            invalid.append(field)
+    if all(count is None for count in counts.values()) and not invalid:
+        return None
+    prompt, completion, cached = counts["prompt_tokens"], counts["completion_tokens"], counts["cached_tokens"]
+    if cached is None and prompt is not None and "cached_tokens" not in invalid:
+        cached = 0
+    if prompt is not None and cached is not None and cached > prompt:
+        invalid.append("cached_tokens")
+        cached = None
+    normalized: dict[str, Any] = {
+        "prompt_tokens": prompt,
+        "cached_tokens": cached,
+        "uncached_prompt_tokens": prompt - cached if prompt is not None and cached is not None else None,
+        "completion_tokens": completion,
+        "total_tokens": prompt + completion if prompt is not None and completion is not None else None,
+        "complete": not invalid and all(value is not None for value in (prompt, completion, cached)),
+    }
+    if invalid:
+        normalized["invalid_counters"] = sorted(invalid)
+    return normalized
+
+
+@dataclass(frozen=True)
+class _Attempt:
+    case: str
+    tokens: dict[str, Any] | None
+    scored: bool
+
+
+def _mapping(value: object) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _rows(value: object) -> list[Mapping[str, Any]]:
+    return [item for item in value if isinstance(item, Mapping)] if isinstance(value, list) else []
+
+
+def _case_label(trial: Mapping[str, Any]) -> str:
+    for key in ("entry_id", "trial_id"):
+        value = trial.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return "unknown"
+
+
+def _matching_case(label: str, known_cases: set[str]) -> str:
+    """Map a failed attempt's trial-name prefix to its case when exactly one case matches."""
+    if label in known_cases:
+        return label
+    matches = [case for case in known_cases if case[:_HARBOR_TRIAL_NAME_CHARS].rstrip("_-") == label]
+    return matches[0] if len(matches) == 1 else label
+
+
+def _pass_at_k_branch(agent: Mapping[str, Any], condition: str) -> Mapping[str, Any]:
+    return _mapping(_mapping(agent.get("pass_at_k")).get(condition))
+
+
+def _agent_attempts(agent: Mapping[str, Any]) -> dict[str, list[_Attempt]]:
+    known_cases = {_case_label(trial) for _arm, _condition, key, _unscored in _ARMS for trial in _rows(agent.get(key))}
+    for _arm, condition, _key, _unscored in _ARMS:
+        known_cases.update(str(case) for case in _mapping(_pass_at_k_branch(agent, condition).get("cases")))
+    return {
+        arm: [
+            *(
+                _Attempt(_case_label(trial), normalize_token_counts(trial.get("tokens")), True)
+                for trial in _rows(agent.get(key))
+            ),
+            *(
+                _Attempt(
+                    _matching_case(_case_label(row), known_cases), normalize_token_counts(row.get("tokens")), False
+                )
+                for row in _rows(agent.get(unscored))
+            ),
+        ]
+        for arm, _condition, key, unscored in _ARMS
+    }
+
+
+def _condition(agent: Mapping[str, Any], condition: str) -> Mapping[str, Any]:
+    return _mapping(_mapping(agent.get("conditions")).get(condition))
+
+
+def _condition_not_run(agent: Mapping[str, Any], condition: str) -> bool:
+    """Whether the arm is known not to have run: skipped, or no planned work and no recorded status."""
+    record = _condition(agent, condition)
+    status = record.get("execution_status")
+    if status == "skipped":
+        return True
+    if status in {"succeeded", "failed"} or (_count(record.get("scored_attempts")) or 0) > 0:
+        return False
+    return _count(record.get("expected_attempts")) == 0
+
+
+def _arm_expected(agent: Mapping[str, Any], condition: str, observed: int) -> int:
+    """Return the attempts the arm should have run: its recorded expected attempts plus recovered ones.
+
+    A timed-out attempt that a later attempt recovered is not expected for
+    scoring, but it ran and used tokens. Observed attempts never count as
+    missing, so the expected count is at least the observed one.
+    """
+    record = _condition(agent, condition)
+    expected = _count(record.get("expected_attempts"))
+    if expected is None:
+        return observed
+    return max(observed, expected + (_count(record.get("recovered_attempts_total")) or 0))
+
+
+def _case_expected(agent: Mapping[str, Any], condition: str, case: str, observed: int) -> int:
+    """Return the attempts a case should have run, from pass@k: ``k`` minus attempts skipped after a pass."""
+    branch = _pass_at_k_branch(agent, condition)
+    record = _mapping(_mapping(branch.get("cases")).get(case))
+    k = _count(branch.get("k"))
+    if not record or k is None:
+        return observed
+    return max(observed, k - min(k, _count(record.get("attempts_skipped")) or 0))
+
+
+def _arm_summary(attempts: list[_Attempt], *, expected: int, not_run: bool) -> dict[str, Any]:
+    totals = dict.fromkeys(TOKEN_MEASURES, 0)
+    measured = 0
+    reasons: set[str] = set()
+    for attempt in attempts:
+        tokens = attempt.tokens
+        if tokens is None or not tokens["complete"]:
+            # An incomplete attempt adds none of its counters, so every total
+            # keeps total = prompt + completion over the same attempts.
+            reasons.add(
+                "invalid_token_counters" if tokens and "invalid_counters" in tokens else "missing_token_counters"
+            )
+            continue
+        measured += 1
+        for measure in TOKEN_MEASURES:
+            totals[measure] += tokens[measure]
+    observed = len(attempts)
+    if not attempts and expected == 0:
+        status = "not_run" if not_run else "unavailable"
+        if not not_run:
+            reasons.add("no_attempts_recorded")
+    elif measured == observed == expected:
+        status = "complete"
+    else:
+        status = "partial" if measured else "unavailable"
+    if observed < expected:
+        reasons.add("missing_attempts")
+    return {
+        "totals": totals if measured else None,
+        "coverage": {
+            "status": status,
+            "expected_attempts": expected,
+            "observed_attempts": observed,
+            "measured_attempts": measured,
+            "unscored_attempts": sum(not attempt.scored for attempt in attempts),
+            "reason_codes": sorted(reasons),
+        },
+    }
+
+
+def _combine(summaries: list[dict[str, Any]]) -> dict[str, Any]:
+    """Sum arm summaries of several agents; the sum is complete only when every part is."""
+    totals = dict.fromkeys(TOKEN_MEASURES, 0)
+    coverage = dict.fromkeys(("expected_attempts", "observed_attempts", "measured_attempts", "unscored_attempts"), 0)
+    reasons: set[str] = set()
+    for summary in summaries:
+        for measure in TOKEN_MEASURES:
+            totals[measure] += (summary["totals"] or {}).get(measure, 0)
+        for key in coverage:
+            coverage[key] += summary["coverage"][key]
+        reasons.update(summary["coverage"]["reason_codes"])
+    statuses = {summary["coverage"]["status"] for summary in summaries}
+    if not summaries or statuses == {"not_run"}:
+        status = "not_run"
+    elif statuses <= {"complete", "not_run"}:
+        status = "complete"
+    else:
+        status = "partial" if coverage["measured_attempts"] else "unavailable"
+    return {
+        "totals": totals if coverage["measured_attempts"] else None,
+        "coverage": {"status": status, **coverage, "reason_codes": sorted(reasons)},
+    }
+
+
+def _delta(
+    with_skill: dict[str, Any],
+    baseline: dict[str, Any],
+    *,
+    blockers: list[tuple[str, str]],
+) -> dict[str, Any]:
+    """Return with skill minus baseline total tokens, or why there is none.
+
+    ``blockers`` are ``(code, sentence)`` pairs found by the caller, such as a
+    failed arm or arms that ran different cases.
+    """
+    reasons: list[tuple[str, str]] = []
+    for arm, summary in (("with_skill", with_skill), ("baseline", baseline)):
+        status = summary["coverage"]["status"]
+        if status == "not_run":
+            reasons.append((f"{arm}_not_run", f"The {_ARM_NAMES[arm]} did not run."))
+        elif status != "complete":
+            coverage = summary["coverage"]
+            reasons.append(
+                (
+                    f"{arm}_tokens_incomplete",
+                    f"{_ARM_NAMES[arm].capitalize()} token counts cover {coverage['measured_attempts']} of "
+                    f"{coverage['expected_attempts']} attempts.",
+                )
+            )
+    reasons.extend(blockers)
+    if not reasons and with_skill["coverage"]["observed_attempts"] != baseline["coverage"]["observed_attempts"]:
+        reasons.append(("attempt_scope_mismatch", "The arms ran different numbers of attempts."))
+    if reasons:
+        return {
+            "status": "unavailable",
+            "total_tokens": None,
+            "total_tokens_change_percent": None,
+            "reason_codes": [code for code, _sentence in reasons],
+            "reason": " ".join(sentence for _code, sentence in reasons),
+        }
+    difference = with_skill["totals"]["total_tokens"] - baseline["totals"]["total_tokens"]
+    baseline_total = baseline["totals"]["total_tokens"]
+    return {
+        "status": "available",
+        "total_tokens": difference,
+        "total_tokens_change_percent": round(difference / baseline_total * 100.0, 2) if baseline_total else None,
+        "reason_codes": [] if baseline_total else ["zero_baseline"],
+        "reason": None if baseline_total else "The baseline used no tokens, so there is no percentage change.",
+    }
+
+
+def _failed_arm_blockers(agent: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """Name each arm whose recorded status is ``failed``: its usage is real but not comparable.
+
+    The sentence reuses the coverage notice's short form, such as ``Baseline
+    incomplete (1 of 2 attempts scored).``
+    """
+    from skillevaluator.reporting.tier3_coverage import incomplete_arms
+
+    codes = {"with_skill": "with_skill_failed", "without_skill": "baseline_failed"}
+    return [(codes[arm.condition], f"{str(arm)[:1].upper()}{str(arm)[1:]}.") for arm in incomplete_arms(dict(agent))]
+
+
+def _agent_usage(agent: Mapping[str, Any]) -> dict[str, Any] | None:
+    attempts = _agent_attempts(agent)
+    arms: dict[str, dict[str, Any]] = {}
+    for arm, condition, _key, _unscored in _ARMS:
+        arms[arm] = _arm_summary(
+            attempts[arm],
+            expected=_arm_expected(agent, condition, len(attempts[arm])),
+            not_run=_condition_not_run(agent, condition),
+        )
+    if all(summary["coverage"]["status"] == "not_run" for summary in arms.values()):
+        return None
+    failed = _failed_arm_blockers(agent)
+    cases_by_arm = {arm: Counter(attempt.case for attempt in attempts[arm]) for arm in arms}
+    scope = (
+        [("case_scope_mismatch", "The arms ran different cases or attempts per case.")]
+        if cases_by_arm["with_skill"] != cases_by_arm["baseline"]
+        else []
+    )
+    case_rows = []
+    for case in sorted(
+        {*cases_by_arm["with_skill"], *cases_by_arm["baseline"]}
+        | {
+            str(case)
+            for _a, condition, _k, _u in _ARMS
+            for case in _mapping(_pass_at_k_branch(agent, condition).get("cases"))
+        }
+    ):
+        case_arms = {}
+        for arm, condition, _key, _unscored in _ARMS:
+            case_attempts = [attempt for attempt in attempts[arm] if attempt.case == case]
+            case_arms[arm] = _arm_summary(
+                case_attempts,
+                expected=0
+                if arms[arm]["coverage"]["status"] == "not_run"
+                else _case_expected(agent, condition, case, len(case_attempts)),
+                not_run=arms[arm]["coverage"]["status"] == "not_run",
+            )
+        case_rows.append(
+            {
+                "entry_id": case,
+                **case_arms,
+                "delta": _delta(case_arms["with_skill"], case_arms["baseline"], blockers=failed),
+            }
+        )
+    return {
+        **arms,
+        "delta": _delta(arms["with_skill"], arms["baseline"], blockers=[*failed, *scope]),
+        "cases": case_rows,
+    }
+
+
+def build_token_usage(agents: Mapping[str, Mapping[str, Any]]) -> dict[str, Any] | None:
+    """Return token usage per case, per agent and over all agents, or ``None`` when no attempt was measured.
+
+    ``agents`` maps each agent to its report payload (``trials``,
+    ``trials_baseline``, ``conditions``, ``pass_at_k`` and ``execution_status``)
+    plus the loader's unscored attempts under :data:`UNSCORED_ATTEMPT_KEYS`.
+    """
+    usage: dict[str, dict[str, Any]] = {}
+    for name in sorted(agents):
+        agent_usage = _agent_usage(_mapping(agents[name]))
+        if agent_usage is not None:
+            usage[name] = agent_usage
+    if not any(
+        agent_usage[arm]["coverage"]["measured_attempts"]
+        for agent_usage in usage.values()
+        for arm in ("with_skill", "baseline")
+    ):
+        return None
+    dataset = {
+        arm: _combine([agent_usage[arm] for agent_usage in usage.values()]) for arm in ("with_skill", "baseline")
+    }
+    agents_without_change = (
+        []
+        if all(item["delta"]["status"] == "available" for item in usage.values())
+        else [("agent_scope_mismatch", "Not every agent has a token change, so there is no change over all agents.")]
+    )
+    return {
+        "schema_version": TOKEN_USAGE_SCHEMA_VERSION,
+        "scored": False,
+        "accounting": dict(_ACCOUNTING),
+        "agents": usage,
+        "dataset": {
+            **dataset,
+            "delta": _delta(dataset["with_skill"], dataset["baseline"], blockers=agents_without_change),
+        },
+    }

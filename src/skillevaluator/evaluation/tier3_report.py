@@ -631,6 +631,13 @@ def render_agent_eval_html_report(
             "schema_version": _TIER3_FEEDBACK_SCHEMA_VERSION,
             **{field: list(canonical_payload.get(field) or []) for field in _TIER3_FEEDBACK_FIELDS},
         }
+        from skillevaluator.tier3.token_usage import per_agent_token_usage
+
+        # The terminal summary prints token usage per agent; per-case rows stay in the report files.
+        if token_usage := per_agent_token_usage(canonical_payload.get("token_usage")):
+            engine_result["token_usage"] = token_usage
+        else:
+            engine_result.pop("token_usage", None)
 
     target = output_path.expanduser().resolve() if output_path is not None else run_dir / "report.html"
     from skillevaluator.publication_identity import publication_target_name
@@ -1035,6 +1042,18 @@ def build_agent_eval_payload(
     # as an arm that never ran.
     if notices := coverage_notices(agent_payloads):
         payload["coverage_notices"] = notices
+    from skillevaluator.tier3.token_usage import USAGE_ONLY_ATTEMPT_KEYS, build_token_usage
+
+    # Measured, never scored: token usage per case and agent, counting attempts
+    # that failed before scoring. Scores and ``resources`` do not read it.
+    token_usage = build_token_usage(
+        {
+            name: {**agent, **{key: agents.get(name, {}).get(key) for key in USAGE_ONLY_ATTEMPT_KEYS}}
+            for name, agent in agent_payloads.items()
+        }
+    )
+    if token_usage:
+        payload["token_usage"] = token_usage
 
     _layer_llm_insights(
         payload,
@@ -1406,6 +1425,9 @@ def _enforce_report_payload_budget(
                     agent[key] = []
             if _compact_agent_conditions(agent):
                 omitted_items += 1
+        from skillevaluator.tier3.token_usage import drop_token_usage_cases
+
+        omitted_items += drop_token_usage_cases(payload.get("token_usage"))
         report_budget.omit("dataset_and_trial_items", omitted_items)
         refresh_signal()
 

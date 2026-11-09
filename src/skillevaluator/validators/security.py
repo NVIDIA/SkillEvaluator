@@ -2023,7 +2023,11 @@ class SecurityValidator(ValidatorBase):
             skillspector_reference_root: Artifact root that contains the
                 scanned directory, such as a plugin around its bundled skills.
                 References written relative to it still count as agent
-                references. Defaults to the scanned directory.
+                references. Defaults to the scanned directory. Missing
+                references are accepted only in a scan of this root, or
+                without it, of the whole target of :meth:`validate` or
+                :meth:`validate_security_only`
+                (:func:`_skillspector_missing_reference_notes`).
             skillspector_baseline: Audited SkillSpector YAML/JSON suppression
                 baseline. Matching findings are removed by SkillSpector before
                 scoring. Baselines are only applied when passed explicitly; one

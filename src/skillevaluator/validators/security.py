@@ -1984,6 +1984,22 @@ def _skillspector_universal_analyzers_completed(analyzer_statuses: list[dict], t
     return accounted == universal
 
 
+def _skillspector_row_is_reference_caveat(row: Mapping[str, object]) -> bool:
+    """Whether a ledger row is a missing reference, the only caveat of a ``complete_with_caveats`` analysis."""
+    return row.get("reason_code") == "reference_missing" and row.get("phase") == "reference_resolution"
+
+
+def _skillspector_rows_are_reference_caveats(ledger_exceptions: list[dict]) -> bool:
+    """Whether a ``complete_with_caveats`` ledger has caveats and every one is a missing reference.
+
+    SkillSpector 2.13.4 and later give that status only when every ledger row
+    is a nonfatal ``reference_missing`` row, which they record in phase
+    ``reference_resolution``; any other row makes the analysis ``partial`` or
+    ``failed``. A report that fails this contradicts its own status.
+    """
+    return bool(ledger_exceptions) and all(_skillspector_row_is_reference_caveat(row) for row in ledger_exceptions)
+
+
 def _skillspector_reference_caveat_notes(
     ledger_exceptions: list[dict],
     analyzer_statuses: list[dict],
@@ -2008,10 +2024,7 @@ def _skillspector_reference_caveat_notes(
     in a ``partial`` report. A caveat of any other kind is not one SkillSpector
     emits with this status, so it keeps the scan INCOMPLETE.
     """
-    if not ledger_exceptions or any(
-        row.get("reason_code") != "reference_missing" or row.get("phase") != "reference_resolution"
-        for row in ledger_exceptions
-    ):
+    if not _skillspector_rows_are_reference_caveats(ledger_exceptions):
         return None
     return _skillspector_missing_reference_notes(
         ledger_exceptions,
@@ -2028,19 +2041,28 @@ def _skillspector_reference_caveat_notes(
 
 
 def _skillspector_reference_caveat_error(ledger_exceptions: list[dict]) -> str:
-    """Describe a ``complete_with_caveats`` analysis whose caveats were not accepted, naming up to three."""
+    """Describe a ``complete_with_caveats`` analysis whose caveats were not accepted, naming up to three.
+
+    When some caveats are not missing references, which contradicts the
+    status, only those are named.
+    """
     if not ledger_exceptions:
         return (
             "skillspector JSON field 'analysis_completeness' reports status 'complete_with_caveats' "
             "without a caveat; security scan did not complete"
         )
-    shown = ledger_exceptions[:_SKILLSPECTOR_INCOMPLETE_EXAMPLES]
+    rows = [row for row in ledger_exceptions if not _skillspector_row_is_reference_caveat(row)]
+    description = "caveats other than missing references"
+    if not rows:
+        rows = ledger_exceptions
+        description = "caveats that SkillEvaluator does not accept"
+    shown = rows[:_SKILLSPECTOR_INCOMPLETE_EXAMPLES]
     message = (
-        "skillspector JSON field 'analysis_completeness' reports caveats that SkillEvaluator does not accept "
+        f"skillspector JSON field 'analysis_completeness' reports {description} "
         f"(status 'complete_with_caveats'): {'; '.join(_skillspector_ledger_exception_label(row) for row in shown)}"
     )
-    if len(ledger_exceptions) > len(shown):
-        message = f"{message}; and {len(ledger_exceptions) - len(shown)} more"
+    if len(rows) > len(shown):
+        message = f"{message}; and {len(rows) - len(shown)} more"
     return f"{message}; security scan did not complete"
 
 
@@ -2642,10 +2664,18 @@ class SecurityValidator(ValidatorBase):
         From SkillSpector 2.13.4, an analysis whose only gaps are missing
         references is ``complete_with_caveats`` instead of ``partial``. Its
         caveats get the same warning when they pass the same rules
-        (:func:`_skillspector_reference_caveat_notes`); otherwise the scan is
-        INCOMPLETE. An earlier release that reports that status is not trusted.
+        (:func:`_skillspector_reference_caveat_notes`). Otherwise the scan is
+        INCOMPLETE and, as for a ``partial`` report, the report's findings are
+        still checked and kept.
+        A report with that status and no caveat, or with a caveat that is not
+        a missing reference, contradicts itself and is not trusted, and neither
+        is the status from an earlier release.
         """
         partial_reported = False
+        # Rejected caveats mark the scan INCOMPLETE below, but SkillSpector still
+        # keeps a LOW complete_with_caveats report SAFE, so the recommendation
+        # check reads the state the result had on entry.
+        incomplete_before = result.is_incomplete
         if "error" in data and data["error"] is not None:
             result.add_error("skillspector reported an error; security scan did not complete")
             return False
@@ -3162,6 +3192,10 @@ class SecurityValidator(ValidatorBase):
                     if with_caveats:
                         # Caveats do not make the analysis partial: SkillSpector
                         # keeps a LOW report SAFE, so partial_reported stays False.
+                        if not _skillspector_rows_are_reference_caveats(ledger_exceptions):
+                            # SkillSpector reports any other gap as partial or failed.
+                            result.add_error(_skillspector_reference_caveat_error(ledger_exceptions))
+                            return False
                         caveat_notes = _skillspector_reference_caveat_notes(
                             ledger_exceptions,
                             analyzer_statuses,
@@ -3175,10 +3209,13 @@ class SecurityValidator(ValidatorBase):
                             reference_root=reference_root,
                         )
                         if caveat_notes is None:
+                            # As for a partial report's gaps, the findings are
+                            # still checked and kept.
                             result.add_error(_skillspector_reference_caveat_error(ledger_exceptions))
-                            return False
-                        for note in caveat_notes:
-                            result.add_warning(note)
+                            result.mark_scan_incomplete(stage_name)
+                        else:
+                            for note in caveat_notes:
+                                result.add_warning(note)
                 elif not complete_by_applicability:
                     if not (
                         counts["partially_inspected_files"]
@@ -3289,7 +3326,7 @@ class SecurityValidator(ValidatorBase):
             return False
         recommendation = risk.get("recommendation")
         expected_recommendation = _SKILLSPECTOR_RECOMMENDATION_BY_SEVERITY[severity]
-        if (result.is_incomplete or partial_reported) and severity == "LOW":
+        if (incomplete_before or partial_reported) and severity == "LOW":
             expected_recommendation = "CAUTION"
         if not isinstance(recommendation, str) or recommendation != expected_recommendation:
             result.add_error(

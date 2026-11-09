@@ -9792,11 +9792,26 @@ _OVERRIDE_NOTES_SKILL = (
 )
 
 
-def _caveat_error(labels: str) -> str:
+def _caveat_error(labels: str, *, description: str = "caveats that SkillEvaluator does not accept") -> str:
     return (
-        "skillspector JSON field 'analysis_completeness' reports caveats that SkillEvaluator does not accept "
+        f"skillspector JSON field 'analysis_completeness' reports {description} "
         f"(status 'complete_with_caveats'): {labels}; security scan did not complete"
     )
+
+
+def _other_caveat_error(labels: str) -> str:
+    return _caveat_error(labels, description="caveats other than missing references")
+
+
+def _completeness_error(message: str, field: str = "analysis_completeness") -> str:
+    return f"skillspector JSON field '{field}' {message}; security scan did not complete"
+
+
+_OVERRIDE_HIGH_ERROR = "[SECURITY-HIGH] Prompt Injection: Ignore all previous instructions in SKILL.md:8"
+
+
+def _high_checks(result: ValidationResult) -> list[str]:
+    return sorted(finding.check_name for finding in result.findings if finding.severity == Severity.HIGH)
 
 
 class TestSkillspectorCompleteWithCaveats:
@@ -9928,39 +9943,52 @@ class TestSkillspectorCompleteWithCaveats:
             assert not result.warnings
 
     @pytest.mark.parametrize(
-        "case",
+        ("case", "error"),
         [
-            "no-caveat",
-            "static-parse-limit",
-            "reference-unresolved",
-            "wrong-phase",
-            "skipped-outcome",
-            "fatal",
-            "names-analyzer",
-            "error-class",
-            "multi-line",
-            "unconfirmed-reference",
-            "absolute-path",
-            "escaping-path",
-            "backslash-path",
-            "control-character-path",
-            "unlisted-path",
-            "directory-path",
-            "missing-file",
-            "symlinked-file",
-            "image-row",
-            "limitation",
-            "partially-inspected",
-            "entirely-uninspected",
-            "not-complete",
-            "execution-failed",
-            "complete-status",
-            "degraded-analyzer",
-            "fatal-scope-exclusion",
+            ("no-caveat", _completeness_error("reports status 'complete_with_caveats' without a caveat")),
+            ("static-parse-limit", _other_caveat_error("SKILL.md:10 [static; static_parse_limit]")),
+            ("reference-unresolved", _other_caveat_error("SKILL.md:10 [reference_resolution; reference_unresolved]")),
+            ("wrong-phase", _other_caveat_error("SKILL.md:10 [static; reference_missing]")),
+            ("skipped-outcome", _caveat_error("SKILL.md:10 [reference_resolution; reference_missing]")),
+            ("fatal", _completeness_error("has a fatal exception despite successful execution")),
+            (
+                "names-analyzer",
+                _caveat_error(
+                    "SKILL.md:10 [reference_resolution; reference_missing; analyzers=static_patterns_prompt_injection]"
+                ),
+            ),
+            ("error-class", _caveat_error("SKILL.md:10 [reference_resolution; reference_missing]")),
+            ("multi-line", _caveat_error("SKILL.md:10 [reference_resolution; reference_missing]")),
+            ("unconfirmed-reference", _caveat_error("SKILL.md:10 [reference_resolution; reference_missing]")),
+            # The label quotes the absolute path, which differs per run and platform.
+            ("absolute-path", None),
+            ("escaping-path", _caveat_error("../notes-writer/SKILL.md:10 [reference_resolution; reference_missing]")),
+            ("backslash-path", _caveat_error("scripts\\summarize.py:10 [reference_resolution; reference_missing]")),
+            ("control-character-path", _caveat_error("SKILL.md:10 [reference_resolution; reference_missing]")),
+            ("unlisted-path", _caveat_error("README.md:10 [reference_resolution; reference_missing]")),
+            ("directory-path", _caveat_error("scripts:10 [reference_resolution; reference_missing]")),
+            ("missing-file", _caveat_error("SKILL.md:10 [reference_resolution; reference_missing]")),
+            ("symlinked-file", _caveat_error("SKILL.md:10 [reference_resolution; reference_missing]")),
+            (
+                "image-row",
+                _other_caveat_error("SKILL.md [static; binary_content; analyzers=static_patterns_prompt_injection]"),
+            ),
+            ("limitation", _completeness_error("details contradict complete analysis")),
+            ("partially-inspected", _completeness_error("details contradict complete analysis")),
+            ("entirely-uninspected", _completeness_error("details contradict complete analysis")),
+            ("not-complete", _completeness_error("has contradictory status markers")),
+            ("execution-failed", "skillspector reported execution_successful=false; security scan did not complete"),
+            ("complete-status", _completeness_error("details contradict complete analysis")),
+            (
+                "degraded-analyzer",
+                _completeness_error("contradicts complete analysis", "analysis_completeness.analyzer_statuses"),
+            ),
+            ("fatal-scope-exclusion", _caveat_error("SKILL.md:10 [reference_resolution; reference_missing]")),
         ],
     )
     @patch("skillevaluator.validators.security.Tools")
-    def test_near_misses_stay_incomplete(self, mock_tools, tmp_path: Path, case: str) -> None:
+    def test_near_misses_stay_incomplete(self, mock_tools, tmp_path: Path, case: str, error: str | None) -> None:
+        """Each near miss is rejected by the check named in its error, not by an unknown status."""
         skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
         payload = _reference_report("2.13.4")
         completeness = payload["analysis_completeness"]
@@ -10054,31 +10082,27 @@ class TestSkillspectorCompleteWithCaveats:
 
         assert result.is_incomplete
         assert result.incomplete_scans == ["skillspector"]
-        assert not any("does not bundle" in warning for warning in result.warnings)
-        if case == "no-caveat":
-            assert result.errors == [
-                "skillspector JSON field 'analysis_completeness' reports status 'complete_with_caveats' "
-                "without a caveat; security scan did not complete"
-            ]
-        elif case == "complete-status":
-            assert result.errors == [
-                "skillspector JSON field 'analysis_completeness' details contradict complete analysis; "
-                "security scan did not complete"
-            ]
-        elif case in {"reference-unresolved", "unconfirmed-reference", "missing-file", "symlinked-file"}:
-            reason = "reference_unresolved" if case == "reference-unresolved" else "reference_missing"
-            assert result.errors == [_caveat_error(f"SKILL.md:10 [reference_resolution; {reason}]")]
+        assert not result.warnings
+        assert not any("is not recognized" in message for message in result.errors)
+        if error is None:
+            prefix, suffix = _caveat_error("<path>:10 [reference_resolution; reference_missing]").split("<path>")
+            assert len(result.errors) == 1
+            assert result.errors[0].startswith(prefix)
+            assert result.errors[0].endswith(suffix)
+        else:
+            assert result.errors == [error]
 
     def test_caveats_need_a_scan_root(self) -> None:
         payload = _reference_report("2.13.4")
         result = ValidationResult(validator_name="security", passed=True)
 
-        accepted = SecurityValidator._validate_skillspector_report(
+        SecurityValidator._validate_skillspector_report(
             payload, 0, False, "skillspector", result, scanned_root=None, reference_root=None
         )
 
-        assert not accepted
+        assert result.incomplete_scans == ["skillspector"]
         assert result.errors == [_caveat_error("SKILL.md:10 [reference_resolution; reference_missing]")]
+        assert not result.warnings
 
     def test_caveats_must_all_be_missing_references(self, tmp_path: Path) -> None:
         skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
@@ -10122,6 +10146,10 @@ class TestSkillspectorCompleteWithCaveats:
             "SKILL.md:4 [reference_resolution; reference_missing]; "
             "SKILL.md:6 [reference_resolution; reference_missing]; and 2 more"
         )
+        other = {**row, "phase": "static", "reason_code": "static_parse_limit"}
+        assert _skillspector_reference_caveat_error([row, other, other]) == _other_caveat_error(
+            "SKILL.md:10 [static; static_parse_limit]; SKILL.md:10 [static; static_parse_limit]"
+        )
 
     @pytest.mark.parametrize(("recommendation", "accepted"), [("SAFE", True), ("CAUTION", False)])
     @patch("skillevaluator.validators.security.Tools")
@@ -10157,6 +10185,52 @@ class TestSkillspectorCompleteWithCaveats:
         assert result.status == "failed"
         assert not result.is_incomplete
         assert result.incomplete_scans == []
-        assert "[SECURITY-HIGH] Prompt Injection: Ignore all previous instructions in SKILL.md:8" in result.errors
+        assert _OVERRIDE_HIGH_ERROR in result.errors
         assert any(finding.check_name == "Instruction Override (P1)" for finding in result.findings)
         assert result.warnings == [_missing_reference_warning("SKILL.md:12 [reference_resolution; reference_missing]")]
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_rejected_caveats_keep_the_findings(self, mock_tools, tmp_path: Path) -> None:
+        """Caveats rejected for a folder target leave the scan INCOMPLETE with its findings, like a partial report."""
+        root = tmp_path / "bundle"
+        skill = _write_skill(
+            root / "skills" / "override-notes", {**_NOTES_WRITER_FILES, "SKILL.md": _OVERRIDE_NOTES_SKILL}
+        )
+        payload = _reference_report("2.13.4", "instruction-override-and-missing")
+        partial = _reference_report("2.13.4", "instruction-override-and-missing")
+        partial["metadata"]["skillspector_version"] = "2.13.3"
+        partial["analysis_completeness"].update({"status": "partial", "is_complete": False})
+
+        result = _validate_skillspector_payload(mock_tools, root, payload, exit_code=1)
+        as_partial = _validate_skillspector_payload(mock_tools, root, partial, exit_code=1)
+
+        assert mock_tools.skillspector.run.call_args.args[0][1] == str(skill.resolve())
+        assert result.status == "incomplete"
+        assert result.incomplete_scans == ["skillspector"]
+        assert f"[override-notes] {_caveat_error('SKILL.md:12 [reference_resolution; reference_missing]')}" in (
+            result.errors
+        )
+        assert len(_high_checks(result)) == 3
+        assert f"[override-notes] {_OVERRIDE_HIGH_ERROR}" in result.errors
+        assert not result.warnings
+        # The same skill reported as partial by SkillSpector 2.13.3 keeps the same findings.
+        assert as_partial.status == "incomplete"
+        assert _high_checks(as_partial) == _high_checks(result)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_caveats_that_contradict_the_status_drop_the_report(self, mock_tools, tmp_path: Path) -> None:
+        """SkillSpector never gives this status to another gap, so such a report is not trusted at all."""
+        skill = _write_skill(tmp_path / "override-notes", {**_NOTES_WRITER_FILES, "SKILL.md": _OVERRIDE_NOTES_SKILL})
+        payload = _reference_report("2.13.4", "instruction-override-and-missing")
+        row = payload["analysis_completeness"]["ledger_exceptions"][0]
+        payload["analysis_completeness"]["ledger_exceptions"].append(
+            {**row, "phase": "static", "reason_code": "static_parse_limit", "start_line": None, "end_line": None}
+        )
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload, exit_code=1)
+
+        assert result.status == "incomplete"
+        assert result.incomplete_scans == ["skillspector"]
+        assert result.errors == [_other_caveat_error("SKILL.md [static; static_parse_limit]")]
+        assert not result.findings
+        assert not result.warnings

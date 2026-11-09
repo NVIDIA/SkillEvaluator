@@ -153,10 +153,12 @@ All notable changes to SkillEvaluator are documented in this file.
   `complete_with_caveats` instead of `partial`. SkillEvaluator now accepts the
   caveats under the same conditions as the missing references above and shows
   the same warning, and checks the report's findings as in any other complete
-  scan. A caveat that is not a nonfatal `reference_missing` row, or that fails
-  one of those conditions, such as a line that names a file left out of the
-  scanned copy, leaves the scan `INCOMPLETE`, as does `complete_with_caveats`
-  from an earlier release.
+  scan. A caveat that fails one of those conditions, such as a line that names
+  a file left out of the scanned copy, leaves the scan `INCOMPLETE` and, as
+  for a `partial` report, still reports the findings. A report with that
+  status and no caveat, or with a caveat that is not a nonfatal
+  `reference_missing` row, is not trusted: the scan is `INCOMPLETE` without
+  its findings, as with `complete_with_caveats` from an earlier release.
 
 ## 0.8.0 - 2026-11-05
 

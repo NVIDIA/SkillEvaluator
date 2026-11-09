@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -92,6 +93,31 @@ class TestEffectiveChunkLimit:
     )
     def test_limit_depends_on_vector_dimension(self, vector_dimension: int, expected_limit: int) -> None:
         assert effective_chunk_limit(vector_dimension) == expected_limit
+
+    @pytest.mark.parametrize(
+        "environ",
+        [
+            pytest.param({"SKILL_EVAL_EMBEDDING_PROVIDER": "openai", "OPENAI_API_KEY": "test-key"}, id="openai"),
+            pytest.param({"SKILL_EVAL_EMBEDDING_PROVIDER": "nv_build", "NVIDIA_API_KEY": "nvapi-test"}, id="nv-build"),
+        ],
+    )
+    def test_docs_give_the_chunk_limit_of_each_default_embedding_model(self, environ: dict[str, str]) -> None:
+        """The limits table names the limit a user of a default model gets, not only the ceiling."""
+        from skillevaluator.provider_config import resolve_embedding_provider
+
+        # Native output width of each default model; the embedding client requests no other width.
+        default_model_widths = {"text-embedding-3-small": 1536, "nvidia/nemotron-3-embed-1b": 2048}
+        model = resolve_embedding_provider(environ).model
+        vector_dimension = default_model_widths[model]
+        guide = Path(__file__).resolve().parents[3] / "docs" / "tier2-deduplication.mdx"
+        (row,) = [
+            line
+            for line in guide.read_text(encoding="utf-8").splitlines()
+            if line.startswith("| Intra-skill comparison work |")
+        ]
+
+        limit = effective_chunk_limit(vector_dimension)
+        assert re.search(rf"\b{limit:,} (?:chunks )?at {vector_dimension:,} \([^)]*`{re.escape(model)}`\)", row)
 
     def test_limit_is_the_largest_chunk_count_within_budget_for_every_width(self) -> None:
         budget = constants.CONTENT_DEDUP_MAX_SCALAR_COMPARISONS

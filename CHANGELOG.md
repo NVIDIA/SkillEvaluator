@@ -125,15 +125,24 @@ All notable changes to SkillEvaluator are documented in this file.
   Path masking now leaves a URL unchanged, even when its query or fragment names
   a local path, unless its scheme is `file:` or ends in `+file:`, such as
   `git+file:`. The URL ends at whitespace, a quote, `<`, `>`, a backtick, `^`,
-  `{`, `|`, or `}`, at a `\n`, `\r`, or `\t` escape, and before an absolute path
-  or another scheme after a `,` or `;` (also with a name such as `LOG=` or
-  `--find-links=`) or a Markdown `](`, so a run, skill, or home path after it in
-  minified JSON, on the next line of an escaped env dump, or in a `,`- or
-  `;`-separated list is still masked, and so is a `file:` URL after it. A
-  Windows path in a URL is kept, also with a folder named `n`, `r`, or `t`. A
-  field over 65,536 characters with no whitespace after its limit now keeps a
-  masked prefix, cut at punctuation such as `,` or `}` but never inside a URL's
-  user info or host, so `Error: ` followed by minified JSON no longer arrives as
+  `{`, `|`, `}`, or an ANSI escape, at a `\n`, `\r`, or `\t` escape, and before
+  an absolute path or another scheme after a `,` or `;` (also with a name such
+  as `LOG=` or `--find-links=`) or a Markdown `](`, so a run, skill, or home
+  path after it in minified JSON, on the next line of an escaped env dump, or in
+  a `,`- or `;`-separated list is still masked, and so is a `file:` URL after
+  it. A Windows path in a URL is kept, also with a folder whose name starts with
+  `n`, `r`, or `t`, such as `\runs\` or `\t\`, unless that name holds a
+  character other than a letter, a digit, `_`, `.`, `~`, `$`, `%`, or `-`, such
+  as `\runs(old)\`, or no backslash follows it, as in `\notes.txt`; the URL then
+  ends there. A copied run's path right after a `\n`, `\r`, or `\t` escape or an
+  ANSI code, such as a color or erase-line code, is now replaced with the run
+  ID, and the escape or code is kept, also with no URL before it. 0.8.0 sent
+  such a path as is after a word, as in `done.\n/srv/...`, or after a raw ANSI
+  code, and replaced an escape or an escaped code with it otherwise. A relative
+  path after such an escape is no longer read as an absolute one. A field over
+  65,536 characters with no whitespace after its limit now keeps a masked
+  prefix, cut at punctuation such as `,` or `}` but never inside a URL's user
+  info or host, so `Error: ` followed by minified JSON no longer arrives as
   `Error: ...<truncated>`.
 
 - Tier 3 security grading again warns about network exfiltration, lowering

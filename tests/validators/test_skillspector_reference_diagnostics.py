@@ -333,7 +333,9 @@ class TestEvidenceProjection:
             }
         ]
         assert "at target line 3" in finding.suggestion
-        assert "limit_characters=8000, observed_characters=9000, observed_seconds=1.25" in finding.suggestion
+        # The measured run time stays in the metadata, not in the suggestion.
+        assert "limit_characters=8000, observed_characters=9000." in finding.suggestion
+        assert "observed_seconds" not in finding.suggestion
         assert "not-for-export" not in json.dumps(finding.metadata)
         assert "bad" not in json.dumps(finding.metadata)
         assert finding.metadata["skillspector_occurrences"] == [
@@ -356,6 +358,46 @@ class TestEvidenceProjection:
 
         assert is_error
         assert finding.metadata["skillspector_evidence"]["reasons"][0]["limits"] == {"limit_characters": 8000}
+
+    @staticmethod
+    def _runtime_limit_finding(*elapsed: float):
+        """The v2.13.3 AE1 finding with one runtime_limit reason per *elapsed* run time."""
+        issue = _report(_PARSE_LIMIT_REPORT)["issues"][0]
+        issue["evidence"]["reasons"] = [
+            {
+                "reason_code": "runtime_limit",
+                "phase": "exclusion_audit",
+                "message": "Inspection reached its configured runtime limit.",
+                "analyzers": [],
+                "limits": {"limit_seconds": 30.0, "observed_seconds": seconds},
+            }
+            for seconds in elapsed
+        ]
+        finding, is_error = SecurityValidator._convert_skillspector_issue(issue)
+        assert is_error
+        return finding
+
+    def test_run_time_does_not_change_the_finding_id(self) -> None:
+        """Two runs that differ only in the measured run time give the same suggestion and ``finding_id``."""
+        first = self._runtime_limit_finding(30.0412)
+        second = self._runtime_limit_finding(30.1877)
+
+        assert first.suggestion == second.suggestion
+        assert first.finding_id == second.finding_id
+        assert "runtime_limit: Inspection reached its configured runtime limit; limit_seconds=30.0." in first.suggestion
+        assert "observed_seconds" not in first.suggestion
+        # The metadata, which the ID does not hash, keeps what each run measured.
+        assert [finding.metadata["skillspector_evidence"]["reasons"][0]["limits"] for finding in (first, second)] == [
+            {"observed_seconds": 30.0412, "limit_seconds": 30.0},
+            {"observed_seconds": 30.1877, "limit_seconds": 30.0},
+        ]
+
+    def test_reasons_that_differ_only_in_run_time_are_described_once(self) -> None:
+        finding = self._runtime_limit_finding(1.5, 2.5)
+
+        assert len(finding.metadata["skillspector_evidence"]["reasons"]) == 2
+        assert finding.suggestion.count("runtime_limit") == 1
+        assert finding.finding_id == self._runtime_limit_finding(3.5).finding_id
 
     @patch("skillevaluator.validators.security.Tools")
     def test_an_oversized_limit_does_not_stop_the_scan(self, mock_tools, tmp_path: Path) -> None:

@@ -65,6 +65,11 @@ _LIMIT_FIELDS = tuple(
     for prefix in ("observed", "limit")
     for unit in ("artifacts", "bytes", "characters", "depth", "findings", "records", "seconds")
 )
+# The time a run took differs from run to run. A suggestion is part of its
+# finding's ``finding_id``, which must stay the same across runs, so it shows
+# only the limits that the file and the configuration fix; the finding's
+# metadata keeps every limit.
+_RUN_DEPENDENT_LIMITS = frozenset({"observed_seconds"})
 
 
 def diagnostic_text(value: object, *, max_length: int = 4096) -> str | None:
@@ -338,11 +343,17 @@ def issue_diagnostics(
 
 
 def _reason_details(reasons: list[dict]) -> list[str]:
-    """One text per distinct reason, with the analyzers of rows that differ only in them joined."""
+    """One text per distinct reason, with the analyzers of rows that differ only in them joined.
+
+    The measured run time (``observed_seconds``) is left out, so the text, and
+    the ``finding_id`` that hashes it, is the same in every run of one scan.
+    """
     grouped: dict[tuple, list[str]] = {}
     for reason in reasons:
-        limits = reason.get("limits") or {}
-        key = (reason["reason_code"], reason.get("start_line"), reason.get("message"), tuple(sorted(limits.items())))
+        limits = sorted(
+            (key, value) for key, value in (reason.get("limits") or {}).items() if key not in _RUN_DEPENDENT_LIMITS
+        )
+        key = (reason["reason_code"], reason.get("start_line"), reason.get("message"), tuple(limits))
         analyzers = grouped.setdefault(key, [])
         analyzers.extend(name for name in reason.get("analyzers", []) if name not in analyzers)
     details = []

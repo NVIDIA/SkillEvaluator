@@ -35,6 +35,8 @@ from skillevaluator.validators.security import SecurityValidator
 _REPORT = Path(__file__).parents[1] / "fixtures" / "skillspector-2.11.2-perl-help-text-ae1-no-llm.json"
 # A complete v2.12.0 scan whose two AE1 findings name image files it does not analyze.
 _IMAGE_REPORT = Path(__file__).parents[1] / "fixtures" / "skillspector-2.12.0-image-path-reference-no-llm.json"
+# A failed v2.13.3 scan whose first AE1 finding gives a structured reason.
+_PARSE_LIMIT_REPORT = Path(__file__).parents[1] / "fixtures" / "skillspector-2.13.3-perl-parse-limit-ae1-no-llm.json"
 _AE1_OVERRIDE = "SECURITY.Incomplete referenced artifact analysis (AE1)"
 
 
@@ -113,6 +115,34 @@ def test_failed_reports_show_the_counts(tmp_path: Path, monkeypatch: pytest.Monk
     assert exported["skillspector_reference_summary"] == expected
     combined = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
     assert combined["results"][0]["skillspector_reference_summary"] == expected
+
+
+def test_copies_that_differ_only_in_run_time_are_one_unique_finding() -> None:
+    """Two copies of one reference line whose reasons differ only in the measured run time group as one finding.
+
+    With ``--llm`` both stages report the line, and they are not merged when
+    the second stage is incomplete.
+    """
+    result = ValidationResult(validator_name="Security Scan")
+    for seconds in (30.0412, 30.1877):
+        issue = json.loads(_PARSE_LIMIT_REPORT.read_text(encoding="utf-8"))["issues"][0]
+        issue["evidence"]["reasons"] = [
+            {
+                "reason_code": "runtime_limit",
+                "phase": "exclusion_audit",
+                "message": "Inspection reached its configured runtime limit.",
+                "analyzers": [],
+                "limits": {"limit_seconds": 30.0, "observed_seconds": seconds},
+            }
+        ]
+        finding, _is_error = SecurityValidator._convert_skillspector_issue(issue)
+        result.add_finding(finding)
+
+    exported = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+
+    assert exported["finding_counts"]["raw_occurrences"] == 2
+    assert exported["finding_counts"]["unique_findings"] == 1
+    assert len(exported["finding_groups"]) == 1
 
 
 def test_folder_reference_lines_name_their_skill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

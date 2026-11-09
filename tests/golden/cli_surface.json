@@ -304,6 +304,19 @@
           "type": "path"
         },
         {
+          "choices": [
+            "skill",
+            "intent",
+            "trace"
+          ],
+          "default": "skill",
+          "name": "grounding",
+          "opts": [
+            "--grounding"
+          ],
+          "param_type": "option"
+        },
+        {
           "default": "False",
           "is_flag": true,
           "name": "refine",
@@ -2469,6 +2482,19 @@
               ],
               "param_type": "option",
               "type": "path"
+            },
+            {
+              "choices": [
+                "skill",
+                "intent",
+                "trace"
+              ],
+              "default": "skill",
+              "name": "grounding",
+              "opts": [
+                "--grounding"
+              ],
+              "param_type": "option"
             },
             {
               "default": "False",

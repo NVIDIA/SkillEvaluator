@@ -2834,14 +2834,16 @@ _FINDING_EVIDENCE_COOKIE_FLAG_RE = re.compile(r"((?<![^\s'\"])-b[ \t]+)(?=[^\s]*
 # "sshpass" element. An attached "-pVALUE" element is masked after a "login"
 # element or a MySQL client element (["mysql", "-uroot", "-pVALUE"]); find's
 # "-path", "-perm", "-print" and "-prune" are kept. An attached
-# "-uUSER:PASSWORD" element is masked by the -u rule below.
+# "-uUSER:PASSWORD" element is masked by the -u rule below. Each element may
+# sit on its own line, as a formatter writes a long list, so up to 64 spaces
+# and line breaks may follow the comma.
 _FINDING_EVIDENCE_ARGV_FLAG_RE = re.compile(
-    r"([\"'])(" + _FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME + r"|-[pub])\1[ \t]*,[ \t]*(?=[\"'][^-\"'])",
+    r"([\"'])(" + _FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME + r"|-[pub])\1[ \t]*,\s{0,64}(?=[\"'][^-\"'])",
     re.IGNORECASE,
 )
 _FINDING_EVIDENCE_ARGV_VALUE_RE = re.compile(r"\"[^\"\r\n]*\"?|'[^'\r\n]*'?")
 _FINDING_EVIDENCE_ARGV_LOGIN_RE = re.compile(r"[\"']login[\"'][ \t]*,")
-_FINDING_EVIDENCE_ARGV_SSHPASS_RE = re.compile(r"[\"'](?:[^\s'\"]{0,128}/)?sshpass[\"'][ \t]*,[ \t]*$")
+_FINDING_EVIDENCE_ARGV_SSHPASS_RE = re.compile(r"[\"'](?:[^\s'\"]{0,128}/)?sshpass[\"'][ \t]*,\s{0,64}$")
 _FINDING_EVIDENCE_ARGV_MYSQL_RE = re.compile(
     r"[\"'](?:[^\s'\"]{0,128}/s?bin/)?"
     r"(?:mysql|mysqldump|mysqladmin|mysqlimport|mysqlshow|mysqlcheck|mariadb|mariadb-dump)[\"'][ \t]*,"

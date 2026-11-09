@@ -658,6 +658,22 @@ def test_assignment_in_a_remote_command_keeps_the_destructive_command(copy: str,
             "curl -u <redacted> https://x.example",
             id="user-starting-with-plus",
         ),
+        # A formatter writes a long argument list one element per line.
+        pytest.param(
+            f'subprocess.run(\n    [\n        "tool",\n        "--password",\n        "{_BASIC_PASSWORD}",\n    ]\n)',
+            'subprocess.run(\n    [\n        "tool",\n        "--password",\n        <redacted>,\n    ]\n)',
+            id="argv-one-element-per-line",
+        ),
+        pytest.param(
+            f'[\n    "docker",\n    "login",\n    "-u",\n    "bot",\n    "-p",\n    "{_BASIC_PASSWORD}",\n]',
+            '[\n    "docker",\n    "login",\n    "-u",\n    "bot",\n    "-p",\n    <redacted>,\n]',
+            id="argv-login-one-element-per-line",
+        ),
+        pytest.param(
+            f'["sshpass",\n "-p",\n "{_BASIC_PASSWORD}"]',
+            '["sshpass",\n "-p",\n <redacted>]',
+            id="argv-sshpass-per-line",
+        ),
     ],
 )
 def test_more_credential_forms_are_masked(text: str, expected: str) -> None:

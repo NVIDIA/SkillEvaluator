@@ -132,8 +132,9 @@ All notable changes to SkillEvaluator are documented in this file.
   advisory source, fixed versions, aliases, and a runtime, dev, test, docs, or
   build role from the requirements file name or optional group. Safety's
   severity now also comes from the CVSS object it prints with an API key, so
-  a CVSS 9.8 advisory is `critical` and fails the run; in 0.8.0 that object
-  stopped the check with an `AttributeError`. A Safety advisory that
+  a CVSS 9.8 advisory is `critical` and fails the run, and a score that is
+  not a number from 0 to 10 is skipped; in 0.8.0 that object stopped the
+  check with an `AttributeError`. A Safety advisory that
   pip-audit already reported under the same ID or CVE is not repeated. Safety
   JSON with a null `severity` or a top-level list, and a pip-audit advisory
   with a null `severity`, no longer stop the check with an `AttributeError`.

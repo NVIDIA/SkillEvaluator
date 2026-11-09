@@ -989,12 +989,9 @@ class DependencySecurityValidator(ValidatorBase):
             return Severity(level.strip().casefold())
         for block in (v3, v2):
             score = block.get("base_score")
-            if (
-                not isinstance(score, bool)
-                and isinstance(score, int | float)
-                and math.isfinite(score)
-                and 0.0 <= score <= 10.0
-            ):
+            # The range check alone rejects NaN, infinity and huge JSON integers;
+            # math.isfinite would raise OverflowError on an integer past float range.
+            if not isinstance(score, bool) and isinstance(score, int | float) and 0.0 <= score <= 10.0:
                 return cvss_to_severity(score)
         level = v2.get("base_severity")
         if isinstance(level, str) and level.strip().casefold() in Severity:

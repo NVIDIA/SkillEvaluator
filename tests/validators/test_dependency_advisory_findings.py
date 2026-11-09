@@ -421,6 +421,9 @@ SAFETY_CVSS_OBJECT = {
         ({"cvssv3": {"base_score": True}}, Severity.MEDIUM),
         ({"cvssv3": {"base_score": float("nan")}}, Severity.MEDIUM),
         ({"cvssv3": {"base_score": 11}}, Severity.MEDIUM),
+        ({"cvssv3": {"base_score": 10**400}}, Severity.MEDIUM),
+        ({"cvssv3": {"base_score": -(10**400)}, "cvssv2": {"base_score": int("9" * 400)}}, Severity.MEDIUM),
+        ({"cvssv3": {"base_score": float("inf")}, "cvssv2": {"base_score": 7.5}}, Severity.HIGH),
     ],
     ids=[
         "word-high",
@@ -438,6 +441,9 @@ SAFETY_CVSS_OBJECT = {
         "object-bool-score",
         "object-nan-score",
         "object-out-of-range",
+        "object-huge-int-score",
+        "object-huge-int-v3-and-v2-scores",
+        "object-inf-v3-score-then-v2",
     ],
 )
 def test_safety_severity_reads_level_words_and_cvss_objects(tmp_path, pip_audit, safety, severity, expected):

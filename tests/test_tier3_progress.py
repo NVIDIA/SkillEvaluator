@@ -1150,7 +1150,10 @@ def _assert_cursor_shown_and_one_stop_notice(output: str, notice: str) -> None:
     assert "\x1b[?25l" in output
     assert output.rfind("\x1b[?25h") > output.rfind("\x1b[?25l")
     assert output.count("Tier 3 progress display stopped after a drawing error") == 1
-    assert notice in output
+    # The notice is a line of its own below the last frame, even when the
+    # terminal refused the stop that ends the frame's last line.
+    visible = output.replace("\x1b[?25h", "").replace("\x1b[?25l", "")
+    assert f"\n{notice}\n" in visible
 
 
 @pytest.mark.parametrize(
@@ -1289,15 +1292,135 @@ def test_callers_write_that_would_block_is_finished_when_progress_closes(
         assert reporter.is_active is False
         assert rich_reporter._live is None
         stream.armed = False
+        # Once progress is off, other output (a logged warning, say) goes
+        # straight to the terminal below the last frame.
+        for number in range(1, 4):
+            stream.write(f"warning {number} printed after the display stopped\n")
+        printed_before_close = len(stream.getvalue())
     finally:
         reporter.close()
     output = stream.getvalue()
     assert "failed" not in output
     assert "interrupted" not in output
-    # Rich sends this thread's refused writes again with its next one, so a
-    # refused notice is printed then, once, and a refused stop is followed by
-    # the late notice.
-    _assert_cursor_shown_and_one_stop_notice(output, _LATE_STOP_NOTICE if 2 in refused_writes else _STOP_NOTICE)
+    closing_output = output[printed_before_close:]
+    # Rich keeps this thread's refused writes and would send them with its
+    # next one. They move the cursor up over the frame that was on screen
+    # when drawing failed, so close() drops them instead of erasing the
+    # warnings, and prints the late notice in place of a refused one.
+    assert "\x1b[1A" not in closing_output
+    assert "\x1b[2K" not in closing_output
+    assert closing_output.endswith(f"{_LATE_STOP_NOTICE}\n")
+    if 2 in refused_writes:
+        assert "\x1b[?25h" in closing_output
+    _assert_cursor_shown_and_one_stop_notice(output, _LATE_STOP_NOTICE)
+
+
+def test_run_end_close_during_a_refused_heartbeat_stop_shows_the_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
+    from rich.console import Console
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    uncaught: list[BaseException | None] = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: uncaught.append(args.exc_value))
+    lock = _InterleavingLock()
+    closers: list[threading.Thread] = []
+
+    def close_the_run() -> None:
+        # The run ends while the heartbeat thread is still turning a failed
+        # display off: its stop was refused and it has let go of the lock.
+        closer = threading.Thread(target=reporter.close, name="run-end-close")
+        closers.append(closer)
+        closer.start()
+        closer.join(timeout=10)
+
+    class NonBlockingTerminal(_TTYBuffer):
+        """Refuses every heartbeat-thread write while ``refusing`` is set."""
+
+        refusing = True
+
+        def write(self, text: str) -> int:
+            if self.refusing and threading.current_thread().name == "tier3-progress-heartbeat":
+                if "\x1b[?25h" in text:
+                    # Live's stop, which shows the cursor again.
+                    lock.arm(close_the_run)
+                raise BlockingIOError(errno.EAGAIN, "write could not complete without blocking", 0)
+            return super().write(text)
+
+    stream = NonBlockingTerminal()
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=0.05)
+    rich_reporter._lock = lock
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    heartbeat = rich_reporter._thread
+    assert heartbeat is not None
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+
+    heartbeat.join(timeout=10)
+    assert not heartbeat.is_alive()
+    assert len(closers) == 1
+    assert not closers[0].is_alive()
+    stream.refusing = False
+    first_run = stream.getvalue()
+    _assert_cursor_shown_and_one_stop_notice(first_run, _LATE_STOP_NOTICE)
+    # Nothing of the failed run is left for the next one.
+    reporter.start(_plan(progress))
+    reporter.close()
+    assert "display stopped" not in stream.getvalue()[len(first_run) :]
+    assert uncaught == []
+
+
+def test_a_new_run_without_close_carries_nothing_from_a_refused_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    from rich.console import Console
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    class NonBlockingTerminal(_TTYBuffer):
+        """Refuses every write while ``refusing`` is set."""
+
+        refusing = False
+
+        def write(self, text: str) -> int:
+            if self.refusing:
+                raise BlockingIOError(errno.EAGAIN, "write could not complete without blocking", 0)
+            return super().write(text)
+
+    stream = NonBlockingTerminal()
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=60)
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+    stream.refusing = True
+    # The update and Live's stop are both refused.
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="still evaluating"))
+    assert reporter.is_active is False
+    stream.refusing = False
+    first_run = stream.getvalue()
+
+    # The reporter is used again without the close() that ends the failed run.
+    rich_reporter.start(_plan(progress))
+    rich_reporter.emit(progress.ProgressEvent(stage="agent:codex", state="complete", detail="agent finished"))
+    rich_reporter.close()
+
+    second_run = stream.getvalue()[len(first_run) :]
+    assert "agent finished" in second_run
+    assert "still evaluating" not in second_run
+    assert "display stopped" not in second_run
+    assert second_run.rfind("\x1b[?25h") > second_run.rfind("\x1b[?25l")
 
 
 class _InterleavingLock:

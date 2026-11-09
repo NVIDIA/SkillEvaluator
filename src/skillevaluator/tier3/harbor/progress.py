@@ -64,7 +64,8 @@ _LIVE_TABLE_CHROME_WIDTH = 5 + 4 * 2
 # short pieces, so there the rows stay cut on one line as while running.
 _FINAL_DETAIL_MIN_WIDTH = 20
 _DISPLAY_STOPPED_NOTICE = "Tier 3 progress display stopped after a drawing error; the run continues."
-# Printed when the run ends instead, when the terminal refused the line above.
+# Printed when the run ends instead, when the terminal refused the line above
+# or Live's stop.
 _DISPLAY_STOPPED_LATE_NOTICE = "Tier 3 progress display stopped after a drawing error; the run went on without it."
 
 
@@ -97,6 +98,14 @@ class Tier3RunPlan:
     output_dir: str | None = None
     result_path: str | None = None
     report_path: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _FailedDisplayStop:
+    """What reached the terminal when the live view stopped after a drawing failure."""
+
+    stop_refused: bool
+    notice_shown: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -426,10 +435,18 @@ class RichProgressReporter(PlainProgressReporter):
         self._live_events: dict[str, tuple[ProgressEvent, str | None]] = {}
         self._live_event_slots = _LIVE_MIN_EVENT_ROWS
         self._printed_plan_lines: dict[str, str] = {}
-        # Set when the terminal refused Live's stop, or the notice under the
-        # last frame, after a drawing failure: the thread that stopped Live and
-        # whether the notice reached Rich. close() finishes that stop.
-        self._unfinished_stop: tuple[threading.Thread, bool] | None = None
+        # Set, under the same lock hold that stops Live, when a drawing failure
+        # stopped it. The run's close() finishes what the terminal refused.
+        self._failed_stop: _FailedDisplayStop | None = None
+
+    def start_progress(self) -> None:
+        with self._lock:
+            if self._started_at is None and self._failed_stop is not None:
+                # The run whose display failed was never closed. Its refused
+                # writes and its notice do not belong to this run.
+                self._failed_stop = None
+                self._drop_refused_writes()
+            super().start_progress()
 
     def emit(self, event: ProgressEvent) -> None:
         with self._lock:
@@ -464,16 +481,16 @@ class RichProgressReporter(PlainProgressReporter):
             with self._lock:
                 try:
                     if live is not None and live is self._live:
-                        try:
-                            if not after_failure:
+                        if after_failure:
+                            self._stop_live_after_failure(live)
+                        else:
+                            try:
                                 # Once Live stops, its last frame stays in the
-                                # scrollback and no longer needs a fixed height,
-                                # so it lists every stage in full. After a
-                                # drawing failure that frame could fail the same
-                                # way, so Live keeps the last frame it drew.
+                                # scrollback and no longer needs a fixed
+                                # height, so it lists every stage in full.
                                 live.update(self._build_live_table(final=True), refresh=False)
-                        finally:
-                            live.stop()
+                            finally:
+                                live.stop()
                 finally:
                     # Reset even when Live never started, so a failed start
                     # leaves no plan or rows behind for the next run.
@@ -484,46 +501,66 @@ class RichProgressReporter(PlainProgressReporter):
                     self._live_event_slots = _LIVE_MIN_EVENT_ROWS
                     self._printed_plan_lines.clear()
                     if not after_failure:
-                        unfinished, self._unfinished_stop = self._unfinished_stop, None
-                        if unfinished is not None:
-                            self._finish_refused_stop(*unfinished)
+                        failed_stop, self._failed_stop = self._failed_stop, None
+                        if failed_stop is not None:
+                            self._finish_failed_stop(failed_stop)
 
-    def close_after_failure(self) -> None:
-        """Stop the live view after a drawing failure and say that the run goes on."""
-        with self._lock:
-            had_live = self._live is not None
+    def _stop_live_after_failure(self, live) -> None:
+        """Stop the live view after a drawing failure and say that the run goes on.
+
+        The full final frame could fail the same way, so Live keeps the last
+        frame it drew. Runs under the reporter lock and records the outcome in
+        the same lock hold, so the run's close() either stops Live itself or
+        finds the record.
+        """
         try:
-            super().close_after_failure()
+            live.stop()
         except Exception:
             # A terminal that refused the redraw can refuse Live's stop too,
             # and with it the write that shows the cursor again.
-            if had_live:
-                with self._lock:
-                    self._unfinished_stop = (threading.current_thread(), False)
-            raise
-        if had_live:
-            try:
-                # The last frame Live drew stays on screen with its stages
-                # still running, so explain why it no longer updates.
-                self._write_line(_DISPLAY_STOPPED_NOTICE)
-            except Exception:
-                logger.debug("Tier 3 progress stop notice failed", exc_info=True)
-                with self._lock:
-                    self._unfinished_stop = (threading.current_thread(), True)
+            logger.debug("Tier 3 progress display stop failed", exc_info=True)
+            self._failed_stop = _FailedDisplayStop(stop_refused=True, notice_shown=False)
+            return
+        try:
+            # Live keeps the last frame it drew, with its stages still running,
+            # so explain why it no longer updates.
+            self._write_line(_DISPLAY_STOPPED_NOTICE)
+        except Exception:
+            logger.debug("Tier 3 progress stop notice failed", exc_info=True)
+            self._failed_stop = _FailedDisplayStop(stop_refused=False, notice_shown=False)
+        else:
+            self._failed_stop = _FailedDisplayStop(stop_refused=False, notice_shown=True)
 
-    def _finish_refused_stop(self, stopped_on: threading.Thread, notice_sent: bool) -> None:
-        """Show the cursor and the stop notice that the terminal refused after a drawing failure.
+    def _drop_refused_writes(self) -> None:
+        """Discard the output this thread's Rich console holds from refused writes.
 
-        Runs on the thread that closes the run, once the terminal may take
-        writes again. Rich keeps a refused write for its thread and sends it
-        before that thread's next one; a thread that ended took its refused
-        writes with it.
+        Rich keeps a refused write for its thread and sends it before that
+        thread's next one. A refused frame or stop starts by moving the cursor
+        up over the frame that was on screen when drawing failed, so sent any
+        later it would erase and overwrite whatever was printed since. A
+        thread that ended took its refused writes with it.
         """
         try:
-            # Live hides the cursor while it draws and shows it again when it
-            # stops, so a refused stop leaves it hidden after the run.
-            self._console.show_cursor(True)
-            if not notice_sent or stopped_on is not threading.current_thread():
+            self._console.begin_capture()
+            self._console.end_capture()
+        except Exception:
+            logger.debug("Tier 3 progress refused output could not be dropped", exc_info=True)
+
+    def _finish_failed_stop(self, failed_stop: _FailedDisplayStop) -> None:
+        """Show the cursor and the stop notice when the terminal refused them after a drawing failure.
+
+        Runs on the thread that closes the run, once the terminal may take
+        writes again.
+        """
+        self._drop_refused_writes()
+        try:
+            if failed_stop.stop_refused:
+                # Live hides the cursor while it draws and shows it again when
+                # it stops, then ends the frame's last line.
+                self._console.show_cursor(True)
+                if self._console.is_terminal:
+                    self._console.line()
+            if not failed_stop.notice_shown:
                 self._write_line(_DISPLAY_STOPPED_LATE_NOTICE)
         except Exception:
             logger.debug("Tier 3 progress terminal restore failed", exc_info=True)

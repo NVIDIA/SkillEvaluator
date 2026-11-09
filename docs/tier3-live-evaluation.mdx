@@ -608,6 +608,8 @@ they were, a line says that the run continues, and no further progress is
 shown for that run; the final results still print. When the terminal also
 refuses that line, or the write that shows the cursor again, a line saying
 that the run went on is printed and the cursor is shown when the run ends.
+Frames the terminal refused are dropped then, so they are never drawn over
+output printed since.
 
 Every `tier3 evaluate` flag, including resource overrides and Dockerfile
 modes, is in the [CLI Reference](cli-reference.mdx).

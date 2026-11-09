@@ -8930,8 +8930,9 @@ def _missing_reference_notes(payload: dict, scanned_root: Path | None, **options
 def _missing_reference_warning(labels: str, count: int = 1) -> str:
     return (
         f"SkillSpector reported {count} reference(s) to files the skill does not bundle ({labels}); "
-        "every file SkillSpector scanned was inspected and those lines name no file left out of the scan, "
-        "so the scan is not marked incomplete. Files outside the skill were not scanned"
+        "SkillSpector reported no other gap for them, and those lines name no file left out of the scan, "
+        "so they do not mark the scan incomplete. Files not in the scan, including any outside the scanned "
+        "path, were not inspected"
     )
 
 

@@ -1853,8 +1853,9 @@ def _skillspector_missing_reference_warning(rows: list[Mapping[str, object]]) ->
         labels = f"{labels}; and {len(rows) - len(shown)} more"
     return (
         f"SkillSpector reported {len(rows)} reference(s) to files the skill does not bundle ({labels}); "
-        "every file SkillSpector scanned was inspected and those lines name no file left out of the scan, "
-        "so the scan is not marked incomplete. Files outside the skill were not scanned"
+        "SkillSpector reported no other gap for them, and those lines name no file left out of the scan, "
+        "so they do not mark the scan incomplete. Files not in the scan, including any outside the scanned "
+        "path, were not inspected"
     )
 
 

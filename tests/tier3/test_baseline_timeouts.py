@@ -725,8 +725,8 @@ def test_reports_never_fall_back_to_a_tolerated_agent(tmp_path: Path) -> None:
     # The canonical report ranks the complete agent first, then prefers activation.
     assert payload["best_agent"] == "codex"
     assert payload["agents"]["codex"]["skill_activation"]["status"] == "never_activated"
-    # tier3 view shows no findings for a never-activated best agent, as on main,
-    # and never names the tolerated agent instead.
+    # The findings panel has nothing to show for a never-activated best agent,
+    # as on main, and never picks the tolerated agent instead.
     loaded = load_agent_data(tmp_path / "results")
     assert _pick_best_agent(results["agents"], loaded) == ""
     assert _pick_best_agent(loaded, results["agents"]) == ""
@@ -734,6 +734,47 @@ def test_reports_never_fall_back_to_a_tolerated_agent(tmp_path: Path) -> None:
     assert _tolerated_line("opencode") in benchmark
     assert "<strong>Inconclusive: skill never activated.</strong>" in html
     assert "Baseline incomplete for <strong>opencode</strong> (1 of 2 attempts scored)" in html
+
+
+@pytest.mark.parametrize(
+    ("tolerated", "panel_agent"),
+    [((), "opencode"), (("opencode",), None), (("opencode", "claude-code"), None)],
+    ids=["none-tolerated", "one-tolerated", "two-tolerated"],
+)
+def test_terminal_findings_panel_never_shows_a_tolerated_agent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], tolerated: tuple[str, ...], panel_agent: str | None
+) -> None:
+    from skillevaluator.tier3.result_display import render_result
+
+    # codex completes both arms but never activates the skill, so the terminal
+    # summary leaves it out before it picks the agent for the findings panel.
+    activated = list(dict.fromkeys(["opencode", *tolerated]))
+    jobs = tmp_path / "jobs"
+    for agent in activated:
+        _arm(jobs, agent, "with", [(case, "scored") for case in CASES], details=_activation(True))
+        outcome = "timeout" if agent in tolerated else "scored"
+        _arm(jobs, agent, "without", [("case-001", "scored"), ("case-002", outcome)])
+    _arm(jobs, "codex", "with", [(case, "scored") for case in CASES], details=_activation(False))
+    _arm(jobs, "codex", "without", [(case, "scored") for case in CASES])
+    launch_errors = [LAUNCH_ERROR.format(agent=agent, count=1) for agent in tolerated]
+    results = _collect(tmp_path, launch_errors, agents=[*activated, "codex"])
+    assert results["execution_status"] == "succeeded"
+    assert results[RUN_KEY]["tolerated_agents"] == sorted(tolerated)
+    results.update({"skill_name": SKILL, "run_dir": str(tmp_path / "results")})
+
+    capsys.readouterr()
+    render_result(results)
+    printed = capsys.readouterr().out
+    written = sorted(path.parent.name for path in (tmp_path / "results").glob("*/findings.json"))
+    if panel_agent is None:
+        # The canonical best agent is codex, which has no findings to show. No
+        # tolerated agent stands in for it, however many are left.
+        assert "Findings" not in printed
+        assert written == []
+    else:
+        # Without tolerance the one activated agent keeps its panel, as on main.
+        assert f"{SKILL} / {panel_agent} — Findings" in printed
+        assert written == [panel_agent]
 
 
 @pytest.mark.parametrize("kwargs", [{"grading_mode": "custom_only"}, {"skip_baseline": True}])

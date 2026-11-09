@@ -175,6 +175,20 @@ def _pick_best_agent(
     return best[True][1]
 
 
+def _kept_with_failed_baseline(
+    agent: str,
+    agents_data: dict[str, dict[str, Any]],
+    persisted_agents: dict[str, dict[str, Any]] | None,
+) -> bool:
+    """Return whether the in-memory or persisted data of ``agent`` keeps it with a failed baseline."""
+    from skillevaluator.tier3.harbor.baseline_timeouts import kept_with_failed_baseline
+
+    persisted = persisted_agents.get(agent) if isinstance(persisted_agents, dict) else None
+    return any(
+        isinstance(data, dict) and kept_with_failed_baseline(data) for data in (agents_data.get(agent), persisted)
+    )
+
+
 def _findings_eligible(agent_data: dict[str, Any]) -> bool:
     """Return whether persisted execution truth permits quality findings."""
     activation = agent_data.get("skill_activation")
@@ -1124,6 +1138,17 @@ def display_findings_report(
             console.print()
     else:
         best_agent = harbor_agents[0] if harbor_agents else ""
+        # The terminal summary drops never-activated agents before it calls
+        # here, so an agent kept with a failed baseline can be the only one
+        # left. Rank it against every agent, as the canonical report does, so
+        # it never stands in for a complete agent ranked above it.
+        if (
+            best_agent
+            and len(agents_data) > 1
+            and _kept_with_failed_baseline(best_agent, agents_data, loaded_agents)
+            and _pick_best_agent(agents_data, loaded_agents) != best_agent
+        ):
+            best_agent = ""
 
     if (
         not best_agent

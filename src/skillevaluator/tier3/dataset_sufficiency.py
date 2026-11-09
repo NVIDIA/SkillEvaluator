@@ -45,7 +45,7 @@ def _first_noncoverage_reason(checks: list[dict]) -> str | None:
                 return "pass-rate interval unavailable"
             return f"pass-rate interval ±{half_width:.2f} is wider than ±{MAX_PASS_RATE_INTERVAL_HALF_WIDTH:.2f}"
         if check["name"] == "lift_comparison":
-            if check["reason"] == "baseline not run; lift comparison unavailable":
+            if check["reason"] == "baseline not run, so lift has no paired cases":
                 return "baseline not run, so lift has no paired cases"
             paired_cases = check["observed"]["paired_cases"]
             if paired_cases is None:
@@ -107,7 +107,7 @@ def assess_dataset_sufficiency(
             "observed": {"paired_cases": paired_cases},
             "required": {"paired_cases": MIN_PAIRED_CASES},
             "reason": (
-                "baseline not run; lift comparison unavailable"
+                "baseline not run, so lift has no paired cases"
                 if baseline_skipped
                 else "Paired-case count is unavailable"
                 if paired_cases is None

@@ -531,8 +531,8 @@ class RichProgressReporter(PlainProgressReporter):
         else:
             self._failed_stop = _FailedDisplayStop(stop_refused=False, notice_shown=True)
 
-    def _drop_refused_writes(self) -> None:
-        """Discard the output this thread's Rich console holds from refused writes.
+    def _drop_refused_writes(self) -> str:
+        """Discard the output this thread's Rich console holds from refused writes, and return it.
 
         Rich keeps a refused write for its thread and sends it before that
         thread's next one. A refused frame or stop starts by moving the cursor
@@ -542,9 +542,10 @@ class RichProgressReporter(PlainProgressReporter):
         """
         try:
             self._console.begin_capture()
-            self._console.end_capture()
+            return self._console.end_capture()
         except Exception:
             logger.debug("Tier 3 progress refused output could not be dropped", exc_info=True)
+            return ""
 
     def _finish_failed_stop(self, failed_stop: _FailedDisplayStop) -> None:
         """Show the cursor and the stop notice when the terminal refused them after a drawing failure.
@@ -552,7 +553,9 @@ class RichProgressReporter(PlainProgressReporter):
         Runs on the thread that closes the run, once the terminal may take
         writes again.
         """
-        self._drop_refused_writes()
+        from rich.control import Control
+
+        dropped = self._drop_refused_writes()
         try:
             if failed_stop.stop_refused:
                 # Live hides the cursor while it draws and shows it again when
@@ -560,6 +563,13 @@ class RichProgressReporter(PlainProgressReporter):
                 self._console.show_cursor(True)
                 if self._console.is_terminal:
                     self._console.line()
+            elif str(Control.show_cursor(True)) in dropped:
+                # Live.start() stops Live itself when its first frame fails,
+                # so the stop above had nothing left to do. The terminal
+                # refused that earlier stop too, and its write that shows the
+                # cursor was just dropped. No frame reached the terminal, so
+                # there is no last line to end.
+                self._console.show_cursor(True)
             if not failed_stop.notice_shown:
                 self._write_line(_DISPLAY_STOPPED_LATE_NOTICE)
         except Exception:

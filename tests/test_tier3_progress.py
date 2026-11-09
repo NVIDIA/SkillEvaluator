@@ -1423,6 +1423,71 @@ def test_a_new_run_without_close_carries_nothing_from_a_refused_stop(monkeypatch
     assert second_run.rfind("\x1b[?25h") > second_run.rfind("\x1b[?25l")
 
 
+@pytest.mark.parametrize("notice_refused", [True, False], ids=["notice-refused", "notice-accepted"])
+def test_refused_first_frame_and_stop_leave_the_cursor_shown(
+    monkeypatch: pytest.MonkeyPatch,
+    notice_refused: bool,
+) -> None:
+    from rich.console import Console
+    from rich.live import Live
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    class NonBlockingTerminal(_TTYBuffer):
+        """Takes Live's hide-cursor write, then refuses the first frame and Live's own stop."""
+
+        armed = False
+
+        def write(self, text: str) -> int:
+            refused = self.armed and "\x1b[?25l" not in text
+            if refused and (notice_refused or _STOP_NOTICE not in text):
+                raise BlockingIOError(errno.EAGAIN, "write could not complete without blocking", 0)
+            return super().write(text)
+
+    stream = NonBlockingTerminal()
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=60)
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+
+    def live_on_a_refusing_terminal(*args: Any, **kwargs: Any) -> Any:
+        # The plan lines above the frame are already printed.
+        stream.armed = True
+        return Live(*args, **kwargs)
+
+    rich_reporter._live_factory = live_on_a_refusing_terminal
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    try:
+        # Live.start() stops Live itself when its first frame fails, then
+        # raises. The terminal refuses that stop as well, so the cursor Live
+        # hid stays hidden, and Live is already stopped when progress turns off.
+        reporter.start(_plan(progress))
+        assert reporter.is_active is False
+        assert rich_reporter._live is None
+        stream.armed = False
+        printed_before_close = len(stream.getvalue())
+    finally:
+        reporter.close()
+    output = stream.getvalue()
+    _assert_cursor_shown_and_one_stop_notice(output, _LATE_STOP_NOTICE if notice_refused else _STOP_NOTICE)
+    # Nothing the terminal refused is sent when the run ends.
+    assert "\x1b[1A" not in output[printed_before_close:]
+    if notice_refused:
+        # No frame reached the terminal, so the late notice follows the plan
+        # lines without a blank line.
+        assert "Harbor Run Configuration" not in output
+        assert "\n\n" not in output.replace("\x1b[?25h", "").replace("\x1b[?25l", "")
+    else:
+        # The notice went out with the frame and the stop the terminal had
+        # refused just before, so the frame is on screen above it.
+        assert "Harbor Run Configuration" in output
+
+
 class _InterleavingLock:
     """A reentrant lock that runs a hook once, when the arming thread next releases it fully."""
 

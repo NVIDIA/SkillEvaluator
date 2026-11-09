@@ -96,8 +96,6 @@ CREDENTIAL_READS = [
     pytest.param(_bash("cat ~agent/.ssh/id_rsa"), id="bash-tilde-user"),
     pytest.param(_bash("cat /Users/alice/.ssh/id_rsa"), id="bash-macos-users"),
     pytest.param(_read("C:\\Users\\alice\\.ssh\\id_rsa"), id="windows-users-backslashes"),
-    pytest.param(_read("%USERPROFILE%\\.ssh\\id_rsa"), id="windows-userprofile"),
-    pytest.param(_bash("Get-Content $env:USERPROFILE\\.ssh\\id_rsa"), id="powershell-env-userprofile"),
     # New credential stores.
     pytest.param(_bash("cat /home/agent/.aws/config"), id="aws-config"),
     pytest.param(_read("/home/agent/.config/gcloud/credentials.db"), id="gcloud"),
@@ -445,6 +443,8 @@ def test_apply_patch_matches_new_entries_only_from_a_known_directory(
         "*** Add File: /home/agent/.azure_notes.md",
         "*** Add File: project/.config/opencode/opencode.json",
         "*** Update File: /workspace/.gitconfig",
+        # A relative credential entry in an apply_patch header is a workspace file, as on main.
+        "*** Add File: project/.aws/credentials",
     ],
 )
 def test_apply_patch_to_lookalike_paths_is_not_flagged(check_security, header: str) -> None:
@@ -470,11 +470,11 @@ def test_apply_patch_to_lookalike_paths_is_not_flagged(check_security, header: s
         ("cat $HOME//.netrc", "cat ~/.netrc"),
         ("cat /home/agent/a/b/../../.ssh/id_rsa", "cat ~/.ssh/id_rsa"),
         ("type C:\\Users\\Alice\\.netrc", "type c:~/.netrc"),
-        ("type %USERPROFILE%\\.netrc", "type ~/.netrc"),
-        ("Get-Content $env:USERPROFILE\\.ssh\\id_rsa", "get-content ~/.ssh/id_rsa"),
         ("cat /mnt/home/agent/.ssh/id_rsa", "cat /mnt/home/agent/.ssh/id_rsa"),
         ("cat $HOMEDIR/.ssh/id_rsa", "cat $homedir/.ssh/id_rsa"),
         ("cat /Users/Shared/.npmrc", "cat /users/shared/.npmrc"),
+        # The upstream fix reads no Windows environment spellings of the home directory.
+        ("type %USERPROFILE%\\.netrc", "type %userprofile%/.netrc"),
         ("ls /home/agent", "ls /home/agent"),
         ("cd /root && ls", "cd /root && ls"),
     ],

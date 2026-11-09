@@ -399,14 +399,13 @@ _HOME_SENSITIVE_WRITE_PATHS = [
 _PROTECTED_WRITE_PATHS = (*_SENSITIVE_WRITE_PATHS, *_HOME_SENSITIVE_WRITE_PATHS)
 _SENSITIVE_PATH_DIRECTORIES = frozenset({"~/.azure", "~/.config/opencode"})
 # Home spellings rewritten to "~": /home/<user>, /Users/<user> (not the shared
-# /Users/Shared), /root, $HOME and ${HOME} (quoted or not), %USERPROFILE%,
-# $env:USERPROFILE, and ~user that starts a path word, so the "~alice" of
-# "https://host/~alice/.netrc" stays. Backslashes become "/" first, so
-# C:\Users\<user> is a home spelling too.
+# /Users/Shared), /root, $HOME and ${HOME} (quoted or not), and ~user that
+# starts a path word, so the "~alice" of "https://host/~alice/.netrc" stays.
+# Backslashes become "/" first, so C:\Users\<user> is a home spelling too.
 _HOME_ANCHOR_RE = re.compile(
     r"(?<![\w.~$-])"
     r"(?:/home/[^/\s'\"`;|&<>()]+|/users/(?!shared/)[^/\s'\"`;|&<>()]+|/root|\"?\$\{home\}\"?|\"?\$home\"?"
-    r"|%userprofile%|\$env:userprofile|(?<!/)~[a-z_][a-z0-9_.-]*)"
+    r"|(?<!/)~[a-z_][a-z0-9_.-]*)"
     r"(?=/)"
 )
 _PATH_WORD_RE = re.compile(r"[^\s;|&<>()`]+")

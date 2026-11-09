@@ -1049,17 +1049,18 @@ store is enough, so `kubectl --kubeconfig ~/.kube/config get pods` receives
 the finding.
 
 A path matches however it names the home directory: `~`, `$HOME`, `${HOME}`,
-`~user`, `/home/<user>`, `/Users/<user>` (not `/Users/Shared`), `/root`,
-`C:\Users\<user>`, `%USERPROFILE%`, or `$env:USERPROFILE`. `//`, `/./`, and
-`dir/..` segments are resolved first, so `cat /home/agent//.ssh/id_rsa` and
-`cat $HOME/.ssh/id_rsa` match `~/.ssh`. A project file that only shares a
-name with a home file, such as `/home/agent/project/.bashrc` or
-`./project/.npmrc`, does not match; `.aws/credentials` and `.config/gcloud`
-match in any directory. `~/.azure` and `~/.config/opencode` match the
-directory and paths inside it, also when `:` or `,` follows the name, as in
-`docker run -v ~/.azure:/root/.azure`, but not a longer name such as
-`~/.azure_notes.md`. Other entries also match a longer name, such as
-`~/.netrc.bak`.
+`~user`, `/home/<user>`, `/Users/<user>` (not `/Users/Shared`), `/root`, or
+`C:\Users\<user>`. `//`, `/./`, and `dir/..` segments are resolved first, so
+`cat /home/agent//.ssh/id_rsa` and `cat $HOME/.ssh/id_rsa` match `~/.ssh`. A
+project file that only shares a name with a home file, such as
+`/home/agent/project/.bashrc` or `./project/.npmrc`, does not match.
+`.aws/credentials` and `.config/gcloud` match in any directory in commands
+and in Read, Write, and Edit paths, but an `apply_patch` header such as
+`project/.aws/credentials` is a workspace file. `~/.azure` and
+`~/.config/opencode` match the directory and paths inside it, also when `:`
+or `,` follows the name, as in `docker run -v ~/.azure:/root/.azure`, but not
+a longer name such as `~/.azure_notes.md`. Other entries also match a longer
+name, such as `~/.netrc.bak`.
 
 A write to a protected file is a `sensitive_file_write`. The protected files
 are the shell startup files `~/.bashrc`, `~/.bash_profile`, `~/.zshrc`,

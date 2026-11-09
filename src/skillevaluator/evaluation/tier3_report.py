@@ -1053,7 +1053,8 @@ def build_agent_eval_payload(
         {
             name: {**agent, **{key: agents.get(name, {}).get(key) for key in USAGE_ONLY_ATTEMPT_KEYS}}
             for name, agent in agent_payloads.items()
-        }
+        },
+        mode=mode,
     )
 
     _layer_llm_insights(

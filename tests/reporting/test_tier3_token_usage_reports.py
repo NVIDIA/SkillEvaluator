@@ -476,6 +476,30 @@ def test_a_payload_over_the_limits_without_token_usage_keeps_no_token_record(
     assert agent_eval_report_serialization_issue({**base, "suggestions": extra}) is not None
 
 
+def test_a_run_without_a_baseline_reports_its_baseline_tokens_as_not_run(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    _arm(run, "codex", "with-skill", [("case-1__a", (100, 10, 0), True), ("case-2__a", (200, 20, 0), True)])
+
+    result = agent_eval_result_from_directory(tmp_path, run, use_llm_judge=False)
+
+    assert result is not None
+    payload = result.metadata["agent_eval"]
+    assert payload["mode"] == "with_skill_only"
+    codex = payload["token_usage"]["agents"]["codex"]
+    assert codex["baseline"]["coverage"]["status"] == "not_run"
+    assert (codex["delta"]["reason_codes"], codex["delta"]["reason"]) == (
+        ["baseline_not_run"],
+        "The baseline did not run.",
+    )
+    benchmark = BenchmarkReporter(include_timestamp=False).render_all([result])
+    assert "baseline not run; uplift unavailable" in benchmark
+    section = _section(benchmark, "## Token Usage")
+    assert ["Codex", "All cases", "330", "not run", "N/A", "skill 2/2; baseline not run"] in _table_rows(section)
+    assert "0 of 0" not in section
+    assert "status unknown" not in section
+    assert "different cases" not in section
+
+
 def test_dashboards_do_not_read_dropped_token_rows_as_missing_trials(run_result: tuple[Path, Any]) -> None:
     _run_dir, result = run_result
     report = copy.deepcopy(result.metadata["agent_eval"])
@@ -698,6 +722,7 @@ def test_docs_and_changelog_describe_the_token_usage_contract() -> None:
         "tier3-benchmark.md",
         "first 50 case rows",
         "at most 64 per agent",
+        "baseline_not_run",
         "case findings",
         "applicability fields",
     ):

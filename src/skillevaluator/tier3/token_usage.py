@@ -62,6 +62,11 @@ _STOP_ON_PASS_ATTEMPT = re.compile(r"-attempt0*[1-9][0-9]*__.")
 # Run statuses whose scores the report reads (``succeeded``), that never ran
 # (``skipped``), or that the coverage notices name (``failed``).
 _KNOWN_ARM_STATUSES = {"succeeded", "skipped", "failed"}
+# The condition each payload ``mode`` leaves out, as the reports read it.
+_UNEXECUTED_CONDITIONS = {
+    "with_skill_only": frozenset({"without_skill"}),
+    "baseline_only": frozenset({"with_skill"}),
+}
 _ACCOUNTING = {
     "prompt_includes_cached": True,
     "total_tokens": "prompt_tokens + completion_tokens",
@@ -200,14 +205,22 @@ def _condition(agent: Mapping[str, Any], condition: str) -> Mapping[str, Any]:
     return _mapping(_mapping(agent.get("conditions")).get(condition))
 
 
-def _condition_not_run(agent: Mapping[str, Any], condition: str) -> bool:
-    """Whether the arm is known not to have run: skipped, or no planned work and no recorded status."""
+def _condition_not_run(agent: Mapping[str, Any], condition: str, *, attempted: bool, unexecuted: bool) -> bool:
+    """Whether the arm is known not to have run.
+
+    It was skipped, or it had no planned work and no recorded status. An arm
+    without attempts also did not run when the payload ``mode`` leaves it out
+    (``unexecuted``) or the agent has no record of it; the score tables show
+    such a baseline as not run.
+    """
     record = _condition(agent, condition)
     status = record.get("execution_status")
     if status == "skipped":
         return True
     if status in {"succeeded", "failed"} or (_count(record.get("scored_attempts")) or 0) > 0:
         return False
+    if not attempted and (unexecuted or condition not in _mapping(agent.get("conditions"))):
+        return True
     return _count(record.get("expected_attempts")) == 0
 
 
@@ -341,7 +354,9 @@ def _delta(
                 (
                     f"{arm}_tokens_incomplete",
                     f"{_ARM_NAMES[arm].capitalize()} token counts cover {coverage['measured_attempts']} of "
-                    f"{coverage['expected_attempts']} attempts.",
+                    f"{coverage['expected_attempts']} attempts."
+                    if coverage["observed_attempts"]
+                    else f"No {_ARM_NAMES[arm]} attempts were recorded.",
                 )
             )
     reasons.extend(blockers)
@@ -370,8 +385,10 @@ def _withheld_arm_blockers(agent: Mapping[str, Any], arms: Mapping[str, Mapping[
     """Name each arm whose scores the report withholds: its usage is real but not comparable.
 
     A failed arm reuses the coverage notice's short form, such as ``No change:
-    baseline incomplete (1 of 2 attempts scored).`` An arm that ran without a
-    recognized run status (``unknown``) gets ``<arm>_status_unknown``.
+    baseline incomplete (1 of 2 attempts scored).`` An arm that ran attempts
+    without a recognized run status (``unknown``) gets ``<arm>_status_unknown``.
+    An arm without attempts already has ``<arm>_not_run`` or
+    ``<arm>_tokens_incomplete``.
     """
     from skillevaluator.reporting.tier3_coverage import incomplete_arms
 
@@ -379,27 +396,32 @@ def _withheld_arm_blockers(agent: Mapping[str, Any], arms: Mapping[str, Mapping[
     blockers = [(codes[arm.condition], f"No change: {arm}.") for arm in incomplete_arms(dict(agent))]
     for arm, condition, _key, _usage in _ARMS:
         status = _condition(agent, condition).get("execution_status")
-        if status not in _KNOWN_ARM_STATUSES and arms[arm]["coverage"]["status"] != "not_run":
+        if status not in _KNOWN_ARM_STATUSES and arms[arm]["coverage"]["observed_attempts"]:
             blockers.append((f"{arm}_status_unknown", f"No change: {_ARM_NAMES[arm]} status unknown."))
     return blockers
 
 
-def _agent_usage(agent: Mapping[str, Any]) -> dict[str, Any] | None:
+def _agent_usage(agent: Mapping[str, Any], unexecuted: frozenset[str]) -> dict[str, Any] | None:
     attempts = _agent_attempts(agent)
     arms: dict[str, dict[str, Any]] = {}
     for arm, condition, _key, _unscored in _ARMS:
+        not_run = _condition_not_run(
+            agent, condition, attempted=bool(attempts[arm]), unexecuted=condition in unexecuted
+        )
         arms[arm] = _arm_summary(
             attempts[arm],
-            expected=_arm_expected(agent, condition, len(attempts[arm])),
-            not_run=_condition_not_run(agent, condition),
+            # An arm that did not run expects nothing, whatever its record planned.
+            expected=0 if not_run and not attempts[arm] else _arm_expected(agent, condition, len(attempts[arm])),
+            not_run=not_run,
         )
     if all(summary["coverage"]["status"] == "not_run" for summary in arms.values()):
         return None
     withheld = _withheld_arm_blockers(agent, arms)
     cases_by_arm = {arm: Counter(attempt.case for attempt in attempts[arm]) for arm in arms}
+    # An arm without attempts already says why there is no change.
     scope = (
         [("case_scope_mismatch", "The arms ran different cases or attempts per case.")]
-        if cases_by_arm["with_skill"] != cases_by_arm["baseline"]
+        if all(cases_by_arm.values()) and cases_by_arm["with_skill"] != cases_by_arm["baseline"]
         else []
     )
     case_rows = []
@@ -435,16 +457,19 @@ def _agent_usage(agent: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def build_token_usage(agents: Mapping[str, Mapping[str, Any]]) -> dict[str, Any] | None:
+def build_token_usage(agents: Mapping[str, Mapping[str, Any]], *, mode: str = "both") -> dict[str, Any] | None:
     """Return token usage per case, per agent and over all agents, or ``None`` when no attempt was measured.
 
     ``agents`` maps each agent to its report payload (``trials``,
     ``trials_baseline``, ``conditions``, ``pass_at_k`` and ``execution_status``)
     plus the loader's usage-only attempts under :data:`USAGE_ONLY_ATTEMPT_KEYS`.
+    ``mode`` is the payload's ``mode``: an arm that ``with_skill_only`` or
+    ``baseline_only`` leaves out is ``not_run`` for every agent without attempts in it.
     """
+    unexecuted = _UNEXECUTED_CONDITIONS.get(mode, frozenset())
     usage: dict[str, dict[str, Any]] = {}
     for name in sorted(agents):
-        agent_usage = _agent_usage(_mapping(agents[name]))
+        agent_usage = _agent_usage(_mapping(agents[name]), unexecuted)
         if agent_usage is not None:
             usage[name] = agent_usage
     if not any(

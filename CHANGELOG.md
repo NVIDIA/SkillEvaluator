@@ -25,7 +25,7 @@ All notable changes to SkillEvaluator are documented in this file.
   evidence: it joins the report payload last, and its case rows, then its sums,
   are left out, with a note, when the payload would pass its size or node
   limits, also after `tier3 evaluate` adds its case findings and `validate` its
-  applicability fields.
+  applicability fields. A baseline that did not run is shown as not run.
 
 ### Changed
 

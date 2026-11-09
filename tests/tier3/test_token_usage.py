@@ -340,6 +340,63 @@ def test_a_skipped_baseline_is_not_run_and_has_no_change() -> None:
         assert scope["baseline"]["totals"] is None
         assert scope["delta"]["total_tokens"] is None
         assert scope["delta"]["reason_codes"][0] == "baseline_not_run"
+    # The skip is the one reason: the arms did not run different cases.
+    codex = usage["agents"]["codex"]
+    assert (codex["delta"]["reason_codes"], codex["delta"]["reason"]) == (
+        ["baseline_not_run"],
+        "The baseline did not run.",
+    )
+
+
+@pytest.mark.parametrize("mode", ["both", "with_skill_only"])
+def test_a_baseline_without_a_record_or_attempts_did_not_run(mode: str) -> None:
+    agent = _agent([_trial("case-1", 100, 20)], [])
+    del agent["conditions"]["without_skill"]
+
+    usage = build_token_usage({"codex": agent}, mode=mode)
+
+    assert usage is not None
+    for scope in _scopes(usage)[1:]:
+        assert scope["baseline"]["coverage"] == {
+            "status": "not_run",
+            "expected_attempts": 0,
+            "observed_attempts": 0,
+            "measured_attempts": 0,
+            "unscored_attempts": 0,
+            "reason_codes": [],
+        }
+        assert (scope["delta"]["reason_codes"], scope["delta"]["reason"]) == (
+            ["baseline_not_run"],
+            "The baseline did not run.",
+        )
+    assert usage["dataset"]["baseline"]["coverage"]["status"] == "not_run"
+
+
+def test_an_arm_the_run_mode_leaves_out_did_not_run() -> None:
+    agent = _agent([_trial("case-1", 100, 20)], [])
+    agent["conditions"]["without_skill"] = {"expected_attempts": 1}
+
+    usage = build_token_usage({"codex": agent}, mode="with_skill_only")
+
+    assert usage is not None
+    assert usage["agents"]["codex"]["baseline"]["coverage"]["status"] == "not_run"
+    assert usage["agents"]["codex"]["delta"]["reason_codes"] == ["baseline_not_run"]
+    # In a run of both arms the same arm planned an attempt and recorded none.
+    usage = build_token_usage({"codex": agent})
+    assert usage is not None
+    codex = usage["agents"]["codex"]
+    assert codex["baseline"]["coverage"]["status"] == "unavailable"
+    assert (codex["delta"]["reason_codes"], codex["delta"]["reason"]) == (
+        ["baseline_tokens_incomplete"],
+        "No baseline attempts were recorded.",
+    )
+
+    with_skill = _agent([], [_trial("case-1", 100, 20)])
+    del with_skill["conditions"]["with_skill"]
+    usage = build_token_usage({"codex": with_skill}, mode="baseline_only")
+    assert usage is not None
+    assert usage["agents"]["codex"]["with_skill"]["coverage"]["status"] == "not_run"
+    assert usage["agents"]["codex"]["delta"]["reason_codes"] == ["with_skill_not_run"]
 
 
 def test_absent_baseline_evidence_does_not_claim_the_baseline_never_ran() -> None:
@@ -351,7 +408,11 @@ def test_absent_baseline_evidence_does_not_claim_the_baseline_never_ran() -> Non
         baseline = usage["agents"]["codex"]["baseline"]
         assert baseline["coverage"]["status"] == "unavailable"
         assert "no_attempts_recorded" in baseline["coverage"]["reason_codes"]
-        assert "baseline_not_run" not in usage["agents"]["codex"]["delta"]["reason_codes"]
+        # One reason, not a status or case mismatch on top of it.
+        assert (usage["agents"]["codex"]["delta"]["reason_codes"], usage["agents"]["codex"]["delta"]["reason"]) == (
+            ["baseline_tokens_incomplete"],
+            "No baseline attempts were recorded.",
+        )
 
 
 def test_arms_with_different_attempt_counts_or_cases_are_not_compared() -> None:

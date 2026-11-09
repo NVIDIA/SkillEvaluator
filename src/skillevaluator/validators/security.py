@@ -1578,24 +1578,39 @@ _SKILLSPECTOR_REFERENCE_LINE_DECODINGS = 3
 _SKILLSPECTOR_NAME_RUN_RE = re.compile(r"[\w.-]+")
 
 
+def _skillspector_report_path_key(path: object) -> str | None:
+    """A SkillSpector report *path* that is relative POSIX text, else ``None``.
+
+    The path must be text that is safe to pass to OS path APIs, with no
+    backslash, no empty, ``.`` or ``..`` part and no anchor. Other spellings
+    of the same file are not normalized, so they match nothing.
+    """
+    if (
+        not isinstance(path, str)
+        or "\\" in path
+        or not _is_filesystem_safe_path_text(path)
+        or any(part in {"", ".", ".."} or Path(part).anchor for part in path.split("/"))
+    ):
+        return None
+    return path
+
+
 def _skillspector_bundled_file_bytes(path: object, components: object, scanned_root: Path | None) -> bytes | None:
     """The bytes of the scanned file a SkillSpector report *path* names, else ``None``.
 
-    The path must be relative POSIX text with no backslash, no empty, ``.`` or
-    ``..`` part and no anchor, and exactly one ``components`` entry must carry
-    it. Under a directory *scanned_root* it must name a regular, single-link
-    file of at most :data:`_SKILLSPECTOR_REFERENCE_SOURCE_MAX_BYTES` bytes,
-    reached without following a link at any component (:class:`SecureRoot`);
-    a single-file *scanned_root* matches only its own name. Without a root
-    nothing is accepted.
+    The path must pass :func:`_skillspector_report_path_key`, and exactly one
+    ``components`` entry must carry it. Under a directory *scanned_root* it
+    must name a regular, single-link file of at most
+    :data:`_SKILLSPECTOR_REFERENCE_SOURCE_MAX_BYTES` bytes, reached without
+    following a link at any component (:class:`SecureRoot`); a single-file
+    *scanned_root* matches only its own name. Without a root nothing is
+    accepted.
     """
     if scanned_root is None or not isinstance(path, str) or not isinstance(components, list):
         return None
     parts = path.split("/")
     if (
-        "\\" in path
-        or not _is_filesystem_safe_path_text(path)
-        or any(part in {"", ".", ".."} or Path(part).anchor for part in parts)
+        _skillspector_report_path_key(path) is None
         or [component.get("path") for component in components if isinstance(component, dict)].count(path) != 1
     ):
         return None
@@ -2064,6 +2079,196 @@ def _skillspector_reference_caveat_error(ledger_exceptions: list[dict]) -> str:
     if len(rows) > len(shown):
         message = f"{message}; and {len(rows) - len(shown)} more"
     return f"{message}; security scan did not complete"
+
+
+# SkillSpector 2.12.0 and later record a nonfatal ``partial`` ``opaque_content``
+# row from ``bundled_execution_surface`` on a hook manifest whenever they cannot
+# model what a hook does with hook input, which includes every ordinary command
+# hook (NVIDIA/SkillSpector#573). The scan itself completed, but its findings
+# cannot show that the hooks are safe, so the manifest gets a Critical gate
+# failure instead of an incomplete scan.
+_SKILLSPECTOR_HOOK_ANALYZER = "bundled_execution_surface"
+_SKILLSPECTOR_HOOK_LIMITATION = f"Analyzer {_SKILLSPECTOR_HOOK_ANALYZER} status: degraded."
+_SKILLSPECTOR_HOOK_UNVERIFIED_CHECK = "skillspector_hook_payload_unverified"
+# Gate failures that are facts about the scan, not judgments an LLM verifier
+# can overturn.
+_LLM_VERIFY_EXEMPT_CHECKS = frozenset({_SKILLSPECTOR_HOOK_UNVERIFIED_CHECK})
+_SKILLSPECTOR_HOOK_COUNT_FIELDS = (
+    "total_components",
+    "partially_inspected_files",
+    "entirely_uninspected_files",
+    "findings_before_filtering",
+    "findings_after_filtering",
+)
+
+
+def _is_count(value: object) -> bool:
+    """Whether *value* is a JSON integer, not a boolean."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _skillspector_unmodeled_hook_manifests(issues: object) -> frozenset[str]:
+    """The manifests whose BH1 finding says SkillSpector parsed the hooks but could not model their payload.
+
+    Each manifest is the BH1 location's path when it passes
+    :func:`_skillspector_report_path_key`.
+    """
+    if not isinstance(issues, list):
+        return frozenset()
+    manifests: set[str] = set()
+    for issue in issues:
+        if not isinstance(issue, dict) or issue.get("id") != "BH1":
+            continue
+        evidence = issue.get("evidence")
+        location = issue.get("location")
+        if (
+            isinstance(evidence, dict)
+            and evidence.get("payload_analysis_level") == "unmodeled"
+            and isinstance(location, dict)
+            and (manifest := _skillspector_report_path_key(location.get("file"))) is not None
+        ):
+            manifests.add(manifest)
+    return frozenset(manifests)
+
+
+def _skillspector_ledger_exception_is_hook_surface_limitation(
+    exception: Mapping[str, object], unmodeled_manifests: frozenset[str]
+) -> bool:
+    """Whether a ledger row is SkillSpector's limitation for hooks it parsed but could not model.
+
+    The row must be a nonfatal, whole-file ``partial`` ``opaque_content`` row
+    in phase ``static`` that names only ``bundled_execution_surface`` and no
+    error class, on a manifest in *unmodeled_manifests*
+    (:func:`_skillspector_unmodeled_hook_manifests`). SkillSpector records the
+    same row for a manifest it could not parse, which has no such BH1, and for
+    a manifest with more hook declarations than it reads, which records more
+    ``observed_records`` than ``limit_records``; both stay ordinary analysis
+    limitations.
+    """
+    observed = exception.get("observed_records")
+    limit = exception.get("limit_records")
+    return (
+        exception.get("outcome") == "partial"
+        and exception.get("fatal") is False
+        and exception.get("phase") == "static"
+        and exception.get("reason_code") == "opaque_content"
+        and exception.get("analyzers") == [_SKILLSPECTOR_HOOK_ANALYZER]
+        and exception.get("error_class") is None
+        and exception.get("start_line") is None
+        and exception.get("end_line") is None
+        and not (_is_count(observed) and _is_count(limit) and observed > limit)
+        and _skillspector_report_path_key(exception.get("path")) in unmodeled_manifests
+    )
+
+
+def _skillspector_without_hook_surface(
+    data: Mapping[str, object],
+) -> tuple[list[dict], list[dict], list[dict], dict[str, int], list[str]] | None:
+    """A ``partial`` report's gaps without the rows for hooks SkillSpector could not model, else ``None``.
+
+    Returns the hook rows (:func:`_skillspector_ledger_exception_is_hook_surface_limitation`)
+    and the report's other ledger rows, analyzer statuses, counts and
+    limitations as they would be without the hook rows. BH1 findings are read
+    from both ``issues`` and ``suppressed``, because a baseline suppresses the
+    finding but not the row.
+
+    The hook rows are taken out only when they account exactly for their part
+    of the report: one row per manifest; one ``bundled_execution_surface``
+    status, ``degraded`` by one ``partial`` work item per hook row with nothing
+    failed or skipped, which then counts as completed; its ``Analyzer
+    bundled_execution_surface status: degraded.`` limitation, which is
+    dropped; and one partially inspected file for each manifest that no other
+    row names. Anything else returns ``None``, and the report is judged with
+    every row.
+    """
+    completeness = data.get("analysis_completeness")
+    if (
+        not isinstance(completeness, dict)
+        or completeness.get("status") != "partial"
+        or completeness.get("is_complete") is not False
+    ):
+        return None
+    ledger_exceptions = completeness.get("ledger_exceptions")
+    analyzer_statuses = completeness.get("analyzer_statuses")
+    limitations = completeness.get("limitations")
+    counts = {field: completeness.get(field) for field in _SKILLSPECTOR_HOOK_COUNT_FIELDS}
+    if (
+        not isinstance(ledger_exceptions, list)
+        or not all(isinstance(row, dict) for row in ledger_exceptions)
+        or not isinstance(analyzer_statuses, list)
+        or not all(isinstance(status, dict) for status in analyzer_statuses)
+        or not isinstance(limitations, list)
+        or not all(isinstance(limitation, str) for limitation in limitations)
+        or not all(_is_count(value) for value in counts.values())
+    ):
+        return None
+    issues: list[object] = []
+    for field in ("issues", "suppressed"):
+        found = data.get(field)
+        if isinstance(found, list):
+            issues.extend(found)
+    manifests = _skillspector_unmodeled_hook_manifests(issues)
+    hook_rows: list[dict] = []
+    other_rows: list[dict] = []
+    for row in ledger_exceptions:
+        if _skillspector_ledger_exception_is_hook_surface_limitation(row, manifests):
+            hook_rows.append(row)
+        else:
+            other_rows.append(row)
+    hook_paths = {row["path"] for row in hook_rows}
+    surface = [status for status in analyzer_statuses if status.get("analyzer_id") == _SKILLSPECTOR_HOOK_ANALYZER]
+    if not hook_rows or len(hook_paths) != len(hook_rows) or len(surface) != 1:
+        return None
+    [status] = surface
+    completed = status.get("completed")
+    if (
+        status.get("status") != "degraded"
+        or not _is_count(completed)
+        or not _is_count(status.get("partial"))
+        or status.get("partial") != len(hook_rows)
+        or any(not _is_count(status.get(field)) or status.get(field) != 0 for field in ("skipped", "failed"))
+        or _SKILLSPECTOR_HOOK_LIMITATION not in limitations
+    ):
+        return None
+    other_paths = {path for row in other_rows if isinstance(path := row.get("path"), str)}
+    partially_inspected = counts["partially_inspected_files"] - len(hook_paths - other_paths)
+    if partially_inspected < 0:
+        return None
+    remaining_limitations = list(limitations)
+    remaining_limitations.remove(_SKILLSPECTOR_HOOK_LIMITATION)
+    completed_status = {**status, "status": "completed", "completed": completed + len(hook_rows), "partial": 0}
+    return (
+        hook_rows,
+        other_rows,
+        [completed_status if item is status else item for item in analyzer_statuses],
+        {**counts, "partially_inspected_files": partially_inspected},
+        remaining_limitations,
+    )
+
+
+def _skillspector_hook_surface_is_the_only_gap(
+    analyzer_statuses: list[dict],
+    counts: Mapping[str, int],
+    limitations: list[str],
+    scope_exclusions: object,
+) -> bool:
+    """Whether a report without its hook rows (:func:`_skillspector_without_hook_surface`) has no other gap.
+
+    No file may be partially or entirely uninspected, there may be no
+    limitation and no fatal scope exclusion, the report must count as many
+    findings after filtering as before it, each universal analyzer must have
+    completed one work item per component, and every other analyzer must have
+    completed or be not applicable or disabled.
+    """
+    return (
+        isinstance(scope_exclusions, list)
+        and all(isinstance(row, dict) and row.get("fatal") is False for row in scope_exclusions)
+        and not limitations
+        and not counts["partially_inspected_files"]
+        and not counts["entirely_uninspected_files"]
+        and counts["findings_before_filtering"] == counts["findings_after_filtering"]
+        and _skillspector_universal_analyzers_completed(analyzer_statuses, counts["total_components"])
+    )
 
 
 class SecurityValidator(ValidatorBase):
@@ -2621,7 +2826,7 @@ class SecurityValidator(ValidatorBase):
 
     @staticmethod
     def _deduplicate_skillspector_findings(result: ValidationResult) -> None:
-        """Deduplicate findings repeated by static and enriched reports."""
+        """Deduplicate findings and gate failures repeated by static and enriched reports."""
         unique = []
         seen: set[tuple[str, str, int | None, str]] = set()
         for finding in result.findings:
@@ -2631,6 +2836,9 @@ class SecurityValidator(ValidatorBase):
                 unique.append(finding)
         if len(unique) != len(result.findings):
             result.findings = unique
+            if result.gate_failures:
+                # A gate failure a repeated finding raised was repeated with it.
+                result.metadata["gate_failures"] = list(dict.fromkeys(result.gate_failures))
             result.recalculate_from_findings()
 
     @staticmethod
@@ -2660,6 +2868,13 @@ class SecurityValidator(ValidatorBase):
         contains it: the validator's ``skillspector_reference_root``, or else
         the target of the scan in progress. Missing references are accepted
         only when it is *scanned_root*.
+
+        Rows for hooks SkillSpector parsed but could not model are judged
+        apart: when they account exactly for their part of the report
+        (:func:`_skillspector_without_hook_surface`), the rest of the report
+        decides whether the scan is complete, and
+        :meth:`_process_skillspector_cli_result` reports a Critical gate
+        failure for each manifest instead.
 
         From SkillSpector 2.13.4, an analysis whose only gaps are missing
         references is ``complete_with_caveats`` instead of ``partial``. Its
@@ -3230,11 +3445,20 @@ class SecurityValidator(ValidatorBase):
                         )
                         return False
                     partial_reported = True
+                    # Hooks SkillSpector parsed but could not model get a
+                    # Critical in _report_unverified_hooks; only the rest of
+                    # the report decides whether the scan is complete.
+                    without_hooks = _skillspector_without_hook_surface(data)
+                    gap_rows, gap_statuses, gap_counts, gap_limitations = (
+                        (ledger_exceptions, analyzer_statuses, counts, limitations)
+                        if without_hooks is None
+                        else without_hooks[1:]
+                    )
                     gap_notes = _skillspector_missing_reference_notes(
-                        ledger_exceptions,
-                        analyzer_statuses,
-                        counts,
-                        limitations,
+                        gap_rows,
+                        gap_statuses,
+                        gap_counts,
+                        gap_limitations,
                         analysis_completeness.get("scope_exclusions", []),
                         data.get("components"),
                         scanned_root,
@@ -3244,22 +3468,32 @@ class SecurityValidator(ValidatorBase):
                     )
                     if gap_notes is None:
                         raster_note = _skillspector_passive_raster_note(
-                            ledger_exceptions,
-                            analyzer_statuses,
-                            counts,
-                            limitations,
+                            gap_rows,
+                            gap_statuses,
+                            gap_counts,
+                            gap_limitations,
                             analysis_completeness.get("scope_exclusions", []),
                             data.get("components"),
                             scanned_root,
                         )
                         gap_notes = None if raster_note is None else [raster_note]
+                    if (
+                        gap_notes is None
+                        and without_hooks is not None
+                        and not gap_rows
+                        and _skillspector_hook_surface_is_the_only_gap(
+                            gap_statuses,
+                            gap_counts,
+                            gap_limitations,
+                            analysis_completeness.get("scope_exclusions", []),
+                        )
+                    ):
+                        gap_notes = []
                     if gap_notes is not None:
                         for note in gap_notes:
                             result.add_warning(note)
                     else:
-                        result.add_error(
-                            _skillspector_incomplete_analysis_error(completeness_status, ledger_exceptions)
-                        )
+                        result.add_error(_skillspector_incomplete_analysis_error(completeness_status, gap_rows))
                         result.mark_scan_incomplete(stage_name)
 
         status = data.get("status")
@@ -4008,6 +4242,8 @@ class SecurityValidator(ValidatorBase):
         With a ``content_type``, issues outside agent control paths are
         suppressed and excluded from the aggregate risk score (see
         :func:`~skillevaluator.validators.skillspector_scope.scope_skillspector_issues`).
+        Each manifest whose hooks SkillSpector could not model gets a Critical
+        gate failure (:meth:`_report_unverified_hooks`), whatever the scoping.
         """
         self._store_skillspector_metadata(data, result, score_message=False)
 
@@ -4163,13 +4399,73 @@ class SecurityValidator(ValidatorBase):
             )
             has_critical_or_high = True
 
+        without_hooks = _skillspector_without_hook_surface(data)
+        unverified_hooks = self._report_unverified_hooks(
+            without_hooks[0] if without_hooks is not None else [],
+            result,
+            report_components,
+            source_root,
+        )
+
         if not result.is_incomplete:
+            # Each manifest's Critical counts as an issue, so the summary never
+            # reports a clean scan beside it.
             self._summarize_skillspector_results(
-                scanned_issues,
-                has_critical_or_high,
+                [*scanned_issues, *unverified_hooks],
+                has_critical_or_high or bool(unverified_hooks),
                 result,
                 suppressed_inapplicable_issues=skipped_inapplicable,
             )
+
+    @staticmethod
+    def _report_unverified_hooks(
+        hook_rows: list[dict],
+        result: ValidationResult,
+        components: object,
+        source_root: Path | None,
+    ) -> list[str]:
+        """Fail the gate for each manifest whose hooks SkillSpector could not model, and return the manifests.
+
+        *hook_rows* come from :func:`_skillspector_without_hook_surface`. The
+        scan completed, but the absence of findings does not show that such
+        hooks are safe: a hook script that sends its input over a socket gets
+        no blocking SkillSpector finding. Each manifest gets a Critical and a
+        gate failure, so neither a ``--policy`` severity override nor
+        ``--llm-verify`` can clear it. The finding records the manifest's
+        SHA-256 when it is a bundled file
+        (:func:`_skillspector_bundled_file_bytes`), else ``None``.
+        """
+        manifests: list[str] = []
+        for row in hook_rows:
+            manifest = row["path"]
+            manifest_bytes = _skillspector_bundled_file_bytes(manifest, components, source_root)
+            result.add_structured_finding(
+                Finding(
+                    category="SECURITY",
+                    severity=Severity.CRITICAL,
+                    check_name=_SKILLSPECTOR_HOOK_UNVERIFIED_CHECK,
+                    message=(
+                        f"SkillSpector could not fully model the hooks in {manifest} (analyzer "
+                        f"{_SKILLSPECTOR_HOOK_ANALYZER} could not verify what they do with hook input), so they "
+                        "need a recorded review before this artifact can pass."
+                    ),
+                    file_path=manifest,
+                    suggestion=(
+                        f"Review {manifest} and every file its hooks run, or remove the hooks. Neither a --policy "
+                        "severity override nor --llm-verify lets this check pass."
+                    ),
+                    metadata={
+                        "ledger_exceptions": [dict(row)],
+                        "manifest_sha256": (
+                            hashlib.sha256(manifest_bytes).hexdigest() if manifest_bytes is not None else None
+                        ),
+                    },
+                ),
+                is_error=True,
+            )
+            result.fail_gate(f"{manifest}: SkillSpector could not model these hooks; they need a recorded review")
+            manifests.append(manifest)
+        return manifests
 
     def _skillspector_issue_scopes(
         self,
@@ -5456,7 +5752,8 @@ class SecurityValidator(ValidatorBase):
         """Run LLM second-pass verification on all findings.
 
         Findings the LLM classifies as false_positive with high confidence
-        are downgraded to INFO severity and annotated in metadata.
+        are downgraded to INFO severity and annotated in metadata. Checks in
+        :data:`_LLM_VERIFY_EXEMPT_CHECKS` keep their severity.
         """
         if not result.findings:
             return
@@ -5498,7 +5795,11 @@ class SecurityValidator(ValidatorBase):
             finding.metadata["llm_confidence"] = confidence
             finding.metadata["llm_reasoning"] = reasoning
 
-            if verdict == "false_positive" and confidence == "high":
+            if (
+                finding.check_name not in _LLM_VERIFY_EXEMPT_CHECKS
+                and verdict == "false_positive"
+                and confidence == "high"
+            ):
                 finding.severity = Severity.INFO
                 finding.metadata["downgraded"] = True
                 finding.metadata["confidence"] = "low"

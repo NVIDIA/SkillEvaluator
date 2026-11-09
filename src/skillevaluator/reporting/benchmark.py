@@ -468,14 +468,22 @@ class BenchmarkReporter(ReporterBase):
         lines.append("|---|" + "|".join(["---:"] * len(agents)) + "|")
 
         overall_row = ["Overall"]
-        overall_row.extend(
-            _score_transition_values(
-                agent.get("baseline"),
-                agent.get("with_skill", agent.get("overall_score")),
-                skill_never_activated=_mapping(agent.get("skill_activation")).get("status") == "never_activated",
+        compares_baseline_dimensions = False
+        for agent in agents.values():
+            skill_never_activated = _mapping(agent.get("skill_activation")).get("status") == "never_activated"
+            with_skill = agent.get("with_skill", agent.get("overall_score"))
+            compared = None if skill_never_activated else _with_skill_on_baseline_dimensions(agent)
+            if compared is not None:
+                # Show the two scores the recorded lift subtracts, so the row matches it.
+                with_skill = compared
+                compares_baseline_dimensions = True
+            overall_row.append(
+                _score_transition_values(
+                    agent.get("baseline"),
+                    with_skill,
+                    skill_never_activated=skill_never_activated,
+                )
             )
-            for agent in agents.values()
-        )
         lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in overall_row) + " |")
 
         has_partial = False
@@ -515,6 +523,18 @@ class BenchmarkReporter(ReporterBase):
                 "",
             ]
         )
+        if compares_baseline_dimensions:
+            lines.extend(
+                [
+                    (
+                        "Rows marked `baseline N/A` have no baseline score, because the baseline runs without "
+                        "the skill and has no skill to discover or route to. Overall compares both arms on the "
+                        "dimensions the baseline scored, so its uplift matches the Skill Lift in the detailed "
+                        "report. The with-skill overall score in that report also counts the `baseline N/A` rows."
+                    ),
+                    "",
+                ]
+            )
         if has_partial:
             lines.extend(
                 [
@@ -1173,6 +1193,37 @@ def _agent_dimension(agent: dict[str, Any], dim_id: str) -> dict[str, Any] | Non
         if isinstance(dimension, dict) and dimension.get("id") == dim_id:
             return dimension
     return None
+
+
+def _with_skill_on_baseline_dimensions(agent: dict[str, Any]) -> float | None:
+    """Return the with-skill mean over the dimensions the baseline scored, when the baseline skipped some.
+
+    A baseline without the skill records the skill dimensions as not applicable,
+    and the agent's lift compares both arms on the rest. Returns None when every
+    dimension has a baseline or the recorded lift is not that comparison, so the
+    caller keeps the arm score.
+    """
+    compared: list[float] = []
+    skipped = False
+    for dim_id in DIMENSION_MAPPING:
+        dimension = _agent_dimension(agent, dim_id)
+        if dimension is None:
+            return None
+        if agent_eval_baseline_not_applicable(agent, dimension):
+            skipped = True
+            continue
+        score = _number(dimension.get("with_skill", dimension.get("score")))
+        if score is None:
+            return None
+        compared.append(score)
+    baseline = _number(agent.get("baseline"))
+    lift = _number(agent.get("lift"))
+    if not skipped or not compared or baseline is None or lift is None:
+        return None
+    with_skill = sum(compared) / len(compared)
+    if not math.isclose(lift, with_skill - baseline, rel_tol=1e-9, abs_tol=5e-4):
+        return None
+    return with_skill
 
 
 def _score_transition(

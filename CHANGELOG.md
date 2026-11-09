@@ -141,11 +141,13 @@ All notable changes to SkillEvaluator are documented in this file.
   it records `skill_execution` and `skill_efficiency` as not applicable and has
   no Discoverability or Efficiency baseline. The publication check treated
   those two dimensions as missing evidence and compared Skill Lift with the
-  five-dimension score, so those cards said INCOMPLETE instead. A dimension now
-  counts as not applicable for the baseline only when the baseline recorded all
-  of its metrics that way, and Skill Lift is checked over the dimensions both
-  arms scored. Any other missing or inconsistent baseline still makes the card
-  INCOMPLETE.
+  five-dimension score, so those cards said INCOMPLETE instead. Discoverability
+  and Efficiency now count as not applicable for the baseline when it recorded
+  their skill metrics that way, and Skill Lift is checked over the dimensions
+  both arms scored. On the card those two rows say `baseline N/A`, and the
+  Overall row compares both arms on the dimensions the baseline scored, so it
+  shows the same uplift as Skill Lift. Any other missing or inconsistent
+  baseline still makes the card INCOMPLETE.
 
 - All-tier CI retains Tier 2's native reports as advisory while preserving
   failed and incomplete evaluation outcomes. GitHub `ci status` validates the

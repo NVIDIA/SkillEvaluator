@@ -15,6 +15,7 @@ from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_SCORE_POLICY,
     average_metrics,
     dimension_scores,
+    mark_not_applicable,
     not_applicable_metrics,
     overall_score,
 )
@@ -375,3 +376,20 @@ def test_verdict_reads_only_with_skill_na_dimensions(tmp_path, with_na, verdict,
     for dimension_id, row in dimensions.items():
         assert (row["with_skill"] is None) is (dimension_id == with_skill_na_dimension)
     assert payload["verdict"] == verdict
+
+
+def test_na_evaluator_reasons_name_the_dataset_field_and_its_legacy_name(tmp_path):
+    root = _uniform_run(tmp_path, with_na=("accuracy", "goal_accuracy", "behavior_check"))
+
+    reasons = {item["id"]: item["reason"] for item in _report(root)["not_applicable_evaluators"]}
+
+    assert set(reasons) == {"accuracy", "goal_accuracy", "behavior_check"}
+    for metric, field, legacy in (
+        ("accuracy", "expected_output", "ground_truth"),
+        ("goal_accuracy", "expected_output", "ground_truth"),
+        ("behavior_check", "assertions", "expected_behavior"),
+    ):
+        assert reasons[metric].startswith(f"No {field} (legacy {legacy}) defined, so there is no ")
+        reward: dict = {}
+        mark_not_applicable(reward, metric)
+        assert reward["details"][metric]["reason"] == reasons[metric]

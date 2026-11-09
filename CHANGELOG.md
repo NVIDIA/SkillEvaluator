@@ -108,7 +108,9 @@ All notable changes to SkillEvaluator are documented in this file.
   every other row now reads `skipped`, as the docs and the Markdown report
   say. A lift that is missing for another reason still reads `NO SCORE`. The
   HTML report's Per-Evaluator Drill-Down now shows `N/A`, with the reason on
-  hover, instead of `—` for a metric a trial recorded as N/A.
+  hover, instead of `—` for a metric a trial recorded as N/A. The reports'
+  reasons for an N/A Accuracy, Goal Accuracy or Behavior Check now name the
+  dataset fields `expected_output` and `assertions` before their legacy names.
 
 - `skillevaluator tier3 feedback` now writes the evaluated skill's directory
   (known from `--skill` or a run in the skill's `evals/results`) as its name

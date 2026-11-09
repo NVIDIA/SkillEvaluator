@@ -337,7 +337,9 @@ def test_drilldown_reads_na_for_not_applicable_trial_cells() -> None:
 
     assert _cell(table, "With skill", "Accuracy") == "N/A"
     assert 'data-not-applicable="true"' in _raw_cell(table, "With skill", "Accuracy")
-    assert 'title="Accuracy: Not applicable: No ground_truth defined' in _raw_cell(table, "With skill", "Accuracy")
+    assert 'title="Accuracy: Not applicable: No expected_output (legacy ground_truth) defined' in _raw_cell(
+        table, "With skill", "Accuracy"
+    )
     assert _cell(table, "With skill", "Goal Accuracy") == "—"
     assert "data-not-applicable" not in _raw_cell(table, "With skill", "Goal Accuracy")
     assert _cell(table, "With skill", "Skill Execution") == "0.90"

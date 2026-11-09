@@ -14,12 +14,13 @@ All notable changes to SkillEvaluator are documented in this file.
   OpenClaw, and other skill-aware agents.
 
 - JSON reports record the SkillEvaluator `version` that wrote them, the
-  validated `target_path` (`null` from single-check commands such as
-  `security-scan`), and `top_issues`, the grouped issue rows of the HTML
-  report's summary without its page anchors. Each `gating.tiers` entry adds
-  `validator_policies`, which says for each check whether it gates the exit
-  code; the tier's `blocking` is `true` when any one of them does. The keys
-  are additive; no existing key changes.
+  `target_path` (the absolute path or Git remote URL from `validate`, the path
+  as given from `tier1` and `tier2`, and `null` from single-check commands such
+  as `security-scan`), and `top_issues`, the grouped issue rows across every
+  tier that the HTML report data carries, without their page anchors. Each
+  `gating.tiers` entry adds `validator_policies`, which says for each check
+  whether it gates the exit code; the tier's `blocking` is `true` when any one
+  of them does. The keys are additive, and existing keys keep their shape.
 
 ### Changed
 
@@ -144,15 +145,15 @@ All notable changes to SkillEvaluator are documented in this file.
   (such as `Skill.md`) or a dangling symlink still fails its manifest checks,
   and `--type skill` still validates the target as a skill.
 
-- The JSON report of `skillevaluator validate` on one skill folder lists that
-  skill in `skills`. A clean run with a narrowed check list, such as
-  `--checks schema`, has no finding path or quality score to name the skill
-  by, so the report listed one skill per check ID (`manifest_exists`,
-  `frontmatter_valid` and so on). It now uses the folder's name. The
-  `BENCHMARK.md` of a run without a recorded Tier 3 version, such as
-  `--tiers 1`, now records the evaluator version instead of
-  `Evaluator version: not recorded (legacy or non-live result)`; a version
-  recorded by a Tier 3 run still wins.
+- The JSON report of `skillevaluator validate`, `tier1` or `tier2` on one skill
+  folder lists that skill in `skills` and under its author in `contributors`.
+  A clean run with a narrowed check list, such as `--checks schema`, has no
+  finding path or quality score to name the skill by, so the report listed one
+  skill per check ID (`manifest_exists`, `frontmatter_valid` and so on). It
+  now uses the folder's name. The `BENCHMARK.md` of a run without a recorded
+  Tier 3 version, such as `--tiers 1`, now records the evaluator version
+  instead of `Evaluator version: not recorded (legacy or non-live result)`; a
+  version recorded by a Tier 3 run still wins.
 
 ## 0.8.0 - 2026-11-05
 

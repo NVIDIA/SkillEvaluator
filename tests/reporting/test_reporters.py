@@ -573,6 +573,22 @@ class TestJSONReporter:
         # The anchor hashes finding text, which CI redaction cannot refresh.
         assert all(row["issue_key"] not in output for row in html_rows)
 
+    def test_top_issues_cover_every_tier_while_the_html_panel_lists_tier1(
+        self, success_result: ValidationResult
+    ) -> None:
+        results = [success_result, _similarity_result(severity=Severity.HIGH)]
+
+        data = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+        html = HTMLReporter(include_timestamp=False).render_all(results)
+
+        assert [row["message"] for row in data["top_issues"]] == ["same-name similarity match"]
+        assert data["top_issues"] == [
+            {key: value for key, value in row.items() if key != "issue_key"}
+            for row in _html_report_data(html)["top_issues"]
+        ]
+        # The HTML summary panel lists the Tier 1 rows only.
+        assert "same-name similarity match" not in _html_tab(html, "tier1")
+
     def test_gating_tiers_record_each_validator_policy(self) -> None:
         schema = ValidationResult(validator_name="Schema & Repository Governance")
         schema.metadata["gating"] = {"tier": 1, "blocking": True}

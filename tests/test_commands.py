@@ -532,6 +532,7 @@ def test_validate_json_names_a_clean_single_skill_and_records_the_evaluator(
     assert result.exit_code == 0, result.output
     report = json.loads(next(output_dir.glob("skillevaluator-output-*.json")).read_text(encoding="utf-8"))
     assert report["skills"] == [{"name": "simple", "passed": True, "issue_count": 0}]
+    assert [item["name"] for contributor in report["contributors"] for item in contributor["items"]] == ["simple"]
     assert report["version"] == __version__
     if in_git_checkout:
         assert report["target_path"].startswith("https://github.com/example/skills/")

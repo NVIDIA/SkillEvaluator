@@ -138,8 +138,9 @@ class JSONReporter(ReporterBase):
         )
         skills_by_name = html_reporter._reorganize_by_skill(results)
         contributors = HTMLReporter._extract_contributors(skills_by_name, results)
-        # The HTML executive summary's issue rows, without ``issue_key``: that
-        # is an HTML anchor hashed from the finding text, and CI redaction
+        # Top issues across every tier, the rows the HTML report data carries
+        # (its summary panel lists the Tier 1 rows only), without ``issue_key``:
+        # that is an HTML anchor hashed from the finding text, and CI redaction
         # masks the text in this report but cannot refresh a hash it never sees.
         top_issues = [
             {key: value for key, value in issue.items() if key != "issue_key"}

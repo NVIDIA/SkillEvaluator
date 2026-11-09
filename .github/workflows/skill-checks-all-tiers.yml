@@ -22,7 +22,7 @@ jobs:
       env-mode: docker
       provider: nv_build
       embedding-provider: nv_build
-      model: ''
+      model: nvidia/nemotron-3.5-lightning-30b-a3b
       embedding-model: ''
       agents: ''
       runner: ubuntu-24.04

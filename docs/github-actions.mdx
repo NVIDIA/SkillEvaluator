@@ -42,13 +42,21 @@ reusable workflow, and `ci status --tiers 1,2,3` recognizes it.
 
 The repository callers pin a reviewed `main` commit for the evaluator workflows
 and tools, and the verified released Tier 1 image. They use Docker, NVIDIA Build,
-one attempt and one concurrent task, and the committed native datasets. Add
+one attempt and one concurrent task, and the committed native datasets. The
+caller's explicit `model` input selects chat, judging and the default live-agent
+model together; embeddings use the separate `embedding-model` input. Add
 `NVIDIA_API_KEY` as a repository Actions secret before expecting provider-backed
 results. Without it, Tier 2 and Tier 3
 remain incomplete/advisory; a passing Tier 1 gate is not an all-tier evaluation
 pass. Forks retain keyless Tier 1 checks. On PRs, ordinary software changes
 select no skills, skill changes select the affected skills, and CI configuration
 changes select the collection. Pushes to `main` and manual runs scan the collection.
+
+If a provider returns HTTP 404, verify that the selected model accepts chat
+requests with your account. Presence in the public model catalog alone does not
+prove serving availability. Change the caller's `model` input to an accessible
+model and refresh `trusted-caller-blobs` before retrying; do not change global
+provider defaults to troubleshoot one repository.
 
 The setup PR can exercise checks, but its first automatic comment requires
 the consumer feedback listener on `main` and a subsequent PR run. Repository

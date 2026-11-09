@@ -1070,7 +1070,7 @@ def _nemo_gym_doctor_rows(
                 "NeMo Gym CLI",
                 "fail",
                 f"not found: set {NEMO_GYM_BIN_ENV} to a verified, pinned Gym task-folder CLI; "
-                "public nemo-gym 0.7.0 is incompatible and no compatible public pin has been verified",
+                "public nemo-gym 0.7.0 is incompatible and the candidate source still needs runtime qualification",
             )
         )
     elif cli_error := nemo_gym_cli_error(gym):

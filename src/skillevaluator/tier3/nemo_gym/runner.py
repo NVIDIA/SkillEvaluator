@@ -699,7 +699,7 @@ def run_nemo_gym_eval(
     if gym is None:
         raise ValueError(
             f"--backend nemo-gym needs a verified, pinned Gym task-folder CLI: set {NEMO_GYM_BIN_ENV} "
-            "to its `gym` executable; public nemo-gym 0.7.0 is incompatible and no compatible public pin is verified"
+            "to its `gym` executable; public nemo-gym 0.7.0 is incompatible and the candidate source still needs runtime qualification"
         )
     if skip_baseline and skip_with_skill:
         return _config_failure("skip_baseline and skip_with_skill are mutually exclusive (no arm would run)")

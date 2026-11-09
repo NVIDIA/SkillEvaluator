@@ -106,6 +106,10 @@ def nemo_gym_version(gym_bin: str) -> str | None:
     return None
 
 
+# Candidate public source interface; native runtime qualification remains required.
+NEMO_GYM_SOURCE = "git+https://github.com/NVIDIA-NeMo/Gym@792fa142f58277aecff05d402061d647e9a92acf"
+
+
 def nemo_gym_cli_error(gym_bin: str) -> str | None:
     """Check the task-folder CLI contract without starting servers or passing policy credentials.
 
@@ -148,7 +152,7 @@ def nemo_gym_cli_error(gym_bin: str) -> str | None:
     if missing:
         return (
             f"NeMo Gym CLI is incompatible with this experimental task-folder adapter; missing: {', '.join(missing)}. "
-            "Public nemo-gym 0.7.0 is incompatible; a compatible Gym source revision must be verified and pinned. "
+            f"Public nemo-gym 0.7.0 is incompatible; candidate source {NEMO_GYM_SOURCE} still needs runtime qualification. "
             "No Harbor fallback was started."
         )
     return None

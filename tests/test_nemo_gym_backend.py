@@ -301,11 +301,15 @@ def _fake_gym_skill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: str
     import sys
 
     from skillevaluator import provider_config
+    from skillevaluator.evaluation.insights_judge import InsightsJudge
     from skillevaluator.provider_config import ProviderConfig
     from skillevaluator.tier3.eval_core import llm_judge
 
-    # Keep report rendering real while replacing its unrelated remote advice request.
+    # Keep report parsing/rendering real while replacing unrelated remote advice requests.
     monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_args, **_kwargs: ("[]", None))
+    monkeypatch.setattr(
+        InsightsJudge, "completions", lambda *_args, **_kwargs: '{"conclusions": [], "recommendations": []}'
+    )
 
     skill = tmp_path / "calc"
     (skill / "evals").mkdir(parents=True)
@@ -805,12 +809,14 @@ def test_gym_bin_is_absolute_and_version_follows_symlinks(tmp_path: Path, monkey
 
 def test_failed_gym_launch_is_reported_not_succeeded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch)
+    gym = Path(os.environ["SKILL_EVAL_NEMO_GYM_BIN"])
     failing = tmp_path / "failing-gym"
-    failing.write_text("#!/bin/sh\nexit 3\n")
+    failing.write_text(f'#!/bin/sh\ncase "$*" in *--help*) exec "{gym}" "$@";; esac\nexit 3\n')
     failing.chmod(0o755)
     monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_BIN", str(failing))
     result = _run_fake_gym(skill, tmp_path)
-    assert result.get("execution_status") != "succeeded"
+    assert result["execution_status"] == "failed"
+    assert Path(result["run_dir"]).is_dir()
     assert "exited 3" in json.dumps(result)
 
 
@@ -1714,3 +1720,61 @@ def test_stop_failure_during_an_interrupt_keeps_the_interrupt(tmp_path: Path, mo
             reporter=_InterruptOnce(),
         )
     assert isinstance(raised.value.__cause__, RuntimeError)
+
+
+def test_incompatible_gym_cli_is_rejected_before_staging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.tier3.nemo_gym.backend import nemo_gym_cli_error
+
+    skill, env_log = _fake_gym_skill(tmp_path, monkeypatch)
+    old_gym = tmp_path / "old-gym"
+    old_gym.write_text("#!/bin/sh\necho 'usage: gym eval run [--input INPUT]'\nexit 2\n")
+    old_gym.chmod(0o755)
+    assert "exited 2" in (nemo_gym_cli_error(str(old_gym)) or "")
+    monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_BIN", str(old_gym))
+    result = _run_fake_gym(skill, tmp_path)
+    assert "exited 2" in json.dumps(result)
+    assert not env_log.exists()
+    results_root = tmp_path / "results"
+    assert not results_root.exists() or not any(results_root.iterdir())
+
+
+def test_direct_run_probes_once_before_provider_resolution_and_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+
+    from skillevaluator import provider_config
+    from skillevaluator.tier3.nemo_gym import runner as gym_runner
+
+    skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch)
+    events = tmp_path / "preflight-events"
+    gym = os.environ["SKILL_EVAL_NEMO_GYM_BIN"]
+    wrapper = tmp_path / "gym-wrapper"
+    wrapper.write_text(
+        f"#!{sys.executable}\nimport os, sys\nfrom pathlib import Path\n"
+        "if sys.argv[1:] == ['eval', 'run', '--help']:\n"
+        f"    with Path({str(events)!r}).open('a') as log: log.write('probe\\n')\n"
+        f"os.execv({gym!r}, [{gym!r}, *sys.argv[1:]])\n"
+    )
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_BIN", str(wrapper))
+    resolve_provider = provider_config.resolve_llm_provider
+    stage = gym_runner.stage_for_gym
+
+    def recording_provider():
+        with events.open("a") as log:
+            log.write("provider\n")
+        return resolve_provider()
+
+    def recording_stage(*args, **kwargs):
+        with events.open("a") as log:
+            log.write("stage\n")
+        return stage(*args, **kwargs)
+
+    monkeypatch.setattr(provider_config, "resolve_llm_provider", recording_provider)
+    monkeypatch.setattr(gym_runner, "stage_for_gym", recording_stage)
+    result = _run_fake_gym(skill, tmp_path, n_attempts=1, max_cases=1)
+    assert result["execution_status"] == "succeeded"
+    observed = events.read_text().splitlines()
+    assert observed.count("probe") == 1, observed
+    assert observed.index("probe") < observed.index("provider") < observed.index("stage")

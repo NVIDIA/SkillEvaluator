@@ -462,15 +462,19 @@ collector, but requires a Gym interface that is not available in the checked pub
 | Backend | What runs the cases |
 | --- | --- |
 | `harbor` (default) | Harbor orchestrates the trials, runs the agent and the sandbox. Every `--env-mode` is available. |
-| `nemo-gym` | Experimental native Gym task-folder adapter, restricted to `--env-mode docker`. Public Gym 0.7.0 is incompatible and fails preflight. A compatible Gym source revision and independent live validation are still required. |
+| `nemo-gym` | Experimental native Gym task-folder adapter, restricted to `--env-mode docker`. Public Gym 0.7.0 is incompatible and fails preflight. A public source candidate exposes the interface; independent live validation is still required. |
 
 **Compatibility status:** installing `nemo-gym==0.7.0` does not enable this backend.
 That release's `gym eval run` takes JSONL inputs and configured environments; it has
 neither the positional task-directory argument nor `--sandbox` used by this adapter.
 Removing that flag alone does not provide the required execution or verifier contract.
-No compatible public release or source revision has been verified for this adapter;
-there is currently no supported installation pin to recommend. Codex, Claude Code and
-OpenCode mappings are experimental and do not establish end-to-end agent support.
+The immutable public source candidate
+[`NVIDIA-NeMo/Gym@792fa142f58277aecff05d402061d647e9a92acf`](https://github.com/NVIDIA-NeMo/Gym/blob/792fa142f58277aecff05d402061d647e9a92acf/nemo_gym/cli/main.py)
+declares the `TARGET` task-folder argument and the seven required flags. This source
+inspection establishes an interface candidate, not a supported runtime installation.
+Native agent execution, verifier artifacts, paired small/custom-Dockerfile runs and
+input-file handling still need independent qualification. Codex, Claude Code and
+OpenCode mappings remain experimental and do not establish end-to-end agent support.
 
 ```bash
 # Requires a separately verified, pinned Gym task-folder implementation.
@@ -501,9 +505,9 @@ harness and judge match.
 The adapter's required Gym contract is `gym eval run TASKS --sandbox docker`, with
 `--agent`, `--model-type openai_model`, `--model`, `--model-url`, `--output`, and
 `--concurrency`, plus Hydra overrides for repeats, credentials and cache disabling.
-Its help must describe a positional `tasks`, `task_dir`, `tasks_dir` or `task_folder`
-argument. Each rollout must identify its task and provide `verifier_return_code` and
-`verifier_logs_dir`, where the SkillEvaluator verifier's rewards and trajectory can
+Its help must describe a standalone positional `TARGET`, `tasks`, `task_dir`,
+`tasks_dir` or `task_folder` argument. Each rollout must identify its task and provide
+`verifier_return_code` and `verifier_logs_dir`, where the SkillEvaluator verifier's rewards and trajectory can
 be collected. The Gym implementation must execute inside Docker and resolve task
 environment templates; a host-only agent harness does not meet this contract.
 

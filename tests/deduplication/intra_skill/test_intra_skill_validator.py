@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -116,8 +115,9 @@ class TestEffectiveChunkLimit:
             if line.startswith("| Intra-skill comparison work |")
         ]
 
-        limit = effective_chunk_limit(vector_dimension)
-        assert re.search(rf"\b{limit:,} (?:chunks )?at {vector_dimension:,} \([^)]*`{re.escape(model)}`\)", row)
+        (width_entry,) = [entry for entry in row.split(", ") if f"`{model}`" in entry]
+        assert width_entry.startswith(f"{effective_chunk_limit(vector_dimension):,} ")
+        assert f" at {vector_dimension:,} (" in width_entry
 
     def test_limit_is_the_largest_chunk_count_within_budget_for_every_width(self) -> None:
         budget = constants.CONTENT_DEDUP_MAX_SCALAR_COMPARISONS

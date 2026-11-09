@@ -1145,6 +1145,30 @@ def _agent_eval_execution_errors_clear(payload: dict[str, Any] | None) -> bool:
     return True
 
 
+# The metrics a baseline without the skill under test cannot score. It has no
+# skill to discover or route to, so the verifier records them as not applicable.
+BASELINE_NOT_APPLICABLE_SKILL_METRICS = ("skill_execution", "skill_efficiency")
+
+
+def agent_eval_baseline_not_applicable(agent: dict[str, Any], dimension: dict[str, Any]) -> bool:
+    """Return whether the baseline recorded a dimension as not applicable instead of scoring it.
+
+    Only the skill metrics qualify. Any other metric is not applicable when the
+    case has no reference to judge against, which holds for both arms, so a
+    dimension that is missing only its baseline is missing evidence.
+    """
+    config = DIMENSION_MAPPING.get(_agent_eval_safe_text(dimension.get("id")))
+    if config is None or dimension.get("baseline") is not None or dimension.get("lift") is not None:
+        return False
+    raw_not_applicable = agent.get("not_applicable_metrics")
+    recorded = raw_not_applicable.get("without_skill") if isinstance(raw_not_applicable, dict) else None
+    if not isinstance(recorded, list):
+        return False
+    return all(
+        metric in BASELINE_NOT_APPLICABLE_SKILL_METRICS and metric in recorded for metric in config["evaluators"]
+    )
+
+
 def _agent_eval_dimension_scores(
     agent: dict[str, Any],
     *,
@@ -1163,30 +1187,19 @@ def _agent_eval_dimension_scores(
             return None
         dimensions[dimension_id] = raw_dimension
 
-    # A baseline without the skill under test records the skill metrics as not
-    # applicable, so the dimensions they feed have no baseline and no lift.
-    raw_not_applicable = agent.get("not_applicable_metrics")
-    baseline_not_applicable_metrics = (
-        raw_not_applicable.get("without_skill") if isinstance(raw_not_applicable, dict) else None
-    )
-    if not isinstance(baseline_not_applicable_metrics, list):
-        baseline_not_applicable_metrics = []
-
     scores: list[float] = []
     baselines: list[float] = []
     compared_scores: list[float] = []
-    for dimension_id, config in DIMENSION_MAPPING.items():
+    for dimension_id in DIMENSION_MAPPING:
         dimension = dimensions.get(dimension_id)
         if dimension is None:
             return None
         value = dimension.get("with_skill") if "with_skill" in dimension else dimension.get("score")
         score = _agent_eval_finite_score(value)
         baseline = _agent_eval_finite_score(dimension.get("baseline"))
-        baseline_not_applicable = (
-            dimension.get("baseline") is None
-            and dimension.get("lift") is None
-            and all(metric in baseline_not_applicable_metrics for metric in config["evaluators"])
-        )
+        # A baseline without the skill under test has no baseline and no lift
+        # on the dimensions the skill metrics feed.
+        baseline_not_applicable = agent_eval_baseline_not_applicable(agent, dimension)
         if score is None or (require_baseline and baseline is None and not baseline_not_applicable):
             return None
         if require_baseline and not baseline_not_applicable:

@@ -1231,22 +1231,29 @@ def test_benchmark_baseline_without_the_skill_can_pass(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("target", "changes"),
+    "changes",
     [
         # Without the applicability record, a missing baseline is missing evidence.
-        ("not_applicable_metrics", {"without_skill": []}),
+        {"not_applicable_metrics": {"without_skill": []}},
         # The baseline scored accuracy, so Correctness needs its baseline.
-        ("correctness", {"baseline": None, "lift": None}),
+        {"correctness": {"baseline": None, "lift": None}},
         # A dimension the baseline could not score has no lift either.
-        ("efficiency", {"lift": 0.0}),
+        {"efficiency": {"lift": 0.0}},
         # A five-dimension score minus a three-dimension baseline.
-        ("agent", {"lift": 0.28}),
+        {"agent": {"lift": 0.28}},
+        # accuracy is not applicable when a case has no reference, which holds for
+        # both arms. A baseline that alone records it is missing its Correctness
+        # score, even when its baseline and lift add up over Security and Effectiveness.
+        {
+            "not_applicable_metrics": {"without_skill": ["skill_execution", "skill_efficiency", "accuracy"]},
+            "correctness": {"baseline": None, "lift": None},
+            "agent": {"baseline": 0.725, "lift": 0.2},
+        },
     ],
 )
 def test_benchmark_baseline_without_the_skill_still_needs_matching_evidence(
     tmp_path: Path,
-    target: str,
-    changes: dict[str, object],
+    changes: dict[str, dict[str, object]],
 ) -> None:
     payload = _collected_default_run(tmp_path).metadata["agent_eval"]
     agent = payload["agents"]["codex"]
@@ -1254,7 +1261,8 @@ def test_benchmark_baseline_without_the_skill_still_needs_matching_evidence(
 
     containers = {"agent": agent, "not_applicable_metrics": agent["not_applicable_metrics"]}
     containers.update((row["id"], row) for row in agent["dimensions"])
-    containers[target].update(changes)
+    for target, change in changes.items():
+        containers[target].update(change)
 
     assert agent_eval_dimension_verdict(payload) is None
 

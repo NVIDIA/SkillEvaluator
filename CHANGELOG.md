@@ -7,6 +7,15 @@ All notable changes to SkillEvaluator are documented in this file.
 ### Added
 
 - Tier 3 evaluations support token, judge-call, attempt, and priced-cost budgets.
+
+- Run SkillEvaluator's own `skills/` through the pinned three-tier GitHub
+  callers, retaining Tier 1 as required and Tier 2/3 as advisory. A separate
+  consumer feedback listener preserves the reusable publisher's public path;
+  onboarding and status recognize this filename collision without replacing
+  reusable workflow definitions. Automatic comments activate after the
+  listener reaches the default branch.
+  Document the shared chat/judge/agent model input and model-availability
+  troubleshooting for provider-backed CI.
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI
   command, and ships Tier 3 evaluation cases for itself. A test keeps every
@@ -14,7 +23,48 @@ All notable changes to SkillEvaluator are documented in this file.
   Your Agent" docs page shows how to install it in Codex, Claude Code, OpenCode,
   OpenClaw, and other skill-aware agents.
 
+- Opt-in three-tier GitHub and GitLab CI entrypoints with required Tier 1,
+  advisory Tier 2 and paired Tier 3, Docker and native local execution, pinned
+  local agent bootstrap, retained aggregate/native reports, and trusted default-branch
+  feedback. Candidate templates require a capability-bearing release descriptor;
+  released Tier 1 bundles and workflows remain unchanged. Incomplete runs retain
+  redacted startup diagnostics. Interrupted Tier 1 selections cannot pass on
+  partial results; advisory tiers preserve their failed or incomplete status.
+  GitLab callers quote variable values, use literal job timeouts
+  compatible with GitLab 17.8, and safely select changes in runner-owned checkouts.
+  GitLab before 18.4 uses a separate read-only admission credential; feedback
+  initiation is advisory so first-install reporting does not change the tier gate.
+  Same-project feedback uses the short-lived job-token trigger API and verifies
+  the server-bound upstream pipeline and source job, preserving protected-branch
+  and deployment permissions. Its persisted GraphQL MR association supports
+  GitLab 17.x without requiring the newer pipeline/MR REST endpoint. Publisher
+  failures include a trusted check location and finite diagnostic category.
+
+- Private plugin helpers recognize native OpenClaw manifests
+  (`openclaw.plugin.json`) after the existing manifest formats. `id` is the
+  plugin identity and `configSchema` must be an object. Only the `skills` roots
+  the manifest declares are members, searched recursively without implicit
+  `skills/` or hidden and `node_modules` children. `package.json#openclaw`
+  entrypoints are boundary-checked without being imported or run. Every native
+  manifest keeps an unsupported OpenClaw runtime row, so portable skill
+  results never certify tools, hooks, channels, providers or services. Inline
+  `mcpServers` follow OpenClaw's transport, SSE default and verbatim-URL rules;
+  disabled TLS verification and literal enterprise secrets are blocking.
+  Runtime preparation never copies the plugin root as a member, never starts
+  stdio servers whose plugin-root working directory cannot be kept, records
+  unapplied host options as incomplete, and keeps host metadata out of staged
+  manifests. Native Claude Code staging copies only the declared member
+  skills, never the plugin tree, so Claude Code's default skill, command,
+  agent, hook and `bin/` locations stay unloaded.
+  `scripts/ci/smoke_openclaw_plugins.py` repeats these checks against real
+  plugin sources without executing plugin code.
+
 ### Changed
+
+- Run GitLab Tier 2 without Docker-in-Docker while keeping TLS-protected Docker
+  for Tier 3. Both native tiers retain shared caller timeout and runner-tag
+  overrides, advisory outcomes, and aggregate artifacts; local mode still
+  disables the Tier 3 Docker service.
 
 - Align terminal grade and lift colors across compact, full, and direct Tier 3
   reports; displayed zero lift is neutral. Narrow terminals stack complete
@@ -53,6 +103,22 @@ All notable changes to SkillEvaluator are documented in this file.
   required and advisory summary reasons distinct within mixed tiers and focus
   direct agent links on their named panels.
 
+- Compact all-tier CI PR and MR feedback into one summary table with a row per
+  skill, one-line tier statuses and issue counts, and one combined **Report**
+  link per skill. Incomplete or missing evidence keeps issue counts unknown;
+  detailed aggregate and native reports remain in the authenticated artifact.
+
+- Make Tier 1 the only gate in opt-in all-tier GitHub and GitLab CI. Tier 2 and
+  Tier 3 retain failed and incomplete advisory outcomes and native reports.
+  Deprecate and ignore onboarding's `--tier3-required`, GitHub's
+  `tier3-required` input and GitLab's `SKILL_EVAL_TIER3_REQUIRED` variable;
+  none can make Tier 3 block CI. Standalone validation and benchmark
+  publication policies are unchanged.
+
+- Give staged Tier 3 main images a fixed liveness healthcheck so Docker Compose
+  2 can wait for readiness while authored image healthchecks remain suppressed.
+  Keep custom service healthchecks and their readiness dependencies intact.
+
 ### Documentation
 
 - The 0.8.0 entry for refused `claude-code` attempts said the arm reports its
@@ -79,6 +145,19 @@ All notable changes to SkillEvaluator are documented in this file.
   after a `;`, which starts a new command.
 
 ### Fixed
+
+- All-tier CI retains Tier 2's native reports as advisory while preserving
+  failed and incomplete evaluation outcomes. GitHub `ci status` validates the
+  pinned evaluation and feedback configuration before reporting readiness,
+  including malformed YAML and missing approval inputs. Candidate onboarding
+  pins include the reviewed CI fixes and matching runtime metadata.
+  Use the verified released Tier 1 image so valid multi-valued `metadata.domain`
+  fields also work in new all-tier consumers.
+
+- Private native Claude Code staging keeps the source client's skill
+  declarations: Codex paths that Codex ignores are no longer copied into the
+  staged `plugin.json` (where Claude Code rejected or loaded them), and
+  undotted Cursor skill roots become `./` paths Claude Code accepts.
 
 - Read JSON, JSONL and YAML evaluation datasets as UTF-8 so Unicode prompts and
   answers load correctly on hosts with a non-UTF-8 default text encoding.
@@ -119,17 +198,32 @@ All notable changes to SkillEvaluator are documented in this file.
   the default `legacy` policy.
 
 - `skillevaluator tier3 feedback` now writes the evaluated skill's directory
-  (known from `--skill` or a run in the skill's `evals/results`) as its name
-  and the home directory as `~` in the evidence it sends to the LLM, so an
-  error naming the skill's `SKILL.md` no longer shows its local path. A copied
-  run's path starting with `~user/` or `$HOME/` is now also replaced with the
-  run ID. Path masking now skips a URL other than a `file:` URL together with
-  any text after it up to the next whitespace, so in minified JSON a run,
-  skill, or home path that follows such a URL is sent as is, where 0.8.0
-  replaced the run's path with the run ID. A field over 65,536 characters with
-  no whitespace after its limit now keeps a masked prefix, cut at punctuation
-  such as `,` or `}` but never inside a URL's user info or host, so `Error: `
-  followed by minified JSON no longer arrives as `Error: ...<truncated>`.
+  (known from `--skill` or a run in the skill's `evals/results`) as its name and
+  the home directory as `~` in the evidence it sends to the LLM, so an error
+  naming the skill's `SKILL.md` no longer shows its local path. A copied run's
+  path starting with `~user/` or `$HOME/` is now also replaced with the run ID.
+  Path masking now leaves a URL unchanged, even when its query or fragment names
+  a local path, unless its scheme is `file:` or ends in `+file:`, such as
+  `git+file:`. The URL ends at whitespace, a quote, `<`, `>`, a backtick, `^`,
+  `{`, `|`, `}`, or an ANSI escape, at a `\n`, `\r`, or `\t` escape, and before
+  an absolute path or another scheme after a `,` or `;` (also with a name such
+  as `LOG=` or `--find-links=`) or a Markdown `](`, so a run, skill, or home
+  path after it in minified JSON, on the next line of an escaped env dump, or in
+  a `,`- or `;`-separated list is still masked, and so is a `file:` URL after
+  it. A Windows path in a URL is kept, also with a folder whose name starts with
+  `n`, `r`, or `t`, such as `\runs\` or `\t\`, unless that name holds a
+  character other than a letter, a digit, `_`, `.`, `~`, `$`, `%`, or `-`, such
+  as `\runs(old)\`, or no backslash follows it, as in `\notes.txt`; the URL then
+  ends there. A copied run's path right after a `\n`, `\r`, or `\t` escape or an
+  ANSI code, such as a color or erase-line code, is now replaced with the run
+  ID, and the escape or code is kept, also with no URL before it. 0.8.0 sent
+  such a path as is after a word, as in `done.\n/srv/...`, or after a raw ANSI
+  code, and replaced an escape or an escaped code with it otherwise. A relative
+  path after such an escape is no longer read as an absolute one. A field over
+  65,536 characters with no whitespace after its limit now keeps a masked
+  prefix, cut at punctuation such as `,` or `}` but never inside a URL's user
+  info or host, so `Error: ` followed by minified JSON no longer arrives as
+  `Error: ...<truncated>`.
 
 - Tier 3 security grading again warns about network exfiltration, lowering
   the Security score to 0.5, for an HTTPie method word after a capitalized

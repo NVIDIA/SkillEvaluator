@@ -22,6 +22,7 @@ from skillevaluator.reporting.console_ui import summarize_tier1
 from skillevaluator.reporting.html import HTMLReporter
 from skillevaluator.reporting.json_reporter import JSONReporter
 from skillevaluator.reporting.markdown import MarkdownReporter
+from skillevaluator.reporting.retained import render_retained_report, retained_results
 from skillevaluator.skillspector_references import (
     combine_reference_summaries,
     reference_summary_message,
@@ -143,6 +144,51 @@ def test_copies_that_differ_only_in_run_time_are_one_unique_finding() -> None:
     assert exported["finding_counts"]["raw_occurrences"] == 2
     assert exported["finding_counts"]["unique_findings"] == 1
     assert len(exported["finding_groups"]) == 1
+
+
+def test_reports_rendered_again_from_the_json_show_the_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """CI renders its HTML and Markdown reports again from the JSON report; a failed result keeps the line."""
+    result = _validate(tmp_path, monkeypatch, skills=(".",))
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+
+    [retained] = retained_results(payload)
+
+    assert not retained.passed
+    assert retained.metadata["skillspector_reference_summary"] == {
+        "affected_artifacts": 1,
+        "reference_occurrences": 2,
+        "reference_occurrences_truncated": False,
+    }
+    phrase = _phrase(1, "2")
+    assert MarkdownReporter(include_timestamp=False).render_all([retained]).count(phrase) == 1
+    html = render_retained_report(payload, skill_name="perl-test")
+    assert re.findall(r'<p class="reference-analysis-summary"[^>]*>([^<]*)</p>', html) == [phrase]
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        [],
+        {"affected_artifacts": 0, "reference_occurrences": 2},
+        {"affected_artifacts": 1, "reference_occurrences": 10**400},
+        {"affected_artifacts": "<script>alert(1)</script>", "reference_occurrences": 2},
+    ],
+)
+def test_reports_rendered_again_from_the_json_drop_malformed_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, summary: object
+) -> None:
+    result = _validate(tmp_path, monkeypatch, skills=(".",))
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    payload["results"][0]["skillspector_reference_summary"] = summary
+
+    [retained] = retained_results(payload)
+
+    assert "skillspector_reference_summary" not in retained.metadata
+    html = render_retained_report(payload, skill_name="perl-test")
+    assert "referenced artifact(s)" not in html
+    assert "<script>alert(1)" not in html
+    # The findings themselves still render.
+    assert "Incomplete referenced artifact analysis" in html
 
 
 def test_folder_reference_lines_name_their_skill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

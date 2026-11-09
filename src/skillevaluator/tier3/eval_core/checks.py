@@ -5370,6 +5370,41 @@ def check_token_efficiency(total_tokens: int) -> dict[str, Any]:
 # Composite scorers (combine sub-checks into eval-level scores)
 # ---------------------------------------------------------------------------
 
+# Why an eval case leaves a skill metric N/A. The verifier records the reason
+# under ``details.<metric>`` with ``status: "not_applicable"`` and a null score.
+SKILL_CASE_UNLABELED_REASON = "N/A: no expected_skill or should_trigger defined for this eval case"
+SKILL_CASE_NO_EXPECTED_SKILL_REASON = "N/A: no expected_skill defined for this eval case"
+SKILL_CASE_NEGATIVE_EFFICIENCY_REASON = "N/A: negative case, so there is no skill use to measure"
+SKILL_CASE_NEGATIVE_NO_SKILL_REASON = "N/A: negative case with no skill under test to check"
+
+
+def skill_execution_not_applicable_reason(should_trigger: bool | None, expected_skill: str | None) -> str | None:
+    """Return why an eval case gives ``skill_execution`` nothing to score, or ``None`` when it applies.
+
+    A negative case still scores: it checks that the agent left the skill under test alone.
+    """
+    if should_trigger is None:
+        return SKILL_CASE_UNLABELED_REASON
+    if should_trigger and not expected_skill:
+        return SKILL_CASE_NO_EXPECTED_SKILL_REASON
+    return None
+
+
+def skill_efficiency_not_applicable_reason(should_trigger: bool | None, expected_skill: str | None) -> str | None:
+    """Return why an eval case gives ``skill_efficiency`` nothing to measure, or ``None`` when it applies."""
+    if should_trigger is None:
+        return SKILL_CASE_UNLABELED_REASON
+    if not should_trigger:
+        return SKILL_CASE_NEGATIVE_EFFICIENCY_REASON
+    if not expected_skill:
+        return SKILL_CASE_NO_EXPECTED_SKILL_REASON
+    return None
+
+
+def _case_not_applicable(reason: str) -> dict[str, Any]:
+    """A scoreless composite result whose details carry the verifier's N/A marker."""
+    return {"score": None, "details": {"score": None, "status": "not_applicable", "reason": reason}}
+
 
 def score_skill_execution(
     tool_calls: list[dict[str, Any]],
@@ -5389,7 +5424,7 @@ def score_skill_execution(
     details for diagnosis. Negative and unlabeled cases use their own rules.
     """
     if should_trigger is None:
-        return {"score": 1.0, "details": {"message": "No expected_skill -- skipped"}}
+        return _case_not_applicable(SKILL_CASE_UNLABELED_REASON)
 
     if not should_trigger:
         if require_evaluated_skill and not evaluated_skill:
@@ -5402,7 +5437,7 @@ def score_skill_execution(
             }
         skill_under_test = evaluated_skill or expected_skill
         if not skill_under_test:
-            return {"score": 1.0, "details": {"message": "Negative case, no skill identified"}}
+            return _case_not_applicable(SKILL_CASE_NEGATIVE_NO_SKILL_REASON)
         if not tool_calls:
             neg = {"passed": True, "score": 1.0, "reason": "No tool calls"}
         else:
@@ -5410,7 +5445,7 @@ def score_skill_execution(
         return {"score": neg["score"], "details": {"negative_check": neg, "should_trigger": False}}
 
     if not expected_skill:
-        return {"score": 1.0, "details": {"message": "No expected_skill -- skipped"}}
+        return _case_not_applicable(SKILL_CASE_NO_EXPECTED_SKILL_REASON)
 
     checks: dict[str, dict[str, Any]] = {}
     scores: list[float] = []
@@ -5458,7 +5493,7 @@ def score_skill_efficiency(
     tool_calls: list[dict[str, Any]],
     expected_skill: str,
     expected_script: str | None = None,
-    should_trigger: bool = True,
+    should_trigger: bool | None = True,
     *,
     skill_tool_names: list[str] | None = None,
     workspace_skill_names: list[str] | None = None,
@@ -5467,10 +5502,12 @@ def score_skill_efficiency(
 ) -> dict[str, Any]:
     """Compute the ``skill_efficiency`` eval score (average of sub-checks)."""
     if not should_trigger:
-        return {"score": 1.0, "details": {"message": "Negative case -- efficiency not applicable"}}
+        return _case_not_applicable(
+            SKILL_CASE_UNLABELED_REASON if should_trigger is None else SKILL_CASE_NEGATIVE_EFFICIENCY_REASON
+        )
 
     if not expected_skill:
-        return {"score": 1.0, "details": {"message": "No expected_skill -- skipped"}}
+        return _case_not_applicable(SKILL_CASE_NO_EXPECTED_SKILL_REASON)
 
     if not tool_calls:
         return {"score": 0.0, "details": {"message": "No tool calls in trajectory"}}

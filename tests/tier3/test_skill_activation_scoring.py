@@ -104,17 +104,36 @@ def test_negative_control_does_not_require_positive_activation(scorer: ModuleTyp
 
 
 @pytest.mark.parametrize("expected_skill", (None, "", "demo"))
-def test_unlabeled_case_remains_skipped(scorer: ModuleType, expected_skill: str | None) -> None:
+def test_unlabeled_case_is_not_applicable(scorer: ModuleType, expected_skill: str | None) -> None:
     result = scorer.score_skill_execution([], expected_skill, should_trigger=None)
 
-    assert result["score"] == 1.0
-    assert "skipped" in result["details"]["message"]
-    assert "activation" not in result["details"]
+    assert result == {
+        "score": None,
+        "details": {
+            "score": None,
+            "status": "not_applicable",
+            "reason": "N/A: no expected_skill or should_trigger defined for this eval case",
+        },
+    }
 
 
-def test_missing_expected_skill_remains_skipped(scorer: ModuleType) -> None:
-    result = scorer.score_skill_execution([], "", should_trigger=True)
+@pytest.mark.parametrize("expected_skill", (None, ""))
+def test_positive_case_without_expected_skill_is_not_applicable(scorer: ModuleType, expected_skill: str | None) -> None:
+    calls = [{"action": "Read", "action_input": {"file_path": "/skills/demo/SKILL.md"}}]
+    result = scorer.score_skill_execution(calls, expected_skill, should_trigger=True)
 
-    assert result["score"] == 1.0
-    assert "skipped" in result["details"]["message"]
-    assert "activation" not in result["details"]
+    assert result["score"] is None
+    assert result["details"] == {
+        "score": None,
+        "status": "not_applicable",
+        "reason": "N/A: no expected_skill defined for this eval case",
+    }
+
+
+def test_negative_case_without_any_skill_identity_is_not_applicable(scorer: ModuleType) -> None:
+    # Only a caller that does not require the trusted evaluated_skill reaches this branch.
+    result = scorer.score_skill_execution([], "", should_trigger=False)
+
+    assert result["score"] is None
+    assert result["details"]["status"] == "not_applicable"
+    assert result["details"]["reason"] == "N/A: negative case with no skill under test to check"

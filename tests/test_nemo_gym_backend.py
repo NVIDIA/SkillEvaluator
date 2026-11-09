@@ -1392,3 +1392,16 @@ def test_unsupported_gym_sandbox_is_rejected_before_launch(tmp_path: Path, monke
     result = _run_fake_gym(skill, tmp_path)
     assert "SKILL_EVAL_NEMO_GYM_SANDBOX=local" in json.dumps(result)
     assert not env_log.exists()
+
+
+def test_excess_rollouts_are_reported_and_not_collected(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "reward.json").write_text(json.dumps({"overall": 1.0}))
+    row = {"_ng_task_id": {"task_id": "t1"}, "verifier_return_code": 0, "verifier_logs_dir": str(logs)}
+    job = tmp_path / "job"
+    errors = write_job_from_rollouts(
+        [row, dict(row)], job, eval_name="codex__m", task_case_ids={"t1": "case-1"}, n_attempts=1
+    )
+    assert errors == ["NeMo Gym returned 2/1 rollouts for case case-1; the 1 extra rollout(s) were not collected"]
+    assert sorted(path.name for path in job.iterdir() if path.is_dir()) == ["t1__gym001"]

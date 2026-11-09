@@ -173,6 +173,12 @@ def write_job_from_rollouts(
             # Every expected attempt gets a failed trial, so the collector keeps the arm's scored trials.
             missing = {"failure": f"NeMo Gym returned no rollout{detail}", _MISSING_ROLLOUT: True}
             task_rows = [*task_rows, *([missing] * (n_attempts - len(task_rows)))]
+        elif len(task_rows) > n_attempts:
+            # Only the planned attempts become trials; the excess is reported so the run is not shown as matching.
+            errors.append(
+                f"NeMo Gym returned {len(task_rows)}/{n_attempts} rollouts for case {case_id}; "
+                f"the {len(task_rows) - n_attempts} extra rollout(s) were not collected"
+            )
         for attempt, row in enumerate(task_rows[:n_attempts], start=1):
             trial_name = f"{_safe(task_name)}__gym{attempt:03d}"
             trial_dir = job_dir / trial_name

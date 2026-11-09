@@ -457,6 +457,9 @@ def bridge_services(tmp_path: Path) -> _BridgeServices:
     # read; tests that count workers must start from an idle server.
     assert servers[0].wait_for_workers(timeout=2)
 
+    # Receiving the health response does not mean its worker has exited yet.
+    assert servers[0].wait_for_workers(timeout=2), "bridge readiness worker did not finish"
+
     yield _BridgeServices(
         base_url,
         build,

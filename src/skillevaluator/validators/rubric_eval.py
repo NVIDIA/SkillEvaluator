@@ -339,9 +339,11 @@ class RubricJudge(LLMClient):
     def process(self, **kwargs: Any) -> Any:
         """Ask the judge, and ask once more, naming the problem, if its reply cannot be scored.
 
-        A reply that is not JSON, or whose ``checks`` miss, repeat or invent a
-        criterion of ``criteria`` (``RUBRIC_CRITERIA`` unless given) or break
-        a criterion's score or pass flag, gets one more request: the same
+        A reply that ``json`` cannot parse (any ``ValueError`` or
+        ``RecursionError`` from :func:`_extract_json`), or whose ``checks``
+        miss, repeat or invent a criterion of ``criteria``
+        (``RUBRIC_CRITERIA`` unless given) or break a criterion's score or
+        pass flag, gets one more request: the same
         prompts plus the problem, cut to ``_MAX_RETRY_PROBLEM_CHARS``. The
         second reply is returned as parsed, so the validator still fails
         closed when it is invalid too. A provider error that the client's own
@@ -361,8 +363,11 @@ class RubricJudge(LLMClient):
             self.last_attempts = 1
             try:
                 report = self.parse_response(raw, **kwargs)
-            except json.JSONDecodeError as exc:
-                problem = exc.msg
+            except (ValueError, RecursionError) as exc:
+                # json.JSONDecodeError is a ValueError. json.loads also raises a
+                # plain ValueError (an integer past the digit limit) or a
+                # RecursionError (nesting too deep) for a reply it cannot parse.
+                problem = exc.msg if isinstance(exc, json.JSONDecodeError) else str(exc) or type(exc).__name__
             else:
                 problem = _rubric_report_problem(report, kwargs.get("criteria", RUBRIC_CRITERIA))
                 if problem is None:

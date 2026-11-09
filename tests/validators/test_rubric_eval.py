@@ -5,6 +5,7 @@
 
 import json
 import os
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -17,6 +18,7 @@ from skillevaluator.constants import (
 )
 from skillevaluator.inference.types import LLMClientError, LLMClientRefusedError, LLMClientTruncatedError
 from skillevaluator.reporting import HTMLReporter
+from skillevaluator.validators import rubric_eval
 from skillevaluator.validators.rubric_eval import (
     RUBRIC_JSON_SCHEMA,
     RubricEvalValidator,
@@ -1199,6 +1201,62 @@ class TestInvalidReplyRetry:
         assert rubric["judge_attempts"] == 2
         (success,) = result.success_details
         assert success.metadata["judge_attempts"] == 2
+
+    def test_reply_with_an_integer_past_the_digit_limit_is_retried(self, tmp_path):
+        limit = sys.get_int_max_str_digits()
+        if not limit:
+            pytest.skip("integer string conversion is unlimited in this interpreter")
+        first_reply = f'{{"checks": [{{"id": "{_FIRST_ID}", "score": 1{"0" * limit}}}]}}'
+        with pytest.raises(ValueError) as parse_error:
+            json.loads(first_reply)
+        assert not isinstance(parse_error.value, json.JSONDecodeError)
+
+        result, requests = _validate_with(tmp_path, first_reply, _reply())
+
+        assert len(requests) == 2
+        first, retry = requests
+        assert retry["user"] == f"{first['user']}\n{_RETRY_MARKER}{parse_error.value}. {_RETRY_TAIL}"
+        rubric = result.metadata["rubric_eval"]
+        assert result.passed
+        assert _llm_findings(result) == []
+        assert rubric["overall_score"] == 90.0
+        assert rubric["judge_attempts"] == 2
+
+    @pytest.mark.parametrize(
+        ("message", "problem"),
+        [
+            (
+                "maximum recursion depth exceeded while decoding a JSON array from a unicode string",
+                "maximum recursion depth exceeded while decoding a JSON array from a unicode string",
+            ),
+            ("", "RecursionError"),
+        ],
+        ids=["message", "no-message"],
+    )
+    def test_reply_nested_too_deep_to_parse_is_retried(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch, message, problem
+    ):
+        # json.loads raises RecursionError for nesting deeper than the interpreter
+        # allows. That depth differs by Python version and platform, so a stand-in
+        # parser raises it for this one reply.
+        nested_reply = '{"checks": [[[[]]]]}'
+
+        def extract_json(content: str) -> dict:
+            if content == nested_reply:
+                raise RecursionError(message)
+            return _extract_json(content)
+
+        monkeypatch.setattr(rubric_eval, "_extract_json", extract_json)
+
+        result, requests = _validate_with(tmp_path, nested_reply, _reply())
+
+        assert len(requests) == 2
+        first, retry = requests
+        assert retry["user"] == f"{first['user']}\n{_RETRY_MARKER}{problem}. {_RETRY_TAIL}"
+        rubric = result.metadata["rubric_eval"]
+        assert result.passed
+        assert _llm_findings(result) == []
+        assert rubric["judge_attempts"] == 2
 
     def test_valid_first_reply_is_not_retried(self, tmp_path):
         result, requests = _validate_with(tmp_path, _reply())

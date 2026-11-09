@@ -517,9 +517,7 @@ def test_different_condition_metric_sets_preserve_scores_without_overall_lift(
         json.dumps({"with_skill": 1.0, "without_skill": 0.0, "delta": 1.0}), encoding="utf-8"
     )
     for agents in (result["agents"], report_data.load_agent_data(tmp_path / "results")):
-        payload = build_agent_eval_payload(
-            "demo", agents, attempt_policy=result["attempt_policy"], use_llm_judge=False
-        )
+        payload = build_agent_eval_payload("demo", agents, attempt_policy=result["attempt_policy"], use_llm_judge=False)
         assert payload is not None
         assert payload["overall_score"] == conditions[0]["overall"]
         assert payload["agents"]["opencode"]["baseline"] == conditions[1]["overall"]
@@ -565,9 +563,7 @@ def test_multi_agent_legacy_reports_preserve_each_agents_metric_set(
     )
 
     for data in (result["agents"], report_data.load_agent_data(tmp_path / "results")):
-        payload = build_agent_eval_payload(
-            "demo", data, attempt_policy=result["attempt_policy"], use_llm_judge=False
-        )
+        payload = build_agent_eval_payload("demo", data, attempt_policy=result["attempt_policy"], use_llm_judge=False)
         assert payload is not None
         assert payload["agents"]["opencode"]["with_skill"] == 0.9
         assert payload["agents"]["codex"]["with_skill"] == 0.7

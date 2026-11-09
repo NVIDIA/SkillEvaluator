@@ -119,7 +119,16 @@ if _DECLARATIVE_CHECKS_PATH.is_file():
     )
     assert _declarative_spec and _declarative_spec.loader
     _shared_declarative_checks = importlib.util.module_from_spec(_declarative_spec)
-    _declarative_spec.loader.exec_module(_shared_declarative_checks)
+    _had_checks_module = "checks" in sys.modules
+    _previous_checks_module = sys.modules.get("checks")
+    sys.modules["checks"] = _shared_checks
+    try:
+        _declarative_spec.loader.exec_module(_shared_declarative_checks)
+    finally:
+        if _had_checks_module:
+            sys.modules["checks"] = _previous_checks_module
+        else:
+            sys.modules.pop("checks", None)
 else:
     from skillevaluator.tier3.eval_core import declarative_checks as _shared_declarative_checks
 

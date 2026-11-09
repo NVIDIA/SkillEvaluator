@@ -1096,7 +1096,8 @@ cases:
   `cat $HOME/.zshrc > /tmp/zshrc.bak`,
   `sed -i -E 's#~/.claude/settings.json#.claude/settings.json#' README.md`, and
   `source ~/.bashrc && cp dist/app.js "$OUT_DIR/"` do not. A `tee` or `sed`
-  argument list ends at the end of its line.
+  argument list ends at the end of its line or at a `#` comment, so
+  `make test | tee build.log  # env comes from ~/.zprofile` does not either.
 
 The second case reads the command text as written, as the earlier rule does.
 A redirection, `tee`, or `sed` inside a quoted string counts, and its target
@@ -1109,8 +1110,9 @@ does for `~/.bashrc` under the earlier rule: printed text such as
 `echo "run: echo x >> $HOME/.bashrc"` or
 `echo "Copying settings -> ~/.claude/settings.json"`, a here-document body, an
 `apply_patch` body line, a commit message, a redirection to a longer name such
-as `~/.gitconfig.bak`, and a `tee` or `sed` word that is another command's
-argument, as in `grep -n tee ~/.zprofile`.
+as `~/.gitconfig.bak`, a `tee` or `sed` word that is another command's
+argument, as in `grep -n tee ~/.zprofile`, and a comment that holds a write,
+as in `ls  # then run: echo x >> ~/.zprofile`.
 
 Other writes, such as `cp /tmp/x /home/agent/.bashrc` without a redirection
 or interpreter code that opens the file, do not receive the finding.

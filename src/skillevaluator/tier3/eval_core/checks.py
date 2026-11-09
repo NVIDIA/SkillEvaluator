@@ -428,14 +428,15 @@ _PATH_COMPONENT_END = r"(?=/|$|[\s'\"`;|&<>(),:])"
 # sed's "-i ''". A read such as "cat ~/.gitconfig 2>/dev/null" writes
 # /dev/null, and an fd duplication or close ("2>&1", ">&2", "2>&-") has no
 # file. An fd number is matched from the start of its digits, so a long digit
-# run is read once. A tee or sed argument list ends at the end of its line; a
-# backslash line continuation joins two lines first.
+# run is read once. A tee or sed argument list ends at the end of its line or
+# at an unquoted word that starts with "#", which begins a comment; a backslash
+# line continuation joins two lines first.
 _SHELL_WORD = r"(?:\\.|\"[^\"]*\"|'[^']*'|[^\s;|&<>()'\"`\\])+"
 _QUOTED_STRING_RE = re.compile(r"\"[^\"]*\"|'[^']*'")
 _REDIRECT_TARGET_RE = re.compile(r"(?:&>>?|(?<![0-9])[0-9]*>>?[|&]?)\s*(" + _SHELL_WORD + ")")
 _FD_REDIRECT_TARGET_RE = re.compile(r"[0-9]*-?")
-_TEE_OPERANDS_RE = re.compile(r"(?<![\w.-])tee((?:[ \t]+" + _SHELL_WORD + r")+)", re.IGNORECASE)
-_SED_OPERANDS_RE = re.compile(r"(?<![\w.-])sed((?:[ \t]+" + _SHELL_WORD + r")+)", re.IGNORECASE)
+_TEE_OPERANDS_RE = re.compile(r"(?<![\w.-])tee((?:[ \t]+(?!#)" + _SHELL_WORD + r")+)", re.IGNORECASE)
+_SED_OPERANDS_RE = re.compile(r"(?<![\w.-])sed((?:[ \t]+(?!#)" + _SHELL_WORD + r")+)", re.IGNORECASE)
 _SED_IN_PLACE_FLAG_RE = re.compile(r"--in-place\b.*|-[a-z]*i.*", re.IGNORECASE)
 _SED_SCRIPT_OPTION_RE = re.compile(r"--(?:e|fi)[a-z]*(?:=.*)?|-[A-HJ-Za-hj-z]*[ef].*")
 _LINE_CONTINUATION_RE = re.compile(r"\\\r?\n")

@@ -227,8 +227,8 @@ MAIN_WRITES = [
 
 # Text that only holds a redirection, tee, or sed -i is read as a write, as
 # main's keyword rule reads the same text with "~/.bashrc": a here-document
-# body, an apply_patch body line, a commit message, and a tee word that is
-# another command's argument.
+# body, an apply_patch body line, a commit message, a tee word that is another
+# command's argument, and a comment.
 TEXT_WRITES = [
     pytest.param(
         _bash("cat > docs/install.md <<'EOF'\nRun: echo 'eval \"$(pyenv init -)\"' >> ~/.zprofile\nEOF"),
@@ -240,6 +240,7 @@ TEXT_WRITES = [
     ),
     pytest.param(_bash('git commit -m "docs: explain echo x >> ~/.zprofile"'), id="commit-message"),
     pytest.param(_bash("grep -n tee ~/.zprofile"), id="tee-as-argument"),
+    pytest.param(_bash("ls  # then run: echo x >> ~/.zprofile"), id="comment-holds-write"),
 ]
 
 BENIGN_ACTIONS = [
@@ -271,6 +272,9 @@ BENIGN_ACTIONS = [
     # A tee or sed argument list ends at the end of its line.
     pytest.param(_bash("echo x | tee /tmp/log\ncat ~/.zprofile"), id="tee-then-read-next-line"),
     pytest.param(_bash("sed -n 1p ~/.zprofile\ngrep -i path notes.txt"), id="sed-then-grep-next-line"),
+    # A tee or sed argument list ends at a comment.
+    pytest.param(_bash("make test 2>&1 | tee build.log  # env comes from ~/.zprofile"), id="tee-then-comment"),
+    pytest.param(_bash("sed -i 's/a/b/' README.md  # was in ~/.gitconfig"), id="sed-then-comment"),
     # Workspace files that only share a name with a protected file.
     pytest.param(_bash("cat ./project/.npmrc"), id="workspace-npmrc"),
     pytest.param(_read("/home/agent/project/.npmrc"), id="home-project-npmrc"),
@@ -515,6 +519,8 @@ def test_a_url_tilde_user_is_not_a_home_directory() -> None:
         ("echo x | sudo tee /etc/profile.d/npm.sh", "/etc/profile.d"),
         ("echo x | tee -a \\\n ~/.zprofile", "~/.zprofile"),
         ("echo x | tee /tmp/log\ncat ~/.zprofile", None),
+        ("make test | tee build.log  # see ~/.zprofile", None),
+        ("printf x | tee -a ~/.zprofile  # add PATH", "~/.zprofile"),
         # sed -i or --in-place arguments.
         ("sed -i 's/a/b/' ${HOME}/.gitconfig", "~/.gitconfig"),
         ("sed -Ei 's/a/b/' ~/.zshrc", "~/.zshrc"),
@@ -530,6 +536,9 @@ def test_a_url_tilde_user_is_not_a_home_directory() -> None:
         ("sed -nEi -e 's/a/b/' ~/.zprofile", "~/.zprofile"),
         ("sed -i 's/a/b/' notes.md; sed -i 's/c/d/' ~/.zprofile", "~/.zprofile"),
         ("sed -n 1p ~/.zprofile\ngrep -i x notes.txt", None),
+        ("sed -i 's/a/b/' README.md  # was in ~/.gitconfig", None),
+        ("sed -i 's/a/b/' /home/agent/.gitconfig  # fix the name", "~/.gitconfig"),
+        ("sed -i 's/#.*//' ~/.zprofile", "~/.zprofile"),
     ],
 )
 def test_sensitive_write_target(command: str, entry: str | None) -> None:

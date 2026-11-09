@@ -482,11 +482,11 @@ def _tier3_score_reasons(value: object) -> dict[str, str]:
     return reasons
 
 
-def _tier3_not_applicable_reason(metric: object) -> str:
+def _tier3_not_applicable_reason(metric: object, with_skill: bool = False) -> str:
     """Return why a Tier 3 metric can be N/A, for the tooltip of an N/A drill-down cell."""
-    from skillevaluator.tier3.harbor.metrics import NOT_APPLICABLE_REASONS
+    from skillevaluator.tier3.harbor.metrics import not_applicable_reason
 
-    return NOT_APPLICABLE_REASONS.get(str(metric), "Not applicable to this eval case")
+    return not_applicable_reason(str(metric), with_skill=with_skill is True)
 
 
 def _tier3_text_mapping(value: object) -> dict[str, str]:

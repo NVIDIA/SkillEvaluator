@@ -1669,15 +1669,19 @@ def _not_applicable_evaluators(
     metrics: list[str],
     with_scores: dict[str, Any],
     not_applicable: list[str],
+    *,
+    with_skill: bool = True,
 ) -> list[dict[str, str]]:
-    """Evaluators with no with-skill score because no eval case gave them a reference."""
-    from skillevaluator.tier3.harbor.metrics import METRIC_DISPLAY, NOT_APPLICABLE_REASONS
+    """Evaluators with no score in the reported arm because every trial recorded them as N/A."""
+    from skillevaluator.tier3.harbor.metrics import METRIC_DISPLAY, not_applicable_reason
 
     return [
         {
             "id": metric,
             "label": METRIC_DISPLAY.get(metric, metric.replace("_", " ").title()),
-            "reason": NOT_APPLICABLE_REASONS.get(metric, "Not applicable to these eval cases"),
+            "reason": not_applicable_reason(
+                metric, with_skill=with_skill, default="Not applicable to these eval cases"
+            ),
         }
         for metric in metrics
         if metric in not_applicable and _finite_float(with_scores.get(metric)) is None
@@ -1955,7 +1959,7 @@ def _build_agent(
     # N/A notes describe the scored arm: the baseline in a baseline-only run.
     if baseline_only:
         not_applicable_evaluators = _not_applicable_evaluators(
-            baseline_metrics, without_scores, baseline_not_applicable
+            baseline_metrics, without_scores, baseline_not_applicable, with_skill=False
         )
         not_applicable_dimensions = _not_applicable_dimensions(dimensions, baseline_not_applicable)
     else:

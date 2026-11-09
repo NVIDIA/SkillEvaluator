@@ -352,6 +352,50 @@ def test_drilldown_reads_na_for_not_applicable_trial_cells() -> None:
     assert _cell(table, "Without skill", "Accuracy") == "0.50"
 
 
+def test_drilldown_explains_with_skill_skill_metric_na_by_the_eval_case() -> None:
+    # With the skill installed, a negative case leaves Efficiency N/A and a positive case scores it.
+    # The baseline has no skill at all.
+    with_rewards = [
+        _na(_reward("negative__attempt1", "negative", score=0.9, steps=5, prompt=10), "skill_efficiency"),
+        _reward("positive__attempt1", "positive", score=0.9, steps=5, prompt=10),
+    ]
+    baseline_rewards = [
+        _na(_reward(f"{case}__baseline1", case, score=0.5, steps=4, prompt=10), "skill_execution", "skill_efficiency")
+        for case in ("negative", "positive")
+    ]
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 4,
+                "scored_attempts": 4,
+                "with_skill": dict.fromkeys(METRICS, 0.9),
+                "without_skill": {**dict.fromkeys(METRICS, 0.5), "skill_execution": None, "skill_efficiency": None},
+                "rewards": with_rewards,
+                "rewards_baseline": baseline_rewards,
+                "num_trials": 2,
+                "num_trials_baseline": 2,
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    table = _drilldown_table(_render(payload))
+
+    assert _cell(table, "With skill", "Skill Efficiency") == "N/A"
+    assert (
+        'title="Skill Efficiency: Not applicable: Negative case or no expected_skill defined, '
+        'so there is no skill use to measure"'
+    ) in _raw_cell(table, "With skill", "Skill Efficiency")
+    assert _cell(table, "Without skill", "Skill Efficiency") == "N/A"
+    assert 'title="Skill Efficiency: Not applicable: This arm has no skill under test installed' in _raw_cell(
+        table, "Without skill", "Skill Efficiency"
+    )
+    assert _cell(table, "With skill", "Skill Execution") == "0.90"
+
+
 @pytest.mark.parametrize(
     ("recorded", "kept"),
     [

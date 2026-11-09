@@ -96,7 +96,8 @@ DIMENSION_QUESTIONS = {
 # judge against (no expected_output / assertions, which the legacy format calls
 # ground_truth / expected_behavior). The skill metrics are not applicable in an
 # arm that has no skill under test to discover or route to (the no-skill or
-# no-plugin baseline). The verifier records the metric as
+# no-plugin baseline), and for an eval case that names no expected_skill;
+# skill_efficiency also for a negative case. The verifier records the metric as
 # ``null`` with ``details[metric].status == "not_applicable"``; N/A metrics are
 # excluded from the trial overall, the arm averages, and lift. Security never
 # becomes N/A, and an absent or non-finite metric without the explicit marker
@@ -112,6 +113,21 @@ NOT_APPLICABLE_REASONS = {
     ),
     "behavior_check": "No assertions (legacy expected_behavior) defined, so there is no workflow to check",
 }
+# With the skill under test installed, a skill metric is N/A only because of the eval case.
+WITH_SKILL_NOT_APPLICABLE_REASONS = {
+    "skill_execution": "No expected_skill defined, so the eval case names no skill to discover or run",
+    "skill_efficiency": "Negative case or no expected_skill defined, so there is no skill use to measure",
+}
+
+
+def not_applicable_reason(
+    metric: str, *, with_skill: bool = False, default: str = "Not applicable to this eval case"
+) -> str:
+    """Return why *metric* can be N/A in an arm with or without the skill under test."""
+    if with_skill and metric in WITH_SKILL_NOT_APPLICABLE_REASONS:
+        return WITH_SKILL_NOT_APPLICABLE_REASONS[metric]
+    return NOT_APPLICABLE_REASONS.get(metric, default)
+
 
 _RESERVED_METADATA_KEYS = {
     "custom_details",

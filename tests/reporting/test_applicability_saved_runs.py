@@ -438,3 +438,34 @@ def test_na_evaluator_reasons_name_the_dataset_field_and_its_legacy_name(tmp_pat
         reward: dict = {}
         mark_not_applicable(reward, metric)
         assert reward["details"][metric]["reason"] == reasons[metric]
+
+
+def test_with_skill_na_skill_metrics_name_the_eval_case_not_a_missing_skill(tmp_path):
+    # Cases that name no expected_skill leave both skill metrics N/A even with the skill installed.
+    skill_metrics = ("skill_execution", "skill_efficiency")
+    root = _uniform_run(tmp_path, with_na=skill_metrics, baseline_na=skill_metrics)
+
+    payload = _report(root)
+
+    reasons = {item["id"]: item["reason"] for item in payload["not_applicable_evaluators"]}
+    assert reasons == {
+        "skill_execution": "No expected_skill defined, so the eval case names no skill to discover or run",
+        "skill_efficiency": "Negative case or no expected_skill defined, so there is no skill use to measure",
+    }
+    dimensions = {row["id"] for row in payload["agents"]["codex"]["dimensions"]}
+    assert {"discoverability", "efficiency"}.isdisjoint(dimensions)
+    assert {item["id"] for item in payload["not_applicable_dimensions"]} == {"discoverability", "efficiency"}
+    # No with-skill Discoverability or Efficiency score, so the agent cannot PASS.
+    assert payload["verdict"] == VERDICT_NEUTRAL
+
+
+def test_baseline_only_na_skill_metrics_keep_the_missing_skill_reason():
+    from skillevaluator.evaluation.tier3_report import _not_applicable_evaluators
+
+    skill_metrics = ["skill_execution", "skill_efficiency"]
+    baseline = _not_applicable_evaluators(skill_metrics, {}, skill_metrics, with_skill=False)
+
+    assert [item["reason"] for item in baseline] == [
+        "This arm has no skill under test installed, so there is no skill to discover or run",
+        "This arm has no skill under test installed, so there is no skill to route to",
+    ]

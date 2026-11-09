@@ -441,7 +441,7 @@ scores, Skill Lift, pass@k and report are produced the same way.
 | Backend | What runs the cases |
 | --- | --- |
 | `harbor` (default) | Harbor orchestrates the trials, runs the agent and the sandbox. Every `--env-mode` is available. |
-| `nemo-gym` | NeMo Gym runs the cases: `gym eval run` starts its Harbor-format environment server, model server and agent harness, runs each case in a Gym sandbox and grades it with the SkillEvaluator verifier. |
+| `nemo-gym` | NeMo Gym runs the cases: `gym eval run` starts its Harbor-format environment server, model server and agent harness, runs each case in a Gym sandbox and grades it with the SkillEvaluator verifier. Only `--env-mode docker` is supported. |
 
 ```bash
 export SKILL_EVAL_NEMO_GYM_BIN=/opt/nemo-gym/.venv/bin/gym
@@ -464,7 +464,9 @@ harness and judge match.
 
 The `nemo-gym` backend supports `--env-mode docker`, the `codex`, `claude-code` and
 `opencode` agents, and the `default`, `default_plus_custom` and `custom_only` grading
-modes. Unset flags fall back to these `evals/config.yml` keys, as on Harbor:
+modes. Every other `--env-mode` (including `local`, `daytona`, `e2b` and `singularity`) is
+not supported on the NeMo Gym path and is rejected before the run starts; use
+`--backend harbor` for those modes. Unset flags fall back to these `evals/config.yml` keys, as on Harbor:
 `harbor.n_attempts`, `pass_threshold`, `n_concurrent`, `max_cases`, `agents.<agent>.model`,
 `resources` (`cpus`, `memory_mb`), `runtime_env`, `grading.mode`, and
 `skill_workspace.mode`/`include`. `--skip-baseline`, `--skip-with-skill`, `--max-cases` and

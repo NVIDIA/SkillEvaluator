@@ -474,7 +474,7 @@ skillevaluator tier3 evaluate ./my-skill --backend nemo-gym --agents codex --mod
 `tier3 doctor --backend nemo-gym` checks the Gym CLI and its version, that the Docker
 daemon answers, the `SKILL_EVAL_NEMO_GYM_*` settings, each selected agent's policy model
 endpoint, and whether the selected agents and `--env-mode` run on Gym. A Gym run reports
-the same progress stages as a Harbor run.
+configuration, Docker image, per-agent and collection progress.
 
 NeMo Gym requires Python 3.13.14 or later, so it runs as its own pinned install
 rather than a SkillEvaluator dependency. Point `SKILL_EVAL_NEMO_GYM_BIN` at that

@@ -109,6 +109,9 @@ def stage_for_gym(
                 task_file=task_toml,
             )
         if resource_overrides:
+            if "memory_mb" in resource_overrides:
+                # Harbor's deprecated `memory = "4G"` would conflict with the overriding memory_mb.
+                staged = _drop_table_key(staged, "environment", "memory", task_file=task_toml)
             staged = _set_table_numbers(staged, "environment", resource_overrides, task_file=task_toml)
         if staged != text:
             task_toml.write_text(staged, encoding="utf-8")
@@ -170,6 +173,33 @@ def _scaled_task_timeouts(text: str, multiplier: float, *, task_file: Path) -> s
     staged = "\n".join(lines)
     if tomllib.loads(staged) != expected:
         raise ValueError(f"{task_file}: could not apply --timeout-multiplier to the task timeouts")
+    return staged
+
+
+_KEY_RE = re.compile(r"^[ \t]*([A-Za-z0-9_-]+)[ \t]*=")
+
+
+def _drop_table_key(text: str, table_name: str, key: str, *, task_file: Path) -> str:
+    """Remove a single-line ``key = value`` from one top-level task.toml table, checking nothing else changed."""
+    expected = tomllib.loads(text)
+    table_data = expected.get(table_name)
+    if not isinstance(table_data, dict) or key not in table_data:
+        return text
+    del table_data[key]
+    lines = text.split("\n")
+    table = ""
+    for index, line in enumerate(lines):
+        header = _TABLE_RE.match(line)
+        if header:
+            table = header.group(1)
+            continue
+        match = _KEY_RE.match(line)
+        if table == table_name and match and match.group(1) == key:
+            del lines[index]
+            break
+    staged = "\n".join(lines)
+    if tomllib.loads(staged) != expected:
+        raise ValueError(f"{task_file}: could not replace [{table_name}] {key} with the override")
     return staged
 
 
@@ -491,8 +521,12 @@ def _run_gym(
             except subprocess.TimeoutExpired:
                 _stop()
                 return None
-            except BaseException:
-                _stop()
+            except BaseException as interrupt:
+                # A failed stop during Ctrl-C/SIGTERM must not replace the interrupt and let the next arm launch.
+                try:
+                    _stop()
+                except Exception as stop_error:
+                    raise interrupt from stop_error
                 raise
     finally:
         reader.join(timeout=_GYM_LOG_DRAIN_SECONDS)

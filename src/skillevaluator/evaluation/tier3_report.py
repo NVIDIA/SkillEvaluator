@@ -583,9 +583,10 @@ def _apply_engine_failure(payload: dict[str, Any] | None, engine_result: dict[st
         name: [error for error in engine_errors if error.startswith((f"{name} ", f"{name}:"))]
         for name in agent_payloads
     }
-    failed_agents = [name for name, errors in attributed.items() if errors] or list(agent_payloads)
-    for name in failed_agents:
-        _mark_failed(agent_payloads[name], attributed[name] or engine_errors)
+    # Only agents an error names are marked; the root and summary carry unattributed failures.
+    for name, errors in attributed.items():
+        if errors:
+            _mark_failed(agent_payloads[name], errors)
     summary = payload.get("summary")
     for target in (payload, summary) if isinstance(summary, dict) else (payload,):
         _mark_failed(target, engine_errors)

@@ -1267,6 +1267,40 @@ def test_folded_pii_finding_in_a_folder_run_counts_each_location_once(tmp_path) 
     assert re.search(rf"\| `{finding.finding_id}` \| HIGH \| [^|]+ \| 2 \| PII Scan \|", markdown)
 
 
+def test_top_issues_count_a_folded_pii_finding_as_one_record(tmp_path) -> None:
+    from skillevaluator.validators.security import SecurityValidator
+
+    skill = tmp_path / "simple"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: simple\ndescription: A sample skill.\n---\n# Simple\n\n\n"
+        "See /Users/johndoe/a.\nSee /Users/johndoe/b.\nSee /Users/johndoe/c.\n",
+        encoding="utf-8",
+    )
+    result = SecurityValidator(use_llm=False).validate_pii_only(skill)
+    result.validator_name = "PII Scan"
+    [finding] = [finding for finding in result.findings if "/Users/johndoe/" in finding.message]
+    assert finding.metadata["occurrence_count"] == 3
+
+    data = json.loads(JSONReporter(include_timestamp=False, target_path=str(skill)).render_all([result]))
+
+    # finding_groups lists each folded location; top_issues counts raw finding
+    # records, the unit of skills[].issue_count, so the folded finding counts once.
+    [group] = [group for group in data["finding_groups"] if group["finding_id"] == finding.finding_id]
+    assert len(group["occurrences"]) == 3
+    [issue] = [issue for issue in data["top_issues"] if "/Users/johndoe/" in issue["message"]]
+    assert issue["total_count"] == 1
+    assert data["skills"] == [{"name": "simple", "passed": False, "issue_count": len(result.findings)}]
+    assert sum(issue["total_count"] for issue in data["top_issues"]) == data["skills"][0]["issue_count"]
+
+    # The JSON field table in the CI docs states that unit.
+    docs = (Path(__file__).resolve().parents[2] / "docs" / "ci-integration.mdx").read_text(encoding="utf-8")
+    rows = {line.split(" | ", 1)[0]: line for line in docs.splitlines() if line.startswith("| `")}
+    assert "`total_count` of raw finding records" in rows["| `top_issues`"]
+    assert "raw occurrences" not in rows["| `top_issues`"]
+    assert "`issue_count` counts raw finding records" in rows["| `skills`"]
+
+
 def test_finding_group_occurrences_do_not_copy_the_source_line() -> None:
     result = ValidationResult(validator_name="Code Risk")
     for line_number in (3, 9):

@@ -383,7 +383,7 @@ def test_markdown_tables_cap_case_rows_and_say_where_the_rest_are(tmp_path: Path
     ):
         section = _section(text, heading)
         assert len([row for row in _table_rows(section) if row[1].startswith("case-")]) == 50
-        assert "10 more case row(s) are in the HTML report and the JSON payload." in section
+        assert "10 more case row(s) are in the JSON payload under `token_usage`." in section
 
 
 def test_docs_and_changelog_describe_the_token_usage_contract() -> None:

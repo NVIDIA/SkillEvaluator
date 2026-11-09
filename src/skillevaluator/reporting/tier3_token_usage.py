@@ -184,7 +184,7 @@ def token_usage_markdown_lines(
         lines.extend(line(row) for row in cases)
         lines.append("")
         if omitted:
-            lines.extend([f"{omitted} more case row(s) are in the HTML report and the JSON payload.", ""])
+            lines.extend([f"{omitted} more case row(s) are in the JSON payload under `token_usage`.", ""])
         lines.extend(["</details>", ""])
     return lines
 

@@ -701,8 +701,11 @@ or gate.
 `BENCHMARK.md` has a **Token Usage** section after Results at a Glance: one row
 per agent and one for all agents, with the case rows in a collapsed table that
 shows the first 50 cases. The Markdown report has the same table under its
-Tier 3 section. The HTML report lists every case under **Measured Agent
-Resources**. The full terminal report (`validate --verbose` or `-r cli`) and
+Tier 3 section. The HTML report lists the case rows under **Measured Agent
+Resources**; like its other Tier 3 lists, it shows at most 64 per agent when
+the Tier 3 data is larger than its 256 KiB preview. The JSON payload keeps every
+case unless the report size budget drops the case rows together with the
+trials. The full terminal report (`validate --verbose` or `-r cli`) and
 `tier3 evaluate --verbose` print the agent rows only.
 
 ### Failure reasons and per-trial rows

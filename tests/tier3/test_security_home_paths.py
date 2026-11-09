@@ -71,6 +71,11 @@ def _argv(*argv: str) -> dict[str, Any]:
     return {"action": "exec_command", "action_input": {"cmd": list(argv)}, "observation": ""}
 
 
+def _shell_argv(*argv: str) -> dict[str, Any]:
+    """A Codex ``shell`` call, which sends its command as an argv list."""
+    return {"action": "shell", "action_input": {"command": list(argv)}, "observation": ""}
+
+
 def _apply_patch(header: str, **args: str) -> dict[str, Any]:
     patch = f"*** Begin Patch\n{header}\n+export X=1\n*** End Patch"
     return {"action": "apply_patch", "action_input": {"input": patch, **args}, "observation": ""}
@@ -170,6 +175,17 @@ PROTECTED_WRITES = [
     ),
     pytest.param(_argv("tee", "-a", "/home/agent/.bashrc"), id="argv-list-tee"),
     pytest.param(_argv("sed", "-i", "s/a/b/", "/home/agent/.zprofile"), id="argv-list-sed-in-place"),
+    # The script of an argv-list shell command is read as written, not in shlex quoting.
+    pytest.param(_shell_argv("bash", "-lc", "sed -i 's/a/b/' /home/agent/.bashrc"), id="argv-script-sed-quoted"),
+    pytest.param(_shell_argv("bash", "-lc", "sed -i 's/a/b/' $HOME/.bashrc"), id="argv-script-sed-dollar-home"),
+    pytest.param(
+        _shell_argv("bash", "-lc", "sed -i 's/model = .*/model = x/' /root/.codex/config.toml"),
+        id="argv-script-sed-codex-config",
+    ),
+    pytest.param(_shell_argv("bash", "-lc", "sed -i -e 's/a/b/' /home/agent/.zprofile"), id="argv-script-sed-e"),
+    pytest.param(_shell_argv("bash", "-lc", "echo x > '/home/agent/.zprofile'"), id="argv-script-quoted-target"),
+    pytest.param(_shell_argv("bash", "-lc", "printf x | tee -a '/home/agent/.zprofile'"), id="argv-script-quoted-tee"),
+    pytest.param(_shell_argv("sudo", "bash", "-c", "sed -i 's/a/b/' /home/agent/.bashrc"), id="argv-sudo-script"),
     pytest.param(_bash("sed -i -E 's/a/b/' ~/.zprofile"), id="sed-in-place-extended-regex"),
     pytest.param(_bash("sed -ni -e 's/a/b/p' ~/.gitconfig"), id="sed-in-place-cluster-then-expression"),
     pytest.param(_bash("echo x >> /home/agent/project/../.bashrc"), id="parent-segment"),
@@ -311,6 +327,12 @@ BENIGN_ACTIONS = [
     pytest.param(_bash('echo "build -> done"\nnpm test\ngrep -q nvm "$HOME/.bashrc"'), id="arrow-multiline"),
     pytest.param(_bash('echo "pipe it to tee and" "$HOME/.zprofile"'), id="tee-in-quoted-text"),
     pytest.param(_argv("grep", "-n", "->", "/home/agent/.bashrc"), id="argv-list-arrow"),
+    pytest.param(_argv("echo", "a", ">", "/home/agent/.zprofile"), id="argv-list-literal-gt"),
+    pytest.param(_shell_argv("bash", "-lc", "grep -n '->' $HOME/.zprofile"), id="argv-script-arrow"),
+    pytest.param(_shell_argv("bash", "-lc", "echo 'a -> b' && cat ~/.gitconfig"), id="argv-script-echo-arrow"),
+    pytest.param(
+        _shell_argv("bash", "-lc", "sed -i 's#~/.claude/settings.json#x#' README.md"), id="argv-script-sed-names-file"
+    ),
     # A project file patched after a cd that cannot be resolved.
     pytest.param(_shell_apply_patch('cd "$REPO" && ', "*** Update File: .npmrc"), id="unknown-cd-patch-npmrc"),
     pytest.param(

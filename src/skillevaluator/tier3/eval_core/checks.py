@@ -800,13 +800,24 @@ def _command_text(tool_call: dict[str, Any]) -> str:
     return str(args.get("command") or args.get("cmd") or args.get("code") or args.get("raw") or "")
 
 
-def _shell_action_text(tool_call: dict[str, Any]) -> str:
-    """Return ``_action_text`` with each argv-list argument quoted back into one shell command."""
-    args = {
+def _shell_write_texts(tool_call: dict[str, Any]) -> list[str]:
+    """Return the command texts the home-path write rule reads.
+
+    The first is ``_action_text`` with each argv-list argument quoted back into
+    one shell command. Each element of an argv-list command is also read on its
+    own, so the script of ``["bash", "-lc", "sed -i 's/a/b/' ~/.zprofile"]`` is
+    read as written rather than in the quoting ``shlex.join`` gives it.
+    """
+    args = _action_args(tool_call)
+    joined = {
         key: shlex.join(str(part) for part in value) if isinstance(value, (list, tuple)) else value
-        for key, value in _action_args(tool_call).items()
+        for key, value in args.items()
     }
-    return _action_text({"action_input": args})
+    texts = [_action_text({"action_input": joined})]
+    for key in ("command", "cmd", "code", "raw"):
+        if isinstance(value := args.get(key), (list, tuple)):
+            texts.extend(str(part) for part in value)
+    return texts
 
 
 def _normpath_word(match: re.Match[str]) -> str:
@@ -4277,7 +4288,7 @@ def check_security(
             # _SENSITIVE_WRITE_PATHS. Where it finds nothing, a redirection, tee
             # or sed -i target is matched in every home spelling and against
             # _HOME_SENSITIVE_WRITE_PATHS too, reading an argv-list command as
-            # the shell command it runs.
+            # the shell command it runs and each of its elements on its own.
             if not patch_entry and (
                 (
                     any(path in path_text_lower for path in _SENSITIVE_WRITE_PATHS)
@@ -4286,7 +4297,10 @@ def check_security(
                         action_text_lower,
                     )
                 )
-                or _sensitive_write_target(path_text if shell_patch else _shell_action_text(tc)) is not None
+                or any(
+                    _sensitive_write_target(text) is not None
+                    for text in ([path_text] if shell_patch else _shell_write_texts(tc))
+                )
             ):
                 findings.append(
                     _security_finding(

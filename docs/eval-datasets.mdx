@@ -109,6 +109,56 @@ The dataset file can be named `evals.json`, `evals.jsonl`, `evals.yaml`, or
   </Accordion>
 </AccordionGroup>
 
+## Migrate a legacy dataset
+
+Preview a conversion without writing files:
+
+```bash
+skillevaluator tier3 migrate-dataset ./my-skill/evals/evals.json --skill-name my-skill
+```
+
+Review the JSON object printed to stdout, then explicitly choose a **new**
+destination. The command preserves the source and refuses existing destinations,
+including symlinks and the source itself:
+
+```bash
+skillevaluator tier3 migrate-dataset ./my-skill/evals/evals.json \
+  --skill-name my-skill --output ./my-skill/evals/converted.json
+```
+
+Input may be JSON, case-per-line JSONL, YAML, or YML. Output is one canonical
+object in JSON (`.json`) or YAML (`.yaml` or `.yml`). JSONL input must therefore
+convert to JSON or YAML; the command never writes an object-shaped `.jsonl` file.
+After review, place the converted file at the dataset path your skill uses and
+retain the original in version control or a separate backup location. Avoid
+leaving multiple recognized `evals.*` files: JSON takes discovery precedence.
+Fixture selectors retain their authored relative paths, so keep the promoted
+dataset in the same skill's `evals/` directory.
+
+The converter copies every authored field, including IDs (with their numeric or
+string type), explicit `expected_skill: null`, `should_trigger: false`, scripts,
+alternate skills, `files` selectors, extension fields, and generation/check
+metadata. It renames only the aliases in the table above. Re-converting a preferred
+object preserves its content. Conflicting aliases, duplicate keys, invalid or
+colliding IDs, malformed cases, and ambiguous target identities stop conversion
+before writing. `--skill-name` may be omitted when the object declares its identity
+or legacy cases identify exactly one expected skill. A conflicting object identity
+must be resolved in the source.
+
+Legacy cases with neither `expected_skill` nor `should_trigger` have unknown
+routing, whereas preferred objects default to the top-level skill. To prevent a
+silent grading change, label those cases explicitly before migration. Cases
+without `ground_truth` or `expected_output` must also have their expected outcome
+authored first. Explicit null and false routing labels are preserved. Legacy
+readers remain available and their deprecation warning includes the migration
+command.
+
+The five bundled reference datasets have been converted (15 cases). External
+catalog rollout remains separate: record the catalog owner, read-only preview
+results, agreed rollout date, and deprecation milestone before retiring legacy
+reading. No external catalog or retirement date is implied by this repository
+conversion.
+
 ## Generate a dataset
 
 `create-eval-dataset` writes `evals/evals.json` for you, grounded in your

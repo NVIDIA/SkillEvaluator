@@ -3697,6 +3697,30 @@ def health_check(ctx: click.Context, **options: Any) -> None:
     raise SystemExit(_run_doctor(ctx, **options))
 
 
+@tier3.command("migrate-dataset")
+@click.argument("source", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--skill-name", default=None, help="Target skill identity; required when it cannot be inferred unambiguously.")
+@click.option(
+    "--output",
+    "destination",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Write to a new JSON/YAML path. Omit to preview without writing.",
+)
+def tier3_migrate_dataset(source: Path, skill_name: str | None, destination: Path | None) -> None:
+    """Preview a lossless dataset conversion, or write an explicit new destination."""
+    from skillevaluator.tier3.dataset_migration import migrate_dataset
+
+    try:
+        result = migrate_dataset(source, skill_name=skill_name, destination=destination)
+    except (OSError, ValueError, TypeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if destination is None:
+        click.echo(json.dumps(result.dataset, indent=2, ensure_ascii=False))
+    else:
+        click.echo(f"Wrote {len(result.dataset['evals'])} cases to {destination}; source preserved.")
+
+
 @tier3.command("validate")
 @_skill_argument
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON output.")

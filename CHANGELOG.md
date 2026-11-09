@@ -6,6 +6,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- `skillevaluator tier3 migrate-dataset` previews lossless legacy conversions and
+  writes only to an explicit new JSON/YAML destination. Authored routing, case
+  IDs, fixture selectors, and extension metadata are preserved. The five bundled
+  reference datasets now use the preferred object format; legacy reading remains
+  supported.
+
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI
   command, and ships Tier 3 evaluation cases for itself. A test keeps every

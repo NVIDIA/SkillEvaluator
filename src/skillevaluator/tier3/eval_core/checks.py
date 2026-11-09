@@ -406,18 +406,23 @@ _PATH_COMPONENT_END = r"(?=/|$|[\s'\"`;|&<>()])"
 
 # The files a shell command writes, as _sensitive_write_target reads them: the
 # target word of an output redirection (">", ">>", ">|", "&>", "N>"), the
-# operands of tee, and the arguments of a sed with -i or --in-place, its script
-# included. A read such as "cat ~/.gitconfig 2>/dev/null" writes /dev/null, and
-# an fd duplication or close ("2>&1", ">&2", "2>&-") has no file. An fd number
-# is matched from the start of its digits, so a long digit run is read once. A
-# tee or sed argument list ends at the end of its line; a backslash line
-# continuation joins two lines first.
+# operands of tee, and the operands of a sed with -i or --in-place. Without an
+# option that may give the script (-e, -f, --expression, --file, or a short
+# option cluster or long option that may be one of them), the first sed operand
+# is the script and is left out; with one, every operand counts, the script too.
+# An empty operand is the suffix of BSD sed's "-i ''". A read such as
+# "cat ~/.gitconfig 2>/dev/null" writes /dev/null, and an fd duplication or
+# close ("2>&1", ">&2", "2>&-") has no file. An fd number is matched from the
+# start of its digits, so a long digit run is read once. A tee or sed argument
+# list ends at the end of its line; a backslash line continuation joins two
+# lines first.
 _SHELL_WORD = r"(?:\"[^\"]*\"|'[^']*'|[^\s;|&<>()'\"`])+"
 _REDIRECT_TARGET_RE = re.compile(r"(?:&>>?|(?<![0-9])[0-9]*>>?[|&]?)\s*(" + _SHELL_WORD + ")")
 _FD_REDIRECT_TARGET_RE = re.compile(r"[0-9]*-?")
 _TEE_OPERANDS_RE = re.compile(r"(?<![\w.-])tee((?:[ \t]+" + _SHELL_WORD + r")+)")
 _SED_OPERANDS_RE = re.compile(r"(?<![\w.-])sed((?:[ \t]+" + _SHELL_WORD + r")+)")
 _SED_IN_PLACE_FLAG_RE = re.compile(r"--in-place\b.*|-[a-z]*i.*")
+_SED_SCRIPT_OPTION_RE = re.compile(r"--[ef].*|-[a-z]*[ef].*")
 _LINE_CONTINUATION_RE = re.compile(r"\\\r?\n")
 
 # A force-only rm deletes the same files as a plain rm, so it is destructive
@@ -825,8 +830,11 @@ def _shell_write_targets(command: str) -> list[str]:
     ]
     targets.extend(match.group(1) for match in _TEE_OPERANDS_RE.finditer(text))
     for match in _SED_OPERANDS_RE.finditer(text):
-        if any(_SED_IN_PLACE_FLAG_RE.fullmatch(word) for word in re.findall(_SHELL_WORD, match.group(1))):
-            targets.append(match.group(1))
+        words = re.findall(_SHELL_WORD, match.group(1))
+        if any(_SED_IN_PLACE_FLAG_RE.fullmatch(word) for word in words):
+            operands = [word for word in words if not word.startswith("-") and word not in ("''", '""')]
+            scripted = any(_SED_SCRIPT_OPTION_RE.fullmatch(word) for word in words)
+            targets.extend(operands if scripted else operands[1:])
     return targets
 
 

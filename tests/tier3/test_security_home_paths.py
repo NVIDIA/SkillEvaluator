@@ -150,6 +150,8 @@ PROTECTED_WRITES = [
     pytest.param(_bash("sed -i 's/a|b/c/;s/d/e/' /home/agent/.bashrc"), id="sed-in-place"),
     pytest.param(_bash("sed -Ei 's/a/b/' $HOME/.zshrc"), id="sed-in-place-cluster"),
     pytest.param(_bash("sed -E --in-place=.bak 's/x/y/' /home/agent/.gitconfig"), id="sed-long-in-place"),
+    pytest.param(_bash("sed -i -e 's/a/b/' -e 's/c/d/' $HOME/.bash_profile"), id="sed-in-place-expressions"),
+    pytest.param(_bash("sed -i '' 's/a/b/' /Users/alice/.zshrc"), id="sed-in-place-empty-suffix"),
     pytest.param(_bash("sh -c 'echo x >> $HOME/.bashrc'"), id="sh-c-script"),
     pytest.param(_bash('sudo sh -c "echo x >> /home/agent/.profile"'), id="sudo-sh-c-script"),
     pytest.param(
@@ -252,6 +254,12 @@ BENIGN_ACTIONS = [
     # A home entry that only shares a prefix with a protected directory.
     pytest.param(_bash("cat ~/.azure_notes.md"), id="azure-prefix-file"),
     pytest.param(_write("/home/agent/.config/opencode-notes.md"), id="opencode-prefix-file"),
+    # A sed -i whose script, not its file, names a protected file.
+    pytest.param(
+        _bash("sed -i 's#~/.claude/settings.json#.claude/settings.json#' README.md"), id="sed-script-names-file"
+    ),
+    pytest.param(_bash("sed -i.bak 's|/home/agent/.gitconfig|~/.gitconfig|g' docs/setup.md"), id="sed-script-home"),
+    pytest.param(_bash("sed -i '' 's|/Users/alice/.zprofile|~/.zprofile|' notes.md"), id="sed-script-bsd-suffix"),
     # Printed text with no redirection, tee, or sed -i.
     pytest.param(_bash('echo "Install complete. Restart your shell or run: source ~/.bashrc"'), id="prose-install"),
     pytest.param(_bash("printf 'Add the export line to ~/.bash_profile\\n'"), id="prose-printf"),
@@ -392,6 +400,10 @@ def test_home_anchor_normalization(text: str, expected: str) -> None:
         ("sed -Ei 's/a/b/' ~/.zshrc", "~/.zshrc"),
         ("sed --in-place=.bak 's/a/b/' ~/.gitconfig", "~/.gitconfig"),
         ("sed -n 's/a/b/p' ~/.gitconfig", None),
+        ("sed -i 's|~/.gitconfig|x|' README.md", None),
+        ("sed -i -- 's|~/.gitconfig|x|' README.md ~/.zprofile", "~/.zprofile"),
+        ("sed -i -f fix.sed ~/.gitconfig", "~/.gitconfig"),
+        ("sed -i --expression='s/a/b/' ~/.gitconfig", "~/.gitconfig"),
         ("sed -n 1p ~/.zprofile\ngrep -i x notes.txt", None),
     ],
 )

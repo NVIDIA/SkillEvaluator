@@ -1076,13 +1076,16 @@ cases:
   `sed -i` anywhere. This is the earlier rule, unchanged, so
   `cat ~/.bashrc 2>/dev/null` still receives the finding.
 - A protected file, in any home spelling, is the target of an output
-  redirection (`>`, `>>`, `>|`, `&>`, `2>`), an operand of `tee`, or an
-  argument of a `sed` with `-i` or `--in-place` (its script included). A
-  redirection inside a quoted `bash -c` script counts too. So
+  redirection (`>`, `>>`, `>|`, `&>`, `2>`), an operand of `tee`, or a file
+  operand of a `sed` with `-i` or `--in-place`. The first `sed` operand is its
+  script and does not count, unless an option such as `-e` or `-f` may give
+  the script; then every operand counts. A redirection inside a quoted
+  `bash -c` script counts too. So
   `echo x >> $HOME/.bashrc`, `echo x | sudo tee -a /home/agent/.bashrc`,
   `sudo sh -c "echo x >> /home/agent/.profile"`, and `echo '{}' > ~/.claude.json`
   receive the finding, while `cat ~/.gitconfig 2>/dev/null`,
-  `cat $HOME/.zshrc > /tmp/zshrc.bak`, and
+  `cat $HOME/.zshrc > /tmp/zshrc.bak`,
+  `sed -i 's#~/.claude/settings.json#.claude/settings.json#' README.md`, and
   `source ~/.bashrc && cp dist/app.js "$OUT_DIR/"` do not. A `tee` or `sed`
   argument list ends at the end of its line.
 

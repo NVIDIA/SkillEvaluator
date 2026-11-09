@@ -3045,6 +3045,17 @@ class HTMLReporter(ReporterBase):
         tier1_skillspector_provenance = _skillspector_provenance(tier1_results)
         tier2_summary = self._compute_tier_summary(tier2_results, presentation=context.tiers[2])
         tier3_summary = self._compute_tier_summary(tier3_results, presentation=context.tiers[3])
+        tier3_dataset_sufficiency = tier3_data.get("dataset_sufficiency") if isinstance(tier3_data, dict) else None
+        dataset_summary = tier3_data.get("dataset_summary") if isinstance(tier3_data, dict) else None
+        task_count = dataset_summary.get("total_tasks") if isinstance(dataset_summary, dict) else None
+        dataset_source = dataset_summary.get("source") if isinstance(dataset_summary, dict) else None
+        if (
+            not isinstance(task_count, int)
+            or isinstance(task_count, bool)
+            or task_count <= 0
+            or dataset_source == "unavailable"
+        ):
+            tier3_dataset_sufficiency = None
         tier3_preview, tier3_preview_notice = _bounded_tier3_preview(tier3_data)
         tier3_canonical_data, tier3_canonical_encoding = _canonical_tier3_embed(tier3_data)
         tier3_truncation = tier3_data.get("report_truncation", {}) if isinstance(tier3_data, dict) else {}
@@ -3389,6 +3400,7 @@ class HTMLReporter(ReporterBase):
             tier3_canonical_data=tier3_canonical_data,
             tier3_canonical_encoding=tier3_canonical_encoding,
             tier3_truncation=tier3_truncation,
+            tier3_dataset_sufficiency=tier3_dataset_sufficiency,
             tier3_preview_notice=tier3_preview_notice,
             # From the full display payload: the bounded preview can cap rows
             # unevenly per condition and blank identity fields of late rows.

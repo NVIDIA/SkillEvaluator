@@ -868,11 +868,20 @@ def build_agent_eval_payload(
         without_pass = pass_summary.get("without_skill")
         lift = pass_summary.get("lift") if isinstance(pass_summary.get("lift"), dict) else {}
         paired = lift.get("paired_comparison") if isinstance(lift.get("paired_comparison"), dict) else {}
+        raw_paired_cases = paired.get("paired_cases")
+        paired_cases = (
+            _as_nonnegative_int(raw_paired_cases)
+            if isinstance(raw_paired_cases, int) and not isinstance(raw_paired_cases, bool) and raw_paired_cases >= 0
+            else None
+        )
+        unclassified_cases = _as_nonnegative_int(dataset_summary.get("unclassified_tasks"))
         agent_payload["dataset_sufficiency"] = assess_dataset_sufficiency(
-            distinct_cases=int(dataset_summary.get("total_tasks") or 0),
-            negative_cases=int(dataset_summary.get("negative_tasks") or 0),
+            distinct_cases=_as_nonnegative_int(dataset_summary.get("total_tasks")),
+            negative_cases=(
+                None if unclassified_cases > 0 else _as_nonnegative_int(dataset_summary.get("negative_tasks"))
+            ),
             pass_rate_interval=with_pass.get("rate_interval"),
-            paired_cases=paired.get("paired_cases"),
+            paired_cases=paired_cases,
             baseline_skipped=not bool(without_pass),
         )
     effective_dataset_digest = dataset_digest or (

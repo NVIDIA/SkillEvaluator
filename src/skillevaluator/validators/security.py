@@ -1879,9 +1879,10 @@ def _skillspector_missing_reference_notes(
     component. Anything else keeps the scan INCOMPLETE.
 
     A *reference_root* other than *scanned_root*, such as a plugin around the
-    bundled skill that was scanned, means that instructions may name files of
-    the artifact beside the scanned directory, which this scan did not
-    inspect, so the gap is never accepted then.
+    bundled skill that was scanned or a folder whose skills are scanned one by
+    one, means that instructions may name files of the artifact beside the
+    scanned directory, which this scan did not inspect, so the gap is never
+    accepted then.
     """
     reference_rows = [row for row in ledger_exceptions if row.get("phase") == "reference_resolution"]
     other_rows = [row for row in ledger_exceptions if row.get("phase") != "reference_resolution"]
@@ -2028,6 +2029,9 @@ class SecurityValidator(ValidatorBase):
         self.skillspector_reference_root = (
             Path(skillspector_reference_root).resolve() if skillspector_reference_root is not None else None
         )
+        # The folder whose skills are scanned one by one; set only while
+        # _validate_with_applicability() walks a target that is not a skill.
+        self._folder_reference_root: Path | None = None
         self.skillspector_baseline = (
             Path(skillspector_baseline).expanduser().resolve() if skillspector_baseline is not None else None
         )
@@ -2221,6 +2225,13 @@ class SecurityValidator(ValidatorBase):
 
         The folder walker does not merge per-skill metadata, so the counters
         are collected as each skill finishes.
+
+        When *skill_path* is a directory but not a skill, each skill found in
+        it is scanned on its own, and its instructions may name files elsewhere
+        in the folder that its scan does not inspect. Without a configured
+        ``skillspector_reference_root``, the folder is then the reference root
+        for those scans, so their missing references are not accepted
+        (:func:`_skillspector_missing_reference_notes`).
         """
         blocks: list[dict] = []
 
@@ -2231,7 +2242,12 @@ class SecurityValidator(ValidatorBase):
                 blocks.append(block)
             return child
 
-        result = self._validate_folder_or_skill(skill_path, validate_one, action_description=action_description)
+        folder_root = skill_path.resolve() if skill_path.is_dir() and not self._is_skill_directory(skill_path) else None
+        previous_folder_root, self._folder_reference_root = self._folder_reference_root, folder_root
+        try:
+            result = self._validate_folder_or_skill(skill_path, validate_one, action_description=action_description)
+        finally:
+            self._folder_reference_root = previous_folder_root
         if blocks:
             result.metadata["skillspector_applicability"] = _combine_skillspector_applicability(blocks)
         return result
@@ -2476,7 +2492,7 @@ class SecurityValidator(ValidatorBase):
             result,
             baseline_requested=baseline is not None,
             scanned_root=original_root if original_root is not None else scan_root,
-            reference_root=self.skillspector_reference_root,
+            reference_root=self.skillspector_reference_root or self._folder_reference_root,
         ):
             result.mark_scan_incomplete(stage_name)
             return result
@@ -2530,7 +2546,8 @@ class SecurityValidator(ValidatorBase):
         confirmed by the files under *scanned_root*; each kind of gap is then a
         warning instead. *scanned_root* is the directory the report's relative
         paths start from. *reference_root*, when set, is the artifact root that
-        contains it (the validator's ``skillspector_reference_root``).
+        contains it: the validator's ``skillspector_reference_root``, or the
+        folder whose skills are scanned one by one.
         """
         partial_reported = False
         if "error" in data and data["error"] is not None:

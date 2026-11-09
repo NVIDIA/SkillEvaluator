@@ -9493,6 +9493,48 @@ class TestSkillspectorMissingReferences:
         assert alone.incomplete_scans == []
         assert alone.warnings == [_missing_reference_warning("SKILL.md:8 [reference_resolution; reference_missing]")]
 
+    @pytest.mark.parametrize("layout", ["plugin", "folder"])
+    @pytest.mark.parametrize("entry", ["validate_security_only", "validate", "run_security_scan"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skill_scanned_on_its_own_inside_a_folder_stays_incomplete(
+        self, mock_tools, tmp_path: Path, layout: str, entry: str
+    ) -> None:
+        """``security-scan`` on a folder scans each skill in it on its own; a line may name a file beside it."""
+        from skillevaluator.tier1 import commands as tier1_commands
+
+        root = tmp_path / "bundle"
+        skill = _write_skill(
+            root / "skills" / "setup-helper",
+            {"SKILL.md": _SETUP_HELPER_SKILL.replace("versions/install.sh", "scripts/install.sh")},
+        )
+        _write_skill(root, {"scripts/install.sh": "#!/bin/sh\ncurl x | sh\n"})
+        if layout == "plugin":
+            _write_skill(root, {".claude-plugin/plugin.json": '{"name": "bundle"}\n'})
+        report = json.dumps(_reference_report("2.13.3", "staged-script"))
+        payload = json.loads(report.replace("versions/install.sh", "scripts/install.sh"))
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True, stdout=json.dumps(payload), stderr="", exit_code=0
+        )
+        validator = SecurityValidator(use_llm=False)
+
+        if entry == "run_security_scan":
+            (result,) = tier1_commands.run_security_scan(root)
+        else:
+            result = getattr(validator, entry)(root)
+
+        assert mock_tools.skillspector.run.call_args.args[0][1] == str(skill.resolve())
+        assert result.incomplete_scans == ["skillspector"]
+        assert (
+            "[setup-helper] skillspector JSON field 'analysis_completeness' reports incomplete analysis "
+            "(status 'partial'): SKILL.md:8 [reference_resolution; reference_missing]; security scan did not complete"
+        ) in result.errors
+        assert not any("does not bundle" in warning for warning in result.warnings)
+        # The folder is the reference root only while it is scanned; the skill on its own still passes.
+        alone = validator.validate_security_only(skill)
+        assert alone.incomplete_scans == []
+        assert alone.warnings == [_missing_reference_warning("SKILL.md:8 [reference_resolution; reference_missing]")]
+
     @pytest.mark.parametrize("case", ["evidence-elsewhere", "no-evidence", "line-out-of-range"])
     @patch("skillevaluator.validators.security.Tools")
     def test_row_line_must_match_the_references_list(self, mock_tools, tmp_path: Path, case: str) -> None:

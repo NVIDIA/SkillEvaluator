@@ -953,8 +953,15 @@ Return ONLY the refined JSON array. No other text."""
         refined_by_id = {case.get("id"): case for case in refined if isinstance(case, dict)}
         for authored in cases:
             case = refined_by_id.get(authored.get("id"))
+            if case is None:
+                continue
+            original_behaviors = authored.get("expected_behavior")
+            original_behaviors = original_behaviors if isinstance(original_behaviors, list) else []
+            behaviors = case.get("expected_behavior")
+            behaviors = behaviors if isinstance(behaviors, list) else []
+            case["expected_behavior"] = _restore_authored_behaviors(case, original_behaviors, behaviors)
             trajectory = trajectories.get(authored.get("id"))
-            if case is None or trajectory is None:
+            if trajectory is None:
                 continue
             ground_truth = authored.get("ground_truth")
             proposed = case.get("ground_truth")
@@ -964,18 +971,6 @@ Return ONLY the refined JSON array. No other text."""
                 case["ground_truth"] = ground_truth
             elif _extract_agent_final_message(trajectory):
                 _mark_case_for_review(case, "expected outcome taken from an observed run; confirm it is correct")
-            trace_text = json.dumps(trajectory, ensure_ascii=False).casefold()
-            original_behaviors = authored.get("expected_behavior")
-            original_behaviors = original_behaviors if isinstance(original_behaviors, list) else []
-            behaviors = case.get("expected_behavior")
-            behaviors = behaviors if isinstance(behaviors, list) else []
-            for behavior in original_behaviors:
-                if isinstance(behavior, str):
-                    if behavior.casefold() not in trace_text:
-                        _mark_case_for_review(case, f"trace did not show authored step: {behavior}")
-                    if behavior not in behaviors:
-                        behaviors.insert(0, behavior)
-            case["expected_behavior"] = behaviors
 
         return refined
 
@@ -1005,6 +1000,22 @@ def _mark_case_for_review(case: dict[str, Any], reason: str) -> None:
     if reason not in reasons:
         reasons.append(reason)
     case["review"] = {"status": "needs_review", "reasons": reasons}
+
+
+def _restore_authored_behaviors(
+    case: dict[str, Any],
+    authored_behaviors: list[Any],
+    refined_behaviors: list[Any],
+) -> list[Any]:
+    behaviors = list(refined_behaviors)
+    missing_behaviors = [
+        behavior for behavior in authored_behaviors if isinstance(behavior, str) and behavior not in behaviors
+    ]
+    for behavior in missing_behaviors:
+        _mark_case_for_review(case, f"refinement dropped authored step: {behavior}")
+    for behavior in reversed(missing_behaviors):
+        behaviors.insert(0, behavior)
+    return behaviors
 
 
 def _refine_from_trajectory_template(
@@ -1039,12 +1050,8 @@ def _refine_from_trajectory_template(
 
         case = dict(case)
 
-        trace_text = json.dumps(traj, ensure_ascii=False).casefold()
         authored_behaviors = case.get("expected_behavior")
         authored_behaviors = authored_behaviors if isinstance(authored_behaviors, list) else []
-        for behavior in authored_behaviors:
-            if isinstance(behavior, str) and behavior.casefold() not in trace_text:
-                _mark_case_for_review(case, f"trace did not show authored step: {behavior}")
 
         # --- Refine expected_behavior ---
         traj_behaviors: list[str] = []
@@ -1081,6 +1088,7 @@ def _refine_from_trajectory_template(
                 if db not in seen:
                     merged_behaviors.append(db)
                     seen.add(db)
+        merged_behaviors = _restore_authored_behaviors(case, authored_behaviors, merged_behaviors)
         if merged_behaviors:
             merged_behaviors.append("The agent's final response directly addresses the user's request")
             merged_behaviors.append(SECURITY_BEHAVIOR)

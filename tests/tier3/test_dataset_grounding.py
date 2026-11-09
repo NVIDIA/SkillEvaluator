@@ -1,13 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from skillevaluator.evaluation import DatasetGenerationError
+from skillevaluator.inference import client as inference_client
 from skillevaluator.tier3 import generate_dataset
 from skillevaluator.tier3.evals_spec import validate_tier3_source
 
@@ -75,7 +78,59 @@ def test_trace_preserves_authored_ground_truth_and_flags_mismatches():
     assert refined[0]["ground_truth"] == "Authored expected answer"
     assert review["status"] == "needs_review"
     assert "agent answer differs from authored ground truth" in review["reasons"]
-    assert "trace did not show authored step: The agent uses the approved workflow" in review["reasons"]
+    assert "The agent uses the approved workflow" in refined[0]["expected_behavior"]
+    assert not any(reason.startswith("refinement dropped authored step:") for reason in review["reasons"])
+
+
+def test_llm_refinement_restores_and_flags_dropped_authored_behavior(monkeypatch):
+    class FakeLLMClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def completions(self, *_args):
+            return json.dumps(
+                [
+                    {
+                        "id": "case-1",
+                        "question": "Do the task",
+                        "ground_truth": "Authored expected answer",
+                        "expected_behavior": ["The agent uses a refined workflow"],
+                        "expected_skill": "sample-skill",
+                    }
+                ]
+            )
+
+    monkeypatch.setattr(
+        "skillevaluator.provider_config.resolve_llm_provider",
+        lambda: SimpleNamespace(
+            provider="test",
+            model="test",
+        ),
+    )
+    monkeypatch.setattr(inference_client, "LLMClient", FakeLLMClient)
+    cases = [
+        {
+            "id": "case-1",
+            "question": "Do the task",
+            "ground_truth": "Authored expected answer",
+            "expected_behavior": ["The agent uses the approved workflow"],
+            "expected_skill": "sample-skill",
+        }
+    ]
+
+    refined = asyncio.run(
+        generate_dataset._refine_with_llm(
+            {"name": "sample-skill"},
+            cases,
+            {"case-1": {"steps": []}},
+        )
+    )
+
+    assert refined[0]["expected_behavior"][:2] == [
+        "The agent uses the approved workflow",
+        "The agent uses a refined workflow",
+    ]
+    assert refined[0]["review"]["reasons"] == ["refinement dropped authored step: The agent uses the approved workflow"]
 
 
 def test_trace_proposes_unauthored_observed_answer_and_flags_review():

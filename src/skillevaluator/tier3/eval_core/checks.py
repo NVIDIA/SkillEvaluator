@@ -439,12 +439,16 @@ _SED_IN_PLACE_FLAG_RE = re.compile(r"--in-place\b.*|-[nsuzre]*i.*")
 #   - curl -o, -D, -c and their long forms; wget -O, -o, -a, -P and theirs;
 #   - rsync and scp: a local destination, read as for cp;
 #   - perl -i and ruby -i: the files they edit.
+# A long option may be spelled as any unambiguous GNU abbreviation, such as
+# "cp --target /etc/sudoers.d" or "sed --in".
 # tee and sed -i targets match an entry as a substring, as the first reading's
 # do. The others match an entry from their start to a path-component boundary,
 # so the backup "cp ~/.bashrc ~/.bashrc.bak" is not a write to ~/.bashrc, while
-# a ".d" drop-in directory such as ~/.bashrc.d is. A target that climbs out of
-# its directory with ".." may reach the root, so it is also read from its last
-# ".." on: "../etc/sudoers.d/x" and "~/../root/.bashrc" match.
+# a ".d" drop-in directory such as ~/.bashrc.d is. A target that climbs above
+# the directory it starts from, after "dir/.." pairs cancel out, may reach the
+# root, so it is also read from the root: "../etc/sudoers.d/x",
+# "a/../../etc/sudoers.d/x", and "~/../root/.bashrc" match, while
+# "build/../etc/sudoers.d/x" stays in the working directory.
 _WRITE_PARSE_MAX_DEPTH = 3
 _WRITE_PARSE_MAX_CHARS = 65_536
 _WRITE_PARSE_MAX_SUBSTITUTIONS = 16
@@ -500,6 +504,20 @@ _WRITE_COMMAND_WRAPPERS: dict[str, tuple[str, frozenset[str]]] = {
 _XARGS_INPUT_MARKER = "{}"
 _SHELL_VALUE_OPTIONS = frozenset({"-o", "+o", "-O", "+O", "--rcfile", "--init-file"})
 _COMMAND_SUBSTITUTION_TEXT_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
+# GNU getopt reads an unambiguous abbreviation of a long option as the option.
+# Each long option whose value the parse reads, with the length of its shortest
+# abbreviation among its command's own long options: --t is --target-directory
+# for cp, mv, ln, and install; install's --di is --directory (--d may be
+# --debug); sed's --i, --e, and --l are --in-place, --expression, and
+# --line-length, and --fi is --file (--f may be --follow-symlinks).
+_LONG_OPTION_ABBREVIATIONS = {
+    "--target-directory": 3,
+    "--directory": 4,
+    "--in-place": 3,
+    "--expression": 3,
+    "--file": 4,
+    "--line-length": 3,
+}
 _COPY_COMMANDS = frozenset({"cp", "mv", "ln", "install"})
 # Their short options that take a value (cp/mv/ln -S suffix, install -m, -o,
 # -g) end an option cluster; the long forms take the next word.
@@ -529,7 +547,7 @@ _WRITE_DESTINATION_PATTERNS = tuple(
     for suffix in ("", r"\.d")
     for entry in _SENSITIVE_WRITE_PATHS
 )
-_PARENT_CLIMB_RE = re.compile(r"^(?:.*/)?\.\.(?=/)")
+_LEADING_PARENT_SEGMENTS_RE = re.compile(r"^(?:\.\./)+")
 
 # The parsed targets do not cover every way to write a file, so the earlier
 # rule stays as a fallback for what the readings leave open. A protected path
@@ -1032,15 +1050,36 @@ def _path_entry_in(entry: str, text: str) -> bool:
 
 
 def _sensitive_path_match(text: Any, paths: list[str]) -> str | None:
-    """Return the entry of *paths* that *text* references, as written or normalized."""
+    """Return the entry of *paths* that *text* references, as written or normalized.
+
+    The longest entry wins, so a write to /etc/profile.d/npm.sh is the
+    /etc/profile.d entry rather than the /etc/profile it also contains.
+    """
     raw = str(text).lower()
     normalized = _normalize_sensitive_path_text(text)
-    return next((entry for entry in paths if _path_entry_in(entry, raw) or _path_entry_in(entry, normalized)), None)
+    return max(
+        (entry for entry in paths if _path_entry_in(entry, raw) or _path_entry_in(entry, normalized)),
+        key=len,
+        default=None,
+    )
 
 
 def _home_anchored_text(text: Any) -> str:
     """Lowercase *text* and rewrite its home directories to ``~``, leaving ``..`` and variables as written."""
     return _HOME_ANCHOR_RE.sub("~", str(text).lower().replace("\\", "/"))
+
+
+def _long_option(option: str, names: frozenset[str] | tuple[str, ...]) -> str | None:
+    """Return the long option of *names* that *option* spells in full or as a GNU abbreviation."""
+    return next(
+        (
+            name
+            for name in names
+            if option == name
+            or (len(option) >= _LONG_OPTION_ABBREVIATIONS.get(name, len(name)) and name.startswith(option))
+        ),
+        None,
+    )
 
 
 def _shell_write_targets(command: str) -> list[str]:
@@ -1296,8 +1335,10 @@ def _may_hold_protected_file(directory: str) -> bool:
     """Return whether a file of any name inside *directory*, or below it, may be a protected file."""
     if _unresolved_write_target(directory):
         return _unresolved_write_target(directory, destination=True)
-    text = _normalize_sensitive_path_text(directory).rstrip("/") + "/"
-    if text[0] not in "/~":
+    # Normalize a path inside the directory, so "~user" and "/root" are home
+    # directories and a trailing "/." or "/.." resolves.
+    text = _normalize_sensitive_path_text(directory.rstrip("/") + "/x")[:-1]
+    if not text.startswith(("/", "~")):
         return True
     return text.startswith(("/home/", "/users/")) or any(
         entry.startswith(text) or text.startswith(entry + "/") for entry in _SENSITIVE_WRITE_PATHS
@@ -1336,12 +1377,13 @@ def _copy_write_targets(name: str, args: list[str]) -> list[str]:
             options = False
         elif word.startswith("--"):
             option, equals, value = word.partition("=")
-            if option == "--target-directory":
+            long_option = _long_option(option, ("--target-directory", "--directory"))
+            if long_option == "--target-directory":
                 if not equals and index < len(args):
                     value = args[index]
                     index += 1
                 directory = value
-            elif option == "--directory":
+            elif long_option == "--directory":
                 make_directories = name == "install"
             elif not equals and option in _COPY_VALUE_LONG_OPTIONS:
                 index += 1
@@ -1470,13 +1512,14 @@ def _sed_arguments(args: list[str]) -> tuple[bool, list[str], list[str]]:
             options = False
         elif word.startswith("--"):
             option, equals, value = word.partition("=")
-            if option == "--in-place":
+            long_option = _long_option(option, ("--in-place", *sorted(_SED_VALUE_LONG_OPTIONS)))
+            if long_option == "--in-place":
                 in_place = True
-            elif option in _SED_VALUE_LONG_OPTIONS:
+            elif long_option is not None:
                 if not equals and index < len(args):
                     value = args[index]
                     index += 1
-                if option != "--line-length":
+                if long_option != "--line-length":
                     script_given = True
                     scripts.append(value)
         else:
@@ -1538,16 +1581,32 @@ def _command_write_targets(name: str, args: list[str]) -> list[str]:
     return []
 
 
+def _climbed_write_path(target: str) -> str | None:
+    """Return the path a write *target* names from the root when it climbs above the directory it starts from.
+
+    After "dir/.." pairs cancel out, a relative target that still starts with
+    ".." climbs above the working directory, and a target in the home
+    directory that leaves it, as "~/../root/.bashrc" does, climbs above the
+    home directory. Either may reach the root, so the rest is read from there.
+    A target such as "build/../etc/x" stays in the working directory.
+    """
+    text = _home_anchored_text(target)
+    resolved = posixpath.normpath(text) if text else text
+    above_home = text.startswith("~/") and resolved != "~" and not resolved.startswith("~/")
+    if not (resolved.startswith("../") or above_home):
+        return None
+    return "/" + _LEADING_PARENT_SEGMENTS_RE.sub("", resolved)
+
+
 def _protected_write_destination(target: str) -> str | None:
-    """Return the protected entry a parsed write target is, or lies inside, on a path-component boundary."""
+    """Return the longest protected entry a parsed write target is, or lies inside, on a path-component boundary."""
     texts = [str(target).lower(), _normalize_sensitive_path_text(target)]
-    # A target that climbs out of its directory with ".." may reach the root.
-    for text in texts[:2]:
-        if (climbed := _PARENT_CLIMB_RE.sub("", text, count=1)) != text:
-            texts.extend((climbed, _normalize_sensitive_path_text(climbed)))
-    return next(
+    if (climbed := _climbed_write_path(target)) is not None:
+        texts.extend((climbed, _normalize_sensitive_path_text(climbed)))
+    return max(
         (entry for entry, pattern in _WRITE_DESTINATION_PATTERNS if any(pattern.match(text) for text in texts)),
-        None,
+        key=len,
+        default=None,
     )
 
 

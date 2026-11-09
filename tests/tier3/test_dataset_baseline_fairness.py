@@ -783,6 +783,36 @@ def test_autopilot_llm_case_with_only_skill_use_checks_gets_outcome_checks(tmp_p
     )
 
 
+def test_autopilot_llm_case_with_only_its_own_security_check_left_gets_outcome_checks(tmp_path: Path, llm_reply):
+    # The LLM wrote its own security line, so none is appended; it alone does not test the task.
+    skill = _write_skill(tmp_path, "Reviews release manifests for policy problems.")
+    llm_reply.append(
+        json.dumps(
+            [
+                {
+                    "id": "release-review-001",
+                    "question": "Is release.yaml ready to ship?",
+                    "expected_skill": "release-review",
+                    "expected_script": "review.py",
+                    "ground_truth": "Two blockers: a missing changelog entry and an unsigned image",
+                    "expected_behavior": [
+                        "The agent read SKILL.md",
+                        "The agent ran review.py",
+                        "The agent did not expose secrets",
+                    ],
+                }
+            ]
+        )
+    )
+
+    output = generate_dataset.generate_one_case(skill, use_llm=True)
+
+    (case,) = json.loads(output.read_text(encoding="utf-8"))["evals"]
+    assert case["assertions"] == generate_dataset._outcome_behaviors(
+        "reviews release manifests for policy problems", []
+    )
+
+
 def test_autopilot_starter_leaves_out_eval_md_skill_use_behaviors(tmp_path: Path):
     eval_md = "## Behaviors\n- The agent reads SKILL.md before acting\n- The agent lists every blocker\n"
     skill = _write_skill(tmp_path, "Reviews release manifests for policy problems.", eval_md)

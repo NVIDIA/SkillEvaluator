@@ -85,6 +85,66 @@ def test_benchmark_renders_dataset_size(sufficiency):
     assert expected in benchmark
 
 
+def test_benchmark_renders_recorded_negative_count_when_unclassified_cases_remain():
+    sufficiency = assess_dataset_sufficiency(
+        distinct_cases=13,
+        negative_cases=2,
+        pass_rate_interval={"lower": 0.45, "upper": 0.55},
+        paired_cases=13,
+    )
+    result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Live evaluation")
+    result.metadata["agent_eval"] = {
+        "verdict": "pass",
+        "dataset_summary": {
+            "total_tasks": 13,
+            "positive_tasks": 10,
+            "negative_tasks": 2,
+            "unclassified_tasks": 1,
+            "source": "dataset",
+        },
+        "dataset_sufficiency": sufficiency,
+        "agents": {},
+    }
+    benchmark = BenchmarkReporter(include_timestamp=False).render_all([result])
+
+    assert sufficiency["status"] == "sufficient"
+    assert "2 negative cases (needs 1)" in sufficiency["coverage_summary"]
+    assert sufficiency["coverage_summary"] in benchmark
+
+
+def test_agent_eval_keeps_sufficient_recorded_negative_count_with_unclassified_cases(monkeypatch):
+    from skillevaluator.evaluation import tier3_report
+    from skillevaluator.tier3 import dataset_sufficiency as sufficiency_module
+
+    observed = []
+    assess = sufficiency_module.assess_dataset_sufficiency
+    monkeypatch.setattr(
+        sufficiency_module,
+        "assess_dataset_sufficiency",
+        lambda **kwargs: observed.append(kwargs) or assess(**kwargs),
+    )
+    monkeypatch.setattr(
+        tier3_report,
+        "_dataset_summary",
+        lambda *_args: {
+            "total_tasks": 13,
+            "positive_tasks": 10,
+            "negative_tasks": 2,
+            "unclassified_tasks": 1,
+            "source": "dataset",
+        },
+    )
+
+    payload = build_agent_eval_payload(
+        "demo",
+        {"codex": {"execution_status": "succeeded", "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.8)}},
+        use_llm_judge=False,
+    )
+
+    assert payload is not None
+    assert observed[0]["negative_cases"] == 2
+
+
 @pytest.mark.parametrize(
     "dataset_summary",
     [

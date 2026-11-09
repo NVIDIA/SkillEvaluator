@@ -931,6 +931,38 @@ def _stub_runner(
     return runner, skill
 
 
+def _dataset_sufficiency_agent_result(
+    *,
+    score: float = 0.8,
+    paired_cases: int = 13,
+    skill_activation: dict[str, Any] | None = None,
+    skip_with_skill: bool = False,
+) -> dict[str, Any]:
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+
+    scores = dict.fromkeys(DEFAULT_METRICS, score)
+    result = {
+        "execution_status": "succeeded",
+        "execution_errors": [],
+        "metrics_with_skill": list(DEFAULT_METRICS),
+        "metrics_without_skill": list(DEFAULT_METRICS),
+        "with_skill": {} if skip_with_skill else scores,
+        "without_skill": scores,
+        "conditions": {
+            "with_skill": {"execution_status": "skipped" if skip_with_skill else "succeeded"},
+            "without_skill": {"execution_status": "succeeded"},
+        },
+        "pass_at_k": {
+            "with_skill": {"rate_interval": {"lower": 0.45, "upper": 0.55}},
+            "without_skill": {"rate": 0.8},
+            "lift": {"paired_comparison": {"paired_cases": paired_cases}},
+        },
+    }
+    if skill_activation is not None:
+        result["skill_activation"] = skill_activation
+    return result
+
+
 def test_runner_rejects_custom_in_skill_results_root_before_creating_output(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -950,31 +982,17 @@ def test_root_dataset_sufficiency_uses_best_agent_selected_by_report(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from skillevaluator.tier3.harbor import report
-
-    selected_agents: list[dict] = []
-
-    def select_best(agents):
-        selected_agents.append(agents)
-        return "opencode"
-
     def collect(**_kwargs):
-        def agent_result(paired_cases: int) -> dict:
-            return {
-                "pass_at_k": {
-                    "with_skill": {"rate_interval": {"lower": 0.45, "upper": 0.55}},
-                    "lift": {"paired_comparison": {"paired_cases": paired_cases}},
-                }
-            }
-
         return {
             "execution_status": "succeeded",
             "execution_errors": [],
             "metrics": [],
-            "agents": {"codex": agent_result(1), "opencode": agent_result(7)},
+            "agents": {
+                "codex": _dataset_sufficiency_agent_result(score=0.7, paired_cases=1),
+                "opencode": _dataset_sufficiency_agent_result(score=0.9, paired_cases=7),
+            },
         }
 
-    monkeypatch.setattr(report, "_pick_best_agent", select_best)
     runner, skill = _stub_runner(monkeypatch, tmp_path, collect=collect)
 
     result = runner.run_harbor_eval(
@@ -985,9 +1003,114 @@ def test_root_dataset_sufficiency_uses_best_agent_selected_by_report(
     )
 
     assert "error" not in result
-    assert selected_agents and selected_agents[0] is result["agents"]
     assert result["dataset_sufficiency"] == result["agents"]["opencode"]["dataset_sufficiency"]
     assert result["dataset_sufficiency"]["checks"][2]["observed"]["paired_cases"] == 7
+
+
+def test_single_never_activated_agent_gets_root_dataset_sufficiency(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        collect=lambda **_kwargs: {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "metrics": [],
+            "agents": {
+                "codex": _dataset_sufficiency_agent_result(
+                    skill_activation={"status": "never_activated"},
+                )
+            },
+        },
+    )
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    from skillevaluator.tier3.result_display import render_result
+
+    assert "dataset_sufficiency" in result
+    assert "Dataset size:" in render_result(result)
+
+
+def test_skipped_with_skill_agent_gets_root_dataset_sufficiency(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        collect=lambda **_kwargs: {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "metrics": [],
+            "agents": {"codex": _dataset_sufficiency_agent_result(skip_with_skill=True)},
+        },
+    )
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        skip_with_skill=True,
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    from skillevaluator.tier3.result_display import render_result
+
+    assert result["agents"]["codex"]["conditions"]["with_skill"]["execution_status"] == "skipped"
+    assert "dataset_sufficiency" in result
+    assert "Dataset size:" in render_result(result)
+
+
+def test_runner_keeps_recorded_negative_count_when_unclassified_cases_remain(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    entries = [{"id": f"positive-{index}", "prompt": "Question", "expected_skill": "demo"} for index in range(10)]
+    entries.extend({"id": f"negative-{index}", "prompt": "Question", "expected_skill": None} for index in range(2))
+    entries.append({"id": "unclassified", "prompt": "Question"})
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        collect=lambda **_kwargs: {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "metrics": [],
+            "agents": {"codex": _dataset_sufficiency_agent_result()},
+        },
+    )
+    from skillevaluator.tier3.harbor.report_data import build_dataset_snapshot
+
+    dataset_truth = build_dataset_snapshot(entries, evaluator_version=runner.__version__)
+    monkeypatch.setattr(runner, "_persist_dataset_truth", lambda *_args, **_kwargs: dataset_truth)
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    from skillevaluator.tier3.result_display import render_result
+
+    summary = result["dataset_sufficiency"]["coverage_summary"]
+    assert result["dataset_summary"] == {
+        "total_tasks": 13,
+        "positive_tasks": 10,
+        "negative_tasks": 2,
+        "unclassified_tasks": 1,
+        "source": "dataset",
+    }
+    assert summary.startswith("Dataset size: sufficient")
+    assert "2 negative cases (needs 1)" in summary
+    assert summary in render_result(result)
 
 
 def test_run_result_bounds_multibyte_launch_errors_for_report_loader(

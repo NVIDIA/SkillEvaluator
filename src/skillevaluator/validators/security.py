@@ -32,6 +32,7 @@ import unicodedata
 import zlib
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
+from functools import partial
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote
 
@@ -55,6 +56,19 @@ from skillevaluator.provider_config import (
     skillspector_reasoning_effort,
 )
 from skillevaluator.skillspector_provenance import SKILLSPECTOR_LLM_ANALYZERS, sanitize_skillspector_llm_provenance
+from skillevaluator.skillspector_references import (
+    AE1_PATTERN,
+    AE1_RULE_ID,
+    REFERENCE_SUMMARY_KEY,
+    combine_reference_summaries,
+    index_legacy_reference_reasons,
+    is_reference_summary_message,
+    issue_diagnostics,
+    reference_suggestion,
+    reference_summary,
+    reference_summary_message,
+    report_path,
+)
 from skillevaluator.spdx import is_spdx_only_html_comment
 from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.utils.scanner_install import prepare_skillspector
@@ -1060,6 +1074,24 @@ def _combine_skillspector_applicability(blocks: list[dict]) -> dict:
         "raw_risk_score": max(block["raw_risk_score"] for block in blocks),
         "applicable_risk_score": max(block["applicable_risk_score"] for block in blocks),
     }
+
+
+def _record_skillspector_reference_summary(result: ValidationResult) -> None:
+    """Count the referenced artifacts behind *result*'s AE1 evidence in its metadata and one message.
+
+    The counts come from the findings
+    (:func:`~skillevaluator.skillspector_references.reference_summary`), so a
+    second call after the ``--llm`` stage is merged replaces the first count
+    and its message.
+    """
+    result.messages = [message for message in result.messages if not is_reference_summary_message(message)]
+    summary = reference_summary(result.findings)
+    if summary is None:
+        result.metadata.pop(REFERENCE_SUMMARY_KEY, None)
+        return
+    result.metadata[REFERENCE_SUMMARY_KEY] = summary
+    if message := reference_summary_message(summary):
+        result.add_message(message)
 
 
 def _issue_field(issue: dict):
@@ -2610,14 +2642,20 @@ class SecurityValidator(ValidatorBase):
         its scan does not inspect, so their missing references are not
         accepted. A scan run outside this walk has no known target and
         accepts none.
+
+        The counts of referenced artifacts that SkillSpector did not
+        completely inspect are totaled the same way.
         """
         blocks: list[dict] = []
+        reference_summaries: list[object] = []
 
         def validate_one(path: Path) -> ValidationResult:
             child = single_skill_validator(path)
             block = child.metadata.get("skillspector_applicability")
             if isinstance(block, dict):
                 blocks.append(block)
+            if REFERENCE_SUMMARY_KEY in child.metadata:
+                reference_summaries.append(child.metadata[REFERENCE_SUMMARY_KEY])
             return child
 
         previous_target_root, self._scan_target_root = self._scan_target_root, skill_path.resolve()
@@ -2627,6 +2665,8 @@ class SecurityValidator(ValidatorBase):
             self._scan_target_root = previous_target_root
         if blocks:
             result.metadata["skillspector_applicability"] = _combine_skillspector_applicability(blocks)
+        if (references := combine_reference_summaries(reference_summaries)) is not None:
+            result.metadata[REFERENCE_SUMMARY_KEY] = references
         return result
 
     def _validate_single_skill(self, skill_path: Path) -> ValidationResult:
@@ -2739,6 +2779,8 @@ class SecurityValidator(ValidatorBase):
                     result.metadata["skillspector_llm_applicability"] = llm_applicability
                 if not enrichment.is_incomplete:
                     self._deduplicate_skillspector_findings(result)
+                # Count each reference line once across both stages.
+                _record_skillspector_reference_summary(result)
             if baseline_state is not None:
                 result.metadata["skillspector_baseline"] = baseline_state
                 self._report_skillspector_baseline(
@@ -4390,6 +4432,12 @@ class SecurityValidator(ValidatorBase):
         skipped_inapplicable = 0
         skipped_by_role: Counter[str] = Counter()
         has_critical_or_high = False
+        completeness = data.get("analysis_completeness")
+        legacy_reason_index = index_legacy_reference_reasons(
+            candidate_issues,
+            normalize_path=partial(report_path, scan_root=source_root),
+            completeness=completeness,
+        )
         for issue, scope in zip(candidate_issues, scopes, strict=True):
             if scope is not None and not scope.applicable:
                 removed_issues.append(issue)
@@ -4397,7 +4445,12 @@ class SecurityValidator(ValidatorBase):
                 skipped_by_role[scope.file_role] += 1
                 continue
             scanned_issues.append(issue)
-            finding, is_error = self._convert_skillspector_issue(issue)
+            finding, is_error = self._convert_skillspector_issue(
+                issue,
+                completeness=completeness,
+                scan_root=source_root,
+                legacy_reason_index=legacy_reason_index,
+            )
             if scope is not None:
                 finding.metadata.update(
                     {
@@ -4409,6 +4462,7 @@ class SecurityValidator(ValidatorBase):
             if is_error:
                 has_critical_or_high = True
             result.add_structured_finding(finding, is_error=is_error)
+        _record_skillspector_reference_summary(result)
 
         if skipped_generated:
             result.add_message(f"skillspector ignored {skipped_generated} generated artifact issue(s)")
@@ -4892,10 +4946,24 @@ class SecurityValidator(ValidatorBase):
         report("no_matches", f"SkillSpector baseline loaded but matched no findings ({counts}).", problem=False)
 
     @staticmethod
-    def _convert_skillspector_issue(issue: dict) -> tuple[Finding, bool]:
+    def _convert_skillspector_issue(
+        issue: dict,
+        *,
+        completeness: object = None,
+        scan_root: Path | None = None,
+        legacy_reason_index: Mapping[str, list[dict]] | None = None,
+    ) -> tuple[Finding, bool]:
         """Convert a single skillspector issue dict into a Finding.
 
         Returns (Finding, is_error) where is_error is True for CRITICAL/HIGH.
+
+        An ``AE1`` (incomplete referenced artifact analysis) finding is named
+        by its rule when SkillSpector leaves ``pattern`` empty, as releases
+        before v2.12.0 do. When SkillSpector says which file it did not
+        completely inspect and why, its metadata and suggestion carry that
+        (:func:`~skillevaluator.skillspector_references.issue_diagnostics`),
+        with the reasons of earlier releases read from *completeness* or
+        *legacy_reason_index*. Paths count only inside *scan_root*.
         """
         g = _issue_field(issue)
         issue_sev = str(g("severity", "UNKNOWN")).upper()
@@ -4904,19 +4972,33 @@ class SecurityValidator(ValidatorBase):
         suggestion = f"{explanation} {remediation}".strip() or None
         code_snippet = g("code_snippet")
         file_path, line_number = SecurityValidator._parse_issue_location(issue)
+        raw_pattern = issue.get("pattern")
+        if issue.get("id") == AE1_RULE_ID and not (isinstance(raw_pattern, str) and raw_pattern.strip()):
+            pattern = AE1_PATTERN
+        else:
+            pattern = g("pattern", "Unknown")
+        metadata = SecurityValidator._build_issue_metadata(issue)
+        metadata.update(
+            issue_diagnostics(
+                issue,
+                normalize_path=partial(report_path, scan_root=scan_root),
+                completeness=completeness,
+                legacy_reason_index=legacy_reason_index,
+            )
+        )
+        if evidence := metadata.get("skillspector_evidence"):
+            suggestion = reference_suggestion(evidence, remediation)
 
         finding = Finding(
             category="SECURITY",
             severity=issue_sev,
-            check_name=f"{g('pattern', 'Unknown')} ({g('id', '?')})",
-            message=SecurityValidator._build_issue_message(
-                g("category"), g("finding"), explanation, g("pattern", "Unknown")
-            ),
+            check_name=f"{pattern} ({g('id', '?')})",
+            message=SecurityValidator._build_issue_message(g("category"), g("finding"), explanation, pattern),
             file_path=file_path,
             line_number=line_number,
             line_content=code_snippet[:200] if code_snippet else None,
             suggestion=suggestion,
-            metadata=SecurityValidator._build_issue_metadata(issue),
+            metadata=metadata,
         )
         return finding, issue_sev in ("CRITICAL", "HIGH")
 

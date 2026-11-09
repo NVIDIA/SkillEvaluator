@@ -84,6 +84,16 @@ All notable changes to SkillEvaluator are documented in this file.
   now reported as incomplete, and so is a `DUPLICATE` reply with a `"0.9"`
   confidence, which made a HIGH finding in 0.8.0.
 
+- Tier 2 context deduplication now accepts up to 1,024 content chunks per
+  skill, up from 512. In 0.8.0 a skill with more chunks stopped the scan as
+  incomplete with `chunk_count_limit`, and `validate` exited 1 because Tier 2
+  gates by default. The scalar-comparison budget is now 536,346,624, so
+  embeddings of up to 1,024 dimensions reach all 1,024 chunks. Wider embeddings
+  keep a lower effective chunk limit, now 836 chunks at 1,536 dimensions, 724
+  at 2,048, 591 at 3,072, and 512 at 4,096, up from 512, 512, 418, and 362. The
+  cluster member limit follows the chunk ceiling to 1,024. The most clustering
+  work one skill can need doubles with the budget.
+
 - Tier 2 context deduplication now numbers `SHARED CONTENT n` blocks from the
   most repeated text, ties in first-seen order, instead of in first-seen order
   alone. In 0.8.0 a text repeated hundreds of times could get block 10 or later,

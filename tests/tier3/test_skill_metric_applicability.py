@@ -20,6 +20,7 @@ NEGATIVE = "N/A: negative case, so there is no skill use to measure"
 
 READ_SKILL = {"action": "Read", "action_input": {"file_path": "/skills/demo/SKILL.md"}, "observation": "ok"}
 READ_OTHER = {"action": "Read", "action_input": {"file_path": "/workspace/README.md"}, "observation": "ok"}
+READ_ALT = {"action": "Read", "action_input": {"file_path": "/skills/alt/SKILL.md"}, "observation": "ok"}
 
 
 def _judge(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
@@ -153,6 +154,42 @@ def test_positive_case_scores_both_skill_metrics(tmp_path, monkeypatch):
     assert numeric["skill_efficiency"] == 1.0
     assert set(rich["details"]["skill_efficiency"]) == {"routing", "tool_efficiency"}
     assert not metrics.not_applicable_metrics([rich])
+
+
+@pytest.mark.parametrize(
+    ("labels", "tool_calls", "na_reasons"),
+    [
+        ({"expected_skill": None}, [READ_OTHER], {"skill_efficiency": NEGATIVE}),
+        (
+            {"should_trigger": True, "expected_skill": "", "acceptable_skills": ["alt"]},
+            [READ_ALT],
+            {"skill_execution": NO_EXPECTED_SKILL, "skill_efficiency": NO_EXPECTED_SKILL},
+        ),
+        ({"expected_skill": "demo", "acceptable_skills": ["alt"]}, [READ_ALT], {}),
+    ],
+    ids=["negative", "positive-without-expected-skill", "positive-with-alternate"],
+)
+def test_baseline_staging_a_case_candidate_follows_the_case_rules(
+    tmp_path, monkeypatch, labels, tool_calls, na_reasons
+):
+    # A no-skill arm that stages a skill the case could activate is scored on the
+    # skill metrics, but a metric the case gives nothing to score stays N/A there too.
+    entry = _case(has_skill=False, workspace_skill_names=["demo", "alt"], skill_workspace_mode="group", **labels)
+    verifier = _verifier(tmp_path, monkeypatch, entry, tool_calls=tool_calls)
+
+    verifier.main()
+
+    numeric, rich = _outputs(tmp_path)
+    for metric in ("skill_execution", "skill_efficiency"):
+        if metric in na_reasons:
+            assert metric not in numeric
+            assert rich["details"][metric] == {"score": None, "status": "not_applicable", "reason": na_reasons[metric]}
+        else:
+            # Scored, not the baseline's N/A: the staged skill matches a case candidate.
+            assert rich["details"][metric].get("status") != "not_applicable"
+            assert numeric[metric] > 0
+    assert set(metrics.not_applicable_metrics([rich])) == set(na_reasons)
+    assert numeric["overall"] == metrics.overall_score(rich)
 
 
 # ── Verifier: trials without a trajectory ───────────────────────────────

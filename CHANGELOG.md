@@ -117,9 +117,10 @@ All notable changes to SkillEvaluator are documented in this file.
   negative case, such as the one `create-eval-dataset --full` writes, and both
   `skill_execution` (Discoverability) and `skill_efficiency` are N/A for a case
   that is not negative and names no `expected_skill`, such as a legacy case
-  without `expected_skill` and `should_trigger`. The trial overall, pass@k and
-  the arm's averages leave N/A metrics out, so absolute with-skill scores of
-  these cases change: a negative case scoring 1.0 on Security and
+  without `expected_skill` and `should_trigger`. The same holds in a baseline
+  arm that stages a skill the case could activate. The trial overall, pass@k
+  and the arm's averages leave N/A metrics out, so absolute with-skill scores
+  of these cases change: a negative case scoring 1.0 on Security and
   Discoverability and 0.8 on Correctness and Effectiveness now has an overall
   of 0.90, not 0.92. If no case is a positive case that names an
   `expected_skill`, for example when every case is negative, Efficiency has no

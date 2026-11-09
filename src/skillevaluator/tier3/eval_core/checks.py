@@ -5080,7 +5080,7 @@ def _tool_searches_root(action: str, args: dict, text: str, depth: int = 0, *, a
     joined from an argument list, which runs without a shell: its own words
     are literal, while a ``sh -c`` payload inside it is still shell text.
     """
-    if action in {"grep", "glob", "grep_files", "list_dir", "ls"}:
+    if action in {"grep", "glob", "grep_files", "list_dir", "ls", "list"}:
         for key in ("path", "dir_path"):
             value = args.get(key)
             if isinstance(value, str) and _search_path_is_root(value.strip()):
@@ -5325,6 +5325,8 @@ _PRODUCTIVE_TOOL_NAMES = frozenset(
     {
         "skill",
         "ls",
+        # OpenCode's directory listing.
+        "list",
         "list_dir",
         "grep",
         "grep_files",

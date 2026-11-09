@@ -50,6 +50,7 @@ def _classify(module, call: dict, expected_script: str | None = None) -> str:
         _call("Grep", pattern="TODO", path="src"),
         _call("Glob", pattern="**/*.py"),
         _call("LS", path="src"),
+        _call("list", path="/workspace"),
         _call("Bash", command="pytest -q"),
         _call("Skill", skill=_SKILL),
         _call("apply_patch", input="*** Begin Patch\n*** End Patch"),
@@ -347,6 +348,7 @@ def test_root_search_for_the_expected_script_scores_like_any_root_search(module,
         _call("Grep", pattern="release", path="/"),
         _call("Grep", pattern="release", path="//"),
         _call("LS", path="/"),
+        _call("list", path="/"),
         _call("grep_files", pattern="release", path="/"),
         _call("list_dir", dir_path="/", depth=5),
     ],
@@ -364,6 +366,7 @@ def test_native_searches_rooted_at_filesystem_root_are_wasted(module, call):
         _call("Glob", pattern="/work/**/*.yaml"),
         _call("Glob", pattern="**/*.py", path="/workspace"),
         _call("LS", path="/tmp"),
+        _call("list", path="/workspace/src"),
         _call("grep_files", pattern="release", path="/work"),
         _call("list_dir", dir_path="/work", depth=2),
     ],
@@ -449,6 +452,31 @@ def test_install_words_in_file_text_are_not_commands(module, call):
 def test_a_command_recorded_under_raw_is_still_checked(module):
     assert _classify(module, _call("exec_command", raw="pip install requests")) == "wasted"
     assert _classify(module, _call("exec_command", raw="pytest -q")) == "productive"
+
+
+@pytest.mark.parametrize("module", _MODULES)
+def test_opencode_run_scores_like_the_same_claude_code_run(module):
+    # OpenCode lists a directory with "list"; Claude Code uses "LS".
+    skill_md = f"/workspace/skills/{_SKILL}/SKILL.md"
+    opencode = [
+        _call("read", filePath=skill_md, path=skill_md),
+        _call("list", path="/workspace"),
+        _call("edit", filePath="/workspace/src/app.py", path="/workspace/src/app.py"),
+        _call("bash", command="pytest -q"),
+    ]
+    claude_code = [
+        _call("Read", file_path=skill_md),
+        _call("LS", path="/workspace"),
+        _call("Edit", file_path="/workspace/src/app.py"),
+        _call("Bash", command="pytest -q"),
+    ]
+
+    opencode_result = module.check_tool_efficiency(opencode, _SKILL)
+    claude_code_result = module.check_tool_efficiency(claude_code, _SKILL)
+
+    assert opencode_result == claude_code_result
+    assert opencode_result["score"] == 1.0
+    assert opencode_result["reason"] == "4/4 productive calls (100%)"
 
 
 @pytest.mark.parametrize("module", _MODULES)

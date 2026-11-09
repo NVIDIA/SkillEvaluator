@@ -667,6 +667,44 @@ Missing timing stays `N/A` (`null` in JSON), never zero, and follows the same
 complete-arm and matching-case rules as tokens. Timing is diagnostic and does
 not change scores, verdicts, or gates.
 
+### Token usage
+
+The canonical JSON payload also carries a `token_usage` object when at least
+one attempt recorded token counts. It sums the agent's own tokens per case, per
+agent arm, and over all agents, and says how many attempts each sum covers. It
+is a measurement: it is not scored and changes no metric, dimension, verdict,
+or gate.
+
+- Tokens are prompt plus completion (`total_tokens`). Prompt counts include
+  cached tokens, so cached tokens are never added again;
+  `uncached_prompt_tokens` is prompt minus cached. A missing cache counter
+  counts as 0.
+- Attempts that failed before scoring, such as an attempt that hit the agent
+  timeout, still used tokens and are counted. So are the scored attempts of an
+  arm that failed. `coverage.unscored_attempts` counts the attempts without a
+  score. `resources` keeps its own totals, which need every attempt of an arm
+  scored and measured.
+- Nothing is estimated. An attempt with a missing or invalid counter adds no
+  tokens. Its arm's `coverage.status` is then `partial` (other attempts were
+  measured) or `unavailable` (none were), and the totals cover only the measured
+  attempts. A skipped arm is `not_run`, and its `totals` are `null`.
+- `coverage` also gives `expected_attempts`, `observed_attempts`,
+  `measured_attempts`, and `reason_codes` such as `missing_token_counters`,
+  `invalid_token_counters`, and `missing_attempts`.
+- `delta.total_tokens` is with skill minus baseline, and
+  `delta.total_tokens_change_percent` divides it by the baseline. A change needs
+  complete counts in both arms for the same cases and attempts, and no failed
+  arm; otherwise `delta.status` is `unavailable` and `delta.reason_codes` and
+  `delta.reason` say why, for example `baseline_failed`, `case_scope_mismatch`,
+  or `agent_scope_mismatch` for the sum over all agents.
+
+`BENCHMARK.md` has a **Token Usage** section after Results at a Glance: one row
+per agent and one for all agents, with the case rows in a collapsed table that
+shows the first 50 cases. The Markdown report has the same table under its
+Tier 3 section. The HTML report lists every case under **Measured Agent
+Resources**. The full terminal report (`validate --verbose` or `-r cli`) and
+`tier3 evaluate --verbose` print the agent rows only.
+
 ### Failure reasons and per-trial rows
 
 Each evaluator card lists its per-trial evidence by eval case with the

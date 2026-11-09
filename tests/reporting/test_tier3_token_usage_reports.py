@@ -384,3 +384,31 @@ def test_markdown_tables_cap_case_rows_and_say_where_the_rest_are(tmp_path: Path
         section = _section(text, heading)
         assert len([row for row in _table_rows(section) if row[1].startswith("case-")]) == 50
         assert "10 more case row(s) are in the HTML report and the JSON payload." in section
+
+
+def test_docs_and_changelog_describe_the_token_usage_contract() -> None:
+    docs = (REPO_ROOT / "docs" / "reports.mdx").read_text(encoding="utf-8")
+    section = docs.split("### Token usage\n", 1)[1].split("\n### ", 1)[0]
+    for field in (
+        "token_usage",
+        "total_tokens",
+        "uncached_prompt_tokens",
+        "expected_attempts",
+        "observed_attempts",
+        "measured_attempts",
+        "unscored_attempts",
+        "missing_token_counters",
+        "invalid_token_counters",
+        "missing_attempts",
+        "total_tokens_change_percent",
+        "baseline_failed",
+        "case_scope_mismatch",
+        "agent_scope_mismatch",
+        "validate --verbose",
+        "tier3 evaluate --verbose",
+        "first 50 cases",
+    ):
+        assert field in section, field
+    unreleased = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8").split("\n## ", 2)[1]
+    added = unreleased.split("### Added\n", 1)[1].split("\n### ", 1)[0]
+    assert "token usage per case" in added

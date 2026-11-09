@@ -13,6 +13,16 @@ All notable changes to SkillEvaluator are documented in this file.
   Your Agent" docs page shows how to install it in Codex, Claude Code, OpenCode,
   OpenClaw, and other skill-aware agents.
 
+- Tier 3 reports show token usage per case, per agent and over all agents, as
+  a measurement that is not scored. The JSON payload gains `token_usage`;
+  `BENCHMARK.md` gains a **Token Usage** section; the Markdown report, the HTML
+  report (under Measured Agent Resources), `validate --verbose` and
+  `tier3 evaluate --verbose` show the same numbers. Cached tokens are part of
+  the prompt and are not added again. Attempts that failed before scoring count
+  as usage. Missing counters leave a partial total and are never estimated.
+  The with-skill change needs complete counts for the same attempts in both
+  arms.
+
 ### Changed
 
 - Align terminal grade and lift colors across compact, full, and direct Tier 3

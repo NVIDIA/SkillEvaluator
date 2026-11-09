@@ -33,6 +33,27 @@ enable checks or comments on SkillEvaluator's own pull requests. Each repository
 including SkillEvaluator itself, needs the generated caller pair committed
 there, with the trusted feedback caller on its default branch.
 
+SkillEvaluator evaluates its own `skills/` collection with
+`.github/workflows/skill-checks-all-tiers.yml`. Its consumer feedback listener is
+`.github/workflows/skill-feedback-all-tiers.yml`, preserving the public reusable
+publisher at `.github/workflows/feedback-all-tiers.yml`. The CLI selects this
+alternate filename when the conventional feedback file already defines a
+reusable workflow, and `ci status --tiers 1,2,3` recognizes it.
+
+The repository callers use the reviewed all-tier descriptor, Docker, NVIDIA Build,
+one attempt and one concurrent task, and the committed native datasets. Add
+`NVIDIA_API_KEY` to the `skillevaluator` execution environment or repository CI
+secrets before expecting provider-backed results. Without it, Tier 2 and Tier 3
+remain incomplete/advisory; a passing Tier 1 gate is not an all-tier evaluation
+pass. Forks retain keyless Tier 1 checks. On PRs, ordinary software changes
+select no skills, skill changes select the affected skills, and CI configuration
+changes select the collection. Pushes to `main` and manual runs scan the collection.
+
+The setup PR can exercise checks, but its first automatic comment requires
+the consumer feedback listener on `main` and a subsequent PR run. Repository
+maintainers configure branch protection separately if they want the Tier 1
+aggregate check to block merges.
+
 The evaluation workflow calls the existing hardened Tier 1 container workflow
 at the same evaluator revision. Tier 2 and Tier 3 run independently with
 `fail-fast: false`, Python 3.12, and only their tier's installed extras. Native

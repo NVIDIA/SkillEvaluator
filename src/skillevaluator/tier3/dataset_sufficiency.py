@@ -15,14 +15,19 @@ POLICY = "dataset-sufficiency-v1"
 def _format_dataset_size_summary(
     status: str,
     distinct_cases: int,
-    negative_cases: int,
+    negative_cases: int | None,
     reason: str | None = None,
 ) -> str:
     case_label = "case" if distinct_cases == 1 else "cases"
-    negative_label = "negative case" if negative_cases == 1 else "negative cases"
+    negative_summary = (
+        "negative cases not recorded"
+        if negative_cases is None
+        else f"{negative_cases} {'negative case' if negative_cases == 1 else 'negative cases'} "
+        f"(needs {MIN_NEGATIVE_CASES})"
+    )
     summary = (
         f"Dataset size: {status} — {distinct_cases} {case_label} (policy needs {MIN_DISTINCT_CASES}), "
-        f"{negative_cases} {negative_label} (needs {MIN_NEGATIVE_CASES})"
+        f"{negative_summary}"
     )
     if reason:
         summary += f"; {reason}"
@@ -57,13 +62,17 @@ def _first_noncoverage_reason(checks: list[dict]) -> str | None:
 def assess_dataset_sufficiency(
     *,
     distinct_cases: int,
-    negative_cases: int,
+    negative_cases: int | None,
     pass_rate_interval: dict | None,
     paired_cases: int | None,
     baseline_skipped: bool = False,
 ) -> dict:
     """Assess dataset coverage, pass-rate reliability, and paired lift coverage."""
-    coverage_met = distinct_cases >= MIN_DISTINCT_CASES and negative_cases >= MIN_NEGATIVE_CASES
+    coverage_met = (
+        None
+        if negative_cases is None
+        else distinct_cases >= MIN_DISTINCT_CASES and negative_cases >= MIN_NEGATIVE_CASES
+    )
     checks = [
         {
             "name": "coverage",
@@ -73,6 +82,9 @@ def assess_dataset_sufficiency(
             "reason": (
                 "Enough cases for this policy"
                 if coverage_met
+                else f"{distinct_cases} distinct cases and negative cases not recorded; "
+                f"requires {MIN_DISTINCT_CASES} and {MIN_NEGATIVE_CASES}"
+                if negative_cases is None
                 else f"{distinct_cases} distinct cases and {negative_cases} negative cases; "
                 f"requires {MIN_DISTINCT_CASES} and {MIN_NEGATIVE_CASES}"
             ),

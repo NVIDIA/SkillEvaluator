@@ -6248,6 +6248,7 @@ def _run_harbor_eval_impl(
         }
     )
     from skillevaluator.tier3.dataset_sufficiency import assess_dataset_sufficiency
+    from skillevaluator.tier3.harbor.report import _pick_best_agent
 
     summary = dataset_truth["dataset_summary"]
     agent_results = results.get("agents")
@@ -6259,13 +6260,17 @@ def _run_harbor_eval_impl(
             paired = lift.get("paired_comparison") if isinstance(lift.get("paired_comparison"), dict) else {}
             agent_result["dataset_sufficiency"] = assess_dataset_sufficiency(
                 distinct_cases=int(summary.get("total_tasks") or 0),
-                negative_cases=int(summary.get("negative_tasks") or 0),
+                negative_cases=(
+                    None if int(summary.get("unclassified_tasks") or 0) > 0 else int(summary.get("negative_tasks") or 0)
+                ),
                 pass_rate_interval=with_pass.get("rate_interval"),
                 paired_cases=paired.get("paired_cases"),
                 baseline_skipped=skip_baseline,
             )
         if agent_results:
-            results["dataset_sufficiency"] = next(iter(agent_results.values()))["dataset_sufficiency"]
+            best_agent = _pick_best_agent(agent_results)
+            if best_agent in agent_results:
+                results["dataset_sufficiency"] = agent_results[best_agent]["dataset_sufficiency"]
     selected_metrics = tuple(results.get("metrics", DEFAULT_METRICS))
     collected_attempt_policy = results.get("attempt_policy")
     attempt_policy = dict(collected_attempt_policy) if isinstance(collected_attempt_policy, dict) else {}

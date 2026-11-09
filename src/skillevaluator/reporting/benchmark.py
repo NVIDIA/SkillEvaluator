@@ -373,19 +373,20 @@ class BenchmarkReporter(ReporterBase):
                 lines.append("- Agents: not recorded (legacy or non-live result)")
 
         dataset_summary = _dataset_summary(ae)
-        if dataset_summary["total_tasks"] > 0:
+        has_dataset_tasks = dataset_summary["total_tasks"] > 0 and dataset_summary["source"] != "unavailable"
+        if has_dataset_tasks:
             composition = _dataset_composition_label(dataset_summary)
             lines.append(f"- Tasks: {dataset_summary['total_tasks']} evaluation tasks{composition}")
-        sufficiency = ae.get("dataset_sufficiency") if isinstance(ae, dict) else None
-        if isinstance(sufficiency, dict):
-            coverage_summary = _safe_scalar_text(sufficiency.get("coverage_summary"))
-            lines.append(
-                f"- {coverage_summary}"
-                if coverage_summary
-                else f"- Dataset sufficiency: {sufficiency.get('status', 'provisional')} — "
-                f"{_safe_scalar_text(sufficiency.get('reason')) or 'Dataset sufficiency is provisional'}"
-            )
-        elif dataset_summary["total_tasks"] == 0:
+            sufficiency = ae.get("dataset_sufficiency") if isinstance(ae, dict) else None
+            if isinstance(sufficiency, dict):
+                coverage_summary = _safe_scalar_text(sufficiency.get("coverage_summary"))
+                lines.append(
+                    f"- {coverage_summary}"
+                    if coverage_summary
+                    else f"- Dataset sufficiency: {sufficiency.get('status', 'provisional')} — "
+                    f"{_safe_scalar_text(sufficiency.get('reason')) or 'Dataset sufficiency is provisional'}"
+                )
+        else:
             lines.append("- Tasks: not recorded (legacy or non-live result)")
 
         dataset_provenance = agent_eval_publication_dataset_provenance(ae)

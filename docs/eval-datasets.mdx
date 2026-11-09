@@ -15,8 +15,10 @@ Tier 3 reports also assess dataset sufficiency under the
 `dataset-sufficiency-v1` policy: at least 10 distinct cases, at least 1
 negative case, a 95% Wilson pass-rate interval half-width no greater than
 0.20, and at least 10 paired cases for lift comparison. Runs that do not meet
-every assessable requirement are labeled provisional; this is a reporting
-policy, not a verdict or statistical-significance claim.
+every requirement are labeled provisional, as are runs where a requirement
+cannot be assessed (for example, a skipped baseline or a missing pass-rate
+interval). This is a reporting policy, not a verdict or statistical-significance
+claim.
 
 Tier 3 executes these cases through
 [Harbor](https://github.com/harbor-framework/harbor), the open-source agent

@@ -90,3 +90,16 @@ def test_skipped_baseline_makes_lift_comparison_unavailable():
         "Dataset size: provisional — 12 cases (policy needs 10), 2 negative cases (needs 1); "
         "baseline not run, so lift has no paired cases (policy dataset-sufficiency-v1)"
     )
+
+
+def test_unclassified_cases_make_negative_coverage_unknown():
+    result = assess_dataset_sufficiency(
+        distinct_cases=12,
+        negative_cases=None,
+        pass_rate_interval={"lower": 0.45, "upper": 0.55},
+        paired_cases=12,
+    )
+
+    assert result["checks"][0]["met"] is None
+    assert result["checks"][0]["observed"]["negative_cases"] is None
+    assert "negative cases not recorded" in result["coverage_summary"]

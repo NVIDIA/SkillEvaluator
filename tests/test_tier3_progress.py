@@ -946,6 +946,50 @@ def test_runner_rejects_custom_in_skill_results_root_before_creating_output(
     assert not results_root.exists()
 
 
+def test_root_dataset_sufficiency_uses_best_agent_selected_by_report(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.tier3.harbor import report
+
+    selected_agents: list[dict] = []
+
+    def select_best(agents):
+        selected_agents.append(agents)
+        return "opencode"
+
+    def collect(**_kwargs):
+        def agent_result(paired_cases: int) -> dict:
+            return {
+                "pass_at_k": {
+                    "with_skill": {"rate_interval": {"lower": 0.45, "upper": 0.55}},
+                    "lift": {"paired_comparison": {"paired_cases": paired_cases}},
+                }
+            }
+
+        return {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "metrics": [],
+            "agents": {"codex": agent_result(1), "opencode": agent_result(7)},
+        }
+
+    monkeypatch.setattr(report, "_pick_best_agent", select_best)
+    runner, skill = _stub_runner(monkeypatch, tmp_path, collect=collect)
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex", "opencode"],
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    assert "error" not in result
+    assert selected_agents and selected_agents[0] is result["agents"]
+    assert result["dataset_sufficiency"] == result["agents"]["opencode"]["dataset_sufficiency"]
+    assert result["dataset_sufficiency"]["checks"][2]["observed"]["paired_cases"] == 7
+
+
 def test_run_result_bounds_multibyte_launch_errors_for_report_loader(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

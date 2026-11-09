@@ -6,6 +6,15 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Run SkillEvaluator's own `skills/` through the pinned three-tier GitHub
+  callers, retaining Tier 1 as required and Tier 2/3 as advisory. A separate
+  consumer feedback listener preserves the reusable publisher's public path;
+  onboarding and status recognize this filename collision without replacing
+  reusable workflow definitions. Automatic comments activate after the
+  listener reaches the default branch.
+  Document the shared chat/judge/agent model input and model-availability
+  troubleshooting for provider-backed CI.
+
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI
   command, and ships Tier 3 evaluation cases for itself. A test keeps every
@@ -135,6 +144,10 @@ All notable changes to SkillEvaluator are documented in this file.
   after a `;`, which starts a new command.
 
 ### Fixed
+
+- Tier 2 includes qualifying shell comment blocks at end of file in context
+  deduplication. Previously those blocks disappeared unless a blank line or
+  code followed them, which could hide repeated guidance across shell files.
 
 - All-tier CI retains Tier 2's native reports as advisory while preserving
   failed and incomplete evaluation outcomes. GitHub `ci status` validates the

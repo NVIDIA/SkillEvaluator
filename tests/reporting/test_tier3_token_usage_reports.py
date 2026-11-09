@@ -29,6 +29,12 @@ from skillevaluator.evaluation.tier3_report import (
     render_agent_eval_html_report,
 )
 from skillevaluator.reporting import BenchmarkReporter, CLIReporter, HTMLReporter, MarkdownReporter
+from skillevaluator.reporting import base as reporting_base
+from skillevaluator.reporting.base import (
+    agent_eval_publication_evidence_complete,
+    agent_eval_report_serialization_issue,
+)
+from skillevaluator.reporting.dashboard_data import comparison_rows, parse_dashboard_report
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 from skillevaluator.tier3.harbor.report_data import load_agent_data
 from skillevaluator.tier3.result_display import render_result
@@ -119,6 +125,19 @@ def _set_reward_case(run: Path, agent: str, variant: str, trial: str, case: str)
     reward_file = run / agent / variant / "trials" / trial / "reward.json"
     reward = json.loads(reward_file.read_text(encoding="utf-8"))
     reward_file.write_text(json.dumps({**reward, "entry_id": case}), encoding="utf-8")
+
+
+def _nodes(value: Any) -> int:
+    """Count JSON values the way the report serialization limit does: every value is one node."""
+    if isinstance(value, dict):
+        return 1 + sum(_nodes(item) for item in value.values())
+    if isinstance(value, list):
+        return 1 + sum(_nodes(item) for item in value)
+    return 1
+
+
+def _without_token_usage(payload: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in payload.items() if key not in {"token_usage", "report_truncation"}}
 
 
 def _cli_output(result: Any) -> str:
@@ -251,31 +270,79 @@ def test_payload_has_no_token_usage_without_token_counts(tmp_path: Path) -> None
     assert "token_usage" not in result.metadata["agent_eval"]
 
 
-def test_payload_budget_drops_case_rows_with_the_trials_and_keeps_the_sums(
+def _cases_run(tmp_path: Path, agents: int, cases: int) -> Path:
+    run = tmp_path / "run"
+    rows = [(f"case-{index:03d}__a", (100 + index, 10, 0), True) for index in range(cases)]
+    for agent in range(agents):
+        _arm(run, f"agent-{agent}", "with-skill", rows)
+        _arm(run, f"agent-{agent}", "without-skill", rows)
+    return run
+
+
+def test_token_case_rows_go_before_any_score_evidence_under_the_size_budget(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    run = tmp_path / "run"
-    cases = [(f"case-{index}__a", (100 + index, 10, 0), True) for index in range(40)]
-    _arm(run, "codex", "with-skill", cases)
-    _arm(run, "codex", "without-skill", cases)
-    agents = load_agent_data(run)
+    agents = load_agent_data(_cases_run(tmp_path, agents=3, cases=10))
     full = build_agent_eval_payload("demo", copy.deepcopy(agents), use_llm_judge=False, enforce_embedded_size=False)
     assert full is not None
-    slim = copy.deepcopy(full)
-    slim["dataset"], slim["trials"] = [], []
-    for agent in slim["agents"].values():
-        agent["trials"], agent["trials_baseline"], agent["cases"] = [], [], []
-    assert drop_token_usage_cases(slim["token_usage"]) == 40
-    monkeypatch.setattr(tier3_report, "_MAX_EMBEDDED_REPORT_BYTES", tier3_report._serialized_payload_size(slim) + 4096)
+    sums = copy.deepcopy(full["token_usage"])
+    assert drop_token_usage_cases(sums) == 30
+    # Room for every trial and the token sums, but not the token case rows.
+    budget = tier3_report._serialized_payload_size({**_without_token_usage(full), "token_usage": sums}) + 2048
+    assert tier3_report._serialized_payload_size(full) > budget
+    monkeypatch.setattr(tier3_report, "_MAX_EMBEDDED_REPORT_BYTES", budget)
 
     bounded = build_agent_eval_payload("demo", agents, use_llm_judge=False)
 
     assert bounded is not None
-    assert bounded["token_usage"]["agents"]["codex"]["cases"] == []
-    assert (
-        bounded["token_usage"]["agents"]["codex"]["with_skill"] == full["token_usage"]["agents"]["codex"]["with_skill"]
-    )
-    assert bounded["report_truncation"]["omitted"]["dataset_and_trial_items"] >= 40
+    assert _without_token_usage(bounded) == _without_token_usage(full)
+    assert bounded["report_truncation"]["omitted"] == {"token_usage_case_rows": 30}
+    assert bounded["token_usage"] == sums
+    assert bounded["token_usage"]["case_rows_omitted"] == 30
+
+
+@pytest.mark.parametrize("room", ["sums", "truncation_record", "none"])
+def test_token_usage_never_pushes_a_payload_over_the_report_node_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, room: str
+) -> None:
+    agents = load_agent_data(_cases_run(tmp_path, agents=2, cases=6))
+    full = build_agent_eval_payload("demo", copy.deepcopy(agents), use_llm_judge=False)
+    assert full is not None and "report_truncation" not in full
+    base = _without_token_usage(full)
+    sums = copy.deepcopy(full["token_usage"])
+    drop_token_usage_cases(sums)
+    # A truncation record is about 20 nodes; the sums are more and the case rows far more.
+    extra = {"sums": _nodes(sums) + 40, "truncation_record": 30, "none": 0}[room]
+    assert extra < _nodes(full["token_usage"])
+    monkeypatch.setattr(reporting_base, "AGENT_EVAL_REPORT_MAX_NODES", _nodes(base) + extra)
+    assert agent_eval_report_serialization_issue(full) is not None
+    assert agent_eval_report_serialization_issue(base) is None
+
+    bounded = build_agent_eval_payload("demo", agents, use_llm_judge=False)
+
+    assert bounded is not None
+    assert agent_eval_report_serialization_issue(bounded) is None
+    assert _without_token_usage(bounded) == base
+    assert agent_eval_publication_evidence_complete(bounded) == agent_eval_publication_evidence_complete(base)
+    if room == "sums":
+        assert bounded["report_truncation"]["omitted"] == {"token_usage_case_rows": 12}
+        assert bounded["token_usage"] == sums
+    elif room == "truncation_record":
+        assert bounded["report_truncation"]["omitted"] == {"token_usage": 1, "token_usage_case_rows": 12}
+        assert "token_usage" not in bounded
+    else:
+        assert bounded == base
+
+
+def test_dashboards_do_not_read_dropped_token_rows_as_missing_trials(run_result: tuple[Path, Any]) -> None:
+    _run_dir, result = run_result
+    report = copy.deepcopy(result.metadata["agent_eval"])
+    report["report_truncation"] = {"truncated": True, "omitted": {"token_usage_case_rows": 4, "token_usage": 1}}
+
+    data = parse_dashboard_report(report, "report.json")
+
+    codex = [row for row in comparison_rows(data.rows) if row["_agent_key"] == "codex"]
+    assert [row["comparison_status"] for row in codex] == ["comparable"]
 
 
 # -- terminal ----------------------------------------------------------------------

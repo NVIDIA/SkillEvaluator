@@ -1045,15 +1045,14 @@ def build_agent_eval_payload(
     from skillevaluator.tier3.token_usage import USAGE_ONLY_ATTEMPT_KEYS, build_token_usage
 
     # Measured, never scored: token usage per case and agent, counting attempts
-    # that failed before scoring. Scores and ``resources`` do not read it.
+    # that failed before scoring. Scores and ``resources`` do not read it. It
+    # joins the payload after the budget, so it never displaces score evidence.
     token_usage = build_token_usage(
         {
             name: {**agent, **{key: agents.get(name, {}).get(key) for key in USAGE_ONLY_ATTEMPT_KEYS}}
             for name, agent in agent_payloads.items()
         }
     )
-    if token_usage:
-        payload["token_usage"] = token_usage
 
     _layer_llm_insights(
         payload,
@@ -1085,6 +1084,10 @@ def build_agent_eval_payload(
         )
     payload = _sanitize_json_numbers(payload)
     _enforce_report_payload_budget(payload, report_budget, enforce_size=enforce_embedded_size)
+    if token_usage:
+        _add_token_usage(
+            payload, _sanitize_json_numbers(token_usage), report_budget, enforce_size=enforce_embedded_size
+        )
     return payload
 
 
@@ -1425,9 +1428,6 @@ def _enforce_report_payload_budget(
                     agent[key] = []
             if _compact_agent_conditions(agent):
                 omitted_items += 1
-        from skillevaluator.tier3.token_usage import drop_token_usage_cases
-
-        omitted_items += drop_token_usage_cases(payload.get("token_usage"))
         report_budget.omit("dataset_and_trial_items", omitted_items)
         refresh_signal()
 
@@ -1473,6 +1473,55 @@ def _enforce_report_payload_budget(
         _replace_with_minimal_payload(payload, report_budget)
 
     refresh_signal()
+
+
+def _add_token_usage(
+    payload: dict[str, Any], token_usage: dict[str, Any], report_budget: _ReportBudget, *, enforce_size: bool
+) -> None:
+    """Add measured token usage to a payload the budget already bounded, within what it has left.
+
+    Token usage is unscored, so it may never change which evidence the payload
+    keeps, push it past the embedded size budget, or make it fail the report
+    serialization limits (nodes, depth and text) that every reporter checks.
+    Its per-case rows go first, then the sums, and ``report_truncation`` records
+    each drop. If not even that record fits, the payload stays as the budget
+    left it. Read-only payloads (``enforce_size=False``) keep everything.
+    """
+    payload["token_usage"] = token_usage
+    if not enforce_size:
+        return
+    from skillevaluator.reporting.base import agent_eval_report_serialization_issue
+    from skillevaluator.tier3.token_usage import drop_token_usage_cases
+
+    def fits() -> bool:
+        # The minimal last-resort payload carries no details.
+        return (
+            "payload_sections" not in report_budget.omitted
+            and _serialized_payload_size(payload) <= _MAX_EMBEDDED_REPORT_BYTES
+            and agent_eval_report_serialization_issue(payload) is None
+        )
+
+    def omit(section: str, count: int) -> None:
+        report_budget.omit(section, count)
+        if report_budget.truncated:
+            payload["report_truncation"] = report_budget.signal()
+
+    if fits():
+        return
+    omitted_before = dict(report_budget.omitted)
+    truncation_before = payload.get("report_truncation")
+    omit("token_usage_case_rows", drop_token_usage_cases(token_usage))
+    if fits():
+        return
+    del payload["token_usage"]
+    omit("token_usage", 1)
+    if fits():
+        return
+    report_budget.omitted = omitted_before
+    if truncation_before is None:
+        payload.pop("report_truncation", None)
+    else:
+        payload["report_truncation"] = truncation_before
 
 
 def _serialized_payload_size(payload: dict[str, Any]) -> int:

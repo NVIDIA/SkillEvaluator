@@ -488,8 +488,8 @@ def per_agent_token_usage(usage: object) -> dict[str, Any] | None:
 def drop_token_usage_cases(usage: object) -> int:
     """Empty the per-case rows of ``usage`` in place and return how many were dropped.
 
-    The report payload budget drops them with the trials they summarize; the
-    agent and all-agent sums stay.
+    The report payload drops them first when it would pass its limits; the
+    agent and all-agent sums stay, and ``case_rows_omitted`` counts the rows.
     """
     agents = usage.get("agents") if isinstance(usage, dict) else None
     dropped = 0
@@ -497,4 +497,6 @@ def drop_token_usage_cases(usage: object) -> int:
         if isinstance(agent, dict) and isinstance(agent.get("cases"), list) and agent["cases"]:
             dropped += len(agent["cases"])
             agent["cases"] = []
+    if dropped and isinstance(usage, dict):
+        usage["case_rows_omitted"] = dropped
     return dropped

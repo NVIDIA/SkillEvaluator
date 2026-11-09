@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Validate the security boundaries of the opt-in three-tier pipeline."""
 
+import json
 from pathlib import Path
 
 import yaml
@@ -10,6 +11,14 @@ ROOT = Path(__file__).parents[2]
 
 def load(path):
     return list(yaml.load_all((ROOT / path).read_text(), Loader=yaml.BaseLoader))[-1]
+
+
+def test_candidate_onboarding_uses_the_released_tier1_image():
+    candidate = json.loads((ROOT / "src/skillevaluator/ci-release-all-tiers.json").read_text())
+    released = json.loads((ROOT / "src/skillevaluator/ci-release.json").read_text())
+    # Released schema capabilities, such as multi-valued metadata.domain,
+    # must also work for new all-tier consumers of the same package.
+    assert candidate["image"] == released["image"]
 
 
 def test_required_tier1_reuses_hardened_workflow_and_parallel_paid_tiers():

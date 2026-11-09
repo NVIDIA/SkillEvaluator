@@ -17,4 +17,4 @@ jobs:
       tools-repository: NVIDIA/SkillEvaluator
       tools-ref: 472e8becc289a2dc1131e550ebd335c08249918d
       trusted-workflow-ref: NVIDIA/SkillEvaluator/.github/workflows/evaluate-all-tiers.yml@472e8becc289a2dc1131e550ebd335c08249918d
-      trusted-caller-blobs: d0de5537097dc01b7fd13c6186a4b4f3ad0d518b
+      trusted-caller-blobs: 3b199427ef2107cd4f4224735aad274d5784f118

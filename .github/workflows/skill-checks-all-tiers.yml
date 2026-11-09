@@ -28,7 +28,7 @@ jobs:
       runner: ubuntu-24.04
       tools-repository: NVIDIA/SkillEvaluator
       tools-ref: 472e8becc289a2dc1131e550ebd335c08249918d
-      image: ghcr.io/nvidia/skillevaluator-tier1@sha256:a3baec51f48145cdf9de05a5ab054d9576f62f1de0f5276b788410f5c17747d4
+      image: ghcr.io/nvidia/skillevaluator-tier1@sha256:9d5483243918937be4f2178f74cf7c622a531dee41e3176906994d52fa14950a
       n-attempts: 1
       n-concurrent: 1
       timeout-minutes: 300

@@ -416,18 +416,21 @@ _PATH_COMPONENT_END = r"(?=/|$|[\s'\"`;|&<>(),:])"
 # target word of an output redirection (">", ">>", ">|", "&>", "N>"), the
 # operands of tee, and the operands of a sed with -i or --in-place. A
 # redirection inside a quoted string (a "bash -c" script, or the arrow of
-# "echo 'a -> b'") has a target that ends with that string. Without an option
-# that gives the script (-e, -f, --expression, --file, or a short option
-# cluster in which e or f comes before i, whose attached text is the backup
-# suffix), the first sed operand is the script and is left out; with one, every
-# operand counts, the script too. sed options are read case-sensitively, so -E
-# is not -e. An empty operand is the suffix of BSD sed's "-i ''". A read such as
-# "cat ~/.gitconfig 2>/dev/null" writes /dev/null, and an fd duplication or
-# close ("2>&1", ">&2", "2>&-") has no file. An fd number is matched from the
-# start of its digits, so a long digit run is read once. A tee or sed argument
-# list ends at the end of its line; a backslash line continuation joins two
-# lines first.
-_SHELL_WORD = r"(?:\"[^\"]*\"|'[^']*'|[^\s;|&<>()'\"`])+"
+# "echo 'a -> b'") has a target that ends with that string. A double quote
+# escaped with a backslash does not end the string, as in
+# bash -c "echo x >> \"$HOME/.zprofile\"", and a backslash in a word escapes
+# the character after it, so \" does not start a quoted string either. Without
+# an option that gives the script (-e, -f, --expression, --file, or a short
+# option cluster in which e or f comes before i, whose attached text is the
+# backup suffix), the first sed operand is the script and is left out; with
+# one, every operand counts, the script too. sed options are read
+# case-sensitively, so -E is not -e. An empty operand is the suffix of BSD
+# sed's "-i ''". A read such as "cat ~/.gitconfig 2>/dev/null" writes
+# /dev/null, and an fd duplication or close ("2>&1", ">&2", "2>&-") has no
+# file. An fd number is matched from the start of its digits, so a long digit
+# run is read once. A tee or sed argument list ends at the end of its line; a
+# backslash line continuation joins two lines first.
+_SHELL_WORD = r"(?:\\.|\"[^\"]*\"|'[^']*'|[^\s;|&<>()'\"`\\])+"
 _QUOTED_STRING_RE = re.compile(r"\"[^\"]*\"|'[^']*'")
 _REDIRECT_TARGET_RE = re.compile(r"(?:&>>?|(?<![0-9])[0-9]*>>?[|&]?)\s*(" + _SHELL_WORD + ")")
 _FD_REDIRECT_TARGET_RE = re.compile(r"[0-9]*-?")
@@ -859,10 +862,12 @@ def _shell_write_targets(command: str) -> list[str]:
     quoted = [offset for quote in _QUOTED_STRING_RE.finditer(text) for offset in quote.span()]
 
     def argument_text(match: re.Match[str]) -> str:
-        # A redirection, tee or sed inside a quoted string ends with that string.
+        # A redirection, tee or sed inside a quoted string ends with that
+        # string, unless the quote that ends it is an escaped \".
         index = bisect.bisect_right(quoted, match.start())
-        end = min(match.end(1), quoted[index] - 1) if index % 2 else match.end(1)
-        return text[match.start(1) : end]
+        if index % 2 and text[quoted[index] - 2 : quoted[index]] != '\\"':
+            return text[match.start(1) : min(match.end(1), quoted[index] - 1)]
+        return text[match.start(1) : match.end(1)]
 
     targets = [
         target

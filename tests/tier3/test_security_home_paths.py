@@ -169,6 +169,10 @@ PROTECTED_WRITES = [
     pytest.param(_bash("sed -i '' 's/a/b/' /Users/alice/.zshrc"), id="sed-in-place-empty-suffix"),
     pytest.param(_bash("sh -c 'echo x >> $HOME/.bashrc'"), id="sh-c-script"),
     pytest.param(_bash('sudo sh -c "echo x >> /home/agent/.profile"'), id="sudo-sh-c-script"),
+    # An escaped quote inside a double-quoted script does not end the target.
+    pytest.param(_bash('bash -c "echo x >> \\"$HOME/.zprofile\\""'), id="escaped-quote-target"),
+    pytest.param(_bash('bash -c "echo x >> \\"$HOME/.bashrc\\""'), id="escaped-quote-target-bashrc"),
+    pytest.param(_bash('sh -c "printf x | tee -a \\"/home/agent/.zprofile\\""'), id="escaped-quote-tee"),
     pytest.param(
         {"action": "exec_command", "action_input": {"cmd": ["bash", "-lc", "echo x >> $HOME/.bashrc"]}},
         id="argv-list-script",
@@ -326,6 +330,10 @@ BENIGN_ACTIONS = [
     pytest.param(_bash('printf "%s -> %s\\n" "$HOME/.zshrc" "$HOME/.zprofile"'), id="printf-arrow"),
     pytest.param(_bash('echo "build -> done"\nnpm test\ngrep -q nvm "$HOME/.bashrc"'), id="arrow-multiline"),
     pytest.param(_bash('echo "pipe it to tee and" "$HOME/.zprofile"'), id="tee-in-quoted-text"),
+    pytest.param(_bash('bash -c "echo \\"a -> b\\" && cat ~/.gitconfig"'), id="escaped-quote-arrow"),
+    pytest.param(
+        _bash('bash -c "echo \\"x\\" > /tmp/out; cat \\"$HOME/.zprofile\\""'), id="escaped-quote-write-elsewhere"
+    ),
     pytest.param(_argv("grep", "-n", "->", "/home/agent/.bashrc"), id="argv-list-arrow"),
     pytest.param(_argv("echo", "a", ">", "/home/agent/.zprofile"), id="argv-list-literal-gt"),
     pytest.param(_shell_argv("bash", "-lc", "grep -n '->' $HOME/.zprofile"), id="argv-script-arrow"),
@@ -499,6 +507,9 @@ def test_a_url_tilde_user_is_not_a_home_directory() -> None:
         # A redirection inside a quoted string ends with that string.
         ('echo "a -> b"; cat ~/.zprofile; echo "c"', None),
         ('bash -c "echo x >> ~/.zprofile"', "~/.zprofile"),
+        # An escaped quote does not end the string, and \" in a word does not start one.
+        ('bash -c "echo x >> \\"$HOME/.zprofile\\""', "~/.zprofile"),
+        ('bash -c "echo \\"a -> b\\" && cat ~/.gitconfig"', None),
         # tee operands; the longest entry wins.
         ("echo x | tee /tmp/a $HOME/.zprofile", "~/.zprofile"),
         ("echo x | sudo tee /etc/profile.d/npm.sh", "/etc/profile.d"),

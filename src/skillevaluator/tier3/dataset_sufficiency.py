@@ -85,9 +85,15 @@ def assess_dataset_sufficiency(
         }
     )
     unmet = [check["reason"] for check in checks if check["met"] is not True]
+    status = "sufficient" if not unmet else "provisional"
+    negative_label = "no negative case" if negative_cases == 0 else f"{negative_cases} negative case(s)"
     return {
         "policy": POLICY,
-        "status": "sufficient" if not unmet else "provisional",
+        "status": status,
+        "coverage_summary": (
+            f"Dataset size: {status} — {distinct_cases} of {MIN_DISTINCT_CASES} cases, "
+            f"{negative_label} (policy {POLICY})"
+        ),
         "checks": checks,
         "reason": "Enough cases for this policy" if not unmet else "provisional: " + "; ".join(unmet),
     }

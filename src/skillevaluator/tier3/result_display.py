@@ -882,6 +882,10 @@ def render_evaluation_result(
     has_cases = False
     if isinstance(agents, Mapping) and agents and not incomplete:
         has_cases = _case_first_summary(result, console=console, skill_path=skill_path)
+    sufficiency = result.get("dataset_sufficiency")
+    if isinstance(sufficiency, Mapping) and isinstance(sufficiency.get("coverage_summary"), str):
+        style = "yellow" if sufficiency.get("status") == "provisional" else "dim"
+        console.print(Text(safe(sufficiency["coverage_summary"]), style=style))
     detailed = verbose or not has_cases
     if isinstance(agents, Mapping) and agents and not incomplete and detailed:
         metrics = _display_metrics(result, agents)

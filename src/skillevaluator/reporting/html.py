@@ -988,6 +988,17 @@ def _sanitize_tier3_dataset_case(value: dict[str, Any]) -> dict[str, Any]:
 def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
     """Normalize template-facing types after merging canonical and fallback data."""
     payload = _json_safe_tier3_payload(value)
+    sufficiency = payload.get("dataset_sufficiency")
+    if isinstance(sufficiency, dict) and sufficiency.get("status") in {"sufficient", "provisional"}:
+        coverage_summary = sufficiency.get("coverage_summary")
+        reason = sufficiency.get("reason")
+        payload["dataset_sufficiency"] = {
+            "status": sufficiency["status"],
+            "coverage_summary": coverage_summary[:512] if isinstance(coverage_summary, str) else "",
+            "reason": reason[:512] if isinstance(reason, str) else "",
+        }
+    else:
+        payload.pop("dataset_sufficiency", None)
     payload["summary"] = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
     payload["agents"] = {
         identifier: _sanitize_tier3_agent(agent) for identifier, agent in _tier3_agent_entries(payload.get("agents"))

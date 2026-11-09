@@ -21,6 +21,7 @@ from skillevaluator.models import Finding, Severity, ValidationResult
 from skillevaluator.reporting import BenchmarkReporter, CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter
 from skillevaluator.reporting.base import agent_eval_publication_evidence_complete, get_skip_reason
 from skillevaluator.reporting.html import _sanitize_tier3_display_payload
+from skillevaluator.tier3.dataset_sufficiency import assess_dataset_sufficiency
 
 
 def _plain_cli(output: str) -> str:
@@ -192,6 +193,37 @@ def _complete_tier3_result(
     payload["dimensions"] = payload["agents"]["codex"]["dimensions"]
     result.metadata["publication_target"] = dict(publication_target)
     return result
+
+
+@pytest.mark.parametrize(
+    ("distinct_cases", "negative_cases", "pass_rate_interval", "paired_cases", "status"),
+    [
+        (4, 0, {"lower": 0.1, "upper": 0.9}, 4, "provisional"),
+        (12, 2, {"lower": 0.45, "upper": 0.55}, 12, "sufficient"),
+    ],
+)
+def test_html_overview_renders_dataset_size_status(
+    distinct_cases, negative_cases, pass_rate_interval, paired_cases, status
+) -> None:
+    result = _complete_tier3_result("DATASET-SUFFICIENCY", score=0.9, runtime_seconds=1.0)
+    sufficiency = assess_dataset_sufficiency(
+        distinct_cases=distinct_cases,
+        negative_cases=negative_cases,
+        pass_rate_interval=pass_rate_interval,
+        paired_cases=paired_cases,
+    )
+    payload = result.metadata["agent_eval"]
+    payload["dataset_summary"] = {"total_tasks": distinct_cases, "negative_tasks": negative_cases}
+    payload["dataset_sufficiency"] = sufficiency
+    payload["summary"]["dataset_summary"] = payload["dataset_summary"]
+    payload["summary"]["dataset_sufficiency"] = sufficiency
+    payload["agents"]["codex"]["dataset_sufficiency"] = sufficiency
+
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+
+    assert sufficiency["coverage_summary"] in html
+    if status == "provisional":
+        assert "t3-dataset-sufficiency warning" in html
 
 
 def _publication_ready_results(marker: str) -> list[ValidationResult]:

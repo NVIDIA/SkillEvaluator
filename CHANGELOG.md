@@ -7,7 +7,9 @@ All notable changes to SkillEvaluator are documented in this file.
 ### Added
 
 - Report dataset sufficiency as sufficient or provisional using distinct-case,
-  negative-case, Wilson interval, and paired-case coverage requirements.
+  negative-case, Wilson interval, and paired-case coverage requirements. Show
+  the dataset-size status in evaluation, validation, HTML, and BENCHMARK output;
+  validation coverage notes remain informational.
 
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI

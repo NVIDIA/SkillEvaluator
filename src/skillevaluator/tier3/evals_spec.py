@@ -651,6 +651,17 @@ def _validate_dataset_contents(path: Path, results: list[CheckResult]) -> None:
             f"Dataset has {len(entries)} {'entry' if len(entries) == 1 else 'entries'}.",
         )
     )
+    from skillevaluator.tier3.dataset_sufficiency import generation_coverage_summary
+    from skillevaluator.tier3.harbor.report_data import summarize_dataset_entries
+
+    coverage = summarize_dataset_entries(entries)
+    results.append(
+        CheckResult(
+            "Dataset size",
+            "ok",
+            generation_coverage_summary(coverage["total_tasks"], coverage["negative_tasks"]),
+        )
+    )
 
     try:
         validate_case_ids(entry.get("id") for entry in entries)

@@ -2515,6 +2515,12 @@
                 {% endif %}
                 {% endif %}
             </div>
+            {% if tier3.dataset_sufficiency and tier3.dataset_sufficiency.coverage_summary %}
+            <p class="t3-dataset-sufficiency{% if tier3.dataset_sufficiency.status == 'provisional' %} warning{% endif %}"
+               {% if tier3.dataset_sufficiency.status == 'provisional' %}style="color:var(--warning-color);font-weight:600"{% endif %}>
+                {{ tier3.dataset_sufficiency.coverage_summary }}
+            </p>
+            {% endif %}
             {% if harbor_jobs %}
             <div class="t3-harbor-panel">
                 <div>
@@ -2869,11 +2875,6 @@
             </section>
             {% endif %}
 
-            {% if tier3.dataset_sufficiency %}
-            <p class="t3-dataset-sufficiency{% if tier3.dataset_sufficiency.status == 'provisional' %} warning{% endif %}">
-                Dataset sufficiency: {{ tier3.dataset_sufficiency.status }} — {{ tier3.dataset_sufficiency.reason }}
-            </p>
-            {% endif %}
             {% if tier3.pass_at_k and tier3.pass_at_k.with_skill %}
             <details class="t3-details" id="tier3-pass-at-k" open>
                 <summary>Pass@{{ t3_max_attempts }} Summary</summary>

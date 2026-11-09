@@ -421,7 +421,11 @@ class CLIReporter(ReporterBase):
         if isinstance(sufficiency, dict):
             status = str(sufficiency.get("status") or "provisional")
             style = "yellow" if status == "provisional" else "green"
-            console.print(f"  [{style}]Dataset sufficiency: {status} — {sufficiency.get('reason', '')}[/{style}]")
+            line = (
+                sufficiency.get("coverage_summary")
+                or f"Dataset sufficiency: {status} — {sufficiency.get('reason', '')}"
+            )
+            console.print(f"  [{style}]{line}[/{style}]")
         CLIReporter._print_harbor_artifacts(agent_eval, console)
         console.print(f"  {trial_coverage(agent_eval).text}")
         console.print()

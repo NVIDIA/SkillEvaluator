@@ -123,19 +123,24 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - A Tier 1 security scan no longer stops as `INCOMPLETE` with
   `skillspector JSON field 'analysis_completeness' reports incomplete analysis
-  (status 'partial')` when the skill's instructions name a file the skill does
-  not bundle, such as a file it writes at run time or a source file elsewhere
-  in the repository. SkillSpector records such a reference as a nonfatal
-  `reference_missing` row, or `reference_unresolved` before v2.12.0, but still
-  inspects every bundled file. When these references are the report's only
-  gaps, the scan now passes with a warning that quotes up to three of them.
+  (status 'partial')` when the skill's instructions name a file that
+  SkillSpector did not scan, such as a file the skill writes at run time or a
+  source file elsewhere in the repository. SkillSpector v2.12.0 to v2.13.3
+  record such a reference as a nonfatal `reference_missing` row, and v2.10 and
+  v2.11 as `reference_unresolved`. When these references are the report's only
+  gaps, or the only gaps besides accepted referenced images, the scan now
+  passes with a warning that names the file and line of up to three of them.
   Each row must be in a regular, single-link file that the report lists once
-  and that is inside the skill and not reached through a symlink; before
-  v2.12.0 the report's `references` list must also record the reference as
-  `missing`. A reference that matches several bundled files
+  and that is inside the skill and not reached through a symlink, and the
+  report's `references` list must record a `missing` reference on that line.
+  The line must not name a symlink, a file the report does not list, or a
+  directory left out of the scanned copy, such as `evals/` or `node_modules/`,
+  or any file in it. A reference that matches several bundled files
   (`reference_unresolved` from v2.12.0), a fatal or other ledger row, an
   uninspected file, a degraded analyzer, or a limitation still leaves the scan
-  `INCOMPLETE`.
+  `INCOMPLETE`. SkillSpector v2.13.4 and later report a scan whose only gaps
+  are missing references as `complete_with_caveats`, which is not accepted
+  yet.
 
 ## 0.8.0 - 2026-11-05
 

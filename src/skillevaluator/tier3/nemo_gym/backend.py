@@ -103,6 +103,35 @@ def nemo_gym_version(gym_bin: str) -> str | None:
     return None
 
 
+NEMO_GYM_SOURCE = "git+https://github.com/NVIDIA-NeMo/Gym@792fa142f58277aecff05d402061d647e9a92acf"
+
+
+def nemo_gym_cli_error(gym_bin: str) -> str | None:
+    """Return an error when the installed ``gym eval run`` lacks the Harbor task-folder interface this backend uses."""
+    from skillevaluator.tier3.nemo_gym.runner import gym_launch_environment
+
+    try:
+        completed = subprocess.run(
+            [gym_bin, "eval", "run", "--help"],
+            cwd=Path(gym_bin).parent,
+            env=gym_launch_environment({}),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        help_text = completed.stdout + completed.stderr
+    except (OSError, subprocess.SubprocessError):
+        help_text = ""
+    if "TARGET" in help_text and "--sandbox" in help_text:
+        return None
+    return (
+        f"the NeMo Gym CLI at {gym_bin} has no Harbor task-folder `gym eval run TARGET --sandbox` interface "
+        f"(the PyPI nemo-gym 0.7.0 release lacks it); install nemo-gym from {NEMO_GYM_SOURCE}"
+    )
+
+
 def nemo_gym_capability_errors(
     *,
     agents: list[str],

@@ -272,6 +272,9 @@ import json, os, sys
 from pathlib import Path
 
 args = sys.argv[1:]
+if "--help" in args:
+    print("usage: gym eval run TARGET [--sandbox PROVIDER]")
+    sys.exit(0)
 tasks = Path(args[2])
 output = Path(args[args.index("--output") + 1])
 repeats = int(next(a for a in args if a.startswith("+num_repeats=")).split("=", 1)[1])
@@ -543,7 +546,9 @@ def test_gym_bin_is_absolute_and_version_follows_symlinks(tmp_path: Path, monkey
 def test_failed_gym_launch_is_reported_not_succeeded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch)
     failing = tmp_path / "failing-gym"
-    failing.write_text("#!/bin/sh\nexit 3\n")
+    failing.write_text(
+        '#!/bin/sh\ncase "$*" in *--help*) echo "gym eval run TARGET --sandbox"; exit 0;; esac\nexit 3\n'
+    )
     failing.chmod(0o755)
     monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_BIN", str(failing))
     result = _run_fake_gym(skill, tmp_path)
@@ -915,6 +920,7 @@ def test_doctor_reports_nemo_gym_readiness(tmp_path: Path, monkeypatch: pytest.M
     gym.chmod(0o755)
     monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_BIN", str(gym))
     monkeypatch.setattr(backend, "nemo_gym_version", lambda _bin: "0.7.0")
+    monkeypatch.setattr(backend, "nemo_gym_cli_error", lambda _bin: None)
     monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(commands, "_docker_daemon_error", lambda _env: None)
     monkeypatch.setattr(gym_runner, "_model_endpoint", lambda model: (model or "m", "http://127.0.0.1:9/v1", "k"))
@@ -1447,3 +1453,19 @@ def test_stop_failure_during_an_interrupt_keeps_the_interrupt(tmp_path: Path, mo
             reporter=_InterruptOnce(),
         )
     assert isinstance(raised.value.__cause__, RuntimeError)
+
+
+def test_incompatible_gym_cli_is_rejected_before_staging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.tier3.nemo_gym.backend import nemo_gym_cli_error
+
+    skill, env_log = _fake_gym_skill(tmp_path, monkeypatch)
+    old_gym = tmp_path / "old-gym"
+    old_gym.write_text("#!/bin/sh\necho 'usage: gym eval run [--input INPUT]'\nexit 2\n")
+    old_gym.chmod(0o755)
+    assert "PyPI nemo-gym 0.7.0" in (nemo_gym_cli_error(str(old_gym)) or "")
+    monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_BIN", str(old_gym))
+    result = _run_fake_gym(skill, tmp_path)
+    assert "TARGET --sandbox" in json.dumps(result)
+    assert not env_log.exists()
+    results_root = tmp_path / "results"
+    assert not results_root.exists() or not any(results_root.iterdir())

@@ -46,6 +46,7 @@ from skillevaluator.tier3.nemo_gym.backend import (
     native_mcp_servers_declared,
     nemo_gym_bin,
     nemo_gym_capability_errors,
+    nemo_gym_cli_error,
     nemo_gym_sandbox_error,
     nemo_gym_timeout_s,
     nemo_gym_version,
@@ -792,6 +793,8 @@ def run_nemo_gym_eval(
         errors.append(str(exc))
     if sandbox_error := nemo_gym_sandbox_error():
         errors.append(sandbox_error)
+    if not errors and (cli_error := nemo_gym_cli_error(gym)):
+        errors.append(cli_error)
     if errors:
         return _config_failure("; ".join(errors))
     try:

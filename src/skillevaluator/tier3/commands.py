@@ -1056,6 +1056,7 @@ def _nemo_gym_doctor_rows(
         model_url_credential_error,
         nemo_gym_bin,
         nemo_gym_capability_errors,
+        nemo_gym_cli_error,
         nemo_gym_settings_errors,
         nemo_gym_version,
     )
@@ -1072,6 +1073,8 @@ def _nemo_gym_doctor_rows(
                 f"{NEMO_GYM_BIN_ENV} to its `gym` executable",
             )
         )
+    elif cli_error := nemo_gym_cli_error(gym):
+        rows.append(("NeMo Gym CLI", "fail", cli_error))
     elif version := nemo_gym_version(gym):
         rows.append(("NeMo Gym CLI", "pass", f"{gym} (nemo-gym {version})"))
     else:

@@ -248,6 +248,7 @@ def nemo_gym_preflight_errors(skill_path: Path, params: dict[str, Any]) -> list[
         model_url_credential_error,
         nemo_gym_bin,
         nemo_gym_capability_errors,
+        nemo_gym_cli_error,
         nemo_gym_config_errors,
         nemo_gym_settings_errors,
     )
@@ -279,8 +280,11 @@ def nemo_gym_preflight_errors(skill_path: Path, params: dict[str, Any]) -> list[
         value = params.get(name)
         if value is not None and value <= 0:
             errors.append(f"--{name.replace('_', '-')} must be greater than 0")
-    if nemo_gym_bin() is None:
+    gym = nemo_gym_bin()
+    if gym is None:
         errors.append("--backend nemo-gym needs the NeMo Gym CLI: set SKILL_EVAL_NEMO_GYM_BIN to its `gym` executable")
+    elif not errors and (cli_error := nemo_gym_cli_error(gym)):
+        errors.append(cli_error)
     return errors
 
 

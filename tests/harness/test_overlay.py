@@ -397,8 +397,8 @@ def _sized(root: Path, fact: str, target: int) -> Path:
     ("harness", "rule", "fact", "limit"),
     [
         ("hermes", "HM-VIEW-BUDGET", "hermes_view_chars", 100_000),
-        ("openclaw", "OW-READ-BUDGET", "skill_md_chars", 16_000),
-        ("openclaw", "OW-READ-REFUSED", "skill_md_chars", 64_000),
+        ("openclaw", "OW-READ-BUDGET", "skill_md_bytes", 16_000),
+        ("openclaw", "OW-READ-REFUSED", "skill_md_bytes", 64_000),
         ("codex", "CX-SHELL-READ", "skill_md_bytes", 40_000),
         ("opencode", "OC-BODY-CUT", "skill_md_bytes", 51_200),
     ],
@@ -510,3 +510,9 @@ def test_harness_check_accepts_model_config(tmp_path: Path):
 
     assert result.exit_code == 0, result.output
     assert "OW-READ-BUDGET" not in out.read_text()
+
+
+def test_openclaw_read_budget_counts_utf8_bytes(tmp_path: Path):
+    skill = _skill(tmp_path, body="\u65c5" * 8_000)
+
+    assert "OW-READ-BUDGET" in _rule_ids(skill, "openclaw", {"context_tokens": 64_000})

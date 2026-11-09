@@ -115,6 +115,29 @@ def test_failed_reports_show_the_counts(tmp_path: Path, monkeypatch: pytest.Monk
     assert combined["results"][0]["skillspector_reference_summary"] == expected
 
 
+def test_folder_reference_lines_name_their_skill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """In a folder, each exported reference line carries its skill's prefix, like the finding's own path."""
+    result = _validate(tmp_path, monkeypatch, skills=("alpha", "beta"))
+
+    exported = json.loads(JSONReporter(include_timestamp=False).render(result))
+    located = sorted(
+        (finding["file_path"], finding["line_number"], finding["metadata"]["skillspector_occurrences"])
+        for finding in exported["findings"]
+        if finding["check_name"].endswith("(AE1)")
+    )
+    assert located == [
+        (f"[{skill}] SKILL.md", line, [{"file": f"[{skill}] SKILL.md", "start_line": line}])
+        for skill in ("alpha", "beta")
+        for line in (6, 8)
+    ]
+    # The referenced file stays relative to the skill that the prefix names.
+    assert {
+        finding["metadata"]["skillspector_evidence"]["target_path"]
+        for finding in exported["findings"]
+        if finding["check_name"].endswith("(AE1)")
+    } == {"scripts/helper.pl"}
+
+
 def test_a_cut_occurrence_list_is_a_lower_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     result = _validate(tmp_path, monkeypatch, skills=("alpha", "beta"), lines=129)
 

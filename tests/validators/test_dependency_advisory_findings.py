@@ -256,6 +256,34 @@ def test_policy_overlay_can_change_one_advisory(tmp_path, pip_audit):
     assert overlaid.findings[0].severity == Severity.LOW
 
 
+@pytest.mark.parametrize(
+    ("override_key", "passed", "severity"),
+    [("DEPENDENCY.*", True, Severity.LOW), ("CVE.*", False, Severity.HIGH)],
+)
+def test_tier1_reports_apply_the_dependency_wildcard_not_a_cve_key(
+    tmp_path, pip_audit, safety, override_key, passed, severity
+):
+    """The Tier 1 dependency check's advisories take ``DEPENDENCY.*`` overrides in emit_reports; no ``CVE.*`` key."""
+    from skillevaluator.tier1.commands import emit_reports, run_validation
+
+    advisories, _ = pip_audit
+    advisories["pyyaml"] = [PYYAML_ADVISORY]
+    skill = _skill(tmp_path, {"requirements.txt": "pyyaml==5.3\n"})
+    results = run_validation(skill, checks="dependency", content_type="skill", on_check=lambda _name: None)
+    (dependency,) = [result for result in results if result.validator_name == DependencySecurityValidator().name]
+    assert not dependency.passed
+
+    policy = ValidationPolicy(profile="reviewed", severity_overrides={override_key: Severity.LOW})
+    reports_passed = emit_reports(
+        [dependency], report_formats=("json",), output_dir=tmp_path / "out", policy=policy, announce_paths=False
+    )
+
+    assert reports_passed is passed
+    assert [(item.category, item.check_name, item.severity) for item in dependency.findings] == [
+        ("DEPENDENCY", "PYSEC-2020-176", severity)
+    ]
+
+
 def test_policy_overlay_keeps_fail_on_medium_for_advisories_it_does_not_name(tmp_path, pip_audit, safety):
     """Rebuilding a result after an override still fails on medium pip-audit advisories, not on Safety's."""
     advisories, _ = pip_audit

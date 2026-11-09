@@ -333,9 +333,9 @@ def run_validation(
 
     # (check name, builder, applies-to-this-content-type). Quality scoring and
     # script linting are skill-oriented and skipped for rules/workflows. Finding
-    # severities (incl. the LICENSE.* / CVE findings added below) are normalized
-    # centrally by the active policy in emit_reports, so they honor the
-    # selected validation profile.
+    # severities (incl. the LICENSE.* and DEPENDENCY.* advisory findings added
+    # below) are normalized centrally by the active policy in emit_reports, so
+    # they honor the selected validation profile.
     steps = (
         ("schema", _schema_results, True),
         ("version", _version_results, skill_like),

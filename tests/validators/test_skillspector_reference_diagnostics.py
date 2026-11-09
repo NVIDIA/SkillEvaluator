@@ -20,13 +20,16 @@ set to ``/fixture/<name>``:
   cannot parse within its span limit.
 """
 
+import copy
 import json
+from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from tests.validators.test_security import _jpeg_bytes, _png_bytes
 
+from skillevaluator import skillspector_references
 from skillevaluator.skillspector_references import (
     AE1_PATTERN,
     index_legacy_reference_reasons,
@@ -563,6 +566,52 @@ class TestLegacyLedgerReasons:
             assert evidence["reasons_truncated"] is True
         # Each finding normalizes its own paths, never the ledger again.
         assert calls <= 4 * len(issues) + 3
+
+
+class TestLargeReports:
+    def test_each_distinct_path_and_text_is_normalized_once_per_report(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Findings that repeat the same absolute reference lines and reasons redact each text once."""
+        root = _parse_limit_skill(tmp_path / "skill")
+        report = _report(_PARSE_LIMIT_REPORT)
+        template = report["issues"][0]
+        template["occurrences"] = [
+            {"file": f"{root.as_posix()}/SKILL.md", "start_line": line} for line in range(1, 129)
+        ]
+        reason = template["evidence"]["reasons"][0]
+        template["evidence"]["reasons"] = [{**reason, "start_line": line} for line in range(1, 17)]
+        report["issues"] = []
+        for index in range(50):
+            issue = copy.deepcopy(template)
+            issue["evidence"]["target_path"] = f"scripts/helper{index}.pl"
+            report["issues"].append(issue)
+        redacted: list[str] = []
+        prefix_lookups = 0
+        redact, root_prefixes = skillspector_references.redact_sensitive_text, skillspector_references._root_prefixes
+
+        def counting_redact(value: str) -> str:
+            redacted.append(value)
+            return redact(value)
+
+        def counting_root_prefixes(scan_root: Path | None) -> list:
+            nonlocal prefix_lookups
+            prefix_lookups += 1
+            return root_prefixes(scan_root)
+
+        monkeypatch.setattr(skillspector_references, "redact_sensitive_text", counting_redact)
+        monkeypatch.setattr(skillspector_references, "_root_prefixes", counting_root_prefixes)
+
+        result = _process(report, source_root=root)
+
+        findings = _ae1(result)
+        assert len(findings) == 50
+        for finding in findings:
+            assert len(finding.metadata["skillspector_occurrences"]) == 128
+            assert len(finding.metadata["skillspector_evidence"]["reasons"]) == 16
+        assert result.metadata["skillspector_reference_summary"]["affected_artifacts"] == 50
+        assert [text for text, count in Counter(redacted).items() if count > 1] == []
+        assert prefix_lookups == 1
 
 
 class TestTruncatedReasons:

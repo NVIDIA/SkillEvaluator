@@ -32,7 +32,6 @@ import unicodedata
 import zlib
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
-from functools import partial
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote
 
@@ -60,12 +59,12 @@ from skillevaluator.skillspector_references import (
     AE1_PATTERN,
     AE1_RULE_ID,
     REFERENCE_SUMMARY_KEY,
+    ReportNormalizer,
     combine_reference_summaries,
     index_legacy_reference_reasons,
     issue_diagnostics,
     reference_suggestion,
     reference_summary,
-    report_path,
 )
 from skillevaluator.spdx import is_spdx_only_html_comment
 from skillevaluator.utils.path_security import matches_filesystem_name
@@ -4430,10 +4429,13 @@ class SecurityValidator(ValidatorBase):
         skipped_by_role: Counter[str] = Counter()
         has_critical_or_high = False
         completeness = data.get("analysis_completeness")
+        # One normalizer per report: each distinct path and text is redacted once.
+        normalizer = ReportNormalizer(source_root)
         legacy_reason_index = index_legacy_reference_reasons(
             candidate_issues,
-            normalize_path=partial(report_path, scan_root=source_root),
+            normalize_path=normalizer.path,
             completeness=completeness,
+            text=normalizer.text,
         )
         for issue, scope in zip(candidate_issues, scopes, strict=True):
             if scope is not None and not scope.applicable:
@@ -4445,8 +4447,8 @@ class SecurityValidator(ValidatorBase):
             finding, is_error = self._convert_skillspector_issue(
                 issue,
                 completeness=completeness,
-                scan_root=source_root,
                 legacy_reason_index=legacy_reason_index,
+                normalizer=normalizer,
             )
             if scope is not None:
                 finding.metadata.update(
@@ -4949,6 +4951,7 @@ class SecurityValidator(ValidatorBase):
         completeness: object = None,
         scan_root: Path | None = None,
         legacy_reason_index: Mapping[str, list[dict]] | None = None,
+        normalizer: ReportNormalizer | None = None,
     ) -> tuple[Finding, bool]:
         """Convert a single skillspector issue dict into a Finding.
 
@@ -4960,7 +4963,9 @@ class SecurityValidator(ValidatorBase):
         completely inspect and why, its metadata and suggestion carry that
         (:func:`~skillevaluator.skillspector_references.issue_diagnostics`),
         with the reasons of earlier releases read from *completeness* or
-        *legacy_reason_index*. Paths count only inside *scan_root*.
+        *legacy_reason_index*. Paths count only inside *scan_root*. A
+        *normalizer* shared by a report's issues replaces *scan_root*, so each
+        distinct path and text is redacted once per report.
         """
         g = _issue_field(issue)
         issue_sev = str(g("severity", "UNKNOWN")).upper()
@@ -4975,16 +4980,18 @@ class SecurityValidator(ValidatorBase):
         else:
             pattern = g("pattern", "Unknown")
         metadata = SecurityValidator._build_issue_metadata(issue)
+        normalizer = normalizer or ReportNormalizer(scan_root)
         metadata.update(
             issue_diagnostics(
                 issue,
-                normalize_path=partial(report_path, scan_root=scan_root),
+                normalize_path=normalizer.path,
                 completeness=completeness,
                 legacy_reason_index=legacy_reason_index,
+                text=normalizer.text,
             )
         )
         if evidence := metadata.get("skillspector_evidence"):
-            suggestion = reference_suggestion(evidence, remediation)
+            suggestion = reference_suggestion(evidence, remediation, text=normalizer.text)
 
         finding = Finding(
             category="SECURITY",

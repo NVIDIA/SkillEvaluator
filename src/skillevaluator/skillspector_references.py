@@ -35,6 +35,7 @@ __all__ = [
     "AE1_PATTERN",
     "AE1_RULE_ID",
     "REFERENCE_SUMMARY_KEY",
+    "ReportNormalizer",
     "combine_reference_summaries",
     "diagnostic_text",
     "index_legacy_reference_reasons",
@@ -96,38 +97,76 @@ def _root_prefixes(scan_root: Path | None) -> list[PurePosixPath]:
     return prefixes
 
 
+class ReportNormalizer:
+    """:func:`diagnostic_text` and :func:`report_path` for one report, each distinct value computed once.
+
+    A report repeats the same paths and reason texts across its AE1 findings
+    and their reference lines. One normalizer per report redacts each distinct
+    text once and resolves the scan root at most once, however many findings
+    repeat them. Its caches hold only the values of that report.
+    """
+
+    def __init__(self, scan_root: Path | None = None) -> None:
+        self._scan_root = scan_root
+        self._prefixes: list[PurePosixPath] | None = None
+        self._texts: dict[tuple[str, int], str | None] = {}
+        self._paths: dict[str, str | None] = {}
+
+    def text(self, value: object, *, max_length: int = 4096) -> str | None:
+        """:func:`diagnostic_text` of *value*, computed once per distinct text."""
+        if not isinstance(value, str):
+            return None
+        key = (value, max_length)
+        if key not in self._texts:
+            self._texts[key] = diagnostic_text(value, max_length=max_length)
+        return self._texts[key]
+
+    def path(self, value: object) -> str | None:
+        """:func:`report_path` of *value* under this report's scan root, computed once per distinct path."""
+        if not isinstance(value, str):
+            return None
+        if value not in self._paths:
+            self._paths[value] = self._contained_path(self.text(value))
+        return self._paths[value]
+
+    def _contained_path(self, text: str | None) -> str | None:
+        if text is None:
+            return None
+        slash_path = text.replace("\\", "/")
+        if PurePosixPath(slash_path).is_absolute() or PureWindowsPath(slash_path).drive:
+            if self._prefixes is None:
+                self._prefixes = _root_prefixes(self._scan_root)
+            for prefix in self._prefixes:
+                try:
+                    slash_path = PurePosixPath(slash_path).relative_to(prefix).as_posix()
+                    break
+                except ValueError:
+                    continue
+            else:
+                return None
+        normalized = posixpath.normpath(slash_path)
+        if normalized in {".", ".."} or normalized.startswith(("../", "/")):
+            return None
+        return normalized
+
+
 def report_path(value: object, *, scan_root: Path | None = None) -> str | None:
     """A SkillSpector report path as POSIX text relative to the scan, else ``None``.
 
     The path is checked lexically and never resolved, because the file an AE1
     finding names may be missing or unreadable. An absolute path counts only
     under *scan_root*. A path with control characters, a Windows drive, or a
-    ``..`` that leaves the scan, and the scan root itself, are ``None``.
+    ``..`` that leaves the scan, and the scan root itself, are ``None``. To
+    normalize the paths of a whole report, use one :class:`ReportNormalizer`.
     """
-    text = diagnostic_text(value)
-    if text is None:
-        return None
-    slash_path = text.replace("\\", "/")
-    if PurePosixPath(slash_path).is_absolute() or PureWindowsPath(slash_path).drive:
-        for prefix in _root_prefixes(scan_root):
-            try:
-                slash_path = PurePosixPath(slash_path).relative_to(prefix).as_posix()
-                break
-            except ValueError:
-                continue
-        else:
-            return None
-    normalized = posixpath.normpath(slash_path)
-    if normalized in {".", ".."} or normalized.startswith(("../", "/")):
-        return None
-    return normalized
+    return ReportNormalizer(scan_root).path(value)
 
 
 def _line(value: object) -> int | None:
     return value if type(value) is int and 0 < value <= _MAX_COUNT else None
 
 
-def _reasons(rows: object) -> list[dict]:
+def _reasons(rows: object, text: Callable[..., str | None]) -> list[dict]:
     """The first reasons of *rows* with only known, valid fields, without repeats."""
     if not isinstance(rows, list):
         return []
@@ -135,18 +174,16 @@ def _reasons(rows: object) -> list[dict]:
     for row in rows[:_MAX_REASONS]:
         if not isinstance(row, dict):
             continue
-        reason_code = diagnostic_text(row.get("reason_code"), max_length=128)
+        reason_code = text(row.get("reason_code"), max_length=128)
         if not reason_code:
             continue
         reason: dict[str, Any] = {"reason_code": reason_code}
         for field, max_length in (("phase", 128), ("message", 4096)):
-            if value := diagnostic_text(row.get(field), max_length=max_length):
+            if value := text(row.get(field), max_length=max_length):
                 reason[field] = value
         analyzers = row.get("analyzers")
         if isinstance(analyzers, list):
-            reason["analyzers"] = [
-                text for item in analyzers[:_MAX_ANALYZERS] if (text := diagnostic_text(item, max_length=256))
-            ]
+            reason["analyzers"] = [name for item in analyzers[:_MAX_ANALYZERS] if (name := text(item, max_length=256))]
         for field in ("start_line", "end_line"):
             if (line := _line(row.get(field))) is not None:
                 reason[field] = line
@@ -168,7 +205,9 @@ def _reasons(rows: object) -> list[dict]:
     return reasons
 
 
-def _reference_target(issue: Mapping[str, object], normalize_path: Callable[[object], str | None]):
+def _reference_target(
+    issue: Mapping[str, object], normalize_path: Callable[[object], str | None], text: Callable[..., str | None]
+):
     """``(target, disposition, structured)`` of an AE1 issue, else ``None``.
 
     *structured* says whether the target came from ``evidence`` (v2.12.0 and
@@ -177,11 +216,11 @@ def _reference_target(issue: Mapping[str, object], normalize_path: Callable[[obj
     """
     evidence = issue.get("evidence")
     evidence = evidence if isinstance(evidence, dict) else {}
-    target = diagnostic_text(evidence.get("target_path"))
+    target = text(evidence.get("target_path"))
     structured = target is not None
     disposition = evidence.get("target_disposition")
     if not structured:
-        match = _LEGACY_FINDING_RE.fullmatch(diagnostic_text(issue.get("finding")) or "")
+        match = _LEGACY_FINDING_RE.fullmatch(text(issue.get("finding")) or "")
         location = issue.get("location")
         source = location.get("file") if isinstance(location, dict) else None
         if match and normalize_path(source) is not None:
@@ -197,12 +236,14 @@ def index_legacy_reference_reasons(
     *,
     normalize_path: Callable[[object], str | None],
     completeness: object = None,
+    text: Callable[..., str | None] = diagnostic_text,
 ) -> dict[str, list[dict]]:
     """The ledger rows of each AE1 target that has no structured reasons, read once.
 
     At most one row more than an AE1 finding keeps is indexed per target, so
     the extra row still shows that the reasons were cut short. Each path is
-    normalized once, however often it repeats.
+    normalized once, however often it repeats. *normalize_path* and *text*
+    are usually the methods of the report's :class:`ReportNormalizer`.
     """
     if not isinstance(completeness, dict) or not isinstance(completeness.get("ledger_exceptions"), list):
         return {}
@@ -219,7 +260,7 @@ def index_legacy_reference_reasons(
     for issue in issues:
         if not isinstance(issue, dict) or issue.get("id") != AE1_RULE_ID:
             continue
-        target_info = _reference_target(issue, normalize_once)
+        target_info = _reference_target(issue, normalize_once, text)
         if target_info is None:
             continue
         target, _disposition, structured = target_info
@@ -244,6 +285,7 @@ def issue_diagnostics(
     normalize_path: Callable[[object], str | None],
     completeness: object = None,
     legacy_reason_index: Mapping[str, list[dict]] | None = None,
+    text: Callable[..., str | None] = diagnostic_text,
 ) -> dict:
     """Finding metadata that explains an AE1 *issue*: the target, its reasons and the reference lines.
 
@@ -253,10 +295,11 @@ def issue_diagnostics(
     target's ledger rows in *completeness* (or *legacy_reason_index*), and the
     finding gets no evidence without them. ``skillspector_occurrences`` lists
     up to 128 of the issue's ``occurrences``. Any other issue gets ``{}``.
+    Paths go through *normalize_path* and other text through *text*.
     """
     if issue.get("id") != AE1_RULE_ID:
         return {}
-    target_info = _reference_target(issue, normalize_path)
+    target_info = _reference_target(issue, normalize_path, text)
     if target_info is None:
         return {}
     target, disposition, structured = target_info
@@ -266,10 +309,10 @@ def issue_diagnostics(
     if not rows:
         if legacy_reason_index is None:
             legacy_reason_index = index_legacy_reference_reasons(
-                [issue], completeness=completeness, normalize_path=normalize_path
+                [issue], completeness=completeness, normalize_path=normalize_path, text=text
             )
         rows = legacy_reason_index.get(target, [])
-    reasons = _reasons(rows)
+    reasons = _reasons(rows, text)
     # A target named only in the finding text needs matching ledger rows; an
     # unreadable evidence target must not pass for a structured one.
     if not reasons and not structured:
@@ -318,7 +361,9 @@ def _reason_details(reasons: list[dict]) -> list[str]:
     return details
 
 
-def reference_suggestion(evidence: Mapping[str, Any], remediation: object) -> str:
+def reference_suggestion(
+    evidence: Mapping[str, Any], remediation: object, *, text: Callable[..., str | None] = diagnostic_text
+) -> str:
     """The suggestion of an AE1 finding: what was not inspected, why, and what to do.
 
     SkillSpector's own remediation is kept unless it is missing or the generic
@@ -328,7 +373,7 @@ def reference_suggestion(evidence: Mapping[str, Any], remediation: object) -> st
     """
     reasons = evidence["reasons"]
     truncated = evidence.get("reasons_truncated") is True
-    action = diagnostic_text(remediation)
+    action = text(remediation)
     if not action or action == _LEGACY_REMEDIATION:
         codes = set() if truncated else {reason["reason_code"] for reason in reasons}
         if codes == {"static_parse_limit"}:

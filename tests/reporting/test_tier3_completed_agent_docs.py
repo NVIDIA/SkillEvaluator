@@ -352,3 +352,16 @@ def test_results_tree_and_tier3_guide_point_to_the_section() -> None:
     assert f"(#{ANCHOR})" in page
     assert f"(reports.mdx#{ANCHOR})" in guide
     assert "The verdict table above applies only when the run succeeds." in guide
+
+
+def test_changelog_entry_matches_the_docs() -> None:
+    # The entry is found by its opening words so that a release heading above it
+    # can change. test_no_fallback_to_a_lower_complete_agent shows that no score
+    # is shown when the best agent's evidence is incomplete.
+    lead = "- Reports & Results now explains the completed-agent result in Tier 3 reports."
+    changelog = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+    entries = [_plain(block) for block in changelog.split("\n\n") if _plain(block).startswith(lead)]
+
+    assert len(entries) == 1
+    assert "show the best agent's score when that agent's evidence is complete" in entries[0]
+    assert "every Tier 3 run, from `tier3 evaluate` or a `validate` run that includes Tier 3" in entries[0]

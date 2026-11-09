@@ -583,3 +583,68 @@ def test_rejects_mixed_content_catalog_before_model_calls(selection: SimpleNames
     with pytest.raises(ValueError, match="skill-only"):
         _select(selection)
     selection.client.embed_single.assert_not_called()
+
+
+# Decoy selection and group-mode loading read SKILL.md frontmatter as similarity-check does.
+_STRING_FIELDS_REQUIRED = r"requires a skill with a root SKILL\.md whose frontmatter has a string name and description"
+NON_STRING_FRONTMATTER = [
+    pytest.param("name: yes\ndescription: Help with target.", id="boolean-name"),
+    pytest.param("name: 2048\ndescription: Help with target.", id="integer-name"),
+    pytest.param("name: target\ndescription: [Draft]", id="list-description"),
+]
+
+
+def _write_manifest(skill: Path, frontmatter: str) -> None:
+    (skill / "SKILL.md").write_bytes(f"---\n{frontmatter}\n---\n\n# {skill.name}\n".encode())
+
+
+def _alias_chain(name: str, *, levels: int = 18) -> str:
+    """Return frontmatter whose description is a list of 2**levels items built from chained aliases."""
+    lines = ["seed: &a0 safe"]
+    lines += [f"a{level}: &a{level} [*a{level - 1}, *a{level - 1}]" for level in range(1, levels + 1)]
+    return "\n".join([*lines, f"name: {name}", f"description: *a{levels}"])
+
+
+@pytest.mark.parametrize("frontmatter", NON_STRING_FRONTMATTER)
+def test_target_name_or_description_that_is_not_a_string_is_rejected(
+    selection: SimpleNamespace, frontmatter: str
+) -> None:
+    _write_manifest(selection.target, frontmatter)
+
+    with pytest.raises(ValueError, match=_STRING_FIELDS_REQUIRED):
+        _select(selection)
+    selection.client.embed_single.assert_not_called()
+
+
+def test_target_frontmatter_over_a_structure_limit_fails_before_model_calls(selection: SimpleNamespace) -> None:
+    _write_manifest(selection.target, _alias_chain("target"))
+
+    with pytest.raises(ValueError, match=r"^Manifest structured-data complexity limit exceeded: target/SKILL\.md$"):
+        _select(selection)
+    selection.client.embed_single.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("changed", "frontmatter", "match"),
+    [
+        pytest.param("target", "name: yes\ndescription: Help with target.", _STRING_FIELDS_REQUIRED, id="target"),
+        pytest.param(
+            "selected", "name: yes\ndescription: Help with api-debugger.", _STRING_FIELDS_REQUIRED, id="selected"
+        ),
+        pytest.param(
+            "selected",
+            _alias_chain("api-debugger"),
+            r"^Manifest structured-data complexity limit exceeded: api-debugger/SKILL\.md$",
+            id="selected-over-limit",
+        ),
+    ],
+)
+def test_loader_reads_frontmatter_as_selection_does(
+    selection: SimpleNamespace, tmp_path: Path, changed: str, frontmatter: str, match: str
+) -> None:
+    path = tmp_path / "decoys.json"
+    write_decoy_manifest(_select(selection), path)
+    _write_manifest(selection.target if changed == "target" else selection.skills[0], frontmatter)
+
+    with pytest.raises(ValueError, match=match):
+        load_decoy_manifest(selection.target, path)

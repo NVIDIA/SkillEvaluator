@@ -288,3 +288,44 @@ def test_distinct_case_sensitive_directory_can_hold_output(tmp_path: Path, monke
 
     assert result.exit_code == 0, result.output
     assert json.loads(output.read_text(encoding="utf-8")) == manifest
+
+
+@pytest.mark.parametrize(
+    ("frontmatter", "message"),
+    [
+        pytest.param(
+            "name: yes\ndescription: Target.",
+            "Error: Decoy selection requires a skill with a root SKILL.md whose frontmatter has a string name and "
+            "description:",
+            id="boolean-name",
+        ),
+        pytest.param(
+            "name: target\ndescription: Target.\nextra: " + "[" * 150 + "x" + "]" * 150,
+            "Error: Manifest structured-data complexity limit exceeded: target/SKILL.md",
+            id="nesting-over-limit",
+        ),
+        pytest.param(
+            "name: target\ndescription: " + "x" * 16_385,
+            "Error: Manifest frontmatter description exceeds the 16384-character limit: target/SKILL.md",
+            id="long-description",
+        ),
+    ],
+)
+def test_target_frontmatter_errors_fail_cleanly_without_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, frontmatter: str, message: str
+) -> None:
+    from skillevaluator.embedding import client as embedding_client
+
+    client = Mock()
+    monkeypatch.setattr(embedding_client, "EmbeddingClient", Mock(return_value=client))
+    arguments = _arguments(tmp_path)
+    (tmp_path / "skills" / "target" / "SKILL.md").write_bytes(f"---\n{frontmatter}\n---\n# Target\n".encode())
+    output = tmp_path / "selection.json"
+
+    result = CliRunner().invoke(cli, [*arguments, "--output", str(output)])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit), result.exception
+    assert message in " ".join(result.output.split())
+    assert not output.exists()
+    client.embed_single.assert_not_called()

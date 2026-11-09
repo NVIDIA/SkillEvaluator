@@ -711,6 +711,16 @@ helpers stay explicit in `include`; the selector does not infer prerequisites.
 A collision between a selected skill and an explicitly included skill is an
 error.
 
+Selection and group-mode evaluation read the `name` and `description` of the
+target and of each selected skill as `similarity-check` does, within the same
+[frontmatter structure limits](tier2-deduplication.mdx#defaults-and-safety-limits).
+A value that is not a string, such as `name: yes` or `name: 2048`, is never
+converted to text: the command fails and says the skill needs a root `SKILL.md`
+whose frontmatter has a string name and description. Quote such a value, as in
+`name: "yes"`. Frontmatter over a structure limit, or a value longer than 16,384
+characters, fails with an error that names the manifest, such as
+`my-skill/SKILL.md`.
+
 The manifest records catalog and model identity, scores, the target manifest
 hash, and selected skill runtime hashes. Evaluation verifies the hashes and
 uses one snapshot of the selected skills in both arms; it makes no embedding

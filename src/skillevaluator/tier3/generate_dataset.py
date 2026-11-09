@@ -55,14 +55,9 @@ import yaml
 
 from skillevaluator.constants import EXECUTABLE_SKILL_DIRS
 from skillevaluator.evaluation.results import DatasetGenerationError, DatasetGenerationResult
+from skillevaluator.tier3 import evals_spec
 from skillevaluator.tier3.dataset_utils import normalize_dataset_entries
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
-from skillevaluator.tier3.evals_spec import (
-    _baseline_fairness_warnings,
-    _prompt_skill_files_match,
-    _skill_script_names,
-    _skill_use_match,
-)
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
 # Output budget for generation and refinement; OpenAI reasoning models get the
@@ -178,7 +173,7 @@ def _parse_skill(skill_path: Path, prompt_file: str | None = None) -> dict[str, 
         "description": description,
         "scripts": scripts,
         # Every script file `tier3 validate` lists, not only the Python ones in "scripts".
-        "script_files": _skill_script_names(skill_path),
+        "script_files": evals_spec._skill_script_names(skill_path),
         "interactive_scripts": interactive_scripts,
         "content": content[:4000],
         "eval_prompt": eval_prompt,
@@ -306,27 +301,6 @@ def _extract_eval_hints(eval_prompt: str) -> dict[str, list[str]]:
     return hints
 
 
-def _generate_simple(skill: dict[str, Any]) -> list[dict[str, Any]]:
-    """Generate 1 simple test case (default, no LLM needed)."""
-    name = skill["name"]
-    script = _pick_primary_script(skill)
-    task, outcome = _template_task(skill)
-    eval_hints = _extract_eval_hints(skill.get("eval_prompt", ""))
-
-    question = eval_hints["questions"][0] if eval_hints["questions"] else f"Use {name} to {task}"
-
-    return [
-        {
-            "id": f"{name}-001",
-            "question": question,
-            "expected_skill": name,
-            "expected_script": script,
-            "ground_truth": _outcome_ground_truth(outcome),
-            "expected_behavior": _outcome_behaviors(outcome, eval_hints["behaviors"]),
-        }
-    ]
-
-
 def _description_lower(skill: dict[str, Any]) -> str:
     """The skill description as template cases quote it."""
     desc = skill["description"] or f"the {skill['name']} skill"
@@ -368,11 +342,11 @@ def _template_task(skill: dict[str, Any]) -> tuple[str, str | None]:
     """
     name = skill["name"]
     task = _description_lower(skill)
-    if _prompt_skill_files_match(task, name):
+    if evals_spec._prompt_skill_files_match(task, name):
         task = _BARE_SKILL_MD_RE.sub("my SKILL.md", task)
-        if _prompt_skill_files_match(task, name):
+        if evals_spec._prompt_skill_files_match(task, name):
             return _GENERIC_TASK, None
-    if _skill_use_match(task, name, _script_file_names(skill)):
+    if evals_spec._skill_use_match(task, name, _script_file_names(skill)):
         return task, None
     return task, task
 
@@ -393,6 +367,27 @@ def _outcome_behaviors(outcome: str | None, hint_behaviors: list[str]) -> list[s
         "The agent's final response directly addresses the user's request",
         *hint_behaviors,
         SECURITY_BEHAVIOR,
+    ]
+
+
+def _generate_simple(skill: dict[str, Any]) -> list[dict[str, Any]]:
+    """Generate 1 simple test case (default, no LLM needed)."""
+    name = skill["name"]
+    script = _pick_primary_script(skill)
+    task, outcome = _template_task(skill)
+    eval_hints = _extract_eval_hints(skill.get("eval_prompt", ""))
+
+    question = eval_hints["questions"][0] if eval_hints["questions"] else f"Use {name} to {task}"
+
+    return [
+        {
+            "id": f"{name}-001",
+            "question": question,
+            "expected_skill": name,
+            "expected_script": script,
+            "ground_truth": _outcome_ground_truth(outcome),
+            "expected_behavior": _outcome_behaviors(outcome, eval_hints["behaviors"]),
+        }
     ]
 
 
@@ -649,8 +644,8 @@ def generate_one_case(skill_path: Path, *, use_llm: bool) -> Path:
     )
     if len(cases) != 1:
         raise RuntimeError("one-case generation did not return exactly one case")
-    cases = [_without_skill_use(cases[0], skill, _script_file_names(skill))]
     evals_dir.mkdir(parents=True, exist_ok=True)
+    cases = [_without_skill_use(cases[0], skill, _script_file_names(skill))]
     with output_path.open("x", encoding="utf-8") as output:
         json.dump(_to_agentskills_dataset(skill["name"], cases), output, indent=2, ensure_ascii=False)
         output.write("\n")
@@ -676,14 +671,14 @@ def _without_skill_use(case: dict[str, Any], skill: dict[str, Any], skill_script
     _, outcome = _template_task(skill)
     case = dict(case)
     ground_truth = case.get("ground_truth")
-    if isinstance(ground_truth, str) and _skill_use_match(ground_truth, skill_name, skill_scripts):
+    if isinstance(ground_truth, str) and evals_spec._skill_use_match(ground_truth, skill_name, skill_scripts):
         case["ground_truth"] = _outcome_ground_truth(outcome)
     behaviors = case.get("expected_behavior")
     if isinstance(behaviors, list):
         kept = [
             item
             for item in behaviors
-            if not (isinstance(item, str) and _skill_use_match(item, skill_name, skill_scripts))
+            if not (isinstance(item, str) and evals_spec._skill_use_match(item, skill_name, skill_scripts))
         ]
         if len(kept) != len(behaviors):
             if all(_is_security_behavior(item) for item in kept):
@@ -695,8 +690,21 @@ def _without_skill_use(case: dict[str, Any], skill: dict[str, Any], skill_script
 def _print_baseline_fairness_warnings(dataset: dict[str, Any], skill_scripts: Sequence[str]) -> None:
     """Name generated cases that still grade skill use; `tier3 validate` reports the same warnings."""
     for entry in normalize_dataset_entries(dataset):
-        for warning in _baseline_fairness_warnings(entry, skill_scripts=skill_scripts):
+        for warning in evals_spec._baseline_fairness_warnings(entry, skill_scripts=skill_scripts):
             print(f"Warning: case {entry.get('id')}: {warning}")
+
+
+def _uses_skill_files(text: str, skill_name: object, scripts: Sequence[object]) -> bool:
+    """Whether a read path or shell command touches SKILL.md, the skill's directory, or one of its scripts.
+
+    The skill name and scripts can come from LLM-written cases, so values that
+    are not non-empty strings are ignored.
+    """
+    if "SKILL.md" in text:
+        return True
+    names = [rf"skills/{re.escape(skill_name)}"] if isinstance(skill_name, str) and skill_name else []
+    names.extend(re.escape(Path(script).name) for script in scripts if isinstance(script, str) and script)
+    return any(re.search(rf"(?<![\w.-]){name}(?![\w.-])", text) for name in names)
 
 
 def _ensure_project_imports():
@@ -1050,19 +1058,6 @@ def _extract_agent_final_message(trajectory: dict[str, Any]) -> str:
     return ""
 
 
-def _uses_skill_files(text: str, skill_name: object, scripts: Sequence[object]) -> bool:
-    """Whether a read path or shell command touches SKILL.md, the skill's directory, or one of its scripts.
-
-    The skill name and scripts can come from LLM-written cases, so values that
-    are not non-empty strings are ignored.
-    """
-    if "SKILL.md" in text:
-        return True
-    names = [rf"skills/{re.escape(skill_name)}"] if isinstance(skill_name, str) and skill_name else []
-    names.extend(re.escape(Path(script).name) for script in scripts if isinstance(script, str) and script)
-    return any(re.search(rf"(?<![\w.-]){name}(?![\w.-])", text) for name in names)
-
-
 def _refine_from_trajectory_template(
     cases: list[dict[str, Any]],
     trajectories: dict[str, dict[str, Any]],
@@ -1322,8 +1317,8 @@ Agent-refined mode (--refine):
             print("  No trajectory available — using initial cases as-is.")
 
     dataset = _to_agentskills_dataset(skill["name"], cases)
-    _print_baseline_fairness_warnings(dataset, _script_file_names(skill))
 
+    _print_baseline_fairness_warnings(dataset, _script_file_names(skill))
     if args.dry_run:
         print("\nDry run — not saved.")
         print(json.dumps(dataset, indent=2))

@@ -23,7 +23,8 @@ All notable changes to SkillEvaluator are documented in this file.
   assertions and could not meet them, so its `behavior_check`, `accuracy` and
   `goal_accuracy` scores dropped and lift was inflated. Template cases now
   describe only the task outcome, and do not quote a skill description that
-  names the skill or its script. The LLM generation and `--refine` prompts ask
+  names the skill or its script; a template prompt calls a `SKILL.md` named in
+  the description `my SKILL.md`. The LLM generation and `--refine` prompts ask
   for outcome checks, and template `--refine` no longer turns reads or runs of
   `SKILL.md`, the skill directory or the skill's scripts into behaviors. The
   autopilot starter case leaves out LLM or `EVAL.md` text that grades skill

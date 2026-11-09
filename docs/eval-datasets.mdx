@@ -78,6 +78,24 @@ top-level object with `skill_name` and an `evals` array.
 }
 ```
 
+Both arms get the same `prompt` and are graded on the same `expected_output`
+and `assertions`; the no-skill baseline runs without the skill installed. Write
+them about the task outcome. A prompt that points at the skill's files, or an
+expected output or assertion that the agent read `SKILL.md`, ran the skill's
+script, or used the skill, cannot be met by the baseline and inflates lift.
+`skill_execution` scores skill use separately (see
+[How standard grading judges a trial](tier3-live-evaluation.mdx#how-standard-grading-judges-a-trial)).
+Template cases from `create-eval-dataset` are outcome-only; when the skill's
+description mentions `SKILL.md`, the template prompt calls it `my SKILL.md`.
+Its LLM prompts ask for outcome checks. It prints a warning for each generated
+case that still grades skill use, and the autopilot starter case leaves such
+text out. `tier3 validate` warns when a prompt points at `skills/<name>`,
+`<name>/SKILL.md` or reading or following `SKILL.md`, or when the expected
+output or an assertion names those files, calls `<name>` a skill, says the
+agent used, invoked or identified `<name>`, or runs one of the skill's scripts.
+It is a wording heuristic: it skips negated checks such as "did not read
+`SKILL.md`" and can miss skill use phrased another way.
+
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `skill_name` | Yes | Name of the skill under evaluation. |
@@ -89,23 +107,6 @@ top-level object with `skill_name` and an `evals` array.
 | `expected_skill` | No | Skill the agent should route to; `null` for negative cases. |
 | `expected_script` | No | Script the agent should run; `null` if none applies. |
 | `acceptable_skills` | No | Closely related skills that earn partial routing credit (legacy alias: `acceptable_alternates`). |
-
-Both arms get the same `prompt` and are graded on the same `expected_output`
-and `assertions`; the no-skill baseline runs without the skill installed. Write
-them about the task outcome. A prompt that points at the skill's files, or an
-expected output or assertion that the agent read `SKILL.md`, ran the skill's
-script, or used the skill, cannot be met by the baseline and inflates lift.
-`skill_execution` scores skill use separately (see
-[How standard grading judges a trial](tier3-live-evaluation.mdx#how-standard-grading-judges-a-trial)).
-Template cases from `create-eval-dataset` are outcome-only, and its LLM prompts
-ask for outcome checks. It prints a warning for each generated case that still
-grades skill use, and the autopilot starter case leaves such text out.
-`tier3 validate` warns when a prompt points at `skills/<name>`,
-`<name>/SKILL.md` or reading or following `SKILL.md`, or when the expected
-output or an assertion names those files, calls `<name>` a skill, says the
-agent used, invoked or identified `<name>`, or runs one of the skill's scripts.
-It is a wording heuristic: it skips negated checks such as "did not read
-`SKILL.md`" and can miss skill use phrased another way.
 
 The dataset file can be named `evals.json`, `evals.jsonl`, `evals.yaml`, or
 `evals.yml` — `tier3 evaluate` accepts all four.

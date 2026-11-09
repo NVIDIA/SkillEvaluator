@@ -1310,6 +1310,16 @@ def _catalog_child_argv_from_ctx(
         argv.extend(["--max-cases", str(params["max_cases"])])
     if params.get("n_attempts") is not None:
         argv.extend(["--n-attempts", str(params["n_attempts"])])
+    if params.get("max_agent_tokens") is not None:
+        argv.extend(["--max-agent-tokens", str(params["max_agent_tokens"])])
+    if params.get("max_judge_calls") is not None:
+        argv.extend(["--max-judge-calls", str(params["max_judge_calls"])])
+    if params.get("max_attempts_total") is not None:
+        argv.extend(["--max-attempts-total", str(params["max_attempts_total"])])
+    if params.get("max_cost_usd") is not None:
+        argv.extend(["--max-cost-usd", str(params["max_cost_usd"])])
+    if params.get("price_file") is not None:
+        argv.extend(["--price-file", str(Path(params["price_file"]).resolve())])
     if params.get("pass_threshold") is not None:
         argv.extend(["--pass-threshold", str(params["pass_threshold"])])
     stop_on_pass = params.get("stop_on_pass")

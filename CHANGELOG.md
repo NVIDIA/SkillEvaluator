@@ -51,6 +51,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Run GitLab Tier 2 without Docker-in-Docker while keeping TLS-protected Docker
+  for Tier 3. Both native tiers retain shared caller timeout and runner-tag
+  overrides, advisory outcomes, and aggregate artifacts; local mode still
+  disables the Tier 3 Docker service.
+
 - Align terminal grade and lift colors across compact, full, and direct Tier 3
   reports; displayed zero lift is neutral. Narrow terminals stack complete
   condition score/bar groups. Full-report Details retain successful quality and
@@ -136,6 +141,8 @@ All notable changes to SkillEvaluator are documented in this file.
   pinned evaluation and feedback configuration before reporting readiness,
   including malformed YAML and missing approval inputs. Candidate onboarding
   pins include the reviewed CI fixes and matching runtime metadata.
+  Use the verified released Tier 1 image so valid multi-valued `metadata.domain`
+  fields also work in new all-tier consumers.
 
 - Private native Claude Code staging keeps the source client's skill
   declarations: Codex paths that Codex ignores are no longer copied into the

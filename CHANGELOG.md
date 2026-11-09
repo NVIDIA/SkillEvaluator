@@ -133,7 +133,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Tier 3 dataset summaries honor explicit `should_trigger` routing labels before
   legacy `expected_skill` values. Report insights distinguish unavailable trial
-  scores from scored attempts that miss the pass threshold.
+  scores from scored attempts that miss the pass threshold. Dataset snapshots
+  use schema 1.1; valid schema 1.0 snapshots retain their original datasets and
+  integrity checks, with corrected summaries projected without rewriting files.
 
 - All-tier CI retains Tier 2's native reports as advisory while preserving
   failed and incomplete evaluation outcomes. GitHub `ci status` validates the

@@ -2610,6 +2610,48 @@ def test_rerender_uses_run_owned_dataset_and_evaluator_version(tmp_path: Path) -
     assert payload["evaluator_version"] == "evaluated-version-1.2.3"
 
 
+@pytest.mark.parametrize("manifest_source", ["absent", "disk", "engine"])
+def test_rerender_preserves_legacy_snapshot_dataset_with_corrected_summary(
+    tmp_path: Path, manifest_source: str
+) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    run_dir = tmp_path / "results" / "historical-run"
+    _write_summary(run_dir)
+    original = (Path(__file__).parents[1] / "fixtures" / "legacy-routing-dataset-snapshot-1.0.json").read_bytes()
+    snapshot_path = run_dir / "dataset_snapshot.json"
+    snapshot_path.write_bytes(original)
+    historical = json.loads(original)
+    manifest = {key: value for key, value in historical.items() if key != "dataset"}
+    engine_result = {"dataset_snapshot": manifest} if manifest_source == "engine" else None
+    if manifest_source == "disk":
+        (run_dir / "result.json").write_text(json.dumps({"dataset_snapshot": manifest}), encoding="utf-8")
+
+    tier3 = agent_eval_result_from_directory(skill, run_dir, engine_result=engine_result, use_llm_judge=False)
+
+    assert tier3 is not None
+    payload = tier3.metadata["agent_eval"]
+    assert payload["dataset"] == historical["dataset"]
+    expected_summary = {
+        "total_tasks": 3,
+        "positive_tasks": 1,
+        "negative_tasks": 2,
+        "unclassified_tasks": 0,
+        "source": "dataset",
+    }
+    assert payload["dataset_summary"] == expected_summary
+    assert payload["summary"]["dataset_summary"] == expected_summary
+    assert payload["dataset_digest"] == historical["dataset_digest"]
+    assert payload["evaluator_version"] == "0.8.0"
+    embedded = _embedded_tier3_payload(_render_agent_payload(payload))
+    for rendered, original_case in zip(embedded["dataset"], historical["dataset"], strict=True):
+        assert original_case.items() <= rendered.items()
+    assert embedded["dataset_summary"] == expected_summary
+    assert snapshot_path.read_bytes() == original
+    if manifest_source == "disk":
+        assert json.loads((run_dir / "result.json").read_text(encoding="utf-8"))["dataset_snapshot"] == manifest
+
+
 def test_rerender_uses_persisted_publication_identity_after_live_source_changes(tmp_path: Path) -> None:
     from skillevaluator.publication_identity import publication_target_from_path
 

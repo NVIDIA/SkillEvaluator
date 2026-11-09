@@ -641,6 +641,12 @@ def _trajectory_token_counter(value: Any) -> int | None:
     )
 
 
+def _condition_status(agent_info: dict[str, Any], condition: str) -> str:
+    conditions = agent_info.get("conditions")
+    data = conditions.get(condition) if isinstance(conditions, dict) else None
+    return str(data.get("execution_status") or "unknown") if isinstance(data, dict) else "unknown"
+
+
 def _usage_tokens(counters: dict[str, Any]) -> dict[str, int] | None:
     """Return a report trial's ``tokens`` object, or ``None`` without prompt and completion counts."""
     prompt = _trajectory_token_counter(counters.get("prompt_tokens"))
@@ -693,12 +699,6 @@ def _withheld_attempt_usage(rewards: list[dict[str, Any]]) -> list[dict[str, Any
             row["tokens"] = tokens
         rows.append(row)
     return rows
-
-
-def _condition_status(agent_info: dict[str, Any], condition: str) -> str:
-    conditions = agent_info.get("conditions")
-    data = conditions.get(condition) if isinstance(conditions, dict) else None
-    return str(data.get("execution_status") or "unknown") if isinstance(data, dict) else "unknown"
 
 
 def load_agent_data(

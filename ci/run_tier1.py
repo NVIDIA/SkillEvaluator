@@ -506,12 +506,22 @@ def evaluate_skill(
     return fields, data, False
 
 
-def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None, clock=time.monotonic) -> int:
-    """Run all selected skills; return nonzero on every incomplete or failed run.
+def run(
+    workspace: Path,
+    reports: Path,
+    environ: dict[str, str],
+    *,
+    execute=None,
+    clock=time.monotonic,
+    enforcement_mode: str = "strict",
+) -> int:
+    """Run selected skills; advisory mode only relaxes complete policy verdicts.
 
     ``execute`` is called like subprocess.run. The default, run_scan, also
     ends running scans when the run stops early on an interrupt or error.
     """
+    if enforcement_mode not in {"strict", "advisory"}:
+        raise ConfigurationError("enforcement-mode must be strict or advisory.")
     if reports.is_symlink():
         raise ConfigurationError("The report directory must not be a symlink.")
     reports.mkdir(parents=True, exist_ok=True)
@@ -807,6 +817,25 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
     summary["execution"] = context
     _write_summary(reports, summary)
     print(f"SkillEvaluator finished: {summary['passed']} of {summary['total']} skills passed.", flush=True)
+    # Reports have been validated and rendered. A failed headline can coexist
+    # with runtime errors or incomplete scanners, so inspect every skill too.
+    if (
+        enforcement_mode == "advisory"
+        and summary["overall_status"] == "failed"
+        and all(
+            row["overall_status"] in {"passed", "failed"}
+            and not row["incomplete_scans"]
+            and row["exit_code"] in {0, 1}
+            and not row.get("error")
+            for row in rows
+        )
+    ):
+        print(
+            "::warning title=Tier 1 (advisory)::Tier 1 did not pass; enforcement-mode=advisory "
+            "keeps policy findings non-blocking. See the uploaded report.",
+            flush=True,
+        )
+        return 0
     return 0 if summary["overall_passed"] else 1
 
 
@@ -814,9 +843,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path, default=Path("/workspace"))
     parser.add_argument("--reports", type=Path, default=Path("/reports"))
+    parser.add_argument("--enforcement-mode", choices=("strict", "advisory"), default="strict")
     args = parser.parse_args()
     try:
-        return run(args.workspace, args.reports, dict(os.environ))
+        return run(args.workspace, args.reports, dict(os.environ), enforcement_mode=args.enforcement_mode)
     except (ConfigurationError, OSError):
         print("SkillEvaluator could not safely initialize the report directory.", flush=True)
         return 1

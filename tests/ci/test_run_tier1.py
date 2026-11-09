@@ -103,6 +103,109 @@ def test_selection_deduplicates_overlapping_roots(tmp_path):
     assert runner.discover_skills(tmp_path, "skills\nskills/a\nskills") == [first, second]
 
 
+@pytest.mark.parametrize("mode", ["strict", "advisory"])
+@pytest.mark.parametrize(
+    "case",
+    ["passed", "failed", "incomplete", "mixed", "mixed-error", "missing", "malformed", "crash", "config"],
+)
+def test_enforcement_only_downgrades_complete_policy_verdicts(tmp_path, capsys, mode, case):
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/a")
+    responses = [(0, payload())]
+    if case in {"failed", "mixed", "mixed-error"}:
+        responses = [(1, payload(False, "failed"))]
+    if case in {"incomplete", "mixed"}:
+        incomplete = (1, payload(False, "incomplete", ["semgrep"], findings=0))
+        if case == "mixed":
+            skill(workspace, "skills/b")
+            responses.append(incomplete)
+        else:
+            responses = [incomplete]
+    if case == "missing":
+        responses = [(1, None)]
+    if case == "mixed-error":
+        skill(workspace, "skills/b")
+        responses.append((1, None))
+    if case == "malformed":
+        responses = [(1, {"overall_passed": False})]
+    if case == "crash":
+        responses = [(137, payload(False, "failed"))]
+    reports = tmp_path / "reports"
+    result = runner.run(
+        workspace,
+        reports,
+        {"SKILL_PATHS": "missing" if case == "config" else "skills", "LLM_ENABLED": "false"},
+        execute=fake_cli(responses, []),
+        enforcement_mode=mode,
+    )
+    expected = 0 if case == "passed" or (mode == "advisory" and case == "failed") else 1
+    assert result == expected
+    summary = json.loads((reports / "summary.json").read_text())
+    assert summary["overall_passed"] is (case == "passed")
+    if case == "failed":
+        assert summary["overall_status"] == "failed"
+        assert (reports / "skill-001/skillevaluator-tier1.json").is_file()
+        assert (reports / "index.html").is_file()
+    output = capsys.readouterr().out
+    assert ("::warning title=Tier 1 (advisory)::" in output) is (mode == "advisory" and case == "failed")
+
+
+def test_advisory_render_failure_still_fails(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/a")
+
+    def failed_render(*_args):
+        raise OSError("Report disk is full")
+
+    monkeypatch.setattr(runner, "_write_summary", failed_render)
+    with pytest.raises(OSError, match="disk is full"):
+        runner.run(
+            workspace,
+            tmp_path / "reports",
+            {"SKILL_PATHS": "skills", "LLM_ENABLED": "false"},
+            execute=fake_cli([(1, payload(False, "failed"))], []),
+            enforcement_mode="advisory",
+        )
+
+
+@pytest.mark.parametrize("mode,expected", [("strict", 1), ("advisory", 0)])
+def test_cli_enforcement_flag_preserves_failed_evidence(tmp_path, mode, expected):
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/a")
+    binary = tmp_path / "skillevaluator"
+    binary.write_text(
+        f"#!{sys.executable}\nimport pathlib,sys\n"
+        "output=pathlib.Path(sys.argv[sys.argv.index('-o')+1])\n"
+        f"(output/'skillevaluator-tier1.json').write_text({json.dumps(payload(False, 'failed'))!r})\n"
+        "raise SystemExit(1)\n"
+    )
+    binary.chmod(0o755)
+    reports = tmp_path / "reports"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MODULE_PATH),
+            "--workspace",
+            str(workspace),
+            "--reports",
+            str(reports),
+            "--enforcement-mode",
+            mode,
+        ],
+        env={
+            **os.environ,
+            "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+            "SKILL_PATHS": "skills",
+            "LLM_ENABLED": "false",
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == expected, result.stderr
+    assert json.loads((reports / "summary.json").read_text())["overall_status"] == "failed"
+    assert ("::warning title=Tier 1 (advisory)::" in result.stdout) is (mode == "advisory")
+
+
 def test_contradictory_passing_report_with_incomplete_scanners_has_publishable_error_row(tmp_path):
     import ci.publish_reports as publisher
 

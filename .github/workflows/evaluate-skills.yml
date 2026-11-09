@@ -65,6 +65,16 @@ jobs:
     env:
       SCAN_MODE: ${{ inputs.scan-mode == 'auto' && (github.event_name == 'pull_request' && 'changed' || 'all') || inputs.scan-mode }}
     steps:
+      - name: Validate enforcement mode
+        env:
+          ENFORCEMENT_MODE: ${{ inputs.enforcement-mode }}
+        run: |
+          python3 -I - <<'PY'
+          import os
+          mode = os.environ["ENFORCEMENT_MODE"]
+          if mode not in {"strict", "advisory"}:
+              raise SystemExit("enforcement-mode must be strict or advisory")
+          PY
       - name: Capture the optional hosted-report execution receipt
         id: provenance
         continue-on-error: true
@@ -134,20 +144,9 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/anonymous-docker-config"
           docker --config "$RUNNER_TEMP/anonymous-docker-config" pull "$IMAGE"
-      - name: Validate enforcement mode
+      - name: Evaluate selected skills
         env:
           ENFORCEMENT_MODE: ${{ inputs.enforcement-mode }}
-        run: |
-          python3 -I - <<'PY'
-          import os
-          mode = os.environ["ENFORCEMENT_MODE"]
-          if mode not in {"strict", "advisory"}:
-              raise SystemExit("enforcement-mode must be strict or advisory")
-          PY
-      - name: Evaluate selected skills
-        id: evaluate
-        continue-on-error: ${{ inputs.enforcement-mode == 'advisory' }}
-        env:
           IMAGE: ${{ inputs.image }}
           DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           DIFF_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -176,6 +175,10 @@ jobs:
           if [ "$LLM_ENABLED" = true ]; then
             llm_secret_args=(--env LLM_API_KEY)
           fi
+          enforcement_args=()
+          if [ "$ENFORCEMENT_MODE" = advisory ]; then
+            enforcement_args=(--enforcement-mode advisory)
+          fi
           docker run --rm --user "$(id -u):$(id -g)" \
             --read-only --tmpfs /tmp:rw,nosuid,noexec,size=1g \
             --tmpfs /audit-tmp:rw,nosuid,noexec,mode=1777,size=1g --env TMPDIR=/audit-tmp \
@@ -187,15 +190,7 @@ jobs:
             --env SECURITY_BASELINES --env POLICY_SOURCE_SHA \
             --env CALLER_WORKFLOW_SHA \
             --env GITHUB_ACTIONS --env REPORT_IMAGE --env REPORT_URL --env REPORT_RUN_URL --env REPORT_COMMIT \
-            "$IMAGE"
-      - name: Advisory mode keeps findings non-blocking
-        if: ${{ always() && inputs.enforcement-mode == 'advisory' && steps.evaluate.outcome != 'success' }}
-        run: |
-          echo "Tier 1 returned a non-passing result, but enforcement-mode=advisory keeps this workflow non-blocking."
-      - name: Strict mode enforces a passing Tier 1 result
-        if: ${{ always() && inputs.enforcement-mode == 'strict' && steps.evaluate.outcome != 'success' }}
-        run: |
-          exit 1
+            "$IMAGE" "${enforcement_args[@]}"
       - name: Add the result to the workflow summary
         if: always()
         run: |

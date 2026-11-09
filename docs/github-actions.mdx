@@ -42,7 +42,6 @@ with:
     skills
     .agents/skills
   min-score: 70
-  enforcement-mode: strict
   scan-mode: auto
   llm: false
 ```
@@ -50,8 +49,27 @@ with:
 Use your own skill folders. Keep `auto` to scan changed skills in PRs;
 `all` checks the configured collection. If your default branch is not `main`,
 update the template's push branch.
-Keep `enforcement-mode: strict` for merge gating, or switch to `advisory` for
-non-blocking visibility runs that still retain full Tier 1 artifacts.
+The 0.8.0 template pins a workflow that does not accept `enforcement-mode`;
+leave that input out when using the released template.
+
+To opt into advisory enforcement, first update both the reusable workflow's
+commit pin and the image digest to versions that include
+`enforcement-mode` support. This feature is unreleased and is not available
+in the 0.8.0 bundle. Use the reviewed commit SHA of a supporting workflow and
+the published immutable digest of its matching scanner image; changing only
+the input on the 0.8.0 template causes workflow validation to fail.
+
+With compatible pins, omit `enforcement-mode` or set it to `strict` for merge
+gating. Set `enforcement-mode: advisory` for visibility runs: complete policy
+or score failures retain their failed verdict and full artifacts, emit a workflow
+warning, and leave the job successful. Configuration errors, incomplete scanners,
+missing or malformed evidence, and runtime failures still fail the job.
+The hosted-report publisher currently expects a failing verdict to come from a
+failing workflow conclusion. If advisory mode returns success with a failing
+verdict, hosted report publication and PR comments do not run unless the
+publisher is updated to accept that advisory combination.
+An older image without advisory support rejects the explicit advisory flag;
+strict mode continues to work with existing images.
 
 ### Commit the workflow and open a skill PR
 

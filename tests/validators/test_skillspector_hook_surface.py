@@ -787,6 +787,7 @@ class TestOtherGapsStayIncomplete:
         [
             ("extra-limitation", "limitation 'Transitive traversal stopped early.'"),
             ("uninspected-file", "1 partially inspected file(s)"),
+            ("unread-file", "1 uninspected file(s)"),
             ("fatal-scope-exclusion", "1 fatal scope exclusion(s)"),
             ("filtered", "3 finding(s) before filtering and 2 after"),
             (
@@ -805,6 +806,9 @@ class TestOtherGapsStayIncomplete:
             completeness["limitations"].append("Transitive traversal stopped early.")
         elif case == "uninspected-file":
             completeness.update(partially_inspected_files=2, fully_inspected_files=3, scanned_components=3)
+            completeness["coverage_percent"] = 60.0
+        elif case == "unread-file":
+            completeness.update(entirely_uninspected_files=1, fully_inspected_files=3, scanned_components=3)
             completeness["coverage_percent"] = 60.0
         elif case == "fatal-scope-exclusion":
             completeness["scope_exclusions"] = [{"path": "vendor", "reason_code": "excluded", "fatal": True}]

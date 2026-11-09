@@ -134,6 +134,42 @@ NVIDIA Build uses OpenCode. CI installs Tier 2 or Tier 3 extras from the reviewe
 tools commit. Tier 3 checks the selected environment with `doctor`; local mode
 also installs pinned native CLIs into an isolated runtime directory.
 
+For a reviewed candidate with `ci-model-routing-v1`, independently configure
+Tier 1 LLM checks and Tier 3 gateway agents. These options run locally during
+setup; CI later reads the committed configuration:
+
+```bash
+skillevaluator ci init --tiers 1,2,3 --mode preview --no-input \
+  --paths skills --provider nv_build --embedding-provider nv_build \
+  --model "$DEDUP_MODEL" \
+  --tier1-llm --tier1-provider nv_build --tier1-model "$SECURITY_MODEL" \
+  --tier3-provider openai-compatible --tier3-base-url "$GATEWAY_API_ROOT" \
+  --tier3-model "$JUDGE_MODEL" --gateway-secret MY_INFERENCE_KEY \
+  --agents claude-code,codex \
+  --agent-model "claude-code=$CLAUDE_MODEL" --agent-model "codex=$CODEX_MODEL"
+```
+
+Set those model variables to exact accessible catalog IDs and the gateway
+variable to its API root, commonly ending in `/v1`. `MY_INFERENCE_KEY` is the
+name of a CI secret, not its value. Configure that repository Actions secret
+and the Build secret `NVIDIA_API_KEY`; never pass a key value to `ci init`.
+Use `--mode pr` after reviewing the preview. `--base-url` and
+`--embedding-base-url` configure shared chat and embedding endpoints when
+needed. Tier 1's immutable image uses native provider endpoints, so choose a
+supported `--tier1-provider` when other tiers use a custom gateway.
+
+The separate `--tier3-model` selects judging. Repeatable `--agent-model`
+selects each native agent's model without replacing it with the judge's model.
+`--tier1-model` also reaches SkillSpector; an empty value keeps the image's
+provider defaults. Confirm that the pinned image supports the selected model.
+
+Every combined report retains benchmark cards. On GitHub, add
+`--benchmark-pr` with a `ci-benchmark-pr-v1` candidate to propose eligible cards
+beside their skills through a dedicated update PR after default-branch runs.
+The setup still contains two entry files. GitLab retains cards in its aggregate
+artifact; automated benchmark-update MRs are not provided by this option.
+Older descriptors reject these new options before writing unsupported CI files.
+
 `--timeout-minutes` sets the native job duration (10 to 360, 300 by default).
 The evaluator's runtime budget ends 20 minutes, or a quarter of a shorter
 duration, earlier so setup and retained evidence fit. If setup outlasts that

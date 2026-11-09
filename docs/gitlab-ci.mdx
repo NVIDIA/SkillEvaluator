@@ -87,6 +87,27 @@ retains `skill-evaluator-results/ci-results.json`, `index.html`, `summary.md`,
 and each tier's native reports for 14 days. Reports stay behind your normal
 GitLab artifact access controls.
 
+A reviewed `ci-model-routing-v1` candidate can opt into
+`SKILL_EVAL_TIER1_LLM: "true"`, with independent
+`SKILL_EVAL_TIER1_PROVIDER` and `SKILL_EVAL_TIER1_MODEL` settings. The additional
+Tier 1 image job runs in the protected execution environment, rechecks current
+MR/default-branch eligibility, and uses no Docker-in-Docker service. Its
+enriched evidence determines the Tier 1 gate for an eligible run; missing
+evidence cannot fall back to a passing static baseline. Forks retain the
+keyless baseline.
+
+Use `SKILL_EVAL_TIER3_PROVIDER`, `SKILL_EVAL_TIER3_BASE_URL` and
+`SKILL_EVAL_TIER3_MODEL` for a separate live-agent/judge route, and
+`SKILL_EVAL_AGENT_MODELS` for newline-separated `AGENT=MODEL` selections.
+Generic gateways use environment-scoped `SKILL_EVAL_LLM_API_KEY`; chat and
+embedding settings can remain independent. These variables are also generated
+by the [local onboarding options](cli-onboarding.mdx).
+
+The aggregate retains source-bound `BENCHMARK.md` cards and combined JSON under
+`benchmarks/skill-NNN/`. Publication requirements remain separate from advisory
+CI policy. GitLab currently publishes these cards as authenticated artifacts;
+the optional `--benchmark-pr` source-update feature is GitHub-only.
+
 Trusted MR feedback uses one summary table with a row per skill. Each row has
 one-line results for Static and Security Validation, Deduplication, and Live
 Agent Evaluation, with status, recorded issue count and the main finding or

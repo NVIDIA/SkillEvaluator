@@ -6,6 +6,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Capability-gated CI onboarding for protected Tier 1 `--llm`/SkillSpector
+  checks, independent Tier 3 gateway/judge settings and native agent models.
+  Combined reports retain source-bound `BENCHMARK.md` cards for every outcome;
+  GitHub can optionally propose eligible cards through a separate trusted
+  benchmark-update PR. Tier 2/3 remain advisory for CI. Retained JSON preserves
+  Tier 1 required-check and unscanned-content scope for publication decisions.
+
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI
   command, and ships Tier 3 evaluation cases for itself. A test keeps every

@@ -8,6 +8,29 @@ redesign, and publication gate is available. Existing `BENCHMARK.md` files are
 generated artifacts; merging the renderer does not rewrite cards already
 published in skill repositories.
 
+## Generate cards in repository CI
+
+The candidate three-tier CI aggregate composes each skill's actual retained
+Tier 1/2/3 results into `benchmarks/skill-NNN/skillevaluator.json` and
+`benchmarks/skill-NNN/BENCHMARK.md`. Find both through the combined report's
+index. Generation requires no model calls and never reads mutable skill files.
+It preserves exact source, dataset, run and coverage identities; contradictory
+or missing evidence produces an honest incomplete card.
+
+Tier 2/3 advisory CI policy does not waive benchmark publication requirements.
+Automation must use `publication.status` and `publication.eligible` in the
+combined JSON. A passing required CI gate alone cannot approve publication.
+In particular, older Tier 1 images that do not retain required-check scope
+produce incomplete cards until a compatible image is selected.
+
+On GitHub, local onboarding can opt into `--benchmark-pr` with a reviewed
+`ci-benchmark-pr-v1` descriptor. A trusted default-branch publisher verifies the
+producer, exact source head, current attempt and native JSON, regenerates
+eligible cards, and opens a dedicated PR containing only `BENCHMARK.md`
+updates. Source PRs and the default branch are never edited directly. Artifact
+Markdown is never trusted as write-ready content. GitLab currently retains
+cards in the aggregate artifact. See [GitHub Actions](github-actions.mdx#llm-security-gateway-agents-and-benchmark-cards).
+
 ## Before and after
 
 The legacy card led with dense tier output and mixed verdict evidence into the

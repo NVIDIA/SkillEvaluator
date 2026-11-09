@@ -36,13 +36,47 @@ on:
       model:
         type: string
         default: ''
+      base-url:
+        description: Optional explicit chat API root; required for openai-compatible gateways
+        type: string
+        default: ''
+      tier1-llm:
+        description: Enable protected Tier 1 LLM security, SkillSpector enrichment and rubric checks
+        type: boolean
+        default: false
+      tier1-provider:
+        description: Tier 1 image provider override; openai, anthropic or nv_build
+        type: string
+        default: ''
+      tier1-model:
+        description: Tier 1 and SkillSpector model; empty preserves their provider defaults
+        type: string
+        default: ''
       embedding-provider:
         type: string
         default: ''
       embedding-model:
         type: string
         default: ''
+      embedding-base-url:
+        type: string
+        default: ''
+      tier3-provider:
+        description: Optional independent live-agent and judge provider
+        type: string
+        default: ''
+      tier3-model:
+        description: Optional independent Tier 3 judge model; native agent models remain separate
+        type: string
+        default: ''
+      tier3-base-url:
+        type: string
+        default: ''
       agents:
+        type: string
+        default: ''
+      agent-models:
+        description: Newline-separated native AGENT=MODEL overrides for Tier 3 and doctor
         type: string
         default: ''
       runner:
@@ -72,6 +106,11 @@ on:
         required: false
       NVIDIA_API_KEY:
         required: false
+      LLM_API_KEY:
+        description: Inference credential for an explicitly configured compatible gateway
+        required: false
+      EMBEDDING_API_KEY:
+        required: false
 permissions:
   contents: read
   id-token: write
@@ -85,7 +124,9 @@ jobs:
       paths: ${{ inputs.paths }}
       min-score: ${{ inputs.min-score }}
       scan-mode: ${{ needs.eligibility.outputs.scan-mode || inputs.scan-mode }}
-      artifact-name: skill-evaluator-tier1
+      # Keep an unconditional keyless baseline. Eligible opt-in runs use the
+      # protected enriched job's canonical evidence for the required gate.
+      artifact-name: ${{ inputs.tier1-llm && needs.eligibility.outputs.allowed == 'true' && 'skill-evaluator-tier1-baseline' || 'skill-evaluator-tier1' }}
       llm: false
   eligibility:
     runs-on: ubuntu-24.04
@@ -184,10 +225,16 @@ jobs:
       SKILL_EVAL_ENV_MODE: ${{ inputs.env-mode }}
       SKILL_EVAL_PROVIDER: ${{ inputs.provider }}
       SKILL_EVAL_MODEL: ${{ inputs.model }}
+      SKILL_EVAL_BASE_URL: ${{ inputs.base-url }}
+      SKILL_EVAL_TIER3_PROVIDER: ${{ inputs.tier3-provider }}
+      SKILL_EVAL_TIER3_MODEL: ${{ inputs.tier3-model }}
+      SKILL_EVAL_TIER3_BASE_URL: ${{ inputs.tier3-base-url }}
       # Empty lets run_tiers choose the documented default (OpenAI for Anthropic chat).
       SKILL_EVAL_EMBEDDING_PROVIDER: ${{ inputs.embedding-provider }}
       SKILL_EVAL_EMBEDDING_MODEL: ${{ inputs.embedding-model }}
+      SKILL_EVAL_EMBEDDING_BASE_URL: ${{ inputs.embedding-base-url }}
       SKILL_EVAL_AGENTS: ${{ inputs.agents }}
+      SKILL_EVAL_AGENT_MODELS: ${{ inputs.agent-models }}
       SKILL_EVAL_TIER3_REQUIRED: 'false'
       SKILL_EVAL_N_ATTEMPTS: ${{ inputs.n-attempts }}
       SKILL_EVAL_N_CONCURRENT: ${{ inputs.n-concurrent }}
@@ -224,7 +271,8 @@ jobs:
           python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.11.27
           env -i PATH="$PATH" python -I -m uv --no-config --cache-dir "$RUNNER_TEMP/uv-cache" sync --locked --no-dev --extra "tier${TIER}" --project "$GITHUB_WORKSPACE/evaluator" --python 3.12 --default-index https://pypi.org/simple
           echo "$GITHUB_WORKSPACE/evaluator/.venv/bin" >> "$GITHUB_PATH"
-      - name: Recheck current head after environment approval
+      - &current-head-check
+        name: Recheck current head after environment approval
         id: current-head
         env:
           GH_TOKEN: ${{ github.token }}
@@ -268,6 +316,8 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          SKILL_EVAL_LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          SKILL_EVAL_EMBEDDING_API_KEY: ${{ secrets.EMBEDDING_API_KEY }}
         run: python -I evaluator/ci/bootstrap_tiers.py
       - name: Evaluate selected tier and retain native evidence
         if: ${{ !cancelled() && steps.current-head.outputs.allowed == 'true' && contains(format(',{0},', inputs.tiers), format(',{0},', matrix.tier)) }}
@@ -276,6 +326,8 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          SKILL_EVAL_LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          SKILL_EVAL_EMBEDDING_API_KEY: ${{ secrets.EMBEDDING_API_KEY }}
         run: |
           # The job budget also covers setup; stop evaluation first so timeout evidence is retained.
           reserve=$(( SKILL_EVAL_TIMEOUT_MINUTES / 4 < 20 ? SKILL_EVAL_TIMEOUT_MINUTES / 4 : 20 ))
@@ -289,8 +341,67 @@ jobs:
           path: ${{ runner.temp }}/skill-reports/
           if-no-files-found: warn
           retention-days: 14
+  tier1-llm:
+    needs: eligibility
+    if: ${{ inputs.tier1-llm && needs.eligibility.outputs.allowed == 'true' && contains(format(',{0},', inputs.tiers), ',1,') }}
+    runs-on: ${{ inputs.runner }}
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      pull-requests: read
+    timeout-minutes: 60
+    env:
+      SKILL_EVAL_PATHS: ${{ inputs.paths }}
+      SKILL_EVAL_SCAN_MODE: ${{ needs.eligibility.outputs.scan-mode || inputs.scan-mode }}
+      SKILL_EVAL_MIN_SCORE: ${{ inputs.min-score }}
+      SKILL_EVAL_PROVIDER: ${{ inputs.provider }}
+      SKILL_EVAL_TIER1_PROVIDER: ${{ inputs.tier1-provider }}
+      SKILL_EVAL_TIER1_MODEL: ${{ inputs.tier1-model }}
+      DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      DIFF_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      REPORT_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      REPORT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          repository: ${{ inputs.tools-repository }}
+          ref: ${{ inputs.tools-ref }}
+          path: evaluator
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Install the locked credential-free Tier 1 launcher
+        run: |
+          python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.11.27
+          env -i PATH="$PATH" python -I -m uv --no-config --cache-dir "$RUNNER_TEMP/uv-cache" sync --locked --no-dev --project "$GITHUB_WORKSPACE/evaluator" --python 3.12 --default-index https://pypi.org/simple
+          echo "$GITHUB_WORKSPACE/evaluator/.venv/bin" >> "$GITHUB_PATH"
+      - *current-head-check
+      - name: Evaluate enriched Tier 1 in the hardened image
+        if: ${{ steps.current-head.outputs.allowed == 'true' }}
+        env:
+          IMAGE: ${{ inputs.image }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+        run: python -I evaluator/ci/run_tier1_image.py --workspace "$GITHUB_WORKSPACE/candidate" --reports "$RUNNER_TEMP/skill-reports" --image "$IMAGE"
+      - name: Retain enriched Tier 1 reports after failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: skill-evaluator-tier1-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/skill-reports/
+          if-no-files-found: warn
+          retention-days: 14
   aggregate:
-    needs: [tier1, paid-tiers]
+    needs: [tier1, tier1-llm, paid-tiers]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     permissions:

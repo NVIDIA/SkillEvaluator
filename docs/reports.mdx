@@ -24,6 +24,13 @@ names it `skill-evaluator-results-attempt-N`; GitLab retains the aggregate job's
 actual artifact download for that run. Authentication and artifact expiry still
 apply; this link does not imply publicly hosted HTML.
 
+Current candidate aggregates also retain `benchmarks/skill-NNN/BENCHMARK.md`
+and `benchmarks/skill-NNN/skillevaluator.json` for each selected skill. The
+index links these source-bound cards and combined JSON alongside native tier
+reports. Cards retain failed and incomplete publication states. A passing
+Tier 1 CI gate does not certify benchmark eligibility; inspect the combined
+JSON's `publication.status` and `publication.eligible`.
+
 The PR or MR comment presents one summary table with a row for each skill.
 Each row shows a one-line status, issue count and the most important available
 finding or blocker for **Tier 1 — Static and Security Validation**,

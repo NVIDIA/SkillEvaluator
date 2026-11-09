@@ -88,6 +88,42 @@ must remain visible as an incomplete or needs-action result. Local `ci init`,
 is not evidence that the three tiers passed. Optional Pages hosting remains a
 separate opt-in; artifact feedback works without it.
 
+### LLM security, gateway agents and benchmark cards
+
+A candidate descriptor advertising `ci-model-routing-v1` supports
+`--tier1-llm`, independent Tier 1 provider/model inputs, and separate Tier 3
+gateway and judge settings. The protected Tier 1 job reuses the hardened image
+with LLM security, SkillSpector semantic findings, verification and rubric
+checks. An unconditional keyless baseline remains available for forks and
+denied admission. For an authorized LLM run, missing or failed enriched evidence
+fails the required Tier 1 gate; it is never replaced with a passing static scan.
+The image supports OpenAI, Anthropic and NVIDIA Build at their native endpoints.
+
+Tier 2 chat/embeddings can use one provider while Tier 3 uses an
+`openai-compatible` gateway. Set `tier3-provider`, `tier3-base-url` and
+`tier3-model` for the judge, then `agents` and `agent-models` for the actual
+Claude Code/Codex models. A gateway must serve Chat Completions for judging,
+Responses for Codex, and Anthropic Messages for Claude Code, including tool
+calls. A model catalog listing alone does not verify these APIs or your key's
+model access. The generic `LLM_API_KEY` reusable-workflow secret maps to the
+repository secret selected by local `ci init --gateway-secret`.
+
+The combined artifact includes `benchmarks/skill-NNN/BENCHMARK.md` and its
+combined native JSON. The index links to both. Failed or incomplete evidence
+retains a card with its actual publication status. Publication still requires
+complete required-tier evidence even when Tier 2/3 are advisory CI jobs.
+Older Tier 1 images that omit required-check scope cannot certify a passing
+card; use a compatible image rather than inferring coverage from a green gate.
+
+With capability `ci-benchmark-pr-v1`, `ci init --benchmark-pr` adds an optional
+job to the same feedback file. After a verified current default-branch run, a
+separate trusted publisher regenerates eligible cards from native JSON and
+opens a benchmark-update PR. It never changes the evaluated source PR or pushes
+to the default branch. This job needs `contents: write` and
+`pull-requests: write`; the existing comment job keeps read-only contents
+permission. GitHub must allow Actions to create PRs. If that setting is
+disabled, the job reports its prepared branch and a manual PR action.
+
 ## Get started
 
 The scanner uses one **default validation policy** for public and private

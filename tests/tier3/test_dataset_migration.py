@@ -164,6 +164,35 @@ def test_equal_aliases_are_collapsed_and_identity_can_be_inferred(tmp_path: Path
     }
 
 
+@pytest.mark.parametrize("expected_skill", [" ", "\t", "\n", "\u2003"])
+@pytest.mark.parametrize("write_output", [False, True], ids=["preview", "output"])
+def test_blank_inferred_identity_is_rejected_without_writing(
+    tmp_path: Path, expected_skill: str, write_output: bool
+) -> None:
+    from skillevaluator.tier3.dataset_migration import migrate_dataset
+
+    source = _write(tmp_path / "source.json", [_case(expected_skill=expected_skill)])
+    original = source.read_bytes()
+    destination = tmp_path / "new.json" if write_output else None
+    with pytest.raises(ValueError, match=r"non-empty|infer"):
+        migrate_dataset(source, destination=destination)
+    assert list(tmp_path.iterdir()) == [source]
+    assert source.read_bytes() == original
+
+
+def test_padded_inferred_identity_is_preserved_and_loadable(tmp_path: Path) -> None:
+    from skillevaluator.tier3.dataset_migration import migrate_dataset
+
+    source = _write(tmp_path / "source.json", [_case(expected_skill=" demo\t")])
+    original = source.read_bytes()
+    destination = tmp_path / "new.json"
+    result = migrate_dataset(source, destination=destination)
+    assert result.dataset["skill_name"] == " demo\t"
+    assert result.dataset["evals"][0]["expected_skill"] == " demo\t"
+    assert load_dataset_entries(destination)[0]["expected_skill"] == " demo\t"
+    assert source.read_bytes() == original
+
+
 @pytest.mark.parametrize("destination_kind", ["source", "existing", "symlink", "dangling", "jsonl"])
 def test_destinations_never_overwrite_and_jsonl_output_is_not_misrepresented(
     tmp_path: Path, destination_kind: str

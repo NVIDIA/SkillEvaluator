@@ -105,6 +105,8 @@ def _identity(metadata: dict[str, Any], entries: list[Any], skill_name: str | No
         if not names:
             raise ValueError("Cannot infer target skill identity; supply --skill-name")
         identity = names.pop()
+        if not identity.strip():
+            raise ValueError("Inferred skill identity must be a non-empty string; supply --skill-name")
     return identity
 
 

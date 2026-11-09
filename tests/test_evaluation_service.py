@@ -296,6 +296,87 @@ def _write_one_case(skill: Path, marker: str = "generated") -> None:
     )
 
 
+@pytest.mark.parametrize("command", ["validate", "evaluate", "tier3 evaluate"])
+@pytest.mark.parametrize(
+    ("flags", "diagnostic"),
+    [
+        (["--agents", "unknown-agent"], "Unknown agent"),
+        (["--agent-model", "not-an-override"], "AGENT=MODEL"),
+        (["--n-attempts", "0"], "n_attempts"),
+        (["--stop-on-pass", "--n-attempts", "1"], "stop_on_pass"),
+        (["--agent-model", "opencode=other-model"], "catalog model ID"),
+    ],
+)
+def test_autopilot_rejects_invalid_run_before_paid_generation(monkeypatch, tmp_path, command, flags, diagnostic):
+    from skillevaluator import cli as cli_module
+
+    skill = _autopilot_skill(tmp_path)
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-key-never-sent")
+    monkeypatch.setattr(cli_module, "_offer_scanner_install", lambda *_a, **_kw: None)
+    monkeypatch.setattr(cli_module, "run_validation", lambda *_a, **_kw: [])
+    generated = []
+
+    def generate(_self, path, *, use_llm):
+        generated.append(use_llm)
+        _write_one_case(path)
+
+    monkeypatch.setattr(EvaluationService, "create_autopilot_dataset", generate)
+    monkeypatch.setattr(
+        EvaluationService,
+        "evaluate",
+        lambda *_a, **_kw: {"execution_status": "succeeded", "execution_errors": []},
+    )
+    args = [*command.split(), str(skill), *flags]
+    args += ["--no-tier2", "-o", str(tmp_path / "reports")] if command == "validate" else ["--autopilot"]
+
+    result = CliRunner().invoke(cli, args)
+
+    assert generated == [], result.output
+    assert not (skill / "evals" / "evals.json").exists()
+    if command == "validate":
+        report = json.loads(next((tmp_path / "reports").glob("*.json")).read_text())
+        assert diagnostic in json.dumps(report)
+        assert result.exit_code == 0, result.output
+    else:
+        assert result.exit_code != 0
+        assert diagnostic in result.output
+
+
+@pytest.mark.parametrize("command", ["validate", "evaluate", "tier3 evaluate"])
+def test_autopilot_missing_docker_does_not_spend_generation_request(monkeypatch, tmp_path, command):
+    from skillevaluator import cli as cli_module
+    from skillevaluator.tier3.harbor import runner
+
+    skill = _autopilot_skill(tmp_path)
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-key-never-sent")
+    monkeypatch.setattr(cli_module, "_offer_scanner_install", lambda *_a, **_kw: None)
+    monkeypatch.setattr(cli_module, "run_validation", lambda *_a, **_kw: [])
+    monkeypatch.setattr(runner, "_harbor_bin", lambda: "/test/harbor")
+
+    def missing_docker(*_a, **_kw):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(runner.subprocess, "run", missing_docker)
+    monkeypatch.setattr(
+        EvaluationService, "create_autopilot_dataset", lambda *_a, **_kw: pytest.fail("must not spend generation")
+    )
+    args = [*command.split(), str(skill)]
+    args += ["--no-tier2", "-o", str(tmp_path / "reports")] if command == "validate" else ["--autopilot"]
+
+    result = CliRunner().invoke(cli, args)
+
+    assert not (skill / "evals").exists()
+    if command == "validate":
+        report = json.loads(next((tmp_path / "reports").glob("*.json")).read_text())
+        assert "Docker Compose v2 is required" in json.dumps(report)
+        assert result.exit_code == 0, result.output
+    else:
+        assert result.exit_code != 0
+        assert "Docker Compose v2 is required" in result.output
+
+
 def test_cli_autopilot_reuses_existing_dataset_unchanged_and_preserves_skip_baseline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -329,12 +410,14 @@ def test_cli_autopilot_uses_keyed_llm_one_case_generation_and_forwards_options(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from skillevaluator import provider_config
+    from skillevaluator.tier3.harbor import runner
 
     skill = _autopilot_skill(tmp_path)
     calls = []
     captured: dict[str, object] = {}
-    monkeypatch.setattr(provider_config, "resolve_llm_provider", lambda: SimpleNamespace(provider="openai", model="m"))
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-key-never-sent")
+    monkeypatch.setattr(runner, "_check_prerequisites", lambda **_kw: [])
 
     def create(_self, _skill_path, *, use_llm):
         calls.append(use_llm)
@@ -407,11 +490,13 @@ def test_cli_autopilot_warns_and_falls_back_when_llm_generation_errors(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from skillevaluator import provider_config
     from skillevaluator.inference.client import LLMClient
+    from skillevaluator.tier3.harbor import runner
 
     skill = _autopilot_skill(tmp_path)
-    monkeypatch.setattr(provider_config, "resolve_llm_provider", lambda: SimpleNamespace(provider="openai", model="m"))
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-key-never-sent")
+    monkeypatch.setattr(runner, "_check_prerequisites", lambda **_kw: [])
     monkeypatch.setattr(
         LLMClient,
         "completions",

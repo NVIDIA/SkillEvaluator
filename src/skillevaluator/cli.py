@@ -1064,7 +1064,13 @@ def _offer_local_runtime_install(raw_agents: str | None) -> None:
             console.print(f"  [green]✓ {agent} installed[/green]")
 
 
-def _ensure_autopilot_dataset(skill_path: Path, *, quiet: bool = False, progress: str = "auto") -> str | None:
+def _ensure_autopilot_dataset(
+    skill_path: Path,
+    *,
+    quiet: bool = False,
+    progress: str = "auto",
+    evaluation_params: dict[str, Any] | None = None,
+) -> str | None:
     """Ensure an evaluation source exists, generating one when missing.
 
     Mirrors the standalone ``evaluate --autopilot`` behavior: reuse an existing
@@ -1099,6 +1105,20 @@ def _ensure_autopilot_dataset(skill_path: Path, *, quiet: bool = False, progress
             echo("Autopilot: no public provider key is configured; generating one deterministic case.")
         else:
             no_llm = False
+            if evaluation_params is not None:
+                from skillevaluator.tier3.workflow import (
+                    _preflight_environment,
+                    _preflight_options,
+                    _source_snapshot,
+                )
+
+                # Match the direct Tier 3 workflow before spending a generation
+                # request. Keep keyless deterministic starters available, and
+                # leave existing authored sources untouched above.
+                params = {**evaluation_params, "skill_path": skill_path}
+                with _source_snapshot(skill_path) as source_path:
+                    environment_kwargs = _preflight_options(source_path, params)
+                _preflight_environment(params, environment_kwargs=environment_kwargs)
             provider_name, model_name = safe_llm_labels(provider.provider, provider.model)
             echo(f"Autopilot: generating one case with {provider_name} / {model_name}.")
 
@@ -2339,14 +2359,16 @@ def validate(
         view.tier_start(0)
         view.tier_progress(0, [stage_hint_row("status", "preparing evaluation dataset…")])
         try:
-            autopilot_dataset_note = _ensure_autopilot_dataset(tier3_path, quiet=quiet)
+            autopilot_dataset_note = _ensure_autopilot_dataset(
+                tier3_path, quiet=quiet, evaluation_params=click.get_current_context().params
+            )
         except (Exception, SystemExit) as exc:
             try:
-                error_detail = sanitize_tier3_console_text(str(exc), limit=72)
+                error_detail = sanitize_tier3_console_text(str(exc), limit=1024)
             except Exception:
                 error_detail = type(exc).__name__
             autopilot_error = sanitize_tier3_console_text(
-                f"autopilot dataset generation failed: {error_detail or type(exc).__name__}"
+                f"autopilot dataset generation failed: {error_detail or type(exc).__name__}", limit=1200
             )
             if not quiet:
                 click.echo(f"Warning: {autopilot_error}", err=True)
@@ -2512,6 +2534,12 @@ def validate(
             repo_context_exclude_paths=tuple(repo_context_exclude_paths),
         )
         results.append(tier3_result)
+        if autopilot_error:
+            # Invalid/missing sources may be reported as a failed Tier 3 check,
+            # rather than a skip. Preserve the preparation diagnostic in both
+            # cases so users can recover from the reason generation stopped.
+            tier3_result.metadata["autopilot_error"] = autopilot_error
+            tier3_result.add_warning(autopilot_error)
         # The panel follows the formats this run emits: with cli the full report
         # lists the source errors under the Tier 3 finding, so the panel keeps
         # the count; it shortens its own list only when an HTML or JSON report
@@ -3260,7 +3288,7 @@ def evaluate(
         evaluator_container_revision,
     )
     if autopilot:
-        _ensure_autopilot_dataset(skill_path, progress=progress)
+        _ensure_autopilot_dataset(skill_path, progress=progress, evaluation_params=click.get_current_context().params)
 
     parsed_environment_kwargs = _parse_environment_kwargs_cli(environment_kwarg, env_mode=env_mode)
 

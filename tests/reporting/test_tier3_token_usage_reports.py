@@ -24,17 +24,20 @@ from scripts.ci import check_public_benchmarks as benchmark_gate
 
 from skillevaluator.evaluation import tier3_report
 from skillevaluator.evaluation.tier3_report import (
+    _validation_result_from_payload,
     agent_eval_result_from_directory,
     build_agent_eval_payload,
     render_agent_eval_html_report,
 )
 from skillevaluator.reporting import BenchmarkReporter, CLIReporter, HTMLReporter, MarkdownReporter
 from skillevaluator.reporting import base as reporting_base
+from skillevaluator.reporting import html as html_reporting
 from skillevaluator.reporting.base import (
     agent_eval_publication_evidence_complete,
     agent_eval_report_serialization_issue,
 )
 from skillevaluator.reporting.dashboard_data import comparison_rows, parse_dashboard_report
+from skillevaluator.reporting.tier3_token_usage import EVALUATE_CASE_POINTER, VALIDATE_CASE_POINTER
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 from skillevaluator.tier3.harbor.report_data import load_agent_data
 from skillevaluator.tier3.result_display import render_result
@@ -327,6 +330,8 @@ def test_token_usage_never_pushes_a_payload_over_the_report_node_limit(
     if room == "sums":
         assert bounded["report_truncation"]["omitted"] == {"token_usage_case_rows": 12}
         assert bounded["token_usage"] == sums
+        benchmark = BenchmarkReporter(include_timestamp=False).render_all([_validation_result_from_payload(bounded)])
+        assert "12 case row(s) were left out of this report" in _section(benchmark, "## Token Usage")
     elif room == "truncation_record":
         assert bounded["report_truncation"]["omitted"] == {"token_usage": 1, "token_usage_case_rows": 12}
         assert "token_usage" not in bounded
@@ -362,7 +367,7 @@ def test_validate_terminal_prints_agent_rows_and_notes(run_result: tuple[Path, A
     assert rows["codex"] == ["1,210", "1,650", "-440 (-26.7%)", "skill 2/2; baseline 2/2"]
     assert rows["All agents"] == ["4,510", "51,722", "N/A", "skill 4/4; baseline 4/4 (1 unscored)"]
     assert "claude-code: No change: baseline incomplete (1 of 2 attempts scored)." in output
-    assert "Token usage per case is in the HTML report and BENCHMARK.md." in output
+    assert VALIDATE_CASE_POINTER in output
     assert "case-1" not in output.split("Token Usage (measured, not scored)", 1)[1].split("Token usage per case", 1)[0]
 
 
@@ -386,6 +391,7 @@ def test_tier3_evaluate_terminal_prints_the_agent_sums_the_report_step_recorded(
     output = render_result(display)
     assert "Token Usage (measured, not scored)" in output
     assert re.search(r"claude-code\s+│\s+3,300\s+│\s+50,072\s+│\s+N/A", output)
+    assert EVALUATE_CASE_POINTER in " ".join(output.split())
 
 
 def test_terminal_tables_print_agent_names_as_text_not_markup() -> None:
@@ -458,6 +464,30 @@ def test_html_report_lists_case_rows_under_measured_agent_resources(run_result: 
     assert "claude-code: No change: baseline incomplete (1 of 2 attempts scored)." in block
     # Extends the resources section; no second token chart.
     assert report.count('id="tier3-token-chart"') <= 1
+
+
+def test_html_rows_stay_whole_when_the_tier3_payload_is_above_the_preview_trigger(tmp_path: Path) -> None:
+    result = agent_eval_result_from_directory(tmp_path, _cases_run(tmp_path, agents=2, cases=70), use_llm_judge=False)
+    assert result is not None
+    payload = result.metadata["agent_eval"]
+    assert tier3_report._serialized_payload_size(payload) > html_reporting._TIER3_HTML_PREVIEW_TRIGGER_BYTES
+
+    report = HTMLReporter(include_timestamp=False).render_all([result])
+
+    assert "HTML preview omitted" in report
+    block = report.split('<div id="t3-token-usage">', 1)[1].split("</details>", 1)[0]
+    rows = [
+        [re.sub(r"<[^>]+>", "", cell).strip() for cell in re.findall(r"<td>(.*?)</td>", row)]
+        for row in re.findall(
+            r"<tr[^>]*>(.*?)</tr>", block.split("<tbody>", 1)[1].split("</table>", 1)[0], flags=re.DOTALL
+        )
+    ]
+    agent_row = next(row for row in rows if row[:2] == ["agent-0", "All cases"])
+    assert agent_row[2:] == ["10,115", "10,115", "+0 (+0.0%)", "skill 70/70; baseline 70/70"]
+    case_rows = [row for row in rows if row[0] == "agent-1" and row[1] != "All cases"]
+    assert [row[1] for row in case_rows] == [f"case-{index:03d}" for index in range(64)]
+    assert all(row[2] == row[3] and "(partial)" not in row[2] for row in case_rows)
+    assert "12 more case row(s) are in the JSON payload under token_usage." in block
 
 
 def test_untrusted_case_names_are_escaped_in_every_report(tmp_path: Path) -> None:

@@ -3005,7 +3005,13 @@ class HTMLReporter(ReporterBase):
         tier1_skillspector_provenance = _skillspector_provenance(tier1_results)
         tier2_summary = self._compute_tier_summary(tier2_results, presentation=context.tiers[2])
         tier3_summary = self._compute_tier_summary(tier3_results, presentation=context.tiers[3])
-        tier3_preview, tier3_preview_notice = _bounded_tier3_preview(tier3_data)
+        # The token usage table reads the full payload below, so the bounded
+        # preview leaves ``token_usage`` out and stays as it is without it.
+        tier3_preview, tier3_preview_notice = _bounded_tier3_preview(
+            {key: value for key, value in tier3_data.items() if key != "token_usage"}
+            if isinstance(tier3_data, dict)
+            else tier3_data
+        )
         tier3_canonical_data, tier3_canonical_encoding = _canonical_tier3_embed(tier3_data)
         tier3_truncation = tier3_data.get("report_truncation", {}) if isinstance(tier3_data, dict) else {}
 
@@ -3350,8 +3356,11 @@ class HTMLReporter(ReporterBase):
             tier3_canonical_encoding=tier3_canonical_encoding,
             tier3_truncation=tier3_truncation,
             tier3_preview_notice=tier3_preview_notice,
-            # Measured, not scored. Built from the bounded preview, like the other Tier 3 tables.
-            tier3_token_usage=token_usage_table((tier3_preview or {}).get("token_usage")),
+            # Measured, not scored. From the full display payload, with its own
+            # per-agent cap: the preview walk can blank strings of late keys.
+            tier3_token_usage=token_usage_table(
+                tier3_data.get("token_usage") if isinstance(tier3_data, dict) else None
+            ),
             # From the full display payload: the bounded preview can cap rows
             # unevenly per condition and blank identity fields of late rows.
             steps_by_case_chart=steps_by_case_chart(

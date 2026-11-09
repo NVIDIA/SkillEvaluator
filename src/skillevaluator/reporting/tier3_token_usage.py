@@ -34,8 +34,12 @@ COVERAGE_NOTE = (
     "Measured attempts: attempts with token counts, of those expected, in each arm. "
     "Unscored attempts failed before scoring."
 )
-#: Where the terminal, which prints agent rows only, sends readers for case rows.
-PER_CASE_POINTER = "Token usage per case is in the HTML report and BENCHMARK.md."
+#: Where ``validate``'s terminal report, which prints agent rows only, sends readers for case rows.
+VALIDATE_CASE_POINTER = "Token usage per case is in the HTML, Markdown and JSON reports (-r html, markdown or json)."
+#: Where ``tier3 evaluate``'s terminal summary sends readers for case rows.
+EVALUATE_CASE_POINTER = "Token usage per case is in report.html and tier3-benchmark.md in the run directory."
+#: Case rows per agent in the HTML table; the JSON payload keeps the rest.
+HTML_CASE_ROWS_PER_AGENT = 64
 
 
 @dataclass(frozen=True)
@@ -113,15 +117,36 @@ def _row(agent: str | None, case: str | None, item: Mapping[str, Any]) -> TokenU
     )
 
 
+def more_case_rows_note(count: int, *, code: Callable[[str], str] = lambda text: f"`{text}`") -> str | None:
+    """Say how many case rows a table left out; ``code`` formats the payload key."""
+    return f"{count} more case row(s) are in the JSON payload under {code('token_usage')}." if count else None
+
+
+def dropped_case_rows_note(usage: object) -> str | None:
+    """Say how many case rows the report payload dropped to stay within the report limits, if any."""
+    count = _count(_mapping(usage).get("case_rows_omitted"))
+    if not count:
+        return None
+    return (
+        f"{count:,} case row(s) were left out of this report to keep it within the report size limits; "
+        "the agent sums cover every attempt."
+    )
+
+
 def token_usage_rows(
-    usage: object, *, include_cases: bool = True, max_case_rows: int | None = None
+    usage: object,
+    *,
+    include_cases: bool = True,
+    max_case_rows: int | None = None,
+    max_case_rows_per_agent: int | None = None,
 ) -> tuple[list[TokenUsageRow], int]:
-    """Return the rows of ``usage`` and how many case rows ``max_case_rows`` left out.
+    """Return the rows of ``usage`` and how many case rows the caps left out.
 
     Each agent gets an ``All cases`` row followed by its case rows; the
-    all-agent row comes last when more than one agent ran. Only agent and
-    all-agent rows carry a note: a case's change is unavailable for the same
-    reasons, which its cells already show.
+    all-agent row comes last when more than one agent ran. ``max_case_rows``
+    caps the case rows of all agents together and ``max_case_rows_per_agent``
+    those of each agent. Only agent and all-agent rows carry a note: a case's
+    change is unavailable for the same reasons, which its cells already show.
     """
     usage = _mapping(usage)
     agents = _mapping(usage.get("agents"))
@@ -135,13 +160,17 @@ def token_usage_rows(
         if not include_cases:
             continue
         cases = agent.get("cases")
+        agent_rows = 0
         for case in cases if isinstance(cases, list) else []:
             if not isinstance(case, Mapping):
                 continue
-            if max_case_rows is not None and case_rows >= max_case_rows:
+            if (max_case_rows is not None and case_rows >= max_case_rows) or (
+                max_case_rows_per_agent is not None and agent_rows >= max_case_rows_per_agent
+            ):
                 omitted += 1
                 continue
             case_rows += 1
+            agent_rows += 1
             rows.append(_row(name, str(case.get("entry_id") or "unknown"), case))
     dataset = usage.get("dataset")
     if isinstance(dataset, Mapping) and sum(not row.is_case for row in rows) > 1:
@@ -179,21 +208,26 @@ def token_usage_markdown_lines(
     notes = [f"- {agent_label(row.agent)}: {row.note}" for row in summary if row.note]
     if notes:
         lines.extend([*notes, ""])
+    if dropped := dropped_case_rows_note(usage):
+        lines.extend([dropped, ""])
     if cases:
         lines.extend(["<details>", "<summary>Show token usage per case</summary>", "", header, separator])
         lines.extend(line(row) for row in cases)
         lines.append("")
-        if omitted:
-            lines.extend([f"{omitted} more case row(s) are in the JSON payload under `token_usage`.", ""])
+        if more := more_case_rows_note(omitted):
+            lines.extend([more, ""])
         lines.extend(["</details>", ""])
     return lines
 
 
-def render_token_usage_table(console: Console, usage: object, *, text: Callable[[str], str] = str) -> bool:
+def render_token_usage_table(
+    console: Console, usage: object, *, case_pointer: str, text: Callable[[str], str] = str
+) -> bool:
     """Print one row per agent and the all-agent row, then the notes; return whether anything printed.
 
-    ``text`` makes agent names and notes safe for the console, for example by
-    redacting secrets. Cells are plain text, never console markup.
+    ``case_pointer`` names the files of the calling command that hold the
+    case rows. ``text`` makes agent names and notes safe for the console, for
+    example by redacting secrets. Cells are plain text, never console markup.
     """
     rows, _omitted = token_usage_rows(usage, include_cases=False)
     if not rows:
@@ -215,11 +249,24 @@ def render_token_usage_table(console: Console, usage: object, *, text: Callable[
     for row in rows:
         if row.note:
             console.print(Text(f"  {text(row.agent if row.agent is not None else 'All agents')}: {text(row.note)}"))
-    console.print(Text(f"  {TOKEN_USAGE_NOTE} {COVERAGE_NOTE} {PER_CASE_POINTER}", style="dim"))
+    pointer = " ".join(part for part in (case_pointer, dropped_case_rows_note(usage)) if part)
+    console.print(Text(f"  {TOKEN_USAGE_NOTE} {COVERAGE_NOTE} {pointer}", style="dim"))
     return True
 
 
 def token_usage_table(usage: object) -> dict[str, Any] | None:
-    """Return the HTML report's token usage table: every row and the notes, or ``None`` without rows."""
-    rows, _omitted = token_usage_rows(usage)
-    return {"rows": rows, "note": TOKEN_USAGE_NOTE, "coverage_note": COVERAGE_NOTE} if rows else None
+    """Return the HTML report's token usage table, or ``None`` without rows.
+
+    Each agent shows its first :data:`HTML_CASE_ROWS_PER_AGENT` case rows;
+    ``more_cases`` says how many more are in the JSON payload.
+    """
+    rows, omitted = token_usage_rows(usage, max_case_rows_per_agent=HTML_CASE_ROWS_PER_AGENT)
+    if not rows:
+        return None
+    return {
+        "rows": rows,
+        "note": TOKEN_USAGE_NOTE,
+        "coverage_note": COVERAGE_NOTE,
+        "more_cases": more_case_rows_note(omitted, code=str),
+        "dropped_cases": dropped_case_rows_note(usage),
+    }

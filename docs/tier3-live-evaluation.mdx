@@ -907,13 +907,13 @@ that were N/A in every trial (`not_applicable_metrics`) and how many trials
 marked each one (`not_applicable_counts`). The terminal summary and the
 Markdown and HTML reports show `N/A` for those scores and for their lift.
 
-An agent's verdict reads only the with-skill arm, and it needs a with-skill
-score in every dimension. When a dimension's metrics are N/A in every with-skill
-trial, for example Correctness when no case defines `expected_output` (legacy
-`ground_truth`), that dimension has no with-skill score, so the agent's verdict
-is NEUTRAL, never PASS. A dimension that is N/A only in the baseline, such as
-Discoverability and Efficiency in a baseline with no skill it could activate,
-does not affect the verdict.
+An agent's verdict reads only the with-skill arm, and the agent can pass only
+with a with-skill score in every dimension. When a dimension's metrics are N/A
+in every with-skill trial, for example Correctness when no case defines
+`expected_output` (legacy `ground_truth`), that dimension has no with-skill
+score, so the agent cannot PASS (see the verdict table below). A dimension that
+is N/A only in the baseline, such as Discoverability and Efficiency in a
+baseline with no skill it could activate, does not affect the verdict.
 
 | Dimension | Key question | Maps to | Weights | Source |
 | --- | --- | --- | --- | --- |

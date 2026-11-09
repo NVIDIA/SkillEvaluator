@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -314,12 +315,19 @@ def test_saved_run_does_not_renormalize_a_missing_metric_without_validated_na(tm
     assert not any(row["id"] == "effectiveness" and row["with_skill"] is not None for row in agent["dimensions"])
 
 
-def _uniform_run(root, *, with_na=(), baseline_na=()):
-    """Write a two-case saved run scoring 0.95 with the skill and 0.50 without it on every metric not N/A."""
-    for condition, value, na_metrics in (("with-skill", 0.95, with_na), ("without-skill", 0.5, baseline_na)):
+def _uniform_run(root, *, with_na=(), baseline_na=(), with_scores=None):
+    """Write a two-case saved run scoring 0.95 with the skill and 0.50 without it on every metric not N/A.
+
+    ``with_scores`` overrides individual with-skill metric scores.
+    """
+    for condition, value, na_metrics, overrides in (
+        ("with-skill", 0.95, with_na, with_scores or {}),
+        ("without-skill", 0.5, baseline_na, {}),
+    ):
         rows = []
         for case in ("a", "b"):
             row = dict.fromkeys(DEFAULT_METRICS, value)
+            row.update(overrides)
             row.update(
                 entry_id=case,
                 trial_id=f"{case}-trial",
@@ -376,6 +384,43 @@ def test_verdict_reads_only_with_skill_na_dimensions(tmp_path, with_na, verdict,
     for dimension_id, row in dimensions.items():
         assert (row["with_skill"] is None) is (dimension_id == with_skill_na_dimension)
     assert payload["verdict"] == verdict
+
+
+@pytest.mark.parametrize(
+    ("with_scores", "activation"),
+    [({}, None), ({"security": 0.1}, None), ({}, "never_activated")],
+    ids=["other-dimensions-pass", "security-below-0.40", "skill-never-activated"],
+)
+def test_with_skill_na_dimension_never_lets_the_agent_pass(tmp_path, with_scores, activation):
+    # The docs promise only that the agent cannot PASS. Which other verdict it gets depends on the
+    # rest of the run, such as a dimension below 0.40 or a skill that never activated.
+    root = _uniform_run(tmp_path, with_na=("accuracy", "goal_accuracy"), with_scores=with_scores)
+    loaded = load_agent_data(root)
+    if activation:
+        loaded["codex"]["skill_activation"] = {"status": activation}
+
+    payload = build_agent_eval_payload("demo", loaded, use_llm_judge=False)
+
+    assert payload is not None
+    agent = payload["agents"]["codex"]
+    dimensions = {row["id"]: row for row in agent["dimensions"]}
+    assert dimensions["correctness"]["with_skill"] is None
+    assert dimensions["security"]["with_skill"] == pytest.approx(with_scores.get("security", 0.95))
+    assert (agent["skill_activation"].get("status") == "never_activated") is (activation == "never_activated")
+    assert payload["verdict"] != VERDICT_PASS
+
+
+def test_docs_name_only_the_shared_outcome_of_a_with_skill_na_dimension():
+    # The other dimensions and the skill's activation decide which verdict other than PASS applies,
+    # so the N/A paragraph must not name one; the verdict table covers that.
+    docs = (Path(__file__).resolve().parents[2] / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
+    normalized = " ".join(docs.split())
+    start = normalized.index("An agent's verdict reads only the with-skill arm")
+    paragraph = normalized[start : normalized.index("does not affect the verdict.", start)]
+
+    assert "that dimension has no with-skill score, so the agent cannot PASS" in paragraph
+    for verdict in ("NEUTRAL", "FAIL", "INCONCLUSIVE"):
+        assert verdict not in paragraph
 
 
 def test_na_evaluator_reasons_name_the_dataset_field_and_its_legacy_name(tmp_path):

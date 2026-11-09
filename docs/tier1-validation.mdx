@@ -440,10 +440,14 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     Each advisory is a `DEPENDENCY` finding whose check name is the advisory ID
     (a numeric Safety ID reads `SAFETY-<id>`). It points at the requirements
     file and the line that pins the package, or at `pyproject.toml`, so it
-    appears in JSON `findings`, the severity counts, and SARIF results. In a
-    folder run, a skill whose audit passes is summarized as one passed check,
-    so its medium or low advisories are not listed; validate that skill on its
-    own to see them. The finding metadata records:
+    appears in JSON `findings`, the severity counts, and SARIF results.
+    `validate` on a folder of skills validates each skill as its own job, so
+    each skill's report lists its advisories. When one dependency check covers
+    several skills, as with `validate --type rules` or `--type workflows` on a
+    folder, or `DependencySecurityValidator().validate()` on a folder in
+    Python, a skill whose audit passes is summarized as one passed check, so
+    its medium or low advisories are not listed; validate that skill on its own
+    to see them. The finding metadata records:
 
     - `package_name` and `resolved_version`: the package and version the
       scanner checked.
@@ -476,8 +480,9 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     pip-audit advisory; those findings record `fail_on_medium: true` in their
     metadata, so a policy overlay keeps that rule. Safety's severity is its
     level word or, when Safety runs with an API key, its CVSS object: the
-    CVSS v3 level, then the v3 score, then the v2 score and level. A Safety
-    advisory with none of these is `medium`. When pip-audit already reported
+    CVSS v3 level, then the v3 score, then the v2 score and level. A score
+    that is not a number from 0 to 10 is skipped, and a Safety advisory with
+    none of these is `medium`. When pip-audit already reported
     the same advisory ID or CVE for that package version, Safety's copy is
     left out, so one vulnerability is one finding. A critical advisory does not
     stop a folder run at that skill, as a critical finding of other checks
@@ -485,10 +490,12 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     A policy overlay can change one advisory with `DEPENDENCY.<advisory-id>`,
     such as `DEPENDENCY.PYSEC-2020-176: low`, or every advisory with
-    `DEPENDENCY.*`. The warnings that say why an audit is `INCOMPLETE`, such
-    as a line without an exact pin, still appear in the CLI and Markdown
-    reports next to the advisories, and after a policy overlay changes an
-    advisory's severity.
+    `DEPENDENCY.*`. When one dependency check covers several skills, the
+    overlay sees only the advisories that check lists, so it cannot raise a
+    medium or low advisory of a skill whose audit passed. The warnings that say
+    why an audit is `INCOMPLETE`, such as a line without an exact pin, still
+    appear in the CLI and Markdown reports next to the advisories, and after a
+    policy overlay changes an advisory's severity.
 
     ```bash title="Opt-in dependency audit"
     skillevaluator validate ./my-skill --checks dependency

@@ -41,7 +41,10 @@ def test_source_preflight_accepts_yaml_dataset(tmp_path: Path) -> None:
     assert not [check for check in checks if check.status in {"missing", "error"}]
     note = next(check for check in checks if check.path == "Dataset size")
     assert note.status == "ok"
-    assert note.message.startswith("Dataset size: provisional")
+    assert note.message == (
+        "Dataset size: provisional — 1 case (policy needs 10), "
+        "0 negative cases (needs 1) (policy dataset-sufficiency-v1)"
+    )
 
 
 def test_dataset_size_note_does_not_change_validation_result(tmp_path: Path) -> None:

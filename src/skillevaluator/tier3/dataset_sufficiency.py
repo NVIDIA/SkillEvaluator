@@ -12,13 +12,46 @@ MIN_PAIRED_CASES = 10
 POLICY = "dataset-sufficiency-v1"
 
 
+def _format_dataset_size_summary(
+    status: str,
+    distinct_cases: int,
+    negative_cases: int,
+    reason: str | None = None,
+) -> str:
+    case_label = "case" if distinct_cases == 1 else "cases"
+    negative_label = "negative case" if negative_cases == 1 else "negative cases"
+    summary = (
+        f"Dataset size: {status} — {distinct_cases} {case_label} (policy needs {MIN_DISTINCT_CASES}), "
+        f"{negative_cases} {negative_label} (needs {MIN_NEGATIVE_CASES})"
+    )
+    if reason:
+        summary += f"; {reason}"
+    return f"{summary} (policy {POLICY})"
+
+
 def generation_coverage_summary(distinct_cases: int, negative_cases: int) -> str:
     sufficient = distinct_cases >= MIN_DISTINCT_CASES and negative_cases >= MIN_NEGATIVE_CASES
     status = "sufficient" if sufficient else "provisional"
-    negative_label = "no negative case" if negative_cases == 0 else f"{negative_cases} negative case(s)"
-    return (
-        f"Dataset size: {status} — {distinct_cases} of {MIN_DISTINCT_CASES} cases, {negative_label} (policy {POLICY})"
-    )
+    return _format_dataset_size_summary(status, distinct_cases, negative_cases)
+
+
+def _first_noncoverage_reason(checks: list[dict]) -> str | None:
+    for check in checks:
+        if check["name"] == "coverage" or check["met"] is True:
+            continue
+        if check["name"] == "pass_rate_reliability":
+            half_width = check["observed"]["interval_half_width"]
+            if half_width is None:
+                return "pass-rate interval unavailable"
+            return f"pass-rate interval ±{half_width:.2f} is wider than ±{MAX_PASS_RATE_INTERVAL_HALF_WIDTH:.2f}"
+        if check["name"] == "lift_comparison":
+            if check["reason"] == "baseline not run; lift comparison unavailable":
+                return "baseline not run, so lift has no paired cases"
+            paired_cases = check["observed"]["paired_cases"]
+            if paired_cases is None:
+                return "paired-case count unavailable, so lift cannot be compared"
+            return f"lift has {paired_cases} paired cases (needs {MIN_PAIRED_CASES})"
+    return None
 
 
 def assess_dataset_sufficiency(
@@ -86,13 +119,14 @@ def assess_dataset_sufficiency(
     )
     unmet = [check["reason"] for check in checks if check["met"] is not True]
     status = "sufficient" if not unmet else "provisional"
-    negative_label = "no negative case" if negative_cases == 0 else f"{negative_cases} negative case(s)"
     return {
         "policy": POLICY,
         "status": status,
-        "coverage_summary": (
-            f"Dataset size: {status} — {distinct_cases} of {MIN_DISTINCT_CASES} cases, "
-            f"{negative_label} (policy {POLICY})"
+        "coverage_summary": _format_dataset_size_summary(
+            status,
+            distinct_cases,
+            negative_cases,
+            _first_noncoverage_reason(checks),
         ),
         "checks": checks,
         "reason": "Enough cases for this policy" if not unmet else "provisional: " + "; ".join(unmet),

@@ -12,6 +12,19 @@ from skillevaluator.tier3.dataset_sufficiency import assess_dataset_sufficiency
 from skillevaluator.tier3.result_display import render_result
 
 
+def _expected_summary(status: str) -> str:
+    if status == "sufficient":
+        return (
+            "Dataset size: sufficient — 12 cases (policy needs 10), "
+            "2 negative cases (needs 1) (policy dataset-sufficiency-v1)"
+        )
+    return (
+        "Dataset size: provisional — 4 cases (policy needs 10), "
+        "0 negative cases (needs 1); pass-rate interval ±0.40 is wider than ±0.20 "
+        "(policy dataset-sufficiency-v1)"
+    )
+
+
 @pytest.fixture(params=("provisional", "sufficient"))
 def sufficiency(request):
     if request.param == "sufficient":
@@ -32,7 +45,9 @@ def sufficiency(request):
 def test_tier3_evaluate_final_summary_renders_dataset_size(sufficiency):
     output = render_result({"execution_status": "succeeded", "agents": {}, "dataset_sufficiency": sufficiency})
 
-    assert sufficiency["coverage_summary"] in output
+    expected = _expected_summary(sufficiency["status"])
+    assert sufficiency["coverage_summary"] == expected
+    assert expected in output
 
 
 def test_validate_agent_eval_section_renders_dataset_size(sufficiency):
@@ -46,7 +61,9 @@ def test_validate_agent_eval_section_renders_dataset_size(sufficiency):
         Console(file=stream, force_terminal=False),
     )
 
-    assert sufficiency["coverage_summary"] in " ".join(stream.getvalue().split())
+    expected = _expected_summary(sufficiency["status"])
+    assert sufficiency["coverage_summary"] == expected
+    assert expected in " ".join(stream.getvalue().split())
 
 
 def test_benchmark_renders_dataset_size(sufficiency):
@@ -61,4 +78,6 @@ def test_benchmark_renders_dataset_size(sufficiency):
 
     benchmark = BenchmarkReporter(include_timestamp=False).render_all([result])
 
-    assert sufficiency["coverage_summary"] in benchmark
+    expected = _expected_summary(sufficiency["status"])
+    assert sufficiency["coverage_summary"] == expected
+    assert expected in benchmark

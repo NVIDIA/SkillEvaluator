@@ -221,7 +221,16 @@ def test_html_overview_renders_dataset_size_status(
 
     html = HTMLReporter(include_timestamp=False).render_all([result])
 
-    assert sufficiency["coverage_summary"] in html
+    expected = (
+        "Dataset size: provisional — 4 cases (policy needs 10), "
+        "0 negative cases (needs 1); pass-rate interval ±0.40 is wider than ±0.20 "
+        "(policy dataset-sufficiency-v1)"
+        if status == "provisional"
+        else "Dataset size: sufficient — 12 cases (policy needs 10), "
+        "2 negative cases (needs 1) (policy dataset-sufficiency-v1)"
+    )
+    assert sufficiency["coverage_summary"] == expected
+    assert expected in html
     if status == "provisional":
         assert "t3-dataset-sufficiency warning" in html
 

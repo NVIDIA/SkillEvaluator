@@ -78,6 +78,8 @@ from skillevaluator.validators.pii_waivers import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from skillevaluator.reporting.presentation import FinalRenderContext
 
 
@@ -1070,6 +1072,7 @@ def _ensure_autopilot_dataset(
     quiet: bool = False,
     progress: str = "auto",
     evaluation_params: dict[str, Any] | None = None,
+    prepare_environment: Callable[[], None] | None = None,
 ) -> str | None:
     """Ensure an evaluation source exists, generating one when missing.
 
@@ -1118,6 +1121,8 @@ def _ensure_autopilot_dataset(
                 params = {**evaluation_params, "skill_path": skill_path}
                 with _source_snapshot(skill_path) as source_path:
                     environment_kwargs = _preflight_options(source_path, params)
+                if prepare_environment is not None:
+                    prepare_environment()
                 _preflight_environment(params, environment_kwargs=environment_kwargs)
             provider_name, model_name = safe_llm_labels(provider.provider, provider.model)
             echo(f"Autopilot: generating one case with {provider_name} / {model_name}.")
@@ -3287,8 +3292,20 @@ def evaluate(
         evaluated_source_revision,
         evaluator_container_revision,
     )
+    local_runtime_offered = False
+
+    def prepare_local_runtime() -> None:
+        nonlocal local_runtime_offered
+        _offer_local_runtime_install(agents)
+        local_runtime_offered = True
+
     if autopilot:
-        _ensure_autopilot_dataset(skill_path, progress=progress, evaluation_params=click.get_current_context().params)
+        _ensure_autopilot_dataset(
+            skill_path,
+            progress=progress,
+            evaluation_params=click.get_current_context().params,
+            prepare_environment=prepare_local_runtime if env_mode == "local" else None,
+        )
 
     parsed_environment_kwargs = _parse_environment_kwargs_cli(environment_kwarg, env_mode=env_mode)
 
@@ -3324,7 +3341,8 @@ def evaluate(
     )
     try:
         if env_mode == "local":
-            _offer_local_runtime_install(agents)
+            if not local_runtime_offered:
+                prepare_local_runtime()
             from rich.panel import Panel
             from rich.text import Text
 

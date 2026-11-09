@@ -141,6 +141,24 @@ def test_view_reuses_saved_feedback_when_report_is_missing(tmp_path: Path, llm_c
     assert (run / "what_to_fix.json").read_bytes() == saved_fixes
 
 
+def test_view_writes_rule_based_fixes_when_a_verdict_run_lost_them(tmp_path: Path, llm_calls: list[str]) -> None:
+    """The saved feedback still leads the report; only the missing fixes file gets the rule-based text."""
+    skill, results_root, run = _completed_run(tmp_path, fixes=None, tier3_feedback=SAVED_FEEDBACK)
+    saved_result = (run / "result.json").read_bytes()
+
+    report = commands.view_results(skill, results_dir=results_root)
+
+    html = report.read_text(encoding="utf-8")
+    assert llm_calls == []
+    for text in (SAVED_VERDICT, "Saved conclusion", "Saved recommendation", "Saved suggestion"):
+        assert text in html
+    assert "Check whether SKILL.md steers the agent" not in html
+    assert (run / "result.json").read_bytes() == saved_result
+    written = json.loads((run / "what_to_fix.json").read_text(encoding="utf-8"))
+    assert written[0]["kind"] == "skill hurts"
+    assert "Check whether SKILL.md steers the agent" in written[0]["action"]
+
+
 @pytest.mark.parametrize(
     ("fixes", "shown_fix"),
     [

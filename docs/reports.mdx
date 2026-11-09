@@ -718,13 +718,14 @@ Opens the newest `report.html` for a skill in your browser, regenerating it
 from the stored run data if the file is missing. The regenerated report reuses
 the conclusions, recommendations, and suggestions the run saved in
 `result.json`, so it shows the advice the run produced and makes no LLM call.
-It also reuses the run's `what_to_fix.json`, or writes the rule-based fixes
-when the run has none. The report also takes the run's duration and any Harbor
-log links recorded in `result.json`. Feedback saved by 0.6.0 or earlier has no
-per-case verdict, so the report adds the verdict and lists the case fixes as
-its recommendations and suggestions, without the LLM, as a new report does. A
-run that saved no feedback still has its feedback rebuilt, with the LLM when a
-provider is configured, and its `what_to_fix.json` rewritten.
+It also reuses the run's `what_to_fix.json`. When that file is missing or
+unusable, `view` writes the rule-based fixes, which can differ from the
+recommendations the run saved. The report also takes the run's duration and any
+Harbor log links recorded in `result.json`. Feedback saved by 0.6.0 or earlier
+has no per-case verdict, so the report adds the verdict and lists the case
+fixes as its recommendations and suggestions, without the LLM, as a new report
+does. A run that saved no feedback still has its feedback rebuilt, with the LLM
+when a provider is configured, and its `what_to_fix.json` rewritten.
 
 ```bash title="Open the latest HTML report"
 skillevaluator view ./my-skill

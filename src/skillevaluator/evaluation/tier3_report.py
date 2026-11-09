@@ -3541,10 +3541,11 @@ def _apply_saved_feedback(
 
     The case-findings pass still runs without the LLM, on the run's own
     ``what_to_fix.json`` when it is usable (otherwise it writes the rule-based
-    fixes, as before), so what it adds beyond the saved fields stays. Saved
-    conclusions that carry the per-case verdict replace the pass's verdict and
-    fixes; feedback saved before the verdict existed gets both added, as a
-    fresh render shows them.
+    fixes), so what it adds beyond the saved fields stays. Saved conclusions
+    that carry the per-case verdict replace the pass's verdict and fixes, so
+    rule-based fixes written then can differ from the saved recommendations;
+    feedback saved before the verdict existed gets both added, as a fresh
+    render shows them.
     """
     saved = {field: list(saved_feedback[field]) for field in _TIER3_FEEDBACK_FIELDS if field in saved_feedback}
     fixes = _saved_case_fixes(run_dir)

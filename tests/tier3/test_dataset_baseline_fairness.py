@@ -671,7 +671,8 @@ def test_warnings_name_the_fields_the_dataset_uses(tmp_path: Path):
 # --- Generated starter cases -------------------------------------------------
 
 # Descriptions that name the skill, its script or SKILL.md. Template cases
-# quote the description, so these must not turn into graded skill use.
+# quote the description, so these must not turn into graded skill use or a
+# prompt that points at the skill's files.
 _SKILL_NAMING_DESCRIPTIONS = [
     "The release-review skill checks release manifests",
     "Use release-review for release manifests. Use when a release is cut.",
@@ -679,6 +680,9 @@ _SKILL_NAMING_DESCRIPTIONS = [
     "Follows the SKILL.md format to scaffold new agent skills",
     "Runs review.py on release manifests",
     "Runs review.sh on release manifests",
+    "Reads SKILL.md and reports frontmatter errors.",
+    "Opens the SKILL.md and fixes its description field.",
+    "Keeps skills/release-review/SKILL.md in sync with the docs",
 ]
 # A Python script and a shell script: `tier3 validate` checks graded text against both.
 _SCRIPT_FILES = ("review.py", "review.sh")
@@ -690,6 +694,32 @@ def test_template_cases_stay_fair_when_the_description_names_the_skill(generate,
     skill = _skill(description=description, scripts=["review.py"], script_files=_SCRIPT_FILES)
     for case in generate(skill):
         assert _baseline_fairness_warnings(case, skill_scripts=_SCRIPT_FILES) == [], case
+
+
+@pytest.mark.parametrize(
+    ("description", "task"),
+    [
+        ("Reads SKILL.md and reports frontmatter errors.", "reads my SKILL.md and reports frontmatter errors"),
+        ("Opens the SKILL.md and fixes its description field.", "opens my SKILL.md and fixes its description field"),
+    ],
+)
+def test_template_prompt_names_a_skill_md_in_the_description_as_the_users_file(description, task):
+    # The task stays in the prompt and the graded text; only the SKILL.md is named as the user's.
+    (case,) = generate_dataset._generate_simple(_skill(description=description))
+
+    assert case["question"] == f"Use release-review to {task}"
+    assert case["ground_truth"] == f"A correct, complete result for: {task}"
+
+
+def test_template_prompt_is_generic_when_the_description_names_the_skill_directory():
+    skill = _skill(description="Keeps skills/release-review/SKILL.md in sync with the docs")
+
+    simple, implicit, contextual = generate_dataset._generate_full(skill)
+
+    assert simple["question"] == "Use release-review to handle a typical request"
+    assert implicit["question"] == "I need to handle a typical request"
+    assert "skills/release-review" not in contextual["question"]
+    assert simple["ground_truth"] == "A correct, complete result for the request"
 
 
 def _write_skill(

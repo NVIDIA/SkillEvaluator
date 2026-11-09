@@ -57,7 +57,12 @@ from skillevaluator.constants import EXECUTABLE_SKILL_DIRS
 from skillevaluator.evaluation.results import DatasetGenerationError, DatasetGenerationResult
 from skillevaluator.tier3.dataset_utils import normalize_dataset_entries
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
-from skillevaluator.tier3.evals_spec import _baseline_fairness_warnings, _skill_script_names, _skill_use_match
+from skillevaluator.tier3.evals_spec import (
+    _baseline_fairness_warnings,
+    _prompt_skill_files_match,
+    _skill_script_names,
+    _skill_use_match,
+)
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
 # Output budget for generation and refinement; OpenAI reasoning models get the
@@ -305,11 +310,10 @@ def _generate_simple(skill: dict[str, Any]) -> list[dict[str, Any]]:
     """Generate 1 simple test case (default, no LLM needed)."""
     name = skill["name"]
     script = _pick_primary_script(skill)
-    desc_lower = _description_lower(skill)
-    outcome = _outcome_subject(skill, desc_lower)
+    task, outcome = _template_task(skill)
     eval_hints = _extract_eval_hints(skill.get("eval_prompt", ""))
 
-    question = eval_hints["questions"][0] if eval_hints["questions"] else f"Use {name} to {desc_lower}"
+    question = eval_hints["questions"][0] if eval_hints["questions"] else f"Use {name} to {task}"
 
     return [
         {
@@ -341,16 +345,36 @@ def _script_file_names(skill: dict[str, Any]) -> tuple[str, ...]:
     return tuple(sorted(names))
 
 
-def _outcome_subject(skill: dict[str, Any], desc_lower: str) -> str | None:
-    """The description to quote in graded text, or None when quoting it would grade skill use.
+# What template prompts ask for when the description points at the skill's own files.
+_GENERIC_TASK = "handle a typical request"
+# A bare SKILL.md in a description ("Reads SKILL.md and reports frontmatter
+# errors") is the file the skill works on. Quoted as is in a prompt, it reads
+# as the skill's own SKILL.md, which the no-skill baseline does not have.
+_BARE_SKILL_MD_RE = re.compile(
+    r"(?:\b(?:the|its|this|that|own|skill['\u2019]s)\s+)*(?<![\w./-])skill\.md\b", re.IGNORECASE
+)
 
-    A description such as "The release-review skill checks manifests" or "Runs
-    review.py on ..." names the skill or its script, and the no-skill baseline
-    is graded on the expected output and assertions too.
+
+def _template_task(skill: dict[str, Any]) -> tuple[str, str | None]:
+    """The task template prompts ask for, and the outcome their graded text quotes.
+
+    Both come from the description. A bare SKILL.md in it becomes "my SKILL.md",
+    so the prompt names the user's file rather than the skill's; a description
+    that still points at the skill's files (skills/<name>, <name>/SKILL.md)
+    gives a generic task. The outcome is None, and graded text generic, when
+    quoting the task would grade skill use: "The release-review skill checks
+    manifests" or "Runs review.py on ..." names the skill or its script, and
+    the no-skill baseline is graded on the expected output and assertions too.
     """
-    if _skill_use_match(desc_lower, skill["name"], _script_file_names(skill)):
-        return None
-    return desc_lower
+    name = skill["name"]
+    task = _description_lower(skill)
+    if _prompt_skill_files_match(task, name):
+        task = _BARE_SKILL_MD_RE.sub("my SKILL.md", task)
+        if _prompt_skill_files_match(task, name):
+            return _GENERIC_TASK, None
+    if _skill_use_match(task, name, _script_file_names(skill)):
+        return task, None
+    return task, task
 
 
 def _outcome_ground_truth(outcome: str | None) -> str:
@@ -380,8 +404,7 @@ def _generate_full(skill: dict[str, Any]) -> list[dict[str, Any]]:
     """
     name = skill["name"]
     script = _pick_primary_script(skill)
-    desc_lower = _description_lower(skill)
-    outcome = _outcome_subject(skill, desc_lower)
+    task, outcome = _template_task(skill)
     eval_hints = _extract_eval_hints(skill.get("eval_prompt", ""))
     hint_qs = eval_hints["questions"]
 
@@ -390,7 +413,7 @@ def _generate_full(skill: dict[str, Any]) -> list[dict[str, Any]]:
     cases = [
         {
             "id": f"{name}-001",
-            "question": hint_qs[0] if len(hint_qs) > 0 else f"Use {name} to {desc_lower}",
+            "question": hint_qs[0] if len(hint_qs) > 0 else f"Use {name} to {task}",
             "expected_skill": name,
             "expected_script": script,
             "ground_truth": _outcome_ground_truth(outcome),
@@ -398,7 +421,7 @@ def _generate_full(skill: dict[str, Any]) -> list[dict[str, Any]]:
         },
         {
             "id": f"{name}-002",
-            "question": hint_qs[1] if len(hint_qs) > 1 else f"I need to {desc_lower}",
+            "question": hint_qs[1] if len(hint_qs) > 1 else f"I need to {task}",
             "expected_skill": name,
             "expected_script": script,
             "ground_truth": _outcome_ground_truth(outcome),
@@ -408,7 +431,7 @@ def _generate_full(skill: dict[str, Any]) -> list[dict[str, Any]]:
             "id": f"{name}-003",
             "question": hint_qs[2]
             if len(hint_qs) > 2
-            else f"I'm working on a project and need help with {desc_lower}. Can you assist?",
+            else f"I'm working on a project and need help with {task}. Can you assist?",
             "expected_skill": name,
             "expected_script": script,
             "ground_truth": f"Actionable results for {outcome} that fit the user's project"
@@ -650,7 +673,7 @@ def _without_skill_use(case: dict[str, Any], skill: dict[str, Any], skill_script
     if not isinstance(skill_name, str) or not skill_name.strip():
         return case
     skill_name = skill_name.strip()
-    outcome = _outcome_subject(skill, _description_lower(skill))
+    _, outcome = _template_task(skill)
     case = dict(case)
     ground_truth = case.get("ground_truth")
     if isinstance(ground_truth, str) and _skill_use_match(ground_truth, skill_name, skill_scripts):

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Optional trusted manual run; the basic skill-checks.yml needs no model secret.
 # Use the release-generated copy with reviewed workflow and image pins.
+# The image uses the same default OSS policy for public and private repositories.
+# LLM content sharing is controlled by llm and the selected provider, not a profile.
 name: Skill checks with LLM
 on:
   workflow_dispatch:

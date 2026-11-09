@@ -5,6 +5,27 @@
         "demo": {
           "params": [
             {
+              "choices": [
+                "auto",
+                "github",
+                "gitlab"
+              ],
+              "default": "auto",
+              "name": "platform",
+              "opts": [
+                "--platform"
+              ],
+              "param_type": "option"
+            },
+            {
+              "name": "tiers",
+              "opts": [
+                "--tiers"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
               "default": "<callable pathlib.Path.cwd>",
               "name": "repo",
               "opts": [
@@ -27,6 +48,141 @@
         },
         "init": {
           "params": [
+            {
+              "name": "tiers",
+              "opts": [
+                "--tiers"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "choices": [
+                "auto",
+                "github",
+                "gitlab"
+              ],
+              "default": "auto",
+              "name": "platform",
+              "opts": [
+                "--platform"
+              ],
+              "param_type": "option"
+            },
+            {
+              "choices": [
+                "docker",
+                "local"
+              ],
+              "default": "docker",
+              "name": "env_mode",
+              "opts": [
+                "--env-mode"
+              ],
+              "param_type": "option"
+            },
+            {
+              "choices": [
+                "openai",
+                "anthropic",
+                "nv_build"
+              ],
+              "default": "openai",
+              "name": "provider",
+              "opts": [
+                "--provider"
+              ],
+              "param_type": "option"
+            },
+            {
+              "choices": [
+                "openai",
+                "nv_build"
+              ],
+              "name": "embedding_provider",
+              "opts": [
+                "--embedding-provider"
+              ],
+              "param_type": "option"
+            },
+            {
+              "name": "model",
+              "opts": [
+                "--model"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "embedding_model",
+              "opts": [
+                "--embedding-model"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "agents",
+              "opts": [
+                "--agents"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "runner",
+              "opts": [
+                "--runner"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "tier3_required",
+              "opts": [
+                "--tier3-required"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "1",
+              "name": "n_attempts",
+              "opts": [
+                "--n-attempts"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "default": "1",
+              "name": "n_concurrent",
+              "opts": [
+                "--n-concurrent"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "default": "300",
+              "name": "timeout_minutes",
+              "opts": [
+                "--timeout-minutes"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "default": "skillevaluator",
+              "name": "environment",
+              "opts": [
+                "--environment"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
             {
               "default": "<callable pathlib.Path.cwd>",
               "name": "repo",
@@ -144,6 +300,27 @@
         },
         "status": {
           "params": [
+            {
+              "choices": [
+                "auto",
+                "github",
+                "gitlab"
+              ],
+              "default": "auto",
+              "name": "platform",
+              "opts": [
+                "--platform"
+              ],
+              "param_type": "option"
+            },
+            {
+              "name": "tiers",
+              "opts": [
+                "--tiers"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
             {
               "default": "<callable pathlib.Path.cwd>",
               "name": "repo",
@@ -1188,6 +1365,14 @@
           "type": "boolean"
         },
         {
+          "name": "pii_waivers",
+          "opts": [
+            "--pii-waivers"
+          ],
+          "param_type": "option",
+          "type": "file"
+        },
+        {
           "choices": [
             "cli",
             "json",
@@ -1355,6 +1540,14 @@
           ],
           "param_type": "option",
           "type": "boolean"
+        },
+        {
+          "name": "skillspector_baseline",
+          "opts": [
+            "--skillspector-baseline"
+          ],
+          "param_type": "option",
+          "type": "file"
         },
         {
           "choices": [
@@ -1580,6 +1773,14 @@
               "type": "boolean"
             },
             {
+              "name": "pii_waivers",
+              "opts": [
+                "--pii-waivers"
+              ],
+              "param_type": "option",
+              "type": "file"
+            },
+            {
               "choices": [
                 "cli",
                 "json",
@@ -1749,6 +1950,14 @@
               "type": "boolean"
             },
             {
+              "name": "skillspector_baseline",
+              "opts": [
+                "--skillspector-baseline"
+              ],
+              "param_type": "option",
+              "type": "file"
+            },
+            {
               "choices": [
                 "cli",
                 "json",
@@ -1834,6 +2043,14 @@
               "type": "file"
             },
             {
+              "name": "pii_waivers",
+              "opts": [
+                "--pii-waivers"
+              ],
+              "param_type": "option",
+              "type": "file"
+            },
+            {
               "name": "profile",
               "opts": [
                 "--profile"
@@ -1848,6 +2065,14 @@
               ],
               "param_type": "option",
               "type": "text"
+            },
+            {
+              "name": "skillspector_baseline",
+              "opts": [
+                "--skillspector-baseline"
+              ],
+              "param_type": "option",
+              "type": "file"
             },
             {
               "choices": [
@@ -1937,6 +2162,14 @@
             "type": "file"
           },
           {
+            "name": "pii_waivers",
+            "opts": [
+              "--pii-waivers"
+            ],
+            "param_type": "option",
+            "type": "file"
+          },
+          {
             "name": "profile",
             "opts": [
               "--profile"
@@ -1951,6 +2184,14 @@
             ],
             "param_type": "option",
             "type": "text"
+          },
+          {
+            "name": "skillspector_baseline",
+            "opts": [
+              "--skillspector-baseline"
+            ],
+            "param_type": "option",
+            "type": "file"
           },
           {
             "choices": [
@@ -2852,6 +3093,27 @@
             }
           ]
         },
+        "feedback": {
+          "params": [
+            {
+              "name": "run_dir",
+              "opts": [
+                "run_dir"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "directory"
+            },
+            {
+              "name": "skill_path",
+              "opts": [
+                "--skill"
+              ],
+              "param_type": "option",
+              "type": "directory"
+            }
+          ]
+        },
         "harbor-view": {
           "params": [
             {
@@ -2986,6 +3248,73 @@
               ],
               "param_type": "option",
               "type": "boolean"
+            }
+          ]
+        },
+        "select-decoys": {
+          "params": [
+            {
+              "name": "skill_path",
+              "opts": [
+                "skill_path"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "directory"
+            },
+            {
+              "name": "catalog_path",
+              "opts": [
+                "--catalog"
+              ],
+              "param_type": "option",
+              "required": true,
+              "type": "file"
+            },
+            {
+              "name": "catalog_root",
+              "opts": [
+                "--catalog-root"
+              ],
+              "param_type": "option",
+              "required": true,
+              "type": "directory"
+            },
+            {
+              "default": "4",
+              "name": "count",
+              "opts": [
+                "--count"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "multiple": true,
+              "name": "exclude",
+              "opts": [
+                "--exclude"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "model",
+              "opts": [
+                "--model"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "output_path",
+              "opts": [
+                "--output",
+                "-o"
+              ],
+              "param_type": "option",
+              "required": true,
+              "type": "file"
             }
           ]
         },
@@ -3521,6 +3850,14 @@
           "type": "boolean"
         },
         {
+          "name": "skillspector_baseline",
+          "opts": [
+            "--skillspector-baseline"
+          ],
+          "param_type": "option",
+          "type": "file"
+        },
+        {
           "default": "70",
           "name": "min_score",
           "opts": [
@@ -3533,6 +3870,14 @@
           "name": "quality_config",
           "opts": [
             "--quality-config"
+          ],
+          "param_type": "option",
+          "type": "file"
+        },
+        {
+          "name": "pii_waivers",
+          "opts": [
+            "--pii-waivers"
           ],
           "param_type": "option",
           "type": "file"

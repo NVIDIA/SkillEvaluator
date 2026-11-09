@@ -35,6 +35,7 @@ from skillevaluator.constants import (
     SKILL_MANIFEST_VARIANTS,
 )
 from skillevaluator.inference.client import LLMClient
+from skillevaluator.inference.diagnostics import safe_llm_labels
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.utils.secure_fs import SecureRoot
@@ -558,6 +559,17 @@ class RubricEvalValidator(ValidatorBase):
 
         return result
 
+    def _judge_labels(self) -> dict[str, str]:
+        """Name the provider and model that gave the score, when the judge answered.
+
+        On the native Anthropic API the model can be the server-side fallback,
+        which scores differently from the configured model.
+        """
+        if self._judge.model_used is None:
+            return {}
+        provider, model = safe_llm_labels(self._judge.provider, self._judge.model_used)
+        return {"llm_provider": provider, "llm_model_used": model}
+
     @staticmethod
     def _record_judge_failure(
         result: ValidationResult,
@@ -739,6 +751,7 @@ class RubricEvalValidator(ValidatorBase):
                 )
             )
 
+        judge_labels = self._judge_labels()
         result.metadata["rubric_eval"] = {
             "execution_status": "succeeded",
             "overall_score": overall_score,
@@ -755,13 +768,17 @@ class RubricEvalValidator(ValidatorBase):
                 "criterion_pass_score": _CRITERION_PASS_SCORE,
                 "requires_all_criteria_pass": True,
             },
+            **judge_labels,
         }
 
+        # The success detail also names the model, so each skill of a folder
+        # run keeps its own.
         result.add_success(
             check_name="rubric_eval",
             message=f"LLM Rubric Score: {overall_score}/100",
             overall_score=overall_score,
             overall_pass=overall_pass,
+            **judge_labels,
         )
 
         return result

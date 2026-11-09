@@ -409,7 +409,14 @@ def test_native_custom_only_preserves_authored_judge_controls_in_verifier_env(
 @pytest.mark.parametrize("scope", ["task", "step"])
 @pytest.mark.parametrize(
     "name",
-    ["LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL", "LLM_JUDGE_FALLBACK_MODELS", "SKILL_EVAL_JUDGE_CHARACTER_FACTS"],
+    [
+        "LLM_JUDGE_MODEL",
+        "SKILL_EVAL_JUDGE_MODEL",
+        "LLM_JUDGE_FALLBACK_MODELS",
+        "SKILL_EVAL_JUDGE_CHARACTER_FACTS",
+        "LLM_JUDGE_FALLBACK_POLICY",
+        "LLM_JUDGE_RETRY_POLICY",
+    ],
 )
 def test_native_standard_grading_rejects_task_owned_judge_controls(
     tmp_path: Path,
@@ -448,6 +455,8 @@ def test_native_standard_grading_rejects_task_owned_judge_controls(
         "LLM_JUDGE_MODEL",
         "SKILL_EVAL_JUDGE_MODEL",
         "LLM_JUDGE_FALLBACK_MODELS",
+        "LLM_JUDGE_FALLBACK_POLICY",
+        "LLM_JUDGE_RETRY_POLICY",
     ],
 )
 def test_native_standard_grading_allows_exact_operator_staged_control_placeholders(
@@ -490,6 +499,22 @@ def test_native_standard_grading_injects_operator_staged_judge_fallback(tmp_path
 
     config = TaskConfig.model_validate_toml((staged / "task.toml").read_text(encoding="utf-8"))
     assert config.verifier.env["LLM_JUDGE_FALLBACK_MODELS"] == "${LLM_JUDGE_FALLBACK_MODELS}"
+
+
+def test_native_standard_grading_injects_operator_staged_judge_policies(tmp_path: Path) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    names = ("LLM_JUDGE_FALLBACK_POLICY", "LLM_JUDGE_RETRY_POLICY")
+
+    [staged] = stage_native_harbor_tasks(
+        target,
+        tmp_path / "native-operator-policies",
+        grading_mode="default",
+        verifier_env={name: f"${{{name}}}" for name in names},
+    )
+
+    config = TaskConfig.model_validate_toml((staged / "task.toml").read_text(encoding="utf-8"))
+    assert {name: config.verifier.env[name] for name in names} == {name: f"${{{name}}}" for name in names}
 
 
 @pytest.mark.parametrize(

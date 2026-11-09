@@ -74,6 +74,10 @@ TEMPLATES_DIR = Path(__file__).parent / "templates"
 _EVAL_CORE_DIR = Path(__file__).resolve().parent.parent / "eval_core"
 _EVALUATOR_TESTS_SUBDIR = "skill_evaluator"
 _BASE_IMAGE_PREFIX = "skillevaluator-base"
+# Compose 2 treats HEALTHCHECK NONE as a configured check, then fails its
+# readiness wait because Docker supplies no health state. Replace authored
+# checks with this constant exec-form probe; do not run authored healthcheck commands.
+_MAIN_CONTAINER_READINESS_HEALTHCHECK = 'HEALTHCHECK --interval=1s --timeout=5s --retries=3 CMD ["/bin/true"]'
 _MAX_REPO_CONTEXT_FILE_BYTES = 10 * 1024 * 1024
 _MAX_REPO_CONTEXT_TOTAL_BYTES = 200 * 1024 * 1024
 _MAX_EVALUATOR_FILE_BYTES = 64 * 1024 * 1024
@@ -219,7 +223,10 @@ _COMPOSE_ALLOWED_BUILD_KEYS = frozenset(
 _COMPOSE_ALLOWED_NETWORK_KEYS = frozenset({"attachable", "enable_ipv4", "enable_ipv6", "internal", "labels"})
 _COMPOSE_ALLOWED_VOLUME_KEYS = frozenset({"labels"})
 _VERIFIER_JUDGE_MODEL_ENV_VARS = frozenset({"LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"})
-_VERIFIER_JUDGE_FALLBACK_ENV_VARS = frozenset({"LLM_JUDGE_FALLBACK_MODELS"})
+# Fallback models and the opt-in fallback and retry policies of the standard judges.
+_VERIFIER_JUDGE_FALLBACK_ENV_VARS = frozenset(
+    {"LLM_JUDGE_FALLBACK_MODELS", "LLM_JUDGE_FALLBACK_POLICY", "LLM_JUDGE_RETRY_POLICY"}
+)
 _VERIFIER_JUDGE_CONTROL_ENV_VARS = (
     _VERIFIER_JUDGE_MODEL_ENV_VARS | _VERIFIER_JUDGE_FALLBACK_ENV_VARS | {"SKILL_EVAL_JUDGE_CHARACTER_FACTS"}
 )
@@ -3529,7 +3536,6 @@ def _custom_compose_path(environment_dir: Path) -> Path | None:
 
 _VERIFIER_DEPS = "ragas~=0.4.0 langchain-community<0.4.2 openai>=1.0 anthropic>=0.40 boto3>=1.34 idna>=3.10,<4"
 _VERIFIER_IMPORT_SMOKE = (
-    "from ragas import SingleTurnSample; "
     "from ragas.llms.base import llm_factory; "
     "from ragas.messages import AIMessage, HumanMessage; "
     "from ragas.metrics.collections import AgentGoalAccuracyWithReference"
@@ -3656,6 +3662,16 @@ _EVALUATOR_MANAGED_RUNTIME_ENV = {
     # answered until the agent timeout. With background tasks off, a command
     # ends in its turn or at the Bash tool timeout. Other agents ignore it.
     "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+    # A refused turn is not retried on another model. When the provider's
+    # safety classifier stops the selected model, Claude Code otherwise retries
+    # on a model from its own fixed table (for example Claude Opus 5.5 ->
+    # ``claude-opus-4-8``) under that bare Anthropic id. A gateway that serves
+    # only the selected model rejects it (HTTP 403, an unknown API error), and
+    # where it succeeds the trial mixes two models but is scored as the
+    # selected one. With the fallback off, the CLI stops with
+    # ``model_refusal_no_fallback`` and Harbor raises AgentSafetyRefusalError.
+    # Other agents ignore it.
+    "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK": "1",
 }
 _CLEAR_SKILL_ROOT_FUNCTION = (
     "clear_skill_root() { target=$1; "
@@ -3849,6 +3865,7 @@ def _append_task_input_projection(
             _RUNTIME_POLICY_ENV_RESET,
             "ENTRYPOINT []",
             "HEALTHCHECK NONE",
+            _MAIN_CONTAINER_READINESS_HEALTHCHECK,
         ]
     )
     if restore_user is not None and restore_user.casefold() != "root":
@@ -3878,6 +3895,7 @@ def _extend_task_input_projection(lines: list[str], *, include_input: bool, agen
             _RUNTIME_POLICY_ENV_RESET,
             "ENTRYPOINT []",
             "HEALTHCHECK NONE",
+            _MAIN_CONTAINER_READINESS_HEALTHCHECK,
         ]
     )
 

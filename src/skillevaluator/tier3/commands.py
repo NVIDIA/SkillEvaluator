@@ -1076,6 +1076,83 @@ def harbor_view(jobs_dir: Path) -> int:
         return 1
 
 
+_FEEDBACK_EXIT_WORDS = frozenset({"exit", "quit", "q", ":q"})
+
+
+def run_feedback_chat(run_dir: Path, *, skill_path: Path | None = None) -> int:
+    """Chat about one completed Tier 3 run directory; nothing is written to disk.
+
+    Returns 0 when the chat ends normally and 1 when the run or provider cannot
+    be used, or when questions were asked but every one of them failed.
+    """
+    from skillevaluator.evaluation.tier3_feedback_chat import (
+        FEEDBACK_CHAT_ASSISTANT_LABEL,
+        assert_completed_run_dir,
+        open_feedback_session,
+        resolve_skill_path_for_run,
+        skill_changed_since_run,
+    )
+
+    try:
+        resolved_run = assert_completed_run_dir(run_dir)
+        resolved_skill = resolve_skill_path_for_run(resolved_run, skill_path)
+        session = open_feedback_session(resolved_skill, resolved_run)
+    except (OSError, ValueError) as exc:
+        # ProviderConfigurationError is a ValueError. No highlighting, so
+        # messages such as "Tier 3" stay plain text.
+        error_line = Text("Error: ", style="red")
+        error_line.append(strip_terminal_controls(str(exc)))
+        console.print(error_line, highlight=False)
+        return 1
+
+    panel_body = Text()
+    panel_body.append(strip_terminal_controls(resolved_skill.name), style="bold")
+    panel_body.append(f" · {strip_terminal_controls(resolved_run.name)}\n")
+    panel_body.append(strip_terminal_controls(str(resolved_run)), style="dim")
+    console.print()
+    console.print(Panel(panel_body, title=Text("Post-run feedback"), border_style="cyan"))
+    if skill_path is not None and skill_changed_since_run(resolved_run, resolved_skill):
+        console.print(
+            Text("The skill has changed since this run; answers describe the evaluated version.", style="yellow")
+        )
+    console.print(
+        Text(
+            "Each question sends this run's evidence to the configured LLM provider. "
+            "Type exit or press Ctrl-D to quit.",
+            style="dim",
+        )
+    )
+    console.print()
+
+    while True:
+        try:
+            line = console.input("[bold cyan]You:[/bold cyan] ")
+        except (EOFError, KeyboardInterrupt):
+            console.print()
+            break
+        question = line.strip()
+        if not question:
+            continue
+        if question.lower() in _FEEDBACK_EXIT_WORDS:
+            break
+        try:
+            answer = session.reply(question)
+        except KeyboardInterrupt:
+            # The session keeps no unanswered turn; Ctrl-C at the prompt still exits.
+            console.print()
+            console.print(Text("Interrupted; that question was discarded.", style="dim"))
+            console.print()
+            continue
+        console.print()
+        # Model text is printed literally: never parsed as markup, escapes removed.
+        reply_line = Text(f"{FEEDBACK_CHAT_ASSISTANT_LABEL}: ", style="bold green")
+        reply_line.append(strip_terminal_controls(answer))
+        console.print(reply_line)
+        console.print()
+
+    return 1 if session.failed_turns and not session.answered_turns else 0
+
+
 def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int:
     """Compare latest Harbor result scores across agents."""
     candidate_roots = iter_candidate_results_roots(skill_path, results_dir)
@@ -1425,6 +1502,7 @@ __all__ = [
     "init_harbor_task",
     "parse_agents",
     "parse_environment_kwargs",
+    "run_feedback_chat",
     "validate_evals",
     "view_results",
 ]

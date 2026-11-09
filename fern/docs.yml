@@ -38,6 +38,9 @@ navigation:
       - page: Providers & Credentials
         path: ../docs/configuration.mdx
         slug: configuration
+      - page: Evaluate from Your Agent
+        path: ../docs/agent-skill.mdx
+        slug: agent-skill
   - section: Evaluate Your Skill
     skip-slug: true
     contents:

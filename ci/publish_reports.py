@@ -6,12 +6,16 @@
 
 Run only from a trusted revision in a privileged workflow. This helper writes
 static files; the workflow owns Git commits, Pages deployment and PR comments.
-TRUSTED_EVALUATOR_SHA and TRUSTED_CALLER_BLOBS must explicitly allow the reusable
-workflow commit and exact caller workflow blob; neither has a permissive default.
+TRUSTED_CALLER_BLOBS always approves the exact caller workflow. Evaluator commits
+require TRUSTED_EVALUATOR_SHA unless DELEGATED_EVALUATOR_WRAPPER explicitly
+delegates revision selection to a single approved wrapper.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import html
 import io
 import json
@@ -248,7 +252,7 @@ def validate_report(report: dict, row: dict) -> None:
     from skillevaluator.reporting.run_status import resolve_run_status
 
     try:
-        retained = retained_results(report, copy_metadata=False)
+        retained = retained_results(report, copy_metadata=False, allowed_tiers={1})
     except RetainedReportError as exc:
         raise PublicationError("A per-skill report contains invalid retained evidence.") from exc
     incomplete = []
@@ -378,6 +382,13 @@ def read_artifact(payload: bytes) -> tuple[dict, dict[str, dict]]:
         redactor = Redactor(tokens)
         summary = redactor.object(summary)
         reports = redactor.object(reports)
+        from skillevaluator.reporting.finding_summary import refresh_finding_identities
+
+        # IDs hashed from the unredacted text could confirm a guessed value.
+        # Refresh even without collected tokens: the redactor also masks
+        # database userinfo that no token names.
+        for report in reports.values():
+            refresh_finding_identities(report)
         validate_summary(summary)
         for row in summary["skills"]:
             if row["overall_status"] != "error":
@@ -476,15 +487,17 @@ def _validate_run(run: dict, repository: str, run_id: int):
         raise PublicationError("The selected run lacks valid revision and attempt metadata.")
 
 
-def _trusted_pins(variable: str) -> set[str]:
+def _trusted_pins(variable: str, *, optional=False) -> set[str]:
     raw = os.environ.get(variable, "")
+    if optional and not raw.strip():
+        return set()
     values = re.split(r"[,\n]", raw.strip())
     if not raw or len(values) > 32 or any(SHA_PATTERN.fullmatch(value.strip()) is None for value in values):
         raise PublicationError("Trusted revision allowlists require comma- or newline-separated full commit/blob SHAs.")
     return {value.strip() for value in values}
 
 
-def _caller_blob(api, repository: str, sha: str) -> str:
+def _caller_blob(api, repository: str, sha: str, *, delegate="") -> str:
     caller = api.get(f"/repos/{repository}/contents/{WORKFLOW_PATH}?ref={sha}")
     if (
         not isinstance(caller, dict)
@@ -494,7 +507,77 @@ def _caller_blob(api, repository: str, sha: str) -> str:
         or SHA_PATTERN.fullmatch(caller["sha"]) is None
     ):
         raise PublicationError("The caller workflow lacks a valid Git blob identity.")
+    if delegate:
+        _validate_delegated_caller(caller, delegate)
     return caller["sha"]
+
+
+def _validate_delegated_caller(caller: dict, delegate: str) -> None:
+    """Prove the only root workflow job calls the explicitly trusted delegate.
+
+    The run API lists referenced workflows without parent/child edges. Requiring
+    this root plus exactly two references proves the leaf is downstream without
+    needing a token that can read the private wrapper repository.
+    """
+    import yaml
+
+    content = caller.get("content")
+    if caller.get("encoding") != "base64" or not isinstance(content, str) or len(content) > 350_000:
+        raise PublicationError("Delegation requires the historical caller workflow contents.")
+    try:
+        raw = base64.b64decode("".join(content.split()), validate=True)
+        if len(raw) > 256 * 1024:
+            raise ValueError
+        blob = hashlib.sha1(b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw).hexdigest()
+        if blob != caller["sha"]:
+            raise ValueError
+        source = raw.decode("utf-8")
+        # Reject YAML aliases and ambiguous mappings instead of allowing parser
+        # differences to change which job the approved caller invokes.
+        for count, token in enumerate(yaml.scan(source)):
+            if count > 20_000 or isinstance(
+                token, (yaml.tokens.AliasToken, yaml.tokens.AnchorToken, yaml.tokens.TagToken)
+            ):
+                raise ValueError
+
+        class UniqueLoader(yaml.BaseLoader):
+            def construct_mapping(self, node, deep=False):
+                mapping = {}
+                for key_node, value_node in node.value:
+                    key = self.construct_object(key_node, deep=deep)
+                    if not isinstance(key, str) or key in mapping or key == "<<":
+                        raise ValueError
+                    mapping[key] = self.construct_object(value_node, deep=deep)
+                return mapping
+
+        document = yaml.load(source, Loader=UniqueLoader)
+    except (ValueError, UnicodeError, binascii.Error, yaml.YAMLError, RecursionError) as exc:
+        raise PublicationError("The delegated caller contents are invalid or ambiguous.") from exc
+    jobs = document.get("jobs") if isinstance(document, dict) else None
+    if not isinstance(jobs, dict) or len(jobs) != 1:
+        raise PublicationError("Delegation requires exactly one caller job invoking the approved wrapper.")
+    job = next(iter(jobs.values()))
+    if (
+        not isinstance(job, dict)
+        or job.get("uses") != delegate
+        or any(key in job for key in ("steps", "runs-on", "strategy"))
+    ):
+        raise PublicationError("Delegation requires exactly one caller job invoking the approved wrapper.")
+
+
+def _workflow_reference(value: str) -> tuple[str, str]:
+    pattern = r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\.github/workflows/[A-Za-z0-9_-][A-Za-z0-9_.-]*\.ya?ml)@([A-Za-z0-9_-][A-Za-z0-9_./-]*)"
+    match = re.fullmatch(pattern, value)
+    if match is None:
+        raise PublicationError("Approved wrappers require an exact workflow path and full SHA or tag name.")
+    workflow, ref = match.groups()
+    if (
+        len(ref) > 255
+        or ".." in ref
+        or any(not part or part.startswith(".") or part.endswith((".lock", ".")) for part in ref.split("/"))
+    ):
+        raise PublicationError("The approved wrapper tag name is invalid.")
+    return workflow, ref
 
 
 def _trusted_wrappers() -> set[str]:
@@ -502,16 +585,20 @@ def _trusted_wrappers() -> set[str]:
     if not raw:
         return set()
     values = [value.strip() for value in re.split(r"[,\n]", raw)]
-    pattern = r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\.github/workflows/[A-Za-z0-9_-][A-Za-z0-9_.-]*\.ya?ml@[0-9a-f]{40}"
-    if len(raw) > 32768 or len(values) > 32 or any(re.fullmatch(pattern, value) is None for value in values):
-        raise PublicationError("Approved wrappers require owner/repository/.github/workflows/file.yml@<full SHA> pins.")
+    if len(raw) > 32768 or len(values) > 32:
+        raise PublicationError("The approved wrapper allowlist exceeds its limit.")
+    for value in values:
+        _workflow_reference(value)
     return set(values)
 
 
 def _validate_workflow_provenance(api, repository: str, run: dict) -> dict:
-    evaluator_pins = _trusted_pins("TRUSTED_EVALUATOR_SHA")
     caller_blobs = _trusted_pins("TRUSTED_CALLER_BLOBS")
     approved_wrappers = _trusted_wrappers()
+    delegate = os.environ.get("DELEGATED_EVALUATOR_WRAPPER", "").strip()
+    if delegate and delegate not in approved_wrappers:
+        raise PublicationError("Evaluator delegation requires one explicitly approved wrapper workflow.")
+    evaluator_pins = _trusted_pins("TRUSTED_EVALUATOR_SHA", optional=bool(delegate))
     references = run.get("referenced_workflows")
     if not isinstance(references, list) or not 1 <= len(references) <= 33:
         raise PublicationError("The scan must reference one approved evaluator and only explicitly approved wrappers.")
@@ -522,29 +609,34 @@ def _validate_workflow_provenance(api, repository: str, run: dict) -> dict:
     evaluator_sha = None
     seen = set()
     wrappers = set()
+    resolved_wrappers = []
     for reference in references:
         if not isinstance(reference, dict):
             raise PublicationError("The scan has an invalid workflow reference.")
         path, sha = reference.get("path"), reference.get("sha")
-        if (
-            not isinstance(path, str)
-            or not isinstance(sha, str)
-            or SHA_PATTERN.fullmatch(sha) is None
-            or not path.endswith(f"@{sha}")
-            or path in seen
-        ):
-            raise PublicationError("The scan has a duplicate or non-immutable workflow reference.")
+        if not isinstance(path, str) or not isinstance(sha, str) or SHA_PATTERN.fullmatch(sha) is None or path in seen:
+            raise PublicationError("The scan has a duplicate or invalid workflow reference.")
         seen.add(path)
-        if path == f"{workflow}@{sha}" and sha in evaluator_pins:
+        if path == f"{workflow}@{sha}" and (sha in evaluator_pins or delegate):
             if evaluator_sha is not None:
                 raise PublicationError("The scan must reference exactly one approved evaluator.")
             evaluator_sha = sha
         elif path in approved_wrappers and not path.startswith(f"{workflow}@"):
+            _, ref = _workflow_reference(path)
+            if SHA_PATTERN.fullmatch(ref):
+                if ref != sha:
+                    raise PublicationError("The wrapper revision does not match its immutable pin.")
+            elif reference.get("ref") != f"refs/tags/{ref}":
+                raise PublicationError("The wrapper tag lacks a matching historical GitHub tag identity.")
+            else:
+                resolved_wrappers.append({"path": path, "ref": reference["ref"], "sha": sha})
             wrappers.add(path)
         else:
             raise PublicationError("The scan references an unapproved evaluator or wrapper workflow.")
     if evaluator_sha is None:
         raise PublicationError("The selected run did not use an approved immutable evaluator workflow.")
+    if delegate and (len(references) != 2 or wrappers != {delegate}):
+        raise PublicationError("Delegation requires exactly the approved root wrapper and one evaluator leaf.")
     # The receipt is a separate artifact made by the trusted reusable workflow.
     # PR associations and current merge refs are mutable, so they never identify
     # which caller configuration produced a historical report.
@@ -561,9 +653,14 @@ def _validate_workflow_provenance(api, repository: str, run: dict) -> dict:
         )
     except ProvenanceError as exc:
         raise PublicationError(str(exc)) from exc
-    if _caller_blob(api, repository, identity["workflow_sha"]) not in caller_blobs:
+    if _caller_blob(api, repository, identity["workflow_sha"], delegate=delegate) not in caller_blobs:
         raise PublicationError("The caller workflow differs from the approved workflow blobs.")
-    return {"evaluator_sha": evaluator_sha, "wrapper_workflows": sorted(wrappers)}
+    return {
+        "evaluator_sha": evaluator_sha,
+        "wrapper_workflows": sorted(wrappers),
+        "resolved_wrapper_workflows": sorted(resolved_wrappers, key=lambda item: item["path"]),
+        "delegated_evaluator_wrapper": delegate,
+    }
 
 
 def _timestamp(value: str) -> datetime:
@@ -788,6 +885,35 @@ def _recorded_image(summary: dict, fallback: str) -> str:
     return selected
 
 
+def _validate_pages_privacy(api, repository: str, base_url: str) -> None:
+    """Recheck access control immediately before retaining source-bearing reports."""
+    info = api.get(f"/repos/{repository}")
+    private_origin = (urllib.parse.urlsplit(base_url).hostname or "").endswith(".pages.github.io")
+    if (
+        isinstance(info, dict)
+        and info.get("private") is False
+        and info.get("visibility") == "public"
+        and not private_origin
+    ):
+        return
+    pages = api.get(f"/repos/{repository}/pages")
+    actual = pages.get("html_url") if isinstance(pages, dict) else None
+    private_url = r"https://(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+pages\.github\.io/?"
+    if (
+        not isinstance(pages, dict)
+        or pages.get("public") is not False
+        or pages.get("build_type") != "workflow"
+        or pages.get("cname")
+        or not isinstance(actual, str)
+        or re.fullmatch(private_url, actual) is None
+        or re.fullmatch(private_url, base_url) is None
+        or actual.removesuffix("/") != base_url.removesuffix("/")
+    ):
+        raise PublicationError(
+            "Private reports require a verified private Pages site at the configured URL; publication was stopped."
+        )
+
+
 def publish(
     api,
     repository: str,
@@ -852,12 +978,17 @@ def publish(
     }
     if provenance["wrapper_workflows"]:
         receipt["trusted_wrapper_workflows"] = provenance["wrapper_workflows"]
+    if provenance["resolved_wrapper_workflows"]:
+        receipt["resolved_wrapper_workflows"] = provenance["resolved_wrapper_workflows"]
+    if provenance["delegated_evaluator_wrapper"]:
+        receipt["delegated_evaluator_wrapper"] = provenance["delegated_evaluator_wrapper"]
     if selected_image:
         receipt["image"] = selected_image
     destination = site / relative
     existing = _read_retained(destination / "receipt.json", None)
     if existing is not None and existing != receipt:
         raise PublicationError("An immutable run path already contains different publication evidence.")
+    _validate_pages_privacy(api, repository, base_url)
     if existing is None:
         if destination.exists():
             raise PublicationError("An immutable run path already exists without its receipt.")

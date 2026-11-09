@@ -9,6 +9,7 @@ import errno
 import importlib
 import io
 import json
+import math
 import os
 import tempfile
 import threading
@@ -355,19 +356,34 @@ def test_rich_reporter_stops_live_display_during_exception_cleanup(monkeypatch: 
     assert live.stop_calls == 1
 
 
-def test_plain_reporter_emits_durable_plan_events_and_elapsed_heartbeat() -> None:
+def test_plain_reporter_emits_durable_plan_events_and_elapsed_heartbeat(monkeypatch: pytest.MonkeyPatch) -> None:
     progress = _progress_module()
+    clock = [0.0]
+    monkeypatch.setattr(progress, "monotonic", lambda: clock[0])
     output = io.StringIO()
     reporter = progress.PlainProgressReporter(stream=output, refresh_interval=60)
+    # Drive heartbeat() ourselves; the real worker only waits for cleanup.
+    monkeypatch.setattr(reporter, "_heartbeat_loop", reporter._stop.wait)
 
-    reporter.start(_plan(progress))
-    reporter.emit(progress.ProgressEvent(stage="configuration", state="running"))
-    reporter.emit(progress.ProgressEvent(stage="configuration", state="ready", detail="eval config loaded"))
-    reporter.emit(progress.ProgressEvent(stage="docker-images", state="delegated", detail="build delegated to Harbor"))
-    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="with-skill + baseline"))
-    reporter.heartbeat()
-    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="complete"))
-    reporter.close()
+    try:
+        reporter.start(_plan(progress))
+        worker = reporter._thread
+        reporter.emit(progress.ProgressEvent(stage="configuration", state="running"))
+        reporter.emit(progress.ProgressEvent(stage="configuration", state="ready", detail="eval config loaded"))
+        reporter.emit(
+            progress.ProgressEvent(stage="docker-images", state="delegated", detail="build delegated to Harbor")
+        )
+        reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="with-skill + baseline"))
+        clock[0] = math.nextafter(60.0, 0.0)
+        reporter.heartbeat()
+        assert "still running" not in output.getvalue()
+        clock[0] = 60.0
+        reporter.heartbeat()
+        reporter.emit(progress.ProgressEvent(stage="agent:codex", state="complete"))
+    finally:
+        reporter.close()
+    assert not worker.is_alive()
+    assert not reporter.is_active
 
     rendered = output.getvalue()
     assert "Tier 3 live evaluation: demo-skill" in rendered
@@ -382,7 +398,7 @@ def test_plain_reporter_emits_durable_plan_events_and_elapsed_heartbeat() -> Non
     assert "timeout=1.5x" in rendered
     assert "configuration: ready - eval config loaded" in rendered
     assert "docker-images: delegated - build delegated to Harbor" in rendered
-    assert "still running" in rendered
+    assert "[00:01:00] still running: agent:codex" in rendered
     assert "agent:codex" in rendered
     assert "\x1b[" not in rendered
     assert "\r" not in rendered
@@ -2765,6 +2781,100 @@ def test_default_collection_exception_cleans_transient_artifacts(
     assert len(run_dirs) == 1
     assert not (run_dirs[0] / "_harbor-jobs").exists()
     assert not (run_dirs[0] / "_harbor-tasks").exists()
+
+
+class _InterruptingReporter(_RecordingReporter):
+    """Deliver Ctrl+C on the coordinator thread once the first agent is running."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.interrupted = False
+
+    def emit(self, event: Any) -> None:
+        super().emit(event)
+        if not self.interrupted and event.stage.startswith("agent:") and event.state == "running":
+            self.interrupted = True
+            raise KeyboardInterrupt
+
+
+def test_interrupt_cancels_running_agent_and_never_starts_queued_agents(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    launched: list[str] = []
+    observed_cancellation: list[bool] = []
+
+    def run_agent(**kwargs: Any) -> list[str]:
+        launched.append(kwargs["agent"])
+        cancellation = kwargs.get("cancellation")
+        # Harbor jobs poll this event; the bounded wait keeps a regression from hanging.
+        observed_cancellation.append(cancellation is not None and cancellation.requested.wait(10))
+        return []
+
+    # The stub configures max_agents=1, so the second agent waits in the queue.
+    runner, skill = _stub_runner(monkeypatch, tmp_path, run_agent=run_agent)
+    reporter = _InterruptingReporter()
+
+    with pytest.raises(KeyboardInterrupt):
+        runner.run_harbor_eval(
+            skill,
+            ["codex", "opencode"],
+            output_dir=tmp_path / "results",
+            progress_reporter=reporter,
+        )
+
+    assert launched == ["codex"]
+    assert observed_cancellation == [True]
+    events = [(event.stage, event.state, event.detail) for event in reporter.events]
+    assert ("agent:codex", "failed", "interrupted before completion") in events
+    assert ("agent:opencode", "running", "with-skill + baseline") not in events
+    assert events[-1] == ("run-finished", "failed", "Tier 3 evaluation interrupted")
+
+
+class _RepeatedInterruptReporter(_RecordingReporter):
+    """Deliver Ctrl+C when the first agent starts and again when it reports stopping."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.interrupts = 0
+
+    def emit(self, event: Any) -> None:
+        super().emit(event)
+        if self.interrupts < 2 and event.stage.startswith("agent:") and event.state == "running":
+            self.interrupts += 1
+            raise KeyboardInterrupt
+
+
+def test_second_interrupt_forces_running_agents_to_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    observed: list[tuple[bool, bool]] = []
+
+    def run_agent(**kwargs: Any) -> list[str]:
+        cancellation = kwargs["cancellation"]
+        # A running Harbor job stays in its cleanup grace until it is forced.
+        observed.append((cancellation.requested.wait(10), cancellation.forced.wait(10)))
+        return []
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, run_agent=run_agent)
+    reporter = _RepeatedInterruptReporter()
+
+    with pytest.raises(KeyboardInterrupt):
+        runner.run_harbor_eval(
+            skill,
+            ["codex"],
+            output_dir=tmp_path / "results",
+            progress_reporter=reporter,
+        )
+
+    assert observed == [(True, True)]
+    assert reporter.interrupts == 2
+    events = [(event.stage, event.state, event.detail) for event in reporter.events]
+    stopping = [detail for stage, state, detail in events if stage == "agent:codex" and state == "running"]
+    assert stopping[-1].startswith("stopping Harbor jobs; press Ctrl+C again")
+    assert ("agent:codex", "failed", "interrupted before completion") in events
+    assert events[-1] == ("run-finished", "failed", "Tier 3 evaluation interrupted")
 
 
 def test_runtime_preflight_running_event_precedes_slow_preflight_call(

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import time
 import urllib.error
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -371,6 +372,28 @@ def test_retry_call_with_backoff_invokes_on_retry_callback(monkeypatch: pytest.M
     assert callback_calls[0][1] >= 0.0
 
 
+class _ManualClock:
+    """Stand-in for the verifier's ``time`` module whose monotonic clock moves only on ``sleep``.
+
+    Real setup cost (importing boto3 and building the first client can take
+    seconds on a loaded host) then never eats into a judge deadline under test.
+    """
+
+    def __init__(self, sleeps: list[float]) -> None:
+        self.now = 0.0
+        self.sleeps = sleeps
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+
 class _BedrockTransportHarness:
     """Test harness for driving _call_bedrock against botocore's URLLib3Session.send."""
 
@@ -634,7 +657,9 @@ def test_bedrock_converse_aborts_when_judge_deadline_exhausted_before_retry(
     bedrock_harness.set_handler(lambda req: bedrock_harness.throttled_response(req, retry_after="5"))
 
     verifier = bedrock_harness.verifier
-    token = verifier._ACTIVE_JUDGE_DEADLINE.set(verifier.time.monotonic() + 0.5)
+    clock = _ManualClock(bedrock_harness.slept)
+    monkeypatch.setattr(verifier, "time", clock)
+    token = verifier._ACTIVE_JUDGE_DEADLINE.set(clock.monotonic() + 0.5)
     try:
         content, error = bedrock_harness.call_bedrock()
     finally:

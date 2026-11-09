@@ -13,12 +13,13 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import click
 
 from skillevaluator import __version__
 from skillevaluator.cli_help import GroupedOption, RichGroup
+from skillevaluator.config import load_pii_patterns
 from skillevaluator.constants import (
     SIMILARITY_DEFAULT_MAX_ENTRIES,
     SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
@@ -69,6 +70,16 @@ from skillevaluator.utils.tier2_paths import (
     paths_refer_to_same_location,
     sanitize_tier2_results,
 )
+from skillevaluator.validators.pii_waivers import (
+    PIIWaiverError,
+    configured_pii_categories,
+    load_pii_waivers,
+    today_utc,
+)
+
+if TYPE_CHECKING:
+    from skillevaluator.reporting.presentation import FinalRenderContext
+
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
@@ -128,6 +139,30 @@ class _QualityConfigPath(click.Path):
 
 
 QUALITY_CONFIG_PATH = _QualityConfigPath()
+# Resolved so parallel catalog children receive the same absolute file.
+SKILLSPECTOR_BASELINE_PATH = click.Path(exists=True, dir_okay=False, readable=True, resolve_path=True, path_type=Path)
+_SKILLSPECTOR_BASELINE_HELP = (
+    "Apply an audited SkillSpector YAML/JSON suppression baseline. Never discovered from the scanned skill."
+)
+
+
+class _PIIWaiversPath(click.Path):
+    """A ``--pii-waivers`` file, validated while arguments are parsed."""
+
+    def __init__(self) -> None:
+        super().__init__(exists=True, dir_okay=False, path_type=Path)
+
+    def convert(self, value, param, ctx):
+        path = super().convert(value, param, ctx)
+        try:
+            load_pii_waivers(path, configured_pii_categories(load_pii_patterns()), today=today_utc())
+        except PIIWaiverError as exc:
+            self.fail(f"{path}: {exc}", param, ctx)
+        return path
+
+
+PII_WAIVERS_PATH = _PIIWaiversPath()
+_PII_WAIVERS_HELP = "Apply reviewed, expiring PII waivers from this YAML file to the PII check."
 
 
 def _validate_similarity_threshold(_ctx: click.Context, _param: click.Parameter, value: float) -> float:
@@ -194,7 +229,7 @@ Examples:
   skillevaluator validate ./my-skill -r cli,json,html       # comma-separated too
   skillevaluator validate ./my-skill -o reports/            # custom output dir
   skillevaluator validate ./my-skill --no-dedup             # skip Tier 2 dedup
-  skillevaluator validate ./my-skill --external             # strict publish profile
+  skillevaluator validate ./my-skill --profile default      # standard validation policy
   skillevaluator validate ./my-skill -c                     # continue on failure (record all issues)
   skillevaluator validate ./my-skill -a codex               # choose the Tier 3 agent
   skillevaluator validate ./my-skill --no-autopilot         # require an existing dataset
@@ -1220,6 +1255,8 @@ def _catalog_child_argv_from_ctx(
         argv.append("--no-llm")
     if params.get("llm_verify"):
         argv.append("--llm-verify")
+    if params.get("skillspector_baseline"):
+        argv.extend(["--skillspector-baseline", str(params["skillspector_baseline"])])
     if not params.get("dedup", True):
         argv.append("--no-dedup")
     block_on_dedup = params.get("block_on_dedup")
@@ -1232,6 +1269,10 @@ def _catalog_child_argv_from_ctx(
         argv.extend(["--min-score", str(min_score)])
     if params.get("quality_config"):
         argv.extend(["--quality-config", str(Path(params["quality_config"]).resolve())])
+    if params.get("pii_waivers"):
+        # Not resolved: a waiver file's entries are relative to the directory the file (or the
+        # symlink to it) is in, so a child must see the same path the parent was given.
+        argv.extend(["--pii-waivers", str(Path(params["pii_waivers"]).absolute())])
     if params.get("external"):
         argv.append("--external")
     if params.get("policy_path"):
@@ -1598,9 +1639,24 @@ def _finish_pipeline_view(
     report_formats: tuple[str, ...],
     target_path: Path,
     agent_eval: bool,
+    presentation_context: FinalRenderContext | None = None,
 ) -> None:
     """Render the quiet-mode verdict panel and report footer."""
     from skillevaluator.reporting.console_ui import MUTED, Verdict, _is_skipped, first_fix
+    from skillevaluator.reporting.harbor_viewer import harbor_job_links
+    from skillevaluator.reporting.presentation import build_final_render_context
+    from skillevaluator.reporting.run_status import Status
+
+    context = presentation_context or build_final_render_context(
+        [
+            *tier_gate_results,
+            *([tier3_result] if tier3_result is not None and tier3_result not in tier_gate_results else []),
+        ]
+    )
+    details = tuple(f"Tier {number}: {tier.summary}" for number, tier in context.tiers.items() if tier.displayed)
+    if context.tiers[3].status != Status.NOT_RUN:
+        details += (context.coverage.text, *context.coverage.details)
+    details += (f"Publication eligibility: {context.publication_label}",)
 
     ext = {"html": ".html", "json": ".json", "markdown": ".md", "sarif": ".sarif.json"}
     links: list[tuple[str, str]] = [
@@ -1610,23 +1666,19 @@ def _finish_pipeline_view(
     ]
     payload = ((tier3_result.metadata or {}).get("agent_eval") or {}) if tier3_result is not None else {}
     summary = payload.get("summary") or payload
+    for job in harbor_job_links(payload):
+        for key, label in (("url", "Results"), ("analysis_url", "Analysis")):
+            if job.get(key):
+                links.append((f"{job['name']} {label}", job[key]))
 
     if not gate_failed:
-        ran = sum(1 for block in view.blocks if block.status not in ("pending", "skip"))
         advisory_failed = any(block.status == "fail" and block.number in {2, 3} for block in view.blocks)
         if advisory_failed:
-            headline = "gating tiers passed · advisory tier reported findings (see report)"
-        else:
-            headline = f"all {ran} tier{'s' if ran != 1 else ''} passed"
-            skipped = sum(
-                1 for r in tier_gate_results if isinstance(r.metadata, dict) and r.metadata.get("skipped_by_user")
-            )
-            if skipped:
-                headline += f"  ·  {skipped} check{'s' if skipped != 1 else ''} skipped"
-            lift = summary.get("overall_lift")
-            if agent_eval and isinstance(lift, (int, float)):
-                headline += f"  ·  skill lift {lift:+.2f}"
-        view.finish(Verdict(passed=True, headline=headline), links)
+            details += ("advisory tier reported findings (see report)",)
+        lift = summary.get("overall_lift")
+        if agent_eval and isinstance(lift, int | float) and not isinstance(lift, bool) and math.isfinite(lift):
+            details += (f"skill lift {lift:+.2f}",)
+        view.finish(Verdict(passed=True, headline=context.command_label, details=details), links)
         return
 
     failed = [result for result in tier_gate_results if not result.passed and not _is_skipped(result)]
@@ -1652,7 +1704,17 @@ def _finish_pipeline_view(
         headline = " · ".join(parts) or "validation failed"
     rerun = _rerun_hint(target_path, agent_eval)
     fix = [("see what to fix above, then rerun", MUTED)] if failed else first_fix(tier_gate_results)
-    view.finish(Verdict(passed=False, headline=headline, fix=fix, rerun=rerun), links)
+    view.finish(
+        Verdict(
+            passed=False,
+            headline=f"{context.command_label}: {headline}",
+            fix=fix,
+            rerun=rerun,
+            incomplete=context.command_status == Status.INCOMPLETE,
+            details=details,
+        ),
+        links,
+    )
 
 
 def _print_tier_banner(title: str) -> None:
@@ -1778,6 +1840,14 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help="Run a second LLM pass to suppress false-positive findings.",
 )
 @click.option(
+    "--skillspector-baseline",
+    type=SKILLSPECTOR_BASELINE_PATH,
+    default=None,
+    cls=GroupedOption,
+    help_group=_TIER1_GROUP,
+    help=_SKILLSPECTOR_BASELINE_HELP,
+)
+@click.option(
     "--min-score",
     type=int,
     default=70,
@@ -1795,18 +1865,26 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help="Override the packaged quality-default.yaml with a custom YAML file.",
 )
 @click.option(
+    "--pii-waivers",
+    type=PII_WAIVERS_PATH,
+    default=None,
+    cls=GroupedOption,
+    help_group=_TIER1_GROUP,
+    help=_PII_WAIVERS_HELP,
+)
+@click.option(
     "--profile",
     default=None,
     cls=GroupedOption,
     help_group=_RUN_GROUP,
-    help="Validation profile: external or a custom name. Default: $SKILLEVALUATOR_PROFILE env var, then external.",
+    help="Validation policy: default (external is a compatibility alias). Default: $SKILLEVALUATOR_PROFILE, then default.",
 )
 @click.option(
     "--external",
     is_flag=True,
     cls=GroupedOption,
     help_group=_RUN_GROUP,
-    help="Shortcut for --profile external (validate for public publication).",
+    help="Compatibility alias for --profile default; does not change repository visibility.",
 )
 @click.option(
     "--policy",
@@ -2053,8 +2131,10 @@ def validate(
     continue_on_failure: bool,
     llm: bool,
     llm_verify: bool,
+    skillspector_baseline: Path | None,
     min_score: int,
     quality_config: Path | None,
+    pii_waivers: Path | None,
     profile: str | None,
     external: bool,
     policy_path: Path | None,
@@ -2133,7 +2213,7 @@ def validate(
     from skillevaluator.utils.helpers import make_timestamped_basename, resolve_git_remote_url, resolve_git_root
     from skillevaluator.validators.policy import apply_policy, resolve_policy
 
-    if external and profile and profile != "external":
+    if external and profile and profile not in {"default", "external"}:
         raise click.ClickException(f"--external conflicts with --profile {profile}; pass one or the other.")
     profile_name = "external" if external else profile
     try:
@@ -2284,8 +2364,10 @@ def validate(
         checks=checks,
         use_llm=llm,
         llm_verify=llm_verify,
+        skillspector_baseline=skillspector_baseline,
         min_score=min_score,
         quality_config=quality_config,
+        pii_waivers=pii_waivers,
         previous_version=previous_version,
         policy=policy,
         content_type=resolved_type,
@@ -2386,7 +2468,12 @@ def validate(
             _show_tier3_progress()
 
         reporter = (
-            ViewProgressReporter(_on_engine_tail, on_cases=_on_case_rows, pass_threshold=pass_threshold)
+            ViewProgressReporter(
+                _on_engine_tail,
+                on_cases=_on_case_rows,
+                pass_threshold=pass_threshold,
+                progress_reporter=view.progress_reporter,
+            )
             if quiet
             else None
         )
@@ -2496,8 +2583,17 @@ def validate(
     # "cli", which renders the full Rich report below the pipeline view.
     effective_formats = _effective_report_formats(report_formats, quiet=quiet)
     report_basename_value = make_timestamped_basename(f"{REPORT_PREFIX}-output")
+    from skillevaluator.reporting.presentation import build_final_render_context
+
+    presentation_context = build_final_render_context(
+        results,
+        requested_tiers=tuple(number for number, enabled in ((1, True), (2, dedup), (3, agent_eval)) if enabled),
+        displayed_tiers=(1, 2, 3),
+        expected_skill_name=publication_name,
+    )
     emit_reports(
         results,
+        presentation_context=presentation_context,
         report_formats=effective_formats,
         output_dir=output_dir,
         basename=report_basename_value,
@@ -2554,6 +2650,7 @@ def validate(
             report_formats=effective_formats,
             target_path=target_path,
             agent_eval=agent_eval,
+            presentation_context=presentation_context,
         )
     if gate_failed:
         raise click.ClickException("validation failed")
@@ -2616,14 +2713,22 @@ def rubric_eval(target_path: Path, min_score: int, report_formats: tuple[str, ..
 @_target_argument
 @click.option("--llm/--no-llm", default=False, show_default=True, help="Enable LLM security analysis.")
 @click.option("--llm-verify", is_flag=True, help="Use LLM verification to reduce false positives.")
+@click.option(
+    "--skillspector-baseline", type=SKILLSPECTOR_BASELINE_PATH, default=None, help=_SKILLSPECTOR_BASELINE_HELP
+)
 @_report_options
 def security_scan(
-    target_path: Path, llm: bool, llm_verify: bool, report_formats: tuple[str, ...], output_dir: Path
+    target_path: Path,
+    llm: bool,
+    llm_verify: bool,
+    skillspector_baseline: Path | None,
+    report_formats: tuple[str, ...],
+    output_dir: Path,
 ) -> None:
     """Scan for security vulnerabilities."""
     output_dir = _resolve_file_report_output_location(target_path.resolve(), output_dir, report_formats)
     if not emit_reports(
-        run_security_scan(target_path, use_llm=llm, llm_verify=llm_verify),
+        run_security_scan(target_path, use_llm=llm, llm_verify=llm_verify, skillspector_baseline=skillspector_baseline),
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("security"),
@@ -2634,12 +2739,19 @@ def security_scan(
 @cli.command("pii-scan")
 @_target_argument
 @click.option("--llm-verify", is_flag=True, help="Use LLM verification to reduce false positives.")
+@click.option("--pii-waivers", type=PII_WAIVERS_PATH, default=None, help=_PII_WAIVERS_HELP)
 @_report_options
-def pii_scan(target_path: Path, llm_verify: bool, report_formats: tuple[str, ...], output_dir: Path) -> None:
+def pii_scan(
+    target_path: Path,
+    llm_verify: bool,
+    pii_waivers: Path | None,
+    report_formats: tuple[str, ...],
+    output_dir: Path,
+) -> None:
     """Scan for PII and local identifiers."""
     output_dir = _resolve_file_report_output_location(target_path.resolve(), output_dir, report_formats)
     if not emit_reports(
-        run_pii_scan(target_path, llm_verify=llm_verify),
+        run_pii_scan(target_path, llm_verify=llm_verify, pii_waivers=pii_waivers),
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("pii"),
@@ -2870,8 +2982,14 @@ def _workflow_report_options(func):
     default=None,
     help="Override the packaged quality-default.yaml with a custom YAML file.",
 )
-@click.option("--profile", default=None, help="Validation policy profile [default: external].")
+@click.option("--pii-waivers", type=PII_WAIVERS_PATH, default=None, help=_PII_WAIVERS_HELP)
+@click.option(
+    "--profile", default=None, help="Validation policy [default: default; external is a compatibility alias]."
+)
 @click.option("--previous-version", default=None, help="Previous version for version checks.")
+@click.option(
+    "--skillspector-baseline", type=SKILLSPECTOR_BASELINE_PATH, default=None, help=_SKILLSPECTOR_BASELINE_HELP
+)
 @_workflow_report_options
 def _tier1_workflow(
     skill_path: Path,
@@ -2880,8 +2998,10 @@ def _tier1_workflow(
     llm: bool | None,
     min_score: int,
     quality_config: Path | None,
+    pii_waivers: Path | None,
     profile: str | None,
     previous_version: str | None,
+    skillspector_baseline: Path | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
 ) -> None:
@@ -2901,8 +3021,10 @@ def _tier1_workflow(
         llm=llm,
         min_score=min_score,
         quality_config=quality_config,
+        pii_waivers=pii_waivers,
         profile=policy,
         previous_version=previous_version,
+        skillspector_baseline=skillspector_baseline,
     )
     # Resolved after the run so configuration errors still leave no output.
     output_dir = _resolve_file_report_output_location(skill_path.resolve(), output_dir, report_formats)
@@ -3587,6 +3709,22 @@ def tier3_validate(skill_path: Path, as_json: bool, strict: bool, harbor_contrac
     raise SystemExit(tier3_validate_evals(skill_path, as_json=as_json, strict=strict, harbor_contract=harbor_contract))
 
 
+@tier3.command("feedback")
+@click.argument("run_dir", type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path))
+@click.option(
+    "--skill",
+    "skill_path",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    default=None,
+    help="Evaluated skill directory; inferred from the run when omitted.",
+)
+def tier3_feedback(run_dir: Path, skill_path: Path | None) -> None:
+    """Chat about one completed run's results and possible skill improvements."""
+    from skillevaluator.tier3.commands import run_feedback_chat
+
+    raise SystemExit(run_feedback_chat(run_dir, skill_path=skill_path))
+
+
 @tier3.command("harbor-view")
 @click.argument("jobs_dir", type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path))
 def harbor_view(jobs_dir: Path) -> None:
@@ -3624,6 +3762,10 @@ tier3.add_command(init_harbor_task, "init-harbor-task")
 tier3.add_command(compare, "compare")
 tier3.add_command(view, "view")
 tier3.add_command(tier3_doctor_command, "doctor")
+
+from skillevaluator.tier3.decoy_commands import select_decoys_command
+
+tier3.add_command(select_decoys_command, "select-decoys")
 
 from skillevaluator.tier3.workflow import build_tier3_workflow
 

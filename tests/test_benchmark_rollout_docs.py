@@ -31,6 +31,29 @@ def test_rollout_runbook_covers_safe_backfill_and_freshness() -> None:
     assert "without completed required Tier 1, Tier 2," in runbook
 
 
+def test_rollout_runbook_documents_the_expected_source_options() -> None:
+    runbook = " ".join((REPO / "docs/benchmark-rollout.mdx").read_text(encoding="utf-8").split())
+
+    for flag in (
+        "--expected-source-repository",
+        "--expected-source-revision",
+        "--expected-evaluator-container-revision",
+    ):
+        assert flag in runbook
+    assert "`--expected-*` option also implies `--require-files`" in runbook
+    # Only the source revision is case-folded; repository names and container
+    # revisions are compared exactly, so the runbook must not promise more.
+    assert "Hex digits in the source revision are compared without regard to case." in runbook
+    assert "Hex digits are compared without regard to case" not in runbook
+    assert "Repository names and evaluator container revisions must match the card exactly" in runbook
+    # The gate reads only plain one-line metadata items; anything else counts as missing.
+    assert "Only a plain one-line list item counts as that line" in runbook
+    assert (
+        "An item that holds a link or inline HTML, or continues onto a second line, "
+        "is treated as missing and reported as not recorded."
+    ) in runbook
+
+
 def test_ci_runs_benchmark_gate_with_project_dependencies() -> None:
     workflow = (REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 

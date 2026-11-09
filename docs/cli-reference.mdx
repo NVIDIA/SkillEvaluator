@@ -31,11 +31,13 @@ commands referenced below.
 | [dedup-scan](#dedup-scan) | Alias of `context-optimization-check` | Embeddings + LLM provider key |
 | [similarity-check](#similarity-check) | Detect duplicate content across a collection | Embeddings provider key |
 | [tier3 evaluate](#tier3-evaluate) | Run Tier 3 live agent evaluation | Provider key plus a credential the selected agents can use (one `NVIDIA_API_KEY` covers both on NVIDIA Build), backend (Docker by default) |
+| [tier3 select-decoys](#tier3-select-decoys) | Save a reproducible set of neighboring skills for group evaluation | Local description-embedding catalog, skill collection, embeddings provider key |
 | [create-eval-dataset](#create-eval-dataset) | Generate synthetic eval datasets | LLM provider key (none with `--no-llm`) |
 | [init-custom-grader](#init-custom-grader) | Scaffold a bring-your-own-grader starter | Nothing |
 | [init-harbor-task](#init-harbor-task) | Scaffold a bring-your-own-task Harbor starter | Nothing |
 | [view](#view) | Open the latest HTML live-evaluation report | A previous `tier3 evaluate` run |
 | [compare](#compare) | Compare live-evaluation results across agents | A previous `tier3 evaluate` run |
+| [tier3 feedback](#tier3-feedback) | Chat about one completed live-evaluation run and possible skill changes | A completed `tier3 evaluate` run, LLM provider key |
 | [dashboard](#dashboard) | Filter quantitative tables and paired usage differences | Saved JSON reports or retained runs; dashboard extra |
 | [harbor-view](#harbor-view) | Browse retained Harbor job artifacts | A run made with `--harbor-keep-jobs` |
 | [doctor](#doctor) | Live-evaluation readiness check, or Tier 1 scanners and Tier 2 providers with `--tier` | Nothing |
@@ -131,8 +133,10 @@ errors, such as an option the workflow does not accept, exit `2`.
 | `--llm / --no-llm` | Enabled when a provider is configured | Enable or skip rubric, LLM security, and finding verification; explicit `--llm` requires valid provider configuration |
 | `--min-score INTEGER` | `70` | Minimum passing quality and rubric score, from 0 to 100; quality severity overrides cannot waive the minimum |
 | `--quality-config PATH` | packaged `quality-default.yaml` | YAML file that replaces the quality check's expected-heading rules. See [Tier 1: Validation](tier1-validation.mdx#the-checks). |
-| `--profile TEXT` | `SKILLEVALUATOR_PROFILE`, then `external` | Validation policy profile |
+| `--pii-waivers PATH` | none | Reviewed, expiring PII waivers applied by the `pii` check. See [PII waivers](tier1-validation.mdx#pii-waivers). |
+| `--profile TEXT` | `SKILLEVALUATOR_PROFILE`, then `default` | Validation policy; `external` is a compatibility alias |
 | `--previous-version TEXT` | `SKILLEVALUATOR_PREVIOUS_VERSION`, else unset | Previous version for version checks |
+| `--skillspector-baseline FILE` | unset | Audited SkillSpector suppression baseline; never discovered from the skill. See [Audited SkillSpector baselines](tier1-validation.mdx#audited-skillspector-baselines). |
 
 Also accepts `-r/--report` and `-o/--output-dir` described above.
 
@@ -160,9 +164,12 @@ pipeline.
 | --- | --- |
 | `tier1` | `validate`, `quality-check`, `rubric-eval`, `security-scan`, `pii-scan`, `lint-scripts` |
 | `tier2` | `context-optimization-check`, `dedup-scan`, `similarity-check` |
-| `tier3` | `evaluate`, `create-eval-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `validate`, `harbor-view` |
+| `tier3` | `evaluate`, `select-decoys`, `create-eval-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `feedback`, `validate`, `harbor-view` |
 
-`health-check` and [models](#models) are top-level only. Two expert commands are advertised **only** inside the `tier3` group: [tier3 evaluate](#tier3-evaluate), documented with its full flag set below, and `tier3 validate`:
+`health-check` and [models](#models) are top-level only. The expert commands
+[tier3 evaluate](#tier3-evaluate), [tier3 select-decoys](#tier3-select-decoys),
+[tier3 feedback](#tier3-feedback), and `tier3 validate` are advertised **only**
+inside the `tier3` group:
 
 ### tier3 validate
 
@@ -188,7 +195,7 @@ skillevaluator validate ./my-skill --llm                  # add LLM security ana
 skillevaluator validate ./my-skill -r cli,json,html       # multiple report formats
 skillevaluator validate ./my-skill --no-dedup             # skip Tier 2 dedup
 skillevaluator validate ./my-skill --no-block-on-dedup    # run Tier 2 as advisory
-skillevaluator validate ./my-skill --external             # strict publication profile
+skillevaluator validate ./my-skill --profile default      # standard validation policy
 skillevaluator validate ./my-skill -a codex               # choose the Tier 3 agent
 skillevaluator validate ./my-skill -a codex \
     --block-on-agent-eval                                  # gate on Tier 3 too
@@ -216,8 +223,8 @@ Applies to the whole run: target typing, policy profile, reports, tier selection
 | `--tiers TEXT` | all three for skills | Explicit tier selection, e.g. `--tiers 1,2` skips live evaluation and `--tiers 1,3` skips dedup. Tier 1 always runs. |
 | `--full` | unnecessary for skills | Compatibility flag for all three tiers with autopilot. Explicit tier selection and disable flags still apply. |
 | `--verbose` | off | Print the full per-check detail stream instead of the compact pipeline view. |
-| `--profile TEXT` | `$SKILLEVALUATOR_PROFILE`, then `external` | Validation profile: `external` or a custom name. |
-| `--external` | — | Shortcut for `--profile external` (validate for public publication). |
+| `--profile TEXT` | `$SKILLEVALUATOR_PROFILE`, then `default` | Bundled validation policy. `external` is a compatibility alias for `default`. |
+| `--external` | — | Compatibility alias for `--profile default`; does not change repository visibility. |
 | `--policy FILE` | none | Custom policy YAML overlaid on top of `--profile`. |
 | `--workers INTEGER RANGE` | `1` | Concurrent skill jobs when validating a folder of skills (`x>=1`). Values above 1 run skills in parallel processes and disable the per-skill pipeline view. |
 
@@ -240,8 +247,10 @@ Static checks; LLM-free by default. Tier 1 gates the exit code and always runs.
 | `-c, --continue-on-failure` | off | Run the full pipeline without stopping early; record all issues in the reports. Overrides `--fail-fast`, and for folder validation keeps scanning every skill past a CRITICAL finding. |
 | `--llm, --tier1-llm / --no-llm, --no-tier1-llm` | `no-llm` | Enable LLM-backed security analysis (requires a configured public provider — see [Providers & Credentials](configuration.mdx)). |
 | `--llm-verify` | off | Run a second LLM pass to suppress false-positive findings. |
+| `--skillspector-baseline FILE` | unset | Audited SkillSpector suppression baseline for the `security` check; never discovered from the skill. See [Audited SkillSpector baselines](tier1-validation.mdx#audited-skillspector-baselines). |
 | `--min-score INTEGER` | `70` | Minimum quality score (0–100) required per skill when the `quality` check runs; policy severity overrides cannot waive this gate. |
 | `--quality-config PATH` | packaged `quality-default.yaml` | YAML file that replaces the quality check's expected-heading rules. See [Tier 1: Validation](tier1-validation.mdx#the-checks). |
+| `--pii-waivers PATH` | none | Reviewed, expiring PII waivers applied by the `pii` check; forwarded to each skill of a catalog run. See [PII waivers](tier1-validation.mdx#pii-waivers). |
 
 ### Tier 2 · Deduplication
 
@@ -339,6 +348,7 @@ skillevaluator security-scan ./my-skill
 | --- | --- | --- |
 | `--llm / --no-llm` | `no-llm` | Enable LLM security analysis. |
 | `--llm-verify` | off | Use LLM verification to reduce false positives. |
+| `--skillspector-baseline FILE` | unset | Audited SkillSpector suppression baseline; never discovered from the skill. See [Audited SkillSpector baselines](tier1-validation.mdx#audited-skillspector-baselines). |
 
 Plus the standard report options.
 
@@ -353,6 +363,7 @@ skillevaluator pii-scan ./my-skill
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `--llm-verify` | off | Use LLM verification to reduce false positives. |
+| `--pii-waivers PATH` | none | Apply reviewed, expiring PII waivers from this YAML file. See [PII waivers](tier1-validation.mdx#pii-waivers). |
 
 Plus the standard report options.
 
@@ -414,6 +425,44 @@ still map to `--catalog` and `--save-catalog`, respectively. Use the catalog
 spellings for new commands. A catalog query and a catalog build cannot be
 combined in one invocation, and each alias cannot be supplied alongside its
 replacement.
+
+## tier3 select-decoys
+
+Choose neighboring skills from a local description-embedding catalog and save
+a frozen JSON manifest for group evaluation. This command makes an embedding
+request for the target; it does not launch an agent or modify the run policy.
+
+```bash title="Save a group-workspace selection"
+skillevaluator tier3 select-decoys ./skills/my-skill \
+  --catalog ./skill-catalog.json --catalog-root ./skills \
+  --count 4 --output ./skills/my-skill/evals/decoys.json
+```
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--catalog FILE` | required | Skill-only catalog with at most 1,000 entries, saved by `similarity-check --save-catalog` without `--full-body`. |
+| `--catalog-root DIRECTORY` | required | Local collection root corresponding to catalog-relative skill paths. |
+| `--count INTEGER` | `4` | Number of eligible skills to select, from `1` to `1000`; fails if fewer are available. |
+| `--exclude PATH` | none | Exclude a catalog-relative skill path; repeatable. |
+| `--model TEXT` | configured embedding model | Embedding model override; must match the catalog. |
+| `-o, --output FILE` | required | Selection manifest to write, outside the collection or inside the target's `evals/` directory. |
+
+The manifest records the catalog hash and embedding identity, selected paths
+and scores, target manifest hash, and selected runtime-content hashes. The
+target's own collection uses a root relative to its parent directory, so an
+identical checkout can reuse the manifest. The hashes cover everything staging
+copies from a selected skill, including ignored or untracked files and empty
+folders, so generate a manifest you plan to commit from a fresh clone.
+Unrelated external collections
+retain an absolute root. Evaluator-only files are excluded from decoy hashes;
+changing a decoy's evaluation config does not require a new selection. Output
+cannot overwrite evaluation inputs or an existing non-manifest file. Set
+`skill_workspace.mode: group` and `skill_workspace.decoy_manifest` in
+`evals/config.yml` to consume it. The manifest path is relative to the target
+skill's parent directory. Evaluation validates and reuses the selection
+without contacting the embedding provider. See
+[Select a reproducible decoy set](agents-and-sandboxes.mdx#select-a-reproducible-decoy-set)
+for a complete example and the limits of similarity-based selection.
 
 ## tier3 evaluate
 
@@ -548,6 +597,92 @@ skillevaluator compare ./my-skill
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `--results-dir DIRECTORY` | unset | Results directory to read from. |
+
+## tier3 feedback
+
+Chat in the terminal about one completed live-evaluation run: which cases
+explain a score, how the skill compared with the baseline, and what to change
+in the skill. Answers are grounded in that run's saved evidence: scores,
+with-skill and baseline comparisons, every case's attempts with per-metric
+scores, measured agent tokens and seconds, execution errors, and the report's
+saved feedback. The run is not evaluated again, and the report's LLM feedback
+is not generated again.
+
+```bash title="Discuss a completed run"
+skillevaluator tier3 feedback ./my-skill/evals/results/20260709_141530_12345_a1b2c3d4e5f6
+
+# Name the evaluated skill explicitly
+skillevaluator tier3 feedback ./my-skill/evals/results/20260709_141530_12345_a1b2c3d4e5f6 --skill ./my-skill
+```
+
+Pass one completed run directory, also when results live under a custom
+`--results-dir`. The command infers the evaluated skill from the run. An
+explicit `--skill` must name the skill directory the run recorded; when that
+skill has changed since the run, the chat says so, and its answers describe the
+evaluated version.
+
+`tier3 feedback` always opens this chat, also in a directory that contains a
+skill folder named `feedback`. To evaluate that skill, run
+`skillevaluator tier3 ./feedback` or `skillevaluator tier3 evaluate feedback`.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--skill DIRECTORY` | inferred from the run | Evaluated skill directory. It must match the skill the run recorded. |
+
+Ask, for example, "Which cases explain the lower score?" or "What should I
+change if agent time matters more than token cost?" Treat proposed changes as
+hypotheses and check them with another evaluation; answer quality depends on
+the configured model. Type `exit` or press Ctrl-D to end the chat. Ctrl-C
+during an answer discards that question and returns to the prompt.
+
+The chat uses the provider and model configured for LLM checks
+(`SKILL_EVAL_LLM_PROVIDER` and `SKILL_EVAL_LLM_MODEL`; see [Environment
+Variables](environment-variables.mdx)). Each question sends the run's compact
+evidence to that provider. The evidence names the run by its ID instead of its
+local path. In every text field, such as errors, warnings, case questions and
+saved feedback, an absolute path that ends in the run's directory is replaced
+with that ID. This covers the path a copied run had on the machine where it ran,
+also when it starts with `~user/`, `$HOME/`, `${HOME}/` or `%USERPROFILE%\`,
+unless that path contains a space. A path joined to it, such as `/usr/bin` in
+`PATH=/usr/bin:/home/ci/results/RUN_ID`, is kept. A root right after `,` `;` `:`
+`=` `(` `[` or `{` starts a new path, so a directory name that ends in one of
+those characters before a `/` is read as two paths and only the second is
+replaced. So does a root right after a `\n`, `\r` or `\t` escape in JSON or repr
+text, such as the next line of an env dump, also with ANSI codes after the
+escape, as on a progress line (`\r\u001b[K`); a relative path after one is kept,
+and a UNC server name that starts with `n`, `r` or `t`, such as `\\nas01\share`,
+is not read as an escape. A path may also start right after an ANSI code, such
+as the color code `\u001b[0m` or the erase-line code `\u001b[K`, and a path
+colored in parts is replaced whole. The evaluated skill's directory is replaced
+with its name and your home directory with `~`; the skill directory is known
+when you pass `--skill` or the run is in the skill's `evals/results` directory.
+Path masking leaves a URL unchanged, even a path in its query or fragment,
+unless its scheme is `file:` or ends in `+file:`, such as `git+file:`. A URL
+ends at whitespace; at a quote, `<`, `>`, a backtick, `^`, `{`, `|`, `}` or an
+ANSI escape (raw, `\u001b` or `\x1b`); at a `\n`, `\r` or `\t` escape; and
+before an absolute path or another scheme that follows a `,` or `;` (also with
+an option or variable name and `=`, such as `LOG=` or `--find-links=`) or a
+Markdown `](`. So a path after a URL in JSON, on the next line of an escaped env
+dump or stderr, in a `,`- or `;`-separated list or in
+`DOC=https://host/e;LOG=/path`, and a `file:` URL listed after one, are still
+replaced. A path joined to a URL by any other character, such as `:`, `=`, `(`
+or `)`, is not. The escape may have a doubled backslash, as in JSON inside JSON.
+A backslash and `n`, `r` or `t` that start a Windows folder name made of
+letters, digits, `_`, `.`, `~`, `$`, `%` or `-` and followed by as many
+backslashes, such as `\runs\` or `\t\` (`\\runs\\` in JSON), are not an escape
+unless an escaped character such as `\u001b` or `\xa0` comes next and is not
+itself followed by a name and as many backslashes, so a Windows path with such
+folders, such as `\t\x64\runs\`, in a URL is kept. Any other folder or file name
+that starts with `n`, `r` or `t`, such as `\runs(old)\` or `\notes.txt`, ends
+the URL there. Credential-shaped text is redacted before the text is shortened,
+and a shortened field ends in `...<truncated>`. The command writes nothing to
+disk.
+
+No request is sent before the first question, so the command exits 0
+immediately when standard input is empty. Piped input sends each line as a
+question, and each one is a paid request. The command exits 1 when the run or
+provider configuration cannot be used, or when questions were asked and every
+one of them failed.
 
 ## dashboard
 

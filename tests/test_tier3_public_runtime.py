@@ -2734,10 +2734,10 @@ def test_native_harbor_metadata_entry_id_seam_across_runner_collector_and_datase
 
     assert results["execution_status"] == "succeeded"
     # stop_on_pass passes physical task directory names to Harbor CLI --include-task-name
-    # With-skill passes on attempt 1 (1.0 >= 0.50), baseline runs 2 attempts per task (0.25 < 0.50)
-    assert seen_include_task_names == [
-        ["physical-case"],
-        ["zero-case"],
+    # With-skill passes on attempt 1 (1.0 >= 0.50), baseline runs 2 attempts per task (0.25 < 0.50).
+    # Cases run concurrently within a condition, so only the per-condition launches are ordered.
+    assert sorted(seen_include_task_names[:2]) == [["physical-case"], ["zero-case"]]
+    assert sorted(seen_include_task_names[2:]) == [
         ["physical-case"],
         ["physical-case"],
         ["zero-case"],
@@ -2899,6 +2899,7 @@ def test_documented_agent_cli_versions_match_the_pins() -> None:
     for page, text in pages.items():
         assert f"Codex {runner._CODEX_VERSION}" in text, page
         assert f"Claude Code {runner._CLAUDE_CODE_VERSION}" in text, page
+        assert f"OpenCode {runner.OPENCODE_VERSION}" in text, page
     for name, minimum in (
         ("Claude Code", local_agents._CLAUDE_CODE_MIN_VERSION_FOR_CLAUDE_5_5),
         ("Codex", local_agents._CODEX_MIN_VERSION_FOR_GPT_6),
@@ -2906,16 +2907,21 @@ def test_documented_agent_cli_versions_match_the_pins() -> None:
         assert f"{name} {'.'.join(map(str, minimum))} or newer" in pages["agents-and-sandboxes.mdx"]
 
 
-def test_opencode_runs_pass_no_agent_kwargs() -> None:
+@pytest.mark.parametrize("env_mode", ["docker", "local"])
+def test_opencode_runs_pass_only_the_pinned_cli_version(env_mode: str) -> None:
+    from skillevaluator.tier3.harbor import runner
+
     command = build_harbor_run_command(
         dataset_path="/tmp/dataset",
         agent="opencode",
         job_name="effort",
-        env_mode="docker",
+        env_mode=env_mode,
         model="anthropic/claude-opus-5-5",
     )
 
-    assert "--ak" not in command
+    # Without a version Harbor installs opencode-ai@latest; local mode runs the installed CLI.
+    # OpenCode never receives a reasoning-effort override.
+    assert _harbor_agent_kwargs(command) == ({} if env_mode == "local" else {"version": runner.OPENCODE_VERSION})
 
 
 def test_codex_agents_render_the_pinned_reasoning_effort(tmp_path: Path) -> None:

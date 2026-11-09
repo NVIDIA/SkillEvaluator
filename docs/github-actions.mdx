@@ -16,6 +16,78 @@ The shared image includes **Tier 1 and SkillSpector security scanning**.
   </Card>
 </CardGroup>
 
+## Three-tier checks and feedback
+
+The opt-in [CLI setup](cli-onboarding.mdx#opt-in-to-three-tier-ci) creates
+`.github/workflows/skill-checks-all-tiers.yml` and
+`.github/workflows/feedback-all-tiers.yml`. This unreleased path needs a reviewed
+candidate build and its bundled capability-bearing descriptor; the 0.8.0
+downloads below remain Tier 1 only. `--tiers 1,2,3` selects the candidate's
+bundled descriptor; `--release` can override it for an alternate reviewed candidate.
+The [candidate source templates](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/templates)
+contain placeholders and must be filled with reviewed immutable references.
+
+The shared `evaluate-all-tiers.yml` and `feedback-all-tiers.yml` files define
+reusable `workflow_call` workflows. Adding them to SkillEvaluator does not
+enable checks or comments on SkillEvaluator's own pull requests. Each repository,
+including SkillEvaluator itself, needs the generated caller pair committed
+there, with the trusted feedback caller on its default branch.
+
+The evaluation workflow calls the existing hardened Tier 1 container workflow
+at the same evaluator revision. Tier 2 and Tier 3 run independently with
+`fail-fast: false`, Python 3.12, and only their tier's installed extras. Native
+evaluator tools come from the pinned tools commit, while the candidate is
+checked out separately at the exact PR head. Provider-backed jobs require the
+current same-repository PR head or current default-branch commit, plus proven
+write, maintain, or admin repository permission for the initiating actor.
+Both actor permission and commit freshness are checked again before secrets
+are used. Environment-scoped provider secrets in `skillevaluator` are
+recommended; explicit mappings from repository CI secrets are also supported.
+Reviewers are optional: repositories can add an approval rule when they want one, while
+automatic execution does not depend on that GitHub plan feature. Protect
+repository and CI workflow write access as part of maintaining this boundary.
+Fork PRs retain keyless Tier 1 evidence. Provider-backed Tier 2/3 execution needs
+an eligible same-repository run; unavailable evidence remains advisory and visible.
+
+The aggregate job always runs, and only Tier 1 determines its required result.
+Tier 2 and Tier 3 remain advisory when they fail or are incomplete; their native
+statuses and reports remain visible. The deprecated `tier3-required` input is
+ignored, including when set to `true`; it cannot make Tier 3 block CI. Keep the
+aggregate check required in branch protection to enforce Tier 1, and review its
+actual check name in a completed run. Reports are retained for 14
+days in `skill-evaluator-results-attempt-N`, including failed and incomplete
+results, with each tier's native JSON and HTML. **Re-run failed jobs** reuses
+the latest evidence from tier jobs that were not rerun, and records each tier's
+producing attempt as `source_attempt`. Artifact download links require
+normal repository access; they do not create public report hosting.
+
+The feedback workflow starts from `workflow_run` on the default branch. It
+checks out only pinned trusted tools, validates the producer and current PR
+head, and updates one comment with a single summary table. Each skill has
+one-line results for Static and Security Validation, Deduplication, and Live
+Agent Evaluation, plus one **Report** link to the exact run's combined private
+artifact. The lines show status, recorded issue count and the main finding or
+blocker; incomplete or missing evidence shows an unknown count. Download and
+extract the artifact, then open `index.html` for the detailed aggregate and
+native reports. See the
+[comment and report contract](reports.mdx#retained-three-tier-ci-evidence).
+The workflow never checks out the candidate with a write token. Fork PR runs and
+producer attempts superseded by a re-run are skipped without a comment rather than
+failed. The workflow defers only to a report comment whose run marker names a
+newer same-repository producer run or attempt of this caller for the same pull
+request head. Otherwise it updates one existing report comment in place,
+preferring one whose marker verifies, and leaves any other report comments
+untouched. Report comments with unverifiable markers are never deferred to.
+Merge this feedback file onto the default branch before expecting the first
+automatic comment. Changes to the caller must refresh its approved Git blob in
+`trusted-caller-blobs`.
+
+A missing provider key, unavailable runtime, or missing committed native dataset
+must remain visible as an incomplete or needs-action result. Local `ci init`,
+`ci status`, and `ci demo` are setup and inspection commands; a successful setup
+is not evidence that the three tiers passed. Optional Pages hosting remains a
+separate opt-in; artifact feedback works without it.
+
 ## Get started
 
 The scanner uses one **default validation policy** for public and private

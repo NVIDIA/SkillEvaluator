@@ -516,3 +516,9 @@ def test_openclaw_read_budget_counts_utf8_bytes(tmp_path: Path):
     skill = _skill(tmp_path, body="\u65c5" * 8_000)
 
     assert "OW-READ-BUDGET" in _rule_ids(skill, "openclaw", {"context_tokens": 64_000})
+
+
+def test_hermes_view_budget_counts_code_points(tmp_path: Path):
+    skill = _skill(tmp_path, body="\u65c5" * 60_000)
+
+    assert "HM-VIEW-BUDGET" not in _rule_ids(skill, "hermes")

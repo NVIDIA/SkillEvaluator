@@ -313,9 +313,9 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         "skill_md_tokens": len(raw) // 4,
         "description_over": max(0, (len(description) if isinstance(description, str) else 0) - 1024),
         "utf16_over": max(0, (len(description.encode("utf-16-le")) // 2 if isinstance(description, str) else 0) - 1024),
-        # Hermes skill_view returns JSON: escaped SKILL.md + description + ~400 chars of other keys.
-        "hermes_view_chars": len(json.dumps(text))
-        + len(json.dumps(description if isinstance(description, str) else ""))
+        # Hermes skill_view returns JSON (ensure_ascii=False, budget in code points): SKILL.md + description + ~400 chars.
+        "hermes_view_chars": len(json.dumps(text, ensure_ascii=False))
+        + len(json.dumps(description if isinstance(description, str) else "", ensure_ascii=False))
         + 400,
         **_dollar_n(body, text[: match.start(2)].count("\n") + 1 if match else 1),
         "uses_arguments_placeholder": "$ARGUMENTS" in body,

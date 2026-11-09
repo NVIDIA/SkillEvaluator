@@ -725,6 +725,7 @@ def test_docs_and_changelog_describe_the_token_usage_contract() -> None:
         "baseline_not_run",
         "case findings",
         "applicability fields",
+        "left out without a record",
     ):
         assert field in section, field
     unreleased = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8").split("\n## ", 2)[1]

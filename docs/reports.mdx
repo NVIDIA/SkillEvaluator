@@ -670,7 +670,8 @@ not change scores, verdicts, or gates.
 ### Token usage
 
 The canonical JSON payload also carries a `token_usage` object when at least
-one attempt recorded token counts. It sums the agent's own tokens per case, per
+one attempt recorded token counts and the report limits leave room for it (see
+below). It sums the agent's own tokens per case, per
 agent arm, and over all agents, and says how many attempts each sum covers. It
 is a measurement: it is not scored and changes no metric, dimension, verdict,
 or gate.
@@ -718,7 +719,10 @@ and `validate` adds its applicability fields. When it does not fit, its case
 rows go first: `token_usage.case_rows_omitted` and
 `report_truncation.omitted.token_usage_case_rows` count them, and every report
 says so. If the agent sums do not fit either, `token_usage` is left out and
-`report_truncation.omitted.token_usage` is 1.
+`report_truncation.omitted.token_usage` is 1. If the payload cannot carry even
+that record, for example because it exceeds the report limits without token
+usage, `token_usage` is left out without a record, and every report marks the
+payload as it would without token usage.
 
 `BENCHMARK.md` has a **Token Usage** section after Results at a Glance: one row
 per agent and one for all agents, with the case rows in a collapsed table that

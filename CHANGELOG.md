@@ -144,9 +144,19 @@ All notable changes to SkillEvaluator are documented in this file.
   A reference that matches several bundled files (`reference_unresolved` from
   v2.12.0), a fatal or other ledger row, an uninspected file, a degraded
   analyzer, a limitation, or fewer findings counted after filtering than
-  before still leaves the scan `INCOMPLETE`. SkillSpector v2.13.4 and later
-  report a scan whose only gaps are missing references as
-  `complete_with_caveats`, which is not accepted yet.
+  before still leaves the scan `INCOMPLETE`.
+
+- A Tier 1 security scan with SkillSpector v2.13.4 or later no longer stops as
+  `INCOMPLETE` with `skillspector JSON field 'analysis_completeness.status' is
+  not recognized` when the skill's instructions name a file that the skill
+  does not bundle. These releases report such a scan as
+  `complete_with_caveats` instead of `partial`. SkillEvaluator now accepts the
+  caveats under the same conditions as the missing references above and shows
+  the same warning, and checks the report's findings as in any other complete
+  scan. A caveat that is not a nonfatal `reference_missing` row, or that fails
+  one of those conditions, such as a line that names a file left out of the
+  scanned copy, leaves the scan `INCOMPLETE`, as does `complete_with_caveats`
+  from an earlier release.
 
 ## 0.8.0 - 2026-11-05
 

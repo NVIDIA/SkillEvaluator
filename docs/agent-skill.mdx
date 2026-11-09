@@ -140,6 +140,9 @@ Effectiveness      68.6%       95.3%    +26.7
 
 This is the SkillEvaluator skill evaluated by SkillEvaluator. Its own eval cases
 ship in [`skills/skillevaluator/evals/`](https://github.com/NVIDIA/SkillEvaluator/tree/main/skills/skillevaluator/evals).
+The run above used an earlier version of case 001 that also asserted the agent
+read the skill's `SKILL.md`, which the baseline cannot do; that assertion has
+since been removed.
 
 <Warning>
   Asking one agent to answer with and without a skill and grade itself is not an

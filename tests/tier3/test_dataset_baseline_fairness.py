@@ -829,3 +829,9 @@ def test_scaffold_starter_case_grades_the_outcome(tmp_path: Path, command):
     assert case["assertions"]
     assert not [item for item in case["assertions"] if re.search(r"\bskill\b", item, re.IGNORECASE)]
 
+
+def test_agent_skill_dataset_passes_the_strict_validate_its_docs_recommend():
+    # skills/skillevaluator/SKILL.md and docs/agent-skill.mdx tell users to run this command.
+    result = CliRunner().invoke(cli, ["tier3", "validate", str(_REPO / "skills" / "skillevaluator"), "--strict"])
+
+    assert result.exit_code == 0, result.output

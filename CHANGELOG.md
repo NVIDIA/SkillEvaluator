@@ -22,14 +22,21 @@ All notable changes to SkillEvaluator are documented in this file.
   skill. The no-skill baseline is graded on the same expected output and
   assertions and could not meet them, so its `behavior_check`, `accuracy` and
   `goal_accuracy` scores dropped and lift was inflated. Template cases now
-  describe only the task outcome; the LLM generation and `--refine` prompts
-  ask for outcome checks; template `--refine` no longer turns reads or runs of
+  describe only the task outcome, and do not quote a skill description that
+  names the skill or its script. The LLM generation and `--refine` prompts ask
+  for outcome checks, and template `--refine` no longer turns reads or runs of
   `SKILL.md`, the skill directory or the skill's scripts into behaviors. The
+  autopilot starter case leaves out LLM or `EVAL.md` text that grades skill
+  use, and `create-eval-dataset` prints a warning for each generated case that
+  still grades it. The starter case from `init-custom-grader` and `init-harbor-task`
+  asserts the task outcome instead of "using the relevant skill workflow". The
   negative template case is unchanged. `tier3 validate` now warns when a
   prompt points at the skill's files or an expected output or assertion grades
-  skill use; the warning fails only `--strict` and never blocks a run. On
-  newly generated datasets, baseline scores rise and lift falls; existing
-  datasets are not rewritten.
+  skill use, including runs of the skill's own scripts; the warning fails only
+  `--strict` and never blocks a run. The bundled agent skill's own dataset no
+  longer asserts that the agent read its `SKILL.md`. On newly generated
+  datasets, baseline scores rise and lift falls; existing datasets are not
+  rewritten.
 
 - Align terminal grade and lift colors across compact, full, and direct Tier 3
   reports; displayed zero lift is neutral. Narrow terminals stack complete

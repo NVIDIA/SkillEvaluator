@@ -733,6 +733,31 @@ def test_markdown_report_keeps_the_incomplete_reason_next_to_an_advisory(tmp_pat
     assert "- ⚠️ [DEPENDENCY-MEDIUM]" not in output
 
 
+def test_markdown_report_escapes_the_incomplete_reason_next_to_an_advisory(tmp_path, pip_audit):
+    """A warning that names a target file is escaped like the error list and the findings table.
+
+    Windows does not allow ``<`` or ``>`` in file names, so the warning is added
+    to a real audit result in the form the validator writes it.
+    """
+    advisories, _ = pip_audit
+    advisories["pyyaml"] = [PYYAML_ADVISORY]
+    skill = _skill(tmp_path, {"requirements.txt": "pyyaml==5.3\n"})
+    validator = DependencySecurityValidator(use_safety=False)
+    result = validator.validate(skill)
+    result.validator_name = validator.name
+    result.add_warning(
+        "requirements-<img src=x onerror=alert(1)>.txt: line 2 requires an exact package version; "
+        "URLs, local paths, includes and pip options are not audited"
+    )
+    result.mark_scan_incomplete("pip-audit")
+
+    output = MarkdownReporter().render_all([result])
+
+    assert result.findings and result.status == "incomplete"
+    assert "<img" not in output
+    assert "- ⚠️ requirements-&lt;img src=x onerror=alert(1)&gt;.txt: line 2 requires" in output
+
+
 def test_markdown_report_keeps_execution_errors_as_the_incomplete_reason():
     """With an execution error and no finding, the error explains the incomplete scan, as before."""
     result = ValidationResult()

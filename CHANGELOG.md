@@ -148,9 +148,9 @@ All notable changes to SkillEvaluator are documented in this file.
   `--hash` continuation lines or a form feed before a pin no longer shift
   them. For every check, the CLI report now lists warnings that no finding
   repeats next to the findings, the Markdown report does so for an
-  `INCOMPLETE` check without an error, and a policy overlay that changes a
-  finding's severity keeps those warnings, so the reason a scan is
-  `INCOMPLETE` stays visible.
+  `INCOMPLETE` check without an error, escaping HTML in them as it does in
+  errors, and a policy overlay that changes a finding's severity keeps those
+  warnings, so the reason a scan is `INCOMPLETE` stays visible.
 
 ## 0.8.0 - 2026-11-05
 

@@ -104,7 +104,9 @@ def _starter_evals_entry(skill_path: Path, case_id: str) -> dict[str, Any]:
         "expected_output": "Replace this with the expected outcome.",
         "expected_skill": skill_path.name,
         "assertions": [
-            "The agent addresses the task using the relevant skill workflow.",
+            # The no-skill baseline is graded on the same assertions, so grade the
+            # outcome, not skill use (skill_execution scores that).
+            "The agent's final response completes the task in the prompt.",
         ],
     }
 

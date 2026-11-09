@@ -97,8 +97,15 @@ expected output or assertion that the agent read `SKILL.md`, ran the skill's
 script, or used the skill, cannot be met by the baseline and inflates lift.
 `skill_execution` scores skill use separately (see
 [How standard grading judges a trial](tier3-live-evaluation.mdx#how-standard-grading-judges-a-trial)).
-`create-eval-dataset` writes outcome-only expected output and assertions, and
-`tier3 validate` warns about entries that grade skill use.
+Template cases from `create-eval-dataset` are outcome-only, and its LLM prompts
+ask for outcome checks. It prints a warning for each generated case that still
+grades skill use, and the autopilot starter case leaves such text out.
+`tier3 validate` warns when a prompt points at `skills/<name>`,
+`<name>/SKILL.md` or reading `SKILL.md`, or when the expected output or an
+assertion names those files, calls `<name>` a skill, says the agent used,
+invoked or identified `<name>`, or runs one of the skill's scripts. It is a
+wording heuristic: it skips negated checks such as "did not read `SKILL.md`"
+and can miss skill use phrased another way.
 
 The dataset file can be named `evals.json`, `evals.jsonl`, `evals.yaml`, or
 `evals.yml` — `tier3 evaluate` accepts all four.
@@ -195,7 +202,10 @@ context:
 
 Author guidance is the highest-priority input: behaviors you list here are
 preserved in the generated cases even when a trial agent skipped them — that
-is exactly the regression the eval should catch.
+is exactly the regression the eval should catch. They become assertions, so the
+no-skill baseline is graded on them too: describe the task outcome, not reading
+`SKILL.md` or running the skill's scripts. `create-eval-dataset` keeps such
+lines and warns about them; the autopilot starter case leaves them out.
 
 ### Refine from real runs
 
@@ -215,7 +225,9 @@ IDs are read from each trial's `reward.json` or Harbor `result.json`, and
 multimodal trajectory messages are read as text, with image and audio parts
 shown as `[image]` and `[audio]` markers. With `--no-llm`, refinement still
 works — it applies template-based updates from the trajectory instead of an LLM
-rewrite.
+rewrite. Template refinement skips trajectory steps that read `SKILL.md` or the
+skill directory or run the skill's scripts, so they never become assertions;
+the LLM rewrite is asked not to add them.
 
 ## Run policy: evals/config.yml
 

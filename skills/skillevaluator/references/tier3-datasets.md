@@ -53,4 +53,5 @@ behavior per assertion. The baseline is graded on the same prompt,
 `expected_output` and assertions without the skill, so keep them about the task
 outcome: never point the prompt at the skill's files or assert that the agent
 read `SKILL.md`, ran the skill's scripts or used the skill (`skill_execution`
-scores that). `tier3 validate` warns about such cases.
+scores that). `tier3 validate` warns about common wordings of these; it is a
+heuristic, so review the cases too.

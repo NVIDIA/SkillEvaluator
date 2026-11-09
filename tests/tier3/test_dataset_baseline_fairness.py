@@ -16,11 +16,7 @@ from click.testing import CliRunner
 
 from skillevaluator.cli import cli
 from skillevaluator.tier3 import generate_dataset
-from skillevaluator.tier3.dataset_utils import (
-    detect_dataset_format,
-    load_dataset_entries_with_format,
-    normalize_dataset_entries,
-)
+from skillevaluator.tier3.dataset_utils import load_dataset_entries_with_format, normalize_dataset_entries
 from skillevaluator.tier3.evals_spec import (
     EVALS_SPEC,
     _baseline_fairness_warnings,
@@ -32,7 +28,14 @@ _REPO = Path(__file__).resolve().parents[2]
 
 
 def _entry(**fields) -> dict:
+    """A legacy entry (question, ground_truth, expected_behavior)."""
     return {"id": "case-1", "expected_skill": "release-review", **fields}
+
+
+def _case(skill_name: str = "release-review", **fields) -> dict:
+    """An agentskills.io entry (prompt, expected_output, assertions), normalized as the loader does."""
+    (entry,) = normalize_dataset_entries({"skill_name": skill_name, "evals": [{"id": "case-1", **fields}]})
+    return entry
 
 
 @pytest.mark.parametrize(
@@ -43,7 +46,7 @@ def _entry(**fields) -> dict:
     ],
 )
 def test_prompt_pointing_at_skill_files_warns(prompt):
-    (warning,) = _baseline_fairness_warnings(_entry(question=prompt), "agentskills")
+    (warning,) = _baseline_fairness_warnings(_case(prompt=prompt))
     assert warning.startswith("prompt points at the skill's files")
 
 
@@ -60,24 +63,24 @@ def test_prompt_pointing_at_skill_files_warns(prompt):
     ],
 )
 def test_assertion_grading_skill_use_warns(assertion):
-    entry = _entry(question="Check manifest.yaml for blockers", expected_behavior=[assertion])
-    (warning,) = _baseline_fairness_warnings(entry, "agentskills")
+    entry = _case(prompt="Check manifest.yaml for blockers", assertions=[assertion])
+    (warning,) = _baseline_fairness_warnings(entry)
     assert warning.startswith("assertions grades skill use")
 
 
 def test_expected_output_grading_skill_use_warns():
     entry = _entry(question="Check manifest.yaml", ground_truth="The agent used release-review and found 2 blockers")
-    (warning,) = _baseline_fairness_warnings(entry, "legacy")
+    (warning,) = _baseline_fairness_warnings(entry)
     assert warning.startswith("ground_truth grades skill use")
 
 
 def test_one_warning_per_entry_for_graded_text():
-    entry = _entry(
-        question="Check manifest.yaml",
-        ground_truth="The agent used the release-review skill",
-        expected_behavior=["The agent read SKILL.md", "The agent used release-review."],
+    entry = _case(
+        prompt="Check manifest.yaml",
+        expected_output="The agent used the release-review skill",
+        assertions=["The agent read SKILL.md", "The agent used release-review."],
     )
-    (warning,) = _baseline_fairness_warnings(entry, "agentskills")
+    (warning,) = _baseline_fairness_warnings(entry)
     assert warning.startswith("expected_output grades skill use")
 
 
@@ -93,75 +96,54 @@ def test_one_warning_per_entry_for_graded_text():
     ],
 )
 def test_outcome_entries_do_not_warn(entry):
-    assert _baseline_fairness_warnings(entry, "agentskills") == []
+    assert _baseline_fairness_warnings(entry) == []
 
 
 @pytest.mark.parametrize(
-    ("entry", "dataset_format"),
+    "entry",
     [
         # A skill named after the CLI it wraps: the baseline can run the same CLI.
-        (
-            {
-                "expected_skill": "glab",
-                "question": "List my open merge requests in group foo",
-                "ground_truth": "The open MRs, listed using glab mr list",
-                "expected_behavior": ["The agent ran glab mr list for group foo"],
-            },
-            "legacy",
-        ),
-        (
-            {
-                "expected_skill": "kubectl",
-                "question": "Which pods are crash-looping in namespace web?",
-                "ground_truth": "The crash-looping pods, found by using kubectl get pods",
-                "expected_behavior": ["The agent used kubectl get pods -n web"],
-            },
-            "legacy",
-        ),
+        {
+            "expected_skill": "glab",
+            "question": "List my open merge requests in group foo",
+            "ground_truth": "The open MRs, listed using glab mr list",
+            "expected_behavior": ["The agent ran glab mr list for group foo"],
+        },
+        {
+            "expected_skill": "kubectl",
+            "question": "Which pods are crash-looping in namespace web?",
+            "ground_truth": "The crash-looping pods, found by using kubectl get pods",
+            "expected_behavior": ["The agent used kubectl get pods -n web"],
+        },
         # A skill named after a file format: "the input PDF" is the task's file.
-        (
-            {
-                "expected_skill": "pdf",
-                "question": "What is the invoice total in invoice.pdf?",
-                "expected_behavior": ["Reads the input PDF and returns the invoice total"],
-            },
-            "agentskills",
-        ),
+        {
+            "expected_skill": "pdf",
+            "question": "What is the invoice total in invoice.pdf?",
+            "expected_behavior": ["Reads the input PDF and returns the invoice total"],
+        },
         # "the <format>" names the task's file, not the skill.
-        (
-            {
-                "expected_skill": "pdf",
-                "question": "What is the invoice total in invoice.pdf?",
-                "expected_behavior": ["Loads the PDF and returns the invoice total"],
-            },
-            "agentskills",
-        ),
-        (
-            {
-                "expected_skill": "csv",
-                "question": "Total the revenue in sales.csv by region",
-                "expected_behavior": ["The agent loaded the CSV and grouped revenue by region"],
-            },
-            "agentskills",
-        ),
+        {
+            "expected_skill": "pdf",
+            "question": "What is the invoice total in invoice.pdf?",
+            "expected_behavior": ["Loads the PDF and returns the invoice total"],
+        },
+        {
+            "expected_skill": "csv",
+            "question": "Total the revenue in sales.csv by region",
+            "expected_behavior": ["The agent loaded the CSV and grouped revenue by region"],
+        },
         # A skill whose task output, or input, is a SKILL.md.
-        (
-            {
-                "expected_skill": "skill-creator",
-                "question": "Write a SKILL.md for my csv-cleaner script",
-                "ground_truth": "A SKILL.md with valid frontmatter",
-                "expected_behavior": ["Writes skills/csv-cleaner/SKILL.md with a name and description"],
-            },
-            "legacy",
-        ),
-        (
-            {
-                "expected_skill": "skill-linter",
-                "question": "Read SKILL.md in ./my-skill and fix its frontmatter",
-                "expected_behavior": ["Opens SKILL.md in ./my-skill", "The fixed SKILL.md has valid frontmatter"],
-            },
-            "legacy",
-        ),
+        {
+            "expected_skill": "skill-creator",
+            "question": "Write a SKILL.md for my csv-cleaner script",
+            "ground_truth": "A SKILL.md with valid frontmatter",
+            "expected_behavior": ["Writes skills/csv-cleaner/SKILL.md with a name and description"],
+        },
+        {
+            "expected_skill": "skill-linter",
+            "question": "Read SKILL.md in ./my-skill and fix its frontmatter",
+            "expected_behavior": ["Opens SKILL.md in ./my-skill", "The fixed SKILL.md has valid frontmatter"],
+        },
     ],
     ids=[
         "cli-named",
@@ -173,8 +155,8 @@ def test_outcome_entries_do_not_warn(entry):
         "reviewing",
     ],
 )
-def test_task_text_that_shares_the_skill_name_or_file_does_not_warn(entry, dataset_format):
-    assert _baseline_fairness_warnings({"id": "case-1", **entry}, dataset_format) == []
+def test_task_text_that_shares_the_skill_name_or_file_does_not_warn(entry):
+    assert _baseline_fairness_warnings({"id": "case-1", **entry}) == []
 
 
 @pytest.mark.parametrize(
@@ -184,20 +166,20 @@ def test_task_text_that_shares_the_skill_name_or_file_does_not_warn(entry, datas
 def test_used_name_then_connective_warns_even_for_cli_named_skill(skill, assertion):
     # Only CLI arguments or a noun after the name exempt it, so "used <name> to ..."
     # still warns for a CLI-named skill.
-    entry = {"id": "case-1", "expected_skill": skill, "question": "q", "expected_behavior": [assertion]}
-    (warning,) = _baseline_fairness_warnings(entry, "agentskills")
+    entry = _case(skill, prompt="q", assertions=[assertion])
+    (warning,) = _baseline_fairness_warnings(entry)
     assert warning.startswith("assertions grades skill use")
 
 
 @pytest.mark.parametrize(
     ("field", "entry"),
     [
-        ("prompt", {"question": "Open SKILL.md and fix its frontmatter"}),
+        ("prompt", {"prompt": "Open SKILL.md and fix its frontmatter"}),
         (
             "assertions",
             {
-                "question": "Fix the frontmatter of the SKILL.md in ./my-skill",
-                "expected_behavior": ["The agent read the SKILL.md and reported the missing description"],
+                "prompt": "Fix the frontmatter of the SKILL.md in ./my-skill",
+                "assertions": ["The agent read the SKILL.md and reported the missing description"],
             },
         ),
     ],
@@ -206,7 +188,7 @@ def test_used_name_then_connective_warns_even_for_cli_named_skill(skill, asserti
 def test_bare_read_skill_md_warns_even_for_skill_md_editing_skill(field, entry):
     # A SKILL.md is exempt only when the task writes it or the text names its
     # location, so a bare "read/open SKILL.md" still means the skill's own instructions.
-    (warning,) = _baseline_fairness_warnings({"id": "case-1", "expected_skill": "skill-linter", **entry}, "agentskills")
+    (warning,) = _baseline_fairness_warnings(_case("skill-linter", **entry))
     assert warning.startswith(f"{field} ")
     assert "SKILL.md" in warning
 
@@ -215,11 +197,11 @@ def test_spec_example_dataset_is_fair_to_the_baseline(tmp_path: Path):
     example = next(spec for spec in EVALS_SPEC if spec.rel_path == "evals/evals.json").example
     path = tmp_path / "evals.json"
     path.write_text(example, encoding="utf-8")
-    entries, dataset_format = load_dataset_entries_with_format(path)
+    entries, _dataset_format = load_dataset_entries_with_format(path)
 
     assert entries
     for entry in entries:
-        assert _baseline_fairness_warnings(entry, dataset_format) == []
+        assert _baseline_fairness_warnings(entry) == []
 
 
 # Pages whose dataset examples users and agents copy.
@@ -239,7 +221,7 @@ def test_documented_dataset_examples_are_fair_to_the_baseline(page):
         for entry in entries:
             if entry.get("id") and entry.get("question"):
                 checked += 1
-                assert _baseline_fairness_warnings(entry, detect_dataset_format(data)) == [], (page, entry["id"])
+                assert _baseline_fairness_warnings(entry) == [], (page, entry["id"])
     assert checked, f"no dataset examples found in {page}"
 
 
@@ -361,7 +343,7 @@ def test_template_generator_cases_are_fair_to_the_baseline(generate, eval_prompt
 
     assert cases
     for case in cases:
-        assert _baseline_fairness_warnings(case, "legacy") == [], case
+        assert _baseline_fairness_warnings(case, skill_scripts=["review.py"]) == [], case
         assert "SKILL.md" not in json.dumps(case)
         assert "review.py" not in json.dumps([case["ground_truth"], case["expected_behavior"]])
 
@@ -459,7 +441,7 @@ def test_llm_generation_prompt_examples_are_fair_to_the_baseline(llm_prompts, fu
     assert good_examples
     for example in good_examples:
         entry = _entry(ground_truth=example, expected_behavior=[example])
-        assert _baseline_fairness_warnings(entry, "legacy") == [], example
+        assert _baseline_fairness_warnings(entry) == [], example
         assert not re.search(r"release-review|SKILL\.md|review\.py", example), example
     assert "skill_execution" in prompt
     assert "observable checks on the task outcome" in prompt
@@ -477,7 +459,7 @@ def test_llm_refine_prompt_does_not_ask_for_skill_use_behaviors(llm_prompts):
     assert not re.search(r'"The agent executed\s+[^"]*\.py', instructions)
     assert not re.search(r"\b\w+\.py\b", instructions)
     for example in re.findall(r'"(The agent[^"]*)"', instructions):
-        assert _baseline_fairness_warnings(_entry(expected_behavior=[example]), "legacy") == [], example
+        assert _baseline_fairness_warnings(_entry(expected_behavior=[example])) == [], example
 
 
 _SKILL_USE_TRAJECTORY = {
@@ -524,7 +506,7 @@ def test_template_refine_drops_skill_use_and_keeps_task_work(with_skill_context)
     assert behaviors[:2] == ["The agent read release.yaml", "The agent executed: grep -n image release.yaml"]
     assert not [item for item in behaviors if re.search(r"SKILL\.md|review\.py|policy\.md", item)]
     assert refined["ground_truth"].startswith("The manifest has two blockers")
-    assert _baseline_fairness_warnings(refined, "legacy") == []
+    assert _baseline_fairness_warnings(refined, skill_scripts=["review.py"]) == []
 
 
 @pytest.mark.parametrize(
@@ -542,3 +524,308 @@ def test_template_refine_drops_skill_use_and_keeps_task_work(with_skill_context)
 )
 def test_uses_skill_files_matches_whole_names_only(text, uses):
     assert generate_dataset._uses_skill_files(text, "release-review", ["scripts/review.py", None]) is uses
+
+
+# --- Skill scripts, negation and wording the check must not misread ---------
+
+
+@pytest.mark.parametrize(
+    "assertion",
+    [
+        "Ran scripts/convert.py",
+        "The agent executed convert.py or explained how to run it",
+        "Ran `python3 ./convert.py report.docx`.",
+        "Saved the output of tools/convert.py next to the input",
+    ],
+)
+def test_assertion_running_a_skill_script_warns(assertion):
+    entry = _case("my-skill", prompt="Convert report.docx to PDF", assertions=[assertion])
+
+    (warning,) = _baseline_fairness_warnings(entry, skill_scripts=["convert.py"])
+
+    assert warning.startswith("assertions grades skill use")
+    assert "convert.py" in warning
+
+
+@pytest.mark.parametrize(
+    "assertion",
+    [
+        "Saves report.pdf next to report.docx",
+        "The agent did not run convert.py",
+        "Converted the file without running convert.py",
+        "Ran preconvert.py on the input",
+        "Attached convert.py.txt to the answer",
+    ],
+)
+def test_text_that_does_not_run_a_skill_script_does_not_warn(assertion):
+    entry = _case("my-skill", prompt="Convert report.docx to PDF", assertions=[assertion])
+
+    assert _baseline_fairness_warnings(entry, skill_scripts=["convert.py"]) == []
+
+
+@pytest.mark.parametrize(
+    "assertions",
+    [["Ran scripts/convert.py"], ["The agent executed convert.py or explained how to run it"]],
+    ids=["path", "old-generator-text"],
+)
+def test_tier3_validate_strict_fails_on_a_skill_script_assertion(tmp_path: Path, assertions):
+    skill = tmp_path / "my-skill"
+    (skill / "scripts").mkdir(parents=True)
+    (skill / "evals").mkdir()
+    (skill / "SKILL.md").write_text("---\nname: my-skill\ndescription: Convert documents\n---\n", encoding="utf-8")
+    (skill / "scripts" / "convert.py").write_text("print('ok')\n", encoding="utf-8")
+    case = {"id": "my-skill-001", "prompt": "Convert report.docx to PDF", "expected_output": "report.pdf"}
+    (skill / "evals" / "evals.json").write_text(
+        json.dumps({"skill_name": "my-skill", "evals": [{**case, "assertions": assertions}]}), encoding="utf-8"
+    )
+
+    result = CliRunner().invoke(cli, ["tier3", "validate", str(skill), "--strict", "--json"])
+
+    assert result.exit_code == 1, result.output
+    (warning,) = [item for item in json.loads(result.output) if item["path"] == "entry my-skill-001"]
+    assert warning["message"].startswith("assertions grades skill use")
+
+
+@pytest.mark.parametrize(
+    ("skill_name", "text"),
+    [
+        ("skill-creator", "The new file follows the SKILL.md frontmatter format"),
+        ("skill-linter", "Loads SKILL.md files and checks their frontmatter"),
+        ("python", "Ranks the python developers by skill level"),
+        ("release-review", "The agent did not read SKILL.md"),
+        ("release-review", "Answers directly, without reading SKILL.md"),
+    ],
+)
+def test_format_wording_and_negated_checks_do_not_warn(skill_name, text):
+    entry = _case(skill_name, prompt=text, expected_output=text, assertions=[text])
+
+    assert _baseline_fairness_warnings(entry) == []
+
+
+@pytest.mark.parametrize(
+    "assertion",
+    [
+        "Reads SKILL.md in the skill directory",
+        "Reads SKILL.md from the installed skill",
+        "Did not ask questions, and read SKILL.md first",
+    ],
+)
+def test_skill_md_in_the_skill_itself_still_warns(assertion):
+    entry = _case(prompt="Check manifest.yaml", assertions=[assertion])
+
+    (warning,) = _baseline_fairness_warnings(entry)
+
+    assert warning.startswith("assertions grades skill use")
+
+
+def test_warnings_name_the_fields_the_dataset_uses(tmp_path: Path):
+    # evals.jsonl is always read as legacy, but its lines may use agentskills.io names.
+    skill = tmp_path / "release-review"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: release-review\ndescription: Review releases\n---\n", encoding="utf-8")
+    lines = [
+        {
+            "id": "release-review-001",
+            "expected_skill": "release-review",
+            "prompt": "Use the skill at skills/release-review on manifest.yaml",
+            "expected_output": "The agent used the release-review skill",
+        },
+        {
+            "id": "release-review-002",
+            "expected_skill": "release-review",
+            "question": "Read release-review/SKILL.md, then check manifest.yaml",
+            "expected_behavior": ["Read release-review/SKILL.md"],
+        },
+    ]
+    (skill / "evals" / "evals.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+
+    fields = {
+        (result.path, result.message.split(" ", 1)[0])
+        for result in validate_skillevaluators(skill)
+        if result.status == "warning" and "skill_execution" in result.message
+    }
+
+    assert fields == {
+        ("entry release-review-001", "prompt"),
+        ("entry release-review-001", "expected_output"),
+        ("entry release-review-002", "question"),
+        ("entry release-review-002", "expected_behavior"),
+    }
+
+
+# --- Generated starter cases -------------------------------------------------
+
+# Descriptions that name the skill, its script or SKILL.md. Template cases
+# quote the description, so these must not turn into graded skill use.
+_SKILL_NAMING_DESCRIPTIONS = [
+    "The release-review skill checks release manifests",
+    "Use release-review for release manifests. Use when a release is cut.",
+    "Loads SKILL.md files and checks their frontmatter",
+    "Follows the SKILL.md format to scaffold new agent skills",
+    "Runs review.py on release manifests",
+]
+
+
+@pytest.mark.parametrize("description", _SKILL_NAMING_DESCRIPTIONS)
+@pytest.mark.parametrize("generate", [generate_dataset._generate_simple, generate_dataset._generate_full])
+def test_template_cases_stay_fair_when_the_description_names_the_skill(generate, description):
+    for case in generate(_skill(description=description, scripts=["review.py"])):
+        assert _baseline_fairness_warnings(case, skill_scripts=["review.py"]) == [], case
+
+
+def _write_skill(tmp_path: Path, description: str, eval_md: str | None = None) -> Path:
+    skill = tmp_path / "release-review"
+    (skill / "scripts").mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        f"---\nname: release-review\ndescription: {json.dumps(description)}\n---\n# Body\n", encoding="utf-8"
+    )
+    (skill / "scripts" / "review.py").write_text("print('ok')\n", encoding="utf-8")
+    if eval_md is not None:
+        (skill / "evals").mkdir()
+        (skill / "evals" / "EVAL.md").write_text(eval_md, encoding="utf-8")
+    return skill
+
+
+@pytest.mark.parametrize("description", _SKILL_NAMING_DESCRIPTIONS)
+def test_starter_case_passes_strict_validate(tmp_path: Path, description):
+    skill = _write_skill(tmp_path, description)
+    generate_dataset.generate_one_case(skill, use_llm=False)
+
+    result = CliRunner().invoke(cli, ["tier3", "validate", str(skill), "--strict", "--json"])
+
+    assert result.exit_code == 0, result.output
+
+
+@pytest.fixture
+def llm_reply(monkeypatch) -> list[str]:
+    """Stub the public provider; the test appends the reply it returns."""
+    from skillevaluator import provider_config
+    from skillevaluator.inference.client import LLMClient
+
+    replies: list[str] = []
+    monkeypatch.setattr(
+        provider_config, "resolve_llm_provider", lambda: SimpleNamespace(provider="openai", model="test-model")
+    )
+    monkeypatch.setattr(LLMClient, "completions", lambda _self, _system, _user, **_kwargs: replies[-1])
+    return replies
+
+
+def test_autopilot_llm_case_does_not_grade_skill_use(tmp_path: Path, llm_reply):
+    skill = _write_skill(tmp_path, "Reviews release manifests for policy problems.")
+    llm_reply.append(
+        json.dumps(
+            [
+                {
+                    "id": "release-review-001",
+                    "question": "Is release.yaml ready to ship?",
+                    "expected_skill": "release-review",
+                    "expected_script": "review.py",
+                    "ground_truth": "The agent used the release-review skill and listed the blockers",
+                    "expected_behavior": [
+                        "The agent read the release-review SKILL.md first",
+                        "The agent ran review.py on release.yaml",
+                        "The agent lists each blocker with its manifest line",
+                    ],
+                }
+            ]
+        )
+    )
+
+    output = generate_dataset.generate_one_case(skill, use_llm=True)
+
+    (case,) = json.loads(output.read_text(encoding="utf-8"))["evals"]
+    assert case["prompt"] == "Is release.yaml ready to ship?"
+    assert case["expected_output"] == ("A correct, complete result for: reviews release manifests for policy problems")
+    assert case["assertions"] == [
+        "The agent lists each blocker with its manifest line",
+        generate_dataset.SECURITY_BEHAVIOR,
+    ]
+    result = CliRunner().invoke(cli, ["tier3", "validate", str(skill), "--strict", "--json"])
+    assert result.exit_code == 0, result.output
+
+
+def test_autopilot_llm_case_with_only_skill_use_checks_gets_outcome_checks(tmp_path: Path, llm_reply):
+    skill = _write_skill(tmp_path, "Reviews release manifests for policy problems.")
+    llm_reply.append(
+        json.dumps(
+            [
+                {
+                    "id": "release-review-001",
+                    "question": "Is release.yaml ready to ship?",
+                    "expected_skill": "release-review",
+                    "expected_script": None,
+                    "ground_truth": "Two blockers: a missing changelog entry and an unsigned image",
+                    "expected_behavior": ["The agent invoked release-review before answering"],
+                }
+            ]
+        )
+    )
+
+    output = generate_dataset.generate_one_case(skill, use_llm=True)
+
+    (case,) = json.loads(output.read_text(encoding="utf-8"))["evals"]
+    assert case["expected_output"] == "Two blockers: a missing changelog entry and an unsigned image"
+    assert case["assertions"] == generate_dataset._outcome_behaviors(
+        "reviews release manifests for policy problems", []
+    )
+
+
+def test_autopilot_starter_leaves_out_eval_md_skill_use_behaviors(tmp_path: Path):
+    eval_md = "## Behaviors\n- The agent reads SKILL.md before acting\n- The agent lists every blocker\n"
+    skill = _write_skill(tmp_path, "Reviews release manifests for policy problems.", eval_md)
+
+    output = generate_dataset.generate_one_case(skill, use_llm=False)
+
+    (case,) = json.loads(output.read_text(encoding="utf-8"))["evals"]
+    assert "The agent lists every blocker" in case["assertions"]
+    assert not [item for item in case["assertions"] if "SKILL.md" in item]
+
+
+def test_create_eval_dataset_warns_about_cases_that_grade_skill_use(tmp_path: Path, capsys):
+    # create-eval-dataset keeps EVAL.md behaviors as written, so it names the ones the baseline cannot meet.
+    eval_md = "## Behaviors\n- The agent reads SKILL.md before acting\n- The agent lists every blocker\n"
+    skill = _write_skill(tmp_path, "Reviews release manifests for policy problems.", eval_md)
+
+    result = generate_dataset.main([str(skill), "--no-llm", "--dry-run"])
+
+    output = capsys.readouterr().out
+    assert "Warning: case release-review-001: assertions grades skill use ('reads SKILL.md')" in output
+    assert "The agent reads SKILL.md before acting" in result.dataset["evals"][0]["assertions"]
+
+
+def test_create_eval_dataset_prints_no_warning_for_outcome_cases(tmp_path: Path, capsys):
+    skill = _write_skill(tmp_path, "Reviews release manifests for policy problems.")
+
+    generate_dataset.main([str(skill), "--no-llm", "--full", "--dry-run"])
+
+    assert "Warning:" not in capsys.readouterr().out
+
+
+def test_template_refine_ignores_non_string_skill_fields():
+    # LLM-written cases are not type-checked for expected_skill or expected_script.
+    skill = _skill(scripts=["review.py"])
+    case = {**generate_dataset._generate_simple(skill)[0], "expected_script": ["review.py"]}
+    trajectories = {case["id"]: _SKILL_USE_TRAJECTORY}
+
+    (with_skill,) = generate_dataset._refine_from_trajectory_template([case], trajectories, skill=skill)
+    (case_only,) = generate_dataset._refine_from_trajectory_template(
+        [{**case, "expected_skill": ["release-review"]}], trajectories, skill=None
+    )
+
+    assert "The agent read release.yaml" in with_skill["expected_behavior"]
+    assert "The agent read release.yaml" in case_only["expected_behavior"]
+
+
+@pytest.mark.parametrize("command", ["init-custom-grader", "init-harbor-task"])
+def test_scaffold_starter_case_grades_the_outcome(tmp_path: Path, command):
+    skill = tmp_path / "release-review"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: release-review\ndescription: Review releases\n---\n", encoding="utf-8")
+
+    result = CliRunner().invoke(cli, [command, str(skill)])
+
+    assert result.exit_code == 0, result.output
+    (case,) = json.loads((skill / "evals" / "evals.json").read_text(encoding="utf-8"))["evals"]
+    assert case["assertions"]
+    assert not [item for item in case["assertions"] if re.search(r"\bskill\b", item, re.IGNORECASE)]
+

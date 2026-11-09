@@ -55,7 +55,9 @@ import yaml
 
 from skillevaluator.constants import EXECUTABLE_SKILL_DIRS
 from skillevaluator.evaluation.results import DatasetGenerationError, DatasetGenerationResult
+from skillevaluator.tier3.dataset_utils import normalize_dataset_entries
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
+from skillevaluator.tier3.evals_spec import _baseline_fairness_warnings, _skill_script_names, _skill_use_match
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
 # Output budget for generation and refinement; OpenAI reasoning models get the
@@ -294,10 +296,10 @@ def _generate_simple(skill: dict[str, Any]) -> list[dict[str, Any]]:
     """Generate 1 simple test case (default, no LLM needed)."""
     name = skill["name"]
     script = _pick_primary_script(skill)
-    desc = skill["description"] or f"the {name} skill"
+    desc_lower = _description_lower(skill)
+    outcome = _outcome_subject(skill, desc_lower)
     eval_hints = _extract_eval_hints(skill.get("eval_prompt", ""))
 
-    desc_lower = desc.lower().rstrip(".")
     question = eval_hints["questions"][0] if eval_hints["questions"] else f"Use {name} to {desc_lower}"
 
     return [
@@ -306,20 +308,48 @@ def _generate_simple(skill: dict[str, Any]) -> list[dict[str, Any]]:
             "question": question,
             "expected_skill": name,
             "expected_script": script,
-            "ground_truth": f"A correct, complete result for: {desc_lower}",
-            "expected_behavior": _outcome_behaviors(desc_lower, eval_hints["behaviors"]),
+            "ground_truth": _outcome_ground_truth(outcome),
+            "expected_behavior": _outcome_behaviors(outcome, eval_hints["behaviors"]),
         }
     ]
 
 
-def _outcome_behaviors(desc_lower: str, hint_behaviors: list[str]) -> list[str]:
+def _description_lower(skill: dict[str, Any]) -> str:
+    """The skill description as template cases quote it."""
+    desc = skill["description"] or f"the {skill['name']} skill"
+    return desc.lower().rstrip(".")
+
+
+def _script_file_names(skill: dict[str, Any]) -> tuple[str, ...]:
+    """File names of the parsed skill's scripts."""
+    return tuple(Path(script).name for script in skill.get("scripts", []) if isinstance(script, str) and script)
+
+
+def _outcome_subject(skill: dict[str, Any], desc_lower: str) -> str | None:
+    """The description to quote in graded text, or None when quoting it would grade skill use.
+
+    A description such as "The release-review skill checks manifests" or "Runs
+    review.py on ..." names the skill or its script, and the no-skill baseline
+    is graded on the expected output and assertions too.
+    """
+    if _skill_use_match(desc_lower, skill["name"], _script_file_names(skill)):
+        return None
+    return desc_lower
+
+
+def _outcome_ground_truth(outcome: str | None) -> str:
+    return f"A correct, complete result for: {outcome}" if outcome else "A correct, complete result for the request"
+
+
+def _outcome_behaviors(outcome: str | None, hint_behaviors: list[str]) -> list[str]:
     """Behaviors about the task outcome, which both arms can be graded on.
 
     Reading SKILL.md or running the skill's script is scored by skill_execution;
     asserting it here would grade the no-skill baseline on something it cannot do.
     """
+    request = f"the request ({outcome})" if outcome else "the request"
     return [
-        f"The agent produced concrete results for the request ({desc_lower}), not only a plan",
+        f"The agent produced concrete results for {request}, not only a plan",
         "The agent's final response directly addresses the user's request",
         *hint_behaviors,
         SECURITY_BEHAVIOR,
@@ -334,12 +364,12 @@ def _generate_full(skill: dict[str, Any]) -> list[dict[str, Any]]:
     """
     name = skill["name"]
     script = _pick_primary_script(skill)
-    desc = skill["description"] or f"the {name} skill"
-    desc_lower = desc.lower().rstrip(".")
+    desc_lower = _description_lower(skill)
+    outcome = _outcome_subject(skill, desc_lower)
     eval_hints = _extract_eval_hints(skill.get("eval_prompt", ""))
     hint_qs = eval_hints["questions"]
 
-    pos_behaviors = _outcome_behaviors(desc_lower, eval_hints["behaviors"])
+    pos_behaviors = _outcome_behaviors(outcome, eval_hints["behaviors"])
 
     cases = [
         {
@@ -347,7 +377,7 @@ def _generate_full(skill: dict[str, Any]) -> list[dict[str, Any]]:
             "question": hint_qs[0] if len(hint_qs) > 0 else f"Use {name} to {desc_lower}",
             "expected_skill": name,
             "expected_script": script,
-            "ground_truth": f"A correct, complete result for: {desc_lower}",
+            "ground_truth": _outcome_ground_truth(outcome),
             "expected_behavior": pos_behaviors,
         },
         {
@@ -355,7 +385,7 @@ def _generate_full(skill: dict[str, Any]) -> list[dict[str, Any]]:
             "question": hint_qs[1] if len(hint_qs) > 1 else f"I need to {desc_lower}",
             "expected_skill": name,
             "expected_script": script,
-            "ground_truth": f"A correct, complete result for: {desc_lower}",
+            "ground_truth": _outcome_ground_truth(outcome),
             "expected_behavior": pos_behaviors,
         },
         {
@@ -365,7 +395,9 @@ def _generate_full(skill: dict[str, Any]) -> list[dict[str, Any]]:
             else f"I'm working on a project and need help with {desc_lower}. Can you assist?",
             "expected_skill": name,
             "expected_script": script,
-            "ground_truth": f"Actionable results for {desc_lower} that fit the user's project",
+            "ground_truth": f"Actionable results for {outcome} that fit the user's project"
+            if outcome
+            else "Actionable results that fit the user's project",
             "expected_behavior": pos_behaviors,
         },
     ]
@@ -578,11 +610,51 @@ def generate_one_case(skill_path: Path, *, use_llm: bool) -> Path:
     )
     if len(cases) != 1:
         raise RuntimeError("one-case generation did not return exactly one case")
+    cases = [_without_skill_use(cases[0], skill, _skill_script_names(skill_path))]
     evals_dir.mkdir(parents=True, exist_ok=True)
     with output_path.open("x", encoding="utf-8") as output:
         json.dump(_to_agentskills_dataset(skill["name"], cases), output, indent=2, ensure_ascii=False)
         output.write("\n")
     return output_path
+
+
+def _without_skill_use(case: dict[str, Any], skill: dict[str, Any], skill_scripts: Sequence[str]) -> dict[str, Any]:
+    """Keep skill use out of the graded text of a starter case that runs unattended.
+
+    Autopilot evaluates the case right away, and the no-skill baseline is graded
+    on its expected output and assertions too. An LLM reply, or an EVAL.md
+    ``## Behaviors`` line, that grades reading SKILL.md, using the skill or
+    running its scripts is replaced: such an expected output by the template's
+    outcome text, such assertions dropped (the template's outcome assertions
+    when only the security check is left).
+    """
+    skill_name = case.get("expected_skill")
+    if not isinstance(skill_name, str) or not skill_name.strip():
+        return case
+    skill_name = skill_name.strip()
+    outcome = _outcome_subject(skill, _description_lower(skill))
+    case = dict(case)
+    ground_truth = case.get("ground_truth")
+    if isinstance(ground_truth, str) and _skill_use_match(ground_truth, skill_name, skill_scripts):
+        case["ground_truth"] = _outcome_ground_truth(outcome)
+    behaviors = case.get("expected_behavior")
+    if isinstance(behaviors, list):
+        kept = [
+            item
+            for item in behaviors
+            if not (isinstance(item, str) and _skill_use_match(item, skill_name, skill_scripts))
+        ]
+        if len(kept) != len(behaviors):
+            only_security = all(item == SECURITY_BEHAVIOR for item in kept)
+            case["expected_behavior"] = _outcome_behaviors(outcome, []) if only_security else kept
+    return case
+
+
+def _print_baseline_fairness_warnings(dataset: dict[str, Any], skill_scripts: Sequence[str]) -> None:
+    """Name generated cases that still grade skill use; `tier3 validate` reports the same warnings."""
+    for entry in normalize_dataset_entries(dataset):
+        for warning in _baseline_fairness_warnings(entry, skill_scripts=skill_scripts):
+            print(f"Warning: case {entry.get('id')}: {warning}")
 
 
 def _ensure_project_imports():
@@ -936,12 +1008,16 @@ def _extract_agent_final_message(trajectory: dict[str, Any]) -> str:
     return ""
 
 
-def _uses_skill_files(text: str, skill_name: str | None, scripts: Sequence[str | None]) -> bool:
-    """Whether a read path or shell command touches SKILL.md, the skill's directory, or one of its scripts."""
+def _uses_skill_files(text: str, skill_name: object, scripts: Sequence[object]) -> bool:
+    """Whether a read path or shell command touches SKILL.md, the skill's directory, or one of its scripts.
+
+    The skill name and scripts can come from LLM-written cases, so values that
+    are not non-empty strings are ignored.
+    """
     if "SKILL.md" in text:
         return True
-    names = [rf"skills/{re.escape(skill_name)}"] if skill_name else []
-    names.extend(re.escape(Path(script).name) for script in scripts if script)
+    names = [rf"skills/{re.escape(skill_name)}"] if isinstance(skill_name, str) and skill_name else []
+    names.extend(re.escape(Path(script).name) for script in scripts if isinstance(script, str) and script)
     return any(re.search(rf"(?<![\w.-]){name}(?![\w.-])", text) for name in names)
 
 
@@ -1204,6 +1280,7 @@ Agent-refined mode (--refine):
             print("  No trajectory available — using initial cases as-is.")
 
     dataset = _to_agentskills_dataset(skill["name"], cases)
+    _print_baseline_fairness_warnings(dataset, _skill_script_names(skill_path))
 
     if args.dry_run:
         print("\nDry run — not saved.")

@@ -173,7 +173,7 @@ inside the `tier3` group:
 
 ### tier3 validate
 
-Validate the Tier 3 `evals/` directory and the optional Harbor bring-your-own-task contract before you spend money on a live run. The dataset and directory rules it enforces are documented in [Eval Datasets](eval-datasets.mdx). It warns when a case's prompt points at the skill's files, or its expected output or assertions grade skill use (reading `SKILL.md`, running the skill's script, or using the skill), because the no-skill baseline is graded on the same text; these warnings fail the command only with `--strict`.
+Validate the Tier 3 `evals/` directory and the optional Harbor bring-your-own-task contract before you spend money on a live run. The dataset and directory rules it enforces are documented in [Eval Datasets](eval-datasets.mdx). Because the no-skill baseline is graded on the same text, it warns when a case's prompt points at `skills/<name>`, `<name>/SKILL.md` or reading `SKILL.md`, or when its expected output or an assertion names those files, calls `<name>` a skill, says the agent used, invoked or identified `<name>`, or runs one of the skill's scripts from `scripts/` or `tools/`. The check is a wording heuristic, and these warnings fail the command only with `--strict`.
 
 ```bash title="Check evals/ before a live run"
 skillevaluator tier3 validate ./my-skill --strict

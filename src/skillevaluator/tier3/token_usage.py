@@ -41,13 +41,14 @@ TOKEN_MEASURES = (
     "completion_tokens",
     "total_tokens",
 )
-# Loaded agent data keeps attempts that have no usable reward under these keys;
-# see ``report_data.load_agent_data``.
-UNSCORED_ATTEMPT_KEYS = ("unscored_attempts", "unscored_attempts_baseline")
-# (payload arm, condition key, scored trials key, unscored attempts key)
+# Loaded agent data keeps, per arm, the attempts whose usage no report trial
+# carries: attempts without a usable reward (``scored`` false) and scored
+# attempts of an arm whose scores are withheld. See ``report_data.load_agent_data``.
+USAGE_ONLY_ATTEMPT_KEYS = ("usage_only_attempts", "usage_only_attempts_baseline")
+# (payload arm, condition key, report trials key, usage-only attempts key)
 _ARMS = (
-    ("with_skill", "with_skill", "trials", "unscored_attempts"),
-    ("baseline", "without_skill", "trials_baseline", "unscored_attempts_baseline"),
+    ("with_skill", "with_skill", "trials", "usage_only_attempts"),
+    ("baseline", "without_skill", "trials_baseline", "usage_only_attempts_baseline"),
 )
 _ARM_NAMES = {"with_skill": "with-skill run", "baseline": "baseline"}
 # Harbor names a trial after its task, cut to 32 characters, and the task after
@@ -142,24 +143,22 @@ def _pass_at_k_branch(agent: Mapping[str, Any], condition: str) -> Mapping[str, 
 
 
 def _agent_attempts(agent: Mapping[str, Any]) -> dict[str, list[_Attempt]]:
-    known_cases = {_case_label(trial) for _arm, _condition, key, _unscored in _ARMS for trial in _rows(agent.get(key))}
-    for _arm, condition, _key, _unscored in _ARMS:
+    known_cases = {_case_label(trial) for _arm, _condition, key, _usage in _ARMS for trial in _rows(agent.get(key))}
+    for _arm, condition, _key, usage_key in _ARMS:
         known_cases.update(str(case) for case in _mapping(_pass_at_k_branch(agent, condition).get("cases")))
-    return {
-        arm: [
-            *(
-                _Attempt(_case_label(trial), normalize_token_counts(trial.get("tokens")), True)
-                for trial in _rows(agent.get(key))
-            ),
-            *(
-                _Attempt(
-                    _matching_case(_case_label(row), known_cases), normalize_token_counts(row.get("tokens")), False
-                )
-                for row in _rows(agent.get(unscored))
-            ),
+        known_cases.update(_case_label(row) for row in _rows(agent.get(usage_key)) if row.get("scored") is True)
+    attempts: dict[str, list[_Attempt]] = {}
+    for arm, _condition, key, usage_key in _ARMS:
+        attempts[arm] = [
+            _Attempt(_case_label(trial), normalize_token_counts(trial.get("tokens")), True)
+            for trial in _rows(agent.get(key))
         ]
-        for arm, _condition, key, unscored in _ARMS
-    }
+        for row in _rows(agent.get(usage_key)):
+            scored = row.get("scored") is True
+            # A scored attempt names its case; an unscored one only has its trial name.
+            case = _case_label(row) if scored else _matching_case(_case_label(row), known_cases)
+            attempts[arm].append(_Attempt(case, normalize_token_counts(row.get("tokens")), scored))
+    return attempts
 
 
 def _condition(agent: Mapping[str, Any], condition: str) -> Mapping[str, Any]:
@@ -315,13 +314,13 @@ def _delta(
 def _failed_arm_blockers(agent: Mapping[str, Any]) -> list[tuple[str, str]]:
     """Name each arm whose recorded status is ``failed``: its usage is real but not comparable.
 
-    The sentence reuses the coverage notice's short form, such as ``Baseline
-    incomplete (1 of 2 attempts scored).``
+    The sentence reuses the coverage notice's short form, such as ``No change:
+    baseline incomplete (1 of 2 attempts scored).``
     """
     from skillevaluator.reporting.tier3_coverage import incomplete_arms
 
     codes = {"with_skill": "with_skill_failed", "without_skill": "baseline_failed"}
-    return [(codes[arm.condition], f"{str(arm)[:1].upper()}{str(arm)[1:]}.") for arm in incomplete_arms(dict(agent))]
+    return [(codes[arm.condition], f"No change: {arm}.") for arm in incomplete_arms(dict(agent))]
 
 
 def _agent_usage(agent: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -380,7 +379,7 @@ def build_token_usage(agents: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]
 
     ``agents`` maps each agent to its report payload (``trials``,
     ``trials_baseline``, ``conditions``, ``pass_at_k`` and ``execution_status``)
-    plus the loader's unscored attempts under :data:`UNSCORED_ATTEMPT_KEYS`.
+    plus the loader's usage-only attempts under :data:`USAGE_ONLY_ATTEMPT_KEYS`.
     """
     usage: dict[str, dict[str, Any]] = {}
     for name in sorted(agents):
@@ -411,3 +410,30 @@ def build_token_usage(agents: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]
             "delta": _delta(dataset["with_skill"], dataset["baseline"], blockers=agents_without_change),
         },
     }
+
+
+def per_agent_token_usage(usage: object) -> dict[str, Any] | None:
+    """Return ``usage`` without its per-case rows, for the terminal summary of a run."""
+    if not isinstance(usage, Mapping) or not isinstance(usage.get("agents"), Mapping):
+        return None
+    agents = {
+        name: {key: value for key, value in agent.items() if key != "cases"}
+        for name, agent in usage["agents"].items()
+        if isinstance(agent, Mapping)
+    }
+    return {**usage, "agents": agents}
+
+
+def drop_token_usage_cases(usage: object) -> int:
+    """Empty the per-case rows of ``usage`` in place and return how many were dropped.
+
+    The report payload budget drops them with the trials they summarize; the
+    agent and all-agent sums stay.
+    """
+    agents = usage.get("agents") if isinstance(usage, dict) else None
+    dropped = 0
+    for agent in agents.values() if isinstance(agents, dict) else []:
+        if isinstance(agent, dict) and isinstance(agent.get("cases"), list) and agent["cases"]:
+            dropped += len(agent["cases"])
+            agent["cases"] = []
+    return dropped

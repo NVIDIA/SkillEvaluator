@@ -626,6 +626,12 @@ def aggregate_execution_error_details(
     }
 
 
+_USAGE_COUNTERS = ("prompt_tokens", "completion_tokens", "cached_tokens")
+# Attempts that count for token usage only, per arm: they never reach scores,
+# pass@k or resource totals. See ``skillevaluator.tier3.token_usage``.
+_USAGE_ONLY_KEYS = {"with_skill": "usage_only_attempts", "without_skill": "usage_only_attempts_baseline"}
+
+
 def _trajectory_token_counter(value: Any) -> int | None:
     """Return a browser-safe token counter without inventing zero usage."""
     return (
@@ -633,6 +639,60 @@ def _trajectory_token_counter(value: Any) -> int | None:
         if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAX_JSON_SAFE_INTEGER
         else None
     )
+
+
+def _usage_tokens(counters: dict[str, Any]) -> dict[str, int] | None:
+    """Return a report trial's ``tokens`` object, or ``None`` without prompt and completion counts."""
+    prompt = _trajectory_token_counter(counters.get("prompt_tokens"))
+    completion = _trajectory_token_counter(counters.get("completion_tokens"))
+    if prompt is None or completion is None:
+        return None
+    tokens = {"prompt": prompt, "completion": completion}
+    cached = _trajectory_token_counter(counters.get("cached_tokens"))
+    if cached is not None:
+        tokens["cached"] = cached
+    return tokens
+
+
+def _unscored_attempt_usage(trial_dir: Path) -> dict[str, Any]:
+    """Read the token counters of an attempt that has no usable reward.
+
+    The attempt is not scored, but it ran and used tokens. The case is the
+    trial name's prefix, as for a reward without one. Its trajectory is
+    optional telemetry, so an unreadable or oversized file only leaves the
+    counters out and does not mark score evidence truncated.
+    """
+    attempt: dict[str, Any] = {
+        "entry_id": trial_dir.name.split("__", 1)[0] or "unknown",
+        "trial_id": trial_dir.name,
+        "scored": False,
+    }
+    trajectory_file = trial_dir / "trajectory.json"
+    trajectory = _load_bounded_json(trajectory_file, [], artifact="trajectory") if trajectory_file.exists() else None
+    final_metrics = trajectory.get("final_metrics") if isinstance(trajectory, dict) else None
+    if isinstance(final_metrics, dict):
+        tokens = _usage_tokens({name: final_metrics.get(f"total_{name}") for name in _USAGE_COUNTERS})
+        if tokens is not None:
+            attempt["tokens"] = tokens
+    return attempt
+
+
+def _withheld_attempt_usage(rewards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the token usage of scored attempts whose arm's scores are not reported.
+
+    One row per logical attempt. As in report trials, an attempt scored over
+    several reward rows has no token counts.
+    """
+    rows = []
+    for group in logical_trial_reward_groups(rewards):
+        reward = group[0]
+        row: dict[str, Any] = {"entry_id": reward.get("entry_id"), "trial_id": reward.get("trial_id"), "scored": True}
+        counters = reward.get("_traj")
+        tokens = _usage_tokens(counters) if len(group) == 1 and isinstance(counters, dict) else None
+        if tokens is not None:
+            row["tokens"] = tokens
+        rows.append(row)
+    return rows
 
 
 def _condition_status(agent_info: dict[str, Any], condition: str) -> str:
@@ -787,6 +847,7 @@ def load_agent_data(
 
         for variant_key, variant_dir_name in (("rewards", "with-skill"), ("rewards_baseline", "without-skill")):
             trial_list: list[dict[str, Any]] = []
+            unscored_attempts: list[dict[str, Any]] = []
             count_key = "num_trials" if variant_key == "rewards" else "num_trials_baseline"
             reward_row_count_key = "num_reward_rows" if variant_key == "rewards" else "num_reward_rows_baseline"
             expected_logical_trials = agent_info.get(count_key)
@@ -824,10 +885,13 @@ def load_agent_data(
                     reward_file = trial_dir / "reward.json"
                     if not reward_file.exists():
                         rewards_complete = False
+                        # Not scored, but its token usage still counts.
+                        unscored_attempts.append(_unscored_attempt_usage(trial_dir))
                         continue
                     reward = _load_bounded_json(reward_file, agent_diagnostics, artifact="reward")
                     if not isinstance(reward, dict):
                         rewards_complete = False
+                        unscored_attempts.append(_unscored_attempt_usage(trial_dir))
                         continue
                     if not reward.get("entry_id"):
                         reward["entry_id"] = trial_dir.name.split("__", 1)[0] if trial_dir.name else "unknown"
@@ -873,6 +937,9 @@ def load_agent_data(
                 rewards_complete = False
             agent_info[variant_key] = trial_list
             agent_info[f"{variant_key}_complete"] = rewards_complete
+            agent_info[_USAGE_ONLY_KEYS["with_skill" if variant_key == "rewards" else "without_skill"]] = (
+                unscored_attempts
+            )
 
         if "with_skill" not in agent_info:
             continue
@@ -935,6 +1002,11 @@ def load_agent_data(
             condition_status = _condition_status(agent_info, condition)
             if condition_status == "succeeded":
                 continue
+            # The arm's scores are withheld below, but its scored attempts used tokens.
+            agent_info[_USAGE_ONLY_KEYS[condition]] = [
+                *_withheld_attempt_usage(agent_info.get(fields[-1]) or []),
+                *agent_info.get(_USAGE_ONLY_KEYS[condition], []),
+            ]
             condition_info = condition_execution.get(condition, {})
             for field in fields:
                 if field.startswith("pass_") and condition_status in {"failed", "unknown"}:

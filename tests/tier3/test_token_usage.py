@@ -34,8 +34,8 @@ def _agent(
     return {
         "trials": with_skill,
         "trials_baseline": baseline,
-        "unscored_attempts": unscored,
-        "unscored_attempts_baseline": unscored_baseline,
+        "usage_only_attempts": [{**row, "scored": False} for row in unscored],
+        "usage_only_attempts_baseline": [{**row, "scored": False} for row in unscored_baseline],
         "conditions": {
             "with_skill": {
                 "execution_status": with_status,
@@ -262,7 +262,7 @@ def test_attempts_skipped_after_a_pass_are_not_missing() -> None:
 def test_a_recovered_timeout_attempt_is_expected_usage() -> None:
     history = {"entry_id": "case-1", "trial_id": "case-1__x", "tokens": {"prompt": 10, "completion": 1}}
     agent = _agent([_trial("case-1", 100, 20)], [_trial("case-1", 90, 10)])
-    agent["unscored_attempts"] = [history]
+    agent["usage_only_attempts"] = [{**history, "scored": False}]
     agent["conditions"]["with_skill"]["recovered_attempts_total"] = 1
 
     usage = build_token_usage({"codex": agent})
@@ -378,7 +378,7 @@ def test_a_failed_baseline_arm_keeps_its_usage_but_gets_no_change() -> None:
     for delta in (agent_usage["delta"], *(case["delta"] for case in agent_usage["cases"])):
         assert delta["status"] == "unavailable"
         assert delta["reason_codes"] == ["baseline_failed"]
-        assert delta["reason"] == "Baseline incomplete (1 of 2 attempts scored)."
+        assert delta["reason"] == "No change: baseline incomplete (1 of 2 attempts scored)."
 
 
 def test_no_measured_attempt_gives_no_token_usage() -> None:

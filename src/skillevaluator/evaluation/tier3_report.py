@@ -2879,6 +2879,7 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
     from skillevaluator.tier3.harbor.metrics import (
         DEFAULT_METRIC_SET,
         LEGACY_METRIC_SET,
+        metric_is_not_applicable,
         metric_set_for_reward,
         metric_set_for_rewards,
         metric_value,
@@ -2961,7 +2962,10 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
             (not declared_metric_set or str(declared_metric_set) in standard_metric_sets)
             and metric_set in standard_metric_sets
             and "skill_execution" in standard_metrics
-            and metric_value(reward, "skill_execution") is not None
+            and (
+                metric_value(reward, "skill_execution") is not None
+                or metric_is_not_applicable(reward, "skill_execution")
+            )
         )
         if (
             not is_multi_row
@@ -2987,6 +2991,7 @@ def _trusted_observed_activation(reward: dict[str, Any]) -> str:
     from skillevaluator.tier3.harbor.metrics import (
         DEFAULT_METRIC_SET,
         LEGACY_METRIC_SET,
+        metric_is_not_applicable,
         metric_set_for_reward,
         metric_value,
     )
@@ -2998,7 +3003,7 @@ def _trusted_observed_activation(reward: dict[str, Any]) -> str:
         (declared and str(declared) not in standard_sets)
         or metric_set not in standard_sets
         or "skill_execution" not in metrics
-        or metric_value(reward, "skill_execution") is None
+        or (metric_value(reward, "skill_execution") is None and not metric_is_not_applicable(reward, "skill_execution"))
         or reward.get("invocation_evidence_source") != "trajectory"
     ):
         return "unknown"
@@ -3059,6 +3064,8 @@ def _attach_activation_expectations(
     skill_name: str,
 ) -> None:
     """Compare authored expectations with observed use, independently of correctness."""
+    from skillevaluator.tier3.eval_core.checks import resolve_should_trigger
+
     entries: dict[str, list[dict[str, Any]]] = {}
     for entry in dataset:
         if isinstance(entry, dict) and entry.get("id") is not None:
@@ -3068,10 +3075,15 @@ def _attach_activation_expectations(
             for trial in agent.get(arm, []):
                 expected: bool | None = False if baseline else None
                 matches = entries.get(str(trial.get("entry_id")), [])
-                if not baseline and len(matches) == 1 and "expected_skill" in matches[0]:
-                    expected_skill = matches[0]["expected_skill"]
-                    if expected_skill is None or (isinstance(expected_skill, str) and expected_skill.strip()):
-                        expected = expected_skill == skill_name
+                if not baseline and len(matches) == 1:
+                    entry = matches[0]
+                    should_trigger = resolve_should_trigger(entry)
+                    if should_trigger is False:
+                        expected = False
+                    elif should_trigger is True:
+                        expected_skill = entry.get("expected_skill")
+                        if isinstance(expected_skill, str) and expected_skill.strip():
+                            expected = expected_skill == skill_name
                 validation = trial["activation_validation"]
                 validation["expected_activation"] = expected
                 observed = validation["observed_activation"]

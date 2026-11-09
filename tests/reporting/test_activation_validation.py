@@ -42,7 +42,7 @@ def _trajectory(skill: str | None = None) -> dict:
     }
 
 
-def _collected(tmp_path: Path, trajectory: dict | None) -> dict:
+def _collected(tmp_path: Path, trajectory: dict | None, *, variant: str = "with") -> dict:
     trial = tmp_path / "job" / "case__attempt1"
     (trial / "agent").mkdir(parents=True)
     if trajectory is not None:
@@ -63,24 +63,40 @@ def _collected(tmp_path: Path, trajectory: dict | None) -> dict:
         "skill_invoked": True,
         "invocation_evidence_source": "verifier",
     }
-    _save_trials([reward], tmp_path / "saved", tmp_path / "job", skill_name="demo", agent="codex", variant="with")
+    if variant == "without":
+        for metric in ("skill_execution", "skill_efficiency"):
+            reward[metric] = None
+            reward["details"][metric] = {
+                "score": None,
+                "status": "not_applicable",
+                "reason": "N/A: this arm has no skill under test installed, so there is no skill to discover, run or route to",
+            }
+    _save_trials([reward], tmp_path / "saved", tmp_path / "job", skill_name="demo", agent="codex", variant=variant)
     return json.loads(next((tmp_path / "saved").glob("*/reward.json")).read_text())
 
 
-def _payload(rewards: list[dict], expected_skill: object = "demo", *, baseline: list[dict] | None = None) -> dict:
+def _payload(
+    rewards: list[dict],
+    expected_skill: object = "demo",
+    *,
+    baseline: list[dict] | None = None,
+    entry: dict | None = None,
+) -> dict:
     payload = build_agent_eval_payload(
         "demo",
         {
             "codex": {
                 "execution_status": "succeeded",
                 "with_skill": dict.fromkeys(DEFAULT_METRICS, 1.0),
-                "without_skill": dict.fromkeys(DEFAULT_METRICS, 1.0) if baseline else {},
+                "without_skill": {"security": 1.0, "accuracy": 1.0, "goal_accuracy": 1.0, "behavior_check": 1.0}
+                if baseline
+                else {},
                 "rewards": rewards,
                 "rewards_baseline": baseline or [],
                 "model": "fixture-model",
             }
         },
-        dataset=[{"id": "case", "expected_skill": expected_skill}],
+        dataset=[entry if entry is not None else {"id": "case", "expected_skill": expected_skill}],
         env_mode="docker",
         run_id="fixture-run",
         use_llm_judge=False,
@@ -118,14 +134,43 @@ def test_activation_expectation_is_independent_of_perfect_task_score(
     assert validation["evidence_scopes"][0]["workflow"]["workflow_order"] == {"passed": False, "score": 0.0}
 
 
-def test_correct_baseline_is_non_use_without_becoming_skill_success(tmp_path: Path) -> None:
-    baseline = _collected(tmp_path, _trajectory())
-    payload = _payload([baseline], baseline=[baseline])
-    validation = payload["agents"]["codex"]["trials_baseline"][0]["activation_validation"]
+@pytest.mark.parametrize(
+    ("skill", "trace_present", "observed", "status"),
+    [
+        (None, True, "not_invoked", "matched"),
+        ("demo", True, "invoked", "mismatched"),
+        (None, False, "unknown", "unknown"),
+    ],
+    ids=["correct-baseline-non-use", "baseline-invocation", "missing-baseline-trace"],
+)
+def test_standard_baseline_retains_na_scores_and_independent_activation_evidence(
+    tmp_path: Path,
+    skill: str | None,
+    trace_present: bool,
+    observed: str,
+    status: str,
+) -> None:
+    with_skill = _collected(tmp_path / "with", _trajectory("demo"))
+    baseline = _collected(tmp_path / "without", _trajectory(skill) if trace_present else None, variant="without")
+    payload = _payload([with_skill], baseline=[baseline])
+    trial = payload["agents"]["codex"]["trials_baseline"][0]
+    validation = trial["activation_validation"]
     assert validation["expected_activation"] is False
-    assert validation["observed_activation"] == "not_invoked"
-    assert validation["expectation_status"] == "matched"
-    assert validation["task_outcome"]["accuracy"] == 1.0
+    assert validation["observed_activation"] == observed
+    assert validation["expectation_status"] == status
+    assert validation["task_outcome"] == {"accuracy": 1.0, "goal_accuracy": 1.0}
+    for metric in ("skill_execution", "skill_efficiency"):
+        assert baseline[metric] is None
+        assert baseline["details"][metric]["score"] is None
+        assert baseline["details"][metric]["status"] == "not_applicable"
+        assert metric not in trial["scores"]
+        assert metric in trial["not_applicable_metrics"]
+    if trace_present:
+        assert baseline["skill_invoked"] is (skill == "demo")
+        assert baseline["invocation_evidence_scope"] == "logical_trial"
+    else:
+        assert "skill_invoked" not in baseline
+        assert "invocation_evidence_scope" not in baseline
 
 
 def test_missing_trace_stays_unknown_even_with_perfect_scores(tmp_path: Path) -> None:
@@ -370,3 +415,67 @@ def test_historical_unspecified_scope_cannot_certify_a_complete_logical_trial(tm
     validation = _payload([reward])["trials"][0]["activation_validation"]
     assert validation["observed_activation"] == "unknown"
     assert validation["evidence_scopes"][0]["observed_activation"] == "invoked"
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"id": "case", "expected_skill": "demo", "should_trigger": False},
+        {"id": "case", "should_trigger": False},
+    ],
+    ids=["named-negative", "nameless-negative"],
+)
+@pytest.mark.parametrize(("skill", "status"), [(None, "matched"), ("demo", "mismatched")])
+def test_explicit_negative_precedence_matches_runner_contract(
+    tmp_path: Path,
+    entry: dict,
+    skill: str | None,
+    status: str,
+) -> None:
+    reward = _collected(tmp_path, _trajectory(skill))
+    validation = _payload([reward], entry=entry)["trials"][0]["activation_validation"]
+    assert validation["expected_activation"] is False
+    assert validation["expectation_status"] == status
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"id": "case"},
+        {"id": "case", "should_trigger": True},
+        {"id": "case", "expected_skill": None, "should_trigger": True},
+    ],
+    ids=["unlabeled", "positive-without-target", "positive-with-null-target"],
+)
+def test_activation_expectation_needs_a_target_for_positive_routing(tmp_path: Path, entry: dict) -> None:
+    reward = _collected(tmp_path, _trajectory("demo"))
+    validation = _payload([reward], entry=entry)["trials"][0]["activation_validation"]
+    assert validation["expected_activation"] is None
+    assert validation["expectation_status"] == "unknown"
+
+
+def test_custom_only_na_skill_metrics_do_not_create_supported_activation(tmp_path: Path) -> None:
+    reward = _collected(tmp_path, _trajectory(), variant="without")
+    reward["metric_set"] = "custom-only"
+    reward["skill_invoked"] = False
+    reward["invocation_evidence_source"] = "trajectory"
+    reward["invocation_evidence_scope"] = "logical_trial"
+    [trial] = _normalize_trials([reward], list(DEFAULT_METRICS))
+    assert trial["activation_validation"]["observed_activation"] == "unknown"
+
+
+def test_null_skill_score_without_explicit_na_provenance_stays_unsupported() -> None:
+    [trial] = _normalize_trials(
+        [
+            {
+                "metric_set": DEFAULT_METRIC_SET,
+                **dict.fromkeys(DEFAULT_METRICS, 1.0),
+                "skill_execution": None,
+                "skill_invoked": False,
+                "invocation_evidence_source": "trajectory",
+                "invocation_evidence_scope": "logical_trial",
+            }
+        ],
+        list(DEFAULT_METRICS),
+    )
+    assert trial["activation_validation"]["observed_activation"] == "unknown"

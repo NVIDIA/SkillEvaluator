@@ -84,9 +84,10 @@ cases, and retain a versioned dataset with these four buckets:
 
 Template generation with `--no-llm --full` needs an authored negative prompt in
 `evals/EVAL.md` to produce the negative bucket. Add the edge case yourself and
-make each `expected_skill` explicit. A missing expectation remains unknown in
-activation validation. Keep task correctness assertions outcome-oriented; a
-correct answer alone cannot demonstrate skill use.
+make each `expected_skill` explicit. An authored `should_trigger` takes
+precedence, including `false` without a skill name. Unlabeled expectations and
+positive routing without a target identity remain unknown. Keep task correctness
+assertions outcome-oriented; a correct answer alone cannot demonstrate skill use.
 
 ```bash title="Run the reviewed matrix through the normal harness"
 skillevaluator tier3 validate ./my-skill --strict
@@ -107,6 +108,8 @@ Each canonical report trial now includes `activation_validation`:
 - `observed_activation` is `invoked`, `not_invoked`, or `unknown`, using only
   the collector's trusted trajectory evidence. `expectation_status` compares
   these as `matched`, `mismatched`, or `unknown`.
+  A standard baseline's explicit null/N/A skill scores do not prevent collecting
+  trajectory evidence; those scores stay N/A. The arm alone never proves non-use.
 - `task_outcome` retains accuracy and goal accuracy independently of routing;
   `evidence_scopes[].workflow` retains workflow order, script execution and
   recovery diagnostics, and `resources` retains available time/token counters.

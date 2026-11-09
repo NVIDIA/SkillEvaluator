@@ -11,6 +11,8 @@ All notable changes to SkillEvaluator are documented in this file.
   unknown traces, task correctness, workflow diagnostics, resources and retained
   evidence links. Fallback multi-step rows retain scoped observations without
   claiming complete logical-trial activation or changing numeric grading.
+  Explicit `should_trigger` precedence is preserved, and standard baselines
+  retain trusted trajectory observations independently of null/N/A skill scores.
 
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI

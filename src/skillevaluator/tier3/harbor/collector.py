@@ -5913,7 +5913,11 @@ def _annotate_security_attribution(
 
 
 def _is_standard_skill_execution_reward(reward: dict[str, Any]) -> bool:
-    """Return whether the reward carries a usable canonical standard score."""
+    """Admit standard invocation evidence independently of numeric skill grading.
+
+    A baseline's explicitly N/A skill score still has an observable trajectory.
+    Missing scores without the applicability marker do not establish support.
+    """
     standard_metric_sets = {DEFAULT_METRIC_SET, LEGACY_METRIC_SET}
     declared_metric_set = reward.get("metric_set") or reward.get("metric_set_version")
     if declared_metric_set and str(declared_metric_set) not in standard_metric_sets:
@@ -5922,7 +5926,7 @@ def _is_standard_skill_execution_reward(reward: dict[str, Any]) -> bool:
     return (
         metric_set in standard_metric_sets
         and "skill_execution" in metrics
-        and metric_value(reward, "skill_execution") is not None
+        and (metric_value(reward, "skill_execution") is not None or metric_is_not_applicable(reward, "skill_execution"))
     )
 
 

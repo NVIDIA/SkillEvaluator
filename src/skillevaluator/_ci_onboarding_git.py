@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
@@ -78,6 +79,24 @@ def repository_root(path: Path) -> Path:
     if top != repo:
         raise SetupError("Run from the Git repository root, or pass that root using --repo.")
     return repo
+
+
+def parse_origin[T](repo: Path, parse: Callable[[str], T]) -> T:
+    """Parse origin as configured, then as rewritten by Git's url.<base>.insteadOf rules.
+
+    `git remote get-url` applies insteadOf rewrites, so a user-level rule such as
+    https://github.com/ -> ssh://git@github.com/ would hide a supported origin, while
+    an alias origin such as gh:owner/repo only parses after the rewrite.
+    """
+    configured = git(repo, "config", "--get", "remote.origin.url", optional=True).strip()
+    rewritten = git(repo, "remote", "get-url", "origin").strip()
+    first_error: SetupError | None = None
+    for value in dict.fromkeys(v for v in (configured, rewritten) if v):
+        try:
+            return parse(value)
+        except SetupError as exc:
+            first_error = first_error or exc
+    raise first_error or SetupError("The repository has no origin remote.")
 
 
 def parse_remote(value: str) -> str:

@@ -79,6 +79,45 @@ def _write_scored_job(job_dir: Path, reward: dict[str, object]) -> None:
     _write_json(job_dir / "case-001__attempt" / "verifier" / "reward.json", reward)
 
 
+def test_environment_invalid_trial_is_unscored_with_reason(tmp_path):
+    jobs = tmp_path / "jobs"
+    job = jobs / "demo-codex-with"
+    _write_scored_job(job, {"overall": 0.0})
+    _write_json(
+        job / "case-001__attempt" / "verifier" / "skill_evaluator_reward.json",
+        {
+            "evaluation_status": "failed",
+            "evaluation_errors": {
+                "environment": "jq is unavailable; declare it in scripts/apt-packages.txt or install in evals/environment/Dockerfile"
+            },
+            "environment_issues": [
+                {
+                    "fault": "environment",
+                    "fault_kind": "undeclared_dependency",
+                    "missing": "jq",
+                    "missing_kind": "executable",
+                    "recovered": False,
+                }
+            ],
+        },
+    )
+    result = collect_harbor_results(
+        "demo",
+        ["codex"],
+        tmp_path / "results",
+        jobs,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+    )
+    assert result["scored_attempts"] == 0
+    assert result["agents"]["codex"]["with_skill"] == {}
+    (failure,) = result["agents"]["codex"]["trial_failures"]["with_skill"]
+    assert "[environment]" in failure["reason"]
+    assert "jq" in failure["reason"]
+    assert "scripts/apt-packages.txt" in failure["reason"]
+
+
 @pytest.mark.parametrize("grading_mode", [None, "default", "default_plus_custom", "custom_only"])
 @pytest.mark.parametrize("skip_baseline", [True, False])
 def test_failed_conditions_keep_requested_grading_policy(

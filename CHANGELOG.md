@@ -186,6 +186,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `BENCHMARK.md` no longer publishes an Overall uplift that disagrees with
+  `lift.json` and the JSON, HTML, Markdown and terminal reports when a metric is
+  N/A in only one arm. The Overall row now shows the two scores the published
+  Skill Lift subtracts, which the canonical report records per agent as
+  `lift_overall`, and notes when they differ from the arm overall scores. A
+  cross-format test reconciles Overall and lift across every output of one run.
+
 - Tier 3 dataset summaries honor explicit `should_trigger` routing labels before
   legacy `expected_skill` values. Report insights distinguish unavailable trial
   scores from scored attempts that miss the pass threshold. Dataset snapshots

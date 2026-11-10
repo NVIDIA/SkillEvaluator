@@ -101,6 +101,7 @@ from skillevaluator.reporting.tier3_scope import completed_agent_result, validat
 from skillevaluator.reporting.trial_charts import steps_by_case_chart
 from skillevaluator.skillspector_provenance import skillspector_provenance_records
 from skillevaluator.source_identity import recorded_evaluated_source
+from skillevaluator.tier3.baseline_store import baseline_description
 from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
 from skillevaluator.tier3.evidence_volume import format_evidence_volume
 
@@ -1286,6 +1287,9 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
                 maximum=1.0,
             )
     payload["runtime_seconds"] = _finite_number(payload.get("runtime_seconds"), minimum=0.0) or 0.0
+    baseline = payload.get("baseline")
+    if isinstance(baseline, dict) and baseline:
+        payload["baseline_description"] = baseline_description(baseline)
     payload["summary"]["runtime_seconds"] = (
         _finite_number(payload["summary"].get("runtime_seconds"), minimum=0.0) or 0.0
     )

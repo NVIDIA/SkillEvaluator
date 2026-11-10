@@ -6,6 +6,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Document an additive qualitative assessment review worksheet with bounded
+  evidence from real successful, failed-setup and invalid-judge runs. Preserve
+  numeric grading and identify the separate decisions needed for scoreless support.
+  Pin the public calculator input to the historical repository revision used by
+  the run, preserving its original hash and evidence pointers after migration.
+
 - `skillevaluator tier3 migrate-dataset` previews lossless legacy conversions and
   writes only to an explicit new JSON/YAML destination. Authored routing, case
   IDs, fixture selectors, and extension metadata are preserved. The five bundled

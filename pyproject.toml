@@ -123,7 +123,7 @@ include = ["skillevaluator*"]
 
 [tool.setuptools.package-data]
 "skillevaluator.tier3" = ["grader_reference/*.json", "grader_reference/trajectories/*.json"]
-"skillevaluator" = ["ci-release.json"]
+"skillevaluator" = ["ci-release.json", "ci-release-all-tiers.json"]
 "skillevaluator.config" = ["*.yaml", "profiles/*.yaml"]
 "skillevaluator.reporting" = ["templates/*.j2", "assets/*.js", "assets/*.md"]
 "skillevaluator.tier3.harbor" = [

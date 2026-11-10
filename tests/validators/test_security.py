@@ -9821,6 +9821,47 @@ class TestSkillspectorMissingReferences:
         long_reference = {**reference, "evidence": "Write `output/notes.md`."}
         assert not _skillspector_reference_line_avoids(f"# Title\n{long_line}\n".encode(), row, [long_reference], none)
 
+    def test_reference_line_check_is_bounded(self) -> None:
+        """A line that would take too long to search for every left-out name is not accepted."""
+        row = {"path": "SKILL.md", "start_line": 2, "end_line": 2}
+        line = "Write the summary to `output/notes.md`."
+        reference = {"source_path": "SKILL.md", "line": 2, "status": "missing", "evidence": line}
+        # Names that are not plain name runs are searched for in every decoded form of the line.
+        keys = _skillspector_name_keys({f"file {index:05d} x" for index in range(15_000)})
+        junk = line + " " + ("a%2526amp%253B\\_&amp;%2541\\%25 " * 400)[:9_900]
+
+        assert not _skillspector_reference_line_avoids(f"# Title\n{junk}\n".encode(), row, [reference], keys)
+        assert _skillspector_reference_line_avoids(f"# Title\n{line}\n".encode(), row, [reference], keys)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_one_budget_serves_every_line_of_a_report(
+        self, mock_tools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from skillevaluator.validators import security as security_module
+
+        row = {"path": "SKILL.md", "start_line": 2, "end_line": 2}
+        line = "Write the summary to `output/notes.md`."
+        reference = {"source_path": "SKILL.md", "line": 2, "status": "missing", "evidence": line}
+        source = f"# Title\n{line}\n".encode()
+        keys = _skillspector_name_keys({"evals", "my notes.txt"})
+        probe = security_module._SkillspectorMatchBudget()
+        full = probe.remaining
+        assert _skillspector_reference_line_avoids(source, row, [reference], keys, probe)
+        cost = full - probe.remaining
+        assert cost > 0
+
+        budget = security_module._SkillspectorMatchBudget(2 * cost)
+        checks = [_skillspector_reference_line_avoids(source, row, [reference], keys, budget) for _ in range(3)]
+
+        assert checks == [True, True, False]
+        # A report's lines draw on one budget, so a scan that would overdraw it stays INCOMPLETE.
+        skill = _write_skill(tmp_path / "notes-writer", {**_NOTES_WRITER_FILES, "evals/evals.json": "[]\n"})
+        assert _validate_skillspector_payload(mock_tools, skill, _reference_report("2.13.3")).incomplete_scans == []
+        monkeypatch.setattr(security_module, "_SKILLSPECTOR_REFERENCE_MATCH_BUDGET", 1)
+        assert _validate_skillspector_payload(mock_tools, skill, _reference_report("2.13.3")).incomplete_scans == [
+            "skillspector"
+        ]
+
     @pytest.mark.parametrize(
         "case", ["both", "image-only", "not-an-image", "ambiguous-reference", "line-names-a-left-out-file"]
     )

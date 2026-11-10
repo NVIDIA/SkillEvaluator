@@ -15,6 +15,7 @@ from __future__ import annotations
 import bisect
 import contextlib
 import fnmatch
+import functools
 import getpass
 import hashlib
 import html
@@ -1586,6 +1587,13 @@ _SKILLSPECTOR_SHELL_EXPANSION_RE = re.compile(r"\{[^{}]*(?:,|\.\.)[^{}]*\}|\$\{[
 _SKILLSPECTOR_SHELL_QUOTE_RE = re.compile(r"[\"'\\]")
 _SKILLSPECTOR_GLOB_SYNTAX = frozenset("*?[")
 _SKILLSPECTOR_PATH_PART_SEPARATOR_RE = re.compile(r"[/=:]")
+# Work that checking the lines of one report's missing references may take, in
+# units of about one character compared: decoding a line costs 1,000 per
+# character, each search of a decoded line for a name 100 plus the line's
+# length, and each pattern 20,000 plus 300 and the name's length for each name
+# matched against it. Beyond the budget the lines are not accepted, which
+# bounds the time that a skill built to slow the check can cost.
+_SKILLSPECTOR_REFERENCE_MATCH_BUDGET = 1_000_000_000
 
 
 def _skillspector_bundled_file_bytes(path: object, components: object, scanned_root: Path | None) -> bytes | None:
@@ -1780,6 +1788,39 @@ def _skillspector_name_keys(names: Iterable[str]) -> frozenset[str]:
     )
 
 
+class _SkillspectorMatchBudget:
+    """The work left for checking the lines of one report's missing references."""
+
+    __slots__ = ("remaining",)
+
+    def __init__(self, remaining: int | None = None) -> None:
+        self.remaining = _SKILLSPECTOR_REFERENCE_MATCH_BUDGET if remaining is None else remaining
+
+    def spend(self, cost: int) -> bool:
+        """Take *cost* from the budget; ``False`` once it is overdrawn."""
+        self.remaining -= cost
+        return self.remaining >= 0
+
+
+@functools.lru_cache(maxsize=8)
+def _skillspector_key_kinds(keys: frozenset[str]) -> tuple[Mapping[str, int], tuple[str, ...], int]:
+    """*keys* split into plain name runs and other names, with their total length.
+
+    Each name run is given by its text before any trailing dots, mapped to the
+    fewest trailing dots of a key with that text.
+    """
+    runs: dict[str, int] = {}
+    others: list[str] = []
+    for key in keys:
+        if _SKILLSPECTOR_NAME_RUN_RE.fullmatch(key):
+            base = key.rstrip(".")
+            dots = len(key) - len(base)
+            runs[base] = min(dots, runs.get(base, dots))
+        else:
+            others.append(key)
+    return runs, tuple(sorted(others)), sum(len(key) for key in keys)
+
+
 def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
     """:mod:`fnmatch` patterns for the path parts of the words in *texts* that a shell expands or unquotes.
 
@@ -1806,6 +1847,7 @@ def _skillspector_reference_line_avoids(
     row: Mapping[str, object],
     references: list,
     keys: frozenset[str],
+    budget: _SkillspectorMatchBudget | None = None,
 ) -> bool:
     """Whether the line of a missing-reference *row* names no entry whose name key is in *keys*.
 
@@ -1823,6 +1865,10 @@ def _skillspector_reference_line_avoids(
     :data:`_SKILLSPECTOR_REFERENCE_LINE_DECODINGS` of these steps in any order.
     A word that a shell would expand or unquote is read as a pattern
     (:func:`_skillspector_shell_patterns`), and no name may match it.
+
+    The check takes work from *budget*, by default a fresh
+    :data:`_SKILLSPECTOR_REFERENCE_MATCH_BUDGET`, and names the line as
+    uninspected when it would overdraw it.
     """
     line_number = row.get("start_line")
     lines = source.decode("utf-8", errors="replace").split("\n")
@@ -1841,6 +1887,11 @@ def _skillspector_reference_line_avoids(
         or any(not isinstance(text, str) or not text or text not in cleaned for text in evidence)
     ):
         return False
+    if not keys:
+        return True
+    budget = budget or _SkillspectorMatchBudget()
+    if not budget.spend(len(line) * 1_000):
+        return False
     decodings: tuple[Callable[[str], str], ...] = (
         lambda text: _SKILLSPECTOR_MARKDOWN_ESCAPE_RE.sub(r"\1", text),
         html.unescape,
@@ -1852,28 +1903,30 @@ def _skillspector_reference_line_avoids(
     texts = {text.casefold() for text in variants} | {
         unicodedata.normalize("NFC", text).casefold() for text in variants
     }
+    run_keys, other_keys, key_chars = _skillspector_key_kinds(keys)
+    patterns = _skillspector_shell_patterns(texts)
+    globs = [pattern for pattern in patterns if not _SKILLSPECTOR_GLOB_SYNTAX.isdisjoint(pattern)]
+    searches = len(texts) * len(other_keys)
+    cost = searches * 100 + sum(len(text) for text in texts) * len(other_keys)
+    cost += len(globs) * (20_000 + 300 * len(keys) + key_chars)
+    if not budget.spend(cost):
+        return False
     # A key made only of name characters matches a whole run of them, less any trailing dots.
-    runs: set[str] = set()
+    runs: dict[str, int] = {}
     for text in texts:
         for run in _SKILLSPECTOR_NAME_RUN_RE.findall(text):
-            runs.add(run)
-            while run.endswith("."):
-                run = run[:-1]
-                runs.add(run)
-    for key in keys:
-        if _SKILLSPECTOR_NAME_RUN_RE.fullmatch(key):
-            if key in runs:
-                return False
-        elif any(_skillspector_text_names(text, key) for text in texts):
-            return False
-    patterns = _skillspector_shell_patterns(texts)
+            base = run.rstrip(".")
+            runs[base] = max(len(run) - len(base), runs.get(base, 0))
+    if any(base in run_keys and run_keys[base] <= dots for base, dots in runs.items()):
+        return False
     if not patterns.isdisjoint(keys):
         return False
-    for pattern in patterns:
-        if not _SKILLSPECTOR_GLOB_SYNTAX.isdisjoint(pattern):
-            matches = re.compile(fnmatch.translate(pattern)).match
-            if any(matches(key) for key in keys):
-                return False
+    if any(_skillspector_text_names(text, key) for key in other_keys for text in texts):
+        return False
+    for pattern in globs:
+        matches = re.compile(fnmatch.translate(pattern)).match
+        if any(matches(key) for key in keys):
+            return False
     return True
 
 
@@ -1931,9 +1984,10 @@ def _skillspector_missing_reference_notes(
     :func:`_skillspector_reference_row_is_advisory` and names a bundled file
     (:func:`_skillspector_bundled_file_bytes`) whose line names no entry of the
     skill that SkillSpector did not inspect (:func:`_skillspector_unscanned_names`,
-    :func:`_skillspector_reference_line_avoids`), such as a link or a file in
-    an artifact directory left out of a staged scan, and there is no fatal
-    scope exclusion. Any other ledger rows must be referenced images that
+    :func:`_skillspector_reference_line_avoids`, with one work budget for all
+    of the report's lines), such as a link or a file in an artifact directory
+    left out of a staged scan, and there is no fatal scope exclusion. Any
+    other ledger rows must be referenced images that
     :func:`_skillspector_passive_raster_note` accepts, which then accounts for
     the counts, analyzers and limitations, and its note follows. Without them,
     no file is partially or entirely uninspected, no finding was filtered out,
@@ -1985,6 +2039,7 @@ def _skillspector_missing_reference_notes(
     if unscanned is None:
         return None
     keys = _skillspector_name_keys(unscanned)
+    budget = _SkillspectorMatchBudget()
     sources: dict[str, bytes] = {}
     checked: set[tuple[str, object]] = set()
     for row in reference_rows:
@@ -1996,7 +2051,7 @@ def _skillspector_missing_reference_notes(
             if source is None:
                 return None
             sources[path] = source
-        if not _skillspector_reference_line_avoids(sources[path], row, references, keys):
+        if not _skillspector_reference_line_avoids(sources[path], row, references, keys, budget):
             return None
         checked.add((path, row.get("start_line")))
     return notes

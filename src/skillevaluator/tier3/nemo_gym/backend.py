@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -171,9 +172,27 @@ def nemo_gym_capability_errors(
     override_storage_mb: int | None = None,
     agent_runtime_preflight: bool = False,
     timeout_multiplier: float | None = None,
+    reuse_baseline: str | None = None,
+    compare_to: str | None = None,
+    max_agent_tokens: int | None = None,
+    max_judge_calls: int | None = None,
+    max_attempts_total: int | None = None,
+    max_cost_usd: float | None = None,
+    price_file: Path | None = None,
 ) -> list[str]:
     """Reject configurations the NeMo Gym backend cannot run equivalently, before anything starts."""
     errors: list[str] = []
+    errors += nemo_gym_harbor_only_option_errors(
+        {
+            "reuse_baseline": reuse_baseline,
+            "compare_to": compare_to,
+            "max_agent_tokens": max_agent_tokens,
+            "max_judge_calls": max_judge_calls,
+            "max_attempts_total": max_attempts_total,
+            "max_cost_usd": max_cost_usd,
+            "price_file": price_file,
+        }
+    )
     if os.name != "posix":
         errors.append("--backend nemo-gym needs a POSIX host (Linux or macOS); NeMo Gym does not run on Windows")
     unsupported = [agent for agent in agents if agent not in NEMO_GYM_AGENTS]
@@ -203,6 +222,25 @@ def nemo_gym_capability_errors(
             _validated_timeout_multiplier(timeout_multiplier)
         except ValueError as exc:
             errors.append(str(exc))
+    return errors
+
+
+def nemo_gym_harbor_only_option_errors(options: Mapping[str, object], *, from_config: bool = False) -> list[str]:
+    """Reject baseline reuse, version comparison and budgets until Gym can honor them."""
+    errors: list[str] = []
+    for name in (
+        "reuse_baseline",
+        "compare_to",
+        "max_agent_tokens",
+        "max_judge_calls",
+        "max_attempts_total",
+        "max_cost_usd",
+        "price_file",
+    ):
+        # Zero is an explicit limit, not an unset option.
+        if options.get(name) is not None:
+            label = f"harbor.{name}" if from_config else f"--{name.replace('_', '-')}"
+            errors.append(f"{label} is not supported with --backend nemo-gym yet")
     return errors
 
 
@@ -322,7 +360,7 @@ def nemo_gym_config_errors(
     except EvalsConfigError as exc:
         return [str(exc)]
     harbor = config.get("harbor") or {}
-    errors: list[str] = []
+    errors = nemo_gym_harbor_only_option_errors(harbor, from_config=True)
     if stop_on_pass is None and harbor.get("stop_on_pass"):
         errors.append("harbor.stop_on_pass is not supported with --backend nemo-gym yet")
     if agent_runtime_preflight is None and harbor.get("agent_runtime_preflight"):

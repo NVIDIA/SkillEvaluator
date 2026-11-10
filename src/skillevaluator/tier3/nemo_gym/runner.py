@@ -47,6 +47,7 @@ from skillevaluator.tier3.nemo_gym.backend import (
     nemo_gym_bin,
     nemo_gym_capability_errors,
     nemo_gym_cli_error,
+    nemo_gym_harbor_only_option_errors,
     nemo_gym_sandbox_error,
     nemo_gym_timeout_s,
     nemo_gym_version,
@@ -735,6 +736,7 @@ def run_nemo_gym_eval(
             else harbor_config.get("agent_runtime_preflight", False)
         ),
     )
+    errors += nemo_gym_harbor_only_option_errors(harbor_config, from_config=True)
     from skillevaluator.tier3.harbor.runner import _validated_timeout_multiplier
 
     try:

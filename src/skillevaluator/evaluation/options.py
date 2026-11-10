@@ -57,6 +57,13 @@ class EvaluationOptions:
     environment_kwargs: dict[str, str] = field(default_factory=dict)
     # Appended so legacy positional construction keeps its field order.
     max_cases: int | None = None
+    reuse_baseline: str | None = None
+    compare_to: str | None = None
+    max_agent_tokens: int | None = None
+    max_judge_calls: int | None = None
+    max_attempts_total: int | None = None
+    max_cost_usd: float | None = None
+    price_file: Path | None = None
     # Tier 3 execution backend ("harbor" or "nemo-gym"); appended to keep positional order stable.
     backend: str = "harbor"
 
@@ -78,6 +85,7 @@ class DatasetOptions:
     dry_run: bool = False
     force: bool = False
     prompt: Path | None = None
+    grounding: str = "skill"
     refine: bool = False
     from_results: Path | None = None
     results_dir: Path | None = None

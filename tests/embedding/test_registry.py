@@ -109,7 +109,6 @@ class TestBuildFromDirectory:
         collection = tmp_path / "nested" / "external-skills"
         collection.mkdir(parents=True)
         debug = MagicMock()
-        monkeypatch.setattr(registry_module, "discover_and_extract", lambda *_args, **_kwargs: [])
         monkeypatch.setattr(registry_module.logger, "debug", debug)
 
         count = EmbeddingRegistry(_make_mock_client([])).build_from_directory(collection, "skill")

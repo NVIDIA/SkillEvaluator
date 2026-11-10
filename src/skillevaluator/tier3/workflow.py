@@ -126,6 +126,8 @@ def _preflight_options(skill_path: Path, params: dict[str, Any], *, harbor_runti
 
     if params.get("skip_baseline") and params.get("skip_with_skill"):
         raise ValueError("--skip-baseline and --skip-with-skill are mutually exclusive (no arm would run)")
+    if params.get("reuse_baseline") and (params.get("skip_baseline") or params.get("skip_with_skill")):
+        raise ValueError("--reuse-baseline is mutually exclusive with --skip-baseline and --skip-with-skill")
     provider = resolve_llm_provider()
     config, config_path = load_evals_config(skill_path)
     effective = deepcopy(config)
@@ -138,12 +140,17 @@ def _preflight_options(skill_path: Path, params: dict[str, Any], *, harbor_runti
         "n_concurrent",
         "max_agents",
         "max_cases",
+        "max_agent_tokens",
+        "max_judge_calls",
+        "max_attempts_total",
+        "max_cost_usd",
+        "price_file",
         "timeout_multiplier",
         "agent_runtime_preflight",
         "custom_dockerfile_mode",
     ):
         if params.get(name) is not None:
-            harbor[name] = params[name]
+            harbor[name] = str(params[name]) if name == "price_file" else params[name]
     for resource in ("cpus", "memory_mb", "storage_mb"):
         if params.get(f"override_{resource}") is not None:
             harbor.setdefault("resources", {})[resource] = params[f"override_{resource}"]
@@ -154,6 +161,16 @@ def _preflight_options(skill_path: Path, params: dict[str, Any], *, harbor_runti
     resolved_environment_kwargs = _resolve_workflow_environment_kwargs(params)
     if harbor.get("stop_on_pass", False) and harbor.get("n_attempts", 1) == 1:
         raise ValueError("stop_on_pass requires n_attempts > 1")
+    if harbor.get("pre_agent_setup") and not params.get("skip_baseline"):
+        if params.get("skip_with_skill"):
+            raise ValueError(
+                "harbor.pre_agent_setup/setup_commands cannot run in a baseline-only run (--skip-with-skill); "
+                "the baseline arm must stay isolated from skill-owned setup commands"
+            )
+        raise ValueError(
+            "harbor.pre_agent_setup/setup_commands cannot run in a paired evaluation; "
+            "use --skip-baseline for a with-skill-only run"
+        )
 
     workspace = effective.get("skill_workspace", {})
     # Match the expert callback: CLI paths are relative to the caller, while
@@ -265,6 +282,13 @@ def nemo_gym_preflight_errors(skill_path: Path, params: dict[str, Any]) -> list[
         override_storage_mb=params.get("override_storage_mb"),
         agent_runtime_preflight=bool(params.get("agent_runtime_preflight")),
         timeout_multiplier=params.get("timeout_multiplier"),
+        reuse_baseline=params.get("reuse_baseline"),
+        compare_to=params.get("compare_to"),
+        max_agent_tokens=params.get("max_agent_tokens"),
+        max_judge_calls=params.get("max_judge_calls"),
+        max_attempts_total=params.get("max_attempts_total"),
+        max_cost_usd=params.get("max_cost_usd"),
+        price_file=params.get("price_file"),
     ) + nemo_gym_config_errors(
         skill_path,
         stop_on_pass=params.get("stop_on_pass"),

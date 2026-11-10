@@ -101,7 +101,9 @@ def test_required_behavior_judge_wrapper_keeps_inventory_on_unexpected_exception
         raise TimeoutError("judge deadline")
 
     args = () if keyword_arguments else ("conversation", ["first", "second"])
-    kwargs = {"conversation_text": "conversation", "expected_behaviors": ["first", "second"]} if keyword_arguments else {}
+    kwargs = (
+        {"conversation_text": "conversation", "expected_behaviors": ["first", "second"]} if keyword_arguments else {}
+    )
     result = eval_template._call_required_judge("behavior_check", raise_timeout, *args, **kwargs)
     assert result["score"] is None and result["status"] == "error"
     assert result["results"] == []
@@ -201,7 +203,7 @@ def test_report_reasons_still_omit_criteria_excluded_by_older_rewards():
     findings = {finding["metric"]: finding for finding in report._extract_findings([reward])}
     reasons = findings["accuracy"]["reasons"]
     assert findings["accuracy"]["score"] == 0.75
-    assert "ACTION_CORRECT failed" in reasons
+    assert "The agent did not take the action the expected answer calls for (criterion ACTION_CORRECT)" in reasons
     assert not any("SKILL_IDENTIFIED" in reason for reason in reasons)
 
 

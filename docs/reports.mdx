@@ -557,7 +557,9 @@ completed run directly:
   deltas between the two arms; written only when both arms produced scores
   (a `--skip-baseline` or `--skip-with-skill` run has neither).
 - **`<agent>/findings.json`** — bounded per-metric findings and improvement
-  suggestions; see [Findings and severity](#findings-and-severity).
+  suggestions; written by `tier3 evaluate` only when the detailed view is
+  shown (`--verbose` or when no per-case summary is shown), never by
+  `validate --tier3`; see [Findings and severity](#findings-and-severity).
 - **`<agent>/{with-skill,without-skill}/`** — each arm's `summary.json`
   (scores, dimensions, pass@k, trial counts) and a `trials/` directory of
   per-trial artifacts: the trial's `reward.json`, Harbor's `trajectory.json`
@@ -616,6 +618,7 @@ score, not its rounded terminal display.
 | --- | --- |
 | Advisory finding severity | Per-metric `ok` ≥ 0.80, `warning` ≥ 0.40 and below 0.80, `critical` below 0.40 |
 | [Dimension bands](#the-five-dimensions) | PASS ≥ 0.50, NEUTRAL ≥ 0.40 and below 0.50, FAIL below 0.40 |
+| Terminal score colors | Green ≥ 0.80, amber ≥ 0.60, red below 0.60 |
 | [Attempt pass threshold](#passk) | Overall attempt score ≥ 0.50 by default; configurable with `--pass-threshold` |
 | [Overall verdict](#skill-lift) | Combines the five dimensions across successful agents, not finding labels |
 | [Skill Lift bands](#skill-lift) | Diagnostic difference between arms, not an absolute metric score |
@@ -638,15 +641,18 @@ per-trial failure reasons also use the 0.80 gate:
 scores below it can carry reasons. This is the advisory metric scale, not
 the attempt pass threshold.
 
-When the findings report runs, it writes `<run>/<agent>/findings.json` for
-each eligible agent with findings. Only the best agent receives generated
-suggestions; other agents use `suggestion_mode: "not_generated"`. The file
-can be absent when execution did not succeed, the skill never activated,
+`tier3 evaluate` writes the findings report only when it shows the detailed
+view (`--verbose`, or when no per-case summary is shown); `validate --tier3`
+never writes it. In that view, it writes `<run>/<agent>/findings.json` for each
+eligible agent with findings. Only the best agent receives generated
+suggestions; other agents use `suggestion_mode: "not_generated"`. The file is
+also absent in a default `tier3 evaluate` run that shows per-case rows without
+`--verbose`, or when execution did not succeed, the skill never activated,
 there are no rewards or usable metric details/scores, or the output path is
-unsafe or symlinked. Stale files are removed at the start of reporting, so
-old advice is not reused. If the best agent has no eligible findings, the
-report returns without writing artifacts for the other agents. Write failures
-are non-fatal.
+unsafe or symlinked. Stale files are removed at the start of reporting, so old
+advice is not reused. If the best agent has no eligible findings, the report
+returns without writing artifacts for the other agents. Write failures are
+non-fatal.
 
 Scores come from canonical with-skill summary scores when available. Otherwise,
 the report takes the mean over logical trials only when rewards are complete

@@ -51,10 +51,13 @@ def test_payload_and_docs_are_in_sync():
     assert payload["findings_total"] == payload["findings_shown"] == 0
     assert payload["findings_truncated"] is False
     docs = (Path(__file__).resolve().parents[2] / "docs/reports.mdx").read_text()
+    normalized_docs = " ".join(docs.split())
     for key in {*payload, "evidence_refs_omitted", "evidence_refs_omitted_reason"}:
         assert f"`{key}`" in docs
     assert f"`ok` at {report.FINDING_OK_THRESHOLD:.2f} or above" in docs
     assert f"`critical` below {report.FINDING_CRITICAL_THRESHOLD:.2f}" in docs
+    assert "| Terminal score colors | Green ≥ 0.80, amber ≥ 0.60, red below 0.60 |" in docs
+    assert "`validate --tier3` never writes it" in normalized_docs
 
 
 def test_payload_skips_invalid_scores():
@@ -68,7 +71,7 @@ def test_cli_legend():
     body = report._render_findings_body([])
     assert body.plain == (
         "  Advisory metric severity: ok ≥ 0.80 · warning 0.40\u2013<0.80 · critical < 0.40. "
-        "Dimension verdicts use pass ≥ 0.50 (see Results by Dimension).\n\n"
+        "Dimension verdicts use pass ≥ 0.50.\n\n"
     )
     assert body.spans[0].style == "dim"
 

@@ -354,7 +354,7 @@ def _render_findings_body(findings: list[dict[str, Any]]) -> Any:
         f"  Advisory metric severity: ok ≥ {FINDING_OK_THRESHOLD:.2f} · "
         f"warning {FINDING_CRITICAL_THRESHOLD:.2f}\u2013<{FINDING_OK_THRESHOLD:.2f} · "
         f"critical < {FINDING_CRITICAL_THRESHOLD:.2f}. "
-        "Dimension verdicts use pass ≥ 0.50 (see Results by Dimension).\n\n",
+        "Dimension verdicts use pass ≥ 0.50.\n\n",
         style="dim",
     )
     for finding in findings:

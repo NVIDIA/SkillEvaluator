@@ -3729,7 +3729,14 @@ def write_reward_outputs(result, overall):
 
 def _dependency_context(skill: str, *, skills_root: Path = Path("/workspace/skills")) -> dict[str, Any]:
     """Read bounded dependency evidence from the evaluator-staged skill."""
-    context: dict[str, Any] = {"apt": [], "pip": [], "skill_text": "", "skill_dirs": []}
+    context: dict[str, Any] = {
+        "apt": [],
+        "pip": [],
+        "skill_text": "",
+        "skill_dirs": [],
+        "skill_modules": set(),
+        "script_imports": set(),
+    }
     if not skill or skill in {".", ".."} or Path(skill).name != skill:
         return context
     root = skills_root / skill
@@ -3748,8 +3755,14 @@ def _dependency_context(skill: str, *, skills_root: Path = Path("/workspace/skil
             break
         if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
             continue
+        relative = path.relative_to(root)
+        if path.suffix == ".py":
+            context["skill_modules"].add(path.stem)
+            context["skill_modules"].update(relative.parts[:-1])
+        if path.name == "__init__.py":
+            context["skill_modules"].add(path.parent.name)
         dependency = path.parent.name == "scripts" and path.name in {"requirements.txt", "apt-packages.txt"}
-        if not dependency and path.name.lower() != "skill.md" and "scripts" not in path.relative_to(root).parts:
+        if not dependency and path.name.lower() != "skill.md" and "scripts" not in relative.parts:
             continue
         try:
             with path.open("rb") as stream:
@@ -3767,6 +3780,11 @@ def _dependency_context(skill: str, *, skills_root: Path = Path("/workspace/skil
             )
         else:
             context["skill_text"] += "\n" + content
+            if "scripts" in relative.parts and path.suffix == ".py":
+                imports = re.finditer(r"(?m)^\s*(?:from\s+([\w.]+)\s+import\b|import\s+([\w.]+))", content)
+                context["script_imports"].update((match.group(1) or match.group(2)).split(".")[0] for match in imports)
+    context["skill_modules"] = sorted(context["skill_modules"])
+    context["script_imports"] = sorted(context["script_imports"])
     return context
 
 

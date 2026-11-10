@@ -4534,11 +4534,21 @@ def _classify_execution_failure(
         }
 
     module = re.search(r"(?:ModuleNotFoundError|ImportError): No module named\s+['\"]?([\w.-]+)", observation)
-    missing = module.group(1).split(".")[0] if module else None
+    subprocess_executable = None
+    if re.search(r"(?:subprocess\.py|_execute_child)", observation):
+        subprocess_executable = re.search(
+            r"FileNotFoundError:[^\n]*No such file or directory:\s*['\"]([^/'\"\\]+)['\"]", observation
+        )
+    missing = (
+        module.group(1).split(".")[0] if module else (subprocess_executable.group(1) if subprocess_executable else None)
+    )
     kind = "python_module" if module else "executable"
+    if module and missing in context.get("skill_modules", []):
+        return {"fault": "skill", "fault_kind": "missing_skill_file", "missing": missing, "missing_kind": kind}
     if not missing:
         patterns = (
             r"(?:^|\n)(?:/[^\s:]+/)?(?:bash|sh):\s*(?:(?:line\s+)?\d+:\s*)?([^\s:]+): (?:command )?not found",
+            r"^[^\s:]+: (?:line )?\d+: ([^\s:]+): (?:command )?not found",
             r"zsh: command not found: ([^\s]+)",
             r"env: ['\"\u2018]?([^\s'\"\u2019]+)['\"\u2019]?: No such file or directory",
             r'exec: "([^\"]+)": executable file not found in \$PATH',
@@ -4557,16 +4567,30 @@ def _classify_execution_failure(
         return match.group().lower().replace("-", "_") if match else ""
 
     dependencies = context.get("pip", []) if module else context.get("apt", [])
-    declared = normalized(missing) in {normalized(str(name)) for name in dependencies}
+    aliases = {
+        "yaml": "pyyaml",
+        "pil": "pillow",
+        "bs4": "beautifulsoup4",
+        "docx": "python-docx",
+        "pdftotext": "poppler-utils",
+    }
+    declared_names = {normalized(str(name)) for name in dependencies}
+    declared = normalized(missing) in declared_names or normalized(aliases.get(missing.lower(), "")) in declared_names
     used = bool(re.search(r"(?<![\w-])" + re.escape(missing) + r"(?![\w-])", context.get("skill_text", "")))
-    used = used or bool(expected_script and expected_script in command) or any(root + "/" in command for root in paths)
+    used = (
+        used or missing in context.get("script_imports", []) or _command_executes_skill(command, expected_script, paths)
+    )
     result = {"fault": "agent", "fault_kind": "agent_tool_choice", "missing": missing, "missing_kind": kind}
     if declared or used:
         declaration = "scripts/requirements.txt" if module else "scripts/apt-packages.txt"
         guidance = (
             f"{missing} is declared but not installed in the evaluation environment. "
             if declared
-            else f"Declare {missing} in {declaration}, or install it in evals/environment/Dockerfile. "
+            else (
+                f"Install the package that provides {missing}, or ship it with the skill. "
+                if module and missing in context.get("script_imports", [])
+                else f"Declare {missing} in {declaration}, or install it in evals/environment/Dockerfile. "
+            )
         )
         guidance += (
             "With a custom evals/environment/Dockerfile, dependency files are not auto-installed; install it there."
@@ -4577,6 +4601,25 @@ def _classify_execution_failure(
             guidance=guidance,
         )
     return result
+
+
+def _command_executes_skill(command: str, expected_script: str | None, paths: list[str]) -> bool:
+    if expected_script and _cmd_executes_script(command, expected_script) is True:
+        return True
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    interpreters = {"bash", "sh", "zsh", "python", "python2", "python3", "node", "ruby", "perl", "php"}
+    candidates = tokens[:1]
+    candidates.extend(
+        tokens[index + 1] for index, token in enumerate(tokens[:-1]) if token.rsplit("/", 1)[-1].lower() in interpreters
+    )
+    return any(
+        bool((expected_script or paths) and token.removeprefix("./").startswith("scripts/"))
+        or any(token.startswith(root + "/") for root in paths)
+        for token in candidates
+    )
 
 
 def check_error_recovery(
@@ -4854,7 +4897,9 @@ def check_error_recovery(
     skill_faults = sum(1 for f in failures if f["fault"] == "skill")
     agent_faults = sum(1 for f in failures if f["fault"] == "agent")
     environment_issues = [f for f in failures if f["fault"] == "environment"]
-    environment_invalid = any(not f["recovered"] for f in environment_issues)
+    environment_invalid = any(not f["recovered"] for f in environment_issues) and not any(
+        not f["recovered"] and f["fault"] == "skill" for f in failures
+    )
     unrecovered_failures = [f for f in failures if not f["recovered"] and f["fault"] != "environment"]
 
     if first_attempt_clean:
@@ -4873,7 +4918,12 @@ def check_error_recovery(
 
     if environment_invalid:
         reason = "Environment invalid: " + "; ".join(
-            dict.fromkeys(f["guidance"] for f in environment_issues if not f["recovered"])
+            dict.fromkeys(
+                [
+                    *(f["guidance"] for f in environment_issues if not f["recovered"]),
+                    *(f["failed_cmd"] for f in unrecovered_failures),
+                ]
+            )
         )
 
     return {

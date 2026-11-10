@@ -1134,7 +1134,14 @@ def _ensure_autopilot_dataset(
             enabled=not quiet and progress != "off", stream=click.get_text_stream("stderr")
         ):
             try:
-                service.create_autopilot_dataset(skill_path, use_llm=not no_llm)
+                if no_llm:
+                    service.create_autopilot_dataset(
+                        skill_path,
+                        use_llm=False,
+                        fallback_reason="public LLM provider is not configured",
+                    )
+                else:
+                    service.create_autopilot_dataset(skill_path, use_llm=True)
                 generated = True
             except FileExistsError:
                 echo("Autopilot: an evaluation source appeared concurrently; reusing it unchanged.")
@@ -1147,7 +1154,7 @@ def _ensure_autopilot_dataset(
                 echo("  Falling back to one deterministic starter case; review evals/ before using it as a benchmark.")
                 dataset_note = f"deterministic starter — LLM generation failed: {diagnostic} Review evals/."
                 if not eval_source_exists():
-                    service.create_autopilot_dataset(skill_path, use_llm=False)
+                    service.create_autopilot_dataset(skill_path, use_llm=False, fallback_reason=diagnostic)
                     generated = True
             if not eval_source_exists():
                 raise click.ClickException("Autopilot dataset generation did not produce an evaluation source.")
@@ -3431,6 +3438,7 @@ def evaluate(
 @click.option("--dry-run", is_flag=True, help="Preview without writing.")
 @click.option("--force", is_flag=True, help="Overwrite existing evals/evals.json.")
 @click.option("--prompt", type=click.Path(exists=True, path_type=Path), default=None)
+@click.option("--grounding", type=click.Choice(["skill", "intent", "trace"]), default="skill")
 @click.option("--refine", is_flag=True, help="Refine cases using existing or collected trajectories.")
 @click.option("--from-results", type=click.Path(exists=True, path_type=Path), default=None)
 @click.option("--results-dir", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=None)
@@ -3441,6 +3449,7 @@ def create_dataset(
     dry_run: bool,
     force: bool,
     prompt: Path | None,
+    grounding: str,
     refine: bool,
     from_results: Path | None,
     results_dir: Path | None,
@@ -3457,6 +3466,7 @@ def create_dataset(
                 dry_run=dry_run,
                 force=force,
                 prompt=prompt,
+                grounding=grounding,
                 refine=refine,
                 from_results=from_results,
                 results_dir=results_dir,

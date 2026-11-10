@@ -6,6 +6,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Tier 3 generation provenance distinguishes LLM, requested-template, and
+  template-fallback datasets, marks trace refinement and autopilot generation,
+  and displays the source and review state in terminal, HTML, and BENCHMARK
+  reports. Run payloads retain the generation record with shortened input hashes.
+
+- `create-eval-dataset --grounding` selects skill, author-intent, or trace
+  grounding. Generated datasets record relative input provenance and review
+  flags for observed answers that differ from authored expectations and
+  authored behavior steps omitted by refinement output.
+
 - `tier3 validate` reports informational dataset coverage counts and concrete
   gaps in text and JSON. Generated one-case starters now explain their limits
   and point authors to full dataset generation and coverage validation.

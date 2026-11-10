@@ -52,6 +52,7 @@ from skillevaluator.reporting.base import (
 from skillevaluator.reporting.run_status import resolve_run_status
 from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
 from skillevaluator.source_identity import evaluated_source_revision, recorded_evaluated_source
+from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
 
 if TYPE_CHECKING:
@@ -378,6 +379,10 @@ class BenchmarkReporter(ReporterBase):
             lines.append(f"- Tasks: {dataset_summary['total_tasks']} evaluation tasks{composition}")
         else:
             lines.append("- Tasks: not recorded (legacy or non-live result)")
+
+        dataset_line, _ = dataset_provenance_display(ae.get("dataset_provenance") if ae else None)
+        if dataset_line:
+            lines.append(f"- {_publication_safe_inline(dataset_line)}")
 
         dataset_provenance = agent_eval_publication_dataset_provenance(ae)
         if dataset_provenance is not None:

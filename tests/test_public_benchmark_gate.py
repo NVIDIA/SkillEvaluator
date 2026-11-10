@@ -1288,7 +1288,7 @@ def test_no_ground_truth_run_with_destructive_command_publishes_fail(tmp_path: P
 
     assert "**Overall verdict: FAIL" in rendered
     assert "| Tier 3 | Live agent evaluation | **FAIL** |" in rendered
-    assert "| Correctness | Not available |" in rendered
+    assert "| Correctness | Not applicable" in rendered
     assert report["publication_status"] == "fail"
     assert report["tier3"]["verdict"] == "fail"
     assert offenders == []
@@ -1326,7 +1326,7 @@ def test_no_ground_truth_destructive_command_reads_failed_in_tier3_status(
     # --format markdown
     assert "**Publication status:** ❌ FAIL" in markdown
     assert "| ❌ Failed | 1 |" in markdown
-    assert "**Verdict:** FAIL (composite lift" in markdown
+    assert "**Verdict:** FAIL (Skill Lift" in markdown
 
 
 def test_no_ground_truth_destructive_command_fails_in_tier3_evaluate_report(

@@ -16,6 +16,12 @@ All notable changes to SkillEvaluator are documented in this file.
   suggest removing cases or loosening expectations. The rules need no LLM; the
   Tier 3 payload carries them as `next_steps`.
 
+- Document an additive qualitative assessment review worksheet with bounded
+  evidence from real successful, failed-setup and invalid-judge runs. Preserve
+  numeric grading and identify the separate decisions needed for scoreless support.
+  Pin the public calculator input to the historical repository revision used by
+  the run, preserving its original hash and evidence pointers after migration.
+
 - Tier 3 reports show per-case expectation inventories with explicit met,
   unmet, unchecked, unscored and inapplicable judgments, evidence and next
   diagnostic steps for executed conditions. Behavior judges can abstain when

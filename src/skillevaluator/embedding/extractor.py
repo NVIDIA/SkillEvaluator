@@ -304,12 +304,12 @@ def _extract_from_file(
     frontmatter_yaml, _markdown_content = match.groups()
     if label is None:
         label = relative_path.as_posix() if relative_path is not None else file_path.name
-    if not _frontmatter_root_is_mapping(frontmatter_yaml):
-        logger.debug("Frontmatter in %s is not a YAML mapping", file_path)
-        return None
+    # A root that is not a mapping is never parsed; it is skipped like an
+    # empty mapping.
+    root_is_mapping = _frontmatter_root_is_mapping(frontmatter_yaml)
     try:
         # Agent clients keep the last value of a repeated frontmatter key.
-        data = load_bounded_yaml(frontmatter_yaml, last_key_wins=True)
+        data = load_bounded_yaml(frontmatter_yaml, last_key_wins=True) if root_is_mapping else None
     except StructuredDataSyntaxError as exc:
         logger.debug("Invalid YAML frontmatter in %s: %s", file_path, exc)
         return None
@@ -321,20 +321,16 @@ def _extract_from_file(
     name = data.get(name_field)
     description = data.get(description_field)
 
-    if not name or not description:
+    # Never call str() on a frontmatter value: a list or mapping built from
+    # YAML aliases renders to a string far larger than the manifest. A value
+    # that is not a string makes the entry invalid, like a missing one.
+    if not (isinstance(name, str) and name and isinstance(description, str) and description):
         logger.debug(
             "Missing %s or %s in %s",
             name_field,
             description_field,
             file_path,
         )
-        return None
-
-    # Never call str() on a frontmatter value: a list or mapping built from
-    # YAML aliases renders to a string far larger than the manifest. A value
-    # that is not a string makes the entry invalid, like invalid YAML.
-    if not isinstance(name, str) or not isinstance(description, str):
-        logger.debug("%s or %s in %s is not a string", name_field, description_field, file_path)
         return None
     try:
         name = require_bounded_string(name, name_field, max_chars=MAX_FRONTMATTER_FIELD_CHARS, allow_empty=True)

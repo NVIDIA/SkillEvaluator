@@ -136,11 +136,9 @@ def _agent_eval(volume: dict) -> dict:
 
 def _provisional_agent_eval() -> dict:
     conditions = {
-        "with_skill": _condition(cases=3, planned=30, scored=27, judge_failures=1),
+        "with_skill": _condition(cases=3, planned=30, scored=30),
         "without_skill": _condition(cases=3, planned=30, scored=30),
     }
-    for condition in conditions.values():
-        condition["execution_status"] = "succeeded"
     payload = build_agent_eval_payload(
         "test-skill",
         {
@@ -150,7 +148,7 @@ def _provisional_agent_eval() -> dict:
                 "conditions": conditions,
                 "execution_status": "succeeded",
                 "expected_attempts": 60,
-                "scored_attempts": 57,
+                "scored_attempts": 60,
                 "rewards": [],
                 "rewards_baseline": [],
                 "rewards_complete": True,

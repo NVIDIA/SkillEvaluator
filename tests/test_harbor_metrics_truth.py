@@ -898,34 +898,39 @@ def test_condition_summary_counts_judge_failures_beyond_bounded_detail_sample() 
 
 
 def test_condition_summary_counts_step_judge_failures_once_per_logical_attempt() -> None:
+    step_names = ("first", "second", "third")
     rewards = [
         {
-            "_trial_root_name": "case-001__attempt1",
-            "_step_name": f"step{step}",
-            "entry_id": "case-001",
+            "_trial_root_name": f"case-002__attempt{attempt}",
+            "_trial_name": f"case-002__attempt{attempt}",
+            "entry_id": "case-002",
+            "overall": 0.5,
         }
-        for step in range(1, 4)
+        for attempt in (1, 2)
     ]
     failures = [
         {
-            "trial": f"case-001__attempt1__step{step}",
+            "_trial_root_name": "case-001__attempt1",
+            "trial": f"case-001__attempt1__step{step_name}",
             "reason": "Required judge evaluation failed: accuracy",
         }
-        for step in range(1, 4)
+        for step_name in step_names
     ]
+    failures.append({"trial": "case-001__attempt2", "reason": "HarborTrialError: attempt errored"})
 
     summary = _condition_execution_summary(
         rewards,
-        expected_case_ids=["case-001"],
-        expected_cases=1,
-        n_attempts=1,
+        expected_case_ids=["case-001", "case-002"],
+        expected_cases=2,
+        n_attempts=2,
         job_failure="",
         reward_failures=failures,
     )
 
-    assert summary["expected_attempts"] == 1
-    assert summary["scored_attempts"] == 0
+    assert summary["expected_attempts"] == 4
+    assert summary["scored_attempts"] == 2
     assert summary["judge_failures"] == 1
+    assert all(set(failure) == {"trial", "reason"} for failure in collector_module._public_failure_list(failures))
 
 
 @pytest.mark.parametrize(

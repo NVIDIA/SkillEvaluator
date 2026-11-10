@@ -687,6 +687,41 @@ def test_trial_report_renders_unavailable_tokens_as_unavailable() -> None:
     assert re.search(r"<td>4</td>\s*<td>—</td>", trials_html)
 
 
+def test_no_skill_baseline_dimension_na_explains_why_in_html() -> None:
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 1.0),
+                "without_skill": {
+                    "security": 0.8,
+                    "accuracy": 0.7,
+                    "goal_accuracy": 0.6,
+                    "behavior_check": 0.8,
+                },
+                "not_applicable_validated_without_skill": True,
+                "not_applicable_without_skill": ["skill_execution", "skill_efficiency"],
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    html = _render_agent_payload(payload)
+
+    assert (
+        '<td title="No-skill baseline: This arm has no skill under test installed, '
+        'so there is no skill to discover or run">N/A</td>'
+    ) in html
+    assert (
+        '<td title="No-skill baseline: This arm has no skill under test installed, '
+        'so there is no skill to route to">N/A</td>'
+    ) in html
+
+
 def test_trial_report_omits_token_chart_for_incomplete_agent_telemetry() -> None:
     payload = build_agent_eval_payload(
         "demo",

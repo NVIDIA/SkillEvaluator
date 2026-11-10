@@ -19,6 +19,8 @@ All notable changes to SkillEvaluator are documented in this file.
   `tier3 import-traces`, then promote only explicitly human-reviewed expectations
   and replay fixtures with `tier3 accept-traces`.
 
+- Tier 3 evaluations support token, judge-call, attempt, and priced-cost budgets.
+
 - Tier 3 reports list up to three run-level **Next steps** under the per-case
   fixes in the terminal, `report.html` and the Markdown report: re-run an
   incomplete run, add attempts for inconsistent cases, add cases or negative

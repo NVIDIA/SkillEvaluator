@@ -1036,6 +1036,9 @@ def build_agent_eval_payload(
         best_evidence_links,
     )
 
+    budget_metadata = (run_config or {}).get("budget")
+    from skillevaluator.tier3.harbor.run_budget import budget_line
+
     payload = {
         "schema_version": _SCHEMA_VERSION,
         "summary": summary,
@@ -1094,6 +1097,8 @@ def build_agent_eval_payload(
         "supported_metric_ids": list(AGENT_EVAL_EVALUATORS),
         "metric_labels": metric_labels,
         "attempt_policy": policy,
+        "budget": budget_metadata,
+        "budget_summary": budget_line(budget_metadata) if isinstance(budget_metadata, dict) else None,
         "dataset": public_dataset,
         "case_diagnostics": case_diagnostics,
         "provenance": _build_provenance(

@@ -8,6 +8,7 @@ import json
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
@@ -110,6 +111,57 @@ def test_executable_checks():
         gv.verify_checks({"method": "executable", "checks": checks}, trajectory, "test")
 
 
+def test_tool_result_checks_match_recorded_content_text_only():
+    trajectory = {
+        "steps": [
+            {
+                "observation": {
+                    "results": [
+                        None,
+                        {"source_call_id": "call-3", "content": "Result: 14\nProcess exited with code 0"},
+                    ]
+                }
+            }
+        ]
+    }
+    label = {
+        "method": "executable",
+        "checks": [{"type": "tool_result_contains", "value": "Result: 14\nProcess exited"}],
+    }
+    gv.verify_checks(label, trajectory, "test")
+    label["checks"] = [{"type": "tool_result_contains", "value": "source_call_id"}]
+    with pytest.raises(ValueError, match="check failed"):
+        gv.verify_checks(label, trajectory, "test")
+
+
+@pytest.mark.parametrize(
+    "tool_calls",
+    [
+        {"function_name": "Write", "arguments": {"file_path": "/workspace/a", "content": "done"}},
+        [{"function_name": None, "arguments": {"file_path": "/workspace/a", "content": "done"}}],
+        [{"function_name": "Write", "arguments": "not an object"}],
+        [{"function_name": "Write", "arguments": {"file_path": "/workspace/a", "content": None}}],
+    ],
+)
+def test_malformed_file_evidence_is_a_named_suite_error(suite_dir, tool_calls):
+    suite = gv.load_suite(suite_dir)
+    case = next(case for case in suite["cases"] if case["trajectory"] is not None)
+    trajectory_path = suite_dir / case["trajectory"]
+    trajectory = json.loads(trajectory_path.read_text())
+    trajectory["steps"] = [{"source": "agent", "tool_calls": tool_calls}]
+    trajectory_path.write_text(json.dumps(trajectory))
+    case["label"]["method"] = "executable"
+    case["label"]["checks"] = [{"type": "file_written_contains", "path": "/workspace/a", "value": "done"}]
+    write_suite(suite_dir, suite)
+    result = CliRunner().invoke(
+        cli,
+        ["tier3", "validate-grader", str(suite_dir), "--check-suite", "--case", case["id"]],
+    )
+    assert result.exit_code == 2, result.output
+    assert case["id"] in result.output
+    assert "Traceback" not in result.output
+
+
 @pytest.mark.parametrize(
     ("reward", "metric", "expected"),
     [
@@ -161,6 +213,20 @@ def test_behavior_pool():
     assert [r["observed"] for r in rows] == ["pass", "fail", "pass", "fail"]
     reward["details"]["behavior_check"]["status"] = "error"
     assert all(r["observed"] == "error" for r in gv.observations(case, reward, gv.DEFAULT_THRESHOLDS)[1:])
+
+
+def test_behavior_expected_class_uses_suite_threshold():
+    case = {"id": "mixed", "expected": {"overall": "fail", "metrics": {"behavior_check": [True, False]}}}
+    reward = {
+        "behavior_check": 0.5,
+        "details": {"behavior_check": {"results": [{"step": 1, "passed": True}, {"step": 2, "passed": False}]}},
+    }
+    thresholds = gv.DEFAULT_THRESHOLDS | {"behavior_check": 0.5}
+    rows = gv.observations(case, reward, thresholds)
+    behavior = next(row for row in rows if row["metric"] == "behavior_check")
+    steps = [row for row in rows if row["metric"] == "behavior_steps"]
+    assert behavior["expected"] == behavior["observed"] == "pass"
+    assert [(row["expected"], row["observed"]) for row in steps] == [("pass", "pass"), ("fail", "fail")]
 
 
 def test_bundled_check_suite_and_usage(monkeypatch):
@@ -293,6 +359,92 @@ def test_real_template_cli(judge_server, tmp_path):
     assert json.loads((output / "grader-validation.json").read_text()) == report
 
 
+def test_attempt_uses_resolved_provider_environment(monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.delenv("SKILL_EVAL_LLM_PROVIDER", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-openai-key")
+    monkeypatch.setenv("NVIDIA_API_KEY", "synthetic-nvidia-key")
+
+    def run(_command, *, env, **_kwargs):
+        captured.update(env)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(gv.subprocess, "run", run)
+    case = {
+        "id": "provider",
+        "entry": {},
+        "trajectory": None,
+        "expected": {"overall": "fail", "metrics": {}},
+    }
+    gv._attempt(
+        gv.REFERENCE_SUITE,
+        case,
+        1,
+        tmp_path,
+        gv.DEFAULT_THRESHOLDS,
+        1,
+        {
+            "SKILL_EVAL_LLM_PROVIDER": "openai",
+            "SKILL_EVAL_LLM_MODEL": "resolved-model",
+            "OPENAI_API_KEY": "synthetic-openai-key",
+        },
+    )
+    assert captured["SKILL_EVAL_LLM_PROVIDER"] == "openai"
+    assert captured["SKILL_EVAL_LLM_MODEL"] == "resolved-model"
+    assert captured["NVIDIA_API_KEY"] == "synthetic-nvidia-key"
+
+
+def test_provenance_records_resolved_judge_controls_and_verifier_files(tmp_path):
+    from skillevaluator.tier3.harbor.adapter import _VERIFIER_FILES
+    from skillevaluator.tier3.harbor.runner import _judge_model_config
+
+    provider = SimpleNamespace(provider="openai", model="chat-model")
+    provider_env = {
+        "LLM_JUDGE_MODEL": "override-judge",
+        "LLM_JUDGE_FALLBACK_MODELS": "fallback-judge",
+        "LLM_JUDGE_FALLBACK_POLICY": "replace",
+        "LLM_JUDGE_RETRY_POLICY": "strict",
+        "SKILL_EVAL_JUDGE_CHARACTER_FACTS": "1",
+        "SKILL_EVAL_LLM_MAX_RETRIES": "2",
+        "SKILL_EVAL_JUDGE_FALLBACK_MODEL": "unused",
+        "SKILL_EVAL_JUDGE_REASONING_EFFORT": "unused",
+        "SKILL_EVAL_GOAL_ACCURACY_METHOD": "unused",
+        "OPENAI_API_KEY": "synthetic-secret",
+    }
+    suite = gv.load_suite(gv.REFERENCE_SUITE)
+    output = tmp_path / "provenance"
+    output.mkdir()
+    result = gv.qualify(
+        gv.REFERENCE_SUITE,
+        suite,
+        [],
+        output,
+        1,
+        1,
+        1,
+        "assessment",
+        provider,
+        provider_env,
+        _judge_model_config(provider, provider_env, "default"),
+    )
+    provenance = result["provenance"]
+    assert provenance["judge_config"]["model"] == "override-judge"
+    assert provenance["judge_environment"]["LLM_JUDGE_FALLBACK_MODELS"] == "fallback-judge"
+    assert provenance["judge_environment"]["LLM_JUDGE_RETRY_POLICY"] == "strict"
+    assert provenance["judge_environment"]["SKILL_EVAL_LLM_MAX_RETRIES"] == "2"
+    assert "SKILL_EVAL_JUDGE_FALLBACK_MODEL" not in provenance["judge_environment"]
+    assert "SKILL_EVAL_JUDGE_REASONING_EFFORT" not in provenance["judge_environment"]
+    assert "SKILL_EVAL_GOAL_ACCURACY_METHOD" not in provenance["judge_environment"]
+    assert "OPENAI_API_KEY" not in provenance["judge_environment"]
+    assert provenance["skillevaluator_version"] == gv.__version__
+    digests = provenance["verifier_file_sha256"]
+    assert len(digests) == len(_VERIFIER_FILES)
+    assert any(name.endswith("/eval.py") for name in digests)
+    assert any(name.endswith("/checks.py") for name in digests)
+    assert any(name.endswith("/evidence.py") for name in digests)
+    assert len(provenance["verifier_sha256"]) == 64
+
+
 def test_split_separation_and_gates(judge_server, tmp_path):
     result = CliRunner().invoke(
         cli,
@@ -343,6 +495,26 @@ def test_split_separation_and_gates(judge_server, tmp_path):
     assert (
         gv.gate_failures({"metrics": {"overall": {"false_pass_rate": gv.rate(1, 2)}}}, {"false_pass_rate": 0.5}) == []
     )
+    text = CliRunner().invoke(
+        cli,
+        [
+            "tier3",
+            "validate-grader",
+            "--split",
+            "all",
+            "--case",
+            "arithmetic",
+            "--case",
+            "tuning-wrong",
+            "--repeats",
+            "1",
+            "-o",
+            str(tmp_path / "all-text"),
+        ],
+    )
+    assert text.exit_code == 0, text.output
+    assert "Assessment grader qualification" in text.output
+    assert "Tuning grader qualification" in text.output
 
 
 def test_timeout_is_unscored(monkeypatch, tmp_path):

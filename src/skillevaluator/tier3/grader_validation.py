@@ -15,18 +15,19 @@ import sys
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
-from importlib.metadata import version
 from pathlib import Path
 
 import click
 from rich.console import Console
 from rich.table import Table
 
+from skillevaluator import __version__
 from skillevaluator.provider_config import resolve_llm_provider
 from skillevaluator.tier3.eval_core.atif_helpers import (
     extract_tool_calls_as_dicts,
     get_final_response,
 )
+from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
 
 SCHEMA = "skillevaluator.grader-qualification/v1"
 CATEGORIES = {"positive", "negative", "edge", "failure_recovery", "unavailable_evidence", "non_use", "baseline"}
@@ -176,7 +177,10 @@ def load_suite(directory):
                 raise ValueError(f"{case_id}: trajectory must have nonempty ATIF steps")
         elif case["category"] != "unavailable_evidence" or expected["overall"] != "insufficient_evidence":
             raise ValueError("null trajectory requires unavailable_evidence with insufficient_evidence label")
-        verify_checks(label, trajectory, case_id)
+        try:
+            verify_checks(label, trajectory, case_id)
+        except (AttributeError, TypeError) as exc:
+            raise ValueError(f"{case_id}: malformed trajectory evidence") from exc
     return suite
 
 
@@ -202,16 +206,56 @@ def verify_checks(label, trajectory, case_id):
             found = check["value"] in get_final_response(trajectory)
             passed = not found if kind.endswith("not_contains") else found
         elif kind == "tool_result_contains":
-            observations = [step.get("observation", {}) for step in trajectory["steps"]]
-            passed = check["value"] in json.dumps(observations, ensure_ascii=False)
+            passed = any(
+                check["value"] in atif_content_text(result.get("content"))
+                for step in trajectory["steps"]
+                if isinstance(step, dict)
+                for observation in [step.get("observation")]
+                if isinstance(observation, dict)
+                for results in [observation.get("results")]
+                if isinstance(results, list)
+                for result in results
+                if isinstance(result, dict)
+            )
         else:
             _text(check.get("path"), "check.path")
-            passed = any(
-                call.get("action", "").lower() in {"write", "write_file"}
-                and call.get("action_input", {}).get("file_path") == check["path"]
-                and check["value"] in call.get("action_input", {}).get("content", "")
-                for call in extract_tool_calls_as_dicts(trajectory)
-            )
+            safe_steps = []
+            for step in trajectory["steps"]:
+                if not isinstance(step, dict):
+                    continue
+                calls = step.get("tool_calls")
+                safe_calls = []
+                if isinstance(calls, list):
+                    for call in calls:
+                        if (
+                            isinstance(call, dict)
+                            and isinstance(call.get("function_name"), str)
+                            and isinstance(call.get("arguments") or {}, dict)
+                        ):
+                            safe_calls.append(call)
+                safe_steps.append(
+                    {
+                        **step,
+                        "tool_calls": safe_calls,
+                    }
+                )
+            safe_trajectory = {**trajectory, "steps": safe_steps}
+            passed = False
+            for call in extract_tool_calls_as_dicts(safe_trajectory):
+                if not isinstance(call, dict):
+                    continue
+                action = call.get("action")
+                action_input = call.get("action_input")
+                if (
+                    isinstance(action, str)
+                    and action.lower() in {"write", "write_file"}
+                    and isinstance(action_input, dict)
+                    and action_input.get("file_path") == check["path"]
+                    and isinstance(action_input.get("content"), str)
+                    and check["value"] in action_input["content"]
+                ):
+                    passed = True
+                    break
         if not passed:
             raise ValueError(f"{case_id}: executable label check failed: {kind}")
 
@@ -253,11 +297,12 @@ def observations(case, reward, thresholds):
         observed = classify(reward, metric, thresholds)
         score = reward.get(metric)
         if isinstance(expected, list):
+            expected_score = round(sum(expected) / len(expected), 4) if expected else 1.0
             result.append(
                 {
                     "metric": metric,
                     "judgment": f"{case['id']}:{metric}",
-                    "expected": "pass" if all(expected) else "fail",
+                    "expected": "pass" if expected_score >= thresholds[metric] else "fail",
                     "observed": observed,
                     "score": score,
                 }
@@ -339,11 +384,12 @@ def _write(path, value):
     path.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
 
 
-def _attempt(root, case, repeat, output, thresholds, timeout):
+def _attempt(root, case, repeat, output, thresholds, timeout, provider_env=None):
     directory = output / case["id"] / f"attempt-{repeat}"
     directory.mkdir(parents=True, exist_ok=True)
     _write(directory / "entry.json", case["entry"])
     env = os.environ.copy()
+    env.update(provider_env or {})
     paths = {
         "ENTRY_JSON": directory / "entry.json",
         "ATIF_PATH": directory / "trajectory.json",
@@ -380,11 +426,13 @@ def _attempt(root, case, repeat, output, thresholds, timeout):
     return {"case": case["id"], "repeat": repeat, "returncode": code, "reward": reward, "observations": rows}
 
 
-def qualify(root, suite, cases, output, repeats, concurrency, timeout, split, provider):
+def qualify(root, suite, cases, output, repeats, concurrency, timeout, split, provider, provider_env, judge_config):
     thresholds = DEFAULT_THRESHOLDS | suite.get("thresholds", {})
     tasks = [(case, repeat) for case in cases for repeat in range(1, repeats + 1)]
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
-        attempts = list(executor.map(lambda task: _attempt(root, *task, output, thresholds, timeout), tasks))
+        attempts = list(
+            executor.map(lambda task: _attempt(root, *task, output, thresholds, timeout, provider_env), tasks)
+        )
     rows = [row for attempt in attempts for row in attempt["observations"]]
     summaries = {}
     for metric in (*METRICS, "behavior_steps", "overall"):
@@ -406,25 +454,26 @@ def qualify(root, suite, cases, output, repeats, concurrency, timeout, split, pr
     details = [
         detail for reward in rewards for detail in reward.get("details", {}).values() if isinstance(detail, dict)
     ]
+    from skillevaluator.tier3.harbor.adapter import (
+        _VERIFIER_BUDGET_ENV_VARS,
+        _VERIFIER_FILES,
+        _VERIFIER_JUDGE_CONTROL_ENV_VARS,
+        _VERIFIER_RETRY_ENV_VARS,
+    )
+
     safe_env = {
         key: value
-        for key, value in os.environ.items()
-        if key
-        in {
-            "SKILL_EVAL_JUDGE_MODEL",
-            "SKILL_EVAL_JUDGE_FALLBACK_MODEL",
-            "SKILL_EVAL_JUDGE_REASONING_EFFORT",
-            "SKILL_EVAL_GOAL_ACCURACY_METHOD",
-            "SKILL_EVAL_LLM_JUDGE_BUDGET_SEC",
-            "SKILL_EVAL_LLM_MAX_RETRIES",
-            "SKILL_EVAL_LLM_RETRY_BASE_DELAY",
-            "SKILL_EVAL_LLM_RETRY_MAX_DELAY",
-            "SKILL_EVAL_ACCURACY_BUDGET",
-            "SKILL_EVAL_GOAL_ACCURACY_BUDGET",
-            "SKILL_EVAL_BEHAVIOR_CHECK_BUDGET",
-            "SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT",
-        }
+        for key, value in provider_env.items()
+        if key in _VERIFIER_BUDGET_ENV_VARS | _VERIFIER_RETRY_ENV_VARS | _VERIFIER_JUDGE_CONTROL_ENV_VARS
     }
+    source_root = Path(__file__).resolve().parents[2]
+    verifier_file_sha256 = {}
+    verifier_digest = hashlib.sha256()
+    for path in sorted(_VERIFIER_FILES, key=lambda item: item.relative_to(source_root).as_posix()):
+        name = path.relative_to(source_root).as_posix()
+        content = path.read_bytes()
+        verifier_file_sha256[name] = hashlib.sha256(content).hexdigest()
+        verifier_digest.update(name.encode() + b"\0" + len(content).to_bytes(8, "big") + content)
     result = {
         "schema": SCHEMA,
         "suite": suite["suite"],
@@ -444,8 +493,9 @@ def qualify(root, suite, cases, output, repeats, concurrency, timeout, split, pr
             "hash_files": files,
             "split": split,
             "case_ids": [c["id"] for c in cases],
-            "skillevaluator_version": version("skillevaluator"),
-            "verifier_sha256": hashlib.sha256(TEMPLATE.read_bytes()).hexdigest(),
+            "skillevaluator_version": __version__,
+            "verifier_sha256": verifier_digest.hexdigest(),
+            "verifier_file_sha256": verifier_file_sha256,
             "contracts": {
                 key: sorted({r[key] for r in rewards if key in r})
                 for key in ("judge_contract", "metric_set", "score_policy")
@@ -456,6 +506,7 @@ def qualify(root, suite, cases, output, repeats, concurrency, timeout, split, pr
             ),
             "provider": provider.provider,
             "model": provider.model,
+            "judge_config": judge_config,
             "judge_environment": safe_env,
             "thresholds": thresholds,
             "repeats": repeats,
@@ -554,11 +605,27 @@ def validate_grader(
             )
             return
         provider = resolve_llm_provider()
+        from skillevaluator.tier3.harbor.runner import _judge_model_config, _provider_environment
+
+        provider_env = _provider_environment(provider)
+        judge_config = _judge_model_config(provider, provider_env, "default")
         output = output.resolve()
         if output.exists() and any(output.iterdir()):
             raise ValueError("output directory must be empty (prevents stale attempt evidence)")
         output.mkdir(parents=True, exist_ok=True)
-        result = qualify(suite_dir.resolve(), suite, cases, output, repeats, concurrency, timeout, split, provider)
+        result = qualify(
+            suite_dir.resolve(),
+            suite,
+            cases,
+            output,
+            repeats,
+            concurrency,
+            timeout,
+            split,
+            provider,
+            provider_env,
+            judge_config,
+        )
     except (ValueError, OSError) as exc:
         raise click.UsageError(str(exc)) from exc
     gates = {
@@ -570,14 +637,19 @@ def validate_grader(
     if as_json:
         click.echo(json.dumps(result, indent=2))
     else:
-        table = Table(title="Grader qualification")
-        for header in ("Metric", "False passes", "False fails", "Unjudgeable", "Judgments / cases"):
-            table.add_column(header)
-        summaries = result["metrics"] or result["by_split"]["assessment"]
-        for metric, summary in summaries.items():
-            cells = [f"{summary[key]['numerator']}/{summary[key]['denominator']}" for key in gates]
-            table.add_row(metric, *cells, f"{summary['judgments']} / {summary['cases']}")
-        Console().print(table)
+        tables = (
+            [(name.title(), summaries) for name, summaries in result["by_split"].items()]
+            if split == "all"
+            else [("Grader qualification", result["metrics"])]
+        )
+        for title, summaries in tables:
+            table = Table(title=title if split != "all" else f"{title} grader qualification")
+            for header in ("Metric", "False passes", "False fails", "Unjudgeable", "Judgments / cases"):
+                table.add_column(header)
+            for metric, summary in summaries.items():
+                cells = [f"{summary[key]['numerator']}/{summary[key]['denominator']}" for key in gates]
+                table.add_row(metric, *cells, f"{summary['judgments']} / {summary['cases']}")
+            Console().print(table)
         click.echo(f"Split: {split}; report: {output / 'grader-validation.json'}")
         click.echo(LIMITATIONS)
     if failures:

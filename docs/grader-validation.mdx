@@ -212,9 +212,11 @@ disagreement and judge errors are reported rather than changing the exit code.
 
 ## Measured baseline
 
-On 2026-11-07, SkillEvaluator 0.8.0 graded the bundled assessment split with
-the `openai-compatible` provider: 14 cases × 3 repeats = 42 attempts per model.
-Suite SHA-256 prefix: `5e85ceac…`; verifier SHA-256 prefix: `d444e2c4…`.
+On 2026-11-07, SkillEvaluator commit
+`0205909b653f139602fc2e7681ba7d0112c0871a` graded the bundled assessment split
+with the `openai-compatible` provider: 14 cases × 3 repeats = 42 attempts per
+model. Suite SHA-256 prefix: `5e85ceac…`; the then-recorded `eval.py` SHA-256
+prefix was `d444e2c4…`.
 The fractions below use the scored known-fail and known-pass denominators
 defined above, not all 42 attempts.
 

@@ -28,7 +28,8 @@ def normalize_harbor_viewer_for_display(agent_eval: dict[str, Any]) -> dict[str,
 
     jobs: list[dict[str, str]] = []
     seen_jobs: set[str] = set()
-    for item in raw.get("jobs") or []:
+    raw_jobs = raw.get("jobs")
+    for item in raw_jobs if isinstance(raw_jobs, list) else []:
         if not isinstance(item, dict):
             continue
         url = safe_url(item.get("url") or item.get("job_url"))
@@ -50,7 +51,8 @@ def normalize_harbor_viewer_for_display(agent_eval: dict[str, Any]) -> dict[str,
 
     evidence: list[dict[str, Any]] = []
     seen_evidence: set[str] = set()
-    for item in raw.get("evidence_links") or []:
+    raw_evidence = raw.get("evidence_links")
+    for item in raw_evidence if isinstance(raw_evidence, list) else []:
         if not isinstance(item, dict):
             continue
         url = safe_url(item.get("url"))
@@ -64,6 +66,34 @@ def normalize_harbor_viewer_for_display(agent_eval: dict[str, Any]) -> dict[str,
     if evidence:
         out["evidence_links"] = evidence
     return out
+
+
+def harbor_job_links(agent_eval: dict[str, Any]) -> list[dict[str, str]]:
+    """Project every normalized job and unmatched legacy link, without attribution."""
+    viewer = normalize_harbor_viewer_for_display(agent_eval)
+    jobs = [dict(job) for job in viewer.get("jobs", [])]
+    job_url, analysis_url = viewer.get("job_url"), viewer.get("analysis_url")
+    unmatched_analysis = bool(analysis_url) and not any(job.get("analysis_url") == analysis_url for job in jobs)
+    if job_url and not any(job["url"] == job_url for job in jobs):
+        legacy = {"url": job_url}
+        if unmatched_analysis:
+            # A top-level job_url/analysis_url pair describes one job.
+            legacy["analysis_url"] = analysis_url
+            unmatched_analysis = False
+        jobs.append(legacy)
+    for index, job in enumerate(jobs, 1):
+        job["name"] = job.get("name") or f"Job {index}"
+    if unmatched_analysis:
+        # A run-level analysis is not a job; never number it as one.
+        jobs.append({"name": "Run analysis", "analysis_url": analysis_url})
+    seen_analysis: set[str] = set()
+    for job in jobs:
+        analysis = job.get("analysis_url")
+        if analysis in seen_analysis:
+            job.pop("analysis_url", None)
+        elif analysis:
+            seen_analysis.add(analysis)
+    return jobs
 
 
 def normalize_agent_eval_harbor_links(agent_eval: dict[str, Any]) -> dict[str, Any]:

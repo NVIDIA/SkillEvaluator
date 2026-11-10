@@ -1616,6 +1616,33 @@ _SKILLSPECTOR_PATH_PART_SEPARATOR_RE = re.compile(r"[=:,]")
 _SKILLSPECTOR_REFERENCE_MATCH_BUDGET = 1_000_000_000
 
 
+# The files and directories that Git itself writes at the top of a ".git"
+# directory (gitrepository-layout(5), and the state files of merge, rebase,
+# cherry-pick, revert and bisect), with the lock files Git takes on them.
+_SKILLSPECTOR_GIT_FILE_RE = re.compile(
+    r"(?:HEAD|[A-Z_]+_HEAD|config|config\.worktree|description|index|packed-refs|shallow|commondir|"
+    r"COMMIT_EDITMSG|TAG_EDITMSG|SQUASH_MSG|AUTO_MERGE|MERGE_(?:MSG|MODE|RR)|BISECT_[A-Z_]+|"
+    r"gitk\.cache|sharedindex\.[0-9a-f]+)(?:\.lock)?"
+)
+_SKILLSPECTOR_GIT_DIRECTORIES = frozenset(
+    {
+        "branches",
+        "common",
+        "info",
+        "logs",
+        "modules",
+        "objects",
+        "rebase-apply",
+        "rebase-merge",
+        "refs",
+        "remotes",
+        "rr-cache",
+        "sequencer",
+        "worktrees",
+    }
+)
+
+
 def _skillspector_bundled_file_bytes(path: object, components: object, scanned_root: Path | None) -> bytes | None:
     """The bytes of the scanned file a SkillSpector report *path* names, else ``None``.
 
@@ -1731,10 +1758,13 @@ def _skillspector_unscanned_names(scanned_root: Path, components: object) -> set
     entry's path is a name, so a directory that holds one is named even when it
     also holds listed files. Links are not followed.
 
-    A ``.git`` directory that holds no listed file counts by its own name and by
+    A ``.git`` directory that holds no listed file counts by its own name, by
+    every entry outside Git's own layout (:data:`_SKILLSPECTOR_GIT_FILE_RE`,
+    :data:`_SKILLSPECTOR_GIT_DIRECTORIES`) with everything inside it, and by
     the entries of its ``hooks`` directory other than regular ``*.sample``
-    files, which Git never runs. Git writes the rest of it, and names such as
-    ``config``, ``HEAD`` or ``main`` are common words.
+    files, which Git never runs. Git writes its layout, and names such as
+    ``config``, ``HEAD`` or a branch name such as ``main`` are common words, so
+    those files and what Git's directories hold do not count.
 
     SkillSpector scans a single-file *scanned_root* on its own, so every other
     entry of the directory that holds it is uninspected.
@@ -1783,9 +1813,11 @@ def _skillspector_unscanned_names(scanned_root: Path, components: object) -> set
                     if git_part == ".git":
                         if entry.name == "hooks" and is_directory:
                             pending.append((Path(entry.path), relative + "/", False, "hooks"))
-                        elif entry.name == "hooks":
-                            uninspected.add(relative)
-                        continue
+                            continue
+                        if (is_directory and entry.name in _SKILLSPECTOR_GIT_DIRECTORIES) or (
+                            is_file and _SKILLSPECTOR_GIT_FILE_RE.fullmatch(entry.name)
+                        ):
+                            continue
                     if git_part == "hooks" and is_file and entry.name.endswith(".sample"):
                         continue
                     if is_directory:

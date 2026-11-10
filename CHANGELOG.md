@@ -98,9 +98,10 @@ All notable changes to SkillEvaluator are documented in this file.
   operator, a bash extended glob, a command in backticks, a cmd.exe `^`
   escape, variable or batch parameter such as `%DIR%`, `!DIR!` or `%~dp0`, a
   PowerShell backtick escape, a `\` separator or a Windows 8.3 short name such
-  as `NODE_M~1`. Inside `.git`, only `.git` itself and hooks other
-  than `*.sample` templates count. A lone file such as `SKILL.md` is scanned
-  on its own, so a line that names a file beside it keeps the scan
+  as `NODE_M~1`. Inside `.git`, Git's own files and directories, such as
+  `HEAD`, `config` or `refs`, do not count, but hooks other than `*.sample`
+  templates and any other file there do. A lone file such as `SKILL.md` is
+  scanned on its own, so a line that names a file beside it keeps the scan
   `INCOMPLETE`. Tier 3 output in the default `<skill>/evals/results` location,
   such as `results`, `report.html` or `summary.json`, or with
   `--harbor-keep-jobs` a copy of every bundled file, and input fixtures in

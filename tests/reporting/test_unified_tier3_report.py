@@ -7,6 +7,7 @@ import base64
 import json
 import math
 import re
+from html import unescape
 from pathlib import Path
 
 import pytest
@@ -538,9 +539,7 @@ def test_conclusions_separate_unavailable_trials_from_threshold_misses(has_thres
     assert payload["agents"]["codex"]["trials"][0]["overall"] is None
     conclusions = {item["title"]: item["message"] for item in payload["conclusions"]}
     assert "Unscored trials" in conclusions
-    assert conclusions["Unscored trials"] == (
-        "1 trial(s) have unavailable overall scores; examples: codex/unscored"
-    )
+    assert conclusions["Unscored trials"] == ("1 trial(s) have unavailable overall scores; examples: codex/unscored")
     html = _render_agent_payload(payload)
     assert "1 trial(s) have unavailable overall scores; examples: codex/unscored" in html
     if has_threshold_miss:
@@ -691,14 +690,15 @@ def test_no_skill_baseline_dimension_na_explains_why_in_html() -> None:
 
     html = _render_agent_payload(payload)
 
-    assert (
-        '<td title="No-skill baseline: This arm has no skill under test installed, '
-        'so there is no skill to discover or run">N/A</td>'
-    ) in html
-    assert (
-        '<td title="No-skill baseline: This arm has no skill under test installed, '
-        'so there is no skill to route to">N/A</td>'
-    ) in html
+    for title in (
+        "No-skill baseline: This arm has no skill under test installed, so there is no skill to discover or run",
+        "No-skill baseline: This arm has no skill under test installed, so there is no skill to route to",
+    ):
+        cell_start = html.index(f'<td title="{title}">')
+        cell_end = html.index("</td>", cell_start)
+        cell = html[cell_start:cell_end]
+        assert "N/A" in cell
+        assert '<div class="t3-dim-hint">baseline not scored</div>' in cell
 
 
 def test_trial_report_omits_token_chart_for_incomplete_agent_telemetry() -> None:
@@ -1571,6 +1571,44 @@ def test_canonical_html_tolerates_legacy_string_evidence_refs() -> None:
     assert "trajectory.json#/steps/14" in agents_html
 
 
+def test_tier3_html_renders_plain_accuracy_reason_and_unavailable_evidence() -> None:
+    scores = dict.fromkeys(DEFAULT_METRICS, 1.0)
+    scores["accuracy"] = 0.2
+    reward = {
+        "entry_id": "case-plain-language",
+        **scores,
+        "details": {
+            "accuracy": {
+                "reason": "The answer was inaccurate",
+                "criteria": {"FACTUALLY_ACCURATE": False},
+                "ground_truth": "correct result",
+                "final_answer": "wrong result",
+            }
+        },
+    }
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": scores,
+                "rewards": [reward],
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    agents_html = unescape(_tier3_page(_render_agent_payload(payload), "agents", "dataset"))
+
+    assert "Failed criteria: FACTUALLY_ACCURATE" in agents_html
+    assert "Expected: correct result; observed: wrong result" in agents_html
+    assert "Evidence unavailable — No trajectory evidence was recorded for this metric" in agents_html
+
+
 def test_canonical_payload_deduplicates_repeated_metric_evidence() -> None:
     reward = {
         "entry_id": "case-1",
@@ -1603,6 +1641,7 @@ def test_canonical_payload_deduplicates_repeated_metric_evidence() -> None:
             "failures": [],
             "checks": [],
             "evidence_refs": [],
+            "evidence_unavailable_reason": "No trajectory evidence was recorded for this metric",
             "occurrences": 2,
         }
     ]

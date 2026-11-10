@@ -19,6 +19,10 @@ All notable changes to SkillEvaluator are documented in this file.
   without-skill evidence, preserving lift calculations and baseline provenance.
   `latest` searches completed runs and falls back to a fresh baseline when needed.
 
+- `tier3 validate-grader` qualifies the shipped verifier against independent
+  versioned labels, with offline suite checks, repeated-grading statistics,
+  provenance, optional rate gates and a bundled public reference suite.
+
 - Tier 3 evaluations support token, judge-call, attempt, and priced-cost budgets.
 
 - Tier 3 reports list up to three run-level **Next steps** under the per-case

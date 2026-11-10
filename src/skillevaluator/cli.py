@@ -3994,8 +3994,10 @@ tier3.add_command(view, "view")
 tier3.add_command(tier3_doctor_command, "doctor")
 
 from skillevaluator.tier3.decoy_commands import select_decoys_command
+from skillevaluator.tier3.grader_validation import validate_grader
 
 tier3.add_command(select_decoys_command, "select-decoys")
+tier3.add_command(validate_grader, "validate-grader")
 
 from skillevaluator.tier3.workflow import build_tier3_workflow
 

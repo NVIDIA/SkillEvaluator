@@ -354,3 +354,19 @@ def test_shallow_clone_fails_changed_selection_instead_of_scanning_everything(re
     git(clone, "checkout", "-q", "--detach", head)
     with pytest.raises(selector.SelectionError):
         select(clone, base, head)
+
+
+@pytest.mark.parametrize(
+    ("paths", "expected"),
+    [
+        (["skills/demo/SKILL.md"], False),
+        (["ci/build.sh", "skills/demo/SKILL.md"], False),
+        ([".skillevaluator/notes.md", ".gitlab-ci.yaml"], False),
+        ([".github/workflows/skill-checks-all-tiers.yml"], True),
+        ([".gitlab/skill-feedback.yml"], True),
+        ([".gitlab-ci.yml"], True),
+        ([".skillevaluator/ci.yml"], True),
+    ],
+)
+def test_setup_change_predicate_is_the_documented_ci_setup_paths(paths, expected):
+    assert selector.setup_changed(paths) is expected

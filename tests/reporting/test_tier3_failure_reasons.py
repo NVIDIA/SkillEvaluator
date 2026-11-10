@@ -737,7 +737,7 @@ def test_html_preview_keeps_the_overview_when_failure_reasons_overflow_it() -> N
     # The preview drops the unrendered top-level card copy without counting it.
     assert _reason_count(preview) == _rendered_reason_count(preview)
     kept = _rendered_reason_count(preview)
-    assert 0 <= kept < total
+    assert 0 < kept < total
     assert kept + notice["failure_reasons"] == total
     # The canonical payload embedded next to the preview keeps every reason.
     assert _reason_count(data) == all_reasons > total

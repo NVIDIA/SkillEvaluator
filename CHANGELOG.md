@@ -78,73 +78,49 @@ All notable changes to SkillEvaluator are documented in this file.
   characters: a text that saves only a few characters stays inline when sharing
   it would push another text past block 9 and cost more than it saves.
 
-- Tier 3 **Measured Agent Resources** no longer count idle or user time as LLM
-  seconds when timing is inferred from step timestamps and an agent step with
-  tool calls is followed by a user or system step. The whole gap up to that
-  step, minus the measured tool time, was charged to the model, so a step with a
-  1 s tool call, followed 38 s later by a user step, added 37 LLM seconds. Only
-  the agent's next step shows when the model finished with the tool output, so
-  such a trial now has no LLM or tool seconds and, like other unmeasured trials,
-  leaves its arm's LLM and tool totals `N/A` (`null` in JSON). Native ATIF
-  timing is unchanged.
-
-- Tier 3 standard judges under `LLM_JUDGE_RETRY_POLICY=strict` with Bedrock
-  as the provider no longer label a Bedrock error that the policy treats as an
-  unavailable model, such as throttling, a missing or inaccessible model, or
-  an unreachable endpoint, as `Public provider call failed`. Where such an
-  error is reported, in a failed judge's `evaluation_errors` reason and in the
-  `problem` of its `judge_attempts.json` entry, it now reads
-  `Bedrock request failed`, like a Bedrock error that ends the judge and like
-  the default `legacy` policy.
-
-- `skillevaluator tier3 feedback` now writes the evaluated skill's directory
-  (known from `--skill` or a run in the skill's `evals/results`) as its name
-  and the home directory as `~` in the evidence it sends to the LLM, so an
-  error naming the skill's `SKILL.md` no longer shows its local path. A copied
-  run's path starting with `~user/` or `$HOME/` is now also replaced with the
-  run ID. Path masking now skips a URL other than a `file:` URL together with
-  any text after it up to the next whitespace, so in minified JSON a run,
-  skill, or home path that follows such a URL is sent as is, where 0.8.0
-  replaced the run's path with the run ID. A field over 65,536 characters with
-  no whitespace after its limit now keeps a masked prefix, cut at punctuation
-  such as `,` or `}` but never inside a URL's user info or host, so `Error: `
-  followed by minified JSON no longer arrives as `Error: ...<truncated>`.
-
-- Tier 3 security grading again warns about network exfiltration, lowering
-  the Security score to 0.5, for an HTTPie method word after a capitalized
-  `HTTP`, `HTTPS`, or `Http` word in cases that 0.8.0 stopped flagging: the
-  `HTTP` word follows a pass-through wrapper or a `$VAR` command word, as in
-  `strace -f HTTP POST URL`, or is printed into a pipe by `echo` or `printf`,
-  as in `echo HTTP POST URL | sh`, or a brace-expanded `name:@file` header
-  item such as `X-Data:{@,}.env` follows it. Both the host checker and the
-  bundled Harbor verifier apply the fix. Prose such as
-  `Use HTTP POST to create an item.` in a here-document or an unpiped `echo`
-  still does not warn.
-
-- A Tier 1 security scan no longer stops as `INCOMPLETE` with
-  `skillspector JSON field 'analysis_completeness' reports incomplete analysis
-  (status 'partial')` when the skill's instructions name a file that
-  SkillSpector did not scan, such as a file the skill writes at run time or a
-  source file elsewhere in the repository. SkillSpector v2.12.0 to v2.13.3
-  record such a reference as a nonfatal `reference_missing` row, and v2.10 and
-  v2.11 as `reference_unresolved`. When these references are the report's only
-  gaps, or the only gaps besides accepted referenced images, the scan now
-  passes with a warning that names the file and line of up to three of them.
-  Each row must be in a regular, single-link file that the report lists once
-  and that is inside the skill and not reached through a symlink, and the
-  report's `references` list must record a `missing` reference on that line.
-  The line must not name a symlink, a file the report does not list, a
-  directory left out of the scanned copy, such as `evals/` or `node_modules/`,
-  anything in it, or a directory that holds any of these. Inside `.git`, only
-  `.git` itself and hooks other than `*.sample` templates count. A lone file
-  such as `SKILL.md` is scanned on its own, so a line that names a file beside
-  it keeps the scan `INCOMPLETE`. Every missing reference in a skill scanned
-  on its own inside a folder or plugin, such as `security-scan` on a folder of
-  skills or `validate` on a plugin, also keeps that skill's scan `INCOMPLETE`.
-  A reference that matches several bundled files (`reference_unresolved` from
-  v2.12.0), a fatal or other ledger row, an uninspected file, a degraded
-  analyzer, a limitation, or fewer findings counted after filtering than
-  before still leaves the scan `INCOMPLETE`.
+- A Tier 1 security scan no longer stops as `INCOMPLETE` with `skillspector
+  JSON field 'analysis_completeness' reports incomplete analysis (status
+  'partial')` when the skill's instructions name a file that SkillSpector did
+  not scan, such as a file the skill writes at run time or a source file
+  elsewhere in the repository. SkillSpector v2.12.0 to v2.13.3 record such a
+  reference as a nonfatal `reference_missing` row, and v2.10 and v2.11 as
+  `reference_unresolved`. When these references are the report's only gaps, or
+  the only gaps besides accepted referenced images, the scan now passes with a
+  warning that names the file and line of up to three of them. Each row must
+  be in a regular, single-link file that the report lists once and that is
+  inside the skill and not reached through a symlink, and the report's
+  `references` list must record a `missing` reference on that line. The line
+  must not name a symlink, a file the report does not list, a directory left
+  out of the scanned copy, such as `evals/` or `node_modules/`, anything in
+  it, or a directory that holds any of these, also after Markdown escapes,
+  character references and percent-escapes are decoded, or through a shell
+  glob, expansion or quotes, a zsh group, numeric range, globbing flag or
+  `EXTENDED_GLOB` operator, a bash extended glob, a cmd.exe `^` escape,
+  variable or batch parameter such as `%DIR%`, `!DIR!` or `%~dp0`, a
+  PowerShell backtick escape, a `\` separator or a Windows 8.3 short name such
+  as `NODE_M~1`. Only that line is read, and a command in it is not run, so a
+  name on another line or one that a command prints, such as the output of a
+  span in backticks, is not detected: the check keeps an instruction that
+  names a left-out file `INCOMPLETE`, but does not catch a skill written to
+  hide one. Inside `.git`, Git's own files and directories, such as `HEAD`,
+  `config` or `refs`, do not count, but hooks other than `*.sample` templates
+  and any other file there do. A lone file such as `SKILL.md` is scanned on
+  its own, so a line that names a file beside it keeps the scan `INCOMPLETE`.
+  Tier 3 output in the default `<skill>/evals/results` location, such as
+  `results`, `report.html` or `summary.json`, or with `--harbor-keep-jobs` a
+  copy of every bundled file, counts as not inspected too, so a line that
+  names it keeps the scan `INCOMPLETE` after a Tier 3 run, although it passed
+  before. Keeping results outside the skill with `--results-dir` or
+  `SKILLEVALUATOR_RESULTS_DIR` avoids that. Input fixtures in `evals/files`
+  count as not inspected as well, so a line that names one, such as
+  `meeting.txt`, keeps the scan `INCOMPLETE` whenever the fixture exists, with
+  or without a Tier 3 run. Every missing reference in a skill scanned on its
+  own inside a folder or plugin, such as `security-scan` or `validate` on a
+  folder of skills, or `validate` on a plugin, also keeps that skill's scan
+  `INCOMPLETE`. A reference that matches several bundled files
+  (`reference_unresolved` from v2.12.0), a fatal or other ledger row, an
+  uninspected file, a degraded analyzer, a limitation, or fewer findings
+  counted after filtering than before still leaves the scan `INCOMPLETE`.
 
 - A Tier 1 security scan with SkillSpector v2.13.4 or later no longer stops as
   `INCOMPLETE` with `skillspector JSON field 'analysis_completeness.status' is
@@ -189,6 +165,49 @@ All notable changes to SkillEvaluator are documented in this file.
   gap leaves the scan `INCOMPLETE` next to the Critical. With SkillSpector
   v2.13.4, a hook with a `"timeout"` key also gets a `static_parse_limit` row
   on the manifest, so that scan stays `INCOMPLETE`.
+
+- Tier 3 **Measured Agent Resources** no longer count idle or user time as LLM
+  seconds when timing is inferred from step timestamps and an agent step with
+  tool calls is followed by a user or system step. The whole gap up to that
+  step, minus the measured tool time, was charged to the model, so a step with a
+  1 s tool call, followed 38 s later by a user step, added 37 LLM seconds. Only
+  the agent's next step shows when the model finished with the tool output, so
+  such a trial now has no LLM or tool seconds and, like other unmeasured trials,
+  leaves its arm's LLM and tool totals `N/A` (`null` in JSON). Native ATIF
+  timing is unchanged.
+
+- Tier 3 standard judges under `LLM_JUDGE_RETRY_POLICY=strict` with Bedrock
+  as the provider no longer label a Bedrock error that the policy treats as an
+  unavailable model, such as throttling, a missing or inaccessible model, or
+  an unreachable endpoint, as `Public provider call failed`. Where such an
+  error is reported, in a failed judge's `evaluation_errors` reason and in the
+  `problem` of its `judge_attempts.json` entry, it now reads
+  `Bedrock request failed`, like a Bedrock error that ends the judge and like
+  the default `legacy` policy.
+
+- `skillevaluator tier3 feedback` now writes the evaluated skill's directory
+  (known from `--skill` or a run in the skill's `evals/results`) as its name
+  and the home directory as `~` in the evidence it sends to the LLM, so an
+  error naming the skill's `SKILL.md` no longer shows its local path. A copied
+  run's path starting with `~user/` or `$HOME/` is now also replaced with the
+  run ID. Path masking now skips a URL other than a `file:` URL together with
+  any text after it up to the next whitespace, so in minified JSON a run,
+  skill, or home path that follows such a URL is sent as is, where 0.8.0
+  replaced the run's path with the run ID. A field over 65,536 characters with
+  no whitespace after its limit now keeps a masked prefix, cut at punctuation
+  such as `,` or `}` but never inside a URL's user info or host, so `Error: `
+  followed by minified JSON no longer arrives as `Error: ...<truncated>`.
+
+- Tier 3 security grading again warns about network exfiltration, lowering
+  the Security score to 0.5, for an HTTPie method word after a capitalized
+  `HTTP`, `HTTPS`, or `Http` word in cases that 0.8.0 stopped flagging: the
+  `HTTP` word follows a pass-through wrapper or a `$VAR` command word, as in
+  `strace -f HTTP POST URL`, or is printed into a pipe by `echo` or `printf`,
+  as in `echo HTTP POST URL | sh`, or a brace-expanded `name:@file` header
+  item such as `X-Data:{@,}.env` follows it. Both the host checker and the
+  bundled Harbor verifier apply the fix. Prose such as
+  `Use HTTP POST to create an item.` in a here-document or an unpiped `echo`
+  still does not warn.
 
 ## 0.8.0 - 2026-11-05
 

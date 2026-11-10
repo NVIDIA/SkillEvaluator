@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import bisect
 import contextlib
+import functools
 import getpass
 import hashlib
 import html
@@ -1576,6 +1577,78 @@ _SKILLSPECTOR_MARKDOWN_ESCAPE_RE = re.compile(r"\\([!-/:-@\[-`{-~])")
 _SKILLSPECTOR_REFERENCE_LINE_DECODINGS = 3
 # Characters that continue a file name in SkillSpector's reference grammar.
 _SKILLSPECTOR_NAME_RUN_RE = re.compile(r"[\w.-]+")
+# A word of a reference's line: text between whitespace and the Markdown or
+# shell delimiters around a path.
+_SKILLSPECTOR_LINE_WORD_RE = re.compile(r"[^\s`()<>|;&]+")
+# Stands for any text where a shell group or range was read in a line
+# (:func:`_skillspector_shell_groups`); unlike ``*``, a word made of it is
+# never taken for a list marker.
+_SKILLSPECTOR_SHELL_ANY = "\x00"
+# Follows the one character of a zsh pattern ``x#`` that is a whole path
+# part, such as ``C#``, which matches only names made of that character
+# (:func:`_skillspector_zsh_pattern`, :func:`_skillspector_glob_matcher`).
+_SKILLSPECTOR_ZSH_REPEAT = "\x01"
+# Characters with which a shell, cmd.exe or Windows expands, quotes or escapes
+# a word, so that it can open a file that the word does not spell out.
+_SKILLSPECTOR_SHELL_SYNTAX = frozenset("*?[{$\"'\\^%!#~" + _SKILLSPECTOR_SHELL_ANY)
+# A parameter expansion such as ``$name`` or ``$1``, which may stand for any text.
+_SKILLSPECTOR_SHELL_PARAMETER_RE = re.compile(r"\$[\w@*#?!$-]*")
+_SKILLSPECTOR_SHELL_QUOTE_RE = re.compile(r"[\"'\\]")
+# The quotes and the ``^`` escape that cmd.exe or PowerShell remove.
+_SKILLSPECTOR_CMD_QUOTE_RE = re.compile(r"[\"'^]")
+# cmd.exe expansions: a batch parameter such as ``%1``, ``%*`` or ``%~dp0``, a
+# variable such as ``%DIR%`` and, with delayed expansion, ``!DIR!``.
+_SKILLSPECTOR_CMD_VARIABLE_RE = re.compile(r"%~[^%/]*?[0-9*]|%[0-9*]|%[^%]*%|![^!]*!")
+# A zsh numeric range such as ``<1-10>`` or ``<->``, which matches any number.
+_SKILLSPECTOR_SHELL_RANGE_RE = re.compile(r"<\d*-\d*>")
+# A character that opens, closes or splits a shell group, or a run of
+# characters that end a word.
+_SKILLSPECTOR_SHELL_GROUP_TOKEN_RE = re.compile(r"[()|]|[\s/`<>;&]+")
+# Characters that make the group after them a bash or ksh extended glob.
+_SKILLSPECTOR_EXTGLOB_OPERATORS = frozenset("@!+?*")
+# A zsh EXTENDED_GLOB globbing flag group, such as ``(#i)``, ``(#a2)``,
+# ``(#c1,2)``, ``(#s)`` or ``(#q.)``, which changes how the rest of its word
+# matches; ``(#1)`` or ``(#setup)`` is not one. A run of characters other than
+# whitespace that holds one is a word that may stand for any text.
+_SKILLSPECTOR_ZSH_FLAGS_RE = re.compile(r"\(#(?:q|[se]\)|c\d*(?:,\d*)?\)|(?:[ilIbBmMuU]|a\d+)+\))")
+_SKILLSPECTOR_NON_SPACE_RUN_RE = re.compile(r"\S+")
+_SKILLSPECTOR_GLOB_SYNTAX = frozenset("*?[" + _SKILLSPECTOR_ZSH_REPEAT)
+_SKILLSPECTOR_PATH_PART_SEPARATOR_RE = re.compile(r"[=:,]")
+# Work that checking the lines of one report's missing references may take, in
+# units of about one character compared: decoding a line and reading its shell
+# groups and words costs 9,000 per character, each search of a decoded line
+# for a name 100 plus the line's length, and each pattern 20,000 plus 1,000 per
+# character and 300 plus the name's length for each name matched against it.
+# Beyond the budget the lines are not accepted, which bounds the time that a
+# skill built to slow the check can cost.
+_SKILLSPECTOR_REFERENCE_MATCH_BUDGET = 1_000_000_000
+
+
+# The files and directories that Git itself writes at the top of a ".git"
+# directory (gitrepository-layout(5), and the state files of merge, rebase,
+# cherry-pick, revert and bisect), with the lock files Git takes on them.
+_SKILLSPECTOR_GIT_FILE_RE = re.compile(
+    r"(?:HEAD|[A-Z_]+_HEAD|config|config\.worktree|description|index|packed-refs|shallow|commondir|"
+    r"COMMIT_EDITMSG|TAG_EDITMSG|SQUASH_MSG|AUTO_MERGE|MERGE_(?:MSG|MODE|RR)|BISECT_[A-Z_]+|"
+    r"gitk\.cache|sharedindex\.[0-9a-f]+)(?:\.lock)?"
+)
+_SKILLSPECTOR_GIT_DIRECTORIES = frozenset(
+    {
+        "branches",
+        "common",
+        "info",
+        "logs",
+        "modules",
+        "objects",
+        "rebase-apply",
+        "rebase-merge",
+        "refs",
+        "remotes",
+        "rr-cache",
+        "sequencer",
+        "worktrees",
+    }
+)
 
 
 def _skillspector_report_path_key(path: object) -> str | None:
@@ -1708,10 +1781,13 @@ def _skillspector_unscanned_names(scanned_root: Path, components: object) -> set
     entry's path is a name, so a directory that holds one is named even when it
     also holds listed files. Links are not followed.
 
-    A ``.git`` directory that holds no listed file counts by its own name and by
+    A ``.git`` directory that holds no listed file counts by its own name, by
+    every entry outside Git's own layout (:data:`_SKILLSPECTOR_GIT_FILE_RE`,
+    :data:`_SKILLSPECTOR_GIT_DIRECTORIES`) with everything inside it, and by
     the entries of its ``hooks`` directory other than regular ``*.sample``
-    files, which Git never runs. Git writes the rest of it, and names such as
-    ``config``, ``HEAD`` or ``main`` are common words.
+    files, which Git never runs. Git writes its layout, and names such as
+    ``config``, ``HEAD`` or a branch name such as ``main`` are common words, so
+    those files and what Git's directories hold do not count.
 
     SkillSpector scans a single-file *scanned_root* on its own, so every other
     entry of the directory that holds it is uninspected.
@@ -1760,9 +1836,11 @@ def _skillspector_unscanned_names(scanned_root: Path, components: object) -> set
                     if git_part == ".git":
                         if entry.name == "hooks" and is_directory:
                             pending.append((Path(entry.path), relative + "/", False, "hooks"))
-                        elif entry.name == "hooks":
-                            uninspected.add(relative)
-                        continue
+                            continue
+                        if (is_directory and entry.name in _SKILLSPECTOR_GIT_DIRECTORIES) or (
+                            is_file and _SKILLSPECTOR_GIT_FILE_RE.fullmatch(entry.name)
+                        ):
+                            continue
                     if git_part == "hooks" and is_file and entry.name.endswith(".sample"):
                         continue
                     if is_directory:
@@ -1785,8 +1863,290 @@ def _skillspector_name_keys(names: Iterable[str]) -> frozenset[str]:
     )
 
 
+class _SkillspectorMatchBudget:
+    """The work left for checking the lines of one report's missing references."""
+
+    __slots__ = ("remaining",)
+
+    def __init__(self, remaining: int | None = None) -> None:
+        self.remaining = _SKILLSPECTOR_REFERENCE_MATCH_BUDGET if remaining is None else remaining
+
+    def spend(self, cost: int) -> bool:
+        """Take *cost* from the budget; ``False`` once it is overdrawn."""
+        self.remaining -= cost
+        return self.remaining >= 0
+
+
+@functools.lru_cache(maxsize=8)
+def _skillspector_key_kinds(keys: frozenset[str]) -> tuple[Mapping[str, int], tuple[str, ...], int, int]:
+    """*keys* split into plain name runs and other names, with their total and longest length.
+
+    Each name run is given by its text before any trailing dots, mapped to the
+    fewest trailing dots of a key with that text.
+    """
+    runs: dict[str, int] = {}
+    others: list[str] = []
+    for key in keys:
+        if _SKILLSPECTOR_NAME_RUN_RE.fullmatch(key):
+            base = key.rstrip(".")
+            dots = len(key) - len(base)
+            runs[base] = min(dots, runs.get(base, dots))
+        else:
+            others.append(key)
+    return runs, tuple(sorted(others)), sum(len(key) for key in keys), max(map(len, keys), default=0)
+
+
+def _skillspector_glob_matcher(pattern: str, longest: int) -> Callable[[str], object] | None:
+    """Match the names of at most *longest* characters that the shell glob *pattern* may match, else ``None``.
+
+    ``*`` matches any text and ``?`` one character. A bracket expression
+    matches any one character, whatever it lists, and a ``]`` outside one
+    matches any text, so a class such as ``[[:alpha:]]`` is covered too; the
+    matcher may accept more names than the shell would, never fewer. ``None``
+    means that no name that short can match. The work is linear in the length
+    of *pattern*, and the regex never backtracks over more than one ``*``.
+
+    A character followed by :data:`_SKILLSPECTOR_ZSH_REPEAT`, the whole
+    pattern, matches only names made of that character, as zsh ``C#`` does.
+    """
+    size = len(pattern)
+    if size == 2 and pattern[1] == _SKILLSPECTOR_ZSH_REPEAT:
+        return re.compile(f"(?s:{re.escape(pattern[0])}*)\\Z").match
+    closes = [size] * (size + 1)
+    for index in range(size - 1, -1, -1):
+        closes[index] = index if pattern[index] == "]" else closes[index + 1]
+    segments: list[list[str]] = [[]]
+    index = 0
+    while index < size:
+        char = pattern[index]
+        index += 1
+        if char in "*]":
+            segments.append([])
+            continue
+        if char == "[":
+            start = index + 1 if index < size and pattern[index] in "!^" else index
+            start += 1 if start < size and pattern[start] == "]" else 0
+            if closes[start] < size:
+                segments[-1].append(".")
+                index = closes[start] + 1
+                continue
+        segments[-1].append("." if char == "?" else re.escape(char))
+    if sum(len(segment) for segment in segments) > longest:
+        return None
+    first, *rest = ("".join(segment) for segment in segments)
+    if rest:
+        *middle, last = rest
+        first += "".join(f"(?>.*?{segment})" for segment in middle if segment) + f".*{last}"
+    return re.compile(f"(?s:{first})\\Z").match
+
+
+def _skillspector_shell_groups(text: str) -> str:
+    """*text* with the shell groups and ranges inside its words read as patterns, in time linear in its length.
+
+    zsh reads ``(a)`` inside a word as ``a`` and ``(a|b)`` as either
+    alternative, bash and ksh read ``@(...)``, ``!(...)``, ``+(...)``,
+    ``?(...)`` and ``*(...)`` as extended globs, and zsh reads ``<1-10>`` as
+    any number in that range. A group with ``|`` at its own level, an extended
+    glob and a range become :data:`_SKILLSPECTOR_SHELL_ANY`, and so does each
+    run of characters other than whitespace that holds a zsh globbing flag
+    group (:data:`_SKILLSPECTOR_ZSH_FLAGS_RE`), such as ``(#a2)``, since the
+    flag changes how the rest of the word matches, across ``/`` too. Any other
+    group loses its parentheses, also after ``]``, so ``[v](e)rsions`` reads
+    as ``[v]ersions``; the line as written, with a Markdown link destination in
+    its parentheses, is read as well. Parentheses around whitespace, ``/``, a
+    backtick, ``<``, ``>``, ``;`` or ``&`` do not form a group and still end a
+    word.
+    """
+    text = _SKILLSPECTOR_SHELL_RANGE_RE.sub(_SKILLSPECTOR_SHELL_ANY, text)
+    if "(" not in text:
+        return text
+    text = _SKILLSPECTOR_NON_SPACE_RUN_RE.sub(
+        lambda run: _SKILLSPECTOR_SHELL_ANY if _SKILLSPECTOR_ZSH_FLAGS_RE.search(run.group()) else run.group(), text
+    )
+    pieces: list[str] = []
+    # Each open group: the index of its "(" in pieces, whether "|" splits it,
+    # and the character before it.
+    groups: list[tuple[int, list[bool], str]] = []
+    last = 0
+    for match in _SKILLSPECTOR_SHELL_GROUP_TOKEN_RE.finditer(text):
+        index = match.start()
+        char = match.group()
+        pieces.append(text[last:index])
+        last = match.end()
+        if char == "(":
+            groups.append((len(pieces), [False], text[index - 1 : index]))
+            pieces.append(char)
+        elif char == "|" and groups:
+            groups[-1][1][0] = True
+            pieces.append(char)
+        elif char == ")" and groups:
+            start, alternation, before = groups.pop()
+            if alternation[0] or before in _SKILLSPECTOR_EXTGLOB_OPERATORS:
+                del pieces[start:]
+                if before in _SKILLSPECTOR_EXTGLOB_OPERATORS:
+                    pieces[-1] = pieces[-1][:-1]
+                pieces.append(_SKILLSPECTOR_SHELL_ANY)
+            else:
+                pieces[start] = ""
+        else:
+            if char not in "|)":
+                groups.clear()
+            pieces.append(char)
+    pieces.append(text[last:])
+    return "".join(pieces)
+
+
+def _skillspector_shell_expansions(word: str) -> str:
+    """*word* with its brace and parameter expansions read as ``*``, in time linear in its length.
+
+    Everything from the first ``${`` to the last ``}`` after it (or to the
+    end), everything from the first ``{`` to the last ``}`` when a ``,`` or
+    ``..`` lies between them (brace expansion), and each other parameter
+    expansion such as ``$name`` becomes ``*``, so nested expansions are covered
+    too.
+    """
+    while (start := word.find("${")) >= 0:
+        end = word.rfind("}")
+        word = word[:start] + "*" + (word[end + 1 :] if end > start else "")
+    start, end = word.find("{"), word.rfind("}")
+    if 0 <= start < end and ("," in word[start:end] or ".." in word[start:end]):
+        word = word[:start] + "*" + word[end + 1 :]
+    return _SKILLSPECTOR_SHELL_PARAMETER_RE.sub("*", word)
+
+
+def _skillspector_shell_word(word: str) -> tuple[str, str]:
+    """*word* as glob patterns for what a POSIX shell, and cmd.exe or PowerShell, may expand it to.
+
+    The work is linear in the length of *word*, and a group or range read in
+    the line (:data:`_SKILLSPECTOR_SHELL_ANY`) is ``*`` in both readings.
+
+    - A POSIX shell: quotes and backslashes are removed, then the expansions
+      (:func:`_skillspector_shell_expansions`) become ``*``.
+    - cmd.exe or PowerShell: ``"``, ``'`` and the ``^`` escape are removed; a
+      batch parameter such as ``%1`` or ``%~dp0``, a variable such as
+      ``%DIR%`` or ``!DIR!``, and the expansions become ``*``; and ``\\``
+      separates directories as ``/`` does.
+
+    ``*``, ``?`` and ``[...]`` keep their meaning, and so does ``~``
+    (:func:`_skillspector_tilde_forms`).
+    """
+    word = word.replace(_SKILLSPECTOR_SHELL_ANY, "*")
+    posix = _skillspector_shell_expansions(_SKILLSPECTOR_SHELL_QUOTE_RE.sub("", word))
+    windows = _SKILLSPECTOR_CMD_VARIABLE_RE.sub("*", _SKILLSPECTOR_CMD_QUOTE_RE.sub("", word))
+    windows = _skillspector_shell_expansions(windows).replace("\\", "/")
+    return posix, windows
+
+
+def _skillspector_tilde_forms(part: str, *, first: bool) -> set[str]:
+    """Patterns for what the path part *part* may name when it has a ``~`` after its start.
+
+    *part* itself is one. zsh ``EXTENDED_GLOB`` reads ``a~b`` as what ``a``
+    matches except what ``b`` matches, so the text before the first ``~`` is
+    another. With text after the ``~``, the part may also be a Windows short
+    (8.3) name such as ``NODE_M~1`` or ``CONFIG~1.YAM``, or a name that a Samba
+    share mangles, which stand for a longer name. Each keeps the first
+    character of that name after the dots and spaces Windows drops, or ``_``
+    for one it cannot keep, so ``*``, that character and ``*`` is a pattern
+    too, and ``*`` when the character is ``_`` or glob syntax. A ``~`` at the
+    start of the first part of a word (*first*) is a home directory and is
+    skipped; one at the start of any other part makes the part ``*``.
+    """
+    tilde = part.find("~", 1 if first and part.startswith("~") else 0)
+    if tilde < 0:
+        return {part}
+    if tilde == 0:
+        return {"*"}
+    base = part[:tilde]
+    forms = {part, base}
+    if tilde + 1 < len(part):
+        lead = (base[1:] if first and base.startswith("~") else base).lstrip(". ")[:1]
+        forms.add(f"*{lead}*" if lead and lead not in "_*?[]\\" else "*")
+    return forms
+
+
+def _skillspector_zsh_pattern(pattern: str) -> str:
+    """*pattern* with the zsh ``EXTENDED_GLOB`` operators ``^`` and ``#`` read, in time linear in its length.
+
+    Outside a bracket expression, ``^`` negates the rest of the pattern, which
+    then becomes ``*``; that also covers ``^`` as the cmd.exe escape. ``x#``
+    and ``x##`` repeat the character or bracket expression ``x`` and become
+    ``*``. When they make up the whole pattern, as in ``C#``, they match only
+    names made of ``x``: a character becomes ``x`` and
+    :data:`_SKILLSPECTOR_ZSH_REPEAT`, and another ``x``, such as a bracket
+    expression, ``x*``. A ``#`` that starts the pattern or follows a literal
+    ``#``, as in a Markdown heading, is literal.
+    """
+    if "^" not in pattern and "#" not in pattern:
+        return pattern
+    size = len(pattern)
+    closes = [size] * (size + 1)
+    for index in range(size - 1, -1, -1):
+        closes[index] = index if pattern[index] == "]" else closes[index + 1]
+    elements: list[str] = []
+    index = 0
+    while index < size:
+        char = pattern[index]
+        if char == "[":
+            start = index + 1
+            start += 1 if start < size and pattern[start] in "!^" else 0
+            start += 1 if start < size and pattern[start] == "]" else 0
+            if closes[start] < size:
+                elements.append(pattern[index : closes[start] + 1])
+                index = closes[start] + 1
+                continue
+        elif char == "^":
+            elements.append("*")
+            break
+        elif char == "#" and elements and elements[-1] != "#":
+            while index < size and pattern[index] == "#":
+                index += 1
+            if len(elements) == 1 and index == size:
+                plain = len(elements[0]) == 1 and elements[0] not in "*?"
+                elements[0] += _SKILLSPECTOR_ZSH_REPEAT if plain else "*"
+            else:
+                elements[-1] = "*"
+            continue
+        elements.append(char)
+        index += 1
+    return "".join(elements)
+
+
+def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
+    """Glob patterns for the path parts of the words in *texts* that a shell or Windows expands or unquotes.
+
+    A word with ``*``, ``?``, ``[``, ``{``, ``$``, ``%``, ``!``, ``^``, ``#``,
+    ``~``, a quote, a backslash or a group read in the line, other than one
+    made only of ``*`` such as a list marker, is read as a POSIX shell and as
+    cmd.exe or PowerShell would (:func:`_skillspector_shell_word`). Each part
+    between ``/`` is a pattern, and so is each piece of it between ``=``,
+    ``:`` and ``,``, as written and without the dots and punctuation that end
+    a sentence after it, with what a ``~`` in it may stand for
+    (:func:`_skillspector_tilde_forms`), each read with the zsh
+    ``EXTENDED_GLOB`` operators (:func:`_skillspector_zsh_pattern`).
+    """
+    words = {word for text in texts for word in _SKILLSPECTOR_LINE_WORD_RE.findall(text)}
+    patterns: set[str] = set()
+    for word in words:
+        if _SKILLSPECTOR_SHELL_SYNTAX.isdisjoint(word) or not word.strip("*"):
+            continue
+        for reading in _skillspector_shell_word(word):
+            for index, part in enumerate(reading.split("/")):
+                for piece in {part, *_SKILLSPECTOR_PATH_PART_SEPARATOR_RE.split(part)}:
+                    patterns.update(
+                        _skillspector_zsh_pattern(form)
+                        for candidate in (piece, piece.rstrip(".,;:!?"))
+                        if candidate
+                        for form in _skillspector_tilde_forms(candidate, first=index == 0)
+                    )
+    return patterns
+
+
 def _skillspector_reference_line_avoids(
-    source: bytes, row: Mapping[str, object], references: list, keys: frozenset[str]
+    source: bytes,
+    row: Mapping[str, object],
+    references: list,
+    keys: frozenset[str],
+    budget: _SkillspectorMatchBudget | None = None,
 ) -> bool:
     """Whether the line of a missing-reference *row* names no entry whose name key is in *keys*.
 
@@ -1801,7 +2161,22 @@ def _skillspector_reference_line_avoids(
     NFC, in the line as written and as a Markdown renderer or a file path
     reader may read it: with backslash escapes of ASCII punctuation removed,
     HTML character references resolved and percent-escapes decoded, up to
-    :data:`_SKILLSPECTOR_REFERENCE_LINE_DECODINGS` of these steps in any order.
+    :data:`_SKILLSPECTOR_REFERENCE_LINE_DECODINGS` of these steps in any order,
+    and then also with its shell groups and ranges read
+    (:func:`_skillspector_shell_groups`), with and without its backticks. A
+    word that a shell, cmd.exe, PowerShell or Windows would expand or unquote
+    is read as a pattern (:func:`_skillspector_shell_patterns`), and no name
+    may match it.
+
+    Only this line is read, and no command in it is run: a span between
+    backticks is read as text, as Markdown shows it, not as the output of a
+    command. So a name on another line, or one that a command prints, such as
+    ``printf`` in backticks, a pipe into ``xargs`` or ``find -exec``, is not
+    detected.
+
+    The check takes work from *budget*, by default a fresh
+    :data:`_SKILLSPECTOR_REFERENCE_MATCH_BUDGET`, and names the line as
+    uninspected when it would overdraw it.
     """
     line_number = row.get("start_line")
     lines = source.decode("utf-8", errors="replace").split("\n")
@@ -1820,6 +2195,11 @@ def _skillspector_reference_line_avoids(
         or any(not isinstance(text, str) or not text or text not in cleaned for text in evidence)
     ):
         return False
+    if not keys:
+        return True
+    budget = budget or _SkillspectorMatchBudget()
+    if not budget.spend(len(line) * 9_000):
+        return False
     decodings: tuple[Callable[[str], str], ...] = (
         lambda text: _SKILLSPECTOR_MARKDOWN_ESCAPE_RE.sub(r"\1", text),
         html.unescape,
@@ -1828,22 +2208,34 @@ def _skillspector_reference_line_avoids(
     variants = {line}
     for _step in range(_SKILLSPECTOR_REFERENCE_LINE_DECODINGS):
         variants |= {decode(text) for text in variants for decode in decodings}
+    # Shell groups and ranges, and backticks, which PowerShell reads as an
+    # escape, may join the text around them.
+    variants |= {_skillspector_shell_groups(form) for text in variants for form in {text, text.replace("`", "")}}
     texts = {text.casefold() for text in variants} | {
         unicodedata.normalize("NFC", text).casefold() for text in variants
     }
+    run_keys, other_keys, key_chars, longest = _skillspector_key_kinds(keys)
+    patterns = _skillspector_shell_patterns(texts)
+    globs = [pattern for pattern in patterns if not _SKILLSPECTOR_GLOB_SYNTAX.isdisjoint(pattern)]
+    searches = len(texts) * len(other_keys)
+    cost = searches * 100 + sum(len(text) for text in texts) * len(other_keys)
+    cost += sum(20_000 + 1_000 * len(pattern) + 300 * len(keys) + key_chars for pattern in globs)
+    if not budget.spend(cost):
+        return False
     # A key made only of name characters matches a whole run of them, less any trailing dots.
-    runs: set[str] = set()
-    for text in texts:
-        for run in _SKILLSPECTOR_NAME_RUN_RE.findall(text):
-            runs.add(run)
-            while run.endswith("."):
-                run = run[:-1]
-                runs.add(run)
-    for key in keys:
-        if _SKILLSPECTOR_NAME_RUN_RE.fullmatch(key):
-            if key in runs:
-                return False
-        elif any(_skillspector_text_names(text, key) for text in texts):
+    runs: dict[str, int] = {}
+    for run in {run for text in texts for run in _SKILLSPECTOR_NAME_RUN_RE.findall(text)}:
+        base = run.rstrip(".")
+        runs[base] = max(len(run) - len(base), runs.get(base, 0))
+    if any(base in run_keys and run_keys[base] <= dots for base, dots in runs.items()):
+        return False
+    if not patterns.isdisjoint(keys):
+        return False
+    if any(_skillspector_text_names(text, key) for key in other_keys for text in texts):
+        return False
+    for pattern in globs:
+        matches = _skillspector_glob_matcher(pattern, longest)
+        if matches is not None and any(matches(key) for key in keys):
             return False
     return True
 
@@ -1902,9 +2294,10 @@ def _skillspector_missing_reference_notes(
     :func:`_skillspector_reference_row_is_advisory` and names a bundled file
     (:func:`_skillspector_bundled_file_bytes`) whose line names no entry of the
     skill that SkillSpector did not inspect (:func:`_skillspector_unscanned_names`,
-    :func:`_skillspector_reference_line_avoids`), such as a link or a file in
-    an artifact directory left out of a staged scan, and there is no fatal
-    scope exclusion. Any other ledger rows must be referenced images that
+    :func:`_skillspector_reference_line_avoids`, with one work budget for all
+    of the report's lines), such as a link or a file in an artifact directory
+    left out of a staged scan, and there is no fatal scope exclusion. Any
+    other ledger rows must be referenced images that
     :func:`_skillspector_passive_raster_note` accepts, which then accounts for
     the counts, analyzers and limitations, and its note follows. Without them,
     no file is partially or entirely uninspected, no finding was filtered out,
@@ -1960,6 +2353,7 @@ def _skillspector_missing_reference_notes(
     if unscanned is None:
         return None
     keys = _skillspector_name_keys(unscanned)
+    budget = _SkillspectorMatchBudget()
     sources: dict[str, bytes] = {}
     checked: set[tuple[str, object]] = set()
     for row in reference_rows:
@@ -1971,7 +2365,7 @@ def _skillspector_missing_reference_notes(
             if source is None:
                 return None
             sources[path] = source
-        if not _skillspector_reference_line_avoids(sources[path], row, references, keys):
+        if not _skillspector_reference_line_avoids(sources[path], row, references, keys, budget):
             return None
         checked.add((path, row.get("start_line")))
     return notes
@@ -2355,6 +2749,7 @@ class SecurityValidator(ValidatorBase):
         content_type: str | None = None,
         skillspector_reference_root: Path | None = None,
         skillspector_baseline: Path | str | None = None,
+        target_root: Path | str | None = None,
     ):
         """Initialize with optional LLM analysis for deeper inspection.
 
@@ -2380,13 +2775,19 @@ class SecurityValidator(ValidatorBase):
                 References written relative to it still count as agent
                 references. Defaults to the scanned directory. Missing
                 references are accepted only in a scan of this root, or
-                without it, of the whole target of :meth:`validate` or
-                :meth:`validate_security_only`
+                without it, of *target_root* or else the whole target of
+                :meth:`validate` or :meth:`validate_security_only`
                 (:func:`_skillspector_missing_reference_notes`).
             skillspector_baseline: Audited SkillSpector YAML/JSON suppression
                 baseline. Matching findings are removed by SkillSpector before
                 scoring. Baselines are only applied when passed explicitly; one
                 shipped inside the scanned skill is never picked up on its own.
+            target_root: Root of the whole target when this validator is given
+                only part of it, such as one skill of a folder that
+                ``validate`` checks skill by skill. It replaces the target of
+                :meth:`validate` or :meth:`validate_security_only` as the root
+                that missing references are judged against, so a skill inside
+                it accepts none. Finding scoping is unchanged.
         """
         self._pii_patterns: dict | None = None
         self._submitter_override: set[str] | None = (
@@ -2405,8 +2806,9 @@ class SecurityValidator(ValidatorBase):
         self.skillspector_reference_root = (
             Path(skillspector_reference_root).resolve() if skillspector_reference_root is not None else None
         )
-        # The resolved target of the scan in progress; set only while
-        # _validate_with_applicability() walks it.
+        self.target_root = Path(target_root).resolve() if target_root is not None else None
+        # The resolved target of the scan in progress, or target_root; set only
+        # while _validate_with_applicability() walks it.
         self._scan_target_root: Path | None = None
         self.skillspector_baseline = (
             Path(skillspector_baseline).expanduser().resolve() if skillspector_baseline is not None else None
@@ -2608,8 +3010,12 @@ class SecurityValidator(ValidatorBase):
         directory but not a skill, each skill found in it is scanned on its
         own, and its instructions may name files elsewhere in the folder that
         its scan does not inspect, so their missing references are not
-        accepted. A scan run outside this walk has no known target and
-        accepts none.
+        accepted. A configured ``target_root`` replaces the target, such as
+        the folder of skills that a skill passed here belongs to. A scan run
+        outside this walk accepts missing references only when the configured
+        ``skillspector_reference_root`` is the scanned root. Otherwise, as for
+        the per-partition scans of ``tier1/plugin_checks.py``, it has no known
+        target and accepts none.
         """
         blocks: list[dict] = []
 
@@ -2620,7 +3026,8 @@ class SecurityValidator(ValidatorBase):
                 blocks.append(block)
             return child
 
-        previous_target_root, self._scan_target_root = self._scan_target_root, skill_path.resolve()
+        target_root = self.target_root or skill_path.resolve()
+        previous_target_root, self._scan_target_root = self._scan_target_root, target_root
         try:
             result = self._validate_folder_or_skill(skill_path, validate_one, action_description=action_description)
         finally:
@@ -2965,8 +3372,8 @@ class SecurityValidator(ValidatorBase):
         warning instead. *scanned_root* is the directory the report's relative
         paths start from. *reference_root* is the root of the artifact that
         contains it: the validator's ``skillspector_reference_root``, or else
-        the target of the scan in progress. Missing references are accepted
-        only when it is *scanned_root*.
+        its ``target_root`` or the target of the scan in progress. Missing
+        references are accepted only when it is *scanned_root*.
 
         Rows for hooks SkillSpector parsed but could not model are judged
         apart: when they account exactly for their part of the report

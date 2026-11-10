@@ -1599,11 +1599,6 @@ _SKILLSPECTOR_SHELL_RANGE_RE = re.compile(r"<\d*-\d*>")
 _SKILLSPECTOR_SHELL_GROUP_TOKEN_RE = re.compile(r"[()|]|[\s/`<>;&]+")
 # Characters that make the group after them a bash or ksh extended glob.
 _SKILLSPECTOR_EXTGLOB_OPERATORS = frozenset("@!+?*")
-# A span between backticks, and the name text or "/" that may join one before
-# or after it.
-_SKILLSPECTOR_BACKTICK_SPAN_RE = re.compile(r"`[^`]*`")
-_SKILLSPECTOR_JOINED_BEFORE_RE = re.compile(r"(?:\w[.-]?|/)\Z")
-_SKILLSPECTOR_JOINED_AFTER_RE = re.compile(r"[.-]?\w|/")
 _SKILLSPECTOR_GLOB_SYNTAX = frozenset("*?[")
 _SKILLSPECTOR_PATH_PART_SEPARATOR_RE = re.compile(r"[=:,]")
 # Work that checking the lines of one report's missing references may take, in
@@ -1962,30 +1957,6 @@ def _skillspector_shell_groups(text: str) -> str:
     return "".join(pieces)
 
 
-def _skillspector_command_substitutions(text: str) -> str:
-    """*text* with each backtick span that joins a name read as a command substitution, in linear time.
-
-    Backticks pair from the left. A span with a letter, digit, ``_`` or ``/``
-    right before or after it, also across one ``.`` or ``-``, is joined to a
-    name, such as a span holding ``echo v`` right before ``ersions``. A shell
-    replaces the span with the command's output, so it becomes
-    :data:`_SKILLSPECTOR_SHELL_ANY`. A Markdown code span between spaces or
-    before a full stop is left as it is.
-    """
-    if "`" not in text:
-        return text
-
-    def read(match: re.Match[str]) -> str:
-        start, end = match.span()
-        if _SKILLSPECTOR_JOINED_BEFORE_RE.search(text, max(0, start - 2), start) or (
-            _SKILLSPECTOR_JOINED_AFTER_RE.match(text, end)
-        ):
-            return _SKILLSPECTOR_SHELL_ANY
-        return match.group()
-
-    return _SKILLSPECTOR_BACKTICK_SPAN_RE.sub(read, text)
-
-
 def _skillspector_shell_expansions(word: str) -> str:
     """*word* with its brace and parameter expansions read as ``*``, in time linear in its length.
 
@@ -2129,6 +2100,12 @@ def _skillspector_reference_line_avoids(
     is read as a pattern (:func:`_skillspector_shell_patterns`), and no name
     may match it.
 
+    Only this line is read, and no command in it is run: a span between
+    backticks is read as text, as Markdown shows it, not as the output of a
+    command. So a name on another line, or one that a command prints, such as
+    ``printf`` in backticks, a pipe into ``xargs`` or ``find -exec``, is not
+    detected.
+
     The check takes work from *budget*, by default a fresh
     :data:`_SKILLSPECTOR_REFERENCE_MATCH_BUDGET`, and names the line as
     uninspected when it would overdraw it.
@@ -2164,12 +2141,8 @@ def _skillspector_reference_line_avoids(
     for _step in range(_SKILLSPECTOR_REFERENCE_LINE_DECODINGS):
         variants |= {decode(text) for text in variants for decode in decodings}
     # Shell groups and ranges, and backticks, which PowerShell reads as an
-    # escape and a shell as command substitution, may join the text around them.
-    variants |= {
-        _skillspector_shell_groups(form)
-        for text in variants
-        for form in {text, text.replace("`", ""), _skillspector_command_substitutions(text)}
-    }
+    # escape, may join the text around them.
+    variants |= {_skillspector_shell_groups(form) for text in variants for form in {text, text.replace("`", "")}}
     texts = {text.casefold() for text in variants} | {
         unicodedata.normalize("NFC", text).casefold() for text in variants
     }

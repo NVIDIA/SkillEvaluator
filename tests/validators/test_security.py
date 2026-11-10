@@ -9992,7 +9992,6 @@ class TestSkillspectorMissingReferences:
             ("Run [it](v*\\i*.sh) now.", "install.sh", True),
             ("Run `& ver`sions/inst`all.sh` now.", "versions", True),
             ("Run ``sh `echo v`ersions/setup`` now.", "versions", True),
-            ("Run ``sh `printf '\\166'`ersions/setup`` now.", "versions", True),
             ("Run ``sh $(printf '\\166')ersions/setup`` now.", "versions", True),
             ("Write the summary to `output/notes.md` (optional).", "evals", False),
             ("Call `render(notes)` and write `output/notes.md`.", "evals", False),
@@ -10001,6 +10000,11 @@ class TestSkillspectorMissingReferences:
             ("Keep it to ~5 lines in `output/notes.md`, 50% shorter.", "evals", False),
             ("Read `~/.config/notes.toml`, then write `output/notes.md`!", "evals", False),
             ("Answer `yes` or `no`, then write `output/notes.md`.", "evals", False),
+            # A span between backticks is code, not a command whose output may be any name.
+            ("List the `topic`s and write the summary to `output/notes.md`.", "evals", False),
+            ("Call the API with `GET`/`POST` and write `output/notes.md`.", "evals", False),
+            ("Run `npm`'s installer, set `--mode`=`fast` and write `output/notes.md`.", "evals", False),
+            ('Say "`yes`" or "`no`", then write `output/notes.md`.', "evals", False),
         ],
     )
     def test_reference_line_names_an_unscanned_entry(self, line: str, name: str, named: bool) -> None:

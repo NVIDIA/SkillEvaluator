@@ -95,10 +95,12 @@ All notable changes to SkillEvaluator are documented in this file.
   it, or a directory that holds any of these, also after Markdown escapes,
   character references and percent-escapes are decoded, or through a shell
   glob, expansion or quotes, a zsh group, numeric range or `EXTENDED_GLOB`
-  operator, a bash extended glob, a command in backticks, a cmd.exe `^`
-  escape, variable or batch parameter such as `%DIR%`, `!DIR!` or `%~dp0`, a
-  PowerShell backtick escape, a `\` separator or a Windows 8.3 short name such
-  as `NODE_M~1`. Inside `.git`, Git's own files and directories, such as
+  operator, a bash extended glob, a cmd.exe `^` escape, variable or batch
+  parameter such as `%DIR%`, `!DIR!` or `%~dp0`, a PowerShell backtick escape,
+  a `\` separator or a Windows 8.3 short name such as `NODE_M~1`. Only that
+  line is read, and a command in it is not run, so a name on another line or
+  one that a command prints, such as the output of a span in backticks, is not
+  detected. Inside `.git`, Git's own files and directories, such as
   `HEAD`, `config` or `refs`, do not count, but hooks other than `*.sample`
   templates and any other file there do. A lone file such as `SKILL.md` is
   scanned on its own, so a line that names a file beside it keeps the scan

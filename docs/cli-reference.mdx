@@ -164,7 +164,7 @@ pipeline.
 | --- | --- |
 | `tier1` | `validate`, `quality-check`, `rubric-eval`, `security-scan`, `pii-scan`, `lint-scripts` |
 | `tier2` | `context-optimization-check`, `dedup-scan`, `similarity-check` |
-| `tier3` | `evaluate`, `select-decoys`, `create-eval-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `feedback`, `validate`, `harbor-view` |
+| `tier3` | `evaluate`, `select-decoys`, `create-eval-dataset`, `migrate-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `feedback`, `validate`, `harbor-view` |
 
 `health-check` and [models](#models) are top-level only. The expert commands
 [tier3 evaluate](#tier3-evaluate), [tier3 select-decoys](#tier3-select-decoys),
@@ -519,6 +519,25 @@ last value as `nvidia/nvidia/nemotron-3-super-120b-a12b` because its adapter
 namespace precedes the NVIDIA catalog ID.
 
 Flags marked "unset" fall back to their matching keys in `evals/config.yml` where one exists, then to the built-in defaults. The exception is `--results-dir`, which resolves independently of `evals/config.yml`.
+
+## tier3 migrate-dataset
+
+Preview a lossless conversion to the preferred dataset object. No provider or
+Tier 3 runtime is required:
+
+```bash
+skillevaluator tier3 migrate-dataset ./my-skill/evals/evals.json --skill-name my-skill
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--skill-name NAME` | inferred when unambiguous | Target skill identity. Required for all-negative or mixed-identity legacy datasets. |
+| `--output DESTINATION` | preview only | Write a new `.json`, `.yaml`, or `.yml` file; existing paths and the source are refused. |
+
+`SOURCE` accepts JSON, case-per-line JSONL, YAML, or YML. JSONL is input-only;
+output is one JSON/YAML object. See [Migrate a legacy dataset](eval-datasets.mdx#migrate-a-legacy-dataset)
+for routing-label requirements, preserved fields, and how to promote the reviewed
+conversion without changing fixture paths.
 
 ## create-eval-dataset
 

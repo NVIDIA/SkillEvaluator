@@ -16,6 +16,12 @@ All notable changes to SkillEvaluator are documented in this file.
   Pin the public calculator input to the historical repository revision used by
   the run, preserving its original hash and evidence pointers after migration.
 
+- `skillevaluator tier3 migrate-dataset` previews lossless legacy conversions and
+  writes only to an explicit new JSON/YAML destination. Authored routing, case
+  IDs, fixture selectors, and extension metadata are preserved. The five bundled
+  reference datasets now use the preferred object format; legacy reading remains
+  supported.
+
 - Tier 3 reports show per-case expectation inventories with explicit met,
   unmet, unchecked, unscored and inapplicable judgments, evidence and next
   diagnostic steps for executed conditions. Behavior judges can abstain when

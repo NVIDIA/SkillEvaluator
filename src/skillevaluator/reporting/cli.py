@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from skillevaluator.constants import (
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
@@ -53,6 +54,7 @@ from skillevaluator.reporting.harbor_viewer import (
 from skillevaluator.reporting.presentation import FinalRenderContext, build_final_render_context, trial_coverage
 from skillevaluator.reporting.run_status import Status, result_status
 from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, RED, TEXT, grade_style, lift_style
+from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
 from skillevaluator.utils.rich_markup import escape_markup
 
 if TYPE_CHECKING:
@@ -212,6 +214,11 @@ class CLIReporter(ReporterBase):
             if id(result) not in rendered:
                 agent_eval = result.metadata.get("agent_eval")
                 if isinstance(agent_eval, dict):
+                    provenance_line, provenance_is_template = dataset_provenance_display(
+                        agent_eval.get("dataset_provenance")
+                    )
+                    if provenance_line:
+                        console.print(Text(f"  {provenance_line}", style="yellow" if provenance_is_template else "dim"))
                     self._print_harbor_artifacts(agent_eval, console)
 
         color = {Status.PASSED: "green", Status.FAILED: "red"}.get(context.command_status, "yellow")
@@ -411,12 +418,24 @@ class CLIReporter(ReporterBase):
             f"\n  [{vc}]Verdict: {verdict_text}[/{vc}] "
             f"(composite lift = [{composite_style}]{composite_text}[/{composite_style}])"
         )
+        provenance_line, provenance_is_template = dataset_provenance_display(agent_eval.get("dataset_provenance"))
+        if provenance_line:
+            console.print(Text(f"  {provenance_line}", style="yellow" if provenance_is_template else "dim"))
         if verdict == "inconclusive":
             console.print(
                 "  [yellow]Skill never activated. Scores are diagnostic only; no lift verdict was computed.[/yellow]"
             )
         if runtime:
             console.print(f"  [dim]Runtime: {runtime:.1f}s[/dim]")
+        sufficiency = agent_eval.get("dataset_sufficiency")
+        if isinstance(sufficiency, dict):
+            status = str(sufficiency.get("status") or "provisional")
+            style = "yellow" if status == "provisional" else "green"
+            line = (
+                sufficiency.get("coverage_summary")
+                or f"Dataset sufficiency: {status} — {sufficiency.get('reason', '')}"
+            )
+            console.print(f"  [{style}]{line}[/{style}]")
         CLIReporter._print_harbor_artifacts(agent_eval, console)
         console.print(f"  {trial_coverage(agent_eval).text}")
         console.print()

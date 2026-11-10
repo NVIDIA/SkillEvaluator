@@ -884,6 +884,8 @@ class TestInsightsJudgeRecommendationQuality:
             "Relax the assertions for positive-001.",
             "Lower the pass threshold for positive-001 to 0.3.",
             "Soften positive-001's ground truth to accept partial answers.",
+            "The pass threshold for positive-001 should be lowered to 0.3.",
+            "Expectations for positive-001 ought to be relaxed so the agent passes.",
         ],
     )
     def test_drops_advice_that_weakens_requirements(self, message: str) -> None:
@@ -892,6 +894,24 @@ class TestInsightsJudgeRecommendationQuality:
     def test_keeps_advice_that_clarifies_requirements(self) -> None:
         message = "Make the expected output of positive-001 explicit in evals.json."
         assert self._parse(message) == [message]
+
+    def test_keeps_negated_and_non_requirement_uses_of_weakening_verbs(self) -> None:
+        messages = (
+            "Do not lower the pass threshold for positive-001; fix the rounding step instead.",
+            "Lower ambiguity in positive-001's acceptance criteria by documenting the rounding rule.",
+            "Tell the agent to lowercase unit names, as positive-001's expected output does.",
+        )
+        assert self._parse(*messages) == list(messages)
+
+    def test_does_not_match_a_requirement_across_title_and_message(self) -> None:
+        message = "Document the expected JSON shape for positive-001 in SKILL.md."
+        recommendation = self._recommendation(message, title="Lower token usage")
+        response = json.dumps({"conclusions": [], "recommendations": [recommendation]})
+        parsed = InsightsJudge().parse_response(
+            response,
+            canonical={"dataset": [{"id": "positive-001", "expected_skill": "calculator"}], "trials": []},
+        )
+        assert [item["message"] for item in parsed["recommendations"]] == [message]
 
     def test_drops_repeats_of_deterministic_and_earlier_recommendations(self) -> None:
         first = "Document the rounding rule that positive-001 depends on in SKILL.md."

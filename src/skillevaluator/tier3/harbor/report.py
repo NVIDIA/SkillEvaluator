@@ -244,6 +244,14 @@ def _metric_label(metric: str) -> str:
     )
 
 
+def _normalize_evidence_refs(raw_refs: Any) -> list[Any]:
+    if isinstance(raw_refs, list):
+        return raw_refs
+    if isinstance(raw_refs, dict | str):
+        return [raw_refs]
+    return []
+
+
 def _extract_findings(
     rewards: list[dict[str, Any]],
     *,
@@ -295,11 +303,7 @@ def _extract_findings(
         for t in trials:
             d = t["detail"]
             if isinstance(d, dict):
-                raw_refs = d.get("evidence_refs")
-                if isinstance(raw_refs, list):
-                    metric_refs.extend(raw_refs)
-                elif isinstance(raw_refs, dict | str):
-                    metric_refs.append(raw_refs)
+                metric_refs.extend(_normalize_evidence_refs(d.get("evidence_refs")))
         _seen: set[tuple[Any, ...]] = set()
         _refs: list[dict[str, Any]] = []
         for raw_ref in metric_refs:
@@ -588,13 +592,14 @@ def _build_evidence_ref_lookup(rewards: list[dict[str, Any]]) -> dict[str, dict[
             metric_detail = _detail_for_finding(reward, metric)
             if not isinstance(metric_detail, dict):
                 continue
-            for ref in metric_detail.get("evidence_refs") or []:
-                if not isinstance(ref, dict):
+            for ref in _normalize_evidence_refs(metric_detail.get("evidence_refs")):
+                if not isinstance(ref, dict | str):
                     continue
-                if ref.get("source") or evidence_ref_identity(ref):
-                    key = _compact_evidence_ref(ref)
+                resolved = _resolve_evidence_ref(ref, {})
+                if resolved.get("source") or evidence_ref_identity(resolved):
+                    key = _compact_evidence_ref(resolved)
                     if key not in lookup:
-                        lookup[key] = ref
+                        lookup[key] = resolved
     return lookup
 
 

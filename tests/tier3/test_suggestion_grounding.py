@@ -444,6 +444,34 @@ def test_suggestions_drop_evidence_refs_the_run_did_not_record(monkeypatch):
     assert obj["evidence_refs"][0]["kind"] == "tool_call"
 
 
+@pytest.mark.parametrize(
+    "raw_refs",
+    [
+        ["trajectory.json#/steps/14"],
+        {"source": "trajectory.json", "json_pointer": "/steps/14", "kind": "tool_call", "excerpt": "submit ..."},
+        "trajectory.json#/steps/14",
+    ],
+)
+def test_suggestions_resolve_legacy_evidence_ref_shapes(monkeypatch, raw_refs):
+    monkeypatch.setattr(
+        "skillevaluator.tier3.eval_core.llm_judge.call_public_llm",
+        lambda _prompt, **_kw: (
+            '[{"suggestion": "Fix evaluator job", "dimension": "goal_accuracy",'
+            ' "evidence_refs": ["trajectory.json#/steps/14"]}]',
+            None,
+        ),
+    )
+    reward = _reward_multi_metric(0.1)
+    reward["details"]["goal_accuracy"]["evidence_refs"] = raw_refs
+    findings = report._extract_findings([reward])
+    [suggestion] = report._generate_suggestions_structured("demo", findings, [reward])
+    assert suggestion["evidence_refs"][0]["source"] == "trajectory.json"
+    assert suggestion["evidence_refs"][0]["json_pointer"] == "/steps/14"
+    if isinstance(raw_refs, dict):
+        assert suggestion["evidence_refs"][0]["kind"] == "tool_call"
+        assert suggestion["evidence_refs"][0]["excerpt"] == "submit ..."
+
+
 def test_suggestions_keep_one_copy_of_a_repeated_suggestion(monkeypatch):
     monkeypatch.setattr(
         "skillevaluator.tier3.eval_core.llm_judge.call_public_llm",

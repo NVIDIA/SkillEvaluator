@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import bisect
 import contextlib
+import fnmatch
 import getpass
 import hashlib
 import html
@@ -1573,6 +1574,18 @@ _SKILLSPECTOR_MARKDOWN_ESCAPE_RE = re.compile(r"\\([!-/:-@\[-`{-~])")
 _SKILLSPECTOR_REFERENCE_LINE_DECODINGS = 3
 # Characters that continue a file name in SkillSpector's reference grammar.
 _SKILLSPECTOR_NAME_RUN_RE = re.compile(r"[\w.-]+")
+# A word of a reference's line: text between whitespace and the Markdown or
+# shell delimiters around a path.
+_SKILLSPECTOR_LINE_WORD_RE = re.compile(r"[^\s`()<>|;&]+")
+# Characters with which a shell expands, quotes or escapes a word, so that it
+# can open a file that the word does not spell out.
+_SKILLSPECTOR_SHELL_SYNTAX = frozenset("*?[{$\"'\\")
+# Brace expansions (``{a,b}``, ``{1..3}``) and parameter expansions (``$name``,
+# ``${name}``), which may stand for any text.
+_SKILLSPECTOR_SHELL_EXPANSION_RE = re.compile(r"\{[^{}]*(?:,|\.\.)[^{}]*\}|\$\{[^{}]*\}?|\$[\w@*#?!$-]*")
+_SKILLSPECTOR_SHELL_QUOTE_RE = re.compile(r"[\"'\\]")
+_SKILLSPECTOR_GLOB_SYNTAX = frozenset("*?[")
+_SKILLSPECTOR_PATH_PART_SEPARATOR_RE = re.compile(r"[/=:]")
 
 
 def _skillspector_bundled_file_bytes(path: object, components: object, scanned_root: Path | None) -> bytes | None:
@@ -1767,8 +1780,32 @@ def _skillspector_name_keys(names: Iterable[str]) -> frozenset[str]:
     )
 
 
+def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
+    """:mod:`fnmatch` patterns for the path parts of the words in *texts* that a shell expands or unquotes.
+
+    A word with ``*``, ``?``, ``[``, ``{``, ``$``, a quote or a backslash, other
+    than one made only of ``*`` such as a list marker, is read as a shell
+    would: each brace or parameter expansion stands for any text (``*``),
+    quotes and backslashes are removed, and ``*``, ``?`` and ``[...]`` keep
+    their meaning. Each part between ``/``, ``=`` and ``:`` is a pattern, as
+    written and without the dots and punctuation that end a sentence after it.
+    """
+    patterns: set[str] = set()
+    for text in texts:
+        for word in _SKILLSPECTOR_LINE_WORD_RE.findall(text):
+            if _SKILLSPECTOR_SHELL_SYNTAX.isdisjoint(word) or not word.strip("*"):
+                continue
+            unquoted = _SKILLSPECTOR_SHELL_QUOTE_RE.sub("", _SKILLSPECTOR_SHELL_EXPANSION_RE.sub("*", word))
+            for part in _SKILLSPECTOR_PATH_PART_SEPARATOR_RE.split(unquoted):
+                patterns.update(candidate for candidate in (part, part.rstrip(".,;:!?")) if candidate)
+    return patterns
+
+
 def _skillspector_reference_line_avoids(
-    source: bytes, row: Mapping[str, object], references: list, keys: frozenset[str]
+    source: bytes,
+    row: Mapping[str, object],
+    references: list,
+    keys: frozenset[str],
 ) -> bool:
     """Whether the line of a missing-reference *row* names no entry whose name key is in *keys*.
 
@@ -1784,6 +1821,8 @@ def _skillspector_reference_line_avoids(
     reader may read it: with backslash escapes of ASCII punctuation removed,
     HTML character references resolved and percent-escapes decoded, up to
     :data:`_SKILLSPECTOR_REFERENCE_LINE_DECODINGS` of these steps in any order.
+    A word that a shell would expand or unquote is read as a pattern
+    (:func:`_skillspector_shell_patterns`), and no name may match it.
     """
     line_number = row.get("start_line")
     lines = source.decode("utf-8", errors="replace").split("\n")
@@ -1827,6 +1866,14 @@ def _skillspector_reference_line_avoids(
                 return False
         elif any(_skillspector_text_names(text, key) for text in texts):
             return False
+    patterns = _skillspector_shell_patterns(texts)
+    if not patterns.isdisjoint(keys):
+        return False
+    for pattern in patterns:
+        if not _SKILLSPECTOR_GLOB_SYNTAX.isdisjoint(pattern):
+            matches = re.compile(fnmatch.translate(pattern)).match
+            if any(matches(key) for key in keys):
+                return False
     return True
 
 

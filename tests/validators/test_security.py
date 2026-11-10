@@ -9322,6 +9322,10 @@ class TestSkillspectorMissingReferences:
             ("[the setup folder](versions/)", "versions/install.sh"),
             ("[the setup script](node\\_modules/run\\_all.sh)", "node_modules/run_all.sh"),
             ("[the setup script](&#118;ersions/inst&#97;ll.sh)", "versions/install.sh"),
+            ("[the setup script](v*/*.sh)", "versions/install.sh"),
+            ("[the setup script](vers?ons/inst?ll.sh)", "versions/install.sh"),
+            ('[the setup script](ver""sions/inst""all.sh)', "versions/install.sh"),
+            ("[the setup script](v[e]rsions/i[n]stall.sh)", "versions/install.sh"),
         ],
     )
     @patch("skillevaluator.validators.security.Tools")
@@ -9773,6 +9777,22 @@ class TestSkillspectorMissingReferences:
             ("Run `reinstall.sh` now.", "install.sh", False),
             ("Run `install.shx` now.", "install.sh", False),
             ("Write the summary to `output/notes.md`.", "evals", False),
+            # A shell expands globs and removes quotes, so these name the files they match.
+            ("Run [it](v*/*.sh) now.", "versions", True),
+            ("Run [it](v*/*.sh) now.", "install.sh", True),
+            ("Run [it](vers?ons/inst?ll.sh) now.", "install.sh", True),
+            ('Run [it](ver""sions/inst""all.sh) now.', "versions", True),
+            ("Run [it](v[e]rsions/i[n]stall.sh) now.", "install.sh", True),
+            ("Run [it](v{e,x}rsions/setup) now.", "versions", True),
+            ("Run [it]($ROOT/setup) now.", "versions", True),
+            ("Run `ver\\sions/setup` now.", "versions", True),
+            ("Run `bash v*/*.sh`, then write `output/notes.md`.", "install.sh", True),
+            ("Write `output/*.md` files.", "readme.md", True),
+            ("Write `output/*.md` files.", "evals", False),
+            ("* Write the summary to `output/notes.md`.", "evals", False),
+            ("Write **all** notes to `output/notes.md`.", "evals", False),
+            ("Write each summary to `output/{name}.md`.", "evals", False),
+            ("Is the user's summary in `output/notes.md`?", "evals", False),
         ],
     )
     def test_reference_line_names_an_unscanned_entry(self, line: str, name: str, named: bool) -> None:

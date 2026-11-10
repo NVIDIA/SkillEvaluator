@@ -1,216 +1,13 @@
 ---
 title: "GitLab CI/CD"
-description: "Add reusable skill checks to GitLab, including an opt-in three-tier pipeline with trusted feedback."
+description: "Add quality and security checks to GitLab with no model key required."
 ---
 
-Bring skill evaluation to GitLab with a reusable CI job. Point it at your skills
+Bring quality and security checks to your repository. No model key required.
+Optional LLM checks are available. Point the reusable GitLab CI job at your skills
 and choose a quality threshold; merge requests evaluate changed skills
 without installing scanners or adding evaluation code to your repository.
 The shared container includes SkillSpector security scanning.
-
-## Three-tier checks and feedback
-
-This path requires **GitLab 17.0 or later** for validated include inputs.
-The unreleased [all-tier CLI path](cli-onboarding.mdx#opt-in-to-three-tier-ci)
-creates two thin files: `.gitlab-ci.yml` includes the pinned shared evaluation
-configuration, and `.gitlab/skill-feedback.yml` includes pinned trusted feedback.
-Install a reviewed candidate build; `--tiers 1,2,3` selects its bundled
-schema-version 2 descriptor declaring `all-tiers-gitlab`. Use `--release` only
-to override it with an alternate reviewed descriptor. Released 0.8.0
-configurations below remain Tier 1 only. The CLI never replaces an existing,
-different `.gitlab-ci.yml`, such as a released Tier 1 setup: `--mode preview`
-prints the rendered files and the merge steps, and `--mode save` and `--mode pr`
-stop with an error until you merge by hand.
-
-### Merge into an existing root configuration
-
-The trusted feedback job validates the root `.gitlab-ci.yml` of the MR
-pipeline, so a merged file must keep this shape:
-
-1. Make `include` exactly the two rendered entries: the pinned `all-tiers.yml`
-   remote and the `.gitlab/skill-feedback.yml` local include with its rule.
-   Remove the Tier 1 `skill-evaluation.yml` include, which defines the same
-   `skill-evaluation` job, and any other include. Feedback rejects other
-   includes and reads the root as plain YAML, so do not use `!reference` tags.
-2. Add the rendered `variables`, replacing earlier `SKILL_EVAL_*` values.
-   If the root defines `stages`, keep `test` in the list: every SkillEvaluator
-   job uses stage `test`, and GitLab rejects a job whose stage is not listed.
-3. Use the rendered `workflow: rules`. Keep your own workflow rules after the
-   two `SKILL_EVAL_FEEDBACK` rules and before the final `when: never`, and
-   only if they still allow merge-request, default-branch and web pipelines.
-4. Replace any `skill-evaluation` override with the rendered
-   `skill-evaluation` and `skill-evaluation-native` entries.
-5. Guard every other job. Trusted feedback runs as a pipeline on the protected
-   default branch, so an unguarded job, such as a deployment gated on the
-   default branch, would run again for every MR. Start each job's rules with
-   the guard. A job that has neither `rules` nor `only`/`except` gets the guard
-   followed by `- when: on_success`:
-
-   ```yaml
-   deploy:
-     script: ./deploy.sh
-     rules:
-       - if: '$SKILL_EVAL_FEEDBACK == "true"'
-         when: never
-       - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-   lint:
-     script: make lint
-     rules:
-       - if: '$SKILL_EVAL_FEEDBACK == "true"'
-         when: never
-       - when: on_success
-   ```
-
-   Merge these guards to the default branch before the setup MR. Its own
-   feedback request starts a pipeline from the current default-branch
-   configuration, and the guard is inert until `SKILL_EVAL_FEEDBACK` is set.
-   Write these guards as rules: `.skill-evaluation-not-feedback` is defined by
-   the all-tiers include, so until the setup MR merges,
-   `extends: .skill-evaluation-not-feedback` fails validation with
-   `unknown keys in extends`. After that, a job added later with neither
-   `rules` nor `only`/`except` can use that `extends` instead.
-6. Add `.gitlab/skill-feedback.yml` as rendered and merge both files through
-   a setup MR. After it merges, `skillevaluator ci status --tiers 1,2,3`
-   reports whether the root is recognized and warns about unguarded root jobs.
-
-The shared configuration runs the pinned Tier 1 image plus parallel native
-Tier 2 and Tier 3 jobs. Tier 2 runs without a Docker service. Only Tier 1 is
-required; Tier 2 and Tier 3 are advisory,
-including failed or incomplete outcomes. The deprecated
-`SKILL_EVAL_TIER3_REQUIRED` variable is ignored, including when set to `'true'`;
-it cannot make Tier 3 block CI. Native execution jobs retain failed outcomes
-without stopping their parallel sibling. The aggregate is the required merge
-gate and follows Tier 1 only: failed, incomplete or missing Tier 1 evidence
-fails it, while advisory outcomes remain visible in retained reports.
-The always-running aggregate job
-retains `skill-evaluator-results/ci-results.json`, `index.html`, `summary.md`,
-and each tier's native reports for 14 days. Reports stay behind your normal
-GitLab artifact access controls.
-
-Trusted MR feedback uses one summary table with a row per skill. Each row has
-one-line results for Static and Security Validation, Deduplication, and Live
-Agent Evaluation, with status, recorded issue count and the main finding or
-blocker. Incomplete or missing evidence shows an unknown count. One **Report**
-link per skill downloads the combined aggregate artifact; extract it and open
-`index.html` for the detailed aggregate and native reports. Separate tier
-sections and per-tier links stay out of the comment. See the
-[comment and report contract](reports.mdx#retained-three-tier-ci-evidence).
-
-Configure a native-job runner matching `SKILL_EVAL_RUNNER` (default `docker`).
-Tier 1, aggregation and feedback jobs have no runner tags and also need a
-compatible runner that accepts untagged jobs and supports their container
-images. This remains necessary when a Linux or macOS shell runner runs the
-native jobs in local mode. Configure the protected
-`SKILL_EVAL_ENVIRONMENT` (default `skillevaluator`) and provider secrets scoped
-to that execution environment. The native jobs and the trusted feedback job
-use `environment: action: prepare`: each receives its environment's scoped
-variables and access protection but records no deployment, so GitLab's
-**Prevent outdated deployment jobs** setting cannot drop an older MR's jobs.
-Do not add deployment approval rules to these environments. Depending on the
-GitLab version and its `prevent_blocking_non_deployment_jobs` feature flag,
-approval rules either do not gate these jobs or turn them into manual jobs
-that wait to be run. Restrict who can run them with the protected
-environments' deploy access. The Tier 3 Docker
-service needs a privileged runner with Docker-in-Docker enabled. The daemon accepts only TLS clients on
-port 2376 (`DOCKER_TLS_CERTDIR: /certs`), so agent containers cannot use the
-Docker API. Configure the runner with `volumes = ["/certs/client"]` so the job
-can read the generated client certificates. Docker mode also requires the Docker CLI,
-Compose v2 and Buildx; the shared job installs these clients in supported root
-Linux containers and checks readiness before evaluation. For local mode the generated caller
-removes that service; use a Linux or macOS native runner with Python 3.12,
-Git and Node/npm. Missing native tools must be installed by the runner
-administrator; system-package bootstrap is limited to root Linux containers. The
-trusted tools are installed from `SKILL_EVAL_TOOLS_REF`, an immutable commit.
-Local agent CLIs are pinned and bootstrapped before selected-mode readiness
-checks. The current same-project MR head is checked before model execution;
-fork MRs do not receive provider-backed jobs.
-
-GitLab 17.0–18.3 requires a separate project access token with **Reporter** role
-and **read_api** scope for current-MR admission. Store it as masked
-`SKILLEVALUATOR_GITLAB_READ_TOKEN`, scoped only to the configured execution
-environment (`skillevaluator` by default). Protect that environment to approved CI maintainers. For ordinary
-unprotected MR branches, the variable must be available on those refs; enabling
-GitLab's protected-variable restriction would withhold it. The admission helper
-uses this read credential once, refuses HTTP redirects, and the job removes it
-before runtime installation, doctor or provider execution.
-
-GitLab 18.4 and later support the default short-lived `CI_JOB_TOKEN` path for
-this MR endpoint; the separate read token remains optional. `ci init --mode pr`
-and `ci status` check the server version through the local authenticated API.
-Offline preview/save keep the version unverified. These local commands report
-the prerequisite and do not claim to validate a stored CI secret's privileges.
-The setup still consists of two consumer files.
-
-Protect the default branch and create a project access token with `api` scope
-and the Maintainer role. The publisher reads source-pipeline variables to verify
-provenance as well as reading artifacts and updating MR notes; GitLab 17.8
-rejects the variables request for a Developer token. Store the token as masked, protected
-`SKILLEVALUATOR_GITLAB_TOKEN`, scoped only to the protected
-`skillevaluator-feedback` environment. The MR pipeline never receives that
-token. After aggregation, a small job uses its short-lived `CI_JOB_TOKEN` with
-GitLab's pipeline trigger API to request a separate pipeline on the protected
-default branch. It sends only `SKILL_EVAL_FEEDBACK=true` and the source pipeline
-ID, without forwarding repository variables or caller-supplied pipeline overrides.
-GitLab also adds its own `TRIGGER_PAYLOAD` file variable. The publisher accepts
-that bounded file entry alongside the two selectors and treats its contents as
-opaque; additional caller variables remain disallowed.
-The API supports same-project pipelines; GitLab's declarative multi-project
-bridge rejects a target in the same project. That trusted pipeline uses validated include inputs for fixed evaluator pins,
-API host and project, so forwarded MR variables cannot replace its privileged
-bootstrap. It fetches only pinned evaluator tools and authenticates the server's
-upstream pipeline and source job relationship, then validates the source
-configuration, aggregate artifact, MR and current commit before updating one
-comment. The publisher needs access to the instance's REST and GraphQL APIs;
-the pipeline's persisted MR association supports GitLab 17.x as well.
-The initiating pipeline user must be allowed to create a pipeline on
-the protected default branch, pass the two pipeline variables and run the
-protected feedback environment. Configure these permissions for authorized CI
-maintainers; a job token does not bypass protected-branch or protected-environment permissions.
-The feedback request is advisory. When GitLab refuses it, for example because
-the MR pipeline user cannot run pipelines on the protected default branch or
-may not pass pipeline variables, the request job fails as an allowed failure:
-the pipeline shows a warning, no comment is posted or updated, and the aggregate
-continues to enforce Tier 1. Server and network errors fail the job the same
-way; its log says whether to fix permissions or retry. Before the setup MR
-installs feedback on the default branch, no comment is posted and the aggregate
-still enforces Tier 1.
-
-For a rejected publisher, open its job log. The check location refers to the
-pinned `ci/feedback.py` revision, and the category distinguishes validation,
-authentication and transport failures.
-
-Install both configuration files on the default branch before the first demo
-MR. GitLab must permit the downstream pipeline and the protected feedback job;
-a setup MR alone cannot establish trusted automatic feedback. On instances
-that restrict protected variables in MR pipelines, approve an eligible protected
-execution path according to your project policy; missing provider credentials
-remain actionable evidence rather than a pass. Review the pipeline's actual
-aggregate check before enabling merge restrictions; it gates Tier 1 only.
-
-The CLI's `--timeout-minutes` option writes a literal native-job duration and
-a shorter evaluator budget. The default is 300 minutes. The budget ends 20
-minutes, or a quarter of a shorter duration, before the job timeout, leaving
-time for setup and for retaining evidence: 300 minutes gives 16800 seconds.
-On GitLab 17.8, CI variables are not expanded in a job's `timeout` field. For
-a manual consumer, set the literal directly:
-
-```yaml
-variables:
-  SKILL_EVAL_TIMEOUT_SECONDS: '2040'
-skill-evaluation-native:
-  timeout: 45 minutes
-```
-
-Timeout and runner-tag overrides on `skill-evaluation-native` apply to both
-native tiers. The
-`skill-evaluation-native-tier2` job extends that public job and clears its
-Docker service and TLS client variables; a caller's `services` override applies
-to Tier 3. The generated local-mode caller sets `services: []` on
-`skill-evaluation-native` to disable Tier 3's Docker service too.
-
-Keep a manual tier selection quoted, for example `SKILL_EVAL_TIERS: '1,2,3'`.
-GitLab's YAML parser reads the unquoted value as the number `123`. The CLI
-quotes generated variable values automatically.
 
 ## Get started
 
@@ -328,9 +125,10 @@ Skill result: "skills/glossary-builder" — FAILED
   </Accordion>
   <Accordion title="Scores, reports and privacy">
     The threshold applies to the quality score; security, schema and other
-    required checks remain independent gates. The first version runs Tier 1
-    only. This integration does not host reports or post merge-request comments
-    automatically. Known values detected by credential patterns, NVIDIA API
+    required checks remain independent gates. The scanner runs quality and
+    security checks and saves reports as job artifacts; it does not host reports
+    or post merge-request comments automatically. Known values detected by
+    credential patterns, NVIDIA API
     keys, and unquoted `KEY=value` and `Bearer` credentials are redacted,
     including parts of them that a scanner cuts or escapes, but not every
     secret or transformation is detectable. Raw scanner logs are
@@ -340,3 +138,12 @@ Skill result: "skills/glossary-builder" — FAILED
 </AccordionGroup>
 
 For GitHub and other CI systems, see [Repository Integration](/skills/skillevaluator/repository-integration).
+
+<div id="three-tier-checks-and-feedback">
+<div id="merge-into-an-existing-root-configuration">
+
+For the explicit all-tier opt-in and its prerequisites, see [Advanced CI](/skills/skillevaluator/advanced-ci).
+The [GitLab setup](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/all-tiers/README.md#gitlab-checks-and-feedback) and [all-tier pipeline migration](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/all-tiers/README.md#merge-into-an-existing-root-configuration) references preserve the detailed contracts.
+
+</div>
+</div>

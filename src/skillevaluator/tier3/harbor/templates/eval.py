@@ -112,6 +112,26 @@ if _CHECKS_PATH.is_file():
 else:  # Source-tree template: the canonical module lives in the package.
     from skillevaluator.tier3.eval_core import checks as _shared_checks
 
+_DECLARATIVE_CHECKS_PATH = _SCRIPT_TESTS_DIR / "declarative_checks.py"
+if _DECLARATIVE_CHECKS_PATH.is_file():
+    _declarative_spec = importlib.util.spec_from_file_location(
+        "_skillevaluator_shared_declarative_checks", _DECLARATIVE_CHECKS_PATH
+    )
+    assert _declarative_spec and _declarative_spec.loader
+    _shared_declarative_checks = importlib.util.module_from_spec(_declarative_spec)
+    _had_checks_module = "checks" in sys.modules
+    _previous_checks_module = sys.modules.get("checks")
+    sys.modules["checks"] = _shared_checks
+    try:
+        _declarative_spec.loader.exec_module(_shared_declarative_checks)
+    finally:
+        if _had_checks_module:
+            sys.modules["checks"] = _previous_checks_module
+        else:
+            sys.modules.pop("checks", None)
+else:
+    from skillevaluator.tier3.eval_core import declarative_checks as _shared_declarative_checks
+
 AMBIGUOUS_OUTER_EXEC_OBSERVATION = _shared_checks.AMBIGUOUS_OUTER_EXEC_OBSERVATION
 UNOBSERVED_INNER_CALL = _shared_checks.UNOBSERVED_INNER_CALL
 UNSUPPORTED_NATIVE_CODEX_EXEC = _shared_checks.UNSUPPORTED_NATIVE_CODEX_EXEC
@@ -583,6 +603,13 @@ logger = logging.getLogger(__name__)
 
 def _env_path(name, default):
     return Path(os.environ.get(name, str(default)))
+
+
+def _declarative_workspace_roots():
+    roots = [Path.cwd(), Path("/workspace"), Path("/workspace/output")]
+    if artifact_root := os.environ.get("HARBOR_ARTIFACTS_DIR"):
+        roots.append(Path(artifact_root))
+    return list(dict.fromkeys(roots))
 
 
 LOGS_DIR = _env_path("HARBOR_LOGS_DIR", "/logs")
@@ -2886,6 +2913,10 @@ def _record_judge_attempt(
     if score is not None:
         entry["score"] = score
     attempts.append(entry)
+    _write_judge_attempts(attempts)
+
+
+def _write_judge_attempts(attempts):
     try:
         path = _verifier_output_dir() / JUDGE_ATTEMPTS_FILE_NAME
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -3778,6 +3809,67 @@ def write_reward_outputs(result, overall):
     REWARD_TXT.write_text(str(sanitized_overall))
 
 
+def _dependency_context(skill: str, *, skills_root: Path = Path("/workspace/skills")) -> dict[str, Any]:
+    """Read bounded dependency evidence from the evaluator-staged skill."""
+    context: dict[str, Any] = {
+        "apt": [],
+        "pip": [],
+        "skill_text": "",
+        "skill_dirs": [],
+        "skill_modules": set(),
+        "script_imports": set(),
+    }
+    if not skill or skill in {".", ".."} or Path(skill).name != skill:
+        return context
+    root = skills_root / skill
+    if not root.is_dir():
+        return context
+    context["skill_dirs"] = [
+        str(root),
+        f"/root/.claude/skills/{skill}",
+        f"/root/.agents/skills/{skill}",
+        f"/root/.config/opencode/skills/{skill}",
+        f"/etc/codex/skills/{skill}",
+    ]
+    remaining = 1024 * 1024
+    for index, path in enumerate(root.rglob("*")):
+        if index >= 4096 or remaining <= 0:
+            break
+        if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
+            continue
+        relative = path.relative_to(root)
+        if path.suffix == ".py":
+            context["skill_modules"].add(path.stem)
+            context["skill_modules"].update(relative.parts[:-1])
+        if path.name == "__init__.py":
+            context["skill_modules"].add(path.parent.name)
+        dependency = path.parent.name == "scripts" and path.name in {"requirements.txt", "apt-packages.txt"}
+        if not dependency and path.name.lower() != "skill.md" and "scripts" not in relative.parts:
+            continue
+        try:
+            with path.open("rb") as stream:
+                data = stream.read(min(remaining, 128 * 1024))
+        except OSError:
+            continue
+        remaining -= len(data)
+        content = data.decode("utf-8", errors="replace")
+        if dependency:
+            key = "pip" if path.name == "requirements.txt" else "apt"
+            context[key].extend(
+                line.split("#", 1)[0].strip()
+                for line in content.splitlines()
+                if line.strip() and not line.lstrip().startswith(("#", "-"))
+            )
+        else:
+            context["skill_text"] += "\n" + content
+            if "scripts" in relative.parts and path.suffix == ".py":
+                imports = re.finditer(r"(?m)^\s*(?:from\s+([\w.]+)\s+import\b|import\s+([\w.]+))", content)
+                context["script_imports"].update((match.group(1) or match.group(2)).split(".")[0] for match in imports)
+    context["skill_modules"] = sorted(context["skill_modules"])
+    context["script_imports"] = sorted(context["script_imports"])
+    return context
+
+
 def main():
     entry = json.loads(ENTRY_PATH.read_text(encoding="utf-8"))
     traj, traj_meta = load_trajectory_with_fallback(ATIF_PATH, ATIF_PATH.parent)
@@ -3788,6 +3880,7 @@ def main():
     evaluated_skill = entry.get("evaluated_skill") or ""
     acceptable_skills = _resolve_acceptable_skills(entry, expected_skill)
     expected_behavior = normalize_expected_behaviors(entry.get("expected_behavior", []))
+    declarative_checks = entry.get("checks", [])
     question = entry.get("question", "")
     ground_truth = entry.get("ground_truth", "")
     workspace_mode = entry.get("skill_workspace_mode", "isolated")
@@ -3833,6 +3926,38 @@ def main():
             "trajectory_source": traj_meta.get("source"),
             "trajectory_detail": traj_meta.get("warning") or traj_meta.get("note"),
         }
+        if declarative_checks:
+            direct_results = _shared_declarative_checks.evaluate_declarative_checks(
+                declarative_checks,
+                tool_calls=[],
+                final_response="",
+                workspace_roots=_declarative_workspace_roots(),
+            )
+            direct_results = _shared_declarative_checks.mark_no_skill_script_checks(
+                declarative_checks,
+                direct_results,
+                has_skill=entry.get("has_skill", True),
+                skill_metrics_on=skill_metrics_on,
+                evaluated_skill=evaluated_skill,
+            )
+            judged_count = len(expected_behavior) if _has_judge_reference(expected_behavior) else 0
+            base_behavior = {
+                "score": judge_scores["behavior_check"],
+                "status": "accepted" if judged_count else "not_applicable",
+                "reason": "No trajectory or reconstructible agent log"
+                if judged_count
+                else _NO_EXPECTED_BEHAVIOR_REASON,
+                "results": [
+                    {"step": index + 1, "passed": False, "reason": "No trajectory or reconstructible agent log"}
+                    for index in range(judged_count)
+                ],
+            }
+            behavior_result = _shared_declarative_checks.combine_behavior_check(
+                base_behavior, direct_results, judged_count
+            )
+            judge_scores["behavior_check"] = behavior_result["score"]
+            judge_details["behavior_check"] = behavior_result
+            result["behavior_check"] = behavior_result["score"]
         if judge_details:
             result["details"] = judge_details
         write_reward_outputs(result, 0.0)
@@ -3872,9 +3997,26 @@ def main():
             require_evaluated_skill=True,
             skill_tool_names=skill_tools,
             acceptable_skills=acceptable_skills,
+            dependency_context=_dependency_context(evaluated_skill or expected_skill),
         )
         se_score = skill_execution_result["score"]
         details["skill_execution"] = skill_execution_result["details"]
+        if skill_execution_result.get("status") == "environment_invalid":
+            recovery = skill_execution_result["details"]["error_recovery"]
+            write_reward_outputs(
+                {
+                    "evaluation_status": "failed",
+                    "evaluation_errors": {"environment": recovery["reason"]},
+                    "environment_issues": recovery["environment_issues"],
+                    "entry_id": entry.get("id"),
+                    "metric_set": DEFAULT_METRIC_SET,
+                    "score_policy": DEFAULT_SCORE_POLICY,
+                    "details": details,
+                },
+                0.0,
+            )
+            logger.error("[environment] %s", recovery["reason"])
+            raise SystemExit(1)
     else:
         se_score = None
         details["skill_execution"] = _skill_metric_not_applicable()
@@ -3913,7 +4055,8 @@ def main():
     )
 
     # Every judge attempt below is saved to judge_attempts.json as it happens.
-    judge_evidence_token = _ACTIVE_JUDGE_EVIDENCE.set([])
+    judge_attempts = []
+    judge_evidence_token = _ACTIVE_JUDGE_EVIDENCE.set(judge_attempts)
     try:
         # ── Eval 4: accuracy (LLM judge) ─────────────────────────────────
         acc_result = _call_required_judge(
@@ -3941,17 +4084,45 @@ def main():
         details["goal_accuracy"] = ga_result
 
         # ── Eval 6: behavior_check (LLM judge) ───────────────────────────
-        bc_result = _call_required_judge(
-            "behavior_check",
-            judge_behavior_check,
-            bundles["behavior_check"]["prompt_evidence"],
-            expected_behavior,
-            allow_not_applicable=not _has_judge_reference(expected_behavior),
-        )
+        if declarative_checks:
+            if _has_judge_reference(expected_behavior):
+                bc_result = _call_required_judge(
+                    "behavior_check",
+                    judge_behavior_check,
+                    bundles["behavior_check"]["prompt_evidence"],
+                    expected_behavior,
+                )
+            else:
+                bc_result = _judge_not_applicable(_NO_EXPECTED_BEHAVIOR_REASON, results=[])
+        else:
+            bc_result = _call_required_judge(
+                "behavior_check",
+                judge_behavior_check,
+                bundles["behavior_check"]["prompt_evidence"],
+                expected_behavior,
+                allow_not_applicable=not _has_judge_reference(expected_behavior),
+            )
+        if declarative_checks:
+            direct_results = _shared_declarative_checks.evaluate_declarative_checks(
+                declarative_checks,
+                tool_calls=tool_calls,
+                final_response=_get_final_response(traj),
+                workspace_roots=_declarative_workspace_roots(),
+            )
+            direct_results = _shared_declarative_checks.mark_no_skill_script_checks(
+                declarative_checks,
+                direct_results,
+                has_skill=entry.get("has_skill", True),
+                skill_metrics_on=skill_metrics_on,
+                evaluated_skill=evaluated_skill,
+            )
+            judged_count = len(expected_behavior) if _has_judge_reference(expected_behavior) else 0
+            bc_result = _shared_declarative_checks.combine_behavior_check(bc_result, direct_results, judged_count)
         bc_score = bc_result["score"]
         details["behavior_check"] = bc_result
     finally:
         _ACTIVE_JUDGE_EVIDENCE.reset(judge_evidence_token)
+        _write_judge_attempts(judge_attempts)
 
     # persist refs + omission metadata onto the metric details
     attach_metric_evidence_refs(details, {m: bundles[m]["evidence_refs"] for m in bundles})

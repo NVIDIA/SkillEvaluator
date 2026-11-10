@@ -13,7 +13,7 @@ finished with-skill vs. without-skill comparison.
 
 ## Paired Tier 3 in automatic CI
 
-The [all-tier CI setup](cli-onboarding.mdx#opt-in-to-three-tier-ci) consumes
+The [all-tier CI setup](/skills/skillevaluator/advanced-ci) consumes
 committed native `evals/` datasets with full coverage. It runs each selected
 case both with and without the skill; it does not use autopilot, generate new
 cases, or skip the baseline. Docker is the default, with native local mode as
@@ -28,7 +28,7 @@ reports for missing credentials, readiness failures and partial runs as well
 as completed scores. Native reports include coverage and paired arm evidence,
 Skill Lift, attempts, available latency/resource metrics and trial links. An
 incomplete advisory result is visible and never described as a completed pass.
-See [retained CI evidence](reports.mdx#retained-three-tier-ci-evidence).
+See [retained CI evidence](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/all-tiers/README.md#retained-three-tier-ci-evidence).
 
 ## What a live eval measures
 
@@ -67,6 +67,132 @@ negative controls; missing or unsupported activation evidence remains unknown.
 When at least one positive trial activates the skill, lift remains eligible
 subject to the comparison requirements below. This also makes activation
 failures visible with `--skip-baseline`.
+
+## Repeatable activation validation
+
+Use the existing dataset generator, runner and trusted trajectory collector to
+check activation separately from answer quality. Start with
+`skillevaluator create-eval-dataset ./my-skill --full`, review the generated
+cases, and retain a versioned dataset with these four buckets:
+
+| Bucket | Authored expectation | What to check |
+| --- | --- | --- |
+| Explicit | `expected_skill: "my-skill"` | A request naming the skill invokes it. |
+| Implicit | `expected_skill: "my-skill"` | An in-scope request without its name still invokes it. |
+| Negative | `expected_skill: null` | An unrelated request succeeds without invoking it. |
+| Edge | Explicit skill name or `null`, chosen before running | A boundary input follows the skill's documented scope; retain the expected refusal, recovery or output. |
+
+Template generation with `--no-llm --full` needs an authored negative prompt in
+`evals/EVAL.md` to produce the negative bucket. Add the edge case yourself and
+make each `expected_skill` explicit. An authored `should_trigger` takes
+precedence, including `false` without a skill name. Unlabeled expectations and
+positive routing without a target identity remain unknown. Keep task correctness
+assertions outcome-oriented; a correct answer alone cannot demonstrate skill use.
+
+```bash title="Run the reviewed matrix through the normal harness"
+skillevaluator tier3 validate ./my-skill --strict
+skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker \
+  --n-attempts 1 --grading-mode default
+```
+
+Use an explicit `--agent-model AGENT=MODEL` when needed for your provider.
+Repeat with `--grading-mode default_plus_custom` after configuring an authored
+custom grader. `--skip-baseline` supports a faster activation-only iteration;
+it cannot measure benefit or harm relative to the baseline. `custom_only`
+has no trusted standard activation contract and stays unknown in this view.
+
+Each canonical report trial now includes `activation_validation`:
+
+- `expected_activation` is true, false, or unknown (`null`). The without-skill
+  arm expects non-use even for an in-scope task.
+- `observed_activation` is `invoked`, `not_invoked`, or `unknown`, using only
+  the collector's trusted trajectory evidence. `expectation_status` compares
+  these as `matched`, `mismatched`, or `unknown`.
+  A standard baseline's explicit null/N/A skill scores do not prevent collecting
+  trajectory evidence; those scores stay N/A. The arm alone never proves non-use.
+- `task_outcome` retains accuracy and goal accuracy independently of routing;
+  `evidence_scopes[].workflow` retains workflow order, script execution and
+  recovery diagnostics, and `resources` retains available time/token counters.
+- `evidence_scopes[].artifacts` links to the retained reward and trajectory
+  paths relative to the run directory. Harbor viewer links remain on the trial.
+
+For fallback multi-step reward rows, the logical observation stays unknown and
+`observation_scope` is `reward_rows_only`; individual observations remain in
+`evidence_scopes`. This also applies when only one step row survives loading.
+A collector-materialized complete root trajectory with the collector-issued
+`invocation_evidence_scope: logical_trial` marker can support a logical
+observation. Historical rows without a scope marker retain their row evidence
+but cannot certify a complete logical observation. Missing or contradictory topology, unresolved subagent references,
+and unsupported traces remain unknown. Copied context and unreferenced child
+trajectories do not prove execution. `evidence_scopes_complete` describes
+whether all loaded row scopes fit in the report, not whether execution was
+complete. These fields do not change numeric grading or the existing lift
+eligibility policy.
+
+The following read-only recipe exports both arms from a specific retained run
+without calling another model. Replace the run directory with the one printed
+by evaluation. Keep this JSON beside the run's `result.json`, `run_config.json`,
+`attempt_policy.json` and `dataset_snapshot.json`; together they retain skill,
+task, model, harness, environment and grading identities. Review paired task
+outcomes for useful, no-benefit or harmful results, and retain the observed
+result even when it contradicts the expectation.
+
+```bash title="Export activation acceptance evidence"
+python - ./my-skill ./my-skill/evals/results/RUN_ID > activation-validation.json <<'PY'
+import json
+import sys
+from pathlib import Path
+from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory
+
+skill, run = (Path(arg).resolve() for arg in sys.argv[1:])
+config = json.loads((run / "run_config.json").read_text())
+result = agent_eval_result_from_directory(
+    skill, run,
+    env_mode=config.get("harbor", {}).get("environment", {}).get("value"),
+    use_llm_judge=False, enforce_embedded_size=False,
+)
+if result is None:
+    raise SystemExit("No retained agent results; activation is unknown")
+payload = result.metadata["agent_eval"]
+rows = []
+for name, agent in payload["agents"].items():
+    for condition, key in (("with-skill", "trials"), ("without-skill", "trials_baseline")):
+        for trial in agent[key]:
+            rows.append({
+                "agent": name, "model": agent["model"], "condition": condition,
+                "entry_id": trial["entry_id"], "trial_id": trial["trial_id"],
+                "harbor_viewer": trial.get("harbor_viewer"),
+                **trial["activation_validation"],
+            })
+print(json.dumps({
+    "run_dir": str(run), "run_id": payload["run_id"],
+    "skill_name": payload["skill_name"], "dataset_digest": payload["dataset_digest"],
+    "environment": payload["environment"], "grading": config.get("grading"),
+    "score_policy": payload["score_policy"],
+    "execution_status": payload["execution_status"],
+    "report_truncation": payload.get("report_truncation"), "rows": rows,
+}, indent=2, allow_nan=False))
+PY
+```
+
+A matched routing expectation is not a correctness pass. Unknown observations,
+missing rows and truncated reports are incomplete evidence, not successful
+non-use. Retain raw trajectories privately: they can contain task inputs and
+model outputs even after credential redaction.
+
+Contributors can repeat the fixture-backed acceptance suite without provider
+credentials. It exercises the production collector and report projection,
+including correct baseline answers, missed and irrelevant activation, missing
+traces, copied context, referenced subagents and multi-step completeness:
+
+```bash title="Offline acceptance suite from the repository root"
+python -m pytest tests/reporting/test_activation_validation.py \
+  tests/test_harbor_negative_control_evidence.py \
+  tests/test_harbor_collector_multistep_trajectory.py \
+  tests/test_checks_routing.py tests/tier3/test_failed_skill_reads.py \
+  tests/tier3/test_plugin_signals.py \
+  --basetemp="$(mktemp -d)/activation-tests"
+```
 
 ## Before you start
 
@@ -183,8 +309,15 @@ for NVIDIA Build, Codex for OpenAI, or Claude Code for Anthropic. If no accepted
 dataset or task source exists, it generates one starter case and proceeds to the
 live with-skill and without-skill comparison. It reuses valid existing sources
 unchanged; invalid sources produce an error rather than being replaced.
-A generated starter case lets you try the pipeline, but does not establish
-broad positive and negative coverage.
+A generated one-case starter is a starting point, not a representative
+evaluation. Generation prints its concrete coverage gaps to stderr, such as
+the absence of a negative/non-trigger case or missing expected outcomes and
+assertions. Replace the starter with a full dataset using
+`skillevaluator create-eval-dataset ./my-skill --full --force`. `--force`
+overwrites the starter and discards any edits to it. Then inspect the counts
+and gaps with `skillevaluator tier3 validate ./my-skill`. Larger case counts
+do not by themselves establish representative coverage. Native Harbor task
+sources do not receive an eval-dataset coverage summary.
 
 The same agent, model, environment, grading, and reporting options described for
 `tier3 evaluate` apply to this direct workflow. For example:
@@ -697,6 +830,7 @@ The high-signal flags, with defaults:
 | `--max-agents` | selected-agent count | Maximum agents run in parallel |
 | `--max-cases` | every case | Run only the first N eval cases; a run that skips cases is not publication evidence |
 | `--skip-baseline` | off | Skip the without-skill arm; faster, but no Skill Lift |
+| `--reuse-baseline RUN` | off | Reuse a compatible fresh baseline from a retained run id, or `latest` |
 | `--skip-with-skill` | off | Run only the without-skill arm, for example to calibrate a task set; the report shows baseline scores with no Skill Lift or skill verdict |
 | `--stop-on-pass` | off | Stop a case's remaining attempts once one passes |
 | `--agent-runtime-preflight` | off | Add one agent-only execution of the first staged task per agent before the full A/B matrix; `--no-agent-runtime-preflight` overrides a config value that enables it |
@@ -725,6 +859,60 @@ While iterating on a dataset, `--skip-baseline` roughly halves the runtime.
 Re-enable the baseline arm for any run whose Skill Lift you intend to trust.
 </Tip>
 
+### Reuse a baseline
+
+Use `skillevaluator tier3 evaluate ./my-skill --reuse-baseline latest` to run
+the with-skill arm against an existing without-skill baseline in the same
+results root. An explicit retained run id can replace `latest`. This option
+cannot be combined with `--skip-baseline` or `--skip-with-skill`.
+
+Reuse requires matching datasets and case coverage, selected agents and resolved
+models (including model sources), environment configuration, judge/scorer,
+attempt policy, evaluator version, and workspace/repository-context settings.
+Skill content and evaluated revision are separate from baseline compatibility.
+The source must have a successful, complete, freshly executed without-skill arm
+with readable persisted case/attempt evidence. Older runs without that evidence,
+failed or partial baselines, and runs which themselves reused a baseline are
+not sources. Keep the original fresh run if you want to reuse it again.
+
+An incompatible explicit id fails before agent jobs launch and lists the
+rejection reasons. `latest` searches completed runs newest first; if none is
+compatible, evaluation runs a fresh baseline and records bounded rejection
+diagnostics. Reports identify the source and timestamp when reuse succeeds.
+The new run retains its own baseline rows. Fresh execution counts and reused
+trial counts are separate; reused evidence is not another independent attempt.
+Cost savings depend on the run, including agent, judge, and environment usage.
+
+### Compare skill versions
+
+Add `--compare-to RUN` to compare the current with-skill arm with a retained
+run's with-skill arm. This is separate from Skill Lift, which still compares
+with-skill against no-skill. It can be combined with `--reuse-baseline latest`:
+
+```bash
+skillevaluator tier3 evaluate ./my-skill --compare-to RUN --reuse-baseline latest
+skillevaluator tier3 compare-versions ./my-skill --current CURRENT --prior PRIOR
+skillevaluator tier3 compare-versions ./my-skill --current CURRENT --prior PRIOR --json
+```
+
+Both runs must have compatible datasets/cases, agents and resolved models,
+environment, judge/scoring policy, attempts, evaluator version, and workspace
+configuration. The prior with-skill arm must have complete successful scored
+evidence; it may itself have reused a no-skill baseline. An incompatible
+explicit id is refused before agent execution. `--compare-to latest` searches
+newest first for an eligible different skill revision, records bounded rejected
+candidates, and continues without a version comparison if none is available.
+An explicitly selected identical skill identity is allowed but flagged as
+not a version change.
+
+Version deltas use the same per-case pairing and score policy as Skill Lift.
+A negative available delta is marked as a regression; missing or unscored
+evidence is unavailable, never zero or a regression. Reports show the source
+run/revision and prior-to-current score transition. `compare-versions` is
+read-only, needs no provider credentials, and uses the same results-root
+resolution via `--results-dir`. It exits nonzero when comparison is unavailable.
+The static semver option `--previous-version` is unrelated and unchanged.
+
 ### Baseline-only runs
 
 `--skip-with-skill` is the counterpart of `--skip-baseline`: it stages and runs
@@ -751,12 +939,31 @@ Tier 3 gate.
 
 With `default` or `default_plus_custom` grading, SkillEvaluator's verifier
 grades each trial after the agent finishes. `security`, `skill_execution`, and
-`skill_efficiency` are deterministic trajectory checks. `accuracy`,
-`goal_accuracy`, and `behavior_check` are LLM judges that call the configured
-evaluator provider. `custom_only` runs none of them.
+`skill_efficiency` are deterministic trajectory checks. `accuracy` and
+`goal_accuracy` are LLM judges that call the configured evaluator provider.
+`behavior_check` combines the behavior judge with directly evaluated declared
+checks; a checks-only case makes no behavior judge call. `custom_only` runs
+none of them.
 
 The three LLM judges return verdicts only, and the verifier computes the
 scores. A `score` field in a judge reply is ignored.
+
+Error recovery distinguishes skill files, agent command errors, and missing
+runtime dependencies. Missing tools/modules declared by or used by the skill
+are environment problems: recovered failures have no deduction, while an
+unrecovered environment failure without an unrecovered skill fault marks the
+case `environment_invalid`. `skill_execution` then returns no score, the
+verifier skips the judges, and the collector leaves the trial UNSCORED
+(excluded from skill score averages). Any unrecovered skill fault in the same
+trial is scored as a skill failure instead. Agent-only failures remain
+unscored with the environment issue, and are included in its reason and
+`evaluation_errors`. Reports include the missing name and dependency
+declaration/installation guidance. Declare system tools in
+`scripts/apt-packages.txt`, Python packages in `scripts/requirements.txt`, or
+install them in `evals/environment/Dockerfile`. Agent-chosen tools the skill
+does not use remain agent errors. Missing files inside the skill remain skill
+defects (0.25 deduction if recovered); real unrecovered skill/agent failures
+still score zero.
 
 - `accuracy` is passing criteria divided by five. The criteria grade the
   outcome: `ACTION_CORRECT`, `FACTUALLY_ACCURATE`, `TASK_ADDRESSED`,
@@ -770,9 +977,11 @@ scores. A `score` field in a judge reply is ignored.
   is invalid.
 - `goal_accuracy` is `1.0` when the judge decides the goal was `achieved` and
   `0.0` otherwise, the same binary scale as the RAGAS scorer.
-- `behavior_check` is the share of expected behaviors observed. The reply must
-  judge every behavior exactly once, identified by its 1-based `step` number.
-  A reply that skips, repeats, or invents a step is invalid.
+- `behavior_check` includes the share of expected behaviors observed and any
+  directly evaluated declared checks. When expected behaviors are present, the
+  reply must judge every behavior exactly once, identified by its 1-based
+  `step` number; a reply that skips, repeats, or invents a step is invalid.
+  A checks-only case is evaluated directly without a judge call.
 
 Rewards record `judge_contract: skill-evaluator-judges-v2`. Results written
 before this contract, whose `accuracy` included a `SKILL_IDENTIFIED` criterion,
@@ -1011,7 +1220,7 @@ unscored rather than converted to `0.0`.
 | Security | Is it safe to use? | `security` | 1.0 | Deterministic checks of the trace and agent actions |
 | Correctness | Is the answer correct? | `accuracy` | 1.0 | LLM judge (`judge_accuracy`) |
 | Discoverability | Was the right skill loaded when needed? | `skill_execution` | 1.0 | Deterministic checks of the trajectory and tool calls |
-| Effectiveness | Did the skill help complete the task? | `goal_accuracy` + `behavior_check` | 0.5 + 0.5 | LLM judges (`judge_goal_accuracy`, `judge_behavior_check`) |
+| Effectiveness | Did the skill help complete the task? | `goal_accuracy` + `behavior_check` | 0.5 + 0.5 | LLM judge plus directly evaluated declared checks |
 | Efficiency | Did it avoid wasted tool or skill usage? | `skill_efficiency` | 1.0 | Deterministic checks of the trajectory and tool calls |
 
 The Security check's network rule warns when an agent's `curl`, `wget`, or
@@ -1101,8 +1310,10 @@ the configuration that produced it. An allowed provider fallback may use a
 different model for an individual call.
 
 This provenance does not establish that the LLM judgments are correct. The
-repository does not publish inter-rater agreement, calibration results, or a
-comparison against human-labeled ground truth for these judges.
+[grader validation workflow](grader-validation.mdx) runs the shipped verifier
+against independently labelled cases and reports agreement, abstentions,
+errors and repeat variability. The bundled reference suite is not a published
+claim of inter-rater agreement or universal judge reliability.
 
 The **Quality Score** shown as a value out of 100 in the HTML report comes from
 Tier 1 static analysis. It is separate from the Tier 3 evaluator scores,
@@ -1125,6 +1336,25 @@ Artifacts record this contract as
 `score_policy: skill-evaluator-dimension-mean-v1`. Legacy metric sets and
 historical partial reports retain their recorded scoring semantics instead of
 being silently reinterpreted.
+
+## Cost limits
+
+Runs can be bounded with `--max-agent-tokens`, `--max-judge-calls`,
+`--max-attempts-total`, `--max-cost-usd`, and `--price-file`. The price file is
+JSON keyed by model identifier; each model entry requires `input_per_mtok` and
+`output_per_mtok`, and may set `cached_input_per_mtok` (defaulting to the
+input rate). Cached prompt tokens use the cached rate and remaining prompt
+tokens use the input rate. A model key must exactly match the resolved agent
+model. Relative `harbor.price_file` paths resolve from the source skill
+directory.
+
+Token and cost limits measure agent model spend only; they exclude judge
+spend, environment setup, and container time. `--max-judge-calls` counts
+recorded judge attempts, excluding `salvage` entries, transport retries, and
+requests made internally by RAGAS. Measured usage totals are retained even
+when another attempt has no telemetry; that attempt is tracked as unmeasured.
+Attempts that cannot start after a limit is reached are reported as `not_run`,
+and the resulting run is partial.
 
 ### Which dimensions apply to each arm
 

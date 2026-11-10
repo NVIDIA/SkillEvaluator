@@ -6,12 +6,30 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Document an additive qualitative assessment review worksheet with bounded
+  evidence from real successful, failed-setup and invalid-judge runs. Preserve
+  numeric grading and identify the separate decisions needed for scoreless support.
+  Pin the public calculator input to the historical repository revision used by
+  the run, preserving its original hash and evidence pointers after migration.
+
 - Tier 3 reports show per-case expectation inventories with explicit met,
   unmet, unchecked, unscored and inapplicable judgments, evidence and next
   diagnostic steps for executed conditions. Behavior judges can abstain when
   evidence is missing; partial results preserve every original requirement
   without presenting missing judgments as verified skill defects. Unexpected
   judge errors retain that inventory; intentionally skipped arms add no attempts.
+
+- Repeatable Tier 3 activation-validation recipe and offline acceptance suite.
+  Canonical trials separate expected target-skill use, trusted observed use or
+  unknown traces, task correctness, workflow diagnostics, resources and retained
+  evidence links. Fallback multi-step rows retain scoped observations without
+  claiming complete logical-trial activation or changing numeric grading.
+  Explicit `should_trigger` precedence is preserved, and standard baselines
+  retain trusted trajectory observations independently of null/N/A skill scores.
+  Primary skill identities match case-insensitively; accepted alternate use remains
+  optional, including the legacy alternate field, without changing numeric grades.
+  Unrendered activation diagnostics remain in canonical exports without consuming
+  HTML overview or failure-reason preview budgets.
 
 - Run SkillEvaluator's own `skills/` through the pinned three-tier GitHub
   callers, retaining Tier 1 as required and Tier 2/3 as advisory. A separate
@@ -161,6 +179,12 @@ All notable changes to SkillEvaluator are documented in this file.
   after a `;`, which starts a new command.
 
 ### Fixed
+
+- Tier 3 dataset summaries honor explicit `should_trigger` routing labels before
+  legacy `expected_skill` values. Report insights distinguish unavailable trial
+  scores from scored attempts that miss the pass threshold. Dataset snapshots
+  use schema 1.1; valid schema 1.0 snapshots retain their original datasets and
+  integrity checks, with corrected summaries projected without rewriting files.
 
 - Tier 2 includes qualifying shell comment blocks at end of file in context
   deduplication. Previously those blocks disappeared unless a blank line or

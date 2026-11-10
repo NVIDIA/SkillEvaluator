@@ -17,7 +17,7 @@ No external vector database or catalog service is required.
 
 ## Tier 2 in automatic CI
 
-The [all-tier onboarding path](cli-onboarding.mdx#opt-in-to-three-tier-ci)
+The [all-tier onboarding path](/skills/skillevaluator/advanced-ci)
 runs Tier 2 as an advisory check, independently from the Tier 1 image and paired
 Tier 3 evaluation. Configure chat and embedding provider credentials as CI
 secrets. Tier 2 does not read `evals/`; committed native datasets are needed
@@ -28,7 +28,7 @@ The aggregate artifact preserves native Tier 2 JSON and HTML, including
 deduplication and catalog-similarity findings. Failed, missing or incomplete
 Tier 2 results stay advisory and do not block a passing Tier 1 CI gate; they are
 never relabeled as completed passes. See
-[retained CI evidence](reports.mdx#retained-three-tier-ci-evidence).
+[retained CI evidence](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/all-tiers/README.md#retained-three-tier-ci-evidence).
 
 ## Run Tier 2
 

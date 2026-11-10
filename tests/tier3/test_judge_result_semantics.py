@@ -52,6 +52,89 @@ eval_template = _load_template_module()
 
 
 @pytest.mark.parametrize("module", [llm_judge, eval_template])
+def test_behavior_inventory_preserves_original_requirements_and_missing_verdicts(module, monkeypatch):
+    truncated = '{"results":[{"step":2,"passed":false,"reason":"file absent"},{"step":3'
+    monkeypatch.setattr(module, "call_public_llm", _pair_script([(truncated, None)], []))
+    result = module.judge_behavior_check("conversation", ["read the input", "write the file", "check the file"])
+
+    assert result["score"] == 0.0
+    assert result["results"] == [{"step": 2, "passed": False, "reason": "file absent"}]
+    assert [item["requirement"] for item in result["expectations"]] == [
+        "read the input",
+        "write the file",
+        "check the file",
+    ]
+    assert [item["status"] for item in result["expectations"]] == ["not_checked", "unmet", "not_checked"]
+    assert all(item["reason"] for item in result["expectations"])
+
+
+@pytest.mark.parametrize("module", [llm_judge, eval_template])
+def test_behavior_inventory_keeps_all_expectations_after_judge_error(module, monkeypatch):
+    monkeypatch.setattr(module, "call_public_llm", _pair_script([("", "judge unavailable")], []))
+    result = module.judge_behavior_check("conversation", ["first", "second"])
+
+    assert result["score"] is None
+    assert result["status"] == "error"
+    assert [item["requirement"] for item in result["expectations"]] == ["first", "second"]
+    assert all(item["status"] == "not_checked" for item in result["expectations"])
+    assert all(item["reason"] for item in result["expectations"])
+
+
+@pytest.mark.parametrize("module", [llm_judge, eval_template])
+@pytest.mark.parametrize("exception", [TimeoutError, RuntimeError])
+def test_behavior_inventory_survives_unexpected_provider_exceptions(module, exception, monkeypatch):
+    def raise_error(*_args, **_kwargs):
+        raise exception("provider failed")
+
+    monkeypatch.setattr(module, "call_public_llm", raise_error)
+    result = module.judge_behavior_check("conversation", ["first", "second"])
+    assert result["score"] is None and result["status"] == "error"
+    assert result["results"] == []
+    assert [item["requirement"] for item in result["expectations"]] == ["first", "second"]
+    assert all(item["status"] == "not_checked" for item in result["expectations"])
+    assert all(exception.__name__ in item["reason"] for item in result["expectations"])
+
+
+@pytest.mark.parametrize("keyword_arguments", [False, True])
+def test_required_behavior_judge_wrapper_keeps_inventory_on_unexpected_exception(keyword_arguments):
+    def raise_timeout(*_args, **_kwargs):
+        raise TimeoutError("judge deadline")
+
+    args = () if keyword_arguments else ("conversation", ["first", "second"])
+    kwargs = {"conversation_text": "conversation", "expected_behaviors": ["first", "second"]} if keyword_arguments else {}
+    result = eval_template._call_required_judge("behavior_check", raise_timeout, *args, **kwargs)
+    assert result["score"] is None and result["status"] == "error"
+    assert result["results"] == []
+    assert [item["requirement"] for item in result["expectations"]] == ["first", "second"]
+    assert all(item["status"] == "not_checked" for item in result["expectations"])
+    assert all("TimeoutError" in item["reason"] for item in result["expectations"])
+
+
+@pytest.mark.parametrize("module", [llm_judge, eval_template])
+def test_behavior_judge_can_abstain_without_calling_missing_evidence_a_violation(module, monkeypatch):
+    response = json.dumps(
+        {
+            "results": [
+                {"step": 1, "passed": True, "reason": "input read"},
+                {"step": 2, "passed": None, "reason": "artifact contents not captured"},
+            ]
+        }
+    )
+    monkeypatch.setattr(module, "call_public_llm", _pair_script([(response, None)], []))
+    result = module.judge_behavior_check("partial trace", ["read input", "verify contents"])
+    assert result["score"] == 0.5
+    assert [item["status"] for item in result["expectations"]] == ["met", "not_checked"]
+    assert result["expectations"][1]["reason"] == "artifact contents not captured"
+
+
+@pytest.mark.parametrize("module", [llm_judge, eval_template])
+@pytest.mark.parametrize("reason", [None, "", " ", []])
+def test_behavior_abstention_requires_a_reason(module, reason):
+    payload = {"results": [{"step": 1, "passed": None, "reason": reason}]}
+    assert module._behavior_payload_error(payload, 1) is not None
+
+
+@pytest.mark.parametrize("module", [llm_judge, eval_template])
 def test_accuracy_grades_the_outcome_not_skill_use(module, monkeypatch):
     # A correct no-skill or negative-case answer can reach 1.0: skill use is
     # scored by skill_execution, not by an accuracy criterion.

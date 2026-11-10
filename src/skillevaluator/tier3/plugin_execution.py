@@ -422,7 +422,11 @@ def evaluate_prepared_plugin(
     from skillevaluator.tier3.plugin_prepare import bind_runtime_results, stage_wrapper_skill, wrapper_skill_name
 
     if not package.runnable:
-        raise PluginLoadError("plugin has no runnable skill, rule, MCP server, or text component")
+        # Nothing was evaluated: INCOMPLETE with its recorded reasons, never a successful skip.
+        reasons = "; ".join(package.incomplete_reasons)
+        raise PluginLoadError(
+            "plugin has no runnable skill, rule, MCP server, or text component" + (f" ({reasons})" if reasons else "")
+        )
     agents = parse_agents(options.agents)
     if load != "wrapper" and not agents:
         raise PluginLoadError("native plugin loading needs explicit agents")

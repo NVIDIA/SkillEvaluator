@@ -60,3 +60,9 @@ Open a pull request or merge request that changes a skill to see the checks.
 Enable the platform's CI service, allow the referenced workflows or includes,
 and provide a compatible runner. The [platform guides](../../docs/repository-integration.mdx)
 cover results and merge-gating settings.
+
+## Advanced CI
+
+The unreleased, explicitly enabled all-tier integration has separate
+[setup and maintainer instructions](all-tiers/README.md). Released templates
+above provide quality and security checks without a model key.

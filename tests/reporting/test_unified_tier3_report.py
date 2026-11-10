@@ -16,6 +16,7 @@ from skillevaluator.evaluation.tier3_report import (
     _attach_harbor_evidence_to_conclusions,
     _attach_harbor_evidence_to_recommendations,
     _attach_harbor_evidence_to_suggestions_v2,
+    _build_conclusions,
     _cases,
     _evaluator_cards,
     _metric_evidence,
@@ -32,8 +33,10 @@ from skillevaluator.reporting import HTMLReporter, JSONReporter
 from skillevaluator.reporting import html as html_module
 from skillevaluator.reporting.base import agent_eval_publication_evidence_complete
 from skillevaluator.reporting.html import PackageLoader, _compact_json
+from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION
 from skillevaluator.tier3.harbor.collector import _paired_pass_comparison, _wilson_score_interval
 from skillevaluator.tier3.harbor.metrics import (
+    CUSTOM_SCORE_POLICY,
     DEFAULT_METRICS,
     DEFAULT_SCORE_POLICY,
     LEGACY_METRICS,
@@ -198,11 +201,160 @@ def test_normalize_trials_preserves_only_trusted_standard_invocation_evidence() 
     assert standard["skill_invoked"] is True
     assert standard["routing_passed"] is False
     assert standard["invocation_evidence_source"] == "trajectory"
+    assert "required_check_data" not in standard
+    assert "goal_accuracy_for_verdict" not in standard
     assert "skill_execution" not in custom_spoof["scores"]
     for trial in (custom_spoof, untrusted):
         assert "skill_invoked" not in trial
         assert "routing_passed" not in trial
         assert "invocation_evidence_source" not in trial
+
+
+def test_normalize_trials_uses_configured_attempt_threshold_for_attempt_verdict() -> None:
+    [trial] = _normalize_trials(
+        [
+            {
+                "trial_id": "case-1__attempt1",
+                "entry_id": "case-1",
+                "metric_set": "custom-only",
+                "score_policy": CUSTOM_SCORE_POLICY,
+                "overall": 0.46,
+                "goal_accuracy": 1.0,
+                "security": 1.0,
+            }
+        ],
+        [],
+        pass_threshold=0.3,
+    )
+
+    assert trial["overall"] == 0.46
+    assert trial["attempt_verdict"]["passed"] is True
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["goal not met (goal accuracy 0.00)", "security issue (security 0.00)"],
+)
+def test_build_conclusions_counts_unscored_required_attempt_failure_as_failing(reason: str) -> None:
+    conclusions = _build_conclusions(
+        {
+            "codex": {
+                "with_skill": 0.5,
+                "trials": [
+                    {
+                        "entry_id": "case-1",
+                        "overall": None,
+                        "attempt_verdict": {"passed": False, "reason": reason},
+                    }
+                ],
+            }
+        },
+        [],
+        pass_threshold=0.5,
+    )
+
+    assert any(item["title"] == "Cases needing review" for item in conclusions)
+    assert not any(item["title"] == "Unscored trials" for item in conclusions)
+
+
+def test_build_conclusions_counts_unscored_only_attempt_as_unscored() -> None:
+    conclusions = _build_conclusions(
+        {
+            "codex": {
+                "with_skill": 0.5,
+                "trials": [
+                    {
+                        "entry_id": "case-1",
+                        "overall": None,
+                        "attempt_verdict": {"passed": False, "reason": "overall score was not available"},
+                    }
+                ],
+            }
+        },
+        [],
+        pass_threshold=0.5,
+    )
+
+    assert any(item["title"] == "Unscored trials" for item in conclusions)
+    assert not any(item["title"] == "Cases needing review" for item in conclusions)
+
+
+@pytest.mark.parametrize(
+    ("overall", "expected_title"),
+    [(None, "Unscored trials"), (0.4, "Cases needing review")],
+)
+def test_build_conclusions_falls_back_to_overall_without_boolean_attempt_verdict(
+    overall: float | None, expected_title: str
+) -> None:
+    conclusions = _build_conclusions(
+        {
+            "codex": {
+                "with_skill": 0.5,
+                "trials": [
+                    {
+                        "entry_id": "case-1",
+                        "overall": overall,
+                        "attempt_verdict": {"passed": None},
+                    }
+                ],
+            }
+        },
+        [],
+        pass_threshold=0.5,
+    )
+
+    assert any(item["title"] == expected_title for item in conclusions)
+
+
+def test_report_attempt_chip_uses_configured_attempt_threshold() -> None:
+    trial_id = "case-1__attempt1"
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "metric_set_with_skill": "custom-only",
+                "score_policy_with_skill": CUSTOM_SCORE_POLICY,
+                "overall_with_skill": 0.46,
+                "pass_with_skill": {
+                    "k": 1,
+                    "pass_threshold": 0.3,
+                    "rate": 1.0,
+                    "cases": {
+                        "case-1": {
+                            "passed": True,
+                            "attempts_used": 1,
+                            "best_score": 0.46,
+                            "attempts": [{"attempt": 1, "trial": trial_id, "score": 0.46, "passed": True}],
+                        }
+                    },
+                },
+                "rewards": [
+                    {
+                        "trial_id": trial_id,
+                        "entry_id": "case-1",
+                        "metric_set": "custom-only",
+                        "score_policy": CUSTOM_SCORE_POLICY,
+                        "overall": 0.46,
+                        "goal_accuracy": 1.0,
+                        "security": 1.0,
+                    }
+                ],
+            }
+        },
+        attempt_policy={"max_attempts": 1, "pass_threshold": 0.3},
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    html = _render_agent_payload(payload)
+
+    assert "A1: 0.46 PASS" in html
+    hint = html.split("Each row is one eval case", 1)[1].split("</p>", 1)[0]
+    assert "goal accuracy is at least" in hint
+    assert "security is at least" in hint
 
 
 def test_normalize_trials_collapses_multi_step_rows_to_one_logical_attempt() -> None:
@@ -505,9 +657,9 @@ def test_conclusions_separate_unavailable_trials_from_threshold_misses(has_thres
     rewards = [
         {"entry_id": "unscored", "metric_set": "skill-evaluator-default-v2", "overall": None},
         {
-            "entry_id": "at-threshold",
+            "entry_id": "passed-checks",
             "metric_set": "skill-evaluator-default-v2",
-            **dict.fromkeys(DEFAULT_METRICS, 0.5),
+            **dict.fromkeys(DEFAULT_METRICS, 1.0),
         },
     ]
     if has_threshold_miss:
@@ -539,9 +691,7 @@ def test_conclusions_separate_unavailable_trials_from_threshold_misses(has_thres
     assert payload["agents"]["codex"]["trials"][0]["overall"] is None
     conclusions = {item["title"]: item["message"] for item in payload["conclusions"]}
     assert "Unscored trials" in conclusions
-    assert conclusions["Unscored trials"] == (
-        "1 trial(s) have unavailable overall scores; examples: codex/unscored"
-    )
+    assert conclusions["Unscored trials"] == ("1 trial(s) have unavailable overall scores; examples: codex/unscored")
     html = _render_agent_payload(payload)
     assert "1 trial(s) have unavailable overall scores; examples: codex/unscored" in html
     if has_threshold_miss:
@@ -692,14 +842,15 @@ def test_no_skill_baseline_dimension_na_explains_why_in_html() -> None:
 
     html = _render_agent_payload(payload)
 
-    assert (
-        '<td title="No-skill baseline: This arm has no skill under test installed, '
-        'so there is no skill to discover or run">N/A</td>'
-    ) in html
-    assert (
-        '<td title="No-skill baseline: This arm has no skill under test installed, '
-        'so there is no skill to route to">N/A</td>'
-    ) in html
+    for title in (
+        "No-skill baseline: This arm has no skill under test installed, so there is no skill to discover or run",
+        "No-skill baseline: This arm has no skill under test installed, so there is no skill to route to",
+    ):
+        cell_start = html.index(f'<td title="{title}">')
+        cell_end = html.index("</td>", cell_start)
+        cell = html[cell_start:cell_end]
+        assert "N/A" in cell
+        assert '<div class="t3-dim-hint">baseline not scored</div>' in cell
 
 
 def test_trial_report_omits_token_chart_for_incomplete_agent_telemetry() -> None:
@@ -1613,9 +1764,17 @@ def test_tier3_html_renders_plain_accuracy_reason_and_unavailable_evidence() -> 
 def test_canonical_payload_deduplicates_repeated_metric_evidence() -> None:
     reward = {
         "entry_id": "case-1",
-        "security": 1.0,
+        "security": 0.5,
         "goal_accuracy": 0.5,
-        "details": {"goal_accuracy": {"reason": "same representative evidence"}},
+        "details": {
+            "security": {"reason": "security judge reason"},
+            "goal_accuracy": {
+                "reason": "A; B",
+                "criteria": {"A": False, "B": False},
+                "expected": "expected answer",
+                "observed": "observed answer",
+            },
+        },
     }
     payload = build_agent_eval_payload(
         "demo",
@@ -1625,7 +1784,7 @@ def test_canonical_payload_deduplicates_repeated_metric_evidence() -> None:
                 "execution_errors": [],
                 "expected_attempts": 2,
                 "scored_attempts": 2,
-                "with_skill": {"security": 1.0, "goal_accuracy": 0.5},
+                "with_skill": {"security": 0.5, "goal_accuracy": 0.5},
                 "rewards": [dict(reward), dict(reward)],
             }
         },
@@ -1634,18 +1793,17 @@ def test_canonical_payload_deduplicates_repeated_metric_evidence() -> None:
     assert payload is not None
 
     goal_card = next(card for card in payload["agents"]["codex"]["evaluator_cards"] if card["id"] == "goal_accuracy")
-    assert goal_card["evidence"] == [
-        {
-            "entry_id": "case-1",
-            "score": 0.5,
-            "notes": ["same representative evidence"],
-            "failures": [],
-            "checks": [],
-            "evidence_refs": [],
-            "evidence_unavailable_reason": "No trajectory evidence was recorded for this metric",
-            "occurrences": 2,
-        }
-    ]
+    [goal_evidence] = goal_card["evidence"]
+    assert goal_evidence["notes"] == ["A; B"]
+    assert goal_evidence["reason"] == "Expected: expected answer; observed: observed answer; Failed criteria: A, B"
+    assert goal_evidence["entry_id"] == "case-1"
+    assert goal_evidence["score"] == 0.5
+    assert goal_evidence["evidence_unavailable_reason"] == "No trajectory evidence was recorded for this metric"
+    assert goal_evidence["occurrences"] == 2
+    security_card = next(card for card in payload["agents"]["codex"]["evaluator_cards"] if card["id"] == "security")
+    [security_evidence] = security_card["evidence"]
+    assert security_evidence["notes"] == ["security judge reason"]
+    assert "reason" not in security_evidence
     agents_html = _tier3_page(_render_agent_payload(payload), "agents", "dataset")
     assert "\u00d72" in agents_html
     assert "1 cases, 2 trials" in agents_html
@@ -3668,9 +3826,86 @@ def test_pass_at_k_final_column_has_a_narrow_viewport_scroll_contract() -> None:
 
     assert region is not None
     assert 'class="summary-table pass-at-k-table"' in region.group("table")
-    assert re.search(r"<th>Lift</th>\s*</tr>", region.group("table"))
+    assert re.search(r"<th>Pass-rate difference</th>\s*</tr>", region.group("table"))
+    assert "Pass@1 (supporting reliability)" in html
+    assert "attempt passes at Overall ≥ 0.50" in html
+    assert SKILL_LIFT_DEFINITION in html
     assert ".table-scroll { max-width: 100%; overflow-x: auto;" in html
     assert ".pass-at-k-table { min-width: 720px; }" in html
+
+
+def test_shared_metric_pass_lift_is_labelled_separately_from_arm_rates() -> None:
+    from skillevaluator.reporting.summary_copy import pass_at_k_summary
+    from skillevaluator.tier3.harbor.collector import _shared_metric_pass_lift
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS, DEFAULT_SCORE_POLICY
+
+    with_skill_reward = {
+        **dict.fromkeys(DEFAULT_METRICS, 0.4),
+        "entry_id": "case-1",
+        "metric_set": DEFAULT_METRIC_SET,
+        "score_policy": DEFAULT_SCORE_POLICY,
+        "details": {"skill_execution": {"activation": {"passed": True, "score": 1.0}}},
+    }
+    with_skill_reward["skill_execution"] = 1.0
+    with_skill_reward["skill_efficiency"] = 1.0
+    without_skill_reward = {
+        **dict.fromkeys(DEFAULT_METRICS, 0.4),
+        "entry_id": "case-1",
+        "metric_set": DEFAULT_METRIC_SET,
+        "score_policy": DEFAULT_SCORE_POLICY,
+        "skill_execution": None,
+        "skill_efficiency": None,
+        "details": {
+            "skill_execution": {"score": None, "status": "not_applicable"},
+            "skill_efficiency": {"score": None, "status": "not_applicable"},
+        },
+    }
+    shared_lift = _shared_metric_pass_lift(
+        [with_skill_reward],
+        [without_skill_reward],
+        n_attempts=1,
+        pass_threshold=0.5,
+        stop_on_pass=False,
+        expected_cases=1,
+        expected_case_ids=["case-1"],
+    )
+    assert shared_lift["basis"] == "shared_metrics"
+    assert shared_lift["with_skill"] == shared_lift["without_skill"] == 0.0
+
+    pass_at_k = {
+        "with_skill": {"k": 1, "pass_threshold": 0.5, "rate": 1.0, "passed_cases": 1, "total_cases": 1},
+        "without_skill": {"k": 1, "pass_threshold": 0.5, "rate": 0.0, "passed_cases": 0, "total_cases": 1},
+        "lift": shared_lift,
+    }
+    summary = pass_at_k_summary(pass_at_k, {"max_attempts": 1, "pass_threshold": 0.5})
+    assert summary is not None
+    assert "with skill 100.0%, without skill 0.0%" in summary
+    assert "Pass-rate difference +100.0 percentage points" in summary
+    assert "Shared-metric pass-rate difference +0.0 percentage points" in summary
+
+    payload = build_agent_eval_payload(
+        "shared-metric-pass-demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+                "overall_with_skill": 0.64,
+                "overall_without_skill": 0.4,
+                "pass_with_skill": pass_at_k["with_skill"],
+                "pass_without_skill": pass_at_k["without_skill"],
+                "pass_lift": shared_lift,
+            }
+        },
+        attempt_policy={"max_attempts": 1, "pass_threshold": 0.5},
+        use_llm_judge=False,
+    )
+    assert payload is not None
+    html = _render_agent_payload(payload)
+    assert "Shared-metric pass-rate difference: +0 percentage points (with skill 0%, without skill 0%)." in html
+    assert "<td>With skill</td>" in html and "<td>100%</td>" in html
+    assert "<td>Without skill</td>" in html and "<td>0%</td>" in html
 
 
 def test_unavailable_pairing_does_not_render_a_zero_evidence_row() -> None:

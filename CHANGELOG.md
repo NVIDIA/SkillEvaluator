@@ -6,6 +6,41 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- A reproducible public terminal starter runs the released CLI against the
+  bundled text-analyzer skill, checks real script/report output and a seeded
+  quality regression, and retains an editable task, fixture and run receipt.
+  The walkthrough connects setup, interpretation, live-evaluation prerequisites,
+  troubleshooting and adaptation; contributor guidance clarifies environment
+  setup, example verification and the existing DCO policy.
+
+- Tier 3 datasets can declare deterministic behavior checks for script invocation and success, workspace files, and final-response text.
+
+- Tier 3 `evaluate --reuse-baseline RUN` reuses compatible retained fresh
+  without-skill evidence, preserving lift calculations and baseline provenance.
+  `latest` searches completed runs and falls back to a fresh baseline when needed.
+
+- Tier 3 evaluations support token, judge-call, attempt, and priced-cost budgets.
+
+- Tier 3 reports list up to three run-level **Next steps** under the per-case
+  fixes in the terminal, `report.html` and the Markdown report: re-run an
+  incomplete run, add attempts for inconsistent cases, add cases or negative
+  controls, or compare agents and models. Each step names its target
+  (evaluation, dataset or agent), the observed problem and evidence, the action,
+  and the check that would show improvement. Steps about agents or models are
+  marked as hypotheses to test, steps from incomplete runs as limited, and none
+  suggest removing cases or loosening expectations. The rules need no LLM; the
+  Tier 3 payload carries them as `next_steps`.
+
+- Document per-agent Tier 3 `findings.json` artifacts and distinguish advisory
+  metric severity from dimension verdicts; include severity thresholds in the
+  artifact and a muted CLI legend without changing scores or thresholds.
+
+- `tier3 import-metrics` accepts versioned, normalized per-case custom scores
+  from external evaluations and writes clearly labeled JSON/Markdown reports.
+  Imports validate identities, metric metadata and values, retain declared
+  provenance and source hashes, and compute custom lift only on matched
+  case/attempt pairs, without assigning standard scores or claiming execution.
+
 - Show per-agent evidence volume next to Tier 3 scores: distinct cases, planned
   and scored attempts, execution and judge failures, and per-arm counts when a
   baseline ran. Flag limited case coverage or incomplete attempt coverage;
@@ -16,7 +51,6 @@ All notable changes to SkillEvaluator are documented in this file.
   negative-case, Wilson interval, and paired-case coverage requirements. Show
   the dataset-size status in evaluation, validation, HTML, and BENCHMARK output;
   validation coverage notes remain informational.
-
 - Experimental `hermes` Tier 3 agent for Docker and native NVIDIA Build routing,
   pinned to Hermes v2026.9.24. Includes isolated skill staging, ATIF trajectories,
   activation evidence, token accounting and retained execution diagnostics.
@@ -71,7 +105,7 @@ All notable changes to SkillEvaluator are documented in this file.
   onboarding and status recognize this filename collision without replacing
   reusable workflow definitions. Automatic comments activate after the
   listener reaches the default branch.
-  Document the shared chat/judge/agent model input and model-availability
+   Document the shared chat/judge/agent model input and model-availability
   troubleshooting for provider-backed CI.
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI
@@ -116,7 +150,31 @@ All notable changes to SkillEvaluator are documented in this file.
   `scripts/ci/smoke_openclaw_plugins.py` repeats these checks against real
   plugin sources without executing plugin code.
 
+- Simplify repository CI onboarding around quality and security checks with
+  no model key required,
+  keeping optional LLM checks and hosted feedback separate. Preserve opt-in
+  all-tier setup and report contracts in an Advanced CI reference.
+
 ### Changed
+
+- Name Skill Lift as the headline comparison and label pass@k differences as
+  supporting reliability across reports and terminal output.
+
+- A scored Tier 3 attempt now fails when `goal_accuracy` or security is below
+  1.0, even if its Overall score meets the pass threshold. N/A or unscored
+  metrics preserve the existing verdict behavior; missed behavior-check steps
+  are warnings. A with-skill required-check failure fails the quality verdict,
+  while no-skill failures do not. Reports show required-check, goals-met,
+  and security-clean counts for both arms, plus failed-case reasons.
+
+- HTML and `BENCHMARK.md` reports explain each Tier 3 dimension in plain
+  language with its evidence source and whether the run has a no-skill baseline
+  for it. Dimensions that could not be scored or do not apply stay listed with
+  the reason instead of disappearing or reading `Not available`, and baseline-only
+  cards show the baseline score. A short key in both reports separates the
+  verdict, dimension and overall scores, BENCHMARK Uplift, published Skill Lift,
+  pass@k, the Tier 1
+  Quality Score, and publication eligibility.
 
 - Write Tier 3 accuracy deductions as plain-language reasons, identify findings
   without trajectory evidence, and include expected/observed text only when

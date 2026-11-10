@@ -107,6 +107,34 @@ names such as `none.sh` intact.
 The dataset file can be named `evals.json`, `evals.jsonl`, `evals.yaml`, or
 `evals.yml` — `tier3 evaluate` accepts all four.
 
+### Deterministic checks
+
+Use the optional `checks` list for requirements that can be evaluated without
+a custom grader or language-model judge. Each check contributes one item to
+`behavior_check`; checks without the required evidence are reported as not
+checked and are excluded from its mean.
+
+```json
+{
+  "checks": [
+    {"type": "script_invoked", "script": "scripts/build.py"},
+    {"type": "command_succeeded", "script": "scripts/build.py"},
+    {"type": "file_exists", "path": "out/report.md"},
+    {"type": "output_matches", "pattern": "Report [0-9]+"},
+    {"type": "output_contains", "text": "Build complete"}
+  ]
+}
+```
+
+`script_invoked` checks command evidence in the trajectory. `command_succeeded`
+also requires recorded success; an invocation without an exit result is not
+checked. `file_exists` inspects the post-run workspace, not a path merely
+mentioned in the response. `output_matches` uses a regular expression and
+`output_contains` uses a literal substring; both inspect the final response.
+Unknown check types and invalid fields are dataset-validation errors. On a
+without-skill baseline, checks for scripts inside the evaluated skill are not
+checked because that skill is not installed.
+
 <AccordionGroup>
   <Accordion title="Legacy flat format">
     Older datasets are a flat array of entries with `question` instead of
@@ -346,6 +374,11 @@ grading:
 | `harbor.n_concurrent` | integer ≥ 1 | Concurrent trials. |
 | `harbor.max_agents` | integer ≥ 1 | Cap on agents evaluated in one run. |
 | `harbor.max_cases` | integer ≥ 1 | Run only the first N cases in staged order (eval dataset order, or task-directory name order for native Harbor tasks). Unset runs every case. A run that skips cases is not publication evidence. The `--max-cases` CLI flag overrides this value. |
+| `harbor.max_agent_tokens` | integer ≥ 0 | Maximum observed agent-model tokens across the run. |
+| `harbor.max_judge_calls` | integer ≥ 0 | Maximum recorded non-salvage judge attempts; excludes transport retries and RAGAS-internal requests. |
+| `harbor.max_attempts_total` | integer ≥ 0 | Maximum logical Harbor attempts admitted across agents and arms, including private comparison arms. |
+| `harbor.max_cost_usd` | finite number ≥ 0 | Agent model spend ceiling; requires `harbor.price_file` and excludes judge spend, setup, and container time. |
+| `harbor.price_file` | path | JSON price book keyed by exact resolved model identifier. Relative paths resolve from the source skill directory. Each model requires `input_per_mtok` and `output_per_mtok`; optional `cached_input_per_mtok` defaults to the input rate. |
 | `harbor.timeout_multiplier` | finite number > 0 | Scales task timeouts. Values that would overflow Harbor's mandatory lifecycle timeouts are rejected before execution. |
 | `harbor.agent_runtime_preflight` | boolean | Opt-in extra agent-only execution of the first staged task before the measured evaluation. Default: `false`; the CLI flag overrides this value. |
 | `harbor.agent_workdir` | string | Working directory for the agent inside the container. |

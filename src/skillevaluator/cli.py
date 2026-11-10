@@ -896,6 +896,11 @@ def _run_agent_eval_or_skip(
     max_agents: int | None,
     max_cases: int | None = None,
     n_attempts: int | None = None,
+    max_agent_tokens: int | None = None,
+    max_judge_calls: int | None = None,
+    max_attempts_total: int | None = None,
+    max_cost_usd: float | None = None,
+    price_file: Path | None = None,
     pass_threshold: float | None = None,
     stop_on_pass: bool | None = None,
     model: str | None = None,
@@ -956,6 +961,11 @@ def _run_agent_eval_or_skip(
         max_agents=max_agents,
         max_cases=max_cases,
         n_attempts=n_attempts,
+        max_agent_tokens=max_agent_tokens,
+        max_judge_calls=max_judge_calls,
+        max_attempts_total=max_attempts_total,
+        max_cost_usd=max_cost_usd,
+        price_file=price_file,
         pass_threshold=pass_threshold,
         stop_on_pass=stop_on_pass,
         model=model,
@@ -1351,6 +1361,16 @@ def _catalog_child_argv_from_ctx(
         argv.extend(["--max-cases", str(params["max_cases"])])
     if params.get("n_attempts") is not None:
         argv.extend(["--n-attempts", str(params["n_attempts"])])
+    if params.get("max_agent_tokens") is not None:
+        argv.extend(["--max-agent-tokens", str(params["max_agent_tokens"])])
+    if params.get("max_judge_calls") is not None:
+        argv.extend(["--max-judge-calls", str(params["max_judge_calls"])])
+    if params.get("max_attempts_total") is not None:
+        argv.extend(["--max-attempts-total", str(params["max_attempts_total"])])
+    if params.get("max_cost_usd") is not None:
+        argv.extend(["--max-cost-usd", str(params["max_cost_usd"])])
+    if params.get("price_file") is not None:
+        argv.extend(["--price-file", str(Path(params["price_file"]).resolve())])
     if params.get("pass_threshold") is not None:
         argv.extend(["--pass-threshold", str(params["pass_threshold"])])
     stop_on_pass = params.get("stop_on_pass")
@@ -2055,6 +2075,34 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help_group=_TIER3_GROUP,
     help="Attempts per eval case (pass@k).",
 )
+@click.option("--max-agent-tokens", type=click.IntRange(min=0), default=None, help="Maximum observed agent tokens.")
+@click.option(
+    "--max-judge-calls",
+    type=click.IntRange(min=0),
+    default=None,
+    help=(
+        "Maximum recorded non-salvage judge attempts; transport retries and RAGAS-internal requests are not counted "
+        "separately."
+    ),
+)
+@click.option(
+    "--max-attempts-total",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Maximum logical Harbor attempts across agents and arms, including private comparison arms.",
+)
+@click.option(
+    "--max-cost-usd",
+    type=click.FloatRange(min=0),
+    default=None,
+    help="Maximum agent model spend; requires --price-file and excludes judge spend, setup, and container time.",
+)
+@click.option(
+    "--price-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Model price JSON with input_per_mtok/output_per_mtok rates and optional cached_input_per_mtok.",
+)
 @click.option(
     "--pass-threshold",
     type=float,
@@ -2192,6 +2240,11 @@ def validate(
     max_agents: int | None,
     max_cases: int | None,
     n_attempts: int | None,
+    max_agent_tokens: int | None,
+    max_judge_calls: int | None,
+    max_attempts_total: int | None,
+    max_cost_usd: float | None,
+    price_file: Path | None,
     pass_threshold: float | None,
     stop_on_pass: bool | None,
     model: str | None,
@@ -2537,6 +2590,11 @@ def validate(
             max_agents=max_agents,
             max_cases=max_cases,
             n_attempts=n_attempts,
+            max_agent_tokens=max_agent_tokens,
+            max_judge_calls=max_judge_calls,
+            max_attempts_total=max_attempts_total,
+            max_cost_usd=max_cost_usd,
+            price_file=price_file,
             pass_threshold=pass_threshold,
             stop_on_pass=stop_on_pass,
             model=model,
@@ -3184,11 +3242,47 @@ def _tier2_workflow(
 )
 @click.option("--skip-baseline", is_flag=True, help="Skip without-skill baseline.")
 @click.option(
+    "--reuse-baseline", metavar="RUN", default=None, help="Reuse a compatible retained baseline run id or latest."
+)
+@click.option(
     "--skip-with-skill",
     is_flag=True,
     help="Skip the with-skill arm and run only the without-skill baseline (no lift analysis).",
 )
 @click.option("--n-attempts", type=int, default=None)
+@click.option(
+    "--max-agent-tokens",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Maximum measured agent-model tokens.",
+)
+@click.option(
+    "--max-judge-calls",
+    type=click.IntRange(min=0),
+    default=None,
+    help=(
+        "Maximum recorded non-salvage judge attempts; transport retries and RAGAS-internal requests are not counted "
+        "separately."
+    ),
+)
+@click.option(
+    "--max-attempts-total",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Maximum logical Harbor attempts across agents and arms, including private comparison arms.",
+)
+@click.option(
+    "--max-cost-usd",
+    type=click.FloatRange(min=0),
+    default=None,
+    help="Maximum agent model spend; requires --price-file and excludes judge spend, setup, and container time.",
+)
+@click.option(
+    "--price-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Model price JSON with input_per_mtok/output_per_mtok rates and optional cached_input_per_mtok.",
+)
 @click.option("--pass-threshold", type=float, default=None)
 @click.option(
     "--stop-on-pass/--no-stop-on-pass",
@@ -3266,7 +3360,13 @@ def evaluate(
     autopilot: bool,
     skip_baseline: bool,
     skip_with_skill: bool,
+    reuse_baseline: str | None,
     n_attempts: int | None,
+    max_agent_tokens: int | None,
+    max_judge_calls: int | None,
+    max_attempts_total: int | None,
+    max_cost_usd: float | None,
+    price_file: Path | None,
     pass_threshold: float | None,
     stop_on_pass: bool | None,
     n_concurrent: int | None,
@@ -3300,6 +3400,19 @@ def evaluate(
     if skip_baseline and skip_with_skill:
         # Reject before --autopilot can spend a generation call on a run that cannot start.
         raise click.UsageError("--skip-baseline and --skip-with-skill are mutually exclusive (no arm would run)")
+    if reuse_baseline and (skip_baseline or skip_with_skill):
+        raise click.UsageError("--reuse-baseline is mutually exclusive with --skip-baseline and --skip-with-skill")
+    from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
+
+    try:
+        merged_config, _ = load_evals_config(skill_path)
+    except EvalsConfigError as exc:
+        raise click.UsageError(str(exc)) from exc
+    harbor_config = merged_config.get("harbor", {})
+    effective_max_cost = max_cost_usd if max_cost_usd is not None else harbor_config.get("max_cost_usd")
+    effective_price_file = price_file or harbor_config.get("price_file")
+    if effective_max_cost is not None and effective_price_file is None:
+        raise click.UsageError("--max-cost-usd requires --price-file")
     service = EvaluationService()
     # Resolved before the service is built so a non-canonical value is refused
     # at the boundary rather than after a long live run has already started.
@@ -3332,7 +3445,13 @@ def evaluate(
         environment_kwarg=environment_kwarg,
         skip_baseline=skip_baseline,
         skip_with_skill=skip_with_skill,
+        reuse_baseline=reuse_baseline,
         n_attempts=n_attempts,
+        max_agent_tokens=max_agent_tokens,
+        max_judge_calls=max_judge_calls,
+        max_attempts_total=max_attempts_total,
+        max_cost_usd=max_cost_usd,
+        price_file=price_file,
         pass_threshold=pass_threshold,
         stop_on_pass=stop_on_pass,
         n_concurrent=n_concurrent,
@@ -3760,6 +3879,27 @@ def tier3_doctor_command(ctx: click.Context, **options: Any) -> None:
 def health_check(ctx: click.Context, **options: Any) -> None:
     """Quick readiness check for the CLI and selected live-eval backend, or another tier with --tier."""
     raise SystemExit(_run_doctor(ctx, **options))
+
+
+@tier3.command("import-metrics")
+@click.argument("source", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "-o",
+    "--output-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    required=True,
+    help="New directory for external-only JSON and Markdown reports; must not exist.",
+)
+def tier3_import_metrics(source: Path, output_dir: Path) -> None:
+    """Report precomputed custom scores without executing tests or assigning standard scores."""
+    from skillevaluator.reporting.external_metrics import import_external_metrics
+
+    try:
+        import_external_metrics(source, output_dir)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo("Imported external observations; SkillEvaluator did not execute these tests.")
+    click.echo(f"Reports: {output_dir / 'external_metrics.json'}, {output_dir / 'external_metrics.md'}")
 
 
 @tier3.command("migrate-dataset")

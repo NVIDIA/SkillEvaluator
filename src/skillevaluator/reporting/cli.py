@@ -56,6 +56,7 @@ from skillevaluator.reporting.run_status import Status, result_status
 from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, RED, TEXT, grade_style, lift_style
 from skillevaluator.tier3.baseline_store import baseline_description
 from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
+from skillevaluator.tier3.evidence_volume import format_evidence_volume
 from skillevaluator.tier3.version_comparison import version_comparison_lines
 from skillevaluator.utils.rich_markup import escape_markup
 
@@ -431,6 +432,10 @@ class CLIReporter(ReporterBase):
             )
         if runtime:
             console.print(f"  [dim]Runtime: {runtime:.1f}s[/dim]")
+        evidence_line = format_evidence_volume(agent_eval.get("evidence_volume"))
+        if evidence_line:
+            style = "yellow" if evidence_line.startswith("Limited evidence:") else "dim"
+            console.print(f"  [{style}]{evidence_line}[/{style}]")
         sufficiency = agent_eval.get("dataset_sufficiency")
         if isinstance(sufficiency, dict):
             status = str(sufficiency.get("status") or "provisional")

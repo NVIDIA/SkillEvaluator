@@ -94,7 +94,11 @@ All notable changes to SkillEvaluator are documented in this file.
   out of the scanned copy, such as `evals/` or `node_modules/`, anything in
   it, or a directory that holds any of these, also after Markdown escapes,
   character references and percent-escapes are decoded, or through a shell
-  glob, expansion or quotes. Inside `.git`, only `.git` itself and hooks other
+  glob, expansion or quotes, a zsh group, numeric range or `EXTENDED_GLOB`
+  operator, a bash extended glob, a command in backticks, a cmd.exe `^`
+  escape, variable or batch parameter such as `%DIR%`, `!DIR!` or `%~dp0`, a
+  PowerShell backtick escape, a `\` separator or a Windows 8.3 short name such
+  as `NODE_M~1`. Inside `.git`, only `.git` itself and hooks other
   than `*.sample` templates count. A lone file such as `SKILL.md` is scanned
   on its own, so a line that names a file beside it keeps the scan
   `INCOMPLETE`. Tier 3 output in the default `<skill>/evals/results` location,

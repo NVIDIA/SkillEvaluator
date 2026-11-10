@@ -1577,21 +1577,42 @@ _SKILLSPECTOR_NAME_RUN_RE = re.compile(r"[\w.-]+")
 # A word of a reference's line: text between whitespace and the Markdown or
 # shell delimiters around a path.
 _SKILLSPECTOR_LINE_WORD_RE = re.compile(r"[^\s`()<>|;&]+")
-# Characters with which a shell expands, quotes or escapes a word, so that it
-# can open a file that the word does not spell out.
-_SKILLSPECTOR_SHELL_SYNTAX = frozenset("*?[{$\"'\\")
+# Stands for any text where a shell group or range was read in a line
+# (:func:`_skillspector_shell_groups`); unlike ``*``, a word made of it is
+# never taken for a list marker.
+_SKILLSPECTOR_SHELL_ANY = "\x00"
+# Characters with which a shell, cmd.exe or Windows expands, quotes or escapes
+# a word, so that it can open a file that the word does not spell out.
+_SKILLSPECTOR_SHELL_SYNTAX = frozenset("*?[{$\"'\\^%!#~" + _SKILLSPECTOR_SHELL_ANY)
 # A parameter expansion such as ``$name`` or ``$1``, which may stand for any text.
 _SKILLSPECTOR_SHELL_PARAMETER_RE = re.compile(r"\$[\w@*#?!$-]*")
 _SKILLSPECTOR_SHELL_QUOTE_RE = re.compile(r"[\"'\\]")
+# The quotes and the ``^`` escape that cmd.exe or PowerShell remove.
+_SKILLSPECTOR_CMD_QUOTE_RE = re.compile(r"[\"'^]")
+# cmd.exe expansions: a batch parameter such as ``%1``, ``%*`` or ``%~dp0``, a
+# variable such as ``%DIR%`` and, with delayed expansion, ``!DIR!``.
+_SKILLSPECTOR_CMD_VARIABLE_RE = re.compile(r"%~[^%/]*?[0-9*]|%[0-9*]|%[^%]*%|![^!]*!")
+# A zsh numeric range such as ``<1-10>`` or ``<->``, which matches any number.
+_SKILLSPECTOR_SHELL_RANGE_RE = re.compile(r"<\d*-\d*>")
+# A character that opens, closes or splits a shell group, or a run of
+# characters that end a word.
+_SKILLSPECTOR_SHELL_GROUP_TOKEN_RE = re.compile(r"[()|]|[\s/`<>;&]+")
+# Characters that make the group after them a bash or ksh extended glob.
+_SKILLSPECTOR_EXTGLOB_OPERATORS = frozenset("@!+?*")
+# A span between backticks, and the name text or "/" that may join one before
+# or after it.
+_SKILLSPECTOR_BACKTICK_SPAN_RE = re.compile(r"`[^`]*`")
+_SKILLSPECTOR_JOINED_BEFORE_RE = re.compile(r"(?:\w[.-]?|/)\Z")
+_SKILLSPECTOR_JOINED_AFTER_RE = re.compile(r"[.-]?\w|/")
 _SKILLSPECTOR_GLOB_SYNTAX = frozenset("*?[")
 _SKILLSPECTOR_PATH_PART_SEPARATOR_RE = re.compile(r"[=:,]")
 # Work that checking the lines of one report's missing references may take, in
-# units of about one character compared: decoding a line costs 3,000 per
-# character, each search of a decoded line for a name 100 plus the line's
-# length, and each pattern 20,000 plus 1,000 per character and 300 plus the
-# name's length for each name matched against it. Beyond the budget the lines
-# are not accepted, which bounds the time that a skill built to slow the check
-# can cost.
+# units of about one character compared: decoding a line and reading its shell
+# groups and words costs 9,000 per character, each search of a decoded line
+# for a name 100 plus the line's length, and each pattern 20,000 plus 1,000 per
+# character and 300 plus the name's length for each name matched against it.
+# Beyond the budget the lines are not accepted, which bounds the time that a
+# skill built to slow the check can cost.
 _SKILLSPECTOR_REFERENCE_MATCH_BUDGET = 1_000_000_000
 
 
@@ -1859,17 +1880,89 @@ def _skillspector_glob_matcher(pattern: str, longest: int) -> Callable[[str], ob
     return re.compile(f"(?s:{first})\\Z").match
 
 
-def _skillspector_shell_word(word: str) -> str:
-    """*word* as a glob pattern for what a shell may expand it to, in time linear in its length.
+def _skillspector_shell_groups(text: str) -> str:
+    """*text* with the shell groups and ranges inside its words read as patterns, in time linear in its length.
 
-    Quotes and backslashes are removed. Then everything from the first
-    ``${`` to the last ``}`` after it (or to the end), everything from the
-    first ``{`` to the last ``}`` when a ``,`` or ``..`` lies between them
-    (brace expansion), and each other parameter expansion such as ``$name``
-    becomes ``*``, so nested expansions are covered too. ``*``, ``?`` and
-    ``[...]`` keep their meaning.
+    zsh reads ``(a)`` inside a word as ``a`` and ``(a|b)`` as either
+    alternative, bash and ksh read ``@(...)``, ``!(...)``, ``+(...)``,
+    ``?(...)`` and ``*(...)`` as extended globs, and zsh reads ``<1-10>`` as
+    any number in that range. A group with ``|`` at its own level, an extended
+    glob and a range become :data:`_SKILLSPECTOR_SHELL_ANY`. Any other group
+    loses its parentheses, unless it follows ``]``, as a Markdown link
+    destination does. Parentheses around whitespace, ``/``, a backtick, ``<``,
+    ``>``, ``;`` or ``&`` do not form a group and still end a word.
     """
-    word = _SKILLSPECTOR_SHELL_QUOTE_RE.sub("", word)
+    text = _SKILLSPECTOR_SHELL_RANGE_RE.sub(_SKILLSPECTOR_SHELL_ANY, text)
+    if "(" not in text:
+        return text
+    pieces: list[str] = []
+    # Each open group: the index of its "(" in pieces, whether "|" splits it,
+    # and the character before it.
+    groups: list[tuple[int, list[bool], str]] = []
+    last = 0
+    for match in _SKILLSPECTOR_SHELL_GROUP_TOKEN_RE.finditer(text):
+        index = match.start()
+        char = match.group()
+        pieces.append(text[last:index])
+        last = match.end()
+        if char == "(":
+            groups.append((len(pieces), [False], text[index - 1 : index]))
+            pieces.append(char)
+        elif char == "|" and groups:
+            groups[-1][1][0] = True
+            pieces.append(char)
+        elif char == ")" and groups:
+            start, alternation, before = groups.pop()
+            if alternation[0] or before in _SKILLSPECTOR_EXTGLOB_OPERATORS:
+                del pieces[start:]
+                if before in _SKILLSPECTOR_EXTGLOB_OPERATORS:
+                    pieces[-1] = pieces[-1][:-1]
+                pieces.append(_SKILLSPECTOR_SHELL_ANY)
+            elif before == "]":
+                pieces.append(char)
+            else:
+                pieces[start] = ""
+        else:
+            if char not in "|)":
+                groups.clear()
+            pieces.append(char)
+    pieces.append(text[last:])
+    return "".join(pieces)
+
+
+def _skillspector_command_substitutions(text: str) -> str:
+    """*text* with each backtick span that joins a name read as a command substitution, in linear time.
+
+    Backticks pair from the left. A span with a letter, digit, ``_`` or ``/``
+    right before or after it, also across one ``.`` or ``-``, is joined to a
+    name, such as a span holding ``echo v`` right before ``ersions``. A shell
+    replaces the span with the command's output, so it becomes
+    :data:`_SKILLSPECTOR_SHELL_ANY`. A Markdown code span between spaces or
+    before a full stop is left as it is.
+    """
+    if "`" not in text:
+        return text
+
+    def read(match: re.Match[str]) -> str:
+        start, end = match.span()
+        if _SKILLSPECTOR_JOINED_BEFORE_RE.search(text, max(0, start - 2), start) or (
+            _SKILLSPECTOR_JOINED_AFTER_RE.match(text, end)
+        ):
+            return _SKILLSPECTOR_SHELL_ANY
+        return match.group()
+
+    return _SKILLSPECTOR_BACKTICK_SPAN_RE.sub(read, text)
+
+
+def _skillspector_shell_expansions(word: str) -> str:
+    """*word* with its brace and parameter expansions read as ``*``, in time linear in its length.
+
+    Everything from the first ``${`` to the last ``}`` after it (or to the
+    end), everything from the first ``{`` to the last ``}`` when a ``,`` or
+    ``..`` lies between them (brace expansion), and each other parameter
+    expansion such as ``$name`` becomes ``*``, so nested expansions are covered
+    too.
+    """
     while (start := word.find("${")) >= 0:
         end = word.rfind("}")
         word = word[:start] + "*" + (word[end + 1 :] if end > start else "")
@@ -1879,23 +1972,101 @@ def _skillspector_shell_word(word: str) -> str:
     return _SKILLSPECTOR_SHELL_PARAMETER_RE.sub("*", word)
 
 
-def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
-    """Glob patterns for the path parts of the words in *texts* that a shell expands or unquotes.
+def _skillspector_shell_word(word: str) -> tuple[str, str]:
+    """*word* as glob patterns for what a POSIX shell, and cmd.exe or PowerShell, may expand it to.
 
-    A word with ``*``, ``?``, ``[``, ``{``, ``$``, a quote or a backslash, other
-    than one made only of ``*`` such as a list marker, is read as a shell
-    would (:func:`_skillspector_shell_word`). Each part between ``/`` is a
-    pattern, and so is each piece of it between ``=``, ``:`` and ``,``, as
-    written and without the dots and punctuation that end a sentence after it.
+    The work is linear in the length of *word*, and a group or range read in
+    the line (:data:`_SKILLSPECTOR_SHELL_ANY`) is ``*`` in both readings.
+
+    - A POSIX shell: quotes and backslashes are removed, then the expansions
+      (:func:`_skillspector_shell_expansions`) become ``*``.
+    - cmd.exe or PowerShell: ``"``, ``'`` and the ``^`` escape are removed; a
+      batch parameter such as ``%1`` or ``%~dp0``, a variable such as
+      ``%DIR%`` or ``!DIR!``, and the expansions become ``*``; and ``\\``
+      separates directories as ``/`` does.
+
+    In both, a path part with ``~`` after its first character becomes ``*``:
+    Windows reads a short (8.3) name such as ``NODE_M~1`` as a longer name, and
+    zsh ``EXTENDED_GLOB`` reads ``a~b`` as ``a`` except ``b``. ``*``, ``?`` and
+    ``[...]`` keep their meaning.
     """
-    patterns: set[str] = set()
-    for text in texts:
-        for word in _SKILLSPECTOR_LINE_WORD_RE.findall(text):
-            if _SKILLSPECTOR_SHELL_SYNTAX.isdisjoint(word) or not word.strip("*"):
+    word = word.replace(_SKILLSPECTOR_SHELL_ANY, "*")
+    posix = _skillspector_shell_expansions(_SKILLSPECTOR_SHELL_QUOTE_RE.sub("", word))
+    windows = _SKILLSPECTOR_CMD_VARIABLE_RE.sub("*", _SKILLSPECTOR_CMD_QUOTE_RE.sub("", word))
+    windows = _skillspector_shell_expansions(windows).replace("\\", "/")
+    posix, windows = (
+        "/".join("*" if "~" in (part if index else part[1:]) else part for index, part in enumerate(parts))
+        for parts in (posix.split("/"), windows.split("/"))
+    )
+    return posix, windows
+
+
+def _skillspector_zsh_pattern(pattern: str) -> str:
+    """*pattern* with the zsh ``EXTENDED_GLOB`` operators ``^`` and ``#`` read, in time linear in its length.
+
+    Outside a bracket expression, ``^`` negates the rest of the pattern, which
+    then becomes ``*``; that also covers ``^`` as the cmd.exe escape. ``x#``
+    and ``x##`` repeat the character or bracket expression ``x`` and become
+    ``*``, or ``x*`` when they make up the whole pattern, as in ``C#``. A ``#``
+    that starts the pattern or follows a literal ``#``, as in a Markdown
+    heading, is literal.
+    """
+    if "^" not in pattern and "#" not in pattern:
+        return pattern
+    size = len(pattern)
+    closes = [size] * (size + 1)
+    for index in range(size - 1, -1, -1):
+        closes[index] = index if pattern[index] == "]" else closes[index + 1]
+    elements: list[str] = []
+    index = 0
+    while index < size:
+        char = pattern[index]
+        if char == "[":
+            start = index + 1
+            start += 1 if start < size and pattern[start] in "!^" else 0
+            start += 1 if start < size and pattern[start] == "]" else 0
+            if closes[start] < size:
+                elements.append(pattern[index : closes[start] + 1])
+                index = closes[start] + 1
                 continue
-            for part in _skillspector_shell_word(word).split("/"):
+        elif char == "^":
+            elements.append("*")
+            break
+        elif char == "#" and elements and elements[-1] != "#":
+            while index < size and pattern[index] == "#":
+                index += 1
+            elements[-1] = elements[-1] + "*" if len(elements) == 1 and index == size else "*"
+            continue
+        elements.append(char)
+        index += 1
+    return "".join(elements)
+
+
+def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
+    """Glob patterns for the path parts of the words in *texts* that a shell or Windows expands or unquotes.
+
+    A word with ``*``, ``?``, ``[``, ``{``, ``$``, ``%``, ``!``, ``^``, ``#``,
+    ``~``, a quote, a backslash or a group read in the line, other than one
+    made only of ``*`` such as a list marker, is read as a POSIX shell and as
+    cmd.exe or PowerShell would (:func:`_skillspector_shell_word`). Each part
+    between ``/`` is a pattern, and so is each piece of it between ``=``,
+    ``:`` and ``,``, as written and without the dots and punctuation that end
+    a sentence after it, each read with the zsh ``EXTENDED_GLOB`` operators
+    (:func:`_skillspector_zsh_pattern`).
+    """
+    words = {word for text in texts for word in _SKILLSPECTOR_LINE_WORD_RE.findall(text)}
+    patterns: set[str] = set()
+    for word in words:
+        if _SKILLSPECTOR_SHELL_SYNTAX.isdisjoint(word) or not word.strip("*"):
+            continue
+        for reading in _skillspector_shell_word(word):
+            for part in reading.split("/"):
                 for piece in {part, *_SKILLSPECTOR_PATH_PART_SEPARATOR_RE.split(part)}:
-                    patterns.update(candidate for candidate in (piece, piece.rstrip(".,;:!?")) if candidate)
+                    patterns.update(
+                        _skillspector_zsh_pattern(candidate)
+                        for candidate in (piece, piece.rstrip(".,;:!?"))
+                        if candidate
+                    )
     return patterns
 
 
@@ -1919,9 +2090,12 @@ def _skillspector_reference_line_avoids(
     NFC, in the line as written and as a Markdown renderer or a file path
     reader may read it: with backslash escapes of ASCII punctuation removed,
     HTML character references resolved and percent-escapes decoded, up to
-    :data:`_SKILLSPECTOR_REFERENCE_LINE_DECODINGS` of these steps in any order.
-    A word that a shell would expand or unquote is read as a pattern
-    (:func:`_skillspector_shell_patterns`), and no name may match it.
+    :data:`_SKILLSPECTOR_REFERENCE_LINE_DECODINGS` of these steps in any order,
+    and then also with its shell groups and ranges read
+    (:func:`_skillspector_shell_groups`), with and without its backticks. A
+    word that a shell, cmd.exe, PowerShell or Windows would expand or unquote
+    is read as a pattern (:func:`_skillspector_shell_patterns`), and no name
+    may match it.
 
     The check takes work from *budget*, by default a fresh
     :data:`_SKILLSPECTOR_REFERENCE_MATCH_BUDGET`, and names the line as
@@ -1947,7 +2121,7 @@ def _skillspector_reference_line_avoids(
     if not keys:
         return True
     budget = budget or _SkillspectorMatchBudget()
-    if not budget.spend(len(line) * 3_000):
+    if not budget.spend(len(line) * 9_000):
         return False
     decodings: tuple[Callable[[str], str], ...] = (
         lambda text: _SKILLSPECTOR_MARKDOWN_ESCAPE_RE.sub(r"\1", text),
@@ -1957,6 +2131,13 @@ def _skillspector_reference_line_avoids(
     variants = {line}
     for _step in range(_SKILLSPECTOR_REFERENCE_LINE_DECODINGS):
         variants |= {decode(text) for text in variants for decode in decodings}
+    # Shell groups and ranges, and backticks, which PowerShell reads as an
+    # escape and a shell as command substitution, may join the text around them.
+    variants |= {
+        _skillspector_shell_groups(form)
+        for text in variants
+        for form in {text, text.replace("`", ""), _skillspector_command_substitutions(text)}
+    }
     texts = {text.casefold() for text in variants} | {
         unicodedata.normalize("NFC", text).casefold() for text in variants
     }
@@ -1970,10 +2151,9 @@ def _skillspector_reference_line_avoids(
         return False
     # A key made only of name characters matches a whole run of them, less any trailing dots.
     runs: dict[str, int] = {}
-    for text in texts:
-        for run in _SKILLSPECTOR_NAME_RUN_RE.findall(text):
-            base = run.rstrip(".")
-            runs[base] = max(len(run) - len(base), runs.get(base, 0))
+    for run in {run for text in texts for run in _SKILLSPECTOR_NAME_RUN_RE.findall(text)}:
+        base = run.rstrip(".")
+        runs[base] = max(len(run) - len(base), runs.get(base, 0))
     if any(base in run_keys and run_keys[base] <= dots for base, dots in runs.items()):
         return False
     if not patterns.isdisjoint(keys):

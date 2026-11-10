@@ -20,6 +20,11 @@ def test_repository_skill_checks_use_reviewed_full_three_tier_configuration():
     scan = workflow(SCAN)
     assert set(scan["on"]) == {"pull_request", "push", "workflow_dispatch"}
     assert scan["on"]["push"]["branches"] == ["main"]
+    # Unrelated pull requests start no run and receive no feedback comment;
+    # caller changes still run so the setup change is exercised.
+    triggers = ["skills/**", SCAN, FEEDBACK]
+    assert scan["on"]["pull_request"] == {"paths": triggers}
+    assert scan["on"]["push"]["paths"] == triggers
     assert scan["permissions"] == {
         "contents": "read",
         "actions": "read",

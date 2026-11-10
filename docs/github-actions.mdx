@@ -342,6 +342,10 @@ or let the [CLI](/skills/skillevaluator/cli-onboarding) handle it.
     collection each time. No changed skills is a successful **Skipped** result,
     not a scanner pass. Changes to shared files outside the skill roots are not
     inferred dependencies; use `all` when they should trigger a full scan.
+    The generated all-tier caller (`skillevaluator ci init`) also carries
+    `paths` filters, so a pull request that changes nothing under the selected
+    skill folders or the two caller workflows starts no run and receives no
+    comment.
     Selection is capped at 100 skills. Timeouts retain completed results and
     mark unfinished work incomplete. The workflow scans up to four skills at
     once; `scan-workers` accepts 1–16.

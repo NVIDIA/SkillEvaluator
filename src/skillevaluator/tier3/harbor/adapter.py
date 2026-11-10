@@ -78,6 +78,7 @@ _VERIFIER_FILES = (
     _EVAL_CORE_DIR / "atif_helpers.py",
     _EVAL_CORE_DIR / "shell_lexing.py",
     _EVAL_CORE_DIR / "script_invocation.py",
+    _EVAL_CORE_DIR / "optional_reference.py",
     _EVAL_CORE_DIR / "checks.py",
     _EVAL_CORE_DIR / "secret_redaction.py",
     _EVAL_CORE_DIR / "codex_tool_call_normalizer.py",

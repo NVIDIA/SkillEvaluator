@@ -1006,12 +1006,14 @@ The **Quality Score** shown as a value out of 100 in the HTML report comes from
 Tier 1 static analysis. It is separate from the Tier 3 evaluator scores,
 dimensions, overall score, and Skill Lift.
 
-For standard grading, the overall score is the equal-weight mean of these five
-dimensions:
+For standard grading, each arm's overall score is the equal-weight mean of the
+dimensions that arm can be scored on. An N/A dimension is left out; it is not
+counted as 0 or 1. Within Effectiveness, N/A source metrics are also left out,
+and the dimension is N/A only when neither source metric can be scored:
 
 ```text
-overall = (Security + Correctness + Discoverability + Effectiveness + Efficiency) / 5
-Effectiveness = (goal_accuracy + behavior_check) / 2
+overall = mean(scored(Security, Correctness, Discoverability, Effectiveness, Efficiency))
+Effectiveness = mean(scored(goal_accuracy, behavior_check))
 ```
 
 Effectiveness therefore enters the overall score once; its two source
@@ -1021,6 +1023,32 @@ Artifacts record this contract as
 `score_policy: skill-evaluator-dimension-mean-v1`. Legacy metric sets and
 historical partial reports retain their recorded scoring semantics instead of
 being silently reinterpreted.
+
+### Which dimensions apply to each arm
+
+Security is scored for every arm. Correctness uses `accuracy`, which is N/A
+when `ground_truth` is missing. Effectiveness uses `goal_accuracy`
+(`ground_truth`) and `behavior_check` (`expected_behavior`); each missing
+reference makes its metric N/A. The dimension is N/A only if both metrics are
+N/A.
+
+| Arm | Security | Correctness | Discoverability | Effectiveness | Efficiency |
+| --- | --- | --- | --- | --- | --- |
+| With skill, `should_trigger=true` | Scored | Scored with `ground_truth`; otherwise N/A | Scored: the skill is present to discover and run | Scored for each present reference; N/A if both are missing | Scored: routing and tool use are evaluated |
+| With skill, `should_trigger=false` (negative case) | Scored | Scored with `ground_truth`; otherwise N/A | Scored: `skill_execution` evaluates the negative case | Scored for each present reference; N/A if both are missing | Scored as 1.0 when no skill is expected to trigger |
+| Without skill and no applicable alternate staged | Scored | Scored with `ground_truth`; otherwise N/A | N/A: no skill under test to discover or run | Scored for each present reference; N/A if both are missing | N/A: no skill under test to route to |
+| Without skill, with an acceptable alternate staged | Scored | Scored with `ground_truth`; otherwise N/A | Scored when the staged skill matches a case candidate | Scored for each present reference; N/A if both are missing | Scored when the staged skill matches a case candidate |
+
+For a positive case, an alternate candidate is the expected skill or an
+acceptable alternate. For a negative case, the candidate is the evaluated
+skill, or the expected skill when no evaluated skill is recorded. In either
+case, the staged name must match a candidate for the no-skill arm's skill
+metrics to apply.
+
+Skill Lift per dimension and overall uses only cases and metrics both arms
+scored; the `basis` block in `lift.json` records the shared comparison ([Skill
+Lift reporting](reports.mdx#skill-lift)). A baseline is never credited or
+penalized for a skill it was not given.
 
 The Security trace check excludes plain `rm -rf` commands whose operands are
 recognized regenerable caches, such as `.pytest_cache`, `__pycache__`, or
@@ -1087,10 +1115,7 @@ agent passes only when every dimension passes. The top-level Tier 3 verdict is:
 | Neutral | No agent passes, but at least one has no dimension below 0.40 |
 | Fail | Every successful agent has a dimension below 0.40 |
 
-Skill Lift is `with-skill overall score - without-skill overall score` for
-comparable cases. Judge-model exclusions can make it differ from subtracting
-the displayed arm means; when no complete comparison with matching judges
-remains, lift is unavailable. It uses the same score units as the two arms;
+Skill Lift compares Overall on the metrics and cases both arms scored, so it can differ from the displayed with-skill Overall minus baseline Overall when the baseline has N/A dimensions. Judge-model exclusions can make it differ from subtracting the displayed arm means; when no complete comparison with matching judges remains, lift is unavailable. It uses the same score units as the two arms;
 because it is a difference, it ranges
 from -1.0 to +1.0. Its independent band is **PASS** at +0.05 or above,
 **NEUTRAL** between -0.10 and +0.05, and **FAIL** at -0.10 or below. Lift is

@@ -840,6 +840,46 @@
           "type": "integer"
         },
         {
+          "name": "max_agent_tokens",
+          "opts": [
+            "--max-agent-tokens"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "name": "max_judge_calls",
+          "opts": [
+            "--max-judge-calls"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "name": "max_attempts_total",
+          "opts": [
+            "--max-attempts-total"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "name": "max_cost_usd",
+          "opts": [
+            "--max-cost-usd"
+          ],
+          "param_type": "option",
+          "type": "float range"
+        },
+        {
+          "name": "price_file",
+          "opts": [
+            "--price-file"
+          ],
+          "param_type": "option",
+          "type": "file"
+        },
+        {
           "name": "pass_threshold",
           "opts": [
             "--pass-threshold"
@@ -2902,6 +2942,46 @@
               "type": "integer"
             },
             {
+              "name": "max_agent_tokens",
+              "opts": [
+                "--max-agent-tokens"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "name": "max_judge_calls",
+              "opts": [
+                "--max-judge-calls"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "name": "max_attempts_total",
+              "opts": [
+                "--max-attempts-total"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "name": "max_cost_usd",
+              "opts": [
+                "--max-cost-usd"
+              ],
+              "param_type": "option",
+              "type": "float range"
+            },
+            {
+              "name": "price_file",
+              "opts": [
+                "--price-file"
+              ],
+              "param_type": "option",
+              "type": "file"
+            },
+            {
               "name": "pass_threshold",
               "opts": [
                 "--pass-threshold"
@@ -3639,6 +3719,46 @@
             "type": "integer"
           },
           {
+            "name": "max_agent_tokens",
+            "opts": [
+              "--max-agent-tokens"
+            ],
+            "param_type": "option",
+            "type": "integer range"
+          },
+          {
+            "name": "max_judge_calls",
+            "opts": [
+              "--max-judge-calls"
+            ],
+            "param_type": "option",
+            "type": "integer range"
+          },
+          {
+            "name": "max_attempts_total",
+            "opts": [
+              "--max-attempts-total"
+            ],
+            "param_type": "option",
+            "type": "integer range"
+          },
+          {
+            "name": "max_cost_usd",
+            "opts": [
+              "--max-cost-usd"
+            ],
+            "param_type": "option",
+            "type": "float range"
+          },
+          {
+            "name": "price_file",
+            "opts": [
+              "--price-file"
+            ],
+            "param_type": "option",
+            "type": "file"
+          },
+          {
             "name": "pass_threshold",
             "opts": [
               "--pass-threshold"
@@ -4228,6 +4348,46 @@
           ],
           "param_type": "option",
           "type": "integer"
+        },
+        {
+          "name": "max_agent_tokens",
+          "opts": [
+            "--max-agent-tokens"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "name": "max_judge_calls",
+          "opts": [
+            "--max-judge-calls"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "name": "max_attempts_total",
+          "opts": [
+            "--max-attempts-total"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "name": "max_cost_usd",
+          "opts": [
+            "--max-cost-usd"
+          ],
+          "param_type": "option",
+          "type": "float range"
+        },
+        {
+          "name": "price_file",
+          "opts": [
+            "--price-file"
+          ],
+          "param_type": "option",
+          "type": "file"
         },
         {
           "name": "pass_threshold",

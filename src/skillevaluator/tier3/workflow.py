@@ -135,12 +135,17 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> dict[str, An
         "n_concurrent",
         "max_agents",
         "max_cases",
+        "max_agent_tokens",
+        "max_judge_calls",
+        "max_attempts_total",
+        "max_cost_usd",
+        "price_file",
         "timeout_multiplier",
         "agent_runtime_preflight",
         "custom_dockerfile_mode",
     ):
         if params.get(name) is not None:
-            harbor[name] = params[name]
+            harbor[name] = str(params[name]) if name == "price_file" else params[name]
     for resource in ("cpus", "memory_mb", "storage_mb"):
         if params.get(f"override_{resource}") is not None:
             harbor.setdefault("resources", {})[resource] = params[f"override_{resource}"]

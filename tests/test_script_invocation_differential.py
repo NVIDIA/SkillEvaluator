@@ -31,9 +31,11 @@ def test_current_git_baseline_loads_its_own_shared_modules(monkeypatch):
         "baseline_template",
         "script_invocation",
         "shell_lexing",
+        "optional_reference",
         "secret_redaction",
         "skillevaluator.tier3.eval_core.script_invocation",
         "skillevaluator.tier3.eval_core.shell_lexing",
+        "skillevaluator.tier3.eval_core.optional_reference",
     ):
         assert sys.modules.get(name) is previous_modules.get(name)
     assert host._cmd_executes_script is not differential.host_checks._cmd_executes_script

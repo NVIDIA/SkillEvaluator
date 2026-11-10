@@ -3424,9 +3424,12 @@ def test_streamed_exec_escalates_after_launcher_exits_with_term_ignoring_descend
     environment = _initialized_local_environment(tmp_path)
     environment._local_command_guardrail_reason = lambda *_args: ""  # type: ignore[method-assign]
     child_pid_path = environment._workspace / f"term-ignoring-{lifecycle}.pid"
+    child_pid_tmp_path = child_pid_path.with_name(f"{child_pid_path.name}.tmp")
     command = (
         "(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & "
-        f"printf '%s' \"$!\" > {shlex.quote(child_pid_path.name)}; "
+        # Existence signals readiness, so publish only the complete PID.
+        f"printf '%s' \"$!\" > {shlex.quote(child_pid_tmp_path.name)} && "
+        f"mv {shlex.quote(child_pid_tmp_path.name)} {shlex.quote(child_pid_path.name)}; "
         "printf ready; wait"
     )
 

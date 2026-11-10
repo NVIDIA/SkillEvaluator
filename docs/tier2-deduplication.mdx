@@ -278,8 +278,9 @@ an error that names it, before any embedding request. So does a `name` or
 text, in every embedding mode. Description mode embeds `name: description`, so
 there the two values together must also fit in 16,384 characters. A list,
 mapping, number, date, or boolean is never converted to text: the manifest is
-skipped, as are manifests with invalid YAML, frontmatter that is not a mapping,
-or a missing or empty value. Quote a value such as `name: "2048"` or
+excluded with the reason `non_string_name_or_description`, as manifests with
+invalid YAML, frontmatter that is not a mapping, or a missing or empty value are
+excluded with their own reasons. Quote a value such as `name: "2048"` or
 `name: "yes"` to keep it a string. Errors name a manifest by its path under the
 scan root, or by its directory and file name when one manifest is read on its
 own, such as a catalog query target.
@@ -290,7 +291,8 @@ Every selected manifest is accounted for: reports include `collection_coverage`
 with `selected_count`, `indexed_count`, and `skipped_count`. Here indexed means
 valid manifests eligible for embedding; a provider or work-limit error can still
 stop the index build. Missing frontmatter, malformed YAML, a non-mapping header,
-or missing name/title or description produces an exclusion reason. Up to 100
+a missing name/title or description, or one that is not a string produces an
+exclusion reason. Up to 100
 exclusions are listed with collection-relative paths (each bounded to 512
 characters); `omitted_exclusions` counts additional diagnostics. An excluded
 manifest makes the scan **INCOMPLETE** and blocking, even when the indexed subset
@@ -464,7 +466,7 @@ you intend to skip Tier 2 entirely.
 | Embedding input cap | 3,000 characters | Caps every Markdown, Python, and shell embedding input; oversized Markdown sections are packed at paragraph boundaries |
 | High-confidence duplicate boundary | `0.70` | Maps actionable duplicate verdicts to HIGH rather than MEDIUM |
 | Frontmatter structure | 100 nesting levels, 20,000 nodes, 1,024 alias references, 1,024 items per mapping or sequence, 65,536 characters per value, integers up to 14,000 bits (about 4,200 digits) | Bounds every Markdown mapping frontmatter Tier 2 parses; aliases and merge keys count after expansion. A decimal integer longer than 4,300 digits, Python's default limit for converting text to an integer, counts as invalid YAML, not as a limit failure |
-| Inter-skill name and description | 16,384 characters each | Per-field catalog text limit, in every embedding mode; description mode also caps `name: description` at 16,384 characters. A value that is not a string skips the manifest |
+| Inter-skill name and description | 16,384 characters each | Per-field catalog text limit, in every embedding mode; description mode also caps `name: description` at 16,384 characters. A value that is not a string excludes the manifest and makes the scan incomplete |
 | Intra-skill content chunks | 512 | Per-skill ceiling, checked before any embedding request |
 | Intra-skill comparison work | 267,911,168 scalar comparisons | Bounds all-pairs clustering; allows all 512 chunks with embeddings of up to 2,048 dimensions, 418 chunks at 3,072, and 362 at 4,096 |
 | Intra-skill LLM review clusters | 50 | Most candidate clusters sent for chat-LLM review in one skill |
@@ -552,7 +554,7 @@ handling terms before sending confidential skill content to a hosted endpoint.
     | Catalog path is missing | Returns an error and does not rebuild it silently |
     | Candidate lacks a root `SKILL.md`, or its frontmatter is not a valid YAML mapping with a non-empty string name and description | Rejects the catalog query and says what the frontmatter needs |
     | A manifest's frontmatter exceeds a structure limit, or its name or description is longer than 16,384 characters | Fails with an error that names the manifest, before any embedding request |
-    | A manifest's name or description is not a string, such as `name: 2048`, or its frontmatter is not a mapping | Skips the manifest, as for invalid YAML |
+    | A manifest's name or description is not a string, such as `name: 2048`, or its frontmatter is not a mapping | Excludes the manifest with a coverage reason, as for invalid YAML, and reports the scan as incomplete |
     | A skill contains an exactly named, single-link regular `AGENTS.md` plus `CLAUDE.md -> AGENTS.md` | Validates and skips the unrelated compatibility alias while discovering `SKILL.md` |
     | The collection contains a relative directory alias such as `.agents -> .claude` whose target is a regular directory in the same collection | Skips the alias without following it, so manifests in the target are discovered once |
     | Candidate matches multiple catalog entries | Reports matches in descending similarity order |

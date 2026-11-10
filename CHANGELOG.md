@@ -440,9 +440,10 @@ All notable changes to SkillEvaluator are documented in this file.
   deduplication with a CRITICAL `manifest_complexity_limit` finding, before any
   provider call. Text between the `---` lines that is not a mapping is still
   not frontmatter and is never checked against these limits.
-  `similarity-check` now skips a manifest whose `name`, `title`, or
-  `description` is not a string, such as `name: 2048`, as it skips one with
-  invalid YAML, instead of converting the value. It stops with an error that
+  `similarity-check` now excludes a manifest whose `name`, `title`, or
+  `description` is not a string, such as `name: 2048`, with the coverage reason
+  `non_string_name_or_description` instead of converting the value; like any
+  excluded manifest, it makes the scan incomplete. It stops with an error that
   names the manifest when a value is longer than 16,384 characters, the
   per-field catalog text limit; description mode still also caps
   `name: description` at 16,384 characters. An invalid tagged value such as

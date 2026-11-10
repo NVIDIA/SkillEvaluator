@@ -706,7 +706,7 @@ def test_llm_generation_writes_null_for_placeholder_expected_script(tmp_path, mo
     assert "assertions" not in payload["evals"][0]
 
 
-def test_llm_generation_falls_back_for_non_string_expected_script(tmp_path, monkeypatch):
+def test_llm_generation_falls_back_for_non_string_expected_script(tmp_path, monkeypatch, capsys):
     skill_path = tmp_path / "my-skill"
     skill_path.mkdir()
     (skill_path / "SKILL.md").write_text(
@@ -747,3 +747,4 @@ def test_llm_generation_falls_back_for_non_string_expected_script(tmp_path, monk
 
     assert cases
     assert cases[0]["expected_script"] is None
+    assert "Warning: LLM generation failed: LLM configuration or response was invalid." in capsys.readouterr().out

@@ -18,6 +18,7 @@ import skillevaluator.embedding.registry as registry_module
 from skillevaluator.embedding.extractor import (
     _is_symlink_or_reparse,
     discover_and_extract,
+    discover_and_extract_detailed,
     extract_from_rule,
     extract_from_skill,
     extract_from_workflow,
@@ -905,28 +906,44 @@ class TestBoundedFrontmatter:
             discover_and_extract(tmp_path, content_type)
 
     @pytest.mark.parametrize(
-        ("content_type", "relative", "manifest", "expected"),
+        ("content_type", "relative", "manifest", "expected", "reason"),
         [
             pytest.param(
-                "skill", "nested/odd/SKILL.md", "---\nname: 2048\ndescription: Odd\n---\n", "valid-skill", id="skill"
+                "skill",
+                "nested/odd/SKILL.md",
+                "---\nname: 2048\ndescription: Odd\n---\n",
+                "valid-skill",
+                "non_string_name_or_description",
+                id="skill",
             ),
             pytest.param(
-                "skill", "nested/odd/SKILL.md", "---\n- item\n- item\n---\n# Body\n", "valid-skill", id="skill-list"
+                "skill",
+                "nested/odd/SKILL.md",
+                "---\n- item\n- item\n---\n# Body\n",
+                "valid-skill",
+                "invalid_frontmatter_mapping",
+                id="skill-list",
             ),
             pytest.param(
-                "rules", "nested/odd.mdc", "---\ntitle: [a, b]\ndescription: Rule\n---\n", "valid-rule", id="rules"
+                "rules",
+                "nested/odd.mdc",
+                "---\ntitle: [a, b]\ndescription: Rule\n---\n",
+                "valid-rule",
+                "non_string_name_or_description",
+                id="rules",
             ),
             pytest.param(
                 "workflows",
                 "nested/odd/workflow-rules.mdc",
                 "---\ntitle: Workflow\ndescription: {a: b}\n---\n",
                 "valid-workflow",
+                "non_string_name_or_description",
                 id="workflows",
             ),
         ],
     )
-    def test_collection_skips_a_manifest_whose_field_is_not_a_string(
-        self, tmp_path: Path, write_skill, content_type: str, relative: str, manifest: str, expected: str
+    def test_collection_excludes_a_manifest_whose_field_is_not_a_string(
+        self, tmp_path: Path, write_skill, content_type: str, relative: str, manifest: str, expected: str, reason: str
     ) -> None:
         write_skill(tmp_path, "valid-skill", "A valid skill")
         _write_rule(tmp_path, "valid.mdc", "valid-rule", "A valid rule")
@@ -935,6 +952,32 @@ class TestBoundedFrontmatter:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(manifest.encode("utf-8"))
 
-        entries = discover_and_extract(tmp_path, content_type)
+        result = discover_and_extract_detailed(tmp_path, content_type)
 
-        assert [entry.name for entry in entries] == [expected]
+        assert [entry.name for entry in result.entries] == [expected]
+        assert result.selected_count == 2
+        assert result.exclusions == [{"path": relative, "reason": reason}]
+
+    @pytest.mark.parametrize(
+        ("frontmatter", "reason"),
+        [
+            pytest.param('name: odd\ndescription: Odd\nversion: !!int ""', "invalid_yaml", id="tagged-int"),
+            pytest.param("name: odd\ndescription: Odd\nlast_updated: 2024-02-30", "invalid_yaml", id="impossible-date"),
+            # The YAML is malformed before its root node, so it is invalid, not a non-mapping root.
+            pytest.param("\tname: odd\ndescription: Odd", "invalid_yaml", id="tab-before-root"),
+            pytest.param("- item\n- item", "invalid_frontmatter_mapping", id="list-root"),
+            # A list root is never built, so YAML errors after it do not change the reason.
+            pytest.param("- item\n- key: a: b", "invalid_frontmatter_mapping", id="list-root-then-invalid"),
+            pytest.param("name: ''\ndescription: Odd", "missing_name_or_description", id="empty-name"),
+        ],
+    )
+    def test_collection_names_why_frontmatter_is_excluded(
+        self, tmp_path: Path, write_skill, frontmatter: str, reason: str
+    ) -> None:
+        write_skill(tmp_path, "valid-skill", "A valid skill")
+        _write_skill_manifest(tmp_path, "odd", f"---\n{frontmatter}\n---\n# Body\n")
+
+        result = discover_and_extract_detailed(tmp_path, "skill")
+
+        assert [entry.name for entry in result.entries] == ["valid-skill"]
+        assert result.exclusions == [{"path": "odd/SKILL.md", "reason": reason}]

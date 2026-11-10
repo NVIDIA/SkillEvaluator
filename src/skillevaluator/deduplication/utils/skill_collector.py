@@ -348,10 +348,12 @@ def _is_link_or_reparse(path: Path, rel_path: str | None = None) -> bool:
     return stat.S_ISLNK(info.st_mode) or bool(reparse_flag and file_attributes & reparse_flag)
 
 
-def _frontmatter_root_is_mapping(frontmatter_yaml: str) -> bool:
-    """Return whether the text between the ``---`` lines opens a plain YAML mapping.
+def _frontmatter_root_kind(frontmatter_yaml: str) -> str:
+    """Classify the root node of the text between the ``---`` lines.
 
-    Only the parser events up to the root node are read. Text that is not a
+    Returns ``"mapping"`` for a plain YAML mapping, ``"invalid"`` when the YAML
+    is malformed before its root node, and ``"other"`` for anything else. Only
+    the parser events up to the root node are read. Text that is not a
     mapping, such as a thematic break followed by a long list or prose, or a
     ``!!set`` that loads as a set, is never frontmatter, so it is not built or
     checked against the structure limits.
@@ -359,10 +361,16 @@ def _frontmatter_root_is_mapping(frontmatter_yaml: str) -> bool:
     try:
         for event in yaml.parse(frontmatter_yaml, Loader=yaml.SafeLoader):
             if isinstance(event, NodeEvent):
-                return isinstance(event, MappingStartEvent) and event.tag in _PLAIN_MAPPING_TAGS
+                is_mapping = isinstance(event, MappingStartEvent) and event.tag in _PLAIN_MAPPING_TAGS
+                return "mapping" if is_mapping else "other"
     except yaml.YAMLError:
-        return False
-    return False
+        return "invalid"
+    return "other"
+
+
+def _frontmatter_root_is_mapping(frontmatter_yaml: str) -> bool:
+    """Return whether the text between the ``---`` lines opens a plain YAML mapping."""
+    return _frontmatter_root_kind(frontmatter_yaml) == "mapping"
 
 
 def _strip_valid_frontmatter(raw_text: str) -> tuple[str, int]:

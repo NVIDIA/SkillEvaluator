@@ -29,7 +29,7 @@ from skillevaluator.constants import (
     WORKFLOWS_MANIFEST_FILE,
 )
 from skillevaluator.deduplication.utils.skill_collector import (
-    _frontmatter_root_is_mapping,
+    _frontmatter_root_kind,
     _SecureReadError,
     _SecureRoot,
 )
@@ -357,12 +357,15 @@ def _extract_from_file(
     frontmatter_yaml, _markdown_content = match.groups()
     if label is None:
         label = relative_path.as_posix() if relative_path is not None else file_path.name
-    # A root that is not a mapping is never parsed; it is skipped like an
-    # empty mapping.
-    root_is_mapping = _frontmatter_root_is_mapping(frontmatter_yaml)
+    # Only the parser events up to the root node are read first. A root that
+    # is not a mapping is never built; it is excluded like an empty mapping,
+    # even when the YAML after the root node is also malformed. YAML that is
+    # malformed before its root node goes to the loader, which rejects it as
+    # invalid YAML.
+    root_kind = _frontmatter_root_kind(frontmatter_yaml)
     try:
         # Agent clients keep the last value of a repeated frontmatter key.
-        data = load_bounded_yaml(frontmatter_yaml, last_key_wins=True) if root_is_mapping else None
+        data = load_bounded_yaml(frontmatter_yaml, last_key_wins=True) if root_kind != "other" else None
     except StructuredDataSyntaxError as exc:
         if budget is not None:
             budget.exclude(file_path, "invalid_yaml")
@@ -378,14 +381,24 @@ def _extract_from_file(
     name = data.get(name_field)
     description = data.get(description_field)
 
-    # Never call str() on a frontmatter value: a list or mapping built from
-    # YAML aliases renders to a string far larger than the manifest. A value
-    # that is not a string makes the entry invalid, like a missing one.
-    if not (isinstance(name, str) and name and isinstance(description, str) and description):
+    if not name or not description:
         if budget is not None:
             budget.exclude(file_path, "missing_name_or_description")
         logger.debug(
             "Missing %s or %s in %s",
+            name_field,
+            description_field,
+            file_path,
+        )
+        return None
+    # Never call str() on a frontmatter value: a list or mapping built from
+    # YAML aliases renders to a string far larger than the manifest. A value
+    # that is not a string makes the entry invalid, with its own reason.
+    if not (isinstance(name, str) and isinstance(description, str)):
+        if budget is not None:
+            budget.exclude(file_path, "non_string_name_or_description")
+        logger.debug(
+            "%s or %s is not a string in %s",
             name_field,
             description_field,
             file_path,

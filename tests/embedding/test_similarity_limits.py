@@ -319,13 +319,17 @@ def _embedded_texts(client: MagicMock) -> list[str]:
 
 
 @pytest.mark.parametrize(
-    "manifest",
+    ("manifest", "reason"),
     [
-        pytest.param("---\nname: yes\ndescription: Odd\n---\n", id="boolean-name"),
-        pytest.param("---\nname: odd\ndescription: Odd\nlast_updated: 2024-02-30\n---\n", id="impossible-date"),
+        pytest.param("---\nname: yes\ndescription: Odd\n---\n", "non_string_name_or_description", id="boolean-name"),
+        pytest.param(
+            "---\nname: odd\ndescription: Odd\nlast_updated: 2024-02-30\n---\n", "invalid_yaml", id="impossible-date"
+        ),
     ],
 )
-def test_invalid_manifest_is_skipped_and_the_rest_are_compared(tmp_path: Path, monkeypatch, manifest: str) -> None:
+def test_invalid_manifest_is_excluded_and_the_rest_are_compared(
+    tmp_path: Path, monkeypatch, manifest: str, reason: str
+) -> None:
     _collection(tmp_path, 2)
     (tmp_path / "odd").mkdir()
     (tmp_path / "odd" / "SKILL.md").write_text(manifest, encoding="utf-8")
@@ -334,8 +338,11 @@ def test_invalid_manifest_is_skipped_and_the_rest_are_compared(tmp_path: Path, m
 
     (result,) = run_similarity_check(tmp_path, content_type="skill")
 
-    assert result.passed is True
-    assert result.errors == []
+    assert result.passed is False
+    assert result.is_incomplete is True
+    (error,) = result.errors
+    assert error.startswith("Incomplete collection coverage: 1 selected manifests were excluded")
+    assert error.endswith(f"odd/SKILL.md: {reason}")
     assert sorted(_embedded_texts(client)) == ["skill-0: Description 0", "skill-1: Description 1"]
 
 

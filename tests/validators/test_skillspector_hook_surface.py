@@ -644,6 +644,30 @@ class TestFolderScans:
             f"[{name}] .claude/settings.json" for name in ("a", "b")
         ]
 
+    @pytest.mark.parametrize("version", _MISSING_REFERENCE_VERSIONS)
+    @patch("skillevaluator.validators.security.Tools")
+    def test_hooks_beside_a_missing_reference_in_a_folder_job_stay_incomplete(
+        self, mock_tools, tmp_path: Path, version: str
+    ) -> None:
+        """``validate`` checks each skill of a folder as its own job, and its target_root accepts no missing reference.
+
+        Taking the hook row out leaves the reference row to that rule: the
+        error names only the reference row, and the Critical is still reported.
+        """
+        folder = tmp_path / "folder"
+        root = _settings_missing_reference_skill(folder)
+        validator = SecurityValidator(use_llm=False, content_type="skill", target_root=folder)
+
+        result = _validate(mock_tools, root, _report(_settings_missing_reference_report(version)), validator)
+
+        assert result.incomplete_scans == ["skillspector"]
+        assert [error for error in result.errors if "did not complete" in error] == [
+            "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+            "SKILL.md:7 [reference_resolution; reference_missing]; security scan did not complete"
+        ]
+        assert _MISSING_REFERENCE_WARNING not in result.warnings
+        _assert_hook_critical(result, root, ".claude/settings.json")
+
 
 class TestPartlyReadManifests:
     @pytest.mark.parametrize(

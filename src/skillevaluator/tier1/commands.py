@@ -215,6 +215,7 @@ def run_validation(
     previous_version: str | None = None,
     policy: ValidationPolicy | None = None,
     content_type: str | None = None,
+    target_root: Path | None = None,
     fail_fast: bool = False,
     continue_on_failure: bool = False,
     on_check: Callable[[str], None] | None = None,
@@ -245,6 +246,11 @@ def run_validation(
     *pii_waivers* is an optional PII waiver file applied by the ``pii`` check.
     *skillspector_baseline* is an audited SkillSpector suppression baseline
     applied to the ``security`` check; it is never discovered from the target.
+    *target_root* is the folder that *target_path* belongs to when a caller
+    validates that folder one skill at a time, as ``validate`` does for a
+    folder of skills. The ``security`` check then accepts no SkillSpector
+    missing reference in the skill, because its instructions may name a file
+    elsewhere in the folder that its scan did not inspect.
     """
     enabled = _enabled_checks(checks)
     skipped = skipped_checks(skip)
@@ -292,6 +298,7 @@ def run_validation(
             content_type=content_type if content_type in _AGENT_ARTIFACT_CONTENT_TYPES else None,
             skillspector_reference_root=target_path if content_type == CONTENT_TYPE_PLUGIN else None,
             skillspector_baseline=skillspector_baseline,
+            target_root=target_root,
         )
         return [_run_result("security", "Security Scan", v.description, v.validate_security_only)]
 

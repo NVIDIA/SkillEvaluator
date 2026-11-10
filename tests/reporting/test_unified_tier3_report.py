@@ -499,6 +499,60 @@ def test_conclusions_without_case_grounding_do_not_receive_positional_evidence()
     assert "evidence" not in conclusions[0]
 
 
+@pytest.mark.parametrize("has_threshold_miss", [False, True])
+def test_conclusions_separate_unavailable_trials_from_threshold_misses(has_threshold_miss: bool) -> None:
+    rewards = [
+        {"entry_id": "unscored", "metric_set": "skill-evaluator-default-v2", "overall": None},
+        {
+            "entry_id": "at-threshold",
+            "metric_set": "skill-evaluator-default-v2",
+            **dict.fromkeys(DEFAULT_METRICS, 0.5),
+        },
+    ]
+    if has_threshold_miss:
+        rewards.append(
+            {
+                "entry_id": "zero-score",
+                "metric_set": "skill-evaluator-default-v2",
+                **dict.fromkeys(DEFAULT_METRICS, 0.0),
+            }
+        )
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": len(rewards),
+                "scored_attempts": len(rewards) - 1,
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.8),
+                "rewards": rewards,
+                "rewards_complete": False,
+            }
+        },
+        attempt_policy={"pass_threshold": 0.5},
+        use_llm_judge=False,
+    )
+
+    assert payload is not None
+    assert payload["overall_score"] == 0.8
+    assert payload["agents"]["codex"]["trials"][0]["overall"] is None
+    conclusions = {item["title"]: item["message"] for item in payload["conclusions"]}
+    assert "Unscored trials" in conclusions
+    assert conclusions["Unscored trials"] == (
+        "1 trial(s) have unavailable overall scores; examples: codex/unscored"
+    )
+    html = _render_agent_payload(payload)
+    assert "1 trial(s) have unavailable overall scores; examples: codex/unscored" in html
+    if has_threshold_miss:
+        assert conclusions["Cases needing review"] == (
+            "1 trial(s) missed the pass threshold; examples: codex/zero-score"
+        )
+        assert "1 trial(s) missed the pass threshold; examples: codex/zero-score" in html
+    else:
+        assert "Cases needing review" not in conclusions
+        assert "missed the pass threshold" not in html
+
+
 def test_package_loader_reads_template_resources_as_utf8(monkeypatch: pytest.MonkeyPatch) -> None:
     class TemplateResource:
         def joinpath(self, _path: str) -> TemplateResource:
@@ -2589,6 +2643,79 @@ def test_rerender_uses_run_owned_dataset_and_evaluator_version(tmp_path: Path) -
     assert payload["dataset_summary"] == snapshot["dataset_summary"]
     assert payload["dataset_digest"] == snapshot["dataset_digest"]
     assert payload["evaluator_version"] == "evaluated-version-1.2.3"
+
+
+@pytest.mark.parametrize("manifest_source", ["absent", "disk", "engine"])
+def test_rerender_preserves_legacy_snapshot_dataset_with_corrected_summary(
+    tmp_path: Path, manifest_source: str
+) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    run_dir = tmp_path / "results" / "historical-run"
+    _write_summary(run_dir)
+    original = (Path(__file__).parents[1] / "fixtures" / "legacy-routing-dataset-snapshot-1.0.json").read_bytes()
+    snapshot_path = run_dir / "dataset_snapshot.json"
+    snapshot_path.write_bytes(original)
+    historical = json.loads(original)
+    manifest = {key: value for key, value in historical.items() if key != "dataset"}
+    engine_result = {"dataset_snapshot": manifest} if manifest_source == "engine" else None
+    if manifest_source == "disk":
+        (run_dir / "result.json").write_text(json.dumps({"dataset_snapshot": manifest}), encoding="utf-8")
+
+    tier3 = agent_eval_result_from_directory(skill, run_dir, engine_result=engine_result, use_llm_judge=False)
+
+    assert tier3 is not None
+    payload = tier3.metadata["agent_eval"]
+    assert payload["dataset"] == historical["dataset"]
+    expected_summary = {
+        "total_tasks": 3,
+        "positive_tasks": 1,
+        "negative_tasks": 2,
+        "unclassified_tasks": 0,
+        "source": "dataset",
+    }
+    assert payload["dataset_summary"] == expected_summary
+    assert payload["summary"]["dataset_summary"] == expected_summary
+    assert payload["dataset_digest"] == historical["dataset_digest"]
+    assert payload["evaluator_version"] == "0.8.0"
+    embedded = _embedded_tier3_payload(_render_agent_payload(payload))
+    for rendered, original_case in zip(embedded["dataset"], historical["dataset"], strict=True):
+        assert original_case.items() <= rendered.items()
+    assert embedded["dataset_summary"] == expected_summary
+    assert snapshot_path.read_bytes() == original
+    if manifest_source == "disk":
+        assert json.loads((run_dir / "result.json").read_text(encoding="utf-8"))["dataset_snapshot"] == manifest
+
+
+@pytest.mark.parametrize("schema_version", [[], {}, "9.9"], ids=["array", "object", "unknown"])
+def test_rerender_falls_back_from_invalid_snapshot_schema(tmp_path: Path, schema_version: object) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    run_dir = tmp_path / "results" / "historical-run"
+    _write_summary(run_dir)
+    snapshot = build_dataset_snapshot([{"id": "invalid-snapshot-case"}], evaluator_version="0.8.0")
+    snapshot["schema_version"] = schema_version
+    snapshot_path = run_dir / "dataset_snapshot.json"
+    original = json.dumps(snapshot).encode("utf-8")
+    snapshot_path.write_bytes(original)
+    fallback = {"id": "fallback-case", "expected_skill": "demo", "should_trigger": False}
+    staged = run_dir / "_harbor-tasks" / "fallback-case" / "tests"
+    staged.mkdir(parents=True)
+    (staged / "entry.json").write_text(json.dumps(fallback), encoding="utf-8")
+
+    tier3 = agent_eval_result_from_directory(skill, run_dir, use_llm_judge=False)
+
+    assert tier3 is not None
+    payload = tier3.metadata["agent_eval"]
+    assert payload["dataset"] == [fallback]
+    assert payload["dataset_summary"] == {
+        "total_tasks": 1,
+        "positive_tasks": 0,
+        "negative_tasks": 1,
+        "unclassified_tasks": 0,
+        "source": "dataset",
+    }
+    assert snapshot_path.read_bytes() == original
 
 
 def test_rerender_uses_persisted_publication_identity_after_live_source_changes(tmp_path: Path) -> None:

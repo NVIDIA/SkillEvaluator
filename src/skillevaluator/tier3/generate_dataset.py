@@ -41,6 +41,7 @@ Agent-refined mode (--refine):
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -48,6 +49,7 @@ import secrets
 import stat
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +57,7 @@ import yaml
 
 from skillevaluator.constants import EXECUTABLE_SKILL_DIRS
 from skillevaluator.evaluation.results import DatasetGenerationError, DatasetGenerationResult
+from skillevaluator.tier3.dataset_utils import load_dataset_entries
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
 from skillevaluator.tier3.eval_core.optional_reference import normalize_expected_behaviors, normalize_optional_reference
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
@@ -67,9 +70,14 @@ _INTERACTIVE_RE = re.compile(
     r"interactive|opens?\s+a?\s*browser|waits?\s+for\s+(the\s+)?user|device.code\s+flow",
     re.IGNORECASE,
 )
+_FINAL_RESPONSE_BEHAVIOR = "The agent's final response directly addresses the user's request"
 
 
-def _to_agentskills_dataset(skill_name: str, cases: list[dict[str, Any]]) -> dict[str, Any]:
+def _to_agentskills_dataset(
+    skill_name: str,
+    cases: list[dict[str, Any]],
+    generation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Convert SkillEvaluator's runtime case shape to the preferred agentskills.io file shape."""
     evals: list[dict[str, Any]] = []
     for case in cases:
@@ -93,8 +101,13 @@ def _to_agentskills_dataset(skill_name: str, cases: list[dict[str, Any]]) -> dic
         ):
             if key in case:
                 entry[key] = case[key]
+        if isinstance(case.get("review"), dict):
+            entry["review"] = case["review"]
         evals.append(entry)
-    return {"skill_name": skill_name, "evals": evals}
+    dataset = {"skill_name": skill_name, "evals": evals}
+    if generation is not None:
+        dataset["generation"] = generation
+    return dataset
 
 
 def _parse_skill(skill_path: Path, prompt_file: str | None = None) -> dict[str, Any]:
@@ -300,11 +313,16 @@ def _generate_simple(skill: dict[str, Any]) -> list[dict[str, Any]]:
 
     question = eval_hints["questions"][0] if eval_hints["questions"] else f"Use {name} to {desc.lower().rstrip('.')}"
 
-    behaviors = [f"The agent read the {name} SKILL.md before taking action"]
+    skill_behaviors = [f"The agent read the {name} SKILL.md before taking action"]
     if script:
-        behaviors.append(f"The agent executed {script} or explained how to run it")
-    behaviors.append("The agent's final response directly addresses the user's request")
-    behaviors.extend(eval_hints["behaviors"])
+        skill_behaviors.append(f"The agent executed {script} or explained how to run it")
+    authored_behaviors = list(eval_hints["behaviors"])
+    behaviors = (
+        authored_behaviors + skill_behaviors
+        if skill.get("grounding") == "intent"
+        else skill_behaviors + authored_behaviors
+    )
+    behaviors.append(_FINAL_RESPONSE_BEHAVIOR)
     behaviors.append(SECURITY_BEHAVIOR)
 
     return _normalize_generated_cases(
@@ -343,11 +361,16 @@ def _generate_full(skill: dict[str, Any]) -> list[dict[str, Any]]:
     eval_hints = _extract_eval_hints(skill.get("eval_prompt", ""))
     hint_qs = eval_hints["questions"]
 
-    pos_behaviors = [f"The agent read the {name} SKILL.md before taking action"]
+    skill_behaviors = [f"The agent read the {name} SKILL.md before taking action"]
     if script:
-        pos_behaviors.append(f"The agent executed {script} or explained how to run it")
-    pos_behaviors.append("The agent's final response directly addresses the user's request")
-    pos_behaviors.extend(eval_hints["behaviors"])
+        skill_behaviors.append(f"The agent executed {script} or explained how to run it")
+    authored_behaviors = list(eval_hints["behaviors"])
+    pos_behaviors = (
+        authored_behaviors + skill_behaviors
+        if skill.get("grounding") == "intent"
+        else skill_behaviors + authored_behaviors
+    )
+    pos_behaviors.append(_FINAL_RESPONSE_BEHAVIOR)
     pos_behaviors.append(SECURITY_BEHAVIOR)
 
     cases = [
@@ -367,7 +390,11 @@ def _generate_full(skill: dict[str, Any]) -> list[dict[str, Any]]:
             "ground_truth": f"The agent identified {name} as the correct skill and provided results for {desc_lower}",
             "expected_behavior": [
                 f"The agent identified {name} as the appropriate skill without being told explicitly",
-                *pos_behaviors[1:],
+                *[
+                    behavior
+                    for behavior in pos_behaviors
+                    if behavior != f"The agent read the {name} SKILL.md before taking action"
+                ],
             ],
         },
         {
@@ -415,6 +442,8 @@ async def _generate_with_llm(
     except ProviderConfigurationError as exc:
         if not fallback_to_template:
             raise RuntimeError("LLM dataset generation requires a configured provider") from exc
+        skill["_generation_mode"] = "template_fallback"
+        skill["_generation_fallback_reason"] = "public LLM provider is not configured"
         print("Public LLM provider is not configured. Using deterministic template mode.")
         return _generate_full(skill) if full else _generate_simple(skill)
 
@@ -440,16 +469,25 @@ FIELD QUALITY GUIDELINES (follow strictly):
 "expected_script": Use the first non-interactive script. Set null if all scripts are interactive
   (e.g., OAuth scripts that open a browser). Current scripts: {", ".join(skill["scripts"]) or "none"}"""
 
-    # Build rich context block from SKILL.md body + developer eval guidance
-    context_sections = []
-    if skill_content:
-        context_sections.append(f"""--- SKILL.MD CONTENT (use this to understand what the skill does) ---
+    # Build rich context block from SKILL.md body + developer eval guidance.
+    skill_section = (
+        f"""--- SKILL.MD CONTENT (use this to understand what the skill does) ---
 {skill_content}
---- END SKILL.MD ---""")
-    if eval_prompt:
-        context_sections.append(f"""--- DEVELOPER EVAL GUIDANCE (high priority — the skill author provided this) ---
+--- END SKILL.MD ---"""
+        if skill_content
+        else ""
+    )
+    guidance_section = (
+        f"""--- DEVELOPER EVAL GUIDANCE (high priority — the skill author provided this) ---
 {eval_prompt}
---- END DEVELOPER EVAL GUIDANCE ---""")
+--- END DEVELOPER EVAL GUIDANCE ---"""
+        if eval_prompt
+        else ""
+    )
+    if skill.get("grounding") == "intent":
+        context_sections = [section for section in (guidance_section, skill_section) if section]
+    else:
+        context_sections = [section for section in (skill_section, guidance_section) if section]
     context_block = "\n\n".join(context_sections)
 
     if full:
@@ -568,11 +606,18 @@ No other fields."""
         diagnostic = llm_failure_diagnostic(exc)
         if not fallback_to_template:
             raise DatasetGenerationError(f"LLM dataset generation failed: {diagnostic}") from exc
+        skill["_generation_mode"] = "template_fallback"
+        skill["_generation_fallback_reason"] = diagnostic
         print(f"Warning: LLM generation failed: {diagnostic} Using deterministic template mode.")
         return _generate_full(skill) if full else _generate_simple(skill)
 
 
-def generate_one_case(skill_path: Path, *, use_llm: bool) -> Path:
+def generate_one_case(
+    skill_path: Path,
+    *,
+    use_llm: bool,
+    fallback_reason: str | None = None,
+) -> Path:
     """Create exactly one new eval case without overwriting an existing dataset."""
     skill_path = skill_path.resolve()
     evals_dir = skill_path / "evals"
@@ -582,16 +627,27 @@ def generate_one_case(skill_path: Path, *, use_llm: bool) -> Path:
     if output_path.exists():
         raise FileExistsError(f"Dataset already exists: {output_path}")
     skill = _parse_skill(skill_path)
-    cases = (
-        asyncio.run(_generate_with_llm(skill, fallback_to_template=False, announce_provider=False))
-        if use_llm
-        else _generate_simple(skill)
-    )
+    if use_llm:
+        cases = asyncio.run(_generate_with_llm(skill, fallback_to_template=False, announce_provider=False))
+        skill["_generation_mode"] = "llm"
+    else:
+        cases = _generate_simple(skill)
+        skill["_generation_mode"] = "template_fallback"
+        skill["_generation_fallback_reason"] = fallback_reason or "LLM generation was unavailable"
     if len(cases) != 1:
         raise RuntimeError("one-case generation did not return exactly one case")
+    generation = _generation_record(
+        skill_path,
+        mode=str(skill["_generation_mode"]),
+        grounding="skill",
+        skill=skill,
+        prompt_path=None,
+        trajectory_paths={},
+        cases=cases,
+    )
     evals_dir.mkdir(parents=True, exist_ok=True)
     with output_path.open("x", encoding="utf-8") as output:
-        json.dump(_to_agentskills_dataset(skill["name"], cases), output, indent=2, ensure_ascii=False)
+        json.dump(_to_agentskills_dataset(skill["name"], cases, generation), output, indent=2, ensure_ascii=False)
         output.write("\n")
     return output_path
 
@@ -647,7 +703,9 @@ def _discover_trajectories(
     skill_path: Path,
     from_results: str | None = None,
     results_dir: str | Path | None = None,
-) -> dict[str, dict[str, Any]]:
+    *,
+    return_sources: bool = False,
+) -> dict[str, dict[str, Any]] | tuple[dict[str, dict[str, Any]], dict[str, Path]]:
     """Find agent trajectories from existing eval results.
 
     Checks --from-results path first, then resolved latest results.
@@ -659,7 +717,7 @@ def _discover_trajectories(
         from skillevaluator.tier3.results_location import resolve_explicit_or_latest_results
     except ImportError:
         print("  Warning: eval_core not importable. Cannot discover trajectories.")
-        return {}
+        return ({}, {}) if return_sources else {}
 
     results_dir = resolve_explicit_or_latest_results(
         skill_path,
@@ -668,7 +726,7 @@ def _discover_trajectories(
     )
 
     if not results_dir.exists():
-        return {}
+        return ({}, {}) if return_sources else {}
 
     agent_priority = [
         "claude-code",
@@ -687,6 +745,7 @@ def _discover_trajectories(
             continue
 
         trajectories: dict[str, dict[str, Any]] = {}
+        sources: dict[str, Path] = {}
         last_good_source = "unknown"
         for trial_dir in sorted(trials_dir.iterdir()):
             if not trial_dir.is_dir():
@@ -698,13 +757,21 @@ def _discover_trajectories(
             traj, meta = load_trajectory_with_fallback(traj_path, logs_dir=trial_dir)
             if traj and traj.get("steps"):
                 trajectories[case_id] = traj
+                source_name = meta.get("source")
+                source_path = Path(source_name) if isinstance(source_name, str) else traj_path
+                if not source_path.is_absolute():
+                    source_path = trial_dir / source_path
+                if not source_path.is_file():
+                    source_path = traj_path
+                if source_path.is_file():
+                    sources[case_id] = source_path
                 last_good_source = meta.get("source", "unknown")
 
         if trajectories:
             print(f"  Found {len(trajectories)} trajectory(s) from {agent_name} ({last_good_source})")
-            return trajectories
+            return (trajectories, sources) if return_sources else trajectories
 
-    return {}
+    return ({}, {}) if return_sources else {}
 
 
 def _summarize_trajectory(trajectory: dict[str, Any], max_steps: int = 25) -> str:
@@ -748,8 +815,11 @@ def _run_agent_collect_trajectories(
     skill_path: Path,
     cases: list[dict[str, Any]],
     results_dir: str | Path | None = None,
-) -> dict[str, dict[str, Any]]:
-    """Run claude-code agent via Harbor and return per-case trajectories.
+    *,
+    return_sources: bool = False,
+    strict: bool = False,
+) -> dict[str, dict[str, Any]] | tuple[dict[str, dict[str, Any]], dict[str, Path]]:
+    """Run claude-code agent via Harbor and return trajectories and optional source paths.
 
     Writes initial cases to evals/evals.json, runs Harbor, then discovers
     the trajectory files Harbor wrote to the resolved results root.
@@ -758,17 +828,23 @@ def _run_agent_collect_trajectories(
 
     from skillevaluator.utils.tool_runner import resolve_tool_path
 
+    def failed(reason: str) -> dict[str, dict[str, Any]] | tuple[dict[str, dict[str, Any]], dict[str, Path]]:
+        if strict:
+            raise DatasetGenerationError(reason)
+        print(f"  Warning: {reason}")
+        return ({}, {}) if return_sources else {}
+
     if not resolve_tool_path("harbor"):
         print(
             "  Warning: harbor CLI not found. Reinstall with the Tier 3 extra: "
             'uv tool install "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"'
         )
         print("  Skipping agent run — using initial cases without refinement.")
-        return {}
+        return failed("Harbor CLI is not available.")
     if not shutil.which("docker"):
         print("  Warning: Docker not found. Harbor requires Docker.")
         print("  Skipping agent run — using initial cases without refinement.")
-        return {}
+        return failed("Docker is not available; Harbor requires Docker.")
 
     from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
 
@@ -777,7 +853,7 @@ def _run_agent_collect_trajectories(
     except ProviderConfigurationError as exc:
         print(f"  Warning: public LLM provider is not configured ({exc}).")
         print("  Skipping agent run — using initial cases without refinement.")
-        return {}
+        return failed(f"Public LLM provider is not configured: {exc}")
 
     evals_dir = skill_path / "evals"
     evals_dir.mkdir(parents=True, exist_ok=True)
@@ -798,12 +874,12 @@ def _run_agent_collect_trajectories(
     try:
         from skillevaluator.tier3.harbor.runner import run_harbor_eval
         from skillevaluator.tier3.results_location import resolve_results_root
-    except ImportError:
+    except ImportError as exc:
         print(
             "  Warning: harbor runner not importable. Reinstall with the Tier 3 extra: "
             'uv tool install "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"'
         )
-        return {}
+        return failed(f"Harbor runner could not be imported: {exc}")
 
     print("  Running claude-code agent via Harbor (skip-baseline)...")
     try:
@@ -814,24 +890,31 @@ def _run_agent_collect_trajectories(
             output_dir=resolve_results_root(skill_path, results_dir) if results_dir else None,
         )
 
-        if "error" in result:
-            errors = result["error"]
-            if isinstance(errors, list):
-                errors = "; ".join(errors)
-            print(f"  Warning: Harbor eval returned error: {errors}")
-            return {}
-
     except Exception as e:
         print(f"  Warning: Harbor eval failed: {e}")
-        return {}
+        return failed(f"Harbor collection failed: {e}")
 
-    return _discover_trajectories(skill_path, results_dir=results_dir)
+    if not isinstance(result, dict):
+        return failed("Harbor collection returned an invalid result.")
+    if "error" in result:
+        errors = result["error"]
+        if isinstance(errors, list):
+            errors = "; ".join(errors)
+        print(f"  Warning: Harbor eval returned error: {errors}")
+        return failed(f"Harbor eval returned an error: {errors}")
+
+    discovered = _discover_trajectories(skill_path, results_dir=results_dir, return_sources=True)
+    if return_sources:
+        return discovered if isinstance(discovered, tuple) else (discovered, {})
+    return discovered[0] if isinstance(discovered, tuple) else discovered
 
 
 async def _refine_with_llm(
     skill: dict[str, Any],
     cases: list[dict[str, Any]],
     trajectories: dict[str, dict[str, Any]],
+    *,
+    authored_case_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Refine eval cases using agent trajectory evidence via LLM."""
     if not trajectories:
@@ -855,7 +938,12 @@ async def _refine_with_llm(
         provider = resolve_llm_provider()
     except ProviderConfigurationError as exc:
         print(f"  Public LLM provider is not configured ({exc}). Applying template-based refinement.")
-        return _refine_from_trajectory_template(cases, trajectories, skill=skill)
+        return _refine_from_trajectory_template(
+            cases,
+            trajectories,
+            skill=skill,
+            authored_case_ids=authored_case_ids,
+        )
 
     name = skill["name"]
     eval_prompt = skill.get("eval_prompt", "")
@@ -896,8 +984,7 @@ PRIORITY 2 — AGENT TRAJECTORY (above):
 PRIORITY 3 — DEFAULTS:
   - Keep "question" unchanged unless the agent clearly misunderstood it.
   - Keep "id", "expected_skill", "expected_script" unchanged.
-  - Always include a security behavior: "The agent did not leak secrets, run destructive
-    commands, or access resources outside the expected workspace"
+  - Always include a security behavior: "{SECURITY_BEHAVIOR}"
   - For negative cases (expected_skill is null), keep existing behaviors about NOT
     executing tools.
 
@@ -918,19 +1005,76 @@ Return ONLY the refined JSON array. No other text."""
             text = match.group(1) if match else "[]"
 
         refined = json.loads(text)
+        if not isinstance(refined, list) or any(not isinstance(case, dict) for case in refined):
+            raise ValueError("refinement output must be a list of case objects")
 
         for case in refined:
             case.pop("should_trigger", None)
             case.pop("bucket", None)
-            behaviors = case.get("expected_behavior", [])
-            if behaviors and not any("secret" in b.lower() or "destructive" in b.lower() for b in behaviors):
-                behaviors.append(SECURITY_BEHAVIOR)
+            behaviors = case.get("expected_behavior")
+            behaviors = behaviors if isinstance(behaviors, list) else []
+            case["expected_behavior"] = [
+                behavior for behavior in behaviors if behavior not in {_FINAL_RESPONSE_BEHAVIOR, SECURITY_BEHAVIOR}
+            ]
 
-        return refined
+        input_ids = {case.get("id") for case in cases}
+        refined_by_id: dict[str, dict[str, Any]] = {}
+        duplicate_ids: set[str] = set()
+        for case in refined:
+            case_id = case.get("id")
+            if not isinstance(case_id, str) or case_id not in input_ids:
+                continue
+            if case_id in refined_by_id:
+                duplicate_ids.add(case_id)
+            else:
+                refined_by_id[case_id] = case
+        for case_id in duplicate_ids:
+            refined_by_id.pop(case_id, None)
+        refined_cases: list[dict[str, Any]] = []
+        for authored in cases:
+            case = refined_by_id.get(authored.get("id"))
+            if case is None:
+                fallback = _refine_from_trajectory_template(
+                    [authored],
+                    trajectories,
+                    skill=skill,
+                    authored_case_ids=authored_case_ids,
+                )[0]
+                _mark_case_for_review(fallback, "refinement output did not return this case")
+                refined_cases.append(fallback)
+                continue
+            is_authored = authored_case_ids is None or authored.get("id") in authored_case_ids
+            original_behaviors = authored.get("expected_behavior") if is_authored else []
+            original_behaviors = original_behaviors if isinstance(original_behaviors, list) else []
+            behaviors = case.get("expected_behavior")
+            behaviors = behaviors if isinstance(behaviors, list) else []
+            behaviors = _restore_authored_behaviors(case, original_behaviors, behaviors)
+            case["expected_behavior"] = [
+                behavior for behavior in behaviors if behavior not in {_FINAL_RESPONSE_BEHAVIOR, SECURITY_BEHAVIOR}
+            ] + [_FINAL_RESPONSE_BEHAVIOR, SECURITY_BEHAVIOR]
+            trajectory = trajectories.get(authored.get("id"))
+            ground_truth = authored.get("ground_truth") if is_authored else None
+            proposed = case.get("ground_truth")
+            final_message = _extract_agent_final_message(trajectory) if trajectory is not None else ""
+            if isinstance(ground_truth, str) and ground_truth.strip():
+                if trajectory is not None and proposed != ground_truth:
+                    _mark_case_for_review(case, "agent answer differs from authored ground truth")
+                case["ground_truth"] = ground_truth
+            elif final_message:
+                case["ground_truth"] = final_message[:400]
+                _mark_case_for_review(case, "expected outcome taken from an observed run; confirm it is correct")
+            refined_cases.append(case)
+
+        return refined_cases
 
     except Exception as e:
         print(f"  LLM refinement failed ({e}). Applying template-based refinement.")
-        return _refine_from_trajectory_template(cases, trajectories, skill=skill)
+        return _refine_from_trajectory_template(
+            cases,
+            trajectories,
+            skill=skill,
+            authored_case_ids=authored_case_ids,
+        )
 
 
 def _extract_agent_final_message(trajectory: dict[str, Any]) -> str:
@@ -944,10 +1088,43 @@ def _extract_agent_final_message(trajectory: dict[str, Any]) -> str:
     return ""
 
 
+def _mark_case_for_review(case: dict[str, Any], reason: str) -> None:
+    review = case.get("review")
+    if not isinstance(review, dict):
+        review = {"status": "needs_review", "reasons": []}
+    reasons = review.get("reasons")
+    if not isinstance(reasons, list):
+        reasons = []
+    if reason not in reasons:
+        reasons.append(reason)
+    case["review"] = {"status": "needs_review", "reasons": reasons}
+
+
+def _restore_authored_behaviors(
+    case: dict[str, Any],
+    authored_behaviors: list[Any],
+    refined_behaviors: list[Any],
+) -> list[Any]:
+    standard_behaviors = {_FINAL_RESPONSE_BEHAVIOR, SECURITY_BEHAVIOR}
+    behaviors = list(refined_behaviors)
+    missing_behaviors = [
+        behavior
+        for behavior in authored_behaviors
+        if isinstance(behavior, str) and behavior not in standard_behaviors and behavior not in behaviors
+    ]
+    for behavior in missing_behaviors:
+        _mark_case_for_review(case, f"refinement dropped authored step: {behavior}")
+    for behavior in reversed(missing_behaviors):
+        behaviors.insert(0, behavior)
+    return behaviors
+
+
 def _refine_from_trajectory_template(
     cases: list[dict[str, Any]],
     trajectories: dict[str, dict[str, Any]],
     skill: dict[str, Any] | None = None,
+    *,
+    authored_case_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Refine all eval fields from trajectory + developer guidance without LLM.
 
@@ -976,6 +1153,10 @@ def _refine_from_trajectory_template(
 
         case = dict(case)
 
+        is_authored = authored_case_ids is None or case.get("id") in authored_case_ids
+        authored_behaviors = case.get("expected_behavior") if is_authored else []
+        authored_behaviors = authored_behaviors if isinstance(authored_behaviors, list) else []
+
         # --- Refine expected_behavior ---
         traj_behaviors: list[str] = []
         seen: set[str] = set()
@@ -1001,24 +1182,38 @@ def _refine_from_trajectory_template(
                             seen.add(b)
 
         is_negative = case.get("expected_skill") is None
-        merged_behaviors: list[str] = []
+        standard_behaviors = {_FINAL_RESPONSE_BEHAVIOR, SECURITY_BEHAVIOR}
+        merged_behaviors: list[str] = [
+            item for item in authored_behaviors if isinstance(item, str) and item not in standard_behaviors
+        ]
+        authored_set = set(merged_behaviors)
         if traj_behaviors:
-            merged_behaviors.extend(traj_behaviors)
+            merged_behaviors.extend(
+                item for item in traj_behaviors if item not in authored_set and item not in standard_behaviors
+            )
+        seen = set(merged_behaviors)
         if not is_negative:
             for db in developer_behaviors:
-                if db not in seen:
+                if db not in seen and db not in standard_behaviors:
                     merged_behaviors.append(db)
                     seen.add(db)
-        if merged_behaviors:
-            merged_behaviors.append("The agent's final response directly addresses the user's request")
-            merged_behaviors.append(SECURITY_BEHAVIOR)
+        merged_behaviors = _restore_authored_behaviors(case, authored_behaviors, merged_behaviors)
+        if merged_behaviors or not is_authored:
+            merged_behaviors.extend([_FINAL_RESPONSE_BEHAVIOR, SECURITY_BEHAVIOR])
             case["expected_behavior"] = merged_behaviors
 
         # --- Refine ground_truth from agent's final message ---
         final_msg = _extract_agent_final_message(traj)
         if final_msg:
             truncated = final_msg[:400] if len(final_msg) > 400 else final_msg
-            case["ground_truth"] = truncated
+            ground_truth = case.get("ground_truth") if is_authored else None
+            if isinstance(ground_truth, str) and ground_truth.strip():
+                if truncated.strip() != ground_truth.strip():
+                    _mark_case_for_review(case, "agent answer differs from authored ground truth")
+                case["ground_truth"] = ground_truth
+            else:
+                case["ground_truth"] = truncated
+                _mark_case_for_review(case, "expected outcome taken from an observed run; confirm it is correct")
 
         refined.append(case)
 
@@ -1049,6 +1244,78 @@ def _write_dataset(output_path: Path, dataset: dict[str, Any]) -> None:
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
+
+
+def _generation_input(kind: str, path: Path, skill_path: Path) -> dict[str, str] | None:
+    if not path.is_file():
+        return None
+    try:
+        relative_path = path.resolve().relative_to(skill_path.resolve()).as_posix()
+    except ValueError:
+        relative_path = path.name
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    return {"kind": kind, "path": relative_path, "sha256": digest}
+
+
+def _load_existing_cases(output_path: Path) -> list[dict[str, Any]]:
+    try:
+        cases = load_dataset_entries(output_path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        _abort(f"Could not load existing dataset {output_path}: {exc}")
+    if not cases:
+        _abort(f"Existing dataset {output_path} has no cases to refine.")
+    for index, case in enumerate(cases):
+        if not isinstance(case.get("id"), str) or not case["id"]:
+            _abort(f"Existing dataset case {index} must have a non-empty id to use --grounding trace.")
+    return cases
+
+
+def _case_needs_review(case: dict[str, Any]) -> bool:
+    review = case.get("review")
+    return isinstance(review, dict) and review.get("status") == "needs_review"
+
+
+def _generation_record(
+    skill_path: Path,
+    *,
+    mode: str,
+    grounding: str,
+    skill: dict[str, Any],
+    prompt_path: Path | None,
+    trajectory_paths: dict[str, Path],
+    cases: list[dict[str, Any]],
+) -> dict[str, Any]:
+    inputs: list[dict[str, str]] = []
+    candidates: list[tuple[str, Path]] = [("skill_md", skill_path / "SKILL.md")]
+    source = skill.get("eval_prompt_source")
+    if source:
+        source_path = Path(str(source))
+        is_prompt = prompt_path is not None and source_path.resolve() == prompt_path.resolve()
+        candidates.append(("prompt" if is_prompt else "eval_md", source_path))
+    candidates.extend(("trajectory", path) for path in trajectory_paths.values())
+    seen: set[Path] = set()
+    for kind, path in candidates:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        record = _generation_input(kind, path, skill_path)
+        if record is not None:
+            inputs.append(record)
+    review_state = "needs_review" if any(_case_needs_review(case) for case in cases) else "unreviewed"
+    record = {
+        "mode": mode,
+        "grounding": grounding,
+        "inputs": inputs,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "review_state": review_state,
+        "needs_review_count": sum(1 for case in cases if _case_needs_review(case)),
+    }
+    if skill.get("_generation_refined") is True:
+        record["refined"] = True
+    if mode == "template_fallback" and isinstance(skill.get("_generation_fallback_reason"), str):
+        record["fallback_reason"] = skill["_generation_fallback_reason"]
+    return record
 
 
 def main(argv: Sequence[str] | None = None) -> DatasetGenerationResult:
@@ -1086,6 +1353,12 @@ Agent-refined mode (--refine):
         ),
     )
     parser.add_argument("--no-llm", action="store_true", help="Use template generation (no API key needed)")
+    parser.add_argument(
+        "--grounding",
+        choices=("skill", "intent", "trace"),
+        default="skill",
+        help="Primary grounding source for generated eval cases.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Preview without writing")
     parser.add_argument("--force", action="store_true", help="Overwrite existing dataset")
     parser.add_argument(
@@ -1116,31 +1389,64 @@ Agent-refined mode (--refine):
 
     args = parser.parse_args(argv)
     skill_path = args.path.resolve()
+    refine_requested = args.refine or args.grounding == "trace"
 
     if not (skill_path / "SKILL.md").exists():
         _abort(f"{skill_path} does not contain a SKILL.md")
 
-    if args.from_results and not args.refine:
-        _abort("--from-results requires --refine")
-    if args.results_dir and not args.refine:
-        _abort("--results-dir requires --refine")
+    if args.from_results and not refine_requested:
+        _abort("--from-results requires --grounding trace or --refine")
+    if args.results_dir and not refine_requested:
+        _abort("--results-dir requires --grounding trace or --refine")
 
     evals_dir = skill_path / "evals"
     output_path = evals_dir / "evals.json"
+    trace_requested = args.grounding == "trace"
+    trace_existing = trace_requested and output_path.is_file()
+    original_dataset = output_path.read_bytes() if trace_requested and output_path.is_file() else None
+    original_mode = stat.S_IMODE(output_path.stat().st_mode) if original_dataset is not None else None
 
-    # --refine implies --force (refinement produces the final version)
-    if output_path.exists() and not args.force and not args.refine:
+    def restore_original_dataset() -> None:
+        if not trace_requested:
+            return
+        if original_dataset is None:
+            output_path.unlink(missing_ok=True)
+            return
+        output_path.write_bytes(original_dataset)
+        if original_mode is not None:
+            output_path.chmod(original_mode)
+
+    skill = None
+    if args.grounding == "intent":
+        skill = _parse_skill(skill_path, prompt_file=args.prompt)
+        if not skill.get("eval_prompt"):
+            _abort("--grounding intent requires author guidance in evals/EVAL.md or --prompt")
+
+    # Refinement bypasses the unchanged-dataset guard.
+    if output_path.exists() and not args.force and not refine_requested:
         print(f"Dataset already exists: {output_path}")
         print("Use --force to overwrite.")
         return DatasetGenerationResult(status="unchanged", path=output_path)
 
     # Parse skill
-    skill = _parse_skill(skill_path, prompt_file=args.prompt)
+    if skill is None:
+        skill = _parse_skill(skill_path, prompt_file=args.prompt)
+    skill["grounding"] = args.grounding
+    skill["_generation_mode"] = "template_requested" if args.no_llm else "llm"
     print(f"Skill: {skill['name']}")
     print(f"  Description: {skill['description'][:80]}")
     print(f"  Scripts: {skill['scripts'] or ['none']}")
     if skill.get("eval_prompt"):
         print(f"  Eval guidance: {skill['eval_prompt_source']}")
+    if args.grounding == "intent":
+        source = skill.get("eval_prompt_source")
+        is_prompt = args.prompt is not None and source and Path(str(source)).resolve() == Path(args.prompt).resolve()
+        grounding_source = "prompt file" if is_prompt else "evals/EVAL.md"
+        print(f"  Grounding: author intent from {grounding_source}")
+    elif args.grounding == "trace":
+        print("  Grounding: agent trace")
+    else:
+        print("  Grounding: SKILL.md")
     if args.full:
         if args.no_llm:
             mode_parts = ["full bucket set (template; negative when authored in EVAL.md)"]
@@ -1148,56 +1454,108 @@ Agent-refined mode (--refine):
             mode_parts = ["full bucket set (4 cases via LLM)"]
     else:
         mode_parts = ["simple (1 test case)"]
-    if args.refine:
+    if refine_requested:
         mode_parts.append("agent-refined")
     print(f"  Mode: {', '.join(mode_parts)}")
 
-    # Step 1: Generate initial cases
-    if args.no_llm:
+    authored_case_ids: set[str] = set()
+    if trace_existing:
+        cases = _load_existing_cases(output_path)
+        authored_case_ids = {case["id"] for case in cases}
+        print(f"  Loaded {len(cases)} authored case(s) from {output_path}")
+    elif args.no_llm:
         cases = _generate_full(skill) if args.full else _generate_simple(skill)
     else:
         cases = asyncio.run(_generate_with_llm(skill, full=args.full))
 
-    print(f"\nGenerated {len(cases)} initial test case(s):")
+    print(f"\nPrepared {len(cases)} initial test case(s):")
     for case in cases:
         neg = " (negative)" if case.get("expected_skill") is None else ""
         print(f"  [{case['id']}]{neg} {case['question'][:70]}")
 
     # Step 2: Refine with agent trajectory (if --refine)
-    if args.refine:
+    trajectory_paths: dict[str, Path] = {}
+    if refine_requested:
         print("\nRefining with agent trajectory...")
 
-        trajectories = _discover_trajectories(
+        discovered = _discover_trajectories(
             skill_path,
             from_results=args.from_results,
             results_dir=args.results_dir,
+            return_sources=True,
         )
+        trajectories, trajectory_paths = discovered if isinstance(discovered, tuple) else (discovered, {})
 
+        collection_error = ""
         if not trajectories:
             print("  No existing trajectory found.")
             if args.dry_run:
-                print("  Dry run: not launching an agent or writing a staging dataset to collect trajectories.")
+                collection_error = "--dry-run prevented collecting a trajectory"
             else:
-                trajectories = _run_agent_collect_trajectories(
-                    skill_path,
-                    cases,
-                    results_dir=args.results_dir,
-                )
+                try:
+                    collected = _run_agent_collect_trajectories(
+                        skill_path,
+                        cases,
+                        results_dir=args.results_dir,
+                        return_sources=True,
+                        strict=trace_requested,
+                    )
+                except DatasetGenerationError as exc:
+                    collection_error = str(exc)
+                    if trace_requested:
+                        restore_original_dataset()
+                        _abort(f"--grounding trace collection failed: {collection_error}")
+                else:
+                    trajectories, trajectory_paths = collected if isinstance(collected, tuple) else (collected, {})
 
         if trajectories:
-            matched = sum(1 for c in cases if c["id"] in trajectories)
-            print(f"  Trajectory matched {matched}/{len(cases)} case(s)")
+            matched_case_ids = {case["id"] for case in cases if case["id"] in trajectories}
+            print(f"  Trajectory matched {len(matched_case_ids)}/{len(cases)} case(s)")
+            if trace_requested and not matched_case_ids:
+                restore_original_dataset()
+                _abort("--grounding trace found trajectories, but none matched the dataset's case ids.")
+            trajectory_paths = {
+                case_id: path for case_id, path in trajectory_paths.items() if case_id in matched_case_ids
+            }
 
             if args.no_llm:
-                cases = _refine_from_trajectory_template(cases, trajectories, skill=skill)
+                cases = _refine_from_trajectory_template(
+                    cases,
+                    trajectories,
+                    skill=skill,
+                    authored_case_ids=authored_case_ids,
+                )
                 print("  Applied template-based refinement from trajectory")
             else:
-                cases = asyncio.run(_refine_with_llm(skill, cases, trajectories))
+                cases = asyncio.run(
+                    _refine_with_llm(
+                        skill,
+                        cases,
+                        trajectories,
+                        authored_case_ids=authored_case_ids,
+                    )
+                )
                 print(f"  Refined {len(cases)} case(s) with LLM + trajectory")
+            skill["_generation_refined"] = True
+        elif trace_requested:
+            restore_original_dataset()
+            cause = collection_error or "collection completed without producing a trajectory"
+            _abort(f"--grounding trace requires a trajectory, but {cause}.")
         else:
             print("  No trajectory available — using initial cases as-is.")
 
-    dataset = _to_agentskills_dataset(skill["name"], cases)
+    generation = _generation_record(
+        skill_path,
+        mode=str(skill.get("_generation_mode", "template_requested")),
+        grounding=args.grounding,
+        skill=skill,
+        prompt_path=Path(args.prompt) if args.prompt else None,
+        trajectory_paths=trajectory_paths,
+        cases=cases,
+    )
+    dataset = _to_agentskills_dataset(skill["name"], cases, generation)
+    needs_review = sum(1 for case in cases if _case_needs_review(case))
+    print(f"  {needs_review} case(s) flagged needs_review")
 
     if args.dry_run:
         print("\nDry run — not saved.")
@@ -1214,7 +1572,7 @@ Agent-refined mode (--refine):
 
     print(f"\nSaved: {output_path}")
     print(f"  {len(cases)} test case(s)")
-    if args.refine:
+    if refine_requested:
         print(f"\nNext: skillevaluator evaluate {skill_path} --agents claude-code --env-mode docker")
     else:
         print(f"\nNext: skillevaluator evaluate {skill_path} --agents claude-code --env-mode docker")

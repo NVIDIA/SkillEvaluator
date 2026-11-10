@@ -82,3 +82,5 @@ you confirm that you have the right to contribute it under the
   ```
 
 Report vulnerabilities through [SECURITY.md](SECURITY.md), not public issues.
+
+<!-- path-filter probe: temporary, delete with the test PR -->

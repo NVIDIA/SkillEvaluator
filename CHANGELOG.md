@@ -102,6 +102,99 @@ All notable changes to SkillEvaluator are documented in this file.
   characters: a text that saves only a few characters stays inline when sharing
   it would push another text past block 9 and cost more than it saves.
 
+- A Tier 1 security scan no longer stops as `INCOMPLETE` with `skillspector
+  JSON field 'analysis_completeness' reports incomplete analysis (status
+  'partial')` when the skill's instructions name a file that SkillSpector did
+  not scan, such as a file the skill writes at run time or a source file
+  elsewhere in the repository. SkillSpector v2.12.0 to v2.13.3 record such a
+  reference as a nonfatal `reference_missing` row, and v2.10 and v2.11 as
+  `reference_unresolved`. When these references are the report's only gaps, or
+  the only gaps besides accepted referenced images, the scan now passes with a
+  warning that names the file and line of up to three of them. Each row must
+  be in a regular, single-link file that the report lists once and that is
+  inside the skill and not reached through a symlink, and the report's
+  `references` list must record a `missing` reference on that line. The line
+  must not name a symlink, a file the report does not list, a directory left
+  out of the scanned copy, such as `evals/` or `node_modules/`, anything in
+  it, or a directory that holds any of these, also after Markdown escapes,
+  character references and percent-escapes are decoded, or through a shell
+  glob, expansion or quotes, a zsh group, numeric range, globbing flag or
+  `EXTENDED_GLOB` operator, a bash extended glob, a cmd.exe `^` escape,
+  variable or batch parameter such as `%DIR%`, `!DIR!` or `%~dp0`, a
+  PowerShell backtick escape, a `\` separator or a Windows 8.3 short name such
+  as `NODE_M~1`. Only that line is read, and a command in it is not run, so a
+  name on another line or one that a command prints, such as the output of a
+  span in backticks, is not detected: the check keeps an instruction that
+  names a left-out file `INCOMPLETE`, but does not catch a skill written to
+  hide one. Inside `.git`, Git's own files and directories, such as `HEAD`,
+  `config` or `refs`, do not count, but hooks other than `*.sample` templates
+  and any other file there do. A lone file such as `SKILL.md` is scanned on
+  its own, so a line that names a file beside it keeps the scan `INCOMPLETE`.
+  Tier 3 output in the default `<skill>/evals/results` location, such as
+  `results`, `report.html` or `summary.json`, or with `--harbor-keep-jobs` a
+  copy of every bundled file, counts as not inspected too, so a line that
+  names it keeps the scan `INCOMPLETE` after a Tier 3 run, although it passed
+  before. Keeping results outside the skill with `--results-dir` or
+  `SKILLEVALUATOR_RESULTS_DIR` avoids that. Input fixtures in `evals/files`
+  count as not inspected as well, so a line that names one, such as
+  `meeting.txt`, keeps the scan `INCOMPLETE` whenever the fixture exists, with
+  or without a Tier 3 run. Every missing reference in a skill scanned on its
+  own inside a folder or plugin, such as `security-scan` or `validate` on a
+  folder of skills, or `validate` on a plugin, also keeps that skill's scan
+  `INCOMPLETE`. A reference that matches several bundled files
+  (`reference_unresolved` from v2.12.0), a fatal or other ledger row, an
+  uninspected file, a degraded analyzer, a limitation, or fewer findings
+  counted after filtering than before still leaves the scan `INCOMPLETE`.
+
+- A Tier 1 security scan with SkillSpector v2.13.4 or later no longer stops as
+  `INCOMPLETE` with `skillspector JSON field 'analysis_completeness.status' is
+  not recognized` when the skill's instructions name a file that the skill
+  does not bundle. These releases report such a scan as
+  `complete_with_caveats` instead of `partial`. SkillEvaluator now accepts the
+  caveats under the same conditions as the missing references above and shows
+  the same warning, and checks the report's findings as in any other complete
+  scan. A caveat that fails one of those conditions, such as a line that names
+  a file left out of the scanned copy, leaves the scan `INCOMPLETE` and, as
+  for a `partial` report, still reports the findings. A report with that
+  status and no caveat, or with a caveat that is not a nonfatal
+  `reference_missing` row in phase `reference_resolution`, is not trusted:
+  the scan is `INCOMPLETE` without its findings, as with
+  `complete_with_caveats` from an earlier release.
+
+- A Tier 1 security scan with SkillSpector v2.12.0 or later no longer stops as
+  `INCOMPLETE` ("Security Scan didn't run") with
+  `hooks/hooks.json [static; opaque_content; analyzers=bundled_execution_surface]`
+  when the scanned skill, folder or hooks-only plugin has an ordinary command
+  or HTTP hook, one SkillSpector does not report as sending hook content to a
+  remote host (BH2). SkillSpector cannot model what such a hook does with its
+  input, so it reports the analysis as `partial` although the scan finished,
+  and its findings cannot show that the hook is safe: a hook script that sends
+  its input over a socket, `nc` or `/dev/tcp` gets no blocking finding. The
+  scan now fails with the Critical `skillspector_hook_payload_unverified`,
+  which names the manifest, such as `hooks/hooks.json` or
+  `.claude/settings.json`, and a gate failure that neither a `--policy`
+  severity override nor `--llm-verify` clears. Only removing the hooks passes
+  the check. The other findings and the `--llm` stage are reported as for any
+  complete scan, and a folder scan goes on to the next skill. This applies
+  only to SkillSpector's nonfatal, whole-file row on a manifest whose BH1
+  finding says its hook payload is `unmodeled`, also under a baseline, and
+  only when the report accounts for the row exactly. SkillSpector records the
+  same row for a manifest it read only in part: with v2.13.4, whose row counts
+  the records it read, a manifest with a record that is not a parsed hook
+  declaration, such as a skipped handler or a permission rule, stays
+  `INCOMPLETE`; with v2.13.3, only a BH1 with 2,048 or more declarations does,
+  and a partly parsed manifest gets the Critical. The rest of the report is
+  judged as before: missing references and referenced images are still
+  accepted with their warnings under the rules above. Any gap those rules do
+  not accept, such as a missing reference in a skill that `validate` or
+  `security-scan` checks on its own inside a folder or plugin, still records
+  the SkillSpector scan as incomplete (`incomplete_scans` in the JSON report,
+  and publication eligibility `Incomplete`), with an error that names only
+  that gap. The check itself is reported as `FAIL`, not `INCOMPLETE`, because
+  the Critical is a confirmed failure. With SkillSpector v2.13.4, a hook with
+  a `"timeout"` key also gets a `static_parse_limit` row on the manifest, so
+  that scan is recorded as incomplete in the same way.
+
 - Tier 3 **Measured Agent Resources** no longer count idle or user time as LLM
   seconds when timing is inferred from step timestamps and an agent step with
   tool calls is followed by a user or system step. The whole gap up to that
@@ -144,75 +237,6 @@ All notable changes to SkillEvaluator are documented in this file.
   bundled Harbor verifier apply the fix. Prose such as
   `Use HTTP POST to create an item.` in a here-document or an unpiped `echo`
   still does not warn.
-
-- A Tier 1 security scan no longer stops as `INCOMPLETE` with
-  `skillspector JSON field 'analysis_completeness' reports incomplete analysis
-  (status 'partial')` when the skill's instructions name a file that
-  SkillSpector did not scan, such as a file the skill writes at run time or a
-  source file elsewhere in the repository. SkillSpector v2.12.0 to v2.13.3
-  record such a reference as a nonfatal `reference_missing` row, and v2.10 and
-  v2.11 as `reference_unresolved`. When these references are the report's only
-  gaps, or the only gaps besides accepted referenced images, the scan now
-  passes with a warning that names the file and line of up to three of them.
-  Each row must be in a regular, single-link file that the report lists once
-  and that is inside the skill and not reached through a symlink, and the
-  report's `references` list must record a `missing` reference on that line.
-  The line must not name a symlink, a file the report does not list, a
-  directory left out of the scanned copy, such as `evals/` or `node_modules/`,
-  anything in it, or a directory that holds any of these. Inside `.git`, only
-  `.git` itself and hooks other than `*.sample` templates count. A lone file
-  such as `SKILL.md` is scanned on its own, so a line that names a file beside
-  it keeps the scan `INCOMPLETE`. Every missing reference in a skill scanned
-  on its own inside a folder or plugin, such as `security-scan` on a folder of
-  skills or `validate` on a plugin, also keeps that skill's scan `INCOMPLETE`.
-  A reference that matches several bundled files (`reference_unresolved` from
-  v2.12.0), a fatal or other ledger row, an uninspected file, a degraded
-  analyzer, a limitation, or fewer findings counted after filtering than
-  before still leaves the scan `INCOMPLETE`.
-
-- A Tier 1 security scan with SkillSpector v2.13.4 or later no longer stops as
-  `INCOMPLETE` with `skillspector JSON field 'analysis_completeness.status' is
-  not recognized` when the skill's instructions name a file that the skill
-  does not bundle. These releases report such a scan as
-  `complete_with_caveats` instead of `partial`. SkillEvaluator now accepts the
-  caveats under the same conditions as the missing references above and shows
-  the same warning, and checks the report's findings as in any other complete
-  scan. A caveat that fails one of those conditions, such as a line that names
-  a file left out of the scanned copy, leaves the scan `INCOMPLETE` and, as
-  for a `partial` report, still reports the findings. A report with that
-  status and no caveat, or with a caveat that is not a nonfatal
-  `reference_missing` row in phase `reference_resolution`, is not trusted:
-  the scan is `INCOMPLETE` without its findings, as with
-  `complete_with_caveats` from an earlier release.
-
-- A Tier 1 security scan with SkillSpector v2.12.0 or later no longer stops as
-  `INCOMPLETE` ("Security Scan didn't run") with
-  `hooks/hooks.json [static; opaque_content; analyzers=bundled_execution_surface]`
-  when the scanned skill, folder or hooks-only plugin has an ordinary command
-  or HTTP hook, one SkillSpector does not report as sending hook content to a
-  remote host (BH2). SkillSpector cannot model what such a hook does with its
-  input, so it reports the analysis as `partial` although the scan finished,
-  and its findings cannot show that the hook is safe: a hook script that sends
-  its input over a socket, `nc` or `/dev/tcp` gets no blocking finding. The
-  scan now fails with the Critical `skillspector_hook_payload_unverified`,
-  which names the manifest, such as `hooks/hooks.json` or
-  `.claude/settings.json`, and a gate failure that neither a `--policy`
-  severity override nor `--llm-verify` clears. Only removing the hooks passes
-  the check. The other findings and the `--llm` stage are reported as for any
-  complete scan, and a folder scan goes on to the next skill. This applies
-  only to SkillSpector's nonfatal, whole-file row on a manifest whose BH1
-  finding says its hook payload is `unmodeled`, also under a baseline, and
-  only when the report accounts for the row exactly. SkillSpector records the
-  same row for a manifest it read only in part: with v2.13.4, whose row counts
-  the records it read, a manifest with a record that is not a parsed hook
-  declaration, such as a skipped handler or a permission rule, stays
-  `INCOMPLETE`; with v2.13.3, only a BH1 with 2,048 or more declarations does,
-  and a partly parsed manifest gets the Critical. The rest of the report is
-  judged as before, and its error names only its own gaps: missing references
-  and referenced images are still accepted with their warnings, and any other
-  gap leaves the scan `INCOMPLETE` next to the Critical. With SkillSpector
-  v2.13.4, a hook with a `"timeout"` key also gets a `static_parse_limit` row
-  on the manifest, so that scan stays `INCOMPLETE`.
 
 ## 0.8.0 - 2026-11-05
 

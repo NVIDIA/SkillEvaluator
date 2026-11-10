@@ -49,6 +49,7 @@ from unittest.mock import patch
 
 import pytest
 
+from skillevaluator.reporting.run_status import Status, resolve_run_status
 from skillevaluator.utils.tool_runner import ToolResult
 from skillevaluator.validators.base import Severity, ValidationResult
 from skillevaluator.validators.policy import ValidationPolicy, apply_policy
@@ -355,6 +356,21 @@ def _assert_hook_critical(result: ValidationResult, root: Path, manifest: str = 
     assert not result.passed
 
 
+def _assert_failed_with_incomplete_scan(result: ValidationResult, stage: str = "skillspector") -> None:
+    """The scan is recorded as incomplete, but the check is reported as failed.
+
+    A confirmed failure, such as the Critical, takes precedence over missing
+    evidence in the reported status, so the check shows FAIL, not INCOMPLETE.
+    Only the incomplete scans and publication eligibility say incomplete.
+    """
+    assert result.incomplete_scans == [stage]
+    run = resolve_run_status([result])
+    assert run.of(result) == Status.FAILED
+    assert run.headline == Status.FAILED
+    assert run.missing == (stage,)
+    assert run.publication == Status.INCOMPLETE
+
+
 class TestCapturedReports:
     @pytest.mark.parametrize(("name", "build", "manifest"), _CAPTURES, ids=[name for name, _b, _m in _CAPTURES])
     def test_captured_report_matches_its_tree(
@@ -538,7 +554,7 @@ class TestUnmodeledHooks:
         result = SecurityValidator(use_llm=True).validate_security_only(root)
 
         assert mock_tools.skillspector.run.call_count == 2
-        assert result.incomplete_scans == ["skillspector-llm"]
+        _assert_failed_with_incomplete_scan(result, "skillspector-llm")
         _assert_hook_critical(result, root)
         assert result.errors.count(_unverified(result)[0].to_legacy_string()) == 1
         assert result.summary.critical_count == 1
@@ -644,6 +660,66 @@ class TestFolderScans:
             f"[{name}] .claude/settings.json" for name in ("a", "b")
         ]
 
+    @pytest.mark.parametrize("version", _MISSING_REFERENCE_VERSIONS)
+    @patch("skillevaluator.validators.security.Tools")
+    def test_hooks_beside_a_missing_reference_in_a_folder_job_stay_incomplete(
+        self, mock_tools, tmp_path: Path, version: str
+    ) -> None:
+        """``validate`` checks each skill of a folder as its own job, and its target_root accepts no missing reference.
+
+        Taking the hook row out leaves the reference row to that rule: the
+        scan is recorded as incomplete with an error that names only the
+        reference row, and the Critical still fails the check.
+        """
+        folder = tmp_path / "folder"
+        root = _settings_missing_reference_skill(folder)
+        validator = SecurityValidator(use_llm=False, content_type="skill", target_root=folder)
+
+        result = _validate(mock_tools, root, _report(_settings_missing_reference_report(version)), validator)
+
+        _assert_failed_with_incomplete_scan(result)
+        assert [error for error in result.errors if "did not complete" in error] == [
+            "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+            "SKILL.md:7 [reference_resolution; reference_missing]; security scan did not complete"
+        ]
+        assert _MISSING_REFERENCE_WARNING not in result.warnings
+        _assert_hook_critical(result, root, ".claude/settings.json")
+
+    @pytest.mark.parametrize("method", ["validate_security_only", "validate"])
+    @pytest.mark.parametrize("version", _MISSING_REFERENCE_VERSIONS)
+    @patch("skillevaluator.validators.security.Tools")
+    def test_hooks_beside_a_missing_reference_in_a_folder_scan_stay_incomplete(
+        self, mock_tools, tmp_path: Path, version: str, method: str
+    ) -> None:
+        """``security-scan`` on a folder scans each skill on its own with the folder as its reference root.
+
+        So each skill keeps its reference row as an incomplete-scan error
+        beside its Critical, and the check is reported as failed.
+        """
+        folder = tmp_path / "folder"
+        for name in ("a", "b"):
+            _write(folder / name, {**_SETTINGS_SKILL, "SKILL.md": _SETTINGS_MISSING_REFERENCE_SKILL_MD})
+        report = _report(_settings_missing_reference_report(version))
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True, stdout=json.dumps(report), stderr="", exit_code=0
+        )
+
+        result = getattr(SecurityValidator(use_llm=False), method)(folder)
+
+        assert mock_tools.skillspector.run.call_count == 2
+        _assert_failed_with_incomplete_scan(result)
+        assert [error for error in result.errors if "did not complete" in error] == [
+            f"[{name}] skillspector JSON field 'analysis_completeness' reports incomplete analysis (status "
+            "'partial'): SKILL.md:7 [reference_resolution; reference_missing]; security scan did not complete"
+            for name in ("a", "b")
+        ]
+        assert not [warning for warning in result.warnings if "does not bundle" in warning]
+        assert result.gate_failures == [f"[{name}] {_gate('.claude/settings.json')}" for name in ("a", "b")]
+        assert [finding.file_path for finding in _unverified(result)] == [
+            f"[{name}] .claude/settings.json" for name in ("a", "b")
+        ]
+
 
 class TestPartlyReadManifests:
     @pytest.mark.parametrize(
@@ -673,6 +749,8 @@ class TestPartlyReadManifests:
         )
 
         assert result.incomplete_scans == ["skillspector"]
+        # Without the Critical, nothing confirms a failure, so the check itself is INCOMPLETE.
+        assert resolve_run_status([result]).of(result) == Status.INCOMPLETE
         assert _unverified(result) == []
         assert result.gate_failures == []
         assert result.errors[0] == (
@@ -701,13 +779,15 @@ class TestPartlyReadManifests:
 class TestOtherGapsStayIncomplete:
     @patch("skillevaluator.validators.security.Tools")
     def test_parse_limit_row_on_the_manifest_stays_incomplete(self, mock_tools, tmp_path: Path) -> None:
-        """SkillSpector 2.13.4 reads a hook "timeout" key as a shell wrapper and records a parse limit."""
+        """SkillSpector 2.13.4 reads a hook "timeout" key as a shell wrapper and records a parse limit.
+
+        The scan is recorded as incomplete, and the Critical fails the check.
+        """
         root = _timeout_plugin(tmp_path)
 
         result = _validate(mock_tools, root, _report(_TIMEOUT_REPORT), SecurityValidator(use_llm=False))
 
-        assert result.incomplete_scans == ["skillspector"]
-        assert result.status == "incomplete"
+        _assert_failed_with_incomplete_scan(result)
         assert result.errors[0] == (
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
             f"{_PARSE_LIMIT_ROW}; security scan did not complete"
@@ -739,7 +819,7 @@ class TestOtherGapsStayIncomplete:
 
         result = _replay(PLUGIN, report)
 
-        assert result.incomplete_scans == ["skillspector"]
+        _assert_failed_with_incomplete_scan(result)
         assert result.errors[0] == (
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
             f"{path} [static; static_parse_limit; analyzers={analyzer}]; security scan did not complete"
@@ -850,7 +930,7 @@ class TestOtherGapsStayIncomplete:
         ],
     )
     def test_other_gaps_without_rows_stay_incomplete_with_the_critical(self, case: str, gap: str) -> None:
-        """The error names the gaps that remain, since no row does."""
+        """The error names the gaps that remain, since no row does, and the Critical fails the check."""
         report = _report(_PLUGIN_REPORT)
         completeness = report["analysis_completeness"]
         statuses = {status["analyzer_id"]: status for status in completeness["analyzer_statuses"]}
@@ -874,7 +954,7 @@ class TestOtherGapsStayIncomplete:
 
         result = _replay(PLUGIN, report)
 
-        assert result.incomplete_scans == ["skillspector"]
+        _assert_failed_with_incomplete_scan(result)
         assert result.errors[0] == (
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
             f"{gap}; security scan did not complete"

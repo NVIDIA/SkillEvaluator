@@ -855,10 +855,12 @@ the run warning names the rule that did not hold:
 - Its with-skill arm scored every attempt with no errors.
 - Every missing baseline attempt is a trial that ended in Harbor's
   `AgentTimeoutError`, matched case by case and, with `--stop-on-pass`,
-  attempt by attempt. A setup timeout, process exit, verifier failure or any
-  other baseline error is not tolerated. Native multi-step tasks are not
-  covered: Harbor records their agent timeouts on the step rather than on the
-  trial, so such a baseline is refused (`step_timeout_not_supported`).
+  attempt by attempt. Attempts that a [cost limit](#cost-limits) left
+  `not_run` are not expected, so they are not missing. A setup timeout,
+  process exit, verifier failure or any other baseline error is not
+  tolerated. Native multi-step tasks are not covered: Harbor records their
+  agent timeouts on the step rather than on the trial, so such a baseline is
+  refused (`step_timeout_not_supported`).
 - Every timed-out attempt shows agent output (output tokens above zero).
 - Each timed-out attempt left an agent log, and no log shows a known provider
   overload, rate limit, quota or authentication error identifier (such as
@@ -868,6 +870,8 @@ the run warning names the rule that did not hold:
 - Every other agent completed, at least one of them completed both arms, and
   the run has no other launch errors. A single-agent run never qualifies.
 - The run grades standard dimensions (not `custom_only`) and runs both arms.
+  A baseline reused with `--reuse-baseline` did not run in this run, so the
+  option does not apply to it.
 
 For a tolerated agent, the baseline condition stays `failed` with its errors,
 and its baseline scores, Skill Lift, pass@k lift and security attribution are

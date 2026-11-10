@@ -6,10 +6,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
-- Simplify repository CI onboarding around quality and security checks with
-  no model key required,
-  keeping optional LLM checks and hosted feedback separate. Preserve opt-in
-  all-tier setup and report contracts in an Advanced CI reference.
+- Show per-agent evidence volume next to Tier 3 scores: distinct cases, planned
+  and scored attempts, execution and judge failures, and per-arm counts when a
+  baseline ran. Flag limited case coverage or incomplete attempt coverage;
+  distinguish uniform from early-stopped attempts, and retain case counts from
+  legacy summaries where available.
 
 - Report dataset sufficiency as sufficient or provisional using distinct-case,
   negative-case, Wilson interval, and paired-case coverage requirements. Show
@@ -20,7 +21,6 @@ All notable changes to SkillEvaluator are documented in this file.
   pinned to Hermes v2026.9.24. Includes isolated skill staging, ATIF trajectories,
   activation evidence, token accounting and retained execution diagnostics.
   Other providers/environments fail early; existing agent defaults are unchanged.
-
 - Tier 3 generation provenance distinguishes LLM, requested-template, and
   template-fallback datasets, marks trace refinement and autopilot generation,
   and displays the source and review state in terminal, HTML, and BENCHMARK
@@ -115,6 +115,11 @@ All notable changes to SkillEvaluator are documented in this file.
   agent, hook and `bin/` locations stay unloaded.
   `scripts/ci/smoke_openclaw_plugins.py` repeats these checks against real
   plugin sources without executing plugin code.
+
+- Simplify repository CI onboarding around quality and security checks with
+  no model key required,
+  keeping optional LLM checks and hosted feedback separate. Preserve opt-in
+  all-tier setup and report contracts in an Advanced CI reference.
 
 ### Changed
 

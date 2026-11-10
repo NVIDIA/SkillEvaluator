@@ -2529,6 +2529,12 @@
                 {{ tier3_dataset_sufficiency.coverage_summary }}
             </p>
             {% endif %}
+            {% if tier3.evidence_volume and tier3.evidence_volume.display %}
+            <p class="t3-evidence-volume{% if tier3.evidence_volume.limited %} warning{% endif %}"
+               {% if tier3.evidence_volume.limited %}style="color:var(--warning-color);font-weight:600"{% endif %}>
+                {{ tier3.evidence_volume.display }}
+            </p>
+            {% endif %}
             {% if tier3_dataset_provenance_line %}
             <p class="t3-dataset-provenance{{ ' warning' if tier3_dataset_provenance_warning else '' }}">{{ tier3_dataset_provenance_line }}</p>
             {% endif %}

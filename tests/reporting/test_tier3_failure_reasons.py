@@ -762,7 +762,7 @@ def test_html_preview_drops_failure_reasons_before_bounding_a_large_payload() ->
 def test_html_preview_does_not_report_unrendered_top_level_card_reasons() -> None:
     # The page renders every reason of this run; only the top-level card copy,
     # which the page never shows, did not fit.
-    payload = _failing_multi_agent_payload(2, 36)
+    payload = _failing_multi_agent_payload(2, 35)
     data = _display_data(payload)
     assert _compact_size(data) > html_module._TIER3_HTML_PREVIEW_TRIGGER_BYTES
 

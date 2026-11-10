@@ -192,23 +192,45 @@ _KNOWN_TOP_LEVEL_KEYS = {"profile", "identity", "severity_overrides", "mcp", "ho
 _KNOWN_IDENTITY_KEYS = {"author_email_regex"}
 
 
+_POLICY_MAX_BYTES = 1 << 20
+
+
+def _policy_yaml_reason(exc: BaseException) -> str:
+    """Name the parse problem and its location without echoing policy content."""
+    from skillevaluator.utils.structured_data import StructuredDataLimitError
+
+    if isinstance(exc, UnicodeError):
+        return "the file is not valid UTF-8"
+    if isinstance(exc, StructuredDataLimitError):
+        return str(exc)
+    cause = exc.__cause__
+    if isinstance(cause, yaml.MarkedYAMLError):
+        problem = cause.problem or cause.context or "invalid YAML syntax"
+        mark = cause.problem_mark or cause.context_mark
+        return f"{problem} at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else problem
+    if isinstance(exc, RecursionError):
+        return "the document is nested too deeply"
+    return str(exc)
+
+
 def _load_policy_yaml(path: Path) -> Any:
     """Load policy YAML and normalize parser failures to the public contract."""
-    try:
-        from skillevaluator.utils.structured_data import load_bounded_yaml
+    from skillevaluator.utils.structured_data import load_bounded_yaml
 
+    try:
         with path.open("rb") as fh:
-            raw = fh.read((1 << 20) + 1)
-        if len(raw) > (1 << 20):
-            raise ValueError("Policy YAML exceeds its 1 MiB read bound")
-        return load_bounded_yaml(raw.decode("utf-8-sig"), last_key_wins=True) or {}
-    except (ValueError, RecursionError) as exc:
-        cause = exc.__cause__ if isinstance(exc.__cause__, (yaml.YAMLError, RecursionError)) else exc
-        raise ValueError(f"Invalid policy YAML in {path}") from cause
+            raw = fh.read(_POLICY_MAX_BYTES + 1)
     except FileNotFoundError:
         raise
     except OSError as exc:
         raise ValueError(f"Could not read policy file {path}: {exc}") from exc
+    if len(raw) > _POLICY_MAX_BYTES:
+        raise ValueError(f"Invalid policy YAML in {path}: the file exceeds the 1 MiB read bound")
+    try:
+        return load_bounded_yaml(raw.decode("utf-8-sig"), last_key_wins=True) or {}
+    except (ValueError, RecursionError) as exc:
+        cause = exc.__cause__ if isinstance(exc.__cause__, (yaml.YAMLError, RecursionError)) else exc
+        raise ValueError(f"Invalid policy YAML in {path}: {_policy_yaml_reason(exc)}") from cause
 
 
 def _warn_unknown_keys(data: dict[str, Any], known: set[str], context: str, source: str) -> None:

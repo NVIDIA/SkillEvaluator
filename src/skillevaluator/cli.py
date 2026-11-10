@@ -698,14 +698,7 @@ def _run_dedup_or_skip(target_path: Path) -> list[ValidationResult]:
     """
     import importlib.util
 
-    from skillevaluator.cli_core import detect_content_type
-    from skillevaluator.constants import CONTENT_TYPE_PLUGIN
-
-    if detect_content_type(target_path) == CONTENT_TYPE_PLUGIN:
-        from skillevaluator.tier2.plugin_commands import run_public_plugin_dedup
-
-        return run_public_plugin_dedup(target_path)
-
+    # Plugins share this setup guard; run_dedup_scan routes them to plugin dedup.
     def _skip(message: str) -> list[ValidationResult]:
         from skillevaluator.publication_identity import stamp_publication_target
 
@@ -2975,6 +2968,11 @@ def similarity_check(
     resolved_save_catalog = save_catalog or save_cache
     if resolved_catalog and resolved_save_catalog:
         raise click.UsageError("--catalog and --save-catalog cannot be used together")
+    if llm_verdict or llm_model:
+        from skillevaluator.tier2.plugin_commands import plugin_target
+
+        if plugin_target(content_path, content_type) is None:
+            raise click.UsageError("--llm and --llm-model require a plugin target (--type plugin).")
 
     _reject_linked_tier2_root(content_path)
     output_dir = _resolve_file_report_output_location(content_path.resolve(), output_dir, report_formats)
@@ -3071,6 +3069,11 @@ def dedup_scan(
     """Detect semantically redundant content within one skill."""
     from skillevaluator.tier2.commands import run_dedup_scan
 
+    if catalog is not None or llm_verdict:
+        from skillevaluator.tier2.plugin_commands import plugin_target
+
+        if plugin_target(skill_path) is None:
+            raise click.UsageError("--catalog and --llm require a plugin target.")
     _reject_linked_tier2_root(skill_path)
     output_dir = _resolve_file_report_output_location(skill_path.resolve(), output_dir, report_formats)
     _reject_catalog_report_collisions(

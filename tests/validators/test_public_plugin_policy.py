@@ -147,3 +147,22 @@ def test_hook_endpoint_grants_do_not_apply_to_mcp_targets():
     )
     assert targets[0].allowed_hosts == ("corp.example",)
     assert targets[1].allowed_hosts == ("corp.example", "192.168.1.10")
+
+
+@pytest.mark.parametrize(
+    "document,reason",
+    [
+        ("#" + "x" * (1 << 20), "the file exceeds the 1 MiB read bound"),
+        ("profile: default\nseverity_overrides: [\n", "found '<stream end>' at line 3, column 1"),
+        ("a: " + "[" * 500 + "]" * 500, "nesting depth exceeds"),
+    ],
+    ids=["size-bound", "parse-location", "complexity-limit"],
+)
+def test_policy_yaml_errors_keep_their_reason(tmp_path, document, reason):
+    path = tmp_path / "policy.yml"
+    path.write_text(document, encoding="utf-8")
+    with pytest.raises(ValueError) as exc_info:
+        load_policy_file(path)
+    message = str(exc_info.value)
+    assert message.startswith(f"Invalid policy YAML in {path}: ")
+    assert reason in message

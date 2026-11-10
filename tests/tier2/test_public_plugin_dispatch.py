@@ -295,3 +295,84 @@ def test_combined_validate_keeps_explicit_manifest_for_dedup(tmp_path, monkeypat
         ],
     )
     assert seen == [selected]
+
+
+def _skill(root):
+    root.mkdir()
+    (root / "SKILL.md").write_text("---\nname: skill\ndescription: Test skill\n---\nRun the task.\n", encoding="utf-8")
+    return root
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["dedup-scan", "{target}", "--catalog", "{catalog}"],
+        ["dedup-scan", "{target}", "--llm"],
+        ["similarity-check", "{target}", "--llm"],
+        ["similarity-check", "{target}", "--llm-model", "judge"],
+    ],
+)
+def test_plugin_only_tier2_options_are_refused_for_skills(tmp_path, monkeypatch, command):
+    from click.testing import CliRunner
+
+    from skillevaluator.cli import cli
+
+    skill = _skill(tmp_path / "skill")
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text("{}", encoding="utf-8")
+
+    def forbidden(**_kwargs):
+        raise AssertionError("A refused option must not start a Tier 2 check")
+
+    monkeypatch.setattr(commands, "IntraSkillValidator", forbidden)
+    monkeypatch.setattr(commands, "SimilarityValidator", forbidden)
+    args = [part.format(target=skill, catalog=catalog) for part in command]
+    result = CliRunner().invoke(cli, ["tier2", *args])
+    assert result.exit_code == 2, result.output
+    assert "require a plugin target" in result.output
+
+
+def test_plugin_only_tier2_options_still_reach_plugin_dedup(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from skillevaluator.cli import cli
+
+    root = make_plugin(tmp_path / "plugin")
+    seen = []
+
+    def run(path, **kwargs):
+        seen.append(kwargs)
+        return [ValidationResult(validator_name="Plugin refs")]
+
+    monkeypatch.setattr("skillevaluator.tier2.plugin_commands.plugin_dedup_results", run)
+    result = CliRunner().invoke(cli, ["tier2", "dedup-scan", str(root), "--llm", "-o", str(tmp_path / "reports")])
+    assert result.exit_code == 0, result.output
+    assert seen[0]["llm_verdict"] is True
+
+
+def test_combined_validate_keeps_the_tier2_setup_guard_for_plugins(tmp_path, monkeypatch):
+    from skillevaluator import cli as cli_module
+    from skillevaluator.provider_config import ProviderConfigurationError
+
+    root = make_plugin(tmp_path / "plugin")
+    seen = []
+
+    def run(path, **kwargs):
+        seen.append(path)
+        return [ValidationResult(validator_name="Plugin refs")]
+
+    def unconfigured():
+        raise ProviderConfigurationError("No provider is configured.")
+
+    monkeypatch.setattr("skillevaluator.tier2.plugin_commands.plugin_dedup_results", run)
+    monkeypatch.setattr("skillevaluator.provider_config.resolve_embedding_provider", unconfigured)
+    skipped = cli_module._run_dedup_or_skip(root)
+    assert seen == []
+    assert [result.validator_name for result in skipped] == ["Tier 2 Deduplication"]
+    assert skipped[0].metadata["skipped"] is True
+    assert "embedding setup is required" in skipped[0].warnings[0]
+
+    monkeypatch.setattr("skillevaluator.provider_config.resolve_embedding_provider", lambda: None)
+    manifest = root / ".claude-plugin/plugin.json"
+    assert [result.validator_name for result in cli_module._run_dedup_or_skip(manifest)] == ["Plugin refs"]
+    assert seen == [manifest]

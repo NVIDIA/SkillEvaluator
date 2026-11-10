@@ -175,18 +175,28 @@ class BenchmarkReporter(ReporterBase):
         policy = _benchmark_policy(results, ae, expected_skill_name=expected_skill_name)
         status = _overall_status(results, ae, policy, expected_skill_name=expected_skill_name)
 
-        lines: list[str] = [
-            f"# Skill Benchmark: {skill_name}",
-            "",
-            (
+        run_verdict = ae.get("verdict") if isinstance(ae, dict) else None
+        run_reason = ae.get("verdict_reason") if isinstance(ae, dict) else None
+        if self.report_scope == "tier3" and isinstance(run_verdict, str):
+            tier3_callout = f"> **Tier 3 completed-agent result: {run_verdict.upper()}**" + (
+                f" — {_publication_safe_inline(run_reason, private_labels)}" if run_reason else ""
+            )
+        else:
+            tier3_callout = (
                 f"> **Tier 3 completed-agent result: {completed['verdict'].upper()}**"
+                + (
+                    f" — {_publication_safe_inline(completed['reason'], private_labels)}"
+                    if completed and completed.get("reason")
+                    else ""
+                )
                 if completed
                 else "> **Tier 3: No complete agent result**"
             )
+        lines: list[str] = (
+            [tier3_callout, "", f"# Skill Benchmark: {skill_name}", ""]
             if self.report_scope == "tier3"
-            else _verdict_callout(status),
-            "",
-        ]
+            else [f"# Skill Benchmark: {skill_name}", "", _verdict_callout(status), ""]
+        )
         if self.report_scope == "tier3":
             lines.extend(
                 [
@@ -526,6 +536,60 @@ class BenchmarkReporter(ReporterBase):
             )
         lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in overall_row) + " |")
 
+        for label, field, numerator in (
+            ("Required checks passed", "required_checks", "passed"),
+            ("Goals met", "correct_answers", "correct"),
+            ("Security clean", "security_clean", "clean"),
+        ):
+            row = [label]
+            for agent in agents.values():
+                comparison = agent.get(field)
+                with_skill = comparison.get("with_skill") if isinstance(comparison, dict) else None
+                without_skill = comparison.get("without_skill") if isinstance(comparison, dict) else None
+                difference = comparison.get("difference") if isinstance(comparison, dict) else None
+                with_counts = (
+                    (with_skill.get(numerator), with_skill.get("scored")) if isinstance(with_skill, dict) else ()
+                )
+                without_counts = (
+                    (without_skill.get(numerator), without_skill.get("scored"))
+                    if isinstance(without_skill, dict)
+                    else ()
+                )
+                valid_with = (
+                    len(with_counts) == 2
+                    and all(
+                        isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in with_counts
+                    )
+                    and with_counts[1] > 0
+                )
+                valid_without = (
+                    len(without_counts) == 2
+                    and all(
+                        isinstance(count, int) and not isinstance(count, bool) and count >= 0
+                        for count in without_counts
+                    )
+                    and without_counts[1] > 0
+                )
+                if valid_with and valid_without:
+                    if comparison.get("difference_unit") == "percentage_points":
+                        delta = (
+                            f"{difference:+.1f} pp"
+                            if isinstance(difference, int | float) and not isinstance(difference, bool)
+                            else "N/A"
+                        )
+                    else:
+                        delta = (
+                            f"{difference:+d}"
+                            if isinstance(difference, int) and not isinstance(difference, bool)
+                            else "N/A"
+                        )
+                    row.append(f"{with_counts[0]}/{with_counts[1]} | {without_counts[0]}/{without_counts[1]} | {delta}")
+                elif valid_with:
+                    row.append(f"{with_counts[0]}/{with_counts[1]} | N/A | N/A")
+                else:
+                    row.append("N/A")
+            lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in row) + " |")
+
         has_partial = False
         for dim_id in DIMENSION_MAPPING:
             row = [dim_id.title()]
@@ -544,6 +608,55 @@ class BenchmarkReporter(ReporterBase):
                     )
                 )
             lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in row) + " |")
+
+        failed_cases: list[tuple[str, object, str]] = []
+        warning_cases: list[tuple[str, str]] = []
+        for agent_name, agent in agents.items():
+            pass_at_k = _mapping(agent.get("pass_at_k"))
+            with_skill = _mapping(pass_at_k.get("with_skill"))
+            cases = _mapping(with_skill.get("cases"))
+            for case_id, case in cases.items():
+                if not isinstance(case, dict):
+                    continue
+                label = f"{agent_name}: {case_id}" if len(agents) > 1 else str(case_id)
+                attempts = case.get("attempts") if isinstance(case.get("attempts"), list) else []
+                if case.get("passed") is False and case.get("attempts_used", 0) > 0:
+                    reason = case.get("reason") or next(
+                        (
+                            attempt.get("reason")
+                            for attempt in attempts
+                            if isinstance(attempt, dict) and not attempt.get("passed") and attempt.get("reason")
+                        ),
+                        "required check failed",
+                    )
+                    failed_cases.append((label, case.get("best_score"), str(reason)))
+                warning_cases.extend(
+                    (label, str(warning))
+                    for warning in case.get("warnings", [])
+                    if isinstance(warning, str) and warning.strip()
+                )
+        if failed_cases:
+            lines.extend(["", "### Failed cases", "", "| Case | Score | Reason |", "|---|---:|---|"])
+            for case_id, score, reason in failed_cases:
+                score_text = f"{score:.2f}" if isinstance(score, int | float) and not isinstance(score, bool) else "N/A"
+                lines.append(
+                    "| "
+                    + " | ".join(
+                        (
+                            _md_cell(case_id, private_labels),
+                            _md_cell(score_text, private_labels),
+                            _md_cell(_publication_safe_inline(reason, private_labels), private_labels),
+                        )
+                    )
+                    + " |"
+                )
+        if warning_cases:
+            lines.extend(["", "### Warnings", ""])
+            lines.extend(
+                f"- **{_publication_safe_inline(case_id, private_labels)}**: "
+                f"{_publication_safe_inline(warning, private_labels)}"
+                for case_id, warning in warning_cases
+            )
 
         lines.extend(
             [

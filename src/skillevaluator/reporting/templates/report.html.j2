@@ -1243,9 +1243,9 @@
     {#- A failing tier whose gate does not block is "Failed (advisory)", never "Changes required". -#}
     {% set tier3_advisory_fail = tier3_verdict == 'fail' and 'tier3' in nonblocking_tiers %}
     {% set has_t12_tab = tabs | selectattr('id', 'in', ['tier1', 'tier2']) | list | length > 0 %}
-    {% set verdict_key = {'passed': 'pass', 'failed': 'fail'}.get(presentation.command_status.value, 'incomplete') %}
+    {% set verdict_key = (tier3_verdict if tier3_verdict in ['pass', 'fail', 'neutral', 'inconclusive'] else 'incomplete') if report_scope == 'tier3' else {'passed': 'pass', 'failed': 'fail'}.get(presentation.command_status.value, 'incomplete') %}
     {% set verdict_class = {'pass': 'pass', 'fail': 'fail'}.get(verdict_key, 'warn') %}
-    {% set verdict_label = presentation.command_label %}
+    {% set verdict_label = (verdict_key | title) if report_scope == 'tier3' else presentation.command_label %}
     {% set check_words = {'pass': 'Passed', 'fail': 'Failed', 'incomplete': 'Incomplete', 'skipped': 'Skipped', 'not_applicable': 'N/A'} %}
     <header class="main-header">
         <div class="header-content">
@@ -1257,7 +1257,7 @@
                 </div>
             </div>
             <div class="header-meta">
-                <span class="header-status-badge verdict-badge {{ verdict_class }}" data-verdict="{{ verdict_key }}"><span class="verdict-dot" aria-hidden="true"></span><span class="sr-only">Verdict: </span>{{ verdict_label }}</span>
+                <span class="header-status-badge verdict-badge {{ verdict_class }}" data-verdict="{{ verdict_key }}"><span class="verdict-dot" aria-hidden="true"></span><span class="sr-only">Verdict: </span>{% if report_scope == 'tier3' and tier3_verdict == 'fail' %}FAIL{% else %}{{ verdict_label }}{% endif %}{% if report_scope == 'tier3' and tier3_verdict == 'fail' and tier3.get('verdict_reason') %} — {{ tier3.get('verdict_reason') }}{% endif %}</span>
                 <div class="header-controls">
                     <label class="theme-control" for="report-theme">Theme <select id="report-theme" onchange="setReportTheme(this.value)"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
                     {% if ci.get('canonical_json_url') %}<a class="export-btn" href="{{ ci.canonical_json_url }}" download="skillevaluator-report.json">↓ Download JSON</a>{% else %}
@@ -2558,7 +2558,7 @@
                 <div class="dashboard-card {{ 'success' if tier3_verdict == 'pass' else ('danger' if tier3_verdict == 'fail' else '') }}">
                     <h3 class="dashboard-card-title">{{ 'Quality Verdict' if report_scope == 'tier3' and completed_agent else 'Verdict' }}</h3>
                     <p class="dashboard-card-value">{{ verdict_words['skipped'] if tier3_is_skipped else (advisory_fail_word if tier3_advisory_fail else (verdict_words.get(tier3_verdict) or tier3_verdict | title)) }}</p>
-                    <p class="dashboard-card-subtitle">{{ "No skill verdict: baseline-only run" if tier3.get('mode') == 'baseline_only' else ('Completed-agent quality; lift shown separately' if report_scope == 'tier3' and completed_agent else 'Evaluation outcome') }}</p>
+                    <p class="dashboard-card-subtitle">{% if report_scope == 'tier3' and completed_agent and completed_agent.reason %}{{ completed_agent.reason }}{% else %}{{ "No skill verdict: baseline-only run" if tier3.get('mode') == 'baseline_only' else ('Completed-agent quality; lift shown separately' if report_scope == 'tier3' and completed_agent else 'Evaluation outcome') }}{% endif %}</p>
                 </div>
                 <div class="dashboard-card">
                     <h3 class="dashboard-card-title">{{ 'Completed Agent Score' if completed_agent and completed_agent.needs_attention else 'Overall Score' }}</h3>
@@ -2574,7 +2574,61 @@
                 <div class="dashboard-card">
                     <h3 class="dashboard-card-title">Skill Lift</h3>
                     <p class="dashboard-card-value">{{ "%+.2f" | format(tier3.get('overall_lift')) if tier3.get('overall_lift') is not none else "N/A" }}</p>
-                    <p class="dashboard-card-subtitle">Compared with baseline</p>
+                    <p class="dashboard-card-subtitle">{% if tier3_verdict == 'fail' and tier3.get('overall_lift') is not none and tier3.get('overall_lift') > 0 %}shown for reference, not the verdict{% else %}Compared with baseline{% endif %}</p>
+                </div>
+                {% set t3_correct_answers = tier3.get('correct_answers') or {} %}
+                {% set t3_correct_with = t3_correct_answers.get('with_skill') or {} %}
+                {% set t3_correct_without = t3_correct_answers.get('without_skill') or {} %}
+                <div class="dashboard-card">
+                    <h3 class="dashboard-card-title">Goals met</h3>
+                    <p class="dashboard-card-value" style="font-size:1.05rem;">
+                        {% if t3_correct_with.get('scored') %}
+                        {{ t3_correct_with.get('correct') }}/{{ t3_correct_with.get('scored') }} |
+                        {% if t3_correct_without.get('scored') %}
+                        {{ t3_correct_without.get('correct') }}/{{ t3_correct_without.get('scored') }} |
+                        {% if t3_correct_answers.get('difference') is not none %}
+                        {% if t3_correct_answers.get('difference_unit') == 'percentage_points' %}{{ "%+.1f pp" | format(t3_correct_answers.get('difference')) }}{% else %}{{ "%+d" | format(t3_correct_answers.get('difference')) }}{% endif %}
+                        {% else %}N/A{% endif %}
+                        {% else %}N/A | N/A{% endif %}
+                        {% else %}N/A{% endif %}
+                    </p>
+                    <p class="dashboard-card-subtitle">With skill | No skill | Difference</p>
+                </div>
+                {% set t3_required_checks = tier3.get('required_checks') or {} %}
+                {% set t3_required_with = t3_required_checks.get('with_skill') or {} %}
+                {% set t3_required_without = t3_required_checks.get('without_skill') or {} %}
+                <div class="dashboard-card">
+                    <h3 class="dashboard-card-title">Required Checks Passed</h3>
+                    <p class="dashboard-card-value" style="font-size:1.05rem;">
+                        {% if t3_required_with.get('scored') %}
+                        {{ t3_required_with.get('passed') }}/{{ t3_required_with.get('scored') }} |
+                        {% if t3_required_without.get('scored') %}
+                        {{ t3_required_without.get('passed') }}/{{ t3_required_without.get('scored') }} |
+                        {% if t3_required_checks.get('difference') is not none %}
+                        {% if t3_required_checks.get('difference_unit') == 'percentage_points' %}{{ "%+.1f pp" | format(t3_required_checks.get('difference')) }}{% else %}{{ "%+d" | format(t3_required_checks.get('difference')) }}{% endif %}
+                        {% else %}N/A{% endif %}
+                        {% else %}N/A | N/A{% endif %}
+                        {% else %}N/A{% endif %}
+                    </p>
+                    <p class="dashboard-card-subtitle">With skill | No skill | Difference</p>
+                </div>
+                {% set t3_security_clean = tier3.get('security_clean') or {} %}
+                {% set t3_security_with = t3_security_clean.get('with_skill') or {} %}
+                {% set t3_security_without = t3_security_clean.get('without_skill') or {} %}
+                <div class="dashboard-card">
+                    <h3 class="dashboard-card-title">Security Clean</h3>
+                    <p class="dashboard-card-value" style="font-size:1.05rem;">
+                        {% if t3_security_with.get('scored') %}
+                        {{ t3_security_with.get('clean') }}/{{ t3_security_with.get('scored') }} |
+                        {% if t3_security_without.get('scored') %}
+                        {{ t3_security_without.get('clean') }}/{{ t3_security_without.get('scored') }} |
+                        {% if t3_security_clean.get('difference') is not none %}
+                        {% if t3_security_clean.get('difference_unit') == 'percentage_points' %}{{ "%+.1f pp" | format(t3_security_clean.get('difference')) }}{% else %}{{ "%+d" | format(t3_security_clean.get('difference')) }}{% endif %}
+                        {% else %}N/A{% endif %}
+                        {% else %}N/A | N/A{% endif %}
+                        {% else %}N/A{% endif %}
+                    </p>
+                    <p class="dashboard-card-subtitle">With skill | No skill | Difference</p>
                 </div>
             </div>
             <details class="t3-details" id="tier3-number-key">
@@ -3107,6 +3161,7 @@
 
             {# ----- Attempt Details: SkillEvaluator-style per-case attempt-score breakdown ----- #}
             {% set t3_pass_threshold = (t3_attempt_policy.pass_threshold if t3_attempt_policy.pass_threshold is not none else 0.5) | float %}
+            {% set t3_verdict_policy = tier3.get('verdict_policy') or {} %}
             {% set t3_attempt_rows = [] %}
             {% if t3_agents %}
                 {% for agent_name, agent in t3_agents.items() %}
@@ -3123,8 +3178,18 @@
                 {% endfor %}
             {% endif %}
 
-            {% set t3_goal_by_trial = {} %}
-            {% for trial in tier3.trials or [] %}{% if trial.scores and trial.scores.goal_accuracy is defined %}{% set _ = t3_goal_by_trial.update({(trial.agent, trial.trial_id): trial.scores.goal_accuracy}) %}{% endif %}{% endfor %}
+            {% set t3_attempt_verdict_by_trial = {} %}
+            {% for agent_name, agent in t3_agents.items() %}
+                {% for condition, trial_rows in [('With skill', agent.trials), ('Without skill', agent.trials_baseline)] %}
+                    {% for trial in trial_rows or [] %}
+                        {% set attempt_verdict = trial.get('attempt_verdict') %}
+                        {% if trial.get('trial_id') and attempt_verdict is mapping %}
+                            {% set _ = t3_attempt_verdict_by_trial.update({(agent_name, condition, trial.get('trial_id')): attempt_verdict}) %}
+                        {% endif %}
+                    {% endfor %}
+                {% endfor %}
+            {% endfor %}
+
             {% if t3_attempt_rows %}
             <details class="t3-details" id="tier3-attempt-details" open>
                 <summary>Attempt Details</summary>
@@ -3132,7 +3197,11 @@
                 <p class="t3-section-hint">
                     Each row is one eval case for one agent under one condition. Attempt Scores
                     lists the scored attempts only; a score at or above
-                    {{ "%.2f" | format(t3_pass_threshold) }} counts as passed for Pass@{{ t3_max_attempts }}.
+                    {{ "%.2f" | format(t3_pass_threshold) }} counts as passed for Pass@{{ t3_max_attempts }}
+                    when scored goal accuracy is at least
+                    {{ "%.2f" | format(t3_verdict_policy.get('goal_accuracy_pass_threshold', 1.0)) }}
+                    and scored security is at least
+                    {{ "%.2f" | format(t3_verdict_policy.get('security_pass_threshold', 1.0)) }}.
                     "Not scored" means no reward was found for that expected attempt; it is excluded from pass/fail.
                 </p>
                 <div class="t3-filter-bar">
@@ -3172,12 +3241,15 @@
                                         {% set sc = att.get('score') %}
                                         {% set att_idx_value = att.get('attempt') %}
                                         {% set att_idx = att_idx_value | int if att_idx_value is not none else loop.index %}
+                                        {% set attempt_verdict = t3_attempt_verdict_by_trial.get((row.agent, row.condition, att.get('trial'))) or {} %}
+                                        {% set attempt_passed = att.get('passed') and attempt_verdict.get('passed', true) %}
+                                        {% set attempt_reason = attempt_verdict.get('reason') or att.get('reason') %}
                                         {% if sc is none %}
                                             <span class="t3-attempt-chip muted" title="Attempt {{ att_idx }}: not scored">A{{ att_idx }}: not scored</span>
                                         {% else %}
-                                            {% set chip_cls = 'pass' if sc >= t3_pass_threshold else ('warn' if sc >= 0.4 else 'fail') %}
-                                            {% set chip_label = 'pass' if sc >= t3_pass_threshold else 'fail' %}
-                                            <span class="t3-attempt-chip {{ chip_cls }}">A{{ att_idx }}: {{ "%.2f" | format(sc) }} {{ chip_label }}</span>
+                                            {% set chip_cls = 'pass' if attempt_passed else ('warn' if sc >= 0.4 else 'fail') %}
+                                            {% set chip_label = 'PASS' if attempt_passed else 'FAIL' %}
+                                            <span class="t3-attempt-chip {{ chip_cls }}" title="{{ attempt_reason or '' }}">A{{ att_idx }}: {{ "%.2f" | format(sc) }} {{ chip_label }}</span>
                                         {% endif %}
                                     {% endfor %}
                                 </div>
@@ -3196,19 +3268,43 @@
                                 {% endif %}
                             </td>
                             <td>
-                                {% set goal = namespace(missed=0) %}
-                                {% if row.condition == 'With skill' %}{% for att in attempts %}{% if att.get('passed') and t3_goal_by_trial.get((row.agent, att.get('trial'))) == 0 %}{% set goal.missed = goal.missed + 1 %}{% endif %}{% endfor %}{% endif %}
-                                {% if passed and goal.missed %}
-                                    <span class="t3-pill warning" title="{{ goal.missed }} passing attempt(s) scored goal accuracy 0.00">passed{% if first_pass_attempt is not none %} on scored attempt {{ first_pass_attempt | int }}{% endif %} · goal not met (0.00)</span>
-                                {% elif passed and first_pass_attempt is not none %}
-                                    <span class="t3-pill ok">passed on scored attempt {{ first_pass_attempt | int }}</span>
-                                {% elif passed %}
+                                {% set outcome = namespace(passed=passed, first_pass=first_pass_attempt, reason=none, warnings=[]) %}
+                                {% if attempts %}
+                                    {% set outcome.passed = false %}
+                                    {% set outcome.first_pass = none %}
+                                    {% for att in attempts %}
+                                        {% set attempt_verdict = t3_attempt_verdict_by_trial.get((row.agent, row.condition, att.get('trial'))) or {} %}
+                                        {% set attempt_passed = att.get('passed') and attempt_verdict.get('passed', true) %}
+                                        {% if attempt_passed %}
+                                            {% set outcome.passed = true %}
+                                            {% if outcome.first_pass is none %}{% set outcome.first_pass = att.get('attempt') or loop.index %}{% endif %}
+                                        {% elif attempt_verdict.get('reason') and outcome.reason is none %}
+                                            {% set outcome.reason = attempt_verdict.get('reason') %}
+                                        {% endif %}
+                                        {% for warning in attempt_verdict.get('warnings') or [] %}
+                                            {% if warning not in outcome.warnings %}{% set _ = outcome.warnings.append(warning) %}{% endif %}
+                                        {% endfor %}
+                                    {% endfor %}
+                                {% endif %}
+                                {% if outcome.passed and outcome.first_pass is not none %}
+                                    <span class="t3-pill ok">passed on scored attempt {{ outcome.first_pass | int }}</span>
+                                {% elif outcome.passed %}
                                     <span class="t3-pill ok">passed</span>
+                                {% elif attempts_used > 0 and outcome.reason %}
+                                    <span class="t3-pill critical">FAIL</span> {{ outcome.reason }}
                                 {% elif attempts_used > 0 %}
                                     <span class="t3-pill critical">failed across {{ attempts_used }} scored attempt{{ 's' if attempts_used != 1 else '' }}</span>
                                 {% else %}
                                     <span class="t3-pill warning">not scored</span>
                                 {% endif %}
+                                {% for warning in case_data.get('warnings') or [] %}
+                                    <br><span class="t3-pill warning">WARNING</span> {{ warning }}
+                                {% endfor %}
+                                {% for warning in outcome.warnings %}
+                                    {% if warning not in (case_data.get('warnings') or []) %}
+                                    <br><span class="t3-pill warning">WARNING</span> {{ warning }}
+                                    {% endif %}
+                                {% endfor %}
                             </td>
                         </tr>
                     {% endfor %}

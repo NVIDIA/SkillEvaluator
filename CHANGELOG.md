@@ -130,6 +130,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- A scored Tier 3 attempt now fails when `goal_accuracy` or security is below
+  1.0, even if its Overall score meets the pass threshold. N/A or unscored
+  metrics preserve the existing verdict behavior; missed behavior-check steps
+  are warnings. A with-skill required-check failure fails the quality verdict,
+  while no-skill failures do not. Reports show required-check, goals-met,
+  and security-clean counts for both arms, plus failed-case reasons.
+
 - HTML and `BENCHMARK.md` reports explain each Tier 3 dimension in plain
   language with its evidence source and whether the run has a no-skill baseline
   for it. Dimensions that could not be scored or do not apply stay listed with

@@ -186,8 +186,9 @@ unchanged; invalid sources produce an error rather than being replaced.
 A generated one-case starter is a starting point, not a representative
 evaluation. Generation prints its concrete coverage gaps to stderr, such as
 the absence of a negative/non-trigger case or missing expected outcomes and
-assertions. Expand and review it with
-`skillevaluator create-eval-dataset ./my-skill --full`, then inspect the counts
+assertions. Replace the starter with a full dataset using
+`skillevaluator create-eval-dataset ./my-skill --full --force`. `--force`
+overwrites the starter and discards any edits to it. Then inspect the counts
 and gaps with `skillevaluator tier3 validate ./my-skill`. Larger case counts
 do not by themselves establish representative coverage. Native Harbor task
 sources do not receive an eval-dataset coverage summary.

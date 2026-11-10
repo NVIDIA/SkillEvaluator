@@ -9,12 +9,10 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from skillevaluator.tier3.dataset_utils import find_eval_file, load_dataset_entries
 from skillevaluator.tier3.eval_core.checks import resolve_should_trigger
 from skillevaluator.tier3.eval_core.llm_judge import _has_judge_reference
-from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
+from skillevaluator.tier3.evals_config import load_evals_config
 
 
 def summarize_dataset(entries: list[dict[str, Any]]) -> dict[str, Any]:
@@ -75,10 +73,10 @@ def dataset_coverage_result(skill_path: Path) -> dict[str, Any] | None:
         if (config.get("harbor") or {}).get("task_source") == "native_harbor":
             return None
         dataset = find_eval_file(skill_path)
-        if dataset is None:
+        if dataset is None or dataset.parent.name != "evals":
             return None
         coverage = summarize_dataset(load_dataset_entries(dataset))
-    except (EvalsConfigError, ValueError, OSError, yaml.YAMLError):
+    except Exception:
         return None
     return {
         "path": f"{dataset.relative_to(skill_path)}#coverage",
@@ -95,6 +93,7 @@ def starter_guidance(skill_path: Path) -> str | None:
     path = shlex.quote(str(skill_path))
     return (
         result["message"] + "\n"
-        f"Expand and review with: skillevaluator create-eval-dataset {path} --full\n"
+        f"Replace the starter with a full dataset using: skillevaluator create-eval-dataset {path} --full --force\n"
+        "`--force` overwrites the starter and discards any edits to it.\n"
         f"Inspect coverage with: skillevaluator tier3 validate {path}"
     )

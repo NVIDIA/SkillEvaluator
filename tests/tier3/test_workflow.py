@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from skillevaluator.cli import evaluate
+from skillevaluator.cli import create_dataset, evaluate
 from skillevaluator.evaluation import EvaluationService
 from skillevaluator.tier3.workflow import build_tier3_workflow
 
@@ -113,11 +113,20 @@ def test_direct_workflow_generates_missing_dataset_then_evaluates(skill, configu
     assert calls == [True]
     assert "One-case starter: a starting point, not a representative evaluation" in result.stderr
     assert "no negative case that should not trigger the skill" in result.stderr
-    assert f"skillevaluator create-eval-dataset {skill} --full" in result.stderr
+    assert f"skillevaluator create-eval-dataset {skill} --full --force" in result.stderr
+    assert "`--force` overwrites the starter and discards any edits to it." in result.stderr
     assert f"skillevaluator tier3 validate {skill}" in result.stderr
     assert len(configured) == 1
     assert configured[0].agents == "opencode"
     assert configured[0].skip_baseline is False
+
+
+def test_starter_guidance_command_replaces_the_existing_dataset(skill):
+    dataset = _dataset(skill)
+    original = dataset.read_bytes()
+    result = CliRunner().invoke(create_dataset, [str(skill), "--full", "--force", "--no-llm"])
+    assert result.exit_code == 0, result.output
+    assert dataset.read_bytes() != original
 
 
 @pytest.mark.parametrize(

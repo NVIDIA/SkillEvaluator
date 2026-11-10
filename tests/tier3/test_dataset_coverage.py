@@ -119,6 +119,22 @@ def test_missing_and_malformed_yaml_have_no_coverage(skill):
     assert dataset_coverage_result(skill) is None
 
 
+def test_recursive_yaml_alias_does_not_abort_coverage(skill):
+    (skill / "evals/evals.yaml").write_text(
+        "skill_name: demo\nevals:\n  - id: one\n    prompt: Q\n    expected_output: &a [*a]\n"
+    )
+    assert dataset_coverage_result(skill) is None
+
+
+def test_legacy_dataset_is_not_summarized_as_active_coverage(skill):
+    legacy = skill.parent / "eval"
+    legacy.mkdir()
+    (legacy / "dataset.json").write_text(
+        json.dumps({"skill_name": "demo", "evals": [{"id": "one", "prompt": "Q", "expected_output": "A"}]})
+    )
+    assert dataset_coverage_result(skill) is None
+
+
 def test_native_source_skips_even_if_dataset_present(skill):
     write_dataset(skill, [{"id": "one", "prompt": "Compute."}])
     (skill / "evals/config.yml").write_text("harbor:\n  task_source: native_harbor\n")

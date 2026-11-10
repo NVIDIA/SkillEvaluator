@@ -85,6 +85,14 @@ All notable changes to SkillEvaluator are documented in this file.
   gaps in text and JSON. Generated one-case starters now explain their limits
   and point authors to full dataset generation and coverage validation.
 
+- Collection similarity reports selected, indexed and skipped manifests with bounded
+  exclusion reasons. Malformed selected manifests now make the scan incomplete and
+  block catalog writes. A standalone synthetic scale benchmark records limits and
+  stage measurements without provider requests. Reused Python registries now
+  replace the complete selection on successful builds and preserve committed
+  entries, vector dimensions and coverage together on failure; callers that
+  relied on undocumented merging must pass their complete intended selection.
+
 - Document an additive qualitative assessment review worksheet with bounded
   evidence from real successful, failed-setup and invalid-judge runs. Preserve
   numeric grading and identify the separate decisions needed for scoreless support.

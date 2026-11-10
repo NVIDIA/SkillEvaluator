@@ -17,6 +17,8 @@ button,input,summary{font:inherit}button{cursor:pointer}a{color:var(--secondary-
 @media(min-width:1600px){.container{padding-top:40px}}@media(max-width:1150px){body{padding-left:180px}.report-sidebar{width:180px}.report-sidebar .sidebar-brand{font-size:13px;gap:7px}.container{padding:25px}.header-content{padding:0 25px}.header-content{flex-wrap:wrap}.header-status-badge{display:inline-flex;white-space:normal}.dashboard-card{min-width:110px;padding:0 12px}.agent-hero-title{font-size:25px}.top-issues-table th,.top-issues-table td{padding:10px}.severity-filter-group{margin-left:0}}
 @media(max-width:760px){body{padding-left:0}.report-sidebar{position:relative;width:100%;padding:13px 18px;flex-direction:row;align-items:center;gap:6px;flex-wrap:wrap}.report-sidebar .sidebar-brand{padding:0;margin-right:auto;font-size:14px}.sidebar-brand small,.sidebar-label,.sidebar-footer{display:none}.report-sidebar>a:not(.sidebar-brand){margin:0;padding:8px 10px;white-space:nowrap}.report-sidebar{overflow-x:auto;flex-wrap:nowrap}.main-header{padding:10px 0}.header-content{padding:0 18px;gap:8px}.header-brand .header-subtitle{display:none}.header-meta{width:100%;justify-content:space-between}.header-controls{width:100%;justify-content:flex-end}.header-controls button{min-height:36px}.container{padding:20px 16px 40px}.agent-hero{padding:20px}.agent-hero-top{display:block}.agent-hero-title{font-size:25px}.agent-hero-score.verdict-text,.agent-hero-score,.agent-hero-detail,.verdict-caption{text-align:left}.agent-hero-score.verdict-text{margin-top:22px;font-size:22px}.agent-hero-detail{margin-top:8px}.verdict-caption{margin-bottom:5px}.tier-cards{display:block}.tier-card{margin-top:8px;min-width:0}.tier-card-stats{display:flex;flex-wrap:wrap;gap:8px}.scope-strip{gap:6px 12px;font-size:12px}.scope-strip span+span{padding-left:0;border:0}.scope-strip span:first-child{width:100%}.metadata-grid{grid-template-columns:1fr}.dashboard{gap:16px 0}.dashboard-card{min-width:45%;padding-left:14px}.dashboard-card:nth-child(2n){border-right:0}.dashboard-card-value{font-size:20px}.report-searchbar input{width:100%;flex-basis:100%;order:2}.report-searchbar label{flex:1}.report-searchbar #report-search-count{order:3}.filter-group{gap:6px}.filter-group .severity-filter-group{width:100%;padding-top:8px}.skill-header{display:block;padding:14px}.skill-name{font-size:12px;word-break:break-word}.skill-checks-summary{margin-top:12px}.skill-content.active{padding:12px}.top-issues-table{min-width:620px}.quality-score-block>div:first-child{flex-wrap:wrap;gap:8px}.validator-collapsible{flex-wrap:wrap}.workspace-heading h2{font-size:18px}.workspace-heading p{font-size:11px}.skip-link{left:10px}footer{padding:18px;font-size:11px}}
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*::before,*::after{transition:none!important;animation:none!important}}
+
+
 @media print{body{padding-left:0;background:#fff;color:#111}.skip-link,.report-sidebar,.header-controls,.report-searchbar,.filter-group,.view-toggle-section,#backToTop,.report-no-matches{display:none!important}.container{max-width:none;padding:0}.tab-content,.results-view,.skill-card,.validator-card,.skill-content,.validator-content,.top-issues-content,.contributor-content,.summary-table-container{display:block!important;max-height:none!important;height:auto!important;overflow:visible!important}.skill-card,.validator-card,.top-issues-section{break-inside:auto}.skill-content,.validator-content{padding:12px!important}.scope-strip,.run-metadata{font-size:12px}.agent-hero{padding:15px}.run-metadata>.metadata-grid{display:grid!important}.finding-suggestion{max-height:none!important}footer{padding:12px}.dashboard-card{min-width:100px}.top-issues-table{min-width:0}.report-breadcrumb{margin-bottom:8px}a{color:inherit}}
 
 .quality-outcome-note{font-size:11px;color:var(--text-secondary);margin-bottom:12px}.export-btn{text-decoration:none}
@@ -81,3 +83,232 @@ details.check-result>summary{cursor:pointer;list-style:none;margin-bottom:0}deta
 
 /* Tier 3 pills: the type floor and AA text in both themes. The Tier 3 tab has its own later style block, hence the .tab-content prefix. */
 .tab-content .t3-insight-source,.tab-content .t3-sug-cat{font-size:11px}.tab-content .insight-source-llm{color:var(--llm-tx)}
+
+/* Native page scrolling and complete expanded evidence. */
+:root{color-scheme:light;scrollbar-gutter:stable;--mobile-nav-height:0px;--tier3-nav-height:0px}
+[data-theme="dark"]{color-scheme:dark}
+html{scroll-behavior:auto}
+.table-container.active,.summary-table-container.active{max-height:none;overflow-y:visible}
+.skill-content.active,.validator-content.active,.top-issues-content.active,.contributor-content.active{overflow-y:visible}
+.raw-output{max-height:320px;overflow:auto;scrollbar-gutter:stable}
+.tab-content,.workspace-heading,.run-metadata,.t3-agent-anchor,.check-result,.check-finding{scroll-margin-top:calc(var(--mobile-nav-height) + 80px)}
+.tab-content:focus,.container:focus{outline:none}
+.theme-control{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text-secondary)}
+.theme-control select{font:inherit;color:var(--dark-text);background:var(--bg);border:1px solid var(--border-color);border-radius:5px;padding:7px;min-height:36px}
+select:focus-visible{outline:3px solid var(--focus-ring);outline-offset:3px}
+.tier-empty{padding:24px;border:1px solid var(--border-color);border-radius:8px;background:var(--bg)}
+.tier-empty h2{font-size:18px}.tier-empty p{color:var(--text-secondary);margin-top:10px}
+.mobile-tier-nav{display:none}
+.agent-hero{padding:20px 24px}.agent-hero-detail{max-width:460px}
+.t3-subtabs{top:var(--mobile-nav-height)!important;scrollbar-gutter:stable}
+.t3-subtab,.t3-agent-tab-btn{min-height:40px}
+.t3-agent-anchor{scroll-margin-top:calc(var(--mobile-nav-height) + 80px)}
+@media(max-width:760px){
+ .report-sidebar{position:relative;overflow:visible;flex-wrap:wrap;gap:6px}
+ .report-sidebar [data-report-tier]{display:none}
+ .report-sidebar .sidebar-brand{flex:1}
+ .mobile-tier-nav{display:flex;position:sticky;top:0;z-index:100;gap:6px;padding:8px;background:var(--sidebar-bg);border-radius:6px;box-shadow:0 2px 4px #0001;margin-bottom:16px}
+ .mobile-tier-nav a{flex:1;padding:7px 10px;border-radius:4px;font-size:12px;text-align:center;color:#dce3e8;text-decoration:none;white-space:nowrap}
+ .mobile-tier-nav a[aria-current]{color:#c3e498;background:#30392b;box-shadow:inset 0 -2px #76b900}
+ .tier-cards{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px;padding-top:16px}
+ .tier-card{flex:1 1 150px;margin:0;padding:10px;min-width:0}
+ .tier-card-title,.tier-card-stats{font-size:11px}.agent-hero{padding:16px}
+ .report-sidebar>a:not(.sidebar-brand){padding:6px;font-size:12px}
+ .t3-subtabs{border-radius:0;max-width:100%;z-index:90}
+ .t3-subtab{padding:10px;font-size:12px}
+}
+@media(forced-colors:active){
+ .tier-card.active,.mobile-tier-nav a[aria-current],.report-sidebar .sidebar-current,[role="tab"][aria-selected="true"]{outline:2px solid Highlight;outline-offset:-2px}
+ .theme-control select{border:1px solid ButtonText}
+}
+@media print{
+ :root,[data-theme="dark"]{color-scheme:light;--mobile-nav-height:0px;--tier3-nav-height:0px}
+ .mobile-tier-nav,.theme-control{display:none!important}
+ .tab-content,.t3-page,.t3-agent-panel,.table-container,.summary-table-container{display:block!important;max-height:none!important;overflow:visible!important}
+ .skill-card,.validator-card,.check-finding,.summary-table tr,.t3-trial-card{display:revert!important}
+ .t3-filter-bar{display:none!important}
+ .raw-output{max-height:none;overflow:visible}
+}
+
+.hero-decision-reason{font-size:12px;color:var(--text-secondary);margin-top:8px;max-width:420px}
+
+@media screen and (prefers-color-scheme:dark){:root:not([data-theme]){color-scheme:dark;--light-bg:#151a1f;--bg:#1e252c;--bg-secondary:#252d35;--bg-tertiary:#303b46;--dark-text:#e1e6eb;--text-secondary:#aab5bf;--border-color:#3b454f;--secondary-color:#b0d684;--accent-color:#b0d684;--success-color:#a2cf72;--danger-color:#ffadb1;--warning-color:#e7c778;--critical-color:#ffadb1;--high-color:#f7b27a;--medium-color:#e7c778;--low-color:#aab5bf;--info-color:#8ccff0;--on-accent:#151a1f;--on-success:#151a1f;--on-danger:#151a1f;--on-warning:#151a1f;--focus-ring:#b0d684;--chart-grid:#4b5661;--chart-tick:#aab5bf;--chart-label:#e1e6eb;--table-header-bg:#252d35;--table-row-hover:#303b46;--badge-pass-bg:#293e27;--badge-pass-tx:#c4e7a0;--badge-fail-bg:#412a2d;--badge-fail-tx:#ffc1c4;--badge-warn-bg:#403826;--badge-warn-tx:#f4d792;--sev-critical-bg:#412a2d;--sev-critical-tx:#ffc1c4;--sev-high-bg:#45301f;--sev-high-tx:#ffcd9e;--sev-medium-bg:#403826;--sev-medium-tx:#f4d792;--sev-low-bg:#303b46;--sev-low-tx:#d0d7de;--sev-info-bg:#1d3646;--sev-info-tx:#a9d8f5;--llm-tx:#c4b5fd;--sidebar-bg:#151a1f;--se-logo-panel:#152117;--se-logo-panel-edge:#304631;--se-logo-ring-outer:#39523a;--se-logo-ring-middle:#6f9264;--se-logo-ring-inner:#dbe8d6;--se-logo-core:#76b900;--se-logo-core-edge:#9bdb34}}
+/* Without JS there is no data-theme, so mirror the hard-coded dark overrides from
+   report.html.j2 for system dark mode; test_nojs_dark_fallback keeps both in sync. */
+@media screen and (prefers-color-scheme:dark){:root:not([data-theme]) .header-status-badge.fail { background: #450a0a; color: #fca5a5; border-color: #991b1b; } :root:not([data-theme]) .header-status-badge.warn { background: #451a03; color: #fcd34d; border-color: #92400e; } :root:not([data-theme]) .status-badge.pass { background: #14532d; color: #86efac; } :root:not([data-theme]) .status-badge.fail { background: #450a0a; color: #fca5a5; } :root:not([data-theme]) .status-badge.warn { background: #451a03; color: #fcd34d; } :root:not([data-theme]) .severity-critical, :root:not([data-theme]) .severity-high { background: #450a0a; color: #fca5a5; } :root:not([data-theme]) .severity-medium { background: #451a03; color: #fcd34d; } :root:not([data-theme]) .severity-low { background: #374151; color: #9ca3af; } :root:not([data-theme]) .severity-info { background: #1e3a8a; color: #93c5fd; } :root:not([data-theme]) .suggestion { background: #14532d; color: #bbf7d0; } :root:not([data-theme]) .check-finding .finding-suggestion { background: #14532d; color: #bbf7d0; } :root:not([data-theme]) .contributor-item-pill.pass { background: #14532d; color: #86efac; } :root:not([data-theme]) .contributor-item-pill.fail { background: #450a0a; color: #fca5a5; } :root:not([data-theme]) .skill-filter-banner { background: #1e3a5f; border-color: #2563eb; color: #93c5fd; } :root:not([data-theme]) .skill-filter-banner .clear-filter:hover { background: rgba(255,255,255,0.1); } :root:not([data-theme]) .confidence-badge.high-conf { background: #450a0a; color: #fca5a5; } :root:not([data-theme]) .confidence-badge.medium-conf { background: #451a03; color: #fcd34d; } :root:not([data-theme]) .confidence-badge.low-conf { background: #374151; color: #9ca3af; border-color: #4b5563; } :root:not([data-theme]) .finding-suggestion.truncatable::after { background: #14532d; } :root:not([data-theme]) .severity-breakdown-item.sev-critical, :root:not([data-theme]) .severity-breakdown-item.sev-high { background: #450a0a; color: #fca5a5; } :root:not([data-theme]) .severity-breakdown-item.sev-medium { background: #451a03; color: #fcd34d; } :root:not([data-theme]) .severity-breakdown-item.sev-low { background: #374151; color: #9ca3af; } :root:not([data-theme]) .severity-breakdown-label.advisory { color: #fcd34d; } :root:not([data-theme]) .dedup-finding-high { border-color: #991b1b; background: #450a0a; } :root:not([data-theme]) .dedup-finding-medium { border-color: #92400e; background: #451a03; }}
+
+@media print{
+ table{table-layout:fixed;width:100%!important;min-width:0!important}
+ th,td{white-space:normal!important;overflow-wrap:anywhere!important;word-break:normal!important}
+ .skill-pill-group,.skill-pill,.quality-pill{white-space:normal;min-width:0;max-width:100%;flex-wrap:wrap}
+ .table-scroll,.table-scroll-lg{overflow:visible;min-width:0;max-width:100%}
+}
+
+@media print{
+ .metric-bar-cell,.metric-value,.t3-attempt-list,.t3-mad-cell,.t3-mad-bar,.t3-delta{min-width:0!important;max-width:100%;flex-wrap:wrap}
+ .t3-attempt-chip{white-space:normal;overflow-wrap:anywhere}
+}
+
+@media(max-width:420px){.tier-cards .tier-card{flex-basis:100%}}
+
+.tier2-scope-nav{display:flex;flex-wrap:wrap;gap:8px 16px;margin-bottom:16px}
+
+/* Readability rhythm shared by every tier. Tier 3's conditional style block is
+   emitted later, so scoped selectors retain these spacing rules there too. */
+body{line-height:1.6}
+.agent-hero{padding:24px 28px;margin-bottom:24px}
+.agent-hero-top{gap:28px}
+.agent-hero-title{line-height:1.3}
+.agent-hero-subtitle,.hero-decision-reason,.hero-reason{font-size:14px;line-height:1.6;margin-top:12px}
+.hero-side{gap:12px}
+.agent-hero-detail,.publication-line{font-size:12px;line-height:1.6}
+.hero-score-label{margin-top:8px;line-height:1.6}
+.publication-reasons{line-height:1.6}
+.tier-cards{gap:12px;margin-top:24px;padding-top:24px}
+.tier-card{padding:16px 18px}
+.tier-card-head{flex-wrap:wrap;gap:8px 12px}
+.tier-card-title{font-size:14px;line-height:1.6;margin:12px 0 8px}
+.tier-card-stats{gap:8px 16px;font-size:12px;line-height:1.6}
+.tier-card-links,.tier-card-sev{gap:8px;margin-top:10px}
+.scope-strip,.gate-policy{gap:10px 20px;font-size:12px;line-height:1.6;padding-bottom:20px}
+.run-metadata{padding:16px 2px;margin-bottom:32px}
+.metadata-grid{gap:20px 28px;margin-top:24px}
+.metadata-grid p,.metadata-grid .header-meta-item{font-size:12px;line-height:1.6}
+.metadata-grid strong{margin-bottom:8px}
+.workspace-heading{margin-bottom:24px}
+.workspace-heading h2{margin-bottom:8px}
+.workspace-heading p{font-size:14px;line-height:1.6}
+.exec-summary{padding:24px;margin-bottom:28px}
+.exec-verdict{gap:12px 18px}
+.exec-reason{line-height:1.6}
+.kpis{gap:16px;margin:24px 0 12px}
+.kpi{padding:16px 18px}
+.kpi dt{line-height:1.6}
+.kpi dd{margin-top:10px;line-height:1.6}
+.kpi .kpi-sub{margin-top:10px}
+.kpi-legend{line-height:1.6;margin-top:8px}
+.fix-first{margin-top:24px;padding-top:20px}
+.fix-first h3{margin-bottom:12px}
+.fix-first li{padding:10px 0;font-size:14px;line-height:1.6}
+.fix-meta{margin-top:6px;line-height:1.6}
+.dashboard{padding:18px 0;margin:24px 0 28px;row-gap:20px}
+.dashboard-card-title{font-size:12px;line-height:1.6}
+.dashboard-card-value{margin:8px 0}
+.dashboard-card-subtitle{line-height:1.6}
+.report-searchbar{gap:12px;margin-bottom:20px}
+.report-searchbar label,.skills-summary-bar{font-size:12px}
+.view-toggle-section,.filter-group{gap:10px}
+.view-toggle-btn,.filter-btn,.bulk-action-btn,.severity-filter-btn{font-size:12px;padding:8px 12px}
+.skill-card,.validator-card{margin-bottom:16px}
+.skill-header,.validator-collapsible{padding:18px 20px;gap:16px}
+.skill-name,.validator-name{font-size:14px;line-height:1.6}
+.skill-content.active,.validator-content.active{padding:20px}
+.check-header{padding:14px 16px;gap:12px}
+.check-name{font-size:14px;line-height:1.6}
+.check-description{display:block;font-size:12px;line-height:1.6;margin:6px 0 0}
+.check-details{padding:16px}
+.check-detail-item{padding:8px 0;font-size:14px;line-height:1.6}
+.check-finding{padding:16px;margin:12px 0}
+.finding-message,.check-finding .finding-msg{font-size:14px;line-height:1.6}
+.finding-meta{gap:8px 16px;margin-top:10px;font-size:12px;line-height:1.6}
+.check-finding .finding-suggestion,.finding-suggestion{font-size:12px;line-height:1.6;padding:12px;margin-top:12px}
+.quality-outcome-note,.findings-overflow-note{font-size:12px;line-height:1.6}
+.summary-table th,.top-issues-table th{padding:14px 18px;font-size:12px;line-height:1.6}
+.summary-table td,.top-issues-table td{padding:16px 18px;font-size:14px;line-height:1.6;vertical-align:top}
+.raw-output>summary{padding:8px 0;line-height:1.6}
+.tab-content .t3-subtabs{gap:8px;padding:8px;margin-bottom:24px;flex-wrap:wrap;overflow:visible}
+.tab-content .t3-subtab{padding:10px 16px;font-size:14px;line-height:1.6;white-space:normal}
+.tab-content .t3-page{line-height:1.6;min-width:0;overflow-wrap:anywhere}
+.tab-content .t3-page p{line-height:1.6}
+.tab-content .t3-section{margin-top:28px}
+.tab-content .t3-section h3{margin-bottom:16px;line-height:1.6}
+.tab-content .t3-section-hint{font-size:14px;line-height:1.6;margin-bottom:16px}
+.tab-content .t3-agent-card,.tab-content .t3-finding-card,.tab-content .t3-eval-card,.tab-content .t3-sug-card,.tab-content .t3-harbor-panel,.tab-content .t3-next-steps{padding:20px}
+.tab-content .t3-finding-card{margin:16px 0}
+.tab-content .t3-overview-lead{padding:20px;line-height:1.6;margin-bottom:20px}
+.tab-content .t3-agent-score{margin:10px 0}
+.tab-content .t3-checks{margin-top:12px}
+.tab-content .t3-checks li{padding:8px 0;font-size:14px;line-height:1.6}
+.tab-content .t3-details,.tab-content .t3-collapsed{margin-top:20px}
+.tab-content .t3-details>summary,.tab-content details.t3-ds-card>summary{padding:18px 20px;line-height:1.6}
+.tab-content .t3-details-body{padding:20px}
+.tab-content .t3-agent-tabs{gap:8px;padding:8px;margin-bottom:24px}
+.tab-content .t3-agent-tab-btn{padding:10px 16px;gap:10px;white-space:normal;text-align:left;overflow-wrap:anywhere}
+.tab-content .t3-agent-tab-btn .t3-tab-dot{flex-shrink:0}
+.tab-content .t3-kpi-strip{gap:16px;margin-bottom:24px}
+.tab-content .t3-kpi-card{padding:18px 20px;min-width:0}
+.tab-content .t3-kpi-card .t3-kpi-label{font-size:12px;line-height:1.6}
+.tab-content .t3-kpi-card .t3-kpi-value{margin-top:10px;line-height:1.35}
+.tab-content .t3-kpi-card .t3-kpi-sub{font-size:12px;line-height:1.6;margin-top:10px}
+.tab-content .t3-dim-strip{gap:12px;padding:16px;margin:20px 0 24px}
+.tab-content .t3-dim-pill{padding:12px 14px;gap:8px;min-width:0}
+.tab-content .t3-dim-pill .t3-dim-name,.tab-content .t3-dim-pill .t3-dim-lift{font-size:12px;line-height:1.6}
+.tab-content .t3-eval-stack,.tab-content .t3-sug-stack{gap:16px}
+.tab-content .t3-eval-desc,.tab-content .t3-dim-hint{font-size:12px;line-height:1.6;margin-top:8px}
+.tab-content .t3-eval-bars{margin-top:16px;row-gap:12px}
+.tab-content .t3-eval-evidence{margin-top:20px}
+.tab-content .t3-eval-evidence>summary{padding:8px 0;font-size:12px;line-height:1.6}
+.tab-content .t3-eval-evidence ul{gap:10px;margin-top:12px}
+.tab-content .t3-eval-evidence li{padding:12px;gap:10px;font-size:12px;line-height:1.6}
+.tab-content .t3-reasoning,.tab-content .t3-sug-body,.tab-content .t3-ds-value{font-size:14px;line-height:1.6}
+.tab-content .t3-reasoning-list li{margin-bottom:8px}
+.tab-content .t3-dataset-list{gap:20px}
+.tab-content .t3-ds-field{margin:20px 0}
+.tab-content .t3-ds-label{font-size:12px;line-height:1.6;margin-bottom:8px}
+.tab-content .t3-ds-behaviors{gap:12px;margin-top:12px}
+.tab-content .t3-ds-behaviors li{font-size:14px;line-height:1.6;grid-template-columns:24px minmax(0,1fr)}
+.tab-content .t3-prov-grid{grid-template-columns:minmax(140px,.3fr) minmax(0,1fr) auto;gap:12px 20px;padding:8px 0}
+.tab-content .t3-prov-grid .t3-prov-value{padding:10px 12px;line-height:1.6}
+.tab-content .t3-download-grid{gap:12px}
+.tab-content .t3-filter-bar{gap:12px;margin-bottom:20px}
+.tab-content .t3-filter-input{min-width:0;padding:10px 14px}
+.tab-content .t3-lift-grid{grid-template-columns:repeat(auto-fit,minmax(min(280px,100%),1fr));gap:16px}
+.tab-content .t3-lift-row{padding:10px 0;gap:12px}
+@media(max-width:760px){
+ .agent-hero,.exec-summary{padding:20px}
+ .hero-side{margin-top:24px}
+ .tier-cards{gap:12px;margin-top:24px;padding-top:20px}
+ .tier-card{padding:16px}
+ .tier-card-title{font-size:14px}
+ .tier-card-stats{font-size:12px}
+ .skill-header,.validator-collapsible{padding:16px}
+ .skill-content.active,.validator-content.active{padding:16px}
+ .tab-content .t3-subtab{padding:10px 12px;font-size:12px}
+ .tab-content .t3-prov-grid{grid-template-columns:minmax(0,1fr);gap:8px}
+ .tab-content .t3-prov-grid .t3-prov-label:not(:first-child){margin-top:12px}
+}
+@media(max-width:420px){
+ .agent-hero,.exec-summary{padding:18px}
+ .summary-table th,.top-issues-table th,.summary-table td,.top-issues-table td{padding:14px}
+ .tab-content .t3-agent-card,.tab-content .t3-finding-card,.tab-content .t3-eval-card,.tab-content .t3-sug-card,.tab-content .t3-harbor-panel,.tab-content .t3-next-steps,.tab-content .t3-details-body{padding:16px}
+ .tab-content .t3-eval-evidence li{grid-template-columns:minmax(0,1fr);gap:8px}
+ .tab-content .t3-sug-card{grid-template-columns:auto minmax(0,1fr)}
+ .tab-content .t3-sug-actions{grid-column:2}
+ .tab-content .t3-lift-row{grid-template-columns:minmax(0,1fr)}
+ .tab-content .t3-agent-grid,.tab-content .t3-agent-scorecard-list{grid-template-columns:minmax(0,1fr)}
+}
+/* Semantic severity tokens also govern system themes when JavaScript is unavailable. */
+@media screen and (prefers-color-scheme:dark){:root:not([data-theme]) .severity-critical{background:var(--sev-critical-bg);color:var(--sev-critical-tx)}:root:not([data-theme]) .severity-high{background:var(--sev-high-bg);color:var(--sev-high-tx)}:root:not([data-theme]) .severity-medium{background:var(--sev-medium-bg);color:var(--sev-medium-tx)}:root:not([data-theme]) .severity-low{background:var(--sev-low-bg);color:var(--sev-low-tx)}:root:not([data-theme]) .severity-info{background:var(--sev-info-bg);color:var(--sev-info-tx)}}
+
+@media print{
+ .tab-content .t3-subtabs,.tab-content .t3-agent-tabs{display:none!important}
+ .agent-hero,.exec-summary{padding:16px;margin-bottom:20px}
+ .summary-table th,.summary-table td,.top-issues-table th,.top-issues-table td{padding:10px 12px}
+ .tab-content .t3-page{break-inside:auto}
+}
+/* Keep job actions and recorded metadata distinct when names wrap. */
+.tier-card-link{padding:6px 10px;font-size:12px;line-height:1.6;max-width:100%;white-space:normal;overflow-wrap:anywhere}
+.metadata-grid>div>div{margin-top:12px;line-height:1.6}
+.metadata-grid>div>strong{margin-bottom:12px}
+.tab-content .t3-harbor-actions{gap:12px;min-width:0}
+.tab-content .t3-harbor-link{padding:10px 14px;font-size:12px;line-height:1.6;max-width:100%;white-space:normal;overflow-wrap:anywhere}
+.tab-content .t3-harbor-panel>div{min-width:0}
+.tab-content .t3-harbor-panel p{margin-top:8px;font-size:14px;line-height:1.6}
+.tab-content dl:not(.kpis){row-gap:16px}
+.tab-content dl:not(.kpis) dt{margin-top:8px;font-size:12px;line-height:1.6}
+.tab-content dl:not(.kpis) dd{margin-top:8px;line-height:1.6;overflow-wrap:anywhere}
+/* Measured heights clear every wrapped tab row, independent of breakpoints. */
+.tab-content .t3-agent-anchor{scroll-margin-top:calc(var(--mobile-nav-height) + var(--tier3-nav-height) + 20px)}
+/* Recorded provenance is a label/value list; action-column grids use DIVs. */
+.tab-content dl.t3-prov-grid{grid-template-columns:minmax(140px,.3fr) minmax(0,1fr);align-items:start}
+@media(max-width:760px){.tab-content dl.t3-prov-grid{grid-template-columns:minmax(0,1fr)}}

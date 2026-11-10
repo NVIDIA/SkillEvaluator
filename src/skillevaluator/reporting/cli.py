@@ -434,9 +434,7 @@ class CLIReporter(ReporterBase):
         verdict_reason = agent_eval.get("verdict_reason")
         safe_reason = f" — {escape_markup(str(verdict_reason))}" if verdict == "fail" and verdict_reason else ""
         lift_label = (
-            "Skill Lift (for reference)"
-            if verdict == "fail" and scored_lift and composite > 0
-            else "Skill Lift"
+            "Skill Lift (for reference)" if verdict == "fail" and scored_lift and composite > 0 else "Skill Lift"
         )
         console.print(
             f"\n  [{vc}]Verdict: {verdict_text}[/{vc}]{safe_reason} "

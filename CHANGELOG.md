@@ -10,6 +10,12 @@ All notable changes to SkillEvaluator are documented in this file.
   `tier3 import-traces`, then promote only explicitly human-reviewed expectations
   and replay fixtures with `tier3 accept-traces`.
 
+- Show per-agent evidence volume next to Tier 3 scores: distinct cases, planned
+  and scored attempts, execution and judge failures, and per-arm counts when a
+  baseline ran. Flag limited case coverage or incomplete attempt coverage;
+  distinguish uniform from early-stopped attempts, and retain case counts from
+  legacy summaries where available.
+
 - Report dataset sufficiency as sufficient or provisional using distinct-case,
   negative-case, Wilson interval, and paired-case coverage requirements. Show
   the dataset-size status in evaluation, validation, HTML, and BENCHMARK output;
@@ -19,7 +25,6 @@ All notable changes to SkillEvaluator are documented in this file.
   pinned to Hermes v2026.9.24. Includes isolated skill staging, ATIF trajectories,
   activation evidence, token accounting and retained execution diagnostics.
   Other providers/environments fail early; existing agent defaults are unchanged.
-
 - Tier 3 generation provenance distinguishes LLM, requested-template, and
   template-fallback datasets, marks trace refinement and autopilot generation,
   and displays the source and review state in terminal, HTML, and BENCHMARK
@@ -117,6 +122,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Write Tier 3 accuracy deductions as plain-language reasons, identify findings
+  without trajectory evidence, and include expected/observed text only when
+  both values are recorded.
+
 - Tier 3 LLM suggestions and insight recommendations now keep only evidence
   references the run recorded (cited references that don't resolve are
   dropped rather than shown as evidence) and keep one copy of a repeated
@@ -125,7 +134,6 @@ All notable changes to SkillEvaluator are documented in this file.
   pass threshold, are dropped. Both prompts ask for distinct actions and
   label untested causes, such as switching to a different model, as
   hypotheses or experiments.
-
 - Tier 3 reports missing skill runtime dependencies as environment problems,
   with declaration and custom Dockerfile guidance. Unrecovered environment
   failures leave the trial UNSCORED instead of reducing the skill's score;
@@ -133,7 +141,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Document per-arm Tier 3 dimension applicability and test how N/A baseline
   metrics are handled in Overall scores and Skill Lift comparisons.
-
 - Run GitLab Tier 2 without Docker-in-Docker while keeping TLS-protected Docker
   for Tier 3. Both native tiers retain shared caller timeout and runner-tag
   overrides, advisory outcomes, and aggregate artifacts; local mode still

@@ -11,6 +11,11 @@ All notable changes to SkillEvaluator are documented in this file.
   the dataset-size status in evaluation, validation, HTML, and BENCHMARK output;
   validation coverage notes remain informational.
 
+- Experimental `hermes` Tier 3 agent for Docker and native NVIDIA Build routing,
+  pinned to Hermes v2026.9.24. Includes isolated skill staging, ATIF trajectories,
+  activation evidence, token accounting and retained execution diagnostics.
+  Other providers/environments fail early; existing agent defaults are unchanged.
+
 - Tier 3 generation provenance distinguishes LLM, requested-template, and
   template-fallback datasets, marks trace refinement and autopilot generation,
   and displays the source and review state in terminal, HTML, and BENCHMARK

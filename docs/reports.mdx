@@ -670,7 +670,10 @@ and mark the overall comparison as incomplete, without selecting a best agent.
 A custom-only agent, one whose conditions use only its grader's own overall
 (`custom-overall-v1`), is still ranked against standard agents by that score,
 and `tier3 compare` shows it beside them. `tier3 compare` refuses standard
-agents scored under different policies or metric sets.
+agents scored under different policies or metric sets. When a metric is N/A in
+only one arm, `tier3 compare` drops it from both arms for the Overall lift, as
+`lift.json` does, so its lift can differ from the difference between the two
+arm overall scores.
 
 ### Lift history and retention
 

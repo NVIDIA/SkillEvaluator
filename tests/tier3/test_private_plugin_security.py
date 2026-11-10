@@ -276,6 +276,7 @@ def test_private_helper_loads_with_staged_sibling_imports(security, tmp_path):
     for name in (
         "plugin_security.py",
         "checks.py",
+        "optional_reference.py",
         "shell_lexing.py",
         "script_invocation.py",
         "codex_tool_call_normalizer.py",

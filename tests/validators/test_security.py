@@ -9722,7 +9722,9 @@ class TestSkillspectorMissingReferences:
         outer_root = SecurityValidator(use_llm=False, skillspector_reference_root=tmp_path)._run_skillspector(skill)
 
         assert own_root.incomplete_scans == []
-        assert own_root.warnings == [_missing_reference_warning("SKILL.md:10 [reference_resolution; reference_missing]")]
+        assert own_root.warnings == [
+            _missing_reference_warning("SKILL.md:10 [reference_resolution; reference_missing]")
+        ]
         assert outer_root.incomplete_scans == ["skillspector"]
         assert not outer_root.warnings
 

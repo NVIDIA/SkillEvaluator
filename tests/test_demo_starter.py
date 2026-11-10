@@ -3,6 +3,7 @@
 
 import copy
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -29,7 +30,15 @@ def test_starter_runs_real_cli_and_preserves_sources(tmp_path):
     source = ROOT / "src/skillevaluator/tier3/reference_skills/text-analyzer/SKILL.md"
     original = source.read_bytes()
     command = [sys.executable, str(ROOT / "scripts/demo_starter.py"), "--output", str(output)]
-    result = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        command,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONIOENCODING": "cp1252"},
+        check=False,
+    )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PASS: starter output" in result.stdout
     assert source.read_bytes() == original

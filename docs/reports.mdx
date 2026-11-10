@@ -731,14 +731,11 @@ The **Quality Score** displayed out of 100 in the HTML report is the Tier 1
 static-analysis score. It is not an input to the Tier 3 dimensions, overall
 score, or Skill Lift.
 
-The standard overall score gives each dimension one equal vote:
+For standard grading, each arm's Overall is the mean of the dimensions it
+scored, and each dimension is the mean of its scored metrics. N/A dimensions
+and metrics are excluded rather than counted as 0 or 1.
 
-```text
-overall = (Security + Correctness + Discoverability + Effectiveness + Efficiency) / 5
-Effectiveness = (goal_accuracy + behavior_check) / 2
-```
-
-This formula is shared by the report, per-attempt pass@k thresholding, Skill
+This per-arm rule is shared by the report, per-attempt pass@k thresholding, Skill
 Lift, comparisons, and best-agent selection. Standard artifacts identify it as
 `skill-evaluator-dimension-mean-v1` in `score_policy` and in the persisted
 attempt policy. Older metric sets and partial historical artifacts keep their
@@ -758,8 +755,7 @@ agents scored under different policies or metric sets.
 
 ### Skill Lift
 
-Skill Lift is `with-skill overall score - without-skill overall score` for
-comparable cases. It uses the same score units as both arms and ranges from
+Skill Lift compares Overall on the metrics and cases both arms scored, so it can differ from the displayed with-skill Overall minus baseline Overall when the baseline has N/A dimensions. It uses the same score units as both arms and ranges from
 -1.0 to +1.0. Because live agent runs are noisy, especially at low attempt
 counts, small deltas are kept neutral. The verdict bands:
 
@@ -893,6 +889,52 @@ Case by Agent and Condition** chart plots one series per agent and condition
 from every trial, not only the rows the preview keeps, for up to 200 eval
 cases; a note says how many more cases the JSON download holds. A case with
 missing or partial step telemetry is a gap, not a zero.
+
+### Per-case expectation diagnostics
+
+The HTML **Dataset** tab expands each case into its authored requirements and
+recorded judgments, separately for each agent, attempt and condition. The JSON
+payload's `case_diagnostics` carries the same inventory. Requirements retain
+their original text (with credentials redacted); behavior IDs use the source
+field and zero-based position, while judge `step` numbers remain one-based.
+Routing and script checks use their named sub-checks, not the aggregate score.
+Expected output is checked separately for goal achievement and accuracy; an
+excluded accuracy criterion is listed as inapplicable, never as unmet.
+
+Each judgment has one of five statuses:
+
+| Status | Meaning | Next diagnostic step |
+| --- | --- | --- |
+| Met | An explicit verdict supports the requirement | No correction indicated by this check |
+| Unmet | An explicit verdict reports a violation | Compare the requirement with the observed evidence; inspect execution if it is valid, or correct the test if it is inappropriate |
+| Not checked | No unique usable verdict: missing/truncated output, judge or execution error, ambiguous identity, or explicit judge abstention | Inspect the retained execution/judge artifacts and rerun before diagnosing a skill defect |
+| Unscored | The grader did not score this requirement's metric | Inspect grader configuration and score output |
+| Not applicable | The grader explicitly excluded this check for this condition | Confirm that exclusion is intended; do not count it as a failure |
+
+Reasons and short evidence excerpts accompany the verdicts when recorded.
+Excerpts are metric-level context, not proof automatically attributed to every
+requirement. A low score alone never assigns ownership to the skill or test.
+Negative controls may correctly avoid the skill while completing an unrelated
+task; being unrelated is not a reason to remove the case. The no-skill baseline
+can mark skill checks inapplicable while still judging the task outcome.
+Intentionally skipped conditions do not create diagnostic attempts. Failed or
+unknown conditions remain visible even when no trial result was retained.
+
+Behavior judges may return `passed: null` with an explanation when evidence
+does not permit a check. The rich behavior result's `expectations` retains all
+original behaviors, including those missing from a salvaged response. Existing
+conservative scoring is preserved: only explicit passes earn credit, and the
+denominator remains the full expected behavior count. Unchecked entries can
+therefore lower the score without establishing a verified defect.
+
+Inventories are bounded to 512 cases, 128 requirements per case, 512 attempts
+across the report and 8,192 judgments. Any omissions are recorded under
+`report_truncation.omitted`. Oversized HTML previews omit whole diagnostic
+inventories rather than truncating identity or status fields; JSON Downloads
+retain them unless the canonical 2 MiB limit also requires dropping them.
+Dropping an oversized diagnostic inventory preserves built failure reasons
+whenever those reasons still fit within the canonical limit.
+Retained run artifacts remain the source for details omitted by either limit.
 
 ### pass@k
 

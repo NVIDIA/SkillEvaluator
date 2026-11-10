@@ -18,7 +18,7 @@ the [NVIDIA Verified Skills pipeline](https://github.com/NVIDIA/skills).
 
 ## Bring skill evaluation to your repository
 
-Check changed skills in GitHub or GitLab with Tier 1 checks, SkillSpector
+Check changed skills in GitHub or GitLab with quality checks, SkillSpector
 security scanning and reports. Configure folders and thresholds.
 
 **GitHub guided setup:** run inside your checked-out repository:

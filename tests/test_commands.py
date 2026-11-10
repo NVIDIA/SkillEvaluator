@@ -1853,6 +1853,43 @@ def test_catalog_child_argv_forwards_every_validate_option() -> None:
     assert sorted(dropped) == sorted(not_forwarded)
 
 
+def test_catalog_child_argv_forwards_run_budget_options(tmp_path: Path) -> None:
+    from skillevaluator.cli import _catalog_child_argv_from_ctx, validate
+
+    skill_dir = tmp_path / "catalog" / "simple"
+    skill_dir.mkdir(parents=True)
+    price_file = tmp_path / "prices.json"
+    price_file.write_text("{}", encoding="utf-8")
+    ctx = validate.make_context(
+        "validate",
+        [
+            str(skill_dir),
+            "--max-agent-tokens",
+            "120",
+            "--max-judge-calls",
+            "5",
+            "--max-attempts-total",
+            "9",
+            "--max-cost-usd",
+            "2.5",
+            "--price-file",
+            str(price_file),
+        ],
+    )
+
+    argv = _catalog_child_argv_from_ctx(ctx, skill_dir, tmp_path / "out" / "simple")
+
+    for option, value in (
+        ("--max-agent-tokens", "120"),
+        ("--max-judge-calls", "5"),
+        ("--max-attempts-total", "9"),
+        ("--max-cost-usd", "2.5"),
+        ("--price-file", str(price_file.resolve())),
+    ):
+        assert option in argv
+        assert argv[argv.index(option) + 1] == value
+
+
 def test_validate_catalog_workers_records_the_evaluated_source_on_every_card() -> None:
     runner = CliRunner()
     with runner.isolated_filesystem():

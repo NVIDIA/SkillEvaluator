@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts
-from skillevaluator.tier3.eval_core.checks import check_error_recovery
+from skillevaluator.tier3.eval_core.checks import check_error_recovery, score_skill_execution
 from skillevaluator.tier3.harbor.report import _collect_fail_reasons
 from skillevaluator.tier3.harbor.templates import eval as eval_template
 
@@ -40,6 +40,189 @@ def _codex_output(exit_code: int, output: str = "") -> str:
         f"Original token count: {len(output.split())}\n"
         f"Output:\n{output}"
     )
+
+
+@pytest.mark.parametrize(
+    "diagnostic,missing,kind",
+    [
+        ("bash: jq: command not found", "jq", "executable"),
+        ("bash: line 1: jq: command not found", "jq", "executable"),
+        ("sh: 1: jq: not found", "jq", "executable"),
+        ("/bin/sh: jq: not found", "jq", "executable"),
+        ("zsh: command not found: jq", "jq", "executable"),
+        ("env: 'jq': No such file or directory", "jq", "executable"),
+        ('exec: "jq": executable file not found in $PATH', "jq", "executable"),
+        ("ModuleNotFoundError: No module named 'Some_Package.sub'", "Some_Package", "python_module"),
+        ("ImportError: No module named Some_Package", "Some_Package", "python_module"),
+    ],
+)
+@pytest.mark.parametrize("source", ["declared", "skill_text", "script", "agent"])
+@pytest.mark.parametrize("recovered", [True, False])
+def test_dependency_attribution(checker, diagnostic, missing, kind, source, recovered):
+    context = {"apt": ["JQ=1.0"], "pip": ["some-package[extra]>=1"]} if source == "declared" else {}
+    if source == "skill_text":
+        context["skill_text"] = f"Run {missing} to finish"
+    calls = [_call("python scripts/task.py", diagnostic)]
+    if recovered:
+        calls.append(_call("python scripts/task.py", "exit code 0"))
+    result = checker(
+        calls, expected_script="scripts/task.py" if source == "script" else None, dependency_context=context
+    )
+    failure = result["failures"][0]
+    assert failure["missing"] == missing
+    assert failure["missing_kind"] == kind
+    assert failure["recovered"] is recovered
+    if source == "agent":
+        assert failure["fault_kind"] == "agent_tool_choice"
+        assert result["agent_faults"] == 1
+        assert result["score"] == (0.9 if recovered else 0.0)
+    else:
+        assert failure["fault"] == "environment"
+        assert failure["fault_kind"] == (
+            "declared_dependency_unavailable" if source == "declared" else "undeclared_dependency"
+        )
+        assert result["environment_faults"] == 1
+        assert result["skill_faults"] == result["agent_faults"] == 0
+        assert result["score"] == 1.0
+        assert result["passed"] is (True if recovered else None)
+        assert (result.get("status") == "environment_invalid") is not recovered
+        assert "evals/environment/Dockerfile" in failure["guidance"]
+
+
+def test_skill_path_and_non_skill_file(checker):
+    context = {"skill_dirs": ["/workspace/skills/demo"]}
+    for path, fault in [("/workspace/skills/demo/scripts/run.py", "skill"), ("/input/missing.csv", "agent")]:
+        result = checker(
+            [_call("python run.py", f"FileNotFoundError: [Errno 2] No such file or directory: '{path}'")],
+            dependency_context=context,
+        )
+        assert result["failures"][0]["fault"] == fault
+        assert result["failures"][0]["fault_kind"] == ("missing_skill_file" if fault == "skill" else "command_error")
+        assert result["score"] == 0.0
+
+
+def test_environment_does_not_hide_real_failure(checker):
+    result = checker(
+        [_call("jq", "bash: jq: command not found"), _call("python task.py", "ValueError: invalid input")],
+        dependency_context={"apt": ["jq"]},
+    )
+    assert result["status"] == "environment_invalid"
+    assert result["score"] == 0.0
+    assert result["agent_faults"] == 1
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    [
+        "scripts/extract.sh: line 3: pdftotext: command not found",
+        "/root/.claude/skills/demo/scripts/extract.sh: 3: pdftotext: not found",
+    ],
+)
+def test_skill_script_missing_executable_is_environment_failure(checker, diagnostic):
+    result = checker(
+        [_call("bash scripts/extract.sh", diagnostic)],
+        expected_script="scripts/extract.sh",
+        dependency_context={"skill_text": "Use pdftotext", "skill_dirs": ["/workspace/skills/demo"]},
+    )
+    assert result["environment_faults"] == 1
+    assert result["failures"][0]["missing"] == "pdftotext"
+
+
+def test_subprocess_file_not_found_is_missing_executable_but_open_is_not(checker):
+    context = {"skill_text": "Use pdftotext", "skill_dirs": ["/workspace/skills/demo"]}
+    result = checker(
+        [
+            _call(
+                "python scripts/extract.py",
+                'Traceback: File ".../subprocess.py", line 1950, in _execute_child\n'
+                "FileNotFoundError: [Errno 2] No such file or directory: 'pdftotext'",
+            )
+        ],
+        expected_script="scripts/extract.py",
+        dependency_context=context,
+    )
+    assert result["failures"][0]["missing"] == "pdftotext"
+    assert result["failures"][0]["missing_kind"] == "executable"
+    open_result = checker([_call("python scripts/extract.py", "FileNotFoundError: 'input.json'")])
+    assert open_result["failures"][0]["fault_kind"] == "command_error"
+
+
+def test_skill_path_as_tool_argument_does_not_mean_skill_uses_tool(checker):
+    result = checker(
+        [_call("tree /workspace/skills/demo/", "bash: line 1: tree: command not found")],
+        dependency_context={"skill_dirs": ["/workspace/skills/demo"], "skill_text": "Run scripts/run.py"},
+    )
+    assert result["failures"][0]["fault_kind"] == "agent_tool_choice"
+
+
+def test_skill_modules_and_package_aliases_are_classified(checker):
+    module = checker(
+        [
+            _call(
+                "python /workspace/skills/demo/scripts/run.py", "ModuleNotFoundError: No module named 'scripts.helpers'"
+            )
+        ],
+        expected_script="scripts/run.py",
+        dependency_context={"skill_modules": ["scripts", "helpers"]},
+    )
+    assert module["failures"][0]["fault_kind"] == "missing_skill_file"
+    alias = checker(
+        [_call("python scripts/run.py", "ModuleNotFoundError: No module named 'yaml'")],
+        dependency_context={"pip": ["PyYAML>=6"]},
+    )
+    assert alias["failures"][0]["fault_kind"] == "declared_dependency_unavailable"
+    imported = checker(
+        [_call("python scripts/run.py", "ModuleNotFoundError: No module named 'rasterio'")],
+        dependency_context={"script_imports": ["rasterio"]},
+    )
+    assert "Install the package that provides rasterio" in imported["failures"][0]["guidance"]
+
+
+def test_dependency_context_records_modules_provided_by_skill(tmp_path):
+    skill = tmp_path / "demo"
+    scripts = skill / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "__init__.py").write_text("")
+    (scripts / "helpers.py").write_text("def summarize(): pass\n")
+    (scripts / "run.py").write_text("from rasterio import open\n")
+    context = eval_template._dependency_context("demo", skills_root=tmp_path)
+    assert {"scripts", "helpers"} <= set(context["skill_modules"])
+    assert "rasterio" in context["script_imports"]
+
+
+def test_environment_failure_reason_retains_agent_failure(checker):
+    result = checker(
+        [
+            _call("jq --version", "bash: jq: command not found"),
+            _call("python task.py", "ValueError: invalid input"),
+        ],
+        dependency_context={"apt": ["jq"]},
+    )
+    assert result["status"] == "environment_invalid"
+    assert "python task.py" in result["reason"]
+
+
+def test_skill_fault_overrides_environment_in_score(checker):
+    calls = [
+        _call("jq --version", "bash: jq: command not found"),
+        _call(
+            "python /workspace/skills/demo/scripts/run.py",
+            "FileNotFoundError: can't open file '/workspace/skills/demo/scripts/run.py'",
+        ),
+    ]
+    recovery = checker(
+        calls, expected_script="/workspace/skills/demo/scripts/run.py", dependency_context={"apt": ["jq"]}
+    )
+    scored = score_skill_execution(
+        calls,
+        "demo",
+        expected_script="/workspace/skills/demo/scripts/run.py",
+        skill_tool_names=["demo"],
+        dependency_context={"apt": ["jq"], "skill_dirs": ["/workspace/skills/demo"]},
+    )
+    assert recovery["skill_faults"] == 1
+    assert recovery.get("status") != "environment_invalid"
+    assert scored["score"] is not None
 
 
 def test_failure_with_no_retry_is_not_first_attempt_clean(checker):
@@ -99,7 +282,7 @@ def test_unrecovered_failure_after_earlier_success(checker):
     assert result["score"] == 0.0
     assert len(result["failures"]) == 1
     assert len(result["unrecovered_failures"]) == 1
-    assert result["unrecovered_failures"][0]["fault"] == "skill"
+    assert result["unrecovered_failures"][0]["fault"] == "agent"
     assert "make build" in result["reason"]
 
 
@@ -116,8 +299,8 @@ def test_unrecovered_failure_after_earlier_recovery(checker):
     assert [f["failed_cmd"] for f in result["unrecovered_failures"]] == ["make build"]
     assert result["score"] == 0.0
     assert result["passed"] is False
-    assert result["skill_faults"] == 1
-    assert result["agent_faults"] == 1
+    assert result["skill_faults"] == 0
+    assert result["agent_faults"] == 2
 
 
 @pytest.mark.parametrize(
@@ -169,7 +352,9 @@ def test_failure_detection_agrees(checker, observation):
 
 
 def test_unrecovered_skill_fault_report_reason(checker):
-    result = checker([_call("make build", "gcc: error: missing.c: No such file or directory")])
+    result = checker(
+        [_call("make build", "gcc: error: missing.c: No such file or directory")], expected_script="missing.c"
+    )
     assert result["passed"] is False
     assert result["skill_faults"] == 1
     assert result["agent_faults"] == 0
@@ -181,9 +366,10 @@ def test_unrecovered_skill_fault_report_reason(checker):
 def test_recovered_skill_fault_counted_once(checker):
     result = checker(
         [
-            _call("make build", "No such file or directory"),
+            _call("make build", "missing.c: No such file or directory"),
             _call("make build", "done"),
-        ]
+        ],
+        expected_script="missing.c",
     )
     assert result["skill_faults"] == 1
     assert result["score"] == 0.75

@@ -3782,6 +3782,67 @@ def write_reward_outputs(result, overall):
     REWARD_TXT.write_text(str(sanitized_overall))
 
 
+def _dependency_context(skill: str, *, skills_root: Path = Path("/workspace/skills")) -> dict[str, Any]:
+    """Read bounded dependency evidence from the evaluator-staged skill."""
+    context: dict[str, Any] = {
+        "apt": [],
+        "pip": [],
+        "skill_text": "",
+        "skill_dirs": [],
+        "skill_modules": set(),
+        "script_imports": set(),
+    }
+    if not skill or skill in {".", ".."} or Path(skill).name != skill:
+        return context
+    root = skills_root / skill
+    if not root.is_dir():
+        return context
+    context["skill_dirs"] = [
+        str(root),
+        f"/root/.claude/skills/{skill}",
+        f"/root/.agents/skills/{skill}",
+        f"/root/.config/opencode/skills/{skill}",
+        f"/etc/codex/skills/{skill}",
+    ]
+    remaining = 1024 * 1024
+    for index, path in enumerate(root.rglob("*")):
+        if index >= 4096 or remaining <= 0:
+            break
+        if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
+            continue
+        relative = path.relative_to(root)
+        if path.suffix == ".py":
+            context["skill_modules"].add(path.stem)
+            context["skill_modules"].update(relative.parts[:-1])
+        if path.name == "__init__.py":
+            context["skill_modules"].add(path.parent.name)
+        dependency = path.parent.name == "scripts" and path.name in {"requirements.txt", "apt-packages.txt"}
+        if not dependency and path.name.lower() != "skill.md" and "scripts" not in relative.parts:
+            continue
+        try:
+            with path.open("rb") as stream:
+                data = stream.read(min(remaining, 128 * 1024))
+        except OSError:
+            continue
+        remaining -= len(data)
+        content = data.decode("utf-8", errors="replace")
+        if dependency:
+            key = "pip" if path.name == "requirements.txt" else "apt"
+            context[key].extend(
+                line.split("#", 1)[0].strip()
+                for line in content.splitlines()
+                if line.strip() and not line.lstrip().startswith(("#", "-"))
+            )
+        else:
+            context["skill_text"] += "\n" + content
+            if "scripts" in relative.parts and path.suffix == ".py":
+                imports = re.finditer(r"(?m)^\s*(?:from\s+([\w.]+)\s+import\b|import\s+([\w.]+))", content)
+                context["script_imports"].update((match.group(1) or match.group(2)).split(".")[0] for match in imports)
+    context["skill_modules"] = sorted(context["skill_modules"])
+    context["script_imports"] = sorted(context["script_imports"])
+    return context
+
+
 def main():
     entry = json.loads(ENTRY_PATH.read_text(encoding="utf-8"))
     traj, traj_meta = load_trajectory_with_fallback(ATIF_PATH, ATIF_PATH.parent)
@@ -3876,9 +3937,26 @@ def main():
             require_evaluated_skill=True,
             skill_tool_names=skill_tools,
             acceptable_skills=acceptable_skills,
+            dependency_context=_dependency_context(evaluated_skill or expected_skill),
         )
         se_score = skill_execution_result["score"]
         details["skill_execution"] = skill_execution_result["details"]
+        if skill_execution_result.get("status") == "environment_invalid":
+            recovery = skill_execution_result["details"]["error_recovery"]
+            write_reward_outputs(
+                {
+                    "evaluation_status": "failed",
+                    "evaluation_errors": {"environment": recovery["reason"]},
+                    "environment_issues": recovery["environment_issues"],
+                    "entry_id": entry.get("id"),
+                    "metric_set": DEFAULT_METRIC_SET,
+                    "score_policy": DEFAULT_SCORE_POLICY,
+                    "details": details,
+                },
+                0.0,
+            )
+            logger.error("[environment] %s", recovery["reason"])
+            raise SystemExit(1)
     else:
         se_score = None
         details["skill_execution"] = _skill_metric_not_applicable()

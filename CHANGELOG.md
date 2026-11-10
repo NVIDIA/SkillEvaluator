@@ -160,13 +160,16 @@ All notable changes to SkillEvaluator are documented in this file.
   declaration, such as a skipped handler or a permission rule, stays
   `INCOMPLETE`; with v2.13.3, only a BH1 with 2,048 or more declarations does,
   and a partly parsed manifest gets the Critical. The rest of the report is
-  judged as before, and its error names only its own gaps: missing references
-  and referenced images are still accepted with their warnings under the rules
-  above, so a missing reference in a skill that `validate` or `security-scan`
-  checks on its own inside a folder or plugin still leaves the scan
-  `INCOMPLETE`, and any other gap leaves the scan `INCOMPLETE` next to the
-  Critical. With SkillSpector v2.13.4, a hook with a `"timeout"` key also gets
-  a `static_parse_limit` row on the manifest, so that scan stays `INCOMPLETE`.
+  judged as before: missing references and referenced images are still
+  accepted with their warnings under the rules above. Any gap those rules do
+  not accept, such as a missing reference in a skill that `validate` or
+  `security-scan` checks on its own inside a folder or plugin, still records
+  the SkillSpector scan as incomplete (`incomplete_scans` in the JSON report,
+  and publication eligibility `Incomplete`), with an error that names only
+  that gap. The check itself is reported as `FAIL`, not `INCOMPLETE`, because
+  the Critical is a confirmed failure. With SkillSpector v2.13.4, a hook with
+  a `"timeout"` key also gets a `static_parse_limit` row on the manifest, so
+  that scan is recorded as incomplete in the same way.
 
 - Tier 3 **Measured Agent Resources** no longer count idle or user time as LLM
   seconds when timing is inferred from step timestamps and an agent step with

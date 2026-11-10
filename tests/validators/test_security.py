@@ -6127,6 +6127,23 @@ assert cap is not None and get_max_output_tokens(model) <= cap, (cap, get_max_ou
         assert (finding.metadata["llm_verdict"], finding.severity) == ("false_positive", Severity.INFO)
         assert finding.metadata["llm_model_used"] == expected
 
+    def test_importing_the_security_validator_leaves_the_llm_client_unloaded(self) -> None:
+        """--llm-verify loads the LLM client only when it runs."""
+        script = (
+            "import sys\n"
+            "import skillevaluator.validators.security\n"
+            "print(sorted(name for name in sys.modules if name.startswith('skillevaluator.inference')))\n"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=True,
+        )
+
+        assert completed.stdout.strip() == "[]"
+
     def test_validate_security_only(self, sample_skill_dir: Path):
         """Test validate_security_only method runs only skillspector scan."""
         validator = SecurityValidator()

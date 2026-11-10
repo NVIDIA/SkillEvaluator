@@ -43,7 +43,6 @@ from skillevaluator.constants import (
     SCANNABLE_EXTENSIONS,
     SKILL_MANIFEST_VARIANTS,
 )
-from skillevaluator.inference.diagnostics import safe_llm_model
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.skill import SEMVER_RE
 from skillevaluator.provider_config import (
@@ -4850,6 +4849,7 @@ class SecurityValidator(ValidatorBase):
             return
 
         from skillevaluator.inference import FindingVerifier
+        from skillevaluator.inference.diagnostics import safe_llm_model
 
         logger.info(f"Running LLM verification on {len(result.findings)} finding(s)")
         verifier = FindingVerifier()

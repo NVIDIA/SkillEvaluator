@@ -6066,9 +6066,10 @@ assert cap is not None and get_max_output_tokens(model) <= cap, (cap, get_max_ou
         [
             ("anthropic", "claude-opus-5-5", "claude-opus-4-8", True, "claude-opus-4-8"),
             ("anthropic", "claude-opus-5-5", "claude-opus-5-5", False, "claude-opus-5-5"),
+            ("anthropic", "claude-opus-5-5", "claude-opus-5-5-20261101", False, "claude-opus-5-5-20261101"),
             ("openai", "gpt-5.4-mini", "gpt-5.4-mini-snapshot", False, "gpt-5.4-mini"),
         ],
-        ids=["anthropic-fallback", "anthropic-configured", "openai-configured"],
+        ids=["anthropic-fallback", "anthropic-configured", "anthropic-reply-names-model", "openai-configured"],
     )
     def test_llm_verify_through_the_client_names_the_answering_model(
         self,
@@ -6080,7 +6081,7 @@ assert cap is not None and get_max_output_tokens(model) <= cap, (cap, get_max_ou
         fallback_block: bool,
         expected: str,
     ) -> None:
-        """The real verifier reports the fallback model that answered on Anthropic, else the configured model."""
+        """The real verifier reports the model a Claude 5.5 reply names, and the configured model on OpenAI."""
         pytest.importorskip(provider)
         httpx = pytest.importorskip("httpx")
         from skillevaluator.inference.finding_verifier import FindingVerifier
@@ -6144,6 +6145,24 @@ assert cap is not None and get_max_output_tokens(model) <= cap, (cap, get_max_ou
         assert (finding.metadata["llm_verdict"], finding.severity) == ("false_positive", Severity.INFO)
         assert finding.metadata["llm_provider"] == provider
         assert finding.metadata["llm_model_used"] == expected
+
+    def test_llm_verify_docs_state_the_answering_model_rule_of_rubric_evaluation(self) -> None:
+        """Both labels come from the same client, so the two docs paragraphs state one rule."""
+        page = Path(__file__).parents[2] / "docs" / "tier1-validation.mdx"
+        paragraphs = [" ".join(block.split()) for block in page.read_text(encoding="utf-8").split("\n\n")]
+        [verify] = [text for text in paragraphs if "`llm_model_used`" in text and "`--llm-verify`" in text]
+        [rubric] = [text for text in paragraphs if "`llm_model_used`" in text and "`rubric_eval`" in text]
+        rule = (
+            "For a Claude 5.5 or later model on the native Claude API, the model is the one the reply names; "
+            "otherwise it is the configured model, unless a server-side `fallback` block in the reply names "
+            "another model."
+        )
+
+        assert rule in rubric
+        assert rule in verify
+        assert "Verdicts kept from a reply cut off at the output-token limit name the model that wrote that reply." in (
+            verify
+        )
 
     def test_llm_verify_names_the_fallback_model_for_verdicts_kept_from_a_truncated_reply(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

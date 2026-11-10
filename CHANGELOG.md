@@ -66,7 +66,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Report dataset sufficiency as sufficient or provisional using distinct-case,
   negative-case, Wilson interval, and paired-case coverage requirements. Show
   the dataset-size status in evaluation, validation, HTML, and BENCHMARK output;
-  validation coverage notes remain informational.
+  validation coverage notes remain informational. Baseline-only
+  (`--skip-with-skill`) runs with several agents take the run-level status from
+  the agent with the best baseline score.
 - Experimental `hermes` Tier 3 agent for Docker and native NVIDIA Build routing,
   pinned to Hermes v2026.9.24. Includes isolated skill staging, ATIF trajectories,
   activation evidence, token accounting and retained execution diagnostics.

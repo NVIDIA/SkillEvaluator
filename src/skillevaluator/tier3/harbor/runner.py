@@ -6745,7 +6745,8 @@ def _run_harbor_eval_impl(
                     skip_with_skill
                     or (len(conditions) == len(agent_results) and all(status == "skipped" for status in conditions))
                 )
-                score_field = "without_skill" if baseline_only else "with_skill"
+                # Canonical agent payloads publish the without-skill score as "baseline".
+                score_field = "baseline" if baseline_only else "with_skill"
                 canonical_agents = {
                     name: _build_agent(
                         name,

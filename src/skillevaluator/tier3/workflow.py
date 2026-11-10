@@ -151,6 +151,16 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> dict[str, An
     resolved_environment_kwargs = _resolve_workflow_environment_kwargs(params)
     if harbor.get("stop_on_pass", False) and harbor.get("n_attempts", 1) == 1:
         raise ValueError("stop_on_pass requires n_attempts > 1")
+    if harbor.get("pre_agent_setup") and not params.get("skip_baseline"):
+        if params.get("skip_with_skill"):
+            raise ValueError(
+                "harbor.pre_agent_setup/setup_commands cannot run in a baseline-only run (--skip-with-skill); "
+                "the baseline arm must stay isolated from skill-owned setup commands"
+            )
+        raise ValueError(
+            "harbor.pre_agent_setup/setup_commands cannot run in a paired evaluation; "
+            "use --skip-baseline for a with-skill-only run"
+        )
 
     workspace = effective.get("skill_workspace", {})
     # Match the expert callback: CLI paths are relative to the caller, while

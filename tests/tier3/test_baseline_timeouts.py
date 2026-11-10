@@ -897,44 +897,6 @@ def test_reused_baseline_leaves_the_option_inert(tmp_path: Path) -> None:
     assert all(RECORD_KEY not in agent and REJECTION_KEY not in agent for agent in results["agents"].values())
 
 
-def test_budget_attempts_that_never_ran_are_not_missing_baseline_attempts(tmp_path: Path) -> None:
-    # A run budget admitted no attempt of case-003 for opencode, so neither arm
-    # expects it; only the timed-out case-002 attempt is missing from the baseline.
-    cases = [*CASES, "case-003"]
-    jobs = tmp_path / "jobs"
-    _arm(jobs, "opencode", "with", [(case, "scored") for case in CASES])
-    _arm(jobs, "opencode", "without", [("case-001", "scored"), ("case-002", "timeout")])
-    _arm(jobs, "codex", "with", [(case, "scored") for case in cases])
-    _arm(jobs, "codex", "without", [(case, "scored") for case in cases])
-    not_run = [
-        {"agent": "opencode", "arm": arm, "case_id": "case-003", "attempt": 1, "status": "not_run"}
-        for arm in ("with", "without")
-    ]
-
-    results = collect_harbor_results(
-        skill_name=SKILL,
-        agents=["opencode", "codex"],
-        output_dir=tmp_path / "results",
-        jobs_dir=jobs,
-        n_attempts=1,
-        expected_cases=len(cases),
-        expected_case_ids=cases,
-        case_id_by_task_selector={case: case for case in cases},
-        expected_trials=len(cases),
-        launch_errors=[LAUNCH_ERROR.format(agent="opencode", count=1)],
-        tolerate_baseline_timeouts=True,
-        budget_not_run=not_run,
-    )
-
-    opencode = results["agents"]["opencode"]
-    assert results["execution_status"] == "succeeded"
-    assert results["partial"] is True
-    assert REJECTION_KEY not in opencode
-    assert results[RUN_KEY]["tolerated_agents"] == ["opencode"]
-    assert (opencode[RECORD_KEY]["expected_attempts"], opencode[RECORD_KEY]["scored_attempts"]) == (2, 1)
-    assert [failure["case_id"] for failure in opencode[RECORD_KEY]["failures"]] == ["case-002"]
-
-
 # -- stop-on-pass attempt jobs merged by the runner ---------------------------
 
 
@@ -1095,6 +1057,61 @@ def test_stop_on_pass_recovered_timeout_beside_unrecovered_ones(tmp_path: Path) 
         ("case-b", 1),
         ("case-b", 2),
     ]
+    assert results[RUN_KEY]["explained_launch_errors"] == launch_errors
+
+
+def test_cost_limit_attempts_that_never_ran_are_not_missing_baseline_attempts(tmp_path: Path) -> None:
+    pytest.importorskip("harbor")
+    from skillevaluator.tier3.harbor.runner import _merge_attempt_jobs
+
+    # A cost limit runs every attempt as its own job. It admitted no attempt
+    # of case-b for opencode, so neither arm expects case-b; only the timed-out
+    # second attempt of case-a is missing from the baseline.
+    plan = {
+        ("opencode", "with"): {"case-a": ["pass", "pass"]},
+        ("opencode", "without"): {"case-a": ["pass", "timeout"]},
+        ("codex", "with"): {"case-a": ["pass", "pass"], "case-b": ["pass", "pass"]},
+        ("codex", "without"): {"case-a": ["fail", "fail"], "case-b": ["fail", "fail"]},
+    }
+    for (agent, variant), cases in plan.items():
+        jobs = [
+            _attempt_job(tmp_path, agent, variant, case, attempt, outcome)
+            for case, outcomes in cases.items()
+            for attempt, outcome in enumerate(outcomes, start=1)
+        ]
+        _merge_attempt_jobs(jobs, tmp_path / "jobs" / f"{SKILL}-{agent}-{variant}")
+    not_run = [
+        {"agent": "opencode", "arm": arm, "case_id": "case-b", "attempt": attempt, "status": "not_run"}
+        for arm in ("with", "without")
+        for attempt in (1, 2)
+    ]
+    launch_errors = [
+        "opencode without-skill Harbor run failed: case-a attempt 2: Harbor job did not complete successfully: 1 errored"
+    ]
+
+    results = collect_harbor_results(
+        skill_name=SKILL,
+        agents=["opencode", "codex"],
+        output_dir=tmp_path / "results",
+        jobs_dir=tmp_path / "jobs",
+        n_attempts=2,
+        expected_cases=2,
+        expected_case_ids=["case-a", "case-b"],
+        case_id_by_task_selector={"case-a": "case-a", "case-b": "case-b"},
+        expected_trials=4,
+        launch_errors=launch_errors,
+        tolerate_baseline_timeouts=True,
+        budget_not_run=not_run,
+    )
+
+    opencode = results["agents"]["opencode"]
+    assert results["execution_status"] == "succeeded", results.get("warnings")
+    assert results["partial"] is True
+    assert REJECTION_KEY not in opencode
+    assert opencode["conditions"]["with_skill"]["expected_attempts"] == 2
+    record = opencode[RECORD_KEY]
+    assert (record["expected_attempts"], record["scored_attempts"], record["failed_attempts"]) == (2, 1, 1)
+    assert [(failure["case_id"], failure["attempt"]) for failure in record["failures"]] == [("case-a", 2)]
     assert results[RUN_KEY]["explained_launch_errors"] == launch_errors
 
 

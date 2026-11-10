@@ -82,6 +82,7 @@ from skillevaluator.tier3.evals_config import (
 from skillevaluator.tier3.harbor import (
     CONTAINER_AGENT_IMPORT_PATHS,
     DOCKER_AGENT_IMPORT_PATHS,
+    HERMES_VERSION,
     LOCAL_CODEX_HOME_DIRNAME,
     LOCAL_CODEX_SECRETS_DIRNAME,
 )
@@ -1410,6 +1411,7 @@ _HARBOR_AGENT_KWARGS: Mapping[str, Mapping[str, str]] = MappingProxyType(
         "codex": MappingProxyType({"reasoning_effort": "high", "version": _CODEX_VERSION}),
         "claude-code": MappingProxyType({"version": _CLAUDE_CODE_VERSION}),
         "opencode": MappingProxyType({"version": OPENCODE_VERSION}),
+        "hermes": MappingProxyType({"version": HERMES_VERSION}),
     }
 )
 # Claude Code's default effort depends on the model, and Claude Opus 5 ran at
@@ -2030,6 +2032,15 @@ def _validate_agent_provider_credentials(
     model_sources = agent_model_sources or {}
     models = agent_models or {}
 
+    if "hermes" in agents:
+        if provider.provider != "nv_build" or env_mode != "docker":
+            return ["Experimental hermes supports only NVIDIA Build with --env-mode docker."]
+        if not agent_runtime_env.get("NVIDIA_API_KEY", "").strip():
+            return ["hermes with NVIDIA Build requires NVIDIA_API_KEY."]
+        model = models.get("hermes", "")
+        if model and (model.count("/") != 1 or any(not part.strip() for part in model.split("/"))):
+            return ["hermes requires a full NVIDIA Build catalog model ID in publisher/model form."]
+
     opencode_model = models.get("opencode")
     expected_opencode_provider = {
         "anthropic": "anthropic",
@@ -2136,7 +2147,7 @@ def _validate_agent_provider_credentials(
                     ]
         return []
 
-    unsupported = [agent for agent in agents if agent not in {"claude-code", "codex", "opencode"}]
+    unsupported = [agent for agent in agents if agent not in {"claude-code", "codex", "opencode", "hermes"}]
     if unsupported:
         return [
             "nv_build does not support live agent(s): "
@@ -3080,7 +3091,7 @@ def _agent_credentials(
 ) -> dict[str, str]:
     """Resolve operator-owned credentials for exactly one agent runtime."""
     if provider.provider == "nv_build":
-        if agent == "opencode":
+        if agent in {"opencode", "hermes"}:
             if env_mode == ENV_MODE_LOCAL:
                 return _local_agent_credentials(provider)
             return {"NVIDIA_API_KEY": provider.api_key or ""}
@@ -3572,6 +3583,8 @@ def _model_for_agent(
         # Provider-model, --model, --agent-model, and evals/config.yml overrides
         # stay exact for native OpenCode; bridge defaults remain compatibility-pinned.
         selected = _NVIDIA_BUILD_AGENT_DEFAULT_MODEL
+    if agent == "hermes" and source == "public provider default" and provider.provider == "nv_build":
+        selected = "nvidia/nemotron-3.5-super-vl-120b-a12b"
     if agent == "opencode":
         namespace = {
             "anthropic": "anthropic",
@@ -3612,6 +3625,8 @@ def _agent_import_path(provider: ProviderConfig, agent: str, env_mode: str) -> s
 
 def _provider_agent_import_path(provider: ProviderConfig, agent: str, env_mode: str) -> str | None:
     """Select only the provider-specific wrappers required for this environment."""
+    if agent == "hermes" and provider.provider == "nv_build" and env_mode == "docker":
+        return DOCKER_AGENT_IMPORT_PATHS["hermes"]
     if provider.provider == "openai-compatible" and agent == "codex" and env_mode != ENV_MODE_LOCAL:
         return _GATEWAY_CODEX_IMPORT_PATH
     if provider.provider == "openai-compatible" and agent == "opencode" and env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES:

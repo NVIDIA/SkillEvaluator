@@ -3566,6 +3566,8 @@ _AGENT_SKILL_PATHS = [
     "COPY skills/ /root/.config/opencode/skills/",
 ]
 _RUNTIME_SKILL_DIRS = (
+    "/tmp/hermes/skills",
+    "/root/.hermes/skills",
     "/etc/codex/skills",
     "/tmp/codex-home/skills",
     "/workspace/skills",
@@ -3594,6 +3596,7 @@ _RUNTIME_SKILL_DIRS = (
     "/tmp/agent-home/sessions/skills",
 )
 _PROJECT_SKILL_RELATIVE_DIRS = (
+    ".hermes/skills",
     ".agents/skills",
     ".claude/commands",
     ".claude/skills",
@@ -3797,9 +3800,11 @@ def _validate_runtime_loader_env(runtime_env: dict[str, str] | None) -> None:
 
 def _runtime_skill_reset_lines(agent_workdir: str | None = None) -> list[str]:
     """Replace fixed, effective-home, and project-ancestor skill roots."""
+    runtime_dirs_to_reset = ["/tmp/hermes" if path == "/tmp/hermes/skills" else path for path in _RUNTIME_SKILL_DIRS]
+    runtime_dirs_to_create = [path for path in _RUNTIME_SKILL_DIRS if path != "/tmp/hermes/skills"]
     lines = [
-        "RUN " + json.dumps(["/bin/rm", "-rf", *_RUNTIME_SKILL_DIRS]),
-        "RUN " + json.dumps(["/bin/mkdir", "-p", *_RUNTIME_SKILL_DIRS]),
+        "RUN " + json.dumps(["/bin/rm", "-rf", *runtime_dirs_to_reset]),
+        "RUN " + json.dumps(["/bin/mkdir", "-p", *runtime_dirs_to_create]),
         "RUN " + json.dumps(["/bin/sh", "-c", _PROJECT_SKILL_ANCESTOR_RESET]),
         "RUN " + json.dumps(["/bin/sh", "-c", _HOME_SKILL_RESET]),
         "RUN " + json.dumps(["/bin/sh", "-c", _PASSWD_HOME_SKILL_RESET]),

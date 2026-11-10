@@ -562,6 +562,39 @@ Artifacts panel shows the HTML report path, the output directory, and — only
 when a retained Harbor jobs directory exists — a ready-to-paste `harbor-view`
 command.
 
+### Next steps for the run
+
+Below the per-case fixes, the case summary in the terminal, `report.html`,
+and the Markdown report list up to three **Next steps** for the run as a
+whole: what a single case cannot show. The steps come from fixed rules, so
+they also appear when no LLM is configured. Each step names:
+
+- the **target** to change: the `evaluation` settings (re-run, more
+  attempts), the `dataset` (more cases, negative controls), or the `agent`
+  (compare agents or models);
+- the **problem** observed in this run and the **evidence** behind it (case
+  ids, attempt marks, or per-agent pass-rate changes);
+- the **action** to take, with the flag or file to change;
+- the **check** that would show the change worked.
+
+| Step | Shown when |
+|------|------------|
+| Incomplete run | Attempts did not produce a score and no per-case run error already says so |
+| Inconsistent results | A case passed on some attempts and failed on others (more `--n-attempts`) |
+| Single attempt | Every case ran once |
+| Agent-dependent effect | Two or more agents differ by 20 or more points in pass-rate change, and the best agent gains at least 10 points |
+| More cases | Fewer than five skill cases ran, unless the case fixes already ask for new cases |
+| Negative controls | The dataset snapshot has no case with `expected_skill: null` or `should_trigger: false` |
+| Agent experiment | Only one agent ran and the skill showed no clear gain |
+
+A step marked `hypothesis` is a cause or remedy to test, not a finding: for
+example, that one agent follows the skill differently. A step marked
+`limited` rests on an incomplete run, so re-run first. Steps never suggest
+removing cases or loosening expectations to raise a score. Baseline-only runs
+and runs where the skill never activated get no next steps. The Tier 3 payload
+carries them as `next_steps`, with the `kind`, `target`, `problem`,
+`evidence`, `action`, `check` and `strength` fields.
+
 ### Findings and severity
 
 The terminal Findings panel uses **advisory metric severity**, not dimension

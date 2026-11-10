@@ -50,6 +50,7 @@ from skillevaluator.evaluation.tier3_findings import (
 from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.source_identity import resolve_evaluated_source
+from skillevaluator.tier3.evidence_volume import evidence_volume_for_conditions
 
 logger = logging.getLogger(__name__)
 
@@ -870,7 +871,20 @@ def build_agent_eval_payload(
     )
     from skillevaluator.tier3.dataset_sufficiency import MIN_NEGATIVE_CASES, assess_dataset_sufficiency
 
-    for agent_payload in agent_payloads.values():
+    for agent_name, agent_payload in agent_payloads.items():
+        agent_info = agents.get(agent_name, {})
+        agent_payload["evidence_volume"] = evidence_volume_for_conditions(
+            agent_info.get("conditions"),
+            trial_failures=agent_info.get("trial_failures"),
+            baseline_only=baseline_only,
+            dataset_summary=dataset_summary,
+            rewards_by_arm={
+                "with_skill": agent_info.get("rewards"),
+                "without_skill": agent_info.get("rewards_baseline"),
+            },
+            uniform_attempts=not bool(policy.get("stop_on_pass")),
+            attempts_per_case=_as_nonnegative_int(policy.get("max_attempts")) or None,
+        )
         pass_summary = agent_payload.get("pass_at_k") if isinstance(agent_payload.get("pass_at_k"), dict) else {}
         with_pass = pass_summary.get("with_skill") if isinstance(pass_summary.get("with_skill"), dict) else {}
         without_pass = pass_summary.get("without_skill")
@@ -932,6 +946,7 @@ def build_agent_eval_payload(
         "evaluator_version": evaluator_version,
         "dataset_summary": dataset_summary,
         "dataset_sufficiency": best.get("dataset_sufficiency"),
+        "evidence_volume": best.get("evidence_volume"),
         "dataset_digest": effective_dataset_digest,
         "dataset_digest_algorithm": effective_dataset_digest_algorithm,
         "score_policy": policy["score_policy"],
@@ -1028,6 +1043,7 @@ def build_agent_eval_payload(
         "evaluator_version": evaluator_version,
         "dataset_summary": dataset_summary,
         "dataset_sufficiency": best.get("dataset_sufficiency"),
+        "evidence_volume": best.get("evidence_volume"),
         "dataset_digest": effective_dataset_digest,
         "dataset_digest_algorithm": effective_dataset_digest_algorithm,
         "dataset_provenance": safe_dataset_provenance,
@@ -1538,6 +1554,7 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
             "execution_error_details_truncated",
             "expected_attempts",
             "scored_attempts",
+            "evidence_volume",
         }
     }
     compact_summary["skill_name"] = str(summary.get("skill_name") or payload.get("skill_name") or "")[:256]
@@ -1565,6 +1582,7 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
         "overall_score": payload.get("overall_score"),
         "overall_lift": payload.get("overall_lift"),
         "composite_lift": payload.get("composite_lift"),
+        "evidence_volume": payload.get("evidence_volume"),
         "execution_status": payload.get("execution_status"),
         "execution_errors": compact_summary["execution_errors"],
         "execution_error_details_total": compact_summary.get("execution_error_details_total", 0),
@@ -2189,6 +2207,11 @@ def _build_agent(
             "without_skill": info.get("pass_without_skill") or {},
             "lift": (info.get("pass_lift") or {}) if comparable_scores else {},
         },
+        "evidence_volume": evidence_volume_for_conditions(
+            info.get("conditions"),
+            trial_failures=info.get("trial_failures"),
+            baseline_only=baseline_only,
+        ),
         "cases": _cases(info),
     }
 
@@ -2586,6 +2609,7 @@ def _metric_evidence(
     report_budget: _ReportBudget,
     sampling: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
+    from skillevaluator.tier3.eval_core.atif_helpers import _METRIC_EVIDENCE_REF_METRICS
     from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, metric_set_for_reward
 
     if report_budget.evidence_remaining <= 0:
@@ -2617,7 +2641,8 @@ def _metric_evidence(
         score_failed = raw_score is not None and raw_score < TRIAL_PASS_THRESHOLD
 
         notes: list[str] = []
-        reason = sanitize_grader_text(detail.get("reason"))
+        raw_grader_reason = detail.get("reason")
+        reason = sanitize_grader_text(raw_grader_reason)
         if reason:
             notes.append(reason[:512])
 
@@ -2646,6 +2671,10 @@ def _metric_evidence(
             "checks": checks,
             "evidence_refs": _compact_evidence_refs(detail.get("evidence_refs")),
         }
+        if score_failed and metric in _METRIC_EVIDENCE_REF_METRICS and not entry["evidence_refs"]:
+            from skillevaluator.evaluation.tier3_findings import evidence_unavailable_reason
+
+            entry["evidence_unavailable_reason"] = evidence_unavailable_reason(reward)
         # The built reason and excerpt are not part of the fingerprint: attempts
         # of one case often quote different commands under the same grader
         # reason, and they still collapse into one entry with ``occurrences``.
@@ -2667,11 +2696,18 @@ def _metric_evidence(
             output_truncated = True
             continue
         if score_failed:
-            # Graders that record only a message, findings, or failed criteria
-            # still explain a failing score. The built reason stays separate from
-            # the grader's own notes so size limits can drop it first, and leaves
-            # out failing results, which the card already lists as ``failures``.
-            if not notes and (fallback_reason := failure_reason(detail, include_results=False)):
+            # Graders that record only findings or failed criteria still explain
+            # a failing score. Notes already show the grader's own reason, so the
+            # separate built reason omits that text and leaves out failing
+            # results, which the card already lists as ``failures``.
+            omitted_reasons = (raw_grader_reason, *notes) if isinstance(raw_grader_reason, str) else tuple(notes)
+            if fallback_reason := failure_reason(
+                detail,
+                include_results=False,
+                metric=metric,
+                reward=reward,
+                omit=omitted_reasons,
+            ):
                 entry["reason"] = fallback_reason
             if excerpt := failure_excerpt(detail):
                 entry["excerpt"] = excerpt
@@ -3180,7 +3216,7 @@ def _trial_score_reasons(
                 continue
             if lowest is not None and row_score >= lowest[0]:
                 continue
-            reason = failure_reason(_metric_detail(row, metric))
+            reason = failure_reason(_metric_detail(row, metric), metric=metric, reward=row)
             if reason:
                 lowest = (row_score, reason)
         if lowest is not None:

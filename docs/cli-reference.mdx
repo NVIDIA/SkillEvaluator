@@ -45,6 +45,19 @@ commands referenced below.
 | [health-check](#health-check) | Quick CLI + backend readiness check, or another tier with `--tier` | Nothing |
 | [models](#models) | List models visible through the selected provider's catalog | Provider configuration/key |
 | [tier3 validate](#tier3-validate) | Validate `evals/` and the optional Harbor contract | Nothing |
+| [tier3 import-metrics](#tier3-import-metrics) | Report precomputed custom scores as external observations | A versioned metrics JSON file; no runtime or provider key |
+
+## tier3 import-metrics
+
+```bash
+skillevaluator tier3 import-metrics INPUT.json --output-dir NEW_DIRECTORY
+```
+
+`INPUT.json` must exist. Required `-o, --output-dir` names a directory that must
+not exist. The command validates the complete input before writing
+`external_metrics.json` and `external_metrics.md`. It never executes tests or
+assigns canonical scores; exit 0 means a valid import, not passing tests.
+See the [input contract and simulator example](custom-graders.mdx#import-precomputed-custom-metrics).
 
 ## Global conventions
 
@@ -165,7 +178,7 @@ pipeline.
 | --- | --- |
 | `tier1` | `validate`, `quality-check`, `rubric-eval`, `security-scan`, `pii-scan`, `lint-scripts` |
 | `tier2` | `context-optimization-check`, `dedup-scan`, `similarity-check` |
-| `tier3` | `evaluate`, `interact`, `select-decoys`, `create-eval-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `feedback`, `validate`, `harbor-view` |
+| `tier3` | `evaluate`, `interact`, `select-decoys`, `create-eval-dataset`, `migrate-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `feedback`, `validate`, `harbor-view`, `import-metrics` |
 
 `health-check` and [models](#models) are top-level only. The expert commands
 [tier3 evaluate](#tier3-evaluate), [tier3 select-decoys](#tier3-select-decoys),
@@ -494,7 +507,7 @@ Runs baseline, each individual skill, and the combined selection. Saves
 configuration. Exit 0 means a comparable experiment completed; positive,
 negative, and zero interaction all use exit 0. Exit 1 means incomplete or
 incomparable evidence. Invalid command arguments use Click's usage-error exit.
-See [Skill interaction experiments](tier3-live-evaluation.mdx#skill-interaction-experiments)
+See [Skill interaction experiments](/skills/skillevaluator/tier3-live-evaluation#skill-interaction-experiments)
 for the calculation, input restrictions, attempt budget, and interpretation.
 
 ## tier3 evaluate
@@ -511,7 +524,7 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `-a, --agents TEXT` | provider-native | Comma-separated Harbor agents. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. Supported: `claude-code`, `codex`, `opencode`; the alias `claude` is accepted for `claude-code`. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
+| `-a, --agents TEXT` | provider-native | Comma-separated Harbor agents. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. Supported: `claude-code`, `codex`, `opencode`; Experimental: `hermes` (Docker with NVIDIA Build only; see [Experimental Hermes](agents-and-sandboxes.mdx#experimental-hermes)). The alias `claude` is accepted for `claude-code`. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
 | `--env-mode` | `docker` | Where trials run. SkillEvaluator exposes 27 environment modes: 26 Harbor-native modes — `docker`, `daytona`, `e2b`, `modal`, `runloop`, `langsmith`, `ec2`, `gke`, `ack`, `openshift`, `novita`, `apple-container`, `singularity`, `islo`, `tensorlake`, `cwsandbox`, `wandb`, `use-computer`, `blaxel`, `beam`, `skypilot`, `hyperbrowser`, `vercel`, `kata`, `runta`, `mosaic` — plus SkillEvaluator `local` mode. `wandb` runs Harbor's `cwsandbox` backend with W&B authentication, so it needs the `harbor[cwsandbox]==0.24.0` extra; Harbor 0.24 has no `wandb` extra. Harbor's `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`, `prime`, and `smol` backends are not selectable. See the complete extras and prerequisites matrix in [Agents & Sandboxes](agents-and-sandboxes.mdx#where-trials-run). Installed packages can add more modes; see [Custom execution backends](agents-and-sandboxes.mdx#custom-execution-backends). |
 | `--environment-kwarg`, `--ek` | none | Operator-only `KEY=VALUE` constructor option for Harbor-native non-Docker backends (repeatable). Values accept JSON-compatible types; skill-owned `evals/config.yml` cannot set them. Never pass secrets. Docker and local reject all kwargs, Kata accepts only `kata_runtime` and `kata_dns`, and Harbor runtime-policy fields for overrides, mounts, networks, extra Compose, lifecycle, and pod security are reserved, as are `stream`, `enable_environment_dir_upload`, and `auth` for `cwsandbox`/`wandb`. Names the selected backend does not accept in Harbor 0.24.0 are rejected. See [Native backend constructor options](agents-and-sandboxes.mdx#native-backend-constructor-options). |
 | `--autopilot` | off | Create one eval case when no dataset/task source exists, then evaluate. The case is LLM-generated with the configured provider, with a deterministic keyless template fallback; an existing source is never overwritten. |
@@ -553,6 +566,25 @@ namespace precedes the NVIDIA catalog ID.
 
 Flags marked "unset" fall back to their matching keys in `evals/config.yml` where one exists, then to the built-in defaults. The exception is `--results-dir`, which resolves independently of `evals/config.yml`.
 
+## tier3 migrate-dataset
+
+Preview a lossless conversion to the preferred dataset object. No provider or
+Tier 3 runtime is required:
+
+```bash
+skillevaluator tier3 migrate-dataset ./my-skill/evals/evals.json --skill-name my-skill
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--skill-name NAME` | inferred when unambiguous | Target skill identity. Required for all-negative or mixed-identity legacy datasets. |
+| `--output DESTINATION` | preview only | Write a new `.json`, `.yaml`, or `.yml` file; existing paths and the source are refused. |
+
+`SOURCE` accepts JSON, case-per-line JSONL, YAML, or YML. JSONL is input-only;
+output is one JSON/YAML object. See [Migrate a legacy dataset](eval-datasets.mdx#migrate-a-legacy-dataset)
+for routing-label requirements, preserved fields, and how to promote the reviewed
+conversion without changing fixture paths.
+
 ## create-eval-dataset
 
 Create synthetic eval datasets for agent skill evaluation, written to `evals/evals.json`. Uses the configured LLM provider unless you pass `--no-llm`. Dataset anatomy and the four case buckets are documented in [Eval Datasets](eval-datasets.mdx).
@@ -562,7 +594,7 @@ skillevaluator create-eval-dataset ./my-skill --full
 ```
 
 <Warning>
-`--force` overwrites an existing `evals/evals.json`, including any hand-edited cases, and `--refine` implies `--force`. Use `--dry-run` first if you are unsure.
+`--force` overwrites an existing `evals/evals.json`, including any hand-edited cases. `--refine` normally regenerates the dataset, but `--grounding trace` refines an existing file in place and preserves its authored cases. Use `--dry-run` first if you are unsure.
 </Warning>
 
 | Flag | Default | Effect |
@@ -572,9 +604,10 @@ skillevaluator create-eval-dataset ./my-skill --full
 | `--dry-run` | off | Preview without writing. |
 | `--force` | off | Overwrite existing `evals/evals.json`. |
 | `--prompt PATH` | none | Developer eval-guidance file for generation (default: auto-detects `evals/EVAL.md`). |
-| `--refine` | off | Refine cases using existing or collected trajectories. Reading trajectories from existing results does not require the `tier3` extra; when none exist, collecting one runs `claude-code` through Harbor and needs the `tier3` extra, Docker, and a configured provider (see [Eval Datasets](eval-datasets.mdx)). |
-| `--from-results PATH` | none | With `--refine`: results path containing agent trajectories (default: latest results). |
-| `--results-dir DIRECTORY` | unset | With `--refine`: external results root to search for trajectories. |
+| `--grounding {skill,intent,trace}` | `skill` | Choose `SKILL.md`, author guidance (`evals/EVAL.md` or `--prompt`), or agent trajectories as the primary grounding source. |
+| `--refine` | off | Refine generated cases with trajectories on top of the selected grounding source. Without `--grounding trace`, it regenerates the dataset; with trace grounding and an existing dataset, it refines those cases in place. If no trajectory exists, collection runs `claude-code` through Harbor and needs the `tier3` extra, Docker, and a configured provider (see [Eval Datasets](eval-datasets.mdx)). |
+| `--from-results PATH` | none | With `--grounding trace` or `--refine`: results path containing agent trajectories (default: latest results). |
+| `--results-dir DIRECTORY` | unset | With `--grounding trace` or `--refine`: external results root to search for trajectories. |
 
 ## init-custom-grader
 
@@ -669,22 +702,47 @@ the configured model. Type `exit` or press Ctrl-D to end the chat. Ctrl-C
 during an answer discards that question and returns to the prompt.
 
 The chat uses the provider and model configured for LLM checks
-(`SKILL_EVAL_LLM_PROVIDER` and `SKILL_EVAL_LLM_MODEL`; see
-[Environment Variables](environment-variables.mdx)). Each question sends the
-run's compact evidence to that provider. The evidence names the run by its ID
-instead of its local path. In every text field, such as errors, warnings, case
-questions and saved feedback, an absolute path that ends in the run's directory
-is replaced with that ID. This covers the path a copied run had on the machine
-where it ran, also when it starts with `~user/`, `$HOME/`, `${HOME}/` or
-`%USERPROFILE%\`, unless that path contains a space. A path joined to it, such as
-`/usr/bin` in `PATH=/usr/bin:/home/ci/results/RUN_ID`, is kept. A root right after
-`,` `;` `:` `=` `(` `[` or `{` starts a new path, so a directory name that ends in
-one of those characters before a `/` is read as two paths and only the second is
-replaced. The evaluated skill's directory
-is replaced with its name and your home directory with `~`; the skill directory
-is known when you pass `--skill` or the run is in the skill's `evals/results`
-directory. Credential-shaped text is redacted before the text is shortened, and
-a shortened field ends in `...<truncated>`. The command writes nothing to disk.
+(`SKILL_EVAL_LLM_PROVIDER` and `SKILL_EVAL_LLM_MODEL`; see [Environment
+Variables](environment-variables.mdx)). Each question sends the run's compact
+evidence to that provider. The evidence names the run by its ID instead of its
+local path. In every text field, such as errors, warnings, case questions and
+saved feedback, an absolute path that ends in the run's directory is replaced
+with that ID. This covers the path a copied run had on the machine where it ran,
+also when it starts with `~user/`, `$HOME/`, `${HOME}/` or `%USERPROFILE%\`,
+unless that path contains a space. A path joined to it, such as `/usr/bin` in
+`PATH=/usr/bin:/home/ci/results/RUN_ID`, is kept. A root right after `,` `;` `:`
+`=` `(` `[` or `{` starts a new path, so a directory name that ends in one of
+those characters before a `/` is read as two paths and only the second is
+replaced. So does a root right after a `\n`, `\r` or `\t` escape in JSON or repr
+text, such as the next line of an env dump, also with ANSI codes after the
+escape, as on a progress line (`\r\u001b[K`); a relative path after one is kept,
+and a UNC server name that starts with `n`, `r` or `t`, such as `\\nas01\share`,
+is not read as an escape. A path may also start right after an ANSI code, such
+as the color code `\u001b[0m` or the erase-line code `\u001b[K`, and a path
+colored in parts is replaced whole. The evaluated skill's directory is replaced
+with its name and your home directory with `~`; the skill directory is known
+when you pass `--skill` or the run is in the skill's `evals/results` directory.
+Path masking leaves a URL unchanged, even a path in its query or fragment,
+unless its scheme is `file:` or ends in `+file:`, such as `git+file:`. A URL
+ends at whitespace; at a quote, `<`, `>`, a backtick, `^`, `{`, `|`, `}` or an
+ANSI escape (raw, `\u001b` or `\x1b`); at a `\n`, `\r` or `\t` escape; and
+before an absolute path or another scheme that follows a `,` or `;` (also with
+an option or variable name and `=`, such as `LOG=` or `--find-links=`) or a
+Markdown `](`. So a path after a URL in JSON, on the next line of an escaped env
+dump or stderr, in a `,`- or `;`-separated list or in
+`DOC=https://host/e;LOG=/path`, and a `file:` URL listed after one, are still
+replaced. A path joined to a URL by any other character, such as `:`, `=`, `(`
+or `)`, is not. The escape may have a doubled backslash, as in JSON inside JSON.
+A backslash and `n`, `r` or `t` that start a Windows folder name made of
+letters, digits, `_`, `.`, `~`, `$`, `%` or `-` and followed by as many
+backslashes, such as `\runs\` or `\t\` (`\\runs\\` in JSON), are not an escape
+unless an escaped character such as `\u001b` or `\xa0` comes next and is not
+itself followed by a name and as many backslashes, so a Windows path with such
+folders, such as `\t\x64\runs\`, in a URL is kept. Any other folder or file name
+that starts with `n`, `r` or `t`, such as `\runs(old)\` or `\notes.txt`, ends
+the URL there. Credential-shaped text is redacted before the text is shortened,
+and a shortened field ends in `...<truncated>`. The command writes nothing to
+disk.
 
 No request is sent before the first question, so the command exits 0
 immediately when standard input is empty. Piped input sends each line as a

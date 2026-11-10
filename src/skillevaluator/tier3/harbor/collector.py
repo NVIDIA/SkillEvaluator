@@ -28,6 +28,7 @@ from itertools import islice
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
+from skillevaluator.tier3.attempt_verdict import attempt_verdict, scored_goal_accuracy
 from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts, get_skill_tool_calls
 from skillevaluator.tier3.eval_core.checks import check_negative_case
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
@@ -130,6 +131,7 @@ AGENT_LOG_ARTIFACTS = (
     "gemini-cli.txt",
     "cline.txt",
     "opencode.txt",
+    "hermes.txt",
 )
 GENERATED_AGENT_ARTIFACTS = (
     "lift.json",
@@ -857,6 +859,8 @@ def _agent_log_runtime_failure_reason(
         trial_dir / "codex.txt",
         trial_dir / "agent" / "opencode.txt",
         trial_dir / "opencode.txt",
+        trial_dir / "agent" / "hermes.txt",
+        trial_dir / "hermes.txt",
     ):
         text = _read_bounded_text(path)
         if text is None:
@@ -4387,12 +4391,13 @@ def _partition_scoreable_rewards(
         if raw_trial in failed_trials:
             continue
         failed_trials.add(raw_trial)
-        failures.append(
-            {
-                "trial": _published_trial_label(raw_trial, alias_ordinal=len(failures) + 1),
-                "reason": _unscoreable_reward_reason(reward),
-            }
-        )
+        failure = {
+            "trial": _published_trial_label(raw_trial, alias_ordinal=len(failures) + 1),
+            "reason": _unscoreable_reward_reason(reward),
+        }
+        if reward.get("_trial_root_name"):
+            failure["_trial_root_name"] = str(reward["_trial_root_name"])
+        failures.append(failure)
 
     custom_names = {name for reward in scoreable for name in extract_custom_metrics(reward)}
     if len(custom_names) > MAX_CUSTOM_METRICS:
@@ -4402,12 +4407,13 @@ def _partition_scoreable_rewards(
             if raw_trial in failed_trials:
                 continue
             failed_trials.add(raw_trial)
-            failures.append(
-                {
-                    "trial": _published_trial_label(raw_trial, alias_ordinal=len(failures) + 1),
-                    "reason": UNSAFE_CUSTOM_METRIC_UNION_REASON,
-                }
-            )
+            failure = {
+                "trial": _published_trial_label(raw_trial, alias_ordinal=len(failures) + 1),
+                "reason": UNSAFE_CUSTOM_METRIC_UNION_REASON,
+            }
+            if reward.get("_trial_root_name"):
+                failure["_trial_root_name"] = str(reward["_trial_root_name"])
+            failures.append(failure)
         scoreable = []
     return scoreable, failures
 
@@ -4425,7 +4431,11 @@ def _unscoreable_reward_reason(reward: dict[str, Any]) -> str:
             safe_metric = _safe_diagnostic_text(metric, max_len=64)
             safe_reason = _safe_diagnostic_text(reason, max_len=512)
             if safe_reason:
-                parts.append(f"{safe_metric or 'judge'}: {safe_reason}")
+                parts.append(
+                    f"[environment] {safe_reason}"
+                    if metric == "environment"
+                    else f"{safe_metric or 'judge'}: {safe_reason}"
+                )
     elif isinstance(errors, list):
         parts.extend(_safe_diagnostic_text(reason, max_len=512) for reason in errors[: len(DEFAULT_METRICS)])
         parts = [part for part in parts if part]
@@ -4436,7 +4446,12 @@ def _unscoreable_reward_reason(reward: dict[str, Any]) -> str:
 
     if not parts:
         return fallback
-    return _safe_diagnostic_text("Required judge evaluation failed: " + "; ".join(parts), max_len=2048)
+    prefix = (
+        "Evaluation environment invalid: "
+        if isinstance(errors, dict) and "environment" in errors
+        else "Required judge evaluation failed: "
+    )
+    return _safe_diagnostic_text(prefix + "; ".join(parts), max_len=2048)
 
 
 def _strip_attempt_suffix(value: str) -> str:
@@ -4658,12 +4673,35 @@ def _logical_attempt_rewards(rewards: list[dict[str, Any]]) -> list[dict[str, An
         }
         if judge_models:
             logical_reward["_judge_models"] = judge_models
+        security_shortfalls = [
+            verdict
+            for row in rows
+            if (verdict := attempt_verdict(_overall_score(row), 0.5, reward=row)).security_clean is False
+        ]
+        if security_shortfalls and all(verdict.security_exempt for verdict in security_shortfalls):
+            message = next(
+                (verdict.security_message for verdict in security_shortfalls if verdict.security_message), None
+            )
+            logical_reward["details"] = {
+                "security": {
+                    "supported": False,
+                    "findings": [
+                        {
+                            "type": "unsupported_tool_wrapper",
+                            "score_impact": True,
+                            "message": message,
+                        }
+                    ]
+                    if message
+                    else [],
+                }
+            }
         logical.append(logical_reward)
     return logical
 
 
 def harbor_job_passed(job_dir: Path, pass_threshold: float) -> bool:
-    """Return whether a complete logical attempt meets the pass threshold.
+    """Return whether a complete logical attempt meets the required checks.
 
     This deliberately shares collection's failure filtering and multi-step
     reward precedence. A root Harbor ``result.json`` reward is authoritative;
@@ -4675,7 +4713,11 @@ def harbor_job_passed(job_dir: Path, pass_threshold: float) -> bool:
         return False
     rewards, _ = _partition_scoreable_rewards(_extract_rewards(job_dir))
     return any(
-        (score := _overall_score(reward)) is not None and score >= pass_threshold
+        attempt_verdict(
+            _overall_score(reward),
+            pass_threshold,
+            reward=reward,
+        ).passed
         for reward in _logical_attempt_rewards(rewards)
     )
 
@@ -4954,6 +4996,7 @@ def _pass_summary(
     expected_case_ids: list[str] | None = None,
     recovered_attempts: list[dict[str, Any]] | None = None,
     scorer: Callable[[dict[str, Any]], float | None] | None = None,
+    shared_metrics_by_case: Mapping[str, set[str]] | None = None,
 ) -> dict[str, Any]:
     """Summarize pass@k using SkillEvaluator continuous reward scores.
 
@@ -4964,15 +5007,33 @@ def _pass_summary(
     expected_ids = _validated_expected_case_ids(expected_case_ids)
     expected_id_set = set(expected_ids) if expected_ids else None
     grouped: dict[str, list[tuple[dict[str, Any], float]]] = {}
+    correct_answers = 0
+    scored_answers = 0
+    security_clean_count = 0
+    scored_security = 0
     for reward in _logical_attempt_rewards(rewards):
+        entry_id = _entry_id(reward, expected_id_set)
+        applicable_metrics = shared_metrics_by_case.get(entry_id) if shared_metrics_by_case is not None else None
+        verdict = attempt_verdict(None, pass_threshold, reward=reward, applicable_metrics=applicable_metrics)
+        if expected_id_set is None or entry_id in expected_id_set:
+            if verdict.correct_answer is not None:
+                scored_answers += 1
+                correct_answers += int(verdict.correct_answer)
+            if verdict.security_clean is not None:
+                scored_security += 1
+                security_clean_count += int(verdict.security_clean or verdict.security_exempt)
         overall = score_of(reward)
         if overall is None:
             continue
-        grouped.setdefault(_entry_id(reward, expected_id_set), []).append((reward, overall))
+        grouped.setdefault(entry_id, []).append((reward, overall))
 
     cases: dict[str, Any] = {}
     pairing_cases: dict[str, dict[str, Any]] = {}
     passed_cases = 0
+    scored_cases = 0
+    required_checks_passed = 0
+    wrong_answer_cases = 0
+    security_failed_cases = 0
     attempts_used = 0
     extra_case_ids: list[str] = []
 
@@ -4988,13 +5049,22 @@ def _pass_summary(
         attempts = grouped.get(entry_id, [])
         attempt_rows: list[dict[str, Any]] = []
         attempt_passes: list[dict[str, bool]] = []
+        attempt_verdicts = []
         best_score: float | None = None
         first_pass_attempt: int | None = None
         for idx, (reward, overall) in enumerate(sorted(attempts, key=lambda item: _attempt_sort_key(item[0])), start=1):
             idx = _attempt_ordinal(reward) or idx
             score = round(overall, 4)
-            passed = score >= pass_threshold
-            attempt_passes.append({"passed": passed})
+            applicable_metrics = shared_metrics_by_case.get(entry_id) if shared_metrics_by_case is not None else None
+            verdict = attempt_verdict(
+                score,
+                pass_threshold,
+                reward=reward,
+                applicable_metrics=applicable_metrics,
+            )
+            attempt_verdicts.append(verdict)
+            passed = verdict.passed
+            attempt_passes.append({"passed": passed, "required_failure": verdict.required_failure})
             if passed and first_pass_attempt is None:
                 first_pass_attempt = idx
             best_score = score if best_score is None else max(best_score, score)
@@ -5009,6 +5079,14 @@ def _pass_summary(
                         "trial": _published_trial_label(reward.get("_trial_name", "")),
                         "score": score,
                         "passed": passed,
+                        "goal_accuracy": scored_goal_accuracy(reward),
+                        "reason": verdict.reason,
+                        "warnings": list(verdict.warnings),
+                        "security_clean": verdict.security_clean,
+                        "security_score": verdict.security_score,
+                        "security_message": verdict.security_message,
+                        "security_exempt": verdict.security_exempt,
+                        "required_failure": verdict.required_failure,
                     }
                 )
                 published_attempt_details += 1
@@ -5017,6 +5095,15 @@ def _pass_summary(
         is_expected_case = expected_id_set is None or entry_id in expected_id_set
         if case_passed and is_expected_case:
             passed_cases += 1
+        if attempts and is_expected_case:
+            scored_cases += 1
+            wrong_answer_failed = any(verdict.correct_answer is False for verdict in attempt_verdicts)
+            security_failed = any(
+                verdict.security_clean is False and not verdict.security_exempt for verdict in attempt_verdicts
+            )
+            required_checks_passed += int(not wrong_answer_failed and not security_failed)
+            wrong_answer_cases += int(wrong_answer_failed)
+            security_failed_cases += int(security_failed)
         if is_expected_case:
             attempts_used += len(attempts)
         recovered_count = sum(item["case_id"] == entry_id for item in (recovered_attempts or []))
@@ -5040,6 +5127,10 @@ def _pass_summary(
                 "attempts_missing": missing,
                 "best_score": round(best_score, 4) if best_score is not None else None,
                 "attempts": attempt_rows,
+                "reason": next((verdict.reason for verdict in attempt_verdicts if not verdict.passed), None),
+                "warnings": list(
+                    dict.fromkeys(warning for verdict in attempt_verdicts for warning in verdict.warnings)
+                ),
                 "attempt_details_total": len(attempts),
                 "attempt_details_shown": len(attempt_rows),
                 "attempt_details_truncated": len(attempt_rows) < len(attempts),
@@ -5060,6 +5151,14 @@ def _pass_summary(
     return {
         "k": n_attempts,
         "pass_threshold": pass_threshold,
+        "correct_answers": {"correct": correct_answers, "scored": scored_answers},
+        "required_checks": {
+            "passed": required_checks_passed,
+            "scored": scored_cases,
+            "wrong_answer": wrong_answer_cases,
+            "security": security_failed_cases,
+        },
+        "security_clean": {"clean": security_clean_count, "scored": scored_security},
         "stop_on_pass": stop_on_pass,
         "passed_cases": passed_cases,
         "failed_cases": failed_cases,
@@ -5171,6 +5270,9 @@ def _shared_metric_pass_lift(
         for case in cases & paired_cases:
             shared_by_case[case].discard(metric)
     fallback = set().union(*treatment_scored.values()) & set().union(*control_scored.values())
+    shared_metrics_by_case = {
+        case: shared_by_case.get(case, fallback) for case in set(treatment_scored) | set(control_scored)
+    }
     excluded_metrics = set(judge_mixed).union(*(treatment_scored[case] ^ control_scored[case] for case in paired_cases))
     scorer = _shared_metric_scorer(shared_by_case, fallback, expected_id_set)
     summaries = [
@@ -5182,6 +5284,7 @@ def _shared_metric_pass_lift(
             expected_cases=expected_cases,
             expected_case_ids=expected_case_ids,
             scorer=scorer,
+            shared_metrics_by_case=shared_metrics_by_case,
         )
         for rewards in (treatment_rewards, control_rewards)
     ]
@@ -5913,7 +6016,11 @@ def _annotate_security_attribution(
 
 
 def _is_standard_skill_execution_reward(reward: dict[str, Any]) -> bool:
-    """Return whether the reward carries a usable canonical standard score."""
+    """Admit standard invocation evidence independently of numeric skill grading.
+
+    A baseline's explicitly N/A skill score still has an observable trajectory.
+    Missing scores without the applicability marker do not establish support.
+    """
     standard_metric_sets = {DEFAULT_METRIC_SET, LEGACY_METRIC_SET}
     declared_metric_set = reward.get("metric_set") or reward.get("metric_set_version")
     if declared_metric_set and str(declared_metric_set) not in standard_metric_sets:
@@ -5922,7 +6029,7 @@ def _is_standard_skill_execution_reward(reward: dict[str, Any]) -> bool:
     return (
         metric_set in standard_metric_sets
         and "skill_execution" in metrics
-        and metric_value(reward, "skill_execution") is not None
+        and (metric_value(reward, "skill_execution") is not None or metric_is_not_applicable(reward, "skill_execution"))
     )
 
 
@@ -6137,7 +6244,7 @@ def _add_trusted_invocation_evidence(
     """Replace verifier-authored routing evidence on standard rewards only."""
     if not _is_standard_skill_execution_reward(source_reward):
         return
-    for key in ("skill_invoked", "routing_passed", "invocation_evidence_source"):
+    for key in ("skill_invoked", "routing_passed", "invocation_evidence_source", "invocation_evidence_scope"):
         clean_reward.pop(key, None)
     if trial_root is None:
         return
@@ -6155,6 +6262,7 @@ def _add_trusted_invocation_evidence(
     else:
         return
     clean_reward["invocation_evidence_source"] = "trajectory"
+    clean_reward["invocation_evidence_scope"] = "step" if source_reward.get("_step_name") else "logical_trial"
 
 
 def _can_restore_custom_metric_name(value: str) -> bool:
@@ -6653,6 +6761,7 @@ def _condition_execution_summary(
             "scored_cases": 0,
             "expected_attempts": 0,
             "scored_attempts": 0,
+            "judge_failures": 0,
             **_failure_list_metadata("runtime_failure_details", runtime_failures),
             **_failure_list_metadata("reward_failure_details", reward_failures),
         }
@@ -6665,6 +6774,11 @@ def _condition_execution_summary(
         if item["trial"] not in recovered_names or not item.get("reason", "").startswith("AgentTimeoutError:")
     ]
     reward_failures = [item for item in (reward_failures or []) if item["trial"] not in recovered_names]
+    judge_failure_trials = {
+        str(failure.get("_trial_root_name") or failure.get("trial_root_name") or failure.get("trial") or "")
+        for failure in [*runtime_failures, *reward_failures]
+        if str(failure.get("reason") or "").startswith("Required judge evaluation failed:")
+    }
     errors: list[str] = [job_failure] if job_failure else []
     public_runtime_failures = _public_failure_list(runtime_failures)
     public_reward_failures = _public_failure_list(reward_failures)
@@ -6695,9 +6809,9 @@ def _condition_execution_summary(
     for reward in _logical_attempt_rewards(rewards):
         score = _overall_score(reward)
         if score is not None:
-            logical_passed[str(reward.get("_trial_root_name") or reward.get("_trial_name") or "")] = (
-                score >= pass_threshold
-            )
+            logical_passed[str(reward.get("_trial_root_name") or reward.get("_trial_name") or "")] = attempt_verdict(
+                score, pass_threshold, reward=reward
+            ).passed
     roots: dict[str, dict[str, Any]] = {}
     for reward in rewards:
         root = str(reward.get("_trial_root_name") or "").strip()
@@ -6720,7 +6834,7 @@ def _condition_execution_summary(
                 "case_id": case_id,
                 "steps": {step_name} if step_name else set(),
                 "reward": reward,
-                "passed": logical_passed.get(root, score >= pass_threshold),
+                "passed": logical_passed.get(root, attempt_verdict(score, pass_threshold, reward=reward).passed),
                 "attempt_ordinal": _attempt_ordinal(reward),
             }
             continue
@@ -6813,6 +6927,7 @@ def _condition_execution_summary(
         "scored_cases": len(expected_set.intersection(by_case)) if expected_ids else len(by_case),
         "expected_attempts": expected_attempts,
         "scored_attempts": scored_attempts,
+        "judge_failures": min(len(judge_failure_trials), max(0, expected_attempts - scored_attempts)),
         **(
             {
                 "physical_expected_attempts": physical_expected_attempts,

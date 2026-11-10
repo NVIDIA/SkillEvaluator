@@ -26,7 +26,16 @@ def _run(tmp_path, *, goal_accuracy: float):
 
     def condition(passed):
         attempt = {"attempt": 1, "trial": "case__1", "score": 0.9 if passed else 0.2, "passed": passed}
-        return {"k": 1, "cases": {"case": {"passed": passed, "attempts": [attempt]}}}
+        return {
+            "k": 1,
+            "cases": {
+                "case": {
+                    "passed": passed,
+                    "attempts_used": 1,
+                    "attempts": [attempt],
+                }
+            },
+        }
 
     agent = {"pass_at_k": {"with_skill": condition(True), "without_skill": condition(False)}}
     for arm, passed in (("with-skill", True), ("without-skill", False)):
@@ -50,7 +59,7 @@ def test_report_leads_with_skill_effect_and_goal_not_met_fix(tmp_path) -> None:
     assert "1 issue to fix, most attempts lost first:" in html
     assert "[goal not met]: passed on the other metrics but scored goal accuracy 0.00: asked for the data." in html
     assert "Evidence: opencode/with-skill/trials/case__1/trajectory.json" in html
-    assert "goal not met (0.00)</span>" in html
+    assert "FAIL</span> goal not met (goal accuracy 0.00)" in html
 
 
 def test_report_says_nothing_to_fix_when_every_case_passes_and_meets_its_goal(tmp_path) -> None:
@@ -60,7 +69,7 @@ def test_report_says_nothing_to_fix_when_every_case_passes_and_meets_its_goal(tm
 
     assert json.loads((run / "what_to_fix.json").read_text()) == []
     assert "Nothing to fix in the available case evidence." in html
-    assert "goal not met (0.00)" not in html
+    assert "goal not met (goal accuracy 0.00)" not in html
 
 
 def test_goal_flags_keep_agent_identity_when_trial_names_repeat(tmp_path) -> None:
@@ -80,7 +89,7 @@ def test_goal_flags_keep_agent_identity_when_trial_names_repeat(tmp_path) -> Non
     html = render_agent_eval_html_report(tmp_path, run, use_llm_judge=False).read_text(encoding="utf-8")
     attempts = html.split('id="t3-attempts-table"', 1)[1].split("</table>", 1)[0]
     rows = re.findall(r"<tr>(.*?)</tr>", attempts, flags=re.DOTALL)
-    missed = [row for row in rows if "goal not met (0.00)" in row]
+    missed = [row for row in rows if "goal not met (goal accuracy 0.00)" in row]
     assert len(missed) == 1
     assert "opencode" in missed[0] and "With skill" in missed[0]
 

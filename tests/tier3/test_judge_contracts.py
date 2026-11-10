@@ -107,6 +107,18 @@ def test_every_judge_prompt_example_passes_its_own_validator(judge_module, monke
         assert "score" not in example
 
 
+def test_placeholder_only_expected_behavior_is_not_applicable(judge_module, monkeypatch) -> None:
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("the judge should not run without expected behaviors")
+
+    monkeypatch.setattr(judge_module, "call_public_llm", fail_if_called)
+    result = judge_module.judge_behavior_check("conversation", ["None", "  ", "n/A", None])
+
+    assert result["score"] is None
+    assert result["reason"] == "N/A: no expected_behavior defined for this eval case"
+    assert result["results"] == []
+
+
 @pytest.mark.parametrize("behavior_count", [1, 2, 3, 5, 12])
 def test_behavior_prompt_example_is_a_valid_reply_for_any_number_of_behaviors(
     judge_module, monkeypatch, behavior_count: int
@@ -369,6 +381,32 @@ def _attempts(verifier_dir: Path) -> list[dict[str, Any]]:
     payload = json.loads((verifier_dir / "judge_attempts.json").read_text(encoding="utf-8"))
     assert payload["judge_contract"] == eval_template.JUDGE_CONTRACT
     return payload["attempts"]
+
+
+def test_checks_only_behavior_does_not_call_the_judge(tmp_path: Path) -> None:
+    verifier = _stage_verifier(
+        tmp_path,
+        {
+            "id": "case-1",
+            "has_skill": False,
+            "question": "Complete the task",
+            "ground_truth": "",
+            "expected_behavior": [],
+            "checks": [{"type": "output_contains", "text": "completed"}],
+        },
+    )
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("checks-only behavior must not invoke the judge")
+
+    verifier.judge_behavior_check = fail_if_called
+    verifier.call_public_llm = fail_if_called
+    verifier.main()
+
+    reward = json.loads(verifier.SKILL_EVALUATOR_REWARD_JSON.read_text(encoding="utf-8"))
+    behavior = reward["details"]["behavior_check"]
+    assert reward["behavior_check"] == 1.0
+    assert behavior["declarative_checks"]["summary"] == "Checked directly: 1, judged: 0, not checked: 0"
 
 
 def test_scored_trial_records_judge_contract_and_every_attempt(tmp_path: Path) -> None:

@@ -65,11 +65,12 @@ _LIMIT_FIELDS = tuple(
     for prefix in ("observed", "limit")
     for unit in ("artifacts", "bytes", "characters", "depth", "findings", "records", "seconds")
 )
-# The time a run took differs from run to run. A suggestion is part of its
-# finding's ``finding_id``, which must stay the same across runs, so it shows
-# only the limits that the file and the configuration fix; the finding's
-# metadata keeps every limit.
-_RUN_DEPENDENT_LIMITS = frozenset({"observed_seconds"})
+# Every time limit differs from run to run: SkillSpector records both the time
+# a step took and, as its limit, the part of the scan's time budget left when
+# the step began. A suggestion is part of its finding's ``finding_id``, which
+# must stay the same across runs, so it shows only the limits that the file and
+# the configuration fix; the finding's metadata keeps every limit.
+_RUN_DEPENDENT_LIMITS = frozenset(field for field, seconds in _LIMIT_FIELDS if seconds)
 
 
 def diagnostic_text(value: object, *, max_length: int = 4096) -> str | None:
@@ -345,8 +346,9 @@ def issue_diagnostics(
 def _reason_details(reasons: list[dict]) -> list[str]:
     """One text per distinct reason, with the analyzers of rows that differ only in them joined.
 
-    The measured run time (``observed_seconds``) is left out, so the text, and
-    the ``finding_id`` that hashes it, is the same in every run of one scan.
+    The run time and the time budget (``observed_seconds``, ``limit_seconds``)
+    are left out, so the text, and the ``finding_id`` that hashes it, is the
+    same in every run of one scan.
     """
     grouped: dict[tuple, list[str]] = {}
     for reason in reasons:

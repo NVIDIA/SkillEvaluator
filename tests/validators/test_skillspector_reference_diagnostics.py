@@ -360,8 +360,8 @@ class TestEvidenceProjection:
         assert finding.metadata["skillspector_evidence"]["reasons"][0]["limits"] == {"limit_characters": 8000}
 
     @staticmethod
-    def _runtime_limit_finding(*elapsed: float):
-        """The v2.13.3 AE1 finding with one runtime_limit reason per *elapsed* run time."""
+    def _runtime_limit_finding(*runs: tuple[float, float]):
+        """The v2.13.3 AE1 finding with one runtime_limit reason per ``(limit_seconds, observed_seconds)`` in *runs*."""
         issue = _report(_PARSE_LIMIT_REPORT)["issues"][0]
         issue["evidence"]["reasons"] = [
             {
@@ -369,35 +369,73 @@ class TestEvidenceProjection:
                 "phase": "exclusion_audit",
                 "message": "Inspection reached its configured runtime limit.",
                 "analyzers": [],
-                "limits": {"limit_seconds": 30.0, "observed_seconds": seconds},
+                "limits": {"limit_seconds": limit, "observed_seconds": observed},
             }
-            for seconds in elapsed
+            for limit, observed in runs
         ]
         finding, is_error = SecurityValidator._convert_skillspector_issue(issue)
         assert is_error
         return finding
 
-    def test_run_time_does_not_change_the_finding_id(self) -> None:
-        """Two runs that differ only in the measured run time give the same suggestion and ``finding_id``."""
-        first = self._runtime_limit_finding(30.0412)
-        second = self._runtime_limit_finding(30.1877)
+    @pytest.mark.parametrize(
+        ("first_run", "second_run"),
+        [
+            ((30.0, 30.0412), (30.0, 30.1877)),
+            ((29.99847808299819, 30.0012), (29.998489167017397, 30.0441)),
+            ((12.5, 0.0), (7.25, 0.0)),
+        ],
+        ids=["run-time", "dependency-budget-left", "yara-budget-left"],
+    )
+    def test_run_time_and_time_budget_do_not_change_the_finding_id(
+        self, first_run: tuple[float, float], second_run: tuple[float, float]
+    ) -> None:
+        """Two runs that differ only in the run time and the time budget give the same suggestion and ``finding_id``.
+
+        SkillSpector sets ``limit_seconds`` to the part of the scan's time
+        budget left when a step began, such as the dependency analysis of a
+        lockfile, or each file that YARA did not reach (with an
+        ``observed_seconds`` of 0), so it differs from run to run as well.
+        """
+        first = self._runtime_limit_finding(first_run)
+        second = self._runtime_limit_finding(second_run)
 
         assert first.suggestion == second.suggestion
         assert first.finding_id == second.finding_id
-        assert "runtime_limit: Inspection reached its configured runtime limit; limit_seconds=30.0." in first.suggestion
-        assert "observed_seconds" not in first.suggestion
-        # The metadata, which the ID does not hash, keeps what each run measured.
+        assert "runtime_limit: Inspection reached its configured runtime limit. " in first.suggestion
+        assert "_seconds" not in first.suggestion
+        # The metadata, which the ID does not hash, keeps what each run recorded.
         assert [finding.metadata["skillspector_evidence"]["reasons"][0]["limits"] for finding in (first, second)] == [
-            {"observed_seconds": 30.0412, "limit_seconds": 30.0},
-            {"observed_seconds": 30.1877, "limit_seconds": 30.0},
+            {"limit_seconds": limit, "observed_seconds": observed} for limit, observed in (first_run, second_run)
         ]
 
+    def test_a_time_limit_is_left_out_beside_a_size_limit(self) -> None:
+        """Only the time limits leave the suggestion; a limit that the file and configuration fix stays."""
+        issue = _report(_PARSE_LIMIT_REPORT)["issues"][0]
+        issue["evidence"]["reasons"][0]["limits"] = {
+            "observed_characters": 9000,
+            "limit_characters": 8000,
+            "observed_seconds": 2.5,
+            "limit_seconds": 17.75,
+        }
+
+        finding, is_error = SecurityValidator._convert_skillspector_issue(issue)
+
+        assert is_error
+        assert "; limit_characters=8000, observed_characters=9000." in finding.suggestion
+        assert "_seconds" not in finding.suggestion
+        assert finding.metadata["skillspector_evidence"]["reasons"][0]["limits"] == {
+            "observed_characters": 9000,
+            "limit_characters": 8000,
+            "observed_seconds": 2.5,
+            "limit_seconds": 17.75,
+        }
+
     def test_reasons_that_differ_only_in_run_time_are_described_once(self) -> None:
-        finding = self._runtime_limit_finding(1.5, 2.5)
+        finding = self._runtime_limit_finding((30.0, 1.5), (12.0, 2.5))
 
         assert len(finding.metadata["skillspector_evidence"]["reasons"]) == 2
         assert finding.suggestion.count("runtime_limit") == 1
-        assert finding.finding_id == self._runtime_limit_finding(3.5).finding_id
+        assert finding.finding_id == self._runtime_limit_finding((5.0, 3.5)).finding_id
 
     @patch("skillevaluator.validators.security.Tools")
     def test_an_oversized_limit_does_not_stop_the_scan(self, mock_tools, tmp_path: Path) -> None:

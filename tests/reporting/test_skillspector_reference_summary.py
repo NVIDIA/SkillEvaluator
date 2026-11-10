@@ -119,13 +119,13 @@ def test_failed_reports_show_the_counts(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def test_copies_that_differ_only_in_run_time_are_one_unique_finding() -> None:
-    """Two copies of one reference line whose reasons differ only in the measured run time group as one finding.
+    """Two copies of one reference line whose reasons differ only in the run time and time budget group as one finding.
 
     With ``--llm`` both stages report the line, and they are not merged when
     the second stage is incomplete.
     """
     result = ValidationResult(validator_name="Security Scan")
-    for seconds in (30.0412, 30.1877):
+    for limit, observed in ((29.99847808299819, 30.0012), (29.998489167017397, 30.0441)):
         issue = json.loads(_PARSE_LIMIT_REPORT.read_text(encoding="utf-8"))["issues"][0]
         issue["evidence"]["reasons"] = [
             {
@@ -133,7 +133,7 @@ def test_copies_that_differ_only_in_run_time_are_one_unique_finding() -> None:
                 "phase": "exclusion_audit",
                 "message": "Inspection reached its configured runtime limit.",
                 "analyzers": [],
-                "limits": {"limit_seconds": 30.0, "observed_seconds": seconds},
+                "limits": {"limit_seconds": limit, "observed_seconds": observed},
             }
         ]
         finding, _is_error = SecurityValidator._convert_skillspector_issue(issue)

@@ -64,12 +64,14 @@ All notable changes to SkillEvaluator are documented in this file.
   SkillSpector gives, such as
   `static_parse_limit (static_patterns_tool_misuse)`, with any line and limits,
   and the finding's metadata records them under `skillspector_evidence` and
-  `skillspector_occurrences`. The suggestion leaves out the measured run time,
-  so a finding keeps its `finding_id` from run to run; because the suggestion
-  text is new, each AE1 `finding_id` changes once with this release. Before, the
-  finding said only `Referenced artifact was not completely inspected`, and its
-  reason had to be matched by hand against the incomplete-analysis error, which
-  lists at most three rows. With SkillSpector before v2.12.0 the finding was
+  `skillspector_occurrences`. The suggestion leaves out the run time and the
+  time budget (`observed_seconds`, `limit_seconds`), which differ from run to
+  run, so a finding keeps its `finding_id` from run to run; because the
+  suggestion text is new, each AE1 `finding_id` changes once with this release.
+  Before, the finding said only
+  `Referenced artifact was not completely inspected`, and its reason had to be
+  matched by hand against the incomplete-analysis error, which lists at most
+  three rows. With SkillSpector before v2.12.0 the finding was
   titled `Unknown (AE1)` and told the user to make the file available although
   SkillSpector had read part of it. It now carries the rule's name and the
   reasons from the report's ledger rows for the file. Its check name, and so its

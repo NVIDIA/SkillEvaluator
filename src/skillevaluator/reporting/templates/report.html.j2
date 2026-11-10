@@ -2523,6 +2523,12 @@
                 {% endif %}
                 {% endif %}
             </div>
+            {% if tier3_dataset_sufficiency and tier3_dataset_sufficiency.coverage_summary %}
+            <p class="t3-dataset-sufficiency{% if tier3_dataset_sufficiency.status == 'provisional' %} warning{% endif %}"
+               {% if tier3_dataset_sufficiency.status == 'provisional' %}style="color:var(--warning-color);font-weight:600"{% endif %}>
+                {{ tier3_dataset_sufficiency.coverage_summary }}
+            </p>
+            {% endif %}
             {% if tier3_dataset_provenance_line %}
             <p class="t3-dataset-provenance{{ ' warning' if tier3_dataset_provenance_warning else '' }}">{{ tier3_dataset_provenance_line }}</p>
             {% endif %}

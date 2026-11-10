@@ -67,6 +67,29 @@ _NEGATIVE_CONTROL_SEMANTIC_PATTERNS = (
 )
 
 
+_REQUIREMENT_NOUN = (
+    r"(?:expectations?|expected(?:\s+(?:output|answer|result))?|assertions?|ground[\s_-]*truth|"
+    r"pass[\s_-]*thresholds?|thresholds?|requirements?|criteria)"
+)
+_WEAKENING_VERB = (
+    r"(?:loosen(?:s|ed|ing)?|relax(?:es|ed|ing)?|weaken(?:s|ed|ing)?|lower(?:s|ed|ing)?|soften(?:s|ed|ing)?)"
+)
+_REQUIREMENT_DETERMINER = (
+    r"(?:the|a|an|my|your|our|their|its|this|that|these|those|any|each|every|all|both|"
+    r"[A-Za-z0-9_-]+(?:'s|\u2019s))"
+)
+_WEAKENING_PATTERN = re.compile(
+    rf"\b{_WEAKENING_VERB}\b(?:\s+{_REQUIREMENT_DETERMINER}){{0,3}}\s+{_REQUIREMENT_NOUN}\b",
+    re.IGNORECASE,
+)
+_PASSIVE_WEAKENING_PATTERN = re.compile(
+    rf"\b{_REQUIREMENT_NOUN}\b[\w\s,'\u2019_-]{{0,48}}\b"
+    rf"(?:is|are|was|were|be|been|being|should\s+be|must\s+be|ought\s+to\s+be|will\s+be)\s+"
+    rf"{_WEAKENING_VERB}\b",
+    re.IGNORECASE,
+)
+
+
 _SYSTEM_PROMPT = """\
 You are an expert Skill Quality Reviewer summarising a Tier 3 (live agent)
 evaluation of an Agent Skill.
@@ -128,6 +151,14 @@ an error message, or a comparison).
 RECOMMENDATIONS (up to {max_recommendations}): concrete, actionable next
 steps for the skill author. Each must be one short imperative sentence.
 Tag each with a category from this set: {categories}.
+- Make each recommendation a distinct action; do not restate a
+  deterministic recommendation or another recommendation in other words.
+- Never recommend loosening, relaxing, or lowering an expectation,
+  assertion, ground truth, or pass threshold so that a failing agent passes.
+- Recommend a different agent or model only when the supplied trials compare
+  agents; otherwise phrase it as an experiment to try ("Try ... to test
+  whether ..."). Phrase any cause the evidence does not establish the same
+  way.
 
 SEVERITY: tag every conclusion and recommendation with one of:
 - \"pass\"   - positive observation / low-effort recommendation
@@ -439,6 +470,20 @@ def _text_case_ids(text: str, known_case_ids: set[str]) -> set[str]:
     return references
 
 
+def _weakens_requirements(text: str) -> bool:
+    for pattern in (_WEAKENING_PATTERN, _PASSIVE_WEAKENING_PATTERN):
+        for match in pattern.finditer(text):
+            prefix = text[max(0, match.start() - 48) : match.start()]
+            if re.search(r"\b(?:do\s+not|don't|never|avoid)(?:\s+\w+){0,2}\s*$", prefix, re.IGNORECASE):
+                continue
+            return True
+    return False
+
+
+def _normalized_text(text: object) -> str:
+    return " ".join(str(text or "").lower().split())
+
+
 def _has_negative_control_semantics(text: str) -> bool:
     return any(pattern.search(text) for pattern in _NEGATIVE_CONTROL_SEMANTIC_PATTERNS)
 
@@ -562,6 +607,8 @@ class InsightsJudge(LLMClient):
                 }
             )
 
+        deterministic = kwargs.get("deterministic") if isinstance(kwargs.get("deterministic"), dict) else {}
+        seen_messages = {_normalized_text(text) for text in deterministic.get("suggestions") or []}
         recommendations: list[dict] = []
         for item in (data.get("recommendations") or [])[:INSIGHTS_JUDGE_MAX_RECOMMENDATIONS]:
             if not isinstance(item, dict):
@@ -572,6 +619,11 @@ class InsightsJudge(LLMClient):
             message = (item.get("message") or "").strip()
             if not title and not message:
                 continue
+            if _weakens_requirements(title) or _weakens_requirements(message):
+                continue
+            if (key := _normalized_text(message or title)) in seen_messages:
+                continue
+            seen_messages.add(key)
             recommendations.append(
                 {
                     "claim_type": item["claim_type"],

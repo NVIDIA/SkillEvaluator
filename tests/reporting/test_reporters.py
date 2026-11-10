@@ -2398,6 +2398,7 @@ class TestMarkdownReporter:
 
         output = MarkdownReporter(include_timestamp=False).render_all([result])
 
+        assert "Skill Lift = +0.20" in output
         assert SKILL_LIFT_DEFINITION in output
         assert "Pass@2 (supporting reliability" in output
         assert "Pass-rate difference +25.0 percentage points" in output

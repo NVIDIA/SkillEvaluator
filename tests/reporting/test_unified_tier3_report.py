@@ -15,6 +15,7 @@ from skillevaluator.evaluation.tier3_report import (
     _attach_harbor_evidence_to_conclusions,
     _attach_harbor_evidence_to_recommendations,
     _attach_harbor_evidence_to_suggestions_v2,
+    _build_conclusions,
     _cases,
     _evaluator_cards,
     _metric_evidence,
@@ -227,6 +228,81 @@ def test_normalize_trials_uses_configured_attempt_threshold_for_attempt_verdict(
 
     assert trial["overall"] == 0.46
     assert trial["attempt_verdict"]["passed"] is True
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["goal not met (goal accuracy 0.00)", "security issue (security 0.00)"],
+)
+def test_build_conclusions_counts_unscored_required_attempt_failure_as_failing(reason: str) -> None:
+    conclusions = _build_conclusions(
+        {
+            "codex": {
+                "with_skill": 0.5,
+                "trials": [
+                    {
+                        "entry_id": "case-1",
+                        "overall": None,
+                        "attempt_verdict": {"passed": False, "reason": reason},
+                    }
+                ],
+            }
+        },
+        [],
+        pass_threshold=0.5,
+    )
+
+    assert any(item["title"] == "Cases needing review" for item in conclusions)
+    assert not any(item["title"] == "Unscored trials" for item in conclusions)
+
+
+def test_build_conclusions_counts_unscored_only_attempt_as_unscored() -> None:
+    conclusions = _build_conclusions(
+        {
+            "codex": {
+                "with_skill": 0.5,
+                "trials": [
+                    {
+                        "entry_id": "case-1",
+                        "overall": None,
+                        "attempt_verdict": {"passed": False, "reason": "overall score was not available"},
+                    }
+                ],
+            }
+        },
+        [],
+        pass_threshold=0.5,
+    )
+
+    assert any(item["title"] == "Unscored trials" for item in conclusions)
+    assert not any(item["title"] == "Cases needing review" for item in conclusions)
+
+
+@pytest.mark.parametrize(
+    ("overall", "expected_title"),
+    [(None, "Unscored trials"), (0.4, "Cases needing review")],
+)
+def test_build_conclusions_falls_back_to_overall_without_boolean_attempt_verdict(
+    overall: float | None, expected_title: str
+) -> None:
+    conclusions = _build_conclusions(
+        {
+            "codex": {
+                "with_skill": 0.5,
+                "trials": [
+                    {
+                        "entry_id": "case-1",
+                        "overall": overall,
+                        "attempt_verdict": {"passed": None},
+                    }
+                ],
+            }
+        },
+        [],
+        pass_threshold=0.5,
+    )
+
+    assert any(item["title"] == expected_title for item in conclusions)
 
 
 def test_report_attempt_chip_uses_configured_attempt_threshold() -> None:

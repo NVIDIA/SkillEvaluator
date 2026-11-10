@@ -19,6 +19,10 @@ All notable changes to SkillEvaluator are documented in this file.
   `tier3 import-traces`, then promote only explicitly human-reviewed expectations
   and replay fixtures with `tier3 accept-traces`.
 
+- Document per-agent Tier 3 `findings.json` artifacts and distinguish advisory
+  metric severity from dimension verdicts; include severity thresholds in the
+  artifact and a muted CLI legend without changing scores or thresholds.
+
 - `tier3 import-metrics` accepts versioned, normalized per-case custom scores
   from external evaluations and writes clearly labeled JSON/Markdown reports.
   Imports validate identities, metric metadata and values, retain declared

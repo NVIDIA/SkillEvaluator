@@ -52,6 +52,7 @@ from skillevaluator.reporting.base import (
 from skillevaluator.reporting.run_status import resolve_run_status
 from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
 from skillevaluator.source_identity import evaluated_source_revision, recorded_evaluated_source
+from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
 
 if TYPE_CHECKING:
@@ -389,6 +390,10 @@ class BenchmarkReporter(ReporterBase):
         else:
             lines.append("- Tasks: not recorded (legacy or non-live result)")
 
+        dataset_line, _ = dataset_provenance_display(ae.get("dataset_provenance") if ae else None)
+        if dataset_line:
+            lines.append(f"- {_publication_safe_inline(dataset_line)}")
+
         dataset_provenance = agent_eval_publication_dataset_provenance(ae)
         if dataset_provenance is not None:
             digest, digest_algorithm = dataset_provenance
@@ -477,14 +482,40 @@ class BenchmarkReporter(ReporterBase):
         lines.append("|---|" + "|".join(["---:"] * len(agents)) + "|")
 
         overall_row = ["Overall"]
-        overall_row.extend(
-            _score_transition_values(
-                agent.get("baseline"),
-                agent.get("with_skill", agent.get("overall_score")),
-                skill_never_activated=_mapping(agent.get("skill_activation")).get("status") == "never_activated",
+        shared_basis_agents: dict[tuple[str, ...], list[str]] = {}
+        for name, agent in agents.items():
+            with_skill = agent.get("with_skill", agent.get("overall_score"))
+            baseline = agent.get("baseline")
+            lift_overall = _mapping(agent.get("lift_overall"))
+            if (
+                _number(lift_overall.get("with_skill")) is not None
+                and _number(lift_overall.get("baseline")) is not None
+            ):
+                # Show the scores the published lift subtracts so the row matches it.
+                if _number(lift_overall["with_skill"]) != _number(with_skill) or _number(
+                    lift_overall["baseline"]
+                ) != _number(baseline):
+                    basis = _mapping(agent.get("lift_basis"))
+                    excluded_metrics = basis.get("excluded_metrics")
+                    excluded_cases = basis.get("excluded_cases")
+                    causes = []
+                    if isinstance(excluded_metrics, list) and any(
+                        _mapping(item).get("reason") == "not_applicable" for item in excluded_metrics
+                    ):
+                        causes.append("dimensions only one arm scored")
+                    if isinstance(excluded_cases, list) and any(
+                        _mapping(item).get("reason") == "judge_mixed" for item in excluded_cases
+                    ):
+                        causes.append("cases judged by different models")
+                    shared_basis_agents.setdefault(tuple(causes), []).append(name)
+                with_skill, baseline = lift_overall["with_skill"], lift_overall["baseline"]
+            overall_row.append(
+                _score_transition_values(
+                    baseline,
+                    with_skill,
+                    skill_never_activated=_mapping(agent.get("skill_activation")).get("status") == "never_activated",
+                )
             )
-            for agent in agents.values()
-        )
         lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in overall_row) + " |")
 
         has_partial = False
@@ -521,6 +552,35 @@ class BenchmarkReporter(ReporterBase):
                 "",
             ]
         )
+        if shared_basis_agents:
+            for causes, names in shared_basis_agents.items():
+                if causes == ("dimensions only one arm scored",):
+                    explanation = (
+                        "compares only the dimensions both arms scored, matching the published Skill Lift; "
+                        "the detailed report's Overall scores can also include dimensions only one arm scored"
+                    )
+                elif causes == ("cases judged by different models",):
+                    explanation = (
+                        "compares cases judged by the same model in both arms, matching the published Skill Lift; "
+                        "the detailed report's Overall scores can include cases judged by different models"
+                    )
+                elif causes:
+                    explanation = (
+                        "uses the dimensions both arms scored and cases judged by the same model, matching the "
+                        "published Skill Lift; the detailed report's Overall scores can include other dimensions "
+                        "or cases"
+                    )
+                else:
+                    explanation = (
+                        "uses the shared comparison basis for the published Skill Lift; the detailed report's "
+                        "arm Overall scores can differ"
+                    )
+                lines.extend(
+                    [
+                        _md_cell("Overall for " + ", ".join(names) + " " + explanation + ".", private_labels),
+                        "",
+                    ]
+                )
         if has_partial:
             lines.extend(
                 [

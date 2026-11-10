@@ -778,13 +778,15 @@ def evaluate(
                 environment_kwargs=merged_environment_kwargs,
                 override_storage_mb=override_storage_mb,
                 agent_runtime_preflight=bool(agent_runtime_preflight),
-                reuse_baseline=reuse_baseline,
-                compare_to=compare_to,
-                max_agent_tokens=max_agent_tokens,
-                max_judge_calls=max_judge_calls,
-                max_attempts_total=max_attempts_total,
-                max_cost_usd=max_cost_usd,
-                price_file=price_file,
+                run_options={
+                    "reuse_baseline": reuse_baseline,
+                    "compare_to": compare_to,
+                    "max_agent_tokens": max_agent_tokens,
+                    "max_judge_calls": max_judge_calls,
+                    "max_attempts_total": max_attempts_total,
+                    "max_cost_usd": max_cost_usd,
+                    "price_file": price_file,
+                },
             )
             multi_model_agents = sorted(agent for agent, models in agent_models.items() if len(models) != 1)
             if multi_model_agents:

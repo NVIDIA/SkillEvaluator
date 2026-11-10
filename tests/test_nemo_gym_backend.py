@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
+import click
 import pytest
 
 from skillevaluator.evaluation.options import EvaluationOptions
@@ -1778,3 +1780,118 @@ def test_direct_run_probes_once_before_provider_resolution_and_staging(
     observed = events.read_text().splitlines()
     assert observed.count("probe") == 1, observed
     assert observed.index("probe") < observed.index("provider") < observed.index("stage")
+
+
+def test_gym_cli_probe_ignores_wrapped_option_prose_starting_with_tasks(tmp_path: Path) -> None:
+    from skillevaluator.tier3.nemo_gym.backend import nemo_gym_cli_error
+
+    # The 792fa142 help wraps --only-tasks at 80 columns onto a line that starts with "tasks".
+    gym = tmp_path / "gym"
+    gym.write_text(
+        "#!/bin/sh\ncat <<'HELP'\n"
+        "usage: gym eval run [-h] [--sandbox PROVIDER] [--agent AGENT] [--only-tasks PATTERNS]\n"
+        "                    [--model-type NAME] [--model MODEL] [--model-url MODEL_URL]\n"
+        "                    [--output OUTPUT] [--concurrency CONCURRENCY]\n\n"
+        "options:\n"
+        "  --sandbox PROVIDER    Sandbox provider.\n"
+        "  --agent AGENT         Agent harness.\n"
+        "  --only-tasks PATTERNS\n"
+        "                        Comma-separated glob patterns that select the\n"
+        "                        tasks of a task TARGET run.\n"
+        "  --model-type NAME     Model server type.\n"
+        "  --model MODEL         Policy model.\n"
+        "  --model-url MODEL_URL Policy URL.\n"
+        "  --output OUTPUT       Rollouts JSONL.\n"
+        "  --concurrency CONCURRENCY\n"
+        "                        Parallel rollouts.\n"
+        "HELP\n"
+    )
+    gym.chmod(0o755)
+    error = nemo_gym_cli_error(str(gym))
+    assert error is not None and "missing: positional tasks directory." in error
+
+
+@pytest.mark.parametrize(
+    ("option", "value", "flag"),
+    [
+        ("reuse_baseline", "latest", "--reuse-baseline"),
+        ("compare_to", "latest", "--compare-to"),
+        ("max_agent_tokens", 1000, "--max-agent-tokens"),
+        ("max_judge_calls", 5, "--max-judge-calls"),
+        ("max_attempts_total", 1, "--max-attempts-total"),
+        ("max_cost_usd", 1.0, "--max-cost-usd"),
+        ("price_file", Path("prices.json"), "--price-file"),
+    ],
+)
+def test_nemo_gym_rejects_unsupported_run_options(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, option: str, value: object, flag: str
+) -> None:
+    from skillevaluator.tier3.workflow import nemo_gym_preflight_errors
+
+    with pytest.raises(ValueError, match=re.escape(f"{flag} is not supported with --backend nemo-gym")):
+        _evaluate(monkeypatch, tmp_path, backend="nemo-gym", **{option: value})
+    errors = nemo_gym_preflight_errors(tmp_path, {"agents": "codex", "env_mode": "docker", option: value})
+    assert f"{flag} is not supported with --backend nemo-gym yet" in errors
+
+
+def test_nemo_gym_rejects_budget_config(tmp_path: Path) -> None:
+    from skillevaluator.tier3.nemo_gym.backend import nemo_gym_config_errors
+
+    (tmp_path / "evals").mkdir()
+    (tmp_path / "evals" / "config.yml").write_text("schema_version: 1\nharbor:\n  max_attempts_total: 1\n")
+    assert "harbor.max_attempts_total is not supported with --backend nemo-gym yet" in nemo_gym_config_errors(tmp_path)
+    assert not any(
+        "max_attempts_total" in error
+        for error in nemo_gym_config_errors(tmp_path, run_options={"max_attempts_total": 2})
+    )
+
+
+def test_autopilot_skips_harbor_agent_preflight_for_nemo_gym(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from click.testing import CliRunner
+
+    from skillevaluator import cli as cli_module
+    from skillevaluator.evaluation import EvaluationService
+    from skillevaluator.tier3 import workflow
+    from skillevaluator.tier3.harbor import runner
+
+    seen: list[dict[str, object]] = []
+    prepare_dataset = cli_module._ensure_autopilot_dataset
+
+    def _prepare(path, **kwargs):
+        seen.append(kwargs["evaluation_params"])
+        return prepare_dataset(path, **kwargs)
+
+    def _generate(_self, path, *, use_llm):
+        assert use_llm is True
+        (path / "evals").mkdir(exist_ok=True)
+        (path / "evals" / "evals.json").write_text(
+            json.dumps({"skill_name": "s", "evals": [{"id": "sum", "prompt": "Add 2 and 3.", "expected_output": "5"}]})
+        )
+
+    def _stop_evaluation(*_args, **_kwargs):
+        raise click.ClickException("stop after generation")
+
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-generation-key")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(workflow, "nemo_gym_preflight_errors", lambda *_args: [])
+    monkeypatch.setattr(
+        runner,
+        "_resolve_agent_runtime_plan",
+        lambda **_kwargs: pytest.fail("Gym must not use Harbor agent credentials"),
+    )
+    monkeypatch.setattr(
+        runner, "_check_prerequisites", lambda **_kwargs: pytest.fail("Gym must not check Harbor prerequisites")
+    )
+    monkeypatch.setattr(cli_module, "_ensure_autopilot_dataset", _prepare)
+    monkeypatch.setattr(EvaluationService, "create_autopilot_dataset", _generate)
+    monkeypatch.setattr(EvaluationService, "evaluate", _stop_evaluation)
+    (tmp_path / "SKILL.md").write_text("---\nname: s\ndescription: d\n---\n")
+    result = CliRunner().invoke(
+        cli_module.cli, ["evaluate", str(tmp_path), "--backend", "nemo-gym", "--autopilot", "--agents", "claude-code"]
+    )
+    assert "stop after generation" in result.output
+    assert (tmp_path / "evals" / "evals.json").is_file()
+    assert len(seen) == 1
+    assert seen[0]["backend"] == "nemo-gym"
+    assert seen[0]["agents"] == "claude-code"

@@ -282,19 +282,14 @@ def nemo_gym_preflight_errors(skill_path: Path, params: dict[str, Any]) -> list[
         override_storage_mb=params.get("override_storage_mb"),
         agent_runtime_preflight=bool(params.get("agent_runtime_preflight")),
         timeout_multiplier=params.get("timeout_multiplier"),
-        reuse_baseline=params.get("reuse_baseline"),
-        compare_to=params.get("compare_to"),
-        max_agent_tokens=params.get("max_agent_tokens"),
-        max_judge_calls=params.get("max_judge_calls"),
-        max_attempts_total=params.get("max_attempts_total"),
-        max_cost_usd=params.get("max_cost_usd"),
-        price_file=params.get("price_file"),
+        run_options=params,
     ) + nemo_gym_config_errors(
         skill_path,
         stop_on_pass=params.get("stop_on_pass"),
         timeout_multiplier=params.get("timeout_multiplier"),
         agent_runtime_preflight=params.get("agent_runtime_preflight"),
         custom_dockerfile_mode=params.get("custom_dockerfile_mode"),
+        run_options=params,
     )
     errors += nemo_gym_settings_errors()
     for url in (os.environ.get(MODEL_URL_ENV, "").strip(), str(params.get("model") or "")):

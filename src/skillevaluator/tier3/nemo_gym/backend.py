@@ -11,6 +11,7 @@ import shutil
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 HARBOR_BACKEND = "harbor"
@@ -148,7 +149,7 @@ def nemo_gym_cli_error(gym_bin: str) -> str | None:
     help_text = completed.output_tail
     flags = ("--sandbox", "--agent", "--model-type", "--model", "--model-url", "--output", "--concurrency")
     missing = [flag for flag in flags if not re.search(rf"(?<![\w-]){re.escape(flag)}(?=[\s,=]|$)", help_text)]
-    if not re.search(r"(?im)^\s+(?:tasks|task_dir|tasks_dir|task_folder|TARGET)\s+", help_text):
+    if not _declares_task_positional(help_text):
         missing.append("positional tasks directory")
     if missing:
         return (
@@ -157,6 +158,30 @@ def nemo_gym_cli_error(gym_bin: str) -> str | None:
             "No Harbor fallback was started."
         )
     return None
+
+
+def _declares_task_positional(help_text: str) -> bool:
+    """Whether argparse help lists a task-folder positional under ``positional arguments:``.
+
+    Only entries at argparse's two-space item indent count, so wrapped option prose that happens
+    to start with ``tasks`` (as ``--only-tasks`` does at 80 columns) is not mistaken for one.
+    """
+    section = re.search(r"(?ms)^positional arguments:\n(.*?)(?=^\S|\Z)", help_text)
+    return bool(
+        section and re.search(r"(?m)^ {2}(?:tasks|task_dir|tasks_dir|task_folder|TARGET)(?:\s|$)", section.group(1))
+    )
+
+
+_UNSUPPORTED_RUN_OPTIONS = (
+    ("reuse_baseline", "--reuse-baseline"),
+    ("compare_to", "--compare-to"),
+    ("max_agent_tokens", "--max-agent-tokens"),
+    ("max_judge_calls", "--max-judge-calls"),
+    ("max_attempts_total", "--max-attempts-total"),
+    ("max_cost_usd", "--max-cost-usd"),
+    ("price_file", "--price-file"),
+)
+_UNSUPPORTED_BUDGET_CONFIG = ("max_agent_tokens", "max_judge_calls", "max_attempts_total", "max_cost_usd", "price_file")
 
 
 def nemo_gym_capability_errors(
@@ -172,27 +197,10 @@ def nemo_gym_capability_errors(
     override_storage_mb: int | None = None,
     agent_runtime_preflight: bool = False,
     timeout_multiplier: float | None = None,
-    reuse_baseline: str | None = None,
-    compare_to: str | None = None,
-    max_agent_tokens: int | None = None,
-    max_judge_calls: int | None = None,
-    max_attempts_total: int | None = None,
-    max_cost_usd: float | None = None,
-    price_file: Path | None = None,
+    run_options: dict[str, Any] | None = None,
 ) -> list[str]:
     """Reject configurations the NeMo Gym backend cannot run equivalently, before anything starts."""
-    errors: list[str] = []
-    errors += nemo_gym_harbor_only_option_errors(
-        {
-            "reuse_baseline": reuse_baseline,
-            "compare_to": compare_to,
-            "max_agent_tokens": max_agent_tokens,
-            "max_judge_calls": max_judge_calls,
-            "max_attempts_total": max_attempts_total,
-            "max_cost_usd": max_cost_usd,
-            "price_file": price_file,
-        }
-    )
+    errors = nemo_gym_harbor_only_option_errors(run_options or {})
     if os.name != "posix":
         errors.append("--backend nemo-gym needs a POSIX host (Linux or macOS); NeMo Gym does not run on Windows")
     unsupported = [agent for agent in agents if agent not in NEMO_GYM_AGENTS]
@@ -228,18 +236,10 @@ def nemo_gym_capability_errors(
 def nemo_gym_harbor_only_option_errors(options: Mapping[str, object], *, from_config: bool = False) -> list[str]:
     """Reject baseline reuse, version comparison and budgets until Gym can honor them."""
     errors: list[str] = []
-    for name in (
-        "reuse_baseline",
-        "compare_to",
-        "max_agent_tokens",
-        "max_judge_calls",
-        "max_attempts_total",
-        "max_cost_usd",
-        "price_file",
-    ):
+    for name, flag in _UNSUPPORTED_RUN_OPTIONS:
         # Zero is an explicit limit, not an unset option.
         if options.get(name) is not None:
-            label = f"harbor.{name}" if from_config else f"--{name.replace('_', '-')}"
+            label = f"harbor.{name}" if from_config else flag
             errors.append(f"{label} is not supported with --backend nemo-gym yet")
     return errors
 
@@ -347,6 +347,7 @@ def nemo_gym_config_errors(
     timeout_multiplier: float | None = None,
     agent_runtime_preflight: bool | None = None,
     custom_dockerfile_mode: str | None = None,
+    run_options: dict[str, Any] | None = None,
 ) -> list[str]:
     """Reject ``evals/config.yml`` settings the NeMo Gym backend cannot honor, before any dataset work.
 
@@ -360,7 +361,10 @@ def nemo_gym_config_errors(
     except EvalsConfigError as exc:
         return [str(exc)]
     harbor = config.get("harbor") or {}
-    errors = nemo_gym_harbor_only_option_errors(harbor, from_config=True)
+    unsupported_config = {
+        name: harbor.get(name) for name in _UNSUPPORTED_BUDGET_CONFIG if (run_options or {}).get(name) is None
+    }
+    errors = nemo_gym_harbor_only_option_errors(unsupported_config, from_config=True)
     if stop_on_pass is None and harbor.get("stop_on_pass"):
         errors.append("harbor.stop_on_pass is not supported with --backend nemo-gym yet")
     if agent_runtime_preflight is None and harbor.get("agent_runtime_preflight"):

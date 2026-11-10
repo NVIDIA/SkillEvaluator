@@ -45,6 +45,7 @@ def test_keyed_gym_generates_with_its_endpoint_and_one_compatibility_probe(
         "assert sys.argv[1:] == ['eval', 'run', '--help']\n"
         f"with pathlib.Path({str(probe_log)!r}).open('a') as log: log.write('probe\\n')\n"
         "print('usage: gym eval run TARGET --sandbox --agent --model-type --model --model-url --output --concurrency')\n"
+        "print('\\npositional arguments:')\n"
         "print('  TARGET  Harbor task folder')\n"
     )
     gym.chmod(0o755)

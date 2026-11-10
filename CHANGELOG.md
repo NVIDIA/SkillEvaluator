@@ -63,12 +63,13 @@ All notable changes to SkillEvaluator are documented in this file.
   in place of a configured Claude 5.5 or later model. A duplicate finding
   records the model that gave its verdict as `llm_model_used`, with
   `llm_provider`, in its metadata, and the Tier 2 `llm_analysis` object adds
-  `models_used`, every model that answered a cluster. `llm_analysis.model`
-  stays the configured model, and an `llm_refused` finding still names the
-  configured model as `llm_model`. Each finding that gets an `--llm-verify`
-  verdict records `llm_provider` and `llm_model_used` as well, including a
-  verdict kept from a reply cut off at the output-token limit. A model name
-  that is not a plain identifier, such as a URL or a key, reads `unresolved`.
+  `models_used`, every model that gave a cluster's verdict.
+  `llm_analysis.model` stays the configured model, and an `llm_refused`
+  finding still names the configured model as `llm_model`. Each finding that
+  gets an `--llm-verify` verdict records `llm_provider` and `llm_model_used`
+  as well, including a verdict kept from a reply cut off at the output-token
+  limit. A model name that is not a plain identifier, such as a URL or a key,
+  reads `unresolved`.
 
 ### Changed
 

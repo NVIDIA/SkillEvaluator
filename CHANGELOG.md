@@ -19,6 +19,10 @@ All notable changes to SkillEvaluator are documented in this file.
   without-skill evidence, preserving lift calculations and baseline provenance.
   `latest` searches completed runs and falls back to a fresh baseline when needed.
 
+- Document per-agent Tier 3 `findings.json` artifacts and distinguish advisory
+  metric severity from dimension verdicts; include severity thresholds in the
+  artifact and a muted CLI legend without changing scores or thresholds.
+
 - `tier3 import-metrics` accepts versioned, normalized per-case custom scores
   from external evaluations and writes clearly labeled JSON/Markdown reports.
   Imports validate identities, metric metadata and values, retain declared

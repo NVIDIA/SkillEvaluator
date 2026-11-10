@@ -7,6 +7,7 @@ import base64
 import json
 import math
 import re
+from html import unescape
 from pathlib import Path
 
 import pytest
@@ -1570,6 +1571,44 @@ def test_canonical_html_tolerates_legacy_string_evidence_refs() -> None:
     assert "trajectory.json#/steps/14" in agents_html
 
 
+def test_tier3_html_renders_plain_accuracy_reason_and_unavailable_evidence() -> None:
+    scores = dict.fromkeys(DEFAULT_METRICS, 1.0)
+    scores["accuracy"] = 0.2
+    reward = {
+        "entry_id": "case-plain-language",
+        **scores,
+        "details": {
+            "accuracy": {
+                "reason": "The answer was inaccurate",
+                "criteria": {"FACTUALLY_ACCURATE": False},
+                "ground_truth": "correct result",
+                "final_answer": "wrong result",
+            }
+        },
+    }
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": scores,
+                "rewards": [reward],
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    agents_html = unescape(_tier3_page(_render_agent_payload(payload), "agents", "dataset"))
+
+    assert "Failed criteria: FACTUALLY_ACCURATE" in agents_html
+    assert "Expected: correct result; observed: wrong result" in agents_html
+    assert "Evidence unavailable — No trajectory evidence was recorded for this metric" in agents_html
+
+
 def test_canonical_payload_deduplicates_repeated_metric_evidence() -> None:
     reward = {
         "entry_id": "case-1",
@@ -1602,6 +1641,7 @@ def test_canonical_payload_deduplicates_repeated_metric_evidence() -> None:
             "failures": [],
             "checks": [],
             "evidence_refs": [],
+            "evidence_unavailable_reason": "No trajectory evidence was recorded for this metric",
             "occurrences": 2,
         }
     ]

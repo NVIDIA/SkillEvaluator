@@ -6,6 +6,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Show per-agent evidence volume next to Tier 3 scores: distinct cases, planned
+  and scored attempts, execution and judge failures, and per-arm counts when a
+  baseline ran. Flag limited case coverage or incomplete attempt coverage;
+  distinguish uniform from early-stopped attempts, and retain case counts from
+  legacy summaries where available.
+
 - Report dataset sufficiency as sufficient or provisional using distinct-case,
   negative-case, Wilson interval, and paired-case coverage requirements. Show
   the dataset-size status in evaluation, validation, HTML, and BENCHMARK output;
@@ -15,7 +21,6 @@ All notable changes to SkillEvaluator are documented in this file.
   pinned to Hermes v2026.9.24. Includes isolated skill staging, ATIF trajectories,
   activation evidence, token accounting and retained execution diagnostics.
   Other providers/environments fail early; existing agent defaults are unchanged.
-
 - Tier 3 generation provenance distinguishes LLM, requested-template, and
   template-fallback datasets, marks trace refinement and autopilot generation,
   and displays the source and review state in terminal, HTML, and BENCHMARK
@@ -121,6 +126,10 @@ All notable changes to SkillEvaluator are documented in this file.
   verdict, dimension and overall scores, BENCHMARK Uplift, published Skill Lift,
   pass@k, the Tier 1
   Quality Score, and publication eligibility.
+
+- Write Tier 3 accuracy deductions as plain-language reasons, identify findings
+  without trajectory evidence, and include expected/observed text only when
+  both values are recorded.
 
 - Tier 3 LLM suggestions and insight recommendations now keep only evidence
   references the run recorded (cited references that don't resolve are

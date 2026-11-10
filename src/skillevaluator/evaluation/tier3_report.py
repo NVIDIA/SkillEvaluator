@@ -795,6 +795,7 @@ def build_agent_eval_payload(
             report_budget,
             baseline_only=baseline_only,
         )
+    _attach_activation_expectations(agent_payloads, dataset or [], skill_name)
     best = agent_payloads.get(best_agent, {})
     if suggestions_v2 is None and run_dir is not None:
         # Findings are per-agent evidence. Resolve the canonical best agent
@@ -2910,6 +2911,7 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
     from skillevaluator.tier3.harbor.metrics import (
         DEFAULT_METRIC_SET,
         LEGACY_METRIC_SET,
+        metric_is_not_applicable,
         metric_set_for_reward,
         metric_set_for_rewards,
         metric_value,
@@ -2992,9 +2994,17 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
             (not declared_metric_set or str(declared_metric_set) in standard_metric_sets)
             and metric_set in standard_metric_sets
             and "skill_execution" in standard_metrics
-            and metric_value(reward, "skill_execution") is not None
+            and (
+                metric_value(reward, "skill_execution") is not None
+                or metric_is_not_applicable(reward, "skill_execution")
+            )
         )
-        if not is_multi_row and is_standard_reward and reward.get("invocation_evidence_source") == "trajectory":
+        if (
+            not is_multi_row
+            and reward.get("invocation_evidence_scope") != "step"
+            and is_standard_reward
+            and reward.get("invocation_evidence_source") == "trajectory"
+        ):
             for key in ("skill_invoked", "routing_passed"):
                 if type(reward.get(key)) is bool:
                     trial[key] = reward[key]
@@ -3003,8 +3013,121 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
         harbor_viewer = _normalize_harbor_viewer_metadata(reward.get("harbor_viewer"))
         if harbor_viewer:
             trial["harbor_viewer"] = harbor_viewer
+        trial["activation_validation"] = _trial_activation_validation(group, trial)
         out.append(trial)
     return out
+
+
+def _trusted_observed_activation(reward: dict[str, Any]) -> str:
+    """Project collector-issued invocation evidence; never inspect trajectory or scores as proof."""
+    from skillevaluator.tier3.harbor.metrics import (
+        DEFAULT_METRIC_SET,
+        LEGACY_METRIC_SET,
+        metric_is_not_applicable,
+        metric_set_for_reward,
+        metric_value,
+    )
+
+    standard_sets = {DEFAULT_METRIC_SET, LEGACY_METRIC_SET}
+    declared = reward.get("metric_set") or reward.get("metric_set_version")
+    metric_set, metrics = metric_set_for_reward(reward)
+    if (
+        (declared and str(declared) not in standard_sets)
+        or metric_set not in standard_sets
+        or "skill_execution" not in metrics
+        or (metric_value(reward, "skill_execution") is None and not metric_is_not_applicable(reward, "skill_execution"))
+        or reward.get("invocation_evidence_source") != "trajectory"
+    ):
+        return "unknown"
+    invoked = reward.get("skill_invoked")
+    return ("invoked" if invoked else "not_invoked") if type(invoked) is bool else "unknown"
+
+
+def _trial_activation_validation(group: list[dict[str, Any]], trial: dict[str, Any]) -> dict[str, Any]:
+    """Keep routing, task quality, workflow and resources at their observed scopes.
+
+    Fallback reward rows do not prove a complete logical trajectory. Even when
+    every retained row says non-use, omitted steps may have used the skill.
+    Only a collector-produced single/merged root can certify logical non-use.
+    """
+    scopes: list[dict[str, Any]] = []
+    for index, reward in enumerate(group[:_MAX_EVIDENCE_PER_CARD]):
+        scope: dict[str, Any] = {"reward_row": index, "observed_activation": _trusted_observed_activation(reward)}
+        artifacts = reward.get("_activation_artifacts")
+        if isinstance(artifacts, dict):
+            scope["artifacts"] = {
+                key: value
+                for key, value in artifacts.items()
+                if key in {"reward", "trajectory"}
+                and isinstance(value, str)
+                and len(value) <= 4096
+                and not Path(value).is_absolute()
+                and ".." not in Path(value).parts
+            }
+        details = reward.get("details")
+        execution = details.get("skill_execution") if isinstance(details, dict) else None
+        workflow: dict[str, Any] = {}
+        if isinstance(execution, dict):
+            for key in ("workflow_order", "script_execution", "error_recovery"):
+                check = execution.get(key)
+                if isinstance(check, dict):
+                    workflow[key] = {
+                        "passed": check.get("passed") if type(check.get("passed")) is bool else None,
+                        "score": _unit_interval_score(check.get("score")),
+                    }
+        scope["workflow"] = workflow
+        scopes.append(scope)
+    logical_scope = len(group) == 1 and group[0].get("invocation_evidence_scope") == "logical_trial"
+    return {
+        "expected_activation": None,
+        "observed_activation": _trusted_observed_activation(group[0]) if logical_scope else "unknown",
+        "expectation_status": "unknown",
+        "observation_scope": "logical_trial" if logical_scope else "reward_rows_only",
+        "evidence_scopes": scopes,
+        "evidence_scopes_complete": len(group) <= _MAX_EVIDENCE_PER_CARD,
+        "task_outcome": {key: trial["scores"].get(key) for key in ("accuracy", "goal_accuracy")},
+        "resources": {key: trial[key] for key in ("steps", "tokens", "agent_seconds", "timing") if key in trial},
+    }
+
+
+def _attach_activation_expectations(
+    agents: dict[str, dict[str, Any]],
+    dataset: list[dict[str, Any]],
+    skill_name: str,
+) -> None:
+    """Compare authored expectations with observed use, independently of correctness."""
+    from skillevaluator.tier3.eval_core.checks import resolve_acceptable_skills, resolve_should_trigger
+
+    entries: dict[str, list[dict[str, Any]]] = {}
+    for entry in dataset:
+        if isinstance(entry, dict) and entry.get("id") is not None:
+            entries.setdefault(str(entry["id"]), []).append(entry)
+    for agent in agents.values():
+        for arm, baseline in (("trials", False), ("trials_baseline", True)):
+            for trial in agent.get(arm, []):
+                expected: bool | None = False if baseline else None
+                matches = entries.get(str(trial.get("entry_id")), [])
+                if not baseline and len(matches) == 1:
+                    entry = matches[0]
+                    should_trigger = resolve_should_trigger(entry)
+                    if should_trigger is False:
+                        expected = False
+                    elif should_trigger is True:
+                        expected_skill = entry.get("expected_skill")
+                        if isinstance(expected_skill, str) and expected_skill.strip():
+                            target = skill_name.strip().lower()
+                            if expected_skill.strip().lower() == target:
+                                expected = True
+                            elif target not in {name.lower() for name in resolve_acceptable_skills(entry)}:
+                                expected = False
+                            # Allowed alternate use is optional, so neither use nor non-use is required.
+                validation = trial["activation_validation"]
+                validation["expected_activation"] = expected
+                observed = validation["observed_activation"]
+                if expected is not None and observed != "unknown":
+                    validation["expectation_status"] = (
+                        "matched" if (observed == "invoked") == expected else "mismatched"
+                    )
 
 
 def _trial_score_reasons(

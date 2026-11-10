@@ -482,6 +482,8 @@ def _collect_fail_reasons(metric: str, trials: list[dict[str, Any]]) -> list[str
                         f"Check `{_bounded_reason_text(str(check_name).replace('_', ' '), max_len=480)}` "
                         "did not pass; no reason was recorded"
                     )
+                    if check_data.get("status") == "environment_invalid":
+                        reason = "[environment] " + reason
                     reasons.append(reason)
                 if isinstance(check_data, dict) and check_name == "error_recovery":
                     corrections = check_data.get("corrections")
@@ -490,7 +492,7 @@ def _collect_fail_reasons(metric: str, trials: list[dict[str, Any]]) -> list[str
                             continue
                         fault = _bounded_reason_text(corr.get("fault")) or "unknown"
                         err = _bounded_reason_text(corr.get("error"), max_len=100)
-                        reasons.append(f"[{fault} fault] {err}")
+                        reasons.append(f"[environment] {err}" if fault == "environment" else f"[{fault} fault] {err}")
 
         elif metric == "skill_efficiency":
             for check_name, check_data in detail.items():
@@ -776,6 +778,7 @@ ERROR RECOVERY ISSUES:
 EVIDENCE REFERENCES (cite the relevant compact reference exactly in your suggestions):
 {evidence_block}
 
+Treat [environment] issues as evaluation setup problems, not skill defects. Recommend dependency declarations or installation in evals/environment/Dockerfile, not skill behavior changes.
 Based on these results, provide exactly 3-4 specific, actionable suggestions for the skill developer to improve their skill. Focus on:
 1. What the developer should fix in their skill (SKILL.md, scripts, config)
 2. What they should add to evals/environment/ (Dockerfile, docker-compose) if tools are missing

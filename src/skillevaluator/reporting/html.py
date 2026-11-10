@@ -1296,14 +1296,27 @@ def _bounded_tier3_preview(payload: dict[str, Any] | None) -> tuple[dict[str, An
     """
     if not payload:
         return payload, {}
-    serialized = _compact_json(payload)
+    # A private copy: the caller embeds ``payload`` itself as the canonical data.
+    slim = json.loads(_compact_json(payload))
+    # Activation diagnostics belong to the canonical export. The template does
+    # not render them, so duplicate per-trial copies must not spend overview or
+    # failure-reason space before the preview budget is applied.
+    agents = slim.get("agents")
+    containers = [slim, *(agents.values() if isinstance(agents, dict) else [])]
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        for arm in ("trials", "trials_baseline"):
+            trials = container.get(arm)
+            for trial in trials if isinstance(trials, list) else []:
+                if isinstance(trial, dict):
+                    trial.pop("activation_validation", None)
+    serialized = _compact_json(slim)
     if len(serialized.encode("utf-8")) <= _TIER3_HTML_PREVIEW_TRIGGER_BYTES:
-        return payload, {}
+        return slim, {}
 
     from skillevaluator.evaluation.tier3_findings import failure_reason_text_slots, strip_failure_reason_text
 
-    # A private copy: the caller embeds ``payload`` itself as the canonical data.
-    slim = json.loads(serialized)
     rendered_slots = list(failure_reason_text_slots(slim, include_top_level_cards=False))
     deferred = [(container, key, container.pop(key)) for container, key in rendered_slots]
     # The page renders each agent's cards, never the top-level card copy, so its

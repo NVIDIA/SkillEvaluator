@@ -21,6 +21,19 @@ This guide gets you from a fresh clone to a mergeable pull request. You need Pyt
   uv sync --python 3.13 --all-extras
   ```
 
+  Install [uv](https://docs.astral.sh/uv/getting-started/installation/) first.
+  uv creates `.venv`; either activate it using the command for your shell, or
+  run Make through uv so `python3` resolves to that environment:
+
+  ```bash
+  uv run make lint
+  uv run make test
+  uv run make build
+  ```
+
+  Make is an additional dependency. Without Make, the equivalent commands are `uv run python -m ruff check src tests`,
+  `uv run python -m pytest`, and `uv run python -m build` instead.
+
   If you prefer pip, `make install` runs the equivalent editable install:
 
   ```bash title="pip alternative"
@@ -32,7 +45,7 @@ This guide gets you from a fresh clone to a mergeable pull request. You need Pyt
   These three commands must pass locally before you open a pull request:
 
   ```bash title="The contribution gate"
-  make lint && make test && make build
+  uv run make lint && uv run make test && uv run make build
   ```
 </Steps>
 
@@ -77,6 +90,29 @@ python tests/reporting/browser_navigation_checks.py browser-checks
 ```
 
 The script renders its own fixture reports, then writes screenshots and `navigation-results.json` to `browser-checks/`. To use an installed Chrome instead of Playwright's Chromium, set `SKILLEVALUATOR_TEST_BROWSER` to the browser's executable or pass `--browser`.
+
+## Documentation and starter changes
+
+The [terminal starter](starter-demo.mdx) uses a public skill, task and input with
+real CLI output checks. For changes to it, run:
+
+```bash
+uv run python scripts/demo_starter.py --output reports/contribution-demo
+uv run pytest tests/test_demo_starter.py
+uv run ruff check scripts/demo_starter.py tests/test_demo_starter.py
+```
+
+Choose a new output directory for each replay. To verify the released route,
+also run the pinned command in the starter guide. Report the evaluator version,
+platform and exact commands tested in your pull request. Keep generated reports
+out of commits. Describe seeded failures and incomplete evidence honestly; do
+not reuse historical scores as a fresh run or silently change expectations to
+make a check green. A fresh-user review should ask someone unfamiliar with the
+tool to explain the passing, regressed and incomplete outputs before showing
+the walkthrough's answers, and record what confused them in the pull request.
+The focused test intentionally runs the checkout's evaluator, so a scoring
+change on main can fail it even when the released replay still passes. Review
+both results before changing expectations.
 
 ## Code style and dependencies
 

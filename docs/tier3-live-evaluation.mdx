@@ -805,9 +805,11 @@ Tier 3 gate.
 
 With `default` or `default_plus_custom` grading, SkillEvaluator's verifier
 grades each trial after the agent finishes. `security`, `skill_execution`, and
-`skill_efficiency` are deterministic trajectory checks. `accuracy`,
-`goal_accuracy`, and `behavior_check` are LLM judges that call the configured
-evaluator provider. `custom_only` runs none of them.
+`skill_efficiency` are deterministic trajectory checks. `accuracy` and
+`goal_accuracy` are LLM judges that call the configured evaluator provider.
+`behavior_check` combines the behavior judge with directly evaluated declared
+checks; a checks-only case makes no behavior judge call. `custom_only` runs
+none of them.
 
 The three LLM judges return verdicts only, and the verifier computes the
 scores. A `score` field in a judge reply is ignored.
@@ -841,9 +843,11 @@ still score zero.
   is invalid.
 - `goal_accuracy` is `1.0` when the judge decides the goal was `achieved` and
   `0.0` otherwise, the same binary scale as the RAGAS scorer.
-- `behavior_check` is the share of expected behaviors observed. The reply must
-  judge every behavior exactly once, identified by its 1-based `step` number.
-  A reply that skips, repeats, or invents a step is invalid.
+- `behavior_check` includes the share of expected behaviors observed and any
+  directly evaluated declared checks. When expected behaviors are present, the
+  reply must judge every behavior exactly once, identified by its 1-based
+  `step` number; a reply that skips, repeats, or invents a step is invalid.
+  A checks-only case is evaluated directly without a judge call.
 
 Rewards record `judge_contract: skill-evaluator-judges-v2`. Results written
 before this contract, whose `accuracy` included a `SKILL_IDENTIFIED` criterion,
@@ -1082,7 +1086,7 @@ unscored rather than converted to `0.0`.
 | Security | Is it safe to use? | `security` | 1.0 | Deterministic checks of the trace and agent actions |
 | Correctness | Is the answer correct? | `accuracy` | 1.0 | LLM judge (`judge_accuracy`) |
 | Discoverability | Was the right skill loaded when needed? | `skill_execution` | 1.0 | Deterministic checks of the trajectory and tool calls |
-| Effectiveness | Did the skill help complete the task? | `goal_accuracy` + `behavior_check` | 0.5 + 0.5 | LLM judges (`judge_goal_accuracy`, `judge_behavior_check`) |
+| Effectiveness | Did the skill help complete the task? | `goal_accuracy` + `behavior_check` | 0.5 + 0.5 | LLM judge plus directly evaluated declared checks |
 | Efficiency | Did it avoid wasted tool or skill usage? | `skill_efficiency` | 1.0 | Deterministic checks of the trajectory and tool calls |
 
 The Security check's network rule warns when an agent's `curl`, `wget`, or

@@ -632,6 +632,16 @@ DIMENSION_HINTS: dict[str, str] = {
     "efficiency": "Uses the skill and tools productively without wasted work.",
 }
 
+# Where each Tier 3 signal's evidence comes from, in plain words.
+SIGNAL_EVIDENCE_SOURCES: dict[str, str] = {
+    "security": "deterministic checks of the agent's commands and outputs",
+    "accuracy": "an LLM judge comparing the final answer with the reference answer",
+    "skill_execution": "deterministic checks of the agent's trajectory",
+    "goal_accuracy": "an LLM judge of whether the user's goal was met",
+    "behavior_check": "an LLM judge of the expected workflow",
+    "skill_efficiency": "deterministic checks of the agent's trajectory",
+}
+
 # Token-efficiency evaluator: derived locally from ``trial.tokens`` (the
 # per-trial trajectory token counters). Per-trial sub-score uses a
 # soft asymptote ``1 / (1 + total / TOKEN_EFFICIENCY_HALF_LIFE)`` over the
@@ -687,6 +697,9 @@ PLUGIN_CODEX_MANIFEST_DIR = ".codex-plugin"
 PLUGIN_CODEX_MANIFEST_TYPE = "codex_plugin_json"
 PLUGIN_CURSOR_MANIFEST_DIR = ".cursor-plugin"
 PLUGIN_CURSOR_MANIFEST_TYPE = "cursor_plugin_json"
+# Native OpenClaw manifest at the plugin root (docs.openclaw.ai/plugins/manifest).
+PLUGIN_OPENCLAW_MANIFEST_FILE = "openclaw.plugin.json"
+PLUGIN_OPENCLAW_MANIFEST_TYPE = "openclaw_plugin_json"
 
 
 # Passive plugin discovery contracts; public dispatch remains unchanged.
@@ -697,6 +710,7 @@ PLUGIN_MANIFEST_PRECEDENCE: tuple[tuple[str, str], ...] = (
     (PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE, PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE),
     (f"{PLUGIN_CODEX_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE}", PLUGIN_CODEX_MANIFEST_TYPE),
     (f"{PLUGIN_CURSOR_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE}", PLUGIN_CURSOR_MANIFEST_TYPE),
+    (PLUGIN_OPENCLAW_MANIFEST_FILE, PLUGIN_OPENCLAW_MANIFEST_TYPE),
 )
 
 PLUGIN_NATIVE_MANIFEST_DIRS: tuple[str, ...] = (
@@ -711,6 +725,7 @@ PLUGIN_CONTAINED_MANIFEST_TYPES = frozenset(
         PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE,
         PLUGIN_CODEX_MANIFEST_TYPE,
         PLUGIN_CURSOR_MANIFEST_TYPE,
+        PLUGIN_OPENCLAW_MANIFEST_TYPE,
     }
 )
 

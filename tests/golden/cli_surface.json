@@ -481,6 +481,19 @@
           "type": "path"
         },
         {
+          "choices": [
+            "skill",
+            "intent",
+            "trace"
+          ],
+          "default": "skill",
+          "name": "grounding",
+          "opts": [
+            "--grounding"
+          ],
+          "param_type": "option"
+        },
+        {
           "default": "False",
           "is_flag": true,
           "name": "refine",
@@ -2688,6 +2701,19 @@
               "type": "path"
             },
             {
+              "choices": [
+                "skill",
+                "intent",
+                "trace"
+              ],
+              "default": "skill",
+              "name": "grounding",
+              "opts": [
+                "--grounding"
+              ],
+              "param_type": "option"
+            },
+            {
               "default": "False",
               "is_flag": true,
               "name": "refine",
@@ -3328,6 +3354,35 @@
               ],
               "param_type": "option",
               "type": "boolean"
+            }
+          ]
+        },
+        "migrate-dataset": {
+          "params": [
+            {
+              "name": "source",
+              "opts": [
+                "source"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "file"
+            },
+            {
+              "name": "skill_name",
+              "opts": [
+                "--skill-name"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "destination",
+              "opts": [
+                "--output"
+              ],
+              "param_type": "option",
+              "type": "file"
             }
           ]
         },

@@ -1144,7 +1144,14 @@ def _ensure_autopilot_dataset(
             enabled=not quiet and progress != "off", stream=click.get_text_stream("stderr")
         ):
             try:
-                service.create_autopilot_dataset(skill_path, use_llm=not no_llm)
+                if no_llm:
+                    service.create_autopilot_dataset(
+                        skill_path,
+                        use_llm=False,
+                        fallback_reason="public LLM provider is not configured",
+                    )
+                else:
+                    service.create_autopilot_dataset(skill_path, use_llm=True)
                 generated = True
             except FileExistsError:
                 echo("Autopilot: an evaluation source appeared concurrently; reusing it unchanged.")
@@ -1157,7 +1164,7 @@ def _ensure_autopilot_dataset(
                 echo("  Falling back to one deterministic starter case; review evals/ before using it as a benchmark.")
                 dataset_note = f"deterministic starter — LLM generation failed: {diagnostic} Review evals/."
                 if not eval_source_exists():
-                    service.create_autopilot_dataset(skill_path, use_llm=False)
+                    service.create_autopilot_dataset(skill_path, use_llm=False, fallback_reason=diagnostic)
                     generated = True
             if not eval_source_exists():
                 raise click.ClickException("Autopilot dataset generation did not produce an evaluation source.")
@@ -3543,6 +3550,7 @@ def evaluate(
 @click.option("--dry-run", is_flag=True, help="Preview without writing.")
 @click.option("--force", is_flag=True, help="Overwrite existing evals/evals.json.")
 @click.option("--prompt", type=click.Path(exists=True, path_type=Path), default=None)
+@click.option("--grounding", type=click.Choice(["skill", "intent", "trace"]), default="skill")
 @click.option("--refine", is_flag=True, help="Refine cases using existing or collected trajectories.")
 @click.option("--from-results", type=click.Path(exists=True, path_type=Path), default=None)
 @click.option("--results-dir", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=None)
@@ -3553,6 +3561,7 @@ def create_dataset(
     dry_run: bool,
     force: bool,
     prompt: Path | None,
+    grounding: str,
     refine: bool,
     from_results: Path | None,
     results_dir: Path | None,
@@ -3569,6 +3578,7 @@ def create_dataset(
                 dry_run=dry_run,
                 force=force,
                 prompt=prompt,
+                grounding=grounding,
                 refine=refine,
                 from_results=from_results,
                 results_dir=results_dir,
@@ -3861,6 +3871,30 @@ def tier3_doctor_command(ctx: click.Context, **options: Any) -> None:
 def health_check(ctx: click.Context, **options: Any) -> None:
     """Quick readiness check for the CLI and selected live-eval backend, or another tier with --tier."""
     raise SystemExit(_run_doctor(ctx, **options))
+
+
+@tier3.command("migrate-dataset")
+@click.argument("source", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--skill-name", default=None, help="Target skill identity; required when it cannot be inferred unambiguously.")
+@click.option(
+    "--output",
+    "destination",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Write to a new JSON/YAML path. Omit to preview without writing.",
+)
+def tier3_migrate_dataset(source: Path, skill_name: str | None, destination: Path | None) -> None:
+    """Preview a lossless dataset conversion, or write an explicit new destination."""
+    from skillevaluator.tier3.dataset_migration import migrate_dataset
+
+    try:
+        result = migrate_dataset(source, skill_name=skill_name, destination=destination)
+    except (OSError, ValueError, TypeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if destination is None:
+        click.echo(json.dumps(result.dataset, indent=2, ensure_ascii=False))
+    else:
+        click.echo(f"Wrote {len(result.dataset['evals'])} cases to {destination}; source preserved.")
 
 
 @tier3.command("validate")

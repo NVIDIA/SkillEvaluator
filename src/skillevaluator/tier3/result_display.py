@@ -22,6 +22,7 @@ from rich.text import Text
 
 from skillevaluator.reporting.harbor_viewer import harbor_job_links, normalize_harbor_viewer_for_display
 from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, RED, TEXT, lift_style
+from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
@@ -876,6 +877,9 @@ def render_evaluation_result(
         from skillevaluator.tier3.harbor.run_budget import budget_line
 
         console.print(budget_line(dict(budget)))
+    provenance_line, provenance_is_template = dataset_provenance_display(result.get("dataset_provenance"))
+    if provenance_line:
+        console.print(Text(provenance_line, style="yellow" if provenance_is_template else "dim"))
 
     agents = result.get("agents")
     incomplete = status in {"failed", "incomplete"} and not any(

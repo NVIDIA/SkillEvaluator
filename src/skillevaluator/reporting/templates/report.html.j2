@@ -2260,6 +2260,8 @@
             .t3-agent-scorecards-row { display:grid; grid-template-columns:minmax(220px,0.85fr) repeat(2,minmax(260px,1fr)); gap:1.25rem; align-items:stretch; margin-top:0.75rem; }
             .t3-agent-scorecard-list { display:grid; gap:1rem; align-content:start; }
             .t3-overview-lead { background:linear-gradient(135deg,var(--bg),var(--bg-secondary)); border:1px solid var(--border-color); border-left:4px solid var(--secondary-color); border-radius:12px; padding:1rem 1.15rem; box-shadow:var(--shadow); color:var(--dark-text); line-height:1.55; margin:0 0 1rem; }
+            .t3-dataset-provenance { margin:0 0 1rem; padding:0.7rem 0.9rem; border-left:4px solid var(--border-color); border-radius:6px; background:var(--bg-secondary); color:var(--dark-text); }
+            .t3-dataset-provenance.warning { border-left-color:var(--warning-color); background:var(--badge-warn-bg); color:var(--badge-warn-tx); }
             .t3-harbor-panel { background:var(--bg); border:1px solid var(--border-color); border-left:4px solid var(--secondary-color); border-radius:12px; padding:0.95rem 1.1rem; box-shadow:var(--shadow); margin:0 0 1rem; display:flex; gap:1rem; justify-content:space-between; align-items:center; flex-wrap:wrap; }
             .t3-harbor-panel strong { color:var(--dark-text); }
             .t3-harbor-panel p { color:var(--text-secondary); margin:0.2rem 0 0; font-size:0.85rem; line-height:1.45; }
@@ -2525,6 +2527,9 @@
                 {% endif %}
                 {% endif %}
             </div>
+            {% if tier3_dataset_provenance_line %}
+            <p class="t3-dataset-provenance{{ ' warning' if tier3_dataset_provenance_warning else '' }}">{{ tier3_dataset_provenance_line }}</p>
+            {% endif %}
             {% if harbor_jobs %}
             <div class="t3-harbor-panel">
                 <div>

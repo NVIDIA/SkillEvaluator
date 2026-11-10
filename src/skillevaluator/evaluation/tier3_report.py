@@ -545,6 +545,7 @@ def agent_eval_result_from_directory(
         persisted_dataset_summary=run_truth.get("dataset_summary"),
         dataset_digest=run_truth.get("dataset_digest"),
         dataset_digest_algorithm=run_truth.get("dataset_digest_algorithm"),
+        dataset_provenance=run_truth.get("dataset_provenance"),
         run_id=run_truth.get("run_id"),
         publication_target=publication_target,
         publication_target_conflict=run_truth.get("publication_target_conflict"),
@@ -680,6 +681,7 @@ def build_agent_eval_payload(
     persisted_dataset_summary: dict[str, Any] | None = None,
     dataset_digest: str | None = None,
     dataset_digest_algorithm: str | None = None,
+    dataset_provenance: dict[str, Any] | None = None,
     historical_missing_score_policy: bool = False,
     run_id: str | None = None,
     publication_target: dict[str, str] | None = None,
@@ -886,6 +888,9 @@ def build_agent_eval_payload(
     evidence_links = [link for link in harbor_summary.get("evidence_links") or [] if link.get("agent") in advice_agents]
     best_evidence_links = [link for link in evidence_links if link.get("agent") == best_agent]
 
+    from skillevaluator.tier3.dataset_provenance import sanitize_generation_record
+
+    safe_dataset_provenance = sanitize_generation_record(dataset_provenance)
     summary = {
         "schema_version": _SCHEMA_VERSION,
         "verdict": verdict,
@@ -916,6 +921,8 @@ def build_agent_eval_payload(
         ),
         "scored_attempts": sum(_as_nonnegative_int(agent.get("scored_attempts")) for agent in agent_payloads.values()),
     }
+    if safe_dataset_provenance is not None:
+        summary["dataset_provenance"] = safe_dataset_provenance
     if publication_target_conflict in _PUBLICATION_TARGET_CONFLICT_MARKERS:
         summary["publication_target_conflict"] = publication_target_conflict
     case_selection = _case_selection(run_config)
@@ -996,6 +1003,7 @@ def build_agent_eval_payload(
         "dataset_summary": dataset_summary,
         "dataset_digest": effective_dataset_digest,
         "dataset_digest_algorithm": effective_dataset_digest_algorithm,
+        "dataset_provenance": safe_dataset_provenance,
         "score_policy": policy["score_policy"],
         "run_id": run_id,
         "publication_target": dict(publication_target) if isinstance(publication_target, dict) else None,
@@ -2091,6 +2099,7 @@ def _build_agent(
         overall_lift = _lift_value("overall", judge_lift) if comparable_scores else None
     if comparison_unavailable:
         overall_lift = None
+    lift_overall = _lift_overall_scores(overall_lift, judge_lift, overall_ws, overall_bl)
 
     trials = _normalize_trials(info.get("rewards") or [], with_metrics)
     baseline_trials = _normalize_trials(info.get("rewards_baseline") or [], baseline_metrics)
@@ -2142,6 +2151,7 @@ def _build_agent(
         "with_skill": overall_ws,
         "baseline": overall_bl,
         "lift": overall_lift,
+        "lift_overall": lift_overall,
         "metrics_with_skill": with_metrics,
         "metrics_without_skill": baseline_metrics,
         "num_trials": int(info.get("num_trials", 0) or 0),
@@ -3884,6 +3894,36 @@ def _precomputed_score(precomputed: dict[str, Any], dim_id: str) -> float | None
     return None
 
 
+def _lift_overall_scores(
+    overall_lift: float | None,
+    judge_lift: dict[str, Any] | None,
+    overall_ws: float | None,
+    overall_bl: float | None,
+) -> dict[str, float] | None:
+    """Return the two overall scores that the published overall lift subtracts.
+
+    When a metric is N/A in one arm it drops out of both arms for lift, so these
+    scores can differ from the arm overall scores.
+    """
+    if overall_lift is None:
+        return None
+    entry = judge_lift.get("overall") if isinstance(judge_lift, dict) else None
+    candidates = []
+    if isinstance(entry, dict):
+        candidates.append(
+            (_unit_interval_score(entry.get("with_skill")), _unit_interval_score(entry.get("without_skill")))
+        )
+    candidates.append((overall_ws, overall_bl))
+    for with_score, baseline_score in candidates:
+        if (
+            with_score is not None
+            and baseline_score is not None
+            and abs((with_score - baseline_score) - overall_lift) <= 1e-4 + 1e-9
+        ):
+            return {"with_skill": round(with_score, 4), "baseline": round(baseline_score, 4)}
+    return None
+
+
 def _lift_value(metric: str, lift_data: dict[str, Any]) -> float | None:
     entry = lift_data.get(metric)
     if isinstance(entry, dict):
@@ -4174,6 +4214,12 @@ def _run_truth_metadata(
             truth["dataset"] = [entry for entry in candidate["dataset"] if isinstance(entry, dict)]
         if "dataset_summary" not in truth and isinstance(candidate.get("dataset_summary"), dict):
             truth["dataset_summary"] = dict(candidate["dataset_summary"])
+        if "dataset_provenance" not in truth:
+            from skillevaluator.tier3.dataset_provenance import sanitize_generation_record
+
+            provenance = sanitize_generation_record(candidate.get("dataset_provenance"))
+            if provenance is not None:
+                truth["dataset_provenance"] = provenance
         for field_name in ("evaluator_version", "dataset_digest", "dataset_digest_algorithm"):
             value = candidate.get(field_name)
             if field_name not in truth and isinstance(value, str) and value.strip():

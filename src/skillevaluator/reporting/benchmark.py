@@ -467,7 +467,7 @@ class BenchmarkReporter(ReporterBase):
         lines.append("|---|" + "|".join(["---:"] * len(agents)) + "|")
 
         overall_row = ["Overall"]
-        shared_basis_agents: list[str] = []
+        shared_basis_agents: dict[tuple[str, ...], list[str]] = {}
         for name, agent in agents.items():
             with_skill = agent.get("with_skill", agent.get("overall_score"))
             baseline = agent.get("baseline")
@@ -480,7 +480,19 @@ class BenchmarkReporter(ReporterBase):
                 if _number(lift_overall["with_skill"]) != _number(with_skill) or _number(
                     lift_overall["baseline"]
                 ) != _number(baseline):
-                    shared_basis_agents.append(name)
+                    basis = _mapping(agent.get("lift_basis"))
+                    excluded_metrics = basis.get("excluded_metrics")
+                    excluded_cases = basis.get("excluded_cases")
+                    causes = []
+                    if isinstance(excluded_metrics, list) and any(
+                        _mapping(item).get("reason") == "not_applicable" for item in excluded_metrics
+                    ):
+                        causes.append("dimensions only one arm scored")
+                    if isinstance(excluded_cases, list) and any(
+                        _mapping(item).get("reason") == "judge_mixed" for item in excluded_cases
+                    ):
+                        causes.append("cases judged by different models")
+                    shared_basis_agents.setdefault(tuple(causes), []).append(name)
                 with_skill, baseline = lift_overall["with_skill"], lift_overall["baseline"]
             overall_row.append(
                 _score_transition_values(
@@ -526,19 +538,34 @@ class BenchmarkReporter(ReporterBase):
             ]
         )
         if shared_basis_agents:
-            lines.extend(
-                [
-                    _md_cell(
-                        "Overall for "
-                        + ", ".join(shared_basis_agents)
-                        + " compares only the dimensions both arms scored, matching the published Skill Lift; "
-                        "the with-skill and baseline overall scores in the detailed report also include "
-                        "dimensions that only one arm scored.",
-                        private_labels,
-                    ),
-                    "",
-                ]
-            )
+            for causes, names in shared_basis_agents.items():
+                if causes == ("dimensions only one arm scored",):
+                    explanation = (
+                        "compares only the dimensions both arms scored, matching the published Skill Lift; "
+                        "the detailed report's Overall scores can also include dimensions only one arm scored"
+                    )
+                elif causes == ("cases judged by different models",):
+                    explanation = (
+                        "compares cases judged by the same model in both arms, matching the published Skill Lift; "
+                        "the detailed report's Overall scores can include cases judged by different models"
+                    )
+                elif causes:
+                    explanation = (
+                        "uses the dimensions both arms scored and cases judged by the same model, matching the "
+                        "published Skill Lift; the detailed report's Overall scores can include other dimensions "
+                        "or cases"
+                    )
+                else:
+                    explanation = (
+                        "uses the shared comparison basis for the published Skill Lift; the detailed report's "
+                        "arm Overall scores can differ"
+                    )
+                lines.extend(
+                    [
+                        _md_cell("Overall for " + ", ".join(names) + " " + explanation + ".", private_labels),
+                        "",
+                    ]
+                )
         if has_partial:
             lines.extend(
                 [

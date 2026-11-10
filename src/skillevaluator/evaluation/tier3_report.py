@@ -3748,7 +3748,7 @@ def _lift_overall_scores(
         if (
             with_score is not None
             and baseline_score is not None
-            and abs(round(with_score - baseline_score, 4) - overall_lift) < 1e-9
+            and abs((with_score - baseline_score) - overall_lift) <= 1e-4 + 1e-9
         ):
             return {"with_skill": round(with_score, 4), "baseline": round(baseline_score, 4)}
     return None

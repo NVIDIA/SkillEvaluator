@@ -2767,8 +2767,8 @@ def _metric_evidence(
     *,
     lift_excluded_case_ids: Collection[str] = (),
 ) -> list[dict[str, Any]]:
-    from skillevaluator.tier3.harbor.collector import _entry_id
     from skillevaluator.tier3.eval_core.atif_helpers import _METRIC_EVIDENCE_REF_METRICS
+    from skillevaluator.tier3.harbor.collector import _entry_id
     from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, metric_set_for_reward
 
     if report_budget.evidence_remaining <= 0:

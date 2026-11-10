@@ -478,7 +478,11 @@ def test_terminal_prints_coverage_notes_for_a_non_blocking_tier3_result() -> Non
 
     output = _cli_output(result)
 
-    assert "Agent coverage notes" in output
+    # Printed once, with the result's errors, under Non-blocking Findings
+    # rather than as a bare agent table above it.
+    assert output.count("Agent coverage notes") == 1
+    assert "Non-blocking Findings" in output
+    assert output.index("Non-blocking Findings") < output.index("Agent coverage notes")
     (notice,) = payload["coverage_notices"]
     assert f"• {notice['message']}" in output
 

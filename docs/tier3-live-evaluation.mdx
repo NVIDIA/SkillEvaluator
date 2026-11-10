@@ -13,7 +13,7 @@ finished with-skill vs. without-skill comparison.
 
 ## Paired Tier 3 in automatic CI
 
-The [all-tier CI setup](cli-onboarding.mdx#opt-in-to-three-tier-ci) consumes
+The [all-tier CI setup](/skills/skillevaluator/advanced-ci) consumes
 committed native `evals/` datasets with full coverage. It runs each selected
 case both with and without the skill; it does not use autopilot, generate new
 cases, or skip the baseline. Docker is the default, with native local mode as
@@ -28,7 +28,7 @@ reports for missing credentials, readiness failures and partial runs as well
 as completed scores. Native reports include coverage and paired arm evidence,
 Skill Lift, attempts, available latency/resource metrics and trial links. An
 incomplete advisory result is visible and never described as a completed pass.
-See [retained CI evidence](reports.mdx#retained-three-tier-ci-evidence).
+See [retained CI evidence](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/all-tiers/README.md#retained-three-tier-ci-evidence).
 
 ## What a live eval measures
 

@@ -85,6 +85,13 @@ optional — the config already selects it.
 
 ### The reward contract
 
+`custom_only` still requires a numeric overall score. Qualitative reasons can
+accompany it, but prose alone is not a reward. For a manual, evidence-linked
+assessment alongside current scores, see the
+[qualitative assessment review contract](reports.mdx#qualitative-assessment-review-contract).
+Its worksheet is a documentation prototype, not input to your grader or a
+scoreless runtime mode.
+
 Inside the container, your grader reads two inputs and writes one result:
 
 1. **Read** `/logs/agent/trajectory.json` — the agent's trajectory.

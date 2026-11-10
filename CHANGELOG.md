@@ -295,6 +295,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- A `tier3 evaluate --skip-with-skill` run with two or more agents now records
+  the dataset-size status in `result.json` and the `tier3 evaluate` summary. It
+  is taken from the agent with the best baseline score, as in the reports.
+
 - `BENCHMARK.md` no longer publishes an Overall uplift that disagrees with
   `lift.json` and the JSON, HTML, Markdown and terminal reports when a metric is
   N/A in only one arm. The Overall row now shows the two scores the published

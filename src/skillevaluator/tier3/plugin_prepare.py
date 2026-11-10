@@ -671,6 +671,12 @@ def _collect_dataset(
             base_id = str(entry.get("id") or f"case-{index:03d}")
             case_id = _unique_id(_safe_id(f"{skill}-{base_id}" if skill else base_id), seen)
             combined = {**entry, "id": case_id, "plugin_eval_target": package.plugin_name}
+            if "checks" in combined:
+                from skillevaluator.tier3.eval_core.declarative_checks import validate_declarative_checks
+
+                errors = validate_declarative_checks(combined["checks"])
+                if errors:
+                    raise PreparationError(f"invalid declarative checks for plugin case '{case_id}': {errors[0]}")
             if skill is not None:
                 combined["plugin_eval_source_skill"] = skill
                 combined.setdefault("expected_skill", skill)

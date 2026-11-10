@@ -539,9 +539,7 @@ def test_conclusions_separate_unavailable_trials_from_threshold_misses(has_thres
     assert payload["agents"]["codex"]["trials"][0]["overall"] is None
     conclusions = {item["title"]: item["message"] for item in payload["conclusions"]}
     assert "Unscored trials" in conclusions
-    assert conclusions["Unscored trials"] == (
-        "1 trial(s) have unavailable overall scores; examples: codex/unscored"
-    )
+    assert conclusions["Unscored trials"] == ("1 trial(s) have unavailable overall scores; examples: codex/unscored")
     html = _render_agent_payload(payload)
     assert "1 trial(s) have unavailable overall scores; examples: codex/unscored" in html
     if has_threshold_miss:
@@ -692,14 +690,15 @@ def test_no_skill_baseline_dimension_na_explains_why_in_html() -> None:
 
     html = _render_agent_payload(payload)
 
-    assert (
-        '<td title="No-skill baseline: This arm has no skill under test installed, '
-        'so there is no skill to discover or run">N/A</td>'
-    ) in html
-    assert (
-        '<td title="No-skill baseline: This arm has no skill under test installed, '
-        'so there is no skill to route to">N/A</td>'
-    ) in html
+    for title in (
+        "No-skill baseline: This arm has no skill under test installed, so there is no skill to discover or run",
+        "No-skill baseline: This arm has no skill under test installed, so there is no skill to route to",
+    ):
+        cell_start = html.index(f'<td title="{title}">')
+        cell_end = html.index("</td>", cell_start)
+        cell = html[cell_start:cell_end]
+        assert "N/A" in cell
+        assert '<div class="t3-dim-hint">baseline not scored</div>' in cell
 
 
 def test_trial_report_omits_token_chart_for_incomplete_agent_telemetry() -> None:

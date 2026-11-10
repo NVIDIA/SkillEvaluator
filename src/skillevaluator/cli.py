@@ -2373,11 +2373,11 @@ def validate(
         previous_version=previous_version,
         policy=policy,
         content_type=resolved_type,
+        target_root=catalog_root.resolve() if catalog_root is not None else None,
         fail_fast=fail_fast,
         continue_on_failure=continue_on_failure,
         on_check=_on_check if quiet else None,
         skip=skip,
-        target_root=catalog_root.resolve() if catalog_root is not None else None,
     )
     # The raw pass/fail signal drives --fail-fast identically in both modes;
     # the DISPLAYED tier summary must reflect policy-finalized severities or

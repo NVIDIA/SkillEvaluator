@@ -215,12 +215,12 @@ def run_validation(
     previous_version: str | None = None,
     policy: ValidationPolicy | None = None,
     content_type: str | None = None,
+    target_root: Path | None = None,
     fail_fast: bool = False,
     continue_on_failure: bool = False,
     on_check: Callable[[str], None] | None = None,
     skillspector_baseline: Path | None = None,
     skip: str | None = None,
-    target_root: Path | None = None,
 ) -> list[ValidationResult]:
     """Run selected Tier 1 validators and return structured results.
 

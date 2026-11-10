@@ -10,6 +10,12 @@ All notable changes to SkillEvaluator are documented in this file.
   gaps in text and JSON. Generated one-case starters now explain their limits
   and point authors to full dataset generation and coverage validation.
 
+- Document an additive qualitative assessment review worksheet with bounded
+  evidence from real successful, failed-setup and invalid-judge runs. Preserve
+  numeric grading and identify the separate decisions needed for scoreless support.
+  Pin the public calculator input to the historical repository revision used by
+  the run, preserving its original hash and evidence pointers after migration.
+
 - Tier 3 reports show per-case expectation inventories with explicit met,
   unmet, unchecked, unscored and inapplicable judgments, evidence and next
   diagnostic steps for executed conditions. Behavior judges can abstain when

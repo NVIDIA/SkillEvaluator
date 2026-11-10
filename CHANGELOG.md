@@ -287,6 +287,11 @@ All notable changes to SkillEvaluator are documented in this file.
   `Use HTTP POST to create an item.` in a here-document or an unpiped `echo`
   still does not warn.
 
+- `tier3 compare` reads standard-policy Overall lift from `lift.json` when the
+  arms have different metric applicability, matching the canonical report.
+  Missing lift data is shown as `-`; custom-only and legacy agents retain their
+  arm-difference comparison.
+
 ## 0.8.0 - 2026-11-05
 
 ### Added

@@ -19,6 +19,18 @@ All notable changes to SkillEvaluator are documented in this file.
   without presenting missing judgments as verified skill defects. Unexpected
   judge errors retain that inventory; intentionally skipped arms add no attempts.
 
+- Repeatable Tier 3 activation-validation recipe and offline acceptance suite.
+  Canonical trials separate expected target-skill use, trusted observed use or
+  unknown traces, task correctness, workflow diagnostics, resources and retained
+  evidence links. Fallback multi-step rows retain scoped observations without
+  claiming complete logical-trial activation or changing numeric grading.
+  Explicit `should_trigger` precedence is preserved, and standard baselines
+  retain trusted trajectory observations independently of null/N/A skill scores.
+  Primary skill identities match case-insensitively; accepted alternate use remains
+  optional, including the legacy alternate field, without changing numeric grades.
+  Unrendered activation diagnostics remain in canonical exports without consuming
+  HTML overview or failure-reason preview budgets.
+
 - Run SkillEvaluator's own `skills/` through the pinned three-tier GitHub
   callers, retaining Tier 1 as required and Tier 2/3 as advisory. A separate
   consumer feedback listener preserves the reusable publisher's public path;

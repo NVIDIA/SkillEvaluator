@@ -8,6 +8,7 @@ import stat
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -298,19 +299,35 @@ def test_to_agentskills_dataset_preserves_aces_metadata():
     assert dataset["evals"][0]["expected_script"] == "main.py"
 
 
-def test_dry_run_refine_requires_a_trajectory(tmp_path):
-    from skillevaluator.evaluation import DatasetGenerationError
-
+def test_dry_run_plain_refine_uses_generated_cases_without_a_trajectory(tmp_path):
     skill = tmp_path / "my-skill"
     skill.mkdir()
     (skill / "SKILL.md").write_text(
         "---\nname: my-skill\ndescription: Does useful work\n---\n",
         encoding="utf-8",
     )
-    with pytest.raises(DatasetGenerationError, match="Trace grounding requires at least one trajectory"):
-        generate_dataset.main([str(skill), "--no-llm", "--dry-run", "--refine"])
+    result = generate_dataset.main([str(skill), "--no-llm", "--dry-run", "--refine"])
 
+    assert result.status == "preview"
+    assert result.cases_count == 1
     assert not (skill / "evals" / "evals.json").exists()
+
+
+def test_plain_refine_keeps_generated_cases_when_collection_is_unavailable(tmp_path, monkeypatch):
+    skill = tmp_path / "my-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: my-skill\ndescription: Does useful work\n---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(generate_dataset, "_discover_trajectories", lambda *_args, **_kwargs: ({}, {}))
+    monkeypatch.setattr(generate_dataset, "_run_agent_collect_trajectories", lambda *_args, **_kwargs: ({}, {}))
+
+    result = generate_dataset.main([str(skill), "--no-llm", "--refine"])
+
+    assert result.status == "created"
+    assert result.cases_count == 1
+    assert result.dataset["evals"][0]["expected_output"].startswith("The agent used the my-skill skill")
 
 
 def test_main_invalid_skill_raises_domain_error_without_printing(tmp_path, capsys):
@@ -455,6 +472,35 @@ def test_concurrent_programmatic_generation_has_no_cross_talk(tmp_path):
     assert [result.status for result in results] == ["created", "created"]
     assert [result.path.parent.parent for result in results] == skills
     assert [result.dataset["skill_name"] for result in results] == ["alpha-skill", "beta-skill"]
+
+
+def test_agent_collect_returns_discovered_trajectory_sources(tmp_path, monkeypatch):
+    skill = tmp_path / "my-skill"
+    skill.mkdir()
+    cases = [{"id": "case-001", "question": "Use my-skill.", "expected_skill": "my-skill"}]
+    trajectory = {"steps": [{"source": "agent", "message": "A sufficiently detailed observed response."}]}
+    source_path = tmp_path / "trajectory.json"
+    source_path.write_text(json.dumps(trajectory), encoding="utf-8")
+    discovered = ({"case-001": trajectory}, {"case-001": source_path})
+
+    monkeypatch.setattr("skillevaluator.utils.tool_runner.resolve_tool_path", lambda *_args: "/usr/bin/harbor")
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/docker" if name == "docker" else None)
+    monkeypatch.setattr(
+        "skillevaluator.provider_config.resolve_llm_provider",
+        lambda: SimpleNamespace(provider="test", model="test"),
+    )
+    monkeypatch.setattr(
+        "skillevaluator.tier3.harbor.runner.run_harbor_eval",
+        lambda **_kwargs: {"agents": {}},
+    )
+    monkeypatch.setattr(
+        "skillevaluator.tier3.generate_dataset._discover_trajectories",
+        lambda *_args, **_kwargs: discovered,
+    )
+
+    result = _run_agent_collect_trajectories(skill, cases, return_sources=True)
+
+    assert result == discovered
 
 
 def test_agent_collect_stages_agentskills_dataset(tmp_path, monkeypatch):

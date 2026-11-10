@@ -13,8 +13,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - `create-eval-dataset --grounding` selects skill, author-intent, or trace
   grounding. Generated datasets record relative input provenance and review
-  flags for observed answers that differ from authored expectations or miss
-  authored behavior steps.
+  flags for observed answers that differ from authored expectations and
+  authored behavior steps omitted by refinement output.
 
 - Run SkillEvaluator's own `skills/` through the pinned three-tier GitHub
   callers, retaining Tier 1 as required and Tier 2/3 as advisory. A separate

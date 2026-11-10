@@ -654,20 +654,23 @@ def _validate_dataset_contents(path: Path, results: list[CheckResult]) -> None:
             f"Dataset has {len(entries)} {'entry' if len(entries) == 1 else 'entries'}.",
         )
     )
-
+    case_ids_valid = True
     try:
         validate_case_ids(entry.get("id") for entry in entries)
     except ValueError as exc:
         results.append(CheckResult(str(path.name), "error", str(exc)))
+        case_ids_valid = False
 
     skill_path = path.parent.parent
     skill_has_scripts = any((skill_path / "scripts").glob("*.py"))
+    required_fields_valid = True
 
     for i, entry in enumerate(entries):
         entry_id = entry.get("id", f"<index {i}>")
         required_fields = AGENTSKILLS_REQUIRED_FIELDS if dataset_format == "agentskills" else DATASET_REQUIRED_FIELDS
         missing_required = required_fields - set(entry.keys())
         if missing_required:
+            required_fields_valid = False
             results.append(
                 CheckResult(
                     f"entry {entry_id}",
@@ -696,6 +699,22 @@ def _validate_dataset_contents(path: Path, results: list[CheckResult]) -> None:
                     "Add expected_script or set expected_script: null if no script should be run.",
                 )
             )
+
+    if case_ids_valid and required_fields_valid:
+        try:
+            from skillevaluator.tier3.dataset_sufficiency import generation_coverage_summary
+            from skillevaluator.tier3.harbor.report_data import summarize_dataset_entries
+
+            coverage = summarize_dataset_entries(entries)
+            results.append(
+                CheckResult(
+                    "Dataset size",
+                    "ok",
+                    generation_coverage_summary(coverage["total_tasks"], coverage["negative_tasks"]),
+                )
+            )
+        except (TypeError, ValueError):
+            pass
 
 
 def _run_file_checks(target: Path, spec: EntrySpec, results: list[CheckResult]) -> None:

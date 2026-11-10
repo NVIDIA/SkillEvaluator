@@ -6301,6 +6301,69 @@ def _run_harbor_eval_impl(
             "run_config": run_config,
         }
     )
+    from skillevaluator.evaluation.tier3_report import (
+        _agent_score_policy,
+        _build_agent,
+    )
+    from skillevaluator.evaluation.tier3_report import (
+        _pick_best_agent as _pick_canonical_best_agent,
+    )
+    from skillevaluator.tier3.dataset_sufficiency import MIN_NEGATIVE_CASES, assess_dataset_sufficiency
+    from skillevaluator.tier3.harbor.report import _pick_best_agent
+    from skillevaluator.tier3.harbor.report_data import metrics_for_condition
+
+    summary = dataset_truth["dataset_summary"]
+    agent_results = results.get("agents")
+    if isinstance(agent_results, dict):
+        negative_cases = int(summary.get("negative_tasks") or 0)
+        if int(summary.get("unclassified_tasks") or 0) > 0 and negative_cases < MIN_NEGATIVE_CASES:
+            negative_cases = None
+        for agent_result in agent_results.values():
+            pass_at_k = agent_result.get("pass_at_k") if isinstance(agent_result.get("pass_at_k"), dict) else {}
+            with_pass = pass_at_k.get("with_skill") if isinstance(pass_at_k.get("with_skill"), dict) else {}
+            lift = pass_at_k.get("lift") if isinstance(pass_at_k.get("lift"), dict) else {}
+            paired = lift.get("paired_comparison") if isinstance(lift.get("paired_comparison"), dict) else {}
+            agent_result["dataset_sufficiency"] = assess_dataset_sufficiency(
+                distinct_cases=int(summary.get("total_tasks") or 0),
+                negative_cases=negative_cases,
+                pass_rate_interval=with_pass.get("rate_interval"),
+                paired_cases=paired.get("paired_cases"),
+                baseline_skipped=skip_baseline,
+            )
+        if agent_results:
+            best_agent = _pick_best_agent(agent_results)
+            if best_agent not in agent_results:
+                conditions = [
+                    agent.get("conditions", {}).get("with_skill", {}).get("execution_status")
+                    if isinstance(agent, dict)
+                    and isinstance(agent.get("conditions"), dict)
+                    and isinstance(agent["conditions"].get("with_skill"), dict)
+                    else None
+                    for agent in agent_results.values()
+                ]
+                baseline_only = bool(agent_results) and (
+                    skip_with_skill
+                    or (len(conditions) == len(agent_results) and all(status == "skipped" for status in conditions))
+                )
+                score_field = "without_skill" if baseline_only else "with_skill"
+                canonical_agents = {
+                    name: _build_agent(
+                        name,
+                        agent,
+                        metrics_for_condition(agent, "with_skill"),
+                        metrics_for_condition(agent, "without_skill"),
+                        agent.get("model") if isinstance(agent.get("model"), str) else None,
+                        _agent_score_policy(agent),
+                        baseline_only=baseline_only,
+                    )
+                    for name, agent in agent_results.items()
+                    if isinstance(agent, dict)
+                }
+                best_agent = _pick_canonical_best_agent(canonical_agents, score_field=score_field)
+                if not best_agent and len(agent_results) == 1:
+                    best_agent = next(iter(agent_results))
+            if best_agent in agent_results:
+                results["dataset_sufficiency"] = agent_results[best_agent]["dataset_sufficiency"]
     selected_metrics = tuple(results.get("metrics", DEFAULT_METRICS))
     collected_attempt_policy = results.get("attempt_policy")
     attempt_policy = dict(collected_attempt_policy) if isinstance(collected_attempt_policy, dict) else {}

@@ -661,6 +661,7 @@ def _discover_trajectories(
         "mini-swe-agent",
         "aider",
         "gemini-cli",
+        "hermes",
     ]
     for agent_name in agent_priority:
         trials_dir = results_dir / agent_name / "with-skill" / "trials"

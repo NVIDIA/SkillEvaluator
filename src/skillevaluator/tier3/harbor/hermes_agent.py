@@ -141,7 +141,7 @@ class SkillEvaluatorHermes(Hermes):
         for step in trajectory.steps:
             results = {result.source_call_id: result for result in step.observation.results} if step.observation else {}
             for call in step.tool_calls or []:
-                if call.function_name not in {"terminal", "skill_view"}:
+                if call.function_name not in {"terminal", "skill_view", "read_file"}:
                     continue
                 result = results.get(call.tool_call_id)
                 try:
@@ -167,6 +167,11 @@ class SkillEvaluatorHermes(Hermes):
                         call.arguments = {"path": f"{_HOME}/skills/{name}/{file_path}"}
                     elif result:
                         result.extra = {**(result.extra or {}), "tool_result_is_error": True}
+                elif result:
+                    result.extra = {
+                        **(result.extra or {}),
+                        "tool_result_is_error": bool(payload.get("error")) or payload.get("success") is False,
+                    }
         return trajectory
 
     def populate_context_post_run(self, context: AgentContext) -> None:
@@ -174,11 +179,7 @@ class SkillEvaluatorHermes(Hermes):
         path = self.logs_dir / "trajectory.json"
         path.unlink(missing_ok=True)
         super().populate_context_post_run(context)
-        if not path.is_file():
-            raise RuntimeError("Hermes produced no valid session trajectory; inspect hermes.txt and session export")
-        trajectory = json.loads(path.read_text())
-        if not any(step.get("source") == "agent" for step in trajectory.get("steps", [])):
-            raise RuntimeError("Hermes session contains no agent response; inspect hermes.txt for provider errors")
+        trajectory = json.loads(path.read_text()) if path.is_file() else {}
         metrics = trajectory.get("final_metrics") or {}
         if metrics.get("total_prompt_tokens") is None:
             context.n_input_tokens = None
@@ -186,3 +187,15 @@ class SkillEvaluatorHermes(Hermes):
             context.n_output_tokens = None
         if context.n_input_tokens is None or context.n_output_tokens is None:
             self._reported_session_metrics = None
+        if not path.is_file():
+            context.metadata = {
+                **(context.metadata or {}),
+                "hermes_session_error": "missing_or_invalid_session",
+            }
+            raise RuntimeError("Hermes produced no valid session trajectory; inspect hermes.txt and session export")
+        if not any(step.get("source") == "agent" for step in trajectory.get("steps", [])):
+            context.metadata = {
+                **(context.metadata or {}),
+                "hermes_session_error": "no_agent_response",
+            }
+            raise RuntimeError("Hermes session contains no agent response; inspect hermes.txt for provider errors")

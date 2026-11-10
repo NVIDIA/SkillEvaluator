@@ -19,6 +19,20 @@ import pytest
 pytest.importorskip("harbor")
 from harbor.agents.installed.base import NonZeroAgentExitCodeError
 from harbor.models.agent.context import AgentContext
+from harbor.models.task.task import Task
+from harbor.models.trial.config import (
+    AgentConfig as HarborAgentConfig,
+)
+from harbor.models.trial.config import (
+    TaskConfig as HarborTaskConfig,
+)
+from harbor.models.trial.config import (
+    TrialConfig,
+    VerifierConfig,
+)
+from harbor.tasks.client import TaskDownloadResult
+from harbor.trial.single_step import SingleStepTrial
+from harbor.trial.trial import Trial
 
 from skillevaluator.provider_config import ProviderConfig
 from skillevaluator.tier3.commands import validate_agents
@@ -207,17 +221,40 @@ def test_native_invocation_exports_session_even_on_failure(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize(
-    ("observation", "arguments", "activated"),
+    ("tool", "observation", "arguments", "activated"),
     [
-        ({"success": True, "content": "# Instructions"}, {"name": "lookup-code"}, True),
-        ({"success": False, "error": "not found"}, {"name": "lookup-code"}, False),
-        ({"success": True, "content": "reference"}, {"name": "lookup-code", "file_path": "references/help.md"}, False),
-        ({"success": True, "content": "other"}, {"name": "another-skill"}, False),
+        ("skill_view", {"success": True, "content": "# Instructions"}, {"name": "lookup-code"}, True),
+        ("skill_view", {"success": False, "error": "not found"}, {"name": "lookup-code"}, False),
+        (
+            "skill_view",
+            {"success": True, "content": "reference"},
+            {"name": "lookup-code", "file_path": "references/help.md"},
+            False,
+        ),
+        ("skill_view", {"success": True, "content": "other"}, {"name": "another-skill"}, False),
+        (
+            "read_file",
+            {"error": "File not found: /tmp/hermes/skills/lookup-code/SKILL.md"},
+            {"path": "/tmp/hermes/skills/lookup-code/SKILL.md"},
+            False,
+        ),
+        (
+            "read_file",
+            {"success": False},
+            {"path": "/tmp/hermes/skills/lookup-code/SKILL.md"},
+            False,
+        ),
+        (
+            "read_file",
+            "The skill manifest contents",
+            {"path": "/tmp/hermes/skills/lookup-code/SKILL.md"},
+            True,
+        ),
     ],
 )
-def test_atif_skill_activation_requires_successful_target_manifest(tmp_path, observation, arguments, activated):
+def test_atif_skill_activation_requires_successful_target_manifest(tmp_path, tool, observation, arguments, activated):
     trajectory = _agent(tmp_path)._convert_hermes_session_to_atif(
-        _session(observation=observation, arguments=arguments), "session"
+        _session(tool=tool, observation=observation, arguments=arguments), "session"
     )
     calls = extract_tool_calls_as_dicts(trajectory.to_json_dict())
     assert check_activation(calls, "lookup-code")["passed"] is activated
@@ -254,12 +291,80 @@ def test_terminal_failed_reads_cannot_prove_activation(tmp_path, result):
     assert check_activation(calls, "lookup-code")["passed"] is succeeded
 
 
-@pytest.mark.parametrize("text", [None, "malformed", '{"messages": [{"role": "user", "content": "hi"}]}'])
-def test_missing_or_malformed_session_is_execution_failure(tmp_path, text):
-    if text:
+@pytest.mark.parametrize(
+    ("text", "error_reason"),
+    [
+        (None, "missing_or_invalid_session"),
+        ("", "missing_or_invalid_session"),
+        ("malformed", "missing_or_invalid_session"),
+        (
+            '{"id":"session","messages":[{"role":"user","content":"Look up cobalt"}]}',
+            "no_agent_response",
+        ),
+    ],
+)
+def test_missing_or_malformed_session_is_execution_failure(tmp_path, text, error_reason):
+    if text is not None:
         (tmp_path / "hermes-session.jsonl").write_text(text)
+    context = AgentContext()
+    agent = _agent(tmp_path)
+    agent._reported_session_metrics = ("stale-session", 100, 20)
     with pytest.raises(RuntimeError, match="Hermes"):
-        _agent(tmp_path).populate_context_post_run(AgentContext())
+        agent.populate_context_post_run(context)
+    assert context.metadata == {"hermes_session_error": error_reason}
+    assert context.n_input_tokens is None
+    assert context.n_output_tokens is None
+    assert agent._reported_session_metrics is None
+
+
+def test_harbor_trial_run_recovers_missing_hermes_session_as_execution_failure(tmp_path, monkeypatch):
+    skill = Path(__file__).parent / "fixtures" / "skills" / "lookup-code"
+    task_dir = generate_harbor_tasks(skill, tmp_path / "tasks", with_skill=True)[0]
+    task = Task(task_dir, disable_verification=True)
+    config = TrialConfig(
+        task=HarborTaskConfig(path=task_dir),
+        trial_name="hermes-missing-session",
+        trials_dir=tmp_path / "trials",
+        agent=HarborAgentConfig(
+            import_path=DOCKER_AGENT_IMPORT_PATHS["hermes"],
+            model_name=_provider().model,
+            kwargs={"version": HERMES_VERSION},
+        ),
+        verifier=VerifierConfig(disable=True),
+    )
+    download = TaskDownloadResult(path=task_dir, download_time_sec=0, cached=True)
+
+    def initialize_agent_environment(trial):
+        trial.agent_environment = SimpleNamespace()
+
+    async def no_prepare(_trial):
+        pass
+
+    async def no_agent_phase(_trial, *, target, **_kwargs):
+        target.agent_result = AgentContext()
+
+    async def no_download_agent_logs(_trial):
+        pass
+
+    async def no_collect_artifacts(_trial, **_kwargs):
+        pass
+
+    async def no_stop_agent_environment(_trial):
+        pass
+
+    monkeypatch.setattr(Trial, "_init_agent_environment", initialize_agent_environment)
+    monkeypatch.setattr(Trial, "_init_artifact_handler", lambda _trial: None)
+    monkeypatch.setattr(Trial, "_prepare", no_prepare)
+    monkeypatch.setattr(Trial, "_run_agent_phase", no_agent_phase)
+    monkeypatch.setattr(Trial, "_download_agent_logs", no_download_agent_logs)
+    monkeypatch.setattr(SingleStepTrial, "_collect_artifacts", no_collect_artifacts)
+    monkeypatch.setattr(Trial, "_stop_agent_environment", no_stop_agent_environment)
+
+    trial = SingleStepTrial(config, _task=task, _task_download_result=download)
+    result = asyncio.run(trial.run())
+
+    assert result.exception_info is not None
+    assert result.agent_result.metadata == {"hermes_session_error": "missing_or_invalid_session"}
 
 
 def test_resume_requires_exported_session_id(tmp_path, monkeypatch):

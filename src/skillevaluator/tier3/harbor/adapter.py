@@ -3798,9 +3798,11 @@ def _validate_runtime_loader_env(runtime_env: dict[str, str] | None) -> None:
 
 def _runtime_skill_reset_lines(agent_workdir: str | None = None) -> list[str]:
     """Replace fixed, effective-home, and project-ancestor skill roots."""
+    runtime_dirs_to_reset = ["/tmp/hermes" if path == "/tmp/hermes/skills" else path for path in _RUNTIME_SKILL_DIRS]
+    runtime_dirs_to_create = [path for path in _RUNTIME_SKILL_DIRS if path != "/tmp/hermes/skills"]
     lines = [
-        "RUN " + json.dumps(["/bin/rm", "-rf", *_RUNTIME_SKILL_DIRS]),
-        "RUN " + json.dumps(["/bin/mkdir", "-p", *_RUNTIME_SKILL_DIRS]),
+        "RUN " + json.dumps(["/bin/rm", "-rf", *runtime_dirs_to_reset]),
+        "RUN " + json.dumps(["/bin/mkdir", "-p", *runtime_dirs_to_create]),
         "RUN " + json.dumps(["/bin/sh", "-c", _PROJECT_SKILL_ANCESTOR_RESET]),
         "RUN " + json.dumps(["/bin/sh", "-c", _HOME_SKILL_RESET]),
         "RUN " + json.dumps(["/bin/sh", "-c", _PASSWD_HOME_SKILL_RESET]),

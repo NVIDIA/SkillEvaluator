@@ -99,6 +99,11 @@ top-level object with `skill_name` and an `evals` array.
 | `expected_script` | No | Script the agent should run; `null` if none applies. |
 | `acceptable_skills` | No | Closely related skills that earn partial routing credit (legacy alias: `acceptable_alternates`). |
 
+Use JSON `null` when no script is expected. Case-insensitive whole-value
+placeholders such as `"None"`, `"null"`, `"N/A"`, `"-"`, empty strings, and
+whitespace-only values are treated as `null`; exact matching keeps real script
+names such as `none.sh` intact.
+
 The dataset file can be named `evals.json`, `evals.jsonl`, `evals.yaml`, or
 `evals.yml` — `tier3 evaluate` accepts all four.
 

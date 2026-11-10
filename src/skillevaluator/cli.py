@@ -3761,9 +3761,32 @@ def health_check(ctx: click.Context, **options: Any) -> None:
     raise SystemExit(_run_doctor(ctx, **options))
 
 
+@tier3.command("import-metrics")
+@click.argument("source", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "-o",
+    "--output-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    required=True,
+    help="New directory for external-only JSON and Markdown reports; must not exist.",
+)
+def tier3_import_metrics(source: Path, output_dir: Path) -> None:
+    """Report precomputed custom scores without executing tests or assigning standard scores."""
+    from skillevaluator.reporting.external_metrics import import_external_metrics
+
+    try:
+        import_external_metrics(source, output_dir)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo("Imported external observations; SkillEvaluator did not execute these tests.")
+    click.echo(f"Reports: {output_dir / 'external_metrics.json'}, {output_dir / 'external_metrics.md'}")
+
+
 @tier3.command("migrate-dataset")
 @click.argument("source", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.option("--skill-name", default=None, help="Target skill identity; required when it cannot be inferred unambiguously.")
+@click.option(
+    "--skill-name", default=None, help="Target skill identity; required when it cannot be inferred unambiguously."
+)
 @click.option(
     "--output",
     "destination",

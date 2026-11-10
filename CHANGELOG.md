@@ -10,6 +10,12 @@ All notable changes to SkillEvaluator are documented in this file.
   versioned labels, with offline suite checks, repeated-grading statistics,
   provenance, optional rate gates and a bundled public reference suite.
 
+- `tier3 import-metrics` accepts versioned, normalized per-case custom scores
+  from external evaluations and writes clearly labeled JSON/Markdown reports.
+  Imports validate identities, metric metadata and values, retain declared
+  provenance and source hashes, and compute custom lift only on matched
+  case/attempt pairs, without assigning standard scores or claiming execution.
+
 - Show per-agent evidence volume next to Tier 3 scores: distinct cases, planned
   and scored attempts, execution and judge failures, and per-arm counts when a
   baseline ran. Flag limited case coverage or incomplete attempt coverage;
@@ -75,7 +81,7 @@ All notable changes to SkillEvaluator are documented in this file.
   onboarding and status recognize this filename collision without replacing
   reusable workflow definitions. Automatic comments activate after the
   listener reaches the default branch.
-  Document the shared chat/judge/agent model input and model-availability
+   Document the shared chat/judge/agent model input and model-availability
   troubleshooting for provider-backed CI.
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI
@@ -119,6 +125,11 @@ All notable changes to SkillEvaluator are documented in this file.
   agent, hook and `bin/` locations stay unloaded.
   `scripts/ci/smoke_openclaw_plugins.py` repeats these checks against real
   plugin sources without executing plugin code.
+
+- Simplify repository CI onboarding around quality and security checks with
+  no model key required,
+  keeping optional LLM checks and hosted feedback separate. Preserve opt-in
+  all-tier setup and report contracts in an Advanced CI reference.
 
 ### Changed
 

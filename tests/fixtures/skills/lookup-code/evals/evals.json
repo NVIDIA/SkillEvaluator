@@ -1,0 +1,18 @@
+[
+  {
+    "id": "lookup-positive",
+    "question": "Use the lookup-code skill to look up the sample code for cobalt. Run its lookup script and report the code. If the skill is unavailable, say so rather than inventing a code.",
+    "expected_skill": "lookup-code",
+    "expected_script": "lookup.py",
+    "ground_truth": "The cobalt sample code is ZX-731.",
+    "expected_behavior": ["Load the lookup-code skill instructions", "Run the lookup script for cobalt", "Report ZX-731, not a guessed code"]
+  },
+  {
+    "id": "arithmetic-negative",
+    "question": "Use the terminal to calculate 17 times 19 and report the result. This is arithmetic, not a sample-code lookup.",
+    "should_trigger": false,
+    "expected_skill": "lookup-code",
+    "ground_truth": "17 times 19 is 323.",
+    "expected_behavior": ["Use a terminal calculation", "Report 323", "Do not activate lookup-code"]
+  }
+]

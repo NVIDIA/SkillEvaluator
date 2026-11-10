@@ -6,8 +6,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
-- Tier 3 datasets can declare deterministic behavior checks for script invocation and success, workspace files, and final-response text.
+- A reproducible public terminal starter runs the released CLI against the
+  bundled text-analyzer skill, checks real script/report output and a seeded
+  quality regression, and retains an editable task, fixture and run receipt.
+  The walkthrough connects setup, interpretation, live-evaluation prerequisites,
+  troubleshooting and adaptation; contributor guidance clarifies environment
+  setup, example verification and the existing DCO policy.
 
+- Tier 3 datasets can declare deterministic behavior checks for script invocation and success, workspace files, and final-response text.
 - `tier3 import-metrics` accepts versioned, normalized per-case custom scores
   from external evaluations and writes clearly labeled JSON/Markdown reports.
   Imports validate identities, metric metadata and values, retain declared

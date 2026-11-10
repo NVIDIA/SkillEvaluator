@@ -16,91 +16,14 @@ lift data that `view` and `compare` read back later.
 evaluation framework that runs those Tier 3 trials. SkillEvaluator collects its
 job artifacts into the results tree described on this page.
 
-## Retained three-tier CI evidence
+Tier 3 findings describe failed accuracy criteria in plain language and mark
+when trajectory evidence is unavailable. Expected and observed text appears
+only when both values were recorded in the result.
 
-The opt-in all-tier workflows retain one aggregate artifact for 14 days. GitHub
-names it `skill-evaluator-results-attempt-N`; GitLab retains the aggregate job's
-`skill-evaluator-results/` directory. The trusted feedback comment links the
-actual artifact download for that run. Authentication and artifact expiry still
-apply; this link does not imply publicly hosted HTML.
-
-The PR or MR comment presents one summary table with a row for each skill.
-Each row shows a one-line status, issue count and the most important available
-finding or blocker for **Tier 1 — Static and Security Validation**,
-**Tier 2 — Deduplication** and **Tier 3 — Live Agent Evaluation**. A single
-**Report** link per skill opens the combined report artifact for that run;
-download and extract it, then open `index.html` to inspect the detailed aggregate
-and native reports. The comment keeps tier details in those reports rather
-than adding separate tier sections or report links.
-
-This schematic shows the information in a row; real results supply the statuses,
-counts, findings and authenticated **Report** link:
-
-| Skill | Tier 1 — Static and Security Validation | Tier 2 — Deduplication | Tier 3 — Live Agent Evaluation | Combined report |
-| --- | --- | --- | --- | --- |
-| `skills/example` | Passed · 0 issues | Failed · 1 issue · duplicate content found | Incomplete · issues unknown · paired evidence missing | Report |
-
-Issue counts summarize unique actionable findings plus independent validation
-errors and warnings from retained native evidence; informational notes and
-configuration-only scope notices are excluded. Incomplete or missing evidence
-shows an unknown count; it cannot imply zero findings or a completed check.
-The Tier 1 gate and each advisory tier's status stay separate, so this example
-can pass the required CI gate while still needing review of Tier 2 and Tier 3.
-Every tier selects the same skills: the changed skills, or every skill when
-the pull request changes CI setup under `.github/`, `.gitlab/`,
-`.skillevaluator/ci` or `.gitlab-ci.yml` (on GitHub, also when it changes more
-files than the API can list). A cell for a skill that its tier did not select
-reads `Skipped · issues unknown · Not selected for this tier`.
-
-```text
-ci-results.json
-index.html
-source-attempts.json   # GitHub: run attempt whose artifact supplied each tier
-summary.md
-tier1/                 # hardened scanner reports, including summary.json
-tier2/ci-tier.json
-tier2/skill-001/       # native retained JSON and HTML
-tier3/ci-tier.json
-tier3/skill-001/       # native retained JSON and HTML
-  diagnostics/        # redacted worker logs when execution failed or is incomplete
-```
-
-`ci-results.json` uses report contract `skillevaluator-ci-v1` and records the
-repository, exact commit, platform, run ID, attempt, environment, and each
-tier's required/advisory policy: Tier 1 has `required: true`, while Tier 2 and
-Tier 3 have `required: false`. On GitHub, each tier with retained evidence
-records `source_attempt`, the run attempt that produced it; after **Re-run
-failed jobs** it can be earlier than the aggregate's own attempt. A tier can be
-`passed`, `failed`, `incomplete`, `skipped`, `not_run`, `needs_action`, or
-`neutral`. `neutral` means Tier 3 paired execution completed with a neutral
-dimension-based verdict; Skill Lift has its own independent diagnostic band.
-Like every Tier 3 status, it is advisory. Failed,
-incomplete or missing Tier 1 evidence fails the aggregate. Tier 2/3 failures and
-incomplete results remain advisory and retain their native status; a passing CI
-gate does not mean those tiers passed. A check that never executed cannot become an empty success.
-The deprecated Tier 3 required settings are ignored in CI. Standalone validation
-and benchmark publication retain their separate policies.
-
-Tier 2 reports retain deduplication and catalog-similarity findings;
-Tier 3 reports retain paired scores and coverage, Skill Lift, attempts,
-latency/resource metrics and available trial links. Download and extract the
-artifact, then open `index.html` to inspect the aggregate and native reports.
-Detailed files remain available even when a tier fails or needs configuration.
-When a native skill's execution fails or is incomplete, or its worker exits
-abnormally, the skill retains bounded, redacted worker, Docker and
-agent-installation diagnostics under `diagnostics/`, even if no canonical report
-was produced or its verdict is failed. A complete run with a failed or neutral
-verdict retains none. The worker's `command.log` comes first, then logs from
-one trial of each Harbor job (a failing trial when there is one), at most four
-trials per skill, with failing trials chosen before passing ones. All
-skills of one tier share a limit of 1000 diagnostic files and 16 MiB. Each
-`index.json` records retained, omitted and truncated files, including those
-omitted at a limit.
-Catalog failures retain diagnostics under `tier2/catalog/diagnostics/`.
-Agent trajectories, credentials and runtime configuration are excluded.
-The publisher renders validated retained JSON; it does not execute artifacts
-or trust candidate-provided HTML in its privileged feedback job. Optional
-report hosting is independent from these private artifact links.
+Tier 3 results include a `dataset_sufficiency` policy assessment in `result.json`.
+The status is sufficient only when coverage, pass-rate reliability, and paired
+lift-comparison requirements are met; otherwise it is provisional and does not
+change the evaluation verdict.
 
 ## Report formats
 
@@ -160,7 +83,7 @@ no-color, redirected, and string-rendered output retains readable paths.
 skillevaluator validate ./my-skill -r json,html,markdown,sarif -o reports
 ```
 
-For gating a pipeline on the JSON output, see [Gate Your CI](ci-integration.mdx).
+For gating a pipeline on the JSON output, see [Gate Your CI](/skills/skillevaluator/ci-integration).
 
 ## Reading the final status
 
@@ -221,6 +144,23 @@ Tier 3 Diagnostics. Missing values remain unavailable. These views use existing
 report data and do not read the source tree or contact providers while rendering.
 Full downloads and preview omission counts remain available; with-skill token
 charts are labeled separately from the resource table's two-arm comparisons.
+
+### Dataset generation provenance
+
+When a Tier 3 dataset has a generation record, the CLI evaluate summary,
+validate's `AGENT_EVAL` section, the HTML overview, and `BENCHMARK.md` show one
+dataset line. LLM-generated datasets name their grounding source and review
+state. Template-generated datasets show whether templates were requested or
+used as a fallback, explain that they are generic starters, and warn readers
+to review them before relying on scores. The line adds the number of cases
+marked `needs_review`; handwritten datasets and older datasets without
+generation metadata have no line. Run reports retain the generation metadata,
+with input hashes shortened to their first 12 characters and recorded paths
+preserved. The LLM form is `Dataset: generated by <grounding> grounding, review
+state <state>`. The template form is
+`Dataset: generated from templates (requested|fallback: reason) — cases are
+generic starters; review before relying on scores`. Either form appends
+`; N cases need review` when applicable.
 
 ## File naming
 
@@ -334,6 +274,22 @@ so `0.4995` is shown as `49.95%`, not as a passing `50.0%`. Uplift is the
 difference of the two displayed scores, so a cell such as
 `58.4% → 94.8% (+36.4 points)` always adds up. A score outside 0–1 is shown as
 `Not available`.
+
+A missing score is never shown as zero. When a standard signal was active for a
+successful agent but produced no with-skill score, the dimension reads `Not
+scored with the skill — baseline 50.0%; uplift unavailable` (or `Not scored — a
+signal this dimension needs produced no score` without a baseline). A dimension
+whose signals had nothing to judge in any eval case reads `Not applicable`; it
+has no score, so the agent's verdict stays NEUTRAL and cannot PASS. A
+baseline-only run shows `Baseline 67.0% — baseline-only run; no with-skill score
+or uplift`.
+
+The collapsed **Scoring Methodology** section lists, for every dimension, the
+question it answers in plain words, its weighted signals, where their evidence
+comes from (deterministic trace or trajectory checks, or an LLM judge), and
+whether this run has a no-skill baseline score for it. It ends with a short key
+that separates the overall verdict, dimension scores, the Overall row, uplift,
+pass@k, and the Tier 1 Quality Score.
 
 The card carries one overall verdict — `PASS`, `NEUTRAL`, `FAIL`, or
 `INCOMPLETE`. It fails closed: if a required scanner produced no trustworthy
@@ -486,7 +442,7 @@ the orchestration did not supply render as
 Keep the file with the skill and refresh it whenever the skill, eval dataset,
 agent/model, evaluator version, scoring policy, attempt policy, or execution
 environment materially changes. Follow the
-[rollout and backfill runbook](benchmark-rollout.mdx) when regenerating existing
+[rollout and backfill runbook](/skills/skillevaluator/benchmark-rollout) when regenerating existing
 published cards.
 
 ## Safety guarantees
@@ -547,6 +503,16 @@ completed run directly:
   relative path, byte size, and SHA-256 digest. The in-process return value
   remains complete; readers rebuilding a report from disk follow those
   artifact references.
+- **Baseline provenance** — `result.json` and `run_config.json` include a
+  `baseline` block with mode `fresh`, `reused`, or `skipped`. Reused baselines
+  record `source_run_id`, `source_evaluated_at`, `source_run_dir`, and
+  `source_identity`. A `latest` fallback records bounded `rejected_candidates`
+  and a `reuse_reason`. `comparison_identity` separates baseline configuration
+  from skill revision. Each agent's `execution_counts` and `measured_usage`
+  distinguish fresh execution from reused evidence (not new spend). Missing
+  token/cost measurements stay unavailable rather than becoming zero. Reused
+  baseline rows remain in the new run; its without-skill summary is marked
+  `reused`.
 - **`run_config.json`** / **`attempt_policy.json`** — exactly how the run was
   configured: environment, attempts, concurrency, grading mode, pass threshold.
 - **`report.html`** — the human-readable report, generated automatically at
@@ -556,6 +522,10 @@ completed run directly:
 - **`<agent>/lift.json`** and **`<agent>/pass_at_k_lift.json`** — per-metric
   deltas between the two arms; written only when both arms produced scores
   (a `--skip-baseline` or `--skip-with-skill` run has neither).
+- **`<agent>/findings.json`** — bounded per-metric findings and improvement
+  suggestions; written by `tier3 evaluate` only when the detailed view is
+  shown (`--verbose` or when no per-case summary is shown), never by
+  `validate --tier3`; see [Findings and severity](#findings-and-severity).
 - **`<agent>/{with-skill,without-skill}/`** — each arm's `summary.json`
   (scores, dimensions, pass@k, trial counts) and a `trials/` directory of
   per-trial artifacts: the trial's `reward.json`, Harbor's `trajectory.json`
@@ -564,7 +534,7 @@ completed run directly:
   With standard grading, `reward.json` records `trajectory_source` (the
   trajectory or agent log that was graded) and, under each LLM judge's
   `details`, an `omitted` record showing whether its evidence was truncated to
-  fit the [evidence budget](tier3-live-evaluation.mdx#evidence-budgets) or, for
+  fit the [evidence budget](/skills/skillevaluator/tier3-live-evaluation#evidence-budgets) or, for
   `behavior_check`, the final-response section limit
   (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`). For `behavior_check`, the
   record's `reason` names each setting that applied.
@@ -602,6 +572,126 @@ Artifacts panel shows the HTML report path, the output directory, and — only
 when a retained Harbor jobs directory exists — a ready-to-paste `harbor-view`
 command.
 
+### Next steps for the run
+
+Below the per-case fixes, the case summary in the terminal, `report.html`,
+and the Markdown report list up to three **Next steps** for the run as a
+whole: what a single case cannot show. The steps come from fixed rules, so
+they also appear when no LLM is configured. Each step names:
+
+- the **target** to change: the `evaluation` settings (re-run, more
+  attempts), the `dataset` (more cases, negative controls), or the `agent`
+  (compare agents or models);
+- the **problem** observed in this run and the **evidence** behind it (case
+  ids, attempt marks, or per-agent pass-rate changes);
+- the **action** to take, with the flag or file to change;
+- the **check** that would show the change worked.
+
+| Step | Shown when |
+|------|------------|
+| Incomplete run | Attempts did not produce a score and no per-case run error already says so |
+| Inconsistent results | A case passed on some attempts and failed on others (more `--n-attempts`) |
+| Single attempt | Every case ran once |
+| Agent-dependent effect | Two or more agents differ by 20 or more points in pass-rate change, and the best agent gains at least 10 points |
+| More cases | Fewer than five skill cases ran, unless the case fixes already ask for new cases |
+| Negative controls | The dataset snapshot has no case with `expected_skill: null` or `should_trigger: false` |
+| Agent experiment | Only one agent ran and the skill showed no clear gain |
+
+A step marked `hypothesis` is a cause or remedy to test, not a finding: for
+example, that one agent follows the skill differently. A step marked
+`limited` rests on an incomplete run, so re-run first. Steps never suggest
+removing cases or loosening expectations to raise a score. Baseline-only runs
+and runs where the skill never activated get no next steps. The Tier 3 payload
+carries them as `next_steps`, with the `kind`, `target`, `problem`,
+`evidence`, `action`, `check` and `strength` fields.
+
+### Findings and severity
+
+The terminal Findings panel uses **advisory metric severity**, not dimension
+verdicts: `ok` at 0.80 or above, `warning` from 0.40 to below 0.80, and
+`critical` below 0.40. These labels identify opportunities for improvement;
+a warning does not mean a dimension failed. Boundaries use the underlying
+score, not its rounded terminal display.
+
+| Scale | Meaning and boundaries |
+| --- | --- |
+| Advisory finding severity | Per-metric `ok` ≥ 0.80, `warning` ≥ 0.40 and below 0.80, `critical` below 0.40 |
+| [Dimension bands](#the-five-dimensions) | PASS ≥ 0.50, NEUTRAL ≥ 0.40 and below 0.50, FAIL below 0.40 |
+| Terminal score colors | Green ≥ 0.80, amber ≥ 0.60, red below 0.60 |
+| [Attempt pass threshold](#passk) | Overall attempt score ≥ 0.50 by default; configurable with `--pass-threshold` |
+| [Overall verdict](#skill-lift) | Combines the five dimensions across successful agents, not finding labels |
+| [Skill Lift bands](#skill-lift) | Diagnostic difference between arms, not an absolute metric score |
+
+For a score interpreted on each scale:
+
+| Score | Finding severity | Dimension band |
+| --- | --- | --- |
+| 0.39 | critical | FAIL |
+| 0.40 | warning | NEUTRAL |
+| 0.4545 | warning | NEUTRAL |
+| 0.50 | warning | PASS |
+| 0.6741 | warning | PASS |
+| 0.80 | ok | PASS |
+
+Exactly 0.40 is warning/neutral, exactly 0.50 is pass, and exactly 0.80 is ok.
+For mapped dimensions with multiple inputs, apply the dimension band to the
+combined dimension score, not each input metric. HTML evaluator cards and
+per-trial failure reasons also use the 0.80 gate:
+scores below it can carry reasons. This is the advisory metric scale, not
+the attempt pass threshold.
+
+`tier3 evaluate` writes the findings report only when it shows the detailed
+view (`--verbose`, or when no per-case summary is shown); `validate --tier3`
+never writes it. In that view, it writes `<run>/<agent>/findings.json` for each
+eligible agent with findings. Only the best agent receives generated
+suggestions; other agents use `suggestion_mode: "not_generated"`. The file is
+also absent in a default `tier3 evaluate` run that shows per-case rows without
+`--verbose`, or when execution did not succeed, the skill never activated,
+there are no rewards or usable metric details/scores, or the output path is
+unsafe or symlinked. Stale files are removed at the start of reporting, so old
+advice is not reused. If the best agent has no eligible findings, the report
+returns without writing artifacts for the other agents. Write failures are
+non-fatal.
+
+Scores come from canonical with-skill summary scores when available. Otherwise,
+the report takes the mean over logical trials only when rewards are complete
+(multi-step rewards first combine within each logical trial). If neither source
+is available, that metric is skipped. Reasons and references come from reward
+details and may describe individual trials rather than the aggregate score.
+
+The JSON fields are:
+
+- `skill_name` and `agent`: skill and agent identifiers (512 encoded bytes each).
+- `suggestion_mode`: `remediation` for generated improvement advice,
+  `passing_next_steps` for fallback next steps when no structured remediation
+  was generated, or `not_generated` for other agents (64 encoded bytes).
+- `severity_thresholds`: self-describing advisory metadata:
+  `{"ok_at_or_above": 0.8, "critical_below": 0.4, "scale": "advisory_metric"}`.
+  Older artifacts omit it; readers do not require it and retain the same
+  0.80/0.40 interpretation.
+- `findings`: at most 134 entries (six standard metrics plus 128 custom metrics).
+  Each has `metric` (256 encoded bytes), `label` (512), `severity` (64),
+  finite numeric `score`, `reasons` (at most four, 512 bytes each; ok findings
+  extract at most two), and `evidence_refs` (at most three).
+- `findings_total`, `findings_shown`, and `findings_truncated`: input finding
+  count, serialized count, and whether any were omitted, including invalid scores.
+- `suggestions`: at most four plain-text suggestions, 4096 encoded bytes each
+  before final redaction; these can include evidence links.
+- `suggestions_v2`: at most four structured suggestions with `suggestion`
+  (4096 encoded bytes), `dimension` (256), `evidence_refs` (at most three),
+  and optional `trial_id` (512). This list can be empty even when fallback
+  `suggestions` are present.
+- `evidence_refs_omitted` and `evidence_refs_omitted_reason`: optional fields
+  added when references are dropped to fit the 2 MiB artifact limit. The former
+  is `true`; the latter is `"findings artifact size limit"`.
+
+Evidence references retain only non-empty `source` (256 encoded bytes),
+`json_pointer` (512), `evidence_id` (512), `kind` (64), `path` (512),
+`label` (256), and `excerpt` (512). Encoded-byte limits count the JSON-escaped
+text, excluding surrounding quotes. Text is truncated when necessary and the
+whole payload is redacted before writing, with a final 2048-character string
+cap. The artifact is bounded for browser loading, not a complete evidence archive.
+
 ### The five dimensions
 
 With `default` or `default_plus_custom` grading, reports lead with five
@@ -612,7 +702,7 @@ dimensions, each answering one question:
 | Security | Is it safe to use? | `security`, from deterministic trace checks |
 | Correctness | Is the answer correct? | `accuracy`, from the `judge_accuracy` LLM judge |
 | Discoverability | Was the right skill loaded when needed? | `skill_execution`, from deterministic trajectory checks |
-| Effectiveness | Did the skill help complete the task? | `goal_accuracy` and `behavior_check`, from LLM judges |
+| Effectiveness | Did the skill help complete the task? | `goal_accuracy` from an LLM judge; `behavior_check` from its judge and directly evaluated declared checks (checks-only cases make no judge call) |
 | Efficiency | Did it avoid wasted tool or skill usage? | `skill_efficiency`, from deterministic trajectory checks |
 
 Tool-efficiency checks classify explicit searches rooted at `/` as wasted work,
@@ -660,12 +750,89 @@ and mark the overall comparison as incomplete, without selecting a best agent.
 A custom-only agent, one whose conditions use only its grader's own overall
 (`custom-overall-v1`), is still ranked against standard agents by that score,
 and `tier3 compare` shows it beside them. `tier3 compare` refuses standard
-agents scored under different policies or metric sets.
+agents scored under different policies or metric sets. When a metric is N/A in
+only one arm, `tier3 compare` drops it from both arms for the Overall lift, as
+`lift.json` does, so its lift can differ from the difference between the two
+arm overall scores.
+
+### Prior-version comparison
+
+When requested, `result.json` contains `prior_version_comparison` with `status`
+(`available` or `unavailable`), reasons, source run id and timestamp,
+`source_skill_identity`, `current_skill_identity`, and an `identical_skill`
+flag. Skill identities preserve evaluated-source revision and publication
+target digest when recorded. `latest` also records bounded rejected candidates.
+The report configuration retains this block for later rendering.
+
+Available comparisons contain per-agent `current_overall`, `prior_overall`,
+`delta`, `metrics` (current/prior/delta), optional custom metric deltas, and
+`regression` when delta is negative. The top-level regression flag is true
+when any available agent comparison regresses. Incompatible or missing scored
+evidence for any selected agent makes the whole comparison unavailable, with
+no regression flag. Reports show this
+comparison next to, never folded into, no-skill Skill Lift. The read-only
+`tier3 compare-versions` command recomputes the same comparison from retained
+rows without changing either run.
+
+### Lift history and retention
+
+Use `skillevaluator tier3 history ./my-skill` to list retained runs oldest
+first, with one row per run and agent. The reader uses the same results-root
+precedence and legacy fallback as `compare`: explicit `--results-dir`, then
+`SKILLEVALUATOR_RESULTS_DIR`, then `<skill>/evals/results/`. It reads the first
+populated candidate root, not a merged history from different roots.
+
+```bash
+skillevaluator tier3 history ./my-skill --agent opencode
+skillevaluator tier3 history ./my-skill --results-dir ./saved-runs --json
+skillevaluator tier3 history ./my-skill --output ./lift-history.csv
+skillevaluator tier3 history ./my-skill --output ./lift-history.md
+```
+
+Rows show run id and evaluation time, skill revision/content identity, model,
+dataset digest and case count, with/without scores, paired Skill Lift, scored
+and expected case coverage for both arms, baseline mode, and status. JSON
+keeps the full identities; the table abbreviates long content and dataset
+digests. Failed, incomplete, corrupt, skipped-baseline, baseline-only, or
+unscored rows retain a null `lift_delta`, `lift_status="unavailable"`, and
+reasons. A recorded lift of zero remains a real zero. Older summaries expose
+whatever identity and score fields they recorded; missing facts stay unknown.
+
+Each agent has its own chronological segments. The P0 baseline comparison
+identity excludes skill revisions but includes model, dataset/cases,
+environment, judge/scorer, attempts, score policy, and evaluator version.
+Configuration changes start a numbered segment, set `config_changed`, and
+list mismatch reasons; Markdown exports insert a break line. Known changes
+in unavailable rows also break the segment. `lift_change` compares only
+available rows with known compatible identities within the same segment;
+unknown identities never establish a cross-run trend. Do not interpret
+across-segment differences as skill improvement or regression.
+
+History is a summary reader, not an evidence-eligibility check. Unlike the
+completed-run views above, it also lists timestamped reservations with missing
+or corrupt completion artifacts. This does not make them eligible baseline
+sources. The command never launches evaluation or writes into the results
+root. `--output` writes only the requested JSON, CSV, or Markdown file outside
+the candidate results roots.
+
+New evaluations reserve a unique run directory; they do not prune older run
+directories. The default `<skill>/evals/results/` is inside the skill
+repository, but a separate skill repository does not automatically ignore that
+path. Add it to that repository's `.gitignore` before force-adding selected
+summaries. Keep the full local tree if you need trial evidence or reusable
+baselines. To retain a compact history with the repository, review
+privacy-sensitive metadata and force-add **only** each chosen run's
+`result.json` and `run_config.json` summaries (or copy them into a separately
+tracked archive). Do not commit raw trajectories, logs, credentials, or the
+entire generated results tree. Summary archives preserve history, not the
+per-row evidence required for baseline reuse or publication validation.
 
 ### Skill Lift
 
-Skill Lift compares Overall on the metrics and cases both arms scored, so it can differ from the displayed with-skill Overall minus baseline Overall when the baseline has N/A dimensions. It uses the same score units as both arms and ranges from
--1.0 to +1.0. Because live agent runs are noisy, especially at low attempt
+Skill Lift compares Overall on the metrics and cases both arms scored, so it
+can differ from subtracting the displayed Overall scores. It uses the same
+score units as both arms and ranges from -1.0 to +1.0. Because live agent runs
+are noisy, especially at low attempt
 counts, small deltas are kept neutral. The verdict bands:
 
 | Lift | Verdict | Read it as |
@@ -684,7 +851,17 @@ has a dimension below 0.40.
 A +0.03 lift therefore remains neutral under these bands. Lift requires both
 arms; if you ran with `--skip-baseline`, there is no lift to report. In
 `custom_only` grading, your own grader defines the score and lift — see
-[Custom Graders & Tasks](custom-graders.mdx).
+[Custom Graders & Tasks](/skills/skillevaluator/custom-graders).
+
+The HTML **Dimension Scores and Skill Lift** table shows each dimension's
+plain-language meaning and evidence source beside its score. For a successful
+best agent, a standard dimension whose signals were active but produced no score
+is listed as N/A with a **not scored with the skill** note and **No verdict**.
+A dimension whose signals had nothing to judge reads **Not applicable**; it has
+no score, so the agent's verdict stays NEUTRAL and cannot PASS. A
+collapsed **What each number means** panel under the Tier 3 overview cards
+separates the verdict, Overall Score, Skill Lift, pass@k, the Tier 1 Quality
+Score, and publication eligibility.
 
 When the HTML report has no lift for an agent or dimension, its label says
 why. **no baseline** means that row has no baseline score, for example after
@@ -860,7 +1037,7 @@ the available evidence.
 
 **Qualitative-only grading is not supported by this milestone.** The worksheet
 is additive to current numeric contracts, including the numeric overall required
-by [`custom_only`](custom-graders.mdx#the-reward-contract). A null score means no
+by [`custom_only`](/skills/skillevaluator/custom-graders#the-reward-contract). A null score means no
 valid score was available; it is neither zero nor a pass. Execution failure,
 missing evidence and measured task failure remain distinct.
 
@@ -923,14 +1100,34 @@ Retained run artifacts remain the source for details omitted by either limit.
 
 ### pass@k
 
-pass@k is the reliability signal, reported separately from the dimension
-scores. With `--n-attempts k`, each eval case runs k times per arm, and a case
+pass@k and its pass-rate difference are supporting reliability, not the headline
+claim. The report labels the pass@k delta column **Pass-rate difference**.
+With `--n-attempts k`, each eval case runs k times per arm, and a case
 counts as passed when at least one attempt clears the `--pass-threshold`
-score using the same overall formula above. Comparing pass@k across arms (in
+score using the same overall formula above. A scored `goal_accuracy` must also
+meet its default 1.0 pass threshold; a below-threshold attempt fails with a
+goal-not-met reason even when its Overall score passes. Scored security must
+also be 1.0: a below-threshold result fails with a security-issue reason.
+Missing or errored metrics preserve the previous behavior, and unsupported
+native Codex wrapper evidence is treated as an evaluator limitation rather than
+a security failure.
+`behavior_check` is warning-only; a score below 1.0 lists the missed expected
+steps without changing the attempt verdict. The existing Overall threshold is
+applied after the required checks.
+
+Each arm reports **Required checks passed**, **Goals met**, and
+**Security clean** as counts over scored cases or attempts, with the
+with-skill-minus-no-skill difference. Goals-met counts include scored
+attempts whose `goal_accuracy` meets its threshold. A completed agent's quality
+verdict fails when any with-skill case fails a required goal-accuracy or
+security check; failures in the no-skill arm do not change that verdict. A
+positive Skill Lift remains available for reference, but does not override
+that quality failure.
+Comparing pass@k across arms (in
 `pass_at_k_lift.json`) tells you
 whether the skill makes success more *repeatable*, not just whether the average
 score moved. Each arm also records a case-level 95% Wilson score interval for
-its pass rate. When both arms contain the same identified cases,
+its pass rate; the paired value is the pass-rate difference. When both arms contain the same identified cases,
 `pass_at_k_lift.json` records the paired outcome counts — skill-only passes,
 baseline-only passes, both-pass, and neither-pass — plus a two-sided exact
 McNemar diagnostic over the discordant pairs. Partial or unidentified pairing
@@ -941,6 +1138,14 @@ combine into one attempt score for averages and pass@k. When one condition
 mixes standard-metric and custom-only rewards, its overall score and lift use
 that logical-attempt overall rather than the mean of the standard dimensions,
 which would cover only the standard rows.
+
+`tier3 evaluate` also shows the evidence volume behind the headline: distinct
+cases, planned and scored attempts, and execution or judge failures. When a
+baseline ran, it includes the same counts for each arm. Its incomplete-coverage
+form, such as “27 of 30 attempts scored,” is shown only by `tier3 evaluate`;
+report surfaces show a fully scored best agent. A `Limited evidence:` warning
+appears when there are fewer than 10 distinct cases or any non-skipped arm
+scored fewer attempts than planned.
 
 Case identifiers used as JSON keys must be printable, free of credential
 material, and no larger than 512 UTF-8 bytes. A reward with an unsafe identity
@@ -998,7 +1203,7 @@ Opens a terminal chat about one completed run. Answers are grounded in that
 run's scores, comparisons, per-case attempts, measured agent resources, and
 saved feedback, without running the evaluation or regenerating its LLM feedback.
 Pass the run directory itself; see
-[tier3 feedback](cli-reference.mdx#tier3-feedback) for the options and what the
+[tier3 feedback](/skills/skillevaluator/cli-reference#tier3-feedback) for the options and what the
 chat sends to the LLM provider.
 
 ```bash title="Discuss one run"
@@ -1025,7 +1230,7 @@ alias.)
 
 ## Performance dashboard
 
-Use the optional [Performance Dashboard](performance-dashboard.mdx) to filter
+Use the optional [Performance Dashboard](/skills/skillevaluator/performance-dashboard) to filter
 saved Tier 3 reports and retained runs, compare paired scores and resource use,
 and download the visible tables as CSV. The guide covers installation,
 comparison eligibility, measurement limits, and reloading saved inputs.
@@ -1069,29 +1274,39 @@ Both paths speak the same dialect: standalone `tier3 evaluate` and
 `validate --tier3` share one HTML renderer for `report.html`, and both embed
 the Tier 3 payload at schema version `2.0`. In that payload, conclusions and
 recommendations written by the LLM carry `source: "llm"` and name the model
-that wrote them as `model`. For a Claude 5.5 or later model on the native
+that wrote them as `model`. LLM recommendations that restate a deterministic
+one, or that loosen an expectation, assertion, ground truth, or pass threshold,
+are dropped, and LLM suggestions keep only evidence references the run
+recorded. For a Claude 5.5 or later model on the native
 Claude API this is the model the reply names, which can be the server-side
 refusal fallback model rather than the configured model. Otherwise it is the
 configured model, unless a server-side `fallback` block in the reply names
 another model.
 
 Exit codes and a ready-made JSON gating recipe live in
-[Gate Your CI](ci-integration.mdx).
+[Gate Your CI](/skills/skillevaluator/ci-integration).
 
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Gate Your CI" icon="shield" href="ci-integration.mdx">
+  <Card title="Gate Your CI" icon="shield" href="/skills/skillevaluator/ci-integration">
     Turn the JSON report and exit codes into a merge gate, with a copy-paste
     GitHub Actions workflow.
   </Card>
-  <Card title="Tier 3: Live Evaluation" icon="flask" href="tier3-live-evaluation.mdx">
+  <Card title="Tier 3: Live Evaluation" icon="flask" href="/skills/skillevaluator/tier3-live-evaluation">
     Run the evaluation that produces the results tree on this page.
   </Card>
-  <Card title="Custom Graders & Tasks" icon="book" href="custom-graders.mdx">
+  <Card title="Custom Graders & Tasks" icon="book" href="/skills/skillevaluator/custom-graders">
     Define your own scoring when the default graders can't express success.
   </Card>
-  <Card title="CLI Reference" icon="terminal" href="cli-reference.mdx">
+  <Card title="CLI Reference" icon="terminal" href="/skills/skillevaluator/cli-reference">
     Every flag for view, compare, and the report options, with exact defaults.
   </Card>
 </CardGroup>
+
+<div id="retained-three-tier-ci-evidence">
+
+For the explicit all-tier opt-in and its prerequisites, see [Advanced CI](/skills/skillevaluator/advanced-ci).
+The [retained CI evidence reference](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/all-tiers/README.md#retained-three-tier-ci-evidence) preserves the detailed report contract.
+
+</div>

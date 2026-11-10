@@ -11,6 +11,7 @@ from rich.text import Text
 from skillevaluator.models import ValidationResult
 from skillevaluator.reporting.cli import CLIReporter
 from skillevaluator.reporting.console_ui import ValidateView, Verdict, detail_row, lift_row, summarize_tier1
+from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION
 
 
 @pytest.mark.parametrize(
@@ -254,20 +255,185 @@ def test_quality_grade_cannot_override_failed_incomplete_or_skipped_status(passe
 
 
 def test_full_agent_verdict_keeps_displayed_zero_lift_neutral():
-    console = Console(file=io.StringIO(), width=100)
+    output = io.StringIO()
+    console = Console(file=output, width=100)
     rendered = []
     original_print = console.print
 
     def capture(value="", *args, **kwargs):
-        if isinstance(value, str) and "composite lift" in value:
+        if isinstance(value, str) and "Skill Lift =" in value:
             rendered.append(Text.from_markup(value))
         original_print(value, *args, **kwargs)
 
     console.print = capture
-    CLIReporter._print_agent_eval_tables({"verdict": "pass", "composite_lift": 0.004}, console)
+    CLIReporter._print_agent_eval_tables(
+        {
+            "verdict": "pass",
+            "composite_lift": 0.004,
+            "attempt_policy": {"max_attempts": 3, "pass_threshold": 0.6},
+            "pass_at_k": {
+                "with_skill": {"k": 3, "pass_threshold": 0.6, "rate": 0.75},
+                "without_skill": {"k": 3, "pass_threshold": 0.6, "rate": 0.5},
+                "lift": {"delta": 0.25},
+            },
+        },
+        console,
+    )
     text = rendered[0]
+    rendered_output = " ".join(output.getvalue().splitlines())
+    assert SKILL_LIFT_DEFINITION in rendered_output
+    assert "Pass@3 (supporting reliability" in rendered_output
+    assert "Pass-rate difference +25.0 percentage points" in rendered_output
     style = text.get_style_at_offset(console, text.plain.index("+0.00"))
     assert style.color.name == "#8a8f98"
+
+
+def test_agent_eval_summary_shows_required_counts_and_failed_case_reason():
+    output = io.StringIO()
+    CLIReporter._print_agent_eval_tables(
+        {
+            "verdict": "fail",
+            "verdict_reason": "1 of 2 cases failed: 1 goal not met",
+            "composite_lift": 0.2,
+            "required_checks": {
+                "with_skill": {"passed": 1, "scored": 2},
+                "without_skill": {"passed": 2, "scored": 2},
+                "difference": -1,
+            },
+            "correct_answers": {
+                "with_skill": {"correct": 1, "scored": 2},
+                "without_skill": {"correct": 2, "scored": 2},
+                "difference": -1,
+            },
+            "security_clean": {
+                "with_skill": {"clean": 2, "scored": 2},
+                "without_skill": {"clean": 2, "scored": 2},
+                "difference": 0,
+            },
+            "pass_at_k": {
+                "with_skill": {
+                    "cases": {
+                        "wrong-ground-truth": {
+                            "passed": False,
+                            "attempts_used": 1,
+                            "best_score": 0.82,
+                            "reason": "goal not met (goal accuracy 0.00)",
+                            "warnings": ["missed expected step 1 of 1 (behavior 0.00)"],
+                        }
+                    }
+                }
+            },
+        },
+        Console(file=output, width=140, color_system=None),
+    )
+
+    rendered = output.getvalue()
+    assert "Verdict: FAIL — 1 of 2 cases failed: 1 goal not met" in rendered
+    assert "Skill Lift (for reference)" in rendered
+    assert "Required checks passed: 1/2 | 2/2 | -1" in rendered
+    assert "Goals met: 1/2 | 2/2 | -1" in rendered
+    assert "Security clean: 2/2 | 2/2 | +0" in rendered
+    assert "wrong-ground-truth" in rendered
+    assert "0.82" in rendered
+    assert "goal not met (goal accuracy 0.00)" in rendered
+    assert "WARNING" in rendered
+
+
+def test_agent_eval_summary_shows_with_skill_counts_without_baseline() -> None:
+    output = io.StringIO()
+    CLIReporter._print_agent_eval_tables(
+        {
+            "verdict": "pass",
+            "required_checks": {"with_skill": {"passed": 0, "scored": 2}},
+            "correct_answers": {"with_skill": {"correct": 1, "scored": 2}},
+            "security_clean": {"with_skill": {"clean": 2, "scored": 2}},
+        },
+        Console(file=output, width=140, color_system=None),
+    )
+
+    rendered = output.getvalue()
+    assert "Required checks passed: 0/2 | N/A | N/A" in rendered
+    assert "Goals met: 1/2 | N/A | N/A" in rendered
+    assert "Security clean: 2/2 | N/A | N/A" in rendered
+
+
+def test_failed_agent_eval_summary_row_shows_verdict_reason_and_lift():
+    result = ValidationResult(
+        validator_name="AGENT_EVAL",
+        passed=True,
+        metadata={
+            "agent_eval": {
+                "verdict": "fail",
+                "verdict_reason": "2 of 4 cases failed: 1 goal not met, 1 security issue",
+                "composite_lift": 0.0,
+            }
+        },
+    )
+    result.summary.checks_performed = 1
+    output = io.StringIO()
+
+    CLIReporter(console=Console(file=output, width=180, color_system=None)).print_summary([result])
+
+    rendered = output.getvalue()
+    assert "AGENT_EVAL" in rendered
+    assert "FAIL" in rendered
+    assert "2 of 4 cases failed: 1 goal not met, 1 security issue; lift +0.00" in rendered
+    assert "1 checks passed" not in rendered
+
+
+def test_full_summary_shows_completed_agent_eval_counts_without_findings():
+    result = ValidationResult(
+        validator_name="AGENT_EVAL",
+        passed=True,
+        metadata={
+            "agent_eval": {
+                "verdict": "fail",
+                "verdict_reason": "1 of 2 cases failed: 1 goal not met",
+                "composite_lift": 0.2,
+                "required_checks": {
+                    "with_skill": {"passed": 1, "scored": 2},
+                    "without_skill": {"passed": 2, "scored": 2},
+                    "difference": -1,
+                },
+                "correct_answers": {
+                    "with_skill": {"correct": 1, "scored": 2},
+                    "without_skill": {"correct": 2, "scored": 2},
+                    "difference": -1,
+                },
+                "security_clean": {
+                    "with_skill": {"clean": 2, "scored": 2},
+                    "without_skill": {"clean": 2, "scored": 2},
+                    "difference": 0,
+                },
+                "pass_at_k": {
+                    "with_skill": {
+                        "cases": {
+                            "wrong-ground-truth": {
+                                "passed": False,
+                                "attempts_used": 1,
+                                "best_score": 0.82,
+                                "reason": "goal not met (goal accuracy 0.00)",
+                                "warnings": ["missed expected step 1 of 1 (behavior 0.00)"],
+                            }
+                        }
+                    }
+                },
+            }
+        },
+    )
+    output = io.StringIO()
+
+    CLIReporter(console=Console(file=output, width=140, color_system=None)).print_all([result])
+
+    rendered = output.getvalue()
+    assert "Verdict: FAIL — 1 of 2 cases failed: 1 goal not met" in rendered
+    assert "Required checks passed: 1/2 | 2/2 | -1" in rendered
+    assert "Goals met: 1/2 | 2/2 | -1" in rendered
+    assert "Security clean: 2/2 | 2/2 | +0" in rendered
+    assert "wrong-ground-truth" in rendered
+    assert "0.82" in rendered
+    assert "goal not met (goal accuracy 0.00)" in rendered
+    assert "missed expected step 1 of 1 (behavior 0.00)" in rendered
 
 
 def test_verdict_badge_background_does_not_fill_headline():

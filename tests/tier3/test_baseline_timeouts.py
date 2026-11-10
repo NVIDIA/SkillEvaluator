@@ -757,12 +757,13 @@ def test_verdict_comes_from_the_complete_peer_not_a_tolerated_agent(
 ) -> None:
     from skillevaluator.evaluation.tier3_report import _agent_quality_verdict
 
-    # opencode activates the skill and passes every dimension, but its baseline
-    # timed out. codex completes both arms and fails its dimensions or never
-    # activates the skill.
+    # opencode activates the skill and passes every dimension and required
+    # check (goal accuracy 1.0), but its baseline timed out. codex completes
+    # both arms and fails its dimensions or never activates the skill.
+    passing = {**SCORES, "goal_accuracy": 1.0}
     failing = {**dict.fromkeys(SCORES, 0.3), "security": 1.0}
     jobs = tmp_path / "jobs"
-    _arm(jobs, "opencode", "with", [(case, "scored") for case in CASES], details=_activation(True))
+    _arm(jobs, "opencode", "with", [(case, "scored") for case in CASES], scores=passing, details=_activation(True))
     _arm(jobs, "opencode", "without", [("case-001", "scored"), ("case-002", "timeout")])
     peer_scores = failing if peer == "failing" else None
     peer_activation = _activation(peer != "never-activated")

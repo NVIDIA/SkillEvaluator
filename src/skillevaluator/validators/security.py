@@ -3030,7 +3030,9 @@ class SecurityValidator(ValidatorBase):
         """Validate each discovered skill and total their SkillSpector applicability counters.
 
         The folder walker does not merge per-skill metadata, so the counters
-        are collected as each skill finishes.
+        are collected as each skill finishes. The counts of referenced
+        artifacts that SkillSpector did not completely inspect are totaled like
+        the applicability counters.
 
         Without a configured ``skillspector_reference_root``, the target is the
         reference root of every scan of the walk
@@ -3044,9 +3046,6 @@ class SecurityValidator(ValidatorBase):
         ``skillspector_reference_root`` is the scanned root. Otherwise, as for
         the per-partition scans of ``tier1/plugin_checks.py``, it has no known
         target and accepts none.
-
-        The counts of referenced artifacts that SkillSpector did not
-        completely inspect are totaled the same way.
         """
         blocks: list[dict] = []
         reference_summaries: list[object] = []

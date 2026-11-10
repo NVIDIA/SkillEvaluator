@@ -68,7 +68,13 @@ from skillevaluator.publication_identity import (
     publication_target_from_path,
 )
 from skillevaluator.source_identity import normalized_evaluated_source
-from skillevaluator.tier3.baseline_store import baseline_description, comparison_identity, select_baseline
+from skillevaluator.tier3.baseline_store import (
+    baseline_description,
+    baseline_task_tree_digest,
+    comparison_identity,
+    identity_dataset_digest,
+    select_baseline,
+)
 from skillevaluator.tier3.case_ids import validate_case_ids
 from skillevaluator.tier3.eval_core.llm_judge import JUDGE_REASONING_EFFORT
 from skillevaluator.tier3.evals_config import (
@@ -5519,6 +5525,23 @@ def _run_harbor_eval_impl(
                 detail="credentials and selected models verified",
             )
         )
+    effective_resources = harbor_config.get("resources", {})
+    effective_resources = dict(effective_resources) if isinstance(effective_resources, Mapping) else {}
+    for resource, override in (
+        ("cpus", override_cpus),
+        ("memory_mb", override_memory_mb),
+        ("storage_mb", override_storage_mb),
+    ):
+        if override is not None:
+            effective_resources[resource] = override
+    environment_kwargs_digest = hashlib.sha256(
+        json.dumps(effective_environment_kwargs, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    runtime_env_digest = hashlib.sha256(
+        json.dumps(configured_runtime_env, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
     run_config = {
         "config_file": str(config_path.relative_to(evaluator_skill_path)) if config_path else "none",
         "harbor": {
@@ -5526,6 +5549,7 @@ def _run_harbor_eval_impl(
             "environment_kwargs": {
                 "keys": sorted(effective_environment_kwargs),
                 "sources": environment_kwarg_sources,
+                "values_sha256": environment_kwargs_digest,
             },
             "n_attempts": n_attempts,
             "stop_on_pass": bool(stop_on_pass),
@@ -5533,10 +5557,13 @@ def _run_harbor_eval_impl(
             "timeout_multiplier": timeout_multiplier,
             "base_image_mode": base_image_mode,
             "resources": {
-                "cpus": override_cpus,
-                "memory_mb": override_memory_mb,
-                "storage_mb": override_storage_mb,
+                "cpus": effective_resources.get("cpus"),
+                "memory_mb": effective_resources.get("memory_mb"),
+                "storage_mb": effective_resources.get("storage_mb"),
             },
+            "agent_workdir": harbor_config.get("agent_workdir"),
+            "custom_dockerfile_mode": dockerfile_mode,
+            "runtime_env": {"keys": sorted(configured_runtime_env), "values_sha256": runtime_env_digest},
             "jobs_retained": keep_harbor_jobs,
         },
         "provider": {"name": provider.provider, "model": provider.model},
@@ -5962,6 +5989,13 @@ def _run_harbor_eval_impl(
     task_selectors = expected_task_selectors or []
     case_id_by_task_selector = expected_case_id_by_task_selector or {}
     case_ids = [case_id_by_task_selector[selector] for selector in task_selectors]
+    baseline_task_dirs = {agent: tuple(emitted_tasks[agent].get("without_skill", ())) for agent in agents}
+    try:
+        identity_digest = identity_dataset_digest(next(iter(baseline_task_dirs.values()), ()))
+        task_tree_digest = baseline_task_tree_digest(baseline_task_dirs)
+    except (OSError, UnicodeError, ValueError) as exc:
+        return _persist_pre_execution_failure([f"could not record baseline task identity: {exc}"])
+    run_config["baseline_task_tree_digest"] = task_tree_digest
     try:
         dataset_truth = _persist_dataset_truth(run_dir, fallback_task_ids=case_ids)
     except DatasetSnapshotContractError as exc:
@@ -5971,6 +6005,8 @@ def _run_harbor_eval_impl(
         run_config,
         {
             "dataset_digest": dataset_truth["dataset_digest"],
+            "identity_dataset_digest": identity_digest,
+            "baseline_task_tree_digest": task_tree_digest,
             "expected_case_ids": case_ids,
             "evaluator_version": dataset_truth["evaluator_version"],
             "publication_target": publication_target,
@@ -6291,6 +6327,8 @@ def _run_harbor_eval_impl(
             "dataset_summary": dataset_truth["dataset_summary"],
             "dataset_digest": dataset_truth["dataset_digest"],
             "dataset_digest_algorithm": dataset_truth["dataset_digest_algorithm"],
+            "identity_dataset_digest": identity_digest,
+            "baseline_task_tree_digest": task_tree_digest,
             "run_config": run_config,
         }
     )

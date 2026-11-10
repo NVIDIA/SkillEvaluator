@@ -869,6 +869,11 @@ def render_evaluation_result(
     duration = result.get("duration_seconds")
     if _finite_number(duration) is not None:
         console.print(f"Time: {float(duration):.1f}s")
+    baseline = result.get("baseline")
+    if isinstance(baseline, Mapping) and (baseline.get("mode") == "reused" or baseline.get("reuse_reason")):
+        from skillevaluator.tier3.baseline_store import baseline_description
+
+        console.print(safe(baseline_description(dict(baseline))))
 
     agents = result.get("agents")
     incomplete = status in {"failed", "incomplete"} and not any(

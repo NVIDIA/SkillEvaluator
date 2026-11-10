@@ -48,6 +48,34 @@ def test_overall_lift_headline_preserves_signed_persisted_value_and_original_tab
 
 
 @pytest.mark.parametrize(
+    ("baseline", "expected"),
+    [
+        (
+            {"mode": "reused", "source_run_id": "source", "source_evaluated_at": "time"},
+            "Baseline: reused from run source (time)",
+        ),
+        ({"mode": "fresh", "reuse_reason": "no compatible completed baseline"}, "Baseline: fresh (reuse not possible"),
+    ],
+)
+def test_evaluation_summary_reports_reused_or_fallback_baseline(baseline, expected: str) -> None:
+    stream = io.StringIO()
+    render_evaluation_result(
+        {"execution_status": "succeeded", "baseline": baseline, "agents": {}},
+        console=Console(file=stream, force_terminal=False, width=180),
+    )
+    assert expected in stream.getvalue()
+
+
+def test_evaluation_summary_omits_unremarkable_fresh_baseline() -> None:
+    stream = io.StringIO()
+    render_evaluation_result(
+        {"execution_status": "succeeded", "baseline": {"mode": "fresh"}, "agents": {}},
+        console=Console(file=stream, force_terminal=False, width=180),
+    )
+    assert "Baseline:" not in stream.getvalue()
+
+
+@pytest.mark.parametrize(
     "change",
     [
         {

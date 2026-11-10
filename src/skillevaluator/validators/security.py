@@ -1599,6 +1599,12 @@ _SKILLSPECTOR_SHELL_RANGE_RE = re.compile(r"<\d*-\d*>")
 _SKILLSPECTOR_SHELL_GROUP_TOKEN_RE = re.compile(r"[()|]|[\s/`<>;&]+")
 # Characters that make the group after them a bash or ksh extended glob.
 _SKILLSPECTOR_EXTGLOB_OPERATORS = frozenset("@!+?*")
+# A zsh EXTENDED_GLOB globbing flag group, such as ``(#i)``, ``(#a2)``,
+# ``(#c1,2)``, ``(#s)`` or ``(#q.)``, which changes how the rest of its word
+# matches; ``(#1)`` or ``(#setup)`` is not one. A run of characters other than
+# whitespace that holds one is a word that may stand for any text.
+_SKILLSPECTOR_ZSH_FLAGS_RE = re.compile(r"\(#(?:q|[se]\)|c\d*(?:,\d*)?\)|(?:[ilIbBmMuU]|a\d+)+\))")
+_SKILLSPECTOR_NON_SPACE_RUN_RE = re.compile(r"\S+")
 _SKILLSPECTOR_GLOB_SYNTAX = frozenset("*?[")
 _SKILLSPECTOR_PATH_PART_SEPARATOR_RE = re.compile(r"[=:,]")
 # Work that checking the lines of one report's missing references may take, in
@@ -1914,14 +1920,22 @@ def _skillspector_shell_groups(text: str) -> str:
     alternative, bash and ksh read ``@(...)``, ``!(...)``, ``+(...)``,
     ``?(...)`` and ``*(...)`` as extended globs, and zsh reads ``<1-10>`` as
     any number in that range. A group with ``|`` at its own level, an extended
-    glob and a range become :data:`_SKILLSPECTOR_SHELL_ANY`. Any other group
-    loses its parentheses, unless it follows ``]``, as a Markdown link
-    destination does. Parentheses around whitespace, ``/``, a backtick, ``<``,
-    ``>``, ``;`` or ``&`` do not form a group and still end a word.
+    glob and a range become :data:`_SKILLSPECTOR_SHELL_ANY`, and so does each
+    run of characters other than whitespace that holds a zsh globbing flag
+    group (:data:`_SKILLSPECTOR_ZSH_FLAGS_RE`), such as ``(#a2)``, since the
+    flag changes how the rest of the word matches, across ``/`` too. Any other
+    group loses its parentheses, also after ``]``, so ``[v](e)rsions`` reads
+    as ``[v]ersions``; the line as written, with a Markdown link destination in
+    its parentheses, is read as well. Parentheses around whitespace, ``/``, a
+    backtick, ``<``, ``>``, ``;`` or ``&`` do not form a group and still end a
+    word.
     """
     text = _SKILLSPECTOR_SHELL_RANGE_RE.sub(_SKILLSPECTOR_SHELL_ANY, text)
     if "(" not in text:
         return text
+    text = _SKILLSPECTOR_NON_SPACE_RUN_RE.sub(
+        lambda run: _SKILLSPECTOR_SHELL_ANY if _SKILLSPECTOR_ZSH_FLAGS_RE.search(run.group()) else run.group(), text
+    )
     pieces: list[str] = []
     # Each open group: the index of its "(" in pieces, whether "|" splits it,
     # and the character before it.
@@ -1945,8 +1959,6 @@ def _skillspector_shell_groups(text: str) -> str:
                 if before in _SKILLSPECTOR_EXTGLOB_OPERATORS:
                     pieces[-1] = pieces[-1][:-1]
                 pieces.append(_SKILLSPECTOR_SHELL_ANY)
-            elif before == "]":
-                pieces.append(char)
             else:
                 pieces[start] = ""
         else:

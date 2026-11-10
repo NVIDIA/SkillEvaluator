@@ -9375,6 +9375,9 @@ class TestSkillspectorMissingReferences:
             ("[the setup script](v*\\i*.sh)", "versions/install.sh"),
             ("[the setup script](verr#sions/inst#all.sh)", "versions/install.sh"),
             ("[the setup script](ver^x/inst^x.sh)", "versions/install.sh"),
+            # A zsh group after "]", and zsh globbing flags.
+            ("sh [v](e)rsions/[i](n)stall.sh in zsh", "versions/install.sh"),
+            ("sh (#a2)virsions/(#a2)instell.sh in zsh", "versions/install.sh"),
         ],
     )
     @patch("skillevaluator.validators.security.Tools")
@@ -9993,9 +9996,18 @@ class TestSkillspectorMissingReferences:
             ("Run `& ver`sions/inst`all.sh` now.", "versions", True),
             ("Run ``sh `echo v`ersions/setup`` now.", "versions", True),
             ("Run ``sh $(printf '\\166')ersions/setup`` now.", "versions", True),
+            ("Run sh [v](e)rsions/[i](n)stall.sh in zsh now.", "versions", True),
+            ("Run sh [v](e)rsions/[i](n)stall.sh in zsh now.", "install.sh", True),
+            ("Run sh (#a2)virsions/(#a2)instell.sh in zsh now.", "versions", True),
+            ("Run sh (#a2)virsions/(#a2)instell.sh in zsh now.", "install.sh", True),
+            ("Run `sh vers(i)(#c1)ons/inst(a)(#c1)ll.sh` now.", "install.sh", True),
+            ("Run `sh ver(#a1)zions/inst(#a1)alk.sh` now.", "versions", True),
+            ("Run `sh (#ia1)VIRSIONS/setup` now.", "versions", True),
             ("Write the summary to `output/notes.md` (optional).", "evals", False),
             ("Call `render(notes)` and write `output/notes.md`.", "evals", False),
             ("## Notes: write `output/notes.md`.", "evals", False),
+            ("## Notes (#1): write `output/notes.md`.", "evals", False),
+            ("See [Setup](#setup) and [the guide](guide.md), then write `output/notes.md`.", "evals", False),
             ("Write the C# client to `output/Client.cs`.", "evals", False),
             ("Keep it to ~5 lines in `output/notes.md`, 50% shorter.", "evals", False),
             ("Read `~/.config/notes.toml`, then write `output/notes.md`!", "evals", False),

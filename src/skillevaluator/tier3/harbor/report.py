@@ -244,6 +244,14 @@ def _metric_label(metric: str) -> str:
     )
 
 
+def _normalize_evidence_refs(raw_refs: Any) -> list[Any]:
+    if isinstance(raw_refs, list):
+        return raw_refs
+    if isinstance(raw_refs, dict | str):
+        return [raw_refs]
+    return []
+
+
 def _extract_findings(
     rewards: list[dict[str, Any]],
     *,
@@ -295,11 +303,7 @@ def _extract_findings(
         for t in trials:
             d = t["detail"]
             if isinstance(d, dict):
-                raw_refs = d.get("evidence_refs")
-                if isinstance(raw_refs, list):
-                    metric_refs.extend(raw_refs)
-                elif isinstance(raw_refs, dict | str):
-                    metric_refs.append(raw_refs)
+                metric_refs.extend(_normalize_evidence_refs(d.get("evidence_refs")))
         _seen: set[tuple[Any, ...]] = set()
         _refs: list[dict[str, Any]] = []
         for raw_ref in metric_refs:
@@ -590,13 +594,14 @@ def _build_evidence_ref_lookup(rewards: list[dict[str, Any]]) -> dict[str, dict[
             metric_detail = _detail_for_finding(reward, metric)
             if not isinstance(metric_detail, dict):
                 continue
-            for ref in metric_detail.get("evidence_refs") or []:
-                if not isinstance(ref, dict):
+            for ref in _normalize_evidence_refs(metric_detail.get("evidence_refs")):
+                if not isinstance(ref, dict | str):
                     continue
-                if ref.get("source") or evidence_ref_identity(ref):
-                    key = _compact_evidence_ref(ref)
+                resolved = _resolve_evidence_ref(ref, {})
+                if resolved.get("source") or evidence_ref_identity(resolved):
+                    key = _compact_evidence_ref(resolved)
                     if key not in lookup:
-                        lookup[key] = ref
+                        lookup[key] = resolved
     return lookup
 
 
@@ -631,6 +636,18 @@ def _resolve_evidence_ref(ref: Any, lookup: dict[str, dict[str, Any]]) -> dict[s
     return _bounded_evidence_ref({"source": source, "json_pointer": pointer, "kind": "evidence"})
 
 
+def _recorded_evidence_refs(raw_refs: list[Any], lookup: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Resolve LLM-cited references, keeping only those the run recorded, once each."""
+    resolved: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for ref in raw_refs:
+        key = _compact_evidence_ref(ref) if isinstance(ref, dict) else str(ref)[:1024]
+        if key in lookup and key not in seen:
+            seen.add(key)
+            resolved.append(_resolve_evidence_ref(key, lookup))
+    return resolved
+
+
 def _generate_suggestions_structured(
     skill_name: str,
     findings: list[dict[str, Any]],
@@ -646,8 +663,9 @@ def _generate_suggestions_structured(
     (cheap, reliable).  After parsing the LLM response each string ref is
     resolved against a lookup built from ``rewards[*]["details"][metric]["evidence_refs"]``
     so that the richer dict fields (``kind``, ``path``, ``excerpt``) are
-    preserved.  Unresolvable strings fall back to a minimal dict with
-    ``kind="evidence"``.  Callers that consume ``suggestions_v2[*].evidence_refs``
+    preserved.  References the run did not record are dropped, so a
+    suggestion never cites evidence that does not exist, and repeated
+    suggestions are kept once.  Callers that consume ``suggestions_v2[*].evidence_refs``
     (including the SkillEvaluator report template) therefore always receive dicts rather
     than plain strings.
     """
@@ -715,6 +733,10 @@ Based on these results, provide exactly 3-4 specific, actionable suggestions for
 
 Keep each suggestion to 1-2 sentences. Be concrete — reference specific files, commands, or sections.
 If the failures are purely environmental (e.g. CLI not installed in container), say so directly.
+Give distinct suggestions; do not repeat one fix in different words.
+Do not suggest loosening, removing, or rewriting an eval expectation just so the agent passes; change a case only when the evidence shows the expectation itself is wrong.
+When the evidence does not establish a cause (for example, that a different model would do better), start the suggestion with "Hypothesis:" and say how to test it.
+Cite only evidence references listed above; references the run did not record are dropped.
 
 Respond with ONLY a JSON array of objects {{"suggestion": "...", "dimension": "<metric>", "evidence_refs": ["trajectory.json#/steps/N", ...]}}, no other text."""
 
@@ -732,25 +754,26 @@ Respond with ONLY a JSON array of objects {{"suggestion": "...", "dimension": "<
         parsed = _extract_json(content) if content else None
         if isinstance(parsed, list):
             result: list[dict[str, Any]] = []
+            seen: set[str] = set()
             for item in parsed[:4]:
                 if isinstance(item, dict):
+                    text = str(item.get("suggestion", ""))[:_MAX_FINDING_TEXT_CHARS]
                     raw_refs = list(item.get("evidence_refs") or [])[:_MAX_FINDING_EVIDENCE_REFS]
-                    resolved_refs = [_resolve_evidence_ref(r, ref_lookup) for r in raw_refs]
-                    result.append(
-                        {
-                            "suggestion": str(item.get("suggestion", ""))[:_MAX_FINDING_TEXT_CHARS],
-                            "dimension": str(item.get("dimension", ""))[:256],
-                            "evidence_refs": resolved_refs,
-                        }
-                    )
+                    entry = {
+                        "suggestion": text,
+                        "dimension": str(item.get("dimension", ""))[:256],
+                        "evidence_refs": _recorded_evidence_refs(raw_refs, ref_lookup),
+                    }
                 elif isinstance(item, str):
-                    result.append(
-                        {
-                            "suggestion": item[:_MAX_FINDING_TEXT_CHARS],
-                            "dimension": "",
-                            "evidence_refs": [],
-                        }
-                    )
+                    text = item[:_MAX_FINDING_TEXT_CHARS]
+                    entry = {"suggestion": text, "dimension": "", "evidence_refs": []}
+                else:
+                    continue
+                key = " ".join(text.lower().split())
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                result.append(entry)
             if result:
                 return result
         if isinstance(parsed, dict) and "suggestions" in parsed:

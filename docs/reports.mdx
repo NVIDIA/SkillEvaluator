@@ -755,6 +755,25 @@ only one arm, `tier3 compare` drops it from both arms for the Overall lift, as
 `lift.json` does, so its lift can differ from the difference between the two
 arm overall scores.
 
+### Prior-version comparison
+
+When requested, `result.json` contains `prior_version_comparison` with `status`
+(`available` or `unavailable`), reasons, source run id and timestamp,
+`source_skill_identity`, `current_skill_identity`, and an `identical_skill`
+flag. Skill identities preserve evaluated-source revision and publication
+target digest when recorded. `latest` also records bounded rejected candidates.
+The report configuration retains this block for later rendering.
+
+Available comparisons contain per-agent `current_overall`, `prior_overall`,
+`delta`, `metrics` (current/prior/delta), optional custom metric deltas, and
+`regression` when delta is negative. The top-level regression flag is true
+when any available agent comparison regresses. Incompatible or missing scored
+evidence for any selected agent makes the whole comparison unavailable, with
+no regression flag. Reports show this
+comparison next to, never folded into, no-skill Skill Lift. The read-only
+`tier3 compare-versions` command recomputes the same comparison from retained
+rows without changing either run.
+
 ### Lift history and retention
 
 Use `skillevaluator tier3 history ./my-skill` to list retained runs oldest

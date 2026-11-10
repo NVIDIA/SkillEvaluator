@@ -15,6 +15,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Tier 3 datasets can declare deterministic behavior checks for script invocation and success, workspace files, and final-response text.
 
+- Tier 3 `evaluate --compare-to RUN` and read-only `compare-versions` compare
+  compatible retained skill versions, report paired per-agent deltas and
+  regressions, and keep version comparisons separate from no-skill Skill Lift.
+
 - Read-only Tier 3 `history` lists retained Skill Lift runs chronologically,
   separates incompatible configurations into segments, preserves unavailable
   lift as missing, and exports JSON, CSV, or Markdown summaries.

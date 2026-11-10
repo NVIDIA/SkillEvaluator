@@ -26,6 +26,8 @@ _NON_COMPARISON_FIELDS = frozenset(
         "private_comparisons",
         "baseline",
         "reuse_baseline",
+        "compare_to",
+        "prior_version_comparison",
         "budget",
     }
 )
@@ -197,10 +199,17 @@ def comparison_mismatches(current: dict[str, Any], source: dict[str, Any]) -> li
 
 
 def load_baseline_rows(run_dir: Path, agent: str) -> list[dict[str, Any]]:
+    """Load the retained without-skill arm."""
+    return load_condition_rows(run_dir, agent, "without_skill")
+
+
+def load_condition_rows(run_dir: Path, agent: str, arm: str) -> list[dict[str, Any]]:
     """Restore collector-owned annotations from their public persistence envelope."""
-    paths = sorted((run_dir / agent / "without-skill" / "trials").glob("*/reward.json"))
+    if arm not in {"with_skill", "without_skill"}:
+        raise ValueError("Unknown retained condition")
+    paths = sorted((run_dir / agent / arm.replace("_", "-") / "trials").glob("*/reward.json"))
     if not paths:
-        raise ValueError(f"{agent}: missing without-skill reward rows")
+        raise ValueError(f"{agent}: missing {arm.replace('_', '-')} reward rows")
     rows = []
     for path in paths:
         try:
@@ -228,28 +237,54 @@ def load_baseline_rows(run_dir: Path, agent: str) -> list[dict[str, Any]]:
 def baseline_eligibility(
     run_dir: Path, agents: list[str], identity: dict[str, Any]
 ) -> tuple[list[str], dict[str, Any]]:
-    """Require completed current results and complete, scoreable baseline rows."""
+    """Require a fresh, complete baseline under the current result contract."""
+    return condition_eligibility(run_dir, agents, identity, "without_skill", require_fresh=True)
+
+
+def condition_eligibility(
+    run_dir: Path,
+    agents: list[str],
+    identity: dict[str, Any],
+    arm: str,
+    *,
+    require_fresh: bool = False,
+    collected_result: dict[str, Any] | None = None,
+) -> tuple[list[str], dict[str, Any]]:
+    """Validate a retained arm, or the runner's not-yet-published collection."""
     from skillevaluator.tier3.harbor.collector import _condition_execution_summary, _partition_scoreable_rewards
 
     reasons: list[str] = []
     try:
-        config = json.loads((run_dir / "run_config.json").read_text(encoding="utf-8"))
-        result = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+        result = (
+            collected_result
+            if collected_result is not None
+            else json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+        )
+        if not isinstance(result, dict):
+            raise ValueError("invalid result")
+        config = (
+            result.get("run_config")
+            if collected_result is not None
+            else json.loads((run_dir / "run_config.json").read_text(encoding="utf-8"))
+        )
         if not isinstance(config, dict) or not isinstance(result, dict):
             raise ValueError("invalid result/config")
     except (OSError, ValueError):
         return ["missing or corrupt result/config"], {}
-    if run_directory_sort_key(run_dir, require_completed_result=True) is None:
+    if collected_result is None and run_directory_sort_key(run_dir, require_completed_result=True) is None:
         return ["run is not completed under the current result contract"], result
     baseline = result.get("baseline", config.get("baseline", {}))
-    if not isinstance(baseline, dict) or baseline.get("mode") == "reused":
-        reasons.append("source run reused a baseline; select the original fresh run")
-    elif baseline.get("mode") == "skipped":
-        reasons.append("source run skipped its baseline")
-    elif "baseline" not in result and "baseline" not in config:
-        reasons.append("source run predates baseline provenance")
-    elif baseline.get("mode") != "fresh":
-        reasons.append("source run has an unsupported baseline mode")
+    if require_fresh:
+        if not isinstance(baseline, dict):
+            reasons.append("source run has invalid baseline provenance")
+        elif baseline.get("mode") == "reused":
+            reasons.append("source run reused a baseline; select the original fresh run")
+        elif baseline.get("mode") == "skipped":
+            reasons.append("source run skipped its baseline")
+        elif "baseline" not in result and "baseline" not in config:
+            reasons.append("source run predates baseline provenance")
+        elif baseline.get("mode") != "fresh":
+            reasons.append("source run has an unsupported baseline mode")
     source_identity = result.get("comparison_identity")
     if not isinstance(source_identity, dict):
         reasons.append("run lacks a persisted comparison identity")
@@ -281,28 +316,29 @@ def baseline_eligibility(
             reasons.append("source comparison identity disagrees with attempt policy evidence")
     for agent in agents:
         payload = result.get("agents", {}).get(agent, {})
-        condition = payload.get("conditions", {}).get("without_skill", {})
+        condition = payload.get("conditions", {}).get(arm, {})
+        arm_label = "baseline" if arm == "without_skill" else "with-skill"
         if condition.get("execution_status") != "succeeded":
-            reasons.append(f"{agent}: without-skill condition did not succeed")
+            reasons.append(f"{agent}: {arm.replace('_', '-')} condition did not succeed")
         if (
-            payload.get("job_failures", {}).get("without_skill")
-            or payload.get("trial_failures", {}).get("without_skill")
-            or payload.get("agent_runtime_failures", {}).get("without_skill")
-            or payload.get("historical_job_failures", {}).get("without_skill")
-            or payload.get("recovered_trial_failures", {}).get("without_skill")
+            payload.get("job_failures", {}).get(arm)
+            or payload.get("trial_failures", {}).get(arm)
+            or payload.get("agent_runtime_failures", {}).get(arm)
+            or payload.get("historical_job_failures", {}).get(arm)
+            or payload.get("recovered_trial_failures", {}).get(arm)
         ):
-            reasons.append(f"{agent}: baseline has job, trial or runtime failures")
+            reasons.append(f"{agent}: {arm_label} has job, trial or runtime failures")
         try:
-            summary = json.loads((run_dir / agent / "without-skill" / "summary.json").read_text(encoding="utf-8"))
+            summary = json.loads((run_dir / agent / arm.replace("_", "-") / "summary.json").read_text(encoding="utf-8"))
             if not isinstance(summary, dict):
-                raise ValueError("invalid baseline summary")
+                raise ValueError(f"invalid {arm_label} summary")
             if (
                 summary.get("execution_status") != "succeeded"
                 or summary.get("job_failure")
                 or summary.get("trial_failures")
             ):
-                reasons.append(f"{agent}: baseline summary is incomplete or failed")
-            rows = load_baseline_rows(run_dir, agent)
+                reasons.append(f"{agent}: {arm_label} summary is incomplete or failed")
+            rows = load_condition_rows(run_dir, agent, arm)
             scored, failures = _partition_scoreable_rewards(rows)
             policy = identity["attempt_policy"]
             execution = _condition_execution_summary(
@@ -316,9 +352,9 @@ def baseline_eligibility(
                 reward_failures=failures,
             )
             if failures or execution["execution_status"] != "succeeded":
-                reasons.append(f"{agent}: baseline reward coverage is incomplete or unscoreable")
+                reasons.append(f"{agent}: {arm_label} reward coverage is incomplete or unscoreable")
         except (OSError, ValueError, TypeError, KeyError) as exc:
-            reasons.append(f"{agent}: missing or corrupt baseline evidence: {exc}")
+            reasons.append(f"{agent}: missing or corrupt {arm_label} evidence: {exc}")
     return reasons, result
 
 

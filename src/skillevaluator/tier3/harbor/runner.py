@@ -172,6 +172,7 @@ from skillevaluator.tier3.output_provenance import (
     write_output_file_atomically,
 )
 from skillevaluator.tier3.results_location import publish_latest_results
+from skillevaluator.tier3.version_comparison import compare_versions, select_prior_version
 from skillevaluator.tier3_environments import (
     DEFAULT_ENV_MODE,
     ENV_MODE_LOCAL,
@@ -5321,6 +5322,7 @@ def _run_harbor_eval_impl(
     skip_baseline: bool = False,
     skip_with_skill: bool = False,
     reuse_baseline: str | None = None,
+    compare_to: str | None = None,
     n_attempts: int | None = None,
     max_agent_tokens: int | None = None,
     max_judge_calls: int | None = None,
@@ -5376,6 +5378,10 @@ def _run_harbor_eval_impl(
         return {"error": [detail]}
     if reuse_baseline and (skip_baseline or skip_with_skill):
         detail = "--reuse-baseline is mutually exclusive with --skip-baseline and --skip-with-skill"
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=detail))
+        return {"error": [detail]}
+    if compare_to and skip_with_skill:
+        detail = "--compare-to is mutually exclusive with --skip-with-skill"
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=detail))
         return {"error": [detail]}
     if env_mode == ENV_MODE_LOCAL:
@@ -6321,6 +6327,12 @@ def _run_harbor_eval_impl(
         },
     )
     baseline = {"mode": "skipped" if skip_baseline else "fresh"}
+    prior_version = None
+    if compare_to:
+        try:
+            prior_version = select_prior_version(run_dir.parent, compare_to, identity, current_run_dir=run_dir)
+        except ValueError as exc:
+            return _persist_pre_execution_failure([str(exc)])
     reused_baseline_dir = None
     if reuse_baseline:
         try:
@@ -6776,6 +6788,15 @@ def _run_harbor_eval_impl(
     )
     if errors:
         _merge_launch_execution_errors(results, errors)
+    if prior_version is not None:
+        comparison = (
+            compare_versions(run_dir, Path(prior_version["source_run_dir"]), collected_result=results)
+            if prior_version["status"] == "available"
+            else prior_version
+        )
+        comparison["rejected_candidates"] = prior_version.get("rejected_candidates", [])
+        results["prior_version_comparison"] = comparison
+        run_config["prior_version_comparison"] = comparison
     reporter.emit(ProgressEvent(stage="report", state="running"))
     try:
         (run_dir / "run_config.json").write_text(json.dumps(run_config, indent=2), encoding="utf-8")

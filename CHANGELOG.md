@@ -6,6 +6,19 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Document an additive qualitative assessment review worksheet with bounded
+  evidence from real successful, failed-setup and invalid-judge runs. Preserve
+  numeric grading and identify the separate decisions needed for scoreless support.
+  Pin the public calculator input to the historical repository revision used by
+  the run, preserving its original hash and evidence pointers after migration.
+
+- Tier 3 reports show per-case expectation inventories with explicit met,
+  unmet, unchecked, unscored and inapplicable judgments, evidence and next
+  diagnostic steps for executed conditions. Behavior judges can abstain when
+  evidence is missing; partial results preserve every original requirement
+  without presenting missing judgments as verified skill defects. Unexpected
+  judge errors retain that inventory; intentionally skipped arms add no attempts.
+
 - Repeatable Tier 3 activation-validation recipe and offline acceptance suite.
   Canonical trials separate expected target-skill use, trusted observed use or
   unknown traces, task correctness, workflow diagnostics, resources and retained
@@ -17,13 +30,6 @@ All notable changes to SkillEvaluator are documented in this file.
   optional, including the legacy alternate field, without changing numeric grades.
   Unrendered activation diagnostics remain in canonical exports without consuming
   HTML overview or failure-reason preview budgets.
-
-- Tier 3 reports show per-case expectation inventories with explicit met,
-  unmet, unchecked, unscored and inapplicable judgments, evidence and next
-  diagnostic steps for executed conditions. Behavior judges can abstain when
-  evidence is missing; partial results preserve every original requirement
-  without presenting missing judgments as verified skill defects. Unexpected
-  judge errors retain that inventory; intentionally skipped arms add no attempts.
 
 - Run SkillEvaluator's own `skills/` through the pinned three-tier GitHub
   callers, retaining Tier 1 as required and Tier 2/3 as advisory. A separate

@@ -20,6 +20,7 @@ from skillevaluator.publication_evidence import stamp_publication_evidence
 from skillevaluator.reporting import BenchmarkReporter
 from skillevaluator.reporting.base import agent_eval_dimension_verdict
 from skillevaluator.reporting.benchmark import _publication_safe_inline, _verdict_callout
+from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION
 from skillevaluator.tier3.harbor.collector import collect_harbor_results
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_SCORE_POLICY, overall_score
 from skillevaluator.tier3.harbor.report_data import load_agent_data
@@ -190,6 +191,11 @@ def _live_tier3_result() -> ValidationResult:
             "evaluator_container_revision": "ghcr.io/nvidia/skillevaluator@sha256:0117bc2e3e54da4244a656466526c5b1b5a559ea0117bc2e3e54da4244a65646",
         },
         "attempt_policy": {"max_attempts": 3, "pass_threshold": 0.5, "stop_on_pass": False},
+        "pass_at_k": {
+            "with_skill": {"k": 3, "pass_threshold": 0.5, "rate": 0.75},
+            "without_skill": {"k": 3, "pass_threshold": 0.5, "rate": 0.5},
+            "lift": {"delta": 0.25},
+        },
         "agents": {
             "claude-code": {
                 "model": "claude-sonnet",
@@ -1098,6 +1104,8 @@ def test_verdict_callout_falls_back_for_future_statuses() -> None:
 
 def test_benchmark_pass_card_matches_golden() -> None:
     rendered = BenchmarkReporter(include_timestamp=True).render_all([*_deterministic_results(), _live_tier3_result()])
+    assert SKILL_LIFT_DEFINITION not in rendered
+    assert "Pass@3 (supporting reliability" not in rendered
     assert rendered == PASS_GOLDEN.read_text(encoding="utf-8")
     assert "| Tier 1 | Static validation | **PASSED** |" in rendered
     assert "| Tier 2 | Semantic deduplication | **PASSED WITH OBSERVATIONS** |" in rendered
@@ -1140,8 +1148,8 @@ _DEFAULT_RUN_SCORES = {
         "skill_execution": 1.0,
         "skill_efficiency": 0.9,
         "accuracy": 0.9,
-        "goal_accuracy": 0.8,
-        "behavior_check": 0.9,
+        "goal_accuracy": 1.0,
+        "behavior_check": 0.8,
     },
     "without": {
         "security": 1.0,
@@ -1215,10 +1223,10 @@ def test_benchmark_baseline_without_the_skill_can_pass(tmp_path: Path) -> None:
     tier3 = _collected_default_run(tmp_path)
     agent = tier3.metadata["agent_eval"]["agents"]["codex"]
     # Discoverability and Efficiency have no baseline, so the lift compares the
-    # other three dimensions: 0.9167 - 0.65, not 0.93 - 0.65.
+    # other three dimensions: 0.9333 - 0.65, not 0.94 - 0.65.
     assert agent["not_applicable_metrics"]["without_skill"] == ["skill_execution", "skill_efficiency"]
     assert [row["id"] for row in agent["dimensions"] if row["baseline"] is None] == ["discoverability", "efficiency"]
-    assert (agent["with_skill"], agent["baseline"], agent["lift"]) == (0.93, 0.65, 0.2667)
+    assert (agent["with_skill"], agent["baseline"], agent["lift"]) == (0.94, 0.65, 0.2833)
 
     rendered = BenchmarkReporter(include_timestamp=True).render_all([*_deterministic_results(), tier3])
     benchmark = tmp_path / "BENCHMARK.md"
@@ -1227,8 +1235,8 @@ def test_benchmark_baseline_without_the_skill_can_pass(tmp_path: Path) -> None:
 
     assert "**Overall verdict: PASS" in rendered
     assert "| Tier 3 | Live agent evaluation | **PASS** |" in rendered
-    # The Overall row shows the two scores the lift subtracts, 0.9167 and 0.65.
-    assert "| Overall | 65.0% → 91.7% (+26.7 points) |" in rendered
+    # The Overall row shows the two scores the lift subtracts, 0.9333 and 0.65.
+    assert "| Overall | 65.0% → 93.3% (+28.3 points) |" in rendered
     assert "Overall for codex compares only the dimensions both arms scored" in rendered
     # The baseline ran, it just has no skill to discover or route to.
     assert "| Discoverability | 100.0% — baseline N/A (no skill in the baseline arm) |" in rendered
@@ -1247,14 +1255,14 @@ def test_benchmark_baseline_without_the_skill_can_pass(tmp_path: Path) -> None:
         # A dimension the baseline could not score has no lift either.
         {"efficiency": {"lift": 0.0}},
         # A five-dimension score minus a three-dimension baseline.
-        {"agent": {"lift": 0.28}},
+        {"agent": {"lift": 0.29}},
         # accuracy is not applicable when a case has no reference, which holds for
         # both arms. A baseline that alone records it is missing its Correctness
         # score, even when its baseline and lift add up over Security and Effectiveness.
         {
             "not_applicable_metrics": {"without_skill": ["skill_execution", "skill_efficiency", "accuracy"]},
             "correctness": {"baseline": None, "lift": None},
-            "agent": {"baseline": 0.725, "lift": 0.2},
+            "agent": {"baseline": 0.725, "lift": 0.225},
         },
     ],
 )
@@ -1285,7 +1293,7 @@ def test_benchmark_zero_and_negative_lift_use_percentage_points() -> None:
     assert _score_transition_values(0.50004, 0.500049) == "50.0% → 50.0% (±0.0 points)"
     assert _score_transition_values(0.500049, 0.50004) == "50.0% → 50.0% (±0.0 points)"
     assert _score_transition_values(None, 0.92) == "92.0% — baseline not run; uplift unavailable"
-    assert _score_transition_values(0.5, None) == "Not available"
+    assert _score_transition_values(0.5, None) == "Not scored with the skill — baseline 50.0%; uplift unavailable"
     assert _score_transition({"baseline": float("nan"), "with_skill": 0.92}) == "Not available"
     assert _score_transition({"baseline": 0.5, "with_skill": float("inf")}) == "Not available"
 

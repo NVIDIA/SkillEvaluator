@@ -16,8 +16,9 @@ import math
 from pathlib import Path
 from typing import Any
 
+from skillevaluator.evaluation.tier3_findings import TRIAL_PASS_THRESHOLD
 from skillevaluator.evidence import evidence_ref_identity
-from skillevaluator.tier3.eval_core.llm_judge import _redact_configured_credentials
+from skillevaluator.tier3.eval_core.llm_judge import _ACCURACY_DEDUCTION_SENTENCES, _redact_configured_credentials
 from skillevaluator.tier3.harbor import report_data
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRICS,
@@ -35,6 +36,8 @@ from skillevaluator.utils.redaction import redact_sensitive_data, redact_sensiti
 logger = logging.getLogger(__name__)
 
 DISPLAY_METRICS = DEFAULT_METRICS
+FINDING_OK_THRESHOLD = TRIAL_PASS_THRESHOLD
+FINDING_CRITICAL_THRESHOLD = 0.4
 _MAX_FINDINGS = len(DEFAULT_METRICS) + MAX_CUSTOM_METRICS
 _MAX_FINDING_REASONS = 4
 _MAX_FINDING_EVIDENCE_REFS = 3
@@ -259,6 +262,8 @@ def _extract_findings(
     rewards_complete: bool = True,
 ) -> list[dict[str, Any]]:
     """Extract actionable findings from reward.json details across trials."""
+    from skillevaluator.tier3.eval_core.atif_helpers import _METRIC_EVIDENCE_REF_METRICS
+
     findings: list[dict[str, Any]] = []
 
     metric_names = _finding_metric_names(rewards)
@@ -277,6 +282,7 @@ def _extract_findings(
                             "score": score,
                             "detail": detail,
                             "entry_id": reward.get("entry_id", "?"),
+                            "reward": reward,
                         }
                     )
             if metric_values:
@@ -315,7 +321,7 @@ def _extract_findings(
                 _seen.add(k)
                 _refs.append(r)
 
-        if avg_score >= 0.8:
+        if avg_score >= FINDING_OK_THRESHOLD:
             reasons = _collect_pass_reasons(metric, trials)
             findings.append(
                 {
@@ -329,17 +335,18 @@ def _extract_findings(
             )
         else:
             reasons = _collect_fail_reasons(metric, trials)
-            severity = "critical" if avg_score < 0.4 else "warning"
-            findings.append(
-                {
-                    "metric": metric,
-                    "label": label,
-                    "severity": severity,
-                    "score": avg_score,
-                    "reasons": reasons[:4],
-                    "evidence_refs": _refs[:_MAX_FINDING_EVIDENCE_REFS],
-                }
-            )
+            severity = "critical" if avg_score < FINDING_CRITICAL_THRESHOLD else "warning"
+            finding = {
+                "metric": metric,
+                "label": label,
+                "severity": severity,
+                "score": avg_score,
+                "reasons": reasons[:4],
+                "evidence_refs": _refs[:_MAX_FINDING_EVIDENCE_REFS],
+            }
+            if metric in _METRIC_EVIDENCE_REF_METRICS and not finding["evidence_refs"]:
+                finding["evidence_unavailable_reason"] = _evidence_unavailable_reason(trials)
+            findings.append(finding)
 
     return findings
 
@@ -351,6 +358,13 @@ def _render_findings_body(findings: list[dict[str, Any]]) -> Any:
     from skillevaluator.utils.rich_markup import strip_terminal_controls
 
     body = Text()
+    body.append(
+        f"  Advisory metric severity: ok ≥ {FINDING_OK_THRESHOLD:.2f} · "
+        f"warning {FINDING_CRITICAL_THRESHOLD:.2f}\u2013<{FINDING_OK_THRESHOLD:.2f} · "
+        f"critical < {FINDING_CRITICAL_THRESHOLD:.2f}. "
+        "Dimension verdicts use pass ≥ 0.50.\n\n",
+        style="dim",
+    )
     for finding in findings:
         if finding["severity"] == "critical":
             icon = "⚠ CRITICAL"
@@ -376,6 +390,11 @@ def _render_findings_body(findings: list[dict[str, Any]]) -> Any:
         for ref in (finding.get("evidence_refs") or [])[:3]:
             ref_text = ref if isinstance(ref, str) else _compact_evidence_ref(ref)
             body.append(f"      evidence: {strip_terminal_controls(ref_text)}\n", style="dim")
+        if finding["severity"] != "ok" and finding.get("evidence_unavailable_reason"):
+            body.append(
+                f"      evidence: unavailable — {strip_terminal_controls(str(finding['evidence_unavailable_reason']))}\n",
+                style="dim",
+            )
 
         body.append("\n")
     return body
@@ -431,6 +450,7 @@ def _collect_fail_reasons(metric: str, trials: list[dict[str, Any]]) -> list[str
         detail = trial["detail"]
         if not isinstance(detail, dict):
             continue
+        trial_reason_start = len(reasons)
 
         if metric == "behavior_check":
             results = detail.get("results")
@@ -439,12 +459,17 @@ def _collect_fail_reasons(metric: str, trials: list[dict[str, Any]]) -> list[str
                     continue
                 if reason := _bounded_reason_text(result.get("reason")):
                     reasons.append(reason)
+            declarative_checks = detail.get("declarative_checks")
+            if isinstance(declarative_checks, dict) and (
+                summary := _bounded_reason_text(declarative_checks.get("summary"))
+            ):
+                reasons.append(summary)
 
         elif metric == "accuracy":
             criteria = _applicable_accuracy_criteria(detail)
             for crit, passed in criteria.items():
                 if not passed:
-                    reasons.append(f"{str(crit)[:480]} failed")
+                    reasons.append(_accuracy_criterion_failure_reason(crit))
             if reason := _bounded_reason_text(detail.get("reason")):
                 reasons.append(reason)
 
@@ -472,7 +497,10 @@ def _collect_fail_reasons(metric: str, trials: list[dict[str, Any]]) -> list[str
         elif metric == "skill_execution":
             for check_name, check_data in detail.items():
                 if isinstance(check_data, dict) and not check_data.get("passed", True):
-                    reason = _bounded_reason_text(check_data.get("reason")) or f"{str(check_name)[:480]} failed"
+                    reason = _bounded_reason_text(check_data.get("reason")) or (
+                        f"Check `{_bounded_reason_text(str(check_name).replace('_', ' '), max_len=480)}` "
+                        "did not pass; no reason was recorded"
+                    )
                     if check_data.get("status") == "environment_invalid":
                         reason = "[environment] " + reason
                     reasons.append(reason)
@@ -488,7 +516,10 @@ def _collect_fail_reasons(metric: str, trials: list[dict[str, Any]]) -> list[str
         elif metric == "skill_efficiency":
             for check_name, check_data in detail.items():
                 if isinstance(check_data, dict) and not check_data.get("passed", True):
-                    reason = _bounded_reason_text(check_data.get("reason")) or f"{str(check_name)[:480]} failed"
+                    reason = _bounded_reason_text(check_data.get("reason")) or (
+                        f"Check `{_bounded_reason_text(str(check_name).replace('_', ' '), max_len=480)}` "
+                        "did not pass; no reason was recorded"
+                    )
                     reasons.append(reason)
 
         else:
@@ -504,6 +535,12 @@ def _collect_fail_reasons(metric: str, trials: list[dict[str, Any]]) -> list[str
                 ):
                     reasons.append(reason)
 
+        if metric in ("accuracy", "goal_accuracy") and len(reasons) > trial_reason_start:
+            reward = trial.get("reward")
+            suffix = _expected_observed_suffix(detail, reward if isinstance(reward, dict) else None)
+            if suffix:
+                reasons[-1] = f"{reasons[-1]}; {suffix}"
+
     return _dedupe_report_reasons(reasons)
 
 
@@ -518,8 +555,9 @@ def _collect_pass_reasons(metric: str, trials: list[dict[str, Any]]) -> list[str
         if metric == "behavior_check":
             raw_results = detail.get("results")
             results = [item for item in raw_results if isinstance(item, dict)] if isinstance(raw_results, list) else []
-            passed_count = sum(1 for result in results if result.get("passed") is True)
-            total = len(results)
+            judged_results = [result for result in results if result.get("step") is not None]
+            passed_count = sum(1 for result in judged_results if result.get("passed") is True)
+            total = len(judged_results)
             if total:
                 reasons.append(f"{passed_count}/{total} expected behaviors observed")
             if reason := _bounded_reason_text(detail.get("reason")):
@@ -576,6 +614,55 @@ def _compact_evidence_ref(ref: dict[str, Any]) -> str:
 def _bounded_reason_text(value: Any, *, max_len: int = 512) -> str:
     """Normalize, redact, and bound evaluator explanations."""
     return _bounded_report_reason(value)[:max_len]
+
+
+def _accuracy_criterion_failure_reason(criterion: Any) -> str:
+    key = _bounded_reason_text(str(criterion), max_len=480)
+    sentence = _ACCURACY_DEDUCTION_SENTENCES.get(key)
+    return f"{sentence} (criterion {key})" if sentence else f"Criterion {key} was not met"
+
+
+def _expected_observed_suffix(detail: dict[str, Any], reward: dict[str, Any] | None = None) -> str:
+    from skillevaluator.evaluation.tier3_findings import sanitize_grader_text
+
+    sources: list[dict[str, Any]] = [detail]
+    reward = reward if isinstance(reward, dict) else {}
+    reward_details = reward.get("details")
+    if isinstance(reward_details, dict):
+        sources.append(reward_details)
+    sources.append(reward)
+
+    def value_for(keys: tuple[str, ...]) -> Any:
+        for source in sources:
+            for key in keys:
+                if key in source and source[key] is not None:
+                    return source[key]
+        return None
+
+    expected = sanitize_grader_text(
+        _bounded_reason_text(value_for(("ground_truth", "expected_answer")), max_len=160),
+        160,
+    )
+    observed = sanitize_grader_text(_bounded_reason_text(value_for(("final_answer",)), max_len=160), 160)
+    if not expected or not observed:
+        return ""
+    return f"Expected: {expected}; observed: {observed}"
+
+
+def _evidence_unavailable_reason(trials: list[dict[str, Any]]) -> str:
+    from skillevaluator.evaluation.tier3_findings import sanitize_grader_text
+
+    for trial in trials:
+        reward = trial.get("reward")
+        if not isinstance(reward, dict):
+            continue
+        failure = sanitize_grader_text(
+            reward.get("trajectory_detail") or reward.get("error"),
+            _REPORT_REASON_LIMIT,
+        )
+        if failure:
+            return f"Trajectory evidence could not be loaded: {failure}"
+    return "No trajectory evidence was recorded for this metric"
 
 
 def _build_evidence_ref_lookup(rewards: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -926,7 +1013,7 @@ def _prioritized_evidence_rewards(rewards: list[dict[str, Any]]) -> list[dict[st
 def _reward_has_failing_signal(reward: dict[str, Any]) -> bool:
     for metric in DISPLAY_METRICS:
         value = _metric_score(reward, metric)
-        if value is not None and value < 0.8:
+        if value is not None and value < FINDING_OK_THRESHOLD:
             return True
     details = reward.get("details")
     if not isinstance(details, dict):
@@ -936,7 +1023,7 @@ def _reward_has_failing_signal(reward: dict[str, Any]) -> bool:
             continue
         score = detail.get("score")
         numeric_score = extract_custom_metrics({"detail_score": score}).get("detail_score")
-        if numeric_score is not None and numeric_score < 0.8:
+        if numeric_score is not None and numeric_score < FINDING_OK_THRESHOLD:
             return True
         results = detail.get("results")
         if isinstance(results, list) and any(
@@ -976,6 +1063,8 @@ def _bounded_findings_payload(
     suggestions_v2: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
     """Project a findings artifact into a fixed, browser-loadable schema."""
+    from skillevaluator.tier3.eval_core.atif_helpers import _METRIC_EVIDENCE_REF_METRICS
+
     bounded_findings: list[dict[str, Any]] = []
     for finding in findings[:_MAX_FINDINGS]:
         if not isinstance(finding, dict):
@@ -1008,6 +1097,18 @@ def _bounded_findings_payload(
                 ],
             }
         )
+        if (
+            bounded_findings[-1]["severity"] != "ok"
+            and bounded_findings[-1]["metric"] in _METRIC_EVIDENCE_REF_METRICS
+            and not bounded_findings[-1]["evidence_refs"]
+        ):
+            unavailable_reason = finding.get("evidence_unavailable_reason") or (
+                "No trajectory evidence was recorded for this metric"
+            )
+            bounded_findings[-1]["evidence_unavailable_reason"] = _bounded_json_text(
+                unavailable_reason,
+                max_encoded_bytes=512,
+            )
 
     bounded_v2: list[dict[str, Any]] = []
     for suggestion in (suggestions_v2 or [])[:_MAX_SUGGESTIONS]:
@@ -1031,6 +1132,11 @@ def _bounded_findings_payload(
         "skill_name": _bounded_json_text(skill_name, max_encoded_bytes=512),
         "agent": _bounded_json_text(agent, max_encoded_bytes=512),
         "suggestion_mode": _bounded_json_text(suggestion_mode, max_encoded_bytes=64),
+        "severity_thresholds": {
+            "ok_at_or_above": FINDING_OK_THRESHOLD,
+            "critical_below": FINDING_CRITICAL_THRESHOLD,
+            "scale": "advisory_metric",
+        },
         "findings": bounded_findings,
         "findings_total": len(findings),
         "findings_shown": len(bounded_findings),

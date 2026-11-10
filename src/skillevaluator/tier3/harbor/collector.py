@@ -28,6 +28,8 @@ from itertools import islice
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
+from skillevaluator.tier3.attempt_verdict import attempt_verdict, scored_goal_accuracy
+from skillevaluator.tier3.baseline_store import BASELINE_ANNOTATION_KEYS, load_baseline_rows, measured_condition_usage
 from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts, get_skill_tool_calls
 from skillevaluator.tier3.eval_core.checks import check_negative_case
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
@@ -4390,12 +4392,13 @@ def _partition_scoreable_rewards(
         if raw_trial in failed_trials:
             continue
         failed_trials.add(raw_trial)
-        failures.append(
-            {
-                "trial": _published_trial_label(raw_trial, alias_ordinal=len(failures) + 1),
-                "reason": _unscoreable_reward_reason(reward),
-            }
-        )
+        failure = {
+            "trial": _published_trial_label(raw_trial, alias_ordinal=len(failures) + 1),
+            "reason": _unscoreable_reward_reason(reward),
+        }
+        if reward.get("_trial_root_name"):
+            failure["_trial_root_name"] = str(reward["_trial_root_name"])
+        failures.append(failure)
 
     custom_names = {name for reward in scoreable for name in extract_custom_metrics(reward)}
     if len(custom_names) > MAX_CUSTOM_METRICS:
@@ -4405,12 +4408,13 @@ def _partition_scoreable_rewards(
             if raw_trial in failed_trials:
                 continue
             failed_trials.add(raw_trial)
-            failures.append(
-                {
-                    "trial": _published_trial_label(raw_trial, alias_ordinal=len(failures) + 1),
-                    "reason": UNSAFE_CUSTOM_METRIC_UNION_REASON,
-                }
-            )
+            failure = {
+                "trial": _published_trial_label(raw_trial, alias_ordinal=len(failures) + 1),
+                "reason": UNSAFE_CUSTOM_METRIC_UNION_REASON,
+            }
+            if reward.get("_trial_root_name"):
+                failure["_trial_root_name"] = str(reward["_trial_root_name"])
+            failures.append(failure)
         scoreable = []
     return scoreable, failures
 
@@ -4670,12 +4674,35 @@ def _logical_attempt_rewards(rewards: list[dict[str, Any]]) -> list[dict[str, An
         }
         if judge_models:
             logical_reward["_judge_models"] = judge_models
+        security_shortfalls = [
+            verdict
+            for row in rows
+            if (verdict := attempt_verdict(_overall_score(row), 0.5, reward=row)).security_clean is False
+        ]
+        if security_shortfalls and all(verdict.security_exempt for verdict in security_shortfalls):
+            message = next(
+                (verdict.security_message for verdict in security_shortfalls if verdict.security_message), None
+            )
+            logical_reward["details"] = {
+                "security": {
+                    "supported": False,
+                    "findings": [
+                        {
+                            "type": "unsupported_tool_wrapper",
+                            "score_impact": True,
+                            "message": message,
+                        }
+                    ]
+                    if message
+                    else [],
+                }
+            }
         logical.append(logical_reward)
     return logical
 
 
 def harbor_job_passed(job_dir: Path, pass_threshold: float) -> bool:
-    """Return whether a complete logical attempt meets the pass threshold.
+    """Return whether a complete logical attempt meets the required checks.
 
     This deliberately shares collection's failure filtering and multi-step
     reward precedence. A root Harbor ``result.json`` reward is authoritative;
@@ -4687,7 +4714,11 @@ def harbor_job_passed(job_dir: Path, pass_threshold: float) -> bool:
         return False
     rewards, _ = _partition_scoreable_rewards(_extract_rewards(job_dir))
     return any(
-        (score := _overall_score(reward)) is not None and score >= pass_threshold
+        attempt_verdict(
+            _overall_score(reward),
+            pass_threshold,
+            reward=reward,
+        ).passed
         for reward in _logical_attempt_rewards(rewards)
     )
 
@@ -4964,8 +4995,10 @@ def _pass_summary(
     stop_on_pass: bool = False,
     expected_cases: int | None,
     expected_case_ids: list[str] | None = None,
+    expected_attempts_by_case: Mapping[str, int] | None = None,
     recovered_attempts: list[dict[str, Any]] | None = None,
     scorer: Callable[[dict[str, Any]], float | None] | None = None,
+    shared_metrics_by_case: Mapping[str, set[str]] | None = None,
 ) -> dict[str, Any]:
     """Summarize pass@k using SkillEvaluator continuous reward scores.
 
@@ -4976,15 +5009,33 @@ def _pass_summary(
     expected_ids = _validated_expected_case_ids(expected_case_ids)
     expected_id_set = set(expected_ids) if expected_ids else None
     grouped: dict[str, list[tuple[dict[str, Any], float]]] = {}
+    correct_answers = 0
+    scored_answers = 0
+    security_clean_count = 0
+    scored_security = 0
     for reward in _logical_attempt_rewards(rewards):
+        entry_id = _entry_id(reward, expected_id_set)
+        applicable_metrics = shared_metrics_by_case.get(entry_id) if shared_metrics_by_case is not None else None
+        verdict = attempt_verdict(None, pass_threshold, reward=reward, applicable_metrics=applicable_metrics)
+        if expected_id_set is None or entry_id in expected_id_set:
+            if verdict.correct_answer is not None:
+                scored_answers += 1
+                correct_answers += int(verdict.correct_answer)
+            if verdict.security_clean is not None:
+                scored_security += 1
+                security_clean_count += int(verdict.security_clean or verdict.security_exempt)
         overall = score_of(reward)
         if overall is None:
             continue
-        grouped.setdefault(_entry_id(reward, expected_id_set), []).append((reward, overall))
+        grouped.setdefault(entry_id, []).append((reward, overall))
 
     cases: dict[str, Any] = {}
     pairing_cases: dict[str, dict[str, Any]] = {}
     passed_cases = 0
+    scored_cases = 0
+    required_checks_passed = 0
+    wrong_answer_cases = 0
+    security_failed_cases = 0
     attempts_used = 0
     extra_case_ids: list[str] = []
 
@@ -5000,13 +5051,22 @@ def _pass_summary(
         attempts = grouped.get(entry_id, [])
         attempt_rows: list[dict[str, Any]] = []
         attempt_passes: list[dict[str, bool]] = []
+        attempt_verdicts = []
         best_score: float | None = None
         first_pass_attempt: int | None = None
         for idx, (reward, overall) in enumerate(sorted(attempts, key=lambda item: _attempt_sort_key(item[0])), start=1):
             idx = _attempt_ordinal(reward) or idx
             score = round(overall, 4)
-            passed = score >= pass_threshold
-            attempt_passes.append({"passed": passed})
+            applicable_metrics = shared_metrics_by_case.get(entry_id) if shared_metrics_by_case is not None else None
+            verdict = attempt_verdict(
+                score,
+                pass_threshold,
+                reward=reward,
+                applicable_metrics=applicable_metrics,
+            )
+            attempt_verdicts.append(verdict)
+            passed = verdict.passed
+            attempt_passes.append({"passed": passed, "required_failure": verdict.required_failure})
             if passed and first_pass_attempt is None:
                 first_pass_attempt = idx
             best_score = score if best_score is None else max(best_score, score)
@@ -5021,6 +5081,14 @@ def _pass_summary(
                         "trial": _published_trial_label(reward.get("_trial_name", "")),
                         "score": score,
                         "passed": passed,
+                        "goal_accuracy": scored_goal_accuracy(reward),
+                        "reason": verdict.reason,
+                        "warnings": list(verdict.warnings),
+                        "security_clean": verdict.security_clean,
+                        "security_score": verdict.security_score,
+                        "security_message": verdict.security_message,
+                        "security_exempt": verdict.security_exempt,
+                        "required_failure": verdict.required_failure,
                     }
                 )
                 published_attempt_details += 1
@@ -5029,10 +5097,22 @@ def _pass_summary(
         is_expected_case = expected_id_set is None or entry_id in expected_id_set
         if case_passed and is_expected_case:
             passed_cases += 1
+        if attempts and is_expected_case:
+            scored_cases += 1
+            wrong_answer_failed = any(verdict.correct_answer is False for verdict in attempt_verdicts)
+            security_failed = any(
+                verdict.security_clean is False and not verdict.security_exempt for verdict in attempt_verdicts
+            )
+            required_checks_passed += int(not wrong_answer_failed and not security_failed)
+            wrong_answer_cases += int(wrong_answer_failed)
+            security_failed_cases += int(security_failed)
         if is_expected_case:
             attempts_used += len(attempts)
         recovered_count = sum(item["case_id"] == entry_id for item in (recovered_attempts or []))
-        unscored = max(0, n_attempts - len(attempts) - recovered_count)
+        expected_attempt_count = (
+            expected_attempts_by_case.get(entry_id, n_attempts) if expected_attempts_by_case is not None else n_attempts
+        )
+        unscored = max(0, expected_attempt_count - len(attempts) - recovered_count)
         skipped = unscored if stop_on_pass and case_passed else 0
         missing = 0 if skipped else unscored
 
@@ -5052,6 +5132,10 @@ def _pass_summary(
                 "attempts_missing": missing,
                 "best_score": round(best_score, 4) if best_score is not None else None,
                 "attempts": attempt_rows,
+                "reason": next((verdict.reason for verdict in attempt_verdicts if not verdict.passed), None),
+                "warnings": list(
+                    dict.fromkeys(warning for verdict in attempt_verdicts for warning in verdict.warnings)
+                ),
                 "attempt_details_total": len(attempts),
                 "attempt_details_shown": len(attempt_rows),
                 "attempt_details_truncated": len(attempt_rows) < len(attempts),
@@ -5069,9 +5153,20 @@ def _pass_summary(
     rate = round(passed_cases / total_cases, 4) if total_cases else 0.0
     rate_interval = _wilson_score_interval(passed_cases, total_cases)
 
+    max_attempts_possible = (
+        sum(expected_attempts_by_case.values()) if expected_attempts_by_case is not None else total_cases * n_attempts
+    )
     return {
         "k": n_attempts,
         "pass_threshold": pass_threshold,
+        "correct_answers": {"correct": correct_answers, "scored": scored_answers},
+        "required_checks": {
+            "passed": required_checks_passed,
+            "scored": scored_cases,
+            "wrong_answer": wrong_answer_cases,
+            "security": security_failed_cases,
+        },
+        "security_clean": {"clean": security_clean_count, "scored": scored_security},
         "stop_on_pass": stop_on_pass,
         "passed_cases": passed_cases,
         "failed_cases": failed_cases,
@@ -5079,7 +5174,7 @@ def _pass_summary(
         "rate": rate,
         "rate_interval": rate_interval,
         "attempts_used": attempts_used,
-        "max_attempts_possible": total_cases * n_attempts,
+        "max_attempts_possible": max_attempts_possible,
         "avg_attempts_used": round(attempts_used / total_cases, 4) if total_cases else 0.0,
         "extra_case_count": len(extra_case_ids),
         "extra_cases": extra_case_ids[:PUBLISHED_CASE_ID_DIAGNOSTIC_SAMPLE_MAX],
@@ -5183,6 +5278,9 @@ def _shared_metric_pass_lift(
         for case in cases & paired_cases:
             shared_by_case[case].discard(metric)
     fallback = set().union(*treatment_scored.values()) & set().union(*control_scored.values())
+    shared_metrics_by_case = {
+        case: shared_by_case.get(case, fallback) for case in set(treatment_scored) | set(control_scored)
+    }
     excluded_metrics = set(judge_mixed).union(*(treatment_scored[case] ^ control_scored[case] for case in paired_cases))
     scorer = _shared_metric_scorer(shared_by_case, fallback, expected_id_set)
     summaries = [
@@ -5194,6 +5292,7 @@ def _shared_metric_pass_lift(
             expected_cases=expected_cases,
             expected_case_ids=expected_case_ids,
             scorer=scorer,
+            shared_metrics_by_case=shared_metrics_by_case,
         )
         for rewards in (treatment_rewards, control_rewards)
     ]
@@ -6305,6 +6404,10 @@ def _save_trials(
             reward["_trajectory_summary"] = _summarize_trajectory(materialized_traj)
 
         clean_reward = {k: v for k, v in reward.items() if not k.startswith("_")}
+        clean_reward["baseline_evidence"] = {
+            "version": 1,
+            "annotations": {key: reward[key] for key in BASELINE_ANNOTATION_KEYS if key in reward},
+        }
         if safe_materialized_traj is None and trajectory_reason not in {
             None,
             "missing_single_step_trajectory",
@@ -6649,6 +6752,7 @@ def _condition_execution_summary(
     skipped: bool = False,
     stop_on_pass: bool = False,
     pass_threshold: float = 0.50,
+    expected_attempts_by_case: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """Describe whether a Harbor condition produced complete logical attempts.
 
@@ -6670,6 +6774,7 @@ def _condition_execution_summary(
             "scored_cases": 0,
             "expected_attempts": 0,
             "scored_attempts": 0,
+            "judge_failures": 0,
             **_failure_list_metadata("runtime_failure_details", runtime_failures),
             **_failure_list_metadata("reward_failure_details", reward_failures),
         }
@@ -6682,6 +6787,11 @@ def _condition_execution_summary(
         if item["trial"] not in recovered_names or not item.get("reason", "").startswith("AgentTimeoutError:")
     ]
     reward_failures = [item for item in (reward_failures or []) if item["trial"] not in recovered_names]
+    judge_failure_trials = {
+        str(failure.get("_trial_root_name") or failure.get("trial_root_name") or failure.get("trial") or "")
+        for failure in [*runtime_failures, *reward_failures]
+        if str(failure.get("reason") or "").startswith("Required judge evaluation failed:")
+    }
     errors: list[str] = [job_failure] if job_failure else []
     public_runtime_failures = _public_failure_list(runtime_failures)
     public_reward_failures = _public_failure_list(reward_failures)
@@ -6712,9 +6822,9 @@ def _condition_execution_summary(
     for reward in _logical_attempt_rewards(rewards):
         score = _overall_score(reward)
         if score is not None:
-            logical_passed[str(reward.get("_trial_root_name") or reward.get("_trial_name") or "")] = (
-                score >= pass_threshold
-            )
+            logical_passed[str(reward.get("_trial_root_name") or reward.get("_trial_name") or "")] = attempt_verdict(
+                score, pass_threshold, reward=reward
+            ).passed
     roots: dict[str, dict[str, Any]] = {}
     for reward in rewards:
         root = str(reward.get("_trial_root_name") or "").strip()
@@ -6737,7 +6847,7 @@ def _condition_execution_summary(
                 "case_id": case_id,
                 "steps": {step_name} if step_name else set(),
                 "reward": reward,
-                "passed": logical_passed.get(root, score >= pass_threshold),
+                "passed": logical_passed.get(root, attempt_verdict(score, pass_threshold, reward=reward).passed),
                 "attempt_ordinal": _attempt_ordinal(reward),
             }
             continue
@@ -6763,7 +6873,9 @@ def _condition_execution_summary(
         if len(explicit + recovered_ordinals) != len(set(explicit + recovered_ordinals)):
             errors.append(f"Scored case {case_id!r} has duplicate attempt ordinals")
 
-        required = n_attempts
+        required = (
+            expected_attempts_by_case.get(case_id, n_attempts) if expected_attempts_by_case is not None else n_attempts
+        )
         if stop_on_pass:
             first_pass = next(
                 ((index, item) for index, item in enumerate(attempts, start=1) if item["passed"]),
@@ -6783,7 +6895,15 @@ def _condition_execution_summary(
 
     missing: list[str] = []
     excess: list[str] = []
-    expected_attempts = 0 if stop_on_pass else expected_count * n_attempts
+    expected_attempts = (
+        0
+        if stop_on_pass
+        else (
+            sum(expected_attempts_by_case.values())
+            if expected_attempts_by_case is not None
+            else expected_count * n_attempts
+        )
+    )
     case_ids = expected_ids or sorted(by_case)
     for case_id in case_ids:
         required, case_missing, case_excess = _case_attempt_coverage(case_id, by_case.get(case_id, []))
@@ -6830,6 +6950,7 @@ def _condition_execution_summary(
         "scored_cases": len(expected_set.intersection(by_case)) if expected_ids else len(by_case),
         "expected_attempts": expected_attempts,
         "scored_attempts": scored_attempts,
+        "judge_failures": min(len(judge_failure_trials), max(0, expected_attempts - scored_attempts)),
         **(
             {
                 "physical_expected_attempts": physical_expected_attempts,
@@ -6932,6 +7053,7 @@ def collect_harbor_results(
     *,
     skip_baseline: bool = False,
     skip_with_skill: bool = False,
+    reused_baseline_dir: Path | None = None,
     n_attempts: int = 1,
     pass_threshold: float = 0.50,
     stop_on_pass: bool = False,
@@ -6944,6 +7066,7 @@ def collect_harbor_results(
     agent_models: dict[str, dict[str, str]] | None = None,
     launch_errors: list[str] | None = None,
     grading_mode: str | None = None,
+    budget_not_run: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Collect results from Harbor jobs into evals/results/<agent>/ structure.
 
@@ -6965,6 +7088,36 @@ def collect_harbor_results(
         case_id_by_task_selector,
         expected_case_ids,
     )
+    budget_not_run = budget_not_run or []
+
+    def budget_expectations(
+        agent: str,
+        arm: str,
+    ) -> tuple[int | None, list[str] | None, int | None, dict[str, int] | None]:
+        matching = [
+            item for item in budget_not_run if item.get("agent") == agent and item.get("arm") in {arm, f"{arm}_skill"}
+        ]
+        if not matching:
+            return expected_trials, expected_case_ids, expected_cases, None
+        attempts_by_case: dict[str, int] = {}
+        for item in matching:
+            selector = str(item.get("case_id") or "")
+            case_id = (case_id_by_task_selector or {}).get(selector, selector)
+            attempts_by_case[case_id] = attempts_by_case.get(case_id, 0) + 1
+        active_ids = [case_id for case_id in (expected_case_ids or []) if attempts_by_case.get(case_id, 0) < n_attempts]
+        if expected_case_ids:
+            active_case_ids: list[str] | None = active_ids
+            active_cases = len(active_ids)
+            attempt_counts = {case_id: max(0, n_attempts - attempts_by_case.get(case_id, 0)) for case_id in active_ids}
+        else:
+            fully_not_run = sum(count >= n_attempts for count in attempts_by_case.values())
+            active_case_ids = None
+            active_cases = max(0, (expected_cases or 0) - fully_not_run)
+            attempt_counts = {
+                case_id: max(0, n_attempts - count) for case_id, count in attempts_by_case.items() if count < n_attempts
+            }
+        actual_trials = None if expected_trials is None else max(0, expected_trials - len(matching))
+        return actual_trials, active_case_ids, active_cases, attempt_counts
 
     # Unscored conditions keep the requested grading policy instead of
     # falling back to the default metric set, which custom_only never grades.
@@ -6989,6 +7142,20 @@ def collect_harbor_results(
     _prepare_generated_outputs(output_dir, agents)
 
     for agent in agents:
+        with_expected_trials, with_expected_case_ids, with_expected_cases, with_expected_attempts = budget_expectations(
+            agent, "with"
+        )
+        without_expected_trials, without_expected_case_ids, without_expected_cases, without_expected_attempts = (
+            budget_expectations(agent, "without")
+        )
+        if skip_baseline:
+            agent_expected_case_ids = with_expected_case_ids
+        elif with_expected_case_ids is not None and without_expected_case_ids is not None:
+            agent_expected_case_ids = [
+                case_id for case_id in with_expected_case_ids if case_id in set(without_expected_case_ids)
+            ]
+        else:
+            agent_expected_case_ids = expected_case_ids
         model_info = agent_models.get(agent, {}) if agent_models else {}
         agent_model = _bounded_reward_metadata_text(model_info.get("model"))
         agent_model_source = _bounded_reward_metadata_text(model_info.get("source"))
@@ -7022,7 +7189,7 @@ def collect_harbor_results(
         if with_job_dir:
             with_job_ok, with_job_failure = validate_harbor_job_result(
                 with_job_dir / "result.json",
-                expected_trials=expected_trials,
+                expected_trials=with_expected_trials,
             )
             with_job_failure = _published_job_failure(with_job_failure)
             with_runtime_failures = _extract_agent_runtime_failures(with_job_dir)
@@ -7072,14 +7239,15 @@ def collect_harbor_results(
                 n_attempts=n_attempts,
                 pass_threshold=pass_threshold,
                 stop_on_pass=stop_on_pass,
-                expected_cases=expected_cases,
-                expected_case_ids=expected_case_ids,
+                expected_cases=with_expected_cases,
+                expected_case_ids=with_expected_case_ids,
+                expected_attempts_by_case=with_expected_attempts,
                 recovered_attempts=with_recovered,
             )
             with_execution = _condition_execution_summary(
                 with_rewards,
-                expected_case_ids=expected_case_ids,
-                expected_cases=expected_cases,
+                expected_case_ids=with_expected_case_ids,
+                expected_cases=with_expected_cases,
                 n_attempts=n_attempts,
                 job_failure="" if with_job_recovered else with_job_failure,
                 recovered_attempts=with_recovered,
@@ -7087,6 +7255,7 @@ def collect_harbor_results(
                 reward_failures=with_trial_failures,
                 stop_on_pass=stop_on_pass,
                 pass_threshold=pass_threshold,
+                expected_attempts_by_case=with_expected_attempts,
             )
             if with_policy == "mixed-score-policies":
                 _fail_execution_with_error(with_execution, "Conflicting score policies within the with-skill condition")
@@ -7168,8 +7337,8 @@ def collect_harbor_results(
         if not with_execution:
             with_execution = _condition_execution_summary(
                 with_rewards,
-                expected_case_ids=expected_case_ids,
-                expected_cases=expected_cases,
+                expected_case_ids=with_expected_case_ids,
+                expected_cases=with_expected_cases,
                 n_attempts=n_attempts,
                 job_failure=with_job_failure,
                 runtime_failures=with_runtime_failures,
@@ -7218,6 +7387,7 @@ def collect_harbor_results(
         without_scores: dict[str, float] = {}
         without_custom_scores: dict[str, float] = {}
         without_pass: dict[str, Any] = {}
+        without_collected_rewards: list[dict[str, Any]] = []
         without_runtime_failures: list[dict[str, str]] = []
         without_trial_failures: list[dict[str, str]] = []
         without_job_failure = ""
@@ -7233,51 +7403,60 @@ def collect_harbor_results(
         without_job_dir: Path | None = None
         if not skip_baseline:
             without_job_name = f"{skill_name}-{agent}-without"
-            without_job_dir = _find_job_dir(jobs_dir, without_job_name)
+            without_job_dir = (
+                reused_baseline_dir / agent / "without-skill"
+                if reused_baseline_dir is not None
+                else _find_job_dir(jobs_dir, without_job_name)
+            )
 
             if without_job_dir:
-                without_job_ok, without_job_failure = validate_harbor_job_result(
-                    without_job_dir / "result.json",
-                    expected_trials=expected_trials,
-                )
-                without_job_failure = _published_job_failure(without_job_failure)
-                without_runtime_failures = _extract_agent_runtime_failures(without_job_dir)
-                without_trial_failures = _extract_trial_failures(without_job_dir)
-                preserve_partial = _can_preserve_partial_rewards(without_job_dir, without_trial_failures)
-                # The runner stages unsuffixed task names when only one arm runs.
-                without_arm_suffix = "-without-skill" if not skip_with_skill else ""
-                without_task_entry_ids = (
-                    _staged_task_entry_id_map(output_dir, agent, "without", arm_suffix=without_arm_suffix)
-                    if case_id_by_task_selector is None
-                    else None
-                )
-                without_collected_rewards = (
-                    _extract_rewards(
-                        without_job_dir,
-                        case_id_by_task_selector,
-                        arm_suffix=without_arm_suffix,
-                        task_entry_id_map=without_task_entry_ids,
+                if reused_baseline_dir is not None:
+                    without_job_ok, without_job_failure = True, ""
+                    without_collected_rewards = load_baseline_rows(reused_baseline_dir, agent)
+                    without_rewards, invalid_score_failures = _partition_scoreable_rewards(without_collected_rewards)
+                else:
+                    without_job_ok, without_job_failure = validate_harbor_job_result(
+                        without_job_dir / "result.json",
+                        expected_trials=without_expected_trials,
                     )
-                    if without_job_ok or preserve_partial
-                    else []
-                )
-                without_rewards, invalid_score_failures = _partition_scoreable_rewards(without_collected_rewards)
-                _observe_private_trials(
-                    agent,
-                    "without_skill",
-                    without_job_dir,
-                    without_collected_rewards,
-                    without_rewards,
-                    case_id_by_task_selector,
-                )
-                without_recovered = (
-                    _recovered_timeout_attempts(without_job_dir, without_rewards, n_attempts=n_attempts)
-                    if stop_on_pass
-                    else []
-                )
-                without_job_recovered = _recovered_job_failure(
-                    without_job_dir, without_trial_failures, without_recovered
-                )
+                    without_job_failure = _published_job_failure(without_job_failure)
+                    without_runtime_failures = _extract_agent_runtime_failures(without_job_dir)
+                    without_trial_failures = _extract_trial_failures(without_job_dir)
+                    preserve_partial = _can_preserve_partial_rewards(without_job_dir, without_trial_failures)
+                    # The runner stages unsuffixed task names when only one arm runs.
+                    without_arm_suffix = "-without-skill" if not skip_with_skill else ""
+                    without_task_entry_ids = (
+                        _staged_task_entry_id_map(output_dir, agent, "without", arm_suffix=without_arm_suffix)
+                        if case_id_by_task_selector is None
+                        else None
+                    )
+                    without_collected_rewards = (
+                        _extract_rewards(
+                            without_job_dir,
+                            case_id_by_task_selector,
+                            arm_suffix=without_arm_suffix,
+                            task_entry_id_map=without_task_entry_ids,
+                        )
+                        if without_job_ok or preserve_partial
+                        else []
+                    )
+                    without_rewards, invalid_score_failures = _partition_scoreable_rewards(without_collected_rewards)
+                    _observe_private_trials(
+                        agent,
+                        "without_skill",
+                        without_job_dir,
+                        without_collected_rewards,
+                        without_rewards,
+                        case_id_by_task_selector,
+                    )
+                    without_recovered = (
+                        _recovered_timeout_attempts(without_job_dir, without_rewards, n_attempts=n_attempts)
+                        if stop_on_pass
+                        else []
+                    )
+                    without_job_recovered = _recovered_job_failure(
+                        without_job_dir, without_trial_failures, without_recovered
+                    )
                 without_logical_rewards = _logical_attempt_rewards(without_rewards)
                 without_mixed_metric_contracts = rewards_have_mixed_metric_contracts(without_rewards)
                 without_trial_failures.extend(invalid_score_failures)
@@ -7301,14 +7480,15 @@ def collect_harbor_results(
                     n_attempts=n_attempts,
                     pass_threshold=pass_threshold,
                     stop_on_pass=stop_on_pass,
-                    expected_cases=expected_cases,
-                    expected_case_ids=expected_case_ids,
+                    expected_cases=without_expected_cases,
+                    expected_case_ids=without_expected_case_ids,
+                    expected_attempts_by_case=without_expected_attempts,
                     recovered_attempts=without_recovered,
                 )
                 without_execution = _condition_execution_summary(
                     without_rewards,
-                    expected_case_ids=expected_case_ids,
-                    expected_cases=expected_cases,
+                    expected_case_ids=without_expected_case_ids,
+                    expected_cases=without_expected_cases,
                     n_attempts=n_attempts,
                     job_failure="" if without_job_recovered else without_job_failure,
                     recovered_attempts=without_recovered,
@@ -7316,6 +7496,7 @@ def collect_harbor_results(
                     reward_failures=without_trial_failures,
                     stop_on_pass=stop_on_pass,
                     pass_threshold=pass_threshold,
+                    expected_attempts_by_case=without_expected_attempts,
                 )
                 if without_policy == "mixed-score-policies":
                     _fail_execution_with_error(
@@ -7338,18 +7519,29 @@ def collect_harbor_results(
                     if without_execution["execution_status"] == "succeeded"
                     else None
                 )
-                _save_trials(
-                    without_collected_rewards,
-                    agent_dir / "without-skill" / "trials",
-                    without_job_dir,
-                    skill_name=skill_name,
-                    agent=agent,
-                    variant="without_skill",
-                    agent_model=agent_model,
-                    agent_model_source=agent_model_source,
-                    expected_case_ids=expected_case_ids,
-                )
+                if reused_baseline_dir is not None:
+                    for source_reward in (without_job_dir / "trials").glob("*/reward.json"):
+                        target = agent_dir / "without-skill" / "trials" / source_reward.parent.name
+                        target.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(source_reward, target / "reward.json")
+                        for artifact in ("trajectory.json", "result.json"):
+                            source = source_reward.with_name(artifact)
+                            if source.is_file() and not source.is_symlink():
+                                shutil.copyfile(source, target / artifact)
+                else:
+                    _save_trials(
+                        without_collected_rewards,
+                        agent_dir / "without-skill" / "trials",
+                        without_job_dir,
+                        skill_name=skill_name,
+                        agent=agent,
+                        variant="without_skill",
+                        agent_model=agent_model,
+                        agent_model_source=agent_model_source,
+                        expected_case_ids=expected_case_ids,
+                    )
                 without_summary = {
+                    "reused": reused_baseline_dir is not None,
                     "agent": agent,
                     "model": agent_model,
                     "model_source": agent_model_source,
@@ -7400,14 +7592,15 @@ def collect_harbor_results(
         if not without_execution:
             without_execution = _condition_execution_summary(
                 without_rewards,
-                expected_case_ids=expected_case_ids,
-                expected_cases=expected_cases,
+                expected_case_ids=without_expected_case_ids,
+                expected_cases=without_expected_cases,
                 n_attempts=n_attempts,
                 job_failure=without_job_failure,
                 runtime_failures=without_runtime_failures,
                 skipped=skip_baseline,
                 stop_on_pass=stop_on_pass,
                 pass_threshold=pass_threshold,
+                expected_attempts_by_case=without_expected_attempts,
             )
         if not skip_baseline and without_job_dir is None:
             summary_dir = agent_dir / "without-skill"
@@ -7503,7 +7696,7 @@ def collect_harbor_results(
                 without_scores,
                 with_logical_rewards,
                 without_logical_rewards,
-                expected_case_ids,
+                agent_expected_case_ids,
                 score_policy=with_policy,
                 with_not_applicable=with_not_applicable,
                 without_not_applicable=without_not_applicable,
@@ -7558,8 +7751,8 @@ def collect_harbor_results(
                 n_attempts=n_attempts,
                 pass_threshold=pass_threshold,
                 stop_on_pass=stop_on_pass,
-                expected_cases=expected_cases,
-                expected_case_ids=expected_case_ids,
+                expected_cases=with_expected_cases,
+                expected_case_ids=agent_expected_case_ids,
             )
             _write_generated_root_json(agent_dir / "pass_at_k_lift.json", output_dir, pass_lift)
 
@@ -7572,7 +7765,7 @@ def collect_harbor_results(
                 with_rewards,
                 without_rewards,
                 baseline_run=not skip_baseline,
-                expected_case_ids=expected_case_ids,
+                expected_case_ids=agent_expected_case_ids,
             )
             _write_generated_root_json(
                 agent_dir / "security_attribution.json",
@@ -7598,6 +7791,27 @@ def collect_harbor_results(
         )
         without_active_trial_failures, without_recovered_trial_failures = _split_recovered_failures(
             without_trial_failures, without_recovered
+        )
+        with_reward_trials = {
+            str(reward.get("_trial_root_name") or reward.get("_trial_name") or "") for reward in with_collected_rewards
+        }
+        without_reward_trials = {
+            str(reward.get("_trial_root_name") or reward.get("_trial_name") or "")
+            for reward in without_collected_rewards
+        }
+        with_unrepresented_failures = {
+            str(failure.get("trial") or "")
+            for failure in with_active_trial_failures
+            if failure.get("trial") and str(failure["trial"]) not in with_reward_trials
+        }
+        without_unrepresented_failures = {
+            str(failure.get("trial") or "")
+            for failure in without_active_trial_failures
+            if failure.get("trial") and str(failure["trial"]) not in without_reward_trials
+        }
+        with_execution_count = len(_logical_attempt_rewards(with_collected_rewards)) + len(with_unrepresented_failures)
+        without_execution_count = len(_logical_attempt_rewards(without_collected_rewards)) + len(
+            without_unrepresented_failures
         )
         all_results["agents"][agent] = {
             "model": agent_model,
@@ -7661,6 +7875,28 @@ def collect_harbor_results(
             **agent_execution,
             "num_trials_with": len(with_logical_rewards),
             "num_trials_without": len(without_logical_rewards) if not skip_baseline else 0,
+            "execution_counts": {
+                "fresh": {
+                    "with_skill": with_execution_count,
+                    "without_skill": 0 if reused_baseline_dir else without_execution_count,
+                },
+                "reused": {"without_skill": len(without_logical_rewards) if reused_baseline_dir else 0},
+            },
+            "measured_usage": {
+                "fresh": {
+                    "with_skill": None
+                    if with_active_trial_failures
+                    else measured_condition_usage(agent_dir / "with-skill"),
+                    "without_skill": None
+                    if reused_baseline_dir or without_active_trial_failures
+                    else measured_condition_usage(agent_dir / "without-skill"),
+                },
+                "reused": {
+                    "without_skill": measured_condition_usage(agent_dir / "without-skill")
+                    if reused_baseline_dir
+                    else None,
+                },
+            },
             "output_dir": str(agent_dir.resolve()),
         }
 
@@ -7720,6 +7956,8 @@ def collect_harbor_results(
     if top_execution["execution_errors"]:
         all_results["error"] = list(top_execution["execution_errors"])
 
+    if budget_not_run:
+        all_results["partial"] = True
     return all_results
 
 

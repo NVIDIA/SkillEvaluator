@@ -16,6 +16,7 @@ from skillevaluator.evaluation import insights_judge, tier3_report
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.tier3 import case_summary, commands
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+from skillevaluator.tier3.next_steps import next_steps
 
 RUN_ID = "20261027_120000"
 HARBOR_JOB_URL = "https://harbor.example.test/jobs/run"
@@ -271,11 +272,12 @@ def test_render_with_saved_feedback_skips_the_judge(tmp_path: Path, llm_calls: l
     assert engine_result["tier3_feedback"] == SAVED_FEEDBACK
 
 
+@pytest.mark.parametrize("feedback", [SAVED_FEEDBACK, LEGACY_FEEDBACK], ids=["with_verdict", "before_verdict"])
 def test_saved_feedback_keeps_what_the_case_pass_adds(
-    tmp_path: Path, llm_calls: list[str], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, llm_calls: list[str], monkeypatch: pytest.MonkeyPatch, feedback: dict[str, Any]
 ) -> None:
     """Report content the case-findings pass computes but the run does not save survives a rebuild."""
-    skill, results_root, _run = _completed_run(tmp_path, tier3_feedback=SAVED_FEEDBACK)
+    skill, results_root, run = _completed_run(tmp_path, tier3_feedback=feedback)
     passes: list[dict[str, Any]] = []
     payloads: list[dict[str, Any]] = []
     apply_case_findings = tier3_report._apply_case_findings
@@ -284,7 +286,6 @@ def test_saved_feedback_keeps_what_the_case_pass_adds(
     def case_pass(payload: dict[str, Any], *args: Any, **kwargs: Any) -> None:
         passes.append(kwargs)
         apply_case_findings(payload, *args, **kwargs)
-        payload["next_steps"] = ["Computed by the case pass"]
 
     def build(*args: Any, **kwargs: Any) -> Any:
         result = build_result(*args, **kwargs)
@@ -294,13 +295,19 @@ def test_saved_feedback_keeps_what_the_case_pass_adds(
     monkeypatch.setattr(tier3_report, "_apply_case_findings", case_pass)
     monkeypatch.setattr(tier3_report, "agent_eval_result_from_directory", build)
 
-    commands.view_results(skill, results_dir=results_root)
+    report = commands.view_results(skill, results_dir=results_root)
 
     assert llm_calls == []
     assert len(passes) == 1
     assert passes[0]["use_llm"] is False
     assert passes[0]["fixes"] == SAVED_FIXES
     [payload] = payloads
-    assert payload["next_steps"] == ["Computed by the case pass"]
-    for field in ("conclusions", "recommendations", "suggestions", "suggestions_v2"):
-        assert payload[field] == SAVED_FEEDBACK[field]
+    # The run-level next steps are computed by the case pass and not saved, so the rebuild adds them.
+    result = json.loads((run / "result.json").read_text(encoding="utf-8"))
+    expected_steps = next_steps(result, run_dir=run, fixes=SAVED_FIXES)
+    assert expected_steps
+    assert payload["next_steps"] == expected_steps
+    assert 'id="tier3-run-next-steps"' in report.read_text(encoding="utf-8")
+    if feedback is SAVED_FEEDBACK:
+        for field in ("conclusions", "recommendations", "suggestions", "suggestions_v2"):
+            assert payload[field] == SAVED_FEEDBACK[field]

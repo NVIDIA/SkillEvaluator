@@ -116,6 +116,11 @@ All notable changes to SkillEvaluator are documented in this file.
   `scripts/ci/smoke_openclaw_plugins.py` repeats these checks against real
   plugin sources without executing plugin code.
 
+- Simplify repository CI onboarding around quality and security checks with
+  no model key required,
+  keeping optional LLM checks and hosted feedback separate. Preserve opt-in
+  all-tier setup and report contracts in an Advanced CI reference.
+
 ### Changed
 
 - Write Tier 3 accuracy deductions as plain-language reasons, identify findings

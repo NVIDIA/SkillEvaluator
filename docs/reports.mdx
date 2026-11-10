@@ -717,16 +717,16 @@ root. `--output` writes only the requested JSON, CSV, or Markdown file outside
 the candidate results roots.
 
 New evaluations reserve a unique run directory; they do not prune older run
-directories. The default `<skill>/evals/results/` is already inside the skill
-repository when the skill lives there, but the repository's existing
-[`results/` ignore pattern](../.gitignore) excludes generated results. Keep
-the full local tree if you need trial evidence or reusable baselines. To retain
-a compact history with the repository, review privacy-sensitive metadata and
-force-add **only** each chosen run's `result.json` and `run_config.json`
-summaries (or copy them into a separately tracked archive). Do not commit raw
-trajectories, logs, credentials, or the entire generated results tree. Summary
-archives preserve history, not the per-row evidence required for baseline
-reuse or publication validation.
+directories. The default `<skill>/evals/results/` is inside the skill
+repository, but a separate skill repository does not automatically ignore that
+path. Add it to that repository's `.gitignore` before force-adding selected
+summaries. Keep the full local tree if you need trial evidence or reusable
+baselines. To retain a compact history with the repository, review
+privacy-sensitive metadata and force-add **only** each chosen run's
+`result.json` and `run_config.json` summaries (or copy them into a separately
+tracked archive). Do not commit raw trajectories, logs, credentials, or the
+entire generated results tree. Summary archives preserve history, not the
+per-row evidence required for baseline reuse or publication validation.
 
 ### Skill Lift
 

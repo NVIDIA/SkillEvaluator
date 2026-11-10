@@ -3745,7 +3745,7 @@ def tier3_history(
                 raise click.UsageError("--output must be outside the results roots (history is read-only)")
         history = collect_history(skill_path, results_dir, agent)
         if output is not None:
-            output.write_text(export_history(history, output.suffix.lower()), encoding="utf-8")
+            output.write_text(export_history(history, output.suffix.lower()), encoding="utf-8", newline="")
         if as_json:
             click.echo(export_history(history, ".json"), nl=False)
         else:

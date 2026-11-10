@@ -20,13 +20,16 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from skillevaluator.source_identity import evaluated_source_revision
 from skillevaluator.tier3.baseline_store import comparison_identity, comparison_mismatches
 from skillevaluator.tier3.results_location import (
     _CURRENT_RUN_SUFFIX,
     _run_timestamp_parts,
+    is_legacy_completed_run_dir,
     iter_candidate_results_roots,
     ordered_run_directories,
 )
+from skillevaluator.utils.rich_markup import strip_terminal_controls
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 
 
@@ -121,23 +124,26 @@ def _known_identity(identity: dict, agent: str | None) -> bool:
     )
 
 
-def _known_mismatches(current: dict, previous: dict) -> list[str]:
+def _known_mismatches(current: dict, previous: dict, agent: str | None) -> list[str]:
     if not current.get("config") or not previous.get("config"):
         return []
     current, previous = dict(current), dict(previous)
-    for field in ("dataset_digest", "expected_case_ids", "attempt_policy", "score_policy", "evaluator_version"):
+    for field in (
+        "dataset_digest",
+        "identity_dataset_digest",
+        "expected_case_ids",
+        "attempt_policy",
+        "score_policy",
+        "evaluator_version",
+    ):
         if not current.get(field) or not previous.get(field):
             current[field] = previous[field] = [] if field == "expected_case_ids" else None
     for identity in (current, previous):
         config = dict(_mapping(identity.get("config")))
-        config["agents"] = _mapping(config.get("agents"))
+        agents = _mapping(config.get("agents"))
+        config["agents"] = {agent: agents.get(agent)}
         identity["config"] = config
-    if not current["config"].get("agents") or not previous["config"].get("agents"):
-        current["config"]["agents"] = previous["config"]["agents"] = {}
-    reasons = comparison_mismatches(current, previous)
-    if set(current["config"]["agents"]) != set(previous["config"]["agents"]):
-        reasons.append("agent selection changed")
-    return reasons
+    return comparison_mismatches(current, previous)
 
 
 def _run_rows(run_dir: Path, selected_agent: str | None) -> list[tuple[dict, dict]]:
@@ -187,18 +193,27 @@ def _run_rows(run_dir: Path, selected_agent: str | None) -> list[tuple[dict, dic
                 for arm, condition in (("with_skill", with_condition), ("without_skill", without_condition))
             }
             baseline = _mapping(result.get("baseline", config.get("baseline")))
-            status = result.get("execution_status") or (
-                "corrupt" if result_error and (run_dir / "result.json").exists() else "incomplete"
+            result_path = run_dir / "result.json"
+            legacy_completed = not result_path.exists() and is_legacy_completed_run_dir(run_dir)
+            status = (
+                "legacy"
+                if legacy_completed
+                else result.get("execution_status")
+                or ("corrupt" if result_error and result_path.exists() else "incomplete")
             )
             reasons = [error for error in (config_error, result_error) if error]
+            if legacy_completed:
+                reasons = [error for error in reasons if error != result_error]
+                reasons.append("legacy run: no run-level result.json; case coverage not recorded")
             if not isinstance(status, str):
                 status = "corrupt"
                 reasons.append("invalid run execution status")
             if result.get("run_id", run_dir.name) != run_dir.name:
                 reasons.append("result run id disagrees with directory")
                 status = "corrupt"
-            if status != "succeeded":
-                reasons.append(f"run status is {status}")
+            agent_status = payload.get("execution_status") or result.get("execution_status")
+            if agent_status is not None and agent_status != "succeeded":
+                reasons.append(f"agent status is {agent_status}")
             if baseline.get("mode") == "skipped" or without_condition.get("execution_status") == "skipped":
                 reasons.append("without-skill baseline was skipped")
             if with_condition.get("execution_status") == "skipped":
@@ -231,11 +246,17 @@ def _run_rows(run_dir: Path, selected_agent: str | None) -> list[tuple[dict, dic
                 retained_lift, _ = _read(root, f"{agent}/lift.json")
                 lift = _mapping(retained_lift.get("overall"))
             delta = _number(lift.get("delta"), -1, 1)
-            with_score = _number(payload.get("overall_with_skill", summaries["with_skill"].get("overall_score")))
-            without_score = _number(
+            lift_with_score = _number(lift.get("with_skill"))
+            lift_without_score = _number(lift.get("without_skill"))
+            arm_with_score = _number(payload.get("overall_with_skill", summaries["with_skill"].get("overall_score")))
+            arm_without_score = _number(
                 payload.get("overall_without_skill", summaries["without_skill"].get("overall_score"))
             )
-            if with_score is None or without_score is None:
+            if lift_with_score is not None and lift_without_score is not None:
+                with_score, without_score = lift_with_score, lift_without_score
+            else:
+                with_score, without_score = arm_with_score, arm_without_score
+            if arm_with_score is None or arm_without_score is None:
                 reasons.append("one or both condition overall scores are unscored or unknown")
             if delta is None:
                 reasons.append("paired overall lift was not recorded")
@@ -245,7 +266,7 @@ def _run_rows(run_dir: Path, selected_agent: str | None) -> list[tuple[dict, dic
             ):
                 reasons.append("paired overall lift is corrupt")
             skill = identity["skill"]
-            revision = _mapping(skill.get("evaluated_source")).get("revision")
+            revision = evaluated_source_revision(_mapping(skill.get("evaluated_source"))) or None
             digest = _mapping(skill.get("publication_target")).get("skill_digest")
             model = (
                 payload.get("model")
@@ -309,7 +330,7 @@ def collect_history(skill_path: Path, results_dir: Path | None = None, agent: st
             known = bool(identity) and _known_identity(identity, row["agent"])
             mismatches = []
             if previous and identity and previous["identity"]:
-                mismatches = _known_mismatches(identity, previous["identity"])
+                mismatches = _known_mismatches(identity, previous["identity"], row["agent"])
             segment = (previous["segment"] + bool(mismatches)) if previous else 1
             prior_lift = previous["lift"] if previous and not mismatches else None
             row.update(
@@ -424,7 +445,10 @@ def print_history(history: dict, console: Console) -> None:
         cells[6] = f"{_display(row.get('dataset_digest'))[:22]} ({_display(row.get('case_count'))})"
         if row["lift_delta"] is None:
             cells[9] = "unavailable"
-        table.add_row(*(Text(cell) for cell in [cells[0], cells[1] + "\n" + cells[2], *cells[3:-1]]))
+        safe_cells = [strip_terminal_controls(cell) for cell in cells]
+        table.add_row(
+            *(Text(cell) for cell in [safe_cells[0], safe_cells[1] + "\n" + safe_cells[2], *safe_cells[3:-1]])
+        )
     wide_console = Console(
         file=console.file,
         width=max(console.width, 240),
@@ -436,11 +460,18 @@ def print_history(history: dict, console: Console) -> None:
         console.print("No retained runs match this history request.")
     for row in history["rows"]:
         if row.get("lift_reasons"):
-            console.print(Text(f"{row['run_id']} ({row.get('agent')}): " + "; ".join(row["lift_reasons"])))
+            console.print(
+                Text(
+                    strip_terminal_controls(f"{row['run_id']} ({row.get('agent')}): " + "; ".join(row["lift_reasons"]))
+                )
+            )
         if row["config_changed"]:
             console.print(
                 Text(
-                    f"BREAK: segment {row['segment']} ({row.get('agent')}): " + "; ".join(row["comparison_mismatches"])
+                    strip_terminal_controls(
+                        f"BREAK: segment {row['segment']} ({row.get('agent')}): "
+                        + "; ".join(row["comparison_mismatches"])
+                    )
                 )
             )
 

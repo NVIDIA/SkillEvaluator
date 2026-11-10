@@ -41,7 +41,7 @@ def _run(
         "agents": {"opencode": {"model": model, "source": "explicit"}},
         "harbor": {"environment": "local"},
         "judge": {"model": "judge-a"},
-        "evaluated_source": {"revision": revision * 40},
+        "evaluated_source": {"commit": revision * 40},
     }
     condition = {
         "execution_status": "succeeded",
@@ -227,6 +227,129 @@ def test_agent_segments_are_independent(tmp_path):
     assert [r["agent"] for r in rows] == ["codex", "opencode", "codex", "opencode"]
     opencode = collect_history(skill, agent="opencode")["rows"]
     assert opencode[1]["lift_change"] == 0.0
+
+
+def _set_codex(directory: Path, model: str | None, *, status: str = "succeeded") -> None:
+    config_path = directory / "run_config.json"
+    result_path = directory / "result.json"
+    config = json.loads(config_path.read_text())
+    result = json.loads(result_path.read_text())
+    if model is None:
+        config["agents"].pop("codex", None)
+        result["agents"].pop("codex", None)
+    else:
+        config["agents"]["codex"] = {"model": model, "source": "explicit"}
+        codex = copy.deepcopy(result["agents"]["opencode"])
+        codex["model"] = model
+        codex["execution_status"] = status
+        result["agents"]["codex"] = codex
+        result["agents"]["opencode"]["execution_status"] = "succeeded"
+    result["comparison_identity"] = comparison_identity(config, result)
+    _write(config_path, config)
+    _write(result_path, result)
+
+
+def test_agent_lift_status_is_independent_of_run_status(tmp_path):
+    skill = tmp_path / "demo"
+    root = skill / "evals/results"
+    succeeded = _run(root, 1)
+    failed = _run(root, 2, status="failed")
+    _set_codex(succeeded, "codex-a")
+    _set_codex(failed, "codex-a", status="failed")
+
+    opencode = collect_history(skill, agent="opencode")["rows"]
+    codex = collect_history(skill, agent="codex")["rows"]
+
+    assert opencode[1]["status"] == "failed"
+    assert opencode[1]["lift_delta"] == 0.3
+    assert codex[1]["lift_delta"] is None
+    assert "agent status is failed" in codex[1]["lift_reasons"]
+
+
+def test_agent_segments_ignore_other_agents_changes(tmp_path):
+    skill = tmp_path / "demo"
+    root = skill / "evals/results"
+    first, second, third = (_run(root, hour) for hour in (1, 2, 3))
+    _set_codex(first, "codex-a")
+    _set_codex(second, "codex-b")
+    _set_codex(third, None)
+
+    rows = collect_history(skill, agent="opencode")["rows"]
+
+    assert [row["segment"] for row in rows] == [1, 1, 1]
+    assert not any(row["config_changed"] for row in rows)
+    assert rows[-1]["lift_change"] == 0.0
+
+
+def test_with_and_without_columns_use_recorded_lift_operands(tmp_path):
+    skill = tmp_path / "demo"
+    run = _run(skill / "evals/results", 1, score=0.6)
+    result = json.loads((run / "result.json").read_text())
+    result["agents"]["opencode"]["lift"]["overall"] = {
+        "with_skill": 0.6667,
+        "without_skill": 0.5667,
+        "delta": 0.1,
+    }
+    _write(run / "result.json", result)
+
+    row = collect_history(skill)["rows"][0]
+
+    assert row["with_skill_score"] == 0.6667
+    assert row["without_skill_score"] == 0.5667
+
+
+def test_csv_export_disables_newline_translation(monkeypatch, tmp_path):
+    skill = tmp_path / "demo"
+    _run(skill / "evals/results", 1)
+    output = tmp_path / "history.csv"
+    original_write_text = Path.write_text
+    observed = {}
+
+    def write_text(path, data, encoding=None, errors=None, newline=None):
+        if path == output:
+            observed["newline"] = newline
+        return original_write_text(path, data, encoding=encoding, errors=errors, newline=newline)
+
+    monkeypatch.setattr(Path, "write_text", write_text)
+    result = CliRunner().invoke(
+        cli,
+        ["tier3", "history", str(skill), "--output", str(output)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert observed["newline"] == ""
+
+
+def test_history_sanitizes_terminal_controls_in_cells_and_reasons(tmp_path):
+    skill = tmp_path / "demo"
+    root = skill / "evals/results"
+    _run(root, 1)
+    _run(root, 2, model="model\x1b]8;;https://example.invalid\x1b\\")
+    output = io.StringIO()
+
+    print_history(collect_history(skill), Console(file=output, width=300))
+
+    assert "\x1b" not in output.getvalue()
+    assert "BREAK: segment" in output.getvalue()
+
+
+def test_legacy_completed_run_has_legacy_status_not_missing_result_error(tmp_path):
+    from test_results_location_legacy_compatibility import (
+        _write_legacy_run_config,
+        _write_successful_summary,
+    )
+
+    skill = tmp_path / "demo"
+    legacy = skill / "evals/results/20260709_120000"
+    legacy.mkdir(parents=True)
+    _write_legacy_run_config(legacy, "opencode")
+    _write_successful_summary(legacy)
+
+    row = collect_history(skill)["rows"][0]
+
+    assert row["status"] == "legacy"
+    assert "legacy run: no run-level result.json; case coverage not recorded" in row["lift_reasons"]
+    assert not any("No such file or directory" in reason for reason in row["lift_reasons"])
 
 
 def test_new_run_reservation_keeps_previous_runs(tmp_path):

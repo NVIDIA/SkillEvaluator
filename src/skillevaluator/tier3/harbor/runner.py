@@ -774,6 +774,43 @@ def _persist_dataset_truth(run_dir: Path, *, fallback_task_ids: list[str]) -> di
     return snapshot
 
 
+def _dataset_generation_provenance(skill_path: Path) -> dict[str, Any] | None:
+    source = find_evals_file(skill_path)
+    if source is None or source.suffix.lower() not in {".json", ".yaml", ".yml"}:
+        return None
+    import yaml
+
+    try:
+        if source.suffix.lower() == ".json":
+            document = json.loads(source.read_text(encoding="utf-8"))
+        else:
+            document = yaml.safe_load(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, yaml.YAMLError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    from skillevaluator.tier3.dataset_provenance import sanitize_generation_record
+
+    generation = document.get("generation")
+    if isinstance(generation, dict):
+        generation = dict(generation)
+        eval_entries = document.get("evals")
+        if isinstance(eval_entries, list):
+            needs_review_count = sum(
+                1
+                for entry in eval_entries
+                if isinstance(entry, dict)
+                and isinstance(entry.get("review"), dict)
+                and entry["review"].get("status") == "needs_review"
+            )
+            generation["needs_review_count"] = needs_review_count
+            if needs_review_count > 0:
+                generation["review_state"] = "needs_review"
+            elif generation.get("review_state") == "needs_review":
+                generation["review_state"] = "unreviewed"
+    return sanitize_generation_record(generation)
+
+
 _NVIDIA_BUILD_FILE_SENTINEL = "skillevaluator-file-backed-nvidia-key"
 _NVIDIA_BUILD_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
 _NVIDIA_BUILD_AGENT_DEFAULT_MODEL = CHAT_DEFAULT_NVIDIA
@@ -5326,6 +5363,7 @@ def _run_harbor_eval_impl(
     if task_source not in {"evals_json", "native_harbor"}:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="invalid task source"))
         return {"error": ["harbor.task_source must be auto, evals_json, or native_harbor"]}
+    dataset_provenance = _dataset_generation_provenance(evaluator_skill_path) if task_source == "evals_json" else None
 
     reporter.emit(ProgressEvent(stage="credential-validation", state="running"))
     if runtime_errors:
@@ -6244,6 +6282,7 @@ def _run_harbor_eval_impl(
             "dataset_summary": dataset_truth["dataset_summary"],
             "dataset_digest": dataset_truth["dataset_digest"],
             "dataset_digest_algorithm": dataset_truth["dataset_digest_algorithm"],
+            "dataset_provenance": dataset_provenance,
             "run_config": run_config,
         }
     )

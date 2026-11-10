@@ -92,6 +92,7 @@ from skillevaluator.reporting.tier3_scope import completed_agent_result, validat
 from skillevaluator.reporting.trial_charts import steps_by_case_chart
 from skillevaluator.skillspector_provenance import skillspector_provenance_records
 from skillevaluator.source_identity import recorded_evaluated_source
+from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
 from skillevaluator.tier3.evidence_volume import format_evidence_volume
 
 if TYPE_CHECKING:
@@ -1335,14 +1336,27 @@ def _bounded_tier3_preview(payload: dict[str, Any] | None) -> tuple[dict[str, An
     """
     if not payload:
         return payload, {}
-    serialized = _compact_json(payload)
+    # A private copy: the caller embeds ``payload`` itself as the canonical data.
+    slim = json.loads(_compact_json(payload))
+    # Activation diagnostics belong to the canonical export. The template does
+    # not render them, so duplicate per-trial copies must not spend overview or
+    # failure-reason space before the preview budget is applied.
+    agents = slim.get("agents")
+    containers = [slim, *(agents.values() if isinstance(agents, dict) else [])]
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        for arm in ("trials", "trials_baseline"):
+            trials = container.get(arm)
+            for trial in trials if isinstance(trials, list) else []:
+                if isinstance(trial, dict):
+                    trial.pop("activation_validation", None)
+    serialized = _compact_json(slim)
     if len(serialized.encode("utf-8")) <= _TIER3_HTML_PREVIEW_TRIGGER_BYTES:
-        return payload, {}
+        return slim, {}
 
     from skillevaluator.evaluation.tier3_findings import failure_reason_text_slots, strip_failure_reason_text
 
-    # A private copy: the caller embeds ``payload`` itself as the canonical data.
-    slim = json.loads(serialized)
     rendered_slots = list(failure_reason_text_slots(slim, include_top_level_cards=False))
     deferred = [(container, key, container.pop(key)) for container, key in rendered_slots]
     # The page renders each agent's cards, never the top-level card copy, so its
@@ -3095,6 +3109,9 @@ class HTMLReporter(ReporterBase):
         tier3_preview, tier3_preview_notice = _bounded_tier3_preview(tier3_data)
         if isinstance(tier3_preview, dict) and isinstance(tier3_preview.get("evidence_volume"), dict):
             tier3_preview["evidence_volume"]["display"] = format_evidence_volume(tier3_preview["evidence_volume"]) or ""
+        tier3_dataset_provenance_line, tier3_dataset_provenance_warning = dataset_provenance_display(
+            tier3_data.get("dataset_provenance") if isinstance(tier3_data, dict) else None
+        )
         tier3_canonical_data, tier3_canonical_encoding = _canonical_tier3_embed(tier3_data)
         tier3_truncation = tier3_data.get("report_truncation", {}) if isinstance(tier3_data, dict) else {}
 
@@ -3434,6 +3451,8 @@ class HTMLReporter(ReporterBase):
             content_label_plural=cl + "s",
             quality_scores=quality_scores_by_skill,
             tier3=tier3_preview,
+            tier3_dataset_provenance_line=tier3_dataset_provenance_line,
+            tier3_dataset_provenance_warning=tier3_dataset_provenance_warning,
             chart_assets=_load_chart_assets,
             tier3_canonical_data=tier3_canonical_data,
             tier3_canonical_encoding=tier3_canonical_encoding,

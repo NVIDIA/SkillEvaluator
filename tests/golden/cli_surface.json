@@ -5,6 +5,27 @@
         "demo": {
           "params": [
             {
+              "choices": [
+                "auto",
+                "github",
+                "gitlab"
+              ],
+              "default": "auto",
+              "name": "platform",
+              "opts": [
+                "--platform"
+              ],
+              "param_type": "option"
+            },
+            {
+              "name": "tiers",
+              "opts": [
+                "--tiers"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
               "default": "<callable pathlib.Path.cwd>",
               "name": "repo",
               "opts": [
@@ -27,6 +48,141 @@
         },
         "init": {
           "params": [
+            {
+              "name": "tiers",
+              "opts": [
+                "--tiers"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "choices": [
+                "auto",
+                "github",
+                "gitlab"
+              ],
+              "default": "auto",
+              "name": "platform",
+              "opts": [
+                "--platform"
+              ],
+              "param_type": "option"
+            },
+            {
+              "choices": [
+                "docker",
+                "local"
+              ],
+              "default": "docker",
+              "name": "env_mode",
+              "opts": [
+                "--env-mode"
+              ],
+              "param_type": "option"
+            },
+            {
+              "choices": [
+                "openai",
+                "anthropic",
+                "nv_build"
+              ],
+              "default": "openai",
+              "name": "provider",
+              "opts": [
+                "--provider"
+              ],
+              "param_type": "option"
+            },
+            {
+              "choices": [
+                "openai",
+                "nv_build"
+              ],
+              "name": "embedding_provider",
+              "opts": [
+                "--embedding-provider"
+              ],
+              "param_type": "option"
+            },
+            {
+              "name": "model",
+              "opts": [
+                "--model"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "embedding_model",
+              "opts": [
+                "--embedding-model"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "agents",
+              "opts": [
+                "--agents"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "runner",
+              "opts": [
+                "--runner"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "tier3_required",
+              "opts": [
+                "--tier3-required"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "1",
+              "name": "n_attempts",
+              "opts": [
+                "--n-attempts"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "default": "1",
+              "name": "n_concurrent",
+              "opts": [
+                "--n-concurrent"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "default": "300",
+              "name": "timeout_minutes",
+              "opts": [
+                "--timeout-minutes"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "default": "skillevaluator",
+              "name": "environment",
+              "opts": [
+                "--environment"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
             {
               "default": "<callable pathlib.Path.cwd>",
               "name": "repo",
@@ -144,6 +300,27 @@
         },
         "status": {
           "params": [
+            {
+              "choices": [
+                "auto",
+                "github",
+                "gitlab"
+              ],
+              "default": "auto",
+              "name": "platform",
+              "opts": [
+                "--platform"
+              ],
+              "param_type": "option"
+            },
+            {
+              "name": "tiers",
+              "opts": [
+                "--tiers"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
             {
               "default": "<callable pathlib.Path.cwd>",
               "name": "repo",

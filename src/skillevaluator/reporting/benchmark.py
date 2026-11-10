@@ -172,16 +172,23 @@ class BenchmarkReporter(ReporterBase):
         policy = _benchmark_policy(results, ae, expected_skill_name=expected_skill_name)
         status = _overall_status(results, ae, policy, expected_skill_name=expected_skill_name)
 
-        tier3_callout = (
-            f"> **Tier 3 completed-agent result: {completed['verdict'].upper()}**"
-            + (
-                f" — {_publication_safe_inline(completed['reason'], private_labels)}"
-                if completed and completed.get("reason")
-                else ""
+        run_verdict = ae.get("verdict") if isinstance(ae, dict) else None
+        run_reason = ae.get("verdict_reason") if isinstance(ae, dict) else None
+        if self.report_scope == "tier3" and isinstance(run_verdict, str):
+            tier3_callout = f"> **Tier 3 completed-agent result: {run_verdict.upper()}**" + (
+                f" — {_publication_safe_inline(run_reason, private_labels)}" if run_reason else ""
             )
-            if completed
-            else "> **Tier 3: No complete agent result**"
-        )
+        else:
+            tier3_callout = (
+                f"> **Tier 3 completed-agent result: {completed['verdict'].upper()}**"
+                + (
+                    f" — {_publication_safe_inline(completed['reason'], private_labels)}"
+                    if completed and completed.get("reason")
+                    else ""
+                )
+                if completed
+                else "> **Tier 3: No complete agent result**"
+            )
         lines: list[str] = (
             [tier3_callout, "", f"# Skill Benchmark: {skill_name}", ""]
             if self.report_scope == "tier3"
@@ -491,25 +498,45 @@ class BenchmarkReporter(ReporterBase):
                 with_skill = comparison.get("with_skill") if isinstance(comparison, dict) else None
                 without_skill = comparison.get("without_skill") if isinstance(comparison, dict) else None
                 difference = comparison.get("difference") if isinstance(comparison, dict) else None
-                counts = (
-                    (
-                        with_skill.get(numerator),
-                        with_skill.get("scored"),
-                        without_skill.get(numerator),
-                        without_skill.get("scored"),
-                    )
-                    if isinstance(with_skill, dict) and isinstance(without_skill, dict)
+                with_counts = (
+                    (with_skill.get(numerator), with_skill.get("scored")) if isinstance(with_skill, dict) else ()
+                )
+                without_counts = (
+                    (without_skill.get(numerator), without_skill.get("scored"))
+                    if isinstance(without_skill, dict)
                     else ()
                 )
-                if (
-                    len(counts) == 4
-                    and all(isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in counts)
-                    and counts[1] > 0
-                    and counts[3] > 0
-                    and isinstance(difference, int)
-                    and not isinstance(difference, bool)
-                ):
-                    row.append(f"{counts[0]}/{counts[1]} | {counts[2]}/{counts[3]} | {difference:+d}")
+                valid_with = (
+                    len(with_counts) == 2
+                    and all(
+                        isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in with_counts
+                    )
+                    and with_counts[1] > 0
+                )
+                valid_without = (
+                    len(without_counts) == 2
+                    and all(
+                        isinstance(count, int) and not isinstance(count, bool) and count >= 0
+                        for count in without_counts
+                    )
+                    and without_counts[1] > 0
+                )
+                if valid_with and valid_without:
+                    if comparison.get("difference_unit") == "percentage_points":
+                        delta = (
+                            f"{difference:+.1f} pp"
+                            if isinstance(difference, int | float) and not isinstance(difference, bool)
+                            else "N/A"
+                        )
+                    else:
+                        delta = (
+                            f"{difference:+d}"
+                            if isinstance(difference, int) and not isinstance(difference, bool)
+                            else "N/A"
+                        )
+                    row.append(f"{with_counts[0]}/{with_counts[1]} | {without_counts[0]}/{without_counts[1]} | {delta}")
+                elif valid_with:
+                    row.append(f"{with_counts[0]}/{with_counts[1]} | N/A | N/A")
                 else:
                     row.append("N/A")
             lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in row) + " |")

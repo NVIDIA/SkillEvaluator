@@ -73,6 +73,27 @@ def test_grid_shows_one_row_per_case_with_attempt_marks_per_agent() -> None:
     assert "inconclusive" in output and "conditions cover different cases" in output
 
 
+def test_multi_agent_diagnostics_are_arm_labeled_after_rate_change() -> None:
+    from skillevaluator.tier3.case_summary import _agent_cell
+
+    with_case = {
+        "attempts": [{"attempt": 1, "trial": "case__attempt1", "score": 0.2, "passed": False, "reason": "goal missed"}]
+    }
+    without_case = {
+        "attempts": [
+            {"attempt": 1, "trial": "case__attempt1", "score": 0.2, "passed": False, "reason": "security issue"}
+        ]
+    }
+    output = _agent_cell(with_case, without_case, safe=str).plain
+
+    assert "FAIL: security issue" in output
+    assert "FAIL: goal missed" in output
+    assert output.index("No skill:") < output.index("FAIL: security issue")
+    assert output.index("FAIL: security issue") < output.index("With skill:")
+    assert output.index("With skill:") < output.index("FAIL: goal missed")
+    assert output.index("·") < output.index("No skill:")
+
+
 def test_verdict_thresholds() -> None:
     helps = {"a": _agent({"c": _case(True, True)}, {"c": _case(False, False)})}
     flat = {"a": _agent({"c": _case(True, False)}, {"c": _case(False, True)})}
@@ -82,6 +103,42 @@ def test_verdict_thresholds() -> None:
     assert verdict(hurts)[0] == "skill hurts"
     partial = {"a": _agent({"c": _case(True, missing=1)}, {"c": _case(False, False)})}
     assert verdict(partial) == ("inconclusive", "a: 1 attempt(s) did not run")
+
+
+def test_live_mark_merges_verifier_security_sidecar(tmp_path: Path) -> None:
+    from skillevaluator.tier3.case_summary import _live_mark
+
+    trial = tmp_path / "trial"
+    verifier = trial / "verifier"
+    verifier.mkdir(parents=True)
+    (trial / "result.json").write_text(
+        json.dumps(
+            {
+                "finished_at": "now",
+                "verifier_result": {"rewards": {"overall": 0.9, "security": 0.0, "goal_accuracy": 1.0}},
+            }
+        )
+    )
+    (verifier / "skill_evaluator_reward.json").write_text(
+        json.dumps(
+            {
+                "details": {
+                    "security": {
+                        "supported": False,
+                        "findings": [
+                            {
+                                "type": "unsupported_tool_wrapper",
+                                "score_impact": True,
+                                "message": "unsupported wrapper",
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+    )
+
+    assert _live_mark(trial, tmp_path, 0.5) == "✓"
 
 
 def test_what_to_fix_classifies_and_ranks_by_attempts_lost(tmp_path: Path) -> None:

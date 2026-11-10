@@ -321,6 +321,24 @@ def test_agent_eval_summary_shows_required_counts_and_failed_case_reason():
     assert "WARNING" in rendered
 
 
+def test_agent_eval_summary_shows_with_skill_counts_without_baseline() -> None:
+    output = io.StringIO()
+    CLIReporter._print_agent_eval_tables(
+        {
+            "verdict": "pass",
+            "required_checks": {"with_skill": {"passed": 0, "scored": 2}},
+            "correct_answers": {"with_skill": {"correct": 1, "scored": 2}},
+            "security_clean": {"with_skill": {"clean": 2, "scored": 2}},
+        },
+        Console(file=output, width=140, color_system=None),
+    )
+
+    rendered = output.getvalue()
+    assert "Required checks passed: 0/2 | N/A | N/A" in rendered
+    assert "Goals met: 1/2 | N/A | N/A" in rendered
+    assert "Security clean: 2/2 | N/A | N/A" in rendered
+
+
 def test_failed_agent_eval_summary_row_shows_verdict_reason_and_lift():
     result = ValidationResult(
         validator_name="AGENT_EVAL",

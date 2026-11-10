@@ -33,6 +33,7 @@ from skillevaluator.reporting.base import agent_eval_publication_evidence_comple
 from skillevaluator.reporting.html import PackageLoader, _compact_json
 from skillevaluator.tier3.harbor.collector import _paired_pass_comparison, _wilson_score_interval
 from skillevaluator.tier3.harbor.metrics import (
+    CUSTOM_SCORE_POLICY,
     DEFAULT_METRICS,
     DEFAULT_SCORE_POLICY,
     LEGACY_METRICS,
@@ -197,11 +198,85 @@ def test_normalize_trials_preserves_only_trusted_standard_invocation_evidence() 
     assert standard["skill_invoked"] is True
     assert standard["routing_passed"] is False
     assert standard["invocation_evidence_source"] == "trajectory"
+    assert "required_check_data" not in standard
+    assert "goal_accuracy_for_verdict" not in standard
     assert "skill_execution" not in custom_spoof["scores"]
     for trial in (custom_spoof, untrusted):
         assert "skill_invoked" not in trial
         assert "routing_passed" not in trial
         assert "invocation_evidence_source" not in trial
+
+
+def test_normalize_trials_uses_configured_attempt_threshold_for_attempt_verdict() -> None:
+    [trial] = _normalize_trials(
+        [
+            {
+                "trial_id": "case-1__attempt1",
+                "entry_id": "case-1",
+                "metric_set": "custom-only",
+                "score_policy": CUSTOM_SCORE_POLICY,
+                "overall": 0.46,
+                "goal_accuracy": 1.0,
+                "security": 1.0,
+            }
+        ],
+        [],
+        pass_threshold=0.3,
+    )
+
+    assert trial["overall"] == 0.46
+    assert trial["attempt_verdict"]["passed"] is True
+
+
+def test_report_attempt_chip_uses_configured_attempt_threshold() -> None:
+    trial_id = "case-1__attempt1"
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "metric_set_with_skill": "custom-only",
+                "score_policy_with_skill": CUSTOM_SCORE_POLICY,
+                "overall_with_skill": 0.46,
+                "pass_with_skill": {
+                    "k": 1,
+                    "pass_threshold": 0.3,
+                    "rate": 1.0,
+                    "cases": {
+                        "case-1": {
+                            "passed": True,
+                            "attempts_used": 1,
+                            "best_score": 0.46,
+                            "attempts": [{"attempt": 1, "trial": trial_id, "score": 0.46, "passed": True}],
+                        }
+                    },
+                },
+                "rewards": [
+                    {
+                        "trial_id": trial_id,
+                        "entry_id": "case-1",
+                        "metric_set": "custom-only",
+                        "score_policy": CUSTOM_SCORE_POLICY,
+                        "overall": 0.46,
+                        "goal_accuracy": 1.0,
+                        "security": 1.0,
+                    }
+                ],
+            }
+        },
+        attempt_policy={"max_attempts": 1, "pass_threshold": 0.3},
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    html = _render_agent_payload(payload)
+
+    assert "A1: 0.46 PASS" in html
+    hint = html.split("Each row is one eval case", 1)[1].split("</p>", 1)[0]
+    assert "goal accuracy is at least" in hint
+    assert "security is at least" in hint
 
 
 def test_normalize_trials_collapses_multi_step_rows_to_one_logical_attempt() -> None:
@@ -1485,9 +1560,17 @@ def test_canonical_html_tolerates_legacy_string_evidence_refs() -> None:
 def test_canonical_payload_deduplicates_repeated_metric_evidence() -> None:
     reward = {
         "entry_id": "case-1",
-        "security": 1.0,
+        "security": 0.5,
         "goal_accuracy": 0.5,
-        "details": {"goal_accuracy": {"reason": "same representative evidence"}},
+        "details": {
+            "security": {"reason": "security judge reason"},
+            "goal_accuracy": {
+                "reason": "A; B",
+                "criteria": {"A": False, "B": False},
+                "expected": "expected answer",
+                "observed": "observed answer",
+            },
+        },
     }
     payload = build_agent_eval_payload(
         "demo",
@@ -1497,7 +1580,7 @@ def test_canonical_payload_deduplicates_repeated_metric_evidence() -> None:
                 "execution_errors": [],
                 "expected_attempts": 2,
                 "scored_attempts": 2,
-                "with_skill": {"security": 1.0, "goal_accuracy": 0.5},
+                "with_skill": {"security": 0.5, "goal_accuracy": 0.5},
                 "rewards": [dict(reward), dict(reward)],
             }
         },
@@ -1506,17 +1589,13 @@ def test_canonical_payload_deduplicates_repeated_metric_evidence() -> None:
     assert payload is not None
 
     goal_card = next(card for card in payload["agents"]["codex"]["evaluator_cards"] if card["id"] == "goal_accuracy")
-    assert goal_card["evidence"] == [
-        {
-            "entry_id": "case-1",
-            "score": 0.5,
-            "notes": ["same representative evidence"],
-            "failures": [],
-            "checks": [],
-            "evidence_refs": [],
-            "occurrences": 2,
-        }
-    ]
+    [goal_evidence] = goal_card["evidence"]
+    assert goal_evidence["notes"] == ["A; B"]
+    assert goal_evidence["reason"] == "Expected: expected answer; observed: observed answer; Failed criteria: A, B"
+    security_card = next(card for card in payload["agents"]["codex"]["evaluator_cards"] if card["id"] == "security")
+    [security_evidence] = security_card["evidence"]
+    assert security_evidence["notes"] == ["security judge reason"]
+    assert "reason" not in security_evidence
     agents_html = _tier3_page(_render_agent_payload(payload), "agents", "dataset")
     assert "\u00d72" in agents_html
     assert "1 cases, 2 trials" in agents_html

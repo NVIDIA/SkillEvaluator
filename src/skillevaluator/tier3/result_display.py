@@ -452,17 +452,20 @@ def _agent_score_headlines(
     safe: Any,
 ) -> list[Text]:
     """Build the compact verdict, lift, and per-arm check-count summary."""
-    if _never_activated(data):
-        return []
-
     pass_at_k = data.get("pass_at_k")
     with_pass = pass_at_k.get("with_skill") if isinstance(pass_at_k, Mapping) else None
     without_pass = pass_at_k.get("without_skill") if isinstance(pass_at_k, Mapping) else None
     required_checks = with_pass.get("required_checks") if isinstance(with_pass, Mapping) else None
     verdict_reason = required_check_failure_reason(required_checks)
     headlines = []
-    if verdict_reason:
-        headlines.append(Text(f"QUALITY VERDICT: FAIL — {safe(verdict_reason)}", style=f"bold {RED}"))
+    agents = result.get("agents")
+    multiple_agents = isinstance(agents, Mapping) and len(agents) > 1
+    agent_verdict = "inconclusive" if _never_activated(data) else "fail" if verdict_reason else "pass"
+    if multiple_agents or verdict_reason:
+        verdict_label = f"QUALITY VERDICT ({safe(agent)}):" if multiple_agents else "QUALITY VERDICT:"
+        reason = f" — {safe(verdict_reason)}" if verdict_reason else ""
+        color = "yellow" if agent_verdict == "inconclusive" else RED if agent_verdict == "fail" else GREEN
+        headlines.append(Text(f"{verdict_label} {agent_verdict.upper()}{reason}", style=f"bold {color}"))
     if (
         with_usable
         and baseline_usable
@@ -476,8 +479,7 @@ def _agent_score_headlines(
             lift_label += " (for reference)"
         headline = Text(f"{lift_label}   ", style="bold")
         headline.append_text(_delta_cell(overall["delta"]))
-        agents = result.get("agents")
-        if isinstance(agents, Mapping) and len(agents) > 1:
+        if multiple_agents:
             headline.append(f" · {safe(agent)}", style="dim")
         headlines.append(headline)
 
@@ -492,19 +494,42 @@ def _agent_score_headlines(
             (
                 with_counts.get(numerator),
                 with_counts.get("scored"),
+            )
+            if isinstance(with_counts, Mapping)
+            else ()
+        )
+        baseline_counts = (
+            (
                 without_counts.get(numerator),
                 without_counts.get("scored"),
             )
-            if isinstance(with_counts, Mapping) and isinstance(without_counts, Mapping)
+            if isinstance(without_counts, Mapping)
             else ()
         )
-        line = Text(f"{label}   ", style="bold")
-        if len(counts) == 4 and all(
-            isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in counts
-        ):
-            difference = counts[0] - counts[2] if counts[1] and counts[3] else None
-            delta = f"{difference:+d}" if difference is not None else "N/A"
-            line.append(f"{counts[0]}/{counts[1]} | {counts[2]}/{counts[3]} | {delta}")
+        line_label = f"{label} ({safe(agent)})" if multiple_agents else label
+        line = Text(f"{line_label}   ", style="bold")
+        valid_with = (
+            len(counts) == 2
+            and all(isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in counts)
+            and counts[1] > 0
+        )
+        valid_without = (
+            len(baseline_counts) == 2
+            and all(isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in baseline_counts)
+            and baseline_counts[1] > 0
+        )
+        if valid_with:
+            line.append(f"{counts[0]}/{counts[1]}")
+            if valid_without:
+                line.append(f" | {baseline_counts[0]}/{baseline_counts[1]}")
+                if counts[1] == baseline_counts[1]:
+                    delta = f"{counts[0] - baseline_counts[0]:+d}"
+                else:
+                    rate_delta = 100 * (counts[0] / counts[1] - baseline_counts[0] / baseline_counts[1])
+                    delta = f"{rate_delta:+.1f} pp"
+                line.append(f" | {delta}")
+            else:
+                line.append(" | N/A | N/A")
         else:
             line.append("N/A")
         headlines.append(line)
@@ -953,6 +978,36 @@ def render_evaluation_result(
         rendered_feedback_messages = _render_incomplete_execution(result=result, console=console, safe=safe)
     has_cases = False
     if isinstance(agents, Mapping) and agents and not incomplete:
+        if len(agents) > 1:
+            run_verdict = str(result.get("verdict") or "").casefold()
+            if run_verdict not in {"pass", "fail", "neutral", "inconclusive"}:
+                agent_verdicts = []
+                for raw in agents.values():
+                    if not isinstance(raw, Mapping):
+                        continue
+                    explicit = str(raw.get("verdict") or "").casefold()
+                    if explicit in {"pass", "fail", "neutral", "inconclusive"}:
+                        agent_verdicts.append(explicit)
+                        continue
+                    raw_pass = raw.get("pass_at_k")
+                    raw_with = raw_pass.get("with_skill") if isinstance(raw_pass, Mapping) else None
+                    raw_checks = raw_with.get("required_checks") if isinstance(raw_with, Mapping) else None
+                    agent_verdicts.append(
+                        "inconclusive"
+                        if _never_activated(raw)
+                        else "fail"
+                        if required_check_failure_reason(raw_checks)
+                        else "pass"
+                    )
+                run_verdict = (
+                    "pass"
+                    if "pass" in agent_verdicts
+                    else "inconclusive"
+                    if agent_verdicts and all(item == "inconclusive" for item in agent_verdicts)
+                    else "fail"
+                )
+            style = GREEN if run_verdict == "pass" else RED if run_verdict == "fail" else "yellow"
+            console.print(Text(f"RUN QUALITY VERDICT: {run_verdict.upper()}", style=f"bold {style}"))
         if not verbose:
             for agent, raw in agents.items():
                 if not isinstance(raw, Mapping):

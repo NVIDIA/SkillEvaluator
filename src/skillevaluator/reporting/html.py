@@ -3299,8 +3299,8 @@ class HTMLReporter(ReporterBase):
             publication_status=publication.status,
             publication_reasons=publication.reasons,
             tier3_effective_status=(
-                completed_agent["verdict"]
-                if self.report_scope == "tier3" and completed_agent
+                tier3_data.get("verdict")
+                if self.report_scope == "tier3" and isinstance(tier3_data, dict) and tier3_data.get("verdict")
                 else publication.tier3.status
             ),
             total_validators=total_validators,

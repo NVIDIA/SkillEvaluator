@@ -3,7 +3,13 @@
 
 from __future__ import annotations
 
-from skillevaluator.evaluation.tier3_report import _build_conclusions, build_agent_eval_payload
+from skillevaluator.evaluation.tier3_report import (
+    _agent_quality_verdict,
+    _agent_quality_verdict_reason,
+    _build_conclusions,
+    _count_comparison,
+    build_agent_eval_payload,
+)
 from skillevaluator.reporting.benchmark import BenchmarkReporter
 from skillevaluator.tier3.attempt_verdict import attempt_verdict, required_check_failure_reason
 from skillevaluator.tier3.harbor.collector import _pass_summary
@@ -161,6 +167,87 @@ def test_unsupported_codex_security_result_does_not_gate_attempt() -> None:
         assert verdict.security_exempt is True
 
 
+def test_multiple_unsupported_wrapper_findings_are_exempt_and_count_as_required_pass() -> None:
+    reward = _security_reward(0.0)
+    reward["details"]["security"] = {
+        "findings": [
+            {"type": "unsupported_tool_wrapper", "score_impact": True, "message": "first wrapper"},
+            {"type": "unsupported_tool_wrapper", "score_impact": True, "message": "second wrapper"},
+        ]
+    }
+
+    verdict = attempt_verdict(overall_score(reward), 0.5, reward=reward)
+    summary = _summary([reward])
+
+    assert verdict.passed is True
+    assert verdict.security_exempt is True
+    assert summary["required_checks"] == {"passed": 1, "scored": 1, "wrong_answer": 0, "security": 0}
+
+
+def test_required_check_counts_deduplicate_goal_and_security_failures() -> None:
+    reward = _security_reward(0.0)
+    reward["goal_accuracy"] = 0.0
+
+    summary = _summary([reward])
+
+    assert summary["required_checks"] == {"passed": 0, "scored": 1, "wrong_answer": 1, "security": 1}
+    assert required_check_failure_reason(summary["required_checks"]) == (
+        "1 of 1 cases failed: 1 goal not met, 1 security issue"
+    )
+
+
+def test_expected_case_filter_and_different_denominators_use_scored_rates() -> None:
+    expected = _reward(1, goal_accuracy=1.0)
+    extra = {**_reward(1, goal_accuracy=0.0), "entry_id": "unexpected", "_trial_name": "unexpected__attempt1"}
+    summary = _pass_summary(
+        [expected, extra],
+        n_attempts=1,
+        pass_threshold=0.5,
+        expected_cases=1,
+        expected_case_ids=["case-1"],
+    )
+    comparison = _count_comparison(
+        {
+            "pass_with_skill": {"required_checks": {"passed": 1, "scored": 2}},
+            "pass_without_skill": {"required_checks": {"passed": 1, "scored": 4}},
+        },
+        "required_checks",
+        numerator="passed",
+    )
+
+    assert summary["correct_answers"] == {"correct": 1, "scored": 1}
+    assert summary["security_clean"] == {"clean": 1, "scored": 1}
+    assert comparison["difference"] == 25.0
+    assert comparison["difference_unit"] == "percentage_points"
+
+
+def test_shared_metric_pass_ignores_unshared_goal_gate() -> None:
+    reward = _reward(1, goal_accuracy=0.0)
+    summary = _pass_summary(
+        [reward],
+        n_attempts=1,
+        pass_threshold=0.5,
+        expected_cases=1,
+        expected_case_ids=["case-1"],
+        shared_metrics_by_case={"case-1": {"security"}},
+    )
+
+    assert summary["cases"]["case-1"]["passed"] is True
+    assert summary["required_checks"]["passed"] == 1
+    assert summary["correct_answers"] == {"correct": 0, "scored": 0}
+
+
+def test_never_activated_agent_remains_inconclusive_before_required_failures() -> None:
+    agent = {
+        "execution_status": "succeeded",
+        "skill_activation": {"status": "never_activated"},
+        "required_checks": {"with_skill": {"wrong_answer": 1, "security": 1, "scored": 1}},
+    }
+
+    assert _agent_quality_verdict(agent) == "inconclusive"
+    assert _agent_quality_verdict_reason(agent) is None
+
+
 def test_unscored_security_preserves_overall_verdict() -> None:
     reward = _security_reward(0.0)
     reward["details"]["security"] = {"status": "error"}
@@ -181,11 +268,7 @@ def test_unsupported_security_exemption_survives_cases_needing_review_summary() 
                     {
                         "entry_id": "unsupported-codex",
                         "overall": 0.8,
-                        "required_check_data": {
-                            "security_score": 0.0,
-                            "security_message": "Unsupported native Codex exec wrapper could not be safely normalized",
-                            "security_exempt": True,
-                        },
+                        "attempt_verdict": {"passed": True, "reason": None, "warnings": []},
                     }
                 ],
             }
@@ -405,6 +488,38 @@ def test_no_skill_only_required_check_failure_does_not_fail_headline() -> None:
     assert payload is not None
     assert payload["verdict"] == "pass"
     assert payload["verdict_reason"] is None
+
+
+def test_run_verdict_uses_passing_agent_counts_and_has_no_failure_reason() -> None:
+    def agent(score: float, passed: int) -> dict:
+        return {
+            "with_skill": dict.fromkeys(DEFAULT_METRICS, score),
+            "without_skill": dict.fromkeys(DEFAULT_METRICS, score),
+            "execution_status": "succeeded",
+            "expected_attempts": 1,
+            "scored_attempts": 1,
+            "pass_with_skill": {
+                "pass_threshold": 0.5,
+                "required_checks": {"passed": passed, "scored": 1, "wrong_answer": 1 - passed, "security": 0},
+                "correct_answers": {"correct": passed, "scored": 1},
+                "security_clean": {"clean": 1, "scored": 1},
+            },
+            "pass_without_skill": {
+                "required_checks": {"passed": 1, "scored": 1, "wrong_answer": 0, "security": 0},
+                "correct_answers": {"correct": 1, "scored": 1},
+                "security_clean": {"clean": 1, "scored": 1},
+            },
+        }
+
+    codex = agent(1.0, 0)
+    codex["skill_activation"] = {"status": "never_activated"}
+    payload = build_agent_eval_payload("demo", {"codex": codex, "claude": agent(0.9, 1)})
+
+    assert payload is not None
+    assert payload["verdict"] == "pass"
+    assert payload["verdict_reason"] is None
+    assert payload["required_checks"]["with_skill"]["passed"] == 1
+    assert payload["correct_answers"]["with_skill"]["correct"] == 1
 
 
 def test_required_check_failure_reason_pluralizes_and_omits_zero_counts() -> None:

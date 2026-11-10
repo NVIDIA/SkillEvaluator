@@ -1243,9 +1243,9 @@
     {#- A failing tier whose gate does not block is "Failed (advisory)", never "Changes required". -#}
     {% set tier3_advisory_fail = tier3_verdict == 'fail' and 'tier3' in nonblocking_tiers %}
     {% set has_t12_tab = tabs | selectattr('id', 'in', ['tier1', 'tier2']) | list | length > 0 %}
-    {% set verdict_key = {'passed': 'pass', 'failed': 'fail'}.get(presentation.command_status.value, 'incomplete') %}
+    {% set verdict_key = (tier3_verdict if tier3_verdict in ['pass', 'fail', 'neutral', 'inconclusive'] else 'incomplete') if report_scope == 'tier3' else {'passed': 'pass', 'failed': 'fail'}.get(presentation.command_status.value, 'incomplete') %}
     {% set verdict_class = {'pass': 'pass', 'fail': 'fail'}.get(verdict_key, 'warn') %}
-    {% set verdict_label = presentation.command_label %}
+    {% set verdict_label = (verdict_key | title) if report_scope == 'tier3' else presentation.command_label %}
     {% set check_words = {'pass': 'Passed', 'fail': 'Failed', 'incomplete': 'Incomplete', 'skipped': 'Skipped', 'not_applicable': 'N/A'} %}
     <header class="main-header">
         <div class="header-content">
@@ -2559,8 +2559,14 @@
                 <div class="dashboard-card">
                     <h3 class="dashboard-card-title">Goals met</h3>
                     <p class="dashboard-card-value" style="font-size:1.05rem;">
-                        {% if t3_correct_with.get('scored') and t3_correct_without.get('scored') and t3_correct_answers.get('difference') is not none %}
-                        {{ t3_correct_with.get('correct') }}/{{ t3_correct_with.get('scored') }} | {{ t3_correct_without.get('correct') }}/{{ t3_correct_without.get('scored') }} | {{ "%+d" | format(t3_correct_answers.get('difference')) }}
+                        {% if t3_correct_with.get('scored') %}
+                        {{ t3_correct_with.get('correct') }}/{{ t3_correct_with.get('scored') }} |
+                        {% if t3_correct_without.get('scored') %}
+                        {{ t3_correct_without.get('correct') }}/{{ t3_correct_without.get('scored') }} |
+                        {% if t3_correct_answers.get('difference') is not none %}
+                        {% if t3_correct_answers.get('difference_unit') == 'percentage_points' %}{{ "%+.1f pp" | format(t3_correct_answers.get('difference')) }}{% else %}{{ "%+d" | format(t3_correct_answers.get('difference')) }}{% endif %}
+                        {% else %}N/A{% endif %}
+                        {% else %}N/A | N/A{% endif %}
                         {% else %}N/A{% endif %}
                     </p>
                     <p class="dashboard-card-subtitle">With skill | No skill | Difference</p>
@@ -2571,8 +2577,14 @@
                 <div class="dashboard-card">
                     <h3 class="dashboard-card-title">Required Checks Passed</h3>
                     <p class="dashboard-card-value" style="font-size:1.05rem;">
-                        {% if t3_required_with.get('scored') and t3_required_without.get('scored') and t3_required_checks.get('difference') is not none %}
-                        {{ t3_required_with.get('passed') }}/{{ t3_required_with.get('scored') }} | {{ t3_required_without.get('passed') }}/{{ t3_required_without.get('scored') }} | {{ "%+d" | format(t3_required_checks.get('difference')) }}
+                        {% if t3_required_with.get('scored') %}
+                        {{ t3_required_with.get('passed') }}/{{ t3_required_with.get('scored') }} |
+                        {% if t3_required_without.get('scored') %}
+                        {{ t3_required_without.get('passed') }}/{{ t3_required_without.get('scored') }} |
+                        {% if t3_required_checks.get('difference') is not none %}
+                        {% if t3_required_checks.get('difference_unit') == 'percentage_points' %}{{ "%+.1f pp" | format(t3_required_checks.get('difference')) }}{% else %}{{ "%+d" | format(t3_required_checks.get('difference')) }}{% endif %}
+                        {% else %}N/A{% endif %}
+                        {% else %}N/A | N/A{% endif %}
                         {% else %}N/A{% endif %}
                     </p>
                     <p class="dashboard-card-subtitle">With skill | No skill | Difference</p>
@@ -2583,8 +2595,14 @@
                 <div class="dashboard-card">
                     <h3 class="dashboard-card-title">Security Clean</h3>
                     <p class="dashboard-card-value" style="font-size:1.05rem;">
-                        {% if t3_security_with.get('scored') and t3_security_without.get('scored') and t3_security_clean.get('difference') is not none %}
-                        {{ t3_security_with.get('clean') }}/{{ t3_security_with.get('scored') }} | {{ t3_security_without.get('clean') }}/{{ t3_security_without.get('scored') }} | {{ "%+d" | format(t3_security_clean.get('difference')) }}
+                        {% if t3_security_with.get('scored') %}
+                        {{ t3_security_with.get('clean') }}/{{ t3_security_with.get('scored') }} |
+                        {% if t3_security_without.get('scored') %}
+                        {{ t3_security_without.get('clean') }}/{{ t3_security_without.get('scored') }} |
+                        {% if t3_security_clean.get('difference') is not none %}
+                        {% if t3_security_clean.get('difference_unit') == 'percentage_points' %}{{ "%+.1f pp" | format(t3_security_clean.get('difference')) }}{% else %}{{ "%+d" | format(t3_security_clean.get('difference')) }}{% endif %}
+                        {% else %}N/A{% endif %}
+                        {% else %}N/A | N/A{% endif %}
                         {% else %}N/A{% endif %}
                     </p>
                     <p class="dashboard-card-subtitle">With skill | No skill | Difference</p>
@@ -3073,6 +3091,7 @@
 
             {# ----- Attempt Details: SkillEvaluator-style per-case attempt-score breakdown ----- #}
             {% set t3_pass_threshold = (t3_attempt_policy.pass_threshold if t3_attempt_policy.pass_threshold is not none else 0.5) | float %}
+            {% set t3_verdict_policy = tier3.get('verdict_policy') or {} %}
             {% set t3_attempt_rows = [] %}
             {% if t3_agents %}
                 {% for agent_name, agent in t3_agents.items() %}
@@ -3109,7 +3128,10 @@
                     Each row is one eval case for one agent under one condition. Attempt Scores
                     lists the scored attempts only; a score at or above
                     {{ "%.2f" | format(t3_pass_threshold) }} counts as passed for Pass@{{ t3_max_attempts }}
-                    when scored goal accuracy is not below its pass threshold.
+                    when scored goal accuracy is at least
+                    {{ "%.2f" | format(t3_verdict_policy.get('goal_accuracy_pass_threshold', 1.0)) }}
+                    and scored security is at least
+                    {{ "%.2f" | format(t3_verdict_policy.get('security_pass_threshold', 1.0)) }}.
                     "Not scored" means no reward was found for that expected attempt; it is excluded from pass/fail.
                 </p>
                 <div class="t3-filter-bar">

@@ -18,7 +18,7 @@ inflate the artifact and could carry credentials an agent echoed.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator, Mapping
 from itertools import islice
 from typing import Any
 
@@ -172,6 +172,8 @@ def _reason_candidates(detail: dict[str, Any], *, include_results: bool) -> Iter
     for field in ("reason", "message"):
         if isinstance(detail.get(field), str):
             yield detail[field]
+    if isinstance(detail.get("expected_observed"), str):
+        yield detail["expected_observed"]
 
     for finding in _detail_list(detail, "findings"):
         if isinstance(finding, str):
@@ -210,15 +212,40 @@ def _reason_candidates(detail: dict[str, Any], *, include_results: bool) -> Iter
         yield detail["attribution_explanation"]
 
 
-def failure_reason(detail: object, *, include_results: bool = True) -> str:
+def failure_reason(
+    detail: object,
+    *,
+    include_results: bool = True,
+    omit: Collection[str] = (),
+    metric: str | None = None,
+    reward: Mapping[str, Any] | None = None,
+) -> str:
     """Return one short, deduplicated, redacted reason for a failing metric.
 
     ``include_results=False`` leaves out failing behavior results, for evaluator
     cards that already show them as ``failures``.
     """
+    if not isinstance(detail, dict) and reward is not None and metric:
+        details = reward.get("details")
+        detail = details.get(metric) if isinstance(details, Mapping) else None
     if not isinstance(detail, dict):
         return ""
+    if metric in {"accuracy", "goal_accuracy"}:
+        observed_pair = detail.get("expected_observed")
+        observed_pair = observed_pair if isinstance(observed_pair, Mapping) else detail
+        expected = observed_pair.get("expected")
+        observed = observed_pair.get("observed")
+        if isinstance(expected, str) and expected.strip() and isinstance(observed, str) and observed.strip():
+            detail = {**detail, "expected_observed": f"Expected: {expected}; observed: {observed}"}
     parts: list[str] = []
+    omitted: set[str] = set()
+    for text in omit:
+        if not isinstance(text, str):
+            continue
+        sanitized = sanitize_grader_text(text)
+        if sanitized:
+            omitted.add(sanitized)
+            omitted.update(cleaned for part in sanitized.split("; ") if (cleaned := sanitize_grader_text(part)))
     # Only non-blank candidates count toward the cap, so entries without text
     # cannot crowd out the criteria, checks, or attribution that follow them.
     candidates = (
@@ -226,6 +253,8 @@ def failure_reason(detail: object, *, include_results: bool = True) -> str:
     )
     for candidate in islice(candidates, _MAX_REASON_CANDIDATES):
         cleaned = sanitize_grader_text(candidate)
+        if cleaned and any(cleaned == text or cleaned in text for text in omitted):
+            continue
         if cleaned and cleaned not in parts:
             parts.append(cleaned)
         if len(parts) >= _MAX_REASON_PARTS:

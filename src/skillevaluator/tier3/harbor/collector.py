@@ -4659,6 +4659,29 @@ def _logical_attempt_rewards(rewards: list[dict[str, Any]]) -> list[dict[str, An
         }
         if judge_models:
             logical_reward["_judge_models"] = judge_models
+        security_shortfalls = [
+            verdict
+            for row in rows
+            if (verdict := attempt_verdict(_overall_score(row), 0.5, reward=row)).security_clean is False
+        ]
+        if security_shortfalls and all(verdict.security_exempt for verdict in security_shortfalls):
+            message = next(
+                (verdict.security_message for verdict in security_shortfalls if verdict.security_message), None
+            )
+            logical_reward["details"] = {
+                "security": {
+                    "supported": False,
+                    "findings": [
+                        {
+                            "type": "unsupported_tool_wrapper",
+                            "score_impact": True,
+                            "message": message,
+                        }
+                    ]
+                    if message
+                    else [],
+                }
+            }
         logical.append(logical_reward)
     return logical
 
@@ -4959,6 +4982,7 @@ def _pass_summary(
     expected_case_ids: list[str] | None = None,
     recovered_attempts: list[dict[str, Any]] | None = None,
     scorer: Callable[[dict[str, Any]], float | None] | None = None,
+    shared_metrics_by_case: Mapping[str, set[str]] | None = None,
 ) -> dict[str, Any]:
     """Summarize pass@k using SkillEvaluator continuous reward scores.
 
@@ -4974,17 +4998,20 @@ def _pass_summary(
     security_clean_count = 0
     scored_security = 0
     for reward in _logical_attempt_rewards(rewards):
-        verdict = attempt_verdict(None, pass_threshold, reward=reward)
-        if verdict.correct_answer is not None:
-            scored_answers += 1
-            correct_answers += int(verdict.correct_answer)
-        if verdict.security_clean is not None:
-            scored_security += 1
-            security_clean_count += int(verdict.security_clean)
+        entry_id = _entry_id(reward, expected_id_set)
+        applicable_metrics = shared_metrics_by_case.get(entry_id) if shared_metrics_by_case is not None else None
+        verdict = attempt_verdict(None, pass_threshold, reward=reward, applicable_metrics=applicable_metrics)
+        if expected_id_set is None or entry_id in expected_id_set:
+            if verdict.correct_answer is not None:
+                scored_answers += 1
+                correct_answers += int(verdict.correct_answer)
+            if verdict.security_clean is not None:
+                scored_security += 1
+                security_clean_count += int(verdict.security_clean or verdict.security_exempt)
         overall = score_of(reward)
         if overall is None:
             continue
-        grouped.setdefault(_entry_id(reward, expected_id_set), []).append((reward, overall))
+        grouped.setdefault(entry_id, []).append((reward, overall))
 
     cases: dict[str, Any] = {}
     pairing_cases: dict[str, dict[str, Any]] = {}
@@ -5014,7 +5041,13 @@ def _pass_summary(
         for idx, (reward, overall) in enumerate(sorted(attempts, key=lambda item: _attempt_sort_key(item[0])), start=1):
             idx = _attempt_ordinal(reward) or idx
             score = round(overall, 4)
-            verdict = attempt_verdict(score, pass_threshold, reward=reward)
+            applicable_metrics = shared_metrics_by_case.get(entry_id) if shared_metrics_by_case is not None else None
+            verdict = attempt_verdict(
+                score,
+                pass_threshold,
+                reward=reward,
+                applicable_metrics=applicable_metrics,
+            )
             attempt_verdicts.append(verdict)
             passed = verdict.passed
             attempt_passes.append({"passed": passed, "required_failure": verdict.required_failure})
@@ -5050,13 +5083,13 @@ def _pass_summary(
             passed_cases += 1
         if attempts and is_expected_case:
             scored_cases += 1
-            required_checks_passed += int(case_passed)
-            if not case_passed:
-                failure_kinds = [verdict.required_failure for verdict in attempt_verdicts if verdict.required_failure]
-                if "wrong_answer" in failure_kinds:
-                    wrong_answer_cases += 1
-                elif "security" in failure_kinds:
-                    security_failed_cases += 1
+            wrong_answer_failed = any(verdict.correct_answer is False for verdict in attempt_verdicts)
+            security_failed = any(
+                verdict.security_clean is False and not verdict.security_exempt for verdict in attempt_verdicts
+            )
+            required_checks_passed += int(not wrong_answer_failed and not security_failed)
+            wrong_answer_cases += int(wrong_answer_failed)
+            security_failed_cases += int(security_failed)
         if is_expected_case:
             attempts_used += len(attempts)
         recovered_count = sum(item["case_id"] == entry_id for item in (recovered_attempts or []))
@@ -5223,6 +5256,9 @@ def _shared_metric_pass_lift(
         for case in cases & paired_cases:
             shared_by_case[case].discard(metric)
     fallback = set().union(*treatment_scored.values()) & set().union(*control_scored.values())
+    shared_metrics_by_case = {
+        case: shared_by_case.get(case, fallback) for case in set(treatment_scored) | set(control_scored)
+    }
     excluded_metrics = set(judge_mixed).union(*(treatment_scored[case] ^ control_scored[case] for case in paired_cases))
     scorer = _shared_metric_scorer(shared_by_case, fallback, expected_id_set)
     summaries = [
@@ -5234,6 +5270,7 @@ def _shared_metric_pass_lift(
             expected_cases=expected_cases,
             expected_case_ids=expected_case_ids,
             scorer=scorer,
+            shared_metrics_by_case=shared_metrics_by_case,
         )
         for rewards in (treatment_rewards, control_rewards)
     ]

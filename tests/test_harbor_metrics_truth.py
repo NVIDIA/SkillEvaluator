@@ -522,6 +522,41 @@ def test_collapsed_equal_score_steps_remain_policy_ambiguous() -> None:
     assert _score_policy_for_rewards(logical, DEFAULT_METRICS) == (LEGACY_SCORE_POLICY, False)
 
 
+def test_logical_multistep_security_exemption_requires_every_step_to_be_exempt() -> None:
+    from skillevaluator.tier3.attempt_verdict import attempt_verdict
+
+    def rows(second_type: str) -> list[dict]:
+        result = []
+        for index, finding_type in enumerate(("unsupported_tool_wrapper", second_type), start=1):
+            reward = {
+                "entry_id": "case-001",
+                "_trial_root_name": "case-001__attempt1",
+                "_step_name": f"step-{index}",
+                "metric_set": DEFAULT_METRIC_SET,
+                **dict.fromkeys(DEFAULT_METRICS, 0.9),
+                "security": 0.0,
+                "goal_accuracy": 1.0,
+                "behavior_check": 1.0,
+                "details": {
+                    "security": {
+                        "findings": [{"type": finding_type, "score_impact": True, "message": f"step {index} finding"}]
+                    }
+                },
+            }
+            result.append(reward)
+        return result
+
+    [all_exempt] = _logical_attempt_rewards(rows("unsupported_tool_wrapper"))
+    [mixed] = _logical_attempt_rewards(rows("destructive_command"))
+    exempt_verdict = attempt_verdict(overall_score(all_exempt), 0.5, reward=all_exempt)
+    mixed_verdict = attempt_verdict(overall_score(mixed), 0.5, reward=mixed)
+
+    assert exempt_verdict.passed is True
+    assert exempt_verdict.security_exempt is True
+    assert mixed_verdict.passed is False
+    assert mixed_verdict.security_exempt is False
+
+
 @pytest.mark.parametrize(
     "change",
     [

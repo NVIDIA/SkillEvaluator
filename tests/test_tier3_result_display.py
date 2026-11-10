@@ -97,6 +97,38 @@ def test_required_check_verdict_precedes_counts_and_positive_lift_is_reference()
     assert output.index("SECURITY CLEAN") < output.index("With Skill")
 
 
+def test_multi_agent_headlines_label_agents_and_render_with_skill_counts_alone() -> None:
+    def agent(passed: int, *, case_id: str) -> dict:
+        return {
+            "execution_status": "succeeded",
+            "pass_at_k": {
+                "with_skill": {
+                    "required_checks": {"passed": passed, "scored": 1, "wrong_answer": 1 - passed, "security": 0},
+                    "correct_answers": {"correct": passed, "scored": 1},
+                    "security_clean": {"clean": 1, "scored": 1},
+                    "cases": {case_id: {"passed": bool(passed), "attempts_used": 1, "best_score": 0.8, "attempts": []}},
+                },
+                "without_skill": {},
+            },
+        }
+
+    result = {
+        "execution_status": "succeeded",
+        "agents": {"codex": agent(0, case_id="codex-case"), "claude": agent(1, case_id="claude-case")},
+    }
+    output = io.StringIO()
+
+    render_evaluation_result(result, console=Console(file=output, width=160, color_system=None), verbose=False)
+
+    rendered = output.getvalue()
+    assert rendered.count("RUN QUALITY VERDICT:") == 1
+    assert "RUN QUALITY VERDICT: PASS" in rendered
+    assert "QUALITY VERDICT (codex): FAIL" in rendered
+    assert "QUALITY VERDICT (claude): PASS" in rendered
+    assert "REQUIRED CHECKS PASSED (codex)   0/1 | N/A | N/A" in rendered
+    assert "GOALS MET (claude)   1/1 | N/A | N/A" in rendered
+
+
 def test_default_case_first_display_includes_verdict_and_counts_before_cases() -> None:
     result = {
         "execution_status": "succeeded",
@@ -282,8 +314,11 @@ def test_overall_lift_headline_is_per_agent_and_highlighted_without_a_background
     console = Console()
     for panel, (name, delta) in zip(evaluator_panels, (("codex", 0.3), ("opencode", -0.2)), strict=True):
         assert isinstance(panel.renderable, Group)
-        headline = panel.renderable.renderables[0]
-        assert isinstance(headline, Text)
+        headline = next(
+            item
+            for item in panel.renderable.renderables
+            if isinstance(item, Text) and item.plain.startswith("OVERALL SKILL LIFT")
+        )
         assert headline.plain == f"OVERALL SKILL LIFT   {delta:+.2f} · {name}"
         style = headline.get_style_at_offset(console, headline.plain.index(f"{delta:+.2f}"))
         assert style.bold

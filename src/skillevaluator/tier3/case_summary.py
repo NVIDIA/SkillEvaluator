@@ -529,13 +529,18 @@ def _agent_cell(
     cell = _marks_text(without_marks)
     cell.append(" → ", style="dim")
     cell.append_text(_marks_text(with_marks))
-    cell.append_text(_case_diagnostics(without_case, safe))
-    cell.append_text(_case_diagnostics(with_case, safe))
     (wp, wn), (op, on) = _attempt_rate(with_marks), _attempt_rate(without_marks)
     if not comparable or not wn or not on or ERROR in with_marks + without_marks:
-        return cell.append("  ?", style="yellow")
-    delta = 100.0 * (wp / wn - op / on)
-    return cell.append_text(_change(f"{delta:+.0f}" if delta else "·", delta))
+        cell.append("  ?", style="yellow")
+    else:
+        delta = 100.0 * (wp / wn - op / on)
+        cell.append_text(_change(f"{delta:+.0f}" if delta else "·", delta))
+    for label, case in (("No skill", without_case), ("With skill", with_case)):
+        diagnostics = _case_diagnostics(case, safe)
+        if diagnostics.plain:
+            cell.append(f"\n{label}: ", style="dim")
+            cell.append_text(diagnostics)
+    return cell
 
 
 def _arrow_cell(
@@ -1281,7 +1286,11 @@ def _live_mark(trial: Path, run_dir: Path, pass_threshold: float) -> str | None:
     rewards = verifier.get("rewards") if isinstance(verifier, Mapping) else None
     score = rewards.get("overall") if isinstance(rewards, Mapping) else None
     if isinstance(score, int | float) and not isinstance(score, bool):
-        return PASS if attempt_verdict(score, pass_threshold, reward=rewards).passed else FAIL
+        merged_rewards = dict(rewards)
+        from skillevaluator.tier3.harbor.collector import _merge_reward_sidecars
+
+        _merge_reward_sidecars(merged_rewards, trial / "verifier")
+        return PASS if attempt_verdict(score, pass_threshold, reward=merged_rewards).passed else FAIL
     return ERROR
 
 

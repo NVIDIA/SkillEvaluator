@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -89,8 +89,11 @@ def _unsupported_security_result(result: Mapping[str, Any]) -> bool:
         if isinstance(findings, list)
         else []
     )
-    return len(score_findings) == 1 and (
-        score_findings[0].get("message") == "Unsupported native Codex exec wrapper could not be safely normalized"
+    if score_findings and all(finding.get("type") == "unsupported_tool_wrapper" for finding in score_findings):
+        return True
+    return bool(score_findings) and all(
+        finding.get("message") == "Unsupported native Codex exec wrapper could not be safely normalized"
+        for finding in score_findings
     )
 
 
@@ -140,12 +143,19 @@ def attempt_verdict(
     *,
     reward: Mapping[str, Any] | None = None,
     goal_accuracy_pass_threshold: float = DEFAULT_GOAL_ACCURACY_PASS_THRESHOLD,
+    applicable_metrics: Collection[str] | None = None,
 ) -> AttemptVerdict:
     """Apply required checks before the existing Overall threshold."""
-    if reward is not None:
+    if reward is not None and (applicable_metrics is None or "goal_accuracy" in applicable_metrics):
         goal_accuracy = scored_goal_accuracy(dict(reward))
+    elif applicable_metrics is not None and "goal_accuracy" not in applicable_metrics:
+        goal_accuracy = None
 
-    security_score = _scored_metric(reward, "security") if reward is not None else None
+    security_score = (
+        _scored_metric(reward, "security")
+        if reward is not None and (applicable_metrics is None or "security" in applicable_metrics)
+        else None
+    )
     details = reward.get("details") if reward is not None else None
     security_result = details.get("security") if isinstance(details, Mapping) else None
     security_result = security_result if isinstance(security_result, Mapping) else {}
@@ -225,7 +235,11 @@ def required_check_failure_reason(summary: Mapping[str, Any] | None) -> str | No
     counts = (goal_failures, security_failures, scored_cases)
     if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in counts):
         return None
-    failed_cases = goal_failures + security_failures
+    passed_cases = summary.get("passed")
+    if not isinstance(passed_cases, int) or isinstance(passed_cases, bool) or not 0 <= passed_cases <= scored_cases:
+        failed_cases = goal_failures + security_failures
+    else:
+        failed_cases = scored_cases - passed_cases
     if failed_cases == 0 or failed_cases > scored_cases:
         return None
     reasons = []

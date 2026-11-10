@@ -195,6 +195,7 @@ class CLIReporter(ReporterBase):
                 and result_status(result) not in {Status.SKIPPED, Status.INCOMPLETE}
             ):
                 self._print_agent_eval_tables(agent_eval, console)
+                rendered_result_ids.add(id(result))
 
         # Print detailed results for failures
         if failed:
@@ -220,7 +221,7 @@ class CLIReporter(ReporterBase):
                 self.render_result(result, console)
 
         # Successful results do not enter the detailed failure/finding sections.
-        rendered = {id(result) for result in (*failed, *non_blocking)}
+        rendered = rendered_result_ids
         for result in results:
             if id(result) not in rendered:
                 agent_eval = result.metadata.get("agent_eval")
@@ -410,6 +411,8 @@ class CLIReporter(ReporterBase):
     def _print_agent_eval_tables(agent_eval: dict, console: Console) -> None:
         """Print Tier 3 agent evaluation results."""
         verdict = agent_eval.get("verdict", "unknown")
+        best_agent = agent_eval.get("best_agent")
+        multiple_agents = isinstance(agent_eval.get("agents_run"), list) and len(agent_eval["agents_run"]) > 1
         composite = agent_eval.get("composite_lift")
         runtime = agent_eval.get("runtime_seconds", 0.0)
 
@@ -439,20 +442,36 @@ class CLIReporter(ReporterBase):
             with_skill = count_data.get("with_skill") if isinstance(count_data, dict) else None
             without_skill = count_data.get("without_skill") if isinstance(count_data, dict) else None
             difference = count_data.get("difference") if isinstance(count_data, dict) else None
-            if isinstance(with_skill, dict) and isinstance(without_skill, dict):
-                counts = (
-                    with_skill.get(numerator),
-                    with_skill.get("scored"),
-                    without_skill.get(numerator),
-                    without_skill.get("scored"),
+            with_counts = (with_skill.get(numerator), with_skill.get("scored")) if isinstance(with_skill, dict) else ()
+            without_counts = (
+                (without_skill.get(numerator), without_skill.get("scored")) if isinstance(without_skill, dict) else ()
+            )
+            valid_with = (
+                len(with_counts) == 2
+                and all(isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in with_counts)
+                and with_counts[1] > 0
+            )
+            valid_without = (
+                len(without_counts) == 2
+                and all(
+                    isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in without_counts
                 )
-                if all(isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in counts):
-                    delta = (
-                        f"{difference:+d}"
-                        if isinstance(difference, int) and not isinstance(difference, bool)
-                        else "N/A"
-                    )
-                    console.print(f"  {label}: {counts[0]}/{counts[1]} | {counts[2]}/{counts[3]} | {delta}")
+                and without_counts[1] > 0
+            )
+            if valid_with:
+                suffix = f" ({best_agent})" if multiple_agents and best_agent else ""
+                line = f"  {label}{suffix}: {with_counts[0]}/{with_counts[1]}"
+                if valid_without:
+                    if isinstance(difference, int) and not isinstance(difference, bool):
+                        delta = f"{difference:+d}"
+                    elif isinstance(difference, int | float) and not isinstance(difference, bool):
+                        delta = f"{difference:+.1f} pp"
+                    else:
+                        delta = "N/A"
+                    line += f" | {without_counts[0]}/{without_counts[1]} | {delta}"
+                else:
+                    line += " | N/A | N/A"
+                console.print(line)
         if verdict == "inconclusive":
             console.print(
                 "  [yellow]Skill never activated. Scores are diagnostic only; no lift verdict was computed.[/yellow]"

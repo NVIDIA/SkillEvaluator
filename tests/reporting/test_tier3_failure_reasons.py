@@ -448,6 +448,38 @@ def test_card_shows_lowest_scoring_failing_attempt_reason() -> None:
     assert "Reason A: partial leak" not in evidence_html
 
 
+def test_accuracy_card_keeps_built_reason_outside_bounded_notes() -> None:
+    reward = _reward(
+        accuracy=0.5,
+        details={
+            "accuracy": {
+                "reason": "A; B",
+                "criteria": {"A": False, "B": False},
+                "expected": "expected answer",
+                "observed": "observed answer",
+            }
+        },
+    )
+    payload = _payload([reward])
+    card = next(card for card in payload["agents"]["codex"]["evaluator_cards"] if card["id"] == "accuracy")
+    [evidence] = card["evidence"]
+
+    assert evidence["notes"] == ["A; B"]
+    assert evidence["reason"] == "Expected: expected answer; observed: observed answer; Failed criteria: A, B"
+    assert "A; B" not in evidence["reason"]
+
+
+def test_failure_reason_omits_semicolon_separated_grader_reason_parts() -> None:
+    detail = {
+        "reason": "A; B",
+        "findings": [{"message": "A"}, {"message": "B"}],
+    }
+
+    reason = failure_reason(detail, omit=("A; B",), metric="security", reward={})
+
+    assert reason == ""
+
+
 def test_card_lists_failed_behavior_results_once() -> None:
     # judge_behavior_check records the judge summary as ``reason``, which can be empty.
     failed = ["Did not cite the source document", "Deleted files without asking"]
@@ -759,6 +791,21 @@ def test_html_preview_counts_omitted_case_reasons_not_top_level_card_copies() ->
     html = _render(payload)
     assert f"HTML preview left out {notice['failure_reasons']} failure reasons or excerpts" in html
     assert "HTML preview omitted" not in html
+
+
+def test_html_preview_does_not_report_unrendered_top_level_card_reasons() -> None:
+    payload = _failing_multi_agent_payload(2, 40)
+    data = _display_data(payload)
+    rendered_total = _rendered_reason_count(data)
+    all_reasons = _reason_count(data)
+
+    preview, notice = html_module._bounded_tier3_preview(data)
+
+    assert preview is not None
+    kept = _rendered_reason_count(preview)
+    assert 0 < kept < rendered_total
+    assert notice["failure_reasons"] == rendered_total - kept
+    assert notice["failure_reasons"] < all_reasons
 
 
 def test_row_cap_note_appears_only_when_drilldown_rows_were_capped() -> None:

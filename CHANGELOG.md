@@ -140,10 +140,16 @@ All notable changes to SkillEvaluator are documented in this file.
   glob, expansion or quotes. Inside `.git`, only `.git` itself and hooks other
   than `*.sample` templates count. A lone file such as `SKILL.md` is scanned
   on its own, so a line that names a file beside it keeps the scan
-  `INCOMPLETE`. Every missing reference in a skill scanned on its own inside a
-  folder or plugin, such as `security-scan` or `validate` on a folder of
-  skills, or `validate` on a plugin, also keeps that skill's scan
-  `INCOMPLETE`. A reference that matches several bundled files
+  `INCOMPLETE`. Tier 3 output in the default `<skill>/evals/results` location,
+  such as `results`, `report.html` or `summary.json`, or with
+  `--harbor-keep-jobs` a copy of every bundled file, and input fixtures in
+  `evals/files` count as not inspected too, so a line that names one of them
+  keeps the scan `INCOMPLETE` after a Tier 3 run, although it passed before.
+  Keeping results outside the skill with `--results-dir` or
+  `SKILLEVALUATOR_RESULTS_DIR` avoids that. Every missing reference in a skill
+  scanned on its own inside a folder or plugin, such as `security-scan` or
+  `validate` on a folder of skills, or `validate` on a plugin, also keeps that
+  skill's scan `INCOMPLETE`. A reference that matches several bundled files
   (`reference_unresolved` from v2.12.0), a fatal or other ledger row, an
   uninspected file, a degraded analyzer, a limitation, or fewer findings
   counted after filtering than before still leaves the scan `INCOMPLETE`.

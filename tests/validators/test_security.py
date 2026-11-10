@@ -8956,6 +8956,43 @@ _IMAGE_NOTES_SKILL = (
     "# Notes writer\n\n![Logo](assets/logo.png)\n\nWrite the summary to `output/notes.md` and keep it short.\n"
 )
 
+# What a default Tier 3 run of the notes writer keeps in the skill, under
+# evals/results/<run>/, and what --harbor-keep-jobs adds there: the Harbor task
+# with a copy of every bundled file.
+_TIER3_RUN = "evals/results/20261110_120000_123_abcdef012345"
+_TIER3_RUN_FILES = {
+    f"{_TIER3_RUN}/{name}": "{}\n"
+    for name in (
+        ".skillevaluator-generated-output",
+        "result.json",
+        "run_config.json",
+        "what_to_fix.json",
+        "attempt_policy.json",
+        "report.html",
+        "claude-code/pass_at_k_lift.json",
+        *(
+            f"claude-code/{arm}/{name}"
+            for arm in ("with-skill", "without-skill")
+            for name in (
+                "summary.json",
+                *(
+                    f"trials/c-001__a1/{trial}.json"
+                    for trial in ("result", "reward", "artifact_manifest", "trajectory")
+                ),
+            )
+        ),
+    )
+}
+_TIER3_KEPT_JOB_FILES = {
+    f"{_TIER3_RUN}/_harbor-tasks/claude-code/with/c-001/{name}": text
+    for name, text in {
+        "instruction.md": "Summarize the meeting.\n",
+        "tests/test.sh": "#!/bin/sh\nexit 0\n",
+        "environment/Dockerfile": "FROM scratch\n",
+        **{f"environment/skills/notes-writer/{path}": text for path, text in _NOTES_WRITER_FILES.items()},
+    }.items()
+}
+
 
 class _InlineCatalogExecutor:
     """Run each parallel catalog job of ``validate`` in this process, where the scanner is patched."""
@@ -9489,6 +9526,48 @@ class TestSkillspectorMissingReferences:
 
         assert result.incomplete_scans == ["skillspector"]
         assert not result.warnings
+
+    @pytest.mark.parametrize(
+        ("line", "left_out"),
+        [
+            ("Write the meeting summary to `results/summary.md`.", _TIER3_RUN_FILES),
+            ("Save the formatted notes as `report.html`.", _TIER3_RUN_FILES),
+            (
+                "Run `scripts/summarize.py`, then write the summary to `output/notes.md`.",
+                {**_TIER3_RUN_FILES, **_TIER3_KEPT_JOB_FILES},
+            ),
+            ("Summarize the user's `meeting.txt` into `output/notes.md`.", {"evals/files/meeting.txt": "Notes.\n"}),
+        ],
+        ids=["results-directory", "report-file", "kept-harbor-job", "input-fixture"],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_tier3_output_and_fixtures_in_the_skill_count_as_not_inspected(
+        self, mock_tools, tmp_path: Path, line: str, left_out: dict[str, str]
+    ) -> None:
+        """A Tier 3 run in the default ``<skill>/evals/results`` turns a passing line into ``INCOMPLETE``.
+
+        The run's names (``results``, ``report.html``, and with ``--harbor-keep-jobs``
+        a copy of every bundled file) and the input fixtures in ``evals/files``
+        are left out of the scanned copy, like anything an author keeps there.
+        """
+        original = "Write the summary to `output/notes.md` and keep it short."
+        files = {**_NOTES_WRITER_FILES, "SKILL.md": _NOTES_WRITER_FILES["SKILL.md"].replace(original, line)}
+        files["evals/evals.json"] = '{"evals": []}\n'
+        payload = json.loads(json.dumps(_reference_report("2.13.3")).replace(original, line))
+        before = _write_skill(tmp_path / "before" / "notes-writer", files)
+        after = _write_skill(tmp_path / "after" / "notes-writer", {**files, **left_out})
+
+        fresh = _validate_skillspector_payload(mock_tools, before, payload)
+        rerun = _validate_skillspector_payload(mock_tools, after, payload)
+
+        assert fresh.incomplete_scans == []
+        assert fresh.warnings == [_missing_reference_warning("SKILL.md:10 [reference_resolution; reference_missing]")]
+        assert rerun.incomplete_scans == ["skillspector"]
+        assert rerun.errors == [
+            "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+            "SKILL.md:10 [reference_resolution; reference_missing]; security scan did not complete"
+        ]
+        assert not rerun.warnings
 
     @patch("skillevaluator.validators.security.Tools")
     def test_reference_root_beyond_the_scanned_directory_stays_incomplete(self, mock_tools, tmp_path: Path) -> None:

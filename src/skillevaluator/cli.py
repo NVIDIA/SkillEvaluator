@@ -1651,6 +1651,7 @@ def _finish_pipeline_view(
 ) -> None:
     """Render the quiet-mode verdict panel and report footer."""
     from skillevaluator.reporting.console_ui import MUTED, Verdict, _is_skipped, first_fix
+    from skillevaluator.reporting.harbor_viewer import harbor_job_links
     from skillevaluator.reporting.presentation import build_final_render_context
     from skillevaluator.reporting.run_status import Status
 
@@ -1673,6 +1674,10 @@ def _finish_pipeline_view(
     ]
     payload = ((tier3_result.metadata or {}).get("agent_eval") or {}) if tier3_result is not None else {}
     summary = payload.get("summary") or payload
+    for job in harbor_job_links(payload):
+        for key, label in (("url", "Results"), ("analysis_url", "Analysis")):
+            if job.get(key):
+                links.append((f"{job['name']} {label}", job[key]))
 
     if not gate_failed:
         advisory_failed = any(block.status == "fail" and block.number in {2, 3} for block in view.blocks)

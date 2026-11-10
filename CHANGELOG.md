@@ -129,6 +129,15 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- HTML and `BENCHMARK.md` reports explain each Tier 3 dimension in plain
+  language with its evidence source and whether the run has a no-skill baseline
+  for it. Dimensions that could not be scored or do not apply stay listed with
+  the reason instead of disappearing or reading `Not available`, and baseline-only
+  cards show the baseline score. A short key in both reports separates the
+  verdict, dimension and overall scores, BENCHMARK Uplift, published Skill Lift,
+  pass@k, the Tier 1
+  Quality Score, and publication eligibility.
+
 - Write Tier 3 accuracy deductions as plain-language reasons, identify findings
   without trajectory evidence, and include expected/observed text only when
   both values are recorded.

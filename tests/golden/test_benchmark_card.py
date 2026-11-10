@@ -1137,7 +1137,7 @@ def test_benchmark_zero_and_negative_lift_use_percentage_points() -> None:
     assert _score_transition_values(0.50004, 0.500049) == "50.0% → 50.0% (±0.0 points)"
     assert _score_transition_values(0.500049, 0.50004) == "50.0% → 50.0% (±0.0 points)"
     assert _score_transition_values(None, 0.92) == "92.0% — baseline not run; uplift unavailable"
-    assert _score_transition_values(0.5, None) == "Not available"
+    assert _score_transition_values(0.5, None) == "Not scored with the skill — baseline 50.0%; uplift unavailable"
     assert _score_transition({"baseline": float("nan"), "with_skill": 0.92}) == "Not available"
     assert _score_transition({"baseline": 0.5, "with_skill": float("inf")}) == "Not available"
 

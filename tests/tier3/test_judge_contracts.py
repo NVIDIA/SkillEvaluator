@@ -107,6 +107,18 @@ def test_every_judge_prompt_example_passes_its_own_validator(judge_module, monke
         assert "score" not in example
 
 
+def test_placeholder_only_expected_behavior_is_not_applicable(judge_module, monkeypatch) -> None:
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("the judge should not run without expected behaviors")
+
+    monkeypatch.setattr(judge_module, "call_public_llm", fail_if_called)
+    result = judge_module.judge_behavior_check("conversation", ["None", "  ", "n/A", None])
+
+    assert result["score"] is None
+    assert result["reason"] == "N/A: no expected_behavior defined for this eval case"
+    assert result["results"] == []
+
+
 @pytest.mark.parametrize("behavior_count", [1, 2, 3, 5, 12])
 def test_behavior_prompt_example_is_a_valid_reply_for_any_number_of_behaviors(
     judge_module, monkeypatch, behavior_count: int

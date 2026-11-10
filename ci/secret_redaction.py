@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Iterable
 from pathlib import Path
 
 from skillevaluator.reporting import HTMLReporter, MarkdownReporter, SARIFReporter
@@ -44,10 +45,6 @@ def collect_sensitive_values(skill: Path) -> set[str]:
     We scan matches even in comments or configured exceptions: another scanner
     can still quote those values. Never put collected values into a report.
     """
-    validator = SecurityValidator(use_llm=False)
-    patterns = [item for item in validator._compile_pii_patterns([]) if item[0] in SENSITIVE_PII_CATEGORIES]
-    tokens: set[str] = set()
-    total = 0
     files = []
 
     def inaccessible(_error):
@@ -58,46 +55,49 @@ def collect_sensitive_values(skill: Path) -> set[str]:
         if len(files) > MAX_FILES:
             raise ValueError("The credential preflight exceeded its file limit.")
     with SecureRoot(skill) as root:
-        for path in files:
-            raw, _ = root.read_bytes(path.relative_to(skill), MAX_FILE_BYTES)
-            total += len(raw)
-            if total > MAX_TOTAL_BYTES:
-                raise ValueError("The credential preflight exceeded its size limit.")
-            text = (
-                raw.decode("utf-16", errors="ignore")
-                if raw.startswith((b"\xff\xfe", b"\xfe\xff"))
-                else raw.decode("utf-8-sig", errors="ignore")
-            )
-            # Split lines as the scanners read them, on newlines only.
-            # str.splitlines() also splits on characters such as U+2028 and
-            # form feed, which can sit inside a quoted credential.
-            for line in re.split(r"\r\n?|\n", text):
-                # Some PII patterns can backtrack heavily on very long input.
-                # Refuse the scan before applying them to unbounded lines.
-                if len(line) > MAX_LINE_CHARS:
-                    raise ValueError("The credential preflight exceeded its line length limit.")
-                for category, pattern, _exceptions, _definition in patterns:
-                    for match in pattern.finditer(line):
-                        tokens.update(sensitive_values(category, match.group(), line))
-                tokens.update(NVIDIA_API_KEY.findall(line))
-                for pattern in UNQUOTED_VALUES:
-                    tokens.update(
-                        value
-                        for value in pattern.findall(line)
-                        if any(character.isdigit() for character in value)
-                        and any(character.isalpha() for character in value)
-                    )
-            if "PRIVATE KEY-----" in text:
-                blocks = re.findall(
-                    r"-----BEGIN [^\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^\r\n]*PRIVATE KEY-----", text
+        return collect_sensitive_bytes(root.read_bytes(path.relative_to(skill), MAX_FILE_BYTES)[0] for path in files)
+
+
+def collect_sensitive_bytes(contents: Iterable[bytes]) -> set[str]:
+    """Use the same bounded credential preflight for files and trusted Git blobs."""
+    validator = SecurityValidator(use_llm=False)
+    patterns = [item for item in validator._compile_pii_patterns([]) if item[0] in SENSITIVE_PII_CATEGORIES]
+    tokens: set[str] = set()
+    total = 0
+    for index, raw in enumerate(contents, 1):
+        total += len(raw)
+        if index > MAX_FILES or len(raw) > MAX_FILE_BYTES or total > MAX_TOTAL_BYTES:
+            raise ValueError("The credential preflight exceeded its file or size limit.")
+        text = (
+            raw.decode("utf-16", errors="ignore")
+            if raw.startswith((b"\xff\xfe", b"\xfe\xff"))
+            else raw.decode("utf-8-sig", errors="ignore")
+        )
+        # Split on newlines only, as the scanners do. Other Unicode separators
+        # can sit inside a quoted credential and must not split its evidence.
+        for line in re.split(r"\r\n?|\n", text):
+            if len(line) > MAX_LINE_CHARS:
+                raise ValueError("The credential preflight exceeded its line length limit.")
+            for category, pattern, _exceptions, _definition in patterns:
+                for match in pattern.finditer(line):
+                    tokens.update(sensitive_values(category, match.group(), line))
+            tokens.update(NVIDIA_API_KEY.findall(line))
+            for pattern in UNQUOTED_VALUES:
+                tokens.update(
+                    value
+                    for value in pattern.findall(line)
+                    if any(character.isdigit() for character in value)
+                    and any(character.isalpha() for character in value)
                 )
-                if not blocks:
-                    raise ValueError("A private key could not be safely redacted.")
-                for block in blocks:
-                    tokens.add(block)
-                    tokens.update(line.strip() for line in block.splitlines()[1:-1] if line.strip())
-            if len(tokens) > MAX_TOKENS or any(len(token.encode("utf-8")) > MAX_TOKEN_BYTES for token in tokens):
-                raise ValueError("The credential preflight exceeded its redaction limit.")
+        if "PRIVATE KEY-----" in text:
+            blocks = re.findall(r"-----BEGIN [^\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^\r\n]*PRIVATE KEY-----", text)
+            if not blocks:
+                raise ValueError("A private key could not be safely redacted.")
+            for block in blocks:
+                tokens.add(block)
+                tokens.update(line.strip() for line in block.splitlines()[1:-1] if line.strip())
+        if len(tokens) > MAX_TOKENS or any(len(token.encode("utf-8")) > MAX_TOKEN_BYTES for token in tokens):
+            raise ValueError("The credential preflight exceeded its redaction limit.")
     # Replacing a very short secret throughout a report can corrupt schema keys
     # and identities. Fail closed rather than risk emitting it or a false verdict.
     if any(len(token) < 4 for token in tokens):

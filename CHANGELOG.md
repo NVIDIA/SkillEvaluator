@@ -303,6 +303,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
+  the PR or merge request's target revision. Policy files from the proposed
+  changes cannot approve their own exceptions.
+- Security checks preserve authored evaluation files and their findings while
+  excluding generated outputs. Fully inspected skills with only missing-path
+  reference caveats retain visible warnings instead of an incomplete-scan
+  failure; actual coverage gaps and analyzer failures still block.
+- PII findings clarify that required author attribution is accepted while
+  duplicate contact addresses need removal, replacement, or a reviewed waiver.
+
 - A `tier3 evaluate --skip-with-skill` run with two or more agents now records
   the dataset-size status in `result.json` and the `tier3 evaluate` summary. It
   is taken from the agent with the best baseline score, as in the reports.

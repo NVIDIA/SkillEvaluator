@@ -68,6 +68,18 @@ def test_gitlab_job_runs_all_skills_on_push_and_keeps_output(tmp_path):
     assert evidence == ["all", "", "", "80"]
 
 
+def test_gitlab_baseline_opt_in_rejects_noncanonical_boolean_and_inherited_policy(tmp_path):
+    result, evidence = _run_template(
+        tmp_path,
+        {
+            "SKILL_EVAL_SECURITY_BASELINES": "TRUE",
+            "POLICY_SOURCE_SHA": "a" * 40,
+        },
+    )
+    assert result.returncode != 0
+    assert evidence is None
+
+
 def test_gitlab_job_uses_mr_diff_and_retains_failed_results(tmp_path):
     result, evidence = _run_template(
         tmp_path,

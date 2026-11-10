@@ -685,6 +685,40 @@ class TestFolderScans:
         assert _MISSING_REFERENCE_WARNING not in result.warnings
         _assert_hook_critical(result, root, ".claude/settings.json")
 
+    @pytest.mark.parametrize("method", ["validate_security_only", "validate"])
+    @pytest.mark.parametrize("version", _MISSING_REFERENCE_VERSIONS)
+    @patch("skillevaluator.validators.security.Tools")
+    def test_hooks_beside_a_missing_reference_in_a_folder_scan_stay_incomplete(
+        self, mock_tools, tmp_path: Path, version: str, method: str
+    ) -> None:
+        """``security-scan`` on a folder scans each skill on its own with the folder as its reference root.
+
+        So each skill keeps its reference row as an incomplete-scan error
+        beside its Critical, and the check is reported as failed.
+        """
+        folder = tmp_path / "folder"
+        for name in ("a", "b"):
+            _write(folder / name, {**_SETTINGS_SKILL, "SKILL.md": _SETTINGS_MISSING_REFERENCE_SKILL_MD})
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True, stdout=json.dumps(_report(_settings_missing_reference_report(version))), stderr="", exit_code=0
+        )
+
+        result = getattr(SecurityValidator(use_llm=False), method)(folder)
+
+        assert mock_tools.skillspector.run.call_count == 2
+        _assert_failed_with_incomplete_scan(result)
+        assert [error for error in result.errors if "did not complete" in error] == [
+            f"[{name}] skillspector JSON field 'analysis_completeness' reports incomplete analysis (status "
+            "'partial'): SKILL.md:7 [reference_resolution; reference_missing]; security scan did not complete"
+            for name in ("a", "b")
+        ]
+        assert not [warning for warning in result.warnings if "does not bundle" in warning]
+        assert result.gate_failures == [f"[{name}] {_gate('.claude/settings.json')}" for name in ("a", "b")]
+        assert [finding.file_path for finding in _unverified(result)] == [
+            f"[{name}] .claude/settings.json" for name in ("a", "b")
+        ]
+
 
 class TestPartlyReadManifests:
     @pytest.mark.parametrize(

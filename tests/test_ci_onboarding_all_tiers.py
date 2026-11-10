@@ -88,6 +88,14 @@ def test_all_tiers_save_github_is_minimal_pinned_and_idempotent(repository, all_
     assert job["with"]["tiers"] == "1,2,3"
     assert "tier3-required" not in job["with"]
     assert job["with"]["image"] == ALL_RELEASE["image"]
+    triggers = [
+        "skills/**",
+        ".github/workflows/skill-checks-all-tiers.yml",
+        ".github/workflows/feedback-all-tiers.yml",
+    ]
+    assert scan["on"]["pull_request"] == {"paths": triggers}
+    assert scan["on"]["push"] == {"branches": ["trunk"], "paths": triggers}
+    assert "&" not in scan_path.read_text()  # no YAML aliases in Actions workflows
     feedback = yaml.safe_load((repository / ".github/workflows/feedback-all-tiers.yml").read_text())
     assert feedback["jobs"]["feedback"]["with"]["trusted-caller-blobs"]
     assert feedback["jobs"]["feedback"]["uses"].endswith("@" + ALL_RELEASE["feedback_ref"])

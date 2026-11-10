@@ -737,6 +737,7 @@ def _discover_trajectories(
         "mini-swe-agent",
         "aider",
         "gemini-cli",
+        "hermes",
     ]
     for agent_name in agent_priority:
         trials_dir = results_dir / agent_name / "with-skill" / "trials"
@@ -1571,6 +1572,11 @@ Agent-refined mode (--refine):
 
     print(f"\nSaved: {output_path}")
     print(f"  {len(cases)} test case(s)")
+    from skillevaluator.tier3.dataset_sufficiency import generation_coverage_summary
+    from skillevaluator.tier3.harbor.report_data import summarize_dataset_entries
+
+    composition = summarize_dataset_entries(dataset.get("evals", []))
+    print(f"  {generation_coverage_summary(composition['total_tasks'], composition['negative_tasks'])}")
     if refine_requested:
         print(f"\nNext: skillevaluator evaluate {skill_path} --agents claude-code --env-mode docker")
     else:

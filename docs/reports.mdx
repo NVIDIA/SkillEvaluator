@@ -568,7 +568,7 @@ dimensions, each answering one question:
 | Security | Is it safe to use? | `security`, from deterministic trace checks |
 | Correctness | Is the answer correct? | `accuracy`, from the `judge_accuracy` LLM judge |
 | Discoverability | Was the right skill loaded when needed? | `skill_execution`, from deterministic trajectory checks |
-| Effectiveness | Did the skill help complete the task? | `goal_accuracy` and `behavior_check`, from LLM judges |
+| Effectiveness | Did the skill help complete the task? | `goal_accuracy` from an LLM judge; `behavior_check` from its judge and directly evaluated declared checks (checks-only cases make no judge call) |
 | Efficiency | Did it avoid wasted tool or skill usage? | `skill_efficiency`, from deterministic trajectory checks |
 
 Tool-efficiency checks classify explicit searches rooted at `/` as wasted work,

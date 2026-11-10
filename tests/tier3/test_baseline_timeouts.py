@@ -838,6 +838,75 @@ def test_tolerance_needs_a_baseline_and_dimension_grading(tmp_path: Path, kwargs
     assert all(RECORD_KEY not in agent and REJECTION_KEY not in agent for agent in results["agents"].values())
 
 
+def test_reused_baseline_leaves_the_option_inert(tmp_path: Path) -> None:
+    # A run that completed both arms is the retained baseline (--reuse-baseline).
+    source_jobs = tmp_path / "source-jobs"
+    for agent in ("opencode", "codex"):
+        for variant in ("with", "without"):
+            _arm(source_jobs, agent, variant, [(case, "scored") for case in CASES])
+    source = tmp_path / "source"
+    collect_harbor_results(
+        skill_name=SKILL,
+        agents=["opencode", "codex"],
+        output_dir=source / "results",
+        jobs_dir=source_jobs,
+        n_attempts=1,
+        expected_cases=len(CASES),
+        expected_case_ids=CASES,
+        case_id_by_task_selector={case: case for case in CASES},
+        expected_trials=len(CASES),
+    )
+    jobs = tmp_path / "jobs"
+    for agent in ("opencode", "codex"):
+        _arm(jobs, agent, "with", [(case, "scored") for case in CASES])
+
+    results = _collect(tmp_path, [], reused_baseline_dir=source / "results")
+
+    # The baseline did not run here, so there are no timeouts to judge.
+    assert results["execution_status"] == "succeeded"
+    assert all(agent["without_skill"] for agent in results["agents"].values())
+    assert RUN_KEY not in results
+    assert all(RECORD_KEY not in agent and REJECTION_KEY not in agent for agent in results["agents"].values())
+
+
+def test_budget_attempts_that_never_ran_are_not_missing_baseline_attempts(tmp_path: Path) -> None:
+    # A run budget admitted no attempt of case-003 for opencode, so neither arm
+    # expects it; only the timed-out case-002 attempt is missing from the baseline.
+    cases = [*CASES, "case-003"]
+    jobs = tmp_path / "jobs"
+    _arm(jobs, "opencode", "with", [(case, "scored") for case in CASES])
+    _arm(jobs, "opencode", "without", [("case-001", "scored"), ("case-002", "timeout")])
+    _arm(jobs, "codex", "with", [(case, "scored") for case in cases])
+    _arm(jobs, "codex", "without", [(case, "scored") for case in cases])
+    not_run = [
+        {"agent": "opencode", "arm": arm, "case_id": "case-003", "attempt": 1, "status": "not_run"}
+        for arm in ("with", "without")
+    ]
+
+    results = collect_harbor_results(
+        skill_name=SKILL,
+        agents=["opencode", "codex"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs,
+        n_attempts=1,
+        expected_cases=len(cases),
+        expected_case_ids=cases,
+        case_id_by_task_selector={case: case for case in cases},
+        expected_trials=len(cases),
+        launch_errors=[LAUNCH_ERROR.format(agent="opencode", count=1)],
+        tolerate_baseline_timeouts=True,
+        budget_not_run=not_run,
+    )
+
+    opencode = results["agents"]["opencode"]
+    assert results["execution_status"] == "succeeded"
+    assert results["partial"] is True
+    assert REJECTION_KEY not in opencode
+    assert results[RUN_KEY]["tolerated_agents"] == ["opencode"]
+    assert (opencode[RECORD_KEY]["expected_attempts"], opencode[RECORD_KEY]["scored_attempts"]) == (2, 1)
+    assert [failure["case_id"] for failure in opencode[RECORD_KEY]["failures"]] == ["case-002"]
+
+
 # -- stop-on-pass attempt jobs merged by the runner ---------------------------
 
 

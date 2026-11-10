@@ -7430,8 +7430,9 @@ def collect_harbor_results(
     ``tolerate_baseline_timeouts`` keeps an agent scored on its clean
     with-skill arm when its baseline fell short only through agent execution
     timeouts (see :mod:`skillevaluator.tier3.harbor.baseline_timeouts`); it
-    needs both arms and dimension grading, and ``launch_errors`` must be the
-    runner's launch errors so the run-level rule can account for them.
+    needs both arms run in this collection (no reused baseline) and dimension
+    grading, and ``launch_errors`` must be the runner's launch errors so the
+    run-level rule can account for them.
     """
     if skip_baseline and skip_with_skill:
         raise ValueError("skip_baseline and skip_with_skill are mutually exclusive (no arm would run)")
@@ -7496,8 +7497,13 @@ def collect_harbor_results(
     }
 
     _prepare_generated_outputs(output_dir, agents)
+    # A reused baseline did not run here, so it has no timeouts to judge.
     tolerance_on = (
-        tolerate_baseline_timeouts and not skip_baseline and not skip_with_skill and grading_mode != "custom_only"
+        tolerate_baseline_timeouts
+        and not skip_baseline
+        and not skip_with_skill
+        and reused_baseline_dir is None
+        and grading_mode != "custom_only"
     )
     tolerance_candidates: dict[str, list[dict[str, Any]]] = {}
     tolerance_records: dict[str, dict[str, Any]] = {}
@@ -8284,15 +8290,17 @@ def collect_harbor_results(
             if tolerance_code is None and without_policy == "mixed-score-policies":
                 tolerance_code = "unbound_error"
             if tolerance_code is None:
+                # Attempts a run budget never admitted are not expected, as in the summary.
                 residual = _condition_execution_summary(
                     without_rewards,
-                    expected_case_ids=expected_case_ids,
-                    expected_cases=expected_cases,
+                    expected_case_ids=without_expected_case_ids,
+                    expected_cases=without_expected_cases,
                     n_attempts=n_attempts,
                     job_failure="",
                     recovered_attempts=without_recovered,
                     stop_on_pass=stop_on_pass,
                     pass_threshold=pass_threshold,
+                    expected_attempts_by_case=without_expected_attempts,
                 )
                 tolerance_failures, tolerance_code = _baseline_timeout_failures(
                     job_dir=without_job_dir,
@@ -8308,7 +8316,7 @@ def collect_harbor_results(
                     runtime_failures=without_runtime_failures,
                     trial_failures=without_trial_failures,
                     recovered=without_recovered,
-                    expected_case_ids=expected_case_ids,
+                    expected_case_ids=without_expected_case_ids,
                     case_id_by_task_selector=case_id_by_task_selector,
                     arm_suffix=str(without_identity.get("arm_suffix") or ""),
                     task_entry_id_map=without_identity.get("task_entry_id_map"),

@@ -1433,9 +1433,7 @@ def _enforce_report_payload_budget(
             container[key] = value
         refresh_signal()
         omitted_reasons = (
-            strip_failure_reason_text(payload)
-            if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES
-            else 0
+            strip_failure_reason_text(payload) if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES else 0
         )
     report_budget.omit("failure_reasons", omitted_reasons)
     refresh_signal()

@@ -3314,6 +3314,53 @@
             }
           ]
         },
+        "history": {
+          "params": [
+            {
+              "name": "skill_path",
+              "opts": [
+                "skill_path"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "path"
+            },
+            {
+              "name": "results_dir",
+              "opts": [
+                "--results-dir"
+              ],
+              "param_type": "option",
+              "type": "directory"
+            },
+            {
+              "name": "agent",
+              "opts": [
+                "--agent"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "as_json",
+              "opts": [
+                "--json"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "name": "output",
+              "opts": [
+                "--output"
+              ],
+              "param_type": "option",
+              "type": "file"
+            }
+          ]
+        },
         "import-metrics": {
           "params": [
             {
@@ -3597,6 +3644,121 @@
               ],
               "param_type": "option",
               "type": "boolean"
+            }
+          ]
+        },
+        "validate-grader": {
+          "params": [
+            {
+              "name": "suite_dir",
+              "opts": [
+                "suite_dir"
+              ],
+              "param_type": "argument",
+              "type": "directory"
+            },
+            {
+              "default": "3",
+              "name": "repeats",
+              "opts": [
+                "--repeats"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "choices": [
+                "assessment",
+                "tuning",
+                "all"
+              ],
+              "default": "assessment",
+              "name": "split",
+              "opts": [
+                "--split"
+              ],
+              "param_type": "option"
+            },
+            {
+              "multiple": true,
+              "name": "case_ids",
+              "opts": [
+                "--case"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "default": "grader-validation-output",
+              "name": "output",
+              "opts": [
+                "--output",
+                "-o"
+              ],
+              "param_type": "option",
+              "type": "directory"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "as_json",
+              "opts": [
+                "--json"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "check_suite",
+              "opts": [
+                "--check-suite"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "1",
+              "name": "concurrency",
+              "opts": [
+                "--concurrency"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "default": "300.0",
+              "name": "timeout",
+              "opts": [
+                "--timeout"
+              ],
+              "param_type": "option",
+              "type": "float range"
+            },
+            {
+              "name": "max_false_pass_rate",
+              "opts": [
+                "--max-false-pass-rate"
+              ],
+              "param_type": "option",
+              "type": "float range"
+            },
+            {
+              "name": "max_false_fail_rate",
+              "opts": [
+                "--max-false-fail-rate"
+              ],
+              "param_type": "option",
+              "type": "float range"
+            },
+            {
+              "name": "max_unjudgeable_rate",
+              "opts": [
+                "--max-unjudgeable-rate"
+              ],
+              "param_type": "option",
+              "type": "float range"
             }
           ]
         },

@@ -38,6 +38,7 @@ commands referenced below.
 | [init-harbor-task](#init-harbor-task) | Scaffold a bring-your-own-task Harbor starter | Nothing |
 | [view](#view) | Open the latest HTML live-evaluation report | A previous `tier3 evaluate` run |
 | [compare](#compare) | Compare live-evaluation results across agents | A previous `tier3 evaluate` run |
+| [tier3 history](#tier3-history) | Inspect retained Skill Lift over skill revisions, grouped by compatible configuration | Retained Tier 3 summaries |
 | [tier3 feedback](#tier3-feedback) | Chat about one completed live-evaluation run and possible skill changes | A completed `tier3 evaluate` run, LLM provider key |
 | [dashboard](#dashboard) | Filter quantitative tables and paired usage differences | Saved JSON reports or retained runs; dashboard extra |
 | [harbor-view](#harbor-view) | Browse retained Harbor job artifacts | A run made with `--harbor-keep-jobs` |
@@ -649,6 +650,31 @@ skillevaluator view ./my-skill
 | --- | --- | --- |
 | `--results-dir DIRECTORY` | unset | Results directory to read from (default resolution in [Reports & Results](reports.mdx)). |
 
+## tier3 history
+
+```bash
+skillevaluator tier3 history ./my-skill
+skillevaluator tier3 history ./my-skill --results-dir ./saved-runs --agent opencode --json
+skillevaluator tier3 history ./my-skill --output ./lift-history.md
+```
+
+List every retained run chronologically, with one row per run and agent,
+including failed, incomplete, and corrupt runs. An unavailable lift is JSON
+`null` with `lift_status` and reasons, never an inferred zero. Segments and
+visible break markers separate model, dataset, attempt, scoring-policy, and
+other configuration changes; the change column never crosses a segment boundary.
+Skill revisions alone do not break baseline compatibility.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--results-dir DIRECTORY` | normal results-root resolution | External root containing the per-skill directory; honors the configured location and legacy fallback like `compare`. |
+| `--agent TEXT` | all | Include only this agent's rows. |
+| `--json` | off | Print the complete history as JSON instead of a table. |
+| `--output FILE` | none | Write exactly this `.json`, `.csv`, or `.md` export. The file must be outside all candidate results roots; no directories are created. Stdout still follows `--json`. |
+
+The command reads summaries only: no agents, provider credentials, or raw
+trajectories are needed. See [Lift history and retention](reports.mdx#lift-history-and-retention).
+
 ## compare
 
 Compare live-evaluation results across agents from previous runs.
@@ -660,6 +686,36 @@ skillevaluator compare ./my-skill
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `--results-dir DIRECTORY` | unset | Results directory to read from. |
+
+## tier3 validate-grader
+
+Qualify the shipped Tier 3 verifier against independently labelled evidence.
+See [Grader Validation](grader-validation.mdx) for the versioned suite format,
+denominators, provenance and interpretation.
+
+```bash
+skillevaluator tier3 validate-grader --check-suite
+skillevaluator tier3 validate-grader ./suite --repeats 3 -o qualification
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `SUITE_DIR` | bundled reference suite | Directory containing suite.json |
+| `--repeats N` | 3 | Positive number of grades per case |
+| `--split assessment\|tuning\|all` | assessment | Split selection; all keeps statistics separate |
+| `--case ID` | all selected cases | Repeatable case filter |
+| `-o, --output DIR` | grader-validation-output | Empty output directory for JSON and attempt artifacts |
+| `--json` | off | Print full report as JSON |
+| `--check-suite` | off | Validate suite and executable labels only, no provider needed |
+| `--concurrency N` | 1 | Maximum concurrent verifier subprocesses |
+| `--timeout SECONDS` | 300 | Positive per-attempt timeout |
+| `--max-false-pass-rate RATE` | unset | Gate any reported metric's false-pass rate |
+| `--max-false-fail-rate RATE` | unset | Gate any reported metric's false-fail rate |
+| `--max-unjudgeable-rate RATE` | unset | Gate any reported metric's error/insufficient rate |
+
+Rates must be between 0 and 1. Exit 0 reports results (including disagreement),
+exit 1 means an explicitly supplied gate was exceeded, and exit 2 means invalid
+usage, suite or provider configuration. Gates use assessment only with split all.
 
 ## tier3 feedback
 

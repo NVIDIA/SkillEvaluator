@@ -985,6 +985,22 @@ def _sanitize_tier3_dataset_case(value: dict[str, Any]) -> dict[str, Any]:
     return case
 
 
+def _sanitize_tier3_case_diagnostics(value: object) -> list[dict[str, Any]]:
+    cases = _dict_list(value)
+    for case in cases:
+        case["entry_id"] = _tier3_display_identifier(case.get("entry_id"))
+        case["requirements"] = _dict_list(case.get("requirements"))
+        case["attempts"] = _dict_list(case.get("attempts"))
+        for attempt in case["attempts"]:
+            attempt["errors"] = _string_list(attempt.get("errors"))
+            attempt["judgments"] = _dict_list(attempt.get("judgments"))
+            for judgment in attempt["judgments"]:
+                judgment["evidence"] = _string_list(judgment.get("evidence"))
+                judgment["unmet_checks"] = _string_list(judgment.get("unmet_checks"))
+                judgment["inapplicable_checks"] = _string_list(judgment.get("inapplicable_checks"))
+    return cases
+
+
 def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
     """Normalize template-facing types after merging canonical and fallback data."""
     payload = _json_safe_tier3_payload(value)
@@ -1099,6 +1115,7 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
         for step in _dict_list(payload.get("next_steps"))
     ]
     payload["dataset"] = [_sanitize_tier3_dataset_case(item) for item in _dict_list(payload.get("dataset"))]
+    payload["case_diagnostics"] = _sanitize_tier3_case_diagnostics(payload.get("case_diagnostics"))
     payload["trials"] = [_sanitize_tier3_trial(item) for item in _dict_list(payload.get("trials"))]
     timing: list[dict[str, Any]] = []
     for item in _dict_list(payload.get("timing")):
@@ -1281,9 +1298,20 @@ def _bounded_tier3_preview(payload: dict[str, Any] | None) -> tuple[dict[str, An
     # reasons are dropped without being restored or counted as left out.
     strip_failure_reason_text(slim)
     slim_size = len(_compact_json(slim).encode("utf-8"))
+    omitted_diagnostics = 0
+    if slim_size > _TIER3_HTML_PREVIEW_TRIGGER_BYTES:
+        omitted_diagnostics = len(slim.pop("case_diagnostics", []))
+        slim_size = len(_compact_json(slim).encode("utf-8"))
     if slim_size <= _TIER3_HTML_PREVIEW_TRIGGER_BYTES:
         omitted_reasons = _restore_failure_reason_text(deferred, _TIER3_HTML_PREVIEW_TRIGGER_BYTES - slim_size)
-        return slim, {"failure_reasons": omitted_reasons} if omitted_reasons else {}
+        return slim, {
+            key: count
+            for key, count in {
+                "failure_reasons": omitted_reasons,
+                "case_diagnostics": omitted_diagnostics,
+            }.items()
+            if count
+        }
 
     budget = _Tier3PreviewBudget()
     preview = _bounded_tier3_preview_value(slim, budget)
@@ -1294,6 +1322,7 @@ def _bounded_tier3_preview(payload: dict[str, Any] | None) -> tuple[dict[str, An
             "items": budget.omitted_items,
             "trial_rows": _capped_tier3_trial_rows(slim),
             "failure_reasons": len(deferred),
+            "case_diagnostics": omitted_diagnostics,
         }.items()
         if value > 0
     }

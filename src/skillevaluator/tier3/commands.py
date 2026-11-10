@@ -1304,7 +1304,7 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
 
     table.add_row(*[""] * (1 + sum(2 if agent in agent_without else 1 for agent in agents)))
     overall_row: list[str | Text] = [Text("Overall", style="bold")]
-    shared_basis_agents: list[str] = []
+    lift_json_agents: list[str] = []
     for agent in agents:
         meta = agent_meta[agent]
         with_avg = _overall_score_for_display(
@@ -1325,11 +1325,13 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
                 persisted_overall=meta.get("overall_without_skill"),
                 score_policy=meta.get("score_policy_without_skill"),
             )
-            shared_lift = _shared_dimension_overall_lift(agent_with[agent], agent_without[agent], overall_metrics, meta)
-            if shared_lift is not None:
-                shared_basis_agents.append(agent)
+            uses_lift_json, shared_lift = _shared_dimension_overall_lift(
+                agent_with[agent], agent_without[agent], overall_metrics, meta
+            )
+            if uses_lift_json and shared_lift is not None:
+                lift_json_agents.append(agent)
                 overall_row.append(_lift_text(shared_lift))
-            elif with_avg is None or without_avg is None:
+            elif uses_lift_json or with_avg is None or without_avg is None:
                 overall_row.append(Text("-", style="dim"))
             else:
                 delta = with_avg - without_avg
@@ -1353,9 +1355,9 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
         # Pad before escaping so escape backslashes do not count toward the column width.
         run_line = f"{agent:<16s} {meta['timestamp']} (Harbor, {meta.get('num_trials', '?')} trials)"
         console.print(f"  [dim]{escape_markup(run_line)}[/dim]")
-    if shared_basis_agents:
+    if lift_json_agents:
         console.print(
-            f"  [dim]Overall lift for {escape_markup(', '.join(shared_basis_agents))} compares only the "
+            f"  [dim]Overall lift for {escape_markup(', '.join(lift_json_agents))} compares only the "
             "dimensions both arms scored, as in lift.json and the reports.[/dim]"
         )
     console.print()
@@ -1367,12 +1369,8 @@ def _shared_dimension_overall_lift(
     without_scores: dict[str, float],
     metrics: tuple[str, ...],
     meta: dict[str, Any],
-) -> float | None:
-    """Return the standard overall lift when a metric is N/A in either arm.
-
-    A metric N/A in one arm drops out of both arms for lift, so the lift differs
-    from the difference between the two arm overall scores.
-    """
+) -> tuple[bool, float | None]:
+    """Return the canonical standard-policy Overall lift when shared metrics differ."""
     shared_not_applicable = sorted(
         {*meta.get("not_applicable_with_skill", ()), *meta.get("not_applicable_without_skill", ())}
     )
@@ -1382,18 +1380,17 @@ def _shared_dimension_overall_lift(
         or meta.get("score_policy_with_skill") != DEFAULT_SCORE_POLICY
         or meta.get("score_policy_without_skill") != DEFAULT_SCORE_POLICY
     ):
-        return None
-    with_score, without_score = (
-        overall_score_from_metrics(
-            {metric: score for metric, score in scores.items() if metric not in shared_not_applicable},
-            metrics,
-            not_applicable=shared_not_applicable,
-        )
-        for scores in (with_scores, without_scores)
-    )
-    if with_score is None or without_score is None:
-        return None
-    return round(with_score - without_score, 4)
+        return False, None
+    agent_path = meta.get("path")
+    if not isinstance(agent_path, str) or not agent_path:
+        return True, None
+    try:
+        lift_data = json.loads((Path(agent_path) / "lift.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True, None
+    if not isinstance(lift_data, dict) or not isinstance(lift_data.get("overall"), dict):
+        return True, None
+    return True, _finite_numeric(lift_data["overall"].get("delta"))
 
 
 def _lift_text(delta: float) -> Text:

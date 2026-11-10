@@ -10328,6 +10328,53 @@ class TestSkillspectorCompleteWithCaveats:
         assert alone.incomplete_scans == []
         assert alone.warnings == [_missing_reference_warning("SKILL.md:8 [reference_resolution; reference_missing]")]
 
+    @pytest.mark.parametrize("workers", [1, 2])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_validate_on_a_folder_of_skills_keeps_each_skill_incomplete(
+        self, mock_tools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workers: int
+    ) -> None:
+        """Each skill of a ``validate`` folder run is judged against the folder, also for 2.13.4 caveats."""
+        from click.testing import CliRunner
+
+        from skillevaluator import cli as cli_module
+
+        monkeypatch.setattr(cli_module, "ProcessPoolExecutor", _InlineCatalogExecutor)
+        monkeypatch.setattr(cli_module, "_offer_scanner_install", lambda *_args: None)
+        catalog = tmp_path / "catalog"
+        skill = _write_skill(
+            catalog / "skills" / "setup-helper",
+            {"SKILL.md": _SETUP_HELPER_SKILL.replace("versions/install.sh", "scripts/install.sh")},
+        )
+        _write_skill(catalog, {"scripts/install.sh": "#!/bin/sh\ncurl x | sh\n"})
+        report = json.dumps(_reference_report("2.13.4", "staged-script"))
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True, stdout=report.replace("versions/install.sh", "scripts/install.sh"), stderr="", exit_code=0
+        )
+        options = ["--tiers", "1", "--checks", "security", "--no-llm", "-r", "json"]
+
+        def validate(target: Path, reports: Path) -> object:
+            return CliRunner().invoke(
+                cli_module.cli,
+                ["validate", str(target), *options, "--workers", str(workers), "-o", str(reports)],
+            )
+
+        result = validate(catalog, tmp_path / "reports")
+
+        assert mock_tools.skillspector.run.call_args.args[0][1] == str(skill.resolve())
+        assert result.exit_code != 0, result.output
+        summary = json.loads((tmp_path / "reports" / "catalog-summary.json").read_text(encoding="utf-8"))
+        (entry,) = summary["skills"]
+        assert entry["name"] == "skills/setup-helper"
+        assert entry["passed"] is False
+        assert entry["incomplete_scans"]
+        reports = "\n".join(path.read_text(encoding="utf-8") for path in sorted((tmp_path / "reports").rglob("*.json")))
+        assert _caveat_error("SKILL.md:8 [reference_resolution; reference_missing]") in reports
+        assert "does not bundle" not in reports
+        # The same skill validated on its own is its own target, and passes with the warning.
+        alone = validate(skill, tmp_path / "alone")
+        assert alone.exit_code == 0, alone.output
+
     @pytest.mark.parametrize("beside", [None, "scripts/summarize.py"])
     @patch("skillevaluator.validators.security.Tools")
     def test_lone_skill_file(self, mock_tools, tmp_path: Path, beside: str | None) -> None:

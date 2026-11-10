@@ -2560,7 +2560,7 @@
                 <ul class="t3-reasoning-list">
                     <li><strong>Verdict</strong>: the live-evaluation result from the five dimensions. It passes when one agent scores at least {{ "%.2f" | format(tier3_dimension_pass_threshold) }} on every dimension with the skill.</li>
                     <li><strong>Overall Score</strong>: the equal-weight mean of the five dimension scores with the skill, from 0.00 to 1.00.</li>
-                    <li><strong>Skill Lift</strong>: the overall score with the skill minus the baseline, the same eval cases run without it. It shows whether the skill helped and does not change the verdict; N/A means no comparable baseline, not zero.</li>
+                    <li><strong>Skill Lift</strong>: compares Overall on the metrics and cases both arms scored, so it can differ from subtracting the displayed Overall scores. It shows whether the skill helped and does not change the verdict; N/A means no comparable baseline, not zero.</li>
                     <li><strong>pass@k</strong> (Trials): the share of eval cases with at least one passing attempt out of k. It measures how repeatable success is.</li>
                     <li><strong>Quality Score</strong> (Tier 1, out of 100): a static review of the skill's files. It is not an input to any live-evaluation score.</li>
                     <li><strong>Publication eligibility</strong>: decided separately in BENCHMARK.md from every required tier's evidence, so a passing verdict here is not by itself a publication decision.</li>
@@ -2632,7 +2632,7 @@
             </div>
 
             {% set t3_na_dimensions = tier3.not_applicable_dimensions or [] %}
-            {% if tier3.dimensions or t3_na_dimensions %}
+            {% if tier3_display_dimensions or t3_na_dimensions %}
             {% set t3_baseline_only = tier3.get('mode') == 'baseline_only' %}
             {% set t3_signal_evidence = tier3.signal_evidence or {} %}
             <details class="t3-details" id="tier3-dimension-lift" open>
@@ -2641,7 +2641,7 @@
                 <p class="t3-section-hint">
                     Each dimension answers one question about the skill, scored from 0.00 to 1.00.
                     Score is the agent's result with the skill; Baseline is the same eval cases run without it;
-                    Skill Lift is Score minus Baseline. A dimension passes at {{ "%.2f" | format(tier3_dimension_pass_threshold) }} or above
+                    Skill Lift compares Overall on the metrics and cases both arms scored, so it can differ from subtracting the displayed Overall scores. A dimension passes at {{ "%.2f" | format(tier3_dimension_pass_threshold) }} or above
                     and fails below {{ "%.2f" | format(tier3_dimension_neutral_threshold) }}.
                     Signals are the evaluator metrics behind each dimension, and Evidence says where they come from.
                     N/A means no measurement, never a score of zero; the note under it says why.
@@ -2654,7 +2654,7 @@
                         <th>Verdict</th><th>Signals</th><th>Reasoning</th>
                     </tr></thead>
                     <tbody>
-                    {% for dim in tier3.dimensions %}
+                    {% for dim in tier3_display_dimensions %}
                     {% set dim_score = dim.score if dim.score is not none else dim.with_skill %}
                     {% set dim_color = 'var(--text-secondary)' if dim_score is none else ('var(--success-color)' if dim_score >= 0.7 else ('var(--warning-color)' if dim_score >= 0.4 else 'var(--danger-color)')) %}
                     {% set dim_evidence = [] %}
@@ -2711,7 +2711,7 @@
                         <td>N/A</td><td>N/A</td><td>N/A</td>
                         <td><span class="t3-pill warning">Not applicable</span></td>
                         <td></td>
-                        <td class="t3-reasoning">{{ dim.reason or "Not applicable: its signals had nothing to judge in any eval case." }} It is left out of the verdict, not scored as zero.</td>
+                        <td class="t3-reasoning">{{ dim.reason or "Not applicable: its signals had nothing to judge in any eval case." }} It has no score, so the agent's verdict stays NEUTRAL and cannot PASS.</td>
                     </tr>
                     {% endfor %}
                     </tbody>
@@ -2830,8 +2830,8 @@
                         </div>
                     {% endfor %}
                     </div>
-                    {% set dimension_reference = ('tier3-multi-agent-dimension-table' if t3_agents | length > 1 else 'tier3-dimension-table') if tier3.dimensions else 'tier3-json-downloads' %}
-                    {% set dimension_reference_label = 'Read the dimension scores table' if tier3.dimensions else 'Read JSON Downloads (dimension scores unavailable)' %}
+                    {% set dimension_reference = ('tier3-multi-agent-dimension-table' if t3_agents | length > 1 else 'tier3-dimension-table') if tier3_display_dimensions else 'tier3-json-downloads' %}
+                    {% set dimension_reference_label = 'Read the dimension scores table' if tier3_display_dimensions else 'Read JSON Downloads (dimension scores unavailable)' %}
                     <div class="chart-card">{{ tier3_chart('tier3-radar', 'Dimension Comparison (Radar)', 'Dimension scores for each agent, on a scale from 0 to 1; missing measurements are gaps.', dimension_reference, dimension_reference_label, 260) }}</div>
                     <div class="chart-card">{{ tier3_chart('tier3-metric-bar', 'Dimension Scores by Agent', 'Dimension scores grouped by dimension and agent, on a scale from 0 to 1; missing measurements are gaps.', dimension_reference, dimension_reference_label, 260) }}</div>
                 </div>

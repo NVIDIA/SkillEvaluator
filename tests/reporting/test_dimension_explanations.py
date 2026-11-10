@@ -14,6 +14,7 @@ from scripts.ci import check_public_benchmarks as benchmark_gate
 from skillevaluator.constants import DIMENSION_HINTS, SIGNAL_EVIDENCE_SOURCES
 from skillevaluator.evaluation.tier3_report import _validation_result_from_payload, build_agent_eval_payload
 from skillevaluator.reporting import BenchmarkReporter, HTMLReporter
+from skillevaluator.reporting.benchmark import _baseline_coverage, _dimension_cell
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 
 _SUCCEEDED = {"execution_status": "succeeded", "expected_attempts": 1, "scored_attempts": 1}
@@ -141,7 +142,10 @@ def test_missing_and_not_applicable_dimensions_have_reasons(tmp_path: Path) -> N
     table = _dimension_table(html)
     assert "Discoverability" in table
     assert "N/A N/A N/A Not applicable" in table
-    assert f"{reason} It is left out of the verdict, not scored as zero." in table
+    assert "Skill Efficiency" in table
+    assert "N/A not scored with the skill N/A baseline not scored N/A with-skill unavailable No verdict" in table
+    assert "A signal this dimension needs produced no score." in table
+    assert f"{reason} It has no score, so the agent's verdict stays NEUTRAL and cannot PASS." in table
 
 
 def test_html_dimension_table_names_evidence_and_baseline_status() -> None:
@@ -159,6 +163,10 @@ def test_html_number_key_separates_verdict_scores_lift_and_quality() -> None:
     key = html.split('id="tier3-number-key"', 1)[1].split("</details>", 1)[0]
     for term in ("Verdict", "Overall Score", "Skill Lift", "pass@k", "Quality Score", "Publication eligibility"):
         assert f"<strong>{term}</strong>" in key
+    assert (
+        "Skill Lift</strong>: compares Overall on the metrics and cases both arms scored, so it can differ "
+        "from subtracting the displayed Overall scores."
+    ) in key
     assert "not an input to any live-evaluation score" in key
 
 
@@ -180,3 +188,38 @@ def test_baseline_only_cells_show_the_baseline_without_a_skill_score(tmp_path: P
     )
     assert _methodology_row(markdown, "Security")[4] == "Baseline only; no with-skill arm ran"
     _assert_gate_accepts(markdown, tmp_path)
+
+
+def test_html_does_not_add_unscored_rows_for_custom_only_metrics() -> None:
+    payload = _payload({"agent": _agent()})
+    payload["agents"]["agent"]["metrics_with_skill"] = ["custom_metric"]
+    payload["agents"]["agent"]["dimensions"] = []
+    payload["dimensions"] = []
+    payload["not_applicable_dimensions"] = []
+
+    _markdown, html = _render(payload)
+
+    assert 'id="tier3-dimension-table"' not in html
+
+
+def test_benchmark_missing_dimension_requires_a_successful_active_signal() -> None:
+    active = {
+        "execution_status": "succeeded",
+        "dimensions": [],
+        "metrics_with_skill": ["accuracy"],
+    }
+    assert _dimension_cell(active, "correctness") == "Not scored — a signal this dimension needs produced no score"
+    assert _baseline_coverage({"agent": active}, "correctness", baseline_only=False) == (
+        "No baseline score; uplift unavailable"
+    )
+
+
+def test_benchmark_does_not_blame_missing_signals_for_custom_failed_or_legacy_agents() -> None:
+    agents = [
+        {"execution_status": "succeeded", "dimensions": [], "metrics_with_skill": ["custom_metric"]},
+        {"execution_status": "failed", "dimensions": [], "metrics_with_skill": ["accuracy"]},
+        {"execution_status": "succeeded", "dimensions": []},
+    ]
+    for agent in agents:
+        assert _dimension_cell(agent, "correctness") == "Not available"
+        assert _baseline_coverage({"agent": agent}, "correctness", baseline_only=False) == "Not available"

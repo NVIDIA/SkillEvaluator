@@ -1247,22 +1247,45 @@ def _single_score_label(score: float) -> str:
     return _format_percentage(_percentage_point_units(score, decimal_places), decimal_places)
 
 
+def _agent_has_dimension_signals(agent: dict[str, Any], dim_id: str, *, baseline_only: bool = False) -> bool:
+    metrics = agent.get("metrics_without_skill" if baseline_only else "metrics_with_skill")
+    if not isinstance(metrics, list):
+        return False
+    config = DIMENSION_MAPPING.get(dim_id, {})
+    signals = {*config.get("evaluators", []), *config.get("fallback_evaluators", [])}
+    return any(isinstance(metric, str) and metric in signals for metric in metrics)
+
+
 def _baseline_coverage(agents: dict[str, dict[str, Any]], dim_id: str, *, baseline_only: bool) -> str:
     """Say whether this run has a no-skill baseline score for one dimension."""
     if not agents:
         return "Compared when the baseline arm runs"
     with_baseline = 0
+    eligible = 0
     for agent in agents.values():
+        if agent.get("execution_status") == "failed":
+            continue
         baseline = _number((_agent_dimension(agent, dim_id) or {}).get("baseline"))
-        if baseline is not None and 0 <= baseline <= 1:
+        has_baseline = baseline is not None and 0 <= baseline <= 1
+        has_signals = agent.get("execution_status") == "succeeded" and _agent_has_dimension_signals(
+            agent, dim_id, baseline_only=baseline_only
+        )
+        if not has_baseline and not has_signals:
+            continue
+        eligible += 1
+        if has_baseline:
             with_baseline += 1
     if baseline_only:
+        if not eligible:
+            return "Not available"
         return "Baseline only; no with-skill arm ran" if with_baseline else "Not scored in this run"
-    if with_baseline == len(agents):
+    if not eligible:
+        return "Not available"
+    if with_baseline == eligible:
         return "Yes, a no-skill baseline was scored"
     if with_baseline == 0:
         return "No baseline score; uplift unavailable"
-    return f"Baseline for {with_baseline} of {len(agents)} agents"
+    return f"Baseline for {with_baseline} of {eligible} agents"
 
 
 def _dimension_cell(
@@ -1281,7 +1304,7 @@ def _dimension_cell(
         isinstance(entry, dict) and entry.get("id") == dim_id for entry in not_applicable
     ):
         return "Not applicable — no eval case gave its signals anything to judge"
-    if isinstance(agent.get("dimensions"), list):
+    if agent.get("execution_status") == "succeeded" and _agent_has_dimension_signals(agent, dim_id):
         return "Not scored — a signal this dimension needs produced no score"
     return "Not available"
 

@@ -6145,6 +6145,71 @@ assert cap is not None and get_max_output_tokens(model) <= cap, (cap, get_max_ou
         assert finding.metadata["llm_provider"] == provider
         assert finding.metadata["llm_model_used"] == expected
 
+    def test_llm_verify_names_the_fallback_model_for_verdicts_kept_from_a_truncated_reply(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fallback model's reply cut off at the token limit still labels the verdicts kept from it."""
+        pytest.importorskip("anthropic")
+        httpx = pytest.importorskip("httpx")
+        from skillevaluator.inference.finding_verifier import FindingVerifier
+
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "claude-opus-5-5")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        for name in ("SKILL_EVAL_LLM_BASE_URL", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL"):
+            monkeypatch.delenv(name, raising=False)
+        (tmp_path / "SKILL.md").write_text("# Example\n\nExample text.\n", encoding="utf-8")
+        result = ValidationResult()
+        for index in range(2):
+            result.add_structured_finding(
+                Finding(
+                    category="PII",
+                    severity=Severity.HIGH,
+                    check_name=f"finding-{index}",
+                    message=f"Finding {index}",
+                    file_path="SKILL.md",
+                ),
+                is_error=True,
+            )
+        complete = json.dumps(
+            {"index": 0, "verdict": "false_positive", "confidence": "high", "rationale": "Documentation example."}
+        )
+        reply = complete + '\n{"index": 1, "verdict": "true_pos'
+
+        def handler(request):
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-opus-4-8",
+                    "content": [
+                        {"type": "fallback", "from": {"model": "claude-opus-5-5"}, "to": {"model": "claude-opus-4-8"}},
+                        {"type": "text", "text": reply},
+                    ],
+                    "stop_reason": "max_tokens",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            )
+
+        with (
+            httpx.Client(transport=httpx.MockTransport(handler)) as http_client,
+            patch("skillevaluator.inference.FindingVerifier", lambda: FindingVerifier(http_client=http_client)),
+        ):
+            SecurityValidator(verify_llm=True)._verify_findings_with_llm(result, tmp_path)
+
+        by_check = {finding.check_name: finding for finding in result.findings}
+        downgraded = by_check["finding-0"]
+        assert (downgraded.severity, downgraded.metadata["downgraded"]) == (Severity.INFO, True)
+        assert downgraded.metadata["llm_provider"] == "anthropic"
+        assert downgraded.metadata["llm_model_used"] == "claude-opus-4-8"
+        # The cut-off verdict is not kept, so that finding stays unverified and unlabeled.
+        assert by_check["finding-1"].severity == Severity.HIGH
+        assert not any(key.startswith("llm_") for key in by_check["finding-1"].metadata)
+        assert result.metadata["incomplete_scans"] == ["llm-verification"]
+
     def test_importing_the_security_validator_leaves_the_llm_client_unloaded(self) -> None:
         """--llm-verify loads the LLM client only when it runs."""
         script = (

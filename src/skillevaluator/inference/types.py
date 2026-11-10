@@ -27,12 +27,14 @@ class LLMClientRefusedError(LLMClientError):
 class LLMClientTruncatedError(LLMClientError):
     """Raised when a response stops at the output-token limit.
 
-    ``content`` keeps the partial text for callers that can salvage it.
+    ``content`` keeps the partial text for callers that can salvage it, and
+    ``model_used`` names the model that wrote it when the client knows it.
     """
 
-    def __init__(self, message: str, content: str = "") -> None:
+    def __init__(self, message: str, content: str = "", model_used: str | None = None) -> None:
         super().__init__(message)
         self.content = content
+        self.model_used = model_used
 
 
 LLMConfigError = LLMClientError

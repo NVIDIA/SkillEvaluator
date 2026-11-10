@@ -66,7 +66,8 @@ All notable changes to SkillEvaluator are documented in this file.
   `models_used`, every model that answered a cluster. `llm_analysis.model`
   stays the configured model, and an `llm_refused` finding still names the
   configured model as `llm_model`. Each finding that gets an `--llm-verify`
-  verdict records `llm_provider` and `llm_model_used` as well. A model name
+  verdict records `llm_provider` and `llm_model_used` as well, including a
+  verdict kept from a reply cut off at the output-token limit. A model name
   that is not a plain identifier, such as a URL or a key, reads `unresolved`.
 
 ### Changed

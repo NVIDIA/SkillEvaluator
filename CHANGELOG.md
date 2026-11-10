@@ -6,6 +6,15 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- A reproducible public terminal starter runs the released CLI against the
+  bundled text-analyzer skill, checks real script/report output and a seeded
+  quality regression, and retains an editable task, fixture and run receipt.
+  The walkthrough connects setup, interpretation, live-evaluation prerequisites,
+  troubleshooting and adaptation; contributor guidance clarifies environment
+  setup, example verification and the existing DCO policy.
+
+- Tier 3 datasets can declare deterministic behavior checks for script invocation and success, workspace files, and final-response text.
+
 - Tier 3 `evaluate --compare-to RUN` and read-only `compare-versions` compare
   compatible retained skill versions, report paired per-agent deltas and
   regressions, and keep version comparisons separate from no-skill Skill Lift.
@@ -30,7 +39,6 @@ All notable changes to SkillEvaluator are documented in this file.
   negative-case, Wilson interval, and paired-case coverage requirements. Show
   the dataset-size status in evaluation, validation, HTML, and BENCHMARK output;
   validation coverage notes remain informational.
-
 - Experimental `hermes` Tier 3 agent for Docker and native NVIDIA Build routing,
   pinned to Hermes v2026.9.24. Includes isolated skill staging, ATIF trajectories,
   activation evidence, token accounting and retained execution diagnostics.
@@ -136,6 +144,25 @@ All notable changes to SkillEvaluator are documented in this file.
   all-tier setup and report contracts in an Advanced CI reference.
 
 ### Changed
+
+- Name Skill Lift as the headline comparison and label pass@k differences as
+  supporting reliability across reports and terminal output.
+
+- A scored Tier 3 attempt now fails when `goal_accuracy` or security is below
+  1.0, even if its Overall score meets the pass threshold. N/A or unscored
+  metrics preserve the existing verdict behavior; missed behavior-check steps
+  are warnings. A with-skill required-check failure fails the quality verdict,
+  while no-skill failures do not. Reports show required-check, goals-met,
+  and security-clean counts for both arms, plus failed-case reasons.
+
+- HTML and `BENCHMARK.md` reports explain each Tier 3 dimension in plain
+  language with its evidence source and whether the run has a no-skill baseline
+  for it. Dimensions that could not be scored or do not apply stay listed with
+  the reason instead of disappearing or reading `Not available`, and baseline-only
+  cards show the baseline score. A short key in both reports separates the
+  verdict, dimension and overall scores, BENCHMARK Uplift, published Skill Lift,
+  pass@k, the Tier 1
+  Quality Score, and publication eligibility.
 
 - Write Tier 3 accuracy deductions as plain-language reasons, identify findings
   without trajectory evidence, and include expected/observed text only when

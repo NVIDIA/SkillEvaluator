@@ -926,6 +926,14 @@ def build_agent_eval_payload(
     advice_agents = {name for name, agent in agent_payloads.items() if not _never_activated(agent)}
     evidence_links = [link for link in harbor_summary.get("evidence_links") or [] if link.get("agent") in advice_agents]
     best_evidence_links = [link for link in evidence_links if link.get("agent") == best_agent]
+    verdict_source: dict[str, Any] | None = None
+    if best_agent and _agent_quality_verdict(agent_payloads.get(best_agent, {})) == verdict:
+        verdict_source = agent_payloads[best_agent]
+    else:
+        verdict_source = next(
+            (agent for agent in agent_payloads.values() if _agent_quality_verdict(agent) == verdict),
+            None,
+        )
 
     from skillevaluator.tier3.dataset_provenance import sanitize_generation_record
 
@@ -933,6 +941,7 @@ def build_agent_eval_payload(
     summary = {
         "schema_version": _SCHEMA_VERSION,
         "verdict": verdict,
+        "verdict_reason": None if verdict == VERDICT_PASS else _agent_quality_verdict_reason(verdict_source or {}),
         "skill_activation": best.get("skill_activation", {}),
         "skill_name": skill_name,
         "mode": mode,
@@ -940,6 +949,9 @@ def build_agent_eval_payload(
         "agents_run": list(agent_payloads.keys()),
         "overall_score": round(overall_score, 4) if overall_score is not None else None,
         "overall_lift": round(overall_lift, 4) if overall_lift is not None else None,
+        "correct_answers": verdict_source.get("correct_answers") if verdict_source else None,
+        "required_checks": verdict_source.get("required_checks") if verdict_source else None,
+        "security_clean": verdict_source.get("security_clean") if verdict_source else None,
         "environment": env_mode,
         "runtime_seconds": _finite_float(runtime_seconds) or 0.0,
         "evaluated_at": evaluated_at,
@@ -1025,6 +1037,7 @@ def build_agent_eval_payload(
         "skill_name": skill_name,
         "mode": mode,
         "verdict": verdict,
+        "verdict_reason": summary["verdict_reason"],
         "skill_activation": summary["skill_activation"],
         "best_agent": best_agent,
         "agents_run": list(agent_payloads.keys()),
@@ -1061,6 +1074,9 @@ def build_agent_eval_payload(
         "cases": best.get("cases", []),
         "trials": canonical_trials,
         "pass_at_k": best.get("pass_at_k", {}),
+        "correct_answers": best.get("correct_answers"),
+        "required_checks": best.get("required_checks"),
+        "security_clean": best.get("security_clean"),
         "insights": _insights_from_dimensions(best_dimensions),
         "conclusions": list(deterministic_conclusions),
         "recommendations": recommendations,
@@ -1455,6 +1471,55 @@ def _enforce_report_payload_budget(
         refresh_signal()
 
     if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        compacted_attempt_verdicts = 0
+        trial_lists = []
+        trial_lists.extend(
+            agent.get(key)
+            for agent in (payload.get("agents") or {}).values()
+            if isinstance(agent, dict)
+            for key in ("trials", "trials_baseline")
+        )
+        for trials in trial_lists:
+            if not isinstance(trials, list):
+                continue
+            for trial in trials:
+                attempt = trial.get("attempt_verdict") if isinstance(trial, dict) else None
+                if not isinstance(attempt, dict):
+                    continue
+                if "reason" in attempt or "warnings" in attempt:
+                    attempt.pop("reason", None)
+                    attempt.pop("warnings", None)
+                    compacted_attempt_verdicts += 1
+        flattened_trials = payload.get("trials")
+        if isinstance(flattened_trials, list):
+            payload["trials"] = [
+                {key: value for key, value in trial.items() if key != "attempt_verdict"}
+                if isinstance(trial, dict) and "attempt_verdict" in trial
+                else trial
+                for trial in flattened_trials
+            ]
+            compacted_attempt_verdicts += sum(
+                isinstance(trial, dict) and "attempt_verdict" in trial for trial in flattened_trials
+            )
+        report_budget.omit("attempt_verdict_details", compacted_attempt_verdicts)
+        refresh_signal()
+
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        raw_rewards = provenance.get("raw_trial_rewards") if isinstance(provenance, dict) else None
+        if isinstance(raw_rewards, dict):
+            omitted = sum(len(items) for items in raw_rewards.values() if isinstance(items, list))
+            provenance["raw_trial_rewards"] = {name: [] for name in raw_rewards}
+            report_budget.omit("raw_trial_rewards", omitted)
+        refresh_signal()
+
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        dataset = payload.get("dataset")
+        if isinstance(dataset, list) and dataset:
+            payload["dataset"] = []
+            report_budget.omit("dataset_items", len(dataset))
+            refresh_signal()
+
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
         omitted_items = 0
         for key in ("dataset", "trials"):
             items = payload.get(key)
@@ -1472,14 +1537,6 @@ def _enforce_report_payload_budget(
             if _compact_agent_conditions(agent):
                 omitted_items += 1
         report_budget.omit("dataset_and_trial_items", omitted_items)
-        refresh_signal()
-
-    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
-        raw_rewards = provenance.get("raw_trial_rewards") if isinstance(provenance, dict) else None
-        if isinstance(raw_rewards, dict):
-            omitted = sum(len(items) for items in raw_rewards.values() if isinstance(items, list))
-            provenance["raw_trial_rewards"] = {name: [] for name in raw_rewards}
-            report_budget.omit("raw_trial_rewards", omitted)
         refresh_signal()
 
     if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
@@ -1542,6 +1599,10 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
             "verdict",
             "overall_score",
             "overall_lift",
+            "correct_answers",
+            "required_checks",
+            "security_clean",
+            "verdict_reason",
             "environment",
             "runtime_seconds",
             "score_policy",
@@ -1578,6 +1639,10 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
         "environment": payload.get("environment"),
         "overall_score": payload.get("overall_score"),
         "overall_lift": payload.get("overall_lift"),
+        "correct_answers": summary.get("correct_answers"),
+        "required_checks": summary.get("required_checks"),
+        "security_clean": summary.get("security_clean"),
+        "verdict_reason": summary.get("verdict_reason"),
         "composite_lift": payload.get("composite_lift"),
         "evidence_volume": payload.get("evidence_volume"),
         "execution_status": payload.get("execution_status"),
@@ -2141,8 +2206,15 @@ def _build_agent(
         overall_lift = None
     lift_overall = _lift_overall_scores(overall_lift, judge_lift, overall_ws, overall_bl)
 
-    trials = _normalize_trials(info.get("rewards") or [], with_metrics)
-    baseline_trials = _normalize_trials(info.get("rewards_baseline") or [], baseline_metrics)
+    pass_with_skill = info.get("pass_with_skill")
+    pass_threshold = _finite_float(pass_with_skill.get("pass_threshold")) if isinstance(pass_with_skill, dict) else None
+    pass_threshold = pass_threshold if pass_threshold is not None else 0.5
+    trials = _normalize_trials(info.get("rewards") or [], with_metrics, pass_threshold=pass_threshold)
+    baseline_trials = _normalize_trials(
+        info.get("rewards_baseline") or [],
+        baseline_metrics,
+        pass_threshold=pass_threshold,
+    )
     if not never_activated:
         _attach_baseline_pairs(trials, baseline_trials, with_metrics, comparable_overall=comparable_scores)
     from skillevaluator.tier3.harbor.resource_usage import resource_comparison
@@ -2199,6 +2271,9 @@ def _build_agent(
         "trials": trials,
         "trials_baseline": baseline_trials,
         "resources": resources,
+        "correct_answers": _correct_answer_comparison(info),
+        "required_checks": _required_check_comparison(info),
+        "security_clean": _security_clean_comparison(info),
         "pass_at_k": {
             "with_skill": info.get("pass_with_skill") or {},
             "without_skill": info.get("pass_without_skill") or {},
@@ -2951,12 +3026,90 @@ def _cases(info: dict[str, Any]) -> list[dict[str, Any]]:
     return cases
 
 
+def _correct_answer_arm(value: object) -> dict[str, int | None]:
+    summary = value.get("correct_answers") if isinstance(value, dict) else None
+    summary = summary if isinstance(summary, dict) else {}
+
+    def count(name: str) -> int | None:
+        number = summary.get(name)
+        return number if isinstance(number, int) and not isinstance(number, bool) and number >= 0 else None
+
+    return {"correct": count("correct"), "scored": count("scored")}
+
+
+def _correct_answer_comparison(info: dict[str, Any]) -> dict[str, Any]:
+    return _count_comparison(info, "correct_answers", numerator="correct")
+
+
+def _count_arm(value: object, key: str, *, numerator: str) -> dict[str, int | None]:
+    summary = value.get(key) if isinstance(value, dict) else None
+    summary = summary if isinstance(summary, dict) else {}
+
+    def count(name: str) -> int | None:
+        number = summary.get(name)
+        return number if isinstance(number, int) and not isinstance(number, bool) and number >= 0 else None
+
+    return {numerator: count(numerator), "scored": count("scored")}
+
+
+def _count_comparison(info: dict[str, Any], key: str, *, numerator: str) -> dict[str, Any]:
+    with_skill = _count_arm(info.get("pass_with_skill"), key, numerator=numerator)
+    without_skill = _count_arm(info.get("pass_without_skill"), key, numerator=numerator)
+    difference = None
+    if (
+        with_skill[numerator] is not None
+        and with_skill["scored"]
+        and without_skill[numerator] is not None
+        and without_skill["scored"]
+    ):
+        if with_skill["scored"] == without_skill["scored"]:
+            difference = with_skill[numerator] - without_skill[numerator]
+        else:
+            difference = round(
+                100.0
+                * (with_skill[numerator] / with_skill["scored"] - without_skill[numerator] / without_skill["scored"]),
+                1,
+            )
+    return {
+        "with_skill": with_skill,
+        "without_skill": without_skill,
+        "difference": difference,
+        "difference_unit": (
+            "percentage_points"
+            if difference is not None and with_skill["scored"] != without_skill["scored"]
+            else "count"
+        ),
+    }
+
+
+def _required_check_comparison(info: dict[str, Any]) -> dict[str, Any]:
+    comparison = _count_comparison(info, "required_checks", numerator="passed")
+    for arm_name, source_name in (("with_skill", "pass_with_skill"), ("without_skill", "pass_without_skill")):
+        arm = info.get(source_name)
+        checks = arm.get("required_checks") if isinstance(arm, dict) else None
+        checks = checks if isinstance(checks, dict) else {}
+        comparison[arm_name].update(
+            wrong_answer=checks.get("wrong_answer", 0),
+            security=checks.get("security", 0),
+        )
+    return comparison
+
+
+def _security_clean_comparison(info: dict[str, Any]) -> dict[str, Any]:
+    return _count_comparison(info, "security_clean", numerator="clean")
+
+
 # ---------------------------------------------------------------------------
 # Trials (Trials tab)
 # ---------------------------------------------------------------------------
 
 
-def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list[dict[str, Any]]:
+def _normalize_trials(
+    rewards: list[dict[str, Any]],
+    metrics: list[str],
+    *,
+    pass_threshold: float = 0.5,
+) -> list[dict[str, Any]]:
     """Project raw Harbor reward dicts into canonical per-trial entries.
 
     Each reward (loaded by ``_load_agent_data``) carries the per-evaluator
@@ -2968,6 +3121,7 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
     # Import lazily: ``skillevaluator.tier3`` imports report construction through
     # its command module, so importing Harbor metrics at module load time creates
     # a collector-first circular import.
+    from skillevaluator.tier3.attempt_verdict import attempt_verdict
     from skillevaluator.tier3.harbor.metrics import (
         DEFAULT_METRIC_SET,
         LEGACY_METRIC_SET,
@@ -3012,6 +3166,12 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
             "entry_id": reward.get("entry_id"),
             "scores": scores,
             "overall": _complete_mean([overall_score(item) for item in group]) if group_is_consistent else None,
+        }
+        verdict = attempt_verdict(trial["overall"], pass_threshold, reward=reward)
+        trial["attempt_verdict"] = {
+            "passed": verdict.passed,
+            "reason": verdict.reason,
+            "warnings": list(verdict.warnings),
         }
         from skillevaluator.tier3.harbor.metrics import not_applicable_metrics
 
@@ -3840,7 +4000,15 @@ def _build_conclusions(
         for trial in agent.get("trials") or []:
             overall = _finite_float(trial.get("overall"))
             trial_label = f"{agent_name}/{trial.get('entry_id') or trial.get('trial_id')}"
-            if overall is None:
+            attempt = trial.get("attempt_verdict")
+            attempt_passed = attempt.get("passed") if isinstance(attempt, dict) else None
+            attempt_reason = attempt.get("reason") if isinstance(attempt, dict) else None
+            if attempt_passed is False:
+                if overall is None and attempt_reason == "overall score was not available":
+                    unscored_trials.append(trial_label)
+                else:
+                    failing_trials.append(trial_label)
+            elif overall is None:
                 unscored_trials.append(trial_label)
             elif overall < pass_threshold:
                 failing_trials.append(trial_label)
@@ -4002,12 +4170,17 @@ def _verdict_from_lift(lift: float | None) -> str:
 
 
 def _agent_quality_verdict(agent: dict[str, Any]) -> str:
-    """Classify one supported agent by the canonical dimension gate."""
+    """Classify one supported agent by required checks, then dimensions."""
     if agent.get("execution_status") != "succeeded":
         return VERDICT_NEUTRAL
     if _never_activated(agent):
         return VERDICT_INCONCLUSIVE
+    from skillevaluator.tier3.attempt_verdict import required_check_failure_reason
 
+    required_checks = agent.get("required_checks")
+    required_check_arm = required_checks.get("with_skill") if isinstance(required_checks, dict) else None
+    if required_check_failure_reason(required_check_arm):
+        return VERDICT_FAIL
     dimensions = {
         str(dimension.get("id")): dimension
         for dimension in agent.get("dimensions") or []
@@ -4029,8 +4202,18 @@ def _agent_quality_verdict(agent: dict[str, Any]) -> str:
     return VERDICT_PASS
 
 
+def _agent_quality_verdict_reason(agent: dict[str, Any]) -> str | None:
+    if _never_activated(agent):
+        return None
+    from skillevaluator.tier3.attempt_verdict import required_check_failure_reason
+
+    required_checks = agent.get("required_checks")
+    arm = required_checks.get("with_skill") if isinstance(required_checks, dict) else None
+    return required_check_failure_reason(arm)
+
+
 def _overall_verdict_from_agents(agents: dict[str, dict[str, Any]]) -> str:
-    """PASS only when one supported agent passes every required dimension."""
+    """PASS only when one supported agent passes its quality requirements."""
     verdicts = [
         _agent_quality_verdict(agent) for agent in agents.values() if agent.get("execution_status") == "succeeded"
     ]
@@ -4399,9 +4582,21 @@ def _dataset_summary(dataset: list[dict[str, Any]], trials: list[dict[str, Any]]
 
 def _verdict_policy(attempt_policy: dict[str, Any]) -> dict[str, Any]:
     """Expose the distinct task-attempt, dimension, and overall-lift gates."""
+    from skillevaluator.tier3.attempt_verdict import (
+        DEFAULT_GOAL_ACCURACY_PASS_THRESHOLD,
+        DEFAULT_SECURITY_PASS_THRESHOLD,
+        RUN_FAILS_ON_ANY_FAILED_CASE,
+    )
+
     attempt_threshold = attempt_policy.get("pass_threshold")
     return {
         "attempt_pass_threshold": _finite_float(attempt_threshold),
+        "goal_accuracy_pass_threshold": DEFAULT_GOAL_ACCURACY_PASS_THRESHOLD,
+        "security_pass_threshold": DEFAULT_SECURITY_PASS_THRESHOLD,
+        "attempt_pass_rule": "overall_threshold_and_goal_accuracy_and_security_threshold_when_scored",
+        "run_fail_policy": "any_with_skill_required_check_failure"
+        if RUN_FAILS_ON_ANY_FAILED_CASE
+        else "dimension_gate",
         "dimension_pass_threshold": DIMENSION_VERDICT_PASS_THRESHOLD,
         "dimension_neutral_threshold": DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
         "lift_pass_threshold": TIER3_LIFT_PASS_THRESHOLD,

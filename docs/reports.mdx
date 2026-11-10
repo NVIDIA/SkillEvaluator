@@ -275,6 +275,22 @@ difference of the two displayed scores, so a cell such as
 `58.4% → 94.8% (+36.4 points)` always adds up. A score outside 0–1 is shown as
 `Not available`.
 
+A missing score is never shown as zero. When a standard signal was active for a
+successful agent but produced no with-skill score, the dimension reads `Not
+scored with the skill — baseline 50.0%; uplift unavailable` (or `Not scored — a
+signal this dimension needs produced no score` without a baseline). A dimension
+whose signals had nothing to judge in any eval case reads `Not applicable`; it
+has no score, so the agent's verdict stays NEUTRAL and cannot PASS. A
+baseline-only run shows `Baseline 67.0% — baseline-only run; no with-skill score
+or uplift`.
+
+The collapsed **Scoring Methodology** section lists, for every dimension, the
+question it answers in plain words, its weighted signals, where their evidence
+comes from (deterministic trace or trajectory checks, or an LLM judge), and
+whether this run has a no-skill baseline score for it. It ends with a short key
+that separates the overall verdict, dimension scores, the Overall row, uplift,
+pass@k, and the Tier 1 Quality Score.
+
 The card carries one overall verdict — `PASS`, `NEUTRAL`, `FAIL`, or
 `INCOMPLETE`. It fails closed: if a required scanner produced no trustworthy
 evidence, the verdict is `INCOMPLETE` and the card explicitly says not to use
@@ -562,7 +578,7 @@ dimensions, each answering one question:
 | Security | Is it safe to use? | `security`, from deterministic trace checks |
 | Correctness | Is the answer correct? | `accuracy`, from the `judge_accuracy` LLM judge |
 | Discoverability | Was the right skill loaded when needed? | `skill_execution`, from deterministic trajectory checks |
-| Effectiveness | Did the skill help complete the task? | `goal_accuracy` and `behavior_check`, from LLM judges |
+| Effectiveness | Did the skill help complete the task? | `goal_accuracy` from an LLM judge; `behavior_check` from its judge and directly evaluated declared checks (checks-only cases make no judge call) |
 | Efficiency | Did it avoid wasted tool or skill usage? | `skill_efficiency`, from deterministic trajectory checks |
 
 Tool-efficiency checks classify explicit searches rooted at `/` as wasted work,
@@ -636,8 +652,10 @@ rows without changing either run.
 
 ### Skill Lift
 
-Skill Lift compares Overall on the metrics and cases both arms scored, so it can differ from subtracting the displayed Overall scores. It uses the same score units as both arms and ranges from
--1.0 to +1.0. Because live agent runs are noisy, especially at low attempt
+Skill Lift compares Overall on the metrics and cases both arms scored, so it
+can differ from subtracting the displayed Overall scores. It uses the same
+score units as both arms and ranges from -1.0 to +1.0. Because live agent runs
+are noisy, especially at low attempt
 counts, small deltas are kept neutral. The verdict bands:
 
 | Lift | Verdict | Read it as |
@@ -657,6 +675,16 @@ A +0.03 lift therefore remains neutral under these bands. Lift requires both
 arms; if you ran with `--skip-baseline`, there is no lift to report. In
 `custom_only` grading, your own grader defines the score and lift — see
 [Custom Graders & Tasks](/skills/skillevaluator/custom-graders).
+
+The HTML **Dimension Scores and Skill Lift** table shows each dimension's
+plain-language meaning and evidence source beside its score. For a successful
+best agent, a standard dimension whose signals were active but produced no score
+is listed as N/A with a **not scored with the skill** note and **No verdict**.
+A dimension whose signals had nothing to judge reads **Not applicable**; it has
+no score, so the agent's verdict stays NEUTRAL and cannot PASS. A
+collapsed **What each number means** panel under the Tier 3 overview cards
+separates the verdict, Overall Score, Skill Lift, pass@k, the Tier 1 Quality
+Score, and publication eligibility.
 
 When the HTML report has no lift for an agent or dimension, its label says
 why. **no baseline** means that row has no baseline score, for example after
@@ -895,14 +923,34 @@ Retained run artifacts remain the source for details omitted by either limit.
 
 ### pass@k
 
-pass@k is the reliability signal, reported separately from the dimension
-scores. With `--n-attempts k`, each eval case runs k times per arm, and a case
+pass@k and its pass-rate difference are supporting reliability, not the headline
+claim. The report labels the pass@k delta column **Pass-rate difference**.
+With `--n-attempts k`, each eval case runs k times per arm, and a case
 counts as passed when at least one attempt clears the `--pass-threshold`
-score using the same overall formula above. Comparing pass@k across arms (in
+score using the same overall formula above. A scored `goal_accuracy` must also
+meet its default 1.0 pass threshold; a below-threshold attempt fails with a
+goal-not-met reason even when its Overall score passes. Scored security must
+also be 1.0: a below-threshold result fails with a security-issue reason.
+Missing or errored metrics preserve the previous behavior, and unsupported
+native Codex wrapper evidence is treated as an evaluator limitation rather than
+a security failure.
+`behavior_check` is warning-only; a score below 1.0 lists the missed expected
+steps without changing the attempt verdict. The existing Overall threshold is
+applied after the required checks.
+
+Each arm reports **Required checks passed**, **Goals met**, and
+**Security clean** as counts over scored cases or attempts, with the
+with-skill-minus-no-skill difference. Goals-met counts include scored
+attempts whose `goal_accuracy` meets its threshold. A completed agent's quality
+verdict fails when any with-skill case fails a required goal-accuracy or
+security check; failures in the no-skill arm do not change that verdict. A
+positive Skill Lift remains available for reference, but does not override
+that quality failure.
+Comparing pass@k across arms (in
 `pass_at_k_lift.json`) tells you
 whether the skill makes success more *repeatable*, not just whether the average
 score moved. Each arm also records a case-level 95% Wilson score interval for
-its pass rate. When both arms contain the same identified cases,
+its pass rate; the paired value is the pass-rate difference. When both arms contain the same identified cases,
 `pass_at_k_lift.json` records the paired outcome counts — skill-only passes,
 baseline-only passes, both-pass, and neither-pass — plus a two-sided exact
 McNemar diagnostic over the discordant pairs. Partial or unidentified pairing

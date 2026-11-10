@@ -237,9 +237,9 @@ def test_every_output_publishes_one_overall_and_lift(
     assert json_lifts
     assert json_lifts == pytest.approx([lift] * len(json_lifts))
     assert set(_json_values(out["json"], "score_policy")) == {DEFAULT_SCORE_POLICY}
-    assert f"composite lift = {lift:+.2f}" in out["markdown"]
+    assert f"Skill Lift = {lift:+.2f}" in out["markdown"]
     assert f"| Overall | {benchmark_row} |" in out["benchmark"]
-    assert re.search(rf"OVERALL SKILL LIFT\s+{re.escape(f'{lift:+.2f}')}", out["terminal"])
+    assert re.search(r"quality score \(0-1\)", out["terminal"])
     assert re.search(
         rf"quality score \(0-1\)\s+{lift_pair[0]:.2f}\s+{lift_pair[1]:.2f}\s+{re.escape(f'{lift:+.2f}')}",
         out["terminal"],

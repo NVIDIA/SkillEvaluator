@@ -10718,20 +10718,35 @@ class TestSkillspectorCompleteWithCaveats:
         assert as_partial.status == "incomplete"
         assert _high_checks(as_partial) == _high_checks(result)
 
+    @pytest.mark.parametrize(
+        ("case", "labels"),
+        [
+            ("added-parse-limit", "SKILL.md [static; static_parse_limit]"),
+            # The reason code alone is not enough: a missing reference outside
+            # phase reference_resolution also contradicts the status.
+            ("wrong-phase", "SKILL.md:12 [static; reference_missing]"),
+        ],
+    )
     @patch("skillevaluator.validators.security.Tools")
-    def test_caveats_that_contradict_the_status_drop_the_report(self, mock_tools, tmp_path: Path) -> None:
+    def test_caveats_that_contradict_the_status_drop_the_report(
+        self, mock_tools, tmp_path: Path, case: str, labels: str
+    ) -> None:
         """SkillSpector never gives this status to another gap, so such a report is not trusted at all."""
         skill = _write_skill(tmp_path / "override-notes", {**_NOTES_WRITER_FILES, "SKILL.md": _OVERRIDE_NOTES_SKILL})
         payload = _reference_report("2.13.4", "instruction-override-and-missing")
-        row = payload["analysis_completeness"]["ledger_exceptions"][0]
-        payload["analysis_completeness"]["ledger_exceptions"].append(
-            {**row, "phase": "static", "reason_code": "static_parse_limit", "start_line": None, "end_line": None}
-        )
+        rows = payload["analysis_completeness"]["ledger_exceptions"]
+        assert len(rows) == 1
+        if case == "added-parse-limit":
+            rows.append(
+                {**rows[0], "phase": "static", "reason_code": "static_parse_limit", "start_line": None, "end_line": None}
+            )
+        else:
+            rows[0]["phase"] = "static"
 
         result = _validate_skillspector_payload(mock_tools, skill, payload, exit_code=1)
 
         assert result.status == "incomplete"
         assert result.incomplete_scans == ["skillspector"]
-        assert result.errors == [_other_caveat_error("SKILL.md [static; static_parse_limit]")]
+        assert result.errors == [_other_caveat_error(labels)]
         assert not result.findings
         assert not result.warnings

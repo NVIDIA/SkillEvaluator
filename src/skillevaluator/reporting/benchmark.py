@@ -53,6 +53,7 @@ from skillevaluator.reporting.run_status import resolve_run_status
 from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION, pass_at_k_summary
 from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
 from skillevaluator.source_identity import evaluated_source_revision, recorded_evaluated_source
+from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
 
 if TYPE_CHECKING:
@@ -173,18 +174,28 @@ class BenchmarkReporter(ReporterBase):
         policy = _benchmark_policy(results, ae, expected_skill_name=expected_skill_name)
         status = _overall_status(results, ae, policy, expected_skill_name=expected_skill_name)
 
-        lines: list[str] = [
-            f"# Skill Benchmark: {skill_name}",
-            "",
-            (
+        run_verdict = ae.get("verdict") if isinstance(ae, dict) else None
+        run_reason = ae.get("verdict_reason") if isinstance(ae, dict) else None
+        if self.report_scope == "tier3" and isinstance(run_verdict, str):
+            tier3_callout = f"> **Tier 3 completed-agent result: {run_verdict.upper()}**" + (
+                f" — {_publication_safe_inline(run_reason, private_labels)}" if run_reason else ""
+            )
+        else:
+            tier3_callout = (
                 f"> **Tier 3 completed-agent result: {completed['verdict'].upper()}**"
+                + (
+                    f" — {_publication_safe_inline(completed['reason'], private_labels)}"
+                    if completed and completed.get("reason")
+                    else ""
+                )
                 if completed
                 else "> **Tier 3: No complete agent result**"
             )
+        lines: list[str] = (
+            [tier3_callout, "", f"# Skill Benchmark: {skill_name}", ""]
             if self.report_scope == "tier3"
-            else _verdict_callout(status),
-            "",
-        ]
+            else [f"# Skill Benchmark: {skill_name}", "", _verdict_callout(status), ""]
+        )
         if self.report_scope == "tier3":
             lines.extend(
                 [
@@ -383,6 +394,10 @@ class BenchmarkReporter(ReporterBase):
         else:
             lines.append("- Tasks: not recorded (legacy or non-live result)")
 
+        dataset_line, _ = dataset_provenance_display(ae.get("dataset_provenance") if ae else None)
+        if dataset_line:
+            lines.append(f"- {_publication_safe_inline(dataset_line)}")
+
         dataset_provenance = agent_eval_publication_dataset_provenance(ae)
         if dataset_provenance is not None:
             digest, digest_algorithm = dataset_provenance
@@ -471,15 +486,95 @@ class BenchmarkReporter(ReporterBase):
         lines.append("|---|" + "|".join(["---:"] * len(agents)) + "|")
 
         overall_row = ["Overall"]
-        overall_row.extend(
-            _score_transition_values(
-                agent.get("baseline"),
-                agent.get("with_skill", agent.get("overall_score")),
-                skill_never_activated=_mapping(agent.get("skill_activation")).get("status") == "never_activated",
+        shared_basis_agents: dict[tuple[str, ...], list[str]] = {}
+        for name, agent in agents.items():
+            with_skill = agent.get("with_skill", agent.get("overall_score"))
+            baseline = agent.get("baseline")
+            lift_overall = _mapping(agent.get("lift_overall"))
+            if (
+                _number(lift_overall.get("with_skill")) is not None
+                and _number(lift_overall.get("baseline")) is not None
+            ):
+                # Show the scores the published lift subtracts so the row matches it.
+                if _number(lift_overall["with_skill"]) != _number(with_skill) or _number(
+                    lift_overall["baseline"]
+                ) != _number(baseline):
+                    basis = _mapping(agent.get("lift_basis"))
+                    excluded_metrics = basis.get("excluded_metrics")
+                    excluded_cases = basis.get("excluded_cases")
+                    causes = []
+                    if isinstance(excluded_metrics, list) and any(
+                        _mapping(item).get("reason") == "not_applicable" for item in excluded_metrics
+                    ):
+                        causes.append("dimensions only one arm scored")
+                    if isinstance(excluded_cases, list) and any(
+                        _mapping(item).get("reason") == "judge_mixed" for item in excluded_cases
+                    ):
+                        causes.append("cases judged by different models")
+                    shared_basis_agents.setdefault(tuple(causes), []).append(name)
+                with_skill, baseline = lift_overall["with_skill"], lift_overall["baseline"]
+            overall_row.append(
+                _score_transition_values(
+                    baseline,
+                    with_skill,
+                    skill_never_activated=_mapping(agent.get("skill_activation")).get("status") == "never_activated",
+                )
             )
-            for agent in agents.values()
-        )
         lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in overall_row) + " |")
+
+        for label, field, numerator in (
+            ("Required checks passed", "required_checks", "passed"),
+            ("Goals met", "correct_answers", "correct"),
+            ("Security clean", "security_clean", "clean"),
+        ):
+            row = [label]
+            for agent in agents.values():
+                comparison = agent.get(field)
+                with_skill = comparison.get("with_skill") if isinstance(comparison, dict) else None
+                without_skill = comparison.get("without_skill") if isinstance(comparison, dict) else None
+                difference = comparison.get("difference") if isinstance(comparison, dict) else None
+                with_counts = (
+                    (with_skill.get(numerator), with_skill.get("scored")) if isinstance(with_skill, dict) else ()
+                )
+                without_counts = (
+                    (without_skill.get(numerator), without_skill.get("scored"))
+                    if isinstance(without_skill, dict)
+                    else ()
+                )
+                valid_with = (
+                    len(with_counts) == 2
+                    and all(
+                        isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in with_counts
+                    )
+                    and with_counts[1] > 0
+                )
+                valid_without = (
+                    len(without_counts) == 2
+                    and all(
+                        isinstance(count, int) and not isinstance(count, bool) and count >= 0
+                        for count in without_counts
+                    )
+                    and without_counts[1] > 0
+                )
+                if valid_with and valid_without:
+                    if comparison.get("difference_unit") == "percentage_points":
+                        delta = (
+                            f"{difference:+.1f} pp"
+                            if isinstance(difference, int | float) and not isinstance(difference, bool)
+                            else "N/A"
+                        )
+                    else:
+                        delta = (
+                            f"{difference:+d}"
+                            if isinstance(difference, int) and not isinstance(difference, bool)
+                            else "N/A"
+                        )
+                    row.append(f"{with_counts[0]}/{with_counts[1]} | {without_counts[0]}/{without_counts[1]} | {delta}")
+                elif valid_with:
+                    row.append(f"{with_counts[0]}/{with_counts[1]} | N/A | N/A")
+                else:
+                    row.append("N/A")
+            lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in row) + " |")
 
         has_partial = False
         for dim_id in DIMENSION_MAPPING:
@@ -498,6 +593,55 @@ class BenchmarkReporter(ReporterBase):
                 )
             lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in row) + " |")
 
+        failed_cases: list[tuple[str, object, str]] = []
+        warning_cases: list[tuple[str, str]] = []
+        for agent_name, agent in agents.items():
+            pass_at_k = _mapping(agent.get("pass_at_k"))
+            with_skill = _mapping(pass_at_k.get("with_skill"))
+            cases = _mapping(with_skill.get("cases"))
+            for case_id, case in cases.items():
+                if not isinstance(case, dict):
+                    continue
+                label = f"{agent_name}: {case_id}" if len(agents) > 1 else str(case_id)
+                attempts = case.get("attempts") if isinstance(case.get("attempts"), list) else []
+                if case.get("passed") is False and case.get("attempts_used", 0) > 0:
+                    reason = case.get("reason") or next(
+                        (
+                            attempt.get("reason")
+                            for attempt in attempts
+                            if isinstance(attempt, dict) and not attempt.get("passed") and attempt.get("reason")
+                        ),
+                        "required check failed",
+                    )
+                    failed_cases.append((label, case.get("best_score"), str(reason)))
+                warning_cases.extend(
+                    (label, str(warning))
+                    for warning in case.get("warnings", [])
+                    if isinstance(warning, str) and warning.strip()
+                )
+        if failed_cases:
+            lines.extend(["", "### Failed cases", "", "| Case | Score | Reason |", "|---|---:|---|"])
+            for case_id, score, reason in failed_cases:
+                score_text = f"{score:.2f}" if isinstance(score, int | float) and not isinstance(score, bool) else "N/A"
+                lines.append(
+                    "| "
+                    + " | ".join(
+                        (
+                            _md_cell(case_id, private_labels),
+                            _md_cell(score_text, private_labels),
+                            _md_cell(_publication_safe_inline(reason, private_labels), private_labels),
+                        )
+                    )
+                    + " |"
+                )
+        if warning_cases:
+            lines.extend(["", "### Warnings", ""])
+            lines.extend(
+                f"- **{_publication_safe_inline(case_id, private_labels)}**: "
+                f"{_publication_safe_inline(warning, private_labels)}"
+                for case_id, warning in warning_cases
+            )
+
         lines.extend(
             [
                 "",
@@ -515,6 +659,35 @@ class BenchmarkReporter(ReporterBase):
                 "",
             ]
         )
+        if shared_basis_agents:
+            for causes, names in shared_basis_agents.items():
+                if causes == ("dimensions only one arm scored",):
+                    explanation = (
+                        "compares only the dimensions both arms scored, matching the published Skill Lift; "
+                        "the detailed report's Overall scores can also include dimensions only one arm scored"
+                    )
+                elif causes == ("cases judged by different models",):
+                    explanation = (
+                        "compares cases judged by the same model in both arms, matching the published Skill Lift; "
+                        "the detailed report's Overall scores can include cases judged by different models"
+                    )
+                elif causes:
+                    explanation = (
+                        "uses the dimensions both arms scored and cases judged by the same model, matching the "
+                        "published Skill Lift; the detailed report's Overall scores can include other dimensions "
+                        "or cases"
+                    )
+                else:
+                    explanation = (
+                        "uses the shared comparison basis for the published Skill Lift; the detailed report's "
+                        "arm Overall scores can differ"
+                    )
+                lines.extend(
+                    [
+                        _md_cell("Overall for " + ", ".join(names) + " " + explanation + ".", private_labels),
+                        "",
+                    ]
+                )
         if has_partial:
             lines.extend(
                 [

@@ -6,6 +6,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Tier 3 generation provenance distinguishes LLM, requested-template, and
+  template-fallback datasets, marks trace refinement and autopilot generation,
+  and displays the source and review state in terminal, HTML, and BENCHMARK
+  reports. Run payloads retain the generation record with shortened input hashes.
+
+- `create-eval-dataset --grounding` selects skill, author-intent, or trace
+  grounding. Generated datasets record relative input provenance and review
+  flags for observed answers that differ from authored expectations and
+  authored behavior steps omitted by refinement output.
+
 - `tier3 validate` reports informational dataset coverage counts and concrete
   gaps in text and JSON. Generated one-case starters now explain their limits
   and point authors to full dataset generation and coverage validation.
@@ -15,6 +25,12 @@ All notable changes to SkillEvaluator are documented in this file.
   numeric grading and identify the separate decisions needed for scoreless support.
   Pin the public calculator input to the historical repository revision used by
   the run, preserving its original hash and evidence pointers after migration.
+
+- `skillevaluator tier3 migrate-dataset` previews lossless legacy conversions and
+  writes only to an explicit new JSON/YAML destination. Authored routing, case
+  IDs, fixture selectors, and extension metadata are preserved. The five bundled
+  reference datasets now use the preferred object format; legacy reading remains
+  supported.
 
 - Tier 3 reports show per-case expectation inventories with explicit met,
   unmet, unchecked, unscored and inapplicable judgments, evidence and next
@@ -90,6 +106,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Name Skill Lift as the headline comparison and label pass@k differences as
   supporting reliability across reports and terminal output.
+
+- A scored Tier 3 attempt now fails when `goal_accuracy` or security is below
+  1.0, even if its Overall score meets the pass threshold. N/A or unscored
+  metrics preserve the existing verdict behavior; missed behavior-check steps
+  are warnings. A with-skill required-check failure fails the quality verdict,
+  while no-skill failures do not. Reports show required-check, goals-met,
+  and security-clean counts for both arms, plus failed-case reasons.
 
 - Tier 3 reports missing skill runtime dependencies as environment problems,
   with declaration and custom Dockerfile guidance. Unrecovered environment
@@ -181,6 +204,13 @@ All notable changes to SkillEvaluator are documented in this file.
   after a `;`, which starts a new command.
 
 ### Fixed
+
+- `BENCHMARK.md` no longer publishes an Overall uplift that disagrees with
+  `lift.json` and the JSON, HTML, Markdown and terminal reports when a metric is
+  N/A in only one arm. The Overall row now shows the two scores the published
+  Skill Lift subtracts, which the canonical report records per agent as
+  `lift_overall`, and notes when they differ from the arm overall scores. A
+  cross-format test reconciles Overall and lift across every output of one run.
 
 - Tier 3 dataset summaries honor explicit `should_trigger` routing labels before
   legacy `expected_skill` values. Report insights distinguish unavailable trial

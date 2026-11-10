@@ -448,6 +448,38 @@ def test_card_shows_lowest_scoring_failing_attempt_reason() -> None:
     assert "Reason A: partial leak" not in evidence_html
 
 
+def test_accuracy_card_keeps_built_reason_outside_bounded_notes() -> None:
+    reward = _reward(
+        accuracy=0.5,
+        details={
+            "accuracy": {
+                "reason": "A; B",
+                "criteria": {"A": False, "B": False},
+                "expected": "expected answer",
+                "observed": "observed answer",
+            }
+        },
+    )
+    payload = _payload([reward])
+    card = next(card for card in payload["agents"]["codex"]["evaluator_cards"] if card["id"] == "accuracy")
+    [evidence] = card["evidence"]
+
+    assert evidence["notes"] == ["A; B"]
+    assert evidence["reason"] == "Expected: expected answer; observed: observed answer; Failed criteria: A, B"
+    assert "A; B" not in evidence["reason"]
+
+
+def test_failure_reason_omits_semicolon_separated_grader_reason_parts() -> None:
+    detail = {
+        "reason": "A; B",
+        "findings": [{"message": "A"}, {"message": "B"}],
+    }
+
+    reason = failure_reason(detail, omit=("A; B",), metric="security", reward={})
+
+    assert reason == ""
+
+
 def test_card_lists_failed_behavior_results_once() -> None:
     # judge_behavior_check records the judge summary as ``reason``, which can be empty.
     failed = ["Did not cite the source document", "Deleted files without asking"]
@@ -701,7 +733,7 @@ def test_html_preview_keeps_the_overview_when_failure_reasons_overflow_it() -> N
     assert _compact_size(preview) <= html_module._TIER3_HTML_PREVIEW_TRIGGER_BYTES
     assert _overview_ids(preview) == _overview_ids(data)
     assert data["best_agent"] and all(_overview_ids(data)[1])
-    assert set(notice) == {"failure_reasons"}
+    assert "failure_reasons" in notice
     # The preview drops the unrendered top-level card copy without counting it.
     assert _reason_count(preview) == _rendered_reason_count(preview)
     kept = _rendered_reason_count(preview)
@@ -712,7 +744,10 @@ def test_html_preview_keeps_the_overview_when_failure_reasons_overflow_it() -> N
 
     html = _render(payload)
     assert f"HTML preview left out {notice['failure_reasons']} failure reasons or excerpts" in html
-    assert "HTML preview omitted" not in html
+    if notice.get("characters") or notice.get("items"):
+        assert f"HTML preview omitted {notice['characters']} characters and {notice['items']} items." in html
+    if notice.get("trial_rows"):
+        assert f"The HTML preview left out {notice['trial_rows']} per-trial rows" in html
     assert "built-in method" not in html
 
 
@@ -757,21 +792,39 @@ def test_html_preview_drops_failure_reasons_before_bounding_a_large_payload() ->
     assert f"The HTML preview left out {notice['trial_rows']} per-trial rows" in html
 
 
-def test_html_preview_does_not_report_unrendered_top_level_card_reasons() -> None:
-    # The page renders every reason of this run; only the top-level card copy,
-    # which the page never shows, did not fit.
+def test_html_preview_counts_omitted_case_reasons_not_top_level_card_copies() -> None:
     payload = _failing_multi_agent_payload(2, 36)
     data = _display_data(payload)
+    rendered_total = _rendered_reason_count(data)
+    all_reasons = _reason_count(data)
     assert _compact_size(data) > html_module._TIER3_HTML_PREVIEW_TRIGGER_BYTES
+    assert 0 < rendered_total < all_reasons
 
     preview, notice = html_module._bounded_tier3_preview(data)
 
     assert preview is not None
-    assert notice == {}
-    assert _rendered_reason_count(preview) == _rendered_reason_count(data)
+    kept = _rendered_reason_count(preview)
+    assert notice["failure_reasons"] == rendered_total - kept
+    assert notice["failure_reasons"] < all_reasons
+    assert _reason_count(preview) == kept
     html = _render(payload)
-    assert "HTML preview left out" not in html
+    assert f"HTML preview left out {notice['failure_reasons']} failure reasons or excerpts" in html
     assert "HTML preview omitted" not in html
+
+
+def test_html_preview_does_not_report_unrendered_top_level_card_reasons() -> None:
+    payload = _failing_multi_agent_payload(2, 40)
+    data = _display_data(payload)
+    rendered_total = _rendered_reason_count(data)
+    all_reasons = _reason_count(data)
+
+    preview, notice = html_module._bounded_tier3_preview(data)
+
+    assert preview is not None
+    kept = _rendered_reason_count(preview)
+    assert 0 < kept < rendered_total
+    assert notice["failure_reasons"] == rendered_total - kept
+    assert notice["failure_reasons"] < all_reasons
 
 
 def test_row_cap_note_appears_only_when_drilldown_rows_were_capped() -> None:

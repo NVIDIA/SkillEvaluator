@@ -96,12 +96,17 @@ def test_payload_exposes_report_truth_metadata() -> None:
     }
     assert payload["verdict_policy"] == {
         "attempt_pass_threshold": 0.6,
+        "goal_accuracy_pass_threshold": 1.0,
+        "security_pass_threshold": 1.0,
+        "attempt_pass_rule": "overall_threshold_and_goal_accuracy_and_security_threshold_when_scored",
+        "run_fail_policy": "any_with_skill_required_check_failure",
         "dimension_pass_threshold": DIMENSION_VERDICT_PASS_THRESHOLD,
         "dimension_neutral_threshold": DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
         "lift_pass_threshold": TIER3_LIFT_PASS_THRESHOLD,
         "lift_fail_threshold": TIER3_LIFT_FAIL_THRESHOLD,
         "overall_pass_rule": "one_supported_agent_all_dimensions_pass",
     }
+    assert {"required_checks", "correct_answers", "security_clean"} <= payload.keys()
     assert payload["summary"]["dataset_summary"] == payload["dataset_summary"]
     assert payload["summary"]["score_policy"] == payload["score_policy"]
     assert payload["summary"]["verdict_policy"] == payload["verdict_policy"]

@@ -23,6 +23,7 @@ from rich.text import Text
 
 from skillevaluator.reporting.summary_copy import pass_at_k_summary
 from skillevaluator.reporting.terminal_styles import AMBER
+from skillevaluator.tier3.attempt_verdict import attempt_verdict, scored_goal_accuracy
 from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
 from skillevaluator.utils.redaction import redact_sensitive_text
 from skillevaluator.utils.secret_redaction import Redactor
@@ -188,8 +189,25 @@ def _scored_trials(agent: Mapping[str, Any], key: str) -> dict[str, dict[str, An
         score = reward.get("overall") if isinstance(reward, Mapping) else None
         if isinstance(score, int | float) and not isinstance(score, bool):
             attempts = cases.setdefault(trial.name.split("__", 1)[0], {"attempts": []})["attempts"]
+            verdict = attempt_verdict(
+                score,
+                threshold,
+                reward=reward,
+            )
             attempts.append(
-                {"attempt": len(attempts) + 1, "trial": trial.name, "score": score, "passed": score >= threshold}
+                {
+                    "attempt": len(attempts) + 1,
+                    "trial": trial.name,
+                    "score": score,
+                    "passed": verdict.passed,
+                    "goal_accuracy": scored_goal_accuracy(dict(reward)),
+                    "reason": verdict.reason,
+                    "warnings": list(verdict.warnings),
+                    "security_clean": verdict.security_clean,
+                    "security_score": verdict.security_score,
+                    "security_message": verdict.security_message,
+                    "required_failure": verdict.required_failure,
+                }
             )
     return cases
 
@@ -303,17 +321,75 @@ def _marks_text(marks: list[str]) -> Text:
 def _mean_score(case: Mapping[str, Any] | None) -> float | None:
     attempts = case.get("attempts") if isinstance(case, Mapping) and isinstance(case.get("attempts"), list) else []
     scores = [s for a in attempts if isinstance(a, Mapping) and (s := _score(a.get("score"))) is not None]
-    return sum(scores) / len(scores) if scores else None
+    if scores:
+        return sum(scores) / len(scores)
+    return _score(case.get("best_score")) if isinstance(case, Mapping) else None
 
 
-def _condition_cell(case: Mapping[str, Any] | None) -> Text:
+def _case_diagnostics(case: Mapping[str, Any] | None, safe: Callable[[object], str]) -> Text:
+    attempts = case.get("attempts") if isinstance(case, Mapping) else None
+    attempts = attempts if isinstance(attempts, list) else []
+    case_reason = (
+        case.get("reason")
+        if isinstance(case, Mapping) and case.get("passed") is False and isinstance(case.get("reason"), str)
+        else None
+    )
+    reasons = [safe(case_reason)] if case_reason else []
+    reasons.extend(
+        safe(attempt["reason"])
+        for attempt in attempts
+        if isinstance(attempt, Mapping) and not attempt.get("passed") and attempt.get("reason")
+    )
+    reasons = list(dict.fromkeys(reasons))
+    case_warnings = case.get("warnings") if isinstance(case, Mapping) else None
+    warnings = (
+        [safe(warning) for warning in case_warnings if isinstance(warning, str) and warning.strip()]
+        if isinstance(case_warnings, list)
+        else []
+    )
+    warnings.extend(
+        safe(warning)
+        for attempt in attempts
+        if isinstance(attempt, Mapping)
+        for warning in (attempt.get("warnings") if isinstance(attempt.get("warnings"), list) else [])
+        if isinstance(warning, str) and warning.strip()
+    )
+    warnings = list(dict.fromkeys(warnings))
+    text = Text()
+    if reasons:
+        text.append("\nFAIL: " + "; ".join(reasons), style="bold red")
+    for warning in warnings:
+        text.append("\nWARNING: " + warning, style="yellow")
+    return text
+
+
+def _condition_cell(
+    case: Mapping[str, Any] | None, safe: Callable[[object], str], *, include_diagnostics: bool = True
+) -> Text:
     marks = _marks(case)
     p, n = _attempt_rate(marks)
     cell = Text(f"{p}/{n} " if n else "", style="bold")
     cell.append_text(_marks_text(marks))
     if (mean := _mean_score(case)) is not None:
         cell.append(f" ({mean:.2f})", style="dim")
+    if include_diagnostics:
+        cell.append_text(_case_diagnostics(case, safe))
     return cell
+
+
+def _effect_diagnostics(
+    effect: Text,
+    with_case: Mapping[str, Any] | None,
+    without_case: Mapping[str, Any] | None,
+    safe: Callable[[object], str],
+) -> Text:
+    for label, case in (("with skill", with_case), ("without skill", without_case)):
+        diagnostics = _case_diagnostics(case, safe).plain
+        for diagnostic in diagnostics.splitlines():
+            if diagnostic:
+                style = "bold red" if diagnostic.startswith("FAIL:") else "yellow"
+                effect.append(f"\n↳ {label}: {diagnostic}", style=style)
+    return effect
 
 
 def _effect(
@@ -394,14 +470,17 @@ def _condition_grid(
     table = _table(title, "with skill", "without skill", "effect")
     for case_id in case_ids:
         with_case, without_case = _cases(agent, "with_skill").get(case_id), _cases(agent, "without_skill").get(case_id)
-        table.add_row(
-            Text(safe(case_id)),
-            _condition_cell(with_case),
-            _condition_cell(without_case),
-            # No with-skill arm ran (--skip-with-skill), so there is no effect to call.
+        effect = (
             Text("-", style="dim")
             if with_skill_skipped
-            else _effect(with_case, without_case, comparable=_case_comparable(agent, with_case, without_case)),
+            else _effect(with_case, without_case, comparable=_case_comparable(agent, with_case, without_case))
+        )
+        effect = _effect_diagnostics(effect, with_case, without_case, safe)
+        table.add_row(
+            Text(safe(case_id)),
+            _condition_cell(with_case, safe, include_diagnostics=False),
+            _condition_cell(without_case, safe, include_diagnostics=False),
+            effect,
         )
     table.add_section()
     rates = _agent_rates(agent)
@@ -441,7 +520,11 @@ def _change(text: str, value: float | None) -> Text:
 
 
 def _agent_cell(
-    with_case: Mapping[str, Any] | None, without_case: Mapping[str, Any] | None, *, comparable: bool = True
+    with_case: Mapping[str, Any] | None,
+    without_case: Mapping[str, Any] | None,
+    *,
+    comparable: bool = True,
+    safe: Callable[[object], str],
 ) -> Text:
     with_marks, without_marks = _marks(with_case), _marks(without_case)
     cell = _marks_text(without_marks)
@@ -449,9 +532,16 @@ def _agent_cell(
     cell.append_text(_marks_text(with_marks))
     (wp, wn), (op, on) = _attempt_rate(with_marks), _attempt_rate(without_marks)
     if not comparable or not wn or not on or ERROR in with_marks + without_marks:
-        return cell.append("  ?", style="yellow")
-    delta = 100.0 * (wp / wn - op / on)
-    return cell.append_text(_change(f"{delta:+.0f}" if delta else "·", delta))
+        cell.append("  ?", style="yellow")
+    else:
+        delta = 100.0 * (wp / wn - op / on)
+        cell.append_text(_change(f"{delta:+.0f}" if delta else "·", delta))
+    for label, case in (("No skill", without_case), ("With skill", with_case)):
+        diagnostics = _case_diagnostics(case, safe)
+        if diagnostics.plain:
+            cell.append(f"\n{label}: ", style="dim")
+            cell.append_text(diagnostics)
+    return cell
 
 
 def _arrow_cell(
@@ -478,6 +568,7 @@ def _agent_grid(
                     comparable=_case_comparable(
                         a, _cases(a, "with_skill").get(case_id), _cases(a, "without_skill").get(case_id)
                     ),
+                    safe=safe,
                 )
                 for a in agents.values()
             ),
@@ -1200,7 +1291,11 @@ def _live_mark(trial: Path, run_dir: Path, pass_threshold: float) -> str | None:
     rewards = verifier.get("rewards") if isinstance(verifier, Mapping) else None
     score = rewards.get("overall") if isinstance(rewards, Mapping) else None
     if isinstance(score, int | float) and not isinstance(score, bool):
-        return PASS if score >= pass_threshold else FAIL
+        merged_rewards = dict(rewards)
+        from skillevaluator.tier3.harbor.collector import _merge_reward_sidecars
+
+        _merge_reward_sidecars(merged_rewards, trial / "verifier")
+        return PASS if attempt_verdict(score, pass_threshold, reward=merged_rewards).passed else FAIL
     return ERROR
 
 

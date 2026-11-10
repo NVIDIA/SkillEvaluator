@@ -43,6 +43,7 @@ from skillevaluator.reporting.harbor_viewer import (
 )
 from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
 from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION, pass_at_k_summary
+from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
@@ -360,6 +361,9 @@ class MarkdownReporter(ReporterBase):
                 lines.append(SKILL_LIFT_DEFINITION)
             if pass_summary := pass_at_k_summary(ae.get("pass_at_k"), ae.get("attempt_policy")):
                 lines.append(pass_summary)
+            provenance_line, _ = dataset_provenance_display(ae.get("dataset_provenance"))
+            if provenance_line:
+                lines.append(_markdown_inline_text(provenance_line))
             if verdict == "INCONCLUSIVE":
                 lines.append("Skill never activated. Scores are diagnostic only; no lift verdict was computed.")
             runtime_number = _finite_report_number(runtime)

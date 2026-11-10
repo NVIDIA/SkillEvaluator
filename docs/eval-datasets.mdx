@@ -362,6 +362,28 @@ skillevaluator tier3 validate ./my-skill
 Run it in CI or before a long evaluation: it catches an empty dataset, missing
 required fields, duplicate case IDs, and invalid config in seconds.
 
+The informational **Dataset coverage** block also shows case count, positive
+(should-trigger), negative/non-trigger and unlabeled-trigger counts, plus cases
+with an expected output and assertions/expected behaviors. These use the same
+field normalization and trigger resolution as evaluation. Gaps name missing
+negative or positive examples and missing judge references: without an expected
+output, accuracy and goal_accuracy are N/A; without assertions or expected
+behaviors, behavior_check is N/A.
+
+A single-case dataset is labelled **a starting point, not a representative
+evaluation**. Larger datasets show their counts and concrete gaps without any
+claim of sufficiency. Counts alone do not establish representative coverage;
+review task diversity, failure modes and outcomes independently.
+
+Coverage is informational and does not add warnings or change `--strict` exit
+codes. `--json` remains a list of check objects. It adds an entry with path
+`evals/evals.json#coverage` (or the actual dataset filename), status `ok`, a
+human-readable `message` and a structured `coverage` object containing
+`case_count`, `starter`, `positive_cases`, `negative_cases`,
+`unlabeled_trigger_cases`, `cases_with_expected_outcome`,
+`cases_with_expected_behaviors` and `gaps`. Native Harbor task sources do not
+receive this eval-dataset summary.
+
 `validate PATH` also checks the selected Tier 3 source (dataset entries and
 case IDs, `config.yml`, or the native Harbor task layout) before any live run.
 When that check fails, each error names the entry or file and what is wrong,

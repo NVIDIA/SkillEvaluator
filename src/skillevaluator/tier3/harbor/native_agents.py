@@ -40,6 +40,7 @@ from harbor.agents.installed.codex import Codex
 from harbor.agents.installed.hermes import Hermes
 from harbor.agents.installed.opencode import OpenCode
 
+from skillevaluator.tier3.harbor.hermes_agent import SkillEvaluatorHermes
 from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorCodex
 from skillevaluator.tier3.harbor.local_agents import (
     SetupNetworkErrorAgent,
@@ -290,6 +291,10 @@ class NativeHermes(_NativeHermesMixin, Hermes):
     """Hermes with the load census written before launch."""
 
 
+class NativeNvidiaBuildHermes(_NativeHermesMixin, SkillEvaluatorHermes):
+    """Pinned NVIDIA Build Hermes with the load census written before launch."""
+
+
 # Private baseline and wrapper arms need the same setup-phase error boundary
 # as native arms, without adding native setup, flags, or config to their launch.
 class PrivateClaudeCode(SetupNetworkErrorAgent, ClaudeCode):
@@ -330,6 +335,10 @@ class PrivateGatewayOpenCode(SetupNetworkErrorAgent, SkillEvaluatorGatewayOpenCo
 
 class PrivateHermes(SetupNetworkErrorAgent, Hermes):
     """Stock Hermes with setup-only network error classification."""
+
+
+class PrivateNvidiaBuildHermes(SetupNetworkErrorAgent, SkillEvaluatorHermes):
+    """NVIDIA Build Hermes with setup-only network error classification."""
 
 
 class PrivateLocalClaudeCode(SetupNetworkErrorAgent, SkillEvaluatorLocalClaudeCode):

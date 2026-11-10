@@ -162,8 +162,8 @@ skill-evaluation-native:
     action: prepare
   parallel:
     matrix:
-      - SKILL_EVAL_TIER: ['2', '3']
-  # Docker mode requires a privileged runner supporting Docker-in-Docker and
+      - SKILL_EVAL_TIER: ['3']
+  # Tier 3 Docker mode requires a privileged runner supporting Docker-in-Docker and
   # sharing /certs/client (runner volumes = ["/certs/client"]). TLS client
   # certificates stay in the job and service; agent containers cannot use the
   # daemon. For local mode select a native runner and remove this service.
@@ -230,6 +230,20 @@ skill-evaluation-native:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
     - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
 
+skill-evaluation-native-tier2:
+  # Inherit caller timeout/tags and the shared execution policy, without
+  # starting Tier 3's Docker service or retaining its client configuration.
+  extends: skill-evaluation-native
+  parallel:
+    matrix:
+      - SKILL_EVAL_TIER: ['2']
+  services: []
+  variables:
+    DOCKER_HOST: ''
+    DOCKER_TLS_CERTDIR: ''
+    DOCKER_TLS_VERIFY: ''
+    DOCKER_CERT_PATH: ''
+
 skill-evaluation-aggregate:
   extends: .skill-evaluation-tools
   stage: test
@@ -239,6 +253,9 @@ skill-evaluation-aggregate:
       artifacts: true
       optional: true
     - job: skill-evaluation-native
+      artifacts: true
+      optional: true
+    - job: skill-evaluation-native-tier2
       artifacts: true
       optional: true
   script:

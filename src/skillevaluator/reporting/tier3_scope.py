@@ -112,7 +112,7 @@ def completed_agent_result(payload: dict[str, Any] | None) -> dict[str, Any] | N
         require_baseline=False,
     ):
         return None
-    from skillevaluator.evaluation.tier3_report import _agent_quality_verdict
+    from skillevaluator.evaluation.tier3_report import _agent_quality_verdict, _agent_quality_verdict_reason
 
     result: dict[str, Any] = {
         "name": name,
@@ -120,6 +120,7 @@ def completed_agent_result(payload: dict[str, Any] | None) -> dict[str, Any] | N
         "baseline": baseline,
         "lift": lift,
         "verdict": _agent_quality_verdict(agent),
+        "reason": _agent_quality_verdict_reason(agent),
         "needs_attention": payload.get("execution_status") != "succeeded",
         "recovered_attempts": sum(
             c.get("recovered_attempts_total", 0)

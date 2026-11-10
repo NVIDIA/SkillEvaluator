@@ -32,11 +32,13 @@ commands referenced below.
 | [similarity-check](#similarity-check) | Detect duplicate content across a collection | Embeddings provider key |
 | [tier3 evaluate](#tier3-evaluate) | Run Tier 3 live agent evaluation | Provider key plus a credential the selected agents can use (one `NVIDIA_API_KEY` covers both on NVIDIA Build), backend (Docker by default) |
 | [tier3 select-decoys](#tier3-select-decoys) | Save a reproducible set of neighboring skills for group evaluation | Local description-embedding catalog, skill collection, embeddings provider key |
+| [tier3 compare-versions](#tier3-compare-versions) | Compare current and prior retained with-skill scores without writes | Two compatible retained runs |
 | [create-eval-dataset](#create-eval-dataset) | Generate synthetic eval datasets | LLM provider key (none with `--no-llm`) |
 | [init-custom-grader](#init-custom-grader) | Scaffold a bring-your-own-grader starter | Nothing |
 | [init-harbor-task](#init-harbor-task) | Scaffold a bring-your-own-task Harbor starter | Nothing |
 | [view](#view) | Open the latest HTML live-evaluation report | A previous `tier3 evaluate` run |
 | [compare](#compare) | Compare live-evaluation results across agents | A previous `tier3 evaluate` run |
+| [tier3 history](#tier3-history) | Inspect retained Skill Lift over skill revisions, grouped by compatible configuration | Retained Tier 3 summaries |
 | [tier3 feedback](#tier3-feedback) | Chat about one completed live-evaluation run and possible skill changes | A completed `tier3 evaluate` run, LLM provider key |
 | [dashboard](#dashboard) | Filter quantitative tables and paired usage differences | Saved JSON reports or retained runs; dashboard extra |
 | [harbor-view](#harbor-view) | Browse retained Harbor job artifacts | A run made with `--harbor-keep-jobs` |
@@ -44,6 +46,21 @@ commands referenced below.
 | [health-check](#health-check) | Quick CLI + backend readiness check, or another tier with `--tier` | Nothing |
 | [models](#models) | List models visible through the selected provider's catalog | Provider configuration/key |
 | [tier3 validate](#tier3-validate) | Validate `evals/` and the optional Harbor contract | Nothing |
+| [tier3 import-traces](#tier3-import-traces) | Import redacted trace review candidates | Nothing |
+| [tier3 accept-traces](#tier3-accept-traces) | Promote explicitly reviewed trace candidates | Nothing |
+| [tier3 import-metrics](#tier3-import-metrics) | Report precomputed custom scores as external observations | A versioned metrics JSON file; no runtime or provider key |
+
+## tier3 import-metrics
+
+```bash
+skillevaluator tier3 import-metrics INPUT.json --output-dir NEW_DIRECTORY
+```
+
+`INPUT.json` must exist. Required `-o, --output-dir` names a directory that must
+not exist. The command validates the complete input before writing
+`external_metrics.json` and `external_metrics.md`. It never executes tests or
+assigns canonical scores; exit 0 means a valid import, not passing tests.
+See the [input contract and simulator example](/skills/skillevaluator/custom-graders#import-precomputed-custom-metrics).
 
 ## Global conventions
 
@@ -164,12 +181,47 @@ pipeline.
 | --- | --- |
 | `tier1` | `validate`, `quality-check`, `rubric-eval`, `security-scan`, `pii-scan`, `lint-scripts` |
 | `tier2` | `context-optimization-check`, `dedup-scan`, `similarity-check` |
-| `tier3` | `evaluate`, `select-decoys`, `create-eval-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `feedback`, `validate`, `harbor-view` |
+| `tier3` | `evaluate`, `select-decoys`, `create-eval-dataset`, `migrate-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `feedback`, `validate`, `harbor-view`, `import-metrics`, `import-traces`, `accept-traces` |
 
 `health-check` and [models](#models) are top-level only. The expert commands
 [tier3 evaluate](#tier3-evaluate), [tier3 select-decoys](#tier3-select-decoys),
-[tier3 feedback](#tier3-feedback), and `tier3 validate` are advertised **only**
-inside the `tier3` group:
+[tier3 feedback](#tier3-feedback), [tier3 import-metrics](#tier3-import-metrics),
+[tier3 import-traces](#tier3-import-traces),
+[tier3 accept-traces](#tier3-accept-traces), and `tier3 validate` are advertised
+**only** inside the `tier3` group:
+
+### tier3 import-traces
+
+Import a production trace export into redacted candidates outside the skill.
+See [Trace Datasets](trace-datasets.mdx) for the v1 JSON/JSONL contract and redaction limits.
+
+```bash
+skillevaluator tier3 import-traces ./my-skill ./sessions.jsonl -o ./review
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `-o`, `--output DIR` | `./<skill-dir-name>-trace-review` | Review bundle directory, outside the skill. |
+| `--force` | off | Overwrite an existing candidates file. |
+| `--dry-run` | off | Print classifications, warnings, and the next-step hint; write nothing. |
+
+### tier3 accept-traces
+
+Promote only explicitly reviewed candidates into `evals/evals.json`. Requires
+`SKILL_PATH` and `REVIEW_DIR`. `accept` requires a reviewer-written expectation;
+`accept_observed` is allowed only for successful sessions with non-empty output.
+Pending and rejected candidates are skipped. All decision/redaction errors abort
+before writing; dataset validation errors after writing return a non-zero status.
+
+```bash
+skillevaluator tier3 accept-traces ./my-skill ./review --dry-run
+skillevaluator tier3 accept-traces ./my-skill ./review
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--dry-run` | off | Report additions and already-present ids without writing. |
+| `--allow-native-harbor` | off | Explicitly accept traces when native Harbor tasks are selected. |
 
 ### tier3 validate
 
@@ -281,6 +333,11 @@ The following flags are forwarded to the live-eval engine when Tier 3 is enabled
 | `--max-cases INTEGER RANGE` | unset | Run only the first N eval cases in staged order (minimum `1`); without a limit every case runs. A run that skips cases is recorded in `run_config.json` and is never publication evidence. |
 | `--n-attempts INTEGER` | unset | Attempts per eval case (pass@k). |
 | `--pass-threshold FLOAT` | unset | Score threshold (0.0–1.0) for a case to count as passed. |
+| `--max-agent-tokens INTEGER` | unset | Maximum measured agent-model tokens. |
+| `--max-judge-calls INTEGER` | unset | Maximum recorded non-salvage judge attempts; excludes transport retries and RAGAS-internal requests. |
+| `--max-attempts-total INTEGER` | unset | Maximum logical Harbor attempts admitted across agents and arms, including private comparison arms. |
+| `--max-cost-usd FLOAT` | unset | Maximum agent model spend; requires a price book and excludes judge spend, setup, and container time. |
+| `--price-file FILE` | unset | JSON price book keyed by exact resolved model identifier; see [cost limits](tier3-live-evaluation.mdx#cost-limits). |
 | `--stop-on-pass / --no-stop-on-pass` | unset | Stop a case's remaining attempts once one passes. |
 | `--model TEXT` | unset | Global agent model override. |
 | `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable). |
@@ -465,6 +522,23 @@ without contacting the embedding provider. See
 [Select a reproducible decoy set](agents-and-sandboxes.mdx#select-a-reproducible-decoy-set)
 for a complete example and the limits of similarity-based selection.
 
+## tier3 compare-versions
+
+```bash
+skillevaluator tier3 compare-versions ./my-skill --current CURRENT --prior PRIOR --results-dir ./results --json
+```
+
+Read-only comparison of two retained runs; no agent execution, credentials,
+or artifact writes. Without `--json`, prints the prior/current score table.
+Unavailable comparisons print reasons and exit nonzero.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--current RUN` | required | Current retained run id, or `latest` completed run. |
+| `--prior RUN` | required | Prior retained run id, or `latest` eligible different skill revision. |
+| `--results-dir DIRECTORY` | normal results-root resolution | External results root containing the per-skill directory. |
+| `--json` | off | Print the complete comparison block as JSON. |
+
 ## tier3 evaluate
 
 Run Tier 3 live agent evaluation: real agents attempt your eval cases with and without the skill, and the difference becomes Skill Lift. Requires the `tier3` extra, a provider key for grading, a credential the selected agents can use — with NVIDIA Build in `--env-mode docker`, `kata`, or `local`, the one `NVIDIA_API_KEY` covers both roles — and a running backend (Docker by default). The full walkthrough is [Tier 3: Live Evaluation](tier3-live-evaluation.mdx).
@@ -479,14 +553,21 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `-a, --agents TEXT` | provider-native | Comma-separated Harbor agents. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. Supported: `claude-code`, `codex`, `opencode`; the alias `claude` is accepted for `claude-code`. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
+| `-a, --agents TEXT` | provider-native | Comma-separated Harbor agents. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. Supported: `claude-code`, `codex`, `opencode`; Experimental: `hermes` (Docker with NVIDIA Build only; see [Experimental Hermes](agents-and-sandboxes.mdx#experimental-hermes)). The alias `claude` is accepted for `claude-code`. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
 | `--env-mode` | `docker` | Where trials run. SkillEvaluator exposes 27 environment modes: 26 Harbor-native modes — `docker`, `daytona`, `e2b`, `modal`, `runloop`, `langsmith`, `ec2`, `gke`, `ack`, `openshift`, `novita`, `apple-container`, `singularity`, `islo`, `tensorlake`, `cwsandbox`, `wandb`, `use-computer`, `blaxel`, `beam`, `skypilot`, `hyperbrowser`, `vercel`, `kata`, `runta`, `mosaic` — plus SkillEvaluator `local` mode. `wandb` runs Harbor's `cwsandbox` backend with W&B authentication, so it needs the `harbor[cwsandbox]==0.24.0` extra; Harbor 0.24 has no `wandb` extra. Harbor's `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`, `prime`, and `smol` backends are not selectable. See the complete extras and prerequisites matrix in [Agents & Sandboxes](agents-and-sandboxes.mdx#where-trials-run). Installed packages can add more modes; see [Custom execution backends](agents-and-sandboxes.mdx#custom-execution-backends). |
 | `--environment-kwarg`, `--ek` | none | Operator-only `KEY=VALUE` constructor option for Harbor-native non-Docker backends (repeatable). Values accept JSON-compatible types; skill-owned `evals/config.yml` cannot set them. Never pass secrets. Docker and local reject all kwargs, Kata accepts only `kata_runtime` and `kata_dns`, and Harbor runtime-policy fields for overrides, mounts, networks, extra Compose, lifecycle, and pod security are reserved, as are `stream`, `enable_environment_dir_upload`, and `auth` for `cwsandbox`/`wandb`. Names the selected backend does not accept in Harbor 0.24.0 are rejected. See [Native backend constructor options](agents-and-sandboxes.mdx#native-backend-constructor-options). |
 | `--autopilot` | off | Create one eval case when no dataset/task source exists, then evaluate. The case is LLM-generated with the configured provider, with a deterministic keyless template fallback; an existing source is never overwritten. |
 | `--skip-baseline` | off | Skip the without-skill baseline (no lift analysis, faster). |
 | `--skip-with-skill` | off | Run only the without-skill baseline, for example to calibrate a task set or measure a model change before running the skill. The report is marked baseline-only: the overall score is the baseline score, with-skill and lift are unavailable (shown as `skipped` or N/A, never 0.0), and no skill verdict is given. Mutually exclusive with `--skip-baseline`. Not available on `validate`. |
+| `--reuse-baseline RUN` | off | Reuse a compatible fresh without-skill baseline from a retained run id in the same results root, or `latest`. An incompatible explicit id fails before execution; `latest` falls back to a fresh baseline. Mutually exclusive with `--skip-baseline` and `--skip-with-skill`. |
+| `--compare-to RUN` | off | Compare with-skill scores to a compatible retained run. `latest` selects the newest eligible different skill revision, or records an unavailable comparison and continues. An incompatible explicit id fails before execution. Mutually exclusive with `--skip-with-skill`. Independent of no-skill Skill Lift. |
 | `--n-attempts INTEGER` | unset | Attempts per eval case (pass@k). |
 | `--pass-threshold FLOAT` | unset | Score threshold (0.0–1.0) for a case to count as passed. |
+| `--max-agent-tokens INTEGER` | unset | Maximum measured agent-model tokens. |
+| `--max-judge-calls INTEGER` | unset | Maximum recorded non-salvage judge attempts; excludes transport retries and RAGAS-internal requests. |
+| `--max-attempts-total INTEGER` | unset | Maximum logical Harbor attempts admitted across agents and arms, including private comparison arms. |
+| `--max-cost-usd FLOAT` | unset | Maximum agent model spend; requires a price book and excludes judge spend, setup, and container time. |
+| `--price-file FILE` | unset | JSON price book keyed by exact resolved model identifier; see [cost limits](tier3-live-evaluation.mdx#cost-limits). |
 | `--stop-on-pass / --no-stop-on-pass` | unset | Stop a case's remaining attempts once one passes. |
 | `--n-concurrent INTEGER` | unset | Concurrent eval cases per agent. |
 | `--max-agents INTEGER` | unset | Maximum agents to run in parallel. |
@@ -522,6 +603,25 @@ namespace precedes the NVIDIA catalog ID.
 
 Flags marked "unset" fall back to their matching keys in `evals/config.yml` where one exists, then to the built-in defaults. The exception is `--results-dir`, which resolves independently of `evals/config.yml`.
 
+## tier3 migrate-dataset
+
+Preview a lossless conversion to the preferred dataset object. No provider or
+Tier 3 runtime is required:
+
+```bash
+skillevaluator tier3 migrate-dataset ./my-skill/evals/evals.json --skill-name my-skill
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--skill-name NAME` | inferred when unambiguous | Target skill identity. Required for all-negative or mixed-identity legacy datasets. |
+| `--output DESTINATION` | preview only | Write a new `.json`, `.yaml`, or `.yml` file; existing paths and the source are refused. |
+
+`SOURCE` accepts JSON, case-per-line JSONL, YAML, or YML. JSONL is input-only;
+output is one JSON/YAML object. See [Migrate a legacy dataset](eval-datasets.mdx#migrate-a-legacy-dataset)
+for routing-label requirements, preserved fields, and how to promote the reviewed
+conversion without changing fixture paths.
+
 ## create-eval-dataset
 
 Create synthetic eval datasets for agent skill evaluation, written to `evals/evals.json`. Uses the configured LLM provider unless you pass `--no-llm`. Dataset anatomy and the four case buckets are documented in [Eval Datasets](eval-datasets.mdx).
@@ -531,7 +631,7 @@ skillevaluator create-eval-dataset ./my-skill --full
 ```
 
 <Warning>
-`--force` overwrites an existing `evals/evals.json`, including any hand-edited cases, and `--refine` implies `--force`. Use `--dry-run` first if you are unsure.
+`--force` overwrites an existing `evals/evals.json`, including any hand-edited cases. `--refine` normally regenerates the dataset, but `--grounding trace` refines an existing file in place and preserves its authored cases. Use `--dry-run` first if you are unsure.
 </Warning>
 
 | Flag | Default | Effect |
@@ -541,9 +641,10 @@ skillevaluator create-eval-dataset ./my-skill --full
 | `--dry-run` | off | Preview without writing. |
 | `--force` | off | Overwrite existing `evals/evals.json`. |
 | `--prompt PATH` | none | Developer eval-guidance file for generation (default: auto-detects `evals/EVAL.md`). |
-| `--refine` | off | Refine cases using existing or collected trajectories. Reading trajectories from existing results does not require the `tier3` extra; when none exist, collecting one runs `claude-code` through Harbor and needs the `tier3` extra, Docker, and a configured provider (see [Eval Datasets](eval-datasets.mdx)). |
-| `--from-results PATH` | none | With `--refine`: results path containing agent trajectories (default: latest results). |
-| `--results-dir DIRECTORY` | unset | With `--refine`: external results root to search for trajectories. |
+| `--grounding {skill,intent,trace}` | `skill` | Choose `SKILL.md`, author guidance (`evals/EVAL.md` or `--prompt`), or agent trajectories as the primary grounding source. |
+| `--refine` | off | Refine generated cases with trajectories on top of the selected grounding source. Without `--grounding trace`, it regenerates the dataset; with trace grounding and an existing dataset, it refines those cases in place. If no trajectory exists, collection runs `claude-code` through Harbor and needs the `tier3` extra, Docker, and a configured provider (see [Eval Datasets](eval-datasets.mdx)). |
+| `--from-results PATH` | none | With `--grounding trace` or `--refine`: results path containing agent trajectories (default: latest results). |
+| `--results-dir DIRECTORY` | unset | With `--grounding trace` or `--refine`: external results root to search for trajectories. |
 
 ## init-custom-grader
 
@@ -588,6 +689,31 @@ skillevaluator view ./my-skill
 | --- | --- | --- |
 | `--results-dir DIRECTORY` | unset | Results directory to read from (default resolution in [Reports & Results](reports.mdx)). |
 
+## tier3 history
+
+```bash
+skillevaluator tier3 history ./my-skill
+skillevaluator tier3 history ./my-skill --results-dir ./saved-runs --agent opencode --json
+skillevaluator tier3 history ./my-skill --output ./lift-history.md
+```
+
+List every retained run chronologically, with one row per run and agent,
+including failed, incomplete, and corrupt runs. An unavailable lift is JSON
+`null` with `lift_status` and reasons, never an inferred zero. Segments and
+visible break markers separate model, dataset, attempt, scoring-policy, and
+other configuration changes; the change column never crosses a segment boundary.
+Skill revisions alone do not break baseline compatibility.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--results-dir DIRECTORY` | normal results-root resolution | External root containing the per-skill directory; honors the configured location and legacy fallback like `compare`. |
+| `--agent TEXT` | all | Include only this agent's rows. |
+| `--json` | off | Print the complete history as JSON instead of a table. |
+| `--output FILE` | none | Write exactly this `.json`, `.csv`, or `.md` export. The file must be outside all candidate results roots; no directories are created. Stdout still follows `--json`. |
+
+The command reads summaries only: no agents, provider credentials, or raw
+trajectories are needed. See [Lift history and retention](reports.mdx#lift-history-and-retention).
+
 ## compare
 
 Compare live-evaluation results across agents from previous runs.
@@ -599,6 +725,36 @@ skillevaluator compare ./my-skill
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `--results-dir DIRECTORY` | unset | Results directory to read from. |
+
+## tier3 validate-grader
+
+Qualify the shipped Tier 3 verifier against independently labelled evidence.
+See [Grader Validation](grader-validation.mdx) for the versioned suite format,
+denominators, provenance and interpretation.
+
+```bash
+skillevaluator tier3 validate-grader --check-suite
+skillevaluator tier3 validate-grader ./suite --repeats 3 -o qualification
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `SUITE_DIR` | bundled reference suite | Directory containing suite.json |
+| `--repeats N` | 3 | Positive number of grades per case |
+| `--split assessment\|tuning\|all` | assessment | Split selection; all keeps statistics separate |
+| `--case ID` | all selected cases | Repeatable case filter |
+| `-o, --output DIR` | grader-validation-output | Empty output directory for JSON and attempt artifacts |
+| `--json` | off | Print full report as JSON |
+| `--check-suite` | off | Validate suite and executable labels only, no provider needed |
+| `--concurrency N` | 1 | Maximum concurrent verifier subprocesses |
+| `--timeout SECONDS` | 300 | Positive per-attempt timeout |
+| `--max-false-pass-rate RATE` | unset | Gate any reported metric's false-pass rate |
+| `--max-false-fail-rate RATE` | unset | Gate any reported metric's false-fail rate |
+| `--max-unjudgeable-rate RATE` | unset | Gate any reported metric's error/insufficient rate |
+
+Rates must be between 0 and 1. Exit 0 reports results (including disagreement),
+exit 1 means an explicitly supplied gate was exceeded, and exit 2 means invalid
+usage, suite or provider configuration. Gates use assessment only with split all.
 
 ## tier3 feedback
 

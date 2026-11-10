@@ -15,6 +15,7 @@ import ast
 import logging
 import re
 from dataclasses import dataclass, field, replace
+from itertools import chain
 from typing import TYPE_CHECKING
 
 from markdown_it import MarkdownIt
@@ -310,7 +311,8 @@ def chunk_shell(
 
     comment_start = None
     comment_lines: list[str] = []
-    for i, line in enumerate(lines):
+    # A final empty sentinel flushes a trailing comment block at end of file.
+    for i, line in enumerate(chain(lines, ("",))):
         stripped = line.strip()
         if stripped.startswith("#") and not stripped.startswith("#!"):
             if comment_start is None:

@@ -21,6 +21,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
+from skillevaluator.tier3.eval_core.checks import resolve_should_trigger
 from skillevaluator.tier3.harbor import baseline_timeouts
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
@@ -85,7 +86,7 @@ __all__ = (
 )
 
 DATASET_SNAPSHOT_DIGEST_ALGORITHM = "skill-evaluator-dataset-snapshot/1"
-DATASET_SNAPSHOT_SCHEMA_VERSION = "1.0"
+DATASET_SNAPSHOT_SCHEMA_VERSION = "1.1"
 
 
 class DatasetSnapshotContractError(ValueError):
@@ -125,8 +126,9 @@ def deduplicate_dataset_entries(entries: list[dict[str, Any]]) -> list[dict[str,
 def summarize_dataset_entries(entries: list[dict[str, Any]]) -> dict[str, Any]:
     """Summarize unique task identities and their activation intent."""
     unique = deduplicate_dataset_entries(entries)
-    positive = sum(1 for case in unique if case.get("expected_skill") is not None)
-    negative = sum(1 for case in unique if "expected_skill" in case and case.get("expected_skill") is None)
+    routing_intents = [resolve_should_trigger(case) for case in unique]
+    positive = routing_intents.count(True)
+    negative = routing_intents.count(False)
     return {
         "total_tasks": len(unique),
         "positive_tasks": positive,
@@ -198,11 +200,14 @@ def dataset_snapshot_manifest(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_dataset_snapshot(run_dir: Path) -> dict[str, Any] | None:
-    """Load a validated run-owned dataset snapshot, if one was persisted."""
+    """Validate the recorded schema, then normalize in memory without rewriting it."""
     path = run_dir / "dataset_snapshot.json"
     diagnostics: list[dict[str, Any]] = []
     snapshot = _load_bounded_json(path, diagnostics, artifact="dataset_snapshot")
-    if not isinstance(snapshot, dict) or snapshot.get("schema_version") != DATASET_SNAPSHOT_SCHEMA_VERSION:
+    if not isinstance(snapshot, dict):
+        return None
+    schema_version = snapshot.get("schema_version")
+    if not isinstance(schema_version, str) or schema_version not in {"1.0", DATASET_SNAPSHOT_SCHEMA_VERSION}:
         return None
     try:
         encode_dataset_snapshot(snapshot)
@@ -219,13 +224,27 @@ def load_dataset_snapshot(run_dir: Path) -> dict[str, Any] | None:
         [entry for entry in dataset if isinstance(entry, dict)],
         evaluator_version=version,
     )
-    if dataset != expected["dataset"] or summary != expected["dataset_summary"]:
+    expected_summary = expected["dataset_summary"]
+    if snapshot["schema_version"] == "1.0":
+        # Schema 1.0 counted only legacy expected_skill labels. Validate that
+        # exact historical rule before projecting the corrected 1.1 summary.
+        positive = sum(1 for case in expected["dataset"] if case.get("expected_skill") is not None)
+        negative = sum(
+            1 for case in expected["dataset"] if "expected_skill" in case and case.get("expected_skill") is None
+        )
+        expected_summary = {
+            **expected_summary,
+            "positive_tasks": positive,
+            "negative_tasks": negative,
+            "unclassified_tasks": len(expected["dataset"]) - positive - negative,
+        }
+    if dataset != expected["dataset"] or summary != expected_summary:
         return None
     if snapshot.get("dataset_digest_algorithm") != DATASET_SNAPSHOT_DIGEST_ALGORITHM:
         return None
     if snapshot.get("dataset_digest") != expected["dataset_digest"]:
         return None
-    return snapshot
+    return {**snapshot, **expected}
 
 
 class _JSONLimitError(ValueError):
@@ -765,6 +784,7 @@ def load_agent_data(
                     if job_failure:
                         condition_errors.append(f"{label} aggregate job: {job_failure}")
                     trial_failures = data.get("trial_failures")
+                    judge_failure_trials: set[str] = set()
                     if isinstance(trial_failures, list):
                         for failure in trial_failures:
                             if not isinstance(failure, dict):
@@ -772,12 +792,33 @@ def load_agent_data(
                             trial = failure.get("trial") or "unknown"
                             reason = failure.get("reason") or "Unknown Harbor trial failure"
                             condition_errors.append(f"{label} trial {trial}: {reason}")
+                            trial_id = str(trial)
+                            if str(reason).startswith("Required judge evaluation failed:"):
+                                judge_failure_trials.add(
+                                    str(
+                                        failure.get("_trial_root_name") or failure.get("trial_root_name") or trial_id
+                                    ).split("__step", 1)[0]
+                                )
+                    raw_judge_failures = data.get("judge_failures")
+                    planned_attempts = _nonnegative_counter(data.get("expected_attempts"))
+                    scored_attempts = _nonnegative_counter(data.get("scored_attempts"))
+                    judge_failures = min(
+                        (
+                            _nonnegative_counter(raw_judge_failures)
+                            if isinstance(raw_judge_failures, int) and not isinstance(raw_judge_failures, bool)
+                            else len(judge_failure_trials)
+                        ),
+                        max(0, planned_attempts - scored_attempts),
+                    )
                     condition_execution[key] = {
                         "execution_status": status,
                         "execution_errors": condition_errors,
                         **_execution_error_details(data, len(condition_errors)),
+                        "expected_cases": _nonnegative_counter(data.get("expected_cases")),
+                        "scored_cases": _nonnegative_counter(data.get("scored_cases")),
                         "expected_attempts": _nonnegative_counter(data.get("expected_attempts")),
                         "scored_attempts": _nonnegative_counter(data.get("scored_attempts")),
+                        "judge_failures": judge_failures,
                         "recovered_attempts_total": _nonnegative_counter(data.get("recovered_attempts_total")),
                         "recovered_attempts": data.get("recovered_attempts", []),
                         "recovered_trial_failures": data.get("recovered_trial_failures", []),
@@ -864,6 +905,9 @@ def load_agent_data(
                     if not isinstance(reward, dict):
                         rewards_complete = False
                         continue
+                    # Derive links from the bounded, admitted on-disk layout rather
+                    # than accepting verifier-authored paths as provenance.
+                    reward["_activation_artifacts"] = {"reward": reward_file.relative_to(results_dir).as_posix()}
                     if not reward.get("entry_id"):
                         reward["entry_id"] = trial_dir.name.split("__", 1)[0] if trial_dir.name else "unknown"
                     result_file = trial_dir / "result.json"
@@ -883,6 +927,9 @@ def load_agent_data(
                             artifact="trajectory",
                         )
                         if isinstance(trajectory, dict):
+                            reward["_activation_artifacts"]["trajectory"] = trajectory_file.relative_to(
+                                results_dir
+                            ).as_posix()
                             final_metrics = trajectory.get("final_metrics", {})
                             if not isinstance(final_metrics, dict):
                                 final_metrics = {}

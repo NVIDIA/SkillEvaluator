@@ -33,6 +33,7 @@ skill-evaluation:
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
 # Job duration must be a literal; GitLab 17.8 does not expand CI variables here.
+# Tier 2 inherits this timeout and other shared overrides, such as runner tags.
 skill-evaluation-native:
   timeout: 5 hours
 

@@ -4,10 +4,13 @@
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 from skillevaluator.evaluation.tier3_findings import failure_reason
 from skillevaluator.tier3.eval_core.declarative_checks import (
     combine_behavior_check,
     evaluate_declarative_checks,
+    mark_no_skill_script_checks,
     validate_declarative_checks,
 )
 from skillevaluator.tier3.harbor.adapter import _copy_verifier
@@ -55,6 +58,56 @@ def test_command_succeeded_requires_invocation_and_recorded_success():
     assert _evaluate(check, calls=[_call("python other.py", observation="Exit code: 0")])["passed"] is False
 
 
+def test_command_succeeded_uses_anchored_shared_exit_status():
+    check = {"type": "command_succeeded", "script": "scripts/x.py"}
+
+    failed = _evaluate(check, calls=[_call("python scripts/x.py", observation="Process exited with code 2")])
+    passed = _evaluate(check, calls=[_call("python scripts/x.py", observation="Process exited with code 0")])
+    claude_success = _evaluate(
+        check,
+        calls=[
+            _call(
+                "python scripts/x.py",
+                observation="pytest exit code: 1 (1 failed)",
+                is_error=False,
+            )
+        ],
+    )
+
+    assert failed["passed"] is False
+    assert passed["passed"] is True
+    assert claude_success["passed"] is True
+
+
+@pytest.mark.parametrize(
+    ("command", "observation"),
+    [
+        ("python scripts/x.py | tail -20", "Process exited with code 0"),
+        ("python scripts/x.py || true", "Process exited with code 0"),
+        ("python scripts/x.py; echo done", "Process exited with code 0"),
+        ("bash -c 'python scripts/x.py; echo done'", "Process exited with code 0"),
+        ("python scripts/x.py && pytest -q", "Process exited with code 1"),
+    ],
+)
+def test_command_succeeded_does_not_attribute_shell_tail_status(command, observation):
+    result = _evaluate(
+        {"type": "command_succeeded", "script": "scripts/x.py"},
+        calls=[_call(command, observation=observation)],
+    )
+
+    assert result["passed"] is None
+    assert "could not be attributed" in result["reason"]
+
+
+def test_zero_exit_from_pure_and_chain_proves_script_success():
+    result = _evaluate(
+        {"type": "command_succeeded", "script": "scripts/x.py"},
+        calls=[_call("python scripts/x.py && pytest -q", observation="Process exited with code 0")],
+    )
+
+    assert result["passed"] is True
+
+
 def test_file_exists_uses_workspace_not_response_mentions(tmp_path: Path):
     check = {"type": "file_exists", "path": "out/report.md"}
     output = tmp_path / "out" / "report.md"
@@ -73,6 +126,35 @@ def test_final_response_checks_match_contains_and_regex():
     assert _evaluate({"type": "output_contains", "text": "Report ready"}, response="Still working")["passed"] is False
     assert _evaluate({"type": "output_matches", "pattern": r"Report \d+"}, response="Report 17")["passed"] is True
     assert _evaluate({"type": "output_matches", "pattern": r"Report \d+"}, response="No report")["passed"] is False
+
+
+def test_runtime_invalid_regex_and_unknown_check_are_not_checked():
+    invalid_regex = _evaluate({"type": "output_matches", "pattern": "["}, response="ready")
+    unknown = _evaluate({"type": "made_up", "value": "x"})
+    malformed_type = _evaluate({"type": []})
+
+    assert invalid_regex["passed"] is None
+    assert "not a valid regular expression" in invalid_regex["reason"]
+    assert unknown["passed"] is None
+    assert "Unknown check type" in unknown["reason"]
+    assert malformed_type["passed"] is None
+    assert "Unknown check type" in malformed_type["reason"]
+
+
+def test_skill_script_checks_are_not_applicable_without_the_skill():
+    checks = [{"type": "script_invoked", "script": "scripts/x.py"}]
+    results = [{"type": "script_invoked", "passed": False, "reason": "not invoked"}]
+
+    marked = mark_no_skill_script_checks(
+        checks,
+        results,
+        has_skill=False,
+        skill_metrics_on=False,
+        evaluated_skill="demo",
+    )
+
+    assert marked[0]["passed"] is None
+    assert marked[0]["reason"] == "skill script; not applicable without the skill"
 
 
 def test_not_checked_items_are_excluded_and_coverage_is_reported():
@@ -114,6 +196,17 @@ def test_checks_only_compute_behavior_score_without_a_judge_result():
 
     assert result["score"] == 1.0
     assert result["status"] == "accepted"
+    assert result["reason"] == "Checked directly: 1, judged: 0, not checked: 0"
+
+
+def test_not_applicable_judge_reason_is_dropped_when_checks_are_scored():
+    result = combine_behavior_check(
+        {"score": None, "status": "not_applicable", "reason": "No expected behaviors", "results": []},
+        [{"type": "output_contains", "passed": True, "reason": "found"}],
+        judged_count=0,
+    )
+
+    assert result["reason"] == "Checked directly: 1, judged: 0, not checked: 0"
 
 
 def test_behavior_coverage_and_failure_reasons_reach_report_details():
@@ -130,6 +223,21 @@ def test_behavior_coverage_and_failure_reasons_reach_report_details():
     assert "Expected final response text" in _collect_fail_reasons("behavior_check", trials)
     assert "Checked directly: 1, judged: 0, not checked: 0" in _collect_pass_reasons("behavior_check", trials)
     assert "Checked directly: 1, judged: 0, not checked: 0" in failure_reason(detail)
+
+
+def test_pass_reasons_count_only_judged_behavior_results():
+    detail = {
+        "reason": "Checked directly: 1, judged: 1, not checked: 0",
+        "results": [
+            {"type": "output_contains", "passed": True, "reason": "found"},
+            {"step": 1, "passed": False, "reason": "not observed"},
+        ],
+    }
+
+    reasons = _collect_pass_reasons("behavior_check", [{"detail": detail}])
+
+    assert "0/1 expected behaviors observed" in reasons
+    assert not any("expected behaviors observed" in reason and "0/1" not in reason for reason in reasons)
 
 
 def test_unknown_check_type_lists_supported_types():

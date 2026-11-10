@@ -3817,6 +3817,13 @@ def main():
                 final_response="",
                 workspace_roots=_declarative_workspace_roots(),
             )
+            direct_results = _shared_declarative_checks.mark_no_skill_script_checks(
+                declarative_checks,
+                direct_results,
+                has_skill=entry.get("has_skill", True),
+                skill_metrics_on=skill_metrics_on,
+                evaluated_skill=evaluated_skill,
+            )
             judged_count = len(expected_behavior) if _has_judge_reference(expected_behavior) else 0
             base_behavior = {
                 "score": judge_scores["behavior_check"],
@@ -3967,6 +3974,13 @@ def main():
                 tool_calls=tool_calls,
                 final_response=_get_final_response(traj),
                 workspace_roots=_declarative_workspace_roots(),
+            )
+            direct_results = _shared_declarative_checks.mark_no_skill_script_checks(
+                declarative_checks,
+                direct_results,
+                has_skill=entry.get("has_skill", True),
+                skill_metrics_on=skill_metrics_on,
+                evaluated_skill=evaluated_skill,
             )
             judged_count = len(expected_behavior) if _has_judge_reference(expected_behavior) else 0
             bc_result = _shared_declarative_checks.combine_behavior_check(bc_result, direct_results, judged_count)

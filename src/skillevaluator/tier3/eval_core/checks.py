@@ -50,6 +50,20 @@ _mark_quoted_syntax = _shell_lexing._mark_quoted_syntax
 _keep_attached_descriptors = _shell_lexing._keep_attached_descriptors
 _shell_tokens = _shell_lexing._shell_tokens
 
+_EXIT_STATUS_RE = re.compile(
+    r"^[ \t]*\[?(?:exit_code|exit[ \t]+code|return_code|return[ \t]+code|"
+    r"process[ \t]+exited[ \t]+with[ \t]+code)\]?[ \t]*[=:]?[ \t]*(-?\d+)\]?[ \t]*\r?$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _exit_status(tc: dict[str, Any]) -> int | None:
+    if tc.get("is_error") is False:
+        return 0
+    match = _EXIT_STATUS_RE.search(str(tc.get("observation", "")))
+    return int(match.group(1)) if match else None
+
+
 _ALLEXPORT_MARK = _script_invocation._ALLEXPORT_MARK
 _ARITHMETIC_ASSIGNMENT_RE = _script_invocation._ARITHMETIC_ASSIGNMENT_RE
 _ARITHMETIC_EXPANSION_RE = _script_invocation._ARITHMETIC_EXPANSION_RE
@@ -4562,11 +4576,6 @@ def check_error_recovery(
 
     # Only complete status lines are execution evidence; source code and prose
     # may mention exit_code=1 without describing this command's outcome.
-    exit_status_re = re.compile(
-        r"^[ \t]*\[?(?:exit_code|exit[ \t]+code|process[ \t]+exited[ \t]+with[ \t]+code)"
-        r"\]?[ \t]*[=:]?[ \t]*(-?\d+)\]?[ \t]*\r?$",
-        re.IGNORECASE | re.MULTILINE,
-    )
     # A type annotation such as `error: str | None = None` or `timeout: float = 30.0`
     # is displayed source, not a diagnostic.
     not_annotation = (
@@ -4679,7 +4688,7 @@ def check_error_recovery(
             output = unified_output.group(1)
         else:
             # Other converters emit status/exit_code lines without an envelope.
-            output = exit_status_re.sub("", observation)
+            output = _EXIT_STATUS_RE.sub("", observation)
             output = re.sub(
                 r"^[ \t]*status=(?:completed|failed|error)[ \t]*\r?$",
                 "",
@@ -4700,14 +4709,6 @@ def check_error_recovery(
             for word in segments[end]
         )
         return all(counts and re.fullmatch(r"(?:.*:)?0", line) for line in lines)
-
-    def _exit_status(tc: dict[str, Any]) -> int | None:
-        # Harbor marks Claude Code results that exited 0 with tool_result_is_error
-        # false and adds an exit status line only to failures.
-        if tc.get("is_error") is False:
-            return 0
-        status = exit_status_re.search(str(tc.get("observation", "")))
-        return int(status.group(1)) if status else None
 
     def _is_failure(tc: dict[str, Any]) -> bool:
         obs = str(tc.get("observation", ""))

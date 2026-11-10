@@ -117,7 +117,9 @@ also requires recorded success; an invocation without an exit result is not
 checked. `file_exists` inspects the post-run workspace, not a path merely
 mentioned in the response. `output_matches` uses a regular expression and
 `output_contains` uses a literal substring; both inspect the final response.
-Unknown check types and invalid fields are dataset-validation errors.
+Unknown check types and invalid fields are dataset-validation errors. On a
+without-skill baseline, checks for scripts inside the evaluated skill are not
+checked because that skill is not installed.
 
 <AccordionGroup>
   <Accordion title="Legacy flat format">

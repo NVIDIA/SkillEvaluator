@@ -8,11 +8,19 @@ from pathlib import Path
 from typing import Any
 
 if __package__:
-    from skillevaluator.tier3.eval_core.checks import _command_text, _is_execution_action, _tool_call_shell
-    from skillevaluator.tier3.eval_core.script_invocation import _cmd_executes_script
+    from skillevaluator.tier3.eval_core import script_invocation as _script_invocation
+    from skillevaluator.tier3.eval_core.checks import (
+        _command_text,
+        _exit_status,
+        _is_execution_action,
+        _tool_call_shell,
+    )
 else:
-    from checks import _command_text, _is_execution_action, _tool_call_shell
-    from script_invocation import _cmd_executes_script
+    import script_invocation as _script_invocation
+    from checks import _command_text, _exit_status, _is_execution_action, _tool_call_shell
+
+_cmd_executes_script = _script_invocation._cmd_executes_script
+_SHELL_SEPARATORS = _script_invocation._SHELL_SEPARATORS
 
 SUPPORTED_CHECK_TYPES = (
     "script_invoked",
@@ -21,7 +29,6 @@ SUPPORTED_CHECK_TYPES = (
     "output_matches",
     "output_contains",
 )
-_EXIT_STATUS_RE = re.compile(r"\b(?:exit(?:\s+|_)?code|return(?:\s+|_)?code)\s*[:=]?\s*(-?\d+)\b", re.IGNORECASE)
 
 
 def validate_declarative_checks(value: object) -> list[str]:
@@ -80,15 +87,66 @@ def _invocations(tool_calls: list[dict[str, Any]], script: str) -> list[dict[str
     return calls
 
 
-def _exit_status(call: dict[str, Any]) -> int | None:
-    observation = str(call.get("observation", ""))
-    match = _EXIT_STATUS_RE.search(observation)
-    if match:
-        return int(match.group(1))
-    is_error = call.get("is_error")
-    if isinstance(is_error, bool):
-        return 1 if is_error else 0
-    return None
+def _script_exit_status(call: dict[str, Any], script: str) -> int | None:
+    status = _exit_status(call)
+    if status is None:
+        return None
+    command = _command_text(call)
+    tokens = _script_invocation._shell_tokens(command)
+    if any(
+        token
+        in {
+            "(",
+            ")",
+            "{",
+            "}",
+            "if",
+            "then",
+            "else",
+            "elif",
+            "fi",
+            "for",
+            "while",
+            "until",
+            "select",
+            "do",
+            "done",
+            "case",
+            "esac",
+        }
+        or re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", token)
+        for token in tokens
+    ):
+        return None
+    segments: list[list[str]] = [[]]
+    separators: list[str] = []
+    for token in tokens:
+        if token in _SHELL_SEPARATORS:
+            if not segments[-1]:
+                return None
+            separators.append(token)
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    if not segments[-1]:
+        return None
+    shell, modelled = _tool_call_shell(call)
+    if not modelled:
+        return None
+    invocations = [
+        index
+        for index, segment in enumerate(segments)
+        if _cmd_executes_script(" ".join(segment), script, _shell=shell) is True
+    ]
+    if not invocations:
+        return None
+    last_invocation = invocations[-1]
+    following = separators[last_invocation:]
+    if any(separator != "&&" for separator in following):
+        return None
+    if last_invocation < len(segments) - 1 and status != 0:
+        return None
+    return status
 
 
 def _file_exists(path: str, roots: list[Path]) -> bool | None:
@@ -125,8 +183,19 @@ def evaluate_declarative_checks(
         return results
     for check in checks:
         if not isinstance(check, dict):
+            results.append({"type": None, "passed": None, "reason": "Declarative check must be an object"})
             continue
         check_type = check.get("type")
+        if not isinstance(check_type, str) or check_type not in SUPPORTED_CHECK_TYPES:
+            supported = ", ".join(SUPPORTED_CHECK_TYPES)
+            results.append(
+                {
+                    "type": check_type,
+                    "passed": None,
+                    "reason": f"Unknown check type {check_type!r}; supported types: {supported}",
+                }
+            )
+            continue
         expected = check.get({"script_invoked": "script", "command_succeeded": "script"}.get(check_type, ""))
         if check_type == "script_invoked":
             passed = bool(_invocations(tool_calls, str(expected)))
@@ -137,7 +206,7 @@ def evaluate_declarative_checks(
             )
         elif check_type == "command_succeeded":
             invocations = _invocations(tool_calls, str(expected))
-            statuses = [_exit_status(call) for call in invocations]
+            statuses = [_script_exit_status(call, str(expected)) for call in invocations]
             if not invocations:
                 passed = False
                 reason = f"Expected {expected} to exit successfully, but it was not invoked"
@@ -146,7 +215,12 @@ def evaluate_declarative_checks(
                 reason = f"Expected {expected} to exit successfully; it exited 0"
             elif any(status is None for status in statuses):
                 passed = None
-                reason = f"Expected {expected} to exit successfully, but exit status was not recorded"
+                if any(_exit_status(call) is not None for call in invocations):
+                    reason = (
+                        f"Expected {expected} to exit successfully, but shell command status could not be attributed"
+                    )
+                else:
+                    reason = f"Expected {expected} to exit successfully, but exit status was not recorded"
             else:
                 passed = False
                 status = statuses[-1]
@@ -171,13 +245,53 @@ def evaluate_declarative_checks(
             )
         elif check_type == "output_matches":
             expected = check.get("pattern", "")
-            passed = re.search(str(expected), final_response) is not None
-            reason = (
-                f"Final response matches /{expected}/" if passed else f"Expected final response to match /{expected}/"
-            )
+            try:
+                passed = re.search(str(expected), final_response) is not None
+            except re.error as exc:
+                passed = None
+                reason = f"Could not check output pattern because it is not a valid regular expression: {exc}"
+            else:
+                reason = (
+                    f"Final response matches /{expected}/"
+                    if passed
+                    else f"Expected final response to match /{expected}/"
+                )
         else:
-            continue
+            raise AssertionError(f"Unhandled declarative check type: {check_type}")
         results.append({"type": check_type, "passed": passed, "reason": reason, "expected": expected})
+    return results
+
+
+def mark_no_skill_script_checks(
+    checks: object,
+    results: list[dict[str, Any]],
+    *,
+    has_skill: object,
+    skill_metrics_on: bool,
+    evaluated_skill: str,
+) -> list[dict[str, Any]]:
+    if has_skill is not False or skill_metrics_on or not evaluated_skill or not isinstance(checks, list):
+        return results
+    skill_root = (Path("/workspace/skills") / evaluated_skill).resolve(strict=False)
+    for check, result in zip(checks, results, strict=False):
+        if (
+            not isinstance(check, dict)
+            or check.get("type") not in {"script_invoked", "command_succeeded"}
+            or not isinstance(check.get("script"), str)
+        ):
+            continue
+        script_path = Path(check["script"])
+        candidates = (
+            [script_path] if script_path.is_absolute() else [Path.cwd() / script_path, skill_root / script_path]
+        )
+        for candidate in candidates:
+            try:
+                candidate.resolve(strict=False).relative_to(skill_root)
+            except ValueError:
+                continue
+            result["passed"] = None
+            result["reason"] = "skill script; not applicable without the skill"
+            break
     return results
 
 
@@ -204,6 +318,8 @@ def combine_behavior_check(
     result["score"] = score
     result["status"] = "error" if has_judge_error else "accepted" if score is not None else "not_applicable"
     old_reason = str(judge_result.get("reason") or "").strip()
+    if judge_result.get("status") == "not_applicable" and checked:
+        old_reason = ""
     result["reason"] = f"{old_reason}; {summary}" if old_reason else summary
     judged_results = judge_result.get("results")
     judged_items = (

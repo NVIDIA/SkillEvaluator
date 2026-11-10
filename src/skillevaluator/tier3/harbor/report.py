@@ -517,8 +517,9 @@ def _collect_pass_reasons(metric: str, trials: list[dict[str, Any]]) -> list[str
         if metric == "behavior_check":
             raw_results = detail.get("results")
             results = [item for item in raw_results if isinstance(item, dict)] if isinstance(raw_results, list) else []
-            passed_count = sum(1 for result in results if result.get("passed") is True)
-            total = len(results)
+            judged_results = [result for result in results if result.get("step") is not None]
+            passed_count = sum(1 for result in judged_results if result.get("passed") is True)
+            total = len(judged_results)
             if total:
                 reasons.append(f"{passed_count}/{total} expected behaviors observed")
             if reason := _bounded_reason_text(detail.get("reason")):

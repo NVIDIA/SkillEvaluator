@@ -2422,7 +2422,10 @@ class SecurityValidator(ValidatorBase):
         its scan does not inspect, so their missing references are not
         accepted. A configured ``target_root`` replaces the target, such as
         the folder of skills that a skill passed here belongs to. A scan run
-        outside this walk has no known target and accepts none.
+        outside this walk accepts missing references only when the configured
+        ``skillspector_reference_root`` is the scanned root. Otherwise, as for
+        the per-partition scans of ``tier1/plugin_checks.py``, it has no known
+        target and accepts none.
         """
         blocks: list[dict] = []
 

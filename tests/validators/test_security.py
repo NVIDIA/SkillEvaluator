@@ -9629,6 +9629,25 @@ class TestSkillspectorMissingReferences:
         assert validator._run_skillspector(skill).incomplete_scans == ["skillspector"]
 
     @patch("skillevaluator.validators.security.Tools")
+    def test_scan_outside_a_validated_target_uses_the_configured_reference_root(
+        self, mock_tools, tmp_path: Path
+    ) -> None:
+        """A direct scan accepts missing references only when the configured reference root is the scanned root."""
+        skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True, stdout=json.dumps(_reference_report("2.13.3")), stderr="", exit_code=0
+        )
+
+        own_root = SecurityValidator(use_llm=False, skillspector_reference_root=skill)._run_skillspector(skill)
+        outer_root = SecurityValidator(use_llm=False, skillspector_reference_root=tmp_path)._run_skillspector(skill)
+
+        assert own_root.incomplete_scans == []
+        assert own_root.warnings == [_missing_reference_warning("SKILL.md:10 [reference_resolution; reference_missing]")]
+        assert outer_root.incomplete_scans == ["skillspector"]
+        assert not outer_root.warnings
+
+    @patch("skillevaluator.validators.security.Tools")
     def test_folder_without_skills_is_scanned_as_a_whole(self, mock_tools, tmp_path: Path) -> None:
         """A folder that holds no skill is scanned as one target, so it is its own reference root."""
         rules = _write_skill(

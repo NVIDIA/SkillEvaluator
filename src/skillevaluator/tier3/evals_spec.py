@@ -637,7 +637,9 @@ def _validate_dataset_contents(path: Path, results: list[CheckResult]) -> None:
                 "Deprecated eval dataset format: legacy flat entries are still accepted, "
                 "but new datasets should use the agentskills.io shape "
                 '{"skill_name": "...", "evals": [{"id": "...", "prompt": "...", '
-                '"expected_output": "..."}]}.',
+                '"expected_output": "..."}]}. '
+                "Preview migration with: skillevaluator tier3 migrate-dataset SOURCE --skill-name NAME; "
+                "write a new destination with --output DESTINATION.",
             )
         )
 

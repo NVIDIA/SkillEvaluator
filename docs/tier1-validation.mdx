@@ -83,7 +83,7 @@ for skills. Its Tier 1 LLM checks still run only when requested.
   skillevaluator validate ./my-skill --tiers 1 --llm --llm-verify
   ```
 
-  Confirmed findings keep their original severity. High-confidence false positives stay visible but are downgraded to INFO and carry verification metadata explaining the review. Static scanning always runs first — if a requested LLM stage is unavailable or returns unusable evidence, the run does not silently turn green. `security-scan` and `pii-scan` accept `--llm-verify` too.
+  Confirmed findings keep their original severity. High-confidence false positives stay visible but are downgraded to INFO and carry verification metadata explaining the review. Each finding that gets a verdict names the model that gave it as `llm_model_used` in its JSON metadata: the configured model, unless a Claude reply names a server-side fallback model that answered in its place. Static scanning always runs first — if a requested LLM stage is unavailable or returns unusable evidence, the run does not silently turn green. `security-scan` and `pii-scan` accept `--llm-verify` too.
 </Steps>
 
 Direct `tier1 PATH` and `tier1 validate PATH` print the terminal report and

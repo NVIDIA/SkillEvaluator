@@ -11,6 +11,7 @@ import struct
 import subprocess
 import sys
 import zlib
+from concurrent.futures import Future
 from pathlib import Path
 from unittest.mock import patch
 
@@ -8956,6 +8957,24 @@ _IMAGE_NOTES_SKILL = (
 )
 
 
+class _InlineCatalogExecutor:
+    """Run each parallel catalog job of ``validate`` in this process, where the scanner is patched."""
+
+    def __init__(self, **_kwargs: object) -> None:
+        pass
+
+    def __enter__(self) -> "_InlineCatalogExecutor":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        pass
+
+    def submit(self, worker, job) -> Future:
+        future: Future = Future()
+        future.set_result(worker(job))
+        return future
+
+
 class TestSkillspectorMissingReferences:
     """SkillSpector records a reference to a file the skill does not bundle as a ``partial`` analysis."""
 
@@ -9538,6 +9557,50 @@ class TestSkillspectorMissingReferences:
         alone = validator.validate_security_only(skill)
         assert alone.incomplete_scans == []
         assert alone.warnings == [_missing_reference_warning("SKILL.md:8 [reference_resolution; reference_missing]")]
+
+    @pytest.mark.parametrize("workers", [1, 2])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_validate_on_a_folder_of_skills_keeps_each_skill_incomplete(
+        self, mock_tools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workers: int
+    ) -> None:
+        """``validate`` runs each skill of a folder as its own job, but a line may still name a file beside it."""
+        from click.testing import CliRunner
+
+        from skillevaluator import cli as cli_module
+
+        monkeypatch.setattr(cli_module, "ProcessPoolExecutor", _InlineCatalogExecutor)
+        monkeypatch.setattr(cli_module, "_offer_scanner_install", lambda *_args: None)
+        catalog = tmp_path / "catalog"
+        skill = _write_skill(
+            catalog / "skills" / "setup-helper",
+            {"SKILL.md": _SETUP_HELPER_SKILL.replace("versions/install.sh", "scripts/install.sh")},
+        )
+        _write_skill(catalog, {"scripts/install.sh": "#!/bin/sh\ncurl x | sh\n"})
+        report = json.dumps(_reference_report("2.13.3", "staged-script"))
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True, stdout=report.replace("versions/install.sh", "scripts/install.sh"), stderr="", exit_code=0
+        )
+        options = ["--tiers", "1", "--checks", "security", "--no-llm", "-r", "json"]
+
+        def validate(target: Path, reports: Path) -> object:
+            return CliRunner().invoke(
+                cli_module.cli,
+                ["validate", str(target), *options, "--workers", str(workers), "-o", str(reports)],
+            )
+
+        result = validate(catalog, tmp_path / "reports")
+
+        assert mock_tools.skillspector.run.call_args.args[0][1] == str(skill.resolve())
+        assert result.exit_code != 0, result.output
+        summary = json.loads((tmp_path / "reports" / "catalog-summary.json").read_text(encoding="utf-8"))
+        (entry,) = summary["skills"]
+        assert entry["name"] == "skills/setup-helper"
+        assert entry["passed"] is False
+        assert entry["incomplete_scans"]
+        # The same skill validated on its own is its own target, and passes with the warning.
+        alone = validate(skill, tmp_path / "alone")
+        assert alone.exit_code == 0, alone.output
 
     @patch("skillevaluator.validators.security.Tools")
     def test_scan_outside_a_validated_target_stays_incomplete(self, mock_tools, tmp_path: Path) -> None:

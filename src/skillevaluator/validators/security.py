@@ -2000,6 +2000,7 @@ class SecurityValidator(ValidatorBase):
         content_type: str | None = None,
         skillspector_reference_root: Path | None = None,
         skillspector_baseline: Path | str | None = None,
+        target_root: Path | str | None = None,
     ):
         """Initialize with optional LLM analysis for deeper inspection.
 
@@ -2025,13 +2026,19 @@ class SecurityValidator(ValidatorBase):
                 References written relative to it still count as agent
                 references. Defaults to the scanned directory. Missing
                 references are accepted only in a scan of this root, or
-                without it, of the whole target of :meth:`validate` or
-                :meth:`validate_security_only`
+                without it, of *target_root* or else the whole target of
+                :meth:`validate` or :meth:`validate_security_only`
                 (:func:`_skillspector_missing_reference_notes`).
             skillspector_baseline: Audited SkillSpector YAML/JSON suppression
                 baseline. Matching findings are removed by SkillSpector before
                 scoring. Baselines are only applied when passed explicitly; one
                 shipped inside the scanned skill is never picked up on its own.
+            target_root: Root of the whole target when this validator is given
+                only part of it, such as one skill of a folder that
+                ``validate`` checks skill by skill. It replaces the target of
+                :meth:`validate` or :meth:`validate_security_only` as the root
+                that missing references are judged against, so a skill inside
+                it accepts none. Finding scoping is unchanged.
         """
         self._pii_patterns: dict | None = None
         self._submitter_override: set[str] | None = (
@@ -2050,8 +2057,9 @@ class SecurityValidator(ValidatorBase):
         self.skillspector_reference_root = (
             Path(skillspector_reference_root).resolve() if skillspector_reference_root is not None else None
         )
-        # The resolved target of the scan in progress; set only while
-        # _validate_with_applicability() walks it.
+        self.target_root = Path(target_root).resolve() if target_root is not None else None
+        # The resolved target of the scan in progress, or target_root; set only
+        # while _validate_with_applicability() walks it.
         self._scan_target_root: Path | None = None
         self.skillspector_baseline = (
             Path(skillspector_baseline).expanduser().resolve() if skillspector_baseline is not None else None
@@ -2253,8 +2261,9 @@ class SecurityValidator(ValidatorBase):
         directory but not a skill, each skill found in it is scanned on its
         own, and its instructions may name files elsewhere in the folder that
         its scan does not inspect, so their missing references are not
-        accepted. A scan run outside this walk has no known target and
-        accepts none.
+        accepted. A configured ``target_root`` replaces the target, such as
+        the folder of skills that a skill passed here belongs to. A scan run
+        outside this walk has no known target and accepts none.
         """
         blocks: list[dict] = []
 
@@ -2265,7 +2274,8 @@ class SecurityValidator(ValidatorBase):
                 blocks.append(block)
             return child
 
-        previous_target_root, self._scan_target_root = self._scan_target_root, skill_path.resolve()
+        target_root = self.target_root or skill_path.resolve()
+        previous_target_root, self._scan_target_root = self._scan_target_root, target_root
         try:
             result = self._validate_folder_or_skill(skill_path, validate_one, action_description=action_description)
         finally:
@@ -2569,8 +2579,8 @@ class SecurityValidator(ValidatorBase):
         warning instead. *scanned_root* is the directory the report's relative
         paths start from. *reference_root* is the root of the artifact that
         contains it: the validator's ``skillspector_reference_root``, or else
-        the target of the scan in progress. Missing references are accepted
-        only when it is *scanned_root*.
+        its ``target_root`` or the target of the scan in progress. Missing
+        references are accepted only when it is *scanned_root*.
         """
         partial_reported = False
         if "error" in data and data["error"] is not None:

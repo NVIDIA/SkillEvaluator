@@ -1351,6 +1351,8 @@ def _catalog_child_argv_from_ctx(
     if _report_formats_explicit():
         for fmt in params.get("report_formats") or ():
             argv.extend(["-r", fmt])
+    if catalog_root is not None:
+        argv.extend(["--catalog-root", str(catalog_root)])
     argv.extend(["-o", str(output_dir)])
     return argv
 
@@ -1509,6 +1511,7 @@ def _validate_catalog(
                 "content_type": "skill",
                 "output_dir": skill_output,
                 "results_dir": _catalog_results_dir(ctx, skill_dir, resolved_target),
+                "catalog_root": resolved_target,
             }
             reason = ""
             try:
@@ -1900,6 +1903,9 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help="Concurrent catalog skill jobs when validating a folder of skills. "
     "Values above 1 run skills in parallel processes and disable the per-skill pipeline view.",
 )
+# Set by a catalog run on each per-skill job: the folder of skills that the job's
+# skill belongs to, which the security check judges missing references against.
+@click.option("--catalog-root", type=click.Path(file_okay=False, path_type=Path), default=None, hidden=True)
 @click.option(
     "--dedup/--no-dedup",
     "--tier2/--no-tier2",
@@ -2158,6 +2164,7 @@ def validate(
     harbor_keep_jobs: bool,
     agent_runtime_preflight: bool | None,
     workers: int,
+    catalog_root: Path | None,
     evaluated_source_repository: str | None,
     evaluated_source_revision: str | None,
     evaluator_container_revision: str | None,
@@ -2370,6 +2377,7 @@ def validate(
         continue_on_failure=continue_on_failure,
         on_check=_on_check if quiet else None,
         skip=skip,
+        target_root=catalog_root.resolve() if catalog_root is not None else None,
     )
     # The raw pass/fail signal drives --fail-fast identically in both modes;
     # the DISPLAYED tier summary must reflect policy-finalized severities or

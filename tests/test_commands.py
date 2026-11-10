@@ -1839,6 +1839,7 @@ def test_catalog_child_argv_forwards_every_validate_option() -> None:
         "content_type": "the child re-detects the type of the single skill it is handed",
         "workers": "forwarding it would make each child fan out again",
         "output_dir": "each child is given its own per-skill output directory",
+        "catalog_root": "each child is given the folder it was found in, not the parent's own value",
     }
     source = inspect.getsource(_catalog_child_argv_from_ctx)
 

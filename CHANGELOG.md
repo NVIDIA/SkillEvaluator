@@ -139,8 +139,9 @@ All notable changes to SkillEvaluator are documented in this file.
   `.git` itself and hooks other than `*.sample` templates count. A lone file
   such as `SKILL.md` is scanned on its own, so a line that names a file beside
   it keeps the scan `INCOMPLETE`. Every missing reference in a skill scanned
-  on its own inside a folder or plugin, such as `security-scan` on a folder of
-  skills or `validate` on a plugin, also keeps that skill's scan `INCOMPLETE`.
+  on its own inside a folder or plugin, such as `security-scan` or `validate`
+  on a folder of skills, or `validate` on a plugin, also keeps that skill's
+  scan `INCOMPLETE`.
   A reference that matches several bundled files (`reference_unresolved` from
   v2.12.0), a fatal or other ledger row, an uninspected file, a degraded
   analyzer, a limitation, or fewer findings counted after filtering than

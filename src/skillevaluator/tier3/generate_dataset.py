@@ -59,6 +59,7 @@ from skillevaluator.constants import EXECUTABLE_SKILL_DIRS
 from skillevaluator.evaluation.results import DatasetGenerationError, DatasetGenerationResult
 from skillevaluator.tier3.dataset_utils import load_dataset_entries
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
+from skillevaluator.tier3.eval_core.optional_reference import normalize_expected_behaviors, normalize_optional_reference
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
 # Output budget for generation and refinement; OpenAI reasoning models get the
@@ -324,16 +325,27 @@ def _generate_simple(skill: dict[str, Any]) -> list[dict[str, Any]]:
     behaviors.append(_FINAL_RESPONSE_BEHAVIOR)
     behaviors.append(SECURITY_BEHAVIOR)
 
-    return [
-        {
-            "id": f"{name}-001",
-            "question": question,
-            "expected_skill": name,
-            "expected_script": script,
-            "ground_truth": f"The agent used the {name} skill and provided a response showing {desc.lower().rstrip('.')}",
-            "expected_behavior": behaviors,
-        }
-    ]
+    return _normalize_generated_cases(
+        [
+            {
+                "id": f"{name}-001",
+                "question": question,
+                "expected_skill": name,
+                "expected_script": script,
+                "ground_truth": f"The agent used the {name} skill and provided a response showing {desc.lower().rstrip('.')}",
+                "expected_behavior": behaviors,
+            }
+        ]
+    )
+
+
+def _normalize_generated_cases(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for case in cases:
+        if "expected_script" in case:
+            case["expected_script"] = normalize_optional_reference(case["expected_script"])
+        if "expected_behavior" in case:
+            case["expected_behavior"] = normalize_expected_behaviors(case["expected_behavior"])
+    return cases
 
 
 def _generate_full(skill: dict[str, Any]) -> list[dict[str, Any]]:
@@ -412,7 +424,7 @@ def _generate_full(skill: dict[str, Any]) -> list[dict[str, Any]]:
                 ],
             }
         )
-    return cases
+    return _normalize_generated_cases(cases)
 
 
 async def _generate_with_llm(
@@ -539,6 +551,13 @@ No other fields."""
 
         cases = json.loads(text)
         expected_count = 4 if full else 1
+        if isinstance(cases, list):
+            for case in cases:
+                if isinstance(case, dict):
+                    if "expected_script" in case:
+                        case["expected_script"] = normalize_optional_reference(case["expected_script"])
+                    if isinstance(case.get("expected_behavior"), list):
+                        case["expected_behavior"] = normalize_expected_behaviors(case["expected_behavior"])
         required_fields = {
             "id",
             "question",
@@ -560,7 +579,6 @@ No other fields."""
                 or not isinstance(case["ground_truth"], str)
                 or not case["ground_truth"].strip()
                 or not isinstance(case["expected_behavior"], list)
-                or not case["expected_behavior"]
                 or any(not isinstance(behavior, str) or not behavior.strip() for behavior in case["expected_behavior"])
                 for case in cases
             )
@@ -580,7 +598,7 @@ No other fields."""
             if behaviors and not any("secret" in b.lower() or "destructive" in b.lower() for b in behaviors):
                 behaviors.append(SECURITY_BEHAVIOR)
 
-        return cases
+        return _normalize_generated_cases(cases)
 
     except Exception as exc:
         from skillevaluator.inference.diagnostics import llm_failure_diagnostic

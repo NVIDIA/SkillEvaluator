@@ -110,6 +110,34 @@ class TestEffectiveChunkLimit:
 
 
 class TestIntraSkillValidatorValidate:
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_duplicate_shell_comments_at_eof_are_compared(
+        self, mock_embed, _mock_llm, mock_analyze, tmp_path: Path
+    ) -> None:
+        comments = (
+            "# Document the required setup before invoking this helper script.\n"
+            "# Use the configured workspace for every generated output file.\n"
+            "# Keep the source input unchanged while the helper processes it.\n"
+        )
+        (tmp_path / "first.sh").write_text("#!/bin/sh\necho ready\n" + comments, encoding="utf-8")
+        (tmp_path / "second.sh").write_text("#!/bin/sh\necho ready\n" + comments, encoding="utf-8")
+        mock_embed.return_value.embed.side_effect = _unit_embeddings(2)
+        mock_analyze.return_value = LLMVerdict(
+            verdict="DUPLICATE", confidence=0.9, reasoning="Repeated instructions", suggestion="Consolidate comments"
+        )
+
+        result = IntraSkillValidator().validate(tmp_path)
+
+        mock_embed.return_value.embed.assert_called_once()
+        assert len(mock_embed.return_value.embed.call_args.args[0]) == 2
+        mock_analyze.assert_called_once()
+        assert result.passed is False
+        assert len(result.findings) == 1
+        assert "first.sh" in result.findings[0].message
+        assert "second.sh" in result.findings[0].message
+
     def test_collection_log_uses_target_label_without_host_path(self, tmp_path: Path, caplog) -> None:
         skill_dir = tmp_path / "nested" / "external-skill"
         skill_dir.mkdir(parents=True)

@@ -281,6 +281,49 @@ def test_validate_helper_routes_environment_kwargs_to_shared_service(monkeypatch
     )
 
 
+def test_validate_helper_forwards_budget_options(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from skillevaluator import cli as cli_module
+    from skillevaluator.evaluation import tier3_report
+    from skillevaluator.models.result import ValidationResult
+
+    captured = {}
+    expected = ValidationResult(validator_name="AGENT_EVAL")
+    expected.add_success("agent_eval", "ok")
+    monkeypatch.setattr(
+        EvaluationService,
+        "evaluate",
+        lambda _self, options, **_kwargs: (
+            captured.update(options=options) or {"execution_status": "succeeded", "execution_errors": []}
+        ),
+        raising=True,
+    )
+    monkeypatch.setattr(tier3_report, "agent_eval_result_from_run", lambda *_args, **_kwargs: expected)
+    price_file = tmp_path / "prices.json"
+
+    actual = cli_module._run_agent_eval_or_skip(
+        FIXTURE,
+        agents="codex",
+        env_mode="docker",
+        skip_baseline=True,
+        n_concurrent=1,
+        max_agents=1,
+        max_agent_tokens=1000,
+        max_judge_calls=4,
+        max_attempts_total=8,
+        max_cost_usd=0.5,
+        price_file=price_file,
+        validate_source=False,
+    )
+
+    assert actual is expected
+    options = captured["options"]
+    assert options.max_agent_tokens == 1000
+    assert options.max_judge_calls == 4
+    assert options.max_attempts_total == 8
+    assert options.max_cost_usd == 0.5
+    assert options.price_file == price_file
+
+
 def _autopilot_skill(tmp_path: Path) -> Path:
     skill = tmp_path / "simple"
     shutil.copytree(FIXTURE, skill)
@@ -294,6 +337,35 @@ def _write_one_case(skill: Path, marker: str = "generated") -> None:
         json.dumps({"skill_name": skill.name, "evals": [{"id": f"{skill.name}-001", "prompt": marker}]}),
         encoding="utf-8",
     )
+
+
+def test_cli_evaluate_validates_cost_price_pair_after_config_merge(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.tier3 import evals_config
+
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: skill\ndescription: Test\n---\n", encoding="utf-8")
+    service_calls = []
+    config = {"harbor": {"max_cost_usd": 0.5}}
+    monkeypatch.setattr(evals_config, "load_evals_config", lambda _path: (config, None))
+    monkeypatch.setattr(
+        EvaluationService,
+        "evaluate",
+        lambda *_args, **_kwargs: service_calls.append(True) or {"execution_status": "succeeded"},
+    )
+
+    missing_price = CliRunner().invoke(cli, ["evaluate", str(skill), "--progress", "off"])
+    assert missing_price.exit_code == 2
+    assert "--max-cost-usd requires --price-file" in missing_price.output
+    assert not service_calls
+
+    config["harbor"]["price_file"] = "evals/prices.json"
+    configured_price = CliRunner().invoke(cli, ["evaluate", str(skill), "--progress", "off"])
+    assert configured_price.exit_code == 0, configured_price.output
+    assert service_calls
 
 
 def test_cli_autopilot_reuses_existing_dataset_unchanged_and_preserves_skip_baseline(

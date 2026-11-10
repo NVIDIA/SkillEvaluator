@@ -143,7 +143,7 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> dict[str, An
         "custom_dockerfile_mode",
     ):
         if params.get(name) is not None:
-            harbor[name] = params[name]
+            harbor[name] = str(params[name]) if name == "price_file" else params[name]
     for resource in ("cpus", "memory_mb", "storage_mb"):
         if params.get(f"override_{resource}") is not None:
             harbor.setdefault("resources", {})[resource] = params[f"override_{resource}"]

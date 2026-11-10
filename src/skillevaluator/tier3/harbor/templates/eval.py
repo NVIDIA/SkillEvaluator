@@ -2884,6 +2884,10 @@ def _record_judge_attempt(
     if score is not None:
         entry["score"] = score
     attempts.append(entry)
+    _write_judge_attempts(attempts)
+
+
+def _write_judge_attempts(attempts):
     try:
         path = _verifier_output_dir() / JUDGE_ATTEMPTS_FILE_NAME
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -3862,7 +3866,8 @@ def main():
     )
 
     # Every judge attempt below is saved to judge_attempts.json as it happens.
-    judge_evidence_token = _ACTIVE_JUDGE_EVIDENCE.set([])
+    judge_attempts = []
+    judge_evidence_token = _ACTIVE_JUDGE_EVIDENCE.set(judge_attempts)
     try:
         # ── Eval 4: accuracy (LLM judge) ─────────────────────────────────
         acc_result = _call_required_judge(
@@ -3901,6 +3906,7 @@ def main():
         details["behavior_check"] = bc_result
     finally:
         _ACTIVE_JUDGE_EVIDENCE.reset(judge_evidence_token)
+        _write_judge_attempts(judge_attempts)
 
     # persist refs + omission metadata onto the metric details
     attach_metric_evidence_refs(details, {m: bundles[m]["evidence_refs"] for m in bundles})

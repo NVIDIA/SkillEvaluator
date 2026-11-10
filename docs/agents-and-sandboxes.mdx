@@ -18,14 +18,82 @@ local, and cloud environment backends.
 
 Pass agents as a comma-separated list with `-a/--agents`. Without that option,
 SkillEvaluator selects the provider-native default: `opencode` for NVIDIA Build,
-`codex` for OpenAI, and `claude-code` for Anthropic. Three agents are supported:
+`codex` for OpenAI, and `claude-code` for Anthropic. Three agents are supported,
+with Hermes available as an explicit experimental option:
 
 | Agent | Notes |
 | --- | --- |
 | `claude-code` | Anthropic's Claude Code CLI. `claude` is an accepted alias. Harbor installs Claude Code 2.1.292. Claude 5.5 and later models run with `reasoning_effort=medium`; older models keep Claude Code's default effort. |
 | `codex` | OpenAI's Codex CLI. The OpenAI-provider default. Harbor installs Codex 0.161.0. Runs with `reasoning_effort=high` so scores and cost stay comparable across Harbor releases. |
 | `opencode` | The OpenCode CLI. Harbor installs OpenCode 1.19.5. |
+| `hermes` | Experimental. Hermes v2026.9.24, Docker with NVIDIA Build only; no OpenRouter fallback. |
 
+### Experimental Hermes
+
+Hermes uses NVIDIA Build directly, not a protocol bridge. The initial matrix is
+`--agents hermes --env-mode docker` with `SKILL_EVAL_LLM_PROVIDER=nv_build` and
+`NVIDIA_API_KEY`. Local mode, Kata, cloud backends, and other evaluator providers
+are rejected before execution. OpenCode remains the NVIDIA Build default.
+The compatibility smoke uses Linux amd64, Docker Engine 29.9.3, Harbor 0.24.0,
+and the Hermes/model versions below.
+
+```bash title="Run Hermes with NVIDIA Build"
+export SKILL_EVAL_LLM_PROVIDER=nv_build
+export NVIDIA_API_KEY='nvapi-...'
+skillevaluator doctor --agents hermes --env-mode docker
+skillevaluator tier3 evaluate ./my-skill --agents hermes --env-mode docker \
+  --harbor-keep-jobs
+```
+
+The Hermes default is `nvidia/nemotron-3.5-super-vl-120b-a12b`. Override it with
+`--agent-model hermes=publisher/model` or `harbor.agents.hermes.model` in
+`evals/config.yml`; model IDs must be full NVIDIA Build catalog IDs, without an
+extra agent-provider prefix. Account access and tool support still depend on
+the selected model. The grader model is independent; set
+`SKILL_EVAL_LLM_MODEL` to a model your Build account can invoke for grading.
+
+Harbor 0.24.0 supplies session export and ATIF conversion. SkillEvaluator pins
+both the installer and checkout to Hermes commit
+`f97608f178d1ffeca59860195ab7da295f7c8e5f` (v2026.9.24). The installer needs
+GitHub and Python/Node package download access; first installs may take several
+minutes. Browser and computer-use dependencies are not installed. Only the
+selected NVIDIA credential reaches the agent; an ambient `OPENROUTER_API_KEY`
+does not enable fallback.
+
+Both arms use the same cases, inputs, model and grader. Hermes starts without
+bundled skills or persistent memories; only evaluator-staged skills are copied
+to `/tmp/hermes/skills`. Successful `skill_view` manifest reads and terminal
+calls are normalized for the existing activation and grading checks. Failed
+reads and support-file reads do not establish activation. Session export is
+attempted on errors and timeouts too; a missing/malformed session or a session
+without an agent response is an execution failure, not a scored skill defect.
+
+Retained jobs include `trajectory.json` and `hermes.txt`; normal bounded,
+redacted diagnostic retention applies. Token counts come from Hermes session
+totals (or per-message usage when present); cost, cached tokens and other unreported fields remain
+unknown rather than estimated as zero. Tool approval is noninteractive inside
+the Docker sandbox, as for the other installed harnesses.
+
+The repeatable smoke dataset is
+[`tests/fixtures/skills/lookup-code`](https://github.com/NVIDIA/SkillEvaluator/tree/main/tests/fixtures/skills/lookup-code):
+one script-backed skill lookup and one arithmetic non-trigger case. To validate
+your own installation, run both arms without early stopping:
+
+```bash title="Hermes compatibility smoke from a source checkout"
+SKILL_EVAL_LLM_MODEL=nvidia/nemotron-3.5-super-vl-120b-a12b \
+  skillevaluator tier3 evaluate tests/fixtures/skills/lookup-code \
+  --agents hermes --env-mode docker --n-attempts 1 --n-concurrent 1 \
+  --no-stop-on-pass --harbor-keep-jobs
+```
+
+An opt-in integration test checks the four trials, native activation, terminal
+conversion, diagnostics and nonzero token usage. It installs the harness in
+Docker and makes real API calls (including grading):
+
+```bash
+SKILL_EVAL_HERMES_INTEGRATION=1 python -m pytest -m integration \
+  tests/test_hermes_agent.py -k real_hermes
+```
 The pinned CLI releases apply wherever Harbor installs the agent: Docker and
 the remote environments. [Local mode](#local-mode) runs the CLI already on your
 machine instead.
@@ -528,6 +596,15 @@ agent process killed is the classic out-of-memory symptom; raise
 `--override-memory-mb` first.
 
 ### Custom Dockerfiles
+
+Declare system tools in `scripts/apt-packages.txt` and Python packages in
+`scripts/requirements.txt` anywhere under the skill directory. These files are
+auto-installed only when there is no custom `evals/environment/Dockerfile`.
+With a custom Dockerfile, install those dependencies there yourself. A required
+tool or module that is unavailable makes the case `environment_invalid` and
+UNSCORED, not a skill defect; the report names the missing dependency and fix.
+When an import or executable name differs from its package name, the report
+asks you to install the package that provides it or ship it with the skill.
 
 When a skill ships its own `evals/environment/Dockerfile`,
 `--custom-dockerfile-mode` decides how it combines with the eval image:

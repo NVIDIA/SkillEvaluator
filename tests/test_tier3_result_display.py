@@ -12,6 +12,7 @@ import pytest
 from rich.console import Console
 from rich.panel import Panel
 
+from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
@@ -36,15 +37,279 @@ def test_overall_lift_headline_preserves_signed_persisted_value_and_original_tab
         },
     }
     original = deepcopy(result)
-    output = render_result(result)
+    output = " ".join(render_result(result).splitlines())
 
     assert re.search(rf"OVERALL SKILL LIFT\s+{re.escape(f'{delta:+.2f}')}", output)
     assert output.index("OVERALL SKILL LIFT") < output.index("With Skill")
     assert output.count("Results by Evaluator") == 1
     assert output.count("Results by Dimension") == 1
     assert "Skill Lift" in output
+    assert SKILL_LIFT_DEFINITION in output
     assert "█" in output
     assert result == original
+
+
+def test_case_summary_names_pass_at_k_difference_and_threshold() -> None:
+    result = {
+        "attempt_policy": {"max_attempts": 2, "pass_threshold": 0.6},
+        "agents": {
+            "codex": {
+                "execution_status": "succeeded",
+                "pass_at_k": {
+                    "with_skill": {
+                        "k": 2,
+                        "pass_threshold": 0.6,
+                        "rate": 0.75,
+                        "cases": {"case": {"attempts": [{"passed": True, "score": 0.8}]}},
+                    },
+                    "without_skill": {
+                        "k": 2,
+                        "pass_threshold": 0.6,
+                        "rate": 0.5,
+                        "cases": {"case": {"attempts": [{"passed": False, "score": 0.4}]}},
+                    },
+                    "lift": {"delta": 0.25},
+                },
+            }
+        },
+    }
+
+    output = " ".join(render_result(result).splitlines())
+
+    assert (
+        "Pass@2 (supporting reliability: share of cases with a passing attempt, "
+        "attempt passes at Overall ≥ 0.60)" in output
+    )
+    assert "Pass-rate difference +25.0 percentage points" in output
+
+
+def test_case_summary_does_not_show_zero_difference_without_baseline() -> None:
+    result = {
+        "attempt_policy": {"max_attempts": 2, "pass_threshold": 0.6},
+        "agents": {
+            "codex": {
+                "execution_status": "succeeded",
+                "pass_at_k": {
+                    "with_skill": {
+                        "k": 2,
+                        "pass_threshold": 0.6,
+                        "rate": 0.5,
+                        "cases": {"case": {"attempts": [{"passed": False, "score": 0.4}]}},
+                    },
+                    "lift": {"delta": 0.0},
+                },
+            }
+        },
+    }
+
+    output = render_result(result)
+
+    assert "Pass-rate difference N/A" in output
+    assert "Pass-rate difference +0.0" not in output
+
+
+def test_required_check_verdict_precedes_counts_and_positive_lift_is_reference() -> None:
+    result = {
+        "execution_status": "succeeded",
+        "agents": {
+            "codex": {
+                "execution_status": "succeeded",
+                "lift": {"overall": {"with_skill": 0.8, "without_skill": 0.6, "delta": 0.2}},
+                "pass_at_k": {
+                    "with_skill": {
+                        "required_checks": {"passed": 1, "scored": 2, "wrong_answer": 1, "security": 0},
+                        "correct_answers": {"correct": 1, "scored": 2},
+                        "security_clean": {"clean": 2, "scored": 2},
+                        "cases": {
+                            "wrong-case": {
+                                "passed": False,
+                                "attempts_used": 1,
+                                "best_score": 0.82,
+                                "attempt_details_total": 1,
+                                "attempt_details_shown": 0,
+                                "reason": "goal not met (goal accuracy 0.00)",
+                                "warnings": ["missed expected step 1 of 1 (behavior 0.00)"],
+                                "attempts": [],
+                            }
+                        },
+                    },
+                    "without_skill": {
+                        "required_checks": {"passed": 2, "scored": 2, "wrong_answer": 0, "security": 0},
+                        "correct_answers": {"correct": 2, "scored": 2},
+                        "security_clean": {"clean": 2, "scored": 2},
+                        "cases": {},
+                    },
+                },
+            }
+        },
+    }
+
+    output = render_result(result)
+
+    assert "QUALITY VERDICT: FAIL — 1 of 2 cases failed: 1 goal not met" in output
+    assert "OVERALL SKILL LIFT (for reference)" in output
+    assert "REQUIRED CHECKS PASSED   1/2 | 2/2 | -1" in output
+    assert "GOALS MET   1/2 | 2/2 | -1" in output
+    assert "SECURITY CLEAN   2/2 | 2/2 | +0" in output
+    assert "FAIL: goal not met (goal accuracy 0.00)" in output
+    assert "WARNING: missed expected step 1 of 1 (behavior 0.00)" in output
+    assert "0.82" in output
+    assert output.index("QUALITY VERDICT") < output.index("REQUIRED CHECKS PASSED")
+    assert output.index("SECURITY CLEAN") < output.index("With Skill")
+
+
+def test_multi_agent_headlines_label_agents_and_render_with_skill_counts_alone() -> None:
+    def agent(passed: int, *, case_id: str) -> dict:
+        return {
+            "execution_status": "succeeded",
+            "pass_at_k": {
+                "with_skill": {
+                    "required_checks": {"passed": passed, "scored": 1, "wrong_answer": 1 - passed, "security": 0},
+                    "correct_answers": {"correct": passed, "scored": 1},
+                    "security_clean": {"clean": 1, "scored": 1},
+                    "cases": {case_id: {"passed": bool(passed), "attempts_used": 1, "best_score": 0.8, "attempts": []}},
+                },
+                "without_skill": {},
+            },
+        }
+
+    result = {
+        "execution_status": "succeeded",
+        "agents": {"codex": agent(0, case_id="codex-case"), "claude": agent(1, case_id="claude-case")},
+    }
+    output = io.StringIO()
+
+    render_evaluation_result(result, console=Console(file=output, width=160, color_system=None), verbose=False)
+
+    rendered = output.getvalue()
+    assert rendered.count("RUN QUALITY VERDICT:") == 1
+    assert "RUN QUALITY VERDICT: PASS" in rendered
+    assert "QUALITY VERDICT (codex): FAIL" in rendered
+    assert "QUALITY VERDICT (claude): PASS" in rendered
+    assert "REQUIRED CHECKS PASSED (codex)   0/1 | N/A | N/A" in rendered
+    assert "GOALS MET (claude)   1/1 | N/A | N/A" in rendered
+
+
+def test_default_case_first_display_includes_verdict_and_counts_before_cases() -> None:
+    result = {
+        "execution_status": "succeeded",
+        "agents": {
+            "opencode": {
+                "execution_status": "succeeded",
+                "lift": {"overall": {"with_skill": 0.8, "without_skill": 0.6, "delta": 0.2}},
+                "pass_at_k": {
+                    "with_skill": {
+                        "required_checks": {"passed": 1, "scored": 2, "wrong_answer": 1, "security": 0},
+                        "correct_answers": {"correct": 1, "scored": 2},
+                        "security_clean": {"clean": 2, "scored": 2},
+                        "cases": {
+                            "wrong-case": {
+                                "passed": False,
+                                "attempts_used": 1,
+                                "best_score": 0.82,
+                                "attempt_details_total": 1,
+                                "attempt_details_shown": 1,
+                                "reason": "goal not met (goal accuracy 0.00)",
+                                "warnings": ["missed expected step 1 of 1 (behavior 0.00)"],
+                                "attempts": [
+                                    {
+                                        "attempt": 1,
+                                        "score": 0.82,
+                                        "passed": False,
+                                        "reason": "goal not met (goal accuracy 0.00)",
+                                        "warnings": ["missed expected step 1 of 1 (behavior 0.00)"],
+                                    }
+                                ],
+                            }
+                        },
+                    },
+                    "without_skill": {
+                        "required_checks": {"passed": 2, "scored": 2, "wrong_answer": 0, "security": 0},
+                        "correct_answers": {"correct": 2, "scored": 2},
+                        "security_clean": {"clean": 2, "scored": 2},
+                        "cases": {},
+                    },
+                },
+            }
+        },
+    }
+    output = io.StringIO()
+    render_evaluation_result(
+        result,
+        console=Console(file=output, width=180, color_system=None),
+        verbose=False,
+    )
+    rendered = output.getvalue()
+
+    assert "QUALITY VERDICT: FAIL — 1 of 2 cases failed: 1 goal not met" in rendered
+    assert "OVERALL SKILL LIFT (for reference)" in rendered
+    assert "REQUIRED CHECKS PASSED   1/2 | 2/2 | -1" in rendered
+    assert "GOALS MET   1/2 | 2/2 | -1" in rendered
+    assert "SECURITY CLEAN   2/2 | 2/2 | +0" in rendered
+    assert "FAIL: goal not met (goal accuracy 0.00)" in rendered
+    assert "WARNING: missed expected step 1 of 1 (behavior 0.00)" in rendered
+    assert "0.82" in rendered
+    assert rendered.index("QUALITY VERDICT") < rendered.index("REQUIRED CHECKS PASSED") < rendered.index("wrong-case")
+
+
+def test_case_first_display_keeps_case_matrix_columns_and_ids_at_width_80() -> None:
+    def case(score: float, passed: bool, *, reason: str | None = None, warnings: list[str] | None = None) -> dict:
+        attempt = {"score": score, "passed": passed, "warnings": warnings or []}
+        summary = {
+            "passed": passed,
+            "attempts_used": 1,
+            "best_score": score,
+            "attempt_details_total": 1,
+            "attempt_details_shown": 1,
+            "warnings": warnings or [],
+            "attempts": [attempt],
+        }
+        if reason:
+            summary["reason"] = reason
+            attempt["reason"] = reason
+        return summary
+
+    case_ids = ("correct-answer", "missed-step", "security-warning", "wrong-ground-truth")
+    with_skill = {
+        "correct-answer": case(0.95, True),
+        "missed-step": case(0.95, True, warnings=["missed expected step 1 of 2 (behavior 0.50)"]),
+        "security-warning": case(0.60, False, reason="security issue (security 0.50): network command"),
+        "wrong-ground-truth": case(0.82, False, reason="goal not met (goal accuracy 0.00)"),
+    }
+    without_skill = {
+        "correct-answer": case(1.00, True),
+        "missed-step": case(0.92, True),
+        "security-warning": case(0.83, False, reason="security issue (security 0.50): network command"),
+        "wrong-ground-truth": case(0.70, False, reason="goal not met (goal accuracy 0.00)"),
+    }
+    result = {
+        "execution_status": "succeeded",
+        "agents": {
+            "opencode": {
+                "execution_status": "succeeded",
+                "lift": {"overall": {"with_skill": 0.83, "without_skill": 0.86, "delta": -0.03}},
+                "dimensions_with_skill": {"security": {"score": 0.75}, "accuracy": {"score": 0.90}},
+                "dimensions_without_skill": {"security": {"score": 0.83}, "accuracy": {"score": 0.90}},
+                "pass_at_k": {
+                    "with_skill": {"k": 1, "pass_threshold": 0.5, "cases": with_skill},
+                    "without_skill": {"k": 1, "pass_threshold": 0.5, "cases": without_skill},
+                },
+            }
+        },
+    }
+    output = io.StringIO()
+
+    render_evaluation_result(result, console=Console(file=output, width=80, color_system=None), verbose=False)
+
+    rendered = " ".join(output.getvalue().split())
+    assert "test case (k=1)" in rendered
+    assert "with skill" in rendered
+    assert "without skill" in rendered
+    assert "effect" in rendered
+    assert all(case_id in rendered for case_id in case_ids)
+    assert "security" in rendered
+    assert "accuracy" in rendered
+    assert "FAIL: goal not met (goal accuracy 0.00)" in rendered
 
 
 @pytest.mark.parametrize(
@@ -110,8 +375,11 @@ def test_overall_lift_headline_is_per_agent_and_highlighted_without_a_background
     console = Console()
     for panel, (name, delta) in zip(evaluator_panels, (("codex", 0.3), ("opencode", -0.2)), strict=True):
         assert isinstance(panel.renderable, Group)
-        headline = panel.renderable.renderables[0]
-        assert isinstance(headline, Text)
+        headline = next(
+            item
+            for item in panel.renderable.renderables
+            if isinstance(item, Text) and item.plain.startswith("OVERALL SKILL LIFT")
+        )
         assert headline.plain == f"OVERALL SKILL LIFT   {delta:+.2f} · {name}"
         style = headline.get_style_at_offset(console, headline.plain.index(f"{delta:+.2f}"))
         assert style.bold

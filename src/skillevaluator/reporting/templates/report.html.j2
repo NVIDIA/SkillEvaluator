@@ -3498,7 +3498,7 @@
                             {% set eid = ev.entry_id or 'trial' %}
                             {% if eid not in dedup_map %}
                                 {% set _ = dedup_order.append(eid) %}
-                                {% set _ = dedup_map.update({eid: {'count': 0, 'sum': 0.0, 'with_score': 0, 'notes': [], 'failures': [], 'checks': [], 'evidence_refs': [], 'excerpt': none, 'reason_score': none}}) %}
+                            {% set _ = dedup_map.update({eid: {'count': 0, 'sum': 0.0, 'with_score': 0, 'notes': [], 'failures': [], 'checks': [], 'evidence_refs': [], 'evidence_unavailable_reason': none, 'excerpt': none, 'reason': none, 'reason_score': none}}) %}
                             {% endif %}
                             {% set entry = dedup_map[eid] %}
                             {% set ev_occurrences = ev.occurrences or 1 %}
@@ -3506,17 +3506,19 @@
                             {% if ev.score is not none %}
                                 {% set _ = entry.update({'sum': entry.sum + (ev.score * ev_occurrences), 'with_score': entry.with_score + ev_occurrences}) %}
                             {% endif %}
-                            {# A built reason stands in for grader notes when the grader recorded none. #}
-                            {% set ev_notes = ev.notes or ([ev.reason] if ev.reason else []) %}
-                            {% if (ev_notes or ev.failures or ev.excerpt) and ev.score is not none and (entry.reason_score is none or ev.score < entry.reason_score) %}
-                                {% set _ = entry.update({'notes': ev_notes, 'failures': ev.failures or [], 'excerpt': ev.excerpt or none, 'reason_score': ev.score}) %}
+                            {# Keep built reasons separate from the bounded grader notes. #}
+                            {% set ev_notes = ev.notes or [] %}
+                            {% if (ev_notes or ev.reason or ev.failures or ev.excerpt) and ev.score is not none and (entry.reason_score is none or ev.score < entry.reason_score) %}
+                                {% set _ = entry.update({'notes': ev_notes, 'reason': ev.reason or none, 'failures': ev.failures or [], 'excerpt': ev.excerpt or none, 'reason_score': ev.score}) %}
                             {% elif entry.reason_score is none %}
                                 {% if ev_notes and not entry.notes %}{% set _ = entry.update({'notes': ev_notes}) %}{% endif %}
+                                {% if ev.reason and not entry.reason %}{% set _ = entry.update({'reason': ev.reason}) %}{% endif %}
                                 {% if ev.failures and not entry.failures %}{% set _ = entry.update({'failures': ev.failures}) %}{% endif %}
                                 {% if ev.excerpt and not entry.excerpt %}{% set _ = entry.update({'excerpt': ev.excerpt}) %}{% endif %}
                             {% endif %}
                             {% if ev.checks and not entry.checks %}{% set _ = entry.update({'checks': ev.checks}) %}{% endif %}
                             {% if ev.evidence_refs and not entry.evidence_refs %}{% set _ = entry.update({'evidence_refs': ev.evidence_refs}) %}{% endif %}
+                            {% if ev.evidence_unavailable_reason and not entry.evidence_unavailable_reason %}{% set _ = entry.update({'evidence_unavailable_reason': ev.evidence_unavailable_reason}) %}{% endif %}
                         {% endfor %}
                         {% set evidence_totals = namespace(trials=0) %}
                         {% for ev in card.evidence %}
@@ -3539,7 +3541,7 @@
                                         {% if ev.notes %}{{ (ev.notes[:2] | join('; '))[:160] }}{% endif %}
                                         {% if ev.failures %}<span style="color:var(--danger-color);">{{ (ev.failures[:2] | join('; '))[:120] }}</span>{% endif %}
                                         {% if not ev.notes and not ev.failures and ev.checks %}{{ (ev.checks | length) }} checks{% endif %}
-                                        {% if ev.evidence_refs %}<span class="t3-ev-refs">Evidence: {{ ev.evidence_refs[:3] | join('; ') }}</span>{% endif %}
+                                        {% if ev.evidence_refs %}<span class="t3-ev-refs">Evidence: {{ ev.evidence_refs[:3] | join('; ') }}</span>{% elif ev.evidence_unavailable_reason %}<span class="t3-ev-refs">Evidence unavailable — {{ ev.evidence_unavailable_reason }}</span>{% endif %}
                                     </span>
                                     <span class="t3-ev-count">×{{ ev.count }}</span>
                                     {% if avg_score is not none %}
@@ -3547,6 +3549,7 @@
                                     {% else %}
                                         <span class="t3-bar-value" style="color:var(--text-secondary);">N/A</span>
                                     {% endif %}
+                                    {% if ev.reason %}<div class="t3-ev-detail t3-ev-reason">{{ ev.reason }}</div>{% endif %}
                                     {% if ev.excerpt %}<div class="t3-ev-detail"><code class="t3-ev-excerpt">{{ ev.excerpt }}</code></div>{% endif %}
                                 </li>
                             {% endfor %}

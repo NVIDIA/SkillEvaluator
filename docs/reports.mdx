@@ -16,6 +16,10 @@ lift data that `view` and `compare` read back later.
 evaluation framework that runs those Tier 3 trials. SkillEvaluator collects its
 job artifacts into the results tree described on this page.
 
+Tier 3 findings describe failed accuracy criteria in plain language and mark
+when trajectory evidence is unavailable. Expected and observed text appears
+only when both values were recorded in the result.
+
 Tier 3 results include a `dataset_sufficiency` policy assessment in `result.json`.
 The status is sufficient only when coverage, pass-rate reliability, and paired
 lift-comparison requirements are met; otherwise it is provisional and does not

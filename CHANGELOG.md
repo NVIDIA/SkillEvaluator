@@ -123,6 +123,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Write Tier 3 accuracy deductions as plain-language reasons, identify findings
+  without trajectory evidence, and include expected/observed text only when
+  both values are recorded.
+
 - Tier 3 LLM suggestions and insight recommendations now keep only evidence
   references the run recorded (cited references that don't resolve are
   dropped rather than shown as evidence) and keep one copy of a repeated
@@ -131,7 +135,6 @@ All notable changes to SkillEvaluator are documented in this file.
   pass threshold, are dropped. Both prompts ask for distinct actions and
   label untested causes, such as switching to a different model, as
   hypotheses or experiments.
-
 - Tier 3 reports missing skill runtime dependencies as environment problems,
   with declaration and custom Dockerfile guidance. Unrecovered environment
   failures leave the trial UNSCORED instead of reducing the skill's score;
@@ -139,7 +142,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Document per-arm Tier 3 dimension applicability and test how N/A baseline
   metrics are handled in Overall scores and Skill Lift comparisons.
-
 - Run GitLab Tier 2 without Docker-in-Docker while keeping TLS-protected Docker
   for Tier 3. Both native tiers retain shared caller timeout and runner-tag
   overrides, advisory outcomes, and aggregate artifacts; local mode still

@@ -4426,7 +4426,11 @@ def _unscoreable_reward_reason(reward: dict[str, Any]) -> str:
             safe_metric = _safe_diagnostic_text(metric, max_len=64)
             safe_reason = _safe_diagnostic_text(reason, max_len=512)
             if safe_reason:
-                parts.append(f"{safe_metric or 'judge'}: {safe_reason}")
+                parts.append(
+                    f"[environment] {safe_reason}"
+                    if metric == "environment"
+                    else f"{safe_metric or 'judge'}: {safe_reason}"
+                )
     elif isinstance(errors, list):
         parts.extend(_safe_diagnostic_text(reason, max_len=512) for reason in errors[: len(DEFAULT_METRICS)])
         parts = [part for part in parts if part]
@@ -4437,7 +4441,12 @@ def _unscoreable_reward_reason(reward: dict[str, Any]) -> str:
 
     if not parts:
         return fallback
-    return _safe_diagnostic_text("Required judge evaluation failed: " + "; ".join(parts), max_len=2048)
+    prefix = (
+        "Evaluation environment invalid: "
+        if isinstance(errors, dict) and "environment" in errors
+        else "Required judge evaluation failed: "
+    )
+    return _safe_diagnostic_text(prefix + "; ".join(parts), max_len=2048)
 
 
 def _strip_attempt_suffix(value: str) -> str:
@@ -5914,7 +5923,11 @@ def _annotate_security_attribution(
 
 
 def _is_standard_skill_execution_reward(reward: dict[str, Any]) -> bool:
-    """Return whether the reward carries a usable canonical standard score."""
+    """Admit standard invocation evidence independently of numeric skill grading.
+
+    A baseline's explicitly N/A skill score still has an observable trajectory.
+    Missing scores without the applicability marker do not establish support.
+    """
     standard_metric_sets = {DEFAULT_METRIC_SET, LEGACY_METRIC_SET}
     declared_metric_set = reward.get("metric_set") or reward.get("metric_set_version")
     if declared_metric_set and str(declared_metric_set) not in standard_metric_sets:
@@ -5923,7 +5936,7 @@ def _is_standard_skill_execution_reward(reward: dict[str, Any]) -> bool:
     return (
         metric_set in standard_metric_sets
         and "skill_execution" in metrics
-        and metric_value(reward, "skill_execution") is not None
+        and (metric_value(reward, "skill_execution") is not None or metric_is_not_applicable(reward, "skill_execution"))
     )
 
 
@@ -6138,7 +6151,7 @@ def _add_trusted_invocation_evidence(
     """Replace verifier-authored routing evidence on standard rewards only."""
     if not _is_standard_skill_execution_reward(source_reward):
         return
-    for key in ("skill_invoked", "routing_passed", "invocation_evidence_source"):
+    for key in ("skill_invoked", "routing_passed", "invocation_evidence_source", "invocation_evidence_scope"):
         clean_reward.pop(key, None)
     if trial_root is None:
         return
@@ -6156,6 +6169,7 @@ def _add_trusted_invocation_evidence(
     else:
         return
     clean_reward["invocation_evidence_source"] = "trajectory"
+    clean_reward["invocation_evidence_scope"] = "step" if source_reward.get("_step_name") else "logical_trial"
 
 
 def _can_restore_custom_metric_name(value: str) -> bool:

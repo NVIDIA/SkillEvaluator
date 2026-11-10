@@ -284,6 +284,8 @@ _without_plain_patch_headers = _shared_checks._without_plain_patch_headers
 _without_redirections = _shared_checks._without_redirections
 check_error_recovery = _shared_checks.check_error_recovery
 check_script_execution = _shared_checks.check_script_execution
+normalize_optional_reference = _shared_checks.normalize_optional_reference
+normalize_expected_behaviors = _shared_checks.normalize_expected_behaviors
 resolve_should_trigger = _shared_checks.resolve_should_trigger
 score_skill_execution = _shared_checks.score_skill_execution
 
@@ -3082,7 +3084,7 @@ BEHAVIOR_CHECK_JSON_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "step": {"type": "integer"},
-                    "passed": {"type": "boolean"},
+                    "passed": {"type": ["boolean", "null"]},
                     "reason": {"type": "string"},
                 },
                 "required": ["step", "passed", "reason"],
@@ -3378,8 +3380,14 @@ def _behavior_prompt_example(expected_count):
             "results": [
                 {
                     "step": step,
-                    "passed": step % 2 == 1,
-                    "reason": "Seen in the transcript." if step % 2 == 1 else "Not seen in the transcript.",
+                    "passed": None if step % 3 == 0 else step % 3 == 1,
+                    "reason": (
+                        "Required tool output was not captured."
+                        if step % 3 == 0
+                        else "Seen in the transcript."
+                        if step % 3 == 1
+                        else "Observed output violates the requirement."
+                    ),
                 }
                 for step in range(1, expected_count + 1)
             ],
@@ -3389,6 +3397,7 @@ def _behavior_prompt_example(expected_count):
 
 
 def judge_behavior_check(conversation_text, expected_behaviors):
+    expected_behaviors = normalize_expected_behaviors(expected_behaviors)
     if not _has_judge_reference(expected_behaviors):
         return _judge_not_applicable(_NO_EXPECTED_BEHAVIOR_REASON, results=[])
 
@@ -3407,7 +3416,12 @@ EXPECTED BEHAVIORS:
 
 Respond with ONLY one JSON object. "results" must hold exactly {expected_count} entries, one per \
 expected behavior: "step" is the behavior's number (each number from 1 to {expected_count} exactly \
-once), "passed" is true (observed) or false (not observed), and "reason" is under 15 words. Add a \
+once), "passed" is true (observed), false (evidence supports a violation or absence), or null \
+when missing or incomplete evidence prevents checking the behavior. Missing artifact contents, \
+unavailable tool output, or a truncated trace require null, NOT false, for checks that depend on \
+that evidence. A missing observation alone is not proof the behavior failed. Explain that evidence gap \
+in "reason" (under 15 words). An unrelated task \
+can be a valid negative control: evaluate its stated behavior without requiring skill use. Add a \
 one-sentence "summary". Do not include a score: it is computed from the results.
 Example of the shape for this task's {expected_count} behaviors (the values are only an illustration):
 {_behavior_prompt_example(expected_count)}"""
@@ -3425,35 +3439,56 @@ Example of the shape for this task's {expected_count} behaviors (the values are 
             return None
         return candidate
 
-    parsed, error, _provenance = _call_validated_json_judge(
-        prompt,
-        lambda payload: _behavior_payload_error(payload, expected_count),
-        call_public_llm,
-        extract_json,
-        metric="behavior_check",
-        salvage=salvage,
-        max_tokens=BEHAVIOR_JUDGE_MAX_TOKENS,
-        response_schema=BEHAVIOR_CHECK_JSON_SCHEMA,
-        schema_name="behavior_check_judgment",
-    )
+    try:
+        parsed, error, _provenance = _call_validated_json_judge(
+            prompt,
+            lambda payload: _behavior_payload_error(payload, expected_count),
+            call_public_llm,
+            extract_json,
+            metric="behavior_check",
+            salvage=salvage,
+            max_tokens=BEHAVIOR_JUDGE_MAX_TOKENS,
+            response_schema=BEHAVIOR_CHECK_JSON_SCHEMA,
+            schema_name="behavior_check_judgment",
+        )
+    except Exception as exc:
+        error = f"Required behavior_check judge raised {type(exc).__name__}: {exc}"
     if error:
-        return _judge_error(error, results=[])
+        return _judge_error(error, results=[], expectations=_behavior_expectations(expected_behaviors, [], error))
 
-    # A salvaged reply leaves the behaviors after the cut unjudged; they count as not observed.
+    # Keep the conservative score denominator without calling missing verdicts failures.
     results = sorted(parsed["results"], key=lambda result: result["step"])
     score = sum(1 for result in results if result["passed"]) / expected_count
     return {
         "score": round(score, 4),
         "reason": parsed.get("summary", ""),
         "results": results,
+        "expectations": _behavior_expectations(expected_behaviors, results),
     }
+
+
+def _behavior_expectations(expected_behaviors, results, error=""):
+    by_step = {result["step"]: result for result in results}
+    return [
+        {
+            "step": step,
+            "requirement": requirement,
+            "status": ("met" if by_step[step]["passed"] else "unmet")
+            if step in by_step and type(by_step[step]["passed"]) is bool
+            else "not_checked",
+            "reason": by_step[step].get("reason", "")
+            if step in by_step
+            else _redact_configured_credentials(error) or "No judgment returned for this expectation",
+        }
+        for step, requirement in enumerate(expected_behaviors, 1)
+    ]
 
 
 def _behavior_payload_error(parsed, expected_count, *, allow_partial=False):
     """Describe what is wrong with a behavior reply, or return ``None`` when it is usable.
 
     Each expected behavior is judged exactly once, identified by its 1-based
-    ``step`` number, with a boolean ``passed``. *allow_partial* accepts a
+    ``step`` number, with a boolean ``passed`` or an explicit null abstention. *allow_partial* accepts a
     salvaged prefix that judges each of its steps once. The score is computed
     from the verdicts, so a ``score`` field in the reply is ignored.
     """
@@ -3469,8 +3504,16 @@ def _behavior_payload_error(parsed, expected_count, *, allow_partial=False):
         return f'"results" has {len(results)} entries; it needs exactly {expected_count}, one per behavior'
     if any(not isinstance(result, dict) for result in results):
         return 'every "results" entry must be an object'
-    if any(not isinstance(result.get("passed"), bool) for result in results):
-        return 'every "results" entry needs "passed" set to true or false'
+    if any(
+        "passed" not in result or (result["passed"] is not None and type(result["passed"]) is not bool)
+        for result in results
+    ):
+        return 'every "results" entry needs "passed" set to true, false, or null'
+    if any(
+        result["passed"] is None and (not isinstance(result.get("reason"), str) or not result["reason"].strip())
+        for result in results
+    ):
+        return 'unchecked entries need a nonempty "reason" explaining the missing evidence'
     steps = [result.get("step") for result in results]
     if any(isinstance(step, bool) or not isinstance(step, int) for step in steps):
         return 'every "results" entry needs an integer "step" number'
@@ -3580,7 +3623,15 @@ def _call_required_judge(metric, judge, *args, allow_not_applicable=False, **kwa
                 finally:
                     signal.signal(signal.SIGALRM, previous_alarm_handler)
     except Exception as exc:
-        result = _judge_error(f"Required {metric} judge raised {type(exc).__name__}: {exc}")
+        error = f"Required {metric} judge raised {type(exc).__name__}: {exc}"
+        metadata = {}
+        if metric == "behavior_check":
+            expected_behaviors = kwargs.get("expected_behaviors", args[1] if len(args) > 1 else [])
+            metadata = {
+                "results": [],
+                "expectations": _behavior_expectations(expected_behaviors or [], [], error),
+            }
+        result = _judge_error(error, **metadata)
     finally:
         _ACTIVE_JUDGE_DEADLINE.reset(token)
         _ACTIVE_JUDGE_CALLS.reset(calls_token)
@@ -3732,11 +3783,11 @@ def main():
     traj, traj_meta = load_trajectory_with_fallback(ATIF_PATH, ATIF_PATH.parent)
 
     expected_skill = entry.get("expected_skill") or ""
-    expected_script = entry.get("expected_script") or ""
+    expected_script = normalize_optional_reference(entry.get("expected_script"))
     should_trigger = resolve_should_trigger(entry)
     evaluated_skill = entry.get("evaluated_skill") or ""
     acceptable_skills = _resolve_acceptable_skills(entry, expected_skill)
-    expected_behavior = entry.get("expected_behavior", [])
+    expected_behavior = normalize_expected_behaviors(entry.get("expected_behavior", []))
     question = entry.get("question", "")
     ground_truth = entry.get("ground_truth", "")
     workspace_mode = entry.get("skill_workspace_mode", "isolated")

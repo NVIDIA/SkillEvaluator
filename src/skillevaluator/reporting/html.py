@@ -1243,6 +1243,13 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
     ]
     for key in ("conclusions", "recommendations", "suggestions_v2"):
         payload[key] = _sanitize_tier3_insight_items(payload.get(key))
+    payload["next_steps"] = [
+        {
+            key: str(step.get(key) or "")
+            for key in ("kind", "target", "problem", "evidence", "action", "check", "strength")
+        }
+        for step in _dict_list(payload.get("next_steps"))
+    ]
     payload["dataset"] = [_sanitize_tier3_dataset_case(item) for item in _dict_list(payload.get("dataset"))]
     payload["case_diagnostics"] = _sanitize_tier3_case_diagnostics(payload.get("case_diagnostics"))
     payload["trials"] = [_sanitize_tier3_trial(item) for item in _dict_list(payload.get("trials"))]

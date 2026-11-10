@@ -23,6 +23,7 @@ from fnmatch import fnmatchcase
 from typing import Any
 
 if __package__:
+    from skillevaluator.tier3.eval_core import optional_reference as _optional_reference
     from skillevaluator.tier3.eval_core import script_invocation as _script_invocation
     from skillevaluator.tier3.eval_core import shell_lexing as _shell_lexing
     from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
@@ -32,6 +33,7 @@ if __package__:
     )
     from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
 else:  # Standalone verifier: all dependencies are staged siblings.
+    import optional_reference as _optional_reference
     import script_invocation as _script_invocation
     import shell_lexing as _shell_lexing
     from codex_tool_call_normalizer import (
@@ -40,6 +42,9 @@ else:  # Standalone verifier: all dependencies are staged siblings.
         UNSUPPORTED_NATIVE_CODEX_EXEC,
     )
     from secret_redaction import redact_secrets_in_log_line
+
+normalize_expected_behaviors = _optional_reference.normalize_expected_behaviors
+normalize_optional_reference = _optional_reference.normalize_optional_reference
 
 _ATTACHED_DESCRIPTOR_RE = _shell_lexing._ATTACHED_DESCRIPTOR_RE
 _QUOTED_SYNTAX_MARK = _shell_lexing._QUOTED_SYNTAX_MARK
@@ -4397,6 +4402,7 @@ def check_script_execution(
     expected_script: str | None,
 ) -> dict[str, Any]:
     """Check whether the agent executed the expected script."""
+    expected_script = normalize_optional_reference(expected_script)
     if not expected_script:
         return {"passed": True, "score": 1.0, "reason": "No specific script expected"}
 
@@ -4533,6 +4539,7 @@ def check_error_recovery(
     error keywords in observation) followed by a similar command that
     succeeded.  Returns per-correction details with fault attribution.
     """
+    expected_script = normalize_optional_reference(expected_script)
     if not tool_calls:
         return {
             "passed": True,
@@ -5304,6 +5311,7 @@ def check_tool_efficiency(
     expected_script: str | None = None,
 ) -> dict[str, Any]:
     """Measure what fraction of tool calls were productive vs wasted."""
+    expected_script = normalize_optional_reference(expected_script)
     if not tool_calls:
         return {"passed": True, "score": 1.0, "reason": "No tool calls", "details": {}}
 
@@ -5401,6 +5409,7 @@ def score_skill_execution(
     activation failure receives no execution credit, while retaining all check
     details for diagnosis. Negative and unlabeled cases use their own rules.
     """
+    expected_script = normalize_optional_reference(expected_script)
     if should_trigger is None:
         return {"score": 1.0, "details": {"message": "No expected_skill -- skipped"}}
 
@@ -5479,6 +5488,7 @@ def score_skill_efficiency(
     acceptable_skills: Any = None,
 ) -> dict[str, Any]:
     """Compute the ``skill_efficiency`` eval score (average of sub-checks)."""
+    expected_script = normalize_optional_reference(expected_script)
     if not should_trigger:
         return {"score": 1.0, "details": {"message": "Negative case -- efficiency not applicable"}}
 

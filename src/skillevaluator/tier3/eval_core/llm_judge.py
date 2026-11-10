@@ -37,6 +37,7 @@ from skillevaluator.tier3.eval_core.atif_helpers import (
     _truncate_for_behavior,
 )
 from skillevaluator.tier3.eval_core.character_facts import append_character_facts
+from skillevaluator.tier3.eval_core.optional_reference import normalize_expected_behaviors
 
 logger = logging.getLogger(__name__)
 
@@ -1010,6 +1011,7 @@ def judge_behavior_check(
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Run the behavior check LLM judge; the score is the share of behaviors observed."""
+    expected_behaviors = normalize_expected_behaviors(expected_behaviors)
     if not _has_judge_reference(expected_behaviors):
         return _judge_not_applicable(_NO_EXPECTED_BEHAVIOR_REASON, results=[])
 

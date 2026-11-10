@@ -183,11 +183,13 @@ All notable changes to SkillEvaluator are documented in this file.
   `evals/config.yml`) keeps a Tier 3 agent scored on its clean with-skill arm
   when its only baseline failures are attempts that hit the agent execution
   timeout while the agent was still producing output. By default one such
-  attempt still fails the agent and the whole run. The option needs both arms,
-  standard dimension grading, every other agent completed (at least one with
-  both arms) and no other launch errors; it refuses a timeout whose logs show a
-  known provider overload, rate limit, quota or authentication error, and it
-  does not cover native multi-step tasks. The baseline condition stays
+  attempt still fails the agent and the whole run. The option needs both arms
+  run in the same run (not a `--reuse-baseline` baseline), standard dimension
+  grading, every other agent completed (at least one with both arms) and no
+  other launch errors; attempts a cost limit left `not_run` are not counted as
+  missing. It refuses a timeout whose logs show a known provider overload,
+  rate limit, quota or authentication error, and it does not cover native
+  multi-step tasks. The baseline condition stays
   `failed`, baseline scores and Skill Lift are not reported for that agent, the
   run's best agent, overall score and verdict come from the agents with a
   complete baseline, reports name the tolerated agent in a "Baseline

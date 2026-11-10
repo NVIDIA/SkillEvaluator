@@ -99,7 +99,7 @@ Which number answers which question:
 - **Overall verdict** (top of this card): whether the evidence supports publishing the skill. It needs every required tier, not only Tier 3 scores.
 - **Dimension score**: how well the agent did on one question above when it had the skill, from 0% to 100%.
 - **Overall** row: the equal-weight mean of the five dimension scores with the skill.
-- **Uplift** (Skill Lift in other reports): the skill score minus the no-skill baseline score. It shows whether the skill helped; it does not set the verdict.
+- **Uplift**: the displayed skill score minus the displayed no-skill baseline score. Published Skill Lift compares Overall only on the metrics and cases both arms scored, so it can differ. Uplift does not set the verdict.
 - **pass@k** (HTML report and `pass_at_k_lift.json`): the share of eval cases with at least one passing attempt out of k. It measures how repeatable success is, separately from the dimension scores.
 - **Quality Score** (Tier 1, out of 100): a static review of the skill's files. It is not an input to any Tier 3 score or uplift.
 

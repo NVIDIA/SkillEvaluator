@@ -95,6 +95,11 @@ def test_benchmark_methodology_explains_meaning_evidence_and_baseline(tmp_path: 
     assert effectiveness[3] == "An LLM judge of whether the user's goal was met; an LLM judge of the expected workflow"
     for term in ("**Overall verdict**", "**Uplift**", "**pass@k**", "**Quality Score** (Tier 1"):
         assert term in markdown
+    assert (
+        "**Uplift**: the displayed skill score minus the displayed no-skill baseline score. Published Skill Lift "
+        "compares Overall only on the metrics and cases both arms scored, so it can differ. Uplift does not set the "
+        "verdict."
+    ) in markdown
     _assert_gate_accepts(markdown, tmp_path)
 
 

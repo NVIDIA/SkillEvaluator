@@ -772,8 +772,9 @@ class BenchmarkReporter(ReporterBase):
                 ),
                 "- **Overall** row: the equal-weight mean of the five dimension scores with the skill.",
                 (
-                    "- **Uplift** (Skill Lift in other reports): the skill score minus the no-skill baseline score. "
-                    "It shows whether the skill helped; it does not set the verdict."
+                    "- **Uplift**: the displayed skill score minus the displayed no-skill baseline score. "
+                    "Published Skill Lift compares Overall only on the metrics and cases both arms scored, "
+                    "so it can differ. Uplift does not set the verdict."
                 ),
                 (
                     "- **pass@k** (HTML report and `pass_at_k_lift.json`): the share of eval cases with at least "

@@ -43,6 +43,7 @@ from skillevaluator.constants import (
     SCANNABLE_EXTENSIONS,
     SKILL_MANIFEST_VARIANTS,
 )
+from skillevaluator.inference.diagnostics import safe_llm_model
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.skill import SEMVER_RE
 from skillevaluator.provider_config import (
@@ -4884,6 +4885,10 @@ class SecurityValidator(ValidatorBase):
             finding.metadata["llm_verdict"] = verdict
             finding.metadata["llm_confidence"] = confidence
             finding.metadata["llm_reasoning"] = reasoning
+            # The model that gave the verdict: the configured model, or a
+            # server-side fallback model that answered in its place.
+            if verifier.model_used is not None:
+                finding.metadata["llm_model_used"] = safe_llm_model(verifier.model_used)
 
             if verdict == "false_positive" and confidence == "high":
                 finding.severity = Severity.INFO

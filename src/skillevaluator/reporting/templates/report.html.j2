@@ -2639,6 +2639,8 @@
                         <th>Verdict</th><th>Signals</th><th>Reasoning</th>
                     </tr></thead>
                     <tbody>
+                    {% set t3_best_agent = t3_agents.get(t3_best_name, {}) %}
+                    {% set baseline_na_metrics = t3_best_agent.get('not_applicable_metrics', {}).get('without_skill', []) %}
                     {% for dim in tier3.dimensions %}
                     {% set dim_score = dim.score if dim.score is not none else dim.with_skill %}
                     {% set dim_color = 'var(--success-color)' if dim_score >= 0.7 else ('var(--warning-color)' if dim_score >= 0.4 else 'var(--danger-color)') %}
@@ -2653,7 +2655,7 @@
                                 <div class="mini-bar"><span style="width:{{ (dim_score * 100) | round(0) }}%; background:{{ dim_color }};"></span></div>
                             </div>
                         </td>
-                        <td>{{ "%.2f" | format(dim.baseline) if dim.baseline is not none else "N/A" }}</td>
+                        <td{% if dim.id == 'discoverability' and 'skill_execution' in baseline_na_metrics %} title="No-skill baseline: This arm has no skill under test installed, so there is no skill to discover or run"{% elif dim.id == 'efficiency' and 'skill_efficiency' in baseline_na_metrics %} title="No-skill baseline: This arm has no skill under test installed, so there is no skill to route to"{% endif %}>{{ "%.2f" | format(dim.baseline) if dim.baseline is not none else "N/A" }}</td>
                         <td style="color:{{ 'var(--success-color)' if dim.lift is not none and dim.lift >= tier3_lift_pass_threshold else ('var(--danger-color)' if dim.lift is not none and dim.lift <= tier3_lift_fail_threshold else 'var(--text-secondary)') }};font-weight:600;">
                             {{ "%+.2f" | format(dim.lift) if dim.lift is not none else "N/A" }}
                         </td>

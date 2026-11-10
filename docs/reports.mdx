@@ -640,14 +640,11 @@ The **Quality Score** displayed out of 100 in the HTML report is the Tier 1
 static-analysis score. It is not an input to the Tier 3 dimensions, overall
 score, or Skill Lift.
 
-The standard overall score gives each dimension one equal vote:
+For standard grading, each arm's Overall is the mean of the dimensions it
+scored, and each dimension is the mean of its scored metrics. N/A dimensions
+and metrics are excluded rather than counted as 0 or 1.
 
-```text
-overall = (Security + Correctness + Discoverability + Effectiveness + Efficiency) / 5
-Effectiveness = (goal_accuracy + behavior_check) / 2
-```
-
-This formula is shared by the report, per-attempt pass@k thresholding, Skill
+This per-arm rule is shared by the report, per-attempt pass@k thresholding, Skill
 Lift, comparisons, and best-agent selection. Standard artifacts identify it as
 `skill-evaluator-dimension-mean-v1` in `score_policy` and in the persisted
 attempt policy. Older metric sets and partial historical artifacts keep their
@@ -667,8 +664,7 @@ agents scored under different policies or metric sets.
 
 ### Skill Lift
 
-Skill Lift is `with-skill overall score - without-skill overall score` for
-comparable cases. It uses the same score units as both arms and ranges from
+Skill Lift compares Overall on the metrics and cases both arms scored, so it can differ from the displayed with-skill Overall minus baseline Overall when the baseline has N/A dimensions. It uses the same score units as both arms and ranges from
 -1.0 to +1.0. Because live agent runs are noisy, especially at low attempt
 counts, small deltas are kept neutral. The verdict bands:
 

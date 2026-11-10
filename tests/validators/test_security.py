@@ -10737,9 +10737,8 @@ class TestSkillspectorCompleteWithCaveats:
         rows = payload["analysis_completeness"]["ledger_exceptions"]
         assert len(rows) == 1
         if case == "added-parse-limit":
-            rows.append(
-                {**rows[0], "phase": "static", "reason_code": "static_parse_limit", "start_line": None, "end_line": None}
-            )
+            parse_limit = {"phase": "static", "reason_code": "static_parse_limit", "start_line": None, "end_line": None}
+            rows.append({**rows[0], **parse_limit})
         else:
             rows[0]["phase"] = "static"
 

@@ -6,6 +6,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Tier 3 reports show per-case expectation inventories with explicit met,
+  unmet, unchecked, unscored and inapplicable judgments, evidence and next
+  diagnostic steps for executed conditions. Behavior judges can abstain when
+  evidence is missing; partial results preserve every original requirement
+  without presenting missing judgments as verified skill defects. Unexpected
+  judge errors retain that inventory; intentionally skipped arms add no attempts.
+
 - Run SkillEvaluator's own `skills/` through the pinned three-tier GitHub
   callers, retaining Tier 1 as required and Tier 2/3 as advisory. A separate
   consumer feedback listener preserves the reusable publisher's public path;
@@ -65,8 +72,12 @@ All notable changes to SkillEvaluator are documented in this file.
   for it. Dimensions that could not be scored or do not apply stay listed with
   the reason instead of disappearing or reading `Not available`, and baseline-only
   cards show the baseline score. A short key in both reports separates the
-  verdict, dimension and overall scores, Skill Lift (uplift), pass@k, the Tier 1
+  verdict, dimension and overall scores, BENCHMARK Uplift, published Skill Lift,
+  pass@k, the Tier 1
   Quality Score, and publication eligibility.
+
+- Document per-arm Tier 3 dimension applicability and test how N/A baseline
+  metrics are handled in Overall scores and Skill Lift comparisons.
 - Run GitLab Tier 2 without Docker-in-Docker while keeping TLS-protected Docker
   for Tier 3. Both native tiers retain shared caller timeout and runner-tag
   overrides, advisory outcomes, and aggregate artifacts; local mode still
@@ -167,6 +178,9 @@ All notable changes to SkillEvaluator are documented in this file.
   declarations: Codex paths that Codex ignores are no longer copied into the
   staged `plugin.json` (where Claude Code rejected or loaded them), and
   undotted Cursor skill roots become `./` paths Claude Code accepts.
+
+- Treat empty and placeholder `expected_script` values as no script expectation,
+  and ignore placeholder-only expected behavior entries when grading datasets.
 
 - Read JSON, JSONL and YAML evaluation datasets as UTF-8 so Unicode prompts and
   answers load correctly on hosts with a non-UTF-8 default text encoding.

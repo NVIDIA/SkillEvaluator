@@ -383,6 +383,32 @@ def _attempts(verifier_dir: Path) -> list[dict[str, Any]]:
     return payload["attempts"]
 
 
+def test_checks_only_behavior_does_not_call_the_judge(tmp_path: Path) -> None:
+    verifier = _stage_verifier(
+        tmp_path,
+        {
+            "id": "case-1",
+            "has_skill": False,
+            "question": "Complete the task",
+            "ground_truth": "",
+            "expected_behavior": [],
+            "checks": [{"type": "output_contains", "text": "completed"}],
+        },
+    )
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("checks-only behavior must not invoke the judge")
+
+    verifier.judge_behavior_check = fail_if_called
+    verifier.call_public_llm = fail_if_called
+    verifier.main()
+
+    reward = json.loads(verifier.SKILL_EVALUATOR_REWARD_JSON.read_text(encoding="utf-8"))
+    behavior = reward["details"]["behavior_check"]
+    assert reward["behavior_check"] == 1.0
+    assert behavior["declarative_checks"]["summary"] == "Checked directly: 1, judged: 0, not checked: 0"
+
+
 def test_scored_trial_records_judge_contract_and_every_attempt(tmp_path: Path) -> None:
     verifier = _stage_verifier(tmp_path)
     calls: list[str] = []
@@ -412,6 +438,19 @@ def test_scored_trial_records_judge_contract_and_every_attempt(tmp_path: Path) -
     assert attempts[0]["reply"] == _ACCURACY_RESPONSE
     assert len(attempts[0]["prompt_sha256"]) == 64
     assert "Complete the task" in attempts[0]["prompt"]
+
+
+def test_trial_without_judge_references_writes_empty_attempt_artifact(tmp_path: Path) -> None:
+    verifier = _stage_verifier(
+        tmp_path,
+        {"id": "case-1", "question": "Inspect the output.", "ground_truth": "", "expected_behavior": []},
+    )
+    verifier.call_public_llm = lambda *_args, **_kwargs: pytest.fail("no judge reference")
+    verifier._call_public_llm_with_provenance = lambda *_args, **_kwargs: pytest.fail("no judge reference")
+
+    verifier.main()
+
+    assert _attempts(verifier.VERIFIER_DIR) == []
 
 
 def test_failed_judge_keeps_its_rejected_attempts_without_a_score(tmp_path: Path) -> None:

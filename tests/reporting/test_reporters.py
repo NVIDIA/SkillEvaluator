@@ -27,6 +27,7 @@ from skillevaluator.reporting import (
     MarkdownReporter,
     SARIFReporter,
 )
+from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION
 from skillevaluator.tier1.commands import emit_reports
 
 _SKILLSPECTOR_2_12_LLM_PROVENANCE = Path(__file__).parents[1] / "fixtures" / "skillspector-2.12.0-llm-provenance.json"
@@ -2165,8 +2166,8 @@ class TestHTMLReporter:
         assert "performing well across evaluated dimensions" not in output
 
         markdown = MarkdownReporter(include_timestamp=False).render_all([result])
-        assert "composite lift = N/A" in markdown
-        assert "composite lift = +0.00" not in markdown
+        assert "Skill Lift = N/A" in markdown
+        assert "Skill Lift = +0.00" not in markdown
 
     def test_standalone_tier3_report_uses_skillevaluator_branding(self, tmp_path: Path) -> None:
         """Standalone Tier 3 HTML should use the canonical SkillEvaluator branding."""
@@ -2382,6 +2383,25 @@ class TestMarkdownReporter:
 
         assert "### Evaluator Scores" in output
         assert "| Accuracy | 0.90 | NO SCORE | NO SCORE |" in output
+
+    def test_markdown_names_skill_lift_and_pass_rate_difference(self) -> None:
+        result = _tier3_harbor_result()
+        agent_eval = result.metadata["agent_eval"]
+        agent_eval["composite_lift"] = 0.2
+        agent_eval["overall_lift"] = 0.2
+        agent_eval["attempt_policy"] = {"max_attempts": 2, "pass_threshold": 0.6}
+        agent_eval["pass_at_k"] = {
+            "with_skill": {"k": 2, "pass_threshold": 0.6, "rate": 0.75},
+            "without_skill": {"k": 2, "pass_threshold": 0.6, "rate": 0.5},
+            "lift": {"delta": 0.25},
+        }
+
+        output = MarkdownReporter(include_timestamp=False).render_all([result])
+
+        assert "Skill Lift = +0.20" in output
+        assert SKILL_LIFT_DEFINITION in output
+        assert "Pass@2 (supporting reliability" in output
+        assert "Pass-rate difference +25.0 percentage points" in output
 
     def test_render_tier3_normalized_evidence_uses_distinct_evidence_ids(self) -> None:
         result = _tier3_harbor_result()

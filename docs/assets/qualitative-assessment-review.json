@@ -1,0 +1,430 @@
+{
+  "artifact_kind": "documentation_review_worksheet",
+  "prototype_version": 1,
+  "runtime_contract": false,
+  "description": "Manually authored additive review of existing explanations; not a CLI result schema, supported import format or reward contract.",
+  "scoreless_support": "Not supported by this milestone; future schema, missing-score, aggregation, comparison/lift, pass@k and publication policies require separate approval.",
+  "authorship": "Codex assistant source review; independent assistant case review completed; no human signoff or representative-user validation.",
+  "source_policy": "Original retained artifacts remain access-controlled. Public excerpts omit host paths and private configuration. Hashes identify originals but do not grant access or prove authenticity.",
+  "sources": [
+    {
+      "id": "success-result",
+      "artifact": "result.json",
+      "sha256": "966f454a75ee18439c939e82440d4762a8bb5a2b39c520387d65ad1b437dc8dd",
+      "availability": "Original retained privately; only selected sanitized excerpts included here."
+    },
+    {
+      "id": "setup-result",
+      "artifact": "result.json",
+      "sha256": "8152259ffc7e91a368a13892876ada9a340a05e52ca736a894ddfe6927ffea88",
+      "availability": "Original retained privately; only selected sanitized excerpts included here."
+    },
+    {
+      "id": "rubric-result",
+      "artifact": "skillevaluator-rubric.json",
+      "sha256": "b4d93466e029071fe411bdf37d8ad273a96254f7aa5b0d398560376c3999b5a7",
+      "availability": "Original retained privately; only selected sanitized excerpts included here."
+    },
+    {
+      "id": "success-with-trajectory",
+      "artifact": "opencode/with-skill/trials/calculator-001__H2K5A39/trajectory.json",
+      "sha256": "422263f6fc6f6353da6dfad9f5e7aff06e6948130a815b565ded3427f5bb1599",
+      "availability": "Original retained privately; only selected sanitized excerpts included here."
+    },
+    {
+      "id": "success-baseline-trajectory",
+      "artifact": "opencode/without-skill/trials/calculator-001__UqfkZHq/trajectory.json",
+      "sha256": "e167ddb7deb99f4d6ad364e347d5ab7825e98eb5fbfc6a2e993ebd3b735fb559",
+      "availability": "Original retained privately; only selected sanitized excerpts included here."
+    },
+    {
+      "id": "calculator-dataset",
+      "artifact": "src/skillevaluator/tier3/reference_skills/calculator/evals/evals.json",
+      "repository_commit": "86f1a1f05bc5f73e1c0ee3e8bff0b5ff062913f4",
+      "url": "https://github.com/NVIDIA/SkillEvaluator/blob/86f1a1f05bc5f73e1c0ee3e8bff0b5ff062913f4/src/skillevaluator/tier3/reference_skills/calculator/evals/evals.json",
+      "sha256": "a614af8bc2e464b7e9e764c8591b2469b511450d897834d8a8edd73f34033ff2",
+      "availability": "Historical public source at the pinned repository commit; hash and JSON pointers describe the input used by the actual run, before dataset migration."
+    }
+  ],
+  "examples": [
+    {
+      "id": "successful-calculator",
+      "scope": {
+        "tier": 3,
+        "skill": "calculator",
+        "case_ids": [
+          "calculator-001"
+        ],
+        "environment": "local",
+        "conditions": [
+          "with_skill",
+          "without_skill"
+        ]
+      },
+      "expected_behavior": {
+        "statement": "Read calculator instructions, execute calc.py for 2 + 3 * 4, and return 14.",
+        "evidence": [
+          {
+            "source_id": "calculator-dataset",
+            "json_pointer": "/0/expected_behavior",
+            "excerpt": [
+              "The agent read the calculator SKILL.md to understand the skill",
+              "The agent executed calc.py with the expression '2 + 3 * 4'",
+              "The agent reported the correct result of 14"
+            ],
+            "excerpt_form": "verbatim_value"
+          }
+        ]
+      },
+      "numeric_context": {
+        "execution_status": "succeeded",
+        "expected_attempts": 2,
+        "scored_attempts": 2,
+        "overall_with_skill": 1.0,
+        "overall_without_skill": 0.3333,
+        "score_policy": "skill-evaluator-dimension-mean-v1",
+        "evidence": [
+          {
+            "source_id": "success-result",
+            "json_pointer": "/agents/opencode",
+            "excerpt": {
+              "execution_status": "succeeded",
+              "expected_attempts": 2,
+              "scored_attempts": 2,
+              "overall_with_skill": 1.0,
+              "overall_without_skill": 0.3333
+            },
+            "excerpt_form": "selected_fields"
+          }
+        ]
+      },
+      "observations": [
+        {
+          "statement": "With skill, the agent invoked the calculator skill and ran the expected command, observed Result: 14, then answered 14.",
+          "evidence": [
+            {
+              "source_id": "success-with-trajectory",
+              "json_pointer": "/steps/1/tool_calls/0/function_name",
+              "excerpt": "skill",
+              "excerpt_form": "verbatim_value"
+            },
+            {
+              "source_id": "success-with-trajectory",
+              "json_pointer": "/steps/2/tool_calls/0/arguments/command",
+              "excerpt": "python scripts/calc.py \"2 + 3 * 4\"",
+              "excerpt_form": "verbatim_value"
+            },
+            {
+              "source_id": "success-with-trajectory",
+              "json_pointer": "/steps/2/observation/results/0/content",
+              "excerpt": "Result: 14\n",
+              "excerpt_form": "verbatim_value"
+            },
+            {
+              "source_id": "success-with-trajectory",
+              "json_pointer": "/steps/3/message",
+              "excerpt": "14",
+              "excerpt_form": "verbatim_value"
+            }
+          ]
+        },
+        {
+          "statement": "The retained baseline trajectory ends with /help.",
+          "evidence": [
+            {
+              "source_id": "success-baseline-trajectory",
+              "json_pointer": "/steps/1/message",
+              "excerpt": "/help",
+              "excerpt_form": "verbatim_value"
+            }
+          ]
+        },
+        {
+          "statement": "The existing LLM conclusion already cites the case and describes its scored metrics.",
+          "evidence": [
+            {
+              "source_id": "success-result",
+              "json_pointer": "/tier3_feedback/conclusions/3",
+              "excerpt": {
+                "message": "The best agent achieved 1.0 across accuracy, goal_accuracy, and behavior_check in calculator-001.",
+                "source": "llm",
+                "model": "nvidia/nemotron-3.5-bolt-e4b",
+                "evidence_case_ids": [
+                  "calculator-001"
+                ]
+              },
+              "excerpt_form": "selected_fields"
+            }
+          ]
+        }
+      ],
+      "interpretation": {
+        "kind": "reviewer_inference",
+        "statement": "Expected behavior is supported for this with-skill attempt; the observed difference is local to one paired case, not broad reliability or causal proof."
+      },
+      "uncertainty": [
+        "One positive case and one attempt per arm; no negative controls in this selected run.",
+        "Numeric results are copied from the run, not recomputed from the excerpts."
+      ],
+      "next_action": {
+        "action": "Expand case and attempt coverage before generalizing the explanation.",
+        "verification_needed": "Retain scored outcomes and trajectory evidence for added cases in both arms.",
+        "skill_change_warranted": "No change established by this successful case."
+      },
+      "provenance": {
+        "execution_agent": {
+          "name": "opencode",
+          "model": "nvidia/nvidia/nemotron-3.5-bolt-e4b",
+          "model_source": "CLI; recorded in result.json"
+        },
+        "existing_assessment": {
+          "source": "LLM conclusion plus deterministic run feedback",
+          "judge_model": "nvidia/nemotron-3.5-bolt-e4b",
+          "judge_model_source": "Recorded conclusion model; configured judge catalog verification was degraded."
+        }
+      },
+      "review": {
+        "author": "Codex assistant",
+        "author_model": null,
+        "author_model_note": "Exact assessment model identifier is not recorded in this worksheet.",
+        "review_type": "assistant source review",
+        "review_status": "independent_assistant_case_review_completed",
+        "human_signoff": false,
+        "faithfulness_finding": "The quoted conclusion is supported by the recorded scores and this trajectory; its scope must remain this one case.",
+        "actionability_finding": "The worksheet adds expectation and trajectory references with a sample-size limit; no new runtime explanation is needed.",
+        "representative_user_validation": "Not performed; no measured usability improvement claimed."
+      }
+    },
+    {
+      "id": "failed-calculator-setup",
+      "scope": {
+        "tier": 3,
+        "skill": "calculator",
+        "case_ids": [
+          "calculator-001"
+        ],
+        "environment": "docker",
+        "conditions": [
+          "with_skill",
+          "without_skill"
+        ]
+      },
+      "expected_behavior": {
+        "statement": "Complete agent setup before attempting the same calculator task; the task expectation is unchanged.",
+        "evidence": [
+          {
+            "source_id": "calculator-dataset",
+            "json_pointer": "/0/id",
+            "excerpt": "calculator-001",
+            "excerpt_form": "verbatim_value"
+          }
+        ],
+        "reviewer_expectation": "Agent setup must complete to obtain a measurable task outcome."
+      },
+      "numeric_context": {
+        "execution_status": "failed",
+        "expected_attempts": 2,
+        "scored_attempts": 0,
+        "overall_with_skill": null,
+        "overall_without_skill": null,
+        "score_policy": "skill-evaluator-dimension-mean-v1",
+        "evidence": [
+          {
+            "source_id": "setup-result",
+            "json_pointer": "/agents/opencode",
+            "excerpt": {
+              "execution_status": "failed",
+              "expected_attempts": 2,
+              "scored_attempts": 0,
+              "overall_with_skill": null,
+              "overall_without_skill": null
+            },
+            "excerpt_form": "selected_fields"
+          }
+        ]
+      },
+      "observations": [
+        {
+          "statement": "Both arms report a setup timeout and scored coverage of 0/1.",
+          "evidence": [
+            {
+              "source_id": "setup-result",
+              "json_pointer": "/agents/opencode/conditions/with_skill/execution_errors/1",
+              "excerpt": "Unscoreable reward in calculator-001__4K4Pq7a: AgentSetupTimeoutError: Agent setup timed out after 360.0 seconds",
+              "excerpt_form": "verbatim_value"
+            },
+            {
+              "source_id": "setup-result",
+              "json_pointer": "/agents/opencode/conditions/without_skill/execution_errors/1",
+              "excerpt": "Unscoreable reward in calculator-001__fKMqUf3: AgentSetupTimeoutError: Agent setup timed out after 360.0 seconds",
+              "excerpt_form": "verbatim_value"
+            },
+            {
+              "source_id": "setup-result",
+              "json_pointer": "/agents/opencode/conditions/with_skill/scored_attempts",
+              "excerpt": 0,
+              "excerpt_form": "verbatim_value"
+            },
+            {
+              "source_id": "setup-result",
+              "json_pointer": "/agents/opencode/conditions/without_skill/scored_attempts",
+              "excerpt": 0,
+              "excerpt_form": "verbatim_value"
+            }
+          ]
+        },
+        {
+          "statement": "Existing feedback already identifies inconclusive skill effect and recommends rerunning and inspecting logs if repeated.",
+          "evidence": [
+            {
+              "source_id": "setup-result",
+              "json_pointer": "/tier3_feedback/conclusions/0/message",
+              "excerpt": "per-case result: inconclusive (opencode: condition execution is incomplete).",
+              "excerpt_form": "verbatim_value"
+            },
+            {
+              "source_id": "setup-result",
+              "json_pointer": "/tier3_feedback/suggestions/0",
+              "excerpt": "Not a skill problem: re-run this case; if it repeats, check the agent/gateway logs.",
+              "excerpt_form": "verbatim_value"
+            }
+          ]
+        }
+      ],
+      "interpretation": {
+        "kind": "reviewer_inference",
+        "statement": "The observed blocker is execution setup. This run cannot establish calculator quality or its effect on task success; the quoted recommendation does not independently establish the timeout root cause."
+      },
+      "uncertainty": [
+        "Setup timeout is observed; installation, gateway, network or other root causes were not determined by this review.",
+        "No scored task outcome is available in either arm."
+      ],
+      "next_action": {
+        "action": "Inspect agent setup/install logs, resolve the blocker and rerun the case.",
+        "verification_needed": "Both arms complete and produce valid scored attempts; retain diagnostic logs if setup fails again.",
+        "skill_change_warranted": "No calculator change is justified by this setup failure alone."
+      },
+      "provenance": {
+        "execution_agent": {
+          "name": "opencode",
+          "model": "nvidia/nvidia/nemotron-3.5-bolt-e4b",
+          "model_source": "CLI; recorded in result.json"
+        },
+        "existing_assessment": {
+          "source": "deterministic feedback",
+          "judge_model": null,
+          "judge_model_note": "A judge was configured, but these quoted conclusions and recommendations are deterministic; model attribution would be misleading."
+        }
+      },
+      "review": {
+        "author": "Codex assistant",
+        "author_model": null,
+        "author_model_note": "Exact assessment model identifier is not recorded in this worksheet.",
+        "review_type": "assistant source review",
+        "review_status": "independent_assistant_case_review_completed",
+        "human_signoff": false,
+        "faithfulness_finding": "Failed execution and null scores remain distinct from measured task failure.",
+        "actionability_finding": "Existing retry/log guidance is already actionable; the worksheet makes the unresolved root cause and missing outcome explicit.",
+        "representative_user_validation": "Not performed; no measured usability improvement claimed."
+      }
+    },
+    {
+      "id": "ambiguous-text-analyzer-rubric",
+      "scope": {
+        "tier": 1,
+        "skill": "text-analyzer",
+        "case_ids": [],
+        "check": "RUBRIC_EVAL",
+        "environment": null,
+        "conditions": []
+      },
+      "expected_behavior": {
+        "statement": "Return complete rubric evidence using the required named criterion IDs.",
+        "evidence": [
+          {
+            "source_id": "rubric-result",
+            "json_pointer": "/rubric_eval/summary",
+            "excerpt": "LLM judge returned invalid rubric evidence: missing criterion ids: description_clarity, instruction_clarity, example_quality, documentation_completeness, scope_definition, professional_tone, trigger_simulation, workflow_completeness, error_handling_quality; unexpected criterion ids: 1, 2, 3, 4, 5, 6, 7, 8, 9",
+            "excerpt_form": "verbatim_value"
+          }
+        ]
+      },
+      "numeric_context": {
+        "execution_status": "failed",
+        "overall_score": null,
+        "overall_pass": false,
+        "raw_judge_score": 92,
+        "raw_judge_overall_pass": true,
+        "scale_note": "Raw judge_score is diagnostic rubric output on its original 0–100 scale, not a Tier 3 0–1 score or a valid canonical score.",
+        "evidence": [
+          {
+            "source_id": "rubric-result",
+            "json_pointer": "/rubric_eval",
+            "excerpt": {
+              "execution_status": "failed",
+              "overall_score": null,
+              "overall_pass": false,
+              "judge_score": 92,
+              "judge_overall_pass": true,
+              "checks": []
+            },
+            "excerpt_form": "selected_fields"
+          }
+        ]
+      },
+      "observations": [
+        {
+          "statement": "The artifact preserves a positive judge summary despite rejecting the criterion evidence.",
+          "evidence": [
+            {
+              "source_id": "rubric-result",
+              "json_pointer": "/rubric_eval/judge_summary",
+              "excerpt": "The documentation is comprehensive, clear, and provides excellent examples covering both inline and file-based usage. The implementation details in the script support the documented capabilities well.",
+              "excerpt_form": "verbatim_value"
+            },
+            {
+              "source_id": "rubric-result",
+              "json_pointer": "/results/0/findings/0/check_name",
+              "excerpt": "llm_invalid_response",
+              "excerpt_form": "verbatim_value"
+            }
+          ]
+        }
+      ],
+      "interpretation": {
+        "kind": "reviewer_inference",
+        "statement": "The positive prose is observed judge output, not independently verified documentation quality. Invalid criterion identity prevents a valid rubric result; this is not an intentional scoreless assessment."
+      },
+      "uncertainty": [
+        "The retained report diagnoses unexpected numeric IDs but does not include the full raw judge response.",
+        "Judge model and provider are not recorded in this report and remain unknown.",
+        "This Tier 1 check is not a Tier 3 live execution or a paired skill-lift example."
+      ],
+      "next_action": {
+        "action": "Retry the rubric evaluation with valid named criterion evidence; do not guess a positional ID mapping.",
+        "verification_needed": "A subsequent report contains complete valid criterion evidence and a canonical result.",
+        "skill_change_warranted": "Do not edit the text-analyzer skill solely from this invalid judgment."
+      },
+      "provenance": {
+        "execution_agent": null,
+        "existing_assessment": {
+          "source": "LLM rubric output rejected by validator",
+          "judge_model": null,
+          "judge_provider": null,
+          "provenance_note": "Unknown in retained source; not inferred from other runs."
+        }
+      },
+      "review": {
+        "author": "Codex assistant",
+        "author_model": null,
+        "author_model_note": "Exact assessment model identifier is not recorded in this worksheet.",
+        "review_type": "assistant source review",
+        "review_status": "independent_assistant_case_review_completed",
+        "human_signoff": false,
+        "faithfulness_finding": "Faithful only as a report of invalid evidence and conflicting raw judgment; no verified quality verdict can be drawn.",
+        "actionability_finding": "Retry is justified by the reported contract failure; prose and raw 92 cannot repair the missing valid result.",
+        "representative_user_validation": "Not performed; no measured usability improvement claimed."
+      }
+    }
+  ]
+}

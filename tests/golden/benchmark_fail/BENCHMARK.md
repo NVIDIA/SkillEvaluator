@@ -4,8 +4,6 @@
 
 The skill should be reviewed before publication. Address the blocking findings below, then rerun SkillEvaluator.
 
-Pass@3 (supporting reliability: share of cases with a passing attempt, attempt passes at Overall ≥ 0.50): with skill 75.0%, without skill 50.0%; Pass-rate difference +25.0 percentage points.
-
 ## Evaluation Metadata
 
 - Skill: `demo-skill`
@@ -47,7 +45,7 @@ The three-tier evaluation checks whether the skill:
 | Effectiveness | 72.0% → 31.0% (-41.0 points) | 65.0% → 38.0% (-27.0 points) |
 | Efficiency | 72.0% → 31.0% (-41.0 points) | 65.0% → 38.0% (-27.0 points) |
 
-**How to read this table:** baseline is the same task attempted without the target skill. Scores are rounded to one decimal; threshold-adjacent values use additional precision so their displayed band matches the verdict. Uplift is `skill score - baseline score`, computed from those displayed scores and shown in percentage points. Skill Lift = with-skill Overall − without-skill Overall.
+**How to read this table:** baseline is the same task attempted without the target skill. Scores are rounded to one decimal; threshold-adjacent values use additional precision so their displayed band matches the verdict. Uplift is `skill score - baseline score`, computed from those displayed scores and shown in percentage points.
 
 Example: `47.0% → 92.0% (+45.0 points)` means the skill-assisted run scored 92.0%, 45.0 percentage points above its 47.0% no-skill baseline.
 

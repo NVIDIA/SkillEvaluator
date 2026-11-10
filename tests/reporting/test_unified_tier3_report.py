@@ -3475,6 +3475,80 @@ def test_pass_at_k_final_column_has_a_narrow_viewport_scroll_contract() -> None:
     assert ".pass-at-k-table { min-width: 720px; }" in html
 
 
+def test_shared_metric_pass_lift_is_labelled_separately_from_arm_rates() -> None:
+    from skillevaluator.reporting.summary_copy import pass_at_k_summary
+    from skillevaluator.tier3.harbor.collector import _shared_metric_pass_lift
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS, DEFAULT_SCORE_POLICY
+
+    with_skill_reward = {
+        **dict.fromkeys(DEFAULT_METRICS, 0.4),
+        "entry_id": "case-1",
+        "metric_set": DEFAULT_METRIC_SET,
+        "score_policy": DEFAULT_SCORE_POLICY,
+        "details": {"skill_execution": {"activation": {"passed": True, "score": 1.0}}},
+    }
+    with_skill_reward["skill_execution"] = 1.0
+    with_skill_reward["skill_efficiency"] = 1.0
+    without_skill_reward = {
+        **dict.fromkeys(DEFAULT_METRICS, 0.4),
+        "entry_id": "case-1",
+        "metric_set": DEFAULT_METRIC_SET,
+        "score_policy": DEFAULT_SCORE_POLICY,
+        "skill_execution": None,
+        "skill_efficiency": None,
+        "details": {
+            "skill_execution": {"score": None, "status": "not_applicable"},
+            "skill_efficiency": {"score": None, "status": "not_applicable"},
+        },
+    }
+    shared_lift = _shared_metric_pass_lift(
+        [with_skill_reward],
+        [without_skill_reward],
+        n_attempts=1,
+        pass_threshold=0.5,
+        stop_on_pass=False,
+        expected_cases=1,
+        expected_case_ids=["case-1"],
+    )
+    assert shared_lift["basis"] == "shared_metrics"
+    assert shared_lift["with_skill"] == shared_lift["without_skill"] == 0.0
+
+    pass_at_k = {
+        "with_skill": {"k": 1, "pass_threshold": 0.5, "rate": 1.0, "passed_cases": 1, "total_cases": 1},
+        "without_skill": {"k": 1, "pass_threshold": 0.5, "rate": 0.0, "passed_cases": 0, "total_cases": 1},
+        "lift": shared_lift,
+    }
+    summary = pass_at_k_summary(pass_at_k, {"max_attempts": 1, "pass_threshold": 0.5})
+    assert summary is not None
+    assert "with skill 100.0%, without skill 0.0%" in summary
+    assert "Pass-rate difference +100.0 percentage points" in summary
+    assert "Shared-metric pass-rate difference +0.0 percentage points" in summary
+
+    payload = build_agent_eval_payload(
+        "shared-metric-pass-demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+                "overall_with_skill": 0.64,
+                "overall_without_skill": 0.4,
+                "pass_with_skill": pass_at_k["with_skill"],
+                "pass_without_skill": pass_at_k["without_skill"],
+                "pass_lift": shared_lift,
+            }
+        },
+        attempt_policy={"max_attempts": 1, "pass_threshold": 0.5},
+        use_llm_judge=False,
+    )
+    assert payload is not None
+    html = _render_agent_payload(payload)
+    assert "Shared-metric pass-rate difference: +0 percentage points (with skill 0%, without skill 0%)." in html
+    assert "<td>With skill</td>" in html and "<td>100%</td>" in html
+    assert "<td>Without skill</td>" in html and "<td>0%</td>" in html
+
+
 def test_unavailable_pairing_does_not_render_a_zero_evidence_row() -> None:
     payload = build_agent_eval_payload(
         "unpaired-evidence-demo",

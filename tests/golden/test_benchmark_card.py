@@ -1098,9 +1098,8 @@ def test_verdict_callout_falls_back_for_future_statuses() -> None:
 
 def test_benchmark_pass_card_matches_golden() -> None:
     rendered = BenchmarkReporter(include_timestamp=True).render_all([*_deterministic_results(), _live_tier3_result()])
-    assert SKILL_LIFT_DEFINITION in rendered
-    assert "Pass@3 (supporting reliability" in rendered
-    assert "Pass-rate difference +25.0 percentage points" in rendered
+    assert SKILL_LIFT_DEFINITION not in rendered
+    assert "Pass@3 (supporting reliability" not in rendered
     assert rendered == PASS_GOLDEN.read_text(encoding="utf-8")
     assert "| Tier 1 | Static validation | **PASSED** |" in rendered
     assert "| Tier 2 | Semantic deduplication | **PASSED WITH OBSERVATIONS** |" in rendered

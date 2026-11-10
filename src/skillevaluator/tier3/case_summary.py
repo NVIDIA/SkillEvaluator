@@ -581,7 +581,7 @@ def render_case_summary(
     console.print(table)
     legend = f"{PASS} pass  {FAIL} fail  {ERROR} did not run  {SKIPPED} skipped after a pass"
     if len(agents) > 1:
-        legend += "  ? incomplete\n+50 = pass-rate difference, in percentage points"
+        legend += "  ? incomplete\n+50 = change in per-attempt success rate, in percentage points"
     else:
         legend += "  (0.82) mean score 0-1"
     console.print(Text(legend, style="dim"))

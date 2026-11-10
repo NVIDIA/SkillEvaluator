@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from skillevaluator.constants import (
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
@@ -413,7 +414,7 @@ class CLIReporter(ReporterBase):
             f"(Skill Lift = [{composite_style}]{composite_text}[/{composite_style}])"
         )
         if scored_lift:
-            console.print(f"  [dim]{SKILL_LIFT_DEFINITION}[/dim]")
+            console.print(Text(SKILL_LIFT_DEFINITION, style="dim"), soft_wrap=True)
         if pass_summary := pass_at_k_summary(agent_eval.get("pass_at_k"), agent_eval.get("attempt_policy")):
             console.print(f"  [dim]{pass_summary}[/dim]")
         if verdict == "inconclusive":

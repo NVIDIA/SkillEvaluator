@@ -2551,7 +2551,7 @@
                 <div class="dashboard-card">
                     <h3 class="dashboard-card-title">Skill Lift</h3>
                     <p class="dashboard-card-value">{{ "%+.2f" | format(tier3.get('overall_lift')) if tier3.get('overall_lift') is not none else "N/A" }}</p>
-                    <p class="dashboard-card-subtitle">Skill Lift = with-skill Overall − without-skill Overall</p>
+                    <p class="dashboard-card-subtitle">Skill Lift compares Overall on the metrics and cases both arms scored, so it can differ from subtracting the displayed Overall scores.</p>
                 </div>
             </div>
 
@@ -2898,16 +2898,22 @@
                         {% set wi = wp.rate_interval or {} %}
                         {% set bi = bp.rate_interval or {} %}
                         {% set paired = lf.paired_comparison if lf.paired_comparison is mapping else {} %}
+                        {% set wp_rate = wp.get('rate') %}
+                        {% set bp_rate = bp.get('rate') %}
+                        {% set arm_delta = wp_rate - bp_rate if wp_rate is number and bp_rate is number else none %}
                         {% if wp %}
                         <tr>
                             <td><strong>{{ name }}</strong></td>
                             <td>With skill</td>
-                            <td>{{ "%.0f%%" | format((wp.rate or 0.0) * 100) }}</td>
+                            <td>{{ "%.0f%%" | format((wp_rate or 0.0) * 100) }}</td>
                             <td>{% if wi %}{{ wi | adaptive_interval_percent }}{% else %}—{% endif %}</td>
                             <td>{{ wp.passed_cases or 0 }} of {{ wp.total_cases or 0 }}</td>
                             <td>{{ t3_attempts_passed(wp) }}</td>
-                            <td style="color:{{ 'var(--success-color)' if (lf.delta or 0) >= tier3_lift_pass_threshold else ('var(--danger-color)' if (lf.delta or 0) <= tier3_lift_fail_threshold else 'var(--text-secondary)') }};font-weight:600;">
-                                {% if lf.delta is defined %}{{ "%+.0f%%" | format((lf.delta or 0.0) * 100) }}{% else %}—{% endif %}
+                            <td style="color:{{ 'var(--success-color)' if arm_delta is not none and arm_delta >= tier3_lift_pass_threshold else ('var(--danger-color)' if arm_delta is not none and arm_delta <= tier3_lift_fail_threshold else 'var(--text-secondary)') }};font-weight:600;">
+                                {% if arm_delta is not none %}{{ "%+.0f%%" | format(arm_delta * 100) }}{% else %}—{% endif %}
+                                {% if lf.basis == 'shared_metrics' %}
+                                <div>Shared-metric pass-rate difference: {% if lf.with_skill is number and lf.without_skill is number %}{{ "%+.0f" | format((lf.with_skill - lf.without_skill) * 100) }} percentage points (with skill {{ "%.0f%%" | format(lf.with_skill * 100) }}, without skill {{ "%.0f%%" | format(lf.without_skill * 100) }}){% else %}N/A{% endif %}.</div>
+                                {% endif %}
                             </td>
                         </tr>
                         {% endif %}
@@ -2915,7 +2921,7 @@
                         <tr>
                             <td></td>
                             <td>Without skill</td>
-                            <td>{{ "%.0f%%" | format((bp.rate or 0.0) * 100) }}</td>
+                            <td>{{ "%.0f%%" | format((bp_rate or 0.0) * 100) }}</td>
                             <td>{% if bi %}{{ bi | adaptive_interval_percent }}{% else %}—{% endif %}</td>
                             <td>{{ bp.passed_cases or 0 }} of {{ bp.total_cases or 0 }}</td>
                             <td>{{ t3_attempts_passed(bp) }}</td>
@@ -3374,7 +3380,7 @@
                         <div class="t3-kpi-value" style="color:var(--text-secondary);">N/A</div>
                         <div class="t3-kpi-sub">{% if agent.get('skill_activation', {}).get('status') == 'never_activated' %}inconclusive: skill never activated{% elif agent.with_skill is none and agent.baseline is not none %}with-skill unavailable{% elif agent.with_skill is none %}N/A lift{% elif agent.baseline is not none %}comparison unavailable{% else %}no baseline{% endif %}</div>
                         {% endif %}
-                        <div class="t3-kpi-sub">Skill Lift = with-skill Overall − without-skill Overall</div>
+                        <div class="t3-kpi-sub">Skill Lift compares Overall on the metrics and cases both arms scored, so it can differ from subtracting the displayed Overall scores.</div>
                     </div>
                     <div class="t3-kpi-card">
                         <div class="t3-kpi-label">Trials</div>

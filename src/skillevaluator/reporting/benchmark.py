@@ -235,7 +235,9 @@ class BenchmarkReporter(ReporterBase):
                 lines.append(
                     f"Skill Lift: **{completed['lift']:+.4f}** ({completed['lift'] * 100:+.2f} percentage points)."
                 )
-                lines.append(SKILL_LIFT_DEFINITION + ".")
+                lines.append(SKILL_LIFT_DEFINITION)
+            if pass_summary := pass_at_k_summary((ae or {}).get("pass_at_k"), (ae or {}).get("attempt_policy")):
+                lines.extend([pass_summary, ""])
             if completed["needs_attention"]:
                 lines.append(
                     "**Needs attention:** other execution failures remain. This completed-agent result does not certify the whole run."
@@ -245,8 +247,6 @@ class BenchmarkReporter(ReporterBase):
                     f"Recovered timeout attempts: {completed['recovered_attempts']}; failed history is retained and excluded from scoring."
                 )
             lines.append("")
-        if pass_summary := pass_at_k_summary((ae or {}).get("pass_at_k"), (ae or {}).get("attempt_policy")):
-            lines.extend([pass_summary, ""])
         self._render_metadata(
             lines,
             results,
@@ -505,9 +505,7 @@ class BenchmarkReporter(ReporterBase):
                     "**How to read this table:** baseline is the same task attempted without the target skill. "
                     "Scores are rounded to one decimal; threshold-adjacent values use additional precision so "
                     "their displayed band matches the verdict. Uplift is `skill score - baseline score`, "
-                    "computed from those displayed scores and shown in percentage points. "
-                    + SKILL_LIFT_DEFINITION
-                    + "."
+                    "computed from those displayed scores and shown in percentage points."
                 ),
                 "",
                 (

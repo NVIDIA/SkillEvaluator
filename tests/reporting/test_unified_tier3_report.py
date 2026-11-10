@@ -538,9 +538,7 @@ def test_conclusions_separate_unavailable_trials_from_threshold_misses(has_thres
     assert payload["agents"]["codex"]["trials"][0]["overall"] is None
     conclusions = {item["title"]: item["message"] for item in payload["conclusions"]}
     assert "Unscored trials" in conclusions
-    assert conclusions["Unscored trials"] == (
-        "1 trial(s) have unavailable overall scores; examples: codex/unscored"
-    )
+    assert conclusions["Unscored trials"] == ("1 trial(s) have unavailable overall scores; examples: codex/unscored")
     html = _render_agent_payload(payload)
     assert "1 trial(s) have unavailable overall scores; examples: codex/unscored" in html
     if has_threshold_miss:

@@ -46,6 +46,19 @@ commands referenced below.
 | [tier3 validate](#tier3-validate) | Validate `evals/` and the optional Harbor contract | Nothing |
 | [tier3 import-traces](#tier3-import-traces) | Import redacted trace review candidates | Nothing |
 | [tier3 accept-traces](#tier3-accept-traces) | Promote explicitly reviewed trace candidates | Nothing |
+| [tier3 import-metrics](#tier3-import-metrics) | Report precomputed custom scores as external observations | A versioned metrics JSON file; no runtime or provider key |
+
+## tier3 import-metrics
+
+```bash
+skillevaluator tier3 import-metrics INPUT.json --output-dir NEW_DIRECTORY
+```
+
+`INPUT.json` must exist. Required `-o, --output-dir` names a directory that must
+not exist. The command validates the complete input before writing
+`external_metrics.json` and `external_metrics.md`. It never executes tests or
+assigns canonical scores; exit 0 means a valid import, not passing tests.
+See the [input contract and simulator example](/skills/skillevaluator/custom-graders#import-precomputed-custom-metrics).
 
 ## Global conventions
 
@@ -166,11 +179,12 @@ pipeline.
 | --- | --- |
 | `tier1` | `validate`, `quality-check`, `rubric-eval`, `security-scan`, `pii-scan`, `lint-scripts` |
 | `tier2` | `context-optimization-check`, `dedup-scan`, `similarity-check` |
-| `tier3` | `evaluate`, `select-decoys`, `create-eval-dataset`, `migrate-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `feedback`, `validate`, `harbor-view`, `import-traces`, `accept-traces` |
+| `tier3` | `evaluate`, `select-decoys`, `create-eval-dataset`, `migrate-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `feedback`, `validate`, `harbor-view`, `import-metrics`, `import-traces`, `accept-traces` |
 
 `health-check` and [models](#models) are top-level only. The expert commands
 [tier3 evaluate](#tier3-evaluate), [tier3 select-decoys](#tier3-select-decoys),
-[tier3 feedback](#tier3-feedback), [tier3 import-traces](#tier3-import-traces),
+[tier3 feedback](#tier3-feedback), [tier3 import-metrics](#tier3-import-metrics),
+[tier3 import-traces](#tier3-import-traces),
 [tier3 accept-traces](#tier3-accept-traces), and `tier3 validate` are advertised
 **only** inside the `tier3` group:
 

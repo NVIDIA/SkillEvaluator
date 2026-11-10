@@ -306,6 +306,63 @@ def tier3() -> None:
     """
 
 
+@tier3.command("import-traces")
+@click.argument("skill_path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument("export", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Review bundle directory outside the skill (default: ./<skill-dir-name>-trace-review).",
+)
+@click.option("--force", is_flag=True, help="Overwrite an existing candidates file.")
+@click.option("--dry-run", is_flag=True, help="Print the summary without writing files.")
+def tier3_import_traces(skill_path: Path, export: Path, output: Path | None, force: bool, dry_run: bool) -> None:
+    """Import a production trace export into redacted review candidates."""
+    from skillevaluator.tier3.trace_import import import_traces
+
+    output = output or Path.cwd() / f"{skill_path.resolve().name}-trace-review"
+    try:
+        document = import_traces(skill_path, export, output, force=force, dry_run=dry_run)
+    except (ValueError, OSError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"candidate: {len(document['candidates'])}")
+    for reason in ("duplicate", "incomplete", "unsupported", "other skill"):
+        click.echo(f"{reason}: {sum(s['reason'] == reason for s in document['skipped'])}")
+    for item in document["skipped"]:
+        click.echo(json.dumps(item, ensure_ascii=False))
+    for candidate in document["candidates"]:
+        click.echo(f"{candidate['id']}: redactions={candidate['redactions']} warnings={candidate['warnings']}")
+    click.echo(
+        f"Next: review {output / 'candidates.json'}, then run skillevaluator tier3 accept-traces {skill_path} {output}"
+    )
+
+
+@tier3.command("accept-traces")
+@click.argument("skill_path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument("review_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--dry-run", is_flag=True, help="Report additions without writing files.")
+@click.option(
+    "--allow-native-harbor",
+    is_flag=True,
+    help="Explicitly accept traces when native Harbor tasks are selected.",
+)
+def tier3_accept_traces(skill_path: Path, review_dir: Path, dry_run: bool, allow_native_harbor: bool) -> None:
+    """Promote only human-reviewed trace candidates into evals/evals.json."""
+    from skillevaluator.tier3.trace_import import accept_traces
+
+    try:
+        result = accept_traces(skill_path, review_dir, dry_run=dry_run, allow_native_harbor=allow_native_harbor)
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    for key in ("added", "already present", "skipped"):
+        click.echo(f"{'would add' if dry_run and key == 'added' else key}: {len(result[key])} {', '.join(result[key])}")
+    for check in result["validation"]:
+        click.echo(str(check))
+    if any(check.status == "error" for check in result["validation"]):
+        raise click.ClickException("Dataset validation failed after writing")
+
+
 def _target_argument(func):
     return click.argument("target_path", type=click.Path(exists=True, resolve_path=True, path_type=Path))(func)
 

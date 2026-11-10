@@ -2628,6 +2628,48 @@
     },
     "tier3": {
       "commands": {
+        "accept-traces": {
+          "params": [
+            {
+              "name": "skill_path",
+              "opts": [
+                "skill_path"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "directory"
+            },
+            {
+              "name": "review_dir",
+              "opts": [
+                "review_dir"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "directory"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "dry_run",
+              "opts": [
+                "--dry-run"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "allow_native_harbor",
+              "opts": [
+                "--allow-native-harbor"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            }
+          ]
+        },
         "compare": {
           "params": [
             {
@@ -3316,6 +3358,57 @@
               "param_type": "option",
               "required": true,
               "type": "directory"
+            }
+          ]
+        },
+        "import-traces": {
+          "params": [
+            {
+              "name": "skill_path",
+              "opts": [
+                "skill_path"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "directory"
+            },
+            {
+              "name": "export",
+              "opts": [
+                "export"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "file"
+            },
+            {
+              "name": "output",
+              "opts": [
+                "--output",
+                "-o"
+              ],
+              "param_type": "option",
+              "type": "directory"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "force",
+              "opts": [
+                "--force"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "dry_run",
+              "opts": [
+                "--dry-run"
+              ],
+              "param_type": "option",
+              "type": "boolean"
             }
           ]
         },

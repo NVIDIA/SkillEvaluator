@@ -27,6 +27,10 @@ All notable changes to SkillEvaluator are documented in this file.
   versioned labels, with offline suite checks, repeated-grading statistics,
   provenance, optional rate gates and a bundled public reference suite.
 
+- Import production trace exports into redacted review candidates with
+  `tier3 import-traces`, then promote only explicitly human-reviewed expectations
+  and replay fixtures with `tier3 accept-traces`.
+
 - Tier 3 evaluations support token, judge-call, attempt, and priced-cost budgets.
 
 - Tier 3 reports list up to three run-level **Next steps** under the per-case

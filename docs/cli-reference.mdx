@@ -45,6 +45,8 @@ commands referenced below.
 | [health-check](#health-check) | Quick CLI + backend readiness check, or another tier with `--tier` | Nothing |
 | [models](#models) | List models visible through the selected provider's catalog | Provider configuration/key |
 | [tier3 validate](#tier3-validate) | Validate `evals/` and the optional Harbor contract | Nothing |
+| [tier3 import-traces](#tier3-import-traces) | Import redacted trace review candidates | Nothing |
+| [tier3 accept-traces](#tier3-accept-traces) | Promote explicitly reviewed trace candidates | Nothing |
 | [tier3 import-metrics](#tier3-import-metrics) | Report precomputed custom scores as external observations | A versioned metrics JSON file; no runtime or provider key |
 
 ## tier3 import-metrics
@@ -57,7 +59,7 @@ skillevaluator tier3 import-metrics INPUT.json --output-dir NEW_DIRECTORY
 not exist. The command validates the complete input before writing
 `external_metrics.json` and `external_metrics.md`. It never executes tests or
 assigns canonical scores; exit 0 means a valid import, not passing tests.
-See the [input contract and simulator example](custom-graders.mdx#import-precomputed-custom-metrics).
+See the [input contract and simulator example](/skills/skillevaluator/custom-graders#import-precomputed-custom-metrics).
 
 ## Global conventions
 
@@ -178,12 +180,47 @@ pipeline.
 | --- | --- |
 | `tier1` | `validate`, `quality-check`, `rubric-eval`, `security-scan`, `pii-scan`, `lint-scripts` |
 | `tier2` | `context-optimization-check`, `dedup-scan`, `similarity-check` |
-| `tier3` | `evaluate`, `select-decoys`, `create-eval-dataset`, `migrate-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `feedback`, `validate`, `harbor-view`, `import-metrics` |
+| `tier3` | `evaluate`, `select-decoys`, `create-eval-dataset`, `migrate-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `feedback`, `validate`, `harbor-view`, `import-metrics`, `import-traces`, `accept-traces` |
 
 `health-check` and [models](#models) are top-level only. The expert commands
 [tier3 evaluate](#tier3-evaluate), [tier3 select-decoys](#tier3-select-decoys),
-[tier3 feedback](#tier3-feedback), and `tier3 validate` are advertised **only**
-inside the `tier3` group:
+[tier3 feedback](#tier3-feedback), [tier3 import-metrics](#tier3-import-metrics),
+[tier3 import-traces](#tier3-import-traces),
+[tier3 accept-traces](#tier3-accept-traces), and `tier3 validate` are advertised
+**only** inside the `tier3` group:
+
+### tier3 import-traces
+
+Import a production trace export into redacted candidates outside the skill.
+See [Trace Datasets](trace-datasets.mdx) for the v1 JSON/JSONL contract and redaction limits.
+
+```bash
+skillevaluator tier3 import-traces ./my-skill ./sessions.jsonl -o ./review
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `-o`, `--output DIR` | `./<skill-dir-name>-trace-review` | Review bundle directory, outside the skill. |
+| `--force` | off | Overwrite an existing candidates file. |
+| `--dry-run` | off | Print classifications, warnings, and the next-step hint; write nothing. |
+
+### tier3 accept-traces
+
+Promote only explicitly reviewed candidates into `evals/evals.json`. Requires
+`SKILL_PATH` and `REVIEW_DIR`. `accept` requires a reviewer-written expectation;
+`accept_observed` is allowed only for successful sessions with non-empty output.
+Pending and rejected candidates are skipped. All decision/redaction errors abort
+before writing; dataset validation errors after writing return a non-zero status.
+
+```bash
+skillevaluator tier3 accept-traces ./my-skill ./review --dry-run
+skillevaluator tier3 accept-traces ./my-skill ./review
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--dry-run` | off | Report additions and already-present ids without writing. |
+| `--allow-native-harbor` | off | Explicitly accept traces when native Harbor tasks are selected. |
 
 ### tier3 validate
 

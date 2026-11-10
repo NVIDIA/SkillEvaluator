@@ -11,6 +11,7 @@ from tests.test_tier3_case_summary import _agent, _case
 
 from skillevaluator.evaluation.tier3_report import (
     _validation_result_from_payload,
+    agent_eval_result_from_directory,
     build_agent_eval_payload,
     render_agent_eval_html_report,
 )
@@ -82,6 +83,10 @@ def test_mixed_attempts_ask_for_more_attempts_before_editing_anything(tmp_path: 
     assert "`--n-attempts 4`" in step["action"]
     assert step["evidence"] == "a/c2 with-skill ✓✗"
 
+    result = {"agents": {"a": agent}, "attempt_policy": {"stop_on_pass": True}}
+    [stopped_step] = next_steps(result, run_dir=tmp_path)
+    assert "`--n-attempts 4 --no-stop-on-pass`" in stopped_step["action"]
+
 
 def test_single_attempt_runs_are_flagged_but_stop_on_pass_skips_are_not(tmp_path: Path) -> None:
     _dataset(tmp_path)
@@ -113,6 +118,19 @@ def test_agent_dependent_effect_is_a_hypothesis_to_test(tmp_path: Path) -> None:
     assert step["action"].startswith("Test the hypothesis that codex")
 
 
+def test_never_activated_agent_does_not_trigger_single_agent_experiment(tmp_path: Path) -> None:
+    _dataset(tmp_path)
+    never = {**_helps(), "skill_activation": {"status": "never_activated"}}
+    flat = _agent(
+        {case_id: _case(True, True) for case_id in (*_IDS, "neg")},
+        {case_id: _case(True, True) for case_id in (*_IDS, "neg")},
+    )
+
+    steps = next_steps({"agents": {"claude-code": never, "codex": flat}}, run_dir=tmp_path)
+
+    assert "agent experiment" not in _kinds(steps)
+
+
 def test_few_cases_ask_for_more_cases_and_negative_controls_do_not_count(tmp_path: Path) -> None:
     _dataset(tmp_path, ids=("c1", "c2"))
 
@@ -121,6 +139,10 @@ def test_few_cases_ask_for_more_cases_and_negative_controls_do_not_count(tmp_pat
     assert step["kind"] == "more cases" and step["target"] == "dataset"
     assert step["problem"].startswith("only 2 skill case(s)") and step["evidence"] == "c1, c2"
     assert "keep the existing cases and their expectations" in step["action"]
+    rewritten = [{"kind": "eval case", "case": "c1"}]
+    assert _kinds(next_steps({"agents": {"a": _helps(("c1", "c2"))}}, run_dir=tmp_path, fixes=rewritten)) == [
+        "more cases"
+    ]
     saturated = [{"kind": "eval case", "case": "all cases"}]
     assert next_steps({"agents": {"a": _helps(("c1", "c2"))}}, run_dir=tmp_path, fixes=saturated) == []
 
@@ -193,7 +215,7 @@ def test_html_report_shows_next_steps_under_the_case_fixes(tmp_path: Path) -> No
     assert "Check: With 5 or more skill cases the verdict keeps its direction. Evidence: case" in preview
 
 
-def test_markdown_report_shows_next_steps_with_their_strength() -> None:
+def test_markdown_report_renders_next_step_strength() -> None:
     agent = {
         "num_trials": 1,
         "num_trials_baseline": 1,
@@ -222,3 +244,18 @@ def test_markdown_report_shows_next_steps_with_their_strength() -> None:
     )
     assert "   - Check: A second agent shows the same direction." in markdown
     assert "   - Evidence: opencode +0 pp" in markdown
+
+
+def test_markdown_report_uses_next_steps_from_saved_run_findings(tmp_path: Path) -> None:
+    run = _run(tmp_path, goal_accuracy=1.0)
+    render_agent_eval_html_report(tmp_path, run, use_llm_judge=False)
+
+    result = agent_eval_result_from_directory(tmp_path, run, use_llm_judge=False)
+    assert result is not None
+    assert result.metadata["agent_eval"]["next_steps"]
+
+    markdown = MarkdownReporter(include_timestamp=False).render_all([result])
+
+    assert "### Next Steps" in markdown
+    assert "each case ran once, so a single attempt decides every pass or fail mark" in markdown
+    assert "Check: With 5 or more skill cases the verdict keeps its direction." in markdown

@@ -622,7 +622,7 @@ they also appear when no LLM is configured. Each step names:
 | Incomplete run | Attempts did not produce a score and no per-case run error already says so |
 | Inconsistent results | A case passed on some attempts and failed on others (more `--n-attempts`) |
 | Single attempt | Every case ran once |
-| Agent-dependent effect | Two or more agents differ by 20 or more points in pass-rate change |
+| Agent-dependent effect | Two or more agents differ by 20 or more points in pass-rate change, and the best agent gains at least 10 points |
 | More cases | Fewer than five skill cases ran, unless the case fixes already ask for new cases |
 | Negative controls | The dataset snapshot has no case with `expected_skill: null` or `should_trigger: false` |
 | Agent experiment | Only one agent ran and the skill showed no clear gain |

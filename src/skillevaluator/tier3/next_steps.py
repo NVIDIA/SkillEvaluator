@@ -130,21 +130,28 @@ def next_steps(
     fixes: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
     """Return up to three distinct run-level next steps, most blocking first."""
+    raw_agents = result.get("agents")
+    raw_agents = raw_agents if isinstance(raw_agents, Mapping) else {}
+    total_agent_count = len(raw_agents)
     agents = {
         str(name): agent
-        for name, agent in (result.get("agents") or {}).items()
+        for name, agent in raw_agents.items()
         if isinstance(agent, Mapping) and not _never_activated(agent) and not _with_skill_skipped(agent)
     }
     case_ids = _case_ids(agents)
     if not agents or not case_ids:
         return []
-    fix_kinds = {str(fix.get("kind")) for fix in fixes or [] if isinstance(fix, Mapping)}
+    new_case_fixes = any(
+        isinstance(fix, Mapping) and fix.get("kind") == "eval case" and fix.get("case") == "all cases"
+        for fix in fixes or []
+    )
+    has_run_error_fix = any(isinstance(fix, Mapping) and fix.get("kind") == "run error" for fix in fixes or [])
     steps: list[dict[str, str]] = []
 
     missing, missing_cases, unavailable = _missing_attempts(agents)
     partial = bool(missing or unavailable)
     observed = LIMITED if partial else SUPPORTED
-    if partial and "run error" not in fix_kinds:
+    if partial and not has_run_error_fix:
         problem = (
             f"{missing} attempt(s) did not produce a score"
             if missing
@@ -165,13 +172,18 @@ def next_steps(
 
     mixed, most_attempts = _inconsistent_cases(agents)
     if mixed:
+        attempt_count = max(3, most_attempts + 2)
+        attempt_flags = f"--n-attempts {attempt_count}"
+        attempt_policy = result.get("attempt_policy")
+        if isinstance(attempt_policy, Mapping) and attempt_policy.get("stop_on_pass") is True:
+            attempt_flags += " --no-stop-on-pass"
         steps.append(
             _step(
                 "inconsistent results",
                 "evaluation",
                 f"{len(mixed)} case result(s) passed on some attempts and failed on others",
                 _listed(mixed),
-                f"Re-run with more attempts per case (`--n-attempts {max(3, most_attempts + 2)}`) "
+                f"Re-run with more attempts per case (`{attempt_flags}`) "
                 "before editing the skill or the cases, so one lucky or unlucky attempt does not decide the change.",
                 "Each case passes or fails consistently and the verdict keeps its direction.",
                 observed,
@@ -214,7 +226,7 @@ def next_steps(
     dataset = _dataset_entries(run_dir)
     routed = {case_id: _routing(dataset[case_id]) for case_id in case_ids if case_id in dataset}
     skill_cases = [case_id for case_id in case_ids if routed.get(case_id) is not False]
-    if len(skill_cases) < _MIN_SKILL_CASES and "eval case" not in fix_kinds:
+    if len(skill_cases) < _MIN_SKILL_CASES and not new_case_fixes:
         steps.append(
             _step(
                 "more cases",
@@ -244,7 +256,7 @@ def next_steps(
             )
         )
 
-    if len(agents) == 1 and len(changes) == 1:
+    if total_agent_count == 1 and len(changes) == 1:
         [(name, delta)] = changes.items()
         if delta < _CLEAR_EFFECT_PP:
             steps.append(

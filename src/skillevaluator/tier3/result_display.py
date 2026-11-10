@@ -21,7 +21,9 @@ from rich.table import Table
 from rich.text import Text
 
 from skillevaluator.reporting.harbor_viewer import harbor_job_links, normalize_harbor_viewer_for_display
+from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION
 from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, RED, TEXT, lift_style
+from skillevaluator.tier3.attempt_verdict import required_check_failure_reason
 from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
 from skillevaluator.tier3.evidence_volume import evidence_volume_for_conditions, format_evidence_volume
 from skillevaluator.tier3.harbor.metrics import (
@@ -442,6 +444,101 @@ def _responsive_conditions(table: Table, console: Console) -> Table:
     return compact
 
 
+def _agent_score_headlines(
+    *,
+    result: Mapping[str, Any],
+    agent: str,
+    data: Mapping[str, Any],
+    with_usable: bool,
+    baseline_usable: bool,
+    overall: Mapping[str, Any],
+    safe: Any,
+) -> list[Text]:
+    """Build the compact verdict, lift, and per-arm check-count summary."""
+    pass_at_k = data.get("pass_at_k")
+    with_pass = pass_at_k.get("with_skill") if isinstance(pass_at_k, Mapping) else None
+    without_pass = pass_at_k.get("without_skill") if isinstance(pass_at_k, Mapping) else None
+    required_checks = with_pass.get("required_checks") if isinstance(with_pass, Mapping) else None
+    verdict_reason = required_check_failure_reason(required_checks)
+    headlines = []
+    agents = result.get("agents")
+    multiple_agents = isinstance(agents, Mapping) and len(agents) > 1
+    agent_verdict = "inconclusive" if _never_activated(data) else "fail" if verdict_reason else "pass"
+    if multiple_agents or verdict_reason:
+        verdict_label = f"QUALITY VERDICT ({safe(agent)}):" if multiple_agents else "QUALITY VERDICT:"
+        reason = f" — {safe(verdict_reason)}" if verdict_reason else ""
+        color = "yellow" if agent_verdict == "inconclusive" else RED if agent_verdict == "fail" else GREEN
+        headlines.append(Text(f"{verdict_label} {agent_verdict.upper()}{reason}", style=f"bold {color}"))
+    if (
+        with_usable
+        and baseline_usable
+        and all(
+            _finite_number(value) is not None
+            for value in (overall.get("with_skill"), overall.get("without_skill"), overall.get("delta"))
+        )
+    ):
+        lift_label = "OVERALL SKILL LIFT"
+        if verdict_reason and _finite_number(overall.get("delta")) is not None and overall["delta"] > 0:
+            lift_label += " (for reference)"
+        headline = Text(f"{lift_label}   ", style="bold")
+        headline.append_text(_delta_cell(overall["delta"]))
+        if multiple_agents:
+            headline.append(f" · {safe(agent)}", style="dim")
+        headlines.append(headline)
+
+    for label, field, numerator in (
+        ("REQUIRED CHECKS PASSED", "required_checks", "passed"),
+        ("GOALS MET", "correct_answers", "correct"),
+        ("SECURITY CLEAN", "security_clean", "clean"),
+    ):
+        with_counts = with_pass.get(field) if isinstance(with_pass, Mapping) else None
+        without_counts = without_pass.get(field) if isinstance(without_pass, Mapping) else None
+        counts = (
+            (
+                with_counts.get(numerator),
+                with_counts.get("scored"),
+            )
+            if isinstance(with_counts, Mapping)
+            else ()
+        )
+        baseline_counts = (
+            (
+                without_counts.get(numerator),
+                without_counts.get("scored"),
+            )
+            if isinstance(without_counts, Mapping)
+            else ()
+        )
+        line_label = f"{label} ({safe(agent)})" if multiple_agents else label
+        line = Text(f"{line_label}   ", style="bold")
+        valid_with = (
+            len(counts) == 2
+            and all(isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in counts)
+            and counts[1] > 0
+        )
+        valid_without = (
+            len(baseline_counts) == 2
+            and all(isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in baseline_counts)
+            and baseline_counts[1] > 0
+        )
+        if valid_with:
+            line.append(f"{counts[0]}/{counts[1]}")
+            if valid_without:
+                line.append(f" | {baseline_counts[0]}/{baseline_counts[1]}")
+                if counts[1] == baseline_counts[1]:
+                    delta = f"{counts[0] - baseline_counts[0]:+d}"
+                else:
+                    rate_delta = 100 * (counts[0] / counts[1] - baseline_counts[0] / baseline_counts[1])
+                    delta = f"{rate_delta:+.1f} pp"
+                line.append(f" | {delta}")
+            else:
+                line.append(" | N/A | N/A")
+        else:
+            line.append("N/A")
+        headlines.append(line)
+    return headlines
+
+
 def _render_agent_scores(
     *,
     console: Console,
@@ -610,17 +707,33 @@ def _render_agent_scores(
             Text(""),
             table,
         )
-    elif (
-        with_usable
-        and baseline_usable
-        and all(_finite_number(value) is not None for value in (with_overall, baseline_overall, overall.get("delta")))
-    ):
-        headline = Text("OVERALL SKILL LIFT   ", style="bold")
-        headline.append_text(_delta_cell(overall["delta"]))
-        agents = result.get("agents")
-        if isinstance(agents, Mapping) and len(agents) > 1:
-            headline.append(f" · {safe(agent)}", style="dim")
-        content = Group(headline, Text(""), table)
+    else:
+        headlines = _agent_score_headlines(
+            result=result,
+            agent=agent,
+            data=data,
+            with_usable=with_usable,
+            baseline_usable=baseline_usable,
+            overall=overall,
+            safe=safe,
+        )
+        has_overall_lift = (
+            with_usable
+            and baseline_usable
+            and all(
+                _finite_number(value) is not None
+                for value in (overall.get("with_skill"), overall.get("without_skill"), overall.get("delta"))
+            )
+        )
+        if has_overall_lift:
+            lift_index = next(
+                (index for index, headline in enumerate(headlines) if headline.plain.startswith("OVERALL SKILL LIFT")),
+                None,
+            )
+            if lift_index is not None:
+                headlines.insert(lift_index + 1, Text(SKILL_LIFT_DEFINITION, style="dim"))
+        if headlines:
+            content = Group(*headlines, Text(""), table)
     console.print(
         Panel(
             content,
@@ -899,6 +1012,82 @@ def render_evaluation_result(
         rendered_feedback_messages = _render_incomplete_execution(result=result, console=console, safe=safe)
     has_cases = False
     if isinstance(agents, Mapping) and agents and not incomplete:
+        if len(agents) > 1:
+            run_verdict = str(result.get("verdict") or "").casefold()
+            if run_verdict not in {"pass", "fail", "neutral", "inconclusive"}:
+                agent_verdicts = []
+                for raw in agents.values():
+                    if not isinstance(raw, Mapping):
+                        continue
+                    explicit = str(raw.get("verdict") or "").casefold()
+                    if explicit in {"pass", "fail", "neutral", "inconclusive"}:
+                        agent_verdicts.append(explicit)
+                        continue
+                    raw_pass = raw.get("pass_at_k")
+                    raw_with = raw_pass.get("with_skill") if isinstance(raw_pass, Mapping) else None
+                    raw_checks = raw_with.get("required_checks") if isinstance(raw_with, Mapping) else None
+                    agent_verdicts.append(
+                        "inconclusive"
+                        if _never_activated(raw)
+                        else "fail"
+                        if required_check_failure_reason(raw_checks)
+                        else "pass"
+                    )
+                run_verdict = (
+                    "pass"
+                    if "pass" in agent_verdicts
+                    else "inconclusive"
+                    if agent_verdicts and all(item == "inconclusive" for item in agent_verdicts)
+                    else "fail"
+                )
+            style = GREEN if run_verdict == "pass" else RED if run_verdict == "fail" else "yellow"
+            console.print(Text(f"RUN QUALITY VERDICT: {run_verdict.upper()}", style=f"bold {style}"))
+        if not verbose:
+            for agent, raw in agents.items():
+                if not isinstance(raw, Mapping):
+                    continue
+                pass_at_k = raw.get("pass_at_k")
+                conditions = (
+                    (
+                        pass_at_k.get("with_skill"),
+                        pass_at_k.get("without_skill"),
+                    )
+                    if isinstance(pass_at_k, Mapping)
+                    else ()
+                )
+                if not any(
+                    isinstance(condition, Mapping)
+                    and isinstance(condition.get("cases"), Mapping)
+                    and condition["cases"]
+                    for condition in conditions
+                ):
+                    continue
+                lift = raw.get("lift") if isinstance(raw.get("lift"), Mapping) else {}
+                overall = lift.get("overall") if isinstance(lift.get("overall"), Mapping) else {}
+                if not overall and result.get("metric_set") == CUSTOM_ONLY_METRIC_SET:
+                    custom_lift = raw.get("custom_lift")
+                    overall = (
+                        custom_lift.get("overall")
+                        if isinstance(custom_lift, Mapping) and isinstance(custom_lift.get("overall"), Mapping)
+                        else {}
+                    )
+                with_usable = _condition_usable(raw, "with_skill")
+                baseline_usable = (
+                    _condition_usable(raw, "without_skill") and _condition_status(raw, "without_skill") != "skipped"
+                )
+                headlines = _agent_score_headlines(
+                    result=result,
+                    agent=str(agent),
+                    data=raw,
+                    with_usable=with_usable,
+                    baseline_usable=baseline_usable,
+                    overall=overall,
+                    safe=safe,
+                )
+                for headline in headlines:
+                    console.print(headline)
+                if headlines:
+                    console.print()
         has_cases = _case_first_summary(result, console=console, skill_path=skill_path)
     sufficiency = result.get("dataset_sufficiency")
     if isinstance(sufficiency, Mapping) and isinstance(sufficiency.get("coverage_summary"), str):

@@ -33,6 +33,36 @@ enable checks or comments on SkillEvaluator's own pull requests. Each repository
 including SkillEvaluator itself, needs the generated caller pair committed
 there, with the trusted feedback caller on its default branch.
 
+SkillEvaluator evaluates its own `skills/` collection with
+`.github/workflows/skill-checks-all-tiers.yml`. Its consumer feedback listener is
+`.github/workflows/skill-feedback-all-tiers.yml`, preserving the public reusable
+publisher at `.github/workflows/feedback-all-tiers.yml`. The CLI selects this
+alternate filename when the conventional feedback file already defines a
+reusable workflow, and `ci status --tiers 1,2,3` recognizes it.
+
+The repository callers pin a reviewed `main` commit for the evaluator workflows
+and tools, and the verified released Tier 1 image. They use Docker, NVIDIA Build,
+one attempt and one concurrent task, and the committed native datasets. The
+caller's explicit `model` input selects chat, judging and the default live-agent
+model together; embeddings use the separate `embedding-model` input. Add
+`NVIDIA_API_KEY` as a repository Actions secret before expecting provider-backed
+results. Without it, Tier 2 and Tier 3
+remain incomplete/advisory; a passing Tier 1 gate is not an all-tier evaluation
+pass. Forks retain keyless Tier 1 checks. On PRs, ordinary software changes
+select no skills, skill changes select the affected skills, and CI configuration
+changes select the collection. Pushes to `main` and manual runs scan the collection.
+
+If a provider returns HTTP 404, verify that the selected model accepts chat
+requests with your account. Presence in the public model catalog alone does not
+prove serving availability. Change the caller's `model` input to an accessible
+model and refresh `trusted-caller-blobs` before retrying; do not change global
+provider defaults to troubleshoot one repository.
+
+The setup PR can exercise checks, but its first automatic comment requires
+the consumer feedback listener on `main` and a subsequent PR run. Repository
+maintainers configure branch protection separately if they want the Tier 1
+aggregate check to block merges.
+
 The evaluation workflow calls the existing hardened Tier 1 container workflow
 at the same evaluator revision. Tier 2 and Tier 3 run independently with
 `fail-fast: false`, Python 3.12, and only their tier's installed extras. Native
@@ -266,6 +296,10 @@ or let the [CLI](/skills/skillevaluator/cli-onboarding) handle it.
     collection each time. No changed skills is a successful **Skipped** result,
     not a scanner pass. Changes to shared files outside the skill roots are not
     inferred dependencies; use `all` when they should trigger a full scan.
+    The generated all-tier caller (`skillevaluator ci init`) also carries
+    `paths` filters, so a pull request that changes nothing under the selected
+    skill folders or the two caller workflows starts no run and receives no
+    comment.
     Selection is capped at 100 skills. Timeouts retain completed results and
     mark unfinished work incomplete. The workflow scans up to four skills at
     once; `scan-workers` accepts 1–16.

@@ -280,6 +280,73 @@ def test_unsupported_security_exemption_survives_cases_needing_review_summary() 
     assert not any(item["title"] == "Cases needing review" for item in conclusions)
 
 
+def test_required_failure_with_unscored_overall_is_a_failing_trial() -> None:
+    conclusions = _build_conclusions(
+        {
+            "codex": {
+                "with_skill": 0.8,
+                "trials": [
+                    {
+                        "entry_id": "wrong-answer",
+                        "overall": None,
+                        "attempt_verdict": {
+                            "passed": False,
+                            "reason": "goal not met (goal accuracy 0.00)",
+                            "warnings": [],
+                        },
+                    }
+                ],
+            }
+        },
+        [],
+        pass_threshold=0.5,
+    )
+
+    assert any(item["title"] == "Cases needing review" for item in conclusions)
+    assert not any(item["title"] == "Unscored trials" for item in conclusions)
+
+
+def test_unscored_attempt_verdict_is_not_a_failing_trial() -> None:
+    conclusions = _build_conclusions(
+        {
+            "codex": {
+                "with_skill": 0.8,
+                "trials": [
+                    {
+                        "entry_id": "unscored",
+                        "overall": None,
+                        "attempt_verdict": {
+                            "passed": False,
+                            "reason": "overall score was not available",
+                            "warnings": [],
+                        },
+                    }
+                ],
+            }
+        },
+        [],
+        pass_threshold=0.5,
+    )
+
+    assert any(item["title"] == "Unscored trials" for item in conclusions)
+    assert not any(item["title"] == "Cases needing review" for item in conclusions)
+
+
+def test_missing_boolean_attempt_verdict_falls_back_to_overall() -> None:
+    conclusions = _build_conclusions(
+        {
+            "codex": {
+                "with_skill": 0.8,
+                "trials": [{"entry_id": "below-threshold", "overall": 0.25, "attempt_verdict": {}}],
+            }
+        },
+        [],
+        pass_threshold=0.5,
+    )
+
+    assert any(item["title"] == "Cases needing review" for item in conclusions)
+
+
 def test_unsupported_security_exemption_survives_persisted_attempt_validation() -> None:
     payload = {
         "k": 1,

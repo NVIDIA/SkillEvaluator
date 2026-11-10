@@ -554,6 +554,13 @@ def agent_eval_result_from_directory(
         use_llm_judge=use_llm_judge,
         enforce_embedded_size=enforce_embedded_size,
     )
+    with contextlib.suppress(Exception):
+        source = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+        if isinstance(source, dict) and isinstance(source.get("agents"), dict):
+            from skillevaluator.tier3.case_summary import load_case_findings
+            from skillevaluator.tier3.next_steps import next_steps
+
+            payload["next_steps"] = next_steps(source, run_dir=run_dir, fixes=load_case_findings(run_dir))
     return _validation_result_from_payload(payload)
 
 
@@ -1029,6 +1036,9 @@ def build_agent_eval_payload(
         best_evidence_links,
     )
 
+    budget_metadata = (run_config or {}).get("budget")
+    from skillevaluator.tier3.harbor.run_budget import budget_line
+
     payload = {
         "schema_version": _SCHEMA_VERSION,
         "baseline": (run_config or {}).get("baseline", {}),
@@ -1089,6 +1099,8 @@ def build_agent_eval_payload(
         "supported_metric_ids": list(AGENT_EVAL_EVALUATORS),
         "metric_labels": metric_labels,
         "attempt_policy": policy,
+        "budget": budget_metadata,
+        "budget_summary": budget_line(budget_metadata) if isinstance(budget_metadata, dict) else None,
         "dataset": public_dataset,
         "case_diagnostics": case_diagnostics,
         "provenance": _build_provenance(
@@ -3941,6 +3953,10 @@ def _apply_case_findings(
         for fix in fixes
     ]
     payload["suggestions"] = [fix["action"] for fix in fixes if fix.get("action")]
+    from skillevaluator.tier3.next_steps import next_steps
+
+    with contextlib.suppress(Exception):  # advisory, like the fixes above
+        payload["next_steps"] = next_steps(source, run_dir=run_dir, fixes=fixes)
 
 
 def _recommendation_title_from(text: str) -> str:

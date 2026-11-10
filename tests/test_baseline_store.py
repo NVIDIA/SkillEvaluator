@@ -103,10 +103,15 @@ def test_config_identity_reasons(field: str, value: object, reason: str) -> None
 
 
 def test_identity_separates_skill_and_ignores_only_operational_settings() -> None:
-    config = {"harbor": {"n_concurrent": 1}, "evaluated_source": {"revision": "one"}}
+    config = {
+        "harbor": {"n_concurrent": 1},
+        "evaluated_source": {"revision": "one"},
+        "budget": {"max_attempts_total": 1},
+    }
     old = baseline_store.comparison_identity(config, {})
     config["harbor"]["n_concurrent"] = 8
     config["evaluated_source"]["revision"] = "two"
+    config["budget"]["max_attempts_total"] = 8
     current = baseline_store.comparison_identity(config, {})
     assert current["skill"] != old["skill"]
     assert baseline_store.comparison_mismatches(current, old) == []
@@ -446,10 +451,17 @@ def test_runner_fresh_reused_and_incompatible(
     }
     fresh = runner.run_harbor_eval(skill, ["opencode"], **kwargs)
     assert "error" not in fresh, fresh
-    reused = runner.run_harbor_eval(skill, ["opencode"], reuse_baseline=fresh["run_id"], **kwargs)
+    reused = runner.run_harbor_eval(
+        skill,
+        ["opencode"],
+        reuse_baseline=fresh["run_id"],
+        max_attempts_total=1,
+        **kwargs,
+    )
     assert "error" not in reused, reused
     assert launched == [True, False]
     assert reused["baseline"]["mode"] == "reused"
+    assert reused["budget"]["planned_attempts"] == 1
     assert fresh["comparison_identity"]["score_policy"] == reused["comparison_identity"]["score_policy"]
     assert fresh["agents"]["opencode"]["lift"] == reused["agents"]["opencode"]["lift"]
     assert (

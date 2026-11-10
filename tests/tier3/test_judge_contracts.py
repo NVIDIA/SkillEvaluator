@@ -440,6 +440,19 @@ def test_scored_trial_records_judge_contract_and_every_attempt(tmp_path: Path) -
     assert "Complete the task" in attempts[0]["prompt"]
 
 
+def test_trial_without_judge_references_writes_empty_attempt_artifact(tmp_path: Path) -> None:
+    verifier = _stage_verifier(
+        tmp_path,
+        {"id": "case-1", "question": "Inspect the output.", "ground_truth": "", "expected_behavior": []},
+    )
+    verifier.call_public_llm = lambda *_args, **_kwargs: pytest.fail("no judge reference")
+    verifier._call_public_llm_with_provenance = lambda *_args, **_kwargs: pytest.fail("no judge reference")
+
+    verifier.main()
+
+    assert _attempts(verifier.VERIFIER_DIR) == []
+
+
 def test_failed_judge_keeps_its_rejected_attempts_without_a_score(tmp_path: Path) -> None:
     verifier = _stage_verifier(tmp_path)
     calls: list[str] = []

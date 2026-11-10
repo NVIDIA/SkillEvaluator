@@ -28,6 +28,7 @@ _NON_COMPARISON_FIELDS = frozenset(
         "reuse_baseline",
         "compare_to",
         "prior_version_comparison",
+        "budget",
     }
 )
 _ARM_TASK_NAME_SUFFIX = re.compile(r"(?m)^(\s*name\s*=\s*['\"][^'\"\r\n]*)-(?:with|without)-skill(['\"]\s*(?:#.*)?)$")

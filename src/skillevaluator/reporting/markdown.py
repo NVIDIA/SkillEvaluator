@@ -501,6 +501,24 @@ class MarkdownReporter(ReporterBase):
                             lines.append(f"   - Evidence: [{label}]({url})")
                 lines.append("")
 
+            if next_steps := _dict_items(ae.get("next_steps")):
+                lines.append("### Next Steps")
+                lines.append("")
+                for idx, step in enumerate(next_steps, start=1):
+                    problem = _markdown_inline_text(step.get("problem"))
+                    action = _markdown_inline_text(step.get("action"))
+                    if not problem or not action:
+                        continue
+                    target = _markdown_inline_text(step.get("target")) or "evaluation"
+                    strength = _markdown_inline_text(step.get("strength"))
+                    label = target if strength in ("", "supported") else f"{target} · {strength}"
+                    lines.append(f"{idx}. **{problem}** [{label}]: {action}")
+                    if check := _markdown_inline_text(step.get("check")):
+                        lines.append(f"   - Check: {check}")
+                    if evidence := _markdown_inline_text(step.get("evidence")):
+                        lines.append(f"   - Evidence: {evidence}")
+                lines.append("")
+
         # Results per validator
         lines.append("## Results")
         lines.append("")

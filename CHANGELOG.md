@@ -15,6 +15,17 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Tier 3 datasets can declare deterministic behavior checks for script invocation and success, workspace files, and final-response text.
 
+- Tier 3 reports list up to three run-level **Next steps** under the per-case
+  fixes in the terminal, `report.html` and the Markdown report: re-run an
+  incomplete run, add attempts for inconsistent cases, add cases or negative
+  controls, or compare agents and models. Each step names its target
+  (evaluation, dataset or agent), the observed problem and evidence, the action,
+  and the check that would show improvement. Steps about agents or models are
+  marked as hypotheses to test, steps from incomplete runs as limited, and none
+  suggest removing cases or loosening expectations. The rules need no LLM; the
+  Tier 3 payload carries them as `next_steps`.
+
+
 - Document per-agent Tier 3 `findings.json` artifacts and distinguish advisory
   metric severity from dimension verdicts; include severity thresholds in the
   artifact and a muted CLI legend without changing scores or thresholds.

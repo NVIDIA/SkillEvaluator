@@ -6,6 +6,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Restore Tier 1-first repository CI onboarding with no model key required,
+  keeping optional LLM checks and hosted feedback separate. Preserve opt-in
+  all-tier setup and report contracts in an Advanced CI reference.
+
 - Run SkillEvaluator's own `skills/` through the pinned three-tier GitHub
   callers, retaining Tier 1 as required and Tier 2/3 as advisory. A separate
   consumer feedback listener preserves the reusable publisher's public path;

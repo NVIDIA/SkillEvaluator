@@ -26,6 +26,9 @@ contributors making non-trivial edits.
 - `benchmark-rollout.mdx` — regenerating and promoting `BENCHMARK.md` cards
 - `github-actions.mdx` — reusable Tier 1 onboarding and optional hosted PR feedback
 - `cli-onboarding.mdx` — install the CLI, automate GitHub setup and open an optional test PR
+- `repository-integration.mdx` — choose GitHub or GitLab for Tier 1 onboarding
+- `gitlab-ci.mdx` — reusable Tier 1 checks and downloadable GitLab reports
+- `advanced-ci.mdx` — secondary opt-in prerequisites and all-tier reference
 - `ci-integration.mdx` — exit codes, GitHub Actions recipe, progressive adoption
 - `cli-reference.mdx` — every command and flag
 - `environment-variables.mdx` — variable-by-variable inventory

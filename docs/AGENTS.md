@@ -24,6 +24,11 @@ folder holds MDX pages published to <https://docs.nvidia.com/skills/skillevaluat
 - `reports.mdx` — report formats, scores, and the results-on-disk contract
 - `performance-dashboard.mdx` — compare saved Tier 3 scores and resource use
 - `benchmark-rollout.mdx` — regenerating and promoting `BENCHMARK.md` cards
+- `github-actions.mdx` — Tier 1 workflow setup and optional hosted PR feedback
+- `cli-onboarding.mdx` — released Tier 1 GitHub setup wizard
+- `repository-integration.mdx` — choose GitHub or GitLab for Tier 1 onboarding
+- `gitlab-ci.mdx` — reusable Tier 1 checks and downloadable GitLab reports
+- `advanced-ci.mdx` — secondary opt-in prerequisites and all-tier reference
 - `ci-integration.mdx` — exit codes, GitHub Actions recipe, progressive adoption
 - `cli-reference.mdx` — every command and flag
 - `environment-variables.mdx` — variable-by-variable inventory
@@ -65,12 +70,14 @@ Navigation order, page titles, and slugs are defined in
    `[text](url)` link.
 
 5. **Links**:
-   - Between pages in this folder, link with the relative `.mdx` file path
-     (`configuration.mdx`, `tier1-validation.mdx#anchor`). Fern resolves these
-     to the published slug, and they also work when browsing the source on
-     GitHub — a bare slug (`configuration`) 404s on GitHub.
-   - To files outside `docs/`, use a relative repo path kept as `.md`
-     (`../README.md`, `../THIRD_PARTY_NOTICES.md`) — those are not Fern pages.
+   - In published MDX, use site paths such as
+     `/skills/skillevaluator/configuration` or
+     `/skills/skillevaluator/tier1-validation#anchor`. The pinned Fern 5.121.0
+     preview returns HTTP 400 for file-relative `.mdx` page URLs; it does not
+     resolve them to published slugs.
+   - For repository-only files outside `docs/`, use full GitHub source URLs in
+     published MDX. Keep repository Markdown, images and YAML `path:` entries
+     relative to their source files.
    - When renaming a page, grep the whole repo and fix references in the sibling
      pages, the root [`../README.md`](../README.md), [`README.md`](README.md),
      and [`../fern/docs.yml`](../fern/docs.yml).

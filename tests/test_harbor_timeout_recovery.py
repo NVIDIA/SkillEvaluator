@@ -58,7 +58,20 @@ def test_pass_summary_recovery_uses_shared_score_and_physical_ordinal(shared_val
     assert case["passed"] is passed
     assert case["first_pass_attempt"] == (2 if passed else None)
     assert case["attempts"] == [
-        {"attempt": 2, "trial": "case-a__attempt2", "score": 1.0 if passed else 0.3333, "passed": passed}
+        {
+            "attempt": 2,
+            "trial": "case-a__attempt2",
+            "score": 1.0 if passed else 0.3333,
+            "passed": passed,
+            "goal_accuracy": shared_value,
+            "reason": None if passed else f"goal not met (goal accuracy {shared_value:.2f})",
+            "warnings": [] if passed else [f"missed expected behavior (behavior {shared_value:.2f})"],
+            "security_clean": True,
+            "security_score": 1.0,
+            "security_message": None,
+            "security_exempt": False,
+            "required_failure": None if passed else "wrong_answer",
+        }
     ]
     assert case["attempts_used"] == case["attempts_recovered"] == 1
     assert case["attempts_skipped"] == int(passed)

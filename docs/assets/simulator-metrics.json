@@ -1,0 +1,58 @@
+{
+  "schema_version": "1",
+  "evaluation": {
+    "dataset_id": "circuit-simulation",
+    "dataset_version": "1",
+    "skill_id": "timing-analysis",
+    "skill_version": "1",
+    "agent": "simulation-driver",
+    "agent_version": "1",
+    "model": "example-model-v1",
+    "environment": "example-simulator-v3"
+  },
+  "provenance": {
+    "producer": "example-simulator-exporter-v1",
+    "run_id": "synthetic-example-1",
+    "created_at": "2026-10-01T12:00:00Z"
+  },
+  "metric_definitions": {
+    "timing_error_fraction": {
+      "version": "1",
+      "unit": "fraction_of_budget",
+      "direction": "lower_is_better",
+      "aggregation": "mean"
+    },
+    "convergence_rate": {
+      "version": "1",
+      "unit": "fraction",
+      "direction": "higher_is_better",
+      "aggregation": "mean"
+    }
+  },
+  "observations": [
+    {
+      "case_id": "adder",
+      "attempt": 1,
+      "arm": "with_skill",
+      "custom_metrics": {"timing_error_fraction": 0.1, "convergence_rate": 0.9}
+    },
+    {
+      "case_id": "adder",
+      "attempt": 1,
+      "arm": "without_skill",
+      "custom_metrics": {"timing_error_fraction": 0.3, "convergence_rate": 0.7}
+    },
+    {
+      "case_id": "multiplier",
+      "attempt": 1,
+      "arm": "with_skill",
+      "custom_metrics": {"timing_error_fraction": 0.2, "convergence_rate": 0.8}
+    },
+    {
+      "case_id": "multiplier",
+      "attempt": 1,
+      "arm": "without_skill",
+      "custom_metrics": {"timing_error_fraction": 0.3, "convergence_rate": 0.6}
+    }
+  ]
+}

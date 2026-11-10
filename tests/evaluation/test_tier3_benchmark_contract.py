@@ -264,11 +264,11 @@ def test_dataset_snapshot_migrates_valid_legacy_routing_summary_in_memory(tmp_pa
 
 @pytest.mark.parametrize("schema_version", ["1.0", "1.1"])
 @pytest.mark.parametrize("tamper", ["summary-rule", "dataset", "digest", "algorithm"])
-def test_dataset_snapshot_rejects_tampered_versioned_truth(
-    tmp_path: Path, schema_version: str, tamper: str
-) -> None:
+def test_dataset_snapshot_rejects_tampered_versioned_truth(tmp_path: Path, schema_version: str, tamper: str) -> None:
     snapshot = json.loads(
-        (Path(__file__).parents[1] / "fixtures" / "legacy-routing-dataset-snapshot-1.0.json").read_text(encoding="utf-8")
+        (Path(__file__).parents[1] / "fixtures" / "legacy-routing-dataset-snapshot-1.0.json").read_text(
+            encoding="utf-8"
+        )
     )
     legacy_summary = dict(snapshot["dataset_summary"])
     current_summary = {

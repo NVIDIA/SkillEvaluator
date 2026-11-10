@@ -16,7 +16,7 @@ from skillevaluator.config import load_pii_patterns
 from skillevaluator.tier3.dataset_utils import find_eval_file
 from skillevaluator.tier3.eval_core import log_converters
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
-from skillevaluator.tier3.evals_spec import _validate_dataset_contents
+from skillevaluator.tier3.evals_spec import _validate_dataset_contents, validate_tier3_source
 from skillevaluator.tier3.generate_dataset import _parse_skill
 from skillevaluator.utils.redaction import redact_sensitive_data, redact_sensitive_text
 
@@ -41,16 +41,26 @@ _FIELDS = {
     "started_at",
     "tags",
 }
+_SCIENTIFIC_LITERAL_PATTERN = re.compile(r"(?<![\w.])[-+]?(?:\d+(?:\.\d*)?|\.\d+)[eE][-+]?\d+")
+_SIGNED_DECIMAL_PATTERN = re.compile(r"(?<![\w.])[+-]\d+\.\d+(?![\w.])")
+_HHMM_OFFSET_PATTERN = re.compile(r"\b\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?P<offset>[+-]\d{4})\b")
 
 
 @lru_cache(maxsize=1)
 def _pii_patterns() -> tuple[tuple[str, re.Pattern[str], tuple[str, ...]], ...]:
     configured = load_pii_patterns()
-    return tuple(
+    patterns = [
         (category, re.compile(spec["pattern"]), tuple(spec.get("exceptions", [])))
         for category in ("personal_paths", "home_paths", "emails", "phone_numbers", "ssn")
         for spec in configured.get(category, [])
+    ]
+    patterns.extend(
+        (
+            ("home_paths", re.compile(r"/home/(?!<user>)[^/\s\"'<>]+/?"), ()),
+            ("personal_paths", re.compile(r"/Users/(?!(?:<user>|\{[^/{}]+\}))[^/\s\"'<>]+/?"), ()),
+        )
     )
+    return tuple(patterns)
 
 
 def _redaction_markers(value: Any) -> int:
@@ -76,7 +86,17 @@ def redact(value: Any, *, structured: bool = False) -> tuple[Any, dict[str, int]
         if isinstance(item, list):
             return [clean(v) for v in item]
         if isinstance(item, dict):
-            return {clean(k): clean(v) for k, v in item.items()}
+            cleaned = {}
+            for key, value in item.items():
+                cleaned_key = clean(key)
+                if cleaned_key in cleaned:
+                    base = str(cleaned_key)
+                    suffix = 2
+                    while f"{base}-{suffix}" in cleaned:
+                        suffix += 1
+                    cleaned_key = f"{base}-{suffix}"
+                cleaned[cleaned_key] = clean(value)
+            return cleaned
         if not isinstance(item, str):
             return item
         text = redact_sensitive_text(item)
@@ -84,17 +104,43 @@ def redact(value: Any, *, structured: bool = False) -> tuple[Any, dict[str, int]
         for category, pattern, exceptions in patterns:
 
             def replace(
-                match: re.Match[str], category: str = category, exceptions: tuple[str, ...] = exceptions
+                match: re.Match[str],
+                category: str = category,
+                exceptions: tuple[str, ...] = exceptions,
+                text: str = text,
             ) -> str:
                 found = match.group()
                 if category == "home_paths":
-                    replacement = "/home/<user>/"
+                    replacement = "/home/<user>" + ("/" if found.endswith("/") else "")
                 elif category == "personal_paths":
-                    replacement = "/Users/<user>/" if found.startswith("/") else "C:\\Users\\<user>"
+                    replacement = (
+                        "/Users/<user>" + ("/" if found.endswith("/") else "")
+                        if found.startswith("/")
+                        else "C:\\Users\\<user>"
+                    )
                 else:
                     replacement = "[redacted-pii]"
                 if found == replacement or any(e in found for e in exceptions):
                     return found
+                if category == "phone_numbers":
+                    if "\n" in found or "\r" in found:
+                        return found
+                    window = (max(0, match.start() - 64), match.start() + 64)
+                    if any(
+                        literal.start() <= match.start() < literal.end()
+                        for literal in _SCIENTIFIC_LITERAL_PATTERN.finditer(text, *window)
+                    ):
+                        return found
+                    if any(
+                        number.start() <= match.start() and match.end() <= number.end()
+                        for number in _SIGNED_DECIMAL_PATTERN.finditer(text)
+                    ):
+                        return found
+                    if any(
+                        offset.start("offset") <= match.start() and match.end() <= offset.end("offset")
+                        for offset in _HHMM_OFFSET_PATTERN.finditer(text)
+                    ):
+                        return found
                 counts["pii"] += 1
                 return replacement
 
@@ -106,12 +152,12 @@ def redact(value: Any, *, structured: bool = False) -> tuple[Any, dict[str, int]
 
 def parse_export(raw: bytes) -> list[tuple[int, Any]]:
     """Parse a v1 wrapper or JSONL; malformed lines become unsupported records."""
-    text = raw.decode("utf-8")
+    text = raw.decode("utf-8-sig")
     try:
         obj = json.loads(text)
     except json.JSONDecodeError:
         obj = None
-    if isinstance(obj, dict) and any(k in obj for k in ("format", "version", "sessions")):
+    if isinstance(obj, dict) and "session_id" not in obj and ("format" in obj or "sessions" in obj):
         if (
             obj.get("format") != "skillevaluator.trace-export"
             or type(obj.get("version")) is not int
@@ -122,7 +168,7 @@ def parse_export(raw: bytes) -> list[tuple[int, Any]]:
             raise ValueError("Export sessions must be a list")
         return list(enumerate(obj["sessions"], 1))
     records = []
-    for number, line in enumerate(text.splitlines(), 1):
+    for number, line in enumerate(text.split("\n"), 1):
         if not line.strip():
             continue
         try:
@@ -158,11 +204,13 @@ def _missing_replay_path(call: dict, fixtures: dict[str, str], skill_name: str, 
     if not isinstance(path, str) or not path:
         return None
     relative = Path(path).as_posix()
-    if relative in fixtures or relative.removeprefix("/workspace/input/") in fixtures:
+    if relative in fixtures:
         return None
     target = Path(path)
     if target.is_absolute():
-        if skill_path is not None and target.resolve().is_relative_to(skill_path.resolve()):
+        if (
+            skill_path is not None and target.resolve().is_relative_to(skill_path.resolve())
+        ) or _is_installed_skill_path(target.parts, skill_name):
             return None
     else:
         parts = target.parts
@@ -179,8 +227,26 @@ def _missing_replay_path(call: dict, fixtures: dict[str, str], skill_name: str, 
     return path
 
 
+def _is_installed_skill_path(parts: tuple[str, ...], skill_name: str) -> bool:
+    normalized = [part.casefold() for part in parts]
+    skill = skill_name.casefold()
+    allowed = {"skill.md", "scripts", "references", "assets", "tools"}
+    return any(
+        normalized[index] == "skills"
+        and normalized[index + 1] == skill
+        and index + 2 < len(parts)
+        and normalized[index + 2] in allowed
+        for index in range(len(parts) - 2)
+    )
+
+
 def build_candidates(
-    raw: bytes, export_name: str, skill_name: str, *, skill_path: Path | None = None
+    raw: bytes,
+    export_name: str,
+    skill_name: str,
+    *,
+    skill_path: Path | None = None,
+    skill_directory_name: str | None = None,
 ) -> tuple[dict, dict[str, str]]:
     """Return only redacted review metadata and fixture contents, without writing."""
     candidates: list[dict] = []
@@ -199,7 +265,13 @@ def build_candidates(
         if not isinstance(session, dict):
             skip("unsupported")
             continue
-        if "skill" in session and session["skill"] != skill_name:
+        try:
+            json.dumps(session, ensure_ascii=False).encode("utf-8")
+        except UnicodeEncodeError:
+            skip("unsupported")
+            continue
+        accepted_skill_names = (skill_name, skill_directory_name)
+        if "skill" in session and session["skill"] not in accepted_skill_names:
             skip("other skill")
             continue
         outcome = session.get("outcome", "unknown")
@@ -248,8 +320,12 @@ def build_candidates(
                 local_files[path] = item["content"]
             except ValueError:
                 warnings.append("incomplete: unsafe or invalid fixture dropped")
+        redacted_prompt, prompt_counts = redact(prompt)
+        redacted_files, fixture_counts = redact(local_files)
         fingerprint = hashlib.sha256(
-            json.dumps([" ".join(prompt.split()), sorted(local_files.items())]).encode()
+            json.dumps([" ".join(redacted_prompt.split()), sorted(redacted_files.items())], ensure_ascii=False).encode(
+                "utf-8"
+            )
         ).hexdigest()
         if fingerprint in fingerprints:
             skip("duplicate", duplicate_of=fingerprints[fingerprint])
@@ -291,7 +367,7 @@ def build_candidates(
         )
         candidate = {
             "id": cid,
-            "prompt": prompt,
+            "prompt": redacted_prompt,
             "files": [],
             "observed": {"outcome": outcome, "final_output": final, "tool_calls": tools, "trajectory_source": source},
             "provenance": provenance,
@@ -304,9 +380,14 @@ def build_candidates(
                 "notes": "",
             },
         }
-        clean, counts = redact({"candidate": candidate, "fixtures": local_files})
+        clean, counts = redact({"candidate": candidate, "fixtures": redacted_files})
         for category in counts:
-            counts[category] += structured_counts[category] + provenance_counts[category]
+            counts[category] += (
+                prompt_counts[category]
+                + fixture_counts[category]
+                + structured_counts[category]
+                + provenance_counts[category]
+            )
         candidate = clean["candidate"]
         candidate["redactions"] = counts
         for path, content in clean["fixtures"].items():
@@ -332,21 +413,28 @@ def import_traces(skill: Path, export: Path, output: Path, *, force: bool = Fals
     target = output / "candidates.json"
     if target.exists() and not force:
         raise ValueError("candidates.json already exists; use --force to overwrite")
+    skill_data = _parse_skill(skill)
     document, fixtures = build_candidates(
-        export.read_bytes(), export.name, _parse_skill(skill)["name"], skill_path=skill
+        export.read_bytes(),
+        export.name,
+        skill_data["name"],
+        skill_path=skill,
+        skill_directory_name=skill.name,
     )
     destinations = [(contained(output, ref), content) for ref, content in fixtures.items()]
     contained(output, "candidates.json")
+    fixture_bytes = [(path, content.encode("utf-8")) for path, content in destinations]
+    document_bytes = (json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     if not dry_run:
         output.mkdir(parents=True, exist_ok=True)
-        for path, content in destinations:
+        for path, content in fixture_bytes:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
-        target.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            path.write_bytes(content)
+        target.write_bytes(document_bytes)
     return document
 
 
-def accept_traces(skill: Path, review_dir: Path, *, dry_run: bool = False) -> dict:
+def accept_traces(skill: Path, review_dir: Path, *, dry_run: bool = False, allow_native_harbor: bool = False) -> dict:
     document = json.loads((review_dir / "candidates.json").read_text(encoding="utf-8"))
     if (
         not isinstance(document, dict)
@@ -356,15 +444,28 @@ def accept_traces(skill: Path, review_dir: Path, *, dry_run: bool = False) -> di
     ):
         raise ValueError("Expected skillevaluator.trace-candidates version 1")
     name = _parse_skill(skill)["name"]
-    if document.get("skill_name") != name:
+    accepted_skill_names = (name, skill.name)
+    if document.get("skill_name") not in accepted_skill_names:
         raise ValueError("Review skill_name does not match skill")
+    source, _ = validate_tier3_source(skill)
+    if source == "native_harbor" and not allow_native_harbor:
+        raise ValueError(
+            "Native Harbor tasks are selected for this skill; pass --allow-native-harbor to explicitly accept traces"
+        )
     target = skill / "evals" / "evals.json"
     existing = find_eval_file(skill)
     if existing and existing != target:
         raise ValueError("Existing dataset uses another location or extension; migrate to evals/evals.json first")
     dataset = json.loads(target.read_text(encoding="utf-8")) if target.exists() else {"skill_name": name, "evals": []}
-    if not isinstance(dataset, dict) or dataset.get("skill_name") != name or not isinstance(dataset.get("evals"), list):
+    if (
+        not isinstance(dataset, dict)
+        or not isinstance(dataset.get("skill_name"), str)
+        or not isinstance(dataset.get("evals"), list)
+    ):
         raise ValueError("Existing dataset must use agentskills shape, not a legacy flat list")
+    dataset_name = dataset["skill_name"]
+    if dataset_name not in accepted_skill_names:
+        raise ValueError("Existing dataset skill_name must match the frontmatter or directory name")
     errors = []
     additions = []
     copies = []
@@ -413,7 +514,7 @@ def accept_traces(skill: Path, review_dir: Path, *, dry_run: bool = False) -> di
             "prompt": candidate["prompt"],
             "expected_output": expected,
             "files": [],
-            "expected_skill": name,
+            "expected_skill": dataset_name,
             "trace_source": trace_source,
         }
         assertions = review.get("assertions", [])
@@ -428,9 +529,9 @@ def accept_traces(skill: Path, review_dir: Path, *, dry_run: bool = False) -> di
             if not isinstance(ref, str) or not ref.startswith(prefix):
                 raise ValueError(f"{cid}: invalid fixture reference")
             source = contained(review_dir, ref)
-            rel = f"files/trace/{cid}/{safe_relative(ref[len(prefix) :]).as_posix()}"
+            rel = f"trace-files/{cid}/{safe_relative(ref[len(prefix) :]).as_posix()}"
             dest = contained(skill / "evals", rel)
-            content = source.read_text(encoding="utf-8")
+            content = source.read_bytes().decode("utf-8")
             contents.append(content)
             copies.append((dest, content))
             entry["files"].append(rel)
@@ -443,14 +544,17 @@ def accept_traces(skill: Path, review_dir: Path, *, dry_run: bool = False) -> di
     if errors:
         raise ValueError("\n".join(errors))
     validation = []
-    if not dry_run and additions:
+    if additions:
         contained(skill, "evals/evals.json")
-        for dest, content in copies:
+        updated_dataset = {**dataset, "evals": [*dataset["evals"], *additions]}
+        copy_bytes = [(dest, content.encode("utf-8")) for dest, content in copies]
+        dataset_bytes = (json.dumps(updated_dataset, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    if not dry_run and additions:
+        for dest, content in copy_bytes:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(content, encoding="utf-8")
+            dest.write_bytes(content)
         target.parent.mkdir(parents=True, exist_ok=True)
-        dataset["evals"].extend(additions)
-        target.write_text(json.dumps(dataset, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        target.write_bytes(dataset_bytes)
         _validate_dataset_contents(target, validation)
     return {
         "added": [e["id"] for e in additions],

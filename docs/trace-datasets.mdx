@@ -50,7 +50,7 @@ for JSONL).
 | `session_id` | Required non-empty string; hashed into a stable `trace-` id. |
 | `prompt` | User request; falls back to the first user trajectory message. |
 | `outcome` | `success`, `failure`, or `unknown` (default). Other values are unsupported. |
-| `skill` | Optional skill name, matched against frontmatter name or directory name. Non-matches are skipped. |
+| `skill` | Optional skill name, matched against the frontmatter name or skill directory name. Non-matches are skipped. |
 | `trajectory` | ATIF object containing `steps`. |
 | `agent`, `agent_log` | Alternative raw log input; agents: `claude-code`, `cursor-cli`, `cline`, `opencode`, `codex`. Unknown formats retain a candidate with a warning and no tool summary. |
 | `final_output` | Optional string; otherwise the last agent trajectory message. |
@@ -86,8 +86,13 @@ skillevaluator tier3 accept-traces ./my-skill ./my-skill-trace-review
 
 Accepted entries append to agentskills-shaped `evals/evals.json`. Legacy flat
 lists or other dataset extensions require manual migration first. Fixtures copy
-to `evals/files/trace/<candidate-id>/`; entry-local `files` references prevent
-unrelated fixtures from being staged. Fixture-free entries explicitly use `[]`.
+to `evals/trace-files/<candidate-id>/`; refs use
+`trace-files/<candidate-id>/...`, outside the implicit `evals/files/` pool, so
+they are not staged into unrelated entries. Fixture-free entries explicitly use `[]`.
+Before accepting, the command checks which task source is selected. If native
+Harbor tasks are selected, use `--allow-native-harbor` to explicitly accept the
+source change: with `task_source: auto`, the new eval dataset takes precedence;
+with `task_source: native_harbor`, the trace cases are added but are not run.
 `trace_source` records the redacted session id, export hash, outcome, and review
 decision. Re-running skips ids already present for the same session; a different
 session colliding with an id is an error. Dataset validation runs after writing;
@@ -97,7 +102,7 @@ validation errors are printed and return a non-zero exit status.
 
 Before writing, import applies the shared credential redactor and configured PII
 patterns for email addresses, phone numbers, SSNs, personal macOS/Windows paths,
-and **all** Linux `/home/<name>/` paths (replaced by `/home/<user>/`). Placeholder
+and Linux `/home/<name>` paths (replaced by `/home/<user>`). Placeholder
 exceptions in matching patterns are respected. Prompts, observed outputs, tool
 summaries, fixtures, and provenance strings are redacted; raw logs and unknown
 fields are not copied. Per-candidate counts record introduced secret-redaction markers and PII

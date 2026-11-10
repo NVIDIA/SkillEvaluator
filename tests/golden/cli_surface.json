@@ -2596,6 +2596,16 @@
               ],
               "param_type": "option",
               "type": "boolean"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "allow_native_harbor",
+              "opts": [
+                "--allow-native-harbor"
+              ],
+              "param_type": "option",
+              "type": "boolean"
             }
           ]
         },

@@ -60,6 +60,17 @@ def test_parse_jsonl_and_wrapper():
             json.dumps({"format": "skillevaluator.trace-export", "version": 1, "sessions": records}).encode()
         )
     ] == records
+    bom_jsonl = b"\xef\xbb\xbf" + (json.dumps(records[0]) + "\n").encode()
+    assert [s for _, s in parse_export(bom_jsonl)] == [records[0]]
+    versioned_session = {"session_id": "v", "prompt": "Do it", "version": "2.1.0"}
+    assert [s for _, s in parse_export((json.dumps(versioned_session) + "\n").encode())] == [versioned_session]
+    unicode_separators = {
+        "session_id": "unicode",
+        "prompt": "first\u2028second\u2029third\u0085fourth",
+    }
+    assert [s for _, s in parse_export((json.dumps(unicode_separators, ensure_ascii=False) + "\n").encode())] == [
+        unicode_separators
+    ]
 
 
 @pytest.mark.parametrize(
@@ -97,6 +108,20 @@ def test_classifications_and_warnings():
     assert doc["skipped"][-1]["record"] == 8
     assert "unsupported field: extra" in doc["candidates"][0]["warnings"]
     assert any("incomplete" in w for w in doc["candidates"][0]["warnings"])
+
+
+def test_skill_filter_accepts_directory_name(tmp_path):
+    skill = tmp_path / "pdf-tools-v2"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: pdf-tools\ndescription: Example\n---\nInstructions\n")
+    doc, _ = build_candidates(
+        json.dumps(session(skill="pdf-tools-v2")).encode(),
+        "export",
+        "pdf-tools",
+        skill_path=skill,
+        skill_directory_name=skill.name,
+    )
+    assert len(doc["candidates"]) == 1
 
 
 def test_redaction_every_written_file(workspace):
@@ -287,7 +312,7 @@ def test_invalid_fixture_content_dropped():
 
 def test_append_fixtures_validation_adapter_and_idempotency(workspace):
     skill, _, review = workspace
-    reviewed(workspace, files=[{"path": "nested/input.txt", "content": "Replay fixture"}])
+    reviewed(workspace, files=[{"path": "nested/input.txt", "content": "Replay\r\nfixture\r\n"}])
     (skill / "evals").mkdir()
     target = skill / "evals/evals.json"
     original = {"id": "original", "prompt": "Original", "expected_output": "Expected"}
@@ -297,17 +322,20 @@ def test_append_fixtures_validation_adapter_and_idempotency(workspace):
     result = accept_traces(skill, review)
     assert result["added"]
     assert all(c.status != "error" for c in result["validation"])
+    assert (skill / "evals/trace-files").is_dir()
+    assert not (skill / "evals/files").exists()
     entries, fmt = load_dataset_entries_with_format(target)
     assert fmt == "agentskills"
     assert json.loads(target.read_text())["evals"][0] == original
     entry = entries[1]
     assert entry["trace_source"]["session_id"] == "session-one"
     refs = _entry_file_refs(entry)
-    assert refs == [f"files/trace/{entry['id']}/nested/input.txt"]
-    source, _ = _resolve_entry_file_ref(
+    assert refs == [f"trace-files/{entry['id']}/nested/input.txt"]
+    source, staged_path = _resolve_entry_file_ref(
         refs[0], skill_path=skill, evals_dir=skill / "evals", input_files_dir=skill / "evals/files"
     )
-    assert source.read_text() == "Replay fixture"
+    assert staged_path.as_posix() == refs[0]
+    assert source.read_bytes() == b"Replay\r\nfixture\r\n"
     assert accept_traces(skill, review)["already present"] == [entry["id"]]
     assert len(json.loads(target.read_text())["evals"]) == 2
     entries[1]["trace_source"]["session_id"] = "different"
@@ -348,6 +376,68 @@ def test_empty_export_and_bad_review_contract(workspace):
         accept_traces(skill, review)
 
 
+def test_accepting_into_native_harbor_requires_explicit_flag(workspace):
+    skill, _, review = workspace
+    reviewed(workspace)
+    (skill / "evals/harbor/task-a").mkdir(parents=True)
+    with pytest.raises(ValueError, match="allow-native-harbor"):
+        accept_traces(skill, review)
+    assert accept_traces(skill, review, allow_native_harbor=True)["added"]
+
+
+def test_accept_traces_preserves_directory_named_dataset_skill(workspace, tmp_path):
+    _, _, review = workspace
+    skill = tmp_path / "pdf-tools"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: pdf\ndescription: Example\n---\nInstructions\n")
+    write_export(workspace[1], [session()])
+    doc = import_traces(skill, workspace[1], review)
+    doc["candidates"][0]["review"].update(decision="accept", expected_output="Independent expectation")
+    save_review(review, doc)
+    (skill / "evals").mkdir()
+    target = skill / "evals/evals.json"
+    target.write_text(json.dumps({"skill_name": "pdf-tools", "evals": []}))
+
+    accept_traces(skill, review)
+
+    entry = json.loads(target.read_text())["evals"][0]
+    assert entry["expected_skill"] == "pdf-tools"
+
+
+def test_trace_fingerprints_use_redacted_prompt_and_fixtures():
+    records = [
+        session(
+            prompt="Summarize /Users/alice/q3/report.csv", files=[{"path": "report.txt", "content": "alice@corp.io"}]
+        ),
+        session(
+            session_id="other",
+            prompt="Summarize /Users/bob/q3/report.csv",
+            files=[{"path": "report.txt", "content": "bob@corp.io"}],
+        ),
+    ]
+    doc, _ = build_candidates(("\n".join(json.dumps(item) for item in records)).encode(), "export", "sample")
+    assert len(doc["candidates"]) == 1
+    assert doc["skipped"][0]["reason"] == "duplicate"
+
+
+def test_surrogate_records_are_skipped_before_artifacts_are_written(workspace):
+    skill, export, review = workspace
+    write_export(
+        export,
+        [
+            session(files=[{"path": "good.txt", "content": "good"}]),
+            session(session_id="broken", prompt="broken \ud83d", files=[{"path": "bad.txt", "content": "bad"}]),
+        ],
+    )
+
+    doc = import_traces(skill, export, review)
+
+    assert len(doc["candidates"]) == 1
+    assert doc["skipped"][0]["reason"] == "unsupported"
+    assert (review / "fixtures" / doc["candidates"][0]["id"] / "good.txt").read_bytes() == b"good"
+    assert json.loads((review / "candidates.json").read_bytes())["candidates"]
+
+
 def test_pii_categories_and_stability():
     original = (
         "email: real@domain.io /Users/someone/file C:\\Users\\someone\\file /home/root/file 212-345-6789 123-45-6789"
@@ -357,6 +447,39 @@ def test_pii_categories_and_stability():
     assert "someone" not in clean and "/home/root/" not in clean
     assert redact(clean)[0] == clean
     assert redact("user@example.com /Users/{id}/")[0] == "user@example.com /Users/{id}/"
+
+
+def test_bare_home_paths_are_redacted_idempotently():
+    clean, counts = redact("cwd /home/jdoe and /Users/jdoe")
+    assert clean == "cwd /home/<user> and /Users/<user>"
+    assert counts["pii"] == 2
+    assert redact(clean)[0] == clean
+
+
+def test_numeric_phone_patterns_do_not_change_literals_or_csv_rows():
+    text = "1.000000e+01 2.500000e+00 delta +15.25 pts at 2026-11-07T10:00:00+0000\nid,score\n1,+12.5\n2,-3.0"
+    clean, counts = redact(text)
+    assert clean == text
+    assert counts["pii"] == 0
+
+
+def test_redaction_disambiguates_fixture_keys_after_pii_replacement():
+    doc, fixtures = build_candidates(
+        json.dumps(
+            session(
+                files=[
+                    {"path": "exports/alice@corp.com.csv", "content": "alice rows"},
+                    {"path": "exports/bob@corp.com.csv", "content": "bob rows"},
+                ]
+            )
+        ).encode(),
+        "export",
+        "sample",
+    )
+    candidate = doc["candidates"][0]
+    assert len(fixtures) == 2
+    assert len(candidate["files"]) == 2
+    assert set(fixtures.values()) == {"alice rows", "bob rows"}
 
 
 def test_structured_tool_and_provenance_secrets():
@@ -405,6 +528,9 @@ def test_missing_replay_inputs_redacted_deduplicated_and_capped(workspace):
     paths = [
         "input.txt",
         "/workspace/input/input.txt",
+        "/workspace/skills/sample/SKILL.md",
+        "/home/alice/.claude/skills/sample/references/guide.md",
+        "/workspace/skills/other/SKILL.md",
         "SKILL.md",
         "scripts/run.py",
         "references/guide.md",
@@ -426,9 +552,15 @@ def test_missing_replay_inputs_redacted_deduplicated_and_capped(workspace):
     warnings = doc["candidates"][0]["warnings"]
     assert len(warnings) == 20
     assert warnings.count("missing replay input: missing.csv") == 1
+    assert "missing replay input: /workspace/input/input.txt" in warnings
+    assert "missing replay input: /workspace/skills/other/SKILL.md" in warnings
     assert "missing replay input: /home/<user>/report.csv" in warnings
     assert "privateperson" not in json.dumps(doc)
-    assert not any("SKILL.md" in w or "scripts/" in w or "references/" in w for w in warnings)
+    assert "missing replay input: /workspace/skills/sample/SKILL.md" not in warnings
+    assert "missing replay input: /home/<user>/.claude/skills/sample/references/guide.md" not in warnings
+    assert "missing replay input: SKILL.md" not in warnings
+    assert "missing replay input: scripts/run.py" not in warnings
+    assert "missing replay input: references/guide.md" not in warnings
 
 
 @pytest.mark.parametrize("tool", ["read", "read_file", "open", "open_file"])

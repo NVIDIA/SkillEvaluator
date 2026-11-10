@@ -166,12 +166,13 @@ pipeline.
 | --- | --- |
 | `tier1` | `validate`, `quality-check`, `rubric-eval`, `security-scan`, `pii-scan`, `lint-scripts` |
 | `tier2` | `context-optimization-check`, `dedup-scan`, `similarity-check` |
-| `tier3` | `evaluate`, `select-decoys`, `create-eval-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `feedback`, `validate`, `harbor-view` |
+| `tier3` | `evaluate`, `select-decoys`, `create-eval-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `feedback`, `validate`, `harbor-view`, `import-traces`, `accept-traces` |
 
 `health-check` and [models](#models) are top-level only. The expert commands
 [tier3 evaluate](#tier3-evaluate), [tier3 select-decoys](#tier3-select-decoys),
-[tier3 feedback](#tier3-feedback), and `tier3 validate` are advertised **only**
-inside the `tier3` group:
+[tier3 feedback](#tier3-feedback), [tier3 import-traces](#tier3-import-traces),
+[tier3 accept-traces](#tier3-accept-traces), and `tier3 validate` are advertised
+**only** inside the `tier3` group:
 
 ### tier3 import-traces
 
@@ -204,6 +205,7 @@ skillevaluator tier3 accept-traces ./my-skill ./review
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `--dry-run` | off | Report additions and already-present ids without writing. |
+| `--allow-native-harbor` | off | Explicitly accept traces when native Harbor tasks are selected. |
 
 ### tier3 validate
 

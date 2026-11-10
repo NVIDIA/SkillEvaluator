@@ -104,11 +104,13 @@ All notable changes to SkillEvaluator are documented in this file.
   scanned on its own, so a line that names a file beside it keeps the scan
   `INCOMPLETE`. Tier 3 output in the default `<skill>/evals/results` location,
   such as `results`, `report.html` or `summary.json`, or with
-  `--harbor-keep-jobs` a copy of every bundled file, and input fixtures in
-  `evals/files` count as not inspected too, so a line that names one of them
-  keeps the scan `INCOMPLETE` after a Tier 3 run, although it passed before.
-  Keeping results outside the skill with `--results-dir` or
-  `SKILLEVALUATOR_RESULTS_DIR` avoids that. Every missing reference in a skill
+  `--harbor-keep-jobs` a copy of every bundled file, counts as not inspected
+  too, so a line that names it keeps the scan `INCOMPLETE` after a Tier 3 run,
+  although it passed before. Keeping results outside the skill with
+  `--results-dir` or `SKILLEVALUATOR_RESULTS_DIR` avoids that. Input fixtures
+  in `evals/files` count as not inspected as well, so a line that names one,
+  such as `meeting.txt`, keeps the scan `INCOMPLETE` whenever the fixture
+  exists, with or without a Tier 3 run. Every missing reference in a skill
   scanned on its own inside a folder or plugin, such as `security-scan` or
   `validate` on a folder of skills, or `validate` on a plugin, also keeps that
   skill's scan `INCOMPLETE`. A reference that matches several bundled files

@@ -143,7 +143,7 @@ def test_retained_finding_failure_cannot_claim_a_passing_result(payload):
         retained_results(payload)
 
 
-def test_advisory_skip_keeps_required_gate_but_is_outside_retained_tier1_contract():
+def test_advisory_skip_keeps_required_gate_and_explicit_tier1_boundary():
     from skillevaluator.evaluation.tier3_report import advisory_skip_result
     from skillevaluator.reporting.base import is_cleanly_skipped, passes_required_gate
 
@@ -154,7 +154,8 @@ def test_advisory_skip_keeps_required_gate_but_is_outside_retained_tier1_contrac
     assert emitted["overall_passed"] is True
     assert emitted["results"][0]["status"] == "skipped"
     with pytest.raises(RetainedReportError, match="Only retained Tier 1 reports are supported"):
-        retained_results(emitted)
+        retained_results(emitted, allowed_tiers={1})
+    assert retained_results(emitted)[0].passed is False
 
 
 @pytest.mark.parametrize(

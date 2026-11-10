@@ -25,7 +25,7 @@ with Hermes available as an explicit experimental option:
 | --- | --- |
 | `claude-code` | Anthropic's Claude Code CLI. `claude` is an accepted alias. Harbor installs Claude Code 2.1.292. Claude 5.5 and later models run with `reasoning_effort=medium`; older models keep Claude Code's default effort. |
 | `codex` | OpenAI's Codex CLI. The OpenAI-provider default. Harbor installs Codex 0.161.0. Runs with `reasoning_effort=high` so scores and cost stay comparable across Harbor releases. |
-| `opencode` | The OpenCode CLI. |
+| `opencode` | The OpenCode CLI. Harbor installs OpenCode 1.19.5. |
 | `hermes` | Experimental. Hermes v2026.9.24, Docker with NVIDIA Build only; no OpenRouter fallback. |
 
 ### Experimental Hermes
@@ -94,7 +94,6 @@ Docker and makes real API calls (including grading):
 SKILL_EVAL_HERMES_INTEGRATION=1 python -m pytest -m integration \
   tests/test_hermes_agent.py -k real_hermes
 ```
-
 The pinned CLI releases apply wherever Harbor installs the agent: Docker and
 the remote environments. [Local mode](#local-mode) runs the CLI already on your
 machine instead.

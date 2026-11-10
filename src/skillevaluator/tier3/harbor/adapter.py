@@ -74,6 +74,10 @@ TEMPLATES_DIR = Path(__file__).parent / "templates"
 _EVAL_CORE_DIR = Path(__file__).resolve().parent.parent / "eval_core"
 _EVALUATOR_TESTS_SUBDIR = "skill_evaluator"
 _BASE_IMAGE_PREFIX = "skillevaluator-base"
+# Compose 2 treats HEALTHCHECK NONE as a configured check, then fails its
+# readiness wait because Docker supplies no health state. Replace authored
+# checks with this constant exec-form probe; do not run authored healthcheck commands.
+_MAIN_CONTAINER_READINESS_HEALTHCHECK = 'HEALTHCHECK --interval=1s --timeout=5s --retries=3 CMD ["/bin/true"]'
 _MAX_REPO_CONTEXT_FILE_BYTES = 10 * 1024 * 1024
 _MAX_REPO_CONTEXT_TOTAL_BYTES = 200 * 1024 * 1024
 _MAX_EVALUATOR_FILE_BYTES = 64 * 1024 * 1024
@@ -3864,6 +3868,7 @@ def _append_task_input_projection(
             _RUNTIME_POLICY_ENV_RESET,
             "ENTRYPOINT []",
             "HEALTHCHECK NONE",
+            _MAIN_CONTAINER_READINESS_HEALTHCHECK,
         ]
     )
     if restore_user is not None and restore_user.casefold() != "root":
@@ -3893,6 +3898,7 @@ def _extend_task_input_projection(lines: list[str], *, include_input: bool, agen
             _RUNTIME_POLICY_ENV_RESET,
             "ENTRYPOINT []",
             "HEALTHCHECK NONE",
+            _MAIN_CONTAINER_READINESS_HEALTHCHECK,
         ]
     )
 

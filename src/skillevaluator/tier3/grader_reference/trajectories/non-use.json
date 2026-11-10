@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "session_id": "non-use",
+  "steps": [
+    {
+      "source": "user",
+      "message": "Say hello; do not use calculator."
+    },
+    {
+      "source": "agent",
+      "message": "Hello!"
+    }
+  ]
+}

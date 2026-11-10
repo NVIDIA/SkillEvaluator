@@ -3,32 +3,15 @@ title: Gate Your CI
 description: Make SkillEvaluator a merge gate — exit codes, a copy-paste GitHub Actions workflow, collection validation, progressive adoption, and machine-readable results.
 ---
 
-Turn SkillEvaluator into a merge gate for your skill repository. Tier 1 needs
-no model API key; full scanner-backed checks can still contact vulnerability
-services. Adopt the CLI in any CI system and add model-backed checks separately.
+Turn SkillEvaluator into a merge gate for your skill repository. Quality and
+security checks need no model API key; full scanner-backed checks can still
+contact vulnerability services. Adopt the CLI in any CI system and add
+model-backed checks separately.
 
 For the prebuilt runtime and one-file consumer setup, see
-[GitHub Actions](github-actions.mdx). The recipe below installs tools explicitly;
+[GitHub Actions](/skills/skillevaluator/github-actions). The recipe below installs tools explicitly;
 its PR-comment step is separate from the reusable publisher's hosted-feedback
 setup.
-
-## Managed three-tier CI
-
-For two small consumer files and automatic artifact-backed PR/MR feedback, use
-the opt-in [three-tier CLI onboarding](cli-onboarding.mdx#opt-in-to-three-tier-ci).
-This unreleased capability gates only on Tier 1 and runs advisory Tier 2 and
-paired Tier 3, defaults to Docker, and supports native local mode. Failed or
-incomplete advisory results retain their native evidence without blocking CI.
-The deprecated Tier 3 required settings are ignored. It requires an
-explicit compatible release descriptor and committed native datasets. The
-released Tier 1-only workflows and bundles continue to work unchanged.
-
-The shared evaluator retains native tier reports and an aggregate manifest,
-including incomplete outcomes. A separate trusted feedback entrypoint on the
-default branch verifies the current head and updates one comment linking the
-exact private CI artifact. Local setup and demo commands prepare the remote
-run; inspect that run's gates and reports before considering onboarding verified.
-The hand-written recipes below retain their own CLI flags and policy choices.
 
 ## Exit codes
 
@@ -40,7 +23,7 @@ The hand-written recipes below retain their own CLI flags and policy choices.
 | `1` | Validation failed — a gating check failed, the run could not complete, or an unexpected internal error occurred | Read the report or log; fix the skill, or re-run and file an issue if the run itself failed |
 | `2` | Usage error — an unknown flag, a value outside an option's type or choices, or a target path that does not exist | Fix the pipeline, not the skill |
 
-Tier 1 checks always gate the exit code. Tier 2 deduplication findings gate when dedup runs unless you pass `--no-block-on-dedup`; the recommended keyless gate below selects `--tiers 1` to exclude Tier 2 and Tier 3. Tier 3 live-evaluation results are advisory inside `validate` unless you pass `--block-on-agent-eval`. Reports record the effective choice for each tier. Without an explicit scope, `validate` runs all three tiers for skills, including Tier 3 autopilot.
+Quality and security checks always gate the exit code. Deduplication findings gate when dedup runs unless you pass `--no-block-on-dedup`; the recommended keyless gate below selects `--tiers 1` to exclude deduplication and live agent evaluation. Live-evaluation results are advisory inside `validate` unless you pass `--block-on-agent-eval`. Reports record the effective choice for each stage. Without an explicit scope, `validate` runs all three stages for skills, including live-evaluation autopilot.
 
 ## The recommended gate
 
@@ -51,7 +34,7 @@ skillevaluator validate ./skills --profile default --tiers 1 -r json,markdown,sa
 Each flag earns its place:
 
 - **`--profile default`** pins the standard validation policy explicitly instead of relying on the environment, so the gate behaves identically on every runner. The active profile name is stamped into the HTML and JSON reports (and printed in the run banner with `--verbose`), so a run always records which gate was applied.
-- **`--tiers 1`** runs static checks without the provider-backed Tier 2 and Tier 3 stages. Use `--tiers 1,2` once you add a provider secret, or omit the option to include Tier 3 after configuring its runtime. `--no-dedup` alone skips only Tier 2 and still runs Tier 3.
+- **`--tiers 1`** runs static checks without provider-backed deduplication or live agent evaluation. Use `--tiers 1,2` once you add a provider secret, or omit the option to include live evaluation after configuring its runtime. `--no-dedup` alone skips only deduplication and still runs live evaluation.
 - **`-r json,markdown,sarif`** writes machine-readable JSON, a Markdown PR comment, and a SARIF file for GitHub Code Scanning.
 - **`-o reports`** collects everything in one directory for artifact upload.
 - **`--min-score 70`** is the default quality bar, written out explicitly so raising it later is a visible one-line diff.
@@ -209,9 +192,13 @@ You do not have to turn on the strictest gate on day one. A path that works well
   skillevaluator validate ./skills --profile default --tiers 1 -r markdown -o reports || true
   ```
 
-  ### Gate on Tier 1
+  ### Require quality and security checks
+
+  <div id="gate-on-tier-1">
 
   Remove the `|| true`. Exit code `1` now blocks merges on schema, security, PII, license, code-integrity, Unicode, and quality failures — all still keyless. (The `lint` check also runs, but its findings are advisory warnings and never fail validation.)
+
+  </div>
 
   ### Raise the quality bar
 
@@ -219,11 +206,11 @@ You do not have to turn on the strictest gate on day one. A path that works well
 
   ### Add LLM-backed checks
 
-  Add a provider key as a masked CI secret, set `SKILL_EVAL_LLM_PROVIDER`, then add `--llm` (and `--llm-verify` to suppress false positives) and select `--tiers 1,2` so Tier 2 overlap checks run too. Once dedup runs, its findings gate alongside Tier 1 by default; add `--no-block-on-dedup` if you want evidence without enforcing it yet. See [Providers & Credentials](configuration.mdx) for provider setup.
+  Add a provider key as a masked CI secret, set `SKILL_EVAL_LLM_PROVIDER`, then add `--llm` (and `--llm-verify` to suppress false positives) and select `--tiers 1,2` so overlap checks run too. Once dedup runs, its findings gate alongside quality and security checks by default; add `--no-block-on-dedup` if you want evidence without enforcing it yet. See [Providers & Credentials](/skills/skillevaluator/configuration) for provider setup.
 
   ### Add an advisory Tier 3 job
 
-  Run live agent evaluation as a separate job with `skillevaluator tier3 ./my-skill`, or remove `--tiers 1,2` from `validate` to run all three tiers. Both workflows reuse existing evaluation sources and generate one starter case when none exists. Attached Tier 3 is advisory by default; add `--block-on-agent-eval` when the team is ready for its findings or invalid source evidence to fail the merge gate. Standalone Tier 3 exits non-zero when the run itself fails to complete. Expose agent credentials as CI secrets in the job environment — the `env:` block of the workflow step — because SkillEvaluator reads operator credentials from the host environment only. With the `nv_build` provider and `--env-mode docker`, a single `NVIDIA_API_KEY` secret covers the evaluator and all three agents. See [Tier 3: Live Evaluation](tier3-live-evaluation.mdx).
+  Run live agent evaluation as a separate job with `skillevaluator tier3 ./my-skill`, or remove `--tiers 1,2` from `validate` to run all three tiers. Both workflows reuse existing evaluation sources and generate one starter case when none exists. Attached Tier 3 is advisory by default; add `--block-on-agent-eval` when the team is ready for its findings or invalid source evidence to fail the merge gate. Standalone Tier 3 exits non-zero when the run itself fails to complete. Expose agent credentials as CI secrets in the job environment — the `env:` block of the workflow step — because SkillEvaluator reads operator credentials from the host environment only. With the `nv_build` provider and `--env-mode docker`, a single `NVIDIA_API_KEY` secret covers the evaluator and all three agents. See [Tier 3: Live Evaluation](/skills/skillevaluator/tier3-live-evaluation).
 </Steps>
 
 <Note>
@@ -247,7 +234,7 @@ severity_overrides:
 skillevaluator validate ./skills --profile default --policy ./policy.yaml --tiers 1 -r json,markdown -o reports
 ```
 
-The policy overlays the default rules, and the resulting profile name is stamped into the HTML and JSON reports (and printed in the run banner with `--verbose`) — so a run always tells you which gate produced it. Full overlay syntax is on the [Tier 1: Validation](tier1-validation.mdx) page.
+The policy overlays the default rules, and the resulting profile name is stamped into the HTML and JSON reports (and printed in the run banner with `--verbose`) — so a run always tells you which gate produced it. See the [validation policy reference](/skills/skillevaluator/tier1-validation) for the full overlay syntax.
 
 ## Parse the JSON
 
@@ -262,7 +249,7 @@ When the exit code is not enough — dashboards, custom thresholds, badge genera
 | `benchmark_policy` | object | Persisted `tier2_required` and `tier3_required` evidence policy used for the publication decision |
 | `results[].publication_target` | object | Exact NFC filesystem-entry name, versioned source-tree digest, and digest algorithm used to bind split-tier evidence |
 | `results[].publication_evidence` | object | Validated built-in Tier 1 or Tier 2 producer contract: schema version, producer, tier, and canonical check ID |
-| `results[].skillspector_baseline` | object | Single-skill targets with `--skillspector-baseline`, when SkillSpector is installed: `status`, baseline file name and `sha256:` digest (no local path), scanner versions, suppressed (per stage) and active finding counts, and a message. Absent from merged `security-scan` folder reports; `validate` on a folder records it in each skill's report. See [Audited SkillSpector baselines](tier1-validation.mdx#audited-skillspector-baselines) |
+| `results[].skillspector_baseline` | object | Single-skill targets with `--skillspector-baseline`, when SkillSpector is installed: `status`, baseline file name and `sha256:` digest (no local path), scanner versions, suppressed (per stage) and active finding counts, and a message. Absent from merged `security-scan` folder reports; `validate` on a folder records it in each skill's report. See [Audited SkillSpector baselines](/skills/skillevaluator/tier1-validation#audited-skillspector-baselines) |
 | `tier3.run_id` | string | Run-owned Tier 3 identity; duplicated in the Tier 3 summary for consistency checks |
 | `severity_counts` | object | Totals for `critical`, `high`, `medium`, `low` |
 | `total_errors`, `total_warnings` | number | Raw error and warning records across all validators; a finding that two validators report counts twice |
@@ -325,7 +312,7 @@ report=$(ls -t reports/skillevaluator-output-*.json | head -1)
 jq -e '([.quality_summary[]?.overall_score] | min // 100) >= 80' "$report"
 ```
 
-`jq -e` exits non-zero when the expression is false, so the step fails the job on its own. For Tier 3 payloads and the full results-on-disk layout, see [Reports & Results](reports.mdx).
+`jq -e` exits non-zero when the expression is false, so the step fails the job on its own. For Tier 3 payloads and the full results-on-disk layout, see [Reports & Results](/skills/skillevaluator/reports).
 
 ## Troubleshooting
 
@@ -340,7 +327,7 @@ jq -e '([.quality_summary[]?.overall_score] | min // 100) >= 80' "$report"
     scanners fail closed: `validate` exits non-zero and the report stays
     non-green until every required scanner is installed and returns valid
     evidence. See the workflow above or
-    [Installation: System tools](installation.mdx#system-tools).
+    [Installation: System tools](/skills/skillevaluator/installation#system-tools).
   </Accordion>
   <Accordion title="The report artifact is empty">
     Make sure the artifact `path` matches your `-o` directory and that the upload step carries `if: always()` — otherwise a failed gate skips the upload, and you lose the report exactly when you need it.
@@ -350,16 +337,23 @@ jq -e '([.quality_summary[]?.overall_score] | min // 100) >= 80' "$report"
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Reports & Results" icon="book" href="reports.mdx">
+  <Card title="Reports & Results" icon="book" href="/skills/skillevaluator/reports">
     What every report format contains and how to read scores, severities, and Tier 3 payloads.
   </Card>
-  <Card title="Tier 1: Validation" icon="shield" href="tier1-validation.mdx">
+  <Card title="Quality and security checks" icon="shield" href="/skills/skillevaluator/tier1-validation">
     Every check behind the gate — what it inspects and how to fix findings.
   </Card>
-  <Card title="Providers & Credentials" icon="flask" href="configuration.mdx">
+  <Card title="Providers & Credentials" icon="flask" href="/skills/skillevaluator/configuration">
     Add an LLM provider to unlock `--llm`, Tier 2 dedup, and Tier 3.
   </Card>
-  <Card title="CLI Reference" icon="terminal" href="cli-reference.mdx">
+  <Card title="CLI Reference" icon="terminal" href="/skills/skillevaluator/cli-reference">
     The complete flag reference for `validate` and every other command.
   </Card>
 </CardGroup>
+
+<div id="managed-three-tier-ci">
+
+For the explicit all-tier opt-in and its prerequisites, see [Advanced CI](/skills/skillevaluator/advanced-ci).
+The [managed CI reference](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/all-tiers/README.md#managed-three-tier-ci) preserves the detailed contracts.
+
+</div>

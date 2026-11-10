@@ -143,6 +143,29 @@ def test_shared_metric_pass_comparison_does_not_credit_activation_alone():
     assert comparison["excluded_metrics"] == ["skill_execution", "skill_efficiency"]
 
 
+def test_shared_metric_pass_applies_goal_gate_only_when_goal_accuracy_is_shared():
+    from skillevaluator.tier3.harbor.collector import _shared_metric_pass_lift
+
+    treatment = reward(goal_accuracy=0.0)
+    control = reward()
+    metrics.mark_not_applicable(control, "goal_accuracy")
+
+    comparison = _shared_metric_pass_lift(
+        [treatment],
+        [control],
+        n_attempts=1,
+        pass_threshold=0.5,
+        stop_on_pass=False,
+        expected_cases=1,
+        expected_case_ids=["a"],
+    )
+
+    assert comparison["basis"] == "shared_metrics"
+    assert comparison["excluded_metrics"] == ["goal_accuracy"]
+    assert comparison["with_skill"] == 1.0
+    assert comparison["without_skill"] == 1.0
+
+
 def test_shared_metric_pass_comparison_preserves_canonical_policy_when_nothing_is_excluded():
     from skillevaluator.tier3.harbor.collector import _shared_metric_pass_lift
 

@@ -10,6 +10,12 @@ All notable changes to SkillEvaluator are documented in this file.
   metric severity from dimension verdicts; include severity thresholds in the
   artifact and a muted CLI legend without changing scores or thresholds.
 
+- Document an additive qualitative assessment review worksheet with bounded
+  evidence from real successful, failed-setup and invalid-judge runs. Preserve
+  numeric grading and identify the separate decisions needed for scoreless support.
+  Pin the public calculator input to the historical repository revision used by
+  the run, preserving its original hash and evidence pointers after migration.
+
 - Tier 3 reports show per-case expectation inventories with explicit met,
   unmet, unchecked, unscored and inapplicable judgments, evidence and next
   diagnostic steps for executed conditions. Behavior judges can abstain when

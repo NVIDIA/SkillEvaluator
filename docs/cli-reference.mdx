@@ -165,7 +165,7 @@ pipeline.
 | --- | --- |
 | `tier1` | `validate`, `quality-check`, `rubric-eval`, `security-scan`, `pii-scan`, `lint-scripts` |
 | `tier2` | `context-optimization-check`, `dedup-scan`, `similarity-check` |
-| `tier3` | `evaluate`, `select-decoys`, `create-eval-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `feedback`, `validate`, `harbor-view` |
+| `tier3` | `evaluate`, `select-decoys`, `create-eval-dataset`, `migrate-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `feedback`, `validate`, `harbor-view` |
 
 `health-check` and [models](#models) are top-level only. The expert commands
 [tier3 evaluate](#tier3-evaluate), [tier3 select-decoys](#tier3-select-decoys),
@@ -479,7 +479,7 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `-a, --agents TEXT` | provider-native | Comma-separated Harbor agents. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. Supported: `claude-code`, `codex`, `opencode`; the alias `claude` is accepted for `claude-code`. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
+| `-a, --agents TEXT` | provider-native | Comma-separated Harbor agents. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. Supported: `claude-code`, `codex`, `opencode`; Experimental: `hermes` (Docker with NVIDIA Build only; see [Experimental Hermes](agents-and-sandboxes.mdx#experimental-hermes)). The alias `claude` is accepted for `claude-code`. See [Agents & Sandboxes](agents-and-sandboxes.mdx). |
 | `--env-mode` | `docker` | Where trials run. SkillEvaluator exposes 27 environment modes: 26 Harbor-native modes — `docker`, `daytona`, `e2b`, `modal`, `runloop`, `langsmith`, `ec2`, `gke`, `ack`, `openshift`, `novita`, `apple-container`, `singularity`, `islo`, `tensorlake`, `cwsandbox`, `wandb`, `use-computer`, `blaxel`, `beam`, `skypilot`, `hyperbrowser`, `vercel`, `kata`, `runta`, `mosaic` — plus SkillEvaluator `local` mode. `wandb` runs Harbor's `cwsandbox` backend with W&B authentication, so it needs the `harbor[cwsandbox]==0.24.0` extra; Harbor 0.24 has no `wandb` extra. Harbor's `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`, `prime`, and `smol` backends are not selectable. See the complete extras and prerequisites matrix in [Agents & Sandboxes](agents-and-sandboxes.mdx#where-trials-run). Installed packages can add more modes; see [Custom execution backends](agents-and-sandboxes.mdx#custom-execution-backends). |
 | `--environment-kwarg`, `--ek` | none | Operator-only `KEY=VALUE` constructor option for Harbor-native non-Docker backends (repeatable). Values accept JSON-compatible types; skill-owned `evals/config.yml` cannot set them. Never pass secrets. Docker and local reject all kwargs, Kata accepts only `kata_runtime` and `kata_dns`, and Harbor runtime-policy fields for overrides, mounts, networks, extra Compose, lifecycle, and pod security are reserved, as are `stream`, `enable_environment_dir_upload`, and `auth` for `cwsandbox`/`wandb`. Names the selected backend does not accept in Harbor 0.24.0 are rejected. See [Native backend constructor options](agents-and-sandboxes.mdx#native-backend-constructor-options). |
 | `--autopilot` | off | Create one eval case when no dataset/task source exists, then evaluate. The case is LLM-generated with the configured provider, with a deterministic keyless template fallback; an existing source is never overwritten. |
@@ -522,6 +522,25 @@ namespace precedes the NVIDIA catalog ID.
 
 Flags marked "unset" fall back to their matching keys in `evals/config.yml` where one exists, then to the built-in defaults. The exception is `--results-dir`, which resolves independently of `evals/config.yml`.
 
+## tier3 migrate-dataset
+
+Preview a lossless conversion to the preferred dataset object. No provider or
+Tier 3 runtime is required:
+
+```bash
+skillevaluator tier3 migrate-dataset ./my-skill/evals/evals.json --skill-name my-skill
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--skill-name NAME` | inferred when unambiguous | Target skill identity. Required for all-negative or mixed-identity legacy datasets. |
+| `--output DESTINATION` | preview only | Write a new `.json`, `.yaml`, or `.yml` file; existing paths and the source are refused. |
+
+`SOURCE` accepts JSON, case-per-line JSONL, YAML, or YML. JSONL is input-only;
+output is one JSON/YAML object. See [Migrate a legacy dataset](eval-datasets.mdx#migrate-a-legacy-dataset)
+for routing-label requirements, preserved fields, and how to promote the reviewed
+conversion without changing fixture paths.
+
 ## create-eval-dataset
 
 Create synthetic eval datasets for agent skill evaluation, written to `evals/evals.json`. Uses the configured LLM provider unless you pass `--no-llm`. Dataset anatomy and the four case buckets are documented in [Eval Datasets](eval-datasets.mdx).
@@ -531,7 +550,7 @@ skillevaluator create-eval-dataset ./my-skill --full
 ```
 
 <Warning>
-`--force` overwrites an existing `evals/evals.json`, including any hand-edited cases, and `--refine` implies `--force`. Use `--dry-run` first if you are unsure.
+`--force` overwrites an existing `evals/evals.json`, including any hand-edited cases. `--refine` normally regenerates the dataset, but `--grounding trace` refines an existing file in place and preserves its authored cases. Use `--dry-run` first if you are unsure.
 </Warning>
 
 | Flag | Default | Effect |
@@ -541,9 +560,10 @@ skillevaluator create-eval-dataset ./my-skill --full
 | `--dry-run` | off | Preview without writing. |
 | `--force` | off | Overwrite existing `evals/evals.json`. |
 | `--prompt PATH` | none | Developer eval-guidance file for generation (default: auto-detects `evals/EVAL.md`). |
-| `--refine` | off | Refine cases using existing or collected trajectories. Reading trajectories from existing results does not require the `tier3` extra; when none exist, collecting one runs `claude-code` through Harbor and needs the `tier3` extra, Docker, and a configured provider (see [Eval Datasets](eval-datasets.mdx)). |
-| `--from-results PATH` | none | With `--refine`: results path containing agent trajectories (default: latest results). |
-| `--results-dir DIRECTORY` | unset | With `--refine`: external results root to search for trajectories. |
+| `--grounding {skill,intent,trace}` | `skill` | Choose `SKILL.md`, author guidance (`evals/EVAL.md` or `--prompt`), or agent trajectories as the primary grounding source. |
+| `--refine` | off | Refine generated cases with trajectories on top of the selected grounding source. Without `--grounding trace`, it regenerates the dataset; with trace grounding and an existing dataset, it refines those cases in place. If no trajectory exists, collection runs `claude-code` through Harbor and needs the `tier3` extra, Docker, and a configured provider (see [Eval Datasets](eval-datasets.mdx)). |
+| `--from-results PATH` | none | With `--grounding trace` or `--refine`: results path containing agent trajectories (default: latest results). |
+| `--results-dir DIRECTORY` | unset | With `--grounding trace` or `--refine`: external results root to search for trajectories. |
 
 ## init-custom-grader
 

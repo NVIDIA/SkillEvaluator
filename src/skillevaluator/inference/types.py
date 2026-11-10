@@ -46,6 +46,10 @@ class LLMVerdict:
     confidence: float
     reasoning: str
     suggestion: str
+    # The model that answered, as the client reported it: the configured model,
+    # or a server-side fallback model that answered in its place. ``None`` when
+    # the client named no model.
+    model: str | None = None
 
 
 def require_bounded_llm_string(value: object, label: str, *, max_chars: int) -> str:
@@ -75,7 +79,13 @@ def _require_unit_interval(value: object, label: str) -> float:
     return number
 
 
-def parse_bounded_llm_verdict(data: object, *, valid_verdicts: Collection[str], context: str) -> LLMVerdict:
+def parse_bounded_llm_verdict(
+    data: object,
+    *,
+    valid_verdicts: Collection[str],
+    context: str,
+    model: object = None,
+) -> LLMVerdict:
     """Turn a parsed Tier 2 LLM reply into a verdict with checked, bounded fields.
 
     The reply must be a JSON object whose ``verdict`` is one of
@@ -84,6 +94,10 @@ def parse_bounded_llm_verdict(data: object, *, valid_verdicts: Collection[str], 
     strings of at most ``TIER2_LLM_MAX_RESPONSE_SCALAR_CHARS`` characters. A
     missing confidence reads as 0 and a missing text field as empty. Any other
     reply raises :class:`LLMClientError`.
+
+    ``model`` names the model that answered and is kept only when it is a
+    string. It is stored as given; reports pass it through
+    :func:`~skillevaluator.inference.diagnostics.safe_llm_model`.
     """
     if not isinstance(data, Mapping):
         raise LLMClientError(f"{context} response must be a JSON object")
@@ -107,4 +121,10 @@ def parse_bounded_llm_verdict(data: object, *, valid_verdicts: Collection[str], 
         f"{context} suggestion",
         max_chars=TIER2_LLM_MAX_RESPONSE_SCALAR_CHARS,
     )
-    return LLMVerdict(verdict=verdict, confidence=confidence, reasoning=reasoning, suggestion=suggestion)
+    return LLMVerdict(
+        verdict=verdict,
+        confidence=confidence,
+        reasoning=reasoning,
+        suggestion=suggestion,
+        model=model if isinstance(model, str) else None,
+    )

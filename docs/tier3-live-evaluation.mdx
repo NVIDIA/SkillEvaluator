@@ -11,6 +11,25 @@ Docker or another sandbox. NVIDIA Build in Docker, Kata, or local mode uses one 
 for both roles; OpenAI with Codex can also share its key. This guide takes you from a skill directory to a
 finished with-skill vs. without-skill comparison.
 
+## Paired Tier 3 in automatic CI
+
+The [all-tier CI setup](cli-onboarding.mdx#opt-in-to-three-tier-ci) consumes
+committed native `evals/` datasets with full coverage. It runs each selected
+case both with and without the skill; it does not use autopilot, generate new
+cases, or skip the baseline. Docker is the default, with native local mode as
+the other supported CI environment. Cloud backends remain available through
+the expert CLI but are outside this onboarding path.
+
+Tier 3 and Tier 2 are advisory; only Tier 1 gates CI. Onboarding's
+`--tier3-required`, GitHub's `tier3-required` input and GitLab's
+`SKILL_EVAL_TIER3_REQUIRED` variable are deprecated and ignored, even when true;
+they cannot make Tier 3 block CI. CI preserves native
+reports for missing credentials, readiness failures and partial runs as well
+as completed scores. Native reports include coverage and paired arm evidence,
+Skill Lift, attempts, available latency/resource metrics and trial links. An
+incomplete advisory result is visible and never described as a completed pass.
+See [retained CI evidence](reports.mdx#retained-three-tier-ci-evidence).
+
 ## What a live eval measures
 
 SkillEvaluator runs a real agent (`codex`, `claude-code`, or `opencode` —
@@ -88,10 +107,11 @@ using Harbor 0.24:
   `tier3 evaluate` fail the prerequisite check until you reinstall the extra.
 - Codex runs with `reasoning_effort=high`, the effort Harbor 0.22 used by
   default, so results stay comparable across Harbor upgrades.
-- Harbor installs Codex 0.161.0 and Claude Code 2.1.292 rather than the latest
-  release, so a new CLI release does not change results. Claude Code runs
-  Claude 5.5 and later models with `reasoning_effort=medium`. Local mode uses
-  your installed CLIs and checks that they are new enough for the model.
+- Harbor installs Codex 0.161.0, Claude Code 2.1.292 and OpenCode 1.19.5
+  rather than the latest release, so a new CLI release does not change
+  results. Claude Code runs Claude 5.5 and later models with
+  `reasoning_effort=medium`. Local mode uses your installed CLIs and checks
+  that they are new enough for the model.
 - Installed Codex adapters merge existing user and MCP configuration before the
   selected runtime provider and endpoint take precedence over conflicting route
   keys.

@@ -11,8 +11,9 @@ import math
 from pathlib import Path
 from typing import Any
 
+from skillevaluator.source_identity import evaluated_source_revision
 from skillevaluator.tier3.baseline_store import comparison_identity, condition_eligibility, load_condition_rows
-from skillevaluator.tier3.results_location import ordered_run_directories
+from skillevaluator.tier3.results_location import ordered_run_directories, run_directory_sort_key
 
 
 def retained_run(root: Path, requested: str) -> Path:
@@ -40,7 +41,15 @@ def _read_result(run_dir: Path) -> dict[str, Any]:
 def _skill_revision(skill: dict[str, Any]) -> tuple[Any, Any]:
     source = skill.get("evaluated_source") if isinstance(skill.get("evaluated_source"), dict) else {}
     target = skill.get("publication_target") if isinstance(skill.get("publication_target"), dict) else {}
-    return source.get("revision"), target.get("skill_digest")
+    return evaluated_source_revision(source), target.get("skill_digest")
+
+
+def _same_skill_revision(current: dict[str, Any], prior: dict[str, Any]) -> bool:
+    current_revision, current_digest = _skill_revision(current)
+    prior_revision, prior_digest = _skill_revision(prior)
+    if current_digest and prior_digest:
+        return current_digest == prior_digest
+    return current_revision == prior_revision
 
 
 def _eligible(
@@ -74,7 +83,7 @@ def _provenance(current_identity: dict[str, Any], source: dict[str, Any], source
     prior_skill = copy.deepcopy(source.get("comparison_identity", {}).get("skill", {}))
     current_skill = current_skill if isinstance(current_skill, dict) else {}
     prior_skill = prior_skill if isinstance(prior_skill, dict) else {}
-    identical = _skill_revision(current_skill) == _skill_revision(prior_skill)
+    identical = _same_skill_revision(current_skill, prior_skill)
     return {
         "source_run_id": source_dir.name,
         "source_evaluated_at": source.get("evaluated_at"),
@@ -92,6 +101,15 @@ def select_prior_version(
     candidates = (
         ordered_run_directories(root, completed_only=True) if requested == "latest" else [retained_run(root, requested)]
     )
+    if requested == "latest" and (
+        current_key := run_directory_sort_key(current_run_dir, require_completed_result=True)
+    ):
+        candidates = [
+            candidate
+            for candidate in candidates
+            if (candidate_key := run_directory_sort_key(candidate, require_completed_result=True))
+            and candidate_key < current_key
+        ]
     rejected = []
     for candidate in candidates:
         if candidate.resolve() == current_run_dir.resolve():

@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
+import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +30,9 @@ _NON_COMPARISON_FIELDS = frozenset(
         "prior_version_comparison",
     }
 )
+_ARM_TASK_NAME_SUFFIX = re.compile(r"(?m)^(\s*name\s*=\s*['\"][^'\"\r\n]*)-(?:with|without)-skill(['\"]\s*(?:#.*)?)$")
+_ARM_TASK_DIR_SUFFIX = re.compile(r"-(?:with|without)-skill$")
+_ARM_NEUTRAL_ENTRY_FIELDS = frozenset({"has_skill", "evaluated_skill", "workspace_skill_names"})
 BASELINE_ANNOTATION_KEYS = (
     "_trial_name",
     "_trial_root_name",
@@ -54,6 +60,7 @@ def measured_condition_usage(condition_dir: Path) -> dict[str, float | None]:
             reward = json.loads(reward_path.read_text(encoding="utf-8"))
             trial_id = reward["trial_id"]
             if trial_id in seen:
+                complete = False
                 continue
             seen.add(trial_id)
             trajectory = json.loads(reward_path.with_name("trajectory.json").read_text(encoding="utf-8"))
@@ -68,6 +75,61 @@ def measured_condition_usage(condition_dir: Path) -> dict[str, float | None]:
         field: sum(counters) if complete and counters and len(counters) == len(seen) else None
         for field, counters in values.items()
     }
+
+
+def identity_dataset_digest(task_dirs: Sequence[Path]) -> str:
+    """Hash staged baseline entries without fields that identify one comparison arm."""
+    entries = []
+    for task_dir in sorted(task_dirs, key=lambda path: path.name):
+        task_name = _ARM_TASK_DIR_SUFFIX.sub("", task_dir.name)
+        entry_path = task_dir / "tests" / "entry.json"
+        if entry_path.is_file():
+            entry = json.loads(entry_path.read_text(encoding="utf-8"))
+            if not isinstance(entry, dict):
+                raise ValueError(f"Invalid staged entry: {entry_path}")
+        else:
+            entry = None
+        entries.append(
+            {
+                "task": task_name,
+                "entry": (
+                    {key: value for key, value in entry.items() if key not in _ARM_NEUTRAL_ENTRY_FIELDS}
+                    if isinstance(entry, dict)
+                    else None
+                ),
+            }
+        )
+    encoded = json.dumps(entries, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def baseline_task_tree_digest(task_dirs_by_agent: dict[str, Sequence[Path]]) -> str:
+    """Hash the staged without-skill task trees, normalizing arm-specific task names."""
+    digest = hashlib.sha256()
+    for agent, task_dirs in sorted(task_dirs_by_agent.items()):
+        for task_dir in sorted(task_dirs, key=lambda path: path.name):
+            task_name = _ARM_TASK_DIR_SUFFIX.sub("", task_dir.name)
+            header = f"{agent}/{task_name}".encode()
+            digest.update(len(header).to_bytes(8, "big"))
+            digest.update(header)
+            for path in sorted(task_dir.rglob("*")):
+                if path.name == "repo-context.json":
+                    continue
+                relative = path.relative_to(task_dir).as_posix()
+                if path.is_symlink():
+                    content = b"symlink\0" + path.readlink().as_posix().encode("utf-8")
+                elif path.is_file():
+                    content = path.read_bytes()
+                    if relative == "task.toml":
+                        content = _ARM_TASK_NAME_SUFFIX.sub(r"\1\2", content.decode("utf-8"), count=1).encode("utf-8")
+                else:
+                    continue
+                file_header = relative.encode("utf-8")
+                digest.update(len(file_header).to_bytes(8, "big"))
+                digest.update(file_header)
+                digest.update(len(content).to_bytes(8, "big"))
+                digest.update(content)
+    return "sha256:" + digest.hexdigest()
 
 
 def comparison_identity(run_config: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
@@ -91,6 +153,8 @@ def comparison_identity(run_config: dict[str, Any], result: dict[str, Any]) -> d
     return {
         "config": config,
         "dataset_digest": result.get("dataset_digest"),
+        "identity_dataset_digest": result.get("identity_dataset_digest", result.get("dataset_digest")),
+        "baseline_task_tree_digest": result.get("baseline_task_tree_digest"),
         "expected_case_ids": sorted(result.get("expected_case_ids", [])),
         "attempt_policy": copy.deepcopy(result.get("attempt_policy")),
         "score_policy": result.get("score_policy"),
@@ -109,8 +173,12 @@ def comparison_mismatches(current: dict[str, Any], source: dict[str, Any]) -> li
             reasons.append(f"model changed for {agent}: {old} -> {model}")
     added = sorted(set(current.get("expected_case_ids", [])) - set(source.get("expected_case_ids", [])))
     removed = sorted(set(source.get("expected_case_ids", [])) - set(current.get("expected_case_ids", [])))
-    if current.get("dataset_digest") != source.get("dataset_digest") or added or removed:
+    current_dataset = current.get("identity_dataset_digest", current.get("dataset_digest"))
+    source_dataset = source.get("identity_dataset_digest", source.get("dataset_digest"))
+    if current_dataset != source_dataset or added or removed:
         reasons.append(f"dataset changed (cases added: {added[:16]}; removed: {removed[:16]})")
+    if current.get("baseline_task_tree_digest") != source.get("baseline_task_tree_digest"):
+        reasons.append("staged baseline task tree changed")
     for field in ("attempt_policy", "score_policy", "evaluator_version"):
         if field == "score_policy" and current.get(field) is None:
             continue
@@ -205,8 +273,17 @@ def condition_eligibility(
     if collected_result is None and run_directory_sort_key(run_dir, require_completed_result=True) is None:
         return ["run is not completed under the current result contract"], result
     baseline = result.get("baseline", config.get("baseline", {}))
-    if require_fresh and (not isinstance(baseline, dict) or baseline.get("mode") != "fresh"):
-        reasons.append("source run reused a baseline; select the original fresh run")
+    if require_fresh:
+        if not isinstance(baseline, dict):
+            reasons.append("source run has invalid baseline provenance")
+        elif baseline.get("mode") == "reused":
+            reasons.append("source run reused a baseline; select the original fresh run")
+        elif baseline.get("mode") == "skipped":
+            reasons.append("source run skipped its baseline")
+        elif "baseline" not in result and "baseline" not in config:
+            reasons.append("source run predates baseline provenance")
+        elif baseline.get("mode") != "fresh":
+            reasons.append("source run has an unsupported baseline mode")
     source_identity = result.get("comparison_identity")
     if not isinstance(source_identity, dict):
         reasons.append("run lacks a persisted comparison identity")
@@ -221,9 +298,13 @@ def condition_eligibility(
             reasons.append("source comparison identity disagrees with run configuration")
         else:
             reasons.extend(comparison_mismatches(identity, source_identity))
-        if source_identity.get("dataset_digest") != result.get("dataset_digest") or source_identity.get(
-            "evaluator_version"
-        ) != result.get("evaluator_version"):
+        if (
+            source_identity.get("dataset_digest") != result.get("dataset_digest")
+            or source_identity.get("identity_dataset_digest", source_identity.get("dataset_digest"))
+            != result.get("identity_dataset_digest", result.get("dataset_digest"))
+            or source_identity.get("baseline_task_tree_digest") != result.get("baseline_task_tree_digest")
+            or source_identity.get("evaluator_version") != result.get("evaluator_version")
+        ):
             reasons.append("source comparison identity disagrees with dataset/evaluator evidence")
         if source_identity.get("score_policy") != result.get("score_policy"):
             reasons.append("source comparison identity disagrees with score policy evidence")
@@ -235,6 +316,7 @@ def condition_eligibility(
     for agent in agents:
         payload = result.get("agents", {}).get(agent, {})
         condition = payload.get("conditions", {}).get(arm, {})
+        arm_label = "baseline" if arm == "without_skill" else "with-skill"
         if condition.get("execution_status") != "succeeded":
             reasons.append(f"{agent}: {arm.replace('_', '-')} condition did not succeed")
         if (
@@ -244,17 +326,17 @@ def condition_eligibility(
             or payload.get("historical_job_failures", {}).get(arm)
             or payload.get("recovered_trial_failures", {}).get(arm)
         ):
-            reasons.append(f"{agent}: baseline has job, trial or runtime failures")
+            reasons.append(f"{agent}: {arm_label} has job, trial or runtime failures")
         try:
             summary = json.loads((run_dir / agent / arm.replace("_", "-") / "summary.json").read_text(encoding="utf-8"))
             if not isinstance(summary, dict):
-                raise ValueError("invalid baseline summary")
+                raise ValueError(f"invalid {arm_label} summary")
             if (
                 summary.get("execution_status") != "succeeded"
                 or summary.get("job_failure")
                 or summary.get("trial_failures")
             ):
-                reasons.append(f"{agent}: baseline summary is incomplete or failed")
+                reasons.append(f"{agent}: {arm_label} summary is incomplete or failed")
             rows = load_condition_rows(run_dir, agent, arm)
             scored, failures = _partition_scoreable_rewards(rows)
             policy = identity["attempt_policy"]
@@ -269,9 +351,9 @@ def condition_eligibility(
                 reward_failures=failures,
             )
             if failures or execution["execution_status"] != "succeeded":
-                reasons.append(f"{agent}: baseline reward coverage is incomplete or unscoreable")
+                reasons.append(f"{agent}: {arm_label} reward coverage is incomplete or unscoreable")
         except (OSError, ValueError, TypeError, KeyError) as exc:
-            reasons.append(f"{agent}: missing or corrupt baseline evidence: {exc}")
+            reasons.append(f"{agent}: missing or corrupt {arm_label} evidence: {exc}")
     return reasons, result
 
 

@@ -725,6 +725,8 @@ def evaluate(
             raise ValueError("--skip-baseline and --skip-with-skill are mutually exclusive (no arm would run)")
         if reuse_baseline and (skip_baseline or skip_with_skill):
             raise ValueError("--reuse-baseline is mutually exclusive with --skip-baseline and --skip-with-skill")
+        if compare_to and skip_with_skill:
+            raise ValueError("--compare-to is mutually exclusive with --skip-with-skill")
         unknown = validate_agents(agent_list)
         if unknown:
             supported = ", ".join(sorted(HARBOR_AGENTS_SUPPORTED))

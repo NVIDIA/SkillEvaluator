@@ -3264,6 +3264,8 @@ def evaluate(
         raise click.UsageError("--skip-baseline and --skip-with-skill are mutually exclusive (no arm would run)")
     if reuse_baseline and (skip_baseline or skip_with_skill):
         raise click.UsageError("--reuse-baseline is mutually exclusive with --skip-baseline and --skip-with-skill")
+    if compare_to and skip_with_skill:
+        raise click.UsageError("--compare-to is mutually exclusive with --skip-with-skill")
     service = EvaluationService()
     # Resolved before the service is built so a non-canonical value is refused
     # at the boundary rather than after a long live run has already started.

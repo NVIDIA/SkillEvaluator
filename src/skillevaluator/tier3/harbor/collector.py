@@ -7609,6 +7609,27 @@ def collect_harbor_results(
         without_active_trial_failures, without_recovered_trial_failures = _split_recovered_failures(
             without_trial_failures, without_recovered
         )
+        with_reward_trials = {
+            str(reward.get("_trial_root_name") or reward.get("_trial_name") or "") for reward in with_collected_rewards
+        }
+        without_reward_trials = {
+            str(reward.get("_trial_root_name") or reward.get("_trial_name") or "")
+            for reward in without_collected_rewards
+        }
+        with_unrepresented_failures = {
+            str(failure.get("trial") or "")
+            for failure in with_active_trial_failures
+            if failure.get("trial") and str(failure["trial"]) not in with_reward_trials
+        }
+        without_unrepresented_failures = {
+            str(failure.get("trial") or "")
+            for failure in without_active_trial_failures
+            if failure.get("trial") and str(failure["trial"]) not in without_reward_trials
+        }
+        with_execution_count = len(_logical_attempt_rewards(with_collected_rewards)) + len(with_unrepresented_failures)
+        without_execution_count = len(_logical_attempt_rewards(without_collected_rewards)) + len(
+            without_unrepresented_failures
+        )
         all_results["agents"][agent] = {
             "model": agent_model,
             "model_source": agent_model_source,
@@ -7673,18 +7694,18 @@ def collect_harbor_results(
             "num_trials_without": len(without_logical_rewards) if not skip_baseline else 0,
             "execution_counts": {
                 "fresh": {
-                    "with_skill": len(_logical_attempt_rewards(with_collected_rewards)),
-                    "without_skill": 0
-                    if reused_baseline_dir
-                    else len(_logical_attempt_rewards(without_collected_rewards)),
+                    "with_skill": with_execution_count,
+                    "without_skill": 0 if reused_baseline_dir else without_execution_count,
                 },
                 "reused": {"without_skill": len(without_logical_rewards) if reused_baseline_dir else 0},
             },
             "measured_usage": {
                 "fresh": {
-                    "with_skill": measured_condition_usage(agent_dir / "with-skill"),
+                    "with_skill": None
+                    if with_active_trial_failures
+                    else measured_condition_usage(agent_dir / "with-skill"),
                     "without_skill": None
-                    if reused_baseline_dir
+                    if reused_baseline_dir or without_active_trial_failures
                     else measured_condition_usage(agent_dir / "without-skill"),
                 },
                 "reused": {

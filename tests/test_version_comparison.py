@@ -20,6 +20,7 @@ from skillevaluator.reporting.benchmark import BenchmarkReporter
 from skillevaluator.reporting.cli import CLIReporter
 from skillevaluator.reporting.html import HTMLReporter
 from skillevaluator.reporting.markdown import MarkdownReporter
+from skillevaluator.tier3.baseline_store import condition_eligibility
 from skillevaluator.tier3.harbor import runner, runtime_preflight
 from skillevaluator.tier3.result_display import render_evaluation_result
 from skillevaluator.tier3.version_comparison import compare_versions, select_prior_version, version_comparison_lines
@@ -79,7 +80,7 @@ def evaluation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
             env_mode="docker",
             agent_runtime_preflight=False,
             agent_models={"opencode": "openai/test-model"},
-            evaluated_source={"repository": "example/skill", "revision": version * 40},
+            evaluated_source={"repository": "example/skill", "commit": version * 40},
             **options,
         )
 
@@ -136,6 +137,23 @@ def test_identical_explicit_source_is_flagged(evaluation):
     assert comparison["identical_skill"] is True
     assert comparison["regression"] is False
     assert "not a version change" in " ".join(version_comparison_lines(comparison))
+
+
+def test_revision_fallback_is_used_when_publication_digest_is_missing(evaluation):
+    prior = evaluation("a", 0.8)
+    current = evaluation("b", 0.2)
+    for run in (prior, current):
+        result_path = Path(run["run_dir"]) / "result.json"
+        result = json.loads(result_path.read_text())
+        result["publication_target"]["skill_digest"] = None
+        result["comparison_identity"]["skill"]["publication_target"]["skill_digest"] = None
+        _write(result_path, result)
+
+    comparison = compare_versions(Path(current["run_dir"]), Path(prior["run_dir"]))
+
+    assert comparison["status"] == "available"
+    assert comparison["identical_skill"] is False
+    assert f"rev {'a' * 40}" in version_comparison_lines(comparison)[0]
 
 
 @pytest.mark.parametrize("arm", ["prior", "current"])
@@ -260,6 +278,34 @@ def test_latest_rejects_incompatible_candidates(evaluation):
     )
     assert selection["status"] == "unavailable"
     assert "evaluator version changed" in str(selection["rejected_candidates"])
+
+
+def test_latest_never_selects_a_run_newer_than_the_current_run(evaluation):
+    current = evaluation("a", 0.8)
+    evaluation("b", 0.2)
+
+    selection = select_prior_version(
+        Path(current["run_dir"]).parent,
+        "latest",
+        current["comparison_identity"],
+        current_run_dir=Path(current["run_dir"]),
+    )
+
+    assert selection["status"] == "unavailable"
+    assert selection["reasons"] == ["No compatible completed run of a different skill revision"]
+
+
+def test_with_skill_eligibility_reasons_name_the_with_skill_arm(evaluation):
+    run = evaluation()
+    summary_path = Path(run["run_dir"]) / "opencode/with-skill/summary.json"
+    summary = json.loads(summary_path.read_text())
+    summary["execution_status"] = "failed"
+    _write(summary_path, summary)
+
+    reasons, _ = condition_eligibility(Path(run["run_dir"]), ["opencode"], run["comparison_identity"], "with_skill")
+
+    assert "opencode: with-skill summary is incomplete or failed" in reasons
+    assert not any("baseline" in reason for reason in reasons)
 
 
 def test_malformed_display_scores_are_unavailable():

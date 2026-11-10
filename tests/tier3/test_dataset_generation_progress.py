@@ -49,6 +49,11 @@ def test_generation_announces_provider_and_handoff_on_stderr(generation_skill):
     assert result.stdout == ""
     assert "nv_build / nvidia/" in result.stderr
     assert "evaluation source ready" in result.stderr
+    assert "One-case starter: a starting point, not a representative evaluation" in result.stderr
+    assert "no negative case that should not trigger the skill" in result.stderr
+    assert f"skillevaluator create-eval-dataset {generation_skill} --full --force" in result.stderr
+    assert "`--force` overwrites the starter and discards any edits to it." in result.stderr
+    assert f"skillevaluator tier3 validate {generation_skill}" in result.stderr
     assert (generation_skill / "evals" / "evals.json").exists()
 
 
@@ -128,7 +133,7 @@ def test_interrupted_autopilot_does_not_fallback_or_write_dataset(generation_ski
 
     calls = []
 
-    def interrupt(_self, _path, *, use_llm):
+    def interrupt(_self, _path, *, use_llm, **_kwargs):
         calls.append(use_llm)
         raise KeyboardInterrupt
 
@@ -183,7 +188,12 @@ def test_fallback_explains_safe_failure_and_labels_starter(generation_skill, mon
     assert "private-response-content" not in result.output + notes[0]
     assert "private-endpoint" not in result.output + notes[0]
     assert "Tier 2" not in result.output + notes[0]
-    assert len(json.loads((generation_skill / "evals" / "evals.json").read_text())["evals"]) == 1
+    dataset = json.loads((generation_skill / "evals" / "evals.json").read_text())
+    assert len(dataset["evals"]) == 1
+    assert dataset["generation"]["mode"] == "template_fallback"
+    assert expected in dataset["generation"]["fallback_reason"]
+    assert "private-response-content" not in dataset["generation"]["fallback_reason"]
+    assert "private-endpoint" not in dataset["generation"]["fallback_reason"]
 
 
 def test_quiet_fallback_preserves_reason_in_returned_note(generation_skill, monkeypatch):

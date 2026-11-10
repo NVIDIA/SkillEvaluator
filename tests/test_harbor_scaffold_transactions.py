@@ -324,6 +324,53 @@ def test_existing_yaml_dataset_is_not_shadowed(tmp_path: Path) -> None:
     assert not (evals / "evals.json").exists()
 
 
+def test_init_harbor_task_accepts_agentskills_assertion_placeholder(tmp_path: Path) -> None:
+    skill = _skill(tmp_path)
+    evals = skill / "evals"
+    evals.mkdir()
+    (evals / "evals.json").write_text(
+        json.dumps(
+            {
+                "skill_name": "sample-skill",
+                "evals": [
+                    {
+                        "id": "case-001",
+                        "prompt": "Q",
+                        "expected_output": "A",
+                        "assertions": ["None"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(cli, ["init-harbor-task", str(skill)])
+
+    assert result.exit_code == 0, result.output
+
+
+def test_init_harbor_task_accepts_yaml_block_scalar_assertion(tmp_path: Path) -> None:
+    skill = _skill(tmp_path)
+    evals = skill / "evals"
+    evals.mkdir()
+    (evals / "evals.yaml").write_text(
+        "skill_name: sample-skill\n"
+        "evals:\n"
+        "  - id: case-001\n"
+        "    prompt: Q\n"
+        "    expected_output: A\n"
+        "    assertions:\n"
+        "      - |\n"
+        "        None\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(cli, ["init-harbor-task", str(skill)])
+
+    assert result.exit_code == 0, result.output
+
+
 def test_with_config_updates_existing_config_yaml_without_shadow_file(tmp_path: Path) -> None:
     skill = _skill(tmp_path)
     evals = skill / "evals"

@@ -1201,6 +1201,25 @@ Artifacts record this contract as
 historical partial reports retain their recorded scoring semantics instead of
 being silently reinterpreted.
 
+## Cost limits
+
+Runs can be bounded with `--max-agent-tokens`, `--max-judge-calls`,
+`--max-attempts-total`, `--max-cost-usd`, and `--price-file`. The price file is
+JSON keyed by model identifier; each model entry requires `input_per_mtok` and
+`output_per_mtok`, and may set `cached_input_per_mtok` (defaulting to the
+input rate). Cached prompt tokens use the cached rate and remaining prompt
+tokens use the input rate. A model key must exactly match the resolved agent
+model. Relative `harbor.price_file` paths resolve from the source skill
+directory.
+
+Token and cost limits measure agent model spend only; they exclude judge
+spend, environment setup, and container time. `--max-judge-calls` counts
+recorded judge attempts, excluding `salvage` entries, transport retries, and
+requests made internally by RAGAS. Measured usage totals are retained even
+when another attempt has no telemetry; that attempt is tracked as unmeasured.
+Attempts that cannot start after a limit is reached are reported as `not_run`,
+and the resulting run is partial.
+
 ### Which dimensions apply to each arm
 
 Security is scored for every arm. Correctness uses `accuracy`, which is N/A

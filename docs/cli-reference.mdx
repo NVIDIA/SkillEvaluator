@@ -294,6 +294,11 @@ The following flags are forwarded to the live-eval engine when Tier 3 is enabled
 | `--max-cases INTEGER RANGE` | unset | Run only the first N eval cases in staged order (minimum `1`); without a limit every case runs. A run that skips cases is recorded in `run_config.json` and is never publication evidence. |
 | `--n-attempts INTEGER` | unset | Attempts per eval case (pass@k). |
 | `--pass-threshold FLOAT` | unset | Score threshold (0.0–1.0) for a case to count as passed. |
+| `--max-agent-tokens INTEGER` | unset | Maximum measured agent-model tokens. |
+| `--max-judge-calls INTEGER` | unset | Maximum recorded non-salvage judge attempts; excludes transport retries and RAGAS-internal requests. |
+| `--max-attempts-total INTEGER` | unset | Maximum logical Harbor attempts admitted across agents and arms, including private comparison arms. |
+| `--max-cost-usd FLOAT` | unset | Maximum agent model spend; requires a price book and excludes judge spend, setup, and container time. |
+| `--price-file FILE` | unset | JSON price book keyed by exact resolved model identifier; see [cost limits](tier3-live-evaluation.mdx#cost-limits). |
 | `--stop-on-pass / --no-stop-on-pass` | unset | Stop a case's remaining attempts once one passes. |
 | `--model TEXT` | unset | Global agent model override. |
 | `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable). |
@@ -500,6 +505,11 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 | `--reuse-baseline RUN` | off | Reuse a compatible fresh without-skill baseline from a retained run id in the same results root, or `latest`. An incompatible explicit id fails before execution; `latest` falls back to a fresh baseline. Mutually exclusive with `--skip-baseline` and `--skip-with-skill`. |
 | `--n-attempts INTEGER` | unset | Attempts per eval case (pass@k). |
 | `--pass-threshold FLOAT` | unset | Score threshold (0.0–1.0) for a case to count as passed. |
+| `--max-agent-tokens INTEGER` | unset | Maximum measured agent-model tokens. |
+| `--max-judge-calls INTEGER` | unset | Maximum recorded non-salvage judge attempts; excludes transport retries and RAGAS-internal requests. |
+| `--max-attempts-total INTEGER` | unset | Maximum logical Harbor attempts admitted across agents and arms, including private comparison arms. |
+| `--max-cost-usd FLOAT` | unset | Maximum agent model spend; requires a price book and excludes judge spend, setup, and container time. |
+| `--price-file FILE` | unset | JSON price book keyed by exact resolved model identifier; see [cost limits](tier3-live-evaluation.mdx#cost-limits). |
 | `--stop-on-pass / --no-stop-on-pass` | unset | Stop a case's remaining attempts once one passes. |
 | `--n-concurrent INTEGER` | unset | Concurrent eval cases per agent. |
 | `--max-agents INTEGER` | unset | Maximum agents to run in parallel. |

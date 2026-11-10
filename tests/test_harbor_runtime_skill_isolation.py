@@ -2446,6 +2446,12 @@ def test_final_projection_clears_effective_workdir_ancestors_and_home(tmp_path: 
     assert ".config/goose/skills" in dockerfile
     assert ".cline/skills" in dockerfile
     assert ".qwen/skills" in dockerfile
+    runtime_reset = next(line for line in dockerfile.splitlines() if line.startswith('RUN ["/bin/rm", "-rf"'))
+    runtime_mkdir = next(line for line in dockerfile.splitlines() if line.startswith('RUN ["/bin/mkdir", "-p"'))
+    assert '"/tmp/hermes"' in runtime_reset
+    assert '"/tmp/hermes/skills"' not in runtime_reset
+    assert '"/tmp/hermes"' not in runtime_mkdir
+    assert '"/tmp/hermes/skills"' not in runtime_mkdir
     assert "WORKDIR /opt/task/subdir" in dockerfile[final_projection:]
     assert dockerfile.rindex("current=$(/bin/pwd -P)") > dockerfile.rindex("COPY input/ /workspace/input/")
     task_toml = (task / "task.toml").read_text(encoding="utf-8")

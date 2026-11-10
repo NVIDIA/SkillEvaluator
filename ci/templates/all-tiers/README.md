@@ -209,6 +209,11 @@ enable checks or comments on SkillEvaluator's own pull requests. Each repository
 including SkillEvaluator itself, needs the generated caller pair committed
 there, with the trusted feedback caller on its default branch.
 
+The generated GitHub all-tier caller (`skillevaluator ci init --tiers 1,2,3`)
+also carries `paths` filters. A pull request that changes nothing under the
+selected skill folders or the two caller workflows starts no run and receives
+no comment.
+
 SkillEvaluator evaluates its own `skills/` collection with
 `.github/workflows/skill-checks-all-tiers.yml`. Its consumer feedback listener is
 `.github/workflows/skill-feedback-all-tiers.yml`, preserving the public reusable

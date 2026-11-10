@@ -868,6 +868,31 @@ def build_agent_eval_payload(
         if isinstance(persisted_dataset_summary, dict)
         else _dataset_summary(public_dataset, canonical_trials)
     )
+    from skillevaluator.tier3.dataset_sufficiency import MIN_NEGATIVE_CASES, assess_dataset_sufficiency
+
+    for agent_payload in agent_payloads.values():
+        pass_summary = agent_payload.get("pass_at_k") if isinstance(agent_payload.get("pass_at_k"), dict) else {}
+        with_pass = pass_summary.get("with_skill") if isinstance(pass_summary.get("with_skill"), dict) else {}
+        without_pass = pass_summary.get("without_skill")
+        lift = pass_summary.get("lift") if isinstance(pass_summary.get("lift"), dict) else {}
+        paired = lift.get("paired_comparison") if isinstance(lift.get("paired_comparison"), dict) else {}
+        raw_paired_cases = paired.get("paired_cases")
+        paired_cases = (
+            _as_nonnegative_int(raw_paired_cases)
+            if isinstance(raw_paired_cases, int) and not isinstance(raw_paired_cases, bool) and raw_paired_cases >= 0
+            else None
+        )
+        unclassified_cases = _as_nonnegative_int(dataset_summary.get("unclassified_tasks"))
+        negative_cases = _as_nonnegative_int(dataset_summary.get("negative_tasks"))
+        if unclassified_cases > 0 and negative_cases < MIN_NEGATIVE_CASES:
+            negative_cases = None
+        agent_payload["dataset_sufficiency"] = assess_dataset_sufficiency(
+            distinct_cases=_as_nonnegative_int(dataset_summary.get("total_tasks")),
+            negative_cases=negative_cases,
+            pass_rate_interval=with_pass.get("rate_interval"),
+            paired_cases=paired_cases,
+            baseline_skipped=not bool(without_pass),
+        )
     effective_dataset_digest = dataset_digest or (
         str(computed_dataset_truth["dataset_digest"]) if computed_dataset_truth else None
     )
@@ -918,6 +943,7 @@ def build_agent_eval_payload(
         "evaluated_at": evaluated_at,
         "evaluator_version": evaluator_version,
         "dataset_summary": dataset_summary,
+        "dataset_sufficiency": best.get("dataset_sufficiency"),
         "dataset_digest": effective_dataset_digest,
         "dataset_digest_algorithm": effective_dataset_digest_algorithm,
         "score_policy": policy["score_policy"],
@@ -1011,6 +1037,7 @@ def build_agent_eval_payload(
         "evaluated_at": evaluated_at,
         "evaluator_version": evaluator_version,
         "dataset_summary": dataset_summary,
+        "dataset_sufficiency": best.get("dataset_sufficiency"),
         "dataset_digest": effective_dataset_digest,
         "dataset_digest_algorithm": effective_dataset_digest_algorithm,
         "dataset_provenance": safe_dataset_provenance,
@@ -1426,6 +1453,55 @@ def _enforce_report_payload_budget(
         refresh_signal()
 
     if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        compacted_attempt_verdicts = 0
+        trial_lists = []
+        trial_lists.extend(
+            agent.get(key)
+            for agent in (payload.get("agents") or {}).values()
+            if isinstance(agent, dict)
+            for key in ("trials", "trials_baseline")
+        )
+        for trials in trial_lists:
+            if not isinstance(trials, list):
+                continue
+            for trial in trials:
+                attempt = trial.get("attempt_verdict") if isinstance(trial, dict) else None
+                if not isinstance(attempt, dict):
+                    continue
+                if "reason" in attempt or "warnings" in attempt:
+                    attempt.pop("reason", None)
+                    attempt.pop("warnings", None)
+                    compacted_attempt_verdicts += 1
+        flattened_trials = payload.get("trials")
+        if isinstance(flattened_trials, list):
+            payload["trials"] = [
+                {key: value for key, value in trial.items() if key != "attempt_verdict"}
+                if isinstance(trial, dict) and "attempt_verdict" in trial
+                else trial
+                for trial in flattened_trials
+            ]
+            compacted_attempt_verdicts += sum(
+                isinstance(trial, dict) and "attempt_verdict" in trial for trial in flattened_trials
+            )
+        report_budget.omit("attempt_verdict_details", compacted_attempt_verdicts)
+        refresh_signal()
+
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        raw_rewards = provenance.get("raw_trial_rewards") if isinstance(provenance, dict) else None
+        if isinstance(raw_rewards, dict):
+            omitted = sum(len(items) for items in raw_rewards.values() if isinstance(items, list))
+            provenance["raw_trial_rewards"] = {name: [] for name in raw_rewards}
+            report_budget.omit("raw_trial_rewards", omitted)
+        refresh_signal()
+
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        dataset = payload.get("dataset")
+        if isinstance(dataset, list) and dataset:
+            payload["dataset"] = []
+            report_budget.omit("dataset_items", len(dataset))
+            refresh_signal()
+
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
         omitted_items = 0
         for key in ("dataset", "trials"):
             items = payload.get(key)
@@ -1443,14 +1519,6 @@ def _enforce_report_payload_budget(
             if _compact_agent_conditions(agent):
                 omitted_items += 1
         report_budget.omit("dataset_and_trial_items", omitted_items)
-        refresh_signal()
-
-    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
-        raw_rewards = provenance.get("raw_trial_rewards") if isinstance(provenance, dict) else None
-        if isinstance(raw_rewards, dict):
-            omitted = sum(len(items) for items in raw_rewards.values() if isinstance(items, list))
-            provenance["raw_trial_rewards"] = {name: [] for name in raw_rewards}
-            report_budget.omit("raw_trial_rewards", omitted)
         refresh_signal()
 
     if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
@@ -3905,11 +3973,10 @@ def _build_conclusions(
             attempt = trial.get("attempt_verdict")
             attempt_passed = attempt.get("passed") if isinstance(attempt, dict) else None
             attempt_reason = attempt.get("reason") if isinstance(attempt, dict) else None
-            if isinstance(attempt_passed, bool):
-                is_unscored_attempt = overall is None and attempt_reason == "overall score was not available"
-                if attempt_passed is False and is_unscored_attempt:
+            if attempt_passed is False:
+                if overall is None and attempt_reason == "overall score was not available":
                     unscored_trials.append(trial_label)
-                elif attempt_passed is False:
+                else:
                     failing_trials.append(trial_label)
             elif overall is None:
                 unscored_trials.append(trial_label)

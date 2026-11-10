@@ -82,6 +82,7 @@ from skillevaluator.tier3.evals_config import (
 from skillevaluator.tier3.harbor import (
     CONTAINER_AGENT_IMPORT_PATHS,
     DOCKER_AGENT_IMPORT_PATHS,
+    HERMES_VERSION,
     LOCAL_CODEX_HOME_DIRNAME,
     LOCAL_CODEX_SECRETS_DIRNAME,
 )
@@ -1410,6 +1411,7 @@ _HARBOR_AGENT_KWARGS: Mapping[str, Mapping[str, str]] = MappingProxyType(
         "codex": MappingProxyType({"reasoning_effort": "high", "version": _CODEX_VERSION}),
         "claude-code": MappingProxyType({"version": _CLAUDE_CODE_VERSION}),
         "opencode": MappingProxyType({"version": OPENCODE_VERSION}),
+        "hermes": MappingProxyType({"version": HERMES_VERSION}),
     }
 )
 # Claude Code's default effort depends on the model, and Claude Opus 5 ran at
@@ -2030,6 +2032,15 @@ def _validate_agent_provider_credentials(
     model_sources = agent_model_sources or {}
     models = agent_models or {}
 
+    if "hermes" in agents:
+        if provider.provider != "nv_build" or env_mode != "docker":
+            return ["Experimental hermes supports only NVIDIA Build with --env-mode docker."]
+        if not agent_runtime_env.get("NVIDIA_API_KEY", "").strip():
+            return ["hermes with NVIDIA Build requires NVIDIA_API_KEY."]
+        model = models.get("hermes", "")
+        if model and (model.count("/") != 1 or any(not part.strip() for part in model.split("/"))):
+            return ["hermes requires a full NVIDIA Build catalog model ID in publisher/model form."]
+
     opencode_model = models.get("opencode")
     expected_opencode_provider = {
         "anthropic": "anthropic",
@@ -2136,7 +2147,7 @@ def _validate_agent_provider_credentials(
                     ]
         return []
 
-    unsupported = [agent for agent in agents if agent not in {"claude-code", "codex", "opencode"}]
+    unsupported = [agent for agent in agents if agent not in {"claude-code", "codex", "opencode", "hermes"}]
     if unsupported:
         return [
             "nv_build does not support live agent(s): "
@@ -3080,7 +3091,7 @@ def _agent_credentials(
 ) -> dict[str, str]:
     """Resolve operator-owned credentials for exactly one agent runtime."""
     if provider.provider == "nv_build":
-        if agent == "opencode":
+        if agent in {"opencode", "hermes"}:
             if env_mode == ENV_MODE_LOCAL:
                 return _local_agent_credentials(provider)
             return {"NVIDIA_API_KEY": provider.api_key or ""}
@@ -3572,6 +3583,8 @@ def _model_for_agent(
         # Provider-model, --model, --agent-model, and evals/config.yml overrides
         # stay exact for native OpenCode; bridge defaults remain compatibility-pinned.
         selected = _NVIDIA_BUILD_AGENT_DEFAULT_MODEL
+    if agent == "hermes" and source == "public provider default" and provider.provider == "nv_build":
+        selected = "nvidia/nemotron-3.5-super-vl-120b-a12b"
     if agent == "opencode":
         namespace = {
             "anthropic": "anthropic",
@@ -3612,6 +3625,8 @@ def _agent_import_path(provider: ProviderConfig, agent: str, env_mode: str) -> s
 
 def _provider_agent_import_path(provider: ProviderConfig, agent: str, env_mode: str) -> str | None:
     """Select only the provider-specific wrappers required for this environment."""
+    if agent == "hermes" and provider.provider == "nv_build" and env_mode == "docker":
+        return DOCKER_AGENT_IMPORT_PATHS["hermes"]
     if provider.provider == "openai-compatible" and agent == "codex" and env_mode != ENV_MODE_LOCAL:
         return _GATEWAY_CODEX_IMPORT_PATH
     if provider.provider == "openai-compatible" and agent == "opencode" and env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES:
@@ -6286,6 +6301,69 @@ def _run_harbor_eval_impl(
             "run_config": run_config,
         }
     )
+    from skillevaluator.evaluation.tier3_report import (
+        _agent_score_policy,
+        _build_agent,
+    )
+    from skillevaluator.evaluation.tier3_report import (
+        _pick_best_agent as _pick_canonical_best_agent,
+    )
+    from skillevaluator.tier3.dataset_sufficiency import MIN_NEGATIVE_CASES, assess_dataset_sufficiency
+    from skillevaluator.tier3.harbor.report import _pick_best_agent
+    from skillevaluator.tier3.harbor.report_data import metrics_for_condition
+
+    summary = dataset_truth["dataset_summary"]
+    agent_results = results.get("agents")
+    if isinstance(agent_results, dict):
+        negative_cases = int(summary.get("negative_tasks") or 0)
+        if int(summary.get("unclassified_tasks") or 0) > 0 and negative_cases < MIN_NEGATIVE_CASES:
+            negative_cases = None
+        for agent_result in agent_results.values():
+            pass_at_k = agent_result.get("pass_at_k") if isinstance(agent_result.get("pass_at_k"), dict) else {}
+            with_pass = pass_at_k.get("with_skill") if isinstance(pass_at_k.get("with_skill"), dict) else {}
+            lift = pass_at_k.get("lift") if isinstance(pass_at_k.get("lift"), dict) else {}
+            paired = lift.get("paired_comparison") if isinstance(lift.get("paired_comparison"), dict) else {}
+            agent_result["dataset_sufficiency"] = assess_dataset_sufficiency(
+                distinct_cases=int(summary.get("total_tasks") or 0),
+                negative_cases=negative_cases,
+                pass_rate_interval=with_pass.get("rate_interval"),
+                paired_cases=paired.get("paired_cases"),
+                baseline_skipped=skip_baseline,
+            )
+        if agent_results:
+            best_agent = _pick_best_agent(agent_results)
+            if best_agent not in agent_results:
+                conditions = [
+                    agent.get("conditions", {}).get("with_skill", {}).get("execution_status")
+                    if isinstance(agent, dict)
+                    and isinstance(agent.get("conditions"), dict)
+                    and isinstance(agent["conditions"].get("with_skill"), dict)
+                    else None
+                    for agent in agent_results.values()
+                ]
+                baseline_only = bool(agent_results) and (
+                    skip_with_skill
+                    or (len(conditions) == len(agent_results) and all(status == "skipped" for status in conditions))
+                )
+                score_field = "without_skill" if baseline_only else "with_skill"
+                canonical_agents = {
+                    name: _build_agent(
+                        name,
+                        agent,
+                        metrics_for_condition(agent, "with_skill"),
+                        metrics_for_condition(agent, "without_skill"),
+                        agent.get("model") if isinstance(agent.get("model"), str) else None,
+                        _agent_score_policy(agent),
+                        baseline_only=baseline_only,
+                    )
+                    for name, agent in agent_results.items()
+                    if isinstance(agent, dict)
+                }
+                best_agent = _pick_canonical_best_agent(canonical_agents, score_field=score_field)
+                if not best_agent and len(agent_results) == 1:
+                    best_agent = next(iter(agent_results))
+            if best_agent in agent_results:
+                results["dataset_sufficiency"] = agent_results[best_agent]["dataset_sufficiency"]
     selected_metrics = tuple(results.get("metrics", DEFAULT_METRICS))
     collected_attempt_policy = results.get("attempt_policy")
     attempt_policy = dict(collected_attempt_policy) if isinstance(collected_attempt_policy, dict) else {}

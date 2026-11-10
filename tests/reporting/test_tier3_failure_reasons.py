@@ -786,6 +786,8 @@ def test_html_preview_drops_failure_reasons_before_bounding_a_large_payload() ->
     assert notice["trial_rows"] == 180 - 64
 
     html = _render(payload)
+    assert _compact_size(data) > 256 * 1024
+    assert payload["dataset_sufficiency"]["coverage_summary"] in html
     # The character count depends on the environment, so it comes from the notice.
     assert f"HTML preview omitted {notice['characters']} characters and {notice['items']} items." in html
     assert f"HTML preview left out {total} failure reasons or excerpts" in html

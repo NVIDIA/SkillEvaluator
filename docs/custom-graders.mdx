@@ -353,10 +353,10 @@ was valid and reports were written, **not** that the external evaluation passed.
 
 The example is fabricated data, not a simulator run. Its Markdown report includes:
 
-| Custom metric | With skill | Without skill | Paired delta | Improvement | Paired cases/attempts |
-| --- | --- | --- | --- | --- | --- |
-| convergence_rate | 0.8500 | 0.6500 | 0.2000 | 0.2000 | 2/2 |
-| timing_error_fraction | 0.1500 | 0.3000 | -0.1500 | 0.1500 | 2/2 |
+| Custom metric | Version | Unit | Direction | With skill (n/total) | Without skill (n/total) | Paired delta | Improvement | Paired cases/attempts |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| convergence\_rate | 1 | fraction | higher\_is\_better | 0.8500 (2/2) | 0.6500 (2/2) | 0.2000 | 0.2000 | 2/2 |
+| timing\_error\_fraction | 1 | fraction\_of\_budget | lower\_is\_better | 0.1500 (2/2) | 0.3000 (2/2) | -0.1500 | 0.1500 | 2/2 |
 
 Both reports label the observations as external. SkillEvaluator performs only
 input validation, aggregation and paired comparison, not test execution or

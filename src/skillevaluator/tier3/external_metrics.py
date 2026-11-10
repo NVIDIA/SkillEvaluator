@@ -30,6 +30,7 @@ from skillevaluator.utils.structured_data import preflight_json_structure
 MAX_INPUT_BYTES = 4 * 1024 * 1024
 MAX_OBSERVATIONS = 1000
 ARMS = ("with_skill", "without_skill")
+_NO_MAP_VALUE = object()
 
 
 def _identity(value: str) -> str:
@@ -125,7 +126,9 @@ class ExternalMetrics(_Contract):
         for row in self.observations:
             identity = (row.case_id, row.attempt, row.arm)
             if identity in seen:
-                raise ValueError("duplicate case/attempt/arm observation")
+                raise ValueError(
+                    f"duplicate case/attempt/arm observation for case {row.case_id!r}, attempt {row.attempt}"
+                )
             seen.add(identity)
             if case_names.setdefault(row.case_id.casefold(), row.case_id) != row.case_id:
                 raise ValueError("case IDs must not differ only in letter case")
@@ -147,6 +150,44 @@ def _reject_constant(value: str) -> None:
     raise ValueError("non-finite JSON number")
 
 
+def _safe_validation_location(location: tuple[Any, ...]) -> str:
+    current_model: type[BaseModel] | None = ExternalMetrics
+    map_value_model: type[BaseModel] | None | object = _NO_MAP_VALUE
+    path = ""
+    for segment in location:
+        if isinstance(segment, int):
+            path += f"[{segment}]"
+            continue
+        if map_value_model is not _NO_MAP_VALUE:
+            safe_segment = "<metric>"
+            current_model = map_value_model
+            map_value_model = _NO_MAP_VALUE
+        elif isinstance(segment, str) and current_model is not None and segment in current_model.model_fields:
+            safe_segment = segment
+            if current_model is ExternalMetrics:
+                if segment == "evaluation":
+                    current_model = EvaluationIdentity
+                elif segment == "provenance":
+                    current_model = ExternalProvenance
+                elif segment == "metric_definitions":
+                    map_value_model = MetricDefinition
+                    current_model = None
+                elif segment == "observations":
+                    current_model = ExternalObservation
+                else:
+                    current_model = None
+            elif current_model is ExternalObservation and segment == "custom_metrics":
+                map_value_model = None
+                current_model = None
+            else:
+                current_model = None
+        else:
+            safe_segment = "<field>"
+            current_model = None
+        path += ("" if not path else ".") + safe_segment
+    return path or "<input>"
+
+
 def load_external_metrics(path: Path) -> tuple[ExternalMetrics, str]:
     """Validate a bounded, duplicate-free JSON document and hash its exact bytes."""
     with path.open("rb") as stream:
@@ -162,8 +203,9 @@ def load_external_metrics(path: Path) -> tuple[ExternalMetrics, str]:
     try:
         contract = ExternalMetrics.model_validate(data)
     except ValidationError as exc:
-        reason = exc.errors(include_input=False, include_context=False)[0]["msg"]
-        raise ValueError(f"invalid external metrics contract: {reason}") from exc
+        error = exc.errors(include_input=False, include_context=False)[0]
+        location = _safe_validation_location(error.get("loc", ()))
+        raise ValueError(f"invalid external metrics contract at {location}: {error['msg']}") from exc
     return contract, hashlib.sha256(raw).hexdigest()
 
 

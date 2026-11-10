@@ -268,8 +268,18 @@ def test_documented_simulator_import_end_to_end(tmp_path):
     markdown = (output / "external_metrics.md").read_text()
     assert "did not execute these tests" in markdown
     assert "No canonical dimensions, Overall" in markdown
-    assert "0.8500 (2/2) | 0.6500 (2/2) | 0.2000 | 0.2000 | 2/2" in markdown
-    assert "0.1500 (2/2) | 0.3000 (2/2) | -0.1500 | 0.1500 | 2/2" in markdown
+    assert (
+        "| Custom metric | Version | Unit | Direction | With skill (n/total) | Without skill (n/total) | "
+        "Paired delta | Improvement | Paired cases/attempts |"
+    ) in markdown
+    assert (
+        "| convergence\\_rate | 1 | fraction | higher\\_is\\_better | 0.8500 (2/2) | 0.6500 (2/2) | "
+        "0.2000 | 0.2000 | 2/2 |"
+    ) in markdown
+    assert (
+        "| timing\\_error\\_fraction | 1 | fraction\\_of\\_budget | lower\\_is\\_better | "
+        "0.1500 (2/2) | 0.3000 (2/2) | -0.1500 | 0.1500 | 2/2 |"
+    ) in markdown
 
 
 def test_invalid_import_writes_nothing(payload, tmp_path):
@@ -280,6 +290,7 @@ def test_invalid_import_writes_nothing(payload, tmp_path):
     result = CliRunner().invoke(cli, ["tier3", "import-metrics", str(source), "-o", str(output)])
     assert result.exit_code == 1
     assert "invalid external metrics contract" in result.output
+    assert "observations[0].custom_metrics" in result.output
     assert not output.exists()
 
 
@@ -298,11 +309,19 @@ def test_existing_output_and_source_are_not_overwritten(payload, tmp_path):
 
 
 def test_markdown_escapes_untrusted_metadata(payload):
-    payload["provenance"]["producer"] = '<img src=x onerror="alert(1)">[link](https://example.org)|*text*'
+    payload["provenance"]["producer"] = (
+        '<img src=x onerror="alert(1)">[link](https://example.org)|*text* Acme\'s sim exporter v1'
+    )
+    payload["metric_definitions"]["driver's_rate"] = payload["metric_definitions"].pop("timing_error_fraction")
+    for row in payload["observations"]:
+        row["custom_metrics"]["driver's_rate"] = row["custom_metrics"].pop("timing_error_fraction")
     markdown = render_external_metrics_markdown(summarize(payload))
     assert "<img" not in markdown
     assert "[link](https://example.org)" not in markdown
     assert "\\|\\*text\\*" in markdown
+    assert "Acme's sim exporter v1" in markdown
+    assert "driver's\\_rate" in markdown
+    assert "&#x27;" not in markdown
 
 
 def test_unscored_report_shows_no_score_not_zero(payload):
@@ -337,6 +356,40 @@ def test_loader_diagnostics_do_not_echo_secret_values_or_keys(payload, tmp_path)
         load_external_metrics(source)
     assert secret_text not in str(caught.value)
     assert "sensitive-value" not in str(caught.value)
+    assert "<field>" in str(caught.value)
+
+
+def test_loader_diagnostics_include_observation_field_path(payload, tmp_path):
+    payload["observations"][1]["attempt"] = 0
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match=r"observations\[1\]\.attempt"):
+        load_external_metrics(source)
+
+
+def test_loader_diagnostics_hide_metric_definition_keys(payload, tmp_path):
+    secret_metric = "sensitive_metric_name"
+    payload["metric_definitions"][secret_metric] = {
+        "version": 1,
+        "unit": "fraction",
+        "direction": "higher_is_better",
+        "aggregation": "mean",
+    }
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps(payload))
+    with pytest.raises(ValueError) as caught:
+        load_external_metrics(source)
+    assert "metric_definitions.<metric>.version" in str(caught.value)
+    assert secret_metric not in str(caught.value)
+
+
+def test_duplicate_observation_diagnostic_names_case_and_attempt(payload, tmp_path):
+    payload["observations"].append(copy.deepcopy(payload["observations"][0]))
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps(payload))
+    with pytest.raises(ValueError) as caught:
+        load_external_metrics(source)
+    assert "case 'adder', attempt 1" in str(caught.value)
 
 
 @pytest.mark.parametrize("value", [0, 1])

@@ -15,7 +15,7 @@ from skillevaluator.tier3.external_metrics import ARMS, load_external_metrics, s
 
 
 def _text(value: object) -> str:
-    return re.sub(r"([\\`*{}\[\]()#+.!_|>~-])", r"\\\1", html.escape(str(value)))
+    return re.sub(r"([\\`*{}\[\]()#+.!_|>~-])", r"\\\1", html.escape(str(value), quote=False))
 
 
 def _score(value: float | None) -> str:

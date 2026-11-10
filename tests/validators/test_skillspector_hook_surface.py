@@ -699,9 +699,10 @@ class TestFolderScans:
         folder = tmp_path / "folder"
         for name in ("a", "b"):
             _write(folder / name, {**_SETTINGS_SKILL, "SKILL.md": _SETTINGS_MISSING_REFERENCE_SKILL_MD})
+        report = _report(_settings_missing_reference_report(version))
         mock_tools.skillspector.is_available = True
         mock_tools.skillspector.run.return_value = ToolResult(
-            success=True, stdout=json.dumps(_report(_settings_missing_reference_report(version))), stderr="", exit_code=0
+            success=True, stdout=json.dumps(report), stderr="", exit_code=0
         )
 
         result = getattr(SecurityValidator(use_llm=False), method)(folder)

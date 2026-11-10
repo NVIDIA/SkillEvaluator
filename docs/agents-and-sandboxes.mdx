@@ -24,7 +24,7 @@ SkillEvaluator selects the provider-native default: `opencode` for NVIDIA Build,
 | --- | --- |
 | `claude-code` | Anthropic's Claude Code CLI. `claude` is an accepted alias. Harbor installs Claude Code 2.1.292. Claude 5.5 and later models run with `reasoning_effort=medium`; older models keep Claude Code's default effort. |
 | `codex` | OpenAI's Codex CLI. The OpenAI-provider default. Harbor installs Codex 0.161.0. Runs with `reasoning_effort=high` so scores and cost stay comparable across Harbor releases. |
-| `opencode` | The OpenCode CLI. |
+| `opencode` | The OpenCode CLI. Harbor installs OpenCode 1.19.5. |
 
 The pinned CLI releases apply wherever Harbor installs the agent: Docker and
 the remote environments. [Local mode](#local-mode) runs the CLI already on your

@@ -9495,6 +9495,32 @@ class TestSkillspectorMissingReferences:
         assert result.incomplete_scans == []
         assert result.warnings == [_missing_reference_warning("SKILL.md:10 [reference_resolution; reference_missing]")]
 
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "Summarize in 3~5 sentences and write the summary to `output/notes.md`.",
+            "Write the F# client notes to `output/notes.md`.",
+            "Keep `notes.md~` backups out of `output/notes.md`.",
+            "Call the API with `GET`/`POST` and write the summary to `output/notes.md`.",
+            "List the `topic`s and write the summary to `output/notes.md`.",
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_prose_with_shell_characters_passes_beside_input_fixtures(
+        self, mock_tools, tmp_path: Path, line: str
+    ) -> None:
+        """A range such as ``3~5``, ``C#``-style names, a ``~`` backup and code spans name no fixture in ``evals/``."""
+        original = "Write the summary to `output/notes.md` and keep it short."
+        files = {**_NOTES_WRITER_FILES, "SKILL.md": _NOTES_WRITER_FILES["SKILL.md"].replace(original, line)}
+        files.update({"evals/evals.json": '{"evals": []}\n', "evals/files/meeting.txt": "Notes.\n"})
+        skill = _write_skill(tmp_path / "notes-writer", files)
+        payload = json.loads(json.dumps(_reference_report("2.13.3")).replace(original, line))
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert result.incomplete_scans == []
+        assert result.warnings == [_missing_reference_warning("SKILL.md:10 [reference_resolution; reference_missing]")]
+
     @pytest.mark.parametrize("hook", [None, "pre-commit.sample"])
     @patch("skillevaluator.validators.security.Tools")
     def test_names_git_writes_do_not_block_a_reference(self, mock_tools, tmp_path: Path, hook: str | None) -> None:
@@ -9992,6 +10018,12 @@ class TestSkillspectorMissingReferences:
             ("Run [it](NODE_M~1/BOOTST~1.SH) now.", "node_modules", True),
             ("Run [it](NODE_M~1/BOOTST~1.SH) now.", "bootstrap.sh", True),
             ("Run [it](CONFIG~1.YAM) now.", "config.yaml", True),
+            ("Run [it](NO3F2A~1/setup) now.", "node_modules", True),
+            ("Run [it](NABCDE~F/setup) now.", "node_modules", True),
+            ("Run [it](VENV~1/setup) now.", ".venv", True),
+            ("Run [it](3RD-PA~1.SH) now.", "3rd-party.sh", True),
+            ("Run `sh --script=NODE_M~1/setup` now.", "node_modules", True),
+            ("Write the F# client to `output/Client.fs`.", "ff", True),
             ("Run [it](v*\\i*.sh) now.", "install.sh", True),
             ("Run `& ver`sions/inst`all.sh` now.", "versions", True),
             ("Run ``sh `echo v`ersions/setup`` now.", "versions", True),
@@ -10009,6 +10041,10 @@ class TestSkillspectorMissingReferences:
             ("## Notes (#1): write `output/notes.md`.", "evals", False),
             ("See [Setup](#setup) and [the guide](guide.md), then write `output/notes.md`.", "evals", False),
             ("Write the C# client to `output/Client.cs`.", "evals", False),
+            ("Write the F# client to `output/Client.fs`.", "files", False),
+            ("Summarize in 3~5 sentences and write `output/notes.md`.", "meeting.txt", False),
+            ("Keep `notes.md~` backups out of `output/notes.md`.", "evals", False),
+            ("Use `--config=~/.config/x.toml`, then write `output/notes.md`.", "evals", False),
             ("Keep it to ~5 lines in `output/notes.md`, 50% shorter.", "evals", False),
             ("Read `~/.config/notes.toml`, then write `output/notes.md`!", "evals", False),
             ("Answer `yes` or `no`, then write `output/notes.md`.", "evals", False),
@@ -10042,6 +10078,8 @@ class TestSkillspectorMissingReferences:
             pytest.param("*" * 9_000 + "h", "install.sh", True, id="many-stars"),
             ("v[e", "versions", False),
             ("*.sh", "install.py", False),
+            pytest.param("f\x01", "fff", True, id="zsh-repeat"),
+            pytest.param("f\x01", "files", False, id="zsh-repeat-other"),
             ("[docs]", "docs", False),
             pytest.param("[" * 9_000, "versions", False, id="longer-than-every-name"),
         ],

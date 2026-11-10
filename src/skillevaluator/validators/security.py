@@ -1581,6 +1581,10 @@ _SKILLSPECTOR_LINE_WORD_RE = re.compile(r"[^\s`()<>|;&]+")
 # (:func:`_skillspector_shell_groups`); unlike ``*``, a word made of it is
 # never taken for a list marker.
 _SKILLSPECTOR_SHELL_ANY = "\x00"
+# Follows the one character of a zsh pattern ``x#`` that is a whole path
+# part, such as ``C#``, which matches only names made of that character
+# (:func:`_skillspector_zsh_pattern`, :func:`_skillspector_glob_matcher`).
+_SKILLSPECTOR_ZSH_REPEAT = "\x01"
 # Characters with which a shell, cmd.exe or Windows expands, quotes or escapes
 # a word, so that it can open a file that the word does not spell out.
 _SKILLSPECTOR_SHELL_SYNTAX = frozenset("*?[{$\"'\\^%!#~" + _SKILLSPECTOR_SHELL_ANY)
@@ -1605,7 +1609,7 @@ _SKILLSPECTOR_EXTGLOB_OPERATORS = frozenset("@!+?*")
 # whitespace that holds one is a word that may stand for any text.
 _SKILLSPECTOR_ZSH_FLAGS_RE = re.compile(r"\(#(?:q|[se]\)|c\d*(?:,\d*)?\)|(?:[ilIbBmMuU]|a\d+)+\))")
 _SKILLSPECTOR_NON_SPACE_RUN_RE = re.compile(r"\S+")
-_SKILLSPECTOR_GLOB_SYNTAX = frozenset("*?[")
+_SKILLSPECTOR_GLOB_SYNTAX = frozenset("*?[" + _SKILLSPECTOR_ZSH_REPEAT)
 _SKILLSPECTOR_PATH_PART_SEPARATOR_RE = re.compile(r"[=:,]")
 # Work that checking the lines of one report's missing references may take, in
 # units of about one character compared: decoding a line and reading its shell
@@ -1883,8 +1887,13 @@ def _skillspector_glob_matcher(pattern: str, longest: int) -> Callable[[str], ob
     matcher may accept more names than the shell would, never fewer. ``None``
     means that no name that short can match. The work is linear in the length
     of *pattern*, and the regex never backtracks over more than one ``*``.
+
+    A character followed by :data:`_SKILLSPECTOR_ZSH_REPEAT`, the whole
+    pattern, matches only names made of that character, as zsh ``C#`` does.
     """
     size = len(pattern)
+    if size == 2 and pattern[1] == _SKILLSPECTOR_ZSH_REPEAT:
+        return re.compile(f"(?s:{re.escape(pattern[0])}*)\\Z").match
     closes = [size] * (size + 1)
     for index in range(size - 1, -1, -1):
         closes[index] = index if pattern[index] == "]" else closes[index + 1]
@@ -2000,20 +2009,41 @@ def _skillspector_shell_word(word: str) -> tuple[str, str]:
       ``%DIR%`` or ``!DIR!``, and the expansions become ``*``; and ``\\``
       separates directories as ``/`` does.
 
-    In both, a path part with ``~`` after its first character becomes ``*``:
-    Windows reads a short (8.3) name such as ``NODE_M~1`` as a longer name, and
-    zsh ``EXTENDED_GLOB`` reads ``a~b`` as ``a`` except ``b``. ``*``, ``?`` and
-    ``[...]`` keep their meaning.
+    ``*``, ``?`` and ``[...]`` keep their meaning, and so does ``~``
+    (:func:`_skillspector_tilde_forms`).
     """
     word = word.replace(_SKILLSPECTOR_SHELL_ANY, "*")
     posix = _skillspector_shell_expansions(_SKILLSPECTOR_SHELL_QUOTE_RE.sub("", word))
     windows = _SKILLSPECTOR_CMD_VARIABLE_RE.sub("*", _SKILLSPECTOR_CMD_QUOTE_RE.sub("", word))
     windows = _skillspector_shell_expansions(windows).replace("\\", "/")
-    posix, windows = (
-        "/".join("*" if "~" in (part if index else part[1:]) else part for index, part in enumerate(parts))
-        for parts in (posix.split("/"), windows.split("/"))
-    )
     return posix, windows
+
+
+def _skillspector_tilde_forms(part: str, *, first: bool) -> set[str]:
+    """Patterns for what the path part *part* may name when it has a ``~`` after its start.
+
+    *part* itself is one. zsh ``EXTENDED_GLOB`` reads ``a~b`` as what ``a``
+    matches except what ``b`` matches, so the text before the first ``~`` is
+    another. With text after the ``~``, the part may also be a Windows short
+    (8.3) name such as ``NODE_M~1`` or ``CONFIG~1.YAM``, or a name that a Samba
+    share mangles, which stand for a longer name. Each keeps the first
+    character of that name after the dots and spaces Windows drops, or ``_``
+    for one it cannot keep, so ``*``, that character and ``*`` is a pattern
+    too, and ``*`` when the character is ``_`` or glob syntax. A ``~`` at the
+    start of the first part of a word (*first*) is a home directory and is
+    skipped; one at the start of any other part makes the part ``*``.
+    """
+    tilde = part.find("~", 1 if first and part.startswith("~") else 0)
+    if tilde < 0:
+        return {part}
+    if tilde == 0:
+        return {"*"}
+    base = part[:tilde]
+    forms = {part, base}
+    if tilde + 1 < len(part):
+        lead = (base[1:] if first and base.startswith("~") else base).lstrip(". ")[:1]
+        forms.add(f"*{lead}*" if lead and lead not in "_*?[]\\" else "*")
+    return forms
 
 
 def _skillspector_zsh_pattern(pattern: str) -> str:
@@ -2022,9 +2052,11 @@ def _skillspector_zsh_pattern(pattern: str) -> str:
     Outside a bracket expression, ``^`` negates the rest of the pattern, which
     then becomes ``*``; that also covers ``^`` as the cmd.exe escape. ``x#``
     and ``x##`` repeat the character or bracket expression ``x`` and become
-    ``*``, or ``x*`` when they make up the whole pattern, as in ``C#``. A ``#``
-    that starts the pattern or follows a literal ``#``, as in a Markdown
-    heading, is literal.
+    ``*``. When they make up the whole pattern, as in ``C#``, they match only
+    names made of ``x``: a character becomes ``x`` and
+    :data:`_SKILLSPECTOR_ZSH_REPEAT`, and another ``x``, such as a bracket
+    expression, ``x*``. A ``#`` that starts the pattern or follows a literal
+    ``#``, as in a Markdown heading, is literal.
     """
     if "^" not in pattern and "#" not in pattern:
         return pattern
@@ -2050,7 +2082,11 @@ def _skillspector_zsh_pattern(pattern: str) -> str:
         elif char == "#" and elements and elements[-1] != "#":
             while index < size and pattern[index] == "#":
                 index += 1
-            elements[-1] = elements[-1] + "*" if len(elements) == 1 and index == size else "*"
+            if len(elements) == 1 and index == size:
+                plain = len(elements[0]) == 1 and elements[0] not in "*?"
+                elements[0] += _SKILLSPECTOR_ZSH_REPEAT if plain else "*"
+            else:
+                elements[-1] = "*"
             continue
         elements.append(char)
         index += 1
@@ -2066,8 +2102,9 @@ def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
     cmd.exe or PowerShell would (:func:`_skillspector_shell_word`). Each part
     between ``/`` is a pattern, and so is each piece of it between ``=``,
     ``:`` and ``,``, as written and without the dots and punctuation that end
-    a sentence after it, each read with the zsh ``EXTENDED_GLOB`` operators
-    (:func:`_skillspector_zsh_pattern`).
+    a sentence after it, with what a ``~`` in it may stand for
+    (:func:`_skillspector_tilde_forms`), each read with the zsh
+    ``EXTENDED_GLOB`` operators (:func:`_skillspector_zsh_pattern`).
     """
     words = {word for text in texts for word in _SKILLSPECTOR_LINE_WORD_RE.findall(text)}
     patterns: set[str] = set()
@@ -2075,12 +2112,13 @@ def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
         if _SKILLSPECTOR_SHELL_SYNTAX.isdisjoint(word) or not word.strip("*"):
             continue
         for reading in _skillspector_shell_word(word):
-            for part in reading.split("/"):
+            for index, part in enumerate(reading.split("/")):
                 for piece in {part, *_SKILLSPECTOR_PATH_PART_SEPARATOR_RE.split(part)}:
                     patterns.update(
-                        _skillspector_zsh_pattern(candidate)
+                        _skillspector_zsh_pattern(form)
                         for candidate in (piece, piece.rstrip(".,;:!?"))
                         if candidate
+                        for form in _skillspector_tilde_forms(candidate, first=index == 0)
                     )
     return patterns
 

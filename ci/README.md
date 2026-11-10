@@ -1,8 +1,9 @@
 # Reusable repository CI
 
-This directory supplies the shared Tier 1 CI runtime and consumer onboarding
-templates. Start with [repository integration](../docs/repository-integration.mdx)
-for GitHub Actions or GitLab CI/CD. The GitLab adapter is in `ci/gitlab/`;
+This directory supplies the shared CI runtime for quality and security checks,
+plus consumer onboarding templates. Start with
+[repository integration](../docs/repository-integration.mdx) for GitHub Actions
+or GitLab CI/CD. The GitLab adapter is in `ci/gitlab/`;
 the image and report generation are shared by both platforms.
 The upstream workflow release and public package must be reviewed and published
 before consumers can use this path. Source templates are not runnable while
@@ -32,7 +33,7 @@ policy label. Profile names do not control network access or report visibility.
 | --- | --- |
 | `paths` | `skills`; up to 100 newline-separated repository-relative skill directories or roots |
 | `scan-mode` | `auto`: affected skills on PRs, all configured skills on pushes/manual runs; `all` overrides selection |
-| `llm` | `false`; static Tier 1 requires no model key |
+| `llm` | `false`; static checks require no model key |
 | `artifact-name` | Keep `skill-evaluator-tier1` for the optional publisher |
 | `report-base-url` | Optional own Pages URL, only after hosted publication is configured |
 | `scan-workers` | `4`; skills scanned at once, from 1 to 16. `1` scans one skill at a time |
@@ -288,7 +289,7 @@ placeholders until then.
    runs read that cache but never write it. Release builds do not reuse cached
    layers, so `git` and `ca-certificates` come from the Debian packages current
    at release time.
-   Build the complete Tier 1 runtime with required external scanners. The base
+   Build the shared CI runtime with its required external scanners. The base
    image digest, uv bootstrap, scanner runtime dependencies and SkillSpector
    build dependencies are pinned; scanner installs require package hashes.
    Confirm the resulting digest's source revision and the installed scanner

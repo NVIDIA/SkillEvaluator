@@ -6,6 +6,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- A reproducible public terminal starter runs the released CLI against the
+  bundled text-analyzer skill, checks real script/report output and a seeded
+  quality regression, and retains an editable task, fixture and run receipt.
+  The walkthrough connects setup, interpretation, live-evaluation prerequisites,
+  troubleshooting and adaptation; contributor guidance clarifies environment
+  setup, example verification and the existing DCO policy.
+
+- Tier 3 datasets can declare deterministic behavior checks for script invocation and success, workspace files, and final-response text.
 - `tier3 import-metrics` accepts versioned, normalized per-case custom scores
   from external evaluations and writes clearly labeled JSON/Markdown reports.
   Imports validate identities, metric metadata and values, retain declared
@@ -22,7 +30,6 @@ All notable changes to SkillEvaluator are documented in this file.
   negative-case, Wilson interval, and paired-case coverage requirements. Show
   the dataset-size status in evaluation, validation, HTML, and BENCHMARK output;
   validation coverage notes remain informational.
-
 - Experimental `hermes` Tier 3 agent for Docker and native NVIDIA Build routing,
   pinned to Hermes v2026.9.24. Includes isolated skill staging, ATIF trajectories,
   activation evidence, token accounting and retained execution diagnostics.

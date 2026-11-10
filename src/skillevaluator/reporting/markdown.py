@@ -43,6 +43,7 @@ from skillevaluator.reporting.harbor_viewer import (
 )
 from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
 from skillevaluator.tier3.baseline_store import baseline_description
+from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
@@ -359,6 +360,9 @@ class MarkdownReporter(ReporterBase):
                 lines.append("")
             composite_text = _format_report_number(composite, signed=True)
             lines.append(f"**Verdict:** {verdict} (composite lift = {composite_text})")
+            provenance_line, _ = dataset_provenance_display(ae.get("dataset_provenance"))
+            if provenance_line:
+                lines.append(_markdown_inline_text(provenance_line))
             if verdict == "INCONCLUSIVE":
                 lines.append("Skill never activated. Scores are diagnostic only; no lift verdict was computed.")
             runtime_number = _finite_report_number(runtime)

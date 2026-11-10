@@ -53,6 +53,7 @@ from skillevaluator.reporting.run_status import resolve_run_status
 from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
 from skillevaluator.source_identity import evaluated_source_revision, recorded_evaluated_source
 from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
+from skillevaluator.tier3.evidence_volume import format_evidence_volume
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
 
 if TYPE_CHECKING:
@@ -389,6 +390,9 @@ class BenchmarkReporter(ReporterBase):
                 )
         else:
             lines.append("- Tasks: not recorded (legacy or non-live result)")
+        evidence_line = format_evidence_volume((ae or {}).get("evidence_volume"))
+        if evidence_line:
+            lines.append(f"- Evidence volume: {evidence_line}.")
 
         dataset_line, _ = dataset_provenance_display(ae.get("dataset_provenance") if ae else None)
         if dataset_line:

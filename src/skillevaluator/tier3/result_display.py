@@ -23,6 +23,7 @@ from rich.text import Text
 from skillevaluator.reporting.harbor_viewer import harbor_job_links, normalize_harbor_viewer_for_display
 from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, RED, TEXT, lift_style
 from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
+from skillevaluator.tier3.evidence_volume import evidence_volume_for_conditions, format_evidence_volume
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
@@ -903,6 +904,27 @@ def render_evaluation_result(
     if isinstance(sufficiency, Mapping) and isinstance(sufficiency.get("coverage_summary"), str):
         style = "yellow" if sufficiency.get("status") == "provisional" else "dim"
         console.print(Text(safe(sufficiency["coverage_summary"]), style=style))
+    if isinstance(agents, Mapping) and agents:
+        agent_entries = [(str(name), value) for name, value in agents.items() if isinstance(value, Mapping)]
+        attempt_policy = result.get("attempt_policy") if isinstance(result.get("attempt_policy"), Mapping) else {}
+        for agent_name, best_data in agent_entries:
+            volume = evidence_volume_for_conditions(
+                best_data.get("conditions"),
+                trial_failures=best_data.get("trial_failures"),
+                baseline_only=result.get("mode") == "baseline_only",
+                dataset_summary=result.get("dataset_summary"),
+                rewards_by_arm={
+                    "with_skill": best_data.get("rewards"),
+                    "without_skill": best_data.get("rewards_baseline"),
+                },
+                uniform_attempts=not bool(attempt_policy.get("stop_on_pass")),
+                attempts_per_case=attempt_policy.get("max_attempts"),
+            )
+            evidence_line = format_evidence_volume(volume)
+            if evidence_line:
+                style = "yellow" if evidence_line.startswith("Limited evidence:") else "dim"
+                label = f"{agent_name}: " if len(agent_entries) > 1 else ""
+                console.print(Text(safe(label + evidence_line), style=style))
     detailed = verbose or not has_cases
     if isinstance(agents, Mapping) and agents and not incomplete and detailed:
         metrics = _display_metrics(result, agents)

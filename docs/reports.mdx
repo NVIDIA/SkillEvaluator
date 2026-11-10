@@ -16,11 +16,14 @@ lift data that `view` and `compare` read back later.
 evaluation framework that runs those Tier 3 trials. SkillEvaluator collects its
 job artifacts into the results tree described on this page.
 
+Tier 3 findings describe failed accuracy criteria in plain language and mark
+when trajectory evidence is unavailable. Expected and observed text appears
+only when both values were recorded in the result.
+
 Tier 3 results include a `dataset_sufficiency` policy assessment in `result.json`.
 The status is sufficient only when coverage, pass-rate reliability, and paired
 lift-comparison requirements are met; otherwise it is provisional and does not
 change the evaluation verdict.
-
 ## Retained three-tier CI evidence
 
 The opt-in all-tier workflows retain one aggregate artifact for 14 days. GitHub
@@ -999,6 +1002,14 @@ combine into one attempt score for averages and pass@k. When one condition
 mixes standard-metric and custom-only rewards, its overall score and lift use
 that logical-attempt overall rather than the mean of the standard dimensions,
 which would cover only the standard rows.
+
+`tier3 evaluate` also shows the evidence volume behind the headline: distinct
+cases, planned and scored attempts, and execution or judge failures. When a
+baseline ran, it includes the same counts for each arm. Its incomplete-coverage
+form, such as “27 of 30 attempts scored,” is shown only by `tier3 evaluate`;
+report surfaces show a fully scored best agent. A `Limited evidence:` warning
+appears when there are fewer than 10 distinct cases or any non-skipped arm
+scored fewer attempts than planned.
 
 Case identifiers used as JSON keys must be printable, free of credential
 material, and no larger than 512 UTF-8 bytes. A reward with an unsafe identity

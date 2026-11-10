@@ -24,10 +24,10 @@ folder holds MDX pages published to <https://docs.nvidia.com/skills/skillevaluat
 - `reports.mdx` — report formats, scores, and the results-on-disk contract
 - `performance-dashboard.mdx` — compare saved Tier 3 scores and resource use
 - `benchmark-rollout.mdx` — regenerating and promoting `BENCHMARK.md` cards
-- `github-actions.mdx` — Tier 1 workflow setup and optional hosted PR feedback
-- `cli-onboarding.mdx` — released Tier 1 GitHub setup wizard
-- `repository-integration.mdx` — choose GitHub or GitLab for Tier 1 onboarding
-- `gitlab-ci.mdx` — reusable Tier 1 checks and downloadable GitLab reports
+- `github-actions.mdx` — skill check workflow setup and optional hosted PR feedback
+- `cli-onboarding.mdx` — released GitHub setup wizard
+- `repository-integration.mdx` — choose GitHub or GitLab for skill checks
+- `gitlab-ci.mdx` — reusable skill checks and downloadable GitLab reports
 - `advanced-ci.mdx` — secondary opt-in prerequisites and all-tier reference
 - `ci-integration.mdx` — exit codes, GitHub Actions recipe, progressive adoption
 - `cli-reference.mdx` — every command and flag

@@ -24,10 +24,10 @@ contributors making non-trivial edits.
 - `reports.mdx` — report formats, scores, and the results-on-disk contract
 - `performance-dashboard.mdx` — compare saved Tier 3 scores and resource use
 - `benchmark-rollout.mdx` — regenerating and promoting `BENCHMARK.md` cards
-- `github-actions.mdx` — reusable Tier 1 onboarding and optional hosted PR feedback
+- `github-actions.mdx` — reusable skill checks and optional hosted PR feedback
 - `cli-onboarding.mdx` — install the CLI, automate GitHub setup and open an optional test PR
-- `repository-integration.mdx` — choose GitHub or GitLab for Tier 1 onboarding
-- `gitlab-ci.mdx` — reusable Tier 1 checks and downloadable GitLab reports
+- `repository-integration.mdx` — choose GitHub or GitLab for skill checks
+- `gitlab-ci.mdx` — reusable skill checks and downloadable GitLab reports
 - `advanced-ci.mdx` — secondary opt-in prerequisites and all-tier reference
 - `ci-integration.mdx` — exit codes, GitHub Actions recipe, progressive adoption
 - `cli-reference.mdx` — every command and flag

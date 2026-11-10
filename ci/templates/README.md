@@ -65,4 +65,4 @@ cover results and merge-gating settings.
 
 The unreleased, explicitly enabled all-tier integration has separate
 [setup and maintainer instructions](all-tiers/README.md). Released templates
-above provide Tier 1 checks without a model key.
+above provide quality and security checks without a model key.

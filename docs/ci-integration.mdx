@@ -3,9 +3,10 @@ title: Gate Your CI
 description: Make SkillEvaluator a merge gate — exit codes, a copy-paste GitHub Actions workflow, collection validation, progressive adoption, and machine-readable results.
 ---
 
-Turn SkillEvaluator into a merge gate for your skill repository. Tier 1 needs
-no model API key; full scanner-backed checks can still contact vulnerability
-services. Adopt the CLI in any CI system and add model-backed checks separately.
+Turn SkillEvaluator into a merge gate for your skill repository. Quality and
+security checks need no model API key; full scanner-backed checks can still
+contact vulnerability services. Adopt the CLI in any CI system and add
+model-backed checks separately.
 
 For the prebuilt runtime and one-file consumer setup, see
 [GitHub Actions](/skills/skillevaluator/github-actions). The recipe below installs tools explicitly;
@@ -22,7 +23,7 @@ setup.
 | `1` | Validation failed — a gating check failed, the run could not complete, or an unexpected internal error occurred | Read the report or log; fix the skill, or re-run and file an issue if the run itself failed |
 | `2` | Usage error — an unknown flag, a value outside an option's type or choices, or a target path that does not exist | Fix the pipeline, not the skill |
 
-Tier 1 checks always gate the exit code. Tier 2 deduplication findings gate when dedup runs unless you pass `--no-block-on-dedup`; the recommended keyless gate below selects `--tiers 1` to exclude Tier 2 and Tier 3. Tier 3 live-evaluation results are advisory inside `validate` unless you pass `--block-on-agent-eval`. Reports record the effective choice for each tier. Without an explicit scope, `validate` runs all three tiers for skills, including Tier 3 autopilot.
+Quality and security checks always gate the exit code. Deduplication findings gate when dedup runs unless you pass `--no-block-on-dedup`; the recommended keyless gate below selects `--tiers 1` to exclude deduplication and live agent evaluation. Live-evaluation results are advisory inside `validate` unless you pass `--block-on-agent-eval`. Reports record the effective choice for each stage. Without an explicit scope, `validate` runs all three stages for skills, including live-evaluation autopilot.
 
 ## The recommended gate
 
@@ -33,7 +34,7 @@ skillevaluator validate ./skills --profile default --tiers 1 -r json,markdown,sa
 Each flag earns its place:
 
 - **`--profile default`** pins the standard validation policy explicitly instead of relying on the environment, so the gate behaves identically on every runner. The active profile name is stamped into the HTML and JSON reports (and printed in the run banner with `--verbose`), so a run always records which gate was applied.
-- **`--tiers 1`** runs static checks without the provider-backed Tier 2 and Tier 3 stages. Use `--tiers 1,2` once you add a provider secret, or omit the option to include Tier 3 after configuring its runtime. `--no-dedup` alone skips only Tier 2 and still runs Tier 3.
+- **`--tiers 1`** runs static checks without provider-backed deduplication or live agent evaluation. Use `--tiers 1,2` once you add a provider secret, or omit the option to include live evaluation after configuring its runtime. `--no-dedup` alone skips only deduplication and still runs live evaluation.
 - **`-r json,markdown,sarif`** writes machine-readable JSON, a Markdown PR comment, and a SARIF file for GitHub Code Scanning.
 - **`-o reports`** collects everything in one directory for artifact upload.
 - **`--min-score 70`** is the default quality bar, written out explicitly so raising it later is a visible one-line diff.
@@ -191,9 +192,13 @@ You do not have to turn on the strictest gate on day one. A path that works well
   skillevaluator validate ./skills --profile default --tiers 1 -r markdown -o reports || true
   ```
 
-  ### Gate on Tier 1
+  ### Require quality and security checks
+
+  <div id="gate-on-tier-1">
 
   Remove the `|| true`. Exit code `1` now blocks merges on schema, security, PII, license, code-integrity, Unicode, and quality failures — all still keyless. (The `lint` check also runs, but its findings are advisory warnings and never fail validation.)
+
+  </div>
 
   ### Raise the quality bar
 
@@ -201,7 +206,7 @@ You do not have to turn on the strictest gate on day one. A path that works well
 
   ### Add LLM-backed checks
 
-  Add a provider key as a masked CI secret, set `SKILL_EVAL_LLM_PROVIDER`, then add `--llm` (and `--llm-verify` to suppress false positives) and select `--tiers 1,2` so Tier 2 overlap checks run too. Once dedup runs, its findings gate alongside Tier 1 by default; add `--no-block-on-dedup` if you want evidence without enforcing it yet. See [Providers & Credentials](/skills/skillevaluator/configuration) for provider setup.
+  Add a provider key as a masked CI secret, set `SKILL_EVAL_LLM_PROVIDER`, then add `--llm` (and `--llm-verify` to suppress false positives) and select `--tiers 1,2` so overlap checks run too. Once dedup runs, its findings gate alongside quality and security checks by default; add `--no-block-on-dedup` if you want evidence without enforcing it yet. See [Providers & Credentials](/skills/skillevaluator/configuration) for provider setup.
 
   ### Add an advisory Tier 3 job
 
@@ -229,7 +234,7 @@ severity_overrides:
 skillevaluator validate ./skills --profile default --policy ./policy.yaml --tiers 1 -r json,markdown -o reports
 ```
 
-The policy overlays the default rules, and the resulting profile name is stamped into the HTML and JSON reports (and printed in the run banner with `--verbose`) — so a run always tells you which gate produced it. Full overlay syntax is on the [Tier 1: Validation](/skills/skillevaluator/tier1-validation) page.
+The policy overlays the default rules, and the resulting profile name is stamped into the HTML and JSON reports (and printed in the run banner with `--verbose`) — so a run always tells you which gate produced it. See the [validation policy reference](/skills/skillevaluator/tier1-validation) for the full overlay syntax.
 
 ## Parse the JSON
 
@@ -335,7 +340,7 @@ jq -e '([.quality_summary[]?.overall_score] | min // 100) >= 80' "$report"
   <Card title="Reports & Results" icon="book" href="/skills/skillevaluator/reports">
     What every report format contains and how to read scores, severities, and Tier 3 payloads.
   </Card>
-  <Card title="Tier 1: Validation" icon="shield" href="/skills/skillevaluator/tier1-validation">
+  <Card title="Quality and security checks" icon="shield" href="/skills/skillevaluator/tier1-validation">
     Every check behind the gate — what it inspects and how to fix findings.
   </Card>
   <Card title="Providers & Credentials" icon="flask" href="/skills/skillevaluator/configuration">

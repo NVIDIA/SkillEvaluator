@@ -6,7 +6,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
-- Restore Tier 1-first repository CI onboarding with no model key required,
+- Simplify repository CI onboarding around quality and security checks with
+  no model key required,
   keeping optional LLM checks and hosted feedback separate. Preserve opt-in
   all-tier setup and report contracts in an Advanced CI reference.
 

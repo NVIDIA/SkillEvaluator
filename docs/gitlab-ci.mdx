@@ -1,9 +1,9 @@
 ---
 title: "GitLab CI/CD"
-description: "Add Tier 1 quality and security checks to GitLab with no model key required."
+description: "Add quality and security checks to GitLab with no model key required."
 ---
 
-Bring Tier 1 quality and security checks to your repository. No model key required.
+Bring quality and security checks to your repository. No model key required.
 Optional LLM checks are available. Point the reusable GitLab CI job at your skills
 and choose a quality threshold; merge requests evaluate changed skills
 without installing scanners or adding evaluation code to your repository.
@@ -125,9 +125,10 @@ Skill result: "skills/glossary-builder" — FAILED
   </Accordion>
   <Accordion title="Scores, reports and privacy">
     The threshold applies to the quality score; security, schema and other
-    required checks remain independent gates. This reusable integration runs Tier 1
-    only. This integration does not host reports or post merge-request comments
-    automatically. Known values detected by credential patterns, NVIDIA API
+    required checks remain independent gates. The scanner runs quality and
+    security checks and saves reports as job artifacts; it does not host reports
+    or post merge-request comments automatically. Known values detected by
+    credential patterns, NVIDIA API
     keys, and unquoted `KEY=value` and `Bearer` credentials are redacted,
     including parts of them that a scanner cuts or escapes, but not every
     secret or transformation is detectable. Raw scanner logs are

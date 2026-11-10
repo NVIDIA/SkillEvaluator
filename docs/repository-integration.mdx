@@ -3,13 +3,13 @@ title: "Bring Skill Evaluation to Your Repository"
 description: "Evaluate changed skills automatically with reusable GitHub and GitLab CI configurations."
 ---
 
-Bring Tier 1 quality and security checks to your repository. No model key required.
+Bring quality and security checks to your repository. No model key required.
 Optional LLM checks are available. Choose your skill folders and get results
 automatically when skills change.
 
 No evaluation code to write. No scanner installations to manage. The shared
-container brings the Tier 1 runtime to your CI runner, including SkillSpector
-for specialized skill security scanning.
+container runs the checks in your CI runner, including SkillSpector security
+scanning.
 
 ## How it works
 
@@ -53,7 +53,7 @@ explains customization and optional LLM checks.
 ## What you get
 
 - **Automatic checks:** evaluate changed skills in pull requests or merge requests; run the configured collection on the default branch.
-- **Quality and security:** run Tier 1 checks, including SkillSpector security scanning, without adding evaluator code to the repository.
+- **Quality and security:** check your skills with SkillEvaluator and SkillSpector without adding evaluator code to the repository.
 - **Control:** choose skill directories and a minimum quality score; the job fails when required checks fail or cannot complete.
 - **Results you can inspect:** see a concise outcome in CI and download the detailed HTML, JSON, Markdown and SARIF reports.
 
@@ -65,9 +65,9 @@ Browse [report, log and PR comment examples](https://github.com/NVIDIA/SkillEval
 in the public repository. No demo-repository access is needed.
 
 <Note>
-  The released CI image runs Tier 1, including SkillSpector. It does not run
-  Tier 2 or Tier 3. GitHub and GitLab use the same scanner image with
-  platform-specific workflow files.
+  These quality and security checks are called **Tier 1** in SkillEvaluator
+  reports. GitHub and GitLab use the same scanner image with platform-specific
+  workflow files. Additional evaluation stages require a separate opt-in.
 </Note>
 
 ## Other CI systems

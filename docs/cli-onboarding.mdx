@@ -1,9 +1,9 @@
 ---
 title: "Set Up CI with the CLI"
-description: "Prepare no-key Tier 1 checks for GitHub, with optional hosted reports and PR feedback."
+description: "Set up quality and security checks for GitHub, with optional hosted reports and PR feedback."
 ---
 
-Bring Tier 1 quality and security checks to your repository. No model key required.
+Bring quality and security checks to your repository. No model key required.
 Optional LLM checks are available. SkillEvaluator finds your skills, prepares
 the GitHub workflows and opens a setup PR. The shared runtime includes
 SkillSpector security scanning. Choose checks only or add optional hosted
@@ -43,7 +43,7 @@ locally. The shared container supplies the runtime; you control the configuratio
   public and private repositories. Hosted feedback supports public Pages and
   verified private Pages sites in eligible organization repositories. See
   [private report hosting](#private-report-hosting) for the one-time prerequisite.
-  The released Tier 1 wizard supports GitHub. For Tier 1 on GitLab, use the
+  The released setup wizard supports GitHub. For GitLab, use the
   [GitLab template](/skills/skillevaluator/gitlab-ci).
 </Accordion>
 
@@ -73,8 +73,9 @@ Folders [1]: 1,2
 </Frame>
 
 The score threshold does not override required security or schema checks.
-Default Tier 1 checks use no model key. Tier 2 and Tier 3 are not part of
-the released Tier 1 wizard. Optional model-backed Tier 1 checks use the
+The wizard sets up quality and security checks without a model key;
+deduplication and live agent evaluation require separate setup. Optional
+model-backed checks use the
 [separate manual workflow](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/skill-checks-llm.yml)
 and a provider key.
 

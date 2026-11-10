@@ -3,11 +3,12 @@ title: "Advanced CI"
 description: "Prerequisites and reference for explicitly enabled all-tier CI."
 ---
 
-Standard repository onboarding runs Tier 1 quality and security checks without
+Standard repository onboarding runs quality and security checks without
 a model key. The all-tier integration is a separate, **explicit opt-in and
-unreleased capability**. Released 0.8.0 bundles and plain `ci init` remain
-Tier 1 only; all-tier setup requires a reviewed candidate CLI and its bundled
-schema-version 2 descriptor with the platform's all-tier capability and immutable pins.
+unreleased capability**. Released 0.8.0 bundles and plain `ci init` run only the
+quality and security checks; all-tier setup requires a reviewed candidate CLI
+and its bundled schema-version 2 descriptor with the platform's all-tier
+capability and immutable pins.
 
 ## Before you opt in
 
@@ -32,10 +33,10 @@ for GitHub and GitLab commands, migration, admission, feedback, runner and
 timeout requirements, descriptor maintenance and retained report contracts.
 It also documents SkillEvaluator's own callers and alternative feedback filename.
 
-Only Tier 1 gates this CI integration. Tier 2 and Tier 3 remain advisory even
-when failed or incomplete; deprecated Tier 3 required settings are ignored.
+Only quality and security checks gate this CI integration. Tier 2 and Tier 3
+remain advisory even when failed or incomplete; deprecated Tier 3 required settings are ignored.
 Missing credentials, runtime or datasets must remain visible as incomplete or
-needs-action evidence. A passing Tier 1 gate does not mean all tiers passed.
+needs-action evidence. A passing scan does not mean all evaluation stages passed.
 
 Reports retain native evidence and an aggregate artifact for 14 days. Feedback
 links to the authenticated artifact for that run; download and extract it,

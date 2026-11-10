@@ -404,7 +404,8 @@ def recovered_run_report(root: Path):
 
 HINT_START = "Each row is one eval case for one agent under one condition. Attempt Scores lists the scored attempts"
 HINT_THRESHOLD = (
-    "a score at or above 0.50 counts as passed for Pass@3. "
+    "a score at or above 0.50 counts as passed for Pass@3 when scored goal accuracy is at least 1.00 "
+    "and scored security is at least 1.00. "
     '"Not scored" means no reward was found for that expected attempt; it is excluded from pass/fail.'
 )
 RECOVERED_HINT = (
@@ -428,7 +429,7 @@ def test_attempt_details_show_recovered_timeout_in_the_attempt_budget(tmp_path):
 
     # Attempt 1 timed out, attempt 2 passed, attempt 3 was skipped: three attempts, one scored.
     assert attempt_details_rows(html) == [
-        "opencode With skill case-a A1: timed out, recovered A2: 1.00 pass 1 of 3 scored 1.00 passed on attempt 2"
+        "opencode With skill case-a A1: timed out, recovered A2: 1.00 PASS 1 of 3 scored 1.00 passed on attempt 2"
     ]
     assert "passed on scored attempt" not in html
     # The hint lists the recovered chip among the attempt scores and counts it only in the second number.
@@ -450,7 +451,7 @@ def test_attempt_details_place_each_recovered_timeout_at_its_attempt_number(tmp_
     [row] = attempt_details_rows(render_html(tmp_path))
 
     assert row == (
-        "opencode With skill case-a A1: 0.00 fail A2: timed out, recovered A3: 1.00 pass "
+        "opencode With skill case-a A1: 0.00 FAIL A2: timed out, recovered A3: 1.00 PASS "
         "2 of 3 scored 1.00 passed on attempt 3"
     )
 
@@ -466,7 +467,7 @@ def test_attempt_details_without_recovery_only_reword_the_passing_attempt(tmp_pa
     html = render_html(tmp_path)
 
     assert attempt_details_rows(html) == [
-        "opencode With skill case-a A1: 0.00 fail A2: 1.00 pass 2 of 3 scored 1.00 passed on attempt 2"
+        "opencode With skill case-a A1: 0.00 FAIL A2: 1.00 PASS 2 of 3 scored 1.00 passed on attempt 2"
     ]
     assert "recovered" not in html.split('id="t3-attempts-table"', 1)[1].split("</table>", 1)[0]
     assert attempt_details_hint(html) == f"{HINT_START} only; {HINT_THRESHOLD}"
@@ -484,8 +485,8 @@ def test_attempt_details_read_recovered_attempt_numbers_from_the_rows_own_arm(tm
     html = HTMLReporter(report_scope="tier3").render(result)
 
     assert attempt_details_rows(html) == [
-        "opencode With skill case-a A2: 1.00 pass 1 timed out, recovered 1 of 3 scored 1.00 passed on attempt 2",
-        "opencode Without skill case-a A1: timed out, recovered A2: 1.00 pass 1 of 3 scored 1.00 passed on attempt 2",
+        "opencode With skill case-a A2: 1.00 PASS 1 timed out, recovered 1 of 3 scored 1.00 passed on attempt 2",
+        "opencode Without skill case-a A1: timed out, recovered A2: 1.00 PASS 1 of 3 scored 1.00 passed on attempt 2",
     ]
 
 
@@ -499,7 +500,7 @@ def test_attempt_details_hint_does_not_promise_an_attempt_number_for_a_recovered
     html = HTMLReporter(report_scope="tier3").render(result)
 
     assert attempt_details_rows(html) == [
-        "opencode With skill case-a A2: 1.00 pass 1 timed out, recovered 1 of 3 scored 1.00 passed on attempt 2"
+        "opencode With skill case-a A2: 1.00 PASS 1 timed out, recovered 1 of 3 scored 1.00 passed on attempt 2"
     ]
     assert attempt_details_hint(html) == RECOVERED_HINT
     assert "keeps its attempt number" not in html
@@ -533,7 +534,7 @@ def test_attempt_details_ignore_an_invalid_recovered_count(tmp_path, attempts_re
     # Read like a case without recovery: no recovered chip, tooltip or hint, and the
     # denominator is the scored and skipped attempts only.
     assert attempt_details_rows(html) == [
-        "opencode With skill case-a A2: 1.00 pass 1 of 2 scored 1.00 passed on attempt 2"
+        "opencode With skill case-a A2: 1.00 PASS 1 of 2 scored 1.00 passed on attempt 2"
     ]
     assert attempt_details_hint(html) == f"{HINT_START} only; {HINT_THRESHOLD}"
     assert "recovered agent timeout" not in html

@@ -93,6 +93,7 @@ from skillevaluator.reporting.trial_charts import steps_by_case_chart
 from skillevaluator.skillspector_provenance import skillspector_provenance_records
 from skillevaluator.source_identity import recorded_evaluated_source
 from skillevaluator.tier3.baseline_store import baseline_description
+from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
 from skillevaluator.tier3.version_comparison import version_comparison_lines
 
 if TYPE_CHECKING:
@@ -1006,6 +1007,17 @@ def _sanitize_tier3_case_diagnostics(value: object) -> list[dict[str, Any]]:
 def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
     """Normalize template-facing types after merging canonical and fallback data."""
     payload = _json_safe_tier3_payload(value)
+    sufficiency = payload.get("dataset_sufficiency")
+    if isinstance(sufficiency, dict) and sufficiency.get("status") in {"sufficient", "provisional"}:
+        coverage_summary = sufficiency.get("coverage_summary")
+        reason = sufficiency.get("reason")
+        payload["dataset_sufficiency"] = {
+            "status": sufficiency["status"],
+            "coverage_summary": coverage_summary[:512] if isinstance(coverage_summary, str) else "",
+            "reason": reason[:512] if isinstance(reason, str) else "",
+        }
+    else:
+        payload.pop("dataset_sufficiency", None)
     payload["summary"] = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
     payload["agents"] = {
         identifier: _sanitize_tier3_agent(agent) for identifier, agent in _tier3_agent_entries(payload.get("agents"))
@@ -3043,7 +3055,21 @@ class HTMLReporter(ReporterBase):
         tier1_skillspector_provenance = _skillspector_provenance(tier1_results)
         tier2_summary = self._compute_tier_summary(tier2_results, presentation=context.tiers[2])
         tier3_summary = self._compute_tier_summary(tier3_results, presentation=context.tiers[3])
+        tier3_dataset_sufficiency = tier3_data.get("dataset_sufficiency") if isinstance(tier3_data, dict) else None
+        dataset_summary = tier3_data.get("dataset_summary") if isinstance(tier3_data, dict) else None
+        task_count = dataset_summary.get("total_tasks") if isinstance(dataset_summary, dict) else None
+        dataset_source = dataset_summary.get("source") if isinstance(dataset_summary, dict) else None
+        if (
+            not isinstance(task_count, int)
+            or isinstance(task_count, bool)
+            or task_count <= 0
+            or dataset_source == "unavailable"
+        ):
+            tier3_dataset_sufficiency = None
         tier3_preview, tier3_preview_notice = _bounded_tier3_preview(tier3_data)
+        tier3_dataset_provenance_line, tier3_dataset_provenance_warning = dataset_provenance_display(
+            tier3_data.get("dataset_provenance") if isinstance(tier3_data, dict) else None
+        )
         tier3_canonical_data, tier3_canonical_encoding = _canonical_tier3_embed(tier3_data)
         tier3_truncation = tier3_data.get("report_truncation", {}) if isinstance(tier3_data, dict) else {}
 
@@ -3383,10 +3409,13 @@ class HTMLReporter(ReporterBase):
             content_label_plural=cl + "s",
             quality_scores=quality_scores_by_skill,
             tier3=tier3_preview,
+            tier3_dataset_provenance_line=tier3_dataset_provenance_line,
+            tier3_dataset_provenance_warning=tier3_dataset_provenance_warning,
             chart_assets=_load_chart_assets,
             tier3_canonical_data=tier3_canonical_data,
             tier3_canonical_encoding=tier3_canonical_encoding,
             tier3_truncation=tier3_truncation,
+            tier3_dataset_sufficiency=tier3_dataset_sufficiency,
             tier3_preview_notice=tier3_preview_notice,
             # From the full display payload: the bounded preview can cap rows
             # unevenly per condition and blank identity fields of late rows.

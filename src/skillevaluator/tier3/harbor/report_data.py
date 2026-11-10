@@ -21,6 +21,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
+from skillevaluator.tier3.eval_core.checks import resolve_should_trigger
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
@@ -84,7 +85,7 @@ __all__ = (
 )
 
 DATASET_SNAPSHOT_DIGEST_ALGORITHM = "skill-evaluator-dataset-snapshot/1"
-DATASET_SNAPSHOT_SCHEMA_VERSION = "1.0"
+DATASET_SNAPSHOT_SCHEMA_VERSION = "1.1"
 
 
 class DatasetSnapshotContractError(ValueError):
@@ -124,8 +125,9 @@ def deduplicate_dataset_entries(entries: list[dict[str, Any]]) -> list[dict[str,
 def summarize_dataset_entries(entries: list[dict[str, Any]]) -> dict[str, Any]:
     """Summarize unique task identities and their activation intent."""
     unique = deduplicate_dataset_entries(entries)
-    positive = sum(1 for case in unique if case.get("expected_skill") is not None)
-    negative = sum(1 for case in unique if "expected_skill" in case and case.get("expected_skill") is None)
+    routing_intents = [resolve_should_trigger(case) for case in unique]
+    positive = routing_intents.count(True)
+    negative = routing_intents.count(False)
     return {
         "total_tasks": len(unique),
         "positive_tasks": positive,
@@ -197,11 +199,14 @@ def dataset_snapshot_manifest(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_dataset_snapshot(run_dir: Path) -> dict[str, Any] | None:
-    """Load a validated run-owned dataset snapshot, if one was persisted."""
+    """Validate the recorded schema, then normalize in memory without rewriting it."""
     path = run_dir / "dataset_snapshot.json"
     diagnostics: list[dict[str, Any]] = []
     snapshot = _load_bounded_json(path, diagnostics, artifact="dataset_snapshot")
-    if not isinstance(snapshot, dict) or snapshot.get("schema_version") != DATASET_SNAPSHOT_SCHEMA_VERSION:
+    if not isinstance(snapshot, dict):
+        return None
+    schema_version = snapshot.get("schema_version")
+    if not isinstance(schema_version, str) or schema_version not in {"1.0", DATASET_SNAPSHOT_SCHEMA_VERSION}:
         return None
     try:
         encode_dataset_snapshot(snapshot)
@@ -218,13 +223,27 @@ def load_dataset_snapshot(run_dir: Path) -> dict[str, Any] | None:
         [entry for entry in dataset if isinstance(entry, dict)],
         evaluator_version=version,
     )
-    if dataset != expected["dataset"] or summary != expected["dataset_summary"]:
+    expected_summary = expected["dataset_summary"]
+    if snapshot["schema_version"] == "1.0":
+        # Schema 1.0 counted only legacy expected_skill labels. Validate that
+        # exact historical rule before projecting the corrected 1.1 summary.
+        positive = sum(1 for case in expected["dataset"] if case.get("expected_skill") is not None)
+        negative = sum(
+            1 for case in expected["dataset"] if "expected_skill" in case and case.get("expected_skill") is None
+        )
+        expected_summary = {
+            **expected_summary,
+            "positive_tasks": positive,
+            "negative_tasks": negative,
+            "unclassified_tasks": len(expected["dataset"]) - positive - negative,
+        }
+    if dataset != expected["dataset"] or summary != expected_summary:
         return None
     if snapshot.get("dataset_digest_algorithm") != DATASET_SNAPSHOT_DIGEST_ALGORITHM:
         return None
     if snapshot.get("dataset_digest") != expected["dataset_digest"]:
         return None
-    return snapshot
+    return {**snapshot, **expected}
 
 
 class _JSONLimitError(ValueError):

@@ -4,6 +4,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+## 0.9.0 - 2026-11-10
+
 ### Added
 
 - A reproducible public terminal starter runs the released CLI against the

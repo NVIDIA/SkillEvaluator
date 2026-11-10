@@ -2604,6 +2604,7 @@ def _metric_evidence(
     report_budget: _ReportBudget,
     sampling: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
+    from skillevaluator.tier3.eval_core.atif_helpers import _METRIC_EVIDENCE_REF_METRICS
     from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, metric_set_for_reward
 
     if report_budget.evidence_remaining <= 0:
@@ -2635,7 +2636,8 @@ def _metric_evidence(
         score_failed = raw_score is not None and raw_score < TRIAL_PASS_THRESHOLD
 
         notes: list[str] = []
-        reason = sanitize_grader_text(detail.get("reason"))
+        raw_grader_reason = detail.get("reason")
+        reason = sanitize_grader_text(raw_grader_reason)
         if reason:
             notes.append(reason[:512])
 
@@ -2664,6 +2666,10 @@ def _metric_evidence(
             "checks": checks,
             "evidence_refs": _compact_evidence_refs(detail.get("evidence_refs")),
         }
+        if score_failed and metric in _METRIC_EVIDENCE_REF_METRICS and not entry["evidence_refs"]:
+            from skillevaluator.evaluation.tier3_findings import evidence_unavailable_reason
+
+            entry["evidence_unavailable_reason"] = evidence_unavailable_reason(reward)
         # The built reason and excerpt are not part of the fingerprint: attempts
         # of one case often quote different commands under the same grader
         # reason, and they still collapse into one entry with ``occurrences``.
@@ -2685,11 +2691,18 @@ def _metric_evidence(
             output_truncated = True
             continue
         if score_failed:
-            # Graders that record only a message, findings, or failed criteria
-            # still explain a failing score. The built reason stays separate from
-            # the grader's own notes so size limits can drop it first, and leaves
-            # out failing results, which the card already lists as ``failures``.
-            if not notes and (fallback_reason := failure_reason(detail, include_results=False)):
+            # Graders that record only findings or failed criteria still explain
+            # a failing score. Notes already show the grader's own reason, so the
+            # separate built reason omits that text and leaves out failing
+            # results, which the card already lists as ``failures``.
+            omitted_reasons = (raw_grader_reason, *notes) if isinstance(raw_grader_reason, str) else tuple(notes)
+            if fallback_reason := failure_reason(
+                detail,
+                include_results=False,
+                metric=metric,
+                reward=reward,
+                omit=omitted_reasons,
+            ):
                 entry["reason"] = fallback_reason
             if excerpt := failure_excerpt(detail):
                 entry["excerpt"] = excerpt
@@ -3198,7 +3211,7 @@ def _trial_score_reasons(
                 continue
             if lowest is not None and row_score >= lowest[0]:
                 continue
-            reason = failure_reason(_metric_detail(row, metric))
+            reason = failure_reason(_metric_detail(row, metric), metric=metric, reward=row)
             if reason:
                 lowest = (row_score, reason)
         if lowest is not None:

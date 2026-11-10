@@ -72,6 +72,10 @@ def test_normal_agent_artifacts_are_loaded_without_truncation_marker(tmp_path: P
         {
             "entry_id": "case-001",
             "accuracy": 1.0,
+            "_activation_artifacts": {
+                "reward": "codex/with-skill/trials/case-001__1/reward.json",
+                "trajectory": "codex/with-skill/trials/case-001__1/trajectory.json",
+            },
             "_traj": {"steps": 1, "prompt_tokens": 10, "completion_tokens": 4, "cached_tokens": 2},
         }
     ]

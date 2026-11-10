@@ -10,6 +10,10 @@ All notable changes to SkillEvaluator are documented in this file.
   metric severity from dimension verdicts; include severity thresholds in the
   artifact and a muted CLI legend without changing scores or thresholds.
 
+- `tier3 validate` reports informational dataset coverage counts and concrete
+  gaps in text and JSON. Generated one-case starters now explain their limits
+  and point authors to full dataset generation and coverage validation.
+
 - Document an additive qualitative assessment review worksheet with bounded
   evidence from real successful, failed-setup and invalid-judge runs. Preserve
   numeric grading and identify the separate decisions needed for scoreless support.
@@ -22,6 +26,18 @@ All notable changes to SkillEvaluator are documented in this file.
   evidence is missing; partial results preserve every original requirement
   without presenting missing judgments as verified skill defects. Unexpected
   judge errors retain that inventory; intentionally skipped arms add no attempts.
+- Repeatable Tier 3 activation-validation recipe and offline acceptance suite.
+  Canonical trials separate expected target-skill use, trusted observed use or
+  unknown traces, task correctness, workflow diagnostics, resources and retained
+  evidence links. Fallback multi-step rows retain scoped observations without
+  claiming complete logical-trial activation or changing numeric grading.
+  Explicit `should_trigger` precedence is preserved, and standard baselines
+  retain trusted trajectory observations independently of null/N/A skill scores.
+  Primary skill identities match case-insensitively; accepted alternate use remains
+  optional, including the legacy alternate field, without changing numeric grades.
+  Unrendered activation diagnostics remain in canonical exports without consuming
+  HTML overview or failure-reason preview budgets.
+
 - Run SkillEvaluator's own `skills/` through the pinned three-tier GitHub
   callers, retaining Tier 1 as required and Tier 2/3 as advisory. A separate
   consumer feedback listener preserves the reusable publisher's public path;
@@ -74,6 +90,11 @@ All notable changes to SkillEvaluator are documented in this file.
   plugin sources without executing plugin code.
 
 ### Changed
+
+- Tier 3 reports missing skill runtime dependencies as environment problems,
+  with declaration and custom Dockerfile guidance. Unrecovered environment
+  failures leave the trial UNSCORED instead of reducing the skill's score;
+  recovered environment failures carry no deduction.
 
 - Document per-arm Tier 3 dimension applicability and test how N/A baseline
   metrics are handled in Overall scores and Skill Lift comparisons.
@@ -161,6 +182,12 @@ All notable changes to SkillEvaluator are documented in this file.
   after a `;`, which starts a new command.
 
 ### Fixed
+
+- Tier 3 dataset summaries honor explicit `should_trigger` routing labels before
+  legacy `expected_skill` values. Report insights distinguish unavailable trial
+  scores from scored attempts that miss the pass threshold. Dataset snapshots
+  use schema 1.1; valid schema 1.0 snapshots retain their original datasets and
+  integrity checks, with corrected summaries projected without rewriting files.
 
 - Tier 2 includes qualifying shell comment blocks at end of file in context
   deduplication. Previously those blocks disappeared unless a blank line or
@@ -262,6 +289,11 @@ All notable changes to SkillEvaluator are documented in this file.
   bundled Harbor verifier apply the fix. Prose such as
   `Use HTTP POST to create an item.` in a here-document or an unpiped `echo`
   still does not warn.
+
+- `tier3 compare` reads standard-policy Overall lift from `lift.json` when the
+  arms have different metric applicability, matching the canonical report.
+  Missing lift data is shown as `-`; custom-only and legacy agents retain their
+  arm-difference comparison.
 
 ## 0.8.0 - 2026-11-05
 

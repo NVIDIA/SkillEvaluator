@@ -9785,6 +9785,10 @@ class TestSkillspectorMissingReferences:
             ("Run [it](v[e]rsions/i[n]stall.sh) now.", "install.sh", True),
             ("Run [it](v{e,x}rsions/setup) now.", "versions", True),
             ("Run [it]($ROOT/setup) now.", "versions", True),
+            ("Run [it](v{e{r,x},y}sions/setup) now.", "versions", True),
+            ("Run [it](${X:-${Y:-v}}ersions/setup) now.", "versions", True),
+            ("Run [them](setup.sh,inst*.sh) now.", "install.sh", True),
+            ("Run [it](v[[:alpha:]]rsions/setup) now.", "versions", True),
             ("Run `ver\\sions/setup` now.", "versions", True),
             ("Run `bash v*/*.sh`, then write `output/notes.md`.", "install.sh", True),
             ("Write `output/*.md` files.", "readme.md", True),
@@ -9804,6 +9808,31 @@ class TestSkillspectorMissingReferences:
         avoids = _skillspector_reference_line_avoids(f"# Title\n{line}\n".encode(), row, references, keys)
 
         assert avoids is not named
+
+    @pytest.mark.parametrize(
+        ("pattern", "name", "matches"),
+        [
+            ("v*", "versions", True),
+            ("*.sh", "install.sh", True),
+            ("vers?ons", "versions", True),
+            ("v[e]rsions", "versions", True),
+            ("v[!]x]rsions", "versions", True),
+            ("v[[:alpha:]]rsions", "versions", True),
+            ("*a*b?c[xy]d*", "zzabzcxdzz", True),
+            pytest.param("*" * 9_000 + "h", "install.sh", True, id="many-stars"),
+            ("v[e", "versions", False),
+            ("*.sh", "install.py", False),
+            ("[docs]", "docs", False),
+            pytest.param("[" * 9_000, "versions", False, id="longer-than-every-name"),
+        ],
+    )
+    def test_glob_matcher_covers_what_a_shell_matches(self, pattern: str, name: str, matches: bool) -> None:
+        """A bracket expression may match any one character, and a pattern longer than every name matches none."""
+        from skillevaluator.validators.security import _skillspector_glob_matcher
+
+        matcher = _skillspector_glob_matcher(pattern, len(name))
+
+        assert (matcher is not None and matcher(name) is not None) is matches
 
     def test_reference_line_is_numbered_like_skillspector(self) -> None:
         row = {"path": "SKILL.md", "start_line": 2, "end_line": 2}

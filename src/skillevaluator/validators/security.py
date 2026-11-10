@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import bisect
 import contextlib
-import fnmatch
 import functools
 import getpass
 import hashlib
@@ -1581,18 +1580,18 @@ _SKILLSPECTOR_LINE_WORD_RE = re.compile(r"[^\s`()<>|;&]+")
 # Characters with which a shell expands, quotes or escapes a word, so that it
 # can open a file that the word does not spell out.
 _SKILLSPECTOR_SHELL_SYNTAX = frozenset("*?[{$\"'\\")
-# Brace expansions (``{a,b}``, ``{1..3}``) and parameter expansions (``$name``,
-# ``${name}``), which may stand for any text.
-_SKILLSPECTOR_SHELL_EXPANSION_RE = re.compile(r"\{[^{}]*(?:,|\.\.)[^{}]*\}|\$\{[^{}]*\}?|\$[\w@*#?!$-]*")
+# A parameter expansion such as ``$name`` or ``$1``, which may stand for any text.
+_SKILLSPECTOR_SHELL_PARAMETER_RE = re.compile(r"\$[\w@*#?!$-]*")
 _SKILLSPECTOR_SHELL_QUOTE_RE = re.compile(r"[\"'\\]")
 _SKILLSPECTOR_GLOB_SYNTAX = frozenset("*?[")
-_SKILLSPECTOR_PATH_PART_SEPARATOR_RE = re.compile(r"[/=:]")
+_SKILLSPECTOR_PATH_PART_SEPARATOR_RE = re.compile(r"[=:,]")
 # Work that checking the lines of one report's missing references may take, in
-# units of about one character compared: decoding a line costs 1,000 per
+# units of about one character compared: decoding a line costs 3,000 per
 # character, each search of a decoded line for a name 100 plus the line's
-# length, and each pattern 20,000 plus 300 and the name's length for each name
-# matched against it. Beyond the budget the lines are not accepted, which
-# bounds the time that a skill built to slow the check can cost.
+# length, and each pattern 20,000 plus 1,000 per character and 300 plus the
+# name's length for each name matched against it. Beyond the budget the lines
+# are not accepted, which bounds the time that a skill built to slow the check
+# can cost.
 _SKILLSPECTOR_REFERENCE_MATCH_BUDGET = 1_000_000_000
 
 
@@ -1803,8 +1802,8 @@ class _SkillspectorMatchBudget:
 
 
 @functools.lru_cache(maxsize=8)
-def _skillspector_key_kinds(keys: frozenset[str]) -> tuple[Mapping[str, int], tuple[str, ...], int]:
-    """*keys* split into plain name runs and other names, with their total length.
+def _skillspector_key_kinds(keys: frozenset[str]) -> tuple[Mapping[str, int], tuple[str, ...], int, int]:
+    """*keys* split into plain name runs and other names, with their total and longest length.
 
     Each name run is given by its text before any trailing dots, mapped to the
     fewest trailing dots of a key with that text.
@@ -1818,17 +1817,75 @@ def _skillspector_key_kinds(keys: frozenset[str]) -> tuple[Mapping[str, int], tu
             runs[base] = min(dots, runs.get(base, dots))
         else:
             others.append(key)
-    return runs, tuple(sorted(others)), sum(len(key) for key in keys)
+    return runs, tuple(sorted(others)), sum(len(key) for key in keys), max(map(len, keys), default=0)
+
+
+def _skillspector_glob_matcher(pattern: str, longest: int) -> Callable[[str], object] | None:
+    """Match the names of at most *longest* characters that the shell glob *pattern* may match, else ``None``.
+
+    ``*`` matches any text and ``?`` one character. A bracket expression
+    matches any one character, whatever it lists, and a ``]`` outside one
+    matches any text, so a class such as ``[[:alpha:]]`` is covered too; the
+    matcher may accept more names than the shell would, never fewer. ``None``
+    means that no name that short can match. The work is linear in the length
+    of *pattern*, and the regex never backtracks over more than one ``*``.
+    """
+    size = len(pattern)
+    closes = [size] * (size + 1)
+    for index in range(size - 1, -1, -1):
+        closes[index] = index if pattern[index] == "]" else closes[index + 1]
+    segments: list[list[str]] = [[]]
+    index = 0
+    while index < size:
+        char = pattern[index]
+        index += 1
+        if char in "*]":
+            segments.append([])
+            continue
+        if char == "[":
+            start = index + 1 if index < size and pattern[index] in "!^" else index
+            start += 1 if start < size and pattern[start] == "]" else 0
+            if closes[start] < size:
+                segments[-1].append(".")
+                index = closes[start] + 1
+                continue
+        segments[-1].append("." if char == "?" else re.escape(char))
+    if sum(len(segment) for segment in segments) > longest:
+        return None
+    first, *rest = ("".join(segment) for segment in segments)
+    if rest:
+        *middle, last = rest
+        first += "".join(f"(?>.*?{segment})" for segment in middle if segment) + f".*{last}"
+    return re.compile(f"(?s:{first})\\Z").match
+
+
+def _skillspector_shell_word(word: str) -> str:
+    """*word* as a glob pattern for what a shell may expand it to, in time linear in its length.
+
+    Quotes and backslashes are removed. Then everything from the first
+    ``${`` to the last ``}`` after it (or to the end), everything from the
+    first ``{`` to the last ``}`` when a ``,`` or ``..`` lies between them
+    (brace expansion), and each other parameter expansion such as ``$name``
+    becomes ``*``, so nested expansions are covered too. ``*``, ``?`` and
+    ``[...]`` keep their meaning.
+    """
+    word = _SKILLSPECTOR_SHELL_QUOTE_RE.sub("", word)
+    while (start := word.find("${")) >= 0:
+        end = word.rfind("}")
+        word = word[:start] + "*" + (word[end + 1 :] if end > start else "")
+    start, end = word.find("{"), word.rfind("}")
+    if 0 <= start < end and ("," in word[start:end] or ".." in word[start:end]):
+        word = word[:start] + "*" + word[end + 1 :]
+    return _SKILLSPECTOR_SHELL_PARAMETER_RE.sub("*", word)
 
 
 def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
-    """:mod:`fnmatch` patterns for the path parts of the words in *texts* that a shell expands or unquotes.
+    """Glob patterns for the path parts of the words in *texts* that a shell expands or unquotes.
 
     A word with ``*``, ``?``, ``[``, ``{``, ``$``, a quote or a backslash, other
     than one made only of ``*`` such as a list marker, is read as a shell
-    would: each brace or parameter expansion stands for any text (``*``),
-    quotes and backslashes are removed, and ``*``, ``?`` and ``[...]`` keep
-    their meaning. Each part between ``/``, ``=`` and ``:`` is a pattern, as
+    would (:func:`_skillspector_shell_word`). Each part between ``/`` is a
+    pattern, and so is each piece of it between ``=``, ``:`` and ``,``, as
     written and without the dots and punctuation that end a sentence after it.
     """
     patterns: set[str] = set()
@@ -1836,9 +1893,9 @@ def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
         for word in _SKILLSPECTOR_LINE_WORD_RE.findall(text):
             if _SKILLSPECTOR_SHELL_SYNTAX.isdisjoint(word) or not word.strip("*"):
                 continue
-            unquoted = _SKILLSPECTOR_SHELL_QUOTE_RE.sub("", _SKILLSPECTOR_SHELL_EXPANSION_RE.sub("*", word))
-            for part in _SKILLSPECTOR_PATH_PART_SEPARATOR_RE.split(unquoted):
-                patterns.update(candidate for candidate in (part, part.rstrip(".,;:!?")) if candidate)
+            for part in _skillspector_shell_word(word).split("/"):
+                for piece in {part, *_SKILLSPECTOR_PATH_PART_SEPARATOR_RE.split(part)}:
+                    patterns.update(candidate for candidate in (piece, piece.rstrip(".,;:!?")) if candidate)
     return patterns
 
 
@@ -1890,7 +1947,7 @@ def _skillspector_reference_line_avoids(
     if not keys:
         return True
     budget = budget or _SkillspectorMatchBudget()
-    if not budget.spend(len(line) * 1_000):
+    if not budget.spend(len(line) * 3_000):
         return False
     decodings: tuple[Callable[[str], str], ...] = (
         lambda text: _SKILLSPECTOR_MARKDOWN_ESCAPE_RE.sub(r"\1", text),
@@ -1903,12 +1960,12 @@ def _skillspector_reference_line_avoids(
     texts = {text.casefold() for text in variants} | {
         unicodedata.normalize("NFC", text).casefold() for text in variants
     }
-    run_keys, other_keys, key_chars = _skillspector_key_kinds(keys)
+    run_keys, other_keys, key_chars, longest = _skillspector_key_kinds(keys)
     patterns = _skillspector_shell_patterns(texts)
     globs = [pattern for pattern in patterns if not _SKILLSPECTOR_GLOB_SYNTAX.isdisjoint(pattern)]
     searches = len(texts) * len(other_keys)
     cost = searches * 100 + sum(len(text) for text in texts) * len(other_keys)
-    cost += len(globs) * (20_000 + 300 * len(keys) + key_chars)
+    cost += sum(20_000 + 1_000 * len(pattern) + 300 * len(keys) + key_chars for pattern in globs)
     if not budget.spend(cost):
         return False
     # A key made only of name characters matches a whole run of them, less any trailing dots.
@@ -1924,8 +1981,8 @@ def _skillspector_reference_line_avoids(
     if any(_skillspector_text_names(text, key) for key in other_keys for text in texts):
         return False
     for pattern in globs:
-        matches = re.compile(fnmatch.translate(pattern)).match
-        if any(matches(key) for key in keys):
+        matches = _skillspector_glob_matcher(pattern, longest)
+        if matches is not None and any(matches(key) for key in keys):
             return False
     return True
 

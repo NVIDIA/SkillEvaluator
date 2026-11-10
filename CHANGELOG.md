@@ -13,6 +13,12 @@ All notable changes to SkillEvaluator are documented in this file.
   troubleshooting and adaptation; contributor guidance clarifies environment
   setup, example verification and the existing DCO policy.
 
+- `tier3 import-metrics` accepts versioned, normalized per-case custom scores
+  from external evaluations and writes clearly labeled JSON/Markdown reports.
+  Imports validate identities, metric metadata and values, retain declared
+  provenance and source hashes, and compute custom lift only on matched
+  case/attempt pairs, without assigning standard scores or claiming execution.
+
 - Show per-agent evidence volume next to Tier 3 scores: distinct cases, planned
   and scored attempts, execution and judge failures, and per-arm counts when a
   baseline ran. Flag limited case coverage or incomplete attempt coverage;
@@ -122,6 +128,11 @@ All notable changes to SkillEvaluator are documented in this file.
   agent, hook and `bin/` locations stay unloaded.
   `scripts/ci/smoke_openclaw_plugins.py` repeats these checks against real
   plugin sources without executing plugin code.
+
+- Simplify repository CI onboarding around quality and security checks with
+  no model key required,
+  keeping optional LLM checks and hosted feedback separate. Preserve opt-in
+  all-tier setup and report contracts in an Advanced CI reference.
 
 ### Changed
 

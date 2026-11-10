@@ -109,6 +109,15 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Tier 3 LLM suggestions and insight recommendations now keep only evidence
+  references the run recorded (cited references that don't resolve are
+  dropped rather than shown as evidence) and keep one copy of a repeated
+  suggestion. Insight recommendations that restate a deterministic one, or
+  that loosen, relax, or lower an expectation, assertion, ground truth, or
+  pass threshold, are dropped. Both prompts ask for distinct actions and
+  label untested causes, such as switching to a different model, as
+  hypotheses or experiments.
+
 - Tier 3 reports missing skill runtime dependencies as environment problems,
   with declaration and custom Dockerfile guidance. Unrecovered environment
   failures leave the trial UNSCORED instead of reducing the skill's score;

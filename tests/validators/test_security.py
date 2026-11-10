@@ -5984,7 +5984,7 @@ assert cap is not None and get_max_output_tokens(model) <= cap, (cap, get_max_ou
         assert f"LLM finding verification was skipped (no verdicts returned: {cause})" in result.messages
 
     def test_llm_verdicts_name_the_model_that_answered(self, tmp_path: Path) -> None:
-        """A verdict from a server-side fallback model is labeled with that model, not the configured one."""
+        """A verdict from a server-side fallback model is labeled with that model and its provider."""
         result = ValidationResult()
         for index in range(3):
             result.add_structured_finding(
@@ -6003,25 +6003,40 @@ assert cap is not None and get_max_output_tokens(model) <= cap, (cap, get_max_ou
                 0: {"verdict": "false_positive", "confidence": "high", "rationale": "Documentation example."},
                 1: {"verdict": "true_positive", "confidence": "high", "rationale": "Real address."},
             }
+            verifier_cls.return_value.provider = "anthropic"
             verifier_cls.return_value.model_used = "claude-opus-4-8"
             verifier_cls.return_value.last_failure = None
             SecurityValidator(verify_llm=True)._verify_findings_with_llm(result, tmp_path)
 
         by_check = {finding.check_name: finding for finding in result.findings}
+        labels = {"llm_provider": "anthropic", "llm_model_used": "claude-opus-4-8"}
         assert by_check["finding-0"].severity == Severity.INFO
-        assert by_check["finding-0"].metadata["llm_model_used"] == "claude-opus-4-8"
+        assert by_check["finding-0"].metadata.items() >= labels.items()
         assert by_check["finding-1"].severity == Severity.HIGH
-        assert by_check["finding-1"].metadata["llm_model_used"] == "claude-opus-4-8"
-        # A finding the verifier returned no verdict for names no model either.
-        assert "llm_model_used" not in by_check["finding-2"].metadata
+        assert by_check["finding-1"].metadata.items() >= labels.items()
+        # A finding the verifier returned no verdict for names no provider or model either.
+        assert not by_check["finding-2"].metadata.keys() & labels.keys()
 
     @pytest.mark.parametrize(
-        ("model_used", "expected"),
-        [("https://proxy.example.test/v1", "unresolved"), ("sk-test", "unresolved"), (None, None)],
-        ids=["url", "key-like", "none"],
+        ("provider", "model_used", "expected"),
+        [
+            (
+                "anthropic",
+                "https://proxy.example.test/v1",
+                {"llm_provider": "anthropic", "llm_model_used": "unresolved"},
+            ),
+            ("anthropic", "sk-test", {"llm_provider": "anthropic", "llm_model_used": "unresolved"}),
+            (
+                "https://proxy.example.test",
+                "claude-opus-4-8",
+                {"llm_provider": "unresolved", "llm_model_used": "claude-opus-4-8"},
+            ),
+            ("anthropic", None, {}),
+        ],
+        ids=["url-model", "key-like-model", "url-provider", "no-model"],
     )
-    def test_llm_verdict_model_is_sanitized_or_left_out(
-        self, tmp_path: Path, model_used: str | None, expected: str | None
+    def test_llm_verdict_labels_are_sanitized_or_left_out(
+        self, tmp_path: Path, provider: str, model_used: str | None, expected: dict[str, str]
     ) -> None:
         result = ValidationResult()
         result.add_structured_finding(
@@ -6033,16 +6048,18 @@ assert cap is not None and get_max_output_tokens(model) <= cap, (cap, get_max_ou
             verifier_cls.return_value.verify.return_value = {
                 0: {"verdict": "true_positive", "confidence": "high", "rationale": "Real address."}
             }
+            verifier_cls.return_value.provider = provider
             verifier_cls.return_value.model_used = model_used
             verifier_cls.return_value.last_failure = None
             SecurityValidator(verify_llm=True)._verify_findings_with_llm(result, tmp_path)
 
         metadata = result.findings[0].metadata
         assert metadata["llm_verdict"] == "true_positive"
-        assert metadata.get("llm_model_used", None) == expected
-        assert ("llm_model_used" in metadata) is (expected is not None)
-        if model_used is not None:
-            assert model_used not in json.dumps(metadata)
+        assert {key: metadata[key] for key in ("llm_provider", "llm_model_used") if key in metadata} == expected
+        reported = json.dumps(metadata)
+        for raw, label in ((provider, "llm_provider"), (model_used, "llm_model_used")):
+            if expected.get(label) == "unresolved":
+                assert raw not in reported
 
     @pytest.mark.parametrize(
         ("provider", "configured", "reply_model", "fallback_block", "expected"),
@@ -6125,6 +6142,7 @@ assert cap is not None and get_max_output_tokens(model) <= cap, (cap, get_max_ou
 
         [finding] = result.findings
         assert (finding.metadata["llm_verdict"], finding.severity) == ("false_positive", Severity.INFO)
+        assert finding.metadata["llm_provider"] == provider
         assert finding.metadata["llm_model_used"] == expected
 
     def test_importing_the_security_validator_leaves_the_llm_client_unloaded(self) -> None:

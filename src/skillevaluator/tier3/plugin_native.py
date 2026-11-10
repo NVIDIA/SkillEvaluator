@@ -2296,6 +2296,10 @@ NATIVE_AGENT_IMPORT_PATHS: dict[tuple[str, str | None], str] = {
     ("opencode", None): f"{_NATIVE_AGENTS}:NativeOpenCode",
     ("opencode", f"{_LOCAL_AGENTS}:SkillEvaluatorGatewayOpenCode"): f"{_NATIVE_AGENTS}:NativeGatewayOpenCode",
     ("hermes", None): f"{_NATIVE_AGENTS}:NativeHermes",
+    (
+        "hermes",
+        "skillevaluator.tier3.harbor.hermes_agent:SkillEvaluatorHermes",
+    ): f"{_NATIVE_AGENTS}:NativeNvidiaBuildHermes",
 }
 
 

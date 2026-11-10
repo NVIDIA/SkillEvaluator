@@ -18,7 +18,7 @@ inflate the artifact and could carry credentials an agent echoed.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from itertools import islice
 from typing import Any
 
@@ -160,14 +160,21 @@ def _failed_check_reason(key: str, value: dict[str, Any]) -> str:
         if isinstance(text, str) and text.strip():
             return text
     label = key.replace("_", " ").replace("-", " ").strip()
-    if not label:
-        return "Check failed"
-    return f"{label[0].upper()}{label[1:]} failed"
+    return f"Check `{label}` did not pass; no reason was recorded"
 
 
-def _reason_candidates(detail: dict[str, Any], *, include_results: bool) -> Iterator[str]:
+def _reason_candidates(
+    detail: dict[str, Any],
+    *,
+    include_results: bool,
+    metric: str | None,
+    reward: dict[str, Any] | None,
+) -> Iterator[str]:
     """Yield candidate reason strings across the known grader detail shapes."""
-    from skillevaluator.tier3.harbor.report import _applicable_accuracy_criteria
+    from skillevaluator.tier3.harbor.report import (
+        _applicable_accuracy_criteria,
+        _expected_observed_suffix,
+    )
 
     for field in ("reason", "message"):
         if isinstance(detail.get(field), str):
@@ -193,11 +200,14 @@ def _reason_candidates(detail: dict[str, Any], *, include_results: bool) -> Iter
     # excluded from the score (such as skill identification when no skill is
     # expected) did not fail it.
     criteria = _applicable_accuracy_criteria(detail)
-    failed_criteria = sorted(
-        str(name)[:128] for name, passed in islice(criteria.items(), _MAX_DETAIL_ITEMS) if passed is False
-    )
+    failed_criteria = [str(name) for name, passed in islice(criteria.items(), _MAX_DETAIL_ITEMS) if passed is False]
     if failed_criteria:
         yield f"Failed criteria: {', '.join(failed_criteria)}"
+
+    if metric in ("accuracy", "goal_accuracy"):
+        suffix = _expected_observed_suffix(detail, reward)
+        if suffix:
+            yield suffix
 
     # Other graders nest one dict per named check.
     for key, value in islice(detail.items(), _MAX_DETAIL_ITEMS):
@@ -210,7 +220,14 @@ def _reason_candidates(detail: dict[str, Any], *, include_results: bool) -> Iter
         yield detail["attribution_explanation"]
 
 
-def failure_reason(detail: object, *, include_results: bool = True) -> str:
+def failure_reason(
+    detail: object,
+    *,
+    include_results: bool = True,
+    metric: str | None = None,
+    reward: dict[str, Any] | None = None,
+    omit: Collection[str] = (),
+) -> str:
     """Return one short, deduplicated, redacted reason for a failing metric.
 
     ``include_results=False`` leaves out failing behavior results, for evaluator
@@ -219,13 +236,26 @@ def failure_reason(detail: object, *, include_results: bool = True) -> str:
     if not isinstance(detail, dict):
         return ""
     parts: list[str] = []
+    omitted_texts: set[str] = set()
+    for text in omit:
+        cleaned = sanitize_grader_text(text)
+        if cleaned:
+            omitted_texts.add(cleaned)
+            omitted_texts.update(part for part in cleaned.split("; ") if part)
     # Only non-blank candidates count toward the cap, so entries without text
     # cannot crowd out the criteria, checks, or attribution that follow them.
     candidates = (
-        candidate for candidate in _reason_candidates(detail, include_results=include_results) if candidate.strip()
+        cleaned
+        for candidate in _reason_candidates(
+            detail,
+            include_results=include_results,
+            metric=metric,
+            reward=reward,
+        )
+        if (cleaned := sanitize_grader_text(candidate))
+        and not any(cleaned == omitted or cleaned in omitted for omitted in omitted_texts)
     )
-    for candidate in islice(candidates, _MAX_REASON_CANDIDATES):
-        cleaned = sanitize_grader_text(candidate)
+    for cleaned in islice(candidates, _MAX_REASON_CANDIDATES):
         if cleaned and cleaned not in parts:
             parts.append(cleaned)
         if len(parts) >= _MAX_REASON_PARTS:
@@ -233,6 +263,13 @@ def failure_reason(detail: object, *, include_results: bool = True) -> str:
     # The parts are already redacted, so clipping them before the final pass
     # cannot expose a credential, and the final pass stays short.
     return sanitize_grader_text("; ".join(parts)[: 4 * MAX_REASON_CHARS], MAX_REASON_CHARS)
+
+
+def evidence_unavailable_reason(reward: dict[str, Any]) -> str:
+    failure = sanitize_grader_text(reward.get("trajectory_detail") or reward.get("error"), MAX_REASON_CHARS)
+    if failure:
+        return f"Trajectory evidence could not be loaded: {failure}"
+    return "No trajectory evidence was recorded for this metric"
 
 
 def failure_excerpt(detail: object) -> str:

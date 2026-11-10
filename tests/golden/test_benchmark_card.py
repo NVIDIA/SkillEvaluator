@@ -17,6 +17,7 @@ from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.publication_evidence import stamp_publication_evidence
 from skillevaluator.reporting import BenchmarkReporter
 from skillevaluator.reporting.benchmark import _publication_safe_inline, _verdict_callout
+from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION
 
 PASS_GOLDEN = Path(__file__).resolve().parent / "benchmark_pass" / "BENCHMARK.md"
 FAIL_GOLDEN = Path(__file__).resolve().parent / "benchmark_fail" / "BENCHMARK.md"
@@ -184,6 +185,11 @@ def _live_tier3_result() -> ValidationResult:
             "evaluator_container_revision": "ghcr.io/nvidia/skillevaluator@sha256:0117bc2e3e54da4244a656466526c5b1b5a559ea0117bc2e3e54da4244a65646",
         },
         "attempt_policy": {"max_attempts": 3, "pass_threshold": 0.5, "stop_on_pass": False},
+        "pass_at_k": {
+            "with_skill": {"k": 3, "pass_threshold": 0.5, "rate": 0.75},
+            "without_skill": {"k": 3, "pass_threshold": 0.5, "rate": 0.5},
+            "lift": {"delta": 0.25},
+        },
         "agents": {
             "claude-code": {
                 "model": "claude-sonnet",
@@ -1092,6 +1098,8 @@ def test_verdict_callout_falls_back_for_future_statuses() -> None:
 
 def test_benchmark_pass_card_matches_golden() -> None:
     rendered = BenchmarkReporter(include_timestamp=True).render_all([*_deterministic_results(), _live_tier3_result()])
+    assert SKILL_LIFT_DEFINITION not in rendered
+    assert "Pass@3 (supporting reliability" not in rendered
     assert rendered == PASS_GOLDEN.read_text(encoding="utf-8")
     assert "| Tier 1 | Static validation | **PASSED** |" in rendered
     assert "| Tier 2 | Semantic deduplication | **PASSED WITH OBSERVATIONS** |" in rendered

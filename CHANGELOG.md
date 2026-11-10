@@ -6,11 +6,19 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- A reproducible public terminal starter runs the released CLI against the
+  bundled text-analyzer skill, checks real script/report output and a seeded
+  quality regression, and retains an editable task, fixture and run receipt.
+  The walkthrough connects setup, interpretation, live-evaluation prerequisites,
+  troubleshooting and adaptation; contributor guidance clarifies environment
+  setup, example verification and the existing DCO policy.
+
+- Tier 3 datasets can declare deterministic behavior checks for script invocation and success, workspace files, and final-response text.
+
 - Document per-agent Tier 3 `findings.json` artifacts and distinguish advisory
   metric severity from dimension verdicts; include severity thresholds in the
   artifact and a muted CLI legend without changing scores or thresholds.
-
-- `tier3 import-metrics` accepts versioned, normalized per-case custom scores
+ - `tier3 import-metrics` accepts versioned, normalized per-case custom scores
   from external evaluations and writes clearly labeled JSON/Markdown reports.
   Imports validate identities, metric metadata and values, retain declared
   provenance and source hashes, and compute custom lift only on matched
@@ -26,7 +34,6 @@ All notable changes to SkillEvaluator are documented in this file.
   negative-case, Wilson interval, and paired-case coverage requirements. Show
   the dataset-size status in evaluation, validation, HTML, and BENCHMARK output;
   validation coverage notes remain informational.
-
 - Experimental `hermes` Tier 3 agent for Docker and native NVIDIA Build routing,
   pinned to Hermes v2026.9.24. Includes isolated skill staging, ATIF trajectories,
   activation evidence, token accounting and retained execution diagnostics.
@@ -132,6 +139,16 @@ All notable changes to SkillEvaluator are documented in this file.
   all-tier setup and report contracts in an Advanced CI reference.
 
 ### Changed
+
+- Name Skill Lift as the headline comparison and label pass@k differences as
+  supporting reliability across reports and terminal output.
+
+- A scored Tier 3 attempt now fails when `goal_accuracy` or security is below
+  1.0, even if its Overall score meets the pass threshold. N/A or unscored
+  metrics preserve the existing verdict behavior; missed behavior-check steps
+  are warnings. A with-skill required-check failure fails the quality verdict,
+  while no-skill failures do not. Reports show required-check, goals-met,
+  and security-clean counts for both arms, plus failed-case reasons.
 
 - HTML and `BENCHMARK.md` reports explain each Tier 3 dimension in plain
   language with its evidence source and whether the run has a no-skill baseline

@@ -18,7 +18,7 @@ inflate the artifact and could carry credentials an agent echoed.
 from __future__ import annotations
 
 import re
-from collections.abc import Collection, Iterator
+from collections.abc import Collection, Iterator, Mapping
 from itertools import islice
 from typing import Any
 
@@ -179,6 +179,8 @@ def _reason_candidates(
     for field in ("reason", "message"):
         if isinstance(detail.get(field), str):
             yield detail[field]
+    if isinstance(detail.get("expected_observed"), str):
+        yield detail["expected_observed"]
 
     for finding in _detail_list(detail, "findings"):
         if isinstance(finding, str):
@@ -233,8 +235,18 @@ def failure_reason(
     ``include_results=False`` leaves out failing behavior results, for evaluator
     cards that already show them as ``failures``.
     """
+    if not isinstance(detail, dict) and reward is not None and metric:
+        details = reward.get("details")
+        detail = details.get(metric) if isinstance(details, Mapping) else None
     if not isinstance(detail, dict):
         return ""
+    if metric in {"accuracy", "goal_accuracy"}:
+        observed_pair = detail.get("expected_observed")
+        observed_pair = observed_pair if isinstance(observed_pair, Mapping) else detail
+        expected = observed_pair.get("expected")
+        observed = observed_pair.get("observed")
+        if isinstance(expected, str) and expected.strip() and isinstance(observed, str) and observed.strip():
+            detail = {**detail, "expected_observed": f"Expected: {expected}; observed: {observed}"}
     parts: list[str] = []
     omitted_texts: set[str] = set()
     for text in omit:
@@ -256,6 +268,8 @@ def failure_reason(
         and not any(cleaned == omitted or cleaned in omitted for omitted in omitted_texts)
     )
     for cleaned in islice(candidates, _MAX_REASON_CANDIDATES):
+        if cleaned and any(cleaned == text or cleaned in text for text in omitted_texts):
+            continue
         if cleaned and cleaned not in parts:
             parts.append(cleaned)
         if len(parts) >= _MAX_REASON_PARTS:

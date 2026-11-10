@@ -68,6 +68,13 @@ from skillevaluator.publication_identity import (
     publication_target_from_path,
 )
 from skillevaluator.source_identity import normalized_evaluated_source
+from skillevaluator.tier3.baseline_store import (
+    baseline_description,
+    baseline_task_tree_digest,
+    comparison_identity,
+    identity_dataset_digest,
+    select_baseline,
+)
 from skillevaluator.tier3.case_ids import validate_case_ids
 from skillevaluator.tier3.eval_core.llm_judge import JUDGE_REASONING_EFFORT
 from skillevaluator.tier3.evals_config import (
@@ -4647,6 +4654,214 @@ def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
         )
 
 
+def _budget_usage(job_dir: Path) -> dict[str, Any]:
+    """Read attempt usage from Harbor's retained trajectory and judge artifacts."""
+    usage: dict[str, Any] = {}
+    for trajectory_path in job_dir.glob("**/trajectory.json"):
+        try:
+            payload = json.loads(trajectory_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        final_metrics = payload.get("final_metrics", {}) if isinstance(payload, dict) else {}
+        if isinstance(final_metrics, dict):
+            prompt = final_metrics.get("total_prompt_tokens")
+            completion = final_metrics.get("total_completion_tokens")
+            cached = final_metrics.get("total_cached_tokens")
+            cost = final_metrics.get("total_cost_usd")
+            if isinstance(prompt, int) and isinstance(completion, int):
+                usage["input_tokens"] = usage.get("input_tokens", 0) + prompt
+                usage["output_tokens"] = usage.get("output_tokens", 0) + completion
+                if isinstance(cached, int) and not isinstance(cached, bool):
+                    usage["cached_input_tokens"] = usage.get("cached_input_tokens", 0) + cached
+            if isinstance(cost, int | float) and not isinstance(cost, bool):
+                usage["cost_usd"] = usage.get("cost_usd", 0.0) + float(cost)
+    judge_calls = 0
+    saw_judge_artifact = False
+    for artifact_path in job_dir.glob("**/judge_attempts.json"):
+        saw_judge_artifact = True
+        try:
+            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        attempts = payload.get("attempts") if isinstance(payload, dict) else payload
+        if isinstance(attempts, list):
+            judge_calls += sum(
+                1 for attempt in attempts if isinstance(attempt, dict) and attempt.get("method") != "salvage"
+            )
+    if saw_judge_artifact:
+        usage["judge_calls"] = judge_calls
+    return usage
+
+
+def _resolve_harbor_price_file(
+    price_file: Path | None, harbor_config: Mapping[str, Any], source_skill_dir: Path
+) -> Path | None:
+    if price_file is not None:
+        return Path(price_file).expanduser().resolve()
+    configured = harbor_config.get("price_file")
+    if not configured:
+        return None
+    path = Path(str(configured)).expanduser()
+    return (path if path.is_absolute() else source_skill_dir / path).resolve()
+
+
+def _run_budgeted_variants(
+    *,
+    skill_name: str,
+    agent: str,
+    jobs: list[tuple[str, Path, str | None]],
+    task_names: list[str],
+    env_mode: str,
+    model: str,
+    jobs_dir: Path,
+    run_env: dict[str, str],
+    n_attempts: int,
+    pass_threshold: float,
+    stop_on_pass: bool,
+    timeout_multiplier: float,
+    override_cpus: int | None,
+    override_memory_mb: int | None,
+    override_storage_mb: int | None,
+    budget: Any,
+    n_concurrent: int,
+    verifier_env: Mapping[str, str] | None = None,
+    environment_kwargs: Mapping[str, Any] | None = None,
+    cancellation: _HarborRunCancellation | None = None,
+) -> dict[str, list[str]]:
+    errors: dict[str, dict[tuple[int, int], str]] = {variant: {} for variant, _, _ in jobs}
+    attempt_job_dirs: dict[str, dict[tuple[int, int], Path]] = {variant: {} for variant, _, _ in jobs}
+    result_lock = threading.Lock()
+
+    def run_unit(task_index: int, task_name: str, attempt: int) -> bool:
+        if cancellation is not None:
+            cancellation.raise_if_requested()
+        admissions = [
+            {"agent": agent, "arm": variant, "case_id": task_name, "attempt": attempt} for variant, _, _ in jobs
+        ]
+        if not budget.admit_many(admissions):
+            return False
+        passed = True
+        for variant, dataset, job_import_path in jobs:
+            if cancellation is not None:
+                cancellation.raise_if_requested()
+            job_name = f"{skill_name}-{agent}-{variant}-{task_name}-attempt{attempt:03d}"
+            ok, detail = _run_harbor(
+                dataset=dataset,
+                agent=agent,
+                job_name=job_name,
+                env_mode=env_mode,
+                model=model,
+                jobs_dir=jobs_dir,
+                run_env=run_env,
+                n_attempts=1,
+                n_concurrent=1,
+                timeout_multiplier=timeout_multiplier,
+                override_cpus=override_cpus,
+                override_memory_mb=override_memory_mb,
+                override_storage_mb=override_storage_mb,
+                agent_import_path=job_import_path,
+                verifier_env=verifier_env,
+                environment_kwargs=environment_kwargs,
+                expected_trials=1,
+                include_task_names=[task_name],
+                cancellation=cancellation,
+            )
+            job_dir = jobs_dir / job_name
+            budget.record_usage(_budget_usage(job_dir), model=model)
+            with result_lock:
+                attempt_job_dirs[variant][(task_index, attempt)] = job_dir
+                if ok:
+                    for key, error in list(errors[variant].items()):
+                        failed_dir = attempt_job_dirs[variant].get(key)
+                        if (
+                            key[0] == task_index
+                            and error.endswith(": Harbor job did not complete successfully: 1 errored")
+                            and failed_dir is not None
+                            and harbor_timeout_job_recovered(failed_dir, job_dir)
+                        ):
+                            errors[variant].pop(key)
+                else:
+                    errors[variant][(task_index, attempt)] = (
+                        f"{agent} {variant}-skill Harbor run failed: {task_name} attempt {attempt}: {detail}"
+                    )
+            passed = passed and ok and _job_passed(job_dir, pass_threshold)
+        return passed
+
+    def run_case(task_index: int, task_name: str) -> None:
+        for attempt in range(1, n_attempts + 1):
+            if run_unit(task_index, task_name, attempt) and stop_on_pass:
+                break
+
+    worker_count = max(1, min(n_concurrent, len(task_names) or 1))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        if stop_on_pass:
+            futures = [executor.submit(run_case, index, task_name) for index, task_name in enumerate(task_names)]
+        else:
+            futures = [
+                executor.submit(run_unit, index, task_name, attempt)
+                for index, task_name in enumerate(task_names)
+                for attempt in range(1, n_attempts + 1)
+            ]
+        for future in as_completed(futures):
+            future.result()
+    for variant, _, _ in jobs:
+        _merge_attempt_jobs(
+            [attempt_job_dirs[variant][key] for key in sorted(attempt_job_dirs[variant])],
+            jobs_dir / f"{skill_name}-{agent}-{variant}",
+        )
+    return {variant: [errors[variant][key] for key in sorted(errors[variant])] for variant, _, _ in jobs}
+
+
+def _run_budgeted_variant(
+    *,
+    skill_name: str,
+    agent: str,
+    variant: str,
+    dataset: Path,
+    task_names: list[str],
+    env_mode: str,
+    model: str,
+    jobs_dir: Path,
+    run_env: dict[str, str],
+    n_attempts: int,
+    pass_threshold: float,
+    stop_on_pass: bool,
+    timeout_multiplier: float,
+    override_cpus: int | None,
+    override_memory_mb: int | None,
+    override_storage_mb: int | None,
+    budget: Any,
+    n_concurrent: int = 1,
+    agent_import_path: str | None = None,
+    verifier_env: Mapping[str, str] | None = None,
+    environment_kwargs: Mapping[str, Any] | None = None,
+    cancellation: _HarborRunCancellation | None = None,
+) -> list[str]:
+    errors = _run_budgeted_variants(
+        skill_name=skill_name,
+        agent=agent,
+        jobs=[(variant, dataset, agent_import_path)],
+        task_names=task_names,
+        env_mode=env_mode,
+        model=model,
+        jobs_dir=jobs_dir,
+        run_env=run_env,
+        n_attempts=n_attempts,
+        pass_threshold=pass_threshold,
+        stop_on_pass=stop_on_pass,
+        timeout_multiplier=timeout_multiplier,
+        override_cpus=override_cpus,
+        override_memory_mb=override_memory_mb,
+        override_storage_mb=override_storage_mb,
+        budget=budget,
+        n_concurrent=n_concurrent,
+        verifier_env=verifier_env,
+        environment_kwargs=environment_kwargs,
+        cancellation=cancellation,
+    )
+    return errors[variant]
+
+
 def _run_stop_on_pass_variant(
     *,
     skill_name: str,
@@ -4834,6 +5049,7 @@ def _run_agent_pair(
     cancellation: _HarborRunCancellation | None = None,
     additional_arms: Sequence[tuple[str, Path, str | None]] = (),
     additional_arm_errors: dict[str, str] | None = None,
+    budget_controller: Any = None,
 ) -> list[str]:
     """Run ordinary and privately requested arms under one per-agent trial budget."""
     jobs = [] if with_skill is None else [("with", with_skill, with_agent_import_path or agent_import_path)]
@@ -4852,6 +5068,34 @@ def _run_agent_pair(
         if failures and additional_arm_errors is not None:
             additional_arm_errors[variant] = _bounded_execution_error("; ".join(failures))
         return []
+
+    if budget_controller is not None:
+        budget_errors: list[str] = []
+        failures_by_variant = _run_budgeted_variants(
+            skill_name=skill_name,
+            agent=agent,
+            jobs=jobs,
+            task_names=list(task_names or []),
+            env_mode=env_mode,
+            model=model,
+            jobs_dir=jobs_dir,
+            run_env=run_env,
+            n_attempts=n_attempts,
+            pass_threshold=pass_threshold,
+            stop_on_pass=stop_on_pass,
+            timeout_multiplier=timeout_multiplier,
+            override_cpus=override_cpus,
+            override_memory_mb=override_memory_mb,
+            override_storage_mb=override_storage_mb,
+            budget=budget_controller,
+            n_concurrent=n_concurrent,
+            verifier_env=verifier_env,
+            environment_kwargs=environment_kwargs,
+            cancellation=cancellation,
+        )
+        for variant, failures in failures_by_variant.items():
+            budget_errors.extend(record_failure(variant, failures))
+        return budget_errors
 
     if stop_on_pass:
         # A case's later attempt is launched only after its previous one
@@ -5076,7 +5320,13 @@ def _run_harbor_eval_impl(
     *,
     skip_baseline: bool = False,
     skip_with_skill: bool = False,
+    reuse_baseline: str | None = None,
     n_attempts: int | None = None,
+    max_agent_tokens: int | None = None,
+    max_judge_calls: int | None = None,
+    max_attempts_total: int | None = None,
+    max_cost_usd: float | None = None,
+    price_file: Path | None = None,
     pass_threshold: float | None = None,
     stop_on_pass: bool | None = None,
     n_concurrent: int | None = None,
@@ -5122,6 +5372,10 @@ def _run_harbor_eval_impl(
         return {"error": ["At least one Harbor agent is required."]}
     if skip_baseline and skip_with_skill:
         detail = "skip_baseline and skip_with_skill are mutually exclusive (no arm would run)"
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=detail))
+        return {"error": [detail]}
+    if reuse_baseline and (skip_baseline or skip_with_skill):
+        detail = "--reuse-baseline is mutually exclusive with --skip-baseline and --skip-with-skill"
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=detail))
         return {"error": [detail]}
     if env_mode == ENV_MODE_LOCAL:
@@ -5198,6 +5452,13 @@ def _run_harbor_eval_impl(
     n_concurrent = n_concurrent if n_concurrent is not None else harbor_config.get("n_concurrent", 4)
     max_agents = max_agents if max_agents is not None else harbor_config.get("max_agents", len(agents))
     max_cases = max_cases if max_cases is not None else harbor_config.get("max_cases")
+    max_agent_tokens = max_agent_tokens if max_agent_tokens is not None else harbor_config.get("max_agent_tokens")
+    max_judge_calls = max_judge_calls if max_judge_calls is not None else harbor_config.get("max_judge_calls")
+    max_attempts_total = (
+        max_attempts_total if max_attempts_total is not None else harbor_config.get("max_attempts_total")
+    )
+    max_cost_usd = max_cost_usd if max_cost_usd is not None else harbor_config.get("max_cost_usd")
+    price_file = _resolve_harbor_price_file(price_file, harbor_config, evaluator_skill_path)
     timeout_multiplier = (
         timeout_multiplier if timeout_multiplier is not None else harbor_config.get("timeout_multiplier", 1.0)
     )
@@ -5566,6 +5827,23 @@ def _run_harbor_eval_impl(
                 detail="credentials and selected models verified",
             )
         )
+    effective_resources = harbor_config.get("resources", {})
+    effective_resources = dict(effective_resources) if isinstance(effective_resources, Mapping) else {}
+    for resource, override in (
+        ("cpus", override_cpus),
+        ("memory_mb", override_memory_mb),
+        ("storage_mb", override_storage_mb),
+    ):
+        if override is not None:
+            effective_resources[resource] = override
+    environment_kwargs_digest = hashlib.sha256(
+        json.dumps(effective_environment_kwargs, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    runtime_env_digest = hashlib.sha256(
+        json.dumps(configured_runtime_env, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
     run_config = {
         "config_file": str(config_path.relative_to(evaluator_skill_path)) if config_path else "none",
         "harbor": {
@@ -5573,12 +5851,21 @@ def _run_harbor_eval_impl(
             "environment_kwargs": {
                 "keys": sorted(effective_environment_kwargs),
                 "sources": environment_kwarg_sources,
+                "values_sha256": environment_kwargs_digest,
             },
             "n_attempts": n_attempts,
             "stop_on_pass": bool(stop_on_pass),
             "n_concurrent": n_concurrent,
             "timeout_multiplier": timeout_multiplier,
             "base_image_mode": base_image_mode,
+            "resources": {
+                "cpus": effective_resources.get("cpus"),
+                "memory_mb": effective_resources.get("memory_mb"),
+                "storage_mb": effective_resources.get("storage_mb"),
+            },
+            "agent_workdir": harbor_config.get("agent_workdir"),
+            "custom_dockerfile_mode": dockerfile_mode,
+            "runtime_env": {"keys": sorted(configured_runtime_env), "values_sha256": runtime_env_digest},
             "jobs_retained": keep_harbor_jobs,
         },
         "provider": {"name": provider.provider, "model": provider.model},
@@ -5589,6 +5876,9 @@ def _run_harbor_eval_impl(
         },
         "task_source": task_source,
         "grading": {"mode": grading_mode},
+        "skill_workspace": {"mode": workspace_mode},
+        "copy_repo": copy_repo,
+        "repo_context_exclude_paths": [str(path) for path in repo_context_exclude_paths],
         "agents": model_resolution,
         # Persisted so a card rendered later from this run directory records the
         # source tree that was evaluated, not the evaluator build that ran it.
@@ -6001,11 +6291,98 @@ def _run_harbor_eval_impl(
     task_selectors = expected_task_selectors or []
     case_id_by_task_selector = expected_case_id_by_task_selector or {}
     case_ids = [case_id_by_task_selector[selector] for selector in task_selectors]
+    baseline_task_dirs = {agent: tuple(emitted_tasks[agent].get("without_skill", ())) for agent in agents}
+    try:
+        identity_digest = identity_dataset_digest(next(iter(baseline_task_dirs.values()), ()))
+        task_tree_digest = baseline_task_tree_digest(baseline_task_dirs)
+    except (OSError, UnicodeError, ValueError) as exc:
+        return _persist_pre_execution_failure([f"could not record baseline task identity: {exc}"])
+    run_config["baseline_task_tree_digest"] = task_tree_digest
     try:
         dataset_truth = _persist_dataset_truth(run_dir, fallback_task_ids=case_ids)
     except DatasetSnapshotContractError as exc:
         return _persist_pre_execution_failure([str(exc)])
     expected_trials = len(task_selectors) * n_attempts
+    identity = comparison_identity(
+        run_config,
+        {
+            "dataset_digest": dataset_truth["dataset_digest"],
+            "identity_dataset_digest": identity_digest,
+            "baseline_task_tree_digest": task_tree_digest,
+            "expected_case_ids": case_ids,
+            "evaluator_version": dataset_truth["evaluator_version"],
+            "publication_target": publication_target,
+            "attempt_policy": {
+                "max_attempts": n_attempts,
+                "pass_threshold": float(pass_threshold),
+                "stop_on_pass": bool(stop_on_pass),
+            },
+            "score_policy": None,
+        },
+    )
+    baseline = {"mode": "skipped" if skip_baseline else "fresh"}
+    reused_baseline_dir = None
+    if reuse_baseline:
+        try:
+            baseline = select_baseline(run_dir.parent, reuse_baseline, agents, identity)
+        except ValueError as exc:
+            return _persist_pre_execution_failure([str(exc)])
+        if baseline["mode"] == "reused":
+            reused_baseline_dir = Path(baseline["source_run_dir"])
+            skip_baseline = True
+    run_config["baseline"] = baseline
+    if reuse_baseline:
+        reporter.emit(ProgressEvent(stage="baseline", state="complete", detail=baseline_description(baseline)))
+    from skillevaluator.tier3.harbor.run_budget import (
+        BudgetConfigurationError,
+        BudgetController,
+        PriceBook,
+        planned_attempts,
+    )
+
+    if max_cost_usd is not None and price_file is None:
+        return _persist_pre_execution_failure(["--max-cost-usd requires --price-file"])
+    try:
+        price_book = PriceBook.load(price_file) if price_file is not None else None
+        if price_book is not None:
+            for agent in agents:
+                price_book.price_for(model_resolution[agent]["model"])
+        base_arms = 2 - int(skip_baseline) - int(skip_with_skill)
+        planned_arm_count = sum(base_arms + len(additional_arms.get(agent, ())) for agent in agents)
+        budget = BudgetController(
+            max_agent_tokens=max_agent_tokens,
+            max_judge_calls=max_judge_calls,
+            max_attempts_total=max_attempts_total,
+            max_cost_usd=max_cost_usd,
+            price_book=price_book,
+            planned=planned_attempts(
+                len(case_ids),
+                n_attempts,
+                1,
+                arms=planned_arm_count,
+                stop_on_pass=bool(stop_on_pass),
+            ),
+        )
+    except BudgetConfigurationError as exc:
+        return _persist_pre_execution_failure([str(exc)])
+    active_budget = (
+        budget
+        if any(limit is not None for limit in (max_agent_tokens, max_judge_calls, max_attempts_total, max_cost_usd))
+        else None
+    )
+    multiply_sign = "\u00d7"
+    reporter.emit(
+        ProgressEvent(
+            stage="configuration",
+            state="complete",
+            detail=(
+                f"Planned: {budget.planned} attempts "
+                f"({len(case_ids)} cases {multiply_sign} {n_attempts} attempts {multiply_sign} "
+                f"{planned_arm_count} agent arms total)"
+            ),
+        )
+    )
+    run_config["budget"] = budget.metadata()
     variants = 2 - int(skip_baseline) - int(skip_with_skill)
     matrix_trials = expected_trials * sum(variants + len(additional_arms.get(agent, ())) for agent in agents)
     try:
@@ -6128,7 +6505,7 @@ def _run_harbor_eval_impl(
             model=model_resolution[agent]["model"],
             env_mode=env_mode,
             with_skill=agent_task_dirs[agent][0],
-            baseline=agent_task_dirs[agent][1],
+            baseline=None if reused_baseline_dir is not None else agent_task_dirs[agent][1],
             jobs_dir=jobs_dir,
             run_env={**runtime_plans[agent].subprocess_env, **job_judge_subprocess_env},
             n_attempts=n_attempts,
@@ -6143,6 +6520,7 @@ def _run_harbor_eval_impl(
             stop_on_pass=bool(stop_on_pass),
             pass_threshold=float(pass_threshold),
             task_names=task_selectors,
+            budget_controller=active_budget,
             verifier_env=job_judge_verifier_env,
             environment_kwargs=effective_environment_kwargs,
             cancellation=cancellation,
@@ -6260,8 +6638,9 @@ def _run_harbor_eval_impl(
             agents=agents,
             output_dir=run_dir,
             jobs_dir=jobs_dir,
-            skip_baseline=skip_baseline,
+            skip_baseline=skip_baseline and reused_baseline_dir is None,
             skip_with_skill=skip_with_skill,
+            reused_baseline_dir=reused_baseline_dir,
             n_attempts=n_attempts,
             pass_threshold=float(pass_threshold),
             stop_on_pass=bool(stop_on_pass),
@@ -6275,14 +6654,19 @@ def _run_harbor_eval_impl(
             agent_models=model_resolution,
             launch_errors=errors,
             grading_mode=grading_mode,
+            budget_not_run=active_budget.not_run if active_budget is not None else [],
         )
     except Exception:
         reporter.emit(ProgressEvent(stage="collection", state="failed", detail="result collection failed"))
         _emit_run_finished("failed", "result collection failed")
         raise
     reporter.emit(ProgressEvent(stage="collection", state="complete", detail="Harbor results collected"))
+    identity["score_policy"] = results.get("score_policy", identity["score_policy"])
     results.update(
         {
+            "baseline": baseline,
+            "comparison_identity": identity,
+            "expected_case_ids": case_ids,
             "skill_name": skill_path.name,
             "run_id": run_id,
             **_run_owned_publication_fields(),
@@ -6297,8 +6681,12 @@ def _run_harbor_eval_impl(
             "dataset_summary": dataset_truth["dataset_summary"],
             "dataset_digest": dataset_truth["dataset_digest"],
             "dataset_digest_algorithm": dataset_truth["dataset_digest_algorithm"],
+            "identity_dataset_digest": identity_digest,
+            "baseline_task_tree_digest": task_tree_digest,
+            "budget": budget.metadata(),
             "dataset_provenance": dataset_provenance,
             "run_config": run_config,
+            "partial": bool(budget.not_run),
         }
     )
     from skillevaluator.evaluation.tier3_report import (

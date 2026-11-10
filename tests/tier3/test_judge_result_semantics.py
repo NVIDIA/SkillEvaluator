@@ -101,7 +101,9 @@ def test_required_behavior_judge_wrapper_keeps_inventory_on_unexpected_exception
         raise TimeoutError("judge deadline")
 
     args = () if keyword_arguments else ("conversation", ["first", "second"])
-    kwargs = {"conversation_text": "conversation", "expected_behaviors": ["first", "second"]} if keyword_arguments else {}
+    kwargs = (
+        {"conversation_text": "conversation", "expected_behaviors": ["first", "second"]} if keyword_arguments else {}
+    )
     result = eval_template._call_required_judge("behavior_check", raise_timeout, *args, **kwargs)
     assert result["score"] is None and result["status"] == "error"
     assert result["results"] == []

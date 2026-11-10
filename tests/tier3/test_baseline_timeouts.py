@@ -788,6 +788,33 @@ def test_verdict_comes_from_the_complete_peer_not_a_tolerated_agent(
         )
 
 
+def test_verdict_counts_come_from_a_complete_agent_that_set_the_verdict(tmp_path: Path) -> None:
+    # claude-code passes everything but its baseline timed out. opencode has the
+    # top score but misses a goal (FAIL), so the best agent's own result is not
+    # the run verdict; codex passes with a lower score and sets the PASS.
+    passing = {**SCORES, "goal_accuracy": 1.0}
+    lower_passing = {**dict.fromkeys(SCORES, 0.6), "goal_accuracy": 1.0, "security": 1.0}
+    jobs = tmp_path / "jobs"
+    _arm(jobs, "claude-code", "with", [(case, "scored") for case in CASES], scores=passing, details=_activation(True))
+    _arm(jobs, "claude-code", "without", [("case-001", "scored"), ("case-002", "timeout")])
+    for agent, scores in (("codex", lower_passing), ("opencode", None)):
+        _arm(jobs, agent, "with", [(case, "scored") for case in CASES], scores=scores, details=_activation(True))
+        _arm(jobs, agent, "without", [(case, "scored") for case in CASES], scores=scores)
+    results = _collect(
+        tmp_path, [LAUNCH_ERROR.format(agent="claude-code", count=1)], agents=["claude-code", "codex", "opencode"]
+    )
+    assert results[RUN_KEY]["tolerated_agents"] == ["claude-code"]
+
+    payload, _benchmark, _html, _message = _render_reports_and_message(tmp_path, results)
+
+    assert payload["best_agent"] == "opencode"
+    assert payload["verdict"] == payload["summary"]["verdict"] == "pass"
+    # The PASS counts are codex's, never those of the tolerated agent with no baseline.
+    for field in ("correct_answers", "required_checks", "security_clean"):
+        assert payload["summary"][field] == payload["agents"]["codex"][field]
+    assert payload["agents"]["claude-code"]["correct_answers"] != payload["agents"]["codex"]["correct_answers"]
+
+
 @pytest.mark.parametrize(
     ("tolerated", "panel_agent"),
     [((), "opencode"), (("opencode",), None), (("opencode", "claude-code"), None)],

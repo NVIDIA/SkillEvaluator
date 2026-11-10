@@ -939,8 +939,9 @@ def build_agent_eval_payload(
     if best_agent and _agent_quality_verdict(agent_payloads.get(best_agent, {})) == verdict:
         verdict_source = agent_payloads[best_agent]
     else:
+        # The reason and counts come from an agent the verdict was read from.
         verdict_source = next(
-            (agent for agent in agent_payloads.values() if _agent_quality_verdict(agent) == verdict),
+            (agent for agent in verdict_agents.values() if _agent_quality_verdict(agent) == verdict),
             None,
         )
 

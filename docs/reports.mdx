@@ -893,8 +893,8 @@ agent with observed activation can still contribute a comparison.
 An arm that ran but failed, for example because one baseline attempt hit the
 agent timeout, fails the agent and the run, and the other arm keeps its
 scores. Reports describe such an arm by how many of its attempts scored,
-never as not run. In `BENCHMARK.md`, the agent's cells read
-`90.0% — baseline incomplete (1 of 2 attempts scored); uplift unavailable`, or
+never as not run. In `BENCHMARK.md`, the agent's Overall and dimension cells
+read `90.0% — baseline incomplete (1 of 2 attempts scored); uplift unavailable`, or
 `baseline unavailable` when no baseline attempt scored. They read
 `baseline failed (2 of 2 attempts scored)` when the arm failed with no attempt
 missing, and `baseline failed` with no counts when its recorded counts are

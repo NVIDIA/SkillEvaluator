@@ -107,13 +107,19 @@ def _render(agents: dict[str, dict[str, Any]]) -> tuple[dict[str, Any], Validati
 
 
 def _benchmark_rows(benchmark: str) -> dict[str, list[str]]:
+    """Return the score rows (Overall and each dimension) of the Results at a Glance table.
+
+    The count rows (required checks, goals met, security clean) compare counts,
+    not a baseline score, so they are left out.
+    """
+    score_rows = {"Overall", *(dim_id.title() for dim_id in DIMENSION_MAPPING)}
     section = benchmark.split("## Results at a Glance\n", 1)[1].split("\n## ", 1)[0].split("\n### ", 1)[0]
     return {
         cells[0]: cells[1:]
         for line in section.splitlines()
         if line.startswith("| ")
         for cells in [[cell.strip() for cell in line.strip("|").split("|")]]
-        if cells[0] != "Measure"
+        if cells[0] in score_rows
     }
 
 

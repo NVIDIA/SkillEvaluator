@@ -3689,11 +3689,15 @@ def _build_conclusions(
         )
 
     failing_trials: list[str] = []
+    unscored_trials: list[str] = []
     for agent_name, agent in agents.items():
         for trial in agent.get("trials") or []:
             overall = _finite_float(trial.get("overall"))
-            if overall is None or overall < pass_threshold:
-                failing_trials.append(f"{agent_name}/{trial.get('entry_id') or trial.get('trial_id')}")
+            trial_label = f"{agent_name}/{trial.get('entry_id') or trial.get('trial_id')}"
+            if overall is None:
+                unscored_trials.append(trial_label)
+            elif overall < pass_threshold:
+                failing_trials.append(trial_label)
     if failing_trials:
         conclusions.append(
             {
@@ -3702,6 +3706,17 @@ def _build_conclusions(
                 "message": (
                     f"{len(failing_trials)} trial(s) missed the pass threshold; examples: "
                     + ", ".join(failing_trials[:5])
+                ),
+            }
+        )
+    if unscored_trials:
+        conclusions.append(
+            {
+                "severity": "warn",
+                "title": "Unscored trials",
+                "message": (
+                    f"{len(unscored_trials)} trial(s) have unavailable overall scores; examples: "
+                    + ", ".join(unscored_trials[:5])
                 ),
             }
         )

@@ -171,3 +171,201 @@ def test_catalog_alias_conflicts_precede_provider_work(tmp_path, embedding, kwar
     )
     assert any(not r.passed for r in result)
     assert embedding.requests == []
+
+
+def make_dual_profile_plugin(root):
+    for vendor in ("claude", "codex"):
+        manifest = root / f".{vendor}-plugin/plugin.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(
+            json.dumps(
+                {
+                    "name": f"{vendor}-demo",
+                    "description": f"{vendor.title()} workflow",
+                    "version": "1.0.0",
+                    "skills": f"./{vendor}-skills",
+                }
+            ),
+            encoding="utf-8",
+        )
+        member = root / f"{vendor}-skills/member/SKILL.md"
+        member.parent.mkdir(parents=True)
+        member.write_text(
+            f"---\nname: {vendor}-member\ndescription: {vendor.title()} task\n---\nExecute the task.\n",
+            encoding="utf-8",
+        )
+    return root / ".codex-plugin/plugin.json"
+
+
+def test_local_catalog_build_preserves_explicit_manifest_selection(tmp_path, embedding):
+    from skillevaluator.deduplication.plugin.catalog import LocalCatalog
+
+    selected = make_dual_profile_plugin(tmp_path / "plugin")
+    catalog = LocalCatalog.build(selected, client=embedding)
+    assert [(entry.name, entry.path, entry.manifest) for entry in catalog.plugins] == [
+        ("codex-demo", ".", ".codex-plugin/plugin.json")
+    ]
+    assert [(entry.name, entry.path) for entry in catalog.skills] == [("codex-member", "codex-skills/member")]
+    assert embedding.requests == [["codex-member: Codex task", "codex-demo: Codex workflow"]]
+
+
+@pytest.mark.parametrize("save_option", ["save_catalog", "save_cache"])
+def test_explicit_manifest_catalog_uses_selected_embeddings_and_fresh_profile(tmp_path, embedding, save_option):
+    selected = make_dual_profile_plugin(tmp_path / "plugin")
+    output = tmp_path / "catalog.json"
+    results = commands.run_similarity_check(selected, **{save_option: output})
+    assert all(result.passed for result in results), [result.errors for result in results]
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 2
+    assert [(entry["name"], entry["manifest"], entry["path"]) for entry in payload["plugins"]] == [
+        ("codex-demo", ".codex-plugin/plugin.json", ".")
+    ]
+    assert [(entry["name"], entry["path"]) for entry in payload["entries"]] == [("codex-member", "codex-skills/member")]
+    assert embedding.requests == [["codex-member: Codex task", "codex-demo: Codex workflow"]]
+    targets = [
+        result.metadata["plugin_catalog_target"] for result in results if "plugin_catalog_target" in result.metadata
+    ]
+    assert targets == [{"name": "codex-demo", "path": "."}, {"name": "codex-demo", "path": "."}]
+    expected_identity = publication_target_from_path(selected.parent.parent)
+    assert expected_identity is not None
+    assert all(result.metadata.get("publication_target") == expected_identity for result in results)
+
+
+def test_explicit_manifest_catalog_query_keeps_selected_profile(tmp_path, embedding):
+    catalog = tmp_path / "catalog.json"
+    commands.run_similarity_check(make_plugin(tmp_path / "external", "external"), save_catalog=catalog)
+    embedding.requests.clear()
+    selected = make_dual_profile_plugin(tmp_path / "plugin")
+    results = commands.run_similarity_check(selected, catalog=catalog)
+    assert all(result.passed for result in results), [result.errors for result in results]
+    texts = [text for request in embedding.requests for text in request]
+    assert "codex-demo: Codex workflow" in texts
+    assert "codex-member: Codex task" in texts
+    assert all("claude" not in text.casefold() for text in texts)
+
+
+def test_explicit_manifest_dedup_uses_selected_members(tmp_path, monkeypatch):
+    selected = make_dual_profile_plugin(tmp_path / "plugin")
+    monkeypatch.setattr(
+        "skillevaluator.deduplication.plugin.commands.IntraSkillValidator.validate",
+        lambda *_args, **_kwargs: ValidationResult(validator_name="Context Deduplication"),
+    )
+    results = commands.run_dedup_scan(selected)
+    assert [result.metadata["bundled_skill"] for result in results if "bundled_skill" in result.metadata] == [
+        "codex-skills/member"
+    ]
+    expected_identity = publication_target_from_path(selected.parent.parent)
+    assert expected_identity is not None
+    assert all(result.metadata.get("publication_target") == expected_identity for result in results)
+
+
+def test_combined_validate_keeps_explicit_manifest_for_dedup(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from skillevaluator.cli import cli
+
+    selected = make_dual_profile_plugin(tmp_path / "plugin")
+    seen = []
+
+    def dedup(path):
+        seen.append(path)
+        return [ValidationResult(validator_name="Context Deduplication")]
+
+    monkeypatch.setattr("skillevaluator.cli._run_dedup_or_skip", dedup)
+    CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(selected),
+            "--tiers",
+            "1,2",
+            "--checks",
+            "schema",
+            "-r",
+            "json",
+            "-o",
+            str(tmp_path / "reports"),
+        ],
+    )
+    assert seen == [selected]
+
+
+def _skill(root):
+    root.mkdir()
+    (root / "SKILL.md").write_text("---\nname: skill\ndescription: Test skill\n---\nRun the task.\n", encoding="utf-8")
+    return root
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["dedup-scan", "{target}", "--catalog", "{catalog}"],
+        ["dedup-scan", "{target}", "--llm"],
+        ["similarity-check", "{target}", "--llm"],
+        ["similarity-check", "{target}", "--llm-model", "judge"],
+    ],
+)
+def test_plugin_only_tier2_options_are_refused_for_skills(tmp_path, monkeypatch, command):
+    from click.testing import CliRunner
+
+    from skillevaluator.cli import cli
+
+    skill = _skill(tmp_path / "skill")
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text("{}", encoding="utf-8")
+
+    def forbidden(**_kwargs):
+        raise AssertionError("A refused option must not start a Tier 2 check")
+
+    monkeypatch.setattr(commands, "IntraSkillValidator", forbidden)
+    monkeypatch.setattr(commands, "SimilarityValidator", forbidden)
+    args = [part.format(target=skill, catalog=catalog) for part in command]
+    result = CliRunner().invoke(cli, ["tier2", *args])
+    assert result.exit_code == 2, result.output
+    assert "require a plugin target" in result.output
+
+
+def test_plugin_only_tier2_options_still_reach_plugin_dedup(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from skillevaluator.cli import cli
+
+    root = make_plugin(tmp_path / "plugin")
+    seen = []
+
+    def run(path, **kwargs):
+        seen.append(kwargs)
+        return [ValidationResult(validator_name="Plugin refs")]
+
+    monkeypatch.setattr("skillevaluator.tier2.plugin_commands.plugin_dedup_results", run)
+    result = CliRunner().invoke(cli, ["tier2", "dedup-scan", str(root), "--llm", "-o", str(tmp_path / "reports")])
+    assert result.exit_code == 0, result.output
+    assert seen[0]["llm_verdict"] is True
+
+
+def test_combined_validate_keeps_the_tier2_setup_guard_for_plugins(tmp_path, monkeypatch):
+    from skillevaluator import cli as cli_module
+    from skillevaluator.provider_config import ProviderConfigurationError
+
+    root = make_plugin(tmp_path / "plugin")
+    seen = []
+
+    def run(path, **kwargs):
+        seen.append(path)
+        return [ValidationResult(validator_name="Plugin refs")]
+
+    def unconfigured():
+        raise ProviderConfigurationError("No provider is configured.")
+
+    monkeypatch.setattr("skillevaluator.tier2.plugin_commands.plugin_dedup_results", run)
+    monkeypatch.setattr("skillevaluator.provider_config.resolve_embedding_provider", unconfigured)
+    skipped = cli_module._run_dedup_or_skip(root)
+    assert seen == []
+    assert [result.validator_name for result in skipped] == ["Tier 2 Deduplication"]
+    assert skipped[0].metadata["skipped"] is True
+    assert "embedding setup is required" in skipped[0].warnings[0]
+
+    monkeypatch.setattr("skillevaluator.provider_config.resolve_embedding_provider", lambda: None)
+    manifest = root / ".claude-plugin/plugin.json"
+    assert [result.validator_name for result in cli_module._run_dedup_or_skip(manifest)] == ["Plugin refs"]
+    assert seen == [manifest]

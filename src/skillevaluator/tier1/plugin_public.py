@@ -166,8 +166,25 @@ def run_public_plugin_validation(
         "Private Tree Coverage": "Plugin Tree Coverage",
         "Private Endpoint Checks": "Plugin Endpoint Checks",
     }
+    # Both tree scans run on SecurityValidator instances, so they share its name.
+    # Report each under its skill-run and --skip name; the panel maps checks by name.
+    scan_names = {
+        "security": ("Security Scan", None),
+        "pii": ("PII Scan", "Detect PII and local identifiers"),
+    }
+    skill_members_present = any(
+        member.get("type") == "skill" and member.get("path") and not member.get("problem")
+        for result in results
+        for member in result.metadata.get("plugin", {}).get("component_inventory", {}).get("components", [])
+    )
     for result in results:
         result.validator_name = public_names.get(result.validator_name, result.validator_name)
+        scan = scan_names.get(result.metadata.get("plugin_check"))
+        if scan is not None and result.validator_name == "Security & PII Scanning":
+            result.validator_name = scan[0]
+            result.validator_description = scan[1] or result.validator_description
+        if result.validator_name == "Plugin Schema & Component Checks" and result.passed and not result.is_incomplete:
+            result.add_success("plugin_schema", "Completed bounded plugin manifest and component checks")
         if plugin := result.metadata.get("plugin"):
             chosen = next((row for row in plugin.get("manifest_declarations", []) if row.get("selected")), None)
             if chosen:

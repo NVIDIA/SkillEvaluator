@@ -4425,7 +4425,11 @@ def _unscoreable_reward_reason(reward: dict[str, Any]) -> str:
             safe_metric = _safe_diagnostic_text(metric, max_len=64)
             safe_reason = _safe_diagnostic_text(reason, max_len=512)
             if safe_reason:
-                parts.append(f"{safe_metric or 'judge'}: {safe_reason}")
+                parts.append(
+                    f"[environment] {safe_reason}"
+                    if metric == "environment"
+                    else f"{safe_metric or 'judge'}: {safe_reason}"
+                )
     elif isinstance(errors, list):
         parts.extend(_safe_diagnostic_text(reason, max_len=512) for reason in errors[: len(DEFAULT_METRICS)])
         parts = [part for part in parts if part]
@@ -4436,7 +4440,12 @@ def _unscoreable_reward_reason(reward: dict[str, Any]) -> str:
 
     if not parts:
         return fallback
-    return _safe_diagnostic_text("Required judge evaluation failed: " + "; ".join(parts), max_len=2048)
+    prefix = (
+        "Evaluation environment invalid: "
+        if isinstance(errors, dict) and "environment" in errors
+        else "Required judge evaluation failed: "
+    )
+    return _safe_diagnostic_text(prefix + "; ".join(parts), max_len=2048)
 
 
 def _strip_attempt_suffix(value: str) -> str:

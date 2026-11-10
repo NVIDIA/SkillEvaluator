@@ -1168,6 +1168,7 @@ def _load_baseline(ref: str):
             for name in (
                 "shell_lexing",
                 "script_invocation",
+                "optional_reference",
                 "secret_redaction",
                 "codex_tool_call_normalizer",
                 "log_converters",
@@ -1186,9 +1187,7 @@ def _load_baseline(ref: str):
     with tempfile.TemporaryDirectory(prefix="script-check-baseline-") as temporary:
         directory = Path(temporary)
         for name, relative in sources.items():
-            result = subprocess.run(
-                ["git", "show", f"{ref}:{relative}"], capture_output=True, text=True, cwd=REPO_ROOT
-            )
+            result = subprocess.run(["git", "show", f"{ref}:{relative}"], capture_output=True, text=True, cwd=REPO_ROOT)
             if result.returncode and name not in {"checks", "baseline_template"}:
                 continue  # Shared modules did not exist before their extraction.
             result.check_returncode()

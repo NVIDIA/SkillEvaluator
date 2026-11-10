@@ -365,6 +365,21 @@ def test_validate_skill_evals_warns_expected_script_when_scripts_exist(tmp_path)
     assert any("expected_script is missing" in msg for msg in messages)
 
 
+def test_validate_skill_evals_accepts_placeholder_expected_script_as_explicit_no_script(tmp_path):
+    skill = tmp_path / "script-skill"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "scripts").mkdir()
+    (skill / "scripts" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    (skill / "evals" / "evals.json").write_text(
+        '[{"id":"case-1","question":"Run it.","expected_script":"None"}]',
+        encoding="utf-8",
+    )
+
+    messages = [result.message for result in validate_skill_evals(skill)]
+
+    assert not any("expected_script is missing" in message for message in messages)
+
+
 def test_agentskills_evals_json_is_accepted_without_deprecation_warning(tmp_path):
     skill = tmp_path / "agent-skill"
     (skill / "evals").mkdir(parents=True)
@@ -500,4 +515,3 @@ def test_validate_environment_kwargs_gke_infrastructure_boundary(infra_key: str)
     assert validate_environment_kwargs({infra_key: "test-val"}, allow_gke_infrastructure_kwargs=True) == {
         infra_key: "test-val"
     }
-

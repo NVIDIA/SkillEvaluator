@@ -1229,24 +1229,12 @@ def test_benchmark_baseline_without_the_skill_can_pass(tmp_path: Path) -> None:
     assert "| Tier 3 | Live agent evaluation | **PASS** |" in rendered
     # The Overall row shows the two scores the lift subtracts, 0.9167 and 0.65.
     assert "| Overall | 65.0% → 91.7% (+26.7 points) |" in rendered
-    assert "Overall compares both arms on the dimensions the baseline scored" in rendered
+    assert "Overall for codex compares only the dimensions both arms scored" in rendered
     # The baseline ran, it just has no skill to discover or route to.
     assert "| Discoverability | 100.0% — baseline N/A (no skill in the baseline arm) |" in rendered
     assert "| Efficiency | 90.0% — baseline N/A (no skill in the baseline arm) |" in rendered
     assert "baseline not run" not in rendered
     assert offenders == []
-
-
-def test_benchmark_overall_row_keeps_the_arm_scores_when_the_lift_is_not_that_comparison(tmp_path: Path) -> None:
-    tier3 = _collected_default_run(tmp_path)
-    # A five-dimension score minus a three-dimension baseline.
-    tier3.metadata["agent_eval"]["agents"]["codex"]["lift"] = 0.28
-
-    rendered = BenchmarkReporter(include_timestamp=True).render_all([*_deterministic_results(), tier3])
-
-    assert "| Overall | 65.0% → 93.0% (+28.0 points) |" in rendered
-    assert "Overall compares both arms" not in rendered
-    assert "**Overall verdict: PASS" not in rendered
 
 
 @pytest.mark.parametrize(

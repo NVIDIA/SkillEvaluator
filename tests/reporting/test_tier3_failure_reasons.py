@@ -716,6 +716,25 @@ def test_html_preview_keeps_the_overview_when_failure_reasons_overflow_it() -> N
     assert "built-in method" not in html
 
 
+def test_html_preview_excludes_unrendered_activation_detail_without_changing_canonical_data() -> None:
+    data = _display_data(_failing_multi_agent_payload(2, 1))
+    detail = {"diagnostic": "unrendered-activation-detail" * 30_000}
+    data["trials"][0]["activation_validation"] = detail
+    for key in ("trials", "trials_baseline"):
+        data["agents"]["agent-0"][key][0]["activation_validation"] = detail
+    original = copy.deepcopy(data)
+
+    preview, notice = html_module._bounded_tier3_preview(data)
+
+    assert preview is not None
+    assert notice == {}
+    assert preview["best_agent"] == "agent-0"
+    assert _rendered_reason_count(preview) == _rendered_reason_count(data)
+    assert "unrendered-activation-detail" not in json.dumps(preview)
+    assert data == original
+    assert data["trials"][0]["activation_validation"] == detail
+
+
 def test_html_preview_drops_failure_reasons_before_bounding_a_large_payload() -> None:
     payload = _failing_multi_agent_payload(3, 60)
     data = _display_data(payload)
@@ -732,6 +751,8 @@ def test_html_preview_drops_failure_reasons_before_bounding_a_large_payload() ->
     assert notice["trial_rows"] == 180 - 64
 
     html = _render(payload)
+    assert _compact_size(data) > 256 * 1024
+    assert payload["dataset_sufficiency"]["coverage_summary"] in html
     # The character count depends on the environment, so it comes from the notice.
     assert f"HTML preview omitted {notice['characters']} characters and {notice['items']} items." in html
     assert f"HTML preview left out {total} failure reasons or excerpts" in html

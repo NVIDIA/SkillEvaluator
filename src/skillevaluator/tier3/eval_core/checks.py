@@ -23,6 +23,7 @@ from fnmatch import fnmatchcase
 from typing import Any
 
 if __package__:
+    from skillevaluator.tier3.eval_core import optional_reference as _optional_reference
     from skillevaluator.tier3.eval_core import script_invocation as _script_invocation
     from skillevaluator.tier3.eval_core import shell_lexing as _shell_lexing
     from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
@@ -32,6 +33,7 @@ if __package__:
     )
     from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
 else:  # Standalone verifier: all dependencies are staged siblings.
+    import optional_reference as _optional_reference
     import script_invocation as _script_invocation
     import shell_lexing as _shell_lexing
     from codex_tool_call_normalizer import (
@@ -40,6 +42,9 @@ else:  # Standalone verifier: all dependencies are staged siblings.
         UNSUPPORTED_NATIVE_CODEX_EXEC,
     )
     from secret_redaction import redact_secrets_in_log_line
+
+normalize_expected_behaviors = _optional_reference.normalize_expected_behaviors
+normalize_optional_reference = _optional_reference.normalize_optional_reference
 
 _ATTACHED_DESCRIPTOR_RE = _shell_lexing._ATTACHED_DESCRIPTOR_RE
 _QUOTED_SYNTAX_MARK = _shell_lexing._QUOTED_SYNTAX_MARK
@@ -4384,6 +4389,7 @@ def check_script_execution(
     expected_script: str | None,
 ) -> dict[str, Any]:
     """Check whether the agent executed the expected script."""
+    expected_script = normalize_optional_reference(expected_script)
     if not expected_script:
         return {"passed": True, "score": 1.0, "reason": "No specific script expected"}
 
@@ -4510,16 +4516,131 @@ def check_workflow_order(
     return {"passed": False, "score": 0.0, "reason": "Agent did not follow expected order"}
 
 
+def _classify_execution_failure(
+    command: str, observation: str, expected_script: str | None, context: dict[str, Any] | None
+) -> dict[str, Any]:
+    context = context or {}
+    result = {"fault": "agent", "fault_kind": "command_error"}
+    paths = [str(p).rstrip("/") for p in context.get("skill_dirs", []) if p]
+
+    def skill_path(path: str) -> bool:
+        return bool(expected_script and (path == expected_script or path.endswith("/" + expected_script))) or any(
+            path.startswith(root + "/") for root in paths
+        )
+
+    file_match = re.search(r"(?:FileNotFoundError:[^\n]*|can't open file)\s*['\"]([^'\"]+)['\"]", observation)
+    if file_match is None:
+        file_match = re.search(r"(?:^|\s)([^\s:'\"]+): No such file or directory", observation, re.MULTILINE)
+    if file_match and skill_path(file_match.group(1)):
+        return {
+            "fault": "skill",
+            "fault_kind": "missing_skill_file",
+            "missing": file_match.group(1),
+            "missing_kind": "file",
+        }
+
+    module = re.search(r"(?:ModuleNotFoundError|ImportError): No module named\s+['\"]?([\w.-]+)", observation)
+    subprocess_executable = None
+    if re.search(r"(?:subprocess\.py|_execute_child)", observation):
+        subprocess_executable = re.search(
+            r"FileNotFoundError:[^\n]*No such file or directory:\s*['\"]([^/'\"\\]+)['\"]", observation
+        )
+    missing = (
+        module.group(1).split(".")[0] if module else (subprocess_executable.group(1) if subprocess_executable else None)
+    )
+    kind = "python_module" if module else "executable"
+    if module and missing in context.get("skill_modules", []):
+        return {"fault": "skill", "fault_kind": "missing_skill_file", "missing": missing, "missing_kind": kind}
+    if not missing:
+        patterns = (
+            r"(?:^|\n)(?:/[^\s:]+/)?(?:bash|sh):\s*(?:(?:line\s+)?\d+:\s*)?([^\s:]+): (?:command )?not found",
+            r"^[^\s:]+: (?:line )?\d+: ([^\s:]+): (?:command )?not found",
+            r"zsh: command not found: ([^\s]+)",
+            r"env: ['\"\u2018]?([^\s'\"\u2019]+)['\"\u2019]?: No such file or directory",
+            r'exec: "([^\"]+)": executable file not found in \$PATH',
+        )
+        for pattern in patterns:
+            if match := re.search(pattern, observation):
+                missing = match.group(1)
+                break
+    if not missing:
+        return result
+    if skill_path(missing):
+        return {"fault": "skill", "fault_kind": "missing_skill_file", "missing": missing, "missing_kind": "file"}
+
+    def normalized(name: str) -> str:
+        match = re.match(r"[A-Za-z0-9_.-]+", name.strip())
+        return match.group().lower().replace("-", "_") if match else ""
+
+    dependencies = context.get("pip", []) if module else context.get("apt", [])
+    aliases = {
+        "yaml": "pyyaml",
+        "pil": "pillow",
+        "bs4": "beautifulsoup4",
+        "docx": "python-docx",
+        "pdftotext": "poppler-utils",
+    }
+    declared_names = {normalized(str(name)) for name in dependencies}
+    declared = normalized(missing) in declared_names or normalized(aliases.get(missing.lower(), "")) in declared_names
+    used = bool(re.search(r"(?<![\w-])" + re.escape(missing) + r"(?![\w-])", context.get("skill_text", "")))
+    used = (
+        used or missing in context.get("script_imports", []) or _command_executes_skill(command, expected_script, paths)
+    )
+    result = {"fault": "agent", "fault_kind": "agent_tool_choice", "missing": missing, "missing_kind": kind}
+    if declared or used:
+        declaration = "scripts/requirements.txt" if module else "scripts/apt-packages.txt"
+        guidance = (
+            f"{missing} is declared but not installed in the evaluation environment. "
+            if declared
+            else (
+                f"Install the package that provides {missing}, or ship it with the skill. "
+                if module and missing in context.get("script_imports", [])
+                else f"Declare {missing} in {declaration}, or install it in evals/environment/Dockerfile. "
+            )
+        )
+        guidance += (
+            "With a custom evals/environment/Dockerfile, dependency files are not auto-installed; install it there."
+        )
+        result.update(
+            fault="environment",
+            fault_kind="declared_dependency_unavailable" if declared else "undeclared_dependency",
+            guidance=guidance,
+        )
+    return result
+
+
+def _command_executes_skill(command: str, expected_script: str | None, paths: list[str]) -> bool:
+    if expected_script and _cmd_executes_script(command, expected_script) is True:
+        return True
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    interpreters = {"bash", "sh", "zsh", "python", "python2", "python3", "node", "ruby", "perl", "php"}
+    candidates = tokens[:1]
+    candidates.extend(
+        tokens[index + 1] for index, token in enumerate(tokens[:-1]) if token.rsplit("/", 1)[-1].lower() in interpreters
+    )
+    return any(
+        bool((expected_script or paths) and token.removeprefix("./").startswith("scripts/"))
+        or any(token.startswith(root + "/") for root in paths)
+        for token in candidates
+    )
+
+
 def check_error_recovery(
     tool_calls: list[dict[str, Any]],
     expected_script: str | None = None,
+    *,
+    dependency_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Detect error-retry patterns and attribute fault to skill vs agent.
+    """Detect error-retry patterns and attribute skill, agent, or environment faults.
 
     Scans bash/execute tool calls for commands that failed (non-zero exit or
     error keywords in observation) followed by a similar command that
     succeeded.  Returns per-correction details with fault attribution.
     """
+    expected_script = normalize_optional_reference(expected_script)
     if not tool_calls:
         return {
             "passed": True,
@@ -4529,6 +4650,8 @@ def check_error_recovery(
             "corrections": [],
             "skill_faults": 0,
             "agent_faults": 0,
+            "environment_faults": 0,
+            "environment_issues": [],
         }
 
     exec_actions = {"bash", "execute", "run_code", "run"}
@@ -4582,7 +4705,7 @@ def check_error_recovery(
         r"|^\s*(?:\w*(?:error|exception)|timeout|connectionrefused)\s*$"
         rf"|^\s*\w*(?:Error|Exception)\s*:{not_annotation}|traceback\s*\(most recent call last\)"
         r"|\bstatus\s*=\s*(?:failed|error)\b"
-        r"|\b(?:command not found|no such file(?: or directory)?|permission denied)\b"
+        r"|\b(?:command not found|executable file not found|no such file(?: or directory)?|permission denied)\b"
         r"|\b(?:connection refused|connectionrefused|timed out)\b|:\s*not found\b"
         # Test and build failures (pytest, unittest, jest and go test summaries,
         # tsc, npm) and OpenCode's note for a command stopped at its timeout.
@@ -4591,16 +4714,6 @@ def check_error_recovery(
         r"|\bbash tool terminated command after exceeding timeout\b",
         re.IGNORECASE | re.MULTILINE,
     )
-    skill_fault_keywords = [
-        "no such file",
-        "filenotfounderror",
-        "not found",
-        "command not found",
-        "config",
-        "missing",
-        "invalid path",
-        "modulenotfounderror",
-    ]
 
     quiet_probe_programs = {"grep", "egrep", "fgrep", "rg", "test", "[", "[[", "diff", "cmp", "which"}
     devnull_redirect_re = re.compile(
@@ -4735,10 +4848,6 @@ def check_error_recovery(
         program1, program2 = (re.sub(r"[\d.]+$", "", words[0].rsplit("/", 1)[-1]) for words in (words1, words2))
         return (bool(program1) and program1 == program2) or words1[0] in words2 or words2[0] in words1
 
-    def _is_skill_fault(error_obs: str) -> bool:
-        obs_lower = error_obs.lower()
-        return any(kw in obs_lower for kw in skill_fault_keywords)
-
     failed = [_is_failure(call) for _, call in exec_calls]
     # A benign negative query is not a successful retry of an earlier error.
     succeeded = [not failed[i] and _exit_status(call) in (None, 0) for i, (_, call) in enumerate(exec_calls)]
@@ -4755,14 +4864,14 @@ def check_error_recovery(
 
         cmd = _cmd_text(call)
         obs = str(call.get("observation", ""))
-        fault = "skill" if _is_skill_fault(obs) else "agent"
+        attribution = _classify_execution_failure(cmd, obs, expected_script, dependency_context)
         # Record every observed failure, whether or not it is later recovered.
         # Previously only recovered failures (corrections) were tracked, so an
         # unrecovered failure was silently scored as first-attempt clean.
         failure: dict[str, Any] = {
             "failed_cmd": cmd[:200],
             "error": obs[:300],
-            "fault": fault,
+            **attribution,
             "recovered": False,
         }
         failures.append(failure)
@@ -4783,7 +4892,7 @@ def check_error_recovery(
                         "failed_cmd": cmd[:200],
                         "retry_cmd": retry_cmd[:200],
                         "error": obs[:300],
-                        "fault": fault,
+                        **attribution,
                         "steps_to_fix": retry_idx - orig_idx,
                     }
                 )
@@ -4794,7 +4903,11 @@ def check_error_recovery(
     first_attempt_clean = len(failures) == 0
     skill_faults = sum(1 for f in failures if f["fault"] == "skill")
     agent_faults = sum(1 for f in failures if f["fault"] == "agent")
-    unrecovered_failures = [f for f in failures if not f["recovered"]]
+    environment_issues = [f for f in failures if f["fault"] == "environment"]
+    environment_invalid = any(not f["recovered"] for f in environment_issues) and not any(
+        not f["recovered"] and f["fault"] == "skill" for f in failures
+    )
+    unrecovered_failures = [f for f in failures if not f["recovered"] and f["fault"] != "environment"]
 
     if first_attempt_clean:
         score = 1.0
@@ -4810,8 +4923,21 @@ def check_error_recovery(
         score = max(0.5, 1.0 - (agent_faults * 0.1))
         reason = f"{agent_faults} agent error(s), no skill defects"
 
+    if environment_invalid:
+        reason = "Environment invalid: " + "; ".join(
+            dict.fromkeys(
+                [
+                    *(f["guidance"] for f in environment_issues if not f["recovered"]),
+                    *(f["failed_cmd"] for f in unrecovered_failures),
+                ]
+            )
+        )
+
     return {
-        "passed": first_attempt_clean or (skill_faults == 0 and not unrecovered_failures),
+        **({"status": "environment_invalid"} if environment_invalid else {}),
+        "passed": None
+        if environment_invalid
+        else first_attempt_clean or (skill_faults == 0 and not unrecovered_failures),
         "score": round(score, 4),
         "reason": reason,
         "first_attempt_clean": first_attempt_clean,
@@ -4820,6 +4946,8 @@ def check_error_recovery(
         "unrecovered_failures": unrecovered_failures,
         "skill_faults": skill_faults,
         "agent_faults": agent_faults,
+        "environment_faults": len(environment_issues),
+        "environment_issues": environment_issues,
     }
 
 
@@ -5291,6 +5419,7 @@ def check_tool_efficiency(
     expected_script: str | None = None,
 ) -> dict[str, Any]:
     """Measure what fraction of tool calls were productive vs wasted."""
+    expected_script = normalize_optional_reference(expected_script)
     if not tool_calls:
         return {"passed": True, "score": 1.0, "reason": "No tool calls", "details": {}}
 
@@ -5381,13 +5510,17 @@ def score_skill_execution(
     require_evaluated_skill: bool = False,
     skill_tool_names: list[str] | None = None,
     acceptable_skills: Any = None,
+    dependency_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compute execution credit, requiring activation for positive cases.
 
     Activated or unresolved cases retain the average of sub-checks. A definite
     activation failure receives no execution credit, while retaining all check
     details for diagnosis. Negative and unlabeled cases use their own rules.
+    An unrecovered environment failure returns score None, excluding the case
+    from scoring rather than averaging environment failures into skill credit.
     """
+    expected_script = normalize_optional_reference(expected_script)
     if should_trigger is None:
         return {"score": 1.0, "details": {"message": "No expected_skill -- skipped"}}
 
@@ -5439,8 +5572,10 @@ def score_skill_execution(
     checks["workflow_order"] = r
     scores.append(r["score"])
 
-    r = check_error_recovery(tool_calls, expected_script)
+    r = check_error_recovery(tool_calls, expected_script, dependency_context=dependency_context)
     checks["error_recovery"] = r
+    if r.get("status") == "environment_invalid":
+        return {"score": None, "status": "environment_invalid", "details": checks}
     scores.append(r["score"])
 
     # Nonapplicable script/recovery checks must not create execution credit
@@ -5466,6 +5601,7 @@ def score_skill_efficiency(
     acceptable_skills: Any = None,
 ) -> dict[str, Any]:
     """Compute the ``skill_efficiency`` eval score (average of sub-checks)."""
+    expected_script = normalize_optional_reference(expected_script)
     if not should_trigger:
         return {"score": 1.0, "details": {"message": "Negative case -- efficiency not applicable"}}
 

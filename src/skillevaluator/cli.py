@@ -9,6 +9,7 @@ import copy
 import json
 import logging
 import math
+import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextvars import ContextVar
 from datetime import UTC, datetime
@@ -277,6 +278,8 @@ def cli(verbose: bool) -> None:
 
     Documentation: https://docs.nvidia.com/skills/skillevaluator/
     """
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
     setup_logging(verbose=verbose)
 
 

@@ -242,6 +242,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Configure CLI stdout to replace characters that its encoding cannot
+  represent, so reports complete on legacy Windows code pages.
+
 - `BENCHMARK.md` no longer publishes an Overall uplift that disagrees with
   `lift.json` and the JSON, HTML, Markdown and terminal reports when a metric is
   N/A in only one arm. The Overall row now shows the two scores the published

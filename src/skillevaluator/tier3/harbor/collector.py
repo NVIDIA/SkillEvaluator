@@ -29,6 +29,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from skillevaluator.tier3.attempt_verdict import attempt_verdict, scored_goal_accuracy
+from skillevaluator.tier3.baseline_store import BASELINE_ANNOTATION_KEYS, load_baseline_rows, measured_condition_usage
 from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts, get_skill_tool_calls
 from skillevaluator.tier3.eval_core.checks import check_negative_case
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
@@ -6403,6 +6404,10 @@ def _save_trials(
             reward["_trajectory_summary"] = _summarize_trajectory(materialized_traj)
 
         clean_reward = {k: v for k, v in reward.items() if not k.startswith("_")}
+        clean_reward["baseline_evidence"] = {
+            "version": 1,
+            "annotations": {key: reward[key] for key in BASELINE_ANNOTATION_KEYS if key in reward},
+        }
         if safe_materialized_traj is None and trajectory_reason not in {
             None,
             "missing_single_step_trajectory",
@@ -7048,6 +7053,7 @@ def collect_harbor_results(
     *,
     skip_baseline: bool = False,
     skip_with_skill: bool = False,
+    reused_baseline_dir: Path | None = None,
     n_attempts: int = 1,
     pass_threshold: float = 0.50,
     stop_on_pass: bool = False,
@@ -7381,6 +7387,7 @@ def collect_harbor_results(
         without_scores: dict[str, float] = {}
         without_custom_scores: dict[str, float] = {}
         without_pass: dict[str, Any] = {}
+        without_collected_rewards: list[dict[str, Any]] = []
         without_runtime_failures: list[dict[str, str]] = []
         without_trial_failures: list[dict[str, str]] = []
         without_job_failure = ""
@@ -7396,51 +7403,60 @@ def collect_harbor_results(
         without_job_dir: Path | None = None
         if not skip_baseline:
             without_job_name = f"{skill_name}-{agent}-without"
-            without_job_dir = _find_job_dir(jobs_dir, without_job_name)
+            without_job_dir = (
+                reused_baseline_dir / agent / "without-skill"
+                if reused_baseline_dir is not None
+                else _find_job_dir(jobs_dir, without_job_name)
+            )
 
             if without_job_dir:
-                without_job_ok, without_job_failure = validate_harbor_job_result(
-                    without_job_dir / "result.json",
-                    expected_trials=without_expected_trials,
-                )
-                without_job_failure = _published_job_failure(without_job_failure)
-                without_runtime_failures = _extract_agent_runtime_failures(without_job_dir)
-                without_trial_failures = _extract_trial_failures(without_job_dir)
-                preserve_partial = _can_preserve_partial_rewards(without_job_dir, without_trial_failures)
-                # The runner stages unsuffixed task names when only one arm runs.
-                without_arm_suffix = "-without-skill" if not skip_with_skill else ""
-                without_task_entry_ids = (
-                    _staged_task_entry_id_map(output_dir, agent, "without", arm_suffix=without_arm_suffix)
-                    if case_id_by_task_selector is None
-                    else None
-                )
-                without_collected_rewards = (
-                    _extract_rewards(
-                        without_job_dir,
-                        case_id_by_task_selector,
-                        arm_suffix=without_arm_suffix,
-                        task_entry_id_map=without_task_entry_ids,
+                if reused_baseline_dir is not None:
+                    without_job_ok, without_job_failure = True, ""
+                    without_collected_rewards = load_baseline_rows(reused_baseline_dir, agent)
+                    without_rewards, invalid_score_failures = _partition_scoreable_rewards(without_collected_rewards)
+                else:
+                    without_job_ok, without_job_failure = validate_harbor_job_result(
+                        without_job_dir / "result.json",
+                        expected_trials=without_expected_trials,
                     )
-                    if without_job_ok or preserve_partial
-                    else []
-                )
-                without_rewards, invalid_score_failures = _partition_scoreable_rewards(without_collected_rewards)
-                _observe_private_trials(
-                    agent,
-                    "without_skill",
-                    without_job_dir,
-                    without_collected_rewards,
-                    without_rewards,
-                    case_id_by_task_selector,
-                )
-                without_recovered = (
-                    _recovered_timeout_attempts(without_job_dir, without_rewards, n_attempts=n_attempts)
-                    if stop_on_pass
-                    else []
-                )
-                without_job_recovered = _recovered_job_failure(
-                    without_job_dir, without_trial_failures, without_recovered
-                )
+                    without_job_failure = _published_job_failure(without_job_failure)
+                    without_runtime_failures = _extract_agent_runtime_failures(without_job_dir)
+                    without_trial_failures = _extract_trial_failures(without_job_dir)
+                    preserve_partial = _can_preserve_partial_rewards(without_job_dir, without_trial_failures)
+                    # The runner stages unsuffixed task names when only one arm runs.
+                    without_arm_suffix = "-without-skill" if not skip_with_skill else ""
+                    without_task_entry_ids = (
+                        _staged_task_entry_id_map(output_dir, agent, "without", arm_suffix=without_arm_suffix)
+                        if case_id_by_task_selector is None
+                        else None
+                    )
+                    without_collected_rewards = (
+                        _extract_rewards(
+                            without_job_dir,
+                            case_id_by_task_selector,
+                            arm_suffix=without_arm_suffix,
+                            task_entry_id_map=without_task_entry_ids,
+                        )
+                        if without_job_ok or preserve_partial
+                        else []
+                    )
+                    without_rewards, invalid_score_failures = _partition_scoreable_rewards(without_collected_rewards)
+                    _observe_private_trials(
+                        agent,
+                        "without_skill",
+                        without_job_dir,
+                        without_collected_rewards,
+                        without_rewards,
+                        case_id_by_task_selector,
+                    )
+                    without_recovered = (
+                        _recovered_timeout_attempts(without_job_dir, without_rewards, n_attempts=n_attempts)
+                        if stop_on_pass
+                        else []
+                    )
+                    without_job_recovered = _recovered_job_failure(
+                        without_job_dir, without_trial_failures, without_recovered
+                    )
                 without_logical_rewards = _logical_attempt_rewards(without_rewards)
                 without_mixed_metric_contracts = rewards_have_mixed_metric_contracts(without_rewards)
                 without_trial_failures.extend(invalid_score_failures)
@@ -7503,18 +7519,29 @@ def collect_harbor_results(
                     if without_execution["execution_status"] == "succeeded"
                     else None
                 )
-                _save_trials(
-                    without_collected_rewards,
-                    agent_dir / "without-skill" / "trials",
-                    without_job_dir,
-                    skill_name=skill_name,
-                    agent=agent,
-                    variant="without_skill",
-                    agent_model=agent_model,
-                    agent_model_source=agent_model_source,
-                    expected_case_ids=expected_case_ids,
-                )
+                if reused_baseline_dir is not None:
+                    for source_reward in (without_job_dir / "trials").glob("*/reward.json"):
+                        target = agent_dir / "without-skill" / "trials" / source_reward.parent.name
+                        target.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(source_reward, target / "reward.json")
+                        for artifact in ("trajectory.json", "result.json"):
+                            source = source_reward.with_name(artifact)
+                            if source.is_file() and not source.is_symlink():
+                                shutil.copyfile(source, target / artifact)
+                else:
+                    _save_trials(
+                        without_collected_rewards,
+                        agent_dir / "without-skill" / "trials",
+                        without_job_dir,
+                        skill_name=skill_name,
+                        agent=agent,
+                        variant="without_skill",
+                        agent_model=agent_model,
+                        agent_model_source=agent_model_source,
+                        expected_case_ids=expected_case_ids,
+                    )
                 without_summary = {
+                    "reused": reused_baseline_dir is not None,
                     "agent": agent,
                     "model": agent_model,
                     "model_source": agent_model_source,
@@ -7765,6 +7792,27 @@ def collect_harbor_results(
         without_active_trial_failures, without_recovered_trial_failures = _split_recovered_failures(
             without_trial_failures, without_recovered
         )
+        with_reward_trials = {
+            str(reward.get("_trial_root_name") or reward.get("_trial_name") or "") for reward in with_collected_rewards
+        }
+        without_reward_trials = {
+            str(reward.get("_trial_root_name") or reward.get("_trial_name") or "")
+            for reward in without_collected_rewards
+        }
+        with_unrepresented_failures = {
+            str(failure.get("trial") or "")
+            for failure in with_active_trial_failures
+            if failure.get("trial") and str(failure["trial"]) not in with_reward_trials
+        }
+        without_unrepresented_failures = {
+            str(failure.get("trial") or "")
+            for failure in without_active_trial_failures
+            if failure.get("trial") and str(failure["trial"]) not in without_reward_trials
+        }
+        with_execution_count = len(_logical_attempt_rewards(with_collected_rewards)) + len(with_unrepresented_failures)
+        without_execution_count = len(_logical_attempt_rewards(without_collected_rewards)) + len(
+            without_unrepresented_failures
+        )
         all_results["agents"][agent] = {
             "model": agent_model,
             "model_source": agent_model_source,
@@ -7827,6 +7875,28 @@ def collect_harbor_results(
             **agent_execution,
             "num_trials_with": len(with_logical_rewards),
             "num_trials_without": len(without_logical_rewards) if not skip_baseline else 0,
+            "execution_counts": {
+                "fresh": {
+                    "with_skill": with_execution_count,
+                    "without_skill": 0 if reused_baseline_dir else without_execution_count,
+                },
+                "reused": {"without_skill": len(without_logical_rewards) if reused_baseline_dir else 0},
+            },
+            "measured_usage": {
+                "fresh": {
+                    "with_skill": None
+                    if with_active_trial_failures
+                    else measured_condition_usage(agent_dir / "with-skill"),
+                    "without_skill": None
+                    if reused_baseline_dir or without_active_trial_failures
+                    else measured_condition_usage(agent_dir / "without-skill"),
+                },
+                "reused": {
+                    "without_skill": measured_condition_usage(agent_dir / "without-skill")
+                    if reused_baseline_dir
+                    else None,
+                },
+            },
             "output_dir": str(agent_dir.resolve()),
         }
 

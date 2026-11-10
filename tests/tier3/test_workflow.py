@@ -229,6 +229,21 @@ def test_invalid_options_error_before_generating(skill, configured, monkeypatch,
     assert not configured
 
 
+@pytest.mark.parametrize("skip", ["--skip-baseline", "--skip-with-skill"])
+def test_reuse_baseline_conflicts_before_autopilot_generation(skill, configured, monkeypatch, skip):
+    monkeypatch.setattr(
+        EvaluationService, "create_autopilot_dataset", lambda *_args, **_kwargs: pytest.fail("must preflight")
+    )
+    result = CliRunner().invoke(
+        _command(),
+        [str(skill), "--reuse-baseline", "latest", skip, "--progress", "off"],
+    )
+    assert result.exit_code != 0
+    assert "--reuse-baseline is mutually exclusive" in result.output
+    assert not (skill / "evals").exists()
+    assert not configured
+
+
 def test_invalid_configuration_does_not_generate(skill, configured, monkeypatch):
     (skill / "evals").mkdir()
     config = skill / "evals" / "config.yml"

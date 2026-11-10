@@ -68,6 +68,13 @@ from skillevaluator.publication_identity import (
     publication_target_from_path,
 )
 from skillevaluator.source_identity import normalized_evaluated_source
+from skillevaluator.tier3.baseline_store import (
+    baseline_description,
+    baseline_task_tree_digest,
+    comparison_identity,
+    identity_dataset_digest,
+    select_baseline,
+)
 from skillevaluator.tier3.case_ids import validate_case_ids
 from skillevaluator.tier3.eval_core.llm_judge import JUDGE_REASONING_EFFORT
 from skillevaluator.tier3.evals_config import (
@@ -5313,6 +5320,7 @@ def _run_harbor_eval_impl(
     *,
     skip_baseline: bool = False,
     skip_with_skill: bool = False,
+    reuse_baseline: str | None = None,
     n_attempts: int | None = None,
     max_agent_tokens: int | None = None,
     max_judge_calls: int | None = None,
@@ -5364,6 +5372,10 @@ def _run_harbor_eval_impl(
         return {"error": ["At least one Harbor agent is required."]}
     if skip_baseline and skip_with_skill:
         detail = "skip_baseline and skip_with_skill are mutually exclusive (no arm would run)"
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=detail))
+        return {"error": [detail]}
+    if reuse_baseline and (skip_baseline or skip_with_skill):
+        detail = "--reuse-baseline is mutually exclusive with --skip-baseline and --skip-with-skill"
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=detail))
         return {"error": [detail]}
     if env_mode == ENV_MODE_LOCAL:
@@ -5815,6 +5827,23 @@ def _run_harbor_eval_impl(
                 detail="credentials and selected models verified",
             )
         )
+    effective_resources = harbor_config.get("resources", {})
+    effective_resources = dict(effective_resources) if isinstance(effective_resources, Mapping) else {}
+    for resource, override in (
+        ("cpus", override_cpus),
+        ("memory_mb", override_memory_mb),
+        ("storage_mb", override_storage_mb),
+    ):
+        if override is not None:
+            effective_resources[resource] = override
+    environment_kwargs_digest = hashlib.sha256(
+        json.dumps(effective_environment_kwargs, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    runtime_env_digest = hashlib.sha256(
+        json.dumps(configured_runtime_env, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
     run_config = {
         "config_file": str(config_path.relative_to(evaluator_skill_path)) if config_path else "none",
         "harbor": {
@@ -5822,12 +5851,21 @@ def _run_harbor_eval_impl(
             "environment_kwargs": {
                 "keys": sorted(effective_environment_kwargs),
                 "sources": environment_kwarg_sources,
+                "values_sha256": environment_kwargs_digest,
             },
             "n_attempts": n_attempts,
             "stop_on_pass": bool(stop_on_pass),
             "n_concurrent": n_concurrent,
             "timeout_multiplier": timeout_multiplier,
             "base_image_mode": base_image_mode,
+            "resources": {
+                "cpus": effective_resources.get("cpus"),
+                "memory_mb": effective_resources.get("memory_mb"),
+                "storage_mb": effective_resources.get("storage_mb"),
+            },
+            "agent_workdir": harbor_config.get("agent_workdir"),
+            "custom_dockerfile_mode": dockerfile_mode,
+            "runtime_env": {"keys": sorted(configured_runtime_env), "values_sha256": runtime_env_digest},
             "jobs_retained": keep_harbor_jobs,
         },
         "provider": {"name": provider.provider, "model": provider.model},
@@ -5838,6 +5876,9 @@ def _run_harbor_eval_impl(
         },
         "task_source": task_source,
         "grading": {"mode": grading_mode},
+        "skill_workspace": {"mode": workspace_mode},
+        "copy_repo": copy_repo,
+        "repo_context_exclude_paths": [str(path) for path in repo_context_exclude_paths],
         "agents": model_resolution,
         # Persisted so a card rendered later from this run directory records the
         # source tree that was evaluated, not the evaluator build that ran it.
@@ -6250,6 +6291,48 @@ def _run_harbor_eval_impl(
     task_selectors = expected_task_selectors or []
     case_id_by_task_selector = expected_case_id_by_task_selector or {}
     case_ids = [case_id_by_task_selector[selector] for selector in task_selectors]
+    baseline_task_dirs = {agent: tuple(emitted_tasks[agent].get("without_skill", ())) for agent in agents}
+    try:
+        identity_digest = identity_dataset_digest(next(iter(baseline_task_dirs.values()), ()))
+        task_tree_digest = baseline_task_tree_digest(baseline_task_dirs)
+    except (OSError, UnicodeError, ValueError) as exc:
+        return _persist_pre_execution_failure([f"could not record baseline task identity: {exc}"])
+    run_config["baseline_task_tree_digest"] = task_tree_digest
+    try:
+        dataset_truth = _persist_dataset_truth(run_dir, fallback_task_ids=case_ids)
+    except DatasetSnapshotContractError as exc:
+        return _persist_pre_execution_failure([str(exc)])
+    expected_trials = len(task_selectors) * n_attempts
+    identity = comparison_identity(
+        run_config,
+        {
+            "dataset_digest": dataset_truth["dataset_digest"],
+            "identity_dataset_digest": identity_digest,
+            "baseline_task_tree_digest": task_tree_digest,
+            "expected_case_ids": case_ids,
+            "evaluator_version": dataset_truth["evaluator_version"],
+            "publication_target": publication_target,
+            "attempt_policy": {
+                "max_attempts": n_attempts,
+                "pass_threshold": float(pass_threshold),
+                "stop_on_pass": bool(stop_on_pass),
+            },
+            "score_policy": None,
+        },
+    )
+    baseline = {"mode": "skipped" if skip_baseline else "fresh"}
+    reused_baseline_dir = None
+    if reuse_baseline:
+        try:
+            baseline = select_baseline(run_dir.parent, reuse_baseline, agents, identity)
+        except ValueError as exc:
+            return _persist_pre_execution_failure([str(exc)])
+        if baseline["mode"] == "reused":
+            reused_baseline_dir = Path(baseline["source_run_dir"])
+            skip_baseline = True
+    run_config["baseline"] = baseline
+    if reuse_baseline:
+        reporter.emit(ProgressEvent(stage="baseline", state="complete", detail=baseline_description(baseline)))
     from skillevaluator.tier3.harbor.run_budget import (
         BudgetConfigurationError,
         BudgetController,
@@ -6300,11 +6383,6 @@ def _run_harbor_eval_impl(
         )
     )
     run_config["budget"] = budget.metadata()
-    try:
-        dataset_truth = _persist_dataset_truth(run_dir, fallback_task_ids=case_ids)
-    except DatasetSnapshotContractError as exc:
-        return _persist_pre_execution_failure([str(exc)])
-    expected_trials = len(task_selectors) * n_attempts
     variants = 2 - int(skip_baseline) - int(skip_with_skill)
     matrix_trials = expected_trials * sum(variants + len(additional_arms.get(agent, ())) for agent in agents)
     try:
@@ -6427,7 +6505,7 @@ def _run_harbor_eval_impl(
             model=model_resolution[agent]["model"],
             env_mode=env_mode,
             with_skill=agent_task_dirs[agent][0],
-            baseline=agent_task_dirs[agent][1],
+            baseline=None if reused_baseline_dir is not None else agent_task_dirs[agent][1],
             jobs_dir=jobs_dir,
             run_env={**runtime_plans[agent].subprocess_env, **job_judge_subprocess_env},
             n_attempts=n_attempts,
@@ -6560,8 +6638,9 @@ def _run_harbor_eval_impl(
             agents=agents,
             output_dir=run_dir,
             jobs_dir=jobs_dir,
-            skip_baseline=skip_baseline,
+            skip_baseline=skip_baseline and reused_baseline_dir is None,
             skip_with_skill=skip_with_skill,
+            reused_baseline_dir=reused_baseline_dir,
             n_attempts=n_attempts,
             pass_threshold=float(pass_threshold),
             stop_on_pass=bool(stop_on_pass),
@@ -6582,8 +6661,12 @@ def _run_harbor_eval_impl(
         _emit_run_finished("failed", "result collection failed")
         raise
     reporter.emit(ProgressEvent(stage="collection", state="complete", detail="Harbor results collected"))
+    identity["score_policy"] = results.get("score_policy", identity["score_policy"])
     results.update(
         {
+            "baseline": baseline,
+            "comparison_identity": identity,
+            "expected_case_ids": case_ids,
             "skill_name": skill_path.name,
             "run_id": run_id,
             **_run_owned_publication_fields(),
@@ -6598,13 +6681,14 @@ def _run_harbor_eval_impl(
             "dataset_summary": dataset_truth["dataset_summary"],
             "dataset_digest": dataset_truth["dataset_digest"],
             "dataset_digest_algorithm": dataset_truth["dataset_digest_algorithm"],
+            "identity_dataset_digest": identity_digest,
+            "baseline_task_tree_digest": task_tree_digest,
             "budget": budget.metadata(),
             "dataset_provenance": dataset_provenance,
             "run_config": run_config,
             "partial": bool(budget.not_run),
         }
     )
-    run_config["budget"] = budget.metadata()
     from skillevaluator.evaluation.tier3_report import (
         _agent_score_policy,
         _build_agent,

@@ -55,6 +55,7 @@ from skillevaluator.reporting.presentation import FinalRenderContext, build_fina
 from skillevaluator.reporting.run_status import Status, result_status
 from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION, pass_at_k_summary
 from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, RED, TEXT, grade_style, lift_style
+from skillevaluator.tier3.baseline_store import baseline_description
 from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
 from skillevaluator.tier3.evidence_volume import format_evidence_volume
 from skillevaluator.utils.rich_markup import escape_markup
@@ -419,6 +420,8 @@ class CLIReporter(ReporterBase):
     @staticmethod
     def _print_agent_eval_tables(agent_eval: dict, console: Console) -> None:
         """Print Tier 3 agent evaluation results."""
+        if agent_eval.get("baseline"):
+            console.print(escape_markup(baseline_description(agent_eval["baseline"])))
         verdict = agent_eval.get("verdict", "unknown")
         best_agent = agent_eval.get("best_agent")
         multiple_agents = isinstance(agent_eval.get("agents_run"), list) and len(agent_eval["agents_run"]) > 1

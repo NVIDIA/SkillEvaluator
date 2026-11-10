@@ -29,6 +29,13 @@ All notable changes to SkillEvaluator are documented in this file.
   `--custom-dockerfile-mode preserve`, `harbor.base_image_mode` and native
   `evals/harbor/` tasks work as on Harbor, and
   `tier3 doctor --backend nemo-gym` checks Gym readiness.
+- Tier 3 reports show per-case expectation inventories with explicit met,
+  unmet, unchecked, unscored and inapplicable judgments, evidence and next
+  diagnostic steps for executed conditions. Behavior judges can abstain when
+  evidence is missing; partial results preserve every original requirement
+  without presenting missing judgments as verified skill defects. Unexpected
+  judge errors retain that inventory; intentionally skipped arms add no attempts.
+
 - Run SkillEvaluator's own `skills/` through the pinned three-tier GitHub
   callers, retaining Tier 1 as required and Tier 2/3 as advisory. A separate
   consumer feedback listener preserves the reusable publisher's public path;
@@ -83,11 +90,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Document per-arm Tier 3 dimension applicability and test how N/A baseline
+  metrics are handled in Overall scores and Skill Lift comparisons.
+
 - Run GitLab Tier 2 without Docker-in-Docker while keeping TLS-protected Docker
   for Tier 3. Both native tiers retain shared caller timeout and runner-tag
   overrides, advisory outcomes, and aggregate artifacts; local mode still
   disables the Tier 3 Docker service.
-
 - Align terminal grade and lift colors across compact, full, and direct Tier 3
   reports; displayed zero lift is neutral. Narrow terminals stack complete
   condition score/bar groups. Full-report Details retain successful quality and
@@ -197,6 +206,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Read JSON, JSONL and YAML evaluation datasets as UTF-8 so Unicode prompts and
   answers load correctly on hosts with a non-UTF-8 default text encoding.
+
+- Estimate Tier 1 instruction tokens from the parsed Markdown body, so `---`
+  inside YAML values or comments does not count frontmatter as instructions.
+  Body separators without valid frontmatter no longer produce a spurious estimate.
 
 - A PII finding no longer keeps its `evidence_sha256` after CI redaction masks
   a credential inside the value the finding reports. In 0.8.0 the finding kept

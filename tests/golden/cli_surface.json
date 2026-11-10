@@ -3249,6 +3249,53 @@
             }
           ]
         },
+        "history": {
+          "params": [
+            {
+              "name": "skill_path",
+              "opts": [
+                "skill_path"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "path"
+            },
+            {
+              "name": "results_dir",
+              "opts": [
+                "--results-dir"
+              ],
+              "param_type": "option",
+              "type": "directory"
+            },
+            {
+              "name": "agent",
+              "opts": [
+                "--agent"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "as_json",
+              "opts": [
+                "--json"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "name": "output",
+              "opts": [
+                "--output"
+              ],
+              "param_type": "option",
+              "type": "file"
+            }
+          ]
+        },
         "import-metrics": {
           "params": [
             {

@@ -15,6 +15,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Tier 3 datasets can declare deterministic behavior checks for script invocation and success, workspace files, and final-response text.
 
+- Read-only Tier 3 `history` lists retained Skill Lift runs chronologically,
+  separates incompatible configurations into segments, preserves unavailable
+  lift as missing, and exports JSON, CSV, or Markdown summaries.
+
 - Tier 3 `evaluate --reuse-baseline RUN` reuses compatible retained fresh
   without-skill evidence, preserving lift calculations and baseline provenance.
   `latest` searches completed runs and falls back to a fresh baseline when needed.

@@ -136,6 +136,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Name Skill Lift as the headline comparison and label pass@k differences as
+  supporting reliability across reports and terminal output.
+
 - A scored Tier 3 attempt now fails when `goal_accuracy` or security is below
   1.0, even if its Overall score meets the pass threshold. N/A or unscored
   metrics preserve the existing verdict behavior; missed behavior-check steps

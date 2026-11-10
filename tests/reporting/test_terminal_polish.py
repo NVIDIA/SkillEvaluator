@@ -11,6 +11,7 @@ from rich.text import Text
 from skillevaluator.models import ValidationResult
 from skillevaluator.reporting.cli import CLIReporter
 from skillevaluator.reporting.console_ui import ValidateView, Verdict, detail_row, lift_row, summarize_tier1
+from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION
 
 
 @pytest.mark.parametrize(
@@ -254,18 +255,35 @@ def test_quality_grade_cannot_override_failed_incomplete_or_skipped_status(passe
 
 
 def test_full_agent_verdict_keeps_displayed_zero_lift_neutral():
-    console = Console(file=io.StringIO(), width=100)
+    output = io.StringIO()
+    console = Console(file=output, width=100)
     rendered = []
     original_print = console.print
 
     def capture(value="", *args, **kwargs):
-        if isinstance(value, str) and "composite lift" in value:
+        if isinstance(value, str) and "Skill Lift =" in value:
             rendered.append(Text.from_markup(value))
         original_print(value, *args, **kwargs)
 
     console.print = capture
-    CLIReporter._print_agent_eval_tables({"verdict": "pass", "composite_lift": 0.004}, console)
+    CLIReporter._print_agent_eval_tables(
+        {
+            "verdict": "pass",
+            "composite_lift": 0.004,
+            "attempt_policy": {"max_attempts": 3, "pass_threshold": 0.6},
+            "pass_at_k": {
+                "with_skill": {"k": 3, "pass_threshold": 0.6, "rate": 0.75},
+                "without_skill": {"k": 3, "pass_threshold": 0.6, "rate": 0.5},
+                "lift": {"delta": 0.25},
+            },
+        },
+        console,
+    )
     text = rendered[0]
+    rendered_output = " ".join(output.getvalue().splitlines())
+    assert SKILL_LIFT_DEFINITION in rendered_output
+    assert "Pass@3 (supporting reliability" in rendered_output
+    assert "Pass-rate difference +25.0 percentage points" in rendered_output
     style = text.get_style_at_offset(console, text.plain.index("+0.00"))
     assert style.color.name == "#8a8f98"
 
@@ -311,7 +329,7 @@ def test_agent_eval_summary_shows_required_counts_and_failed_case_reason():
 
     rendered = output.getvalue()
     assert "Verdict: FAIL — 1 of 2 cases failed: 1 goal not met" in rendered
-    assert "composite lift (for reference)" in rendered
+    assert "Skill Lift (for reference)" in rendered
     assert "Required checks passed: 1/2 | 2/2 | -1" in rendered
     assert "Goals met: 1/2 | 2/2 | -1" in rendered
     assert "Security clean: 2/2 | 2/2 | +0" in rendered

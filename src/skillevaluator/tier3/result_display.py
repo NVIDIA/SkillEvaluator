@@ -21,6 +21,7 @@ from rich.table import Table
 from rich.text import Text
 
 from skillevaluator.reporting.harbor_viewer import harbor_job_links, normalize_harbor_viewer_for_display
+from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION
 from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, RED, TEXT, lift_style
 from skillevaluator.tier3.attempt_verdict import required_check_failure_reason
 from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
@@ -716,6 +717,21 @@ def _render_agent_scores(
             overall=overall,
             safe=safe,
         )
+        has_overall_lift = (
+            with_usable
+            and baseline_usable
+            and all(
+                _finite_number(value) is not None
+                for value in (overall.get("with_skill"), overall.get("without_skill"), overall.get("delta"))
+            )
+        )
+        if has_overall_lift:
+            lift_index = next(
+                (index for index, headline in enumerate(headlines) if headline.plain.startswith("OVERALL SKILL LIFT")),
+                None,
+            )
+            if lift_index is not None:
+                headlines.insert(lift_index + 1, Text(SKILL_LIFT_DEFINITION, style="dim"))
         if headlines:
             content = Group(*headlines, Text(""), table)
     console.print(

@@ -69,7 +69,7 @@ def test_grid_shows_one_row_per_case_with_attempt_marks_per_agent() -> None:
     rates = next(line for line in output.splitlines() if line.startswith("success rate"))
     assert "0% → 75%  ?" in rates and rates.rstrip().endswith("?")
     assert output.index("effectiveness") < output.index("security")
-    assert output.count("(without → with skill)") == 2 and "change in pass rate" in output
+    assert output.count("(without → with skill)") == 2 and "change in per-attempt success rate" in output
     assert "inconclusive" in output and "conditions cover different cases" in output
 
 

@@ -53,6 +53,7 @@ from skillevaluator.reporting.harbor_viewer import (
 )
 from skillevaluator.reporting.presentation import FinalRenderContext, build_final_render_context, trial_coverage
 from skillevaluator.reporting.run_status import Status, result_status
+from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION, pass_at_k_summary
 from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, RED, TEXT, grade_style, lift_style
 from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
 from skillevaluator.tier3.evidence_volume import format_evidence_volume
@@ -434,14 +435,16 @@ class CLIReporter(ReporterBase):
         verdict_reason = agent_eval.get("verdict_reason")
         safe_reason = f" — {escape_markup(str(verdict_reason))}" if verdict == "fail" and verdict_reason else ""
         lift_label = (
-            "composite lift (for reference)"
-            if verdict == "fail" and scored_lift and composite > 0
-            else "composite lift"
+            "Skill Lift (for reference)" if verdict == "fail" and scored_lift and composite > 0 else "Skill Lift"
         )
         console.print(
             f"\n  [{vc}]Verdict: {verdict_text}[/{vc}]{safe_reason} "
             f"({lift_label} = [{composite_style}]{composite_text}[/{composite_style}])"
         )
+        if scored_lift:
+            console.print(Text(SKILL_LIFT_DEFINITION, style="dim"), soft_wrap=True)
+        if pass_summary := pass_at_k_summary(agent_eval.get("pass_at_k"), agent_eval.get("attempt_policy")):
+            console.print(f"  [dim]{pass_summary}[/dim]")
         for label, count_data, numerator in (
             ("Required checks passed", agent_eval.get("required_checks"), "passed"),
             ("Goals met", agent_eval.get("correct_answers"), "correct"),

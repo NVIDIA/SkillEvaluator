@@ -12,6 +12,7 @@ import pytest
 from rich.console import Console
 from rich.panel import Panel
 
+from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
@@ -36,15 +37,75 @@ def test_overall_lift_headline_preserves_signed_persisted_value_and_original_tab
         },
     }
     original = deepcopy(result)
-    output = render_result(result)
+    output = " ".join(render_result(result).splitlines())
 
     assert re.search(rf"OVERALL SKILL LIFT\s+{re.escape(f'{delta:+.2f}')}", output)
     assert output.index("OVERALL SKILL LIFT") < output.index("With Skill")
     assert output.count("Results by Evaluator") == 1
     assert output.count("Results by Dimension") == 1
     assert "Skill Lift" in output
+    assert SKILL_LIFT_DEFINITION in output
     assert "█" in output
     assert result == original
+
+
+def test_case_summary_names_pass_at_k_difference_and_threshold() -> None:
+    result = {
+        "attempt_policy": {"max_attempts": 2, "pass_threshold": 0.6},
+        "agents": {
+            "codex": {
+                "execution_status": "succeeded",
+                "pass_at_k": {
+                    "with_skill": {
+                        "k": 2,
+                        "pass_threshold": 0.6,
+                        "rate": 0.75,
+                        "cases": {"case": {"attempts": [{"passed": True, "score": 0.8}]}},
+                    },
+                    "without_skill": {
+                        "k": 2,
+                        "pass_threshold": 0.6,
+                        "rate": 0.5,
+                        "cases": {"case": {"attempts": [{"passed": False, "score": 0.4}]}},
+                    },
+                    "lift": {"delta": 0.25},
+                },
+            }
+        },
+    }
+
+    output = " ".join(render_result(result).splitlines())
+
+    assert (
+        "Pass@2 (supporting reliability: share of cases with a passing attempt, "
+        "attempt passes at Overall ≥ 0.60)" in output
+    )
+    assert "Pass-rate difference +25.0 percentage points" in output
+
+
+def test_case_summary_does_not_show_zero_difference_without_baseline() -> None:
+    result = {
+        "attempt_policy": {"max_attempts": 2, "pass_threshold": 0.6},
+        "agents": {
+            "codex": {
+                "execution_status": "succeeded",
+                "pass_at_k": {
+                    "with_skill": {
+                        "k": 2,
+                        "pass_threshold": 0.6,
+                        "rate": 0.5,
+                        "cases": {"case": {"attempts": [{"passed": False, "score": 0.4}]}},
+                    },
+                    "lift": {"delta": 0.0},
+                },
+            }
+        },
+    }
+
+    output = render_result(result)
+
+    assert "Pass-rate difference N/A" in output
+    assert "Pass-rate difference +0.0" not in output
 
 
 def test_required_check_verdict_precedes_counts_and_positive_lift_is_reference() -> None:

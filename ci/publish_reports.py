@@ -252,7 +252,7 @@ def validate_report(report: dict, row: dict) -> None:
     from skillevaluator.reporting.run_status import resolve_run_status
 
     try:
-        retained = retained_results(report, copy_metadata=False)
+        retained = retained_results(report, copy_metadata=False, allowed_tiers={1})
     except RetainedReportError as exc:
         raise PublicationError("A per-skill report contains invalid retained evidence.") from exc
     incomplete = []

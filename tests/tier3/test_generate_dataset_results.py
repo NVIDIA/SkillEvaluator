@@ -65,6 +65,26 @@ def test_discover_trajectories_opencode_txt_fallback(tmp_path):
     assert trajectories["case-001"].get("steps")
 
 
+def test_discover_trajectories_finds_hermes_only_run(tmp_path):
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    results_root = tmp_path / "results"
+    skill_results = results_root / "demo"
+    run_id = "20260709_120000"
+    run_dir = skill_results / run_id
+    trial = run_dir / "hermes" / "with-skill" / "trials" / "lookup-positive"
+    trial.mkdir(parents=True)
+    trajectory = {"steps": [{"tool_calls": [{"tool": "Read"}]}]}
+    (trial / "trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+    (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
+    (run_dir / "result.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    (skill_results / "latest").symlink_to(run_id)
+
+    found = _discover_trajectories(skill, results_dir=results_root)
+
+    assert found == {"lookup-positive": trajectory}
+
+
 def test_discover_trajectories_opencode_maps_harbor_folder_via_result_metadata(tmp_path):
     skill = tmp_path / "demo"
     skill.mkdir()

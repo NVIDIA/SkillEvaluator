@@ -368,7 +368,6 @@ def test_cli_evaluate_validates_cost_price_pair_after_config_merge(
     assert service_calls
 
 
-
 @pytest.mark.parametrize("command", ["validate", "evaluate", "tier3 evaluate"])
 @pytest.mark.parametrize(
     ("flags", "diagnostic"),

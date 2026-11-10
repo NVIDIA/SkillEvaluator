@@ -43,6 +43,7 @@ from skillevaluator.reporting.harbor_viewer import (
 )
 from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
 from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION, pass_at_k_summary
+from skillevaluator.tier3.baseline_store import baseline_description
 from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
 
 if TYPE_CHECKING:
@@ -355,6 +356,9 @@ class MarkdownReporter(ReporterBase):
 
             lines.append("## Tier 3: Agent Evaluation")
             lines.append("")
+            if ae.get("baseline"):
+                lines.append(baseline_description(ae["baseline"]))
+                lines.append("")
             composite_text = _format_report_number(composite, signed=True)
             lines.append(f"**Verdict:** {verdict} (Skill Lift = {composite_text})")
             if _finite_report_number(composite) is not None:

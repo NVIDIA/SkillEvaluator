@@ -15,6 +15,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Tier 3 datasets can declare deterministic behavior checks for script invocation and success, workspace files, and final-response text.
 
+- Tier 3 `evaluate --reuse-baseline RUN` reuses compatible retained fresh
+  without-skill evidence, preserving lift calculations and baseline provenance.
+  `latest` searches completed runs and falls back to a fresh baseline when needed.
+
 - Tier 3 evaluations support token, judge-call, attempt, and priced-cost budgets.
 
 - Tier 3 reports list up to three run-level **Next steps** under the per-case

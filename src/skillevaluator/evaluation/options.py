@@ -57,6 +57,7 @@ class EvaluationOptions:
     environment_kwargs: dict[str, str] = field(default_factory=dict)
     # Appended so legacy positional construction keeps its field order.
     max_cases: int | None = None
+    reuse_baseline: str | None = None
     max_agent_tokens: int | None = None
     max_judge_calls: int | None = None
     max_attempts_total: int | None = None

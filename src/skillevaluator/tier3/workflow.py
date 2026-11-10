@@ -121,6 +121,8 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> dict[str, An
 
     if params.get("skip_baseline") and params.get("skip_with_skill"):
         raise ValueError("--skip-baseline and --skip-with-skill are mutually exclusive (no arm would run)")
+    if params.get("reuse_baseline") and (params.get("skip_baseline") or params.get("skip_with_skill")):
+        raise ValueError("--reuse-baseline is mutually exclusive with --skip-baseline and --skip-with-skill")
     provider = resolve_llm_provider()
     config, config_path = load_evals_config(skill_path)
     effective = deepcopy(config)

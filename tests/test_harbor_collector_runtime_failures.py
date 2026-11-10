@@ -21,6 +21,7 @@ from skillevaluator.tier3.harbor.collector import (
     collect_harbor_results,
 )
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS
+from skillevaluator.tier3.result_display import render_result
 
 _HARBOR_022_AGENT_RUNTIME_EXCEPTION_TYPES = (
     "AgentAuthenticationError",
@@ -329,9 +330,12 @@ def test_step_token_usage_keeps_authentication_answer_scored(
 
 @pytest.mark.parametrize("metrics", (None, {}, {"prompt_tokens": 0, "completion_tokens": 0}))
 def test_tokenless_trajectory_still_reports_authentication_failure(metrics: dict[str, int] | None) -> None:
-    assert collector_module._trajectory_agent_runtime_failure_reason(
-        {"steps": [{"source": "agent", "message": "401 Unauthorized", "metrics": metrics}]}
-    ) == "Unauthorized"
+    assert (
+        collector_module._trajectory_agent_runtime_failure_reason(
+            {"steps": [{"source": "agent", "message": "401 Unauthorized", "metrics": metrics}]}
+        )
+        == "Unauthorized"
+    )
 
 
 @pytest.mark.parametrize("failure_artifact", ("result.json", "agent/opencode.txt"))
@@ -344,7 +348,9 @@ def test_explicit_runtime_failure_wins_over_step_token_usage(tmp_path: Path, fai
         encoding="utf-8",
     )
     if failure_artifact == "result.json":
-        payload = {"exception_info": {"exception_type": "AgentAuthenticationError", "exception_message": "401 Unauthorized"}}
+        payload = {
+            "exception_info": {"exception_type": "AgentAuthenticationError", "exception_message": "401 Unauthorized"}
+        }
     else:
         payload = {"type": "error", "error": {"name": "AgentAuthenticationError", "message": "401 Unauthorized"}}
     (trial_dir / failure_artifact).write_text(json.dumps(payload), encoding="utf-8")
@@ -955,6 +961,7 @@ def test_complete_low_score_is_execution_success(tmp_path: Path) -> None:
         "scored_cases": 1,
         "expected_attempts": 1,
         "scored_attempts": 1,
+        "judge_failures": 0,
         "runtime_failure_details_total": 0,
         "runtime_failure_details_shown": 0,
         "runtime_failure_details_truncated": False,
@@ -1758,6 +1765,47 @@ def test_complete_ab_run_records_paired_pass_evidence(tmp_path: Path) -> None:
     assert persisted["delta"] == 0.5
     assert persisted["count_derived_delta"] == 0.5
     assert persisted["paired_comparison"] == paired
+
+
+def test_per_step_judge_failures_deduplicate_with_an_errored_attempt(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    step_names = ("first", "second", "third")
+    _write_reward(
+        jobs_dir,
+        variant="with",
+        case_id="case-a",
+        attempt=1,
+        steps=step_names,
+    )
+    for step_name in step_names:
+        reward_path = (
+            jobs_dir / "demo-opencode-with" / "case-a_attempt001" / "steps" / step_name / "verifier" / "reward.json"
+        )
+        reward = json.loads(reward_path.read_text(encoding="utf-8"))
+        reward["evaluation_status"] = "failed"
+        reward["evaluation_errors"] = {"accuracy": "judge response failed"}
+        reward_path.write_text(json.dumps(reward), encoding="utf-8")
+
+    errored_attempt = jobs_dir / "demo-opencode-with" / "case-a_attempt002"
+    errored_attempt.mkdir(parents=True)
+    (errored_attempt / "exception.txt").write_text("attempt errored", encoding="utf-8")
+    for attempt in (1, 2):
+        _write_reward(jobs_dir, variant="with", case_id="case-b", attempt=attempt)
+    for case_id in CASES:
+        for attempt in (1, 2):
+            _write_reward(jobs_dir, variant="without", case_id=case_id, attempt=attempt)
+    _write_variant_job_results(jobs_dir)
+
+    result = _collect(tmp_path)
+    condition = result["agents"]["opencode"]["conditions"]["with_skill"]
+
+    assert condition["expected_attempts"] == 4
+    assert condition["scored_attempts"] == 2
+    assert condition["judge_failures"] == 1
+    assert all(
+        set(failure) == {"trial", "reason"} for failure in result["agents"]["opencode"]["trial_failures"]["with_skill"]
+    )
+    assert "1 judge failure" in render_result(result)
 
 
 def test_result_derived_case_ids_exercise_partial_pairing_through_collector(tmp_path: Path) -> None:

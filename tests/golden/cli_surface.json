@@ -3741,6 +3741,14 @@
           "type": "integer range"
         },
         {
+          "name": "catalog_root",
+          "opts": [
+            "--catalog-root"
+          ],
+          "param_type": "option",
+          "type": "directory"
+        },
+        {
           "default": "True",
           "is_flag": true,
           "name": "dedup",

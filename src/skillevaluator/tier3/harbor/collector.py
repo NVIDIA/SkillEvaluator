@@ -4391,12 +4391,13 @@ def _partition_scoreable_rewards(
         if raw_trial in failed_trials:
             continue
         failed_trials.add(raw_trial)
-        failures.append(
-            {
-                "trial": _published_trial_label(raw_trial, alias_ordinal=len(failures) + 1),
-                "reason": _unscoreable_reward_reason(reward),
-            }
-        )
+        failure = {
+            "trial": _published_trial_label(raw_trial, alias_ordinal=len(failures) + 1),
+            "reason": _unscoreable_reward_reason(reward),
+        }
+        if reward.get("_trial_root_name"):
+            failure["_trial_root_name"] = str(reward["_trial_root_name"])
+        failures.append(failure)
 
     custom_names = {name for reward in scoreable for name in extract_custom_metrics(reward)}
     if len(custom_names) > MAX_CUSTOM_METRICS:
@@ -4406,12 +4407,13 @@ def _partition_scoreable_rewards(
             if raw_trial in failed_trials:
                 continue
             failed_trials.add(raw_trial)
-            failures.append(
-                {
-                    "trial": _published_trial_label(raw_trial, alias_ordinal=len(failures) + 1),
-                    "reason": UNSAFE_CUSTOM_METRIC_UNION_REASON,
-                }
-            )
+            failure = {
+                "trial": _published_trial_label(raw_trial, alias_ordinal=len(failures) + 1),
+                "reason": UNSAFE_CUSTOM_METRIC_UNION_REASON,
+            }
+            if reward.get("_trial_root_name"):
+                failure["_trial_root_name"] = str(reward["_trial_root_name"])
+            failures.append(failure)
         scoreable = []
     return scoreable, failures
 
@@ -6759,6 +6761,7 @@ def _condition_execution_summary(
             "scored_cases": 0,
             "expected_attempts": 0,
             "scored_attempts": 0,
+            "judge_failures": 0,
             **_failure_list_metadata("runtime_failure_details", runtime_failures),
             **_failure_list_metadata("reward_failure_details", reward_failures),
         }
@@ -6771,6 +6774,11 @@ def _condition_execution_summary(
         if item["trial"] not in recovered_names or not item.get("reason", "").startswith("AgentTimeoutError:")
     ]
     reward_failures = [item for item in (reward_failures or []) if item["trial"] not in recovered_names]
+    judge_failure_trials = {
+        str(failure.get("_trial_root_name") or failure.get("trial_root_name") or failure.get("trial") or "")
+        for failure in [*runtime_failures, *reward_failures]
+        if str(failure.get("reason") or "").startswith("Required judge evaluation failed:")
+    }
     errors: list[str] = [job_failure] if job_failure else []
     public_runtime_failures = _public_failure_list(runtime_failures)
     public_reward_failures = _public_failure_list(reward_failures)
@@ -6919,6 +6927,7 @@ def _condition_execution_summary(
         "scored_cases": len(expected_set.intersection(by_case)) if expected_ids else len(by_case),
         "expected_attempts": expected_attempts,
         "scored_attempts": scored_attempts,
+        "judge_failures": min(len(judge_failure_trials), max(0, expected_attempts - scored_attempts)),
         **(
             {
                 "physical_expected_attempts": physical_expected_attempts,

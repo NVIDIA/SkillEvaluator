@@ -22,6 +22,7 @@ from skillevaluator.evaluation import tier3_report
 from skillevaluator.evaluation.tier3_findings import (
     _MAX_SCAN_CHARS,
     MAX_REASON_CHARS,
+    evidence_unavailable_reason,
     failure_excerpt,
     failure_reason,
     failure_reason_text_slots,
@@ -34,6 +35,7 @@ from skillevaluator.reporting import HTMLReporter
 from skillevaluator.reporting import html as html_module
 from skillevaluator.reporting.dashboard_data import _trial_coverage_truncated
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+from skillevaluator.tier3.harbor.report import _expected_observed_suffix
 
 METRICS = list(DEFAULT_METRICS)
 DESTRUCTIVE_REASON = "Agent executed potentially destructive command: rm -rf"
@@ -378,7 +380,11 @@ def test_message_only_detail_explains_failing_score() -> None:
     assert card["evidence"][0]["notes"] == []
     assert card["evidence"][0]["reason"] == "No tool calls in trajectory"
     cards_html = _render(payload).split('class="t3-eval-card', 1)[1]
-    assert re.search(r'<span class="t3-ev-notes">\s*No tool calls in trajectory', cards_html)
+    reason_index = cards_html.index('<div class="t3-ev-detail t3-ev-reason">')
+    row_start = cards_html.rfind("<li>", 0, reason_index)
+    row_end = cards_html.index("</li>", reason_index)
+    row = cards_html[row_start:row_end]
+    assert row.index('<span class="t3-bar-value"') < row.index('<div class="t3-ev-detail t3-ev-reason">')
 
 
 def test_passing_attempt_does_not_hide_failing_attempt_reason() -> None:
@@ -554,9 +560,26 @@ def test_reason_names_failed_checks_criteria_and_attribution() -> None:
     )
 
     assert reason == (
-        "Failed criteria: ACTIONABLE, TASK_ADDRESSED; Command injection check failed; "
+        "Failed criteria: TASK_ADDRESSED, ACTIONABLE; "
+        "Check `command injection check` did not pass; no reason was recorded; "
         "The skill instructions requested the command."
     )
+
+
+def test_reason_retains_all_failed_criteria_compactly() -> None:
+    reason = failure_reason(
+        {
+            "reason": "Ran the right command but reported the wrong installed version.",
+            "criteria": {"FACTUALLY_ACCURATE": False, "ACTIONABLE": False},
+        },
+        metric="accuracy",
+    )
+
+    assert reason == (
+        "Ran the right command but reported the wrong installed version.; "
+        "Failed criteria: FACTUALLY_ACCURATE, ACTIONABLE"
+    )
+    assert len(reason) <= MAX_REASON_CHARS
 
 
 def test_reason_is_bounded_and_marks_truncation() -> None:
@@ -582,8 +605,132 @@ def test_reason_ignores_criteria_excluded_from_the_score() -> None:
         "excluded_criteria": ["SKILL_IDENTIFIED"],
     }
 
-    assert failure_reason(detail) == "Answer omitted the retry limit.; Failed criteria: FACTUALLY_ACCURATE"
+    assert failure_reason(detail) == ("Answer omitted the retry limit.; Failed criteria: FACTUALLY_ACCURATE")
     assert failure_reason({"criteria": {"SKILL_IDENTIFIED": False}, "excluded_criteria": ["SKILL_IDENTIFIED"]}) == ""
+
+
+def test_expected_observed_suffix_redacts_command_line_credentials() -> None:
+    mysql_password = "dummy"
+    curl_password = "dummy"
+    token = "dummy"
+    curl_auth = "admin" + ":" + curl_password
+    suffix = _expected_observed_suffix(
+        {
+            "ground_truth": "expected",
+            "final_answer": f"mysql -u root -p{mysql_password} prod; curl -u {curl_auth} https://example.invalid --token {token}",
+        }
+    )
+
+    assert mysql_password not in suffix
+    assert curl_password not in suffix
+    assert token not in suffix
+    assert "-p<redacted>" in suffix
+    assert "-u <redacted>" in suffix
+    assert "--token <redacted>" in suffix
+
+
+def test_unavailable_reason_uses_reward_load_error_not_trajectory_provenance() -> None:
+    reward = {
+        "trajectory_detail": "trajectory.json could not be read",
+        "details": {
+            "_trajectory_load": {
+                "source": "claude-code.txt",
+                "note": "Synthetic ATIF from Claude Code stream JSONL",
+                "warning": "trajectory.json has no steps[]",
+            }
+        },
+    }
+
+    assert evidence_unavailable_reason(reward) == (
+        "Trajectory evidence could not be loaded: trajectory.json could not be read"
+    )
+    assert evidence_unavailable_reason({"details": reward["details"]}) == (
+        "No trajectory evidence was recorded for this metric"
+    )
+
+
+def test_accuracy_card_keeps_built_reason_outside_bounded_notes_for_full_criteria() -> None:
+    detail = {
+        "reason": "Ran the right command but reported the wrong installed version.",
+        "criteria": {
+            "FACTUALLY_ACCURATE": False,
+            "ACTIONABLE": False,
+            "ACTION_CORRECT": False,
+            "TASK_ADDRESSED": False,
+            "SKILL_IDENTIFIED": False,
+        },
+        "ground_truth": "version 1.4.0",
+        "final_answer": "version 1.2.3",
+    }
+    payload = _payload([_reward(accuracy=0.2, details={"accuracy": detail})])
+    card = next(card for card in payload["agents"]["codex"]["evaluator_cards"] if card["id"] == "accuracy")
+    entry = card["evidence"][0]
+
+    assert entry["notes"] == [detail["reason"]]
+    assert entry["reason"].startswith("Failed criteria: FACTUALLY_ACCURATE")
+    assert detail["reason"] not in entry["reason"]
+    assert "Failed criteria" not in entry["notes"][0]
+    assert "Expected: version 1.4.0; observed: version 1.2.3" in entry["reason"]
+    rendered = _render(payload)
+    assert '<div class="t3-ev-detail t3-ev-reason">' in rendered
+
+
+def test_metric_evidence_omits_grader_reason_and_its_findings() -> None:
+    details = {
+        "security": {
+            "passed": False,
+            "score": 0.0,
+            "reason": "A; B",
+            "findings": [_finding("first", message="A"), _finding("second", message="B")],
+        }
+    }
+    payload = _payload([_reward(details=details)])
+    evidence = _security_card(payload)["evidence"][0]
+
+    assert evidence["notes"] == ["A; B"]
+    assert "reason" not in evidence
+    assert (
+        failure_reason(
+            {
+                "reason": "A; B",
+                "findings": [{"score_impact": True, "message": "A"}, {"score_impact": True, "message": "B"}],
+            },
+            omit=("A; B",),
+        )
+        == ""
+    )
+
+
+def test_saved_html_defaults_only_add_unavailable_reasons_to_eligible_agent_cards() -> None:
+    evidence = {
+        "entry_id": "case-1",
+        "score": 0.0,
+        "notes": [],
+        "failures": [],
+        "checks": [],
+        "evidence_refs": [],
+    }
+    security_card = {
+        "id": "security",
+        "with_skill": 0.0,
+        "evidence": [{**evidence, "evidence_unavailable_reason": "old security label"}],
+    }
+    accuracy_card = {"id": "accuracy", "with_skill": 0.0, "evidence": [evidence]}
+    top_level_accuracy_card = {
+        "id": "accuracy",
+        "with_skill": 0.0,
+        "evidence": [{**evidence, "evidence_unavailable_reason": "old top-level label"}],
+    }
+
+    security_agent = html_module._sanitize_tier3_agent({"evaluator_cards": [security_card]})
+    accuracy_agent = html_module._sanitize_tier3_agent({"evaluator_cards": [accuracy_card]})
+    top_level_accuracy = html_module._sanitize_tier3_evaluator_card(top_level_accuracy_card)
+
+    assert "evidence_unavailable_reason" not in security_agent["evaluator_cards"][0]["evidence"][0]
+    assert accuracy_agent["evaluator_cards"][0]["evidence"][0]["evidence_unavailable_reason"] == (
+        "No trajectory evidence was recorded for this metric"
+    )
+    assert "evidence_unavailable_reason" not in top_level_accuracy["evidence"][0]
 
 
 def test_render_drops_malformed_reasons_and_excerpts() -> None:
@@ -795,7 +942,9 @@ def test_html_preview_drops_failure_reasons_before_bounding_a_large_payload() ->
 
 
 def test_html_preview_counts_omitted_case_reasons_not_top_level_card_copies() -> None:
-    payload = _failing_multi_agent_payload(2, 36)
+    # The page renders every reason of this run; only the top-level card copy,
+    # which the page never shows, did not fit.
+    payload = _failing_multi_agent_payload(2, 35)
     data = _display_data(payload)
     rendered_total = _rendered_reason_count(data)
     all_reasons = _reason_count(data)

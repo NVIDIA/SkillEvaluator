@@ -9518,10 +9518,11 @@ class TestSkillspectorMissingReferences:
 
     @patch("skillevaluator.validators.security.Tools")
     def test_directories_left_out_that_the_line_does_not_name_are_ignored(self, mock_tools, tmp_path: Path) -> None:
+        """The scanned copy leaves out ``evals/results`` and ``.git``; the line names neither."""
         files = {
             **_NOTES_WRITER_FILES,
-            "evals/evals.json": '{"evals": []}\n',
-            "evals/files/input.csv": "a,b\n",
+            "evals/results/run-1/result.json": "{}\n",
+            "evals/results/run-1/report.html": "<html></html>\n",
             ".git/HEAD": "ref: refs/heads/main\n",
             ".git/description": "Unnamed repository\n",
         }
@@ -10202,7 +10203,10 @@ class TestSkillspectorMissingReferences:
         """Each kind of gap must pass its own rule; the scan then carries both warnings."""
         skill = _write_skill(
             tmp_path / "image-notes",
-            {"SKILL.md": _IMAGE_NOTES_SKILL, **({"evals/notes.md": "# Notes\n"} if case.startswith("line") else {})},
+            {
+                "SKILL.md": _IMAGE_NOTES_SKILL,
+                **({"evals/results/notes.md": "# Notes\n"} if case.startswith("line") else {}),
+            },
         )
         (skill / "assets").mkdir()
         (skill / "assets" / "logo.png").write_bytes(b"not an image" if case == "not-an-image" else _png_bytes())

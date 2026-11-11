@@ -317,6 +317,18 @@ All notable changes to SkillEvaluator are documented in this file.
   the dataset-size status in `result.json` and the `tier3 evaluate` summary. It
   is taken from the agent with the best baseline score, as in the reports.
 
+- A default Tier 3 run with a baseline can reach a PASS or NEUTRAL publication
+  verdict in BENCHMARK.md again. The baseline arm has no skill under test, so
+  it records `skill_execution` and `skill_efficiency` as not applicable and has
+  no Discoverability or Efficiency baseline. The publication check treated
+  those two dimensions as missing evidence and compared Skill Lift with the
+  five-dimension score, so those cards said INCOMPLETE instead. Discoverability
+  and Efficiency now count as not applicable for the baseline when it recorded
+  their skill metrics that way, and Skill Lift is checked over the dimensions
+  both arms scored. On the card those two rows say `baseline N/A` instead of
+  `baseline not run`. Any other missing or inconsistent baseline still makes
+  the card INCOMPLETE.
+
 - `BENCHMARK.md` no longer publishes an Overall uplift that disagrees with
   `lift.json` and the JSON, HTML, Markdown and terminal reports when a metric is
   N/A in only one arm. The Overall row now shows the two scores the published

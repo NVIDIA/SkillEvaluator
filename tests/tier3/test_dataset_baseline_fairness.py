@@ -374,6 +374,30 @@ def test_template_cases_keep_developer_behaviors():
     assert case["expected_behavior"][-1] == generate_dataset.SECURITY_BEHAVIOR
 
 
+@pytest.mark.parametrize("grounding", ["skill", "intent"])
+@pytest.mark.parametrize("generate", [generate_dataset._generate_simple, generate_dataset._generate_full])
+def test_template_cases_keep_the_grounding_order_and_stay_fair(generate, grounding):
+    # --grounding intent puts the authored EVAL.md behaviors first; the outcome check replaces skill use.
+    authored = ["The agent lists every blocker with its manifest line", "The agent names the policy each one breaks"]
+    skill = _skill(eval_prompt="## Behaviors\n" + "".join(f"- {item}\n" for item in authored), grounding=grounding)
+    outcome = (
+        "The agent produced concrete results for the request "
+        "(reviews release manifests for policy problems), not only a plan"
+    )
+    leading = [*authored, outcome] if grounding == "intent" else [outcome, *authored]
+
+    cases = generate(skill)
+
+    assert cases
+    for case in cases:
+        assert case["expected_behavior"] == [
+            *leading,
+            generate_dataset._FINAL_RESPONSE_BEHAVIOR,
+            generate_dataset.SECURITY_BEHAVIOR,
+        ]
+        assert _baseline_fairness_warnings(case, skill_scripts=["review.py"]) == []
+
+
 def test_template_negative_case_is_unchanged():
     without_guidance = generate_dataset._generate_full(_skill())
     with_guidance = generate_dataset._generate_full(
@@ -500,8 +524,12 @@ def test_template_refine_drops_skill_use_and_keeps_task_work(with_skill_context)
     skill = _skill(scripts=["review.py"])
     cases = generate_dataset._generate_simple(skill)
 
+    # create-eval-dataset --refine passes no authored case ids for cases it generated.
     (refined,) = generate_dataset._refine_from_trajectory_template(
-        cases, {cases[0]["id"]: _SKILL_USE_TRAJECTORY}, skill=skill if with_skill_context else None
+        cases,
+        {cases[0]["id"]: _SKILL_USE_TRAJECTORY},
+        skill=skill if with_skill_context else None,
+        authored_case_ids=set(),
     )
 
     behaviors = refined["expected_behavior"]

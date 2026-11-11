@@ -854,9 +854,10 @@ the run warning names the rule that did not hold:
 
 - Its with-skill arm scored every attempt with no errors.
 - Every missing baseline attempt is a trial that ended in Harbor's
-  `AgentTimeoutError`, matched case by case and, with `--stop-on-pass`,
-  attempt by attempt. Attempts that a [cost limit](#cost-limits) left
-  `not_run` are not expected, so they are not missing. A setup timeout,
+  `AgentTimeoutError`, matched case by case and, with `--stop-on-pass` or a
+  cost limit (each attempt then runs as its own job), attempt by attempt.
+  Attempts that a [cost limit](#cost-limits) left `not_run` are not expected,
+  so they are not missing. A setup timeout,
   process exit, verifier failure or any other baseline error is not
   tolerated. Native multi-step tasks are not covered: Harbor records their
   agent timeouts on the step rather than on the trial, so such a baseline is
@@ -894,7 +895,9 @@ attention" note and name each tolerated agent on its own line, for example
 `baseline_timeout_tolerance` lists the tolerated agents and the launch errors
 their timeouts explain (at most 32, with `explained_launch_errors_total`). The
 run lists a warning for each tolerated or refused agent, and `run_config.json`
-records `harbor.tolerate_baseline_timeouts`. The missing baseline attempts
+records `harbor.tolerate_baseline_timeouts`. The option changes no execution,
+so `--reuse-baseline`, `--compare-to` and `tier3 history` do not compare it:
+runs with and without it still pair. The missing baseline attempts
 still count, so the run is not complete publication evidence and does not
 satisfy a blocking Tier 3 gate.
 

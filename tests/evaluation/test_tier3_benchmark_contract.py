@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from skillevaluator import __version__
 from skillevaluator.constants import (
     DEFAULT_SCORE_POLICY,
@@ -94,12 +96,17 @@ def test_payload_exposes_report_truth_metadata() -> None:
     }
     assert payload["verdict_policy"] == {
         "attempt_pass_threshold": 0.6,
+        "goal_accuracy_pass_threshold": 1.0,
+        "security_pass_threshold": 1.0,
+        "attempt_pass_rule": "overall_threshold_and_goal_accuracy_and_security_threshold_when_scored",
+        "run_fail_policy": "any_with_skill_required_check_failure",
         "dimension_pass_threshold": DIMENSION_VERDICT_PASS_THRESHOLD,
         "dimension_neutral_threshold": DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
         "lift_pass_threshold": TIER3_LIFT_PASS_THRESHOLD,
         "lift_fail_threshold": TIER3_LIFT_FAIL_THRESHOLD,
         "overall_pass_rule": "one_supported_agent_all_dimensions_pass",
     }
+    assert {"required_checks", "correct_answers", "security_clean"} <= payload.keys()
     assert payload["summary"]["dataset_summary"] == payload["dataset_summary"]
     assert payload["summary"]["score_policy"] == payload["score_policy"]
     assert payload["summary"]["verdict_policy"] == payload["verdict_policy"]
@@ -189,10 +196,119 @@ def test_dataset_truth_counts_unique_task_identities() -> None:
     assert len(payload["dataset"]) == 2
 
 
+@pytest.mark.parametrize(
+    ("routing_fields", "positive", "negative", "unclassified"),
+    [
+        pytest.param({"expected_skill": "demo"}, 1, 0, 0, id="legacy-positive"),
+        pytest.param({"expected_skill": "demo", "should_trigger": False}, 0, 1, 0, id="explicit-negative"),
+        pytest.param({"expected_skill": None, "should_trigger": True}, 1, 0, 0, id="explicit-positive"),
+        pytest.param({"should_trigger": True}, 1, 0, 0, id="positive-label-only"),
+        pytest.param({"should_trigger": False}, 0, 1, 0, id="negative-label-only"),
+        pytest.param({"expected_skill": None}, 0, 1, 0, id="legacy-negative"),
+        pytest.param({}, 0, 0, 1, id="unlabeled"),
+    ],
+)
+def test_dataset_truth_respects_explicit_routing_intent(
+    routing_fields: dict, positive: int, negative: int, unclassified: int
+) -> None:
+    dataset = [{"id": "case-1", **routing_fields}]
+    expected_summary = {
+        "total_tasks": 1,
+        "positive_tasks": positive,
+        "negative_tasks": negative,
+        "unclassified_tasks": unclassified,
+        "source": "dataset",
+    }
+
+    snapshot = build_dataset_snapshot(dataset, evaluator_version=__version__)
+    payload = build_agent_eval_payload("demo", _agents(), dataset=dataset, use_llm_judge=False)
+
+    assert snapshot["dataset_summary"] == expected_summary
+    assert payload is not None
+    assert payload["dataset_summary"] == expected_summary
+    assert payload["summary"]["dataset_summary"] == expected_summary
+
+
 def test_dataset_snapshot_rejects_duplicate_or_tampered_dataset(tmp_path: Path) -> None:
     entry = {"id": "case-1", "prompt": "Run the skill", "expected_skill": "demo"}
     snapshot = build_dataset_snapshot([entry], evaluator_version="0.8.2")
     snapshot["dataset"].append(dict(entry))
+    (tmp_path / "dataset_snapshot.json").write_text(json.dumps(snapshot), encoding="utf-8")
+
+    assert load_dataset_snapshot(tmp_path) is None
+
+
+def test_dataset_snapshot_migrates_valid_legacy_routing_summary_in_memory(tmp_path: Path) -> None:
+    # This fixture was emitted by the base revision's schema 1.0 builder.
+    original = (Path(__file__).parents[1] / "fixtures" / "legacy-routing-dataset-snapshot-1.0.json").read_bytes()
+    persisted = tmp_path / "dataset_snapshot.json"
+    persisted.write_bytes(original)
+    historical = json.loads(original)
+
+    loaded = load_dataset_snapshot(tmp_path)
+
+    assert loaded is not None
+    assert loaded["schema_version"] == "1.1"
+    assert loaded["dataset"] == historical["dataset"]
+    assert loaded["dataset_digest"] == historical["dataset_digest"]
+    assert loaded["evaluator_version"] == "0.8.0"
+    assert loaded["dataset_summary"] == {
+        "total_tasks": 3,
+        "positive_tasks": 1,
+        "negative_tasks": 2,
+        "unclassified_tasks": 0,
+        "source": "dataset",
+    }
+    assert persisted.read_bytes() == original
+
+
+@pytest.mark.parametrize("schema_version", ["1.0", "1.1"])
+@pytest.mark.parametrize("tamper", ["summary-rule", "dataset", "digest", "algorithm"])
+def test_dataset_snapshot_rejects_tampered_versioned_truth(tmp_path: Path, schema_version: str, tamper: str) -> None:
+    snapshot = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "legacy-routing-dataset-snapshot-1.0.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    legacy_summary = dict(snapshot["dataset_summary"])
+    current_summary = {
+        "total_tasks": 3,
+        "positive_tasks": 1,
+        "negative_tasks": 2,
+        "unclassified_tasks": 0,
+        "source": "dataset",
+    }
+    snapshot["schema_version"] = schema_version
+    if schema_version == "1.1":
+        snapshot["dataset_summary"] = current_summary
+    if tamper == "summary-rule":
+        snapshot["dataset_summary"] = current_summary if schema_version == "1.0" else legacy_summary
+    elif tamper == "dataset":
+        snapshot["dataset"][0]["prompt"] = "Changed after evaluation"
+    elif tamper == "digest":
+        snapshot["dataset_digest"] = "sha256:" + "0" * 64
+    else:
+        snapshot["dataset_digest_algorithm"] = "unknown-digest"
+    (tmp_path / "dataset_snapshot.json").write_text(json.dumps(snapshot), encoding="utf-8")
+
+    assert load_dataset_snapshot(tmp_path) is None
+
+
+def test_new_dataset_snapshot_versions_corrected_routing_summary() -> None:
+    snapshot = build_dataset_snapshot(
+        [{"id": "negative", "expected_skill": "demo", "should_trigger": False}],
+        evaluator_version=__version__,
+    )
+
+    assert snapshot["schema_version"] == "1.1"
+    assert snapshot["dataset_summary"]["positive_tasks"] == 0
+    assert snapshot["dataset_summary"]["negative_tasks"] == 1
+
+
+@pytest.mark.parametrize("schema_version", [[], {}, "9.9"], ids=["array", "object", "unknown"])
+def test_dataset_snapshot_rejects_invalid_schema(tmp_path: Path, schema_version: object) -> None:
+    snapshot = build_dataset_snapshot([{"id": "case-1", "expected_skill": "demo"}], evaluator_version=__version__)
+    snapshot["schema_version"] = schema_version
     (tmp_path / "dataset_snapshot.json").write_text(json.dumps(snapshot), encoding="utf-8")
 
     assert load_dataset_snapshot(tmp_path) is None

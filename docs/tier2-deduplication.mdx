@@ -277,10 +277,12 @@ an error that names it, before any embedding request. So does a `name` or
 `description` longer than 16,384 characters, the per-field limit for catalog
 text, in every embedding mode. Description mode embeds `name: description`, so
 there the two values together must also fit in 16,384 characters. A list,
-mapping, number, date, or boolean is never converted to text: the manifest is
-excluded with the reason `non_string_name_or_description`, as manifests with
-invalid YAML, frontmatter that is not a mapping, or a missing or empty value are
-excluded with their own reasons. Quote a value such as `name: "2048"` or
+mapping, number, date, or boolean is never converted to text. Such a value, for
+example `name: 2048` or `name: yes`, excludes the manifest with the reason
+`non_string_name_or_description`. A missing value, or one that is empty, zero,
+or false (`""`, `[]`, `{}`, `0`, `false`, `no`), excludes it with the reason
+`missing_name_or_description` instead. Invalid YAML and frontmatter that is not
+a mapping have their own reasons. Quote a value such as `name: "2048"` or
 `name: "yes"` to keep it a string. Errors name a manifest by its path under the
 scan root, or by its directory and file name when one manifest is read on its
 own, such as a catalog query target.

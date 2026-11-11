@@ -441,10 +441,12 @@ All notable changes to SkillEvaluator are documented in this file.
   provider call. Text between the `---` lines that is not a mapping is still
   not frontmatter and is never checked against these limits.
   `similarity-check` now excludes a manifest whose `name`, `title`, or
-  `description` is not a string, such as `name: 2048`, with the coverage reason
-  `non_string_name_or_description` instead of converting the value; like any
-  excluded manifest, it makes the scan incomplete. It stops with an error that
-  names the manifest when a value is longer than 16,384 characters, the
+  `description` is a non-empty value that is not a string, such as `name: 2048`
+  or `name: yes`, with the coverage reason `non_string_name_or_description`
+  instead of converting the value. An empty, zero, or false value such as `0`,
+  `false`, or `[]` still gets `missing_name_or_description`. Either way, like
+  any excluded manifest, it makes the scan incomplete. It stops with an error
+  that names the manifest when a value is longer than 16,384 characters, the
   per-field catalog text limit; description mode still also caps
   `name: description` at 16,384 characters. An invalid tagged value such as
   `!!int ""`, an impossible date such as `2024-02-30`, or a decimal integer

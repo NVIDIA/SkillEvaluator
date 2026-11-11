@@ -437,8 +437,8 @@ All notable changes to SkillEvaluator are documented in this file.
   does not bundle. These releases report such a scan as
   `complete_with_caveats` instead of `partial`. SkillEvaluator now accepts the
   caveats under the same conditions as the missing references above and shows
-  the same warning, and checks the report's findings as in any other complete
-  scan. A caveat that fails one of those conditions, such as a line that names
+  the same missing-reference warning, and checks the report's findings as in
+  any other complete scan. A caveat that fails one of those conditions, such as a line that names
   a file left out of the scanned copy, leaves the scan `INCOMPLETE` and, as
   for a `partial` report, still reports the findings. Unlike the v2.13.3
   missing-path reference caveat, these caveats are never accepted from the

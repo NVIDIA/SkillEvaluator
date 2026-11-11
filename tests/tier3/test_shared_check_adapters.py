@@ -71,6 +71,16 @@ def test_standalone_efficiency_preserves_its_smaller_output_shape(verifier, call
     assert standalone == {key: value for key, value in host.items() if key != "details"}
 
 
+def test_placeholder_expected_script_matches_no_expectation_for_efficiency(verifier):
+    calls = [{"action": "Bash", "action_input": {"command": "python other.py"}}]
+    for checker in (checks.check_tool_efficiency, verifier.check_tool_efficiency):
+        expected = checker(calls, "calculator", None)
+        actual = checker(calls, "calculator", "None")
+        assert actual["score"] == expected["score"]
+        assert actual["passed"] == expected["passed"]
+        assert "Execute called but not with None" not in actual["reason"]
+
+
 def test_standalone_security_adapts_trajectory_text(verifier):
     trajectory = {
         "steps": [
@@ -114,6 +124,34 @@ def test_staged_template_ignores_an_unrelated_checks_module(tmp_path):
         [sys.executable, "-I", "-c", program, str(staged)], cwd=tmp_path, capture_output=True, text=True, check=True
     )
     assert json.loads(result.stdout) == [str(staged.with_name("checks.py")), True]
+
+
+def test_staged_template_normalizes_optional_references(tmp_path):
+    _copy_verifier(tmp_path)
+    staged = tmp_path / "tests/skill_evaluator/eval.py"
+    program = (
+        "import json,runpy,sys; "
+        "v=runpy.run_path(sys.argv[1]); "
+        "calls=[{'action':'Read','action_input':{'file_path':'/skills/calculator/SKILL.md'}}]; "
+        "execution=v['score_skill_execution']; "
+        "efficiency=v['check_tool_efficiency']; "
+        "script=v['check_script_execution']; "
+        "behavior=v['judge_behavior_check']('conversation',['None']); "
+        "print(json.dumps({"
+        "'execution':[execution(calls,'calculator',None)['score'],execution(calls,'calculator','None')['score']],"
+        "'efficiency':[efficiency(calls,'calculator',None)['score'],efficiency(calls,'calculator','None')['score']],"
+        "'script':[script(calls,None)['score'],script(calls,'None')['score']],"
+        "'behavior':[behavior['score'],behavior['reason']]}))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", program, str(staged)], cwd=tmp_path, capture_output=True, text=True, check=True
+    )
+    output = json.loads(result.stdout)
+
+    assert output["execution"][0] == output["execution"][1]
+    assert output["efficiency"][0] == output["efficiency"][1]
+    assert output["script"][0] == output["script"][1]
+    assert output["behavior"] == [None, "N/A: no expected_behavior defined for this eval case"]
 
 
 def _read(path):

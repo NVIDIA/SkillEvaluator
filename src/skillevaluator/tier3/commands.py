@@ -29,6 +29,7 @@ from skillevaluator.evaluation.results import DatasetGenerationError, DatasetGen
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
 from skillevaluator.tier3.case_ids import safe_child, validate_case_id, validate_case_ids
+from skillevaluator.tier3.dataset_coverage import dataset_coverage_result
 from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS, load_dataset_entries_with_format
 from skillevaluator.tier3.evals_config import CONFIG_FILENAMES, _validate_config, load_evals_config
 from skillevaluator.tier3.evals_spec import validate_harbor_contract, validate_skillevaluators
@@ -48,6 +49,7 @@ from skillevaluator.tier3.harbor.metrics import (
     LEGACY_METRICS,
     LEGACY_SCORE_POLICY,
     PARTIAL_SCORE_POLICY,
+    not_applicable_list,
     overall_score_from_metrics,
 )
 from skillevaluator.tier3.harbor.progress import (
@@ -431,6 +433,7 @@ def create_dataset(
     dry_run: bool = False,
     force: bool = False,
     prompt: Path | None = None,
+    grounding: str = "skill",
     refine: bool = False,
     from_results: Path | None = None,
     results_dir: Path | None = None,
@@ -449,6 +452,8 @@ def create_dataset(
         argv.append("--force")
     if prompt:
         argv.extend(["--prompt", str(prompt.resolve())])
+    if grounding != "skill":
+        argv.extend(["--grounding", grounding])
     if refine:
         argv.append("--refine")
     if from_results:
@@ -665,7 +670,14 @@ def evaluate(
     environment_kwarg: tuple[str, ...] = (),
     skip_baseline: bool,
     skip_with_skill: bool = False,
+    reuse_baseline: str | None = None,
+    compare_to: str | None = None,
     n_attempts: int | None,
+    max_agent_tokens: int | None = None,
+    max_judge_calls: int | None = None,
+    max_attempts_total: int | None = None,
+    max_cost_usd: float | None = None,
+    price_file: Path | None = None,
     pass_threshold: float | None,
     stop_on_pass: bool | None = None,
     n_concurrent: int | None,
@@ -723,6 +735,10 @@ def evaluate(
         reporter.emit(ProgressEvent(stage="configuration", state="running"))
         if skip_baseline and skip_with_skill:
             raise ValueError("--skip-baseline and --skip-with-skill are mutually exclusive (no arm would run)")
+        if reuse_baseline and (skip_baseline or skip_with_skill):
+            raise ValueError("--reuse-baseline is mutually exclusive with --skip-baseline and --skip-with-skill")
+        if compare_to and skip_with_skill:
+            raise ValueError("--compare-to is mutually exclusive with --skip-with-skill")
         unknown = validate_agents(agent_list)
         if unknown:
             supported = ", ".join(sorted(HARBOR_AGENTS_SUPPORTED))
@@ -752,7 +768,14 @@ def evaluate(
             agents=agent_list,
             skip_baseline=skip_baseline,
             skip_with_skill=skip_with_skill,
+            reuse_baseline=reuse_baseline,
+            compare_to=compare_to,
             n_attempts=n_attempts,
+            max_agent_tokens=max_agent_tokens,
+            max_judge_calls=max_judge_calls,
+            max_attempts_total=max_attempts_total,
+            max_cost_usd=max_cost_usd,
+            price_file=price_file,
             pass_threshold=pass_threshold,
             stop_on_pass=stop_on_pass,
             n_concurrent=n_concurrent,
@@ -968,15 +991,19 @@ def validate_evals(skill_path: Path, *, as_json: bool, strict: bool, harbor_cont
                 )
             ]
 
+    coverage = dataset_coverage_result(skill_path)
     if as_json:
         console.print_json(
             json.dumps(
-                [{"path": r.path, "status": r.status, "message": r.message} for r in results],
+                [{"path": r.path, "status": r.status, "message": r.message} for r in results]
+                + ([coverage] if coverage is not None else []),
                 indent=2,
             )
         )
     else:
         _print_validate_results(skill_path, results)
+        if coverage is not None:
+            console.print(Text(coverage["message"]))
 
     has_errors = any(r.status == "error" for r in results)
     has_warnings = any(r.status == "warning" for r in results)
@@ -1208,6 +1235,7 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
                         "score_policy_with_skill": _summary_score_policy(data),
                         "standard_metrics": _summary_standard_metrics(data),
                         "custom_only": _summaries_are_custom_only([data]),
+                        "not_applicable_with_skill": not_applicable_list(data.get("not_applicable_metrics")),
                     }
                     wo_summary = agent_dir / "without-skill" / "summary.json"
                     if wo_summary.exists():
@@ -1235,6 +1263,9 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
                                     {
                                         "overall_without_skill": wo_overall,
                                         "score_policy_without_skill": _summary_score_policy(wo_data),
+                                        "not_applicable_without_skill": not_applicable_list(
+                                            wo_data.get("not_applicable_metrics")
+                                        ),
                                     }
                                 )
                         except (ValueError, OSError):
@@ -1301,6 +1332,7 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
 
     table.add_row(*[""] * (1 + sum(2 if agent in agent_without else 1 for agent in agents)))
     overall_row: list[str | Text] = [Text("Overall", style="bold")]
+    lift_json_agents: list[str] = []
     for agent in agents:
         meta = agent_meta[agent]
         with_avg = _overall_score_for_display(
@@ -1321,7 +1353,13 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
                 persisted_overall=meta.get("overall_without_skill"),
                 score_policy=meta.get("score_policy_without_skill"),
             )
-            if with_avg is None or without_avg is None:
+            uses_lift_json, shared_lift = _shared_dimension_overall_lift(
+                agent_with[agent], agent_without[agent], overall_metrics, meta
+            )
+            if uses_lift_json and shared_lift is not None:
+                lift_json_agents.append(agent)
+                overall_row.append(_lift_text(shared_lift))
+            elif uses_lift_json or with_avg is None or without_avg is None:
                 overall_row.append(Text("-", style="dim"))
             else:
                 delta = with_avg - without_avg
@@ -1345,8 +1383,48 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
         # Pad before escaping so escape backslashes do not count toward the column width.
         run_line = f"{agent:<16s} {meta['timestamp']} (Harbor, {meta.get('num_trials', '?')} trials)"
         console.print(f"  [dim]{escape_markup(run_line)}[/dim]")
+    if lift_json_agents:
+        console.print(
+            f"  [dim]Overall lift for {escape_markup(', '.join(lift_json_agents))} compares only the "
+            "dimensions both arms scored, as in lift.json and the reports.[/dim]"
+        )
     console.print()
     return 0
+
+
+def _shared_dimension_overall_lift(
+    with_scores: dict[str, float],
+    without_scores: dict[str, float],
+    metrics: tuple[str, ...],
+    meta: dict[str, Any],
+) -> tuple[bool, float | None]:
+    """Return the canonical standard-policy Overall lift when shared metrics differ."""
+    shared_not_applicable = sorted(
+        {*meta.get("not_applicable_with_skill", ()), *meta.get("not_applicable_without_skill", ())}
+    )
+    if (
+        not shared_not_applicable
+        or metrics != DEFAULT_METRICS
+        or meta.get("score_policy_with_skill") != DEFAULT_SCORE_POLICY
+        or meta.get("score_policy_without_skill") != DEFAULT_SCORE_POLICY
+    ):
+        return False, None
+    agent_path = meta.get("path")
+    if not isinstance(agent_path, str) or not agent_path:
+        return True, None
+    try:
+        lift_data = json.loads((Path(agent_path) / "lift.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True, None
+    if not isinstance(lift_data, dict) or not isinstance(lift_data.get("overall"), dict):
+        return True, None
+    return True, _finite_numeric(lift_data["overall"].get("delta"))
+
+
+def _lift_text(delta: float) -> Text:
+    delta_text = f"+{delta:.2f}" if delta > 0 else f"{delta:.2f}"
+    delta_style = "bold green" if delta > 0 else ("bold red" if delta < 0 else "bold dim")
+    return Text(delta_text, style=delta_style)
 
 
 def _summary_scores(data: dict[str, Any], *, allow_missing_status: bool = False) -> dict[str, float]:

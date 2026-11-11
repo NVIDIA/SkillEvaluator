@@ -27,6 +27,7 @@ from skillevaluator.reporting import (
     MarkdownReporter,
     SARIFReporter,
 )
+from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION
 from skillevaluator.tier1.commands import emit_reports
 
 _SKILLSPECTOR_2_12_LLM_PROVENANCE = Path(__file__).parents[1] / "fixtures" / "skillspector-2.12.0-llm-provenance.json"
@@ -937,7 +938,7 @@ def test_tier1_dashboard_reconciles_only_tier1_findings() -> None:
     tier_cards = html.split('class="tier-cards', 1)[1].split('<section class="exec-summary', 1)[0]
     assert re.search(r"<strong>1</strong> finding</span>", tier_cards)
     assert '<span class="tier-card-sev-pill high">1 high</span>' in tier_cards
-    assert re.search(r"<strong>1</strong> duplicate\(s\)</span>", tier_cards)
+    assert re.search(r"<strong>1</strong> finding\(s\)</span>", tier_cards)
     # The gate policy counts each tier's unique findings.
     gate_policy = html.split('class="gate-policy"', 1)[1].split("</div>", 1)[0]
     assert "0 critical · 2 high · 0 medium · 0 low" in gate_policy
@@ -2165,8 +2166,8 @@ class TestHTMLReporter:
         assert "performing well across evaluated dimensions" not in output
 
         markdown = MarkdownReporter(include_timestamp=False).render_all([result])
-        assert "composite lift = N/A" in markdown
-        assert "composite lift = +0.00" not in markdown
+        assert "Skill Lift = N/A" in markdown
+        assert "Skill Lift = +0.00" not in markdown
 
     def test_standalone_tier3_report_uses_skillevaluator_branding(self, tmp_path: Path) -> None:
         """Standalone Tier 3 HTML should use the canonical SkillEvaluator branding."""
@@ -2340,8 +2341,9 @@ class TestMarkdownReporter:
         """Tier 3 Markdown should include compact Harbor and evidence links."""
         output = MarkdownReporter(include_timestamp=False).render_all([_tier3_harbor_result()])
 
-        assert "**Harbor logs:** [Open Harbor logs](" in output
-        assert "**Harbor analysis:** [Open Harbor analysis](" in output
+        assert re.search(
+            r"^- \*\*[^*]+:\*\* \[Harbor logs\]\(https://[^)]+\) · \[Harbor analysis\]\(", output, re.MULTILINE
+        )
         assert "https://harbor.example.test/jobs/log-analyzer" in output
         assert "Evidence: [View Step 9](" in output
         assert "log-analyzer-001?step=9" in output
@@ -2381,6 +2383,25 @@ class TestMarkdownReporter:
 
         assert "### Evaluator Scores" in output
         assert "| Accuracy | 0.90 | NO SCORE | NO SCORE |" in output
+
+    def test_markdown_names_skill_lift_and_pass_rate_difference(self) -> None:
+        result = _tier3_harbor_result()
+        agent_eval = result.metadata["agent_eval"]
+        agent_eval["composite_lift"] = 0.2
+        agent_eval["overall_lift"] = 0.2
+        agent_eval["attempt_policy"] = {"max_attempts": 2, "pass_threshold": 0.6}
+        agent_eval["pass_at_k"] = {
+            "with_skill": {"k": 2, "pass_threshold": 0.6, "rate": 0.75},
+            "without_skill": {"k": 2, "pass_threshold": 0.6, "rate": 0.5},
+            "lift": {"delta": 0.25},
+        }
+
+        output = MarkdownReporter(include_timestamp=False).render_all([result])
+
+        assert "Skill Lift = +0.20" in output
+        assert SKILL_LIFT_DEFINITION in output
+        assert "Pass@2 (supporting reliability" in output
+        assert "Pass-rate difference +25.0 percentage points" in output
 
     def test_render_tier3_normalized_evidence_uses_distinct_evidence_ids(self) -> None:
         result = _tier3_harbor_result()
@@ -2690,3 +2711,107 @@ class TestTopIssuesDeepLink:
             )
         )
         return result
+
+
+@pytest.mark.parametrize("reporter", [CLIReporter, MarkdownReporter, HTMLReporter])
+def test_all_harbor_jobs_are_navigable_without_attribution_guessing(reporter):
+    from copy import deepcopy
+
+    result = _tier3_harbor_result()
+    viewer = result.metadata["agent_eval"]["harbor_viewer"]
+    viewer["jobs"] += [
+        {
+            "url": "https://harbor.example.test/jobs/second",
+            "analysis_url": "https://harbor.example.test/analysis/second",
+            "name": "<job>[bad](x)",
+        },
+        {"url": "https://harbor.example.test/jobs/third"},
+        {"url": "https://harbor.example.test/jobs/second", "name": "duplicate"},
+        {"url": "javascript:alert(99)", "name": "unsafe"},
+    ]
+    original = deepcopy(result)
+    output = reporter().render_all([result])
+    assert "https://harbor.example.test/jobs/second" in output
+    assert "https://harbor.example.test/analysis/second" in output
+    assert "https://harbor.example.test/jobs/third" in output
+    assert "Job 3" in output
+    assert "Results" in output
+    assert "javascript:alert(99)" not in output
+    if reporter is HTMLReporter:
+        assert "&lt;job&gt;[bad](x)" in output
+        assert "<job>" not in output
+        panel = output.split('class="t3-harbor-panel"', 1)[1].split("</div>\n            </div>", 1)[0]
+        assert panel.count('href="https://harbor.example.test/jobs/second"') == 1
+    elif reporter is MarkdownReporter:
+        assert "&lt;job&gt;&#91;bad&#93;(x)" in output
+    else:
+        assert "<job>[bad](x)" in output
+    assert result == original
+
+
+def test_html_discloses_only_recorded_validated_provenance_without_changing_payload():
+    from copy import deepcopy
+
+    result = _tier3_harbor_result()
+    ae = result.metadata["agent_eval"]
+    ae["evaluator_version"] = "recorded-evaluator-v1"
+    ae["dataset_digest"] = "sha256:" + "a" * 64
+    ae["dataset_digest_algorithm"] = "skill-evaluator-dataset-snapshot/1"
+    ae["agents"] = {"agent": {"model": "recorded-model-v1"}}
+    result.metadata["evaluated_source"] = {"repository": "org/skill", "commit": "b" * 40}
+    original = deepcopy(result)
+    output = HTMLReporter(include_timestamp=False).render_all([result])
+    diagnostics = output.split('id="tier3-page-provenance"', 1)[1].split("</section>", 1)[0]
+    assert "Recorded evaluation provenance" in diagnostics
+    assert "recorded-evaluator-v1" in diagnostics
+    assert "recorded-model-v1" in diagnostics
+    assert "sha256:" + "a" * 64 in diagnostics
+    assert "org/skill" in diagnostics and "b" * 40 in diagnostics
+    assert result == original
+
+
+@pytest.mark.parametrize("reporter", [CLIReporter, MarkdownReporter, HTMLReporter])
+@pytest.mark.parametrize("summary_only", [False, True])
+def test_legacy_analysis_only_harbor_evidence_is_available(reporter, summary_only):
+    result = _tier3_harbor_result()
+    ae = result.metadata["agent_eval"]
+    ae.pop("harbor_viewer", None)
+    viewer = {"analysis_url": "https://harbor.example.test/analysis-only"}
+    if summary_only:
+        ae["summary"]["harbor_viewer"] = viewer
+    else:
+        ae["harbor_viewer"] = viewer
+    output = reporter().render_all([result])
+    assert "https://harbor.example.test/analysis-only" in output
+    assert "Run analysis" in output
+
+
+@pytest.mark.parametrize("colored", [False, True])
+def test_cli_harbor_job_labels_remain_neutral_and_literal(colored):
+    from io import StringIO
+
+    from rich.console import Console
+
+    stream = StringIO()
+    console = Console(
+        file=stream, force_terminal=colored, color_system="standard" if colored else None, record=True, width=160
+    )
+    payload = {
+        "harbor_viewer": {
+            "jobs": [
+                {
+                    "name": "Job 3 [bad]",
+                    "url": "https://example.test/jobs/3",
+                    "analysis_url": "https://example.test/analysis/3",
+                }
+            ]
+        }
+    }
+    CLIReporter._print_harbor_artifacts(payload, console)
+    output = stream.getvalue()
+    assert "Job 3 [bad]" in output
+    assert "Harbor logs: Results https://example.test/jobs/3" in output
+    assert "Harbor analysis: https://example.test/analysis/3" in output
+    assert "Job 3 [bad]" in console.export_text()
+    if colored:
+        assert "\x1b[1mJob 3 [bad]\x1b[0m" in output

@@ -3,9 +3,10 @@ title: "GitHub Actions"
 description: "Bring SkillEvaluator to your GitHub repository with a reusable workflow, clear results and optional PR feedback."
 ---
 
-Bring skill evaluation to your GitHub repository with one workflow file.
+Bring quality and security checks to your repository. No model key required.
+Optional LLM checks are available.
 Choose your skill folders; pull requests check changed skills automatically.
-The shared image includes **Tier 1 and SkillSpector security scanning**.
+The shared image includes **SkillSpector security scanning**.
 
 <CardGroup cols={2}>
   <Card title="Use the CLI" icon="terminal" href="/skills/skillevaluator/cli-onboarding">
@@ -82,6 +83,28 @@ Download `skill-evaluator-tier1-attempt-N`, extract it, and open `index.html`.
 Failed scans retain their available reports too. The HTML separates the
 **verdict** from the **quality score**: a high score does not override a failed
 required security or schema check.
+
+<AccordionGroup>
+  <Accordion title="Why is an author email reported as PII?">
+    The required `metadata.author` attribution is accepted. Extra copies in
+    contact fields, body text, or reference documents are checked separately.
+    Keep the author field and use a handle or contact-directory link for extra
+    contact information. See [author attribution and approved exceptions](/skills/skillevaluator/tier1-validation#author-attribution-and-contact-emails).
+  </Accordion>
+  <Accordion title="Use reviewed security baselines">
+    This requires a workflow and image version that include baseline support;
+    existing released templates do not gain it automatically.
+
+    Set `security-baselines: true` in the reusable scan job and add a reviewed
+    `.skillevaluator/skillspector-baselines.yaml` mapping each skill to its
+    baseline. For PRs, CI reads both the mapping and baseline from the target
+    branch, so merge the approved policy before expecting it to apply.
+
+    Regenerate and review fingerprint exceptions when the scanner version
+    changes. Baselines do not waive PII checks or incomplete analysis. The [baseline setup guide](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/README.md#reviewed-security-baselines)
+    covers the file format and shared-component forwarding.
+  </Accordion>
+</AccordionGroup>
 
 <Frame caption="Report example: the skill scored 98.2 but did not meet a configured 100-point threshold. The shared renderer is used by both GitHub and GitLab.">
   <img src="./assets/repository-ci-results-example.png" alt="SkillEvaluator report table showing the skill verdict, score and link to its detailed report" />
@@ -175,7 +198,7 @@ or let the [CLI](/skills/skillevaluator/cli-onboarding) handle it.
     `*.pages.github.io` URL. It accepts an existing SkillEvaluator report site
     or a newly configured empty private site, and preserves unrelated websites.
     If private hosting is unavailable, choose checks only. See
-    [private report hosting](cli-onboarding.mdx#private-report-hosting) for the
+    [private report hosting](/skills/skillevaluator/cli-onboarding#private-report-hosting) for the
     guided path and [GitHub's access-control requirements](https://docs.github.com/en/enterprise-cloud@latest/pages/getting-started-with-github-pages/changing-the-visibility-of-your-github-pages-site).
   </Accordion>
 </AccordionGroup>
@@ -202,8 +225,8 @@ or let the [CLI](/skills/skillevaluator/cli-onboarding) handle it.
     After the first run, select its scan check in GitHub branch rules. The
     current template emits `skills / Tier 1 scan`; use the actual check name
     shown in your repository. `min-score` sets the quality threshold; required
-    security, schema and other checks remain independent. This integration
-    runs Tier 1 only.
+    security, schema and other checks remain independent. The reusable scanner
+    runs quality and security checks only.
   </Accordion>
   <Accordion title="The scan finished, but the comment is missing">
     Confirm setup is on the default branch and the PR is eligible for comments.
@@ -240,7 +263,7 @@ or let the [CLI](/skills/skillevaluator/cli-onboarding) handle it.
     require the private Pages setup described above.
   </Accordion>
   <Accordion title="Do the checks need an LLM key or network access?">
-    Default Tier 1 checks use no model key. Dependency audits can contact
+    Default checks use no model key. Dependency audits can contact
     vulnerability services and submit package metadata; packages are not
     installed and build scripts are not run. Optional LLM checks use a separate
     [manual workflow](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/skill-checks-llm.yml),
@@ -257,3 +280,10 @@ or let the [CLI](/skills/skillevaluator/cli-onboarding) handle it.
     Use the shared scanner image with a GitLab pipeline.
   </Card>
 </CardGroup>
+
+<div id="three-tier-checks-and-feedback">
+
+For the explicit all-tier opt-in and its prerequisites, see [Advanced CI](/skills/skillevaluator/advanced-ci).
+The [GitHub setup reference](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/all-tiers/README.md#github-checks-and-feedback) preserves the detailed contracts.
+
+</div>

@@ -402,8 +402,8 @@ All notable changes to SkillEvaluator are documented in this file.
   report lists once and that is inside the skill and not reached through a
   symlink, and the report's `references` list must record a `missing`
   reference on that line. The line must not name a symlink, a file the report
-  does not list, a directory left out of the scanned copy, such as `evals/` or
-  `node_modules/`, anything in it, or a directory that holds any of these,
+  does not list, a directory left out of the scanned copy, such as `versions/`
+  or `node_modules/`, anything in it, or a directory that holds any of these,
   also after Markdown escapes, character references and percent-escapes are
   decoded, or through a shell glob, expansion or quotes, a zsh group, numeric
   range, globbing flag or `EXTENDED_GLOB` operator, a bash extended glob, a
@@ -423,18 +423,15 @@ All notable changes to SkillEvaluator are documented in this file.
   counts as not inspected too, so a line that names it keeps the scan
   `INCOMPLETE` after a Tier 3 run, although it passed before. Keeping results
   outside the skill with `--results-dir` or `SKILLEVALUATOR_RESULTS_DIR`
-  avoids that. Input fixtures in `evals/files` count as not inspected as well,
-  so a line that names one, such as `meeting.txt`, keeps the scan `INCOMPLETE`
-  whenever the fixture exists, with or without a Tier 3 run. Every missing
-  reference in a skill scanned on its own inside a folder or plugin, such as
-  `security-scan` or `validate` on a folder of skills, or `validate` on a
-  plugin, also keeps that skill's scan `INCOMPLETE`. A reference that matches
-  several bundled files (`reference_unresolved` from v2.12.0), a fatal or
-  other ledger row, an uninspected file, a degraded analyzer, a limitation, or
-  fewer findings counted after filtering than before still leaves the scan
-  `INCOMPLETE`. SkillSpector v2.13.4 and later report a scan whose only gaps
-  are missing references as `complete_with_caveats`, which is not accepted
-  yet.
+  avoids that. Every missing reference in a skill scanned on its own inside a
+  folder or plugin, such as `security-scan` or `validate` on a folder of
+  skills, or `validate` on a plugin, also keeps that skill's scan
+  `INCOMPLETE`. A reference that matches several bundled files
+  (`reference_unresolved` from v2.12.0), a fatal or other ledger row, an
+  uninspected file, a degraded analyzer, a limitation, or fewer findings
+  counted after filtering than before still leaves the scan `INCOMPLETE`.
+  SkillSpector v2.13.4 and later report a scan whose only gaps are missing
+  references as `complete_with_caveats`, which is not accepted yet.
 
 - Tier 3 **Measured Agent Resources** no longer count idle or user time as LLM
   seconds when timing is inferred from step timestamps and an agent step with

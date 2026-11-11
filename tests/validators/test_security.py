@@ -9363,7 +9363,7 @@ class TestSkillspectorMissingReferences:
         [
             ("`versions/install.sh`", "versions/install.sh"),
             ("`node_modules/.bin/install.sh`", "node_modules/.bin/install.sh"),
-            ("`evals/install.sh`", "evals/install.sh"),
+            ("`evals/results/install.sh`", "evals/results/install.sh"),
             ("`.venv/install.sh`", ".venv/install.sh"),
             ("`install.sh`", "versions/install.sh"),
             ("[the setup folder](versions/)", "versions/install.sh"),
@@ -9638,9 +9638,8 @@ class TestSkillspectorMissingReferences:
                 "Run `scripts/summarize.py`, then write the summary to `output/notes.md`.",
                 {**_TIER3_RUN_FILES, **_TIER3_KEPT_JOB_FILES},
             ),
-            ("Summarize the user's `meeting.txt` into `output/notes.md`.", {"evals/files/meeting.txt": "Notes.\n"}),
         ],
-        ids=["results-directory", "report-file", "kept-harbor-job", "input-fixture"],
+        ids=["results-directory", "report-file", "kept-harbor-job"],
     )
     @patch("skillevaluator.validators.security.Tools")
     def test_tier3_output_and_fixtures_in_the_skill_count_as_not_inspected(
@@ -9649,8 +9648,8 @@ class TestSkillspectorMissingReferences:
         """A Tier 3 run in the default ``<skill>/evals/results`` turns a passing line into ``INCOMPLETE``.
 
         The run's names (``results``, ``report.html``, and with ``--harbor-keep-jobs``
-        a copy of every bundled file) and the input fixtures in ``evals/files``
-        are left out of the scanned copy, like anything an author keeps there.
+        a copy of every bundled file) are left out of the scanned copy, like
+        anything an author keeps in a ``results`` directory.
         """
         original = "Write the summary to `output/notes.md` and keep it short."
         files = {**_NOTES_WRITER_FILES, "SKILL.md": _NOTES_WRITER_FILES["SKILL.md"].replace(original, line)}

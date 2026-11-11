@@ -3400,7 +3400,11 @@ class SecurityValidator(ValidatorBase):
         (:func:`_skillspector_without_hook_surface`), the rest of the report
         decides whether the scan is complete, and
         :meth:`_process_skillspector_cli_result` reports a Critical gate
-        failure for each manifest instead.
+        failure for each manifest instead. :func:`reference_caveat_metadata`
+        reads the whole report, hook rows included, so its report-only
+        missing-reference caveat does not apply beside the hooks: without a
+        *reference_root*, a missing reference there records the scan as
+        incomplete next to the Critical.
 
         From SkillSpector 2.13.4, an analysis whose only gaps are missing
         references is ``complete_with_caveats`` instead of ``partial``. Its

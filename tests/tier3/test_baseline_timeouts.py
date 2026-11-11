@@ -1368,6 +1368,32 @@ def test_engine_config_key_tolerates_and_drops_the_explained_launch_error(
     assert persisted["agents"]["opencode"][RECORD_KEY]["failed_attempts"] == 1
 
 
+def test_option_is_not_part_of_the_comparison_identity(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The option changes no execution, so reuse and version comparison still pair runs across it."""
+    from skillevaluator.tier3 import baseline_store
+
+    result, _captured = _run_engine(monkeypatch, tmp_path, CONFIG + "  tolerate_baseline_timeouts: true\n")
+    run_dir = Path(result["run_dir"])
+    config = json.loads((run_dir / "run_config.json").read_text(encoding="utf-8"))
+    assert config["harbor"]["tolerate_baseline_timeouts"] is True
+    source = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))["comparison_identity"]
+    assert "tolerate_baseline_timeouts" not in source["config"]["harbor"]
+
+    # The same run configured without the option.
+    config["harbor"].pop("tolerate_baseline_timeouts")
+    current = {**source, "config": baseline_store.comparison_identity(config, {})["config"]}
+    assert baseline_store.comparison_mismatches(current, source) == []
+    assert baseline_store.comparison_mismatches(source, current) == []
+    # The complete peer's baseline is a --reuse-baseline source; the tolerated baseline is not.
+    reasons, _result = baseline_store.baseline_eligibility(run_dir, ["codex"], current)
+    assert reasons == []
+    reasons, _result = baseline_store.baseline_eligibility(run_dir, ["opencode"], current)
+    assert "opencode: without-skill condition did not succeed" in reasons
+    # Both clean with-skill arms are a --compare-to prior.
+    reasons, _result = baseline_store.condition_eligibility(run_dir, ["codex", "opencode"], current, "with_skill")
+    assert reasons == []
+
+
 def test_engine_argument_overrides_the_config_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     result, captured = _run_engine(
         monkeypatch,

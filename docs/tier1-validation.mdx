@@ -386,8 +386,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     | Rule | Deducts when | Packaged points | List field |
     | --- | --- | --- | --- |
     | `mentioned` | `SKILL.md` contains none of the `terms` | `10` | `terms`: whole words, any case. `error` matches `Error` but not `errorless` |
-    | `scripts` | A `.py` file under `scripts/` or `tools/` has neither a `try:`/`except` pair nor any of the `markers` | `5` | `markers`: case-sensitive text found anywhere in the file, such as `raise` or `if not ` |
-    | `lib` | A module in the skill's Python package has neither a `try:`/`except` pair nor any of the `markers` | `5` | `markers`: as for `scripts` |
+    | `scripts` | A `.py` file directly in `scripts/` or `tools/` has neither a `try:`/`except` pair nor any of the `markers` | `5` | `markers`: case-sensitive text found anywhere in the file, such as `raise` or `if not ` |
+    | `lib` | A module in the skill's Python package, for skills with no `.py` or `.sh` files in `scripts/` or `tools/`, has neither a `try:`/`except` pair nor any of the `markers` | `5` | `markers`: as for `scripts` |
 
     Each rule also takes `message` and `suggestion`. The `scripts` and `lib` findings append up to three file names to the message, as in `Scripts may lack error handling: run.py`. The `try:`/`except` pair always counts as error handling and is not configurable. See the packaged `quality-default.yaml` for every default term and marker. The `quality_config` digest in the report covers only the rules your file sets, not the packaged values it leaves out, so the digest changes only when your file's rules change.
 

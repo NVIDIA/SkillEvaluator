@@ -1069,6 +1069,40 @@ def test_skipped_with_skill_agent_gets_root_dataset_sufficiency(
     assert "Dataset size:" in render_result(result)
 
 
+def test_skipped_with_skill_agents_rank_root_dataset_sufficiency_by_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        collect=lambda **_kwargs: {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "metrics": [],
+            "agents": {
+                "codex": _dataset_sufficiency_agent_result(score=0.6, paired_cases=1, skip_with_skill=True),
+                "opencode": _dataset_sufficiency_agent_result(score=0.9, paired_cases=7, skip_with_skill=True),
+            },
+        },
+    )
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex", "opencode"],
+        skip_with_skill=True,
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    from skillevaluator.tier3.result_display import render_result
+
+    agents = result["agents"]
+    assert agents["codex"]["dataset_sufficiency"] != agents["opencode"]["dataset_sufficiency"]
+    assert result["dataset_sufficiency"] == agents["opencode"]["dataset_sufficiency"]
+    assert "Dataset size:" in render_result(result)
+
+
 def test_runner_keeps_recorded_negative_count_when_unclassified_cases_remain(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3304,6 +3338,7 @@ def test_runner_emits_truthful_stages_plan_and_per_agent_state(
         ("with-skill-tasks", "ready"),
         ("baseline-tasks", "running"),
         ("baseline-tasks", "ready"),
+        ("configuration", "complete"),
         ("docker-images", "delegated"),
         ("agent-runtime-preflight", "running"),
         ("agent-runtime-preflight", "complete"),

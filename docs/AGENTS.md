@@ -12,12 +12,14 @@ folder holds MDX pages published to <https://docs.nvidia.com/skills/skillevaluat
 
 - `index.mdx` — landing page and three-tier overview (Fern slug `/`)
 - `quickstart.mdx` — install, one provider and key, and first runs
+- `starter-demo.mdx` — reproducible public terminal starter, output checks and adaptation
 - `installation.mdx` — extras, uv, pip, Docker, requirements
 - `configuration.mdx` — providers, embeddings, and Tier 3 credential roles
 - `agent-skill.mdx` — installing and using the `skills/skillevaluator` agent skill
 - `tier1-validation.mdx` — Tier 1 checks, profiles, scanner setup, exit codes
 - `tier2-deduplication.mdx` — Tier 2 dedup commands, catalogs, thresholds, limits
 - `tier3-live-evaluation.mdx` — Tier 3 live agent evaluation workflow
+- `grader-validation.mdx` — independent-label qualification of the shipped verifier
 - `eval-datasets.mdx` — the `evals/` contract, dataset generation, run policy
 - `agents-and-sandboxes.mdx` — agents, environment backends, local mode, readiness
 - `custom-graders.mdx` — bring-your-own graders and native Harbor tasks

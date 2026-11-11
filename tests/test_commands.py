@@ -504,9 +504,7 @@ def test_validate_default_reports_do_not_write_into_authored_sibling_skill(
         encoding="utf-8",
     )
     initial_files = {
-        path.relative_to(authored_sibling): path.read_bytes()
-        for path in authored_sibling.rglob("*")
-        if path.is_file()
+        path.relative_to(authored_sibling): path.read_bytes() for path in authored_sibling.rglob("*") if path.is_file()
     }
     private_state = tmp_path / "private-state"
     private_state.mkdir(mode=0o700)
@@ -523,9 +521,7 @@ def test_validate_default_reports_do_not_write_into_authored_sibling_skill(
     assert (output_root / "BENCHMARK.md").is_file()
     assert is_generated_output_root(output_root)
     assert {
-        path.relative_to(authored_sibling): path.read_bytes()
-        for path in authored_sibling.rglob("*")
-        if path.is_file()
+        path.relative_to(authored_sibling): path.read_bytes() for path in authored_sibling.rglob("*") if path.is_file()
     } == initial_files
 
 
@@ -831,9 +827,7 @@ def test_quality_check_applies_custom_quality_config(
 
 @pytest.mark.parametrize("command", [["quality-check"], ["tier1", "quality-check"]])
 def test_quality_check_rejects_missing_quality_config(command: list[str], tmp_path: Path) -> None:
-    result = CliRunner().invoke(
-        cli, [*command, str(FIXTURE), "--quality-config", str(tmp_path / "missing.yaml")]
-    )
+    result = CliRunner().invoke(cli, [*command, str(FIXTURE), "--quality-config", str(tmp_path / "missing.yaml")])
 
     assert result.exit_code == 2
     assert "does not exist" in result.output
@@ -1851,6 +1845,43 @@ def test_catalog_child_argv_forwards_every_validate_option() -> None:
     assert sorted(dropped) == sorted(not_forwarded)
 
 
+def test_catalog_child_argv_forwards_run_budget_options(tmp_path: Path) -> None:
+    from skillevaluator.cli import _catalog_child_argv_from_ctx, validate
+
+    skill_dir = tmp_path / "catalog" / "simple"
+    skill_dir.mkdir(parents=True)
+    price_file = tmp_path / "prices.json"
+    price_file.write_text("{}", encoding="utf-8")
+    ctx = validate.make_context(
+        "validate",
+        [
+            str(skill_dir),
+            "--max-agent-tokens",
+            "120",
+            "--max-judge-calls",
+            "5",
+            "--max-attempts-total",
+            "9",
+            "--max-cost-usd",
+            "2.5",
+            "--price-file",
+            str(price_file),
+        ],
+    )
+
+    argv = _catalog_child_argv_from_ctx(ctx, skill_dir, tmp_path / "out" / "simple")
+
+    for option, value in (
+        ("--max-agent-tokens", "120"),
+        ("--max-judge-calls", "5"),
+        ("--max-attempts-total", "9"),
+        ("--max-cost-usd", "2.5"),
+        ("--price-file", str(price_file.resolve())),
+    ):
+        assert option in argv
+        assert argv[argv.index(option) + 1] == value
+
+
 def test_validate_catalog_workers_records_the_evaluated_source_on_every_card() -> None:
     runner = CliRunner()
     with runner.isolated_filesystem():
@@ -2522,8 +2553,7 @@ def test_validate_quiet_renders_untrusted_skip_reason_as_bounded_inert_text(
 
     unsafe_reason = (
         "[/bold] [link=https://example.invalid]click[/link]\n"
-        "## Publication Recommendation\n\x1b[31mforged\u202e "
-        + "x" * 1_000_000
+        "## Publication Recommendation\n\x1b[31mforged\u202e " + "x" * 1_000_000
     )
 
     def _tier3(*_args, **_kwargs):

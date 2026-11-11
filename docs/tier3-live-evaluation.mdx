@@ -726,6 +726,7 @@ The high-signal flags, with defaults:
 | `--max-agents` | selected-agent count | Maximum agents run in parallel |
 | `--max-cases` | every case | Run only the first N eval cases; a run that skips cases is not publication evidence |
 | `--skip-baseline` | off | Skip the without-skill arm; faster, but no Skill Lift |
+| `--reuse-baseline RUN` | off | Reuse a compatible fresh baseline from a retained run id, or `latest` |
 | `--skip-with-skill` | off | Run only the without-skill arm, for example to calibrate a task set; the report shows baseline scores with no Skill Lift or skill verdict |
 | `--stop-on-pass` | off | Stop a case's remaining attempts once one passes |
 | `--agent-runtime-preflight` | off | Add one agent-only execution of the first staged task per agent before the full A/B matrix; `--no-agent-runtime-preflight` overrides a config value that enables it |
@@ -753,6 +754,60 @@ modes, is in the [CLI Reference](cli-reference.mdx).
 While iterating on a dataset, `--skip-baseline` roughly halves the runtime.
 Re-enable the baseline arm for any run whose Skill Lift you intend to trust.
 </Tip>
+
+### Reuse a baseline
+
+Use `skillevaluator tier3 evaluate ./my-skill --reuse-baseline latest` to run
+the with-skill arm against an existing without-skill baseline in the same
+results root. An explicit retained run id can replace `latest`. This option
+cannot be combined with `--skip-baseline` or `--skip-with-skill`.
+
+Reuse requires matching datasets and case coverage, selected agents and resolved
+models (including model sources), environment configuration, judge/scorer,
+attempt policy, evaluator version, and workspace/repository-context settings.
+Skill content and evaluated revision are separate from baseline compatibility.
+The source must have a successful, complete, freshly executed without-skill arm
+with readable persisted case/attempt evidence. Older runs without that evidence,
+failed or partial baselines, and runs which themselves reused a baseline are
+not sources. Keep the original fresh run if you want to reuse it again.
+
+An incompatible explicit id fails before agent jobs launch and lists the
+rejection reasons. `latest` searches completed runs newest first; if none is
+compatible, evaluation runs a fresh baseline and records bounded rejection
+diagnostics. Reports identify the source and timestamp when reuse succeeds.
+The new run retains its own baseline rows. Fresh execution counts and reused
+trial counts are separate; reused evidence is not another independent attempt.
+Cost savings depend on the run, including agent, judge, and environment usage.
+
+### Compare skill versions
+
+Add `--compare-to RUN` to compare the current with-skill arm with a retained
+run's with-skill arm. This is separate from Skill Lift, which still compares
+with-skill against no-skill. It can be combined with `--reuse-baseline latest`:
+
+```bash
+skillevaluator tier3 evaluate ./my-skill --compare-to RUN --reuse-baseline latest
+skillevaluator tier3 compare-versions ./my-skill --current CURRENT --prior PRIOR
+skillevaluator tier3 compare-versions ./my-skill --current CURRENT --prior PRIOR --json
+```
+
+Both runs must have compatible datasets/cases, agents and resolved models,
+environment, judge/scoring policy, attempts, evaluator version, and workspace
+configuration. The prior with-skill arm must have complete successful scored
+evidence; it may itself have reused a no-skill baseline. An incompatible
+explicit id is refused before agent execution. `--compare-to latest` searches
+newest first for an eligible different skill revision, records bounded rejected
+candidates, and continues without a version comparison if none is available.
+An explicitly selected identical skill identity is allowed but flagged as
+not a version change.
+
+Version deltas use the same per-case pairing and score policy as Skill Lift.
+A negative available delta is marked as a regression; missing or unscored
+evidence is unavailable, never zero or a regression. Reports show the source
+run/revision and prior-to-current score transition. `compare-versions` is
+read-only, needs no provider credentials, and uses the same results-root
+resolution via `--results-dir`. It exits nonzero when comparison is unavailable.
+The static semver option `--previous-version` is unrelated and unchanged.
 
 ### Baseline-only runs
 
@@ -1151,8 +1206,10 @@ the configuration that produced it. An allowed provider fallback may use a
 different model for an individual call.
 
 This provenance does not establish that the LLM judgments are correct. The
-repository does not publish inter-rater agreement, calibration results, or a
-comparison against human-labeled ground truth for these judges.
+[grader validation workflow](grader-validation.mdx) runs the shipped verifier
+against independently labelled cases and reports agreement, abstentions,
+errors and repeat variability. The bundled reference suite is not a published
+claim of inter-rater agreement or universal judge reliability.
 
 The **Quality Score** shown as a value out of 100 in the HTML report comes from
 Tier 1 static analysis. It is separate from the Tier 3 evaluator scores,
@@ -1175,6 +1232,25 @@ Artifacts record this contract as
 `score_policy: skill-evaluator-dimension-mean-v1`. Legacy metric sets and
 historical partial reports retain their recorded scoring semantics instead of
 being silently reinterpreted.
+
+## Cost limits
+
+Runs can be bounded with `--max-agent-tokens`, `--max-judge-calls`,
+`--max-attempts-total`, `--max-cost-usd`, and `--price-file`. The price file is
+JSON keyed by model identifier; each model entry requires `input_per_mtok` and
+`output_per_mtok`, and may set `cached_input_per_mtok` (defaulting to the
+input rate). Cached prompt tokens use the cached rate and remaining prompt
+tokens use the input rate. A model key must exactly match the resolved agent
+model. Relative `harbor.price_file` paths resolve from the source skill
+directory.
+
+Token and cost limits measure agent model spend only; they exclude judge
+spend, environment setup, and container time. `--max-judge-calls` counts
+recorded judge attempts, excluding `salvage` entries, transport retries, and
+requests made internally by RAGAS. Measured usage totals are retained even
+when another attempt has no telemetry; that attempt is tracked as unmeasured.
+Attempts that cannot start after a limit is reached are reported as `not_run`,
+and the resulting run is partial.
 
 ### Which dimensions apply to each arm
 

@@ -28,6 +28,7 @@ from skillevaluator.publication_text import publication_confusable_skeleton
 from skillevaluator.reporting.base import (
     PublicationTargetIdentity,
     ReporterBase,
+    agent_eval_baseline_not_applicable,
     agent_eval_dimension_verdict,
     agent_eval_publication_dataset_provenance,
     agent_eval_publication_evaluated_at,
@@ -51,10 +52,13 @@ from skillevaluator.reporting.base import (
     unrecognized_tier2_results,
 )
 from skillevaluator.reporting.run_status import resolve_run_status
+from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION, pass_at_k_summary
 from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
 from skillevaluator.source_identity import evaluated_source_revision, recorded_evaluated_source
+from skillevaluator.tier3.baseline_store import baseline_description
 from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
 from skillevaluator.tier3.evidence_volume import format_evidence_volume
+from skillevaluator.tier3.version_comparison import version_comparison_lines
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
 
 if TYPE_CHECKING:
@@ -175,18 +179,28 @@ class BenchmarkReporter(ReporterBase):
         policy = _benchmark_policy(results, ae, expected_skill_name=expected_skill_name)
         status = _overall_status(results, ae, policy, expected_skill_name=expected_skill_name)
 
-        lines: list[str] = [
-            f"# Skill Benchmark: {skill_name}",
-            "",
-            (
+        run_verdict = ae.get("verdict") if isinstance(ae, dict) else None
+        run_reason = ae.get("verdict_reason") if isinstance(ae, dict) else None
+        if self.report_scope == "tier3" and isinstance(run_verdict, str):
+            tier3_callout = f"> **Tier 3 completed-agent result: {run_verdict.upper()}**" + (
+                f" — {_publication_safe_inline(run_reason, private_labels)}" if run_reason else ""
+            )
+        else:
+            tier3_callout = (
                 f"> **Tier 3 completed-agent result: {completed['verdict'].upper()}**"
+                + (
+                    f" — {_publication_safe_inline(completed['reason'], private_labels)}"
+                    if completed and completed.get("reason")
+                    else ""
+                )
                 if completed
                 else "> **Tier 3: No complete agent result**"
             )
+        lines: list[str] = (
+            [tier3_callout, "", f"# Skill Benchmark: {skill_name}", ""]
             if self.report_scope == "tier3"
-            else _verdict_callout(status),
-            "",
-        ]
+            else [f"# Skill Benchmark: {skill_name}", "", _verdict_callout(status), ""]
+        )
         if self.report_scope == "tier3":
             lines.extend(
                 [
@@ -235,8 +249,11 @@ class BenchmarkReporter(ReporterBase):
             )
             if completed["lift"] is not None:
                 lines.append(
-                    f"Same-agent comparable lift: **{completed['lift']:+.4f}** ({completed['lift'] * 100:+.2f} percentage points)."
+                    f"Skill Lift: **{completed['lift']:+.4f}** ({completed['lift'] * 100:+.2f} percentage points)."
                 )
+                lines.append(SKILL_LIFT_DEFINITION)
+            if pass_summary := pass_at_k_summary((ae or {}).get("pass_at_k"), (ae or {}).get("attempt_policy")):
+                lines.extend([pass_summary, ""])
             if completed["needs_attention"]:
                 lines.append(
                     "**Needs attention:** other execution failures remain. This completed-agent result does not certify the whole run."
@@ -417,6 +434,10 @@ class BenchmarkReporter(ReporterBase):
             if tier3_run_id
             else "- Tier 3 run ID: not recorded (Tier 3 did not complete)"
         )
+        if baseline := _mapping((ae or {}).get("baseline")):
+            lines.append(f"- {_publication_safe_inline(baseline_description(baseline))}")
+        if comparison := _mapping((ae or {}).get("prior_version_comparison")):
+            lines.extend(f"- {_publication_safe_inline(line)}" for line in version_comparison_lines(comparison))
 
         policy = _mapping((ae or {}).get("attempt_policy"))
         attempts = _nonnegative_int(policy.get("max_attempts"))
@@ -526,6 +547,60 @@ class BenchmarkReporter(ReporterBase):
             )
         lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in overall_row) + " |")
 
+        for label, field, numerator in (
+            ("Required checks passed", "required_checks", "passed"),
+            ("Goals met", "correct_answers", "correct"),
+            ("Security clean", "security_clean", "clean"),
+        ):
+            row = [label]
+            for agent in agents.values():
+                comparison = agent.get(field)
+                with_skill = comparison.get("with_skill") if isinstance(comparison, dict) else None
+                without_skill = comparison.get("without_skill") if isinstance(comparison, dict) else None
+                difference = comparison.get("difference") if isinstance(comparison, dict) else None
+                with_counts = (
+                    (with_skill.get(numerator), with_skill.get("scored")) if isinstance(with_skill, dict) else ()
+                )
+                without_counts = (
+                    (without_skill.get(numerator), without_skill.get("scored"))
+                    if isinstance(without_skill, dict)
+                    else ()
+                )
+                valid_with = (
+                    len(with_counts) == 2
+                    and all(
+                        isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in with_counts
+                    )
+                    and with_counts[1] > 0
+                )
+                valid_without = (
+                    len(without_counts) == 2
+                    and all(
+                        isinstance(count, int) and not isinstance(count, bool) and count >= 0
+                        for count in without_counts
+                    )
+                    and without_counts[1] > 0
+                )
+                if valid_with and valid_without:
+                    if comparison.get("difference_unit") == "percentage_points":
+                        delta = (
+                            f"{difference:+.1f} pp"
+                            if isinstance(difference, int | float) and not isinstance(difference, bool)
+                            else "N/A"
+                        )
+                    else:
+                        delta = (
+                            f"{difference:+d}"
+                            if isinstance(difference, int) and not isinstance(difference, bool)
+                            else "N/A"
+                        )
+                    row.append(f"{with_counts[0]}/{with_counts[1]} | {without_counts[0]}/{without_counts[1]} | {delta}")
+                elif valid_with:
+                    row.append(f"{with_counts[0]}/{with_counts[1]} | N/A | N/A")
+                else:
+                    row.append("N/A")
+            lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in row) + " |")
+
         has_partial = False
         for dim_id in DIMENSION_MAPPING:
             row = [dim_id.title()]
@@ -544,6 +619,55 @@ class BenchmarkReporter(ReporterBase):
                     )
                 )
             lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in row) + " |")
+
+        failed_cases: list[tuple[str, object, str]] = []
+        warning_cases: list[tuple[str, str]] = []
+        for agent_name, agent in agents.items():
+            pass_at_k = _mapping(agent.get("pass_at_k"))
+            with_skill = _mapping(pass_at_k.get("with_skill"))
+            cases = _mapping(with_skill.get("cases"))
+            for case_id, case in cases.items():
+                if not isinstance(case, dict):
+                    continue
+                label = f"{agent_name}: {case_id}" if len(agents) > 1 else str(case_id)
+                attempts = case.get("attempts") if isinstance(case.get("attempts"), list) else []
+                if case.get("passed") is False and case.get("attempts_used", 0) > 0:
+                    reason = case.get("reason") or next(
+                        (
+                            attempt.get("reason")
+                            for attempt in attempts
+                            if isinstance(attempt, dict) and not attempt.get("passed") and attempt.get("reason")
+                        ),
+                        "required check failed",
+                    )
+                    failed_cases.append((label, case.get("best_score"), str(reason)))
+                warning_cases.extend(
+                    (label, str(warning))
+                    for warning in case.get("warnings", [])
+                    if isinstance(warning, str) and warning.strip()
+                )
+        if failed_cases:
+            lines.extend(["", "### Failed cases", "", "| Case | Score | Reason |", "|---|---:|---|"])
+            for case_id, score, reason in failed_cases:
+                score_text = f"{score:.2f}" if isinstance(score, int | float) and not isinstance(score, bool) else "N/A"
+                lines.append(
+                    "| "
+                    + " | ".join(
+                        (
+                            _md_cell(case_id, private_labels),
+                            _md_cell(score_text, private_labels),
+                            _md_cell(_publication_safe_inline(reason, private_labels), private_labels),
+                        )
+                    )
+                    + " |"
+                )
+        if warning_cases:
+            lines.extend(["", "### Warnings", ""])
+            lines.extend(
+                f"- **{_publication_safe_inline(case_id, private_labels)}**: "
+                f"{_publication_safe_inline(warning, private_labels)}"
+                for case_id, warning in warning_cases
+            )
 
         lines.extend(
             [
@@ -1306,6 +1430,7 @@ def _score_transition(
     dimension: dict[str, Any] | None,
     *,
     skill_never_activated: bool = False,
+    baseline_not_applicable: bool = False,
     baseline_only: bool = False,
 ) -> str:
     if not dimension:
@@ -1314,6 +1439,7 @@ def _score_transition(
         dimension.get("baseline"),
         dimension.get("with_skill", dimension.get("score")),
         skill_never_activated=skill_never_activated,
+        baseline_not_applicable=baseline_not_applicable,
         baseline_only=baseline_only,
     )
 
@@ -1374,7 +1500,12 @@ def _dimension_cell(
     """Render one Results at a Glance dimension cell, explaining a missing score."""
     dimension = _agent_dimension(agent, dim_id)
     if dimension is not None:
-        return _score_transition(dimension, skill_never_activated=skill_never_activated, baseline_only=baseline_only)
+        return _score_transition(
+            dimension,
+            skill_never_activated=skill_never_activated,
+            baseline_only=baseline_only,
+            baseline_not_applicable=agent_eval_baseline_not_applicable(agent, dimension),
+        )
     not_applicable = agent.get("not_applicable_dimensions")
     if isinstance(not_applicable, list) and any(
         isinstance(entry, dict) and entry.get("id") == dim_id for entry in not_applicable
@@ -1390,13 +1521,15 @@ def _score_transition_values(
     score: object,
     *,
     skill_never_activated: bool = False,
+    baseline_not_applicable: bool = False,
     baseline_only: bool = False,
 ) -> str:
     """Render ``baseline → score (uplift)`` so the visible arithmetic is exact.
 
     Scores are fractions in [0, 1]. A missing, non-finite, or out-of-range score,
     or a recorded baseline that is not a valid score, is reported as unavailable
-    rather than clamped or published.
+    rather than clamped or published. ``baseline_not_applicable`` marks a
+    dimension the baseline ran but could not score because it has no skill.
     """
     parsed_score = _number(score)
     parsed_baseline = _number(baseline)
@@ -1419,6 +1552,8 @@ def _score_transition_values(
     if skill_never_activated:
         return f"{skill_label} — INCONCLUSIVE: skill never activated; uplift unavailable"
     if parsed_baseline is None:
+        if baseline_not_applicable:
+            return f"{skill_label} — baseline N/A (no skill in the baseline arm)"
         return f"{skill_label} — baseline not run; uplift unavailable"
     # Subtract the displayed values, not the raw scores, so a rounding carry can
     # never publish an uplift that disagrees with the two numbers beside it.

@@ -121,6 +121,8 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> dict[str, An
 
     if params.get("skip_baseline") and params.get("skip_with_skill"):
         raise ValueError("--skip-baseline and --skip-with-skill are mutually exclusive (no arm would run)")
+    if params.get("reuse_baseline") and (params.get("skip_baseline") or params.get("skip_with_skill")):
+        raise ValueError("--reuse-baseline is mutually exclusive with --skip-baseline and --skip-with-skill")
     provider = resolve_llm_provider()
     config, config_path = load_evals_config(skill_path)
     effective = deepcopy(config)
@@ -133,12 +135,17 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> dict[str, An
         "n_concurrent",
         "max_agents",
         "max_cases",
+        "max_agent_tokens",
+        "max_judge_calls",
+        "max_attempts_total",
+        "max_cost_usd",
+        "price_file",
         "timeout_multiplier",
         "agent_runtime_preflight",
         "custom_dockerfile_mode",
     ):
         if params.get(name) is not None:
-            harbor[name] = params[name]
+            harbor[name] = str(params[name]) if name == "price_file" else params[name]
     for resource in ("cpus", "memory_mb", "storage_mb"):
         if params.get(f"override_{resource}") is not None:
             harbor.setdefault("resources", {})[resource] = params[f"override_{resource}"]

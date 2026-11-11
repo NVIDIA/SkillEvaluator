@@ -295,6 +295,20 @@ def test_failed_runs_never_produce_zero_or_numeric_interaction(tmp_path, failure
     assert all("interaction" not in agent for agent in report["agents"].values())
 
 
+@pytest.mark.parametrize("failure", ["missing_result", "empty_error", "empty_error_with_result"])
+def test_missing_results_and_empty_errors_are_incomplete(tmp_path, failure):
+    matrix = _matrix(tmp_path)
+    if failure != "empty_error_with_result":
+        del matrix[-1]["result"]
+    if failure != "missing_result":
+        matrix[-1]["error"] = ""
+    report = compare_configurations(matrix, metric="goal_accuracy", n_attempts=1)
+    assert report["status"] == "incomplete"
+    assert report["reasons"] and all(report["reasons"])
+    assert report["agents"] == {}
+    assert "interaction" not in report
+
+
 def _fake_engine(monkeypatch, scores=(0.50, 0.75, 0.70, 0.65), *, on_run=None):
     calls = []
 
@@ -454,7 +468,8 @@ def test_interrupted_experiment_retains_explicit_incomplete_report(monkeypatch, 
         "missing_source",
     ],
 )
-def test_rejects_invalid_experiments_before_execution(monkeypatch, tmp_path, invalid):
+@pytest.mark.parametrize("via_cli", [False, True])
+def test_rejects_invalid_experiments_before_execution(monkeypatch, tmp_path, invalid, via_cli):
     source = _source(tmp_path)
     skills = [_skill(tmp_path, name) for name in ("a", "b")]
     options = EvaluationOptions(source)
@@ -480,12 +495,27 @@ def test_rejects_invalid_experiments_before_execution(monkeypatch, tmp_path, inv
     elif invalid == "missing_source":
         (source / "evals" / "evals.json").unlink()
     calls = _fake_engine(monkeypatch)
-    with pytest.raises((OSError, ValueError)):
-        run_interaction(skills, eval_source=source, options=options, metric=metric)
+    if via_cli:
+        args = ["tier3", "interact", *(str(path) for path in skills), "--eval-source", str(source), "--metric", metric]
+        if options.results_dir:
+            args.extend(["--results-dir", str(options.results_dir)])
+        result = CliRunner().invoke(cli, args)
+        assert result.exit_code == 2, result.output
+        assert "Usage:" in result.stderr
+    else:
+        with pytest.raises((OSError, ValueError)):
+            run_interaction(skills, eval_source=source, options=options, metric=metric)
     assert calls == []
 
 
-def test_preserves_other_configuration_evidence_after_failure(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("failure", "expected_error"),
+    [
+        (RuntimeError("a configuration failed"), "a configuration failed"),
+        (TimeoutError(), "TimeoutError"),
+    ],
+)
+def test_preserves_other_configuration_evidence_after_failure(monkeypatch, tmp_path, failure, expected_error):
     source = _source(tmp_path)
     skills = [_skill(tmp_path, name) for name in ("a", "b")]
     counter = []
@@ -493,7 +523,7 @@ def test_preserves_other_configuration_evidence_after_failure(monkeypatch, tmp_p
     def failing(self, options, **kwargs):
         counter.append(options)
         if len(counter) == 2:
-            raise RuntimeError("a configuration failed")
+            raise failure
         return _evidence(
             options.results_dir / "run",
             {"case-1": [0.5]},
@@ -504,9 +534,10 @@ def test_preserves_other_configuration_evidence_after_failure(monkeypatch, tmp_p
     report = run_interaction(skills, eval_source=source, options=EvaluationOptions(source))
     assert report["status"] == "incomplete"
     assert len(counter) == 4
-    assert report["configurations"][1]["error"] == "a configuration failed"
+    assert report["configurations"][1]["error"] == expected_error
     assert all("result" in report["configurations"][index] for index in (0, 2, 3))
     assert "interaction" not in report
+    assert json.loads((Path(report["run_dir"]) / "interaction.json").read_text()) == report
 
 
 @pytest.mark.parametrize("as_json", [False, True])
@@ -541,10 +572,17 @@ def test_cli_reports_signed_interaction_and_keeps_json_clean(monkeypatch, tmp_pa
         assert "combined lift: +0.1500" in result.stdout
 
 
-def test_cli_incomplete_is_nonzero_and_machine_readable(monkeypatch, tmp_path):
+@pytest.mark.parametrize("failure", [None, TimeoutError(), ValueError("evaluation failed")])
+def test_cli_incomplete_is_nonzero_and_machine_readable(monkeypatch, tmp_path, failure):
     source = _source(tmp_path)
     skills = [_skill(tmp_path, name) for name in ("a", "b")]
-    monkeypatch.setattr(EvaluationService, "evaluate", lambda *_args, **_kwargs: {"error": ["launch failed"]})
+
+    def failing(self, options, **kwargs):
+        if failure is not None:
+            raise failure
+        return {"error": ["launch failed"]}
+
+    monkeypatch.setattr(EvaluationService, "evaluate", failing)
     result = CliRunner().invoke(
         cli, ["tier3", "interact", *(str(path) for path in skills), "--eval-source", str(source), "--json"]
     )
@@ -552,12 +590,28 @@ def test_cli_incomplete_is_nonzero_and_machine_readable(monkeypatch, tmp_path):
     report = json.loads(result.stdout)
     assert report["status"] == "incomplete"
     assert "interaction" not in report
+    assert all(config["error"] for config in report["configurations"])
+
+
+def test_cli_output_io_failure_uses_exit_one(monkeypatch, tmp_path):
+    source = _source(tmp_path)
+    skills = [_skill(tmp_path, name) for name in ("a", "b")]
+
+    def fail_to_write(*args, **kwargs):
+        raise OSError("Cannot write interaction results")
+
+    monkeypatch.setattr("skillevaluator.tier3.interactions.run_interaction", fail_to_write)
+    result = CliRunner().invoke(
+        cli, ["tier3", "interact", *(str(path) for path in skills), "--eval-source", str(source)]
+    )
+    assert result.exit_code == 1
+    assert "Cannot write interaction results" in result.stderr
 
 
 def test_cli_requires_two_skills_and_never_generates_a_source(monkeypatch, tmp_path):
     skill = _skill(tmp_path, "a")
     calls = _fake_engine(monkeypatch)
     result = CliRunner().invoke(cli, ["tier3", "interact", str(skill), "--eval-source", str(skill)])
-    assert result.exit_code != 0
+    assert result.exit_code == 2
     assert "at least two" in result.output
     assert calls == []

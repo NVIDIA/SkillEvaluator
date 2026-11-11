@@ -95,7 +95,9 @@ def interact_command(
                 metric=metric,
                 on_configuration=lambda name: click.echo(f"Tier 3 interaction: running {name}", err=True),
             )
-    except (OSError, ValueError) as exc:
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+    except OSError as exc:
         raise click.ClickException(str(exc)) from exc
     if as_json:
         click.echo(json.dumps(report, indent=2, allow_nan=False))

@@ -264,6 +264,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `tier3 interact` retains incomplete reports when a configuration raises an
+  exception without a message, and handles missing configuration results safely.
+  Invalid experiment inputs use usage-error exit code 2; incomplete experiments
+  and output I/O failures continue to use exit code 1.
+
 - Honor `TMPDIR` for temporary GitLab scan reports, with `/tmp` as the default,
   so scans work with configurable temporary storage.
 

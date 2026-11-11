@@ -137,7 +137,11 @@ def compare_configurations(
     """
     if len(configurations) < 4:
         raise ValueError("Expected baseline, at least two individuals, and combined evidence")
-    failures = [str(config["error"]) for config in configurations if config.get("error")]
+    failures = [
+        str(config.get("error") or "Configuration failed or returned no result")
+        for config in configurations
+        if "error" in config or "result" not in config
+    ]
     if failures:
         return {"status": "incomplete", "reasons": failures, "agents": {}}
     results = [config["result"] for config in configurations]
@@ -382,9 +386,10 @@ def run_interaction(
                         secret_values_from_environment,
                     )
 
-                    config["error"] = redact_progress_detail(
+                    redacted = redact_progress_detail(
                         str(exc), secret_values=secret_values_from_environment(os.environ)
                     )
+                    config["error"] = redacted or type(exc).__name__
             report.update(compare_configurations(report["configurations"], metric=metric, n_attempts=attempts))
         except KeyboardInterrupt:
             report["reasons"] = ["Interaction evaluation interrupted before all configurations completed"]

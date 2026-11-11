@@ -26,6 +26,9 @@ on:
       min-score:
         type: number
         default: 70
+      security-baselines:
+        type: boolean
+        default: false
       env-mode:
         description: docker or local; cloud backends are not supported here
         type: string
@@ -84,6 +87,7 @@ jobs:
       image: ${{ inputs.image }}
       paths: ${{ inputs.paths }}
       min-score: ${{ inputs.min-score }}
+      security-baselines: ${{ inputs.security-baselines }}
       scan-mode: ${{ needs.eligibility.outputs.scan-mode || inputs.scan-mode }}
       artifact-name: skill-evaluator-tier1
       llm: false

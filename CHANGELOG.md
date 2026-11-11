@@ -195,12 +195,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
-- `skillevaluator.quality_config.quality_config_provenance` now loads the
-  config itself. It takes only `path` and returns a `(config, provenance)`
-  tuple, so calls written as `quality_config_provenance(path, config)` must
-  become `quality_config_provenance(path)` and unpack both values. The report's
-  `quality_config` field keeps its shape; a custom file's digest now covers only
-  the rules that file sets.
+- Remove `skillevaluator.quality_config.quality_config_provenance(path, config)`.
+  Use `load_quality_config_with_provenance(path)` instead: it loads the config
+  and returns `(config, provenance)`, and its digest covers only the rules a
+  custom file sets. The report's `quality_config` field keeps its shape.
 
 - Name Skill Lift as the headline comparison and label pass@k differences as
   supporting reliability across reports and terminal output.

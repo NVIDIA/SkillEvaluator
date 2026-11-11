@@ -385,7 +385,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     | Rule | Deducts when | Packaged points | List field |
     | --- | --- | --- | --- |
-    | `mentioned` | `SKILL.md` contains none of the `terms` | `10` | `terms`: whole words, any case. `error` matches `Error` but not `errorless` |
+    | `mentioned` | `SKILL.md` contains none of the `terms` | `10` | `terms`: whole words, any case. `error` matches `Error` but not `errorless`. A term with spaces, such as `exit code`, also matches when its words are split by a line break or several spaces |
     | `scripts` | A `.py` file directly in `scripts/` or `tools/` has neither a `try:`/`except` pair nor any of the `markers` | `5` | `markers`: case-sensitive text found anywhere in the file, such as `raise` or `if not ` |
     | `lib` | A module in the skill's Python package, for skills with no `.py` or `.sh` files in `scripts/` or `tools/`, has neither a `try:`/`except` pair nor any of the `markers` | `5` | `markers`: as for `scripts` |
 

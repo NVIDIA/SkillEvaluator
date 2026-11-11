@@ -182,7 +182,8 @@ def _contains_any_term(text: str, terms: Iterable[str]) -> bool:
 
 
 def _contains_any_word(text: str, words: Iterable[str]) -> bool:
-    pattern = "|".join(re.escape(word) for word in words)
+    # Whitespace inside a multi-word term matches any run of whitespace, so wrapped text still matches.
+    pattern = "|".join(r"\s+".join(map(re.escape, word.split())) for word in words)
     return bool(re.search(rf"(?<!\w)(?:{pattern})(?!\w)", text, re.IGNORECASE))
 
 

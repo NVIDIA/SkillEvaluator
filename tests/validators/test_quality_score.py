@@ -1646,6 +1646,30 @@ class TestReliabilityErrorHandlingConfig:
 
         assert result.metadata["quality_scores"]["metrics"]["has_error_handling"] is True
 
+    @pytest.mark.parametrize("text", ["Check the exit\ncode first.", "Check the exit  code first.", "Check the exit\r\n  code."])
+    def test_multi_word_custom_terms_match_across_wrapped_or_repeated_whitespace(self, tmp_path: Path, text: str):
+        skill_dir = _write_issue_skill(tmp_path, troubleshooting=text)
+        config = 'expected_headers: []\nerror_handling:\n  mentioned:\n    terms: ["exit code"]\n'
+
+        result = _validate_with(skill_dir, tmp_path, config)
+
+        assert result.metadata["quality_scores"]["metrics"]["has_error_handling"] is True
+
+    def test_multi_word_custom_term_still_needs_whole_words(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(tmp_path, troubleshooting="Check the exit codes first.")
+        config = 'expected_headers: []\nerror_handling:\n  mentioned:\n    terms: ["exit code"]\n'
+
+        result = _validate_with(skill_dir, tmp_path, config)
+
+        assert result.metadata["quality_scores"]["metrics"]["has_error_handling"] is False
+
+    def test_packaged_single_word_terms_behave_as_before(self):
+        from skillevaluator.validators.quality_score import _contains_any_word
+
+        assert _contains_any_word("An Error occurred.", ["error"])
+        assert not _contains_any_word("This is errorless.", ["error"])
+        assert not _contains_any_word("nothing here", ["error", "failure"])
+
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])
 @pytest.mark.parametrize(

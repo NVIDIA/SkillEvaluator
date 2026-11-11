@@ -186,7 +186,9 @@ All notable changes to SkillEvaluator are documented in this file.
   reason the reply was not received, before the entry that holds the score or
   the problem. The prompts and replies are redacted and shortened like the
   other judge evidence. A failure while saving this evidence is only logged
-  and never changes a score.
+  and never changes a score. The request entries do not count toward
+  `--max-judge-calls`; the entry with the score or the problem is the one
+  counted RAGAS call, as before.
 
 ### Changed
 

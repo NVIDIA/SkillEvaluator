@@ -997,7 +997,8 @@ in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
   or with the reason the reply was not received. A request that fails before
   any response arrives, such as a refused connection, saves no entry of its
   own. A last `ragas` entry is `accepted` with the score RAGAS computed, or
-  `error` with the reason the prompt judge ran instead.
+  `error` with the reason the prompt judge ran instead. Only that last entry
+  counts toward `--max-judge-calls`; the request entries do not.
   Configured credentials, common key shapes, URL userinfo, `Authorization`,
   API-key, token and `Cookie` header values, and credential flag values
   (`--token`, `--password`, `curl -u user:password`) are masked, and long

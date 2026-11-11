@@ -709,6 +709,7 @@ def generate_one_case(
         skill["_generation_fallback_reason"] = fallback_reason or "LLM generation was unavailable"
     if len(cases) != 1:
         raise RuntimeError("one-case generation did not return exactly one case")
+    cases = [_without_skill_use(cases[0], skill, _script_file_names(skill))]
     generation = _generation_record(
         skill_path,
         mode=str(skill["_generation_mode"]),
@@ -719,7 +720,6 @@ def generate_one_case(
         cases=cases,
     )
     evals_dir.mkdir(parents=True, exist_ok=True)
-    cases = [_without_skill_use(cases[0], skill, _script_file_names(skill))]
     with output_path.open("x", encoding="utf-8") as output:
         json.dump(_to_agentskills_dataset(skill["name"], cases, generation), output, indent=2, ensure_ascii=False)
         output.write("\n")

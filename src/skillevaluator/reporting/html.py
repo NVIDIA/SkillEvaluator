@@ -104,6 +104,7 @@ from skillevaluator.source_identity import recorded_evaluated_source
 from skillevaluator.tier3.baseline_store import baseline_description
 from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
 from skillevaluator.tier3.evidence_volume import format_evidence_volume
+from skillevaluator.tier3.version_comparison import version_comparison_lines
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
@@ -1290,6 +1291,8 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
     baseline = payload.get("baseline")
     if isinstance(baseline, dict) and baseline:
         payload["baseline_description"] = baseline_description(baseline)
+    if comparison := payload.get("prior_version_comparison"):
+        payload["prior_version_lines"] = version_comparison_lines(comparison)
     payload["summary"]["runtime_seconds"] = (
         _finite_number(payload["summary"].get("runtime_seconds"), minimum=0.0) or 0.0
     )

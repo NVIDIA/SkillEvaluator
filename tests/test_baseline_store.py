@@ -224,9 +224,16 @@ def test_baseline_eligibility_explains_source_mode(tmp_path: Path, monkeypatch, 
     assert any(message in reason for reason in reasons), (mode, reasons)
 
 
-@pytest.mark.parametrize("skip", ["--skip-baseline", "--skip-with-skill"])
-def test_cli_mutual_exclusion(tmp_path: Path, skip: str) -> None:
-    result = CliRunner().invoke(cli, ["tier3", "evaluate", str(tmp_path), "--reuse-baseline", "latest", skip])
+@pytest.mark.parametrize(
+    ("reference_flag", "skip"),
+    [
+        ("--reuse-baseline", "--skip-baseline"),
+        ("--reuse-baseline", "--skip-with-skill"),
+        ("--compare-to", "--skip-with-skill"),
+    ],
+)
+def test_cli_mutual_exclusion(tmp_path: Path, reference_flag: str, skip: str) -> None:
+    result = CliRunner().invoke(cli, ["tier3", "evaluate", str(tmp_path), reference_flag, "latest", skip])
     assert result.exit_code == 2
     assert "mutually exclusive" in result.output
 
@@ -362,14 +369,20 @@ def test_active_failed_trials_count_as_started_and_make_usage_unavailable(monkey
     assert agent["measured_usage"]["fresh"]["with_skill"] is None
 
 
-@pytest.mark.parametrize("skip", ["skip_baseline", "skip_with_skill"])
-def test_runner_mutual_exclusion_emits_configuration_failure(tmp_path: Path, skip: str) -> None:
+@pytest.mark.parametrize(
+    ("reference_option", "skip"),
+    [
+        ("reuse_baseline", "skip_baseline"),
+        ("reuse_baseline", "skip_with_skill"),
+        ("compare_to", "skip_with_skill"),
+    ],
+)
+def test_runner_mutual_exclusion_emits_configuration_failure(tmp_path: Path, reference_option: str, skip: str) -> None:
     events = []
     result = runner._run_harbor_eval_impl(
         tmp_path,
         ["opencode"],
-        reuse_baseline="latest",
-        **{skip: True},
+        **{reference_option: "latest", skip: True},
         progress_reporter=SimpleNamespace(emit=events.append),
     )
     assert result["error"]

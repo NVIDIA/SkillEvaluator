@@ -779,6 +779,36 @@ The new run retains its own baseline rows. Fresh execution counts and reused
 trial counts are separate; reused evidence is not another independent attempt.
 Cost savings depend on the run, including agent, judge, and environment usage.
 
+### Compare skill versions
+
+Add `--compare-to RUN` to compare the current with-skill arm with a retained
+run's with-skill arm. This is separate from Skill Lift, which still compares
+with-skill against no-skill. It can be combined with `--reuse-baseline latest`:
+
+```bash
+skillevaluator tier3 evaluate ./my-skill --compare-to RUN --reuse-baseline latest
+skillevaluator tier3 compare-versions ./my-skill --current CURRENT --prior PRIOR
+skillevaluator tier3 compare-versions ./my-skill --current CURRENT --prior PRIOR --json
+```
+
+Both runs must have compatible datasets/cases, agents and resolved models,
+environment, judge/scoring policy, attempts, evaluator version, and workspace
+configuration. The prior with-skill arm must have complete successful scored
+evidence; it may itself have reused a no-skill baseline. An incompatible
+explicit id is refused before agent execution. `--compare-to latest` searches
+newest first for an eligible different skill revision, records bounded rejected
+candidates, and continues without a version comparison if none is available.
+An explicitly selected identical skill identity is allowed but flagged as
+not a version change.
+
+Version deltas use the same per-case pairing and score policy as Skill Lift.
+A negative available delta is marked as a regression; missing or unscored
+evidence is unavailable, never zero or a regression. Reports show the source
+run/revision and prior-to-current score transition. `compare-versions` is
+read-only, needs no provider credentials, and uses the same results-root
+resolution via `--results-dir`. It exits nonzero when comparison is unavailable.
+The static semver option `--previous-version` is unrelated and unchanged.
+
 ### Baseline-only runs
 
 `--skip-with-skill` is the counterpart of `--skip-baseline`: it stages and runs
@@ -1176,8 +1206,10 @@ the configuration that produced it. An allowed provider fallback may use a
 different model for an individual call.
 
 This provenance does not establish that the LLM judgments are correct. The
-repository does not publish inter-rater agreement, calibration results, or a
-comparison against human-labeled ground truth for these judges.
+[grader validation workflow](grader-validation.mdx) runs the shipped verifier
+against independently labelled cases and reports agreement, abstentions,
+errors and repeat variability. The bundled reference suite is not a published
+claim of inter-rater agreement or universal judge reliability.
 
 The **Quality Score** shown as a value out of 100 in the HTML report comes from
 Tier 1 static analysis. It is separate from the Tier 3 evaluator scores,

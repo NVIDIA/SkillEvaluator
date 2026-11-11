@@ -40,6 +40,7 @@ from skillevaluator.tier3.harbor.metrics import (
 )
 from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
 from skillevaluator.tier3.harbor.runner import format_harbor_view_command
+from skillevaluator.tier3.version_comparison import version_comparison_lines
 
 
 def _number(value: object, *, signed: bool = False) -> str:
@@ -1012,6 +1013,9 @@ def render_evaluation_result(
     provenance_line, provenance_is_template = dataset_provenance_display(result.get("dataset_provenance"))
     if provenance_line:
         console.print(Text(provenance_line, style="yellow" if provenance_is_template else "dim"))
+    if comparison := result.get("prior_version_comparison"):
+        for line in version_comparison_lines(comparison):
+            console.print(Text(safe(line)))
 
     agents = result.get("agents")
     incomplete = status in {"failed", "incomplete"} and not any(

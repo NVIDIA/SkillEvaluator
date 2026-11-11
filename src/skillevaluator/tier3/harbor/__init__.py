@@ -25,6 +25,7 @@ from skillevaluator.tier3_environments import (
 
 # Local mode plugs into Harbor as a custom environment/agents via import paths.
 LOCAL_ENV_IMPORT_PATH = "skillevaluator.tier3.harbor.local_environment:SkillEvaluatorLocalEnvironment"
+HERMES_VERSION = "v2026.9.24"
 LOCAL_HARBOR_AGENTS = frozenset({"claude-code", "codex", "opencode"})
 LOCAL_AGENT_IMPORT_PATHS = {
     "claude-code": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalClaudeCode",
@@ -49,6 +50,7 @@ LOCAL_CODEX_SECRETS_DIRNAME = "codex-secrets"
 DOCKER_AGENT_IMPORT_PATHS = {
     "codex": "skillevaluator.tier3.harbor.installed_agents:SkillEvaluatorCodex",
     "claude-code": CONTAINER_AGENT_IMPORT_PATHS["claude-code"],
+    "hermes": "skillevaluator.tier3.harbor.hermes_agent:SkillEvaluatorHermes",
 }
 
 HARBOR_AGENTS_SUPPORTED = frozenset(
@@ -59,7 +61,7 @@ HARBOR_AGENTS_SUPPORTED = frozenset(
     }
 )
 
-HARBOR_AGENTS_EXPERIMENTAL: frozenset[str] = frozenset()
+HARBOR_AGENTS_EXPERIMENTAL: frozenset[str] = frozenset({"hermes"})
 
 HARBOR_AGENTS = HARBOR_AGENTS_SUPPORTED | HARBOR_AGENTS_EXPERIMENTAL
 

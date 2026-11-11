@@ -146,11 +146,26 @@ def test_pull_requests_read_but_never_write_the_layer_cache():
         assert step["with"]["context"] == "."
         assert step["with"]["file"] == "ci/Dockerfile.tier1"
         assert step["with"]["load"] == "true" and "push" not in step["with"]
-    # These events run in main's cache scope on input that a pull request controls.
+    # Privileged events must never execute PR-controlled image/cache code.
     for path in (ROOT / ".github/workflows").glob("*.yml"):
-        triggers = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)["on"]
+        document = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+        triggers = document["on"]
         triggers = [triggers] if isinstance(triggers, str) else triggers
-        assert {"pull_request_target", "workflow_run", "issue_comment"}.isdisjoint(triggers), path.name
+        assert {"pull_request_target", "issue_comment"}.isdisjoint(triggers), path.name
+        if "workflow_run" in triggers:
+            # The consumer listener calls only the immutable trusted publisher;
+            # it has no local steps, candidate checkout or image build/cache job.
+            assert path.name == "skill-feedback-all-tiers.yml"
+            assert set(triggers) == {"workflow_run"}
+            assert set(document["jobs"]) == {"feedback"}
+            caller = document["jobs"]["feedback"]
+            assert set(caller) == {"uses", "with"}
+            assert re.fullmatch(
+                r"NVIDIA/SkillEvaluator/\.github/workflows/feedback-all-tiers\.yml@[0-9a-f]{40}", caller["uses"]
+            )
+            source = caller["uses"].rsplit("@", 1)[1]
+            assert caller["with"]["tools-repository"] == "NVIDIA/SkillEvaluator"
+            assert caller["with"]["tools-ref"] == source
 
 
 def test_release_builds_reuse_no_cached_layers():

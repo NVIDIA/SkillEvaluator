@@ -1133,7 +1133,12 @@ def test_advisory_downgraded_failed_summary_can_publish_with_success_conclusion(
             if artifact_id == 457:
                 return signed_receipt(self.record)
             assert artifact_id == 456
-            return archive([("summary.json", failed_summary(advisory_downgraded=True)), ("skill-001/skillevaluator-tier1.json", failed_report())])
+            return archive(
+                [
+                    ("summary.json", failed_summary(advisory_downgraded=True)),
+                    ("skill-001/skillevaluator-tier1.json", failed_report()),
+                ]
+            )
 
     publisher.publish(
         AdvisoryAPI(record={**run_record(), "conclusion": "success"}),
@@ -1152,7 +1157,12 @@ def test_successful_run_with_failed_summary_still_rejected_without_advisory_down
             if artifact_id == 457:
                 return signed_receipt(self.record)
             assert artifact_id == 456
-            return archive([("summary.json", failed_summary(advisory_downgraded=False)), ("skill-001/skillevaluator-tier1.json", failed_report())])
+            return archive(
+                [
+                    ("summary.json", failed_summary(advisory_downgraded=False)),
+                    ("skill-001/skillevaluator-tier1.json", failed_report()),
+                ]
+            )
 
     with pytest.raises(publisher.PublicationError, match="workflow conclusion contradicts"):
         publisher.publish(

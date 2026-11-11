@@ -64,10 +64,9 @@ gating. Set `enforcement-mode: advisory` for visibility runs: complete policy
 or score failures retain their failed verdict and full artifacts, emit a workflow
 warning, and leave the job successful. Configuration errors, incomplete scanners,
 missing or malformed evidence, and runtime failures still fail the job.
-The hosted-report publisher currently expects a failing verdict to come from a
-failing workflow conclusion. If advisory mode returns success with a failing
-verdict, hosted report publication and PR comments do not run unless the
-publisher is updated to accept that advisory combination.
+Hosted publication and PR comments run for advisory downgrades recorded as
+`enforcement: {mode: advisory, downgraded: true}`; strict failures still require
+a failing workflow conclusion.
 An older image without advisory support rejects the explicit advisory flag;
 strict mode continues to work with existing images.
 

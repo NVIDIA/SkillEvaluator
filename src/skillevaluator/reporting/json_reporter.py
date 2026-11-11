@@ -37,6 +37,7 @@ from skillevaluator.reporting.finding_summary import (
 )
 from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
 from skillevaluator.skillspector_provenance import sanitize_skillspector_provenance_metadata
+from skillevaluator.skillspector_reference_caveats import sanitize_reference_caveat_metadata
 from skillevaluator.skillspector_references import reference_summary_record
 from skillevaluator.source_identity import recorded_evaluated_source
 
@@ -361,6 +362,10 @@ class JSONReporter(ReporterBase):
         skillspector_baseline = result.metadata.get("skillspector_baseline")
         if isinstance(skillspector_baseline, dict):
             data["skillspector_baseline"] = dict(skillspector_baseline)
+
+        reference_caveats = sanitize_reference_caveat_metadata(result.metadata.get("skillspector_reference_caveats"))
+        if reference_caveats is not None:
+            data["skillspector_reference_caveats"] = reference_caveats
 
         # Tier 3: Agent evaluation data
         ae = result.metadata.get("agent_eval")

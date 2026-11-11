@@ -619,7 +619,10 @@ class TestUnmodeledHooks:
     def test_hooks_beside_a_missing_reference_keep_the_reference_warning(
         self, mock_tools, tmp_path: Path, version: str, content_type: str | None
     ) -> None:
-        """The reference gate gets the report without its hook row, so the reference is still only a warning."""
+        """The reference gate gets the report without its hook row, so the reference is still only a warning.
+
+        The report-only 2.13.3 reference caveat reads the whole report, hook row included, so it does not apply.
+        """
         root = _settings_missing_reference_skill(tmp_path)
         report = _report(_settings_missing_reference_report(version))
         assert [(row["path"], row["reason_code"]) for row in report["analysis_completeness"]["ledger_exceptions"]] == [
@@ -636,6 +639,8 @@ class TestUnmodeledHooks:
         _assert_hook_critical(result, root, ".claude/settings.json")
         assert result.summary.critical_count == 1
         assert result.warnings.count(_MISSING_REFERENCE_WARNING) == 1
+        assert "skillspector_reference_caveats" not in result.metadata
+        assert all(finding.check_name != "skillspector_reference_caveats" for finding in result.findings)
 
 
 class TestFolderScans:

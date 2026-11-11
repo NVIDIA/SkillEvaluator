@@ -328,6 +328,20 @@ def test_a_zero_token_baseline_keeps_the_difference_without_a_percentage() -> No
     )
 
 
+def test_a_reused_baseline_is_labelled_and_otherwise_unchanged() -> None:
+    agents = {"codex": _agent([_trial("case-1", 100, 10)], [_trial("case-1", 200, 20)])}
+
+    plain = build_token_usage(agents)
+    reused = build_token_usage(agents, baseline_reused=True)
+
+    assert plain is not None and reused is not None
+    assert "baseline_reused" not in plain
+    assert reused["baseline_reused"] is True
+    # The reused rows are measurements like any other, so the sums and the change stay.
+    assert {key: value for key, value in reused.items() if key != "baseline_reused"} == plain
+    assert reused["dataset"]["delta"]["total_tokens"] == -110
+
+
 def test_a_skipped_baseline_is_not_run_and_has_no_change() -> None:
     agent = _agent([_trial("case-1", 100, 20)], [])
     agent["conditions"]["without_skill"] = {"execution_status": "skipped", "expected_attempts": 0}

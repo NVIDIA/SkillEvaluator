@@ -34,6 +34,10 @@ COVERAGE_NOTE = (
     "Measured attempts: attempts with token counts, of those expected, in each arm. "
     "Unscored attempts failed before scoring."
 )
+#: Said under the table of a run that reused an earlier run's baseline (``--reuse-baseline``).
+REUSED_BASELINE_NOTE = (
+    "This run reused the baseline of an earlier run, so the baseline tokens were used in that run, not in this one."
+)
 #: Where ``validate``'s terminal report, which prints agent rows only, sends readers for case rows.
 VALIDATE_CASE_POINTER = "Token usage per case is in the HTML, Markdown and JSON reports (-r html, markdown or json)."
 #: Where ``tier3 evaluate``'s terminal summary sends readers for case rows.
@@ -122,6 +126,11 @@ def more_case_rows_note(count: int, *, code: Callable[[str], str] = lambda text:
     return f"{count} more case row(s) are in the JSON payload under {code('token_usage')}." if count else None
 
 
+def reused_baseline_note(usage: object) -> str | None:
+    """Say that the baseline tokens come from an earlier run when this run reused its baseline."""
+    return REUSED_BASELINE_NOTE if _mapping(usage).get("baseline_reused") is True else None
+
+
 def dropped_case_rows_note(usage: object) -> str | None:
     """Say how many case rows the report payload dropped to stay within the report limits, if any."""
     count = _count(_mapping(usage).get("case_rows_omitted"))
@@ -205,6 +214,8 @@ def token_usage_markdown_lines(
     cases = [row for row in rows if row.is_case]
     lines = [heading, "", TOKEN_USAGE_NOTE, "", header, separator, *(line(row) for row in summary), ""]
     lines.extend([COVERAGE_NOTE, ""])
+    if reused := reused_baseline_note(usage):
+        lines.extend([reused, ""])
     notes = [f"- {agent_label(row.agent)}: {row.note}" for row in summary if row.note]
     if notes:
         lines.extend([*notes, ""])
@@ -246,6 +257,8 @@ def render_token_usage_table(
             Text(row.coverage),
         )
     console.print(table)
+    if reused := reused_baseline_note(usage):
+        console.print(Text(f"  {reused}"))
     for row in rows:
         if row.note:
             console.print(Text(f"  {text(row.agent if row.agent is not None else 'All agents')}: {text(row.note)}"))
@@ -267,6 +280,7 @@ def token_usage_table(usage: object) -> dict[str, Any] | None:
         "rows": rows,
         "note": TOKEN_USAGE_NOTE,
         "coverage_note": COVERAGE_NOTE,
+        "reused_baseline": reused_baseline_note(usage),
         "more_cases": more_case_rows_note(omitted, code=str),
         "dropped_cases": dropped_case_rows_note(usage),
     }

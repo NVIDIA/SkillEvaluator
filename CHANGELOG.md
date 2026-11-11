@@ -192,7 +192,8 @@ All notable changes to SkillEvaluator are documented in this file.
   are left out, with a note, when the payload would pass its size or node
   limits, also after the run's next steps, `tier3 evaluate`'s case findings and
   `validate`'s applicability fields join it. A baseline that did not run is
-  shown as not run.
+  shown as not run, and a reused baseline's tokens are marked as used in the
+  run it came from.
 
 ### Changed
 

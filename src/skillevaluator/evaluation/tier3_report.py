@@ -1138,12 +1138,15 @@ def build_agent_eval_payload(
     # Measured, never scored: token usage per case and agent, counting attempts
     # that failed before scoring. Scores and ``resources`` do not read it. It
     # joins the payload after the budget, so it never displaces score evidence.
+    baseline_record = (run_config or {}).get("baseline")
     token_usage = build_token_usage(
         {
             name: {**agent, **{key: agents.get(name, {}).get(key) for key in USAGE_ONLY_ATTEMPT_KEYS}}
             for name, agent in agent_payloads.items()
         },
         mode=mode,
+        # A reused baseline's copied trajectories hold the tokens of the run it came from.
+        baseline_reused=isinstance(baseline_record, dict) and baseline_record.get("mode") == "reused",
     )
 
     _layer_llm_insights(

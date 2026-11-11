@@ -457,7 +457,9 @@ def _agent_usage(agent: Mapping[str, Any], unexecuted: frozenset[str]) -> dict[s
     }
 
 
-def build_token_usage(agents: Mapping[str, Mapping[str, Any]], *, mode: str = "both") -> dict[str, Any] | None:
+def build_token_usage(
+    agents: Mapping[str, Mapping[str, Any]], *, mode: str = "both", baseline_reused: bool = False
+) -> dict[str, Any] | None:
     """Return token usage per case, per agent and over all agents, or ``None`` when no attempt was measured.
 
     ``agents`` maps each agent to its report payload (``trials``,
@@ -465,6 +467,9 @@ def build_token_usage(agents: Mapping[str, Mapping[str, Any]], *, mode: str = "b
     plus the loader's usage-only attempts under :data:`USAGE_ONLY_ATTEMPT_KEYS`.
     ``mode`` is the payload's ``mode``: an arm that ``with_skill_only`` or
     ``baseline_only`` leaves out is ``not_run`` for every agent without attempts in it.
+    ``baseline_reused`` marks a run that reused an earlier run's baseline
+    (``--reuse-baseline``): its baseline counts are that run's usage, so the
+    result says so with ``baseline_reused``.
     """
     unexecuted = _UNEXECUTED_CONDITIONS.get(mode, frozenset())
     usage: dict[str, dict[str, Any]] = {}
@@ -490,6 +495,7 @@ def build_token_usage(agents: Mapping[str, Mapping[str, Any]], *, mode: str = "b
         "schema_version": TOKEN_USAGE_SCHEMA_VERSION,
         "scored": False,
         "accounting": dict(_ACCOUNTING),
+        **({"baseline_reused": True} if baseline_reused else {}),
         "agents": usage,
         "dataset": {
             **dataset,

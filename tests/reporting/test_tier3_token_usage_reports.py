@@ -39,12 +39,16 @@ from skillevaluator.reporting.base import (
     agent_eval_report_serialization_issue,
 )
 from skillevaluator.reporting.dashboard_data import comparison_rows, parse_dashboard_report
-from skillevaluator.reporting.tier3_token_usage import EVALUATE_CASE_POINTER, VALIDATE_CASE_POINTER
+from skillevaluator.reporting.tier3_token_usage import (
+    EVALUATE_CASE_POINTER,
+    REUSED_BASELINE_NOTE,
+    VALIDATE_CASE_POINTER,
+)
 from skillevaluator.tier3 import token_usage as token_usage_module
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 from skillevaluator.tier3.harbor.report_data import load_agent_data
 from skillevaluator.tier3.result_display import render_result
-from skillevaluator.tier3.token_usage import drop_token_usage_cases
+from skillevaluator.tier3.token_usage import drop_token_usage_cases, per_agent_token_usage
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GOLDEN = REPO_ROOT / "tests" / "golden" / "benchmark_token_usage" / "TOKEN_USAGE.md"
@@ -513,6 +517,34 @@ def test_a_run_without_a_baseline_reports_its_baseline_tokens_as_not_run(tmp_pat
     assert "different cases" not in section
 
 
+def test_a_reused_baseline_is_labelled_in_every_report(tmp_path: Path) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    run = _run(tmp_path)
+    # What ``tier3 evaluate --reuse-baseline`` records; the baseline trials are copies from that run.
+    baseline = {"mode": "reused", "source_run_id": "run-1", "source_evaluated_at": "2026-11-01T00:00:00Z"}
+    (run / "run_config.json").write_text(json.dumps({"baseline": baseline}), encoding="utf-8")
+
+    result = agent_eval_result_from_directory(skill, run, use_llm_judge=False)
+
+    assert result is not None
+    usage = result.metadata["agent_eval"]["token_usage"]
+    assert usage["baseline_reused"] is True
+    assert usage["dataset"]["baseline"]["totals"]["total_tokens"] == 51722
+    evaluate_summary = render_result(
+        {"execution_status": "succeeded", "agents": {"codex": {}}, "token_usage": per_agent_token_usage(usage)}
+    )
+    reports = {
+        "validate terminal": _cli_output(result),
+        "tier3 evaluate terminal": evaluate_summary,
+        "Markdown": MarkdownReporter().render_all([result]),
+        "BENCHMARK.md": BenchmarkReporter(include_timestamp=False).render_all([result]),
+        "HTML": HTMLReporter(include_timestamp=False).render_all([result]),
+    }
+    for name, report in reports.items():
+        assert REUSED_BASELINE_NOTE in " ".join(report.split()), name
+
+
 def test_dashboards_do_not_read_dropped_token_rows_as_missing_trials(run_result: tuple[Path, Any]) -> None:
     _run_dir, result = run_result
     report = copy.deepcopy(result.metadata["agent_eval"])
@@ -736,6 +768,8 @@ def test_docs_and_changelog_describe_the_token_usage_contract() -> None:
         "first 50 case rows",
         "at most 64 per agent",
         "baseline_not_run",
+        "baseline_reused",
+        "--reuse-baseline",
         "case findings",
         "applicability fields",
         "left out without a record",

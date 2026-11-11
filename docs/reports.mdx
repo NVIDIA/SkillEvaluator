@@ -1023,6 +1023,11 @@ or gate.
   `case_scope_mismatch` (both arms ran attempts, for different cases or
   numbers of attempts per case), or `agent_scope_mismatch` for the sum over all
   agents.
+- A run that reused an earlier run's baseline
+  (`tier3 evaluate --reuse-baseline`) has `baseline_reused: true`. Its baseline
+  counts come from the trajectories copied from that run: they are the tokens
+  the baseline used there, not tokens used in this run, and every token usage
+  table says so.
 
 Token usage joins the payload after the report size budget, so it never
 displaces trials or other score evidence. It also never pushes the payload past

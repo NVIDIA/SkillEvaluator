@@ -294,9 +294,12 @@ All notable changes to SkillEvaluator are documented in this file.
   asserts the task outcome instead of "using the relevant skill workflow". The
   negative template case is unchanged. `tier3 validate` now warns when a
   prompt points at the skill's files or an expected output or assertion grades
-  skill use, including runs of the skill's own scripts; the warning fails only
-  `--strict` and never blocks a run. The bundled agent skill's own dataset no
-  longer asserts that the agent read its `SKILL.md`. On newly generated
+  skill use, including runs of the skill's own scripts. The warning fails
+  `--strict` and the strict dataset check that all-tier CI runs before its
+  advisory Tier 3 step; it never blocks a local run or autopilot. The bundled
+  agent skill's own dataset no longer asserts that the agent read its
+  `SKILL.md`, and the public starter dataset no longer asserts that the agent
+  read text-analyzer's `SKILL.md` and ran its script. On newly generated
   datasets, baseline scores rise and lift falls; existing datasets are not
   rewritten.
 

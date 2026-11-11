@@ -110,7 +110,9 @@ text out. `tier3 validate` warns when a prompt points at `skills/<name>`,
 output or an assertion names those files, calls `<name>` a skill, says the
 agent used, invoked or identified `<name>`, or runs one of the skill's scripts.
 It is a wording heuristic: it skips negated checks such as "did not read
-`SKILL.md`" and can miss skill use phrased another way.
+`SKILL.md`" and can miss skill use phrased another way. The warnings fail
+`tier3 validate --strict` and the strict dataset check that all-tier CI runs
+before its advisory Tier 3 step; they never block a local run or autopilot.
 
 | Field | Required | Meaning |
 | --- | --- | --- |

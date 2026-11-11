@@ -341,6 +341,18 @@ def test_fairness_warnings_do_not_block_the_tier3_source_check(tmp_path: Path):
     assert not [check for check in checks if check.status in {"error", "missing"}]
 
 
+def test_all_tier_ci_tier3_dataset_check_is_strict_about_fairness_warnings(tmp_path: Path):
+    # All-tier CI runs its advisory Tier 3 step only on a dataset that passes strict validation.
+    from ci.run_tiers import ConfigurationError, dataset_preflight
+
+    unfair = _write_release_review_skill(tmp_path / "unfair", ["The agent used the release-review skill"])
+    fair = _write_release_review_skill(tmp_path / "fair", ["Lists both blockers"])
+
+    with pytest.raises(ConfigurationError, match="strict validation"):
+        dataset_preflight(unfair)
+    assert "evals/evals.json" in dataset_preflight(fair)
+
+
 def _skill(**overrides) -> dict:
     return {
         "name": "release-review",

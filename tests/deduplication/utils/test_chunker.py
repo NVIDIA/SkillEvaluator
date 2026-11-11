@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from skillevaluator.deduplication.utils.chunker import (
     ContentChunk,
     chunk_file,
@@ -191,6 +193,38 @@ class TestChunkPython:
 
 
 class TestChunkShell:
+    @pytest.mark.parametrize("prefix", ["", "#!/bin/sh\necho ready\n"])
+    @pytest.mark.parametrize("ending", ["", "\n", "\n\n"])
+    def test_comment_block_at_eof(self, prefix: str, ending: str) -> None:
+        comments = [
+            "Document the required setup before invoking this helper script.",
+            "Use the configured workspace for every generated output file.",
+            "Keep the source input unchanged while the helper processes it.",
+        ]
+        content = prefix + "\n".join(f"# {line}" for line in comments) + ending
+
+        chunks = chunk_shell(_cf(content, ".sh", "run.sh"), min_chars=80)
+
+        assert len(chunks) == 1
+        assert chunks[0].heading == "(comment)"
+        assert chunks[0].text == "\n".join(comments)
+        first_line = len(prefix.splitlines()) + 1
+        assert (chunks[0].start_line, chunks[0].end_line) == (first_line, first_line + 2)
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "",
+            "#!/bin/sh\n",
+            "# Short\n# Two lines",
+            "# This first long comment line explains the helper setup in detail.\n"
+            "# This second long comment line explains the workspace output rules.",
+            "# A\n# B\n# C",
+        ],
+    )
+    def test_eof_comments_keep_existing_filters(self, content: str) -> None:
+        assert chunk_shell(_cf(content, ".sh", "run.sh"), min_chars=80) == []
+
     def test_function_body(self) -> None:
         body = "setup() {\n" + "  echo step\n" * 15 + "}\n"
         chunks = chunk_shell(_cf(body, ".sh", "run.sh"), min_chars=80)

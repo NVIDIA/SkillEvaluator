@@ -1,0 +1,16 @@
+{
+  "analysis": {
+    "word_count": 4,
+    "line_count": 2,
+    "character_count": 27,
+    "sentence_count": 2,
+    "average_word_length": 5.75,
+    "top_words": [
+      {"word": "hello", "count": 2},
+      {"word": "world", "count": 1},
+      {"word": "skills", "count": 1}
+    ]
+  },
+  "quality": {"score": 84.5, "grade": "B", "status": "passed", "exit_code": 0, "publication": "incomplete"},
+  "regressed": {"score": 71.0, "grade": "C", "status": "failed", "exit_code": 1, "publication": "fail"}
+}

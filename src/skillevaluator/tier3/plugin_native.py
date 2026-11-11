@@ -46,9 +46,21 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar
 
-from skillevaluator.constants import CONTENT_DEDUP_MAX_FILE_BYTES, PLUGIN_CONFIG_MAX_BYTES
-from skillevaluator.plugin_formats import CLAUDE_PROFILE
+from skillevaluator.constants import (
+    CONTENT_DEDUP_MAX_FILE_BYTES,
+    PLUGIN_CODEX_MANIFEST_TYPE,
+    PLUGIN_CONFIG_MAX_BYTES,
+    PLUGIN_CURSOR_MANIFEST_TYPE,
+    PLUGIN_OPENCLAW_MANIFEST_TYPE,
+)
+from skillevaluator.plugin_formats import (
+    CLAUDE_PROFILE,
+    CODEX_PROFILE,
+    codex_accepts_path,
+    declared_value_replaces_default,
+)
 from skillevaluator.plugin_inventory import COMPONENT_TYPES
+from skillevaluator.plugin_manifest import manifest_type_for_relative_path
 from skillevaluator.plugin_markdown import parse_markdown
 from skillevaluator.plugin_paths import PluginRootReader, normalize_declared_path
 from skillevaluator.tier3.toml_utils import toml_quote
@@ -487,6 +499,13 @@ def to_claude_root(value: Any, pattern: re.Pattern[str] | None) -> Any:
 
 #: The Cursor and Agent Plugins root placeholders, rewritten in every translated Cursor hook command.
 _CURSOR_ROOT_VAR_RE = foreign_root_var_re(("${CURSOR_PLUGIN_ROOT}", "${PLUGIN_ROOT}"))
+
+
+#: Why native OpenClaw runtime rows are never staged by any adapter.
+OPENCLAW_RUNTIME_NOT_LOADED = (
+    "OpenClaw runtime is not loaded: native tools, hooks, channels, providers and services are inventoried only; "
+    "this run evaluates portable components, not OpenClaw behavior"
+)
 
 
 def declared_plugin_paths(value: Any) -> list[PurePosixPath]:
@@ -1075,7 +1094,15 @@ class HarnessAdapter:
         if modes["hook"] == "unsupported":
             rows.extend(("hook", hook.name, reason) for hook in source.hooks)
         rows.extend((text.type, text.name, reason) for text in source.texts if modes.get(text.type) == "unsupported")
-        rows.extend((component_type, name, reason) for component_type, name in source.other)
+        openclaw = manifest_type_for_relative_path(source.manifest_rel) == PLUGIN_OPENCLAW_MANIFEST_TYPE
+        rows.extend(
+            (
+                component_type,
+                name,
+                OPENCLAW_RUNTIME_NOT_LOADED if openclaw and component_type == "extension" else reason,
+            )
+            for component_type, name in source.other
+        )
         if not self.copies_plugin_tree:
             # Only an adapter that copies the plugin tree can start a server that launches from plugin files.
             rows.extend(
@@ -1352,6 +1379,17 @@ class ClaudeCodeAdapter(HarnessAdapter):
     def plugin_name(self, source: NativePluginSource) -> str:
         return plugin_slug(source.plugin_name)
 
+    @staticmethod
+    def stages_members_only(source: NativePluginSource) -> bool:
+        """Whether only the inventoried member skills are staged, without a copy of the plugin tree.
+
+        A native OpenClaw plugin's members are exactly its declared skill roots.
+        Copying its tree would also load Claude Code's default ``skills/``,
+        ``commands/``, ``agents/``, ``hooks/`` and ``bin/`` locations and ship
+        the native manifest's host metadata, none of which OpenClaw loads.
+        """
+        return manifest_type_for_relative_path(source.manifest_rel) == PLUGIN_OPENCLAW_MANIFEST_TYPE
+
     def manifest(self, source: NativePluginSource) -> dict[str, Any]:
         """The staged ``plugin.json``: identity plus the component keys that stay native.
 
@@ -1362,15 +1400,50 @@ class ClaudeCodeAdapter(HarnessAdapter):
         """
         manifest: dict[str, Any] = {"name": self.plugin_name(source), "description": source.description}
         if source.contained:
-            for key in ("version", "skills", "commands", "agents", "outputStyles", "userConfig"):
+            for key in ("version", "commands", "agents", "outputStyles", "userConfig"):
                 if key in source.manifest:
                     value = source.manifest[key]
                     manifest[key] = json.loads(json.dumps(value)) if isinstance(value, dict | list) else value
+            manifest.update(self._skill_manifest_fields(source))
         return manifest
 
+    def _skill_manifest_fields(self, source: NativePluginSource) -> dict[str, Any]:
+        """Project the source client's skill declarations once, for the manifest and the census.
+
+        Cursor loads undotted roots as written, so those become ``./`` paths
+        Claude Code accepts. Codex drops the paths it rejects instead; when none
+        remain, omitting the field keeps its default ``skills/`` discovery
+        without enabling uninventoried folders. A members-only source (OpenClaw)
+        declares nothing: its member skills are staged under ``skills/``. Native
+        Claude declarations, including invalid ones, are not repaired.
+        """
+        if not source.contained or "skills" not in source.manifest or self.stages_members_only(source):
+            return {}
+        value = source.manifest["skills"]
+        manifest_type = manifest_type_for_relative_path(source.manifest_rel)
+        if manifest_type == PLUGIN_CODEX_MANIFEST_TYPE:
+            if not declared_value_replaces_default(CODEX_PROFILE, "skills", value):
+                return {}
+            if isinstance(value, list):
+                value = [raw for raw in value if codex_accepts_path(raw)]
+        elif manifest_type == PLUGIN_CURSOR_MANIFEST_TYPE:
+            # Normalize contained paths only, keeping the scalar/list shape and
+            # invalid declarations rather than silently making them valid.
+            paths = value if isinstance(value, list) else [value]
+            normalized = []
+            for raw in paths:
+                declared = normalize_declared_path(raw, ()) if isinstance(raw, str) else None
+                normalized.append(
+                    f"./{declared.rel.as_posix()}"
+                    if declared is not None and declared.rel is not None and not declared.dot_relative
+                    else raw
+                )
+            value = normalized if isinstance(value, list) else normalized[0]
+        return {"skills": json.loads(json.dumps(value)) if isinstance(value, dict | list) else value}
+
     def _declared_skill_dirs(self, source: NativePluginSource) -> list[PurePosixPath]:
-        """Root-relative skill directories the staged ``plugin.json`` declares (it keeps a contained ``skills``)."""
-        return declared_plugin_paths(source.manifest.get("skills")) if source.contained else []
+        """Root-relative skill directories declared by the projected Claude Code manifest."""
+        return declared_plugin_paths(self._skill_manifest_fields(source).get("skills"))
 
     def staged_skills(self, source: NativePluginSource) -> list[tuple[str, str, Path | None]]:
         """Every skill the staged plugin loads: ``(census name, plugin-relative dir, copy source or None)``.
@@ -1381,12 +1454,15 @@ class ClaudeCodeAdapter(HarnessAdapter):
         plugin root, or inside it but somewhere Claude Code does not read) is
         copied to ``skills/<name>``. A name that is already taken fails closed,
         because Claude Code would load the other skill under that name; so do
-        two skill directories of the plugin itself with one name.
+        two skill directories of the plugin itself with one name. A members-only
+        source has no plugin copy, so each member skill is copied to ``skills/<name>``.
         """
         root = source.plugin_root.resolve()
         reader = PluginRootReader(root)
+        members_only = self.stages_members_only(source)
         loaded: list[str] = []
-        for read_dir in (PurePosixPath("skills"), *self._declared_skill_dirs(source)):
+        read_dirs = () if members_only else (PurePosixPath("skills"), *self._declared_skill_dirs(source))
+        for read_dir in read_dirs:
             if reader.kind(read_dir) != "dir":
                 continue
             if reader.kind(read_dir / "SKILL.md") == "file":
@@ -1422,7 +1498,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
                 continue
             dest = PurePosixPath("skills") / safe_name(skill.name)
             taken = loaded_names.get(dest.name)
-            if taken is None and (dest.as_posix() in placed or reader.kind(dest) != "missing"):
+            if taken is None and (dest.as_posix() in placed or (not members_only and reader.kind(dest) != "missing")):
                 taken = dest.as_posix()
             if taken is not None:
                 raise ValueError(
@@ -1435,7 +1511,10 @@ class ClaudeCodeAdapter(HarnessAdapter):
         return staged
 
     def _unsupported_rows(self, source: NativePluginSource) -> list[tuple[str, str, str]]:
-        staged = {("bin", "bin"), *(("lsp", name) for name in source.lsp_servers)}
+        # bin/ reaches PATH only through the plugin copy.
+        staged = {("lsp", name) for name in source.lsp_servers}
+        if not self.stages_members_only(source):
+            staged.add(("bin", "bin"))
         if source.settings:
             staged.add(("settings", _PLUGIN_SETTINGS_FILE))
         rows: list[tuple[str, str, str]] = []
@@ -1455,8 +1534,9 @@ class ClaudeCodeAdapter(HarnessAdapter):
     def build(self, source: NativePluginSource) -> NativeBundle:
         bundle = self._base_bundle()
         # The plugin root is copied (secure copy, evals/ and unsupported files
-        # excluded) so hook scripts and other plugin-relative files resolve.
-        bundle.plugin_tree = self.bundle_dir
+        # excluded) so hook scripts and other plugin-relative files resolve. A
+        # members-only source stages its member skills and generated files only.
+        bundle.plugin_tree = None if self.stages_members_only(source) else self.bundle_dir
         bundle.harness = {"kind": "claude-code-init", "plugin": self.plugin_name(source)}
         manifest = self.manifest(source)
         checks: list[CensusCheck] = []
@@ -2222,6 +2302,10 @@ NATIVE_AGENT_IMPORT_PATHS: dict[tuple[str, str | None], str] = {
     ): f"{_NATIVE_AGENTS}:NativeInstalledOpenCode",
     ("opencode", f"{_LOCAL_AGENTS}:SkillEvaluatorGatewayOpenCode"): f"{_NATIVE_AGENTS}:NativeGatewayOpenCode",
     ("hermes", None): f"{_NATIVE_AGENTS}:NativeHermes",
+    (
+        "hermes",
+        "skillevaluator.tier3.harbor.hermes_agent:SkillEvaluatorHermes",
+    ): f"{_NATIVE_AGENTS}:NativeNvidiaBuildHermes",
 }
 
 

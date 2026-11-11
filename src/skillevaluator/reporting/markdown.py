@@ -43,7 +43,9 @@ from skillevaluator.reporting.harbor_viewer import (
 )
 from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
 from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION, pass_at_k_summary
+from skillevaluator.tier3.baseline_store import baseline_description
 from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
+from skillevaluator.tier3.version_comparison import version_comparison_lines
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
@@ -355,6 +357,12 @@ class MarkdownReporter(ReporterBase):
 
             lines.append("## Tier 3: Agent Evaluation")
             lines.append("")
+            if ae.get("baseline"):
+                lines.append(baseline_description(ae["baseline"]))
+                lines.append("")
+            if comparison := ae.get("prior_version_comparison"):
+                lines.extend(html.escape(line) for line in version_comparison_lines(comparison))
+                lines.append("")
             composite_text = _format_report_number(composite, signed=True)
             lines.append(f"**Verdict:** {verdict} (Skill Lift = {composite_text})")
             if _finite_report_number(composite) is not None:
@@ -491,6 +499,24 @@ class MarkdownReporter(ReporterBase):
                         if url:
                             label = _markdown_inline_text(harbor_evidence_link_text(evidence)) or "Evidence"
                             lines.append(f"   - Evidence: [{label}]({url})")
+                lines.append("")
+
+            if next_steps := _dict_items(ae.get("next_steps")):
+                lines.append("### Next Steps")
+                lines.append("")
+                for idx, step in enumerate(next_steps, start=1):
+                    problem = _markdown_inline_text(step.get("problem"))
+                    action = _markdown_inline_text(step.get("action"))
+                    if not problem or not action:
+                        continue
+                    target = _markdown_inline_text(step.get("target")) or "evaluation"
+                    strength = _markdown_inline_text(step.get("strength"))
+                    label = target if strength in ("", "supported") else f"{target} · {strength}"
+                    lines.append(f"{idx}. **{problem}** [{label}]: {action}")
+                    if check := _markdown_inline_text(step.get("check")):
+                        lines.append(f"   - Check: {check}")
+                    if evidence := _markdown_inline_text(step.get("evidence")):
+                        lines.append(f"   - Evidence: {evidence}")
                 lines.append("")
 
         # Results per validator

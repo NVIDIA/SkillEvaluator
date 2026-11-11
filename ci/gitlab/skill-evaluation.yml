@@ -6,6 +6,7 @@ variables:
   SKILL_EVAL_PATHS: "skills"
   SKILL_EVAL_SCAN_MODE: "auto"
   SKILL_EVAL_MIN_SCORE: "70"
+  SKILL_EVAL_SECURITY_BASELINES: "false"
 
 skill-evaluation:
   stage: test
@@ -27,6 +28,16 @@ skill-evaluation:
       trap 'rm -rf "$reports_dir"' EXIT
       export SKILL_PATHS="$SKILL_EVAL_PATHS"
       export MIN_SCORE="$SKILL_EVAL_MIN_SCORE"
+      export SECURITY_BASELINES="${SKILL_EVAL_SECURITY_BASELINES:-false}"
+      unset POLICY_SOURCE_SHA
+      case "$SECURITY_BASELINES" in
+        true|false) ;;
+        *) echo "SKILL_EVAL_SECURITY_BASELINES must be true or false." >&2; exit 1 ;;
+      esac
+      if [ "$SECURITY_BASELINES" = true ]; then
+        POLICY_SOURCE_SHA="$(python -I /opt/skillevaluator/ci/prepare_security_baselines.py)"
+        export POLICY_SOURCE_SHA
+      fi
       # Report links must be HTTPS; an instance served over HTTP gets no job link.
       case "${CI_JOB_URL:-}" in
         https://*) export REPORT_RUN_URL="$CI_JOB_URL" ;;

@@ -83,6 +83,18 @@ def test_gitlab_job_uses_and_cleans_configured_temporary_storage(tmp_path):
     assert not location.exists()
 
 
+def test_gitlab_baseline_opt_in_rejects_noncanonical_boolean_and_inherited_policy(tmp_path):
+    result, evidence = _run_template(
+        tmp_path,
+        {
+            "SKILL_EVAL_SECURITY_BASELINES": "TRUE",
+            "POLICY_SOURCE_SHA": "a" * 40,
+        },
+    )
+    assert result.returncode != 0
+    assert evidence is None
+
+
 def test_gitlab_job_uses_mr_diff_and_retains_failed_results(tmp_path):
     result, evidence = _run_template(
         tmp_path,

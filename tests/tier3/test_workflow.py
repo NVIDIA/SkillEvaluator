@@ -66,8 +66,10 @@ def configured(monkeypatch: pytest.MonkeyPatch) -> list:
     return captured
 
 
-def test_direct_workflow_reuses_dataset_and_forwards_evaluation_options(skill, configured, monkeypatch):
+def test_direct_workflow_reuses_dataset_and_forwards_evaluation_options(skill, configured, monkeypatch, tmp_path):
     dataset = _dataset(skill)
+    price_file = skill / "evals" / "prices.json"
+    price_file.write_text('{"nvidia/test-model": {"input_per_mtok": 1, "output_per_mtok": 2}}')
     original = dataset.read_bytes()
     monkeypatch.setattr(
         EvaluationService, "create_autopilot_dataset", lambda *_args, **_kwargs: pytest.fail("must reuse")
@@ -81,6 +83,16 @@ def test_direct_workflow_reuses_dataset_and_forwards_evaluation_options(skill, c
             "--skip-baseline",
             "--n-attempts",
             "3",
+            "--max-agent-tokens",
+            "1000",
+            "--max-judge-calls",
+            "4",
+            "--max-attempts-total",
+            "12",
+            "--max-cost-usd",
+            "0.25",
+            "--price-file",
+            str(price_file),
             "--no-agent-runtime-preflight",
             "--progress",
             "off",
@@ -95,6 +107,11 @@ def test_direct_workflow_reuses_dataset_and_forwards_evaluation_options(skill, c
     assert configured[0].skip_baseline is True
     assert configured[0].n_attempts == 3
     assert configured[0].agent_runtime_preflight is False
+    assert configured[0].max_agent_tokens == 1000
+    assert configured[0].max_judge_calls == 4
+    assert configured[0].max_attempts_total == 12
+    assert configured[0].max_cost_usd == 0.25
+    assert configured[0].price_file == price_file
     assert configured[0].agent_model == ("opencode=nvidia/nvidia/test-model",)
     assert configured[0].results_dir == skill.parent / "results"
     assert "reusing" in result.output.lower()
@@ -208,6 +225,21 @@ def test_invalid_options_error_before_generating(skill, configured, monkeypatch,
     result = CliRunner().invoke(_command(), [str(skill), *options, "--progress", "off"])
     assert result.exit_code != 0
     assert "Error:" in result.output
+    assert not (skill / "evals").exists()
+    assert not configured
+
+
+@pytest.mark.parametrize("skip", ["--skip-baseline", "--skip-with-skill"])
+def test_reuse_baseline_conflicts_before_autopilot_generation(skill, configured, monkeypatch, skip):
+    monkeypatch.setattr(
+        EvaluationService, "create_autopilot_dataset", lambda *_args, **_kwargs: pytest.fail("must preflight")
+    )
+    result = CliRunner().invoke(
+        _command(),
+        [str(skill), "--reuse-baseline", "latest", skip, "--progress", "off"],
+    )
+    assert result.exit_code != 0
+    assert "--reuse-baseline is mutually exclusive" in result.output
     assert not (skill / "evals").exists()
     assert not configured
 
@@ -669,11 +701,7 @@ def test_gke_workflow_resolves_env_vars_and_enforces_precedence_before_preflight
     from skillevaluator.tier3.harbor import runner
 
     _dataset(skill)
-    (skill / "evals" / "config.yml").write_text(
-        "schema_version: 1\n"
-        "harbor:\n"
-        "  n_attempts: 1\n"
-    )
+    (skill / "evals" / "config.yml").write_text("schema_version: 1\nharbor:\n  n_attempts: 1\n")
     gke_env = {
         "SKILLEVALUATOR_GKE_CLUSTER": "env-cluster",
         "SKILLEVALUATOR_GKE_REGION": "us-central1",

@@ -40,6 +40,7 @@ from skillevaluator.tier3.harbor.metrics import (
 )
 from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
 from skillevaluator.tier3.harbor.runner import format_harbor_view_command
+from skillevaluator.tier3.version_comparison import version_comparison_lines
 
 
 def _number(value: object, *, signed: bool = False) -> str:
@@ -956,7 +957,20 @@ def _case_first_summary(result: Mapping[str, Any], *, console: Console, skill_pa
                 save_case_findings(Path(str(run_dir)), fixes)
         except Exception:  # advisory panel: never break the run summary
             logging.getLogger(__name__).debug("What-to-fix skipped", exc_info=True)
-    return render_case_summary(result, console=console, fixes=fixes)
+    shown = render_case_summary(result, console=console, fixes=fixes)
+    if shown and run_dir and Path(str(run_dir)).is_dir():
+        from skillevaluator.tier3.next_steps import next_steps, render_next_steps
+
+        secrets = secret_values_from_environment(os.environ)
+        try:
+            steps = next_steps(result, run_dir=Path(str(run_dir)), fixes=fixes)
+        except Exception:  # advisory panel: never break the run summary
+            logging.getLogger(__name__).debug("Next steps skipped", exc_info=True)
+            steps = []
+        render_next_steps(
+            steps, console=console, safe=lambda value: redact_progress_detail(value, secret_values=secrets)
+        )
+    return shown
 
 
 def render_evaluation_result(
@@ -984,9 +998,24 @@ def render_evaluation_result(
     duration = result.get("duration_seconds")
     if _finite_number(duration) is not None:
         console.print(f"Time: {float(duration):.1f}s")
+    baseline = result.get("baseline")
+    if isinstance(baseline, Mapping) and (baseline.get("mode") == "reused" or baseline.get("reuse_reason")):
+        from skillevaluator.tier3.baseline_store import baseline_description
+
+        console.print(safe(baseline_description(dict(baseline))))
+    budget = result.get("budget")
+    if isinstance(budget, Mapping) and (
+        budget.get("status") == "exhausted" or any(value is not None for value in (budget.get("limits") or {}).values())
+    ):
+        from skillevaluator.tier3.harbor.run_budget import budget_line
+
+        console.print(budget_line(dict(budget)))
     provenance_line, provenance_is_template = dataset_provenance_display(result.get("dataset_provenance"))
     if provenance_line:
         console.print(Text(provenance_line, style="yellow" if provenance_is_template else "dim"))
+    if comparison := result.get("prior_version_comparison"):
+        for line in version_comparison_lines(comparison):
+            console.print(Text(safe(line)))
 
     agents = result.get("agents")
     incomplete = status in {"failed", "incomplete"} and not any(

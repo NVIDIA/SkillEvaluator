@@ -13,7 +13,7 @@ finding helpers report a declared path that is missing, escapes the root, is
 unsafe, lacks the ``./`` prefix, starts with a root variable, or lies in a
 folder Tier 1 scans skip, and a names-only walk notes the shipped folders the
 scans skip and refuses links out of the plugin inside them. The component
-inventory (:mod:`skillevaluator.plugin_components`) and the MCP collection
+inventory (:mod:`skillevaluator.plugin_inventory`) and the MCP collection
 (:mod:`skillevaluator.plugin_mcp`) share them.
 """
 

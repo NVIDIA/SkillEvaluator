@@ -668,7 +668,14 @@ def evaluate(
     environment_kwarg: tuple[str, ...] = (),
     skip_baseline: bool,
     skip_with_skill: bool = False,
+    reuse_baseline: str | None = None,
+    compare_to: str | None = None,
     n_attempts: int | None,
+    max_agent_tokens: int | None = None,
+    max_judge_calls: int | None = None,
+    max_attempts_total: int | None = None,
+    max_cost_usd: float | None = None,
+    price_file: Path | None = None,
     pass_threshold: float | None,
     stop_on_pass: bool | None = None,
     n_concurrent: int | None,
@@ -726,6 +733,10 @@ def evaluate(
         reporter.emit(ProgressEvent(stage="configuration", state="running"))
         if skip_baseline and skip_with_skill:
             raise ValueError("--skip-baseline and --skip-with-skill are mutually exclusive (no arm would run)")
+        if reuse_baseline and (skip_baseline or skip_with_skill):
+            raise ValueError("--reuse-baseline is mutually exclusive with --skip-baseline and --skip-with-skill")
+        if compare_to and skip_with_skill:
+            raise ValueError("--compare-to is mutually exclusive with --skip-with-skill")
         unknown = validate_agents(agent_list)
         if unknown:
             supported = ", ".join(sorted(HARBOR_AGENTS_SUPPORTED))
@@ -755,7 +766,14 @@ def evaluate(
             agents=agent_list,
             skip_baseline=skip_baseline,
             skip_with_skill=skip_with_skill,
+            reuse_baseline=reuse_baseline,
+            compare_to=compare_to,
             n_attempts=n_attempts,
+            max_agent_tokens=max_agent_tokens,
+            max_judge_calls=max_judge_calls,
+            max_attempts_total=max_attempts_total,
+            max_cost_usd=max_cost_usd,
+            price_file=price_file,
             pass_threshold=pass_threshold,
             stop_on_pass=stop_on_pass,
             n_concurrent=n_concurrent,

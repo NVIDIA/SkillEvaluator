@@ -262,6 +262,28 @@ skillevaluator similarity-check ./skills --max-entries 500 --max-scalar-comparis
 
 The entry budget counts selected manifests even when their frontmatter is
 invalid. It applies before any embedding request and never truncates a scan.
+Every selected manifest is accounted for: reports include `collection_coverage`
+with `selected_count`, `indexed_count`, and `skipped_count`. Here indexed means
+valid manifests eligible for embedding; a provider or work-limit error can still
+stop the index build. Missing frontmatter, malformed YAML, a non-mapping header,
+or missing name/title or description produces an exclusion reason. Up to 100
+exclusions are listed with collection-relative paths (each bounded to 512
+characters); `omitted_exclusions` counts additional diagnostics. An excluded
+manifest makes the scan **INCOMPLETE** and blocking, even when the indexed subset
+has no matches. Matches in the valid subset remain available. Fix excluded
+manifests and rerun; an incomplete collection cannot replace or create a saved
+catalog. Unsafe paths and input limits continue to stop discovery outright.
+
+For Python callers reusing an `EmbeddingRegistry`, each successful
+`build_from_directory()` or `build_from_paths()` replaces the entire indexed
+selection, vector dimensions and committed coverage. An empty directory build
+clears the index. A failed build preserves the prior index and its catalog-saving
+eligibility; `latest_attempt_coverage` retains the attempted directory selection
+for error diagnostics. Builds do not append: pass the complete intended
+selection when rebuilding a registry. This replaces the previous undocumented
+merge behavior, which could retain stale entries or discard incomplete-coverage
+provenance.
+
 Fresh pairwise scans check the comparison budget after the first validated
 embedding batch (or first full-body vector), before requesting the remaining
 embeddings or saving a catalog. Python index-only builds remain available for
@@ -281,6 +303,39 @@ selected-entry budget.
 For a saved catalog query, `--max-entries` does not reduce the catalog's existing
 5,000-entry capacity. Its comparison work is `catalog entries * dimensions`,
 bounded by `--max-scalar-comparisons`.
+
+### Reproduce scale and limit measurements
+
+The repository includes `scripts/benchmark_tier2_scale.py` as a separate CLI,
+so scale runs do not add runtime to the unit suite:
+
+```bash title="Synthetic limit matrix (no provider requests)"
+uv run python scripts/benchmark_tier2_scale.py --output /tmp/tier2-scale.json
+```
+
+The default matrix covers 1,024, 2,500 and 5,000 selected manifests, flat and
+nested layouts, one supporting file per skill, clean and malformed collections,
+and description and full-body modes. It measures extraction, index building,
+all-pairs scans, catalog save/load, saved candidate queries when a catalog fits,
+and fresh-scan comparison preflight. JSON records stage wall time and peak
+Python allocations, coverage, vector dimensions, scalar work, index bytes,
+budget overrides, and synthetic embedding calls/input bytes. Provider tokens are
+unmeasured (`null`); the client makes zero provider requests. Full-body synthetic
+vectors do not simulate provider token chunking or HTTP request latency.
+
+These are synthetic limit measurements, **not production throughput or embedding
+quality claims**. Memory tracing adds runtime overhead and excludes native
+allocations. At 2,048 dimensions, even 1,024 entries exceed the default all-pairs
+work budget; 5,000 need 25,594,880,000 scalar operations. A catalog can also exceed
+the independent 32 MiB serialized-file ceiling. The benchmark records these
+rejections instead of raising limits silently; saved candidate queries run only
+when serialization succeeds. Use a measured real provider/catalog workload to
+establish an operational envelope for your model and machine.
+
+```bash title="Small smoke run; then explicitly allow a measured workload"
+uv run python scripts/benchmark_tier2_scale.py --sizes 8 --dimensions 64 --output /tmp/tier2-smoke.json
+uv run python scripts/benchmark_tier2_scale.py --sizes 1024 --layouts flat --modes description --malformed-counts 0 --max-scalar-comparisons 1072693248 --output /tmp/tier2-1024.json
+```
 
 ## Use a local catalog
 

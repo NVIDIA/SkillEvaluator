@@ -101,8 +101,10 @@ from skillevaluator.reporting.tier3_scope import completed_agent_result, validat
 from skillevaluator.reporting.trial_charts import steps_by_case_chart
 from skillevaluator.skillspector_provenance import skillspector_provenance_records
 from skillevaluator.source_identity import recorded_evaluated_source
+from skillevaluator.tier3.baseline_store import baseline_description
 from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
 from skillevaluator.tier3.evidence_volume import format_evidence_volume
+from skillevaluator.tier3.version_comparison import version_comparison_lines
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
@@ -1242,6 +1244,13 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
     ]
     for key in ("conclusions", "recommendations", "suggestions_v2"):
         payload[key] = _sanitize_tier3_insight_items(payload.get(key))
+    payload["next_steps"] = [
+        {
+            key: str(step.get(key) or "")
+            for key in ("kind", "target", "problem", "evidence", "action", "check", "strength")
+        }
+        for step in _dict_list(payload.get("next_steps"))
+    ]
     payload["dataset"] = [_sanitize_tier3_dataset_case(item) for item in _dict_list(payload.get("dataset"))]
     payload["case_diagnostics"] = _sanitize_tier3_case_diagnostics(payload.get("case_diagnostics"))
     payload["trials"] = [_sanitize_tier3_trial(item) for item in _dict_list(payload.get("trials"))]
@@ -1279,6 +1288,11 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
                 maximum=1.0,
             )
     payload["runtime_seconds"] = _finite_number(payload.get("runtime_seconds"), minimum=0.0) or 0.0
+    baseline = payload.get("baseline")
+    if isinstance(baseline, dict) and baseline:
+        payload["baseline_description"] = baseline_description(baseline)
+    if comparison := payload.get("prior_version_comparison"):
+        payload["prior_version_lines"] = version_comparison_lines(comparison)
     payload["summary"]["runtime_seconds"] = (
         _finite_number(payload["summary"].get("runtime_seconds"), minimum=0.0) or 0.0
     )

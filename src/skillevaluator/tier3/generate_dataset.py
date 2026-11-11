@@ -384,9 +384,7 @@ def _outcome_behaviors(
     request = f"the request ({outcome})" if outcome else "the request"
     outcome_behaviors = [f"The agent produced concrete results for {request}, not only a plan"]
     authored_behaviors = list(hint_behaviors)
-    behaviors = (
-        authored_behaviors + outcome_behaviors if authored_first else outcome_behaviors + authored_behaviors
-    )
+    behaviors = authored_behaviors + outcome_behaviors if authored_first else outcome_behaviors + authored_behaviors
     return [*behaviors, _FINAL_RESPONSE_BEHAVIOR, SECURITY_BEHAVIOR]
 
 

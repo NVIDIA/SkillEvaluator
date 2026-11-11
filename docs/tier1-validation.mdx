@@ -24,7 +24,7 @@ path shows help; expert subcommands remain available below.
 
 ## Tier 1 in automatic CI
 
-The [all-tier CI setup](cli-onboarding.mdx#opt-in-to-three-tier-ci) keeps Tier 1
+The [all-tier CI setup](/skills/skillevaluator/advanced-ci) keeps Tier 1
 as a required gate. GitHub calls the hardened legacy scanner workflow at the
 same evaluator commit; GitLab runs the same digest-pinned scanner image.
 Static CI checks receive no model key. Tier 2 and Tier 3 execute independently
@@ -472,6 +472,18 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     ```
   </Accordion>
 </AccordionGroup>
+
+## Author attribution and contact emails
+
+Keep the required `metadata.author: Name <email>` attribution in `SKILL.md`.
+The PII check accepts that recognized author line. The same address in another
+field, body text, or a reference document is a separate occurrence and can still
+fail the check.
+
+Use a name, team handle, or contact-directory link for additional contact
+information. If a real address must remain, record a reviewed, time-limited
+[PII waiver](#pii-waivers) for that occurrence. An organization-owned email
+domain does not automatically exempt every address in the repository.
 
 ## PII waivers
 

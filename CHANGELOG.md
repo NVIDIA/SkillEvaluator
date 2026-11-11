@@ -296,12 +296,9 @@ All notable changes to SkillEvaluator are documented in this file.
   prompt points at the skill's files or an expected output or assertion grades
   skill use, including runs of the skill's own scripts. The warning fails
   `--strict` and the strict dataset check that all-tier CI runs before its
-  advisory Tier 3 step; it never blocks a local run or autopilot. The bundled
-  agent skill's own dataset no longer asserts that the agent read its
-  `SKILL.md`, and the public starter dataset no longer asserts that the agent
-  read text-analyzer's `SKILL.md` and ran its script. On newly generated
-  datasets, baseline scores rise and lift falls; existing datasets are not
-  rewritten.
+  advisory Tier 3 step; it never blocks a local run or autopilot. On newly
+  generated datasets, baseline scores rise and lift falls; existing datasets
+  are not rewritten.
 
 ### Documentation
 

@@ -272,12 +272,27 @@ def test_render_with_saved_feedback_skips_the_judge(tmp_path: Path, llm_calls: l
     assert engine_result["tier3_feedback"] == SAVED_FEEDBACK
 
 
-@pytest.mark.parametrize("feedback", [SAVED_FEEDBACK, LEGACY_FEEDBACK], ids=["with_verdict", "before_verdict"])
+@pytest.mark.parametrize(
+    ("feedback", "fixes"),
+    [
+        pytest.param(SAVED_FEEDBACK, SAVED_FIXES, id="with_verdict"),
+        pytest.param(LEGACY_FEEDBACK, SAVED_FIXES, id="before_verdict"),
+        pytest.param(SAVED_FEEDBACK, None, id="with_verdict_no_fixes_saved"),
+        pytest.param(LEGACY_FEEDBACK, None, id="before_verdict_no_fixes_saved"),
+    ],
+)
 def test_saved_feedback_keeps_what_the_case_pass_adds(
-    tmp_path: Path, llm_calls: list[str], monkeypatch: pytest.MonkeyPatch, feedback: dict[str, Any]
+    tmp_path: Path,
+    llm_calls: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    feedback: dict[str, Any],
+    fixes: list[dict[str, Any]] | None,
 ) -> None:
     """Report content the case-findings pass computes but the run does not save survives a rebuild."""
-    skill, results_root, run = _completed_run(tmp_path, tier3_feedback=feedback)
+    skill, results_root, run = _completed_run(tmp_path, fixes=fixes, tier3_feedback=feedback)
+    result = json.loads((run / "result.json").read_text(encoding="utf-8"))
+    # What the payload build computes, before the case pass writes any rule-based fixes.
+    built_steps = next_steps(result, run_dir=run, fixes=fixes)
     passes: list[dict[str, Any]] = []
     payloads: list[dict[str, Any]] = []
     apply_case_findings = tier3_report._apply_case_findings
@@ -300,14 +315,22 @@ def test_saved_feedback_keeps_what_the_case_pass_adds(
     assert llm_calls == []
     assert len(passes) == 1
     assert passes[0]["use_llm"] is False
-    assert passes[0]["fixes"] == SAVED_FIXES
+    assert passes[0]["fixes"] == fixes
     [payload] = payloads
-    # The run-level next steps are computed by the case pass and not saved, so the rebuild adds them.
-    result = json.loads((run / "result.json").read_text(encoding="utf-8"))
-    expected_steps = next_steps(result, run_dir=run, fixes=SAVED_FIXES)
+    # main computes the run-level next steps both when it builds the payload and in the case pass,
+    # and saves neither copy, so the rebuild must keep them.
+    case_fixes = json.loads((run / "what_to_fix.json").read_text(encoding="utf-8"))
+    assert (case_fixes == SAVED_FIXES) is (fixes is not None)
+    expected_steps = next_steps(result, run_dir=run, fixes=case_fixes)
     assert expected_steps
     assert payload["next_steps"] == expected_steps
-    assert 'id="tier3-run-next-steps"' in report.read_text(encoding="utf-8")
+    # Without saved fixes the two copies differ: the case pass sees the rule-based fixes it writes
+    # (here a fix for the baseline that passes every case, which drops the "more cases" step).
+    assert (expected_steps == built_steps) is (fixes is not None)
+    html = report.read_text(encoding="utf-8")
+    assert 'id="tier3-run-next-steps"' in html
+    for step in built_steps:
+        assert (step["problem"] in html) is (step in expected_steps)
     if feedback is SAVED_FEEDBACK:
         for field in ("conclusions", "recommendations", "suggestions", "suggestions_v2"):
             assert payload[field] == SAVED_FEEDBACK[field]

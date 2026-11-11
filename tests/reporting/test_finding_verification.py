@@ -258,9 +258,10 @@ def test_cli_verification_is_visible_with_or_without_color(monkeypatch: pytest.M
     else:
         monkeypatch.setenv("NO_COLOR", "1")
         monkeypatch.delenv("FORCE_COLOR", raising=False)
+    hostile_sgr = "\x1b[38;2;1;2;3m"
     reasoning = (
         '<script>alert("review")</script> [link=https://example.test]text[/link] '
-        "\x1b[2J\x1b]8;;https://example.test\x07click\x1b]8;;\x07"
+        f"{hostile_sgr}\x1b[2J\x1b]8;;https://example.test\x07click\x1b]8;;\x07"
     )
     result = _result(
         _finding(metadata={"llm_verdict": "false_positive", "llm_confidence": "medium", "llm_reasoning": reasoning})
@@ -268,11 +269,14 @@ def test_cli_verification_is_visible_with_or_without_color(monkeypatch: pytest.M
 
     output, visible = _render("cli", result)
 
+    # Check unmodified output: normalizing SGR would otherwise hide a leaked input style.
+    assert hostile_sgr not in output
     assert ("\x1b[" in output) is force_color
     assert "False positive (medium confidence)" in visible
     assert "only high-confidence false positives are downgraded to INFO" in visible
     assert '<script>alert("review")</script>' in visible
     assert "[link=https://example.test]text[/link]" in visible
+    assert "[38;2;1;2;3m" in visible
     assert "\x1b[2J" not in output
     assert "\x1b]8;" not in output
     assert not passes_required_gate(result)

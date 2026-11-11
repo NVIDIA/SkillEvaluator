@@ -400,6 +400,7 @@ def test_case_findings_after_the_budget_never_cost_a_payload_with_token_usage_it
     plain, plain_html = render("without-token-usage.html")
 
     assert len(payload["recommendations"]) == 3
+    assert payload["next_steps"]
     assert agent_eval_report_serialization_issue(payload) is None
     assert payload["report_truncation"]["omitted"] == {"token_usage_case_rows": 12}
     assert payload["token_usage"]["case_rows_omitted"] == 12
@@ -410,19 +411,29 @@ def test_case_findings_after_the_budget_never_cost_a_payload_with_token_usage_it
     assert "Incomplete" not in _verdict(html)
 
 
+@pytest.mark.parametrize("run_next_steps", [False, True])
 def test_validate_applicability_keys_never_cost_a_payload_with_token_usage_its_report_limits(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, run_next_steps: bool
 ) -> None:
     skill = REPO_ROOT / "tests" / "fixtures" / "skills" / "simple"
     run = _cases_run(tmp_path, agents=2, cases=6)
+    if run_next_steps:
+        # The run's result.json makes the loader add next steps after the payload is built.
+        (run / "result.json").write_text(json.dumps(_failed_case_findings("agent-1", 3)), encoding="utf-8")
     full = agent_eval_result_from_directory(skill, run, use_llm_judge=False)
     assert full is not None
-    # Token usage fits with one value to spare; validate's three applicability keys do not.
-    monkeypatch.setattr(reporting_base, "AGENT_EVAL_REPORT_MAX_NODES", _nodes(full.metadata["agent_eval"]) + 1)
+    limit = _nodes(full.metadata["agent_eval"]) + 1
+    if run_next_steps:
+        assert full.metadata["agent_eval"]["next_steps"]
+        # Token usage fits when the payload is built; the next steps added after the build do not.
+        limit -= _nodes(full.metadata["agent_eval"]["next_steps"])
+    # Otherwise token usage fits with one value to spare; validate's three applicability keys do not.
+    monkeypatch.setattr(reporting_base, "AGENT_EVAL_REPORT_MAX_NODES", limit)
     result = agent_eval_result_from_directory(skill, run, use_llm_judge=False)
     assert result is not None
     payload = result.metadata["agent_eval"]
     assert "applicability" not in payload and "report_truncation" not in payload
+    assert (agent_eval_report_serialization_issue(payload) is not None) is run_next_steps
     monkeypatch.setattr(cli_module, "_run_agent_eval_or_skip", lambda *_args, **_kwargs: result)
 
     outcome = CliRunner().invoke(

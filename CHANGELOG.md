@@ -190,8 +190,9 @@ All notable changes to SkillEvaluator are documented in this file.
   arms, and both arms must have succeeded. Token usage never displaces score
   evidence: it joins the report payload last, and its case rows, then its sums,
   are left out, with a note, when the payload would pass its size or node
-  limits, also after `tier3 evaluate` adds its case findings and `validate` its
-  applicability fields. A baseline that did not run is shown as not run.
+  limits, also after the run's next steps, `tier3 evaluate`'s case findings and
+  `validate`'s applicability fields join it. A baseline that did not run is
+  shown as not run.
 
 ### Changed
 

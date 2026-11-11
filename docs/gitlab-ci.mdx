@@ -104,6 +104,19 @@ Skill result: "skills/glossary-builder" — FAILED
 </Tabs>
 
 <AccordionGroup>
+  <Accordion title="Author emails and reviewed security exceptions">
+    Keep the required `metadata.author` attribution. Extra email copies in
+    contact fields or documents are checked separately; use a handle or a
+    contact-directory link instead. See [author attribution](/skills/skillevaluator/tier1-validation#author-attribution-and-contact-emails).
+
+    For reviewed SkillSpector exceptions, set
+    `SKILL_EVAL_SECURITY_BASELINES: "true"` and add
+    `.skillevaluator/skillspector-baselines.yaml` using a template and image
+    version that include baseline support. CI reads the approved mapping
+    and baseline files from the merge request's target revision. Regenerate and
+    review fingerprint exceptions when the scanner version changes. Baselines
+    do not waive PII or incomplete analysis. Follow the [baseline setup guide](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/README.md#reviewed-security-baselines).
+  </Accordion>
   <Accordion title="When does it run?">
     `SKILL_EVAL_SCAN_MODE: auto` evaluates changed skills in detached
     merge-request pipelines and all configured skills on the default branch or

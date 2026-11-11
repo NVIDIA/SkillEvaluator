@@ -469,6 +469,18 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
   </Accordion>
 </AccordionGroup>
 
+## Author attribution and contact emails
+
+Keep the required `metadata.author: Name <email>` attribution in `SKILL.md`.
+The PII check accepts that recognized author line. The same address in another
+field, body text, or a reference document is a separate occurrence and can still
+fail the check.
+
+Use a name, team handle, or contact-directory link for additional contact
+information. If a real address must remain, record a reviewed, time-limited
+[PII waiver](#pii-waivers) for that occurrence. An organization-owned email
+domain does not automatically exempt every address in the repository.
+
 ## PII waivers
 
 A PII waiver accepts one reviewed value at one place, for example a public support address that a skill must document. Pass the waiver file with `--pii-waivers PATH` on `validate`, `tier1`, or `pii-scan`. Waivers are never discovered automatically inside the scanned skill, so a skill cannot waive its own findings. Keep it outside the skill: a waiver file inside the scanned tree ships with the skill and is PII-scanned like any other file, owners and reasons included.

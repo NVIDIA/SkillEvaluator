@@ -2012,7 +2012,7 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
                 "id": "G1",
                 "severity": "LOW",
                 "finding": "generated evaluation output",
-                "location": {"file": "evals/run-1/output.md", "start_line": 1},
+                "location": {"file": "evals/results/run-1/output.md", "start_line": 1},
             }
         )
         payload = _skillspector_json_report(issues)

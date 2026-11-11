@@ -9,6 +9,7 @@ import asyncio
 import json
 import re
 import shutil
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -341,8 +342,11 @@ def test_fairness_warnings_do_not_block_the_tier3_source_check(tmp_path: Path):
     assert not [check for check in checks if check.status in {"error", "missing"}]
 
 
-def test_all_tier_ci_tier3_dataset_check_is_strict_about_fairness_warnings(tmp_path: Path):
+def test_all_tier_ci_tier3_dataset_check_is_strict_about_fairness_warnings(tmp_path: Path, monkeypatch):
     # All-tier CI runs its advisory Tier 3 step only on a dataset that passes strict validation.
+    # A staged verifier bundle in another test can leave its own secret_redaction module behind;
+    # without it, the CI scripts import ci.secret_redaction.
+    monkeypatch.delitem(sys.modules, "secret_redaction", raising=False)
     from ci.run_tiers import ConfigurationError, dataset_preflight
 
     unfair = _write_release_review_skill(tmp_path / "unfair", ["The agent used the release-review skill"])

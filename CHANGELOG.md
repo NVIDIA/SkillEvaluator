@@ -438,16 +438,17 @@ All notable changes to SkillEvaluator are documented in this file.
   `complete_with_caveats` instead of `partial`. SkillEvaluator now accepts the
   caveats under the same conditions as the missing references above and shows
   the same missing-reference warning, and checks the report's findings as in
-  any other complete scan. A caveat that fails one of those conditions, such as a line that names
-  a file left out of the scanned copy, leaves the scan `INCOMPLETE` and, as
-  for a `partial` report, still reports the findings. Unlike the v2.13.3
-  missing-path reference caveat, these caveats are never accepted from the
-  report alone, so they leave a scan without a known target `INCOMPLETE`, and
-  an accepted report carries no `skillspector_reference_caveats` entry. A
-  report with that status and no caveat, or with a caveat that is not a
-  nonfatal `reference_missing` row in phase `reference_resolution`, is not
-  trusted: the scan is `INCOMPLETE` without its findings, as with
-  `complete_with_caveats` from an earlier release.
+  any other complete scan. A caveat that fails one of those conditions, such
+  as a line that names a file left out of the scanned copy, leaves the scan
+  `INCOMPLETE` and, as for a `partial` report, still reports the findings.
+  Unlike the v2.13.3 missing-path reference caveat, these caveats are never
+  accepted from the report alone, so they leave a scan without a known target
+  `INCOMPLETE`, and an accepted report carries no
+  `skillspector_reference_caveats` entry. A report with that status and no
+  caveat, or with a caveat that is not a nonfatal `reference_missing` row in
+  phase `reference_resolution`, is not trusted: the scan is `INCOMPLETE`
+  without its findings, as with `complete_with_caveats` from an earlier
+  release.
 
 - Tier 3 **Measured Agent Resources** no longer count idle or user time as LLM
   seconds when timing is inferred from step timestamps and an agent step with

@@ -10643,6 +10643,40 @@ class TestSkillspectorCompleteWithCaveats:
         assert result.errors == [_caveat_error("SKILL.md:10 [reference_resolution; reference_missing]")]
         assert not result.warnings
 
+    @patch("skillevaluator.validators.security.Tools")
+    def test_caveats_are_not_a_2_13_3_reference_caveat(self, mock_tools, tmp_path: Path) -> None:
+        """The 2.13.3 reference-caveat rule reads only ``partial`` reports, so caveats always need a known target.
+
+        In a direct scan without a reference root, the 2.13.3 report of the
+        notes writer passes as that rule's caveat, and the 2.13.4 report of the
+        same skill stays INCOMPLETE. Through validate, the 2.13.4 report carries
+        the missing-reference warning, not that rule's finding or metadata.
+        """
+        skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
+        mock_tools.skillspector.is_available = True
+        validator = SecurityValidator(use_llm=False)
+
+        def scan(version: str) -> ValidationResult:
+            mock_tools.skillspector.run.return_value = ToolResult(
+                success=True, stdout=json.dumps(_reference_report(version)), stderr="", exit_code=0
+            )
+            return validator._run_skillspector(skill)
+
+        older, caveats = scan("2.13.3"), scan("2.13.4")
+        validated = validator.validate_security_only(skill)
+
+        assert older.incomplete_scans == []
+        assert older.warnings == [_reference_caveat_warning("SKILL.md:10", files=2)]
+        assert caveats.incomplete_scans == ["skillspector"]
+        assert caveats.errors == [_caveat_error("SKILL.md:10 [reference_resolution; reference_missing]")]
+        assert not caveats.warnings
+        assert validated.incomplete_scans == []
+        assert validated.warnings == [
+            _missing_reference_warning("SKILL.md:10 [reference_resolution; reference_missing]")
+        ]
+        assert "skillspector_reference_caveats" not in validated.metadata
+        assert all(finding.check_name != "skillspector_reference_caveats" for finding in validated.findings)
+
     def test_caveats_must_all_be_missing_references(self, tmp_path: Path) -> None:
         skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
         payload = _reference_report("2.13.4")

@@ -2986,7 +2986,10 @@ class SecurityValidator(ValidatorBase):
         ``skillspector_reference_root``, or else its ``target_root`` or the
         target of the scan in progress. Missing references are accepted by
         :func:`_skillspector_missing_reference_notes` only when it is
-        *scanned_root*.
+        *scanned_root*. When *reference_root* is given, a caveat that
+        :func:`reference_caveat_metadata` accepts must also pass
+        :func:`_skillspector_missing_reference_notes`; without it, that rule
+        alone decides.
         """
         partial_reported = False
         accepted_reference_caveats = None
@@ -3533,6 +3536,14 @@ class SecurityValidator(ValidatorBase):
                         skillspector_version=skillspector_version,
                         reference_root=reference_root,
                     )
+                    if accepted_reference_caveats is not None and reference_root is not None and gap_notes is None:
+                        # reference_caveat_metadata reads only the report. When
+                        # the scan's reference root is known, its missing
+                        # references must also meet the conditions above, so a
+                        # line that names a file left out of the scan, or a
+                        # skill scanned inside a larger artifact, stays
+                        # incomplete.
+                        accepted_reference_caveats = None
                     if gap_notes is None:
                         raster_note = _skillspector_passive_raster_note(
                             ledger_exceptions,

@@ -449,6 +449,7 @@ def test_never_activated_agent_stays_inconclusive_beside_a_failing_dimension() -
 
 
 def test_no_ground_truth_payload_fails_when_security_is_below_neutral() -> None:
+    """The agent has no pass@k required-check counts, so only the dimension gate can fail it."""
     agents = _agents()
     for arm in ("with_skill", "without_skill"):
         agents["codex"][arm]["accuracy"] = None

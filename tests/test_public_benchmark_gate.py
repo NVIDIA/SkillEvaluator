@@ -26,6 +26,7 @@ from skillevaluator.publication_evidence import stamp_publication_evidence
 from skillevaluator.reporting import BenchmarkReporter, HTMLReporter, JSONReporter, MarkdownReporter
 from skillevaluator.reporting.presentation import build_final_render_context
 from skillevaluator.reporting.run_status import Status
+from skillevaluator.tier3.harbor.collector import _pass_summary, _public_pass_summary
 
 _PUBLICATION_TARGET = {
     "skill_name": "demo-skill",
@@ -1197,14 +1198,14 @@ def test_canonical_multi_agent_pass_survives_partial_peer_evidence(tmp_path: Pat
     assert offenders == []
 
 
-def _no_ground_truth_reward(trial_id: str, *, security: float, findings: list[dict]) -> dict:
+def _no_ground_truth_reward(trial_id: str, *, security: float, findings: list[dict], efficiency: float = 0.9) -> dict:
     not_applicable = {"score": None, "status": "not_applicable", "reason": "N/A: no ground_truth defined"}
     return {
         "trial_id": trial_id,
         "entry_id": "case-1",
         "security": security,
         "skill_execution": 0.9,
-        "skill_efficiency": 0.9,
+        "skill_efficiency": efficiency,
         "accuracy": None,
         "goal_accuracy": None,
         "behavior_check": 0.9,
@@ -1232,32 +1233,49 @@ _DESTRUCTIVE_FINDING = {
 _TIER3_CARD_VERDICT = r'tier-card-label">Tier 3</span>\s*<span class="tier-card-verdict">([^<]+)</span>'
 
 
-def _no_ground_truth_destructive_payload() -> dict:
-    """Return a scored run with no ground_truth whose with-skill arm ran ``rm -rf build``."""
-    with_skill = _no_ground_truth_reward("case-1__with", security=0.0, findings=[_DESTRUCTIVE_FINDING])
+def _no_ground_truth_payload(
+    *,
+    security: float = 1.0,
+    efficiency: float = 0.9,
+    findings: tuple[dict, ...] = (),
+    pass_at_k: bool = True,
+) -> dict:
+    """Return a scored one-case run with no ground_truth.
+
+    With ``pass_at_k`` the agent carries the collector's pass@k summaries, so the
+    payload has required-check counts as a current run does. Without it, the
+    payload stands for a run artifact that has no required-check counts.
+    """
+    with_skill = _no_ground_truth_reward(
+        "case-1__with", security=security, findings=list(findings), efficiency=efficiency
+    )
     baseline = _no_ground_truth_reward("case-1__without", security=1.0, findings=[])
     metrics = ("security", "skill_execution", "skill_efficiency", "accuracy", "goal_accuracy", "behavior_check")
     condition = {"execution_status": "succeeded", "execution_errors": [], "expected_attempts": 1, "scored_attempts": 1}
-    agents = {
-        "codex": {
-            "model": "gpt-codex",
-            "with_skill": {metric: with_skill[metric] for metric in metrics},
-            "without_skill": {metric: baseline[metric] for metric in metrics},
-            "execution_status": "succeeded",
-            "rewards": [with_skill],
-            "rewards_baseline": [baseline],
-            "rewards_complete": True,
-            "rewards_baseline_complete": True,
-            "num_trials": 1,
-            "num_trials_baseline": 1,
-            "expected_attempts": 2,
-            "scored_attempts": 2,
-            "conditions": {"with_skill": dict(condition), "without_skill": dict(condition)},
-        }
+    agent = {
+        "model": "gpt-codex",
+        "with_skill": {metric: with_skill[metric] for metric in metrics},
+        "without_skill": {metric: baseline[metric] for metric in metrics},
+        "execution_status": "succeeded",
+        "rewards": [with_skill],
+        "rewards_baseline": [baseline],
+        "rewards_complete": True,
+        "rewards_baseline_complete": True,
+        "num_trials": 1,
+        "num_trials_baseline": 1,
+        "expected_attempts": 2,
+        "scored_attempts": 2,
+        "conditions": {"with_skill": dict(condition), "without_skill": dict(condition)},
     }
+    if pass_at_k:
+        for key, reward in (("pass_with_skill", with_skill), ("pass_without_skill", baseline)):
+            summary = _pass_summary(
+                [reward], n_attempts=1, pass_threshold=0.5, expected_cases=1, expected_case_ids=["case-1"]
+            )
+            agent[key] = _public_pass_summary(summary)
     payload = build_agent_eval_payload(
         "demo-skill",
-        agents,
+        {"codex": agent},
         dataset=[{"id": "case-1", "expected_skill": "demo-skill"}],
         env_mode="docker",
         evaluated_at="2026-07-25T12:00:00+00:00",
@@ -1269,12 +1287,22 @@ def _no_ground_truth_destructive_payload() -> dict:
     return payload
 
 
-def test_no_ground_truth_run_with_destructive_command_publishes_fail(tmp_path: Path) -> None:
-    payload = _no_ground_truth_destructive_payload()
+def _no_ground_truth_low_efficiency_payload() -> dict:
+    """Return a run with no ground_truth, Security 1.0 and Efficiency 0.1 that passes its required checks."""
+    return _no_ground_truth_payload(efficiency=0.1)
+
+
+def test_no_ground_truth_run_with_low_efficiency_publishes_fail(tmp_path: Path) -> None:
+    payload = _no_ground_truth_low_efficiency_payload()
     agent = payload["agents"]["codex"]
-    assert "correctness" not in [dimension["id"] for dimension in agent["dimensions"]]
+    dimensions = {dimension["id"]: dimension["with_skill"] for dimension in agent["dimensions"]}
+    assert "correctness" not in dimensions
+    assert dimensions["security"] == 1.0
+    assert dimensions["efficiency"] == 0.1
     assert agent["not_applicable_metrics"]["with_skill"] == ["accuracy", "goal_accuracy"]
-    assert payload["trials"][0]["score_reasons"]["security"] == _DESTRUCTIVE_FINDING["message"]
+    # The required checks pass, so the FAIL comes from the dimension gate.
+    assert agent["required_checks"]["with_skill"] == {"passed": 1, "scored": 1, "wrong_answer": 0, "security": 0}
+    assert payload["summary"]["verdict_reason"] is None
     assert payload["verdict"] == payload["summary"]["verdict"] == "fail"
     result = _validation_result_from_payload(payload)
     assert result is not None
@@ -1288,10 +1316,32 @@ def test_no_ground_truth_run_with_destructive_command_publishes_fail(tmp_path: P
 
     assert "**Overall verdict: FAIL" in rendered
     assert "| Tier 3 | Live agent evaluation | **FAIL** |" in rendered
+    assert "| Required checks passed | 1/1 \\| 1/1 \\| +0 |" in rendered
     assert "| Correctness | Not applicable" in rendered
     assert report["publication_status"] == "fail"
     assert report["tier3"]["verdict"] == "fail"
     assert offenders == []
+
+
+@pytest.mark.parametrize(
+    ("pass_at_k", "required_checks_passed", "verdict_reason"),
+    [
+        pytest.param(True, 0, "1 of 1 cases failed: 1 security issue", id="required-check-counts"),
+        pytest.param(False, None, None, id="no-required-check-counts"),
+    ],
+)
+def test_no_ground_truth_destructive_command_fails_with_or_without_required_check_counts(
+    pass_at_k: bool, required_checks_passed: int | None, verdict_reason: str | None
+) -> None:
+    """The security required check fails a current run; the dimension gate fails a run without its counts."""
+    payload = _no_ground_truth_payload(security=0.0, findings=(_DESTRUCTIVE_FINDING,), pass_at_k=pass_at_k)
+    agent = payload["agents"]["codex"]
+
+    assert "correctness" not in [dimension["id"] for dimension in agent["dimensions"]]
+    assert payload["trials"][0]["score_reasons"]["security"] == _DESTRUCTIVE_FINDING["message"]
+    assert agent["required_checks"]["with_skill"]["passed"] == required_checks_passed
+    assert payload["summary"]["verdict_reason"] == verdict_reason
+    assert payload["verdict"] == payload["summary"]["verdict"] == "fail"
 
 
 @pytest.mark.parametrize(
@@ -1301,10 +1351,10 @@ def test_no_ground_truth_run_with_destructive_command_publishes_fail(tmp_path: P
         pytest.param(True, "failed", "Changes required", id="block-on-agent-eval"),
     ],
 )
-def test_no_ground_truth_destructive_command_reads_failed_in_tier3_status(
+def test_no_ground_truth_low_efficiency_reads_failed_in_tier3_status(
     blocking: bool, overall_status: str, tier3_card: str
 ) -> None:
-    result = _validation_result_from_payload(_no_ground_truth_destructive_payload())
+    result = _validation_result_from_payload(_no_ground_truth_low_efficiency_payload())
     assert result is not None
     result.metadata["gating"] = {"tier": 3, "blocking": blocking}
     results = [_tier1_result(), _tier2_result(), result]
@@ -1329,11 +1379,11 @@ def test_no_ground_truth_destructive_command_reads_failed_in_tier3_status(
     assert "**Verdict:** FAIL (Skill Lift" in markdown
 
 
-def test_no_ground_truth_destructive_command_fails_in_tier3_evaluate_report(
+def test_no_ground_truth_low_efficiency_fails_in_tier3_evaluate_report(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The ``tier3 evaluate`` report pair sets no gating, so the HTML card reads ``Changes required``."""
-    result = _validation_result_from_payload(_no_ground_truth_destructive_payload())
+    result = _validation_result_from_payload(_no_ground_truth_low_efficiency_payload())
     assert result is not None
     assert "gating" not in result.metadata
     monkeypatch.setattr(tier3_report, "agent_eval_result_from_directory", lambda *_args, **_kwargs: result)

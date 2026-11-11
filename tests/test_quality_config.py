@@ -8,7 +8,7 @@ import pytest
 from skillevaluator.quality_config import (
     QualityConfigError,
     load_quality_config,
-    load_quality_config_with_provenance,
+    load_quality_config_and_overlay_defaults,
     quality_config_digest,
 )
 
@@ -239,12 +239,12 @@ def test_quality_config_provenance_names_custom_file_without_its_directory(tmp_p
     config_path = tmp_path / "team-quality.yaml"
     config_path.write_text("expected_headers: []\n", encoding="utf-8")
 
-    assert load_quality_config_with_provenance(config_path)[1] == {
+    assert load_quality_config_and_overlay_defaults(config_path)[1] == {
         "source": "custom",
         "file": "team-quality.yaml",
         "digest": quality_config_digest({"expected_headers": []}),
     }
-    assert load_quality_config_with_provenance(None)[1]["file"] is None
+    assert load_quality_config_and_overlay_defaults(None)[1]["file"] is None
 
 
 PACKAGED_ERROR_HANDLING = {
@@ -370,7 +370,7 @@ def test_quality_config_digest_covers_error_handling(tmp_path: Path) -> None:
 
 
 def _digest(path: Path | None) -> str:
-    return load_quality_config_with_provenance(path)[1]["digest"]
+    return load_quality_config_and_overlay_defaults(path)[1]["digest"]
 
 
 def test_packaged_digest_covers_the_whole_packaged_config() -> None:
@@ -398,7 +398,7 @@ def test_custom_digest_ignores_packaged_defaults_the_file_omits(tmp_path: Path, 
     from skillevaluator import quality_config
 
     custom = _write_config(tmp_path, "error_handling: {scripts: {points: 2}}\n")
-    before_config, before = load_quality_config_with_provenance(custom)
+    before_config, before = load_quality_config_and_overlay_defaults(custom)
     changed_default = tmp_path / "changed-default.yaml"
     changed_default.write_text(
         quality_config.DEFAULT_QUALITY_CONFIG.read_text(encoding="utf-8").replace("points: 10", "points: 11"),
@@ -406,7 +406,7 @@ def test_custom_digest_ignores_packaged_defaults_the_file_omits(tmp_path: Path, 
     )
     monkeypatch.setattr(quality_config, "DEFAULT_QUALITY_CONFIG", changed_default)
 
-    after_config, after = load_quality_config_with_provenance(custom)
+    after_config, after = load_quality_config_and_overlay_defaults(custom)
 
     assert after_config["error_handling"]["mentioned"]["points"] == 11  # the new default still applies
     assert before_config["error_handling"]["mentioned"]["points"] == 10

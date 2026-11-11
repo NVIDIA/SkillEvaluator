@@ -186,7 +186,7 @@ def load_quality_config(path: Path | None = None) -> QualityConfig:
     return _load(path)[0]
 
 
-def load_quality_config_with_provenance(path: Path | None = None) -> tuple[QualityConfig, QualityConfigProvenance]:
+def load_quality_config_and_overlay_defaults(path: Path | None = None) -> tuple[QualityConfig, QualityConfigProvenance]:
     """Load the config and describe it. Only the file name is kept, so reports do not leak local paths.
 
     The digest covers the rules the file itself defines. For a custom file, packaged values it

@@ -762,8 +762,18 @@ def _without_skill_use(case: dict[str, Any], skill: dict[str, Any], skill_script
 
 
 def _print_baseline_fairness_warnings(dataset: dict[str, Any], skill_scripts: Sequence[str]) -> None:
-    """Name generated cases that still grade skill use; `tier3 validate` reports the same warnings."""
-    for entry in normalize_dataset_entries(dataset):
+    """Name generated cases that still grade skill use; `tier3 validate` reports the same warnings.
+
+    The check does not read expected_script, and normalizing an invalid one (an
+    LLM can return a list) raises, so it is left out here; `tier3 validate`
+    reports it as an error.
+    """
+    cases = [
+        {key: value for key, value in case.items() if key != "expected_script"}
+        for case in dataset.get("evals", [])
+        if isinstance(case, dict)
+    ]
+    for entry in normalize_dataset_entries({**dataset, "evals": cases}):
         for warning in evals_spec._baseline_fairness_warnings(entry, skill_scripts=skill_scripts):
             print(f"Warning: case {entry.get('id')}: {warning}")
 

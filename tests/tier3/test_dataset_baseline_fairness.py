@@ -924,6 +924,33 @@ def test_create_eval_dataset_prints_no_warning_for_outcome_cases(tmp_path: Path,
     assert "Warning:" not in capsys.readouterr().out
 
 
+def test_create_eval_dataset_warns_when_a_refined_case_has_an_invalid_expected_script(
+    tmp_path: Path, capsys, monkeypatch
+):
+    # The LLM rewrite can return a list expected_script. tier3 validate reports that as an error;
+    # the fairness warnings do not read it, so they still print and the dataset is still written.
+    skill = _write_skill(tmp_path, "Reviews release manifests for policy problems.")
+
+    async def generate(parsed, **_kwargs):
+        return generate_dataset._generate_simple(parsed)
+
+    async def refine(_skill, cases, _trajectories, **_kwargs):
+        return [{**cases[0], "expected_script": ["review.py"], "expected_behavior": ["The agent read SKILL.md"]}]
+
+    monkeypatch.setattr(generate_dataset, "_generate_with_llm", generate)
+    monkeypatch.setattr(generate_dataset, "_refine_with_llm", refine)
+    monkeypatch.setattr(
+        generate_dataset,
+        "_discover_trajectories",
+        lambda *_args, **_kwargs: ({"release-review-001": {"steps": []}}, {}),
+    )
+
+    result = generate_dataset.main([str(skill), "--refine"])
+
+    assert result.status == "created"
+    assert "Warning: case release-review-001: assertions grades skill use" in capsys.readouterr().out
+
+
 def test_template_refine_ignores_non_string_skill_fields():
     # LLM-written cases are not type-checked for expected_skill or expected_script.
     skill = _skill(scripts=["review.py"])

@@ -56,6 +56,7 @@ from skillevaluator.provider_config import (
     skillspector_reasoning_effort,
 )
 from skillevaluator.skillspector_provenance import SKILLSPECTOR_LLM_ANALYZERS, sanitize_skillspector_llm_provenance
+from skillevaluator.skillspector_reference_caveats import reference_caveat_metadata
 from skillevaluator.spdx import is_spdx_only_html_comment
 from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.utils.scanner_install import prepare_skillspector
@@ -210,7 +211,10 @@ _SKILLSPECTOR_DIMINISHING_WEIGHTS = (1.0, 0.5, 0.25)
 # Ledger exceptions quoted in an incomplete-analysis error, and the length of each quoted field.
 _SKILLSPECTOR_INCOMPLETE_EXAMPLES = 3
 _SKILLSPECTOR_REPORT_TEXT_MAX_CHARS = 200
-_SKILLSPECTOR_SCAN_EXCLUDED_DIRS = SCAN_EXCLUDED_DIRS - {"__pycache__"}
+# Evaluation definitions and helpers are authored inputs, including when linked
+# from SKILL.md. Keep them and shipped bytecode visible to SkillSpector; generated
+# results below these directories still match the existing output exclusions.
+_SKILLSPECTOR_SCAN_EXCLUDED_DIRS = SCAN_EXCLUDED_DIRS - {"__pycache__", "evals", ".evals"}
 _SKILLSPECTOR_PROVIDER_MAP = {
     "anthropic": "anthropic",
     "bedrock": "bedrock",
@@ -2507,11 +2511,15 @@ class SecurityValidator(ValidatorBase):
             skillspector_reference_root: Artifact root that contains the
                 scanned directory, such as a plugin around its bundled skills.
                 References written relative to it still count as agent
-                references. Defaults to the scanned directory. Missing
-                references are accepted only in a scan of this root, or
-                without it, of *target_root* or else the whole target of
-                :meth:`validate` or :meth:`validate_security_only`
-                (:func:`_skillspector_missing_reference_notes`).
+                references. Defaults to the scanned directory.
+                :func:`_skillspector_missing_reference_notes` accepts missing
+                references only in a scan of this root, or without it, of
+                *target_root* or else the whole target of :meth:`validate` or
+                :meth:`validate_security_only`. A scan outside those methods
+                without this root has no reference root, so that rule accepts
+                none there; a 2.13.3 report that
+                :func:`reference_caveat_metadata` accepts still passes as its
+                caveat.
             skillspector_baseline: Audited SkillSpector YAML/JSON suppression
                 baseline. Matching findings are removed by SkillSpector before
                 scoring. Baselines are only applied when passed explicitly; one
@@ -2745,11 +2753,14 @@ class SecurityValidator(ValidatorBase):
         own, and its instructions may name files elsewhere in the folder that
         its scan does not inspect, so their missing references are not
         accepted. A configured ``target_root`` replaces the target, such as
-        the folder of skills that a skill passed here belongs to. A scan run
-        outside this walk accepts missing references only when the configured
+        the folder of skills that a skill passed here belongs to. In a scan
+        run outside this walk, :func:`_skillspector_missing_reference_notes`
+        accepts missing references only when the configured
         ``skillspector_reference_root`` is the scanned root. Otherwise, as for
-        the per-partition scans of ``tier1/plugin_checks.py``, it has no known
-        target and accepts none.
+        the per-partition scans of ``tier1/plugin_checks.py``, that rule
+        accepts none. Such a scan without a configured root has no known
+        target, so a 2.13.3 report that :func:`reference_caveat_metadata`
+        accepts still passes as its caveat.
         """
         blocks: list[dict] = []
 
@@ -3058,15 +3069,23 @@ class SecurityValidator(ValidatorBase):
         explicit baseline, and that report must then account for them.
 
         A ``partial`` analysis makes the scan INCOMPLETE unless its only gaps are
-        references to files the skill does not bundle
+        missing-reference caveats in a fully inspected SkillSpector 2.13.3 or
+        later 2.x report (:func:`reference_caveat_metadata`), references to
+        files the skill does not bundle
         (:func:`_skillspector_missing_reference_notes`), referenced PNG or JPEG
-        images (:func:`_skillspector_passive_raster_note`), or both, each
-        confirmed by the files under *scanned_root*; each kind of gap is then a
-        warning instead. *scanned_root* is the directory the report's relative
-        paths start from. *reference_root* is the root of the artifact that
-        contains it: the validator's ``skillspector_reference_root``, or else
-        its ``target_root`` or the target of the scan in progress. Missing
-        references are accepted only when it is *scanned_root*.
+        images (:func:`_skillspector_passive_raster_note`), or both of the last
+        two, each confirmed by the files under *scanned_root*. Each kind of gap
+        is then a visible warning, not a claim that referenced targets were
+        inspected or that the scanner reported SAFE. *scanned_root* is the
+        directory the report's relative paths start from. *reference_root* is
+        the root of the artifact that contains it: the validator's
+        ``skillspector_reference_root``, or else its ``target_root`` or the
+        target of the scan in progress. Missing references are accepted by
+        :func:`_skillspector_missing_reference_notes` only when it is
+        *scanned_root*. When *reference_root* is given, a caveat that
+        :func:`reference_caveat_metadata` accepts must also pass
+        :func:`_skillspector_missing_reference_notes`; without it, that rule
+        alone decides.
 
         From SkillSpector 2.13.4, an analysis whose only gaps are missing
         references is ``complete_with_caveats`` instead of ``partial``. Its
@@ -3085,6 +3104,7 @@ class SecurityValidator(ValidatorBase):
         incomplete_before = result.is_incomplete
         # Accepted caveats are reported only once every later check has passed.
         caveat_warnings: list[str] = []
+        accepted_reference_caveats = None
         if "error" in data and data["error"] is not None:
             result.add_error("skillspector reported an error; security scan did not complete")
             return False
@@ -3496,10 +3516,19 @@ class SecurityValidator(ValidatorBase):
                     and not_applicable_evidence_valid
                     and docs_only_analyzer_states_valid
                 )
+                accepted_reference_caveats = reference_caveat_metadata(
+                    data,
+                    scanner_version=skillspector_version,
+                    required_analyzers=required_analyzer_ids,
+                    universal_analyzers=_SKILLSPECTOR_COMMON_UNIVERSAL_ANALYZERS | {"artifact_integrity"},
+                    optional_analyzers=_SKILLSPECTOR_OPTIONAL_ANALYZERS,
+                    use_llm=use_llm,
+                )
                 if (
                     is_complete
                     or uses_statusless_completeness_schema
                     or complete_by_applicability
+                    or accepted_reference_caveats is not None
                 ) and counts["total_components"]:
                     universal_analyzer_ids = _SKILLSPECTOR_COMMON_UNIVERSAL_ANALYZERS | (
                         {"artifact_integrity"} if uses_completeness_schema else set()
@@ -3649,6 +3678,14 @@ class SecurityValidator(ValidatorBase):
                         skillspector_version=skillspector_version,
                         reference_root=reference_root,
                     )
+                    if accepted_reference_caveats is not None and reference_root is not None and gap_notes is None:
+                        # reference_caveat_metadata reads only the report. When
+                        # the scan's reference root is known, its missing
+                        # references must also meet the conditions above, so a
+                        # line that names a file left out of the scan, or a
+                        # skill scanned inside a larger artifact, stays
+                        # incomplete.
+                        accepted_reference_caveats = None
                     if gap_notes is None:
                         raster_note = _skillspector_passive_raster_note(
                             ledger_exceptions,
@@ -3660,7 +3697,11 @@ class SecurityValidator(ValidatorBase):
                             scanned_root,
                         )
                         gap_notes = None if raster_note is None else [raster_note]
-                    if gap_notes is not None:
+                    if accepted_reference_caveats is not None:
+                        # Add the warning only after all inventory, finding and
+                        # risk-accounting checks below have accepted the report.
+                        pass
+                    elif gap_notes is not None:
                         for note in gap_notes:
                             result.add_warning(note)
                     else:
@@ -4031,6 +4072,36 @@ class SecurityValidator(ValidatorBase):
 
         for note in caveat_warnings:
             result.add_warning(note)
+        if accepted_reference_caveats is not None:
+            result.metadata["skillspector_reference_caveats"] = accepted_reference_caveats
+            locations = ", ".join(
+                f"{_skillspector_report_text(row['path'])}:{row['start_line']}"
+                for row in ledger_exceptions[:_SKILLSPECTOR_INCOMPLETE_EXAMPLES]
+            )
+            remaining = len(ledger_exceptions) - _SKILLSPECTOR_INCOMPLETE_EXAMPLES
+            if remaining > 0:
+                locations = f"{locations} (+{remaining} more)"
+            result.add_finding(
+                Finding(
+                    category="SCAN",
+                    severity=Severity.INFO,
+                    check_name="skillspector_reference_caveats",
+                    message=(
+                        f"SkillSpector inspected all {accepted_reference_caveats['fully_inspected_files']} bundled file(s). "
+                        f"{accepted_reference_caveats['count']} missing-reference caveat(s) remain; "
+                        f"review referenced paths at {locations}. "
+                        "Referenced targets were not verified; the scanner's original partial status is retained."
+                    ),
+                    file_path=ledger_exceptions[0]["path"],
+                    line_number=ledger_exceptions[0]["start_line"],
+                    suggestion="Review the referenced paths; only files bundled in this skill were inspected.",
+                    metadata={
+                        "scanner_status": "partial",
+                        "scanner_recommendation": recommendation,
+                        "missing_targets_verified": False,
+                    },
+                )
+            )
         return True
 
     @staticmethod
@@ -4616,7 +4687,7 @@ class SecurityValidator(ValidatorBase):
         if source_root is None:
             if path.name in SCAN_EXCLUDED_FILES:
                 return True
-            return any(part in SCAN_EXCLUDED_DIRS for part in path.parts)
+            return any(part in _SKILLSPECTOR_SCAN_EXCLUDED_DIRS for part in path.parts)
 
         root = Path(os.path.abspath(source_root))  # noqa: PTH100 - do not follow untrusted path links
         candidate = path if path.is_absolute() else root / path
@@ -4631,7 +4702,7 @@ class SecurityValidator(ValidatorBase):
         current = root
         for part in relative.parts[:-1]:
             current /= part
-            if matches_filesystem_name(current, SCAN_EXCLUDED_DIRS):
+            if matches_filesystem_name(current, _SKILLSPECTOR_SCAN_EXCLUDED_DIRS):
                 return True
         return False
 
@@ -4829,9 +4900,14 @@ class SecurityValidator(ValidatorBase):
         baseline["suppressed_by_severity"] = by_severity
         baseline["suppressed_rule_ids"] = summary.get("rule_ids") if isinstance(summary.get("rule_ids"), list) else []
         llm_stage_suppressed = llm_suppressed if isinstance(llm_suppressed, int) else None
+        # Coverage advisories remain visible, but are not active scanner issues
+        # and cannot be suppressed by a reviewed vulnerability baseline.
+        active_findings = [
+            finding for finding in result.findings if finding.check_name != "skillspector_reference_caveats"
+        ]
         blocking = sum(
             1
-            for finding in result.findings
+            for finding in active_findings
             if (finding.severity if isinstance(finding.severity, Severity) else Severity(str(finding.severity).lower()))
             in (Severity.CRITICAL, Severity.HIGH)
         )
@@ -4841,7 +4917,7 @@ class SecurityValidator(ValidatorBase):
                 "runtime_scanner_version": runtime_version,
                 "suppressed_findings": suppressed,
                 "llm_stage_suppressed_findings": llm_stage_suppressed,
-                "active_findings": len(result.findings),
+                "active_findings": len(active_findings),
                 "active_blocking_findings": blocking,
             }
         )
@@ -5860,19 +5936,24 @@ class SecurityValidator(ValidatorBase):
         result: ValidationResult,
         skill_path: Path,
     ) -> None:
-        """Run LLM second-pass verification on all findings.
+        """Run LLM second-pass verification on security findings.
 
         Findings the LLM classifies as false_positive with high confidence
         are downgraded to INFO severity and annotated in metadata.
         """
-        if not result.findings:
+        # This diagnostic reports scanner coverage, not a vulnerability whose
+        # truth can be adjudicated by the model. Keep its evidence unchanged.
+        findings = [
+            finding for finding in result.findings if finding.check_name != "skillspector_reference_caveats"
+        ]
+        if not findings:
             return
 
         from skillevaluator.inference import FindingVerifier
 
-        logger.info(f"Running LLM verification on {len(result.findings)} finding(s)")
+        logger.info(f"Running LLM verification on {len(findings)} finding(s)")
         verifier = FindingVerifier()
-        verdicts = verifier.verify(result.findings, skill_path)
+        verdicts = verifier.verify(findings, skill_path)
 
         if not verdicts:
             result.mark_scan_incomplete("llm-verification")
@@ -5882,7 +5963,7 @@ class SecurityValidator(ValidatorBase):
 
         suppressed = 0
         verified = 0
-        for idx, finding in enumerate(result.findings):
+        for idx, finding in enumerate(findings):
             verdict_data = verdicts.get(idx)
             if not isinstance(verdict_data, dict) or not verdict_data:
                 continue
@@ -5915,14 +5996,14 @@ class SecurityValidator(ValidatorBase):
             result.recalculate_from_findings()
             result.add_message(f"LLM verification downgraded {suppressed} finding(s) to INFO (false positives)")
 
-        unverified = len(result.findings) - verified
+        unverified = len(findings) - verified
         if unverified:
             result.mark_scan_incomplete("llm-verification")
             noun = "finding" if unverified == 1 else "findings"
             verb = "was" if unverified == 1 else "were"
             cause = f": {verifier.last_failure}" if verifier.last_failure else ""
             result.add_message(
-                f"LLM verification returned verdicts for {verified} of {len(result.findings)} findings; "
+                f"LLM verification returned verdicts for {verified} of {len(findings)} findings; "
                 f"{unverified} {noun} {verb} not verified{cause}"
             )
         elif not suppressed:

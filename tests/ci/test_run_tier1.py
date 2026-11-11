@@ -584,6 +584,267 @@ def selection_checkout(tmp_path):
     return workspace, repository_commit(workspace)
 
 
+def baseline_checkout(tmp_path, manifest=None):
+    workspace, _ = selection_checkout(tmp_path)
+    policy = workspace / ".skillevaluator/skillspector-baselines.yaml"
+    policy.parent.mkdir()
+    policy.write_text(manifest or "version: 1\nbaselines:\n  skills/a: policies/a.json\n")
+    baseline = workspace / "policies/a.json"
+    baseline.parent.mkdir()
+    baseline.write_text(json.dumps({"version": 2, "rules": [{"id": "PE5", "reason": "Reviewed exact policy"}]}))
+    return workspace, repository_commit(workspace), baseline.read_bytes()
+
+
+def test_security_baselines_use_reviewed_mapping_and_bytes_not_pr_head(tmp_path):
+    workspace, approved, approved_bytes = baseline_checkout(tmp_path)
+    (workspace / ".skillevaluator/skillspector-baselines.yaml").write_text(
+        "version: 1\nbaselines:\n  skills/b: policies/a.json\n"
+    )
+    (workspace / "policies/a.json").write_text('{"version":2,"rules":[]}')
+    head = repository_commit(workspace)
+    calls, observed = [], []
+    fixture = fake_cli([(0, payload()), (0, payload())], calls)
+
+    def execute(argv, **kwargs):
+        if "--skillspector-baseline" in argv:
+            path = Path(argv[argv.index("--skillspector-baseline") + 1])
+            observed.append((argv[2], path.read_bytes(), path.is_relative_to(workspace)))
+        return fixture(argv, **kwargs)
+
+    reports = tmp_path / "reports"
+    assert (
+        runner.run(
+            workspace,
+            reports,
+            {
+                "SKILL_PATHS": "skills",
+                "SECURITY_BASELINES": "true",
+                "POLICY_SOURCE_SHA": approved,
+                "REPORT_COMMIT": head,
+            },
+            execute=execute,
+        )
+        == 0
+    )
+    assert observed == [(str(workspace / "skills/a"), approved_bytes, False)]
+    summary = json.loads((reports / "summary.json").read_text())
+    evidence = summary["execution"]["security_baselines"]
+    assert evidence["source_commit"] == approved
+    assert evidence["manifest"] == ".skillevaluator/skillspector-baselines.yaml"
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", evidence["manifest_digest"])
+    assert summary["skills"][0]["security_baseline"]["file"] == "policies/a.json"
+    assert "security_baseline" not in summary["skills"][1]
+
+
+def test_security_baselines_can_use_current_push_commit(tmp_path):
+    workspace, head, expected = baseline_checkout(tmp_path)
+    calls, observed = [], []
+    fixture = fake_cli([(0, payload()), (0, payload())], calls)
+
+    def execute(argv, **kwargs):
+        if "--skillspector-baseline" in argv:
+            observed.append(Path(argv[argv.index("--skillspector-baseline") + 1]).read_bytes())
+        return fixture(argv, **kwargs)
+
+    assert (
+        runner.run(
+            workspace,
+            tmp_path / "reports",
+            {
+                "SKILL_PATHS": "skills",
+                "SECURITY_BASELINES": "true",
+                "POLICY_SOURCE_SHA": head,
+            },
+            execute=execute,
+        )
+        == 0
+    )
+    assert observed == [expected]
+
+
+def test_security_baseline_audit_field_does_not_collide_with_configured_secret_fragment(tmp_path):
+    workspace, approved, _ = baseline_checkout(tmp_path)
+    (workspace / "skills/a/example.txt").write_text('secret="configuredSuperSecret987654321"\n')
+    calls, reports = [], tmp_path / "reports"
+    assert (
+        runner.run(
+            workspace,
+            reports,
+            {"SKILL_PATHS": "skills/a", "SECURITY_BASELINES": "true", "POLICY_SOURCE_SHA": approved},
+            execute=fake_cli([(0, payload())], calls),
+        )
+        == 0
+    )
+    assert len(calls) == 1
+    summary = json.loads((reports / "summary.json").read_text())
+    assert summary["execution"]["security_baselines"]["mapped_skill_count"] == 1
+    assert "configured_skills" not in summary["execution"]["security_baselines"]
+    assert "withheld" in (reports / "skill-001/stdout.log").read_text()
+
+
+def test_security_baselines_require_explicit_opt_in(tmp_path):
+    workspace, head, _ = baseline_checkout(tmp_path)
+    calls = []
+    assert (
+        runner.run(
+            workspace,
+            tmp_path / "reports",
+            {
+                "SKILL_PATHS": "skills",
+                "POLICY_SOURCE_SHA": head,
+            },
+            execute=fake_cli([(0, payload()), (0, payload())], calls),
+        )
+        == 0
+    )
+    assert all("--skillspector-baseline" not in argv for argv, _ in calls)
+
+
+@pytest.mark.parametrize("enabled", ["TRUE", " true ", "False", "yes"])
+def test_security_baselines_reject_noncanonical_boolean_input(tmp_path, enabled):
+    workspace, head, _ = baseline_checkout(tmp_path)
+    calls = []
+    assert (
+        runner.run(
+            workspace,
+            tmp_path / "reports",
+            {
+                "SKILL_PATHS": "skills",
+                "SECURITY_BASELINES": enabled,
+                "POLICY_SOURCE_SHA": head,
+            },
+            execute=fake_cli([(0, payload()), (0, payload())], calls),
+        )
+        == 1
+    )
+    assert not calls
+
+
+@pytest.mark.parametrize("source", ["", "HEAD", "0" * 40])
+def test_security_baselines_fail_closed_without_exact_available_policy_commit(tmp_path, source):
+    workspace, _, _ = baseline_checkout(tmp_path)
+    calls = []
+    assert (
+        runner.run(
+            workspace,
+            tmp_path / "reports",
+            {
+                "SKILL_PATHS": "skills",
+                "SECURITY_BASELINES": "true",
+                "POLICY_SOURCE_SHA": source,
+            },
+            execute=fake_cli([(0, payload()), (0, payload())], calls),
+        )
+        == 1
+    )
+    assert not calls
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        "version: 1\nbaselines:\n  skills/a: policies/a.json\n  skills/a: policies/b.json\n",
+        "version: 1\nbaselines:\n  skills/a: ../a.json\n",
+        "version: 1\nbaselines:\n  ../skills/a: policies/a.json\n",
+        "version: 2\nbaselines: {}\n",
+        "version: 1\nbaselines:\n  skills/a: policies/missing.json\n",
+        "version: 1\nbaselines:\n  skills/a: &approved policies/a.json\n  skills/b: *approved\n",
+        'version: 1\nbaselines:\n  "skills/\\uD800": policies/a.json\n',
+        'version: 1\nbaselines:\n  skills/a: "policies/\\uD800.json"\n',
+    ],
+)
+def test_security_baselines_reject_invalid_reviewed_manifest_before_scanning(tmp_path, manifest):
+    workspace, approved, _ = baseline_checkout(tmp_path, manifest)
+    calls = []
+    assert (
+        runner.run(
+            workspace,
+            tmp_path / "reports",
+            {
+                "SKILL_PATHS": "skills",
+                "SECURITY_BASELINES": "true",
+                "POLICY_SOURCE_SHA": approved,
+            },
+            execute=fake_cli([(0, payload()), (0, payload())], calls),
+        )
+        == 1
+    )
+    assert not calls
+
+
+def test_security_baselines_reject_symlink_blob_from_approved_commit(tmp_path):
+    workspace, _, _ = baseline_checkout(tmp_path)
+    (workspace / "policies/a.json").unlink()
+    (workspace / "policies/a.json").symlink_to("../secret")
+    approved = repository_commit(workspace)
+    calls = []
+    assert (
+        runner.run(
+            workspace,
+            tmp_path / "reports",
+            {
+                "SKILL_PATHS": "skills",
+                "SECURITY_BASELINES": "true",
+                "POLICY_SOURCE_SHA": approved,
+            },
+            execute=fake_cli([(0, payload()), (0, payload())], calls),
+        )
+        == 1
+    )
+    assert not calls
+
+
+@pytest.mark.parametrize("escaped", [False, True])
+def test_security_baselines_redact_credentials_only_in_approved_policy_bytes(tmp_path, escaped):
+    workspace, _, _ = baseline_checkout(tmp_path)
+    token = "nvapi-" + "A1" * 25
+    approved_content = json.dumps({"version": 2, "scanner_version": token, "rules": []})
+    if escaped:
+        approved_content = approved_content.replace(token, "\\u006e" + token[1:])
+    (workspace / "policies/a.json").write_text(approved_content)
+    approved = repository_commit(workspace)
+    (workspace / "policies/a.json").write_text('{"version":2,"rules":[]}')
+    repository_commit(workspace)
+    report = payload(passed=False)
+    report["results"][0]["findings"][0]["message"] = "Baseline scanner version mismatch: " + token
+    reports = tmp_path / "reports"
+    assert (
+        runner.run(
+            workspace,
+            reports,
+            {
+                "SKILL_PATHS": "skills/a",
+                "SECURITY_BASELINES": "true",
+                "POLICY_SOURCE_SHA": approved,
+            },
+            execute=fake_cli([(1, report)], []),
+        )
+        == 1
+    )
+    assert all(token.encode() not in path.read_bytes() for path in reports.rglob("*") if path.is_file())
+    assert "withheld" in (reports / "skill-001/stdout.log").read_text()
+
+
+@pytest.mark.parametrize("content", ['!!int ""', '!!timestamp ""', '!!bool ""'])
+def test_security_baselines_reject_malformed_scalar_before_scanning(tmp_path, content):
+    workspace, _, _ = baseline_checkout(tmp_path)
+    (workspace / "policies/a.json").write_text(content)
+    approved = repository_commit(workspace)
+    calls, reports = [], tmp_path / "reports"
+    assert (
+        runner.run(
+            workspace,
+            reports,
+            {"SKILL_PATHS": "skills", "SECURITY_BASELINES": "true", "POLICY_SOURCE_SHA": approved},
+            execute=fake_cli([(0, payload()), (0, payload())], calls),
+        )
+        == 1
+    )
+    assert not calls
+    summary = json.loads((reports / "summary.json").read_text())
+    assert "Credential preflight" in summary["error"]
+
+
 def test_changed_mode_runs_only_changed_skill_from_real_git_history(tmp_path):
     workspace, base = selection_checkout(tmp_path)
     (workspace / "skills/a/SKILL.md").write_text("# Changed skill\n")
@@ -796,12 +1057,15 @@ def test_quality_threshold_is_forwarded_to_evaluator(tmp_path, score, workers):
     skill(workspace, "skills/a")
     skill(workspace, "skills/b")
     calls = []
-    assert runner.run(
-        workspace,
-        tmp_path / "reports",
-        {"SKILL_PATHS": "skills", "MIN_SCORE": score, "SCAN_WORKERS": workers},
-        execute=fake_cli([(0, payload()), (0, payload())], calls),
-    ) == 0
+    assert (
+        runner.run(
+            workspace,
+            tmp_path / "reports",
+            {"SKILL_PATHS": "skills", "MIN_SCORE": score, "SCAN_WORKERS": workers},
+            execute=fake_cli([(0, payload()), (0, payload())], calls),
+        )
+        == 0
+    )
     assert len(calls) == 2
     for argv, _env in calls:
         assert argv[argv.index("--min-score") + 1] == score
@@ -812,12 +1076,15 @@ def test_invalid_quality_threshold_fails_without_running_scanner(tmp_path, score
     workspace = tmp_path / "workspace"
     skill(workspace, "skills/a")
     calls = []
-    assert runner.run(
-        workspace,
-        tmp_path / "reports",
-        {"SKILL_PATHS": "skills", "MIN_SCORE": score},
-        execute=fake_cli([(0, payload())], calls),
-    ) == 1
+    assert (
+        runner.run(
+            workspace,
+            tmp_path / "reports",
+            {"SKILL_PATHS": "skills", "MIN_SCORE": score},
+            execute=fake_cli([(0, payload())], calls),
+        )
+        == 1
+    )
     assert not calls
     summary = json.loads((tmp_path / "reports/summary.json").read_text())
     assert summary["overall_status"] == "error"

@@ -2015,7 +2015,7 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
                 "id": "G1",
                 "severity": "LOW",
                 "finding": "generated evaluation output",
-                "location": {"file": "evals/run-1/output.md", "start_line": 1},
+                "location": {"file": "evals/results/run-1/output.md", "start_line": 1},
             }
         )
         payload = _skillspector_json_report(issues)
@@ -8941,6 +8941,16 @@ def _missing_reference_warning(labels: str, count: int = 1) -> str:
     )
 
 
+def _reference_caveat_warning(*locations: str, files: int) -> str:
+    """The warning SkillSpector 2.13.3 reference caveats (``reference_caveat_metadata``) carry instead."""
+    return (
+        f"[SCAN-INFO] SkillSpector inspected all {files} bundled file(s). "
+        f"{len(locations)} missing-reference caveat(s) remain; review referenced paths at {', '.join(locations)}. "
+        "Referenced targets were not verified; the scanner's original partial status is retained. "
+        f"in {locations[0]}"
+    )
+
+
 # The skill scanned for the captured staged report: SkillEvaluator scans a copy
 # without versions/, so SkillSpector sees only SKILL.md and records the script
 # on line 8 as reference_missing.
@@ -9034,7 +9044,13 @@ class TestSkillspectorMissingReferences:
         assert result.status == "passed"
         assert not result.errors
         assert result.incomplete_scans == []
-        assert result.warnings == [_missing_reference_warning(f"SKILL.md:10 [reference_resolution; {reason_code}]")]
+        if version == "2.13.3":
+            # The reference-caveat rule accepts this report once the conditions here also hold.
+            assert result.warnings == [_reference_caveat_warning("SKILL.md:10", files=2)]
+            assert result.metadata["skillspector_reference_caveats"]["count"] == 1
+        else:
+            assert result.warnings == [_missing_reference_warning(f"SKILL.md:10 [reference_resolution; {reason_code}]")]
+            assert "skillspector_reference_caveats" not in result.metadata
         assert any(detail.check_name == "skillspector" for detail in result.success_details)
 
     @patch("skillevaluator.validators.security.Tools")
@@ -9056,7 +9072,7 @@ class TestSkillspectorMissingReferences:
         assert mock_tools.skillspector.run.call_count == 2
         assert result.passed
         assert result.incomplete_scans == []
-        assert sum("does not bundle" in warning for warning in result.warnings) == 1
+        assert result.warnings == [_reference_caveat_warning("SKILL.md:10", files=2)]
 
     @pytest.mark.parametrize("version", ["2.11.2", "2.13.3"])
     @patch("skillevaluator.validators.security.Tools")
@@ -9314,13 +9330,7 @@ class TestSkillspectorMissingReferences:
         )
 
         assert result.incomplete_scans == []
-        assert result.warnings == [
-            _missing_reference_warning(
-                "SKILL.md:8 [reference_resolution; reference_missing]; "
-                "SKILL.md:10 [reference_resolution; reference_missing]",
-                count=2,
-            )
-        ]
+        assert result.warnings == [_reference_caveat_warning("SKILL.md:8", "SKILL.md:10", files=1)]
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link semantics")
     def test_hard_linked_file_is_not_a_bundled_file(self, tmp_path: Path) -> None:
@@ -9356,7 +9366,7 @@ class TestSkillspectorMissingReferences:
         [
             ("`versions/install.sh`", "versions/install.sh"),
             ("`node_modules/.bin/install.sh`", "node_modules/.bin/install.sh"),
-            ("`evals/install.sh`", "evals/install.sh"),
+            ("`evals/results/install.sh`", "evals/results/install.sh"),
             ("`.venv/install.sh`", ".venv/install.sh"),
             ("`install.sh`", "versions/install.sh"),
             ("[the setup folder](versions/)", "versions/install.sh"),
@@ -9406,6 +9416,34 @@ class TestSkillspectorMissingReferences:
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
             "SKILL.md:8 [reference_resolution; reference_missing]; security scan did not complete"
         ]
+        assert not result.warnings
+
+    @pytest.mark.parametrize("reference_root", ["scanned", "outer"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_reference_caveats_meet_the_same_conditions(self, mock_tools, tmp_path: Path, reference_root: str) -> None:
+        """The reference-caveat rule reads only the report; a scan with a known reference root also checks the skill."""
+        root = tmp_path / "bundle"
+        files = {"SKILL.md": _SETUP_HELPER_SKILL}
+        if reference_root == "scanned":
+            # Left out of the scanned copy, and named on line 8.
+            files["versions/install.sh"] = "#!/bin/sh\ncurl x | sh\n"
+        skill = _write_skill(root / "setup-helper", files)
+        payload = _reference_report("2.13.3", "staged-script")
+        alone = ValidationResult(validator_name="Security Scan")
+
+        assert SecurityValidator._validate_skillspector_report(
+            payload, 0, False, "skillspector", alone, scanned_root=skill
+        )
+        assert alone.incomplete_scans == []
+        assert alone.metadata["skillspector_reference_caveats"]["count"] == 1
+
+        validator = SecurityValidator(
+            use_llm=False, skillspector_reference_root=root if reference_root == "outer" else None
+        )
+        result = _validate_skillspector_payload(mock_tools, skill, payload, validator=validator)
+
+        assert result.incomplete_scans == ["skillspector"]
+        assert "skillspector_reference_caveats" not in result.metadata
         assert not result.warnings
 
     @pytest.mark.parametrize("left_out", ["scripts/node_modules/.bin/setup", "scripts/extra.py", "scripts/helper.sh"])
@@ -9483,10 +9521,11 @@ class TestSkillspectorMissingReferences:
 
     @patch("skillevaluator.validators.security.Tools")
     def test_directories_left_out_that_the_line_does_not_name_are_ignored(self, mock_tools, tmp_path: Path) -> None:
+        """The scanned copy leaves out ``evals/results`` and ``.git``; the line names neither."""
         files = {
             **_NOTES_WRITER_FILES,
-            "evals/evals.json": '{"evals": []}\n',
-            "evals/files/input.csv": "a,b\n",
+            "evals/results/run-1/result.json": "{}\n",
+            "evals/results/run-1/report.html": "<html></html>\n",
             ".git/HEAD": "ref: refs/heads/main\n",
             ".git/description": "Unnamed repository\n",
         }
@@ -9496,7 +9535,7 @@ class TestSkillspectorMissingReferences:
 
         assert mock_tools.skillspector.run.call_args.args[0][1] != str(skill.resolve())
         assert result.incomplete_scans == []
-        assert result.warnings == [_missing_reference_warning("SKILL.md:10 [reference_resolution; reference_missing]")]
+        assert result.warnings == [_reference_caveat_warning("SKILL.md:10", files=2)]
 
     @pytest.mark.parametrize(
         "line",
@@ -9522,7 +9561,7 @@ class TestSkillspectorMissingReferences:
         result = _validate_skillspector_payload(mock_tools, skill, payload)
 
         assert result.incomplete_scans == []
-        assert result.warnings == [_missing_reference_warning("SKILL.md:10 [reference_resolution; reference_missing]")]
+        assert result.warnings == [_reference_caveat_warning("SKILL.md:10", files=2)]
 
     @pytest.mark.parametrize("hook", [None, "pre-commit.sample"])
     @patch("skillevaluator.validators.security.Tools")
@@ -9551,7 +9590,7 @@ class TestSkillspectorMissingReferences:
 
         assert mock_tools.skillspector.run.call_args.args[0][1] != str(skill.resolve())
         assert result.incomplete_scans == []
-        assert result.warnings == [_missing_reference_warning("SKILL.md:10 [reference_resolution; reference_missing]")]
+        assert result.warnings == [_reference_caveat_warning("SKILL.md:10", files=2)]
 
     @patch("skillevaluator.validators.security.Tools")
     def test_reference_to_an_active_git_hook_stays_incomplete(self, mock_tools, tmp_path: Path) -> None:
@@ -9603,19 +9642,18 @@ class TestSkillspectorMissingReferences:
                 "Run `scripts/summarize.py`, then write the summary to `output/notes.md`.",
                 {**_TIER3_RUN_FILES, **_TIER3_KEPT_JOB_FILES},
             ),
-            ("Summarize the user's `meeting.txt` into `output/notes.md`.", {"evals/files/meeting.txt": "Notes.\n"}),
         ],
-        ids=["results-directory", "report-file", "kept-harbor-job", "input-fixture"],
+        ids=["results-directory", "report-file", "kept-harbor-job"],
     )
     @patch("skillevaluator.validators.security.Tools")
-    def test_tier3_output_and_fixtures_in_the_skill_count_as_not_inspected(
+    def test_tier3_output_in_the_skill_counts_as_not_inspected(
         self, mock_tools, tmp_path: Path, line: str, left_out: dict[str, str]
     ) -> None:
         """A Tier 3 run in the default ``<skill>/evals/results`` turns a passing line into ``INCOMPLETE``.
 
         The run's names (``results``, ``report.html``, and with ``--harbor-keep-jobs``
-        a copy of every bundled file) and the input fixtures in ``evals/files``
-        are left out of the scanned copy, like anything an author keeps there.
+        a copy of every bundled file) are left out of the scanned copy, like
+        anything an author keeps in a ``results`` directory.
         """
         original = "Write the summary to `output/notes.md` and keep it short."
         files = {**_NOTES_WRITER_FILES, "SKILL.md": _NOTES_WRITER_FILES["SKILL.md"].replace(original, line)}
@@ -9628,7 +9666,7 @@ class TestSkillspectorMissingReferences:
         rerun = _validate_skillspector_payload(mock_tools, after, payload)
 
         assert fresh.incomplete_scans == []
-        assert fresh.warnings == [_missing_reference_warning("SKILL.md:10 [reference_resolution; reference_missing]")]
+        assert fresh.warnings == [_reference_caveat_warning("SKILL.md:10", files=2)]
         assert rerun.incomplete_scans == ["skillspector"]
         assert rerun.errors == [
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
@@ -9664,7 +9702,7 @@ class TestSkillspectorMissingReferences:
             mock_tools, skill, payload, validator=SecurityValidator(use_llm=False, skillspector_reference_root=skill)
         )
         assert alone.incomplete_scans == []
-        assert alone.warnings == [_missing_reference_warning("SKILL.md:8 [reference_resolution; reference_missing]")]
+        assert alone.warnings == [_reference_caveat_warning("SKILL.md:8", files=1)]
 
     @pytest.mark.parametrize("layout", ["plugin", "folder"])
     @pytest.mark.parametrize("entry", ["validate_security_only", "validate", "run_security_scan"])
@@ -9706,7 +9744,7 @@ class TestSkillspectorMissingReferences:
         # The folder is the reference root only while it is scanned; the skill on its own still passes.
         alone = validator.validate_security_only(skill)
         assert alone.incomplete_scans == []
-        assert alone.warnings == [_missing_reference_warning("SKILL.md:8 [reference_resolution; reference_missing]")]
+        assert alone.warnings == [_reference_caveat_warning("SKILL.md:8", files=1)]
 
     @pytest.mark.parametrize("workers", [1, 2])
     @patch("skillevaluator.validators.security.Tools")
@@ -9754,9 +9792,13 @@ class TestSkillspectorMissingReferences:
 
     @patch("skillevaluator.validators.security.Tools")
     def test_scan_outside_a_validated_target_stays_incomplete(self, mock_tools, tmp_path: Path) -> None:
-        """A direct per-directory scan, such as one partition of a larger tree, does not know what was left out."""
+        """A direct per-directory scan, such as one partition of a larger tree, does not know what was left out.
+
+        The 2.12.0 report is outside the reference-caveat rule, which reads only
+        the report and so decides alone when the scan has no reference root.
+        """
         skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
-        payload = _reference_report("2.13.3")
+        payload = _reference_report("2.12.0")
         mock_tools.skillspector.is_available = True
         mock_tools.skillspector.run.return_value = ToolResult(
             success=True, stdout=json.dumps(payload), stderr="", exit_code=0
@@ -9773,6 +9815,12 @@ class TestSkillspectorMissingReferences:
         assert _missing_reference_notes(payload, skill, reference_root=None) is None
         assert validator.validate_security_only(skill).incomplete_scans == []
         assert validator._run_skillspector(skill).incomplete_scans == ["skillspector"]
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True, stdout=json.dumps(_reference_report("2.13.3")), stderr="", exit_code=0
+        )
+        caveat = validator._run_skillspector(skill)
+        assert caveat.incomplete_scans == []
+        assert caveat.warnings == [_reference_caveat_warning("SKILL.md:10", files=2)]
 
     @patch("skillevaluator.validators.security.Tools")
     def test_scan_outside_a_validated_target_uses_the_configured_reference_root(
@@ -9789,9 +9837,7 @@ class TestSkillspectorMissingReferences:
         outer_root = SecurityValidator(use_llm=False, skillspector_reference_root=tmp_path)._run_skillspector(skill)
 
         assert own_root.incomplete_scans == []
-        assert own_root.warnings == [
-            _missing_reference_warning("SKILL.md:10 [reference_resolution; reference_missing]")
-        ]
+        assert own_root.warnings == [_reference_caveat_warning("SKILL.md:10", files=2)]
         assert outer_root.incomplete_scans == ["skillspector"]
         assert not outer_root.warnings
 
@@ -9808,7 +9854,7 @@ class TestSkillspectorMissingReferences:
 
         assert mock_tools.skillspector.run.call_args.args[0][1] == str(rules.resolve())
         assert result.incomplete_scans == []
-        assert result.warnings == [_missing_reference_warning("AGENTS.md:10 [reference_resolution; reference_missing]")]
+        assert result.warnings == [_reference_caveat_warning("AGENTS.md:10", files=2)]
 
     @pytest.mark.parametrize("case", ["evidence-elsewhere", "no-evidence", "line-out-of-range"])
     @patch("skillevaluator.validators.security.Tools")
@@ -10160,7 +10206,10 @@ class TestSkillspectorMissingReferences:
         """Each kind of gap must pass its own rule; the scan then carries both warnings."""
         skill = _write_skill(
             tmp_path / "image-notes",
-            {"SKILL.md": _IMAGE_NOTES_SKILL, **({"evals/notes.md": "# Notes\n"} if case.startswith("line") else {})},
+            {
+                "SKILL.md": _IMAGE_NOTES_SKILL,
+                **({"evals/results/notes.md": "# Notes\n"} if case.startswith("line") else {}),
+            },
         )
         (skill / "assets").mkdir()
         (skill / "assets" / "logo.png").write_bytes(b"not an image" if case == "not-an-image" else _png_bytes())

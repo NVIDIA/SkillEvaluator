@@ -3089,13 +3089,15 @@ class SecurityValidator(ValidatorBase):
 
         From SkillSpector 2.13.4, an analysis whose only gaps are missing
         references is ``complete_with_caveats`` instead of ``partial``. Its
-        caveats get the same warning when they pass the same rules
-        (:func:`_skillspector_reference_caveat_notes`) and the rest of the
-        report is accepted. Otherwise the scan is INCOMPLETE and, as for a
-        ``partial`` report, the report's findings are still checked and kept.
-        A report with that status and no caveat, or with a caveat that is not
-        a missing reference, contradicts itself and is not trusted, and neither
-        is the status from an earlier release.
+        caveats get the warning of :func:`_skillspector_missing_reference_notes`
+        when they pass its rules (:func:`_skillspector_reference_caveat_notes`)
+        and the rest of the report is accepted. Otherwise the scan is
+        INCOMPLETE and, as for a ``partial`` report, the report's findings are
+        still checked and kept. :func:`reference_caveat_metadata` reads only
+        ``partial`` reports, so it never accepts these caveats, even without a
+        *reference_root*. A report with that status and no caveat, or with a
+        caveat that is not a missing reference, contradicts itself and is not
+        trusted, and neither is the status from an earlier release.
         """
         partial_reported = False
         # Rejected caveats mark the scan INCOMPLETE below, but SkillSpector still

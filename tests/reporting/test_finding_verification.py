@@ -20,6 +20,9 @@ from skillevaluator.reporting.base import passes_required_gate
 from skillevaluator.validators.policy import ValidationPolicy, apply_policy
 from skillevaluator.validators.security import SecurityValidator
 
+_SGR = re.compile(r"\x1b\[[0-9;]*m")
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
 
 class _Text(HTMLParser):
     def __init__(self) -> None:
@@ -65,7 +68,11 @@ def _render(format_name: str, result: ValidationResult) -> tuple[str, str]:
         output = MarkdownReporter(include_timestamp=False, include_details=False).render(result)
         return output, _text(output)
     output = CLIReporter().render(result)
-    return output, " ".join(output.split())
+    # Rich adds SGR styling in terminal/color environments. Preserve every other
+    # control byte for the safety assertion instead of stripping arbitrary ANSI.
+    plain = _SGR.sub("", output)
+    assert _CONTROL.search(plain) is None, repr(plain)
+    return output, " ".join(plain.split())
 
 
 @pytest.mark.parametrize("format_name", ["html", "markdown", "cli"])
@@ -237,3 +244,35 @@ def test_policy_can_restore_blocking_severity_after_verifier_downgrade(tmp_path:
     assert finding.severity == Severity.HIGH
     assert not passes_required_gate(result)
     assert result == before
+
+
+@pytest.mark.parametrize("force_color", [False, True])
+def test_cli_verification_is_visible_with_or_without_color(monkeypatch: pytest.MonkeyPatch, force_color: bool) -> None:
+    """Rich's own styling must not obscure semantic assertions or permit terminal controls."""
+    monkeypatch.setenv("TERM", "xterm-256color" if force_color else "dumb")
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.delenv("TTY_COMPATIBLE", raising=False)
+    if force_color:
+        monkeypatch.setenv("FORCE_COLOR", "1")
+        monkeypatch.delenv("NO_COLOR", raising=False)
+    else:
+        monkeypatch.setenv("NO_COLOR", "1")
+        monkeypatch.delenv("FORCE_COLOR", raising=False)
+    reasoning = (
+        '<script>alert("review")</script> [link=https://example.test]text[/link] '
+        "\x1b[2J\x1b]8;;https://example.test\x07click\x1b]8;;\x07"
+    )
+    result = _result(
+        _finding(metadata={"llm_verdict": "false_positive", "llm_confidence": "medium", "llm_reasoning": reasoning})
+    )
+
+    output, visible = _render("cli", result)
+
+    assert ("\x1b[" in output) is force_color
+    assert "False positive (medium confidence)" in visible
+    assert "only high-confidence false positives are downgraded to INFO" in visible
+    assert '<script>alert("review")</script>' in visible
+    assert "[link=https://example.test]text[/link]" in visible
+    assert "\x1b[2J" not in output
+    assert "\x1b]8;" not in output
+    assert not passes_required_gate(result)

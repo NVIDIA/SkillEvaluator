@@ -353,6 +353,33 @@ def test_all_tier_ci_tier3_dataset_check_is_strict_about_fairness_warnings(tmp_p
     assert "evals/evals.json" in dataset_preflight(fair)
 
 
+def test_accept_traces_reports_fairness_warnings_on_promoted_cases(tmp_path: Path):
+    # Cases promoted from reviewed production traces are validated with the same check.
+    from skillevaluator.tier3.trace_import import accept_traces, import_traces
+
+    skill = tmp_path / "release-review"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: release-review\ndescription: Review releases\n---\n", encoding="utf-8")
+    export = tmp_path / "export.jsonl"
+    export.write_text(
+        json.dumps({"session_id": "session-one", "prompt": "Review manifest.yaml for release blockers"}),
+        encoding="utf-8",
+    )
+    review = tmp_path / "review"
+    document = import_traces(skill, export, review)
+    document["candidates"][0]["review"].update(
+        decision="accept",
+        expected_output="Two release blockers: missing SBOM and an unsigned image",
+        assertions=["The agent read release-review/SKILL.md"],
+    )
+    (review / "candidates.json").write_text(json.dumps(document), encoding="utf-8")
+
+    result = accept_traces(skill, review)
+
+    (case_id,) = result["added"]
+    assert [check.status for check in result["validation"] if check.path == f"entry {case_id}"] == ["warning"]
+
+
 def _skill(**overrides) -> dict:
     return {
         "name": "release-review",

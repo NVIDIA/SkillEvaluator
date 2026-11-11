@@ -9642,7 +9642,7 @@ class TestSkillspectorMissingReferences:
         ids=["results-directory", "report-file", "kept-harbor-job"],
     )
     @patch("skillevaluator.validators.security.Tools")
-    def test_tier3_output_and_fixtures_in_the_skill_count_as_not_inspected(
+    def test_tier3_output_in_the_skill_counts_as_not_inspected(
         self, mock_tools, tmp_path: Path, line: str, left_out: dict[str, str]
     ) -> None:
         """A Tier 3 run in the default ``<skill>/evals/results`` turns a passing line into ``INCOMPLETE``.

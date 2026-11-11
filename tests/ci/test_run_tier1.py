@@ -134,7 +134,11 @@ def test_enforcement_only_downgrades_complete_policy_verdicts(tmp_path, capsys, 
     result = runner.run(
         workspace,
         reports,
-        {"SKILL_PATHS": "missing" if case == "config" else "skills", "LLM_ENABLED": "false"},
+        {
+            "SKILL_PATHS": "missing" if case == "config" else "skills",
+            "LLM_ENABLED": "false",
+            "GITHUB_ACTIONS": "true",
+        },
         execute=fake_cli(responses, []),
         enforcement_mode=mode,
     )
@@ -142,12 +146,42 @@ def test_enforcement_only_downgrades_complete_policy_verdicts(tmp_path, capsys, 
     assert result == expected
     summary = json.loads((reports / "summary.json").read_text())
     assert summary["overall_passed"] is (case == "passed")
+    assert summary["enforcement"]["mode"] == mode
+    assert summary["enforcement"]["downgraded"] is (mode == "advisory" and case == "failed")
     if case == "failed":
         assert summary["overall_status"] == "failed"
         assert (reports / "skill-001/skillevaluator-tier1.json").is_file()
         assert (reports / "index.html").is_file()
     output = capsys.readouterr().out
     assert ("::warning title=Tier 1 (advisory)::" in output) is (mode == "advisory" and case == "failed")
+
+
+@pytest.mark.parametrize("mode,marker", [("strict", "::error "), ("advisory", "::warning ")])
+def test_annotation_level_follows_enforcement_mode(capsys, mode, marker):
+    row = {"path": "skills/a", "overall_status": "failed"}
+    data = {
+        "results": [
+            {
+                "validator": "Tier 1 fixture validator 1",
+                "status": "failed",
+                "passed": False,
+                "incomplete_scans": [],
+                "legacy": {"errors": []},
+                "findings": [
+                    {
+                        "severity": "HIGH",
+                        "message": "Fixture validation failed",
+                        "suggestion": "Fix the fixture",
+                        "file_path": "SKILL.md",
+                        "line_number": 1,
+                    }
+                ],
+            }
+        ]
+    }
+    runner.log_result(row, data, annotations=True, budget={"errors": 0}, enforcement_mode=mode)
+    output = capsys.readouterr().out
+    assert marker in output
 
 
 def test_advisory_render_failure_still_fails(tmp_path, monkeypatch):

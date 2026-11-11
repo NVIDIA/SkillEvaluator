@@ -286,7 +286,14 @@ def annotation_text(value: str, *, property_value: bool = False) -> str:
     return escaped.replace(":", "%3A").replace(",", "%2C") if property_value else escaped
 
 
-def log_result(row: dict, data: dict | None, *, annotations: bool, budget: dict[str, int]) -> None:
+def log_result(
+    row: dict,
+    data: dict | None,
+    *,
+    annotations: bool,
+    budget: dict[str, int],
+    enforcement_mode: str = "strict",
+) -> None:
     """Explain verdicts promptly without replaying arbitrary subprocess logs."""
     print(f"Skill result: {json.dumps(row['path'])} — {row['overall_status'].upper()}", flush=True)
     if not data:
@@ -303,7 +310,8 @@ def log_result(row: dict, data: dict | None, *, annotations: bool, budget: dict[
         if result.get("incomplete_scans"):
             print(f"    Incomplete scanners: {json.dumps(result['incomplete_scans'])}", flush=True)
         for finding in result.get("findings", []):
-            if finding.get("severity") not in {"critical", "high"} or shown >= 20:
+            severity = str(finding.get("severity", "")).lower()
+            if severity not in {"critical", "high"} or shown >= 20:
                 continue
             shown += 1
             message = str(finding.get("message", "Finding details unavailable."))[:4000]
@@ -314,6 +322,7 @@ def log_result(row: dict, data: dict | None, *, annotations: bool, budget: dict[
             print(f"    Suggested fix: {json.dumps(suggestion)}", flush=True)
             if annotations and result.get("passed") is False and budget["errors"] < 10:
                 budget["errors"] += 1
+                annotation_level = "warning" if enforcement_mode == "advisory" else "error"
                 properties = "title=" + annotation_text(str(result.get("validator", "Tier 1")), property_value=True)
                 relative = finding_repository_path(row["path"], finding.get("file_path"))
                 if relative:
@@ -321,7 +330,10 @@ def log_result(row: dict, data: dict | None, *, annotations: bool, budget: dict[
                     line = finding.get("line_number")
                     if type(line) is int and line > 0:
                         properties += f",line={line}"
-                print(f"::error {properties}::{annotation_text(message + ' Suggested fix: ' + suggestion)}", flush=True)
+                print(
+                    f"::{annotation_level} {properties}::{annotation_text(message + ' Suggested fix: ' + suggestion)}",
+                    flush=True,
+                )
         if result.get("status") in {"incomplete", "failed"}:
             for message in result.get("legacy", {}).get("errors", [])[:3]:
                 print(f"    Scanner error: {json.dumps(str(message)[:4000])}", flush=True)
@@ -506,6 +518,10 @@ def evaluate_skill(
     return fields, data, False
 
 
+def _set_enforcement(summary: dict, *, mode: str, downgraded: bool) -> None:
+    summary["enforcement"] = {"mode": mode, "downgraded": downgraded}
+
+
 def run(
     workspace: Path,
     reports: Path,
@@ -622,6 +638,7 @@ def run(
         if selection is not None:
             summary["selection"] = selection
         summary["execution"] = context
+        _set_enforcement(summary, mode=enforcement_mode, downgraded=False)
         _write_summary(reports, summary)
         print(f"SkillEvaluator configuration failed: {json.dumps(message)}", flush=True)
         return 1
@@ -630,6 +647,7 @@ def run(
     if not selected:
         summary = _summary([])
         summary.update(overall_status="skipped", overall_passed=False, selection=selection, execution=context)
+        _set_enforcement(summary, mode=enforcement_mode, downgraded=False)
         _write_summary(reports, summary)
         print("NO SKILLS CHANGED: no skill was evaluated between the selected Git commits.", flush=True)
         return 0
@@ -652,6 +670,7 @@ def run(
     def checkpoint() -> None:
         summary = _summary(rows)
         summary.update(selection=selection, execution=context)
+        _set_enforcement(summary, mode=enforcement_mode, downgraded=False)
         _write_json(reports / "summary.json", summary)
         render_reports(reports, summary, context)
 
@@ -743,6 +762,7 @@ def run(
                     results.pop(logged),
                     annotations=environ.get("GITHUB_ACTIONS") == "true",
                     budget=annotation_budget,
+                    enforcement_mode=enforcement_mode,
                 )
             elif not final:
                 return
@@ -815,11 +835,7 @@ def run(
     summary = _summary(rows)
     summary["selection"] = selection
     summary["execution"] = context
-    _write_summary(reports, summary)
-    print(f"SkillEvaluator finished: {summary['passed']} of {summary['total']} skills passed.", flush=True)
-    # Reports have been validated and rendered. A failed headline can coexist
-    # with runtime errors or incomplete scanners, so inspect every skill too.
-    if (
+    downgraded = (
         enforcement_mode == "advisory"
         and summary["overall_status"] == "failed"
         and all(
@@ -829,7 +845,13 @@ def run(
             and not row.get("error")
             for row in rows
         )
-    ):
+    )
+    _set_enforcement(summary, mode=enforcement_mode, downgraded=downgraded)
+    _write_summary(reports, summary)
+    print(f"SkillEvaluator finished: {summary['passed']} of {summary['total']} skills passed.", flush=True)
+    # Reports have been validated and rendered. A failed headline can coexist
+    # with runtime errors or incomplete scanners, so inspect every skill too.
+    if downgraded:
         print(
             "::warning title=Tier 1 (advisory)::Tier 1 did not pass; enforcement-mode=advisory "
             "keeps policy findings non-blocking. See the uploaded report.",

@@ -338,7 +338,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
       If a quality score changes unexpectedly, inspect the finding message rather than adding keywords. The checker rewards usable instructions and evidence in their relevant context, not vocabulary alone.
     </Tip>
 
-    **Expected headings.** Reliability deducts points when `SKILL.md` lacks an expected heading. The packaged `quality-default.yaml` expects `## Prerequisites` (or `## Requirements`), `## Limitations`, and `## Troubleshooting` (or `## Common Issues` or `## FAQ`), each worth 5 points. Pass `--quality-config PATH` to `quality-check`, `tier1`, or `validate` to use your own list instead. The `expected_headers` list replaces the packaged list rather than merging with it, so copy any default entries you want to keep. A custom file must include `expected_headers`, even as `expected_headers: []`.
+    **Expected headings.** Reliability deducts points when `SKILL.md` lacks an expected heading. The packaged `quality-default.yaml` expects `## Prerequisites` (or `## Requirements`), `## Limitations`, and `## Troubleshooting` (or `## Common Issues` or `## FAQ`), each worth 5 points. Pass `--quality-config PATH` to `quality-check`, `tier1`, or `validate` to use your own list instead. `expected_headers` is optional in a custom file: when you omit it, the packaged list applies. A list you set replaces the packaged list rather than merging with it, so copy any default entries you want to keep. Set `expected_headers: []` to turn heading checks off.
 
     ```yaml title="quality.yaml"
     expected_headers:
@@ -373,10 +373,9 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     An entry is satisfied when the heading or any alternative appears anywhere in `SKILL.md` as text, so `## Security` also matches `### Security Notes` or a heading inside a code block.
 
-    **Error-handling checks.** Reliability also runs three error-handling rules, set in the `error_handling` section of the same file. Unlike `expected_headers`, this section is optional and merges with the packaged values: an omitted rule or key keeps its packaged value, and a list you set replaces the packaged list. Set `points: 0` to turn a rule off; it then adds no finding.
+    **Error-handling checks.** Reliability also runs three error-handling rules, set in the `error_handling` section of the same file. This section is optional and merges with the packaged values: an omitted rule or key keeps its packaged value, and a list you set replaces the packaged list. Set `points: 0` to turn a rule off; it then adds no finding.
 
     ```yaml title="quality.yaml"
-    expected_headers: []
     error_handling:
       mentioned:
         terms: [error, failure, rollback, retry]

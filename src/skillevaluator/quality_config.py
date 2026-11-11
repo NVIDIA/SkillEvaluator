@@ -217,9 +217,16 @@ def _load(path: Path | None) -> tuple[QualityConfig, dict]:
         raise QualityConfigError(f"{source}: invalid YAML: nesting is too deep") from exc
     except (ValueError, TypeError, KeyError, AttributeError) as exc:
         raise QualityConfigError(f"{source}: invalid YAML: cannot parse a value: {exc}") from exc
-    if not isinstance(raw, dict) or not isinstance(raw.get("expected_headers"), list):
+    if not isinstance(raw, dict):
+        raise QualityConfigError(f"{source}: expected_headers must be a list")
+    # A custom file may omit expected_headers and inherit the packaged list; the packaged file may not.
+    headers_declared = path is None or "expected_headers" in raw
+    if headers_declared and not isinstance(raw.get("expected_headers"), list):
         raise QualityConfigError(f"{source}: expected_headers must be a list")
     _reject_unknown_keys(raw, _TOP_LEVEL_KEYS, source, "top level")
+    if not headers_declared:
+        packaged_config = load_quality_config()
+        raw = {**raw, "expected_headers": []}
 
     expected_headers: list[ExpectedHeader] = []
     seen_headings: dict[str, str] = {}
@@ -271,8 +278,10 @@ def _load(path: Path | None) -> tuple[QualityConfig, dict]:
         return config, dict(config)
     raw_error_handling = raw.get("error_handling", {})
     packaged = load_quality_config()["error_handling"]
+    if not headers_declared:
+        expected_headers = [dict(rule) for rule in packaged_config["expected_headers"]]  # type: ignore[misc]
     error_handling = _parse_error_handling(raw_error_handling, source, base=packaged)
-    declared: dict = {"expected_headers": expected_headers}
+    declared: dict = {"expected_headers": expected_headers} if headers_declared else {}
     declared_error_handling = {
         name: {key: error_handling[name][key] for key in block}
         for name, block in raw_error_handling.items()

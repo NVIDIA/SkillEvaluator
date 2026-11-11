@@ -411,3 +411,57 @@ def test_custom_digest_ignores_packaged_defaults_the_file_omits(tmp_path: Path, 
     assert after_config["error_handling"]["mentioned"]["points"] == 11  # the new default still applies
     assert before_config["error_handling"]["mentioned"]["points"] == 10
     assert after["digest"] == before["digest"]
+
+
+def test_custom_file_without_expected_headers_keeps_the_packaged_list(tmp_path: Path) -> None:
+    custom = tmp_path / "quality.yaml"
+    custom.write_text("error_handling: {mentioned: {points: 9}}\n", encoding="utf-8")
+
+    config = load_quality_config(custom)
+
+    assert config["expected_headers"] == load_quality_config()["expected_headers"]
+    assert len(config["expected_headers"]) == 3
+    assert config["error_handling"]["mentioned"]["points"] == 9
+
+
+def test_explicit_expected_headers_replaces_or_empties_the_packaged_list(tmp_path: Path) -> None:
+    custom = tmp_path / "quality.yaml"
+    custom.write_text("expected_headers: []\n", encoding="utf-8")
+    assert load_quality_config(custom)["expected_headers"] == []
+
+    custom.write_text('expected_headers:\n  - heading: "## Examples"\n', encoding="utf-8")
+    assert [rule["heading"] for rule in load_quality_config(custom)["expected_headers"]] == ["## Examples"]
+
+
+@pytest.mark.parametrize("body", ["expected_headers:\n", "expected_headers: {}\n", "expected_headers: x\n"])
+def test_present_expected_headers_must_still_be_a_list(tmp_path: Path, body: str) -> None:
+    custom = tmp_path / "quality.yaml"
+    custom.write_text(body, encoding="utf-8")
+
+    with pytest.raises(QualityConfigError, match="expected_headers must be a list"):
+        load_quality_config(custom)
+
+
+def test_packaged_file_must_still_declare_expected_headers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator import quality_config
+
+    broken = tmp_path / "broken-default.yaml"
+    broken.write_text("error_handling: {}\n", encoding="utf-8")
+    monkeypatch.setattr(quality_config, "DEFAULT_QUALITY_CONFIG", broken)
+
+    with pytest.raises(QualityConfigError, match="expected_headers must be a list"):
+        load_quality_config()
+
+
+def test_digest_does_not_declare_packaged_headings_when_the_key_is_omitted(tmp_path: Path) -> None:
+    omitted = tmp_path / "omitted.yaml"
+    omitted.write_text("error_handling: {mentioned: {points: 9}}\n", encoding="utf-8")
+    empty = tmp_path / "empty.yaml"
+    empty.write_text("expected_headers: []\nerror_handling: {mentioned: {points: 9}}\n", encoding="utf-8")
+    bare = tmp_path / "bare.yaml"
+    bare.write_text("{}\n", encoding="utf-8")
+
+    assert _digest(omitted) == quality_config_digest({"error_handling": {"mentioned": {"points": 9}}})
+    assert _digest(omitted) != _digest(empty)
+    assert _digest(bare) == quality_config_digest({})
+    assert _digest(bare) != _digest(None)

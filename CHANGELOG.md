@@ -10,7 +10,10 @@ All notable changes to SkillEvaluator are documented in this file.
   Reliability's three error-handling rules: the `SKILL.md` mention check and
   the `scripts` and `lib` code checks. Each sets `points`, `message`,
   `suggestion`, and its `terms` or `markers`; `points: 0` turns a rule off.
-  The section is optional and merges with the packaged values. Without a
+  The section is optional and merges with the packaged values. A custom file
+  may now also omit `expected_headers`, which then falls back to the packaged
+  heading list; a list you set still replaces it and `[]` still turns heading
+  checks off. Without a
   custom file, scores and findings are unchanged. The packaged
   `quality_config` digest changes once, because `quality-default.yaml` gained
   the section. A custom file's digest covers only the rules that file sets, so

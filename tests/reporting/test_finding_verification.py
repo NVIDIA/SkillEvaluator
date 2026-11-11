@@ -159,7 +159,7 @@ def test_missing_or_invalid_verification_metadata_adds_no_verdict(format_name: s
 
     assert "LLM verification:" not in visible
     assert '<div class="llm-verification">' not in output
-    assert "Severity retained" not in visible
+    assert "Reported severity" not in visible
     assert not result.passed
 
 
@@ -191,7 +191,38 @@ def test_verification_reasoning_is_inert_and_bounded(format_name: str) -> None:
         assert "[link=https://example.test]text[/link]" in visible
 
 
-def test_html_keeps_occurrence_specific_verification_reasoning() -> None:
+def test_html_groups_same_verification_decision_with_distinct_reasoning() -> None:
+    """Per-occurrence prose must not turn one repeated issue into many skill cards."""
+    result = ValidationResult(validator_name="SECURITY", validator_description="Security review")
+    reasons = ["First occurrence is an artifact.", "Second occurrence is generated.", "Third occurrence is a pointer."]
+    for line_number, reasoning in zip((10, 20, 30), reasons, strict=True):
+        result.add_finding(
+            _finding(
+                line_number=line_number,
+                metadata={"llm_verdict": "false_positive", "llm_confidence": "medium", "llm_reasoning": reasoning},
+            )
+        )
+
+    output, _ = _render("html", result)
+    skill_view, validator_view = output.split('id="results-by-skill"', 1)[1].split('id="results-by-validator"', 1)
+    skill_text = _text(skill_view)
+    validator_blocks = re.findall(r'<div class="llm-verification">(.*?)</div>', validator_view, re.DOTALL)
+    validator_text = _text(" ".join(validator_blocks))
+
+    assert skill_view.count('<div class="llm-verification">') == 1
+    assert "3 occurrences" in skill_text
+    assert "Lines: 10, 20, 30" in skill_text
+    assert reasons[0] in skill_text
+    assert all(reason not in skill_text for reason in reasons[1:])
+    assert len(validator_blocks) == 3
+    assert all(reason in validator_text for reason in reasons)
+    exported = json.loads(JSONReporter(include_timestamp=False).render(result))
+    assert [finding["metadata"]["llm_reasoning"] for finding in exported["findings"]] == reasons
+    assert [finding["line_number"] for finding in exported["findings"]] == [10, 20, 30]
+    assert not passes_required_gate(result)
+
+
+def test_html_keeps_different_verification_decisions_separate() -> None:
     result = _result(
         _finding(
             metadata={
@@ -219,6 +250,42 @@ def test_html_keeps_occurrence_specific_verification_reasoning() -> None:
     assert "Second occurrence lacks enough context." in visible
     assert "False positive" in visible
     assert "Uncertain" in visible
+
+
+@pytest.mark.parametrize("format_name", ["html", "markdown", "cli"])
+def test_verifier_and_reporter_share_downgrade_policy_with_coverage_exemption(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, format_name: str
+) -> None:
+    """A changed rule must drive both actual downgrade behavior and its explanation."""
+    from skillevaluator import finding_verification_policy
+
+    monkeypatch.setattr(finding_verification_policy, "DOWNGRADE_CONFIDENCE", "medium")
+    monkeypatch.setattr(finding_verification_policy, "DOWNGRADE_SEVERITY", Severity.LOW)
+    coverage = _finding(
+        check_name="skillspector_reference_caveats", severity=Severity.MEDIUM, message="Coverage remains advisory"
+    )
+    result = _result(coverage)
+    result.add_finding(_finding(message="Possible artifact reference"))
+    result.add_finding(_finding(message="Operation needs more context"))
+    with patch("skillevaluator.inference.FindingVerifier") as verifier:
+        verifier.return_value.verify.return_value = {
+            0: {"verdict": "false_positive", "confidence": "medium", "rationale": "Artifact reference."},
+            1: {"verdict": "uncertain", "confidence": "medium", "rationale": "More context needed."},
+        }
+        SecurityValidator(verify_llm=True)._verify_findings_with_llm(result, tmp_path)
+
+    assert result.findings[1].severity == Severity.LOW
+    assert result.findings[2].severity == Severity.HIGH
+    assert coverage.severity == Severity.MEDIUM
+    assert "llm_verdict" not in coverage.metadata
+    assert not result.is_incomplete
+    before = copy.deepcopy(result)
+    _, visible = _render(format_name, result)
+
+    assert "Verifier recorded a downgrade to LOW; reported severity: LOW" in visible
+    assert "only medium-confidence false positives are downgraded to LOW by verification" in visible
+    assert not passes_required_gate(result)
+    assert result == before
 
 
 @pytest.mark.parametrize("format_name", ["html", "markdown", "cli"])

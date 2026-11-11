@@ -2258,8 +2258,10 @@ class HTMLReporter(ReporterBase):
         (e.g., "Personal macOS user path") fires on many lines in the same file.
         A finding's ``occurrence_id`` becomes an ``occurrence_ids`` list on the
         merged entry, so every merged location keeps its identity. The key
-        also holds ``finding_id`` and verification text when present, so two
-        different checks or occurrence-specific verdicts never merge.
+        also holds ``finding_id`` and the verification decision when present,
+        so different checks or decisions never merge. The first occurrence's
+        rationale represents the group; individual rationales remain in the
+        validator view and JSON export.
         """
         groups: dict[tuple, dict[str, Any]] = {}
         seen_occurrences: dict[tuple, set[str]] = {}
@@ -2267,12 +2269,16 @@ class HTMLReporter(ReporterBase):
         for finding in findings:
             # Normalize message for deduplication (strip trailing whitespace/newlines)
             norm_msg = HTMLReporter._normalize_message(finding.get("message", ""))
+            verification = finding_verification(finding)
+            decision = (
+                (verification.verdict, verification.confidence, verification.severity_effect) if verification else None
+            )
             key = (
                 norm_msg,
                 finding.get("file_path", ""),
                 finding.get("suggestion", ""),
                 finding.get("finding_id"),
-                finding_verification(finding),
+                decision,
             )
 
             if key in groups:

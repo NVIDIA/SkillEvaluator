@@ -8,6 +8,7 @@ from __future__ import annotations
 import unicodedata
 from dataclasses import dataclass
 
+from skillevaluator import finding_verification_policy
 from skillevaluator.models import Finding, Severity
 
 _VERDICTS = {
@@ -67,14 +68,16 @@ def finding_verification(finding: Finding | dict) -> FindingVerification | None:
     severity_value = severity.value if isinstance(severity, Severity) else severity
     if not isinstance(severity_value, str) or severity_value not in {item.value for item in Severity}:
         return None
-    if verdict == "false_positive" and confidence == "high":
+    downgrade_severity = finding_verification_policy.DOWNGRADE_SEVERITY.value.upper()
+    if finding_verification_policy.should_downgrade(verdict, confidence):
         if metadata.get("downgraded") is True:
-            effect = f"Verifier recorded a downgrade to INFO; reported severity: {severity_value.upper()}."
+            effect = (
+                f"Verifier recorded a downgrade to {downgrade_severity}; reported severity: {severity_value.upper()}."
+            )
         else:
             effect = f"Reported severity: {severity_value.upper()}; no verification downgrade recorded."
     else:
         effect = (
-            f"Reported severity: {severity_value.upper()}; "
-            "only high-confidence false positives are downgraded to INFO by verification."
+            f"Reported severity: {severity_value.upper()}; {finding_verification_policy.downgrade_policy_explanation()}"
         )
     return FindingVerification(_VERDICTS[verdict], confidence, bounded, effect)

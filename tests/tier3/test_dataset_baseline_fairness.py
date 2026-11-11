@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -225,6 +226,23 @@ def test_documented_dataset_examples_are_fair_to_the_baseline(page):
                 checked += 1
                 assert _baseline_fairness_warnings(entry) == [], (page, entry["id"])
     assert checked, f"no dataset examples found in {page}"
+
+
+def test_public_starter_dataset_passes_strict_validate(tmp_path: Path):
+    # scripts/demo_starter.py copies this dataset next to the text-analyzer skill, and
+    # docs/starter-demo.mdx runs the paired evaluation on it.
+    reference = _REPO / "src" / "skillevaluator" / "tier3" / "reference_skills" / "text-analyzer"
+    skill = tmp_path / "text-analyzer"
+    (skill / "evals" / "files").mkdir(parents=True)
+    (skill / "SKILL.md").write_bytes((reference / "SKILL.md").read_bytes())
+    shutil.copytree(reference / "scripts", skill / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+    starter = _REPO / "examples" / "starter"
+    (skill / "evals" / "evals.json").write_bytes((starter / "evals.json").read_bytes())
+    (skill / "evals" / "files" / "input.txt").write_bytes((starter / "input.txt").read_bytes())
+
+    result = CliRunner().invoke(cli, ["tier3", "validate", str(skill), "--strict", "--json"])
+
+    assert result.exit_code == 0, result.output
 
 
 def test_documented_eval_md_behaviors_are_fair_to_the_baseline():

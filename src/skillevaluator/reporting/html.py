@@ -87,6 +87,7 @@ from skillevaluator.reporting.finding_summary import (
     summarize_messages,
     total_issue_count,
 )
+from skillevaluator.reporting.finding_verification import finding_verification
 from skillevaluator.reporting.harbor_viewer import harbor_job_links, normalize_agent_eval_harbor_links
 from skillevaluator.reporting.presentation import (
     FinalRenderContext,
@@ -1921,6 +1922,7 @@ class HTMLReporter(ReporterBase):
         environment.filters["cleanly_skipped"] = is_cleanly_skipped
         environment.filters["execution_status"] = _result_display_status
         environment.filters["related_paths"] = _related_paths
+        environment.filters["finding_verification"] = finding_verification
         environment.filters["additional_errors"] = additional_errors
         environment.filters["adaptive_percent"] = _adaptive_percent
         environment.filters["adaptive_interval_percent"] = _adaptive_interval_percent
@@ -2256,8 +2258,8 @@ class HTMLReporter(ReporterBase):
         (e.g., "Personal macOS user path") fires on many lines in the same file.
         A finding's ``occurrence_id`` becomes an ``occurrence_ids`` list on the
         merged entry, so every merged location keeps its identity. The key
-        also holds ``finding_id`` when present, so two different checks with
-        the same text never merge and an entry's IDs all belong to it.
+        also holds ``finding_id`` and verification text when present, so two
+        different checks or occurrence-specific verdicts never merge.
         """
         groups: dict[tuple, dict[str, Any]] = {}
         seen_occurrences: dict[tuple, set[str]] = {}
@@ -2270,6 +2272,7 @@ class HTMLReporter(ReporterBase):
                 finding.get("file_path", ""),
                 finding.get("suggestion", ""),
                 finding.get("finding_id"),
+                finding_verification(finding),
             )
 
             if key in groups:

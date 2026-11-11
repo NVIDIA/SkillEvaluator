@@ -348,7 +348,7 @@ def test_plain_refine_keeps_generated_cases_when_collection_is_unavailable(tmp_p
 
     assert result.status == "created"
     assert result.cases_count == 1
-    assert result.dataset["evals"][0]["expected_output"].startswith("The agent used the my-skill skill")
+    assert result.dataset["evals"][0]["expected_output"] == "A correct, complete result for: does useful work"
 
 
 def test_main_invalid_skill_raises_domain_error_without_printing(tmp_path, capsys):

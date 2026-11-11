@@ -45,6 +45,7 @@ from skillevaluator.reporting.run_status import Status, resolve_run_status, resu
 from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION, pass_at_k_summary
 from skillevaluator.tier3.baseline_store import baseline_description
 from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
+from skillevaluator.tier3.version_comparison import version_comparison_lines
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
@@ -358,6 +359,9 @@ class MarkdownReporter(ReporterBase):
             lines.append("")
             if ae.get("baseline"):
                 lines.append(baseline_description(ae["baseline"]))
+                lines.append("")
+            if comparison := ae.get("prior_version_comparison"):
+                lines.extend(html.escape(line) for line in version_comparison_lines(comparison))
                 lines.append("")
             composite_text = _format_report_number(composite, signed=True)
             lines.append(f"**Verdict:** {verdict} (Skill Lift = {composite_text})")

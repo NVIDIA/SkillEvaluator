@@ -2422,11 +2422,15 @@ class SecurityValidator(ValidatorBase):
             skillspector_reference_root: Artifact root that contains the
                 scanned directory, such as a plugin around its bundled skills.
                 References written relative to it still count as agent
-                references. Defaults to the scanned directory. Missing
-                references are accepted only in a scan of this root, or
-                without it, of *target_root* or else the whole target of
-                :meth:`validate` or :meth:`validate_security_only`
-                (:func:`_skillspector_missing_reference_notes`).
+                references. Defaults to the scanned directory.
+                :func:`_skillspector_missing_reference_notes` accepts missing
+                references only in a scan of this root, or without it, of
+                *target_root* or else the whole target of :meth:`validate` or
+                :meth:`validate_security_only`. A scan outside those methods
+                without this root has no reference root, so that rule accepts
+                none there; a 2.13.3 report that
+                :func:`reference_caveat_metadata` accepts still passes as its
+                caveat.
             skillspector_baseline: Audited SkillSpector YAML/JSON suppression
                 baseline. Matching findings are removed by SkillSpector before
                 scoring. Baselines are only applied when passed explicitly; one
@@ -2660,11 +2664,14 @@ class SecurityValidator(ValidatorBase):
         own, and its instructions may name files elsewhere in the folder that
         its scan does not inspect, so their missing references are not
         accepted. A configured ``target_root`` replaces the target, such as
-        the folder of skills that a skill passed here belongs to. A scan run
-        outside this walk accepts missing references only when the configured
+        the folder of skills that a skill passed here belongs to. In a scan
+        run outside this walk, :func:`_skillspector_missing_reference_notes`
+        accepts missing references only when the configured
         ``skillspector_reference_root`` is the scanned root. Otherwise, as for
-        the per-partition scans of ``tier1/plugin_checks.py``, it has no known
-        target and accepts none.
+        the per-partition scans of ``tier1/plugin_checks.py``, that rule
+        accepts none. Such a scan without a configured root has no known
+        target, so a 2.13.3 report that :func:`reference_caveat_metadata`
+        accepts still passes as its caveat.
         """
         blocks: list[dict] = []
 

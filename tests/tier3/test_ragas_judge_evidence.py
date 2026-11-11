@@ -30,6 +30,8 @@ import openai
 import pytest
 from tests.conftest import load_harbor_eval_template
 
+from skillevaluator.tier3.harbor import runner
+
 _OPENAI_TEST_KEY = "test-key-fake"
 _CHAT_URL = "https://api.openai.com/v1/chat/completions"
 # Both spellings are deleted. NO_PROXY is listed so that a lower-case no_proxy,
@@ -328,6 +330,8 @@ def test_failed_ragas_provider_replies_are_saved_with_their_prompt(
     assert _OPENAI_TEST_KEY not in failed["problem"]
     assert "reply" not in failed
     assert [exchange["status"], outcome["status"]] == ["replied", "accepted"]
+    # --max-judge-calls counts the RAGAS score once, not each request or the SDK's retry.
+    assert runner._budget_usage(verifier.VERIFIER_DIR) == {"judge_calls": 1}
 
 
 def test_long_error_body_is_redacted_before_it_is_shortened(
@@ -513,6 +517,8 @@ def test_verifier_run_saves_ragas_exchanges_with_the_other_judges(
         ("goal_accuracy", "ragas", "replied"),
         ("goal_accuracy", "ragas", "accepted"),
     ]
+    # The RAGAS request entry does not count toward --max-judge-calls, as on main.
+    assert runner._budget_usage(verifier.VERIFIER_DIR.parent) == {"judge_calls": 2}
 
 
 @pytest.mark.parametrize(("variable", "proxy"), _PROXY_SETTINGS)

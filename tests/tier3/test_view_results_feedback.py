@@ -317,7 +317,7 @@ def test_saved_feedback_keeps_what_the_case_pass_adds(
     assert passes[0]["use_llm"] is False
     assert passes[0]["fixes"] == fixes
     [payload] = payloads
-    # main computes the run-level next steps both when it builds the payload and in the case pass,
+    # The report computes the run-level next steps both when it builds the payload and in the case pass,
     # and saves neither copy, so the rebuild must keep them.
     case_fixes = json.loads((run / "what_to_fix.json").read_text(encoding="utf-8"))
     assert (case_fixes == SAVED_FIXES) is (fixes is not None)

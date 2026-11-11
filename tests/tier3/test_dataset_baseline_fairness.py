@@ -966,6 +966,28 @@ def test_template_refine_ignores_non_string_skill_fields():
     assert "The agent read release.yaml" in case_only["expected_behavior"]
 
 
+@pytest.mark.parametrize(
+    ("placeholder", "command"),
+    [
+        ("None", "python3 -c 'print(None)'"),
+        ("N/A", "grep -c A grades.csv"),
+        ("-", "sort - < grades.csv"),
+    ],
+)
+def test_template_refine_treats_a_placeholder_expected_script_as_no_script(placeholder, command):
+    # Placeholder expected_script values mean no script, so they must not drop task commands.
+    case = {**generate_dataset._generate_simple(_skill(scripts=[]))[0], "expected_script": placeholder}
+    trajectory = {
+        "steps": [{"source": "agent", "tool_calls": [{"function_name": "bash", "arguments": {"command": command}}]}]
+    }
+
+    (refined,) = generate_dataset._refine_from_trajectory_template(
+        [case], {case["id"]: trajectory}, authored_case_ids=set()
+    )
+
+    assert f"The agent executed: {command}" in refined["expected_behavior"]
+
+
 def test_template_refine_drops_runs_of_a_shell_skill_script(tmp_path: Path):
     skill = generate_dataset._parse_skill(_write_skill(tmp_path, "Reviews release manifests.", scripts=_SCRIPT_FILES))
     cases = generate_dataset._generate_simple(skill)

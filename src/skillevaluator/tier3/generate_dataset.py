@@ -1299,7 +1299,11 @@ def _refine_from_trajectory_template(
 
         case = dict(case)
         skill_name = (skill or {}).get("name") or case.get("expected_skill")
-        skill_scripts = [*_script_file_names(skill or {}), case.get("expected_script")]
+        expected_script = case.get("expected_script")
+        if isinstance(expected_script, str):
+            # A placeholder such as "None" or "N/A" names no script.
+            expected_script = normalize_optional_reference(expected_script)
+        skill_scripts = [*_script_file_names(skill or {}), expected_script]
 
         is_authored = authored_case_ids is None or case.get("id") in authored_case_ids
         authored_behaviors = case.get("expected_behavior") if is_authored else []

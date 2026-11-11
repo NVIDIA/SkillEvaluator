@@ -72,8 +72,26 @@ logger = logging.getLogger(__name__)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 _EVAL_CORE_DIR = Path(__file__).resolve().parent.parent / "eval_core"
+_VERIFIER_FILES = (
+    TEMPLATES_DIR / "eval.py",
+    _EVAL_CORE_DIR / "log_converters.py",
+    _EVAL_CORE_DIR / "atif_helpers.py",
+    _EVAL_CORE_DIR / "shell_lexing.py",
+    _EVAL_CORE_DIR / "script_invocation.py",
+    _EVAL_CORE_DIR / "declarative_checks.py",
+    _EVAL_CORE_DIR / "optional_reference.py",
+    _EVAL_CORE_DIR / "checks.py",
+    _EVAL_CORE_DIR / "secret_redaction.py",
+    _EVAL_CORE_DIR / "codex_tool_call_normalizer.py",
+    _EVAL_CORE_DIR / "character_facts.py",
+    _EVAL_CORE_DIR.parent.parent / "evidence.py",
+)
 _EVALUATOR_TESTS_SUBDIR = "skill_evaluator"
 _BASE_IMAGE_PREFIX = "skillevaluator-base"
+# Compose 2 treats HEALTHCHECK NONE as a configured check, then fails its
+# readiness wait because Docker supplies no health state. Replace authored
+# checks with this constant exec-form probe; do not run authored healthcheck commands.
+_MAIN_CONTAINER_READINESS_HEALTHCHECK = 'HEALTHCHECK --interval=1s --timeout=5s --retries=3 CMD ["/bin/true"]'
 _MAX_REPO_CONTEXT_FILE_BYTES = 10 * 1024 * 1024
 _MAX_REPO_CONTEXT_TOTAL_BYTES = 200 * 1024 * 1024
 _MAX_EVALUATOR_FILE_BYTES = 64 * 1024 * 1024
@@ -2392,23 +2410,11 @@ def _copy_verifier(task_dir: Path) -> None:
     tests_dir = task_dir / "tests"
     tests_dir.mkdir(parents=True, exist_ok=True)
     evaluator_dir = _replace_evaluator_tests_dir(task_dir)
-    sources = (
-        (TEMPLATES_DIR / "eval.py", "Verifier template"),
-        (_EVAL_CORE_DIR / "log_converters.py", "log_converters helper"),
-        (_EVAL_CORE_DIR / "atif_helpers.py", "ATIF evidence helpers"),
-        (_EVAL_CORE_DIR / "shell_lexing.py", "Shell lexical helper"),
-        (_EVAL_CORE_DIR / "script_invocation.py", "Shell invocation helper"),
-        (_EVAL_CORE_DIR / "checks.py", "Deterministic grading checks"),
-        (_EVAL_CORE_DIR / "secret_redaction.py", "Deterministic redaction helper"),
-        (_EVAL_CORE_DIR / "codex_tool_call_normalizer.py", "Codex tool-call normalizer"),
-        (_EVAL_CORE_DIR / "character_facts.py", "Judge character-facts helper"),
-        (_EVAL_CORE_DIR.parent.parent / "evidence.py", "Evidence-reference helper"),
-    )
-    for src, label in sources:
+    for src in _VERIFIER_FILES:
         if src.exists():
             shutil.copy2(src, evaluator_dir / src.name)
         else:
-            logger.warning("%s not found at %s", label, src)
+            logger.warning("Verifier source not found at %s", src)
 
 
 def _has_symlink_component(path: Path, root: Path) -> bool:
@@ -3560,6 +3566,8 @@ _AGENT_SKILL_PATHS = [
     "COPY skills/ /root/.config/opencode/skills/",
 ]
 _RUNTIME_SKILL_DIRS = (
+    "/tmp/hermes/skills",
+    "/root/.hermes/skills",
     "/etc/codex/skills",
     "/tmp/codex-home/skills",
     "/workspace/skills",
@@ -3588,6 +3596,7 @@ _RUNTIME_SKILL_DIRS = (
     "/tmp/agent-home/sessions/skills",
 )
 _PROJECT_SKILL_RELATIVE_DIRS = (
+    ".hermes/skills",
     ".agents/skills",
     ".claude/commands",
     ".claude/skills",
@@ -3791,9 +3800,11 @@ def _validate_runtime_loader_env(runtime_env: dict[str, str] | None) -> None:
 
 def _runtime_skill_reset_lines(agent_workdir: str | None = None) -> list[str]:
     """Replace fixed, effective-home, and project-ancestor skill roots."""
+    runtime_dirs_to_reset = ["/tmp/hermes" if path == "/tmp/hermes/skills" else path for path in _RUNTIME_SKILL_DIRS]
+    runtime_dirs_to_create = [path for path in _RUNTIME_SKILL_DIRS if path != "/tmp/hermes/skills"]
     lines = [
-        "RUN " + json.dumps(["/bin/rm", "-rf", *_RUNTIME_SKILL_DIRS]),
-        "RUN " + json.dumps(["/bin/mkdir", "-p", *_RUNTIME_SKILL_DIRS]),
+        "RUN " + json.dumps(["/bin/rm", "-rf", *runtime_dirs_to_reset]),
+        "RUN " + json.dumps(["/bin/mkdir", "-p", *runtime_dirs_to_create]),
         "RUN " + json.dumps(["/bin/sh", "-c", _PROJECT_SKILL_ANCESTOR_RESET]),
         "RUN " + json.dumps(["/bin/sh", "-c", _HOME_SKILL_RESET]),
         "RUN " + json.dumps(["/bin/sh", "-c", _PASSWD_HOME_SKILL_RESET]),
@@ -3861,6 +3872,7 @@ def _append_task_input_projection(
             _RUNTIME_POLICY_ENV_RESET,
             "ENTRYPOINT []",
             "HEALTHCHECK NONE",
+            _MAIN_CONTAINER_READINESS_HEALTHCHECK,
         ]
     )
     if restore_user is not None and restore_user.casefold() != "root":
@@ -3890,6 +3902,7 @@ def _extend_task_input_projection(lines: list[str], *, include_input: bool, agen
             _RUNTIME_POLICY_ENV_RESET,
             "ENTRYPOINT []",
             "HEALTHCHECK NONE",
+            _MAIN_CONTAINER_READINESS_HEALTHCHECK,
         ]
     )
 

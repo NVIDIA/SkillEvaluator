@@ -293,14 +293,14 @@ Every selected manifest is accounted for: reports include `collection_coverage`
 with `selected_count`, `indexed_count`, and `skipped_count`. Here indexed means
 valid manifests eligible for embedding; a provider or work-limit error can still
 stop the index build. Missing frontmatter, malformed YAML, a non-mapping header,
-a missing name/title or description, or one that is not a string produces an
-exclusion reason. Up to 100
-exclusions are listed with collection-relative paths (each bounded to 512
-characters); `omitted_exclusions` counts additional diagnostics. An excluded
-manifest makes the scan **INCOMPLETE** and blocking, even when the indexed subset
-has no matches. Matches in the valid subset remain available. Fix excluded
-manifests and rerun; an incomplete collection cannot replace or create a saved
-catalog. Unsafe paths and input limits continue to stop discovery outright.
+a missing name/title or description, or one that is not a string, produces an
+exclusion reason. Up to 100 exclusions are listed with collection-relative paths
+(each bounded to 512 characters); `omitted_exclusions` counts additional
+diagnostics. An excluded manifest makes the scan **INCOMPLETE** and blocking,
+even when the indexed subset has no matches. Matches in the valid subset remain
+available. Fix excluded manifests and rerun; an incomplete collection cannot
+replace or create a saved catalog. Unsafe paths and input limits continue to
+stop discovery outright.
 
 For Python callers reusing an `EmbeddingRegistry`, each successful
 `build_from_directory()` or `build_from_paths()` replaces the entire indexed

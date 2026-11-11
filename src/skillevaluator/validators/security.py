@@ -35,6 +35,7 @@ from pathlib import Path, PurePosixPath
 import yaml
 from yaml.events import ScalarEvent
 
+from skillevaluator import finding_verification_policy
 from skillevaluator.config import load_pii_patterns
 from skillevaluator.constants import (
     HOME_PATH_SUBMITTER_ENV_VARS,
@@ -4944,15 +4945,19 @@ class SecurityValidator(ValidatorBase):
             finding.metadata["llm_confidence"] = confidence
             finding.metadata["llm_reasoning"] = reasoning
 
-            if verdict == "false_positive" and confidence == "high":
-                finding.severity = Severity.INFO
+            if finding_verification_policy.should_downgrade(verdict, confidence):
+                finding.severity = finding_verification_policy.DOWNGRADE_SEVERITY
                 finding.metadata["downgraded"] = True
                 finding.metadata["confidence"] = "low"
                 suppressed += 1
 
         if suppressed:
             result.recalculate_from_findings()
-            result.add_message(f"LLM verification downgraded {suppressed} finding(s) to INFO (false positives)")
+            target_severity = finding_verification_policy.DOWNGRADE_SEVERITY.value.upper()
+            verdict_label = finding_verification_policy.DOWNGRADE_VERDICT.replace("_", " ")
+            result.add_message(
+                f"LLM verification downgraded {suppressed} finding(s) to {target_severity} ({verdict_label}s)"
+            )
 
         unverified = len(findings) - verified
         if unverified:
@@ -4965,7 +4970,11 @@ class SecurityValidator(ValidatorBase):
                 f"{unverified} {noun} {verb} not verified{cause}"
             )
         elif not suppressed:
-            result.add_message("LLM verification reviewed all findings; no high-confidence false positives identified")
+            confidence_label = finding_verification_policy.DOWNGRADE_CONFIDENCE
+            verdict_label = finding_verification_policy.DOWNGRADE_VERDICT.replace("_", " ")
+            result.add_message(
+                f"LLM verification reviewed all findings; no {confidence_label}-confidence {verdict_label}s identified"
+            )
 
     # ------------------------------------------------------------------
     # File utilities

@@ -262,7 +262,7 @@ def test_documented_tier_statuses_match_the_manifest_contract():
     import re
     from pathlib import Path
 
-    text = " ".join((Path(__file__).parents[2] / "docs/reports.mdx").read_text().split())
+    text = " ".join((Path(__file__).parents[2] / "ci/templates/all-tiers/README.md").read_text().split())
     sentence = re.search(r"A tier can be (.+?)\.", text)
     assert sentence is not None
     assert set(re.findall(r"`([a-z_]+)`", sentence[1])) == tier_manifest._STATUSES

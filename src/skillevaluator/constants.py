@@ -632,6 +632,16 @@ DIMENSION_HINTS: dict[str, str] = {
     "efficiency": "Uses the skill and tools productively without wasted work.",
 }
 
+# Where each Tier 3 signal's evidence comes from, in plain words.
+SIGNAL_EVIDENCE_SOURCES: dict[str, str] = {
+    "security": "deterministic checks of the agent's commands and outputs",
+    "accuracy": "an LLM judge comparing the final answer with the reference answer",
+    "skill_execution": "deterministic checks of the agent's trajectory",
+    "goal_accuracy": "an LLM judge of whether the user's goal was met",
+    "behavior_check": "an LLM judge of the expected workflow",
+    "skill_efficiency": "deterministic checks of the agent's trajectory",
+}
+
 # Token-efficiency evaluator: derived locally from ``trial.tokens`` (the
 # per-trial trajectory token counters). Per-trial sub-score uses a
 # soft asymptote ``1 / (1 + total / TOKEN_EFFICIENCY_HALF_LIFE)`` over the

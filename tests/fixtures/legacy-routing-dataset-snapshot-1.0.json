@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.0",
+  "evaluator_version": "0.8.0",
+  "dataset": [
+    {
+      "id": "negative-override",
+      "expected_skill": "demo",
+      "should_trigger": false
+    },
+    {
+      "id": "positive-label",
+      "should_trigger": true
+    },
+    {
+      "id": "negative-label",
+      "should_trigger": false
+    }
+  ],
+  "dataset_summary": {
+    "total_tasks": 3,
+    "positive_tasks": 1,
+    "negative_tasks": 0,
+    "unclassified_tasks": 2,
+    "source": "dataset"
+  },
+  "dataset_digest": "sha256:6961169bde298965d72c82e65a8bbe48fac000fb1a1e08db3779898a765dab5c",
+  "dataset_digest_algorithm": "skill-evaluator-dataset-snapshot/1"
+}

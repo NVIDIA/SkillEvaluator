@@ -14,6 +14,7 @@ import subprocess
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from skillevaluator.tier3.output_provenance import GENERATED_OUTPUT_MARKER, is_generated_output_root
@@ -500,6 +501,8 @@ def _legacy_pass_at_k_is_complete(
     allow_coverage_failure: bool = False,
 ) -> bool:
     """Validate the historical collector's complete pass-at-k structure."""
+    from skillevaluator.tier3.attempt_verdict import attempt_verdict
+
     if not isinstance(payload, dict):
         return False
     k = payload.get("k")
@@ -617,7 +620,49 @@ def _legacy_pass_at_k_is_complete(
             ):
                 return False
             score = attempt.get("score")
-            if attempt["passed"] != (score >= threshold):
+            goal_accuracy = attempt.get("goal_accuracy")
+            if goal_accuracy is not None and (not _is_finite_number(goal_accuracy) or not 0 <= goal_accuracy <= 1):
+                return False
+            security_score = attempt.get("security_score")
+            security_clean = attempt.get("security_clean")
+            security_message = attempt.get("security_message")
+            security_exempt = attempt.get("security_exempt", False)
+            if security_score is not None and not _is_finite_number(security_score, minimum=0, maximum=1):
+                return False
+            if not isinstance(security_exempt, bool):
+                return False
+            if security_exempt and (security_score is None or security_clean is not False):
+                return False
+            if security_clean is not None and (
+                not isinstance(security_clean, bool)
+                or security_score is None
+                or security_clean != (security_score == 1.0)
+            ):
+                return False
+            if security_message is not None and not isinstance(security_message, str):
+                return False
+            warnings = attempt.get("warnings")
+            if warnings is not None and (
+                not isinstance(warnings, list) or any(not isinstance(warning, str) for warning in warnings)
+            ):
+                return False
+            verdict_reward: dict[str, Any] = {"goal_accuracy": goal_accuracy}
+            if security_clean is not None:
+                verdict_reward["security"] = security_score
+                security_detail: dict[str, Any] = {
+                    "findings": ([{"score_impact": True, "message": security_message}] if security_message else [])
+                }
+                if security_exempt:
+                    security_detail["supported"] = False
+                verdict_reward["details"] = {"security": security_detail}
+            verdict = attempt_verdict(score, threshold, reward=verdict_reward)
+            if attempt["passed"] != verdict.passed:
+                return False
+            if "security_exempt" in attempt and attempt["security_exempt"] != verdict.security_exempt:
+                return False
+            if ("goal_accuracy" in attempt or "security_score" in attempt) and attempt.get("reason") != verdict.reason:
+                return False
+            if "required_failure" in attempt and attempt.get("required_failure") != verdict.required_failure:
                 return False
         passing_ordinals = [ordinal for ordinal, attempt in enumerate(attempts, start=1) if attempt["passed"]]
         expected_first_pass = passing_ordinals[0] if passing_ordinals else None

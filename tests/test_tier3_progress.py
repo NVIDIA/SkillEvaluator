@@ -406,6 +406,45 @@ def test_rich_progress_uses_manual_refresh_and_recent_event_window(monkeypatch: 
     reporter.close()
 
 
+def test_rich_progress_running_spinner_moves_on_with_each_redraw(monkeypatch: pytest.MonkeyPatch) -> None:
+    import re
+
+    import rich.live
+    from rich.console import Console
+    from rich.spinner import Spinner
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+    reporter = progress.RichProgressReporter(stream=_TTYBuffer(), refresh_interval=60)
+    reporter.start(_plan(progress))
+    live = _FakeLive.instances[0]
+    frames = Spinner("dots").frames
+    interval = Spinner("dots").interval / 1000
+
+    def spinner_frame_at(now: float) -> int:
+        # Draws the latest frame at a fixed time, as Live does on each redraw.
+        rendered = io.StringIO()
+        Console(file=rendered, width=120, color_system=None, get_time=lambda: now).print(live.renderables[-1])
+        glyph = re.search(r"Agent codex\s*│ (\S) running", rendered.getvalue())
+        assert glyph is not None, rendered.getvalue()
+        return frames.index(glyph.group(1))
+
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+    assert spinner_frame_at(100.0) == 0
+    # Rich no longer redraws on its own timer, so the spinner moves only when a
+    # heartbeat or an update redraws the frame. It keeps its place across them.
+    reporter.heartbeat()
+    assert spinner_frame_at(100.0 + 3.5 * interval) == 3
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="attempt 2 of 3"))
+    assert spinner_frame_at(100.0 + 6.5 * interval) == 6
+    # A stage that runs again after it finished starts a new spinner.
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="complete", detail="attempt 2 of 3"))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="attempt 3 of 3"))
+    assert spinner_frame_at(100.0 + 7.5 * interval) == 0
+    reporter.close()
+
+
 def test_rich_progress_resets_state_when_live_initialization_fails() -> None:
     progress = _progress_module()
     reporter = progress.RichProgressReporter(stream=io.StringIO(), refresh_interval=60)

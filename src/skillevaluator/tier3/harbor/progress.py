@@ -18,12 +18,15 @@ import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from time import monotonic
-from typing import Literal, Protocol, TextIO, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, TextIO, runtime_checkable
 
 from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, MUTED, RED, TEXT
 from skillevaluator.tier3.harbor.secret_redaction import redact_secrets_in_log_line
 from skillevaluator.utils.redaction import credential_uri_secret_values
 from skillevaluator.utils.rich_markup import strip_terminal_controls
+
+if TYPE_CHECKING:
+    from rich.spinner import Spinner
 
 ProgressMode = Literal["auto", "rich", "plain", "off"]
 logger = logging.getLogger(__name__)
@@ -433,6 +436,11 @@ class RichProgressReporter(PlainProgressReporter):
         self._live = None
         self._live_plan: Tier3RunPlan | None = None
         self._live_events: dict[str, tuple[ProgressEvent, str | None]] = {}
+        # One spinner per running stage, kept across redraws. A Rich spinner
+        # picks its frame from the time since it was first drawn, and Rich no
+        # longer redraws on its own timer, so a new spinner on every redraw
+        # would always show its first frame.
+        self._live_spinners: dict[str, Spinner] = {}
         self._live_event_slots = _LIVE_MIN_EVENT_ROWS
         self._printed_plan_lines: dict[str, str] = {}
         # Set, under the same lock hold that stops Live, when a drawing failure
@@ -461,6 +469,7 @@ class RichProgressReporter(PlainProgressReporter):
                 finished_at = None
             else:
                 self._active.pop(event.stage, None)
+                self._live_spinners.pop(event.stage, None)
                 finished_at = self._elapsed()
             # Move the stage to the end so the recent-event window shows it.
             self._live_events.pop(event.stage, None)
@@ -509,6 +518,7 @@ class RichProgressReporter(PlainProgressReporter):
                         self._live = None
                     self._live_plan = None
                     self._live_events.clear()
+                    self._live_spinners.clear()
                     self._live_event_slots = _LIVE_MIN_EVENT_ROWS
                     self._printed_plan_lines.clear()
                     if not after_failure:
@@ -723,11 +733,12 @@ class RichProgressReporter(PlainProgressReporter):
                 if stage.startswith("agent:")
                 else stage.replace("-", " ").title()
             )
-            state = (
-                Spinner("dots", text=Text("running", style=TEXT))
-                if event.state == "running"
-                else Text(event.state, style=state_styles.get(event.state, "white"))
-            )
+            if event.state == "running":
+                state = self._live_spinners.get(stage)
+                if state is None:
+                    state = self._live_spinners[stage] = Spinner("dots", text=Text("running", style=TEXT))
+            else:
+                state = Text(event.state, style=state_styles.get(event.state, "white"))
             rows.append(
                 (
                     Text(label),

@@ -253,37 +253,37 @@ Anthropic evaluator with `opencode` also does not support local mode.
 
 SkillEvaluator exposes 27 environment modes: 26 Harbor-native backends,
 including Docker, plus SkillEvaluator's own `local` host-execution mode.
-Docker is the default. The `tier3` extra installs base `harbor==0.24.0`; install
+Docker is the default. The `tier3` extra installs base `harbor==0.25.0`; install
 the environment extra shown below when a managed backend needs one.
 
 | Mode | Type | Harbor extra or system prerequisite |
 | --- | --- | --- |
 | `docker` | Harbor-native | No additional Python extra. Requires Docker Engine and Docker Compose v2 — see [Docker mode](#docker-mode). |
 | `kata` | Harbor-native | No additional Python extra. Requires a Linux host with `/dev/kvm` and a Kata Containers runtime registered with Docker — see [Kata mode](#kata-mode). |
-| `daytona` | Harbor-native | `harbor[daytona]==0.24.0` |
-| `e2b` | Harbor-native | `harbor[e2b]==0.24.0` |
-| `modal` | Harbor-native | `harbor[modal]==0.24.0` |
-| `runloop` | Harbor-native | `harbor[runloop]==0.24.0` |
-| `langsmith` | Harbor-native | `harbor[langsmith]==0.24.0` |
-| `ec2` | Harbor-native | `harbor[ec2]==0.24.0` |
-| `gke` | Harbor-native | `harbor[gke]==0.24.0` |
-| `ack` | Harbor-native | `harbor[gke]==0.24.0` |
+| `daytona` | Harbor-native | `harbor[daytona]==0.25.0` |
+| `e2b` | Harbor-native | `harbor[e2b]==0.25.0` |
+| `modal` | Harbor-native | `harbor[modal]==0.25.0` |
+| `runloop` | Harbor-native | `harbor[runloop]==0.25.0` |
+| `langsmith` | Harbor-native | `harbor[langsmith]==0.25.0` |
+| `ec2` | Harbor-native | `harbor[ec2]==0.25.0` |
+| `gke` | Harbor-native | `harbor[gke]==0.25.0` |
+| `ack` | Harbor-native | `harbor[gke]==0.25.0` |
 | `openshift` | Harbor-native | No Harbor Python extra; install and authenticate the OpenShift `oc` CLI. |
-| `novita` | Harbor-native | `harbor[novita]==0.24.0` |
+| `novita` | Harbor-native | `harbor[novita]==0.25.0` |
 | `apple-container` | Harbor-native | No Harbor Python extra; install the Apple `container` CLI. |
 | `singularity` | Harbor-native | No Harbor Python extra; install the `singularity` CLI Harbor invokes. |
-| `islo` | Harbor-native | `harbor[islo]==0.24.0` |
-| `tensorlake` | Harbor-native | `harbor[tensorlake]==0.24.0` |
-| `cwsandbox` | Harbor-native | `harbor[cwsandbox]==0.24.0` |
-| `wandb` | Harbor-native | `harbor[cwsandbox]==0.24.0` |
-| `use-computer` | Harbor-native | `harbor[use-computer]==0.24.0` |
-| `blaxel` | Harbor-native | `harbor[blaxel]==0.24.0` |
-| `beam` | Harbor-native | `harbor[beam]==0.24.0` |
-| `skypilot` | Harbor-native | `harbor[skypilot]==0.24.0` |
-| `hyperbrowser` | Harbor-native | `harbor[hyperbrowser]==0.24.0` |
-| `vercel` | Harbor-native | `harbor[vercel]==0.24.0` |
-| `runta` | Harbor-native | `harbor[runta]==0.24.0` |
-| `mosaic` | Harbor-native | `harbor[mosaic]==0.24.0` |
+| `islo` | Harbor-native | `harbor[islo]==0.25.0` |
+| `tensorlake` | Harbor-native | `harbor[tensorlake]==0.25.0` |
+| `cwsandbox` | Harbor-native | `harbor[cwsandbox]==0.25.0` |
+| `wandb` | Harbor-native | `harbor[cwsandbox]==0.25.0` |
+| `use-computer` | Harbor-native | `harbor[use-computer]==0.25.0` |
+| `blaxel` | Harbor-native | `harbor[blaxel]==0.25.0` |
+| `beam` | Harbor-native | `harbor[beam]==0.25.0` |
+| `skypilot` | Harbor-native | `harbor[skypilot]==0.25.0` |
+| `hyperbrowser` | Harbor-native | `harbor[hyperbrowser]==0.25.0` |
+| `vercel` | Harbor-native | `harbor[vercel]==0.25.0` |
+| `runta` | Harbor-native | `harbor[runta]==0.25.0` |
+| `mosaic` | Harbor-native | `harbor[mosaic]==0.25.0` |
 | `local` | SkillEvaluator | Your machine, under an OS sandbox policy — see [Local mode](#local-mode). |
 
 Installed packages can add more modes, for example an organization's internal
@@ -302,9 +302,9 @@ authentication (`auth=wandb`), using `WANDB_API_KEY` or the netrc file that
 `wandb login` writes. Because SkillEvaluator sets `auth` itself, `--ek auth=...`
 is rejected for both `cwsandbox` and `wandb`.
 
-Harbor 0.24 also defines `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`,
-`prime`, and `smol`, but those backends are not exposed until SkillEvaluator
-can project the complete task bundle — skill, verifier, dependencies, and
+Harbor 0.25 also defines `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`,
+`prime`, `smol`, `sbx`, `sail`, and `kernel`, but those backends are not exposed
+until SkillEvaluator can project the complete task bundle — skill, verifier, dependencies, and
 inputs — through a trusted image or backend-native provisioning path, with
 credentials and constructor options reviewed per backend. Selecting one of those
 names is rejected before a run starts. Prime cannot build a Dockerfile-only
@@ -385,7 +385,7 @@ in-cluster service account and performs a bounded, namespaced pod-list probe
 before launching trials. `KUBERNETES_SERVICE_HOST` and
 `KUBERNETES_SERVICE_PORT` are forwarded only for this ACK client path.
 
-Harbor 0.24 Modal preflight requires `~/.modal.toml` or `MODAL_TOKEN_ID` plus
+Harbor 0.25 Modal preflight requires `~/.modal.toml` or `MODAL_TOKEN_ID` plus
 `MODAL_TOKEN_SECRET`. SkillEvaluator validates and forwards an explicitly set
 `MODAL_CONFIG_PATH`, but Harbor's child-process preflight does not recognize a
 custom config path by itself; configure one of Harbor's supported credential
@@ -422,8 +422,14 @@ never deletes snapshots. Run evaluations in a Mosaic account that only trusted
 operators can write to, and delete old `harbor-*` snapshots when you no longer
 need the staged skills and inputs they contain.
 
+Harbor's `auto_mounts` and `auto_mounting` output controls are reserved for
+SkillEvaluator's runtime policy. The `cwsandbox` and `wandb` modes also reserve
+`forward_compose_env`, which could copy operator environment values into the
+task's Compose configuration. Credentials continue to use the evaluator's
+controlled handoff.
+
 Other eligible, backend-specific constructor options are forwarded after
-validation. A key that the selected backend's Harbor 0.24.0 constructor does not
+validation. A key that the selected backend's Harbor 0.25.0 constructor does not
 accept is rejected before the run starts; for example, Harbor 0.24 removed
 Modal's `modal_sandbox_v2` option, so drop it from existing `--ek` flags. ACK
 scheduling options such as `node_selector` and `tolerations` are accepted, and
@@ -432,6 +438,10 @@ object—not credential contents. Credential-bearing options such as LangSmith's
 `api_key` and Vercel's `credential_injection` are rejected. Use the same
 `--environment-kwarg` values and eligible non-Docker mode with `doctor` or
 `health-check` to preflight the configuration you intend to evaluate.
+
+Harbor 0.25 adds eligible `dockerd_wait_sec` for Daytona,
+`sandbox_timeout_secs` for E2B, `connection_pool_maxsize` for Runta, and
+`dind_image` for `cwsandbox` and `wandb`.
 
 A few Harbor options contain provider-managed secret **references**, not secret
 values. These narrow shapes are allowed; every other credential-shaped kwarg,
@@ -482,7 +492,7 @@ directory, verifier, and trial paths as a Harbor-native backend.
 
 ### What a backend must provide
 
-- Support the Harbor release SkillEvaluator pins (`harbor==0.24.0`), including
+- Support the Harbor release SkillEvaluator pins (`harbor==0.25.0`), including
   its environment constructor options.
 - Run the evaluator-staged image: build each task's `environment/Dockerfile` as
   written, or an equivalent image with the same layers. Do not substitute a

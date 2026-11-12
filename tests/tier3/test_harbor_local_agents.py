@@ -35,6 +35,12 @@ class _RecordingEnvironment:
 
     def __init__(self) -> None:
         self.uploads: list[tuple[str, str]] = []
+        self.root_commands: list[str] = []
+
+    async def exec(self, command: str, *, user: str | None = None, **_kwargs: object) -> ExecResult:
+        assert user == "root"
+        self.root_commands.append(command)
+        return ExecResult(return_code=0, stdout="", stderr="")
 
     async def upload_file(self, source: object, destination: object) -> None:
         self.uploads.append((str(destination), Path(source).read_text(encoding="utf-8")))
@@ -140,7 +146,8 @@ def _record_installed_agent_exec(monkeypatch: pytest.MonkeyPatch) -> list[tuple[
         **_kwargs: object,
     ) -> SimpleNamespace:
         calls.append((command, dict(env or {})))
-        return SimpleNamespace(return_code=0, stdout="", stderr="")
+        stdout = "CODEX_RUNTIME_ID 1000 1000\n" if "CODEX_RUNTIME_ID" in command else ""
+        return SimpleNamespace(return_code=0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(
         "harbor.agents.installed.base.BaseInstalledAgent.exec_as_agent",
@@ -172,10 +179,11 @@ def test_local_codex_uploads_openai_responses_config_and_creates_per_trial_state
 
     asyncio.run(agent.run("do the thing", environment=environment, context=object()))
 
-    setup_command, setup_env = calls[0]
+    setup_command, setup_env = next((command, env) for command, env in calls if 'mkdir -p "$CODEX_HOME"' in command)
     assert 'mkdir -p "$CODEX_HOME"' in setup_command
     assert SkillEvaluatorLocalCodex._REMOTE_CODEX_SECRETS_DIR.as_posix() in setup_command
     assert setup_env["CODEX_HOME"] == SkillEvaluatorLocalCodex._REMOTE_CODEX_HOME.as_posix()
+    assert any("chown -R 1000:1000" in command and "chmod 700" in command for command in environment.root_commands)
     config = environment.last_codex_config(SkillEvaluatorLocalCodex._REMOTE_CODEX_HOME)
     assert config["model_provider"] == "openai_compatible"
     assert config["model_providers"] == {
@@ -368,7 +376,7 @@ def test_local_claude_does_not_rewrite_instruction_permission_text(monkeypatch, 
 
     run_command, run_env = next((command, env) for command, env in calls if "claude --verbose" in command)
     instruction_vars = {
-        key: value for key, value in run_env.items() if key.startswith("HARBOR_") and "_INSTRUCTION_" in key
+        key: value for key, value in run_env.items() if key.startswith("CLAUDE_CODE_INSTRUCTION_")
     }
     assert instruction_vars and list(instruction_vars.values()) == [instruction]
     assert next(iter(instruction_vars.values())).encode() == instruction.encode()
@@ -1060,7 +1068,7 @@ def test_claude_code_vertex_model_connection_and_auth_env(
     conn = agent.model_connection
     assert conn.provider is None
     assert conn.api_key is None
-    assert conn.configured_base_url is None
+    assert conn.candidate_base_url is None
     assert agent._resolved_model_name() == "claude-sonnet-4-6"
 
     auth_env = agent._resolve_auth_env()

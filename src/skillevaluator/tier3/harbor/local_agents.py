@@ -21,9 +21,9 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
+from harbor.agents.agent_auth_resolution import ResolvedModelConnection, without_inferred_endpoint
 from harbor.agents.installed.base import NetworkConnectionError, NonZeroAgentExitCodeError
 from harbor.agents.installed.opencode import OpenCode
-from harbor.agents.model_connection import ResolvedModelConnection, without_inferred_endpoint
 from harbor.models.trial.paths import EnvironmentPaths
 from harbor.utils.env import parse_bool_env_value
 
@@ -92,14 +92,25 @@ async def _close_running_bridge(
     await _await_task_uninterruptibly(close_task, preserve_cancellation=preserve_cancellation)
 
 
-def _merge_codex_openai_compatible_config(config: dict[str, Any], base_url: str) -> dict[str, Any]:
+def _merge_codex_openai_compatible_config(
+    config: dict[str, Any], base_url: str, user_config: Mapping[str, Any]
+) -> dict[str, Any]:
     """Apply SkillEvaluator's Responses routing without discarding user config."""
     config["model_provider"] = "openai_compatible"
+    config["openai_base_url"] = base_url
 
     model_providers = config.get("model_providers")
     if not isinstance(model_providers, dict):
         model_providers = {}
         config["model_providers"] = model_providers
+
+    # Harbor 0.25 rewrites the originally selected provider's URL. That provider
+    # becomes inactive when we select our Responses route, so retain its config.
+    user_providers = user_config.get("model_providers", {})
+    if isinstance(user_providers, Mapping):
+        for name, value in user_providers.items():
+            if name != "openai_compatible":
+                model_providers[name] = copy.deepcopy(value)
 
     provider = model_providers.get("openai_compatible")
     if not isinstance(provider, dict):
@@ -196,6 +207,12 @@ class SkillEvaluatorClaudeCode(_InstalledClaudeCode):
         if self._uses_vertex_auth():
             return without_inferred_endpoint(access)
         return access
+
+    def _resolved_model_name(self) -> str | None:
+        """Let the native Vertex client select its endpoint after model parsing."""
+        if self._uses_vertex_auth() and self.model_name and not self.skip_model_parsing:
+            return self._parse_model_name(self.model_name)[1]
+        return super()._resolved_model_name()
 
     def _resolve_auth_env(self) -> dict[str, str]:
         """Resolve Claude Code authentication environment including Vertex AI variables."""
@@ -409,7 +426,7 @@ class SkillEvaluatorGatewayCodex(SkillEvaluatorCodex):
         """Extend Harbor's final user/MCP config with SkillEvaluator routing."""
         config = super()._build_effective_config(openai_base_url)
         base_url = openai_base_url or os.environ.get("OPENAI_BASE_URL") or _DEFAULT_OPENAI_BASE_URL
-        return _merge_codex_openai_compatible_config(config, base_url)
+        return _merge_codex_openai_compatible_config(config, base_url, self._base_config)
 
     def _preserve_gateway_model_name(self, command: str, env: dict[str, str] | None) -> str:
         """Undo Harbor's default Codex model truncation when routing through an OpenAI-compatible gateway."""
@@ -417,10 +434,10 @@ class SkillEvaluatorGatewayCodex(SkillEvaluatorCodex):
         if not model_name or "/" not in model_name or not (env or {}).get("OPENAI_BASE_URL"):
             return command
 
-        short_model = model_name.rsplit("/", 1)[-1]
+        runtime_models = {model_name.rsplit("/", 1)[-1], self._resolved_model_name()}
 
         def replace(match: re.Match[str]) -> str:
-            if match.group("model") != short_model:
+            if match.group("model") not in runtime_models:
                 return match.group(0)
             return f"{match.group('prefix')}{shlex.quote(model_name)}{match.group('suffix')}"
 
@@ -952,7 +969,7 @@ class SkillEvaluatorNvidiaBuildCodex(_NvidiaBuildBridgeAgent, SkillEvaluatorCode
         _ = openai_base_url
         bridge_api_url = self._bridge_api_url()
         config = super()._build_effective_config(bridge_api_url)
-        return _merge_codex_openai_compatible_config(config, bridge_api_url)
+        return _merge_codex_openai_compatible_config(config, bridge_api_url, self._base_config)
 
     def _rewrite_bridge_client_command(self, command: str) -> str:
         model_name = str(self.model_name or "")
@@ -962,10 +979,10 @@ class SkillEvaluatorNvidiaBuildCodex(_NvidiaBuildBridgeAgent, SkillEvaluatorCode
         )
         if not model_name or "/" not in model_name:
             return command
-        short_model = model_name.rsplit("/", 1)[-1]
+        runtime_models = {model_name.rsplit("/", 1)[-1], self._resolved_model_name()}
 
         def replace(match: re.Match[str]) -> str:
-            if match.group("model") != short_model:
+            if match.group("model") not in runtime_models:
                 return match.group(0)
             return f"{match.group('prefix')}{model_name}{match.group('suffix')}"
 

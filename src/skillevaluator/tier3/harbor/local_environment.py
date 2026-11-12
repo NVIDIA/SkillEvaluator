@@ -19,10 +19,10 @@ import stat
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn
 
-from harbor.environments.base import BaseEnvironment, ExecResult, OutputCallback, OutputStream
+from harbor.environments.base import BaseEnvironment, EnvironmentPath, ExecResult, OutputCallback, OutputStream
 from harbor.environments.capabilities import EnvironmentCapabilities
 from harbor.models.environment_type import EnvironmentType
 
@@ -77,6 +77,7 @@ _BLOCKED_COMMAND_ENV_PREFIXES = ("DYLD_", "LD_", "PYTHON")
 # Harbor transports Claude Code prompts through an uppercased UUID-named
 # variable; keep that contract narrow so unrelated Harbor controls stay private.
 _HARBOR_INSTRUCTION_ENV_RE = re.compile(r"HARBOR_(?:INSTRUCTION|CLAUDE_CODE_INSTRUCTION_[0-9A-F]{32})")
+_CLAUDE_INSTRUCTION_ENV_RE = re.compile(r"CLAUDE_CODE_INSTRUCTION_[0-9A-F]{32}")
 _INNER_ENV_BOOTSTRAP = """
 import json
 import os
@@ -530,6 +531,26 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
     def capabilities(self) -> EnvironmentCapabilities:
         return EnvironmentCapabilities(mounted=True)
 
+    def is_path_mounted(self, environment_path: EnvironmentPath, host_path: Path) -> bool:
+        """Report direct host mappings so Harbor does not copy outputs onto themselves."""
+        path = PurePosixPath(environment_path)
+        try:
+            if self._resolve_path(str(path)).resolve() != host_path.resolve():
+                return False
+        except ValueError:
+            return False
+        # A parent mapping does not cover a child redirected elsewhere.
+        return all(
+            local.resolve() == host_path.joinpath(*child.relative_to(path).parts).resolve()
+            for remote, local in self._path_map()
+            if (child := PurePosixPath(remote)) != path and child.is_relative_to(path)
+        )
+
+    @property
+    def _artifact_publish_dir(self) -> Path:
+        """Match Harbor's host destination for the main /logs/artifacts convention."""
+        return self.trial_paths.artifacts_dir / "logs" / "artifacts"
+
     @classmethod
     def preflight(cls) -> None:
         return None
@@ -563,6 +584,7 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
             self.trial_paths.agent_dir,
             self.trial_paths.verifier_dir,
             self.trial_paths.artifacts_dir,
+            self._artifact_publish_dir,
             self._solution,
             self._installed_agent,
             self._tmp,
@@ -1343,7 +1365,7 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
             "HARBOR_LOGS_DIR": str(self.trial_paths.trial_dir),
             "HARBOR_AGENT_LOGS_DIR": str(self.trial_paths.agent_dir),
             "HARBOR_VERIFIER_DIR": str(self.trial_paths.verifier_dir),
-            "HARBOR_ARTIFACTS_DIR": str(self.trial_paths.artifacts_dir),
+            "HARBOR_ARTIFACTS_DIR": str(self._artifact_publish_dir),
             "HARBOR_SOLUTION_DIR": str(self._solution),
             "HARBOR_INSTALLED_AGENT_DIR": str(self._installed_agent),
             "HARBOR_SKILLS_DIR": str(self._workspace / "skills"),
@@ -1698,8 +1720,11 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         return os.pathsep.join(parts)
 
     def _rewrite_env_values(self, env: dict[str, str]) -> dict[str, str]:
-        """Map Harbor container paths that are passed through environment values."""
-        return {key: self._rewrite_raw_paths(value) for key, value in env.items()}
+        """Map runtime paths while preserving Claude's instruction payload verbatim."""
+        return {
+            key: value if _CLAUDE_INSTRUCTION_ENV_RE.fullmatch(key) else self._rewrite_raw_paths(value)
+            for key, value in env.items()
+        }
 
     @staticmethod
     def _filter_command_env(env: dict[str, str], *, protected: set[str]) -> dict[str, str]:
@@ -1718,6 +1743,8 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
                 )
             if key in protected or key in {"HOME", "TMPDIR", "PATH", "PWD"}:
                 continue
+            if key.startswith("CLAUDE_CODE_INSTRUCTION") and _CLAUDE_INSTRUCTION_ENV_RE.fullmatch(key) is None:
+                continue
             if (
                 key.startswith("HARBOR_")
                 and key != "HARBOR_DECLARED_PORTS"
@@ -1731,7 +1758,7 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         return [
             ("/logs/agent", self.trial_paths.agent_dir),
             ("/logs/verifier", self.trial_paths.verifier_dir),
-            ("/logs/artifacts", self.trial_paths.artifacts_dir),
+            ("/logs/artifacts", self._artifact_publish_dir),
             ("/logs", self.trial_paths.trial_dir),
             ("/workspace", self._workspace),
             ("/tests", self._tests),

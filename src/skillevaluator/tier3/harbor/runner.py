@@ -1600,6 +1600,8 @@ def _resolve_environment_kwargs(
 
 _HARBOR_RUNTIME_POLICY_KWARGS = frozenset(
     {
+        "auto_mounting",
+        "auto_mounts",
         "context_id",
         "cpu_enforcement_policy",
         "delete",
@@ -1655,8 +1657,9 @@ _HARBOR_ENVIRONMENT_RUNTIME_POLICY_KWARGS: dict[str, frozenset[str]] = {
         }
     ),
     "blaxel": frozenset({"dind_extra_args"}),
-    # Credential strategy selection; SkillEvaluator sets it only for the wandb alias.
-    "cwsandbox": frozenset({"auth"}),
+    # SkillEvaluator owns credential strategy selection and prevents arbitrary
+    # host environment values from reaching remote task Compose interpolation.
+    "cwsandbox": frozenset({"auth", "forward_compose_env"}),
     "daytona": frozenset({"network_block_all"}),
     "ec2": frozenset({"iam_instance_profile", "strict_host_key_checking"}),
     "gke": frozenset({"memory_limit_multiplier"}),
@@ -1672,7 +1675,7 @@ _HARBOR_ENVIRONMENT_RUNTIME_POLICY_KWARGS: dict[str, frozenset[str]] = {
     "singularity": frozenset({"singularity_no_mount"}),
     "use-computer": frozenset({"resources"}),
     "vercel": frozenset({"ports"}),
-    "wandb": frozenset({"auth"}),
+    "wandb": frozenset({"auth", "forward_compose_env"}),
 }
 
 

@@ -324,10 +324,6 @@ All notable changes to SkillEvaluator are documented in this file.
   Isolated wheel tests cover SDK 1.28.1 and 2.3.0; the supported Tier 3 dependency
   range remains unchanged.
 
-- Grader qualification resolves verifier source paths before provenance hashing,
-  so source-directory aliases (including macOS `/tmp`) retain the same relative
-  file identities and hashes while files outside the source root are rejected.
-
 - Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
   the PR or merge request's target revision. Policy files from the proposed
   changes cannot approve their own exceptions.
@@ -389,6 +385,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Read JSON, JSONL and YAML evaluation datasets as UTF-8 so Unicode prompts and
   answers load correctly on hosts with a non-UTF-8 default text encoding.
+
+- Grader qualification resolves verifier source paths before provenance hashing,
+  so source-directory aliases (including macOS `/tmp`) retain the same relative
+  file identities and hashes while files outside the source root are rejected.
 
 - Estimate Tier 1 instruction tokens from the parsed Markdown body, so `---`
   inside YAML values or comments does not count frontmatter as instructions.

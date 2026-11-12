@@ -279,7 +279,7 @@ Keep credentials out of skill repositories and CI configuration files. Export pr
 
 | Variable | Purpose |
 | --- | --- |
-| `SKILLEVALUATOR_GITLAB_READ_TOKEN` | Optional project Reporter/read_api credential for current-MR admission; required on GitLab before 18.4, scoped to the execution environment and removed before provider subprocesses. |
+| `SKILLEVALUATOR_GITLAB_READ_TOKEN` | Optional project Reporter/read_api credential for current-MR and default-branch admission; required on GitLab before 18.4, or when `CI_JOB_TOKEN` cannot read the default branch, scoped to the execution environment and removed before provider subprocesses. |
 | `SKILLEVALUATOR_GITLAB_TOKEN` | Separate project-scoped publisher credential in the protected feedback environment; never used by evaluation jobs. |
 
 Local onboarding can use `SKILLEVALUATOR_GITLAB_TOKEN` or `GITLAB_TOKEN` in its

@@ -29,23 +29,20 @@ from pathlib import Path
 
 # Isolated Python omits the script directory. Trust only this pinned helper
 # checkout for sibling imports, never the consumer working directory.
-if not __package__:
+if __package__:
+    from . import github_api, publish_reports
+    from .comment_summary import render_comment_summary
+    from .summary_metrics import summarize_results
+    from .tier_manifest import tier3_execution_complete, validate_manifest
+    from .verify_provenance import ProvenanceError, verify_receipt
+else:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-try:
     import github_api
     import publish_reports
     from comment_summary import render_comment_summary
     from summary_metrics import summarize_results
     from tier_manifest import tier3_execution_complete, validate_manifest
     from verify_provenance import ProvenanceError, verify_receipt
-except ModuleNotFoundError:
-    from ci.comment_summary import render_comment_summary
-    from ci.summary_metrics import summarize_results
-    from ci.tier_manifest import tier3_execution_complete, validate_manifest
-    from ci.verify_provenance import ProvenanceError, verify_receipt
-
-    from ci import github_api, publish_reports
 
 MARKER = "<!-- skillevaluator-all-tiers-report -->"
 RUN_MARKER = re.compile(r"<!-- skillevaluator-all-tiers-run:([1-9][0-9]*):([1-9][0-9]*) -->")
@@ -58,7 +55,7 @@ MAX_BODY_BYTES = 60000
 # Markdown, SARIF, stdout and stderr) and JSON, HTML and Markdown for Tiers 2
 # and 3; GitLab archives also list each skill's directory once per tier.
 MAX_SKILLS = 100
-MEMBERS_PER_SKILL = 6 + 3 + 3 + 3
+MEMBERS_PER_SKILL = 6 + 3 + 3 + 3 + 3  # two generated files and their directory
 MAX_AGGREGATE_MEMBERS = 64  # manifests, summaries, indexes and tier directories
 MAX_FILES = MAX_SKILLS * MEMBERS_PER_SKILL + MAX_AGGREGATE_MEMBERS
 # A Tier 2/3 skill whose execution failed or is incomplete, or whose worker exited
@@ -122,7 +119,7 @@ def _safe_path(value):
     )
 
 
-def read_results(raw: bytes, *, prefix: str = "") -> dict:
+def read_results(raw: bytes, *, prefix: str = "", native_reports: dict | None = None) -> dict:
     """Validate exact retained native JSON; never extract or interpret HTML."""
     _require(len(raw) <= MAX_BYTES, "The aggregate archive exceeds its size limit.")
     try:
@@ -169,6 +166,7 @@ def read_results(raw: bytes, *, prefix: str = "") -> dict:
             from skillevaluator.reporting.retained import retained_results
             from skillevaluator.reporting.run_status import resolve_run_status
 
+            validated_native = {}
             seen = set()
             for tier in result["tiers"]:
                 # Comment counters come from validated native findings, never
@@ -214,6 +212,7 @@ def read_results(raw: bytes, *, prefix: str = "") -> dict:
                             tier3_execution_complete(native),
                             "Tier 3 passing or neutral evidence lacks complete paired execution.",
                         )
+                    validated_native[json_path] = native
                     skill["metrics"] = summarize_results(retained, tier=tier["tier"], native=native)
                     if skill["status"] in {"incomplete", "skipped", "not_run", "needs_action"}:
                         skill["metrics"]["issue_count_known"] = False
@@ -221,6 +220,8 @@ def read_results(raw: bytes, *, prefix: str = "") -> dict:
                         skill["metrics"]["issue_count_known"] = False
                         skill["metrics"].pop("score", None)
                         skill["metrics"].pop("skill_lift", None)
+            if native_reports is not None:
+                native_reports.update(validated_native)
             return result
     except FeedbackError:
         raise
@@ -304,7 +305,7 @@ def _upsert(api, *, collection, member, owned, body, receipt, current, method="p
     return {"comment_action": action, "comment_id": str(identifier)}
 
 
-def _github_run(run, repository, run_id, attempt):
+def _github_run(run, repository, run_id, attempt, *, events=frozenset({"pull_request"})):
     _require(
         isinstance(run, dict)
         and run.get("id") == run_id
@@ -313,7 +314,7 @@ def _github_run(run, repository, run_id, attempt):
         "The run identity or latest attempt does not match the selected producer.",
     )
     _require(
-        run.get("event") == "pull_request"
+        run.get("event") in events
         and run.get("status") == "completed"
         and run.get("path") == CALLER_PATH
         and isinstance(run.get("head_sha"), str)
@@ -360,22 +361,21 @@ def _github_artifacts(api, root, run):
     return selected
 
 
-def github_feedback(api, repository: str, run_id: int, attempt: int) -> dict:
-    """Authenticate immutable producer identity and upsert current same-repo PR feedback."""
+def verify_github_evidence(
+    api, repository, run_id, attempt, *, events=frozenset({"pull_request"}), native_reports=None
+):
+    """Authenticate one exact producer and validate all canonical retained JSON.
+
+    This read-only helper grants no write policy; callers must check the current
+    source head and latest attempt immediately before each visible mutation.
+    """
     _require(isinstance(repository, str) and github_api.REPOSITORY.fullmatch(repository), "Invalid GitHub repository.")
     _positive(run_id)
     _positive(attempt)
     root = f"/repos/{repository}"
     run = api.get(f"{root}/actions/runs/{run_id}")
-    if isinstance(run, dict) and run.get("id") == run_id and run.get("repository", {}).get("full_name") == repository:
-        # Fork PRs get no receipt, and a re-run supersedes this attempt; neither is a feedback failure.
-        head = run.get("head_repository")
-        if not isinstance(head, dict) or head.get("full_name") != repository:
-            return {"comment_action": "skipped", "comment_reason": "Fork pull-request runs do not receive feedback."}
-        latest = run.get("run_attempt")
-        if (type(latest) is int and latest > attempt) or (latest == attempt and run.get("status") != "completed"):
-            return {"comment_action": "skipped", "comment_reason": "The producer attempt was superseded."}
-    _github_run(run, repository, run_id, attempt)
+    _github_run(run, repository, run_id, attempt, events=events)
+    _require(run.get("head_repository", {}).get("full_name") == repository, "Fork producers are not authorized.")
     reference = os.environ.get("SKILL_EVAL_TRUSTED_WORKFLOW_REF", "")
     match = re.fullmatch(
         r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\.github/workflows/[A-Za-z0-9_.-]+\.yml)@([0-9a-f]{40})", reference
@@ -415,7 +415,7 @@ def github_feedback(api, repository: str, run_id: int, attempt: int) -> dict:
         and caller.get("sha") in pins,
         "The executed caller workflow blob is not approved.",
     )
-    manifest = read_results(api.download_artifact(artifact["id"]))
+    manifest = read_results(api.download_artifact(artifact["id"]), native_reports=native_reports)
     _require(
         all(
             manifest[k] == v
@@ -429,6 +429,27 @@ def github_feedback(api, repository: str, run_id: int, attempt: int) -> dict:
         ),
         "The report manifest does not match the exact producer attempt and revision.",
     )
+    return {"run": run, "manifest": manifest, "artifact": artifact, "identity": identity}
+
+
+def github_feedback(api, repository: str, run_id: int, attempt: int) -> dict:
+    """Authenticate immutable producer identity and upsert current same-repo PR feedback."""
+    _require(isinstance(repository, str) and github_api.REPOSITORY.fullmatch(repository), "Invalid GitHub repository.")
+    _positive(run_id)
+    _positive(attempt)
+    root = f"/repos/{repository}"
+    run = api.get(f"{root}/actions/runs/{run_id}")
+    if isinstance(run, dict) and run.get("id") == run_id and run.get("repository", {}).get("full_name") == repository:
+        # Fork PRs get no receipt, and a re-run supersedes this attempt; neither is a feedback failure.
+        head = run.get("head_repository")
+        if not isinstance(head, dict) or head.get("full_name") != repository:
+            return {"comment_action": "skipped", "comment_reason": "Fork pull-request runs do not receive feedback."}
+        latest = run.get("run_attempt")
+        if (type(latest) is int and latest > attempt) or (latest == attempt and run.get("status") != "completed"):
+            return {"comment_action": "skipped", "comment_reason": "The producer attempt was superseded."}
+    _github_run(run, repository, run_id, attempt)
+    evidence = verify_github_evidence(api, repository, run_id, attempt)
+    manifest, artifact = evidence["manifest"], evidence["artifact"]
     candidates = run.get("pull_requests") or api.get(f"{root}/commits/{run['head_sha']}/pulls")
     _require(
         isinstance(candidates, list) and len(candidates) == 1 and isinstance(candidates[0], dict),

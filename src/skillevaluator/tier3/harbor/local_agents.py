@@ -93,7 +93,11 @@ async def _close_running_bridge(
 
 
 def _merge_codex_openai_compatible_config(
-    config: dict[str, Any], base_url: str, user_config: Mapping[str, Any]
+    config: dict[str, Any],
+    base_url: str,
+    user_config: Mapping[str, Any],
+    *,
+    env_key: str = "OPENAI_API_KEY",
 ) -> dict[str, Any]:
     """Apply SkillEvaluator's Responses routing without discarding user config."""
     config["model_provider"] = "openai_compatible"
@@ -121,7 +125,7 @@ def _merge_codex_openai_compatible_config(
         {
             "name": "OpenAI-compatible provider",
             "base_url": base_url,
-            "env_key": "OPENAI_API_KEY",
+            "env_key": env_key,
             "wire_api": "responses",
         }
     )
@@ -426,7 +430,10 @@ class SkillEvaluatorGatewayCodex(SkillEvaluatorCodex):
         """Extend Harbor's final user/MCP config with SkillEvaluator routing."""
         config = super()._build_effective_config(openai_base_url)
         base_url = openai_base_url or os.environ.get("OPENAI_BASE_URL") or _DEFAULT_OPENAI_BASE_URL
-        return _merge_codex_openai_compatible_config(config, base_url, self._base_config)
+        # Harbor may project the selected key into a custom provider variable
+        # and clear OPENAI_API_KEY before launching the CLI.
+        env_key = self.model_connection.api_key_destination_name or "OPENAI_API_KEY"
+        return _merge_codex_openai_compatible_config(config, base_url, self._base_config, env_key=env_key)
 
     def _preserve_gateway_model_name(self, command: str, env: dict[str, str] | None) -> str:
         """Undo Harbor's default Codex model truncation when routing through an OpenAI-compatible gateway."""

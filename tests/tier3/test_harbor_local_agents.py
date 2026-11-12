@@ -15,15 +15,16 @@ import pytest
 pytest.importorskip("harbor")
 
 from harbor.agents.installed.base import NonZeroAgentExitCodeError
-from harbor.agents.installed.codex import Codex
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.task.config import EnvironmentConfig, MCPServerConfig
 from harbor.models.trial.paths import EnvironmentPaths, TrialPaths
 
 from skillevaluator.tier3.harbor.local_agents import (
     SkillEvaluatorClaudeCode,
+    SkillEvaluatorGatewayCodex,
     SkillEvaluatorLocalClaudeCode,
     SkillEvaluatorLocalCodex,
+    SkillEvaluatorLocalNvidiaBuildCodex,
     SkillEvaluatorLocalOpenCode,
     SkillEvaluatorNvidiaBuildClaudeCode,
     SkillEvaluatorNvidiaBuildCodex,
@@ -304,6 +305,50 @@ def test_local_codex_runtime_provider_fields_win_without_losing_unrelated_user_c
     }
 
 
+@pytest.mark.parametrize("agent_type", [SkillEvaluatorGatewayCodex, SkillEvaluatorLocalCodex])
+def test_gateway_codex_active_provider_uses_the_selected_launch_credential(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    agent_type: type[SkillEvaluatorGatewayCodex],
+) -> None:
+    calls = _record_installed_agent_exec(monkeypatch)
+    monkeypatch.delenv("CODEX_AUTH_JSON_PATH", raising=False)
+    monkeypatch.delenv("CODEX_FORCE_AUTH_JSON", raising=False)
+    environment = _RecordingEnvironment()
+    original_provider = {
+        "base_url": "https://original.example/v1",
+        "env_key": "USER_API_KEY",
+        "http_headers": {"X-User": "preserved"},
+    }
+    unrelated_provider = {"base_url": "https://unrelated.example/v1", "env_key": "UNRELATED_API_KEY"}
+    agent = agent_type(
+        logs_dir=tmp_path,
+        model_name="openai/vendor/model",
+        extra_env={"OPENAI_API_KEY": "selected-test-key", "OPENAI_BASE_URL": "https://gateway.example/v1"},
+        config={
+            "model_provider": "user-provider",
+            "model_providers": {"user-provider": original_provider, "unrelated-provider": unrelated_provider},
+            "mcp_servers": {"user-tools": {"url": "https://user-tools.example/mcp"}},
+        },
+        mcp_servers=[MCPServerConfig(name="task-tools", transport="stdio", command="python3", args=["-m", "tools"])],
+    )
+
+    asyncio.run(agent.run("do the thing", environment=environment, context=object()))
+
+    config = environment.last_codex_config(agent._REMOTE_CODEX_HOME)
+    active_provider = config["model_providers"][config["model_provider"]]
+    run_env = next(env for command, env in calls if "codex exec" in command)
+    assert run_env[active_provider["env_key"]] == "selected-test-key"
+    assert active_provider["base_url"] == "https://gateway.example/v1"
+    assert active_provider["wire_api"] == "responses"
+    assert config["model_providers"]["user-provider"] == original_provider
+    assert config["model_providers"]["unrelated-provider"] == unrelated_provider
+    assert config["mcp_servers"] == {
+        "user-tools": {"url": "https://user-tools.example/mcp"},
+        "task-tools": {"command": "python3", "args": ["-m", "tools"]},
+    }
+
+
 def test_local_codex_rewrites_upstream_tmp_secrets_dir(monkeypatch, tmp_path) -> None:
     captured: dict[str, str] = {}
 
@@ -375,9 +420,7 @@ def test_local_claude_does_not_rewrite_instruction_permission_text(monkeypatch, 
     )
 
     run_command, run_env = next((command, env) for command, env in calls if "claude --verbose" in command)
-    instruction_vars = {
-        key: value for key, value in run_env.items() if key.startswith("CLAUDE_CODE_INSTRUCTION_")
-    }
+    instruction_vars = {key: value for key, value in run_env.items() if key.startswith("CLAUDE_CODE_INSTRUCTION_")}
     assert instruction_vars and list(instruction_vars.values()) == [instruction]
     assert next(iter(instruction_vars.values())).encode() == instruction.encode()
     assert "--permission-mode=auto" in run_command
@@ -463,14 +506,17 @@ def test_local_install_rejects_a_cli_too_old_for_the_model(
     assert "--env-mode docker" in str(excinfo.value)
 
 
+@pytest.mark.parametrize("agent_type", [SkillEvaluatorNvidiaBuildCodex, SkillEvaluatorLocalNvidiaBuildCodex])
 def test_nvidia_build_codex_final_config_keeps_dynamic_bridge_over_user_and_runtime_values(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    agent_type: type[SkillEvaluatorNvidiaBuildCodex],
 ) -> None:
     calls = _record_installed_agent_exec(monkeypatch)
     environment = _RecordingEnvironment()
     bridge_origin = "http://127.0.0.1:43123"
-    agent = SkillEvaluatorNvidiaBuildCodex(
+    original_provider = {"base_url": "https://original.example/v1", "env_key": "USER_API_KEY"}
+    agent = agent_type(
         logs_dir=tmp_path,
         model_name="nvidia/meta/llama-3.1-8b-instruct",
         extra_env={
@@ -482,10 +528,11 @@ def test_nvidia_build_codex_final_config_keeps_dynamic_bridge_over_user_and_runt
             "openai_base_url": "https://user-must-not-win.example/v1",
             "model_provider": "user-provider",
             "model_providers": {
+                "user-provider": original_provider,
                 "openai_compatible": {
                     "base_url": "https://user-must-not-win.example/v1",
                     "http_headers": {"X-User": "preserved"},
-                }
+                },
             },
             "mcp_servers": {"user-tools": {"url": "https://user-tools.example/mcp"}},
         },
@@ -506,11 +553,12 @@ def test_nvidia_build_codex_final_config_keeps_dynamic_bridge_over_user_and_runt
 
     asyncio.run(agent.run("do the thing", environment=environment, context=object()))
 
-    config = environment.last_codex_config(Codex._REMOTE_CODEX_HOME)
+    config = environment.last_codex_config(agent._REMOTE_CODEX_HOME)
     assert config["approval_policy"] == "never"
     assert config["mcp_servers"] == {"user-tools": {"url": "https://user-tools.example/mcp"}}
     assert config["model_provider"] == "openai_compatible"
     assert config["openai_base_url"] == f"{bridge_origin}/v1"
+    assert config["model_providers"]["user-provider"] == original_provider
     assert config["model_providers"]["openai_compatible"] == {
         "name": "OpenAI-compatible provider",
         "base_url": f"{bridge_origin}/v1",
@@ -521,6 +569,7 @@ def test_nvidia_build_codex_final_config_keeps_dynamic_bridge_over_user_and_runt
     run_command, run_env = next((command, env) for command, env in calls if "codex exec" in command)
     assert "--model nvidia/meta/llama-3.1-8b-instruct " in run_command
     assert run_env["OPENAI_API_KEY"] == "bridge-client-token"
+    assert run_env[config["model_providers"]["openai_compatible"]["env_key"]] == "bridge-client-token"
     assert "OPENAI_BASE_URL" not in run_env
     assert "external-key" not in run_command
 
@@ -1119,4 +1168,3 @@ def test_claude_code_vertex_exec_as_agent_unsets_anthropic_vars(
     )
     asyncio.run(direct_agent.exec_as_agent(object(), "claude --version"))
     assert captured[-1] == "claude --version"
-

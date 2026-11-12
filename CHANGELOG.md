@@ -190,7 +190,7 @@ All notable changes to SkillEvaluator are documented in this file.
   constructor options with the release while reserving automatic mounts and
   host Compose environment forwarding for evaluator policy. Preserve local
   agent, verifier, and artifact evidence under Harbor's new mount checks, and
-  retain explicit Codex gateway URLs and full model identifiers.
+  retain explicit Codex gateway URLs, credential aliases, and full model identifiers.
 
 - Name Skill Lift as the headline comparison and label pass@k differences as
   supporting reliability across reports and terminal output.

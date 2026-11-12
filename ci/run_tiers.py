@@ -382,13 +382,24 @@ def _retain(raw: Path, destination: Path, tier: int, tokens: set[str], skill: Pa
     return {"status": status, "metrics": metrics, "complete": complete}
 
 
-def _build_catalog(workspace: Path, selected: list[Path], path: Path) -> None:
+# Catalog helper exit status when a discovered skill has no valid SKILL.md frontmatter.
+INVALID_CATALOG_SKILL = 3
+
+
+def _build_catalog(workspace: Path, selected: list[Path], path: Path) -> int:
     from skillevaluator.embedding.client import EmbeddingClient
-    from skillevaluator.embedding.registry import EmbeddingRegistry
+    from skillevaluator.embedding.registry import EmbeddingRegistry, InvalidExplicitSkillError
 
     registry = EmbeddingRegistry(EmbeddingClient())
-    registry.build_from_paths(workspace, selected)
+    try:
+        registry.build_from_paths(workspace, selected)
+    except InvalidExplicitSkillError as exc:
+        # Raised before any embedding request; it names only the skill's
+        # checkout-relative path, never provider output.
+        print(exc, file=sys.stderr)
+        return INVALID_CATALOG_SKILL
     registry.save_catalog(path)
+    return 0
 
 
 def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> int:
@@ -469,11 +480,17 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
                     "--output",
                     str(catalog),
                 ]
-                if run_command(
+                catalog_status = run_command(
                     args, env=child, cwd=workspace, timeout=deadline - time.monotonic(), log=scratch / "catalog.log"
-                ):
+                )
+                if catalog_status:
                     row["reason"] = (
-                        "The complete comparison catalog could not be built; inspect provider and embedding configuration."
+                        "The complete comparison catalog could not be built; a discovered skill has no root SKILL.md "
+                        "whose frontmatter is a valid YAML mapping with a non-empty string name and description, "
+                        "and the catalog diagnostics name it."
+                        if catalog_status == INVALID_CATALOG_SKILL
+                        else "The complete comparison catalog could not be built; inspect provider and embedding "
+                        "configuration."
                     )
                     diagnostics = scratch / "catalog-diagnostics"
                     diagnostics.mkdir()
@@ -781,8 +798,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "catalog":
             request = read_json(args.input)
-            _build_catalog(Path(request["workspace"]), [Path(p) for p in request["skills"]], args.output)
-            return 0
+            return _build_catalog(Path(request["workspace"]), [Path(p) for p in request["skills"]], args.output)
         if args.command == "native-tier3":
             config = read_json(args.config)
             config["SKILL_EVAL_ENV_MODE"] = args.env_mode

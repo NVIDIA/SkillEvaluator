@@ -105,6 +105,15 @@ _CATALOG_ENTRY_FIELDS = frozenset(
 )
 
 
+class InvalidExplicitSkillError(ValueError):
+    """An explicit skill has no root ``SKILL.md`` with valid name and description frontmatter.
+
+    :meth:`EmbeddingRegistry.build_from_paths` raises it before any embedding
+    request. The message names the skill only by its path under the checkout
+    root, so callers can show it without exposing host directories.
+    """
+
+
 @dataclass
 class RegistryEntry:
     """A single item in the embedding index."""
@@ -269,7 +278,10 @@ class EmbeddingRegistry:
                 raise ValueError("An explicit skill is outside the checkout root")
             entry = extract_from_skill(current)
             if entry is None:
-                raise ValueError("Each explicit path must contain a valid SKILL.md")
+                raise InvalidExplicitSkillError(
+                    "Each explicit skill requires a root SKILL.md whose frontmatter is a valid YAML mapping "
+                    f"with a non-empty string name and description: {relative.as_posix()}"
+                )
             entries.append(entry)
         return self._build_entries(root, entries, 1, False)
 

@@ -844,9 +844,14 @@ All notable changes to SkillEvaluator are documented in this file.
   manifest path, keeping private host-directory names out of logs.
   An empty, zero, or false value such as `0`,
   `false`, or `[]` still gets `missing_name_or_description`. Either way, like
-  any excluded manifest, it makes the scan incomplete. It stops with an error
-  that names the manifest when a value is longer than 16,384 characters, the
-  per-field catalog text limit; description mode still also caps
+  any excluded manifest, it makes the scan incomplete. All-tier CI builds its
+  Tier 2 comparison catalog from every discovered skill, so one such skill
+  stops that catalog and leaves Tier 2 incomplete, as invalid YAML already did.
+  The Tier 2 reason now says that a skill's frontmatter is the cause instead of
+  pointing at provider configuration, and the retained catalog diagnostics
+  name the skill by its path in the repository. `similarity-check` stops with
+  an error that names the manifest when a value is longer than 16,384
+  characters, the per-field catalog text limit; description mode still also caps
   `name: description` at 16,384 characters. An invalid tagged value such as
   `!!int ""`, an impossible date such as `2024-02-30`, or a decimal integer
   longer than 4,300 digits (Python's default limit for converting text to an

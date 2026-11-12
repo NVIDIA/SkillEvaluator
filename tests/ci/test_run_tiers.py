@@ -901,3 +901,49 @@ def test_tier_diagnostics_budget_is_shared_by_every_skill(consumer, tmp_path, mo
     assert not (second / "command.log").exists()
     index = json.loads((second / "index.json").read_text())
     assert index["omitted"] == [{"path": "command.log", "reason": "tier_limit"}]
+
+
+@pytest.mark.parametrize("value", ["name: 2048", "name: yes", "name: [Draft]"])
+def test_skill_without_valid_frontmatter_stops_the_catalog_with_a_frontmatter_reason(
+    consumer, tmp_path, monkeypatch, value
+):
+    import contextlib
+
+    from skillevaluator.embedding.registry import EmbeddingRegistry
+
+    game = consumer / "skills" / "game"
+    game.mkdir()
+    (game / "SKILL.md").write_bytes(f"---\n{value}\ndescription: Play the game.\n---\nInstructions.\n".encode())
+    git = ["git", "-C", str(consumer), "-c", "user.name=CI tests", "-c", "user.email=ci@example.com"]
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "commit", "-m", "game"], check=True, capture_output=True)
+    # Only alpha changed; the catalog still covers every discovered skill.
+    monkeypatch.setattr(run_tiers, "select_skills", lambda workspace, _env: ([workspace / "skills/alpha"], {}))
+
+    def no_embedding(*_args, **_kwargs):
+        raise AssertionError("An invalid catalog skill must be rejected before any embedding request")
+
+    monkeypatch.setattr(EmbeddingRegistry, "_build_entries", no_embedding)
+    commands = []
+
+    def execute(args, *, log, **_kwargs):
+        # Run the catalog helper in this process, with its stderr in the command log.
+        commands.append(args[3])
+        with log.open("w", encoding="utf-8") as stream, contextlib.redirect_stderr(stream):
+            return run_tiers.main(args[3:])
+
+    monkeypatch.setattr(run_tiers, "run_command", execute)
+    reports = tmp_path / "reports"
+    env = env_for(consumer, NVIDIA_API_KEY="test-provider-value-1234")
+    assert run_tiers.evaluate(2, consumer, reports, env) == 0
+    assert commands == ["catalog"]
+    tier = json.loads((reports / "tier2/ci-tier.json").read_text(encoding="utf-8"))["tiers"][0]
+    assert tier["status"] == "incomplete"
+    assert tier["reason"] == (
+        "The complete comparison catalog could not be built; a discovered skill has no root SKILL.md whose "
+        "frontmatter is a valid YAML mapping with a non-empty string name and description, and the catalog "
+        "diagnostics name it."
+    )
+    log = (reports / "tier2/catalog/diagnostics/command.log").read_text(encoding="utf-8")
+    assert "non-empty string name and description: skills/game" in log
+    assert str(consumer) not in log

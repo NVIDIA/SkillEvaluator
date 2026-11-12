@@ -371,6 +371,22 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `skillevaluator view` no longer asks the LLM again when it regenerates a
+  missing `report.html` for a Tier 3 run that saved its report feedback in
+  `result.json`. The regenerated report shows the conclusions,
+  recommendations, and suggestions that run produced, makes no LLM call, and
+  reuses the run's `what_to_fix.json` when it has one. It also takes the run's
+  duration and any Harbor log links recorded in `result.json`, which the 0.8.0
+  rebuild left out. In 0.8.0 the Insights judge and the what-to-fix writer ran
+  again: with a provider configured that cost tokens and could change the
+  advice, without one the run's saved LLM advice was dropped, and either way
+  `what_to_fix.json` was overwritten. Feedback saved by 0.6.0 or earlier has
+  no per-case verdict, so the regenerated report adds the verdict and lists
+  the case fixes as its recommendations and suggestions, without the LLM, as a
+  new report does. A run that saved no feedback still has its feedback
+  rebuilt, with the LLM when a provider is configured, and its
+  `what_to_fix.json` rewritten.
+
 - Public MCP URL probes handle modern SDK client and stream APIs while retaining
   checked-address connections, header grants, response limits, and bounded
   cleanup. Redirect responses are refused before SDK-level redirect handling.

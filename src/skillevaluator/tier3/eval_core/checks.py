@@ -5214,13 +5214,15 @@ def _mask_non_assignment_equals(text: str) -> str:
     return "".join(out)
 
 
-def _tool_searches_root(action: str, args: dict, text: str, depth: int = 0) -> bool:
+def _tool_searches_root(action: str, args: dict, text: str, depth: int = 0, *, argv: bool = False) -> bool:
     """Recognize explicit root search operands, not '/' inside a pattern.
 
     This is bounded top-level command classification. It does not execute or
-    interpret dynamically constructed shell programs.
+    interpret dynamically constructed shell programs. ``argv`` marks text
+    joined from an argument list, which runs without a shell: its own words
+    are literal, while a ``sh -c`` payload inside it is still shell text.
     """
-    if action in {"grep", "glob", "grep_files", "list_dir", "ls"}:
+    if action in {"grep", "glob", "grep_files", "list_dir", "ls", "list"}:
         for key in ("path", "dir_path"):
             value = args.get(key)
             if isinstance(value, str) and _search_path_is_root(value.strip()):
@@ -5235,7 +5237,7 @@ def _tool_searches_root(action: str, args: dict, text: str, depth: int = 0) -> b
     # Without a shell AST, comments, expansions, here-documents and process
     # substitutions cannot be classified reliably. Keep their prior score
     # instead of inventing a path.
-    if any(char in text for char in "$`#"):
+    if not argv and any(char in text for char in "$`#"):
         return False
     tokens = _shell_tokens(text)
     if any(_is_heredoc_redirect(token) or token in {"<(", ">("} for token in tokens):
@@ -5427,12 +5429,175 @@ def _tool_searches_root(action: str, args: dict, text: str, depth: int = 0) -> b
     return False
 
 
+# Tool productivity classes for check_tool_efficiency. Neutral calls (planning,
+# background-shell control, tool discovery and sub-agents) are left out of the
+# score. Reading, searching, writing, patching, running commands and MCP tools
+# count as productive work.
+_NEUTRAL_TOOL_NAMES = frozenset(
+    {
+        "todowrite",
+        "todoread",
+        "update_plan",
+        "bashoutput",
+        "killshell",
+        "killbash",
+        "kill_shell",
+        "taskstop",
+        "taskoutput",
+        "toolsearch",
+        "task",
+        "agent",
+        # Claude Code task lists and plan mode.
+        "taskcreate",
+        "taskget",
+        "tasklist",
+        "taskupdate",
+        "enterplanmode",
+        "exitplanmode",
+        # Codex multi-agent tools.
+        "spawn_agent",
+        "wait",
+        "wait_agent",
+        "close_agent",
+        "send_input",
+        "resume_agent",
+    }
+)
+_PRODUCTIVE_TOOL_NAMES = frozenset(
+    {
+        "skill",
+        "ls",
+        # OpenCode's directory listing.
+        "list",
+        "list_dir",
+        "grep",
+        "grep_files",
+        "glob",
+        "write",
+        "edit",
+        "multiedit",
+        "notebookedit",
+        "write_file",
+        "edit_file",
+        "apply_patch",
+        "applypatch",
+    }
+)
+# Tools that send text to a running shell session (Codex write_stdin) or start
+# a background watch (Claude Code Monitor), and the argument with that text.
+# Without text they only poll or watch and are neutral; with text they run it,
+# and it is classified like any other command.
+_SESSION_INPUT_TOOL_ARGS = {"write_stdin": "chars", "monitor": "command"}
+# Words in an MCP tool's own name that mark a filesystem search or listing.
+_MCP_FILESYSTEM_SEARCH_WORDS = ("search", "list", "tree", "find", "glob", "grep", "directory")
+
+
+def _tool_efficiency_args(tool_call: dict[str, Any]) -> dict[str, Any]:
+    args = tool_call.get("action_input")
+    return args if isinstance(args, dict) else {}
+
+
+def _tool_efficiency_target(name: str, args: dict[str, Any]) -> Any:
+    """The command, code or path a tool call acts on, as recorded."""
+    if name in _SESSION_INPUT_TOOL_ARGS:
+        return args.get(_SESSION_INPUT_TOOL_ARGS[name], "")
+    return (
+        args.get("command", "")
+        or args.get("cmd", "")
+        or args.get("code", "")
+        or args.get("file_path", "")
+        or args.get("path", "")
+        or args.get("raw", "")
+    )
+
+
+def _is_argv(target: Any) -> bool:
+    return isinstance(target, list) and bool(target) and all(isinstance(item, str) for item in target)
+
+
+def _tool_efficiency_text(target: Any) -> str:
+    """Shell text for a tool call target.
+
+    Codex records some shell calls as an argv list such as
+    ``["bash", "-lc", "find / -name x"]``. Joining it the way a shell reads it
+    lets the root-search and expected-script checks see the command instead of
+    a Python list repr.
+    """
+    if _is_argv(target):
+        return shlex.join(target)
+    return str(target)
+
+
+def _tool_efficiency_name(action: Any) -> str:
+    """Lowercased tool name without a Codex namespace such as ``functions.``.
+
+    MCP tool names keep every part, so ``mcp__tasks__task`` stays an MCP call.
+    """
+    name = str(action).lower()
+    return name if name.startswith("mcp__") else name.rsplit(".", 1)[-1]
+
+
+def _session_input_is_text(value: Any) -> bool:
+    """Whether session input types something; Enter or Ctrl-C alone only polls or interrupts."""
+    return isinstance(value, str) and any(char.isprintable() and not char.isspace() for char in value)
+
+
+def _mcp_call_targets_root(name: str, args: dict[str, Any]) -> bool:
+    """Whether an MCP call searches or lists the whole filesystem.
+
+    Only filesystem tools count: a tool of a server whose name contains
+    ``filesystem``, or a tool whose own name says it searches or lists
+    (``_MCP_FILESYSTEM_SEARCH_WORDS``). Other servers use ``path`` for other
+    things, such as a file in a repository, where "/" is the repository root.
+    """
+    if not name.startswith("mcp__"):
+        return False
+    server, _, tool = name[len("mcp__") :].partition("__")
+    if "filesystem" not in server and not any(word in tool for word in _MCP_FILESYSTEM_SEARCH_WORDS):
+        return False
+    return any(
+        isinstance(args.get(key), str) and _search_path_is_root(args[key].strip()) for key in ("path", "dir_path")
+    )
+
+
+def _tool_call_productivity(tc: dict[str, Any], expected_skill: Any, expected_script: Any) -> str:
+    """Classify one tool call as ``productive``, ``wasted`` or ``neutral`` (not scored)."""
+    name = _tool_efficiency_name(tc["action"])
+    if name in _NEUTRAL_TOOL_NAMES:
+        return "neutral"
+    args = _tool_efficiency_args(tc)
+    target = _tool_efficiency_target(name, args)
+    runs_command = _is_execution_action(name)
+    search_action = name
+    if name in _SESSION_INPUT_TOOL_ARGS:
+        if not _session_input_is_text(target):
+            return "neutral"
+        # The text is a command typed into a shell or run as a watch script.
+        runs_command = True
+        search_action = "exec_command"
+    cmd = _tool_efficiency_text(target)
+    # A search rooted at "/" is waste even when it names the expected skill or script.
+    if _tool_searches_root(search_action, args, cmd, argv=_is_argv(target)) or _mcp_call_targets_root(name, args):
+        return "wasted"
+    if ("read" in name and expected_skill and expected_skill in cmd) or (
+        runs_command and expected_script and expected_script in cmd
+    ):
+        return "productive"
+    # Help, version and install commands are waste. Only a command is checked:
+    # the path, content or patch text of any other tool is data, not a command.
+    if runs_command and any(waste in f"{name} {cmd}".lower() for waste in WASTE_INDICATORS):
+        return "wasted"
+    if "read" in name or name in _PRODUCTIVE_TOOL_NAMES or name.startswith("mcp__") or runs_command:
+        return "productive"
+    return "wasted"
+
+
 def check_tool_efficiency(
     tool_calls: list[dict[str, Any]],
     expected_skill: str | None = None,
     expected_script: str | None = None,
 ) -> dict[str, Any]:
-    """Measure what fraction of tool calls were productive vs wasted."""
+    """Measure what fraction of scored tool calls were productive (planning calls are not scored)."""
     expected_script = normalize_optional_reference(expected_script)
     if not tool_calls:
         return {"passed": True, "score": 1.0, "reason": "No tool calls", "details": {}}
@@ -5442,55 +5607,37 @@ def check_tool_efficiency(
             "Tool efficiency could not be evaluated because a native Codex exec wrapper was unsupported"
         )
 
-    productive = 0
-    wasted = 0
+    counts = {"productive": 0, "wasted": 0, "neutral": 0}
     wasted_details: list[str] = []
 
     for tc in tool_calls:
-        action = tc["action"].lower()
-        args = tc.get("action_input", {}) if isinstance(tc.get("action_input"), dict) else {}
-        cmd = str(
-            args.get("command", "")
-            or args.get("cmd", "")
-            or args.get("code", "")
-            or args.get("file_path", "")
-            or args.get("path", "")
-            or args.get("raw", "")
-        )
-        full_text = f"{action} {cmd}".lower()
+        kind = _tool_call_productivity(tc, expected_skill, expected_script)
+        counts[kind] += 1
+        if kind == "wasted":
+            label = str(_tool_efficiency_target(_tool_efficiency_name(tc["action"]), _tool_efficiency_args(tc)))
+            wasted_details.append(f"{tc['action']}({label[:60]})")
 
-        is_productive = False
-
-        if _tool_searches_root(action, args, cmd):
-            is_productive = False
-        elif ("read" in action and expected_skill and expected_skill in cmd) or (
-            _is_execution_action(action) and expected_script and expected_script in cmd
-        ):
-            is_productive = True
-        elif any(waste in full_text for waste in WASTE_INDICATORS):
-            is_productive = False
-        elif "read" in action or _is_execution_action(action) or action.lower() == "skill":
-            is_productive = True
-
-        if is_productive:
-            productive += 1
-        else:
-            wasted += 1
-            wasted_details.append(f"{tc['action']}({cmd[:60]})")
-
+    productive, wasted, neutral = counts["productive"], counts["wasted"], counts["neutral"]
     total = productive + wasted
-    score = productive / total if total > 0 else 1.0
+    details = {
+        "productive": productive,
+        "wasted": wasted,
+        "neutral": neutral,
+        "total": total,
+        "wasted_calls": wasted_details[:5],
+    }
+    not_counted = f"; {neutral} planning or bookkeeping call(s) not counted" if neutral else ""
+    if total == 0:
+        # Only planning or bookkeeping calls: no work was done, so score 0.0.
+        # skill_efficiency then matches a trajectory with no tool calls (0.0).
+        return {"passed": False, "score": 0.0, "reason": f"No scored tool calls{not_counted}", "details": details}
 
+    score = productive / total
     return {
         "passed": score >= 0.5,
         "score": round(score, 4),
-        "reason": f"{productive}/{total} productive calls ({score:.0%})",
-        "details": {
-            "productive": productive,
-            "wasted": wasted,
-            "total": total,
-            "wasted_calls": wasted_details[:5],
-        },
+        "reason": f"{productive}/{total} productive calls ({score:.0%}){not_counted}",
+        "details": details,
     }
 
 

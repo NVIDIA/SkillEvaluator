@@ -212,6 +212,15 @@ no complete object or with more than one counts as a failed analysis. An object
 nested inside an array or inside a malformed container is never used as the
 verdict, and neither is an object with a repeated key, a `NaN` or `Infinity`
 value, a number too large for a float, or more than 128 levels of nesting.
+The verdict must be one of the three names above. When present, the confidence
+must be a JSON number from 0 to 1, and the rationale and suggestion must be
+strings of at most 8,192 characters each. A missing confidence reads as 0, so a
+`DUPLICATE` verdict without one maps to MEDIUM in the table above, and a missing
+rationale or suggestion reads as empty. A reply that breaks any of these rules
+counts as a failed analysis rather than a finding, whatever its verdict: for
+example a confidence of `85` (a percentage), `true`, or `"0.9"` (a string), or
+a suggestion that is `null` or a list. This applies to `INTENTIONAL_DETAIL` and
+`RELATED_BUT_DISTINCT` replies too, although they never become findings.
 
 If chat-LLM analysis fails for a candidate cluster, Tier 2 reports the
 incomplete analysis as a blocking error rather than treating the content as
@@ -479,17 +488,21 @@ you intend to skip Tier 2 entirely.
 | High-confidence duplicate boundary | `0.70` | Maps actionable duplicate verdicts to HIGH rather than MEDIUM |
 | Frontmatter structure | 100 nesting levels, 20,000 nodes, 1,024 alias references, 1,024 items per mapping or sequence, 65,536 characters per value, integers up to 14,000 bits (about 4,200 digits) | Bounds every Markdown mapping frontmatter Tier 2 parses; aliases and merge keys count after expansion. A decimal integer longer than 4,300 digits, Python's default limit for converting text to an integer, counts as invalid YAML, not as a limit failure |
 | Inter-skill name and description | 16,384 characters each | Per-field catalog text limit, in every embedding mode; description mode also caps `name: description` at 16,384 characters. A value that is not a string excludes the manifest and makes the scan incomplete |
-| Intra-skill content chunks | 512 | Per-skill ceiling, checked before any embedding request |
-| Intra-skill comparison work | 267,911,168 scalar comparisons | Bounds all-pairs clustering; allows all 512 chunks with embeddings of up to 2,048 dimensions, 418 chunks at 3,072, and 362 at 4,096 |
+| Intra-skill content chunks | 1,024 | Per-skill ceiling, checked before any embedding request |
+| Intra-skill comparison work | 536,346,624 scalar comparisons | Bounds all-pairs clustering; allows all 1,024 chunks with embeddings of up to 1,024 dimensions, 836 chunks at 1,536 (OpenAI's default `text-embedding-3-small`), 724 at 2,048 (NVIDIA Build's default `nvidia/nemotron-3-embed-1b` and the OpenAI-compatible default `nvidia/nvidia/nemotron-3-embed-1b`), 591 at 3,072, and 512 at 4,096 |
 | Intra-skill LLM review clusters | 50 | Most candidate clusters sent for chat-LLM review in one skill |
-| Intra-skill cluster members | 512 | Same as the chunk ceiling, so it never stops a scan on its own; the review prompt limits decide |
+| Intra-skill cluster members | 1,024 | Same as the chunk ceiling, so it never stops a scan on its own; the review prompt limits decide |
 | Intra-skill review prompt | 64,000 characters | One cluster's request, system prompt included; exactly repeated text (a Markdown section's body after its heading line) is listed once before this limit applies, when that shortens the request |
+| Intra-skill verdict text | 8,192 characters | Longest rationale or suggestion accepted in one chat-LLM verdict; a longer one fails that cluster's analysis |
 | Intra-skill review prompts in total | 1,000,000 characters | All cluster requests for one skill, checked before the first chat-LLM call |
 
 Intra-skill clustering compares every pair of chunks, so its work is
 `n * (n - 1) / 2 * dimensions`. A skill over the chunk ceiling stops before any
 embedding request. A skill within the ceiling whose embeddings are too wide for
 its chunk count stops after the first embedding batch, which sets the width.
+With the 2,048-dimensional default model of NVIDIA Build or of the
+OpenAI-compatible provider, for example, a skill with 725 to 1,024 chunks stops
+there.
 Either way the scan is reported as **INCOMPLETE**. For the comparison-work
 limit (`scalar_comparison_limit`), the execution error and the JSON
 `work_limit` record name the effective chunk limit for that embedding width

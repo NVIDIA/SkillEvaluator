@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import urlparse
 
-from jinja2 import BaseLoader, Environment
+from jinja2 import BaseLoader, Environment, pass_context
 
 from skillevaluator import __version__
 from skillevaluator.constants import (
@@ -501,8 +501,9 @@ def _tier3_score_reasons(value: object) -> dict[str, str]:
     return reasons
 
 
-def _tier3_not_applicable_reason(metric: object, with_skill: bool = False) -> str:
-    """Return why a Tier 3 metric can be N/A, for the tooltip of an N/A drill-down cell."""
+@pass_context
+def _tier3_not_applicable_reason(_context: Any, metric: object, with_skill: bool = False) -> str:
+    """Describe N/A metrics at render time, keeping Tier 3 imports out of base template compilation."""
     from skillevaluator.tier3.harbor.metrics import not_applicable_reason
 
     return not_applicable_reason(str(metric), with_skill=with_skill is True)

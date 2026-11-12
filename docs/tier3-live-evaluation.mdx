@@ -1311,16 +1311,19 @@ N/A.
 
 | Arm | Security | Correctness | Discoverability | Effectiveness | Efficiency |
 | --- | --- | --- | --- | --- | --- |
-| With skill, `should_trigger=true` | Scored | Scored with `ground_truth`; otherwise N/A | Scored: the skill is present to discover and run | Scored for each present reference; N/A if both are missing | Scored: routing and tool use are evaluated |
-| With skill, `should_trigger=false` (negative case) | Scored | Scored with `ground_truth`; otherwise N/A | Scored: `skill_execution` evaluates the negative case | Scored for each present reference; N/A if both are missing | Scored as 1.0 when no skill is expected to trigger |
+| With skill, `should_trigger=true` | Scored | Scored with `ground_truth`; otherwise N/A | Scored when `expected_skill` names a skill; otherwise N/A | Scored for each present reference; N/A if both are missing | Scored when `expected_skill` names a skill; otherwise N/A |
+| With skill, `should_trigger=false` (negative case) | Scored | Scored with `ground_truth`; otherwise N/A | Scored: `skill_execution` evaluates the negative case | Scored for each present reference; N/A if both are missing | N/A: a negative case has no skill use to measure |
 | Without skill and no applicable alternate staged | Scored | Scored with `ground_truth`; otherwise N/A | N/A: no skill under test to discover or run | Scored for each present reference; N/A if both are missing | N/A: no skill under test to route to |
-| Without skill, with an acceptable alternate staged | Scored | Scored with `ground_truth`; otherwise N/A | Scored when the staged skill matches a case candidate | Scored for each present reference; N/A if both are missing | Scored when the staged skill matches a case candidate |
+| Without skill, with an acceptable alternate staged | Scored | Scored with `ground_truth`; otherwise N/A | Scored when the staged skill matches a case candidate and the case is negative or names an `expected_skill`; otherwise N/A | Scored for each present reference; N/A if both are missing | Scored for positive cases that name an `expected_skill` and whose staged skill matches a case candidate; otherwise N/A |
 
 For a positive case, an alternate candidate is the expected skill or an
 acceptable alternate. For a negative case, the candidate is the evaluated
 skill, or the expected skill when no evaluated skill is recorded. In either
 case, the staged name must match a candidate for the no-skill arm's skill
-metrics to apply.
+metrics to apply. The eval-case rules still apply after matching: a negative
+case always leaves Efficiency N/A, and a positive case without `expected_skill`
+leaves both skill metrics N/A. A case with neither `expected_skill` nor a
+resolved `should_trigger` label also leaves both skill metrics N/A.
 
 Skill Lift per dimension and overall uses only cases and metrics both arms
 scored; the `basis` block in `lift.json` records the shared comparison ([Skill

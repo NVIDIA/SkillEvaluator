@@ -675,7 +675,9 @@ def _render_reports(tmp_path: Path, results: dict[str, Any]) -> tuple[dict[str, 
     return payload, benchmark, html
 
 
-def _render_reports_and_message(tmp_path: Path, results: dict[str, Any]) -> tuple[dict[str, Any], str, str, str]:
+def _render_reports_and_message(
+    tmp_path: Path, results: dict[str, Any], *, max_attempts: int = 1
+) -> tuple[dict[str, Any], str, str, str]:
     """Like :func:`_render_reports`, and also return the Tier 3 result's ``agent_eval`` message."""
     from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory, render_agent_eval_html_report
 
@@ -686,7 +688,7 @@ def _render_reports_and_message(tmp_path: Path, results: dict[str, Any]) -> tupl
             "run_dir": str(run_dir),
             "attempt_policy": {
                 **results["attempt_policy"],
-                "max_attempts": 1,
+                "max_attempts": max_attempts,
                 "pass_threshold": 0.5,
                 "stop_on_pass": False,
             },
@@ -1122,18 +1124,26 @@ def test_stop_on_pass_recovered_timeout_beside_unrecovered_ones(tmp_path: Path) 
     assert results[RUN_KEY]["explained_launch_errors"] == launch_errors
 
 
-def test_cost_limit_attempts_that_never_ran_are_not_missing_baseline_attempts(tmp_path: Path) -> None:
+_COST_LIMIT_LAUNCH_ERROR = (
+    "opencode without-skill Harbor run failed: case-a attempt 2: Harbor job did not complete successfully: 1 errored"
+)
+
+
+def _collect_cost_limited(tmp_path: Path, *, codex_short: bool = False) -> dict[str, Any]:
+    """Collect attempt jobs a cost limit cut short; opencode's second case-a baseline attempt timed out.
+
+    The limit admitted no attempt of case-b for opencode. With ``codex_short``
+    it also left codex's second case-b attempt ``not_run`` in both arms.
+    """
     pytest.importorskip("harbor")
     from skillevaluator.tier3.harbor.runner import _merge_attempt_jobs
 
-    # A cost limit runs every attempt as its own job. It admitted no attempt
-    # of case-b for opencode, so neither arm expects case-b; only the timed-out
-    # second attempt of case-a is missing from the baseline.
+    codex_b_attempts = 1 if codex_short else 2
     plan = {
         ("opencode", "with"): {"case-a": ["pass", "pass"]},
         ("opencode", "without"): {"case-a": ["pass", "timeout"]},
-        ("codex", "with"): {"case-a": ["pass", "pass"], "case-b": ["pass", "pass"]},
-        ("codex", "without"): {"case-a": ["fail", "fail"], "case-b": ["fail", "fail"]},
+        ("codex", "with"): {"case-a": ["pass", "pass"], "case-b": ["pass"] * codex_b_attempts},
+        ("codex", "without"): {"case-a": ["fail", "fail"], "case-b": ["fail"] * codex_b_attempts},
     }
     for (agent, variant), cases in plan.items():
         jobs = [
@@ -1147,11 +1157,12 @@ def test_cost_limit_attempts_that_never_ran_are_not_missing_baseline_attempts(tm
         for arm in ("with", "without")
         for attempt in (1, 2)
     ]
-    launch_errors = [
-        "opencode without-skill Harbor run failed: case-a attempt 2: Harbor job did not complete successfully: 1 errored"
-    ]
-
-    results = collect_harbor_results(
+    if codex_short:
+        not_run += [
+            {"agent": "codex", "arm": arm, "case_id": "case-b", "attempt": 2, "status": "not_run"}
+            for arm in ("with", "without")
+        ]
+    return collect_harbor_results(
         skill_name=SKILL,
         agents=["opencode", "codex"],
         output_dir=tmp_path / "results",
@@ -1161,10 +1172,17 @@ def test_cost_limit_attempts_that_never_ran_are_not_missing_baseline_attempts(tm
         expected_case_ids=["case-a", "case-b"],
         case_id_by_task_selector={"case-a": "case-a", "case-b": "case-b"},
         expected_trials=4,
-        launch_errors=launch_errors,
+        launch_errors=[_COST_LIMIT_LAUNCH_ERROR],
         tolerate_baseline_timeouts=True,
         budget_not_run=not_run,
     )
+
+
+def test_cost_limit_attempts_that_never_ran_are_not_missing_baseline_attempts(tmp_path: Path) -> None:
+    # A cost limit runs every attempt as its own job. It admitted no attempt
+    # of case-b for opencode, so neither arm expects case-b; only the timed-out
+    # second attempt of case-a is missing from the baseline.
+    results = _collect_cost_limited(tmp_path)
 
     opencode = results["agents"]["opencode"]
     assert results["execution_status"] == "succeeded", results.get("warnings")
@@ -1174,7 +1192,38 @@ def test_cost_limit_attempts_that_never_ran_are_not_missing_baseline_attempts(tm
     record = opencode[RECORD_KEY]
     assert (record["expected_attempts"], record["scored_attempts"], record["failed_attempts"]) == (2, 1, 1)
     assert [(failure["case_id"], failure["attempt"]) for failure in record["failures"]] == [("case-a", 2)]
-    assert results[RUN_KEY]["explained_launch_errors"] == launch_errors
+    assert results[RUN_KEY]["explained_launch_errors"] == [_COST_LIMIT_LAUNCH_ERROR]
+
+
+@pytest.mark.parametrize("codex_short", [False, True], ids=["peer-complete", "peer-cost-limited"])
+def test_reports_name_tolerated_agents_without_a_completed_agent_result(tmp_path: Path, codex_short: bool) -> None:
+    from skillevaluator.reporting.tier3_scope import completed_agent_result
+
+    # With codex_short the cost limit also cut the best agent's coverage, so
+    # the reports have no completed-agent result; the tolerated baseline still
+    # needs attention and is named in both reports.
+    results = _collect_cost_limited(tmp_path, codex_short=codex_short)
+    assert results["execution_status"] == "succeeded", results.get("warnings")
+    assert results[RUN_KEY]["tolerated_agents"] == ["opencode"]
+
+    payload, benchmark, html, _message = _render_reports_and_message(tmp_path, results, max_attempts=2)
+
+    assert payload["best_agent"] == "codex"
+    assert (completed_agent_result(payload) is None) is codex_short
+    assert _tolerated_line("opencode") in benchmark
+    assert benchmark.count("**Needs attention:** other execution failures remain.") == 1
+    assert "Baseline incomplete for <strong>opencode</strong> (1 of 2 attempts scored)" in html
+    attention = (
+        '<span class="tolerated-baseline"><strong>Needs attention:</strong> other execution failures remain.</span>'
+    )
+    if codex_short:
+        assert "Completed agent: **codex**" not in benchmark
+        assert attention in html
+    else:
+        # The completed-agent lead already says that other failures need attention.
+        assert "Completed agent: **codex**" in benchmark
+        assert "Other execution failures need attention. This is not a whole-run or publication PASS." in html
+        assert attention not in html
 
 
 # -- pure rules -----------------------------------------------------------------

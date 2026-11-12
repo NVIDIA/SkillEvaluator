@@ -2560,9 +2560,12 @@
                 {% endif %}
                 {% endif %}
                 {% endif %}
-                {% if completed_agent %}{% for tolerated in completed_agent.baseline_timeouts_tolerated or [] %}
+                {% if tolerated_baselines and not completed_agent %}
+                <span class="tolerated-baseline"><strong>Needs attention:</strong> other execution failures remain.</span>
+                {% endif %}
+                {% for tolerated in tolerated_baselines or [] %}
                 <span class="tolerated-baseline">Baseline incomplete for <strong>{{ tolerated.name }}</strong>{% if tolerated.scored_attempts is not none and tolerated.expected_attempts is not none %} ({{ tolerated.scored_attempts }} of {{ tolerated.expected_attempts }} attempts scored){% endif %}: kept by <code>--tolerate-baseline-timeouts</code>, so its baseline and uplift are not reported.</span>
-                {% endfor %}{% endif %}
+                {% endfor %}
             </div>
             {% if tier3_dataset_sufficiency and tier3_dataset_sufficiency.coverage_summary %}
             <p class="t3-dataset-sufficiency{% if tier3_dataset_sufficiency.status == 'provisional' %} warning{% endif %}"

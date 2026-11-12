@@ -371,6 +371,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Apply the existing MCP declaration policy to native Harbor task environments
+  before staging. Preserve approved `$VAR` header references by converting them
+  to Harbor 0.25's `${VAR}` form in generated task TOML, without changing source
+  declarations or agent JSON configuration.
+
+- Keep local `/logs/artifacts`, `HARBOR_LOGS_DIR/artifacts`, and
+  `HARBOR_ARTIFACTS_DIR` on the same private staging tree. Artifact collection
+  preserves source files and retained role logs; local whole-log-tree transfers
+  fail before modifying their destination.
+
 - Public MCP URL probes handle modern SDK client and stream APIs while retaining
   checked-address connections, header grants, response limits, and bounded
   cleanup. Redirect responses are refused before SDK-level redirect handling.

@@ -433,6 +433,13 @@ files replaced during the read fail task generation before output mutation. On
 Windows, the selected-file handle also denies concurrent writes and deletion
 for the read.
 
+Native Harbor task `environment.mcp_servers` declarations use the same MCP
+approval policy before staging, including declarations in task-level and
+per-step verifier environments. For generated tasks,
+`evals/environment/mcp_servers.toml` accepts approved `$VAR` and `${VAR}` header
+references; generated Harbor task TOML uses the braced form required by Harbor
+0.25. Source files and the agent's MCP JSON keep their original references.
+
 `evals/environment/input/` is reserved and is not copied into generated tasks.
 Directory-level custom Docker `COPY input/` remains buildable for an empty entry
 using an empty context directory. Missing, dynamic, linked, hardlinked, aliased,

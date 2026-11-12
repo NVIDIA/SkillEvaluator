@@ -2119,6 +2119,17 @@ def validate_mcp_server_declarations(
     return servers
 
 
+def _harbor_mcp_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    """Use Harbor's braced placeholders after validating the original headers."""
+    return {
+        name: _MCP_COMPLETE_PLACEHOLDER_RE.sub(
+            lambda match: f"${{{match.group(3)}}}" if match.group(3) and not match.group(1) else match.group(0),
+            value,
+        )
+        for name, value in headers.items()
+    }
+
+
 def _load_mcp_servers(
     skill_path: Path,
     *,
@@ -2262,6 +2273,8 @@ skills_dir = "/workspace/skills"
             for key, val in srv.items():
                 if not isinstance(key, str):
                     raise TypeError("MCP TOML keys must be strings")
+                if key == "headers":
+                    val = _harbor_mcp_headers(val)
                 content += f"{_toml_quote(key)} = {_toml_value(val)}\n"
         (task_dir / "mcp_servers.json").write_text(json.dumps(mcp_servers, indent=2), encoding="utf-8")
 
@@ -5137,6 +5150,51 @@ def _validate_native_task_host_env_boundaries(
         validate_verifier(step.get("verifier", {}), f"steps[{index}].verifier")
 
 
+def _validate_native_task_mcp_policy(
+    task_toml: Path,
+    data: dict[str, Any],
+    *,
+    runtime_env: dict[str, str] | None,
+) -> None:
+    """Check native MCP declarations before Harbor can resolve their headers."""
+    from harbor.models.task.config import MCPServerConfig
+
+    def validate_environment(environment: object, field: str) -> None:
+        # Harbor's task schema diagnoses malformed surrounding tables.
+        if not isinstance(environment, dict) or "mcp_servers" not in environment:
+            return
+        servers = environment["mcp_servers"]
+        source = f"Native Harbor task [{field}.mcp_servers]: {task_toml}"
+        if not isinstance(servers, list) or any(not isinstance(server, dict) for server in servers):
+            raise ValueError(f"{source} must be an array of MCP server tables")
+        for server in servers:
+            if server.keys() - MCPServerConfig.model_fields.keys():
+                raise ValueError(f"{source} contains unsupported MCP server fields")
+            try:
+                McpServerDeclaration.model_validate(server)
+            except ValidationError:
+                raise ValueError(f"{source} contains an invalid MCP server declaration") from None
+        validate_mcp_server_declarations(servers, allowed_runtime_env=runtime_env, source_label=source)
+        for server in servers:
+            try:
+                MCPServerConfig.model_validate(server)
+            except ValidationError:
+                raise ValueError(f"{source} contains an invalid MCP server declaration") from None
+
+    validate_environment(data.get("environment", {}), "environment")
+
+    def validate_verifier(verifier: object, field: str) -> None:
+        if isinstance(verifier, dict):
+            validate_environment(verifier.get("environment"), f"{field}.environment")
+
+    validate_verifier(data.get("verifier", {}), "verifier")
+    steps = data.get("steps")
+    if isinstance(steps, list):
+        for index, step in enumerate(steps):
+            if isinstance(step, dict):
+                validate_verifier(step.get("verifier", {}), f"steps[{index}].verifier")
+
+
 def _validate_native_verifier_compose_boundaries(
     task_dir: Path,
     data: dict[str, Any],
@@ -5454,6 +5512,7 @@ def _native_task_workdir(
     environment = data.get("environment", {}) if isinstance(data, dict) else {}
     if not isinstance(environment, dict):
         raise ValueError(f"Native Harbor task [environment] must be a table: {task_dir / 'task.toml'}")
+    _validate_native_task_mcp_policy(task_dir / "task.toml", data, runtime_env=runtime_env)
     _validate_native_task_execution_compatibility(
         task_dir,
         data,

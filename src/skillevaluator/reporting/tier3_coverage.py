@@ -26,8 +26,12 @@ _NOT_REPORTED = {
 # many of its attempts scored.
 _NOTICE_CODES = {"with_skill": "with_skill_failed", "without_skill": "baseline_failed"}
 # Harbor records a failed trial as ``ExceptionType: message`` after the trial
-# label. Only the type name is kept, as plain words, so it is safe to publish.
-_EXCEPTION_TYPE = re.compile(r"(?:^|: )(?:[A-Za-z_]\w{0,63}\.){0,8}([A-Z][A-Za-z0-9]{0,63}(?:Error|Exception))(?=:|$)")
+# label. A job whose statistics miss a trial names the trial or step exception
+# Harbor recorded as ``trial <label> recorded ExceptionType: message``. Only the
+# type name is kept, as plain words, so it is safe to publish.
+_EXCEPTION_TYPE = re.compile(
+    r"(?:^|: | recorded )(?:[A-Za-z_]\w{0,63}\.){0,8}([A-Z][A-Za-z0-9]{0,63}(?:Error|Exception))(?=:|$)"
+)
 # An acronym keeps its trailing digits: ``S3UploadFailedError`` gives ``s3 upload
 # failed error`` and ``HTTP2Error`` gives ``http2 error``.
 _CAMEL_WORD = re.compile(r"[A-Z]+[0-9]*(?![a-z])|[A-Z][a-z0-9]*")

@@ -1085,7 +1085,25 @@ def view_results(skill_path: Path, *, results_dir: Path | None = None) -> Path:
     target = latest.resolve() if latest.is_symlink() else latest
     report_path = target / "report.html"
     if not report_path.exists():
-        report_path = render_agent_eval_html_report(skill_path, target)
+        from skillevaluator.evaluation.tier3_feedback_chat import _read_result_json, saved_feedback_for_run
+        from skillevaluator.evaluation.tier3_report import _TIER3_FEEDBACK_FIELDS
+
+        saved_result = _read_result_json(target)
+        saved_feedback = saved_feedback_for_run(saved_result, target)
+        # A run saves every feedback field; anything less is rebuilt as before.
+        if saved_feedback and saved_feedback.keys() == set(_TIER3_FEEDBACK_FIELDS):
+            # Rebuild with the feedback this run saved. Asking the judge again
+            # costs tokens and can change the advice; with no provider it
+            # silently drops the advice the run saved.
+            report_path = render_agent_eval_html_report(
+                skill_path,
+                target,
+                engine_result=saved_result,
+                use_llm_judge=False,
+                saved_feedback=saved_feedback,
+            )
+        else:
+            report_path = render_agent_eval_html_report(skill_path, target)
     console.print(f"Opening: [cyan]{escape_markup(str(report_path))}[/cyan]")
     webbrowser.open(report_path.as_uri())
     return report_path

@@ -2792,7 +2792,7 @@
                             <div class="t3-dim-hint">{{ "with-skill arm not run" if t3_baseline_only else "not scored with the skill" }}</div>
                             {% endif %}
                         </td>
-                        <td{% if dim.id == 'discoverability' and 'skill_execution' in baseline_na_metrics %} title="No-skill baseline: This arm has no skill under test installed, so there is no skill to discover or run"{% elif dim.id == 'efficiency' and 'skill_efficiency' in baseline_na_metrics %} title="No-skill baseline: This arm has no skill under test installed, so there is no skill to route to"{% endif %}>
+                        <td{% if dim.id == 'discoverability' and 'skill_execution' in baseline_na_metrics %} title="No-skill baseline: {{ 'skill_execution' | not_applicable_reason }}"{% elif dim.id == 'efficiency' and 'skill_efficiency' in baseline_na_metrics %} title="No-skill baseline: {{ 'skill_efficiency' | not_applicable_reason }}"{% endif %}>
                             {% if dim.baseline is not none %}{{ "%.2f" | format(dim.baseline) }}{% else %}N/A
                             <div class="t3-dim-hint">{{ "baseline not scored" if t3_best and t3_best.baseline is not none else "baseline not run" }}</div>{% endif %}
                         </td>
@@ -3432,7 +3432,7 @@
                             {% for eval_id in t3_eval_ids %}
                                 {% set s = scores.get(eval_id) %}
                                 {% set cell_na = s is none and eval_id in (trial.not_applicable_metrics or []) %}
-                                {% set cell_reason = reasons.get(eval_id) if s is not none else (("Not applicable: " ~ (eval_id | not_applicable_reason)) if cell_na else none) %}
+                                {% set cell_reason = reasons.get(eval_id) if s is not none else (("Not applicable: " ~ (eval_id | not_applicable_reason(row.condition == 'With skill'))) if cell_na else none) %}
                                 {% set cell_text = "%.2f" | format(s) if s is not none else ("N/A" if cell_na else "—") %}
                                 <td style="{% if s is not none %}background:{{ 'rgba(34,197,94,0.14)' if s >= 0.7 else ('rgba(234,179,8,0.14)' if s >= 0.4 else 'rgba(239,68,68,0.14)') }}; color:{{ 'var(--success-color)' if s >= 0.7 else ('var(--warning-color)' if s >= 0.4 else 'var(--danger-color)') }}; font-weight:600;{% elif cell_na %}color:var(--text-secondary);{% endif %}"{% if cell_na %} data-not-applicable="true"{% endif %}{% if cell_reason %} title="{{ eval_id | replace('_', ' ') | title }}: {{ cell_reason }}"{% endif %}>{% if cell_reason %}<span class="t3-score-reason">{{ cell_text }}</span>{% else %}{{ cell_text }}{% endif %}</td>
                             {% endfor %}

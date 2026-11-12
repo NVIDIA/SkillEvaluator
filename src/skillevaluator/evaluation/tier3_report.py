@@ -4186,7 +4186,12 @@ def _verdict_from_lift(lift: float | None) -> str:
 
 
 def _agent_quality_verdict(agent: dict[str, Any]) -> str:
-    """Classify one supported agent by required checks, then dimensions."""
+    """Classify one supported agent by required checks, then dimensions.
+
+    A dimension below the neutral threshold fails the agent even when another
+    dimension has no score (for example Correctness without ``ground_truth``).
+    A missing or non-finite dimension still blocks PASS.
+    """
     if agent.get("execution_status") != "succeeded":
         return VERDICT_NEUTRAL
     if _never_activated(agent):
@@ -4203,17 +4208,19 @@ def _agent_quality_verdict(agent: dict[str, Any]) -> str:
         if isinstance(dimension, dict)
     }
     scores: list[float] = []
+    incomplete = False
     for dimension_id in _DIMENSION_IDS:
         dimension = dimensions.get(dimension_id)
         value = (dimension or {}).get("with_skill", (dimension or {}).get("score"))
         numeric = _finite_float(value)
         if numeric is None:
-            return VERDICT_NEUTRAL
-        scores.append(numeric)
+            incomplete = True
+        else:
+            scores.append(numeric)
 
     if any(score < DIMENSION_VERDICT_NEUTRAL_THRESHOLD for score in scores):
         return VERDICT_FAIL
-    if any(score < DIMENSION_VERDICT_PASS_THRESHOLD for score in scores):
+    if incomplete or any(score < DIMENSION_VERDICT_PASS_THRESHOLD for score in scores):
         return VERDICT_NEUTRAL
     return VERDICT_PASS
 

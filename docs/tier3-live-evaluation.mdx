@@ -1343,6 +1343,12 @@ agent passes only when every dimension passes. The top-level Tier 3 verdict is:
 | Neutral | No agent passes, but at least one has no dimension below 0.40 |
 | Fail | Every successful agent has a dimension below 0.40 |
 
+A dimension with no score, such as Correctness when no case defines
+`ground_truth`, keeps that agent from passing. It does not hide another
+dimension below 0.40: that agent still counts as Fail, unless its skill never
+activated. A never-activated agent stays INCONCLUSIVE (see
+[What a live eval measures](#what-a-live-eval-measures)).
+
 Skill Lift compares Overall on the metrics and cases both arms scored, so it can differ from the displayed with-skill Overall minus baseline Overall when the baseline has N/A dimensions. Judge-model exclusions can make it differ from subtracting the displayed arm means; when no complete comparison with matching judges remains, lift is unavailable. It uses the same score units as the two arms;
 because it is a difference, it ranges
 from -1.0 to +1.0. Its independent band is **PASS** at +0.05 or above,

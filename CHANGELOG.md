@@ -450,6 +450,29 @@ All notable changes to SkillEvaluator are documented in this file.
   `Bedrock request failed`, like a Bedrock error that ends the judge and like
   the default `legacy` policy.
 
+- The interactive Tier 3 progress view (`--progress rich`, or `auto` in a
+  terminal) now keeps one height for the whole run, so redraws no longer leave
+  repeated or jumbled table frames. The Provider and Run plan rows show a
+  placeholder until the plan resolves, each row is one line that ends in an
+  ellipsis when its value is too long, and stages fill a fixed number of rows,
+  at least six and one per agent, showing the most recently updated. The agent
+  models, provider and run plan are printed in full above the table whenever
+  they change, and the table left on screen when the run ends lists every
+  stage, with its full detail when the Detail column is at least 20 columns
+  wide. A stopping agent's detail now starts with the second Ctrl+C hint, so a
+  cut row still shows it. The view redraws only on progress events and
+  heartbeats, no longer also from Rich's own refresh thread. If drawing fails,
+  including a terminal write that would block, the table keeps its last frame
+  with running stages still shown as running, a line says that the run
+  continues, and no further progress is shown for that run; the final results
+  still print. When the terminal also refuses that line, or the write that
+  shows the cursor again, a line saying that the run went on is printed and
+  the cursor is shown when the run ends. Frames the terminal refused are
+  dropped then, so they are never drawn over output printed since. Before, a
+  failure on the heartbeat thread ended that thread with a traceback and left
+  the view active without updating elapsed times, and a failure on the
+  caller's thread marked the running stages as failed.
+
 - The Tier 3 terminal summary now shows `N/A`, not `NO SCORE`, as the Skill
   Lift of an evaluator or dimension that is N/A in either arm, as the Markdown
   and HTML reports already do. Most runs with a baseline hit this: Skill

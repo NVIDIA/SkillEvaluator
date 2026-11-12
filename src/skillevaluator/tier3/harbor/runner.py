@@ -842,6 +842,13 @@ _HARBOR_RUN_TERMINATE_SECONDS = 0.1
 # waits this long for that cleanup before it kills the process group.
 _HARBOR_RUN_CANCEL_GRACE_SECONDS = 30.0
 _HARBOR_RUN_CANCEL_POLL_SECONDS = 0.1
+# Progress detail for an agent whose Harbor jobs are stopping. The hint comes
+# first and is short, so the Rich progress row, which is cut to the terminal
+# width, still shows it at 80 columns next to the longest built-in stage label,
+# with columns to spare.
+_HARBOR_RUN_STOPPING_DETAIL = (
+    f"2nd Ctrl+C skips wait; stopping Harbor jobs, up to {_HARBOR_RUN_CANCEL_GRACE_SECONDS:g}s of environment cleanup"
+)
 _HARBOR_RUN_REAP_SECONDS = 5.0
 
 
@@ -6582,10 +6589,7 @@ def _run_harbor_eval_impl(
                             ProgressEvent(
                                 stage=f"agent:{agent}",
                                 state="running",
-                                detail=(
-                                    "stopping Harbor jobs; press Ctrl+C again to skip up to "
-                                    f"{_HARBOR_RUN_CANCEL_GRACE_SECONDS:g}s of environment cleanup"
-                                ),
+                                detail=_HARBOR_RUN_STOPPING_DETAIL,
                             )
                         )
                 wait(running, timeout=_HARBOR_RUN_CANCEL_POLL_SECONDS)

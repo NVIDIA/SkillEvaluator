@@ -49,20 +49,64 @@ def test_operators_cannot_choose_cwsandbox_auth(env_mode: str) -> None:
 
 
 @pytest.mark.parametrize("env_mode", ["daytona", "modal", "tensorlake", "beam"])
-@pytest.mark.parametrize("name", ["stream", "enable_environment_dir_upload"])
-def test_harbor_stream_and_upload_controls_are_reserved(env_mode: str, name: str) -> None:
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("stream", False),
+        ("enable_environment_dir_upload", False),
+        ("auto_mounts", [{"source": "/operator-private", "target": "/workspace/exposed"}]),
+        ("auto_mounting", True),
+    ],
+)
+def test_harbor_output_and_upload_controls_are_reserved(env_mode: str, name: str, value: object) -> None:
     with pytest.raises(ValueError, match="reserved for Harbor runtime policy"):
         build_harbor_run_command(
             dataset_path="/tmp/dataset",
             agent="opencode",
             job_name="reserved",
             env_mode=env_mode,
-            environment_kwargs={name: False},
+            environment_kwargs={name: value},
         )
 
 
+@pytest.mark.parametrize("env_mode", ["cwsandbox", "wandb"])
+def test_cwsandbox_cannot_forward_operator_environment_into_task_compose(env_mode: str) -> None:
+    with pytest.raises(ValueError, match=r"reserved for Harbor runtime policy.*forward_compose_env"):
+        build_harbor_run_command(
+            dataset_path="/tmp/dataset",
+            agent="opencode",
+            job_name="host-environment",
+            env_mode=env_mode,
+            environment_kwargs={"forward_compose_env": ["NVIDIA_API_KEY"]},
+        )
+
+
+@pytest.mark.parametrize(
+    ("env_mode", "environment_kwargs", "encoded"),
+    [
+        ("daytona", {"dockerd_wait_sec": 120}, "dockerd_wait_sec=120"),
+        ("e2b", {"sandbox_timeout_secs": 900}, "sandbox_timeout_secs=900"),
+        ("runta", {"connection_pool_maxsize": 16}, "connection_pool_maxsize=16"),
+        ("cwsandbox", {"dind_image": "docker:28.3.3-dind"}, 'dind_image="docker:28.3.3-dind"'),
+        ("wandb", {"dind_image": "docker:28.3.3-dind"}, 'dind_image="docker:28.3.3-dind"'),
+    ],
+)
+def test_harbor_025_backend_options_reach_the_constructor(
+    env_mode: str, environment_kwargs: dict[str, object], encoded: str
+) -> None:
+    command = build_harbor_run_command(
+        dataset_path="/tmp/dataset",
+        agent="opencode",
+        job_name="backend-options",
+        env_mode=env_mode,
+        environment_kwargs=environment_kwargs,
+    )
+
+    assert encoded in _environment_kwargs(command)
+
+
 def test_backend_kwargs_track_the_pinned_harbor_release() -> None:
-    with pytest.raises(ValueError, match=r"Harbor 0\.24\.0 environment 'modal'.*modal_sandbox_v2"):
+    with pytest.raises(ValueError, match=r"Harbor 0\.25\.0 environment 'modal'.*modal_sandbox_v2"):
         build_harbor_run_command(
             dataset_path="/tmp/dataset",
             agent="opencode",
@@ -438,7 +482,7 @@ def test_missing_extra_message_keeps_harbor_diagnosis_without_unpinned_install_h
     )
 
 
-@pytest.mark.parametrize("env_mode", ["prime", "smol"])
+@pytest.mark.parametrize("env_mode", ["prime", "smol", "sbx", "sail", "kernel"])
 def test_harbor_backends_without_task_projection_stay_unexposed(env_mode: str) -> None:
     assert env_mode not in runner.HARBOR_ENV_MODES
     assert "Unsupported Harbor environment" in runner._check_prerequisites(env_mode=env_mode, agents=["opencode"])[0]
@@ -446,7 +490,7 @@ def test_harbor_backends_without_task_projection_stay_unexposed(env_mode: str) -
 
 def test_cwsandbox_prerequisites_require_sdk_and_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(runner.importlib.util, "find_spec", lambda name: None if name == "cwsandbox" else object())
-    assert "harbor[cwsandbox]==0.24.0" in runner._cwsandbox_prerequisite_errors("cwsandbox")[0]
+    assert "harbor[cwsandbox]==0.25.0" in runner._cwsandbox_prerequisite_errors("cwsandbox")[0]
 
     monkeypatch.setattr(runner.importlib.util, "find_spec", lambda _name: object())
     monkeypatch.delenv("CWSANDBOX_API_KEY", raising=False)

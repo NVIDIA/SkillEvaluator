@@ -18,6 +18,7 @@ import pytest
 
 pytest.importorskip("harbor")
 from harbor.agents.installed.base import NonZeroAgentExitCodeError
+from harbor.environments.capabilities import EnvironmentCapabilities
 from harbor.models.agent.context import AgentContext
 from harbor.models.task.task import Task
 from harbor.models.trial.config import (
@@ -335,7 +336,9 @@ def test_harbor_trial_run_recovers_missing_hermes_session_as_execution_failure(t
     download = TaskDownloadResult(path=task_dir, download_time_sec=0, cached=True)
 
     def initialize_agent_environment(trial):
-        trial.agent_environment = SimpleNamespace()
+        trial.agent_environment = SimpleNamespace(
+            capabilities=EnvironmentCapabilities(mounted=True, docker_compose=True),
+        )
 
     async def no_prepare(_trial):
         pass
@@ -364,6 +367,9 @@ def test_harbor_trial_run_recovers_missing_hermes_session_as_execution_failure(t
     result = asyncio.run(trial.run())
 
     assert result.exception_info is not None
+    assert result.exception_info.exception_type == "RuntimeError"
+    assert "Hermes produced no valid session trajectory" in result.exception_info.exception_message
+    assert result.agent_result is not None
     assert result.agent_result.metadata == {"hermes_session_error": "missing_or_invalid_session"}
 
 

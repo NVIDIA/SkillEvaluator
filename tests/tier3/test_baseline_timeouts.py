@@ -306,24 +306,45 @@ def test_reports_reload_the_tolerated_agent_from_disk(tmp_path: Path) -> None:
     assert load_agent_data(tmp_path / "results")["opencode"]["execution_status"] == "failed"
 
 
-@pytest.mark.parametrize("source", ["harbor_result", "trajectory"])
-def test_oversized_completion_counter_rejects_tolerance_without_aborting_collection(
-    tmp_path: Path, source: str
-) -> None:
-    huge_count = 10**400
-    launch_errors = _two_agent_jobs(tmp_path / "jobs", output_tokens=huge_count if source == "harbor_result" else None)
+def _completion_counter_jobs(tmp_path: Path, source: str, count: Any) -> list[str]:
+    """Return the launch errors of jobs whose timed-out baseline attempt reports ``count`` output tokens."""
+    launch_errors = _two_agent_jobs(tmp_path / "jobs", output_tokens=count if source == "harbor_result" else None)
     if source == "trajectory":
         trial = tmp_path / "jobs" / f"{SKILL}-opencode-without" / "case-002__without1"
         _write_json(
             trial / "agent" / "trajectory.json",
-            {"steps": [], "final_metrics": {"total_completion_tokens": huge_count}},
+            {"steps": [], "final_metrics": {"total_completion_tokens": count}},
         )
+    return launch_errors
+
+
+@pytest.mark.parametrize("source", ["harbor_result", "trajectory"])
+# Counts past the float range (either sign), past the JSON-safe integer range, and large floats.
+@pytest.mark.parametrize(
+    "count",
+    [10**400, -(10**400), 2**53, 2**70, 1e16, 1e300],
+    ids=["int-10pow400", "int-minus-10pow400", "int-2pow53", "int-2pow70", "float-1e16", "float-1e300"],
+)
+def test_oversized_completion_counter_rejects_tolerance_without_aborting_collection(
+    tmp_path: Path, source: str, count: Any
+) -> None:
+    launch_errors = _completion_counter_jobs(tmp_path, source, count)
 
     results = _collect(tmp_path, launch_errors)
 
     assert results["execution_status"] == "failed"
     assert RECORD_KEY not in results["agents"]["opencode"]
     assert results["agents"]["opencode"][REJECTION_KEY] == "no_progress_evidence"
+
+
+@pytest.mark.parametrize("source", ["harbor_result", "trajectory"])
+def test_completion_counter_at_the_json_safe_limit_proves_progress(tmp_path: Path, source: str) -> None:
+    launch_errors = _completion_counter_jobs(tmp_path, source, 2**53 - 1)
+
+    results = _collect(tmp_path, launch_errors)
+
+    assert results["execution_status"] == "succeeded"
+    assert results["agents"]["opencode"][RECORD_KEY]["failures"][0]["output_tokens"] == 2**53 - 1
 
 
 def test_trajectory_completion_tokens_prove_progress(tmp_path: Path) -> None:

@@ -44,11 +44,13 @@ LOCAL_CODEX_HOME_DIRNAME = "codex-home"
 LOCAL_CODEX_SECRETS_DIRNAME = "codex-secrets"
 
 # Docker wrappers retain Harbor's installers while avoiding redundant Node/npm
-# packages on the branches that bootstrap their own runtime. Claude Code uses the
+# packages on the branches that bootstrap their own runtime. Codex and OpenCode
+# install their own Node with NVM on glibc images. Claude Code uses the
 # container wrapper, which builds on that installer fix and adds Vertex AI
 # routing and rich MCP server declarations.
 DOCKER_AGENT_IMPORT_PATHS = {
     "codex": "skillevaluator.tier3.harbor.installed_agents:SkillEvaluatorCodex",
+    "opencode": "skillevaluator.tier3.harbor.installed_agents:SkillEvaluatorOpenCode",
     "claude-code": CONTAINER_AGENT_IMPORT_PATHS["claude-code"],
     "hermes": "skillevaluator.tier3.harbor.hermes_agent:SkillEvaluatorHermes",
 }

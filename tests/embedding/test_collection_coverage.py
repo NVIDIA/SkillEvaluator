@@ -207,7 +207,11 @@ def test_failed_build_preserves_committed_index_and_coverage(
     elif failure == "vector":
         client.embed.side_effect = lambda texts: [[float("nan"), 0.0] for _ in texts]
     elif failure == "input":
-        (second / "gamma" / "SKILL.md").write_text("---\nname: gamma\ndescription: " + "x" * 17000 + "\n---\n")
+        # Each field fits the 16,384-character frontmatter field limit, so discovery
+        # succeeds; together they exceed the description-mode embedding-text limit.
+        (second / "gamma" / "SKILL.md").write_text(
+            "---\nname: gamma-" + "g" * 9000 + "\ndescription: " + "x" * 9000 + "\n---\n"
+        )
     with pytest.raises((ValueError, SimilarityConfigError)):
         registry.build_from_directory(
             second, "skill", minimum_entries=3 if failure == "minimum" else 1, for_pairwise_scan=failure == "preflight"

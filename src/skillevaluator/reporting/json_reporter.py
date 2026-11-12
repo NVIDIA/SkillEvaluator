@@ -18,7 +18,11 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from skillevaluator.publication_evidence import result_publication_evidence_dict
+from skillevaluator.publication_evidence import (
+    TIER1_REQUIRED_CHECKS_KEY,
+    TIER1_UNSCANNED_PATHS_KEY,
+    result_publication_evidence_dict,
+)
 from skillevaluator.reporting.base import (
     ReporterBase,
     assess_publication,
@@ -37,6 +41,7 @@ from skillevaluator.reporting.finding_summary import (
 )
 from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
 from skillevaluator.skillspector_provenance import sanitize_skillspector_provenance_metadata
+from skillevaluator.skillspector_reference_caveats import sanitize_reference_caveat_metadata
 from skillevaluator.source_identity import recorded_evaluated_source
 
 if TYPE_CHECKING:
@@ -60,6 +65,22 @@ def _json_safe_benchmark_policy(value: object) -> dict[str, bool] | None:
         if isinstance((candidate := value.get(key)), bool)
     }
     return policy or None
+
+
+def _tier1_scope_strings(value: object, field: str) -> list[str]:
+    """Copy bounded scope evidence without narrowing its publication meaning.
+
+    Reject malformed declarations rather than dropping them: absence has legacy
+    semantics and could otherwise turn incomplete evidence into a passing run.
+    Semantic lineup validation remains the publication assessor's responsibility.
+    """
+    if (
+        not isinstance(value, list)
+        or len(value) > 20_000
+        or any(not isinstance(item, str) or not 1 <= len(item) <= 4096 for item in value)
+    ):
+        raise ValueError(f"Invalid {field}: expected a bounded list of nonempty strings")
+    return list(value)
 
 
 class JSONReporter(ReporterBase):
@@ -255,6 +276,21 @@ class JSONReporter(ReporterBase):
         if rubric_results:
             data["rubric_eval"] = rubric_results[0]
 
+        # Tier 1 applicability: ``--type auto`` found no supported artifact, so
+        # the manifest checks were recorded as not applicable. Every result of
+        # such a run carries the record, whatever --checks selected, so CI can
+        # read this instead of parsing skip reasons.
+        tier1_applicability = next(
+            (
+                result.metadata.get("tier1_applicability")
+                for result in results
+                if isinstance(result.metadata.get("tier1_applicability"), dict)
+            ),
+            None,
+        )
+        if tier1_applicability is not None:
+            data["tier1_applicability"] = tier1_applicability
+
         # Tier 3: Agent evaluation summary
         if emitted_agent_eval:
             data["tier3"] = emitted_agent_eval
@@ -324,6 +360,10 @@ class JSONReporter(ReporterBase):
         if result.metadata.get("confirmed_failure") is True:
             data["confirmed_failure"] = True
 
+        for key in (TIER1_REQUIRED_CHECKS_KEY, TIER1_UNSCANNED_PATHS_KEY):
+            if key in result.metadata:
+                data[key] = _tier1_scope_strings(result.metadata[key], key)
+
         skillspector_version = result.metadata.get("skillspector_version")
         if isinstance(skillspector_version, str):
             data["skillspector_version"] = skillspector_version
@@ -354,6 +394,10 @@ class JSONReporter(ReporterBase):
         skillspector_baseline = result.metadata.get("skillspector_baseline")
         if isinstance(skillspector_baseline, dict):
             data["skillspector_baseline"] = dict(skillspector_baseline)
+
+        reference_caveats = sanitize_reference_caveat_metadata(result.metadata.get("skillspector_reference_caveats"))
+        if reference_caveats is not None:
+            data["skillspector_reference_caveats"] = reference_caveats
 
         # Tier 3: Agent evaluation data
         ae = result.metadata.get("agent_eval")

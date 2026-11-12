@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import urlparse
 
-from jinja2 import BaseLoader, Environment
+from jinja2 import BaseLoader, Environment, pass_context
 
 from skillevaluator import __version__
 from skillevaluator.constants import (
@@ -87,6 +87,7 @@ from skillevaluator.reporting.finding_summary import (
     summarize_messages,
     total_issue_count,
 )
+from skillevaluator.reporting.finding_verification import finding_verification
 from skillevaluator.reporting.harbor_viewer import harbor_job_links, normalize_agent_eval_harbor_links
 from skillevaluator.reporting.presentation import (
     FinalRenderContext,
@@ -98,6 +99,7 @@ from skillevaluator.reporting.presentation import (
 from skillevaluator.reporting.run_status import Status, result_status, result_tier
 from skillevaluator.reporting.tier2_views import tier2_scope_views
 from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
+from skillevaluator.reporting.tier3_token_usage import token_usage_table
 from skillevaluator.reporting.trial_charts import steps_by_case_chart
 from skillevaluator.skillspector_provenance import skillspector_provenance_records
 from skillevaluator.source_identity import recorded_evaluated_source
@@ -130,6 +132,9 @@ _TIER3_JSON_SAFE_PRIORITY_KEYS = (
     "schema_version",
     "verdict",
     "execution_status",
+    # A few hundred bytes that explain a failed agent arm. Walked before the
+    # bulky keys, so the bounded HTML preview keeps every message whole.
+    "coverage_notices",
     "summary",
     "correct_answers",
     "skill_name",
@@ -500,6 +505,14 @@ def _tier3_score_reasons(value: object) -> dict[str, str]:
     return reasons
 
 
+@pass_context
+def _tier3_not_applicable_reason(_context: Any, metric: object, with_skill: bool = False) -> str:
+    """Describe N/A metrics at render time, keeping Tier 3 imports out of base template compilation."""
+    from skillevaluator.tier3.harbor.metrics import not_applicable_reason
+
+    return not_applicable_reason(str(metric), with_skill=with_skill is True)
+
+
 def _tier3_text_mapping(value: object) -> dict[str, str]:
     """Normalize public label maps without silently overwriting aliases."""
     if not isinstance(value, dict):
@@ -577,6 +590,8 @@ def _sanitize_tier3_pass_condition(value: object) -> dict[str, Any]:
             case = dict(raw_case)
             for key in ("attempts_used", "attempts_missing", "attempts_skipped"):
                 case[key] = _nonnegative_count(case.get(key))
+            if "attempts_recovered" in case:
+                case["attempts_recovered"] = _nonnegative_count(case.get("attempts_recovered"))
             case["best_score"] = _finite_number(case.get("best_score"), minimum=0.0, maximum=1.0)
             first_pass = case.get("first_pass_attempt")
             case["first_pass_attempt"] = (
@@ -814,6 +829,19 @@ def _sanitize_tier3_pass_at_k(value: object) -> dict[str, Any]:
     return pass_at_k
 
 
+def _sanitize_tier3_comparison_basis(value: object) -> dict[str, Any] | None:
+    """Keep an evaluator card's judge-model lift exclusions only when they name a case count."""
+    if not isinstance(value, dict) or not (excluded_cases := _nonnegative_count(value.get("excluded_cases"))):
+        return None
+    return {
+        "excluded_cases": excluded_cases,
+        "case_ids": _tier3_identifier_list(value.get("case_ids")),
+        "excluded_attempts": _strict_nonnegative_count(value.get("excluded_attempts")),
+        "contributing_attempts": _strict_nonnegative_count(value.get("contributing_attempts")),
+        "reason": _json_safe_tier3_text(value["reason"]) if isinstance(value.get("reason"), str) else "",
+    }
+
+
 def _sanitize_tier3_evaluator_card(
     value: dict[str, Any],
     *,
@@ -843,6 +871,8 @@ def _sanitize_tier3_evaluator_card(
         for key in FAILURE_REASON_EVIDENCE_KEYS:
             if not (isinstance(entry.get(key), str) and entry[key]):
                 entry.pop(key, None)
+        if entry.pop("comparison_excluded", None) is True:
+            entry["comparison_excluded"] = True
         if (
             include_evidence_unavailable_default
             and card.get("id") in _METRIC_EVIDENCE_REF_METRICS
@@ -859,6 +889,9 @@ def _sanitize_tier3_evaluator_card(
             entry.pop("evidence_unavailable_reason", None)
         evidence.append(entry)
     card["evidence"] = evidence
+    comparison_basis = _sanitize_tier3_comparison_basis(card.pop("comparison_basis", None))
+    if comparison_basis:
+        card["comparison_basis"] = comparison_basis
     sampling = card.get("evidence_sampling") if isinstance(card.get("evidence_sampling"), dict) else {}
     for key in ("represented_cases", "represented_trials", "total_trials", "scanned_trials"):
         if key in sampling:
@@ -1007,6 +1040,11 @@ def _sanitize_tier3_trial(value: dict[str, Any], *, fill_defaults: bool = True) 
     score_reasons = _tier3_score_reasons(trial.pop("score_reasons", None))
     if score_reasons:
         trial["score_reasons"] = score_reasons
+    if "not_applicable_metrics" in trial:
+        from skillevaluator.tier3.harbor.metrics import not_applicable_list
+
+        # Only metrics that can be N/A count, so a malformed payload cannot mark security N/A.
+        trial["not_applicable_metrics"] = not_applicable_list(trial["not_applicable_metrics"])
     # Unavailable telemetry stays absent rather than becoming zero, so the
     # template can omit charts and show "—" instead of reporting no usage.
     raw_tokens = trial.pop("tokens", None)
@@ -1265,6 +1303,16 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
         payload[key] = _tier3_identifier_list(payload.get(key))
     for key in ("execution_errors", "suggestions"):
         payload[key] = _string_list(payload.get(key))
+    # The template lists each notice's message; drop entries without one.
+    coverage_notices = [
+        notice
+        for notice in _dict_list(payload.get("coverage_notices"))
+        if isinstance(notice.get("message"), str) and notice["message"]
+    ]
+    if coverage_notices:
+        payload["coverage_notices"] = coverage_notices
+    else:
+        payload.pop("coverage_notices", None)
     # ``skill_name`` was already validated above as an exact NFC filesystem
     # identity. Do not pass it through compatibility-normalizing display text.
     for key in ("best_agent", "verdict", "execution_status"):
@@ -1429,7 +1477,9 @@ def _bounded_tier3_preview(payload: dict[str, Any] | None) -> tuple[dict[str, An
     if not payload:
         return payload, {}
     # A private copy: the caller embeds ``payload`` itself as the canonical data.
-    slim = json.loads(_compact_json(payload))
+    # The token usage table reads the full payload, so ``token_usage`` neither
+    # triggers the preview nor spends its budget.
+    slim = json.loads(_compact_json({key: value for key, value in payload.items() if key != "token_usage"}))
     # Activation diagnostics belong to the canonical export. The template does
     # not render them, so duplicate per-trial copies must not spend overview or
     # failure-reason space before the preview budget is applied.
@@ -1921,10 +1971,12 @@ class HTMLReporter(ReporterBase):
         environment.filters["cleanly_skipped"] = is_cleanly_skipped
         environment.filters["execution_status"] = _result_display_status
         environment.filters["related_paths"] = _related_paths
+        environment.filters["finding_verification"] = finding_verification
         environment.filters["additional_errors"] = additional_errors
         environment.filters["adaptive_percent"] = _adaptive_percent
         environment.filters["adaptive_interval_percent"] = _adaptive_interval_percent
         environment.filters["skip_reason"] = get_skip_reason
+        environment.filters["not_applicable_reason"] = _tier3_not_applicable_reason
         return environment
 
     @staticmethod
@@ -2256,8 +2308,10 @@ class HTMLReporter(ReporterBase):
         (e.g., "Personal macOS user path") fires on many lines in the same file.
         A finding's ``occurrence_id`` becomes an ``occurrence_ids`` list on the
         merged entry, so every merged location keeps its identity. The key
-        also holds ``finding_id`` when present, so two different checks with
-        the same text never merge and an entry's IDs all belong to it.
+        also holds ``finding_id`` and the verification decision when present,
+        so different checks or decisions never merge. The first occurrence's
+        rationale represents the group; individual rationales remain in the
+        validator view and JSON export.
         """
         groups: dict[tuple, dict[str, Any]] = {}
         seen_occurrences: dict[tuple, set[str]] = {}
@@ -2265,11 +2319,16 @@ class HTMLReporter(ReporterBase):
         for finding in findings:
             # Normalize message for deduplication (strip trailing whitespace/newlines)
             norm_msg = HTMLReporter._normalize_message(finding.get("message", ""))
+            verification = finding_verification(finding)
+            decision = (
+                (verification.verdict, verification.confidence, verification.severity_effect) if verification else None
+            )
             key = (
                 norm_msg,
                 finding.get("file_path", ""),
                 finding.get("suggestion", ""),
                 finding.get("finding_id"),
+                decision,
             )
 
             if key in groups:
@@ -3552,6 +3611,11 @@ class HTMLReporter(ReporterBase):
             tier3_truncation=tier3_truncation,
             tier3_dataset_sufficiency=tier3_dataset_sufficiency,
             tier3_preview_notice=tier3_preview_notice,
+            # Measured, not scored. From the full display payload, with its own
+            # per-agent cap: the preview walk can blank strings of late keys.
+            tier3_token_usage=token_usage_table(
+                tier3_data.get("token_usage") if isinstance(tier3_data, dict) else None
+            ),
             # From the full display payload: the bounded preview can cap rows
             # unevenly per condition and blank identity fields of late rows.
             steps_by_case_chart=steps_by_case_chart(

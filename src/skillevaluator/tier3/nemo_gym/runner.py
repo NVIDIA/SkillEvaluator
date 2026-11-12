@@ -649,6 +649,7 @@ def run_nemo_gym_eval(
     agent_runtime_preflight: bool | None = None,
     custom_dockerfile_mode: str | None = None,
     copy_repo: bool = False,
+    tolerate_baseline_timeouts: bool | None = None,
 ) -> dict[str, Any]:
     """Run the selected arms on NeMo Gym and return the shared results mapping."""
     from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
@@ -737,7 +738,12 @@ def run_nemo_gym_eval(
             else harbor_config.get("agent_runtime_preflight", False)
         ),
     )
-    errors += nemo_gym_harbor_only_option_errors(harbor_config, from_config=True)
+    # A flag overrides its config key, as on Harbor.
+    config_options = dict(harbor_config)
+    if tolerate_baseline_timeouts is not None:
+        config_options.pop("tolerate_baseline_timeouts", None)
+    errors += nemo_gym_harbor_only_option_errors(config_options, from_config=True)
+    errors += nemo_gym_harbor_only_option_errors({"tolerate_baseline_timeouts": tolerate_baseline_timeouts})
     # Gym runs agents one at a time, so the cap always holds; it is still validated as on Harbor.
     effective_max_agents = max_agents if max_agents is not None else harbor_config.get("max_agents", 1)
     if isinstance(effective_max_agents, bool) or not isinstance(effective_max_agents, int) or effective_max_agents < 1:

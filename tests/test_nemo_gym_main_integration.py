@@ -101,6 +101,7 @@ def test_gym_direct_workflow_rejects_unsupported_options_before_generation(monke
         ("max_attempts_total", "max_attempts_total: 0"),
         ("max_cost_usd", "max_cost_usd: 0\n  price_file: prices.json"),
         ("price_file", "price_file: prices.json"),
+        ("tolerate_baseline_timeouts", "tolerate_baseline_timeouts: true"),
     ],
 )
 @pytest.mark.parametrize("entrypoint", ["runner", "workflow"])
@@ -132,6 +133,47 @@ def test_gym_rejects_config_budget_before_generation_or_execution(monkeypatch, t
         assert not dataset.exists()
     assert not (tmp_path / "results").exists()
     assert not env_log.exists()
+
+
+def test_gym_dispatch_rejects_enabled_baseline_timeout_tolerance(monkeypatch, tmp_path):
+    with pytest.raises(ValueError, match="--tolerate-baseline-timeouts is not supported with --backend nemo-gym"):
+        _evaluate(monkeypatch, tmp_path, backend="nemo-gym", tolerate_baseline_timeouts=True)
+    # Off is Gym's own behavior, so an explicit --no-tolerate-baseline-timeouts reaches the runner.
+    calls = _evaluate(monkeypatch, tmp_path, backend="nemo-gym", tolerate_baseline_timeouts=False)
+    assert calls["nemo-gym"]["tolerate_baseline_timeouts"] is False
+
+
+@pytest.mark.parametrize(
+    ("flag", "config", "expected"),
+    [
+        (True, "", "--tolerate-baseline-timeouts is not supported"),
+        (None, "tolerate_baseline_timeouts: true", "harbor.tolerate_baseline_timeouts is not supported"),
+        (False, "tolerate_baseline_timeouts: true", None),
+        (None, "tolerate_baseline_timeouts: false", None),
+    ],
+)
+def test_gym_preflight_baseline_timeout_tolerance_flag_overrides_config(tmp_path, flag, config, expected):
+    from skillevaluator.tier3.workflow import nemo_gym_preflight_errors
+
+    (tmp_path / "evals").mkdir()
+    (tmp_path / "evals" / "config.yml").write_text(f"schema_version: 1\nharbor:\n  {config}\n" if config else "")
+    params = {"agents": "codex", "env_mode": "docker", "tolerate_baseline_timeouts": flag}
+    tolerance_errors = [error for error in nemo_gym_preflight_errors(tmp_path, params) if "tolerate" in error]
+    assert tolerance_errors == ([f"{expected} with --backend nemo-gym yet"] if expected else [])
+
+
+def test_gym_runner_rejects_enabled_tolerance_but_lets_the_flag_override_config(monkeypatch, tmp_path):
+    skill, env_log = _fake_gym_skill(
+        tmp_path, monkeypatch, "schema_version: 1\nharbor:\n  tolerate_baseline_timeouts: true\n"
+    )
+    rejected = _run_fake_gym(skill, tmp_path, tolerate_baseline_timeouts=True)
+    assert "--tolerate-baseline-timeouts is not supported with --backend nemo-gym yet" in rejected["error"], rejected
+    assert not any("harbor.tolerate_baseline_timeouts" in error for error in rejected["error"]), rejected
+    assert not (tmp_path / "results").exists()
+    assert not env_log.exists()
+
+    allowed = _run_fake_gym(skill, tmp_path, tolerate_baseline_timeouts=False)
+    assert allowed.get("execution_status") == "succeeded", allowed
 
 
 @pytest.mark.parametrize(

@@ -182,6 +182,8 @@ _UNSUPPORTED_RUN_OPTIONS = (
     ("price_file", "--price-file"),
 )
 _UNSUPPORTED_BUDGET_CONFIG = ("max_agent_tokens", "max_judge_calls", "max_attempts_total", "max_cost_usd", "price_file")
+# Off is Gym's own behavior, so only an enabled option is rejected.
+_UNSUPPORTED_ENABLED_OPTIONS = (("tolerate_baseline_timeouts", "--tolerate-baseline-timeouts"),)
 
 
 def nemo_gym_capability_errors(
@@ -234,11 +236,15 @@ def nemo_gym_capability_errors(
 
 
 def nemo_gym_harbor_only_option_errors(options: Mapping[str, object], *, from_config: bool = False) -> list[str]:
-    """Reject baseline reuse, version comparison and budgets until Gym can honor them."""
+    """Reject baseline reuse, version comparison, budgets and baseline-timeout tolerance until Gym can honor them."""
     errors: list[str] = []
     for name, flag in _UNSUPPORTED_RUN_OPTIONS:
         # Zero is an explicit limit, not an unset option.
         if options.get(name) is not None:
+            label = f"harbor.{name}" if from_config else flag
+            errors.append(f"{label} is not supported with --backend nemo-gym yet")
+    for name, flag in _UNSUPPORTED_ENABLED_OPTIONS:
+        if options.get(name):
             label = f"harbor.{name}" if from_config else flag
             errors.append(f"{label} is not supported with --backend nemo-gym yet")
     return errors
@@ -362,7 +368,9 @@ def nemo_gym_config_errors(
         return [str(exc)]
     harbor = config.get("harbor") or {}
     unsupported_config = {
-        name: harbor.get(name) for name in _UNSUPPORTED_BUDGET_CONFIG if (run_options or {}).get(name) is None
+        name: harbor.get(name)
+        for name in (*_UNSUPPORTED_BUDGET_CONFIG, *(name for name, _flag in _UNSUPPORTED_ENABLED_OPTIONS))
+        if (run_options or {}).get(name) is None
     }
     errors = nemo_gym_harbor_only_option_errors(unsupported_config, from_config=True)
     if stop_on_pass is None and harbor.get("stop_on_pass"):

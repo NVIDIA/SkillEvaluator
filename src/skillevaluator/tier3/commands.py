@@ -787,6 +787,7 @@ def evaluate(
                     "max_attempts_total": max_attempts_total,
                     "max_cost_usd": max_cost_usd,
                     "price_file": price_file,
+                    "tolerate_baseline_timeouts": tolerate_baseline_timeouts,
                 },
             )
             multi_model_agents = sorted(agent for agent, models in agent_models.items() if len(models) != 1)
@@ -824,6 +825,7 @@ def evaluate(
                 override_memory_mb=override_memory_mb,
                 repo_context_exclude_paths=repo_context_exclude_paths,
                 copy_repo=copy_repo,
+                tolerate_baseline_timeouts=tolerate_baseline_timeouts,
                 progress_reporter=reporter,
             )
         engine_started = True

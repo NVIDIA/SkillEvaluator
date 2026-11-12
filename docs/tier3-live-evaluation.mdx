@@ -668,10 +668,10 @@ behave as on Harbor. `--environment-kwarg` is rejected, as Harbor rejects it in
 Docker mode. It rejects `--stop-on-pass`,
 `--harbor-keep-jobs`, `--agent-runtime-preflight`, `--override-storage-mb`,
 `--reuse-baseline`, `--compare-to`, `--max-agent-tokens`, `--max-judge-calls`,
-`--max-attempts-total`, `--max-cost-usd`, `--price-file`,
+`--max-attempts-total`, `--max-cost-usd`, `--price-file`, `--tolerate-baseline-timeouts`,
 and the config keys
 `resources.storage_mb`, `max_agent_tokens`, `max_judge_calls`, `max_attempts_total`,
-`max_cost_usd`, `price_file` under `harbor`, MCP
+`max_cost_usd`, `price_file` and `tolerate_baseline_timeouts: true` under `harbor`, MCP
 servers in `evals/environment/mcp_servers.toml` or a native task's `[[environment.mcp_servers]]`, a model URL with embedded credentials, and Windows hosts,
 whether set by flag or config (a flag overrides its config key), before anything
 starts (`tier3 PATH --autopilot` checks these before it writes a dataset); it never

@@ -362,6 +362,15 @@ skill-evaluation-aggregate:
           esac
         fi
       fi
+      if [ "$enriched" = true ] && [ "${CI_PIPELINE_SOURCE:-}" = merge_request_event ]; then
+        # Recompute the enriched job's no-skill-change skip with the pinned
+        # tools; never trust an artifact or checkout file for this decision.
+        # The keyless scan (every skill for a setup change) is then the gate.
+        changed="$(python -I "$SKILL_EVAL_TOOLS_DIR/ci/run_tier1_image.py" --skills-changed --workspace "$CI_PROJECT_DIR")"
+        if [ "$changed" = false ]; then
+          enriched=false
+        fi
+      fi
       if [ "$enriched" = true ]; then
         # Missing authenticated evidence must fail the required gate instead of
         # silently substituting a successful static-only scan.

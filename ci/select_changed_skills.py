@@ -38,6 +38,15 @@ def setup_changed(paths: list[str]) -> bool:
     return any(path.startswith(SETUP_PREFIXES) or path in SETUP_FILES for path in paths)
 
 
+def skill_root_changed(paths: list[str], roots: list[str]) -> bool:
+    """Return whether any changed path (both sides of a rename) is inside a skill root.
+
+    The paid LLM-enriched Tier 1 pass runs only for such changes. The GitHub
+    eligibility script keeps an inline copy that tests hold equal to this one.
+    """
+    return any(PurePosixPath(path).is_relative_to(root) for path in paths if path for root in roots)
+
+
 class SelectionError(ValueError):
     """A selection cannot be established from the supplied checkout."""
 

@@ -363,6 +363,11 @@ with LLM security, SkillSpector semantic findings, verification and rubric
 checks. An unconditional keyless baseline remains available for forks and
 denied admission. For an authorized LLM run, missing or failed enriched evidence
 fails the required Tier 1 gate; it is never replaced with a passing static scan.
+With the default `scan-mode: auto`, a PR runs the enriched job only when it
+changes a file under a configured skill root. CI configuration or unrelated
+changes skip it, and the keyless scan, which covers every skill for a setup
+change, remains the Tier 1 gate. Pushes to the default branch, manual runs and
+`scan-mode: all` keep the enriched job.
 The image supports OpenAI, Anthropic and NVIDIA Build at their native endpoints.
 
 Tier 2 chat/embeddings can use one provider while Tier 3 uses an
@@ -478,7 +483,10 @@ enriched evidence determines the Tier 1 gate for an eligible run; missing
 evidence cannot fall back to a passing static baseline. Default-branch enrichment
 is limited to `push` and `web` pipelines, matching provider admission. Scheduled,
 API, trigger and downstream default-branch pipelines retain the keyless Tier 1
-baseline, as do forks.
+baseline, as do forks. With `SKILL_EVAL_SCAN_MODE: auto`, an MR that changes no
+file under a configured skill root skips the paid scan before reading a provider
+key. The aggregate recomputes that decision from the checkout with the pinned
+tools, never from an artifact, and then keeps the keyless report as the Tier 1 gate.
 
 Use `SKILL_EVAL_TIER3_PROVIDER`, `SKILL_EVAL_TIER3_BASE_URL` and
 `SKILL_EVAL_TIER3_MODEL` for a separate live-agent/judge route, and

@@ -14,7 +14,10 @@ All notable changes to SkillEvaluator are documented in this file.
   Tier 1 required-check and unscanned-content scope for publication decisions.
   The repository's own candidate CI selects Build for Tier 1/2 and separate
   gateway-backed Claude Code/Codex models for Tier 3, without changing upstream
-  provider defaults.
+  provider defaults. With the default `scan-mode: auto`, a pull or merge request
+  that changes no file under a configured skill root skips the paid LLM-enriched
+  Tier 1 scan, and the keyless scan remains the Tier 1 gate. The enriched scan
+  applies reviewed security baselines like the keyless scan.
 
 - HTML, Markdown, and terminal findings show recorded LLM verification verdicts,
   confidence, and reasoning, with an explanation of retained or downgraded severity.

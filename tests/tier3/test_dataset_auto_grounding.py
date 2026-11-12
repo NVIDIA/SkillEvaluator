@@ -336,7 +336,8 @@ def test_auto_searches_past_an_agent_without_usable_matching_evidence(tmp_path, 
 
 
 @pytest.mark.parametrize("use_llm", [False, True])
-def test_auto_trace_preserves_authored_prompt_metadata_and_review_history(tmp_path, monkeypatch, use_llm):
+@pytest.mark.parametrize("wrapper", ["evals", "cases"])
+def test_auto_trace_preserves_authored_prompt_metadata_and_review_history(tmp_path, monkeypatch, use_llm, wrapper):
     from types import SimpleNamespace
 
     from skillevaluator.inference import client as inference_client
@@ -349,7 +350,7 @@ def test_auto_trace_preserves_authored_prompt_metadata_and_review_history(tmp_pa
                 "skill_name": "sample-skill",
                 "dataset_version": "author-v2",
                 "source": {"kind": "reviewed_import"},
-                "evals": [
+                wrapper: [
                     {
                         "id": "authored",
                         "prompt": "Check this exact authored invoice",
@@ -401,7 +402,59 @@ def test_auto_trace_preserves_authored_prompt_metadata_and_review_history(tmp_pa
     assert "Original reviewer concern" in case["review"]["reasons"]
     assert result.dataset["dataset_version"] == "author-v2"
     assert result.dataset["source"] == {"kind": "reviewed_import"}
+    assert "cases" not in result.dataset
     assert result.dataset["generation"]["grounding"] == "trace"
     assert {"kind": "dataset", "path": "evals/evals.json", "sha256": original_hash} in result.dataset["generation"][
         "inputs"
     ]
+
+
+@pytest.mark.parametrize(
+    "filename", ["trajectory.json", "claude-code.txt", "cursor-cli.txt", "cline.txt", "opencode.txt", "codex.txt"]
+)
+def test_auto_rejects_nonregular_trace_sources_before_reading(tmp_path, monkeypatch, filename):
+    import os
+    from pathlib import Path
+
+    skill = _skill(tmp_path)
+    source = _trace(skill, tmp_path / "results")
+    source.unlink()
+    blocked = source.parent / filename
+    os.mkfifo(blocked)
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(tmp_path / "results"))
+    original_read = Path.read_text
+
+    def guarded_read(path, *args, **kwargs):
+        if path == blocked:
+            pytest.fail("auto discovery must reject a FIFO before attempting to read it")
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded_read)
+    with pytest.raises(DatasetGenerationError, match="--grounding auto requires"):
+        generate_dataset.main([str(skill), "--no-llm"])
+    assert not (skill / "evals" / "evals.json").exists()
+
+
+@pytest.mark.parametrize("relative", ["reward.json", "verifier/reward.json", "result.json"])
+def test_auto_rejects_linked_case_identity_before_reading(tmp_path, monkeypatch, relative):
+    from pathlib import Path
+
+    skill = _skill(tmp_path)
+    source = _trace(skill, tmp_path / "results")
+    outside = tmp_path / "foreign-result.json"
+    outside.write_text(json.dumps({"entry_id": "sample-skill-001"}))
+    linked = source.parent / relative
+    linked.parent.mkdir(exist_ok=True)
+    linked.symlink_to(outside)
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(tmp_path / "results"))
+    original_read = Path.read_text
+
+    def guarded_read(path, *args, **kwargs):
+        if path == linked:
+            pytest.fail("auto discovery must reject linked identity inputs before reading them")
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded_read)
+    with pytest.raises(DatasetGenerationError, match="--grounding auto requires"):
+        generate_dataset.main([str(skill), "--no-llm"])
+    assert not (skill / "evals" / "evals.json").exists()

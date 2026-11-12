@@ -852,6 +852,42 @@ def _case_id_from_trial_dir(trial_dir: Path) -> str:
     return trial_dir.name
 
 
+def _auto_trial_inputs_are_regular(trial_dir: Path, run_dir: Path) -> bool:
+    """Check every identity/trajectory input before automatic discovery reads it."""
+    from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
+
+    try:
+        if stat_is_link_or_reparse(trial_dir.lstat()) or not trial_dir.resolve().is_relative_to(run_dir.resolve()):
+            return False
+        # Keep the fallback names aligned with load_trajectory_with_fallback.
+        for relative in (
+            "reward.json",
+            "verifier/reward.json",
+            "result.json",
+            "trajectory.json",
+            "claude-code.txt",
+            "cursor-cli.txt",
+            "cline.txt",
+            "opencode.txt",
+            "codex.txt",
+        ):
+            source = trial_dir / relative
+            try:
+                metadata = source.lstat()
+            except FileNotFoundError:
+                continue
+            if (
+                stat_is_link_or_reparse(metadata)
+                or not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or not source.resolve().is_relative_to(run_dir.resolve())
+            ):
+                return False
+    except (OSError, RuntimeError):
+        return False
+    return True
+
+
 def _discover_trajectories(
     skill_path: Path,
     from_results: str | None = None,
@@ -905,6 +941,8 @@ def _discover_trajectories(
         last_good_source = "unknown"
         for trial_dir in sorted(trials_dir.iterdir()):
             if not trial_dir.is_dir():
+                continue
+            if require_usable_steps and not _auto_trial_inputs_are_regular(trial_dir, results_dir):
                 continue
             case_id = _case_id_from_trial_dir(trial_dir)
             if not case_id or (case_ids is not None and case_id not in case_ids):
@@ -1886,8 +1924,11 @@ Agent-refined mode (--refine):
     dataset = _to_agentskills_dataset(
         skill["name"], cases, generation, preserve_authored_metadata=auto_authored_dataset is not None
     )
-    if isinstance(auto_authored_dataset, dict) and isinstance(auto_authored_dataset.get("evals"), list):
-        dataset = {**auto_authored_dataset, **dataset}
+    if isinstance(auto_authored_dataset, dict) and any(
+        isinstance(auto_authored_dataset.get(key), list) for key in ("evals", "cases")
+    ):
+        root_metadata = {key: value for key, value in auto_authored_dataset.items() if key not in {"evals", "cases"}}
+        dataset = {**root_metadata, **dataset}
     needs_review = sum(1 for case in cases if _case_needs_review(case))
     print(f"  {needs_review} case(s) flagged needs_review")
 

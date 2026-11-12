@@ -12,7 +12,9 @@ All notable changes to SkillEvaluator are documented in this file.
   provider access, collection, or writes; existing skill-only scripts must pass
   `--grounding skill`, even with `--no-llm`. Auto trace selection preserves
   authored cases and flags unmatched coverage and observed answers for review;
-  provenance records the effective grounding and retained source hashes.
+  retained identity and trace files are checked before reading, and legacy
+  `cases` wrappers retain root metadata when converted to `evals`.
+  Provenance records the effective grounding and retained source hashes.
   Explicit grounding modes and refinement remain available. Unattended
   autopilot keeps its skill-grounded one-case starter behavior.
 

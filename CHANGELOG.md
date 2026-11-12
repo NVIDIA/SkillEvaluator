@@ -693,6 +693,20 @@ All notable changes to SkillEvaluator are documented in this file.
   the HTML and JSON reports and `BENCHMARK.md`. A failed arm still fails the
   agent and the run, and the notes say so.
 
+- `--tolerate-baseline-timeouts` (see its entry under Added) now follows its
+  own rules in every place a run is reported. The `RUN QUALITY VERDICT` line
+  that `tier3 evaluate` prints reads the same agents as the run verdict, so a
+  tolerated agent that passes no longer prints PASS beside a complete agent
+  that fails or never activated the skill; the line now reads FAIL or
+  INCONCLUSIVE, as the reports do. `BENCHMARK.md` and `report.html` keep the
+  "Needs attention" note and the `Baseline incomplete` line for each tolerated
+  agent also when a cost limit left the best agent's attempts short, where
+  both left them out. An output-token count past the JSON-safe integer range
+  (above 2^53 - 1) in a timed-out attempt is no longer progress evidence, so
+  the agent is refused as `no_progress_evidence`; result collection used to
+  stop with `browser-unsafe JSON integer` and write no `result.json` or
+  report.
+
 - Tier 3 standard judges under `LLM_JUDGE_RETRY_POLICY=strict` with Bedrock
   as the provider no longer label a Bedrock error that the policy treats as an
   unavailable model, such as throttling, a missing or inaccessible model, or

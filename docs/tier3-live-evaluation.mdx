@@ -896,7 +896,8 @@ the run warning names the rule that did not hold:
   tolerated. Native multi-step tasks are not covered: Harbor records their
   agent timeouts on the step rather than on the trial, so such a baseline is
   refused (`step_timeout_not_supported`).
-- Every timed-out attempt shows agent output (output tokens above zero).
+- Every timed-out attempt shows agent output (output tokens above zero; a
+  count past the JSON-safe integer range is not evidence).
 - Each timed-out attempt left an agent log, and no log shows a known provider
   overload, rate limit, quota or authentication error identifier (such as
   `rate_limit_error`, `insufficient_quota`, `Error code: 429` or a `429`
@@ -913,13 +914,15 @@ and its baseline scores, Skill Lift, pass@k lift and security attribution are
 not reported. The reports, and the findings panel that `tier3 evaluate` prints
 with `--verbose`, rank it below every agent with a complete baseline, so the
 best agent, overall score and lift come from complete evidence. The run's
-verdict reads the same agents: a tolerated agent that passes every dimension
+verdict, also the `RUN QUALITY VERDICT` line that `tier3 evaluate` prints,
+reads the same agents: a tolerated agent that passes every dimension
 does not make the run PASS, and when every agent with a complete baseline
 never activated the skill the verdict is INCONCLUSIVE. When the best agent
 never activated the skill, the findings panel is left out rather than showing
 a tolerated agent's findings. `BENCHMARK.md` and `report.html` keep the "Needs
 attention" note and name each tolerated agent on its own line, for example
-`Baseline incomplete for opencode (1 of 2 attempts scored)`.
+`Baseline incomplete for opencode (1 of 2 attempts scored)`, also when a cost
+limit leaves the report without a completed-agent result.
 
 `result.json` records the timed-out attempts under the agent's
 `baseline_timeout_tolerance` (also written to

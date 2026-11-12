@@ -16,15 +16,22 @@ import pytest
 from rich.console import Console
 
 from skillevaluator import cli as cli_module
+from skillevaluator.utils.json_output import json_needs_ascii
 
 _ENCODINGS = ("cp936", "cp1252", "ascii", "utf-8")
 _UNICODE = "Résumé 中文 • 😀"
+_JSON_CASES = [(encoding, _UNICODE, encoding == "utf-8") for encoding in _ENCODINGS] + [
+    ("cp936", "中文", True),
+    ("cp1252", "Résumé café", True),
+    ("ascii", "plain ASCII", True),
+]
 
 
+@pytest.mark.parametrize("newline", (None, "\n", "\r\n"))
 @pytest.mark.parametrize("encoding", _ENCODINGS)
-def test_cli_replaces_characters_not_supported_by_stdout_encoding(monkeypatch, encoding) -> None:
+def test_cli_replaces_characters_not_supported_by_stdout_encoding(monkeypatch, encoding, newline) -> None:
     output = BytesIO()
-    stdout = TextIOWrapper(output, encoding=encoding, errors="strict")
+    stdout = TextIOWrapper(output, encoding=encoding, errors="strict", newline=newline)
     monkeypatch.setattr(cli_module.sys, "stdout", stdout)
 
     with cli_module.cli.make_context("skillevaluator", ["tier3"]):
@@ -32,9 +39,9 @@ def test_cli_replaces_characters_not_supported_by_stdout_encoding(monkeypatch, e
     stdout.flush()
 
     assert stdout.errors == "replace"
-    assert output.getvalue().decode(encoding) == f"  {_UNICODE} Errors: 1\n".encode(encoding, errors="replace").decode(
-        encoding
-    )
+    assert output.getvalue().decode(encoding).replace("\r\n", "\n") == f"  {_UNICODE} Errors: 1\n".encode(
+        encoding, errors="replace"
+    ).decode(encoding)
 
 
 @pytest.mark.parametrize("encoding", _ENCODINGS)
@@ -62,11 +69,11 @@ def test_stdout_without_reconfigure_is_supported(monkeypatch) -> None:
     assert "Usage:" in stdout.getvalue()
 
 
-@pytest.mark.parametrize("encoding", _ENCODINGS)
-def test_migration_preview_preserves_unicode(encoding, tmp_path) -> None:
+@pytest.mark.parametrize("encoding,text,readable", _JSON_CASES)
+def test_migration_preview_preserves_unicode(encoding, text, readable, tmp_path) -> None:
     source = tmp_path / "legacy.json"
     source.write_text(
-        json.dumps([{"id": 1, "question": _UNICODE, "ground_truth": _UNICODE, "expected_skill": "demo"}]),
+        json.dumps([{"id": 1, "question": text, "ground_truth": text, "expected_skill": "demo"}]),
         encoding="utf-8",
     )
     original = source.read_bytes()
@@ -86,14 +93,17 @@ def test_migration_preview_preserves_unicode(encoding, tmp_path) -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    case = json.loads(result.stdout.decode(encoding))["evals"][0]
-    assert case["prompt"] == _UNICODE
-    assert case["expected_output"] == _UNICODE
+    rendered = result.stdout.decode(encoding)
+    case = json.loads(rendered)["evals"][0]
+    assert case["prompt"] == text
+    assert case["expected_output"] == text
+    if readable:
+        assert text in rendered
     assert source.read_bytes() == original
 
 
-@pytest.mark.parametrize("encoding", _ENCODINGS)
-def test_validate_json_preserves_unicode(monkeypatch, encoding, tmp_path) -> None:
+@pytest.mark.parametrize("encoding,text,readable", _JSON_CASES)
+def test_validate_json_preserves_unicode(monkeypatch, encoding, text, readable, tmp_path) -> None:
     from skillevaluator.tier3 import commands
 
     output = BytesIO()
@@ -104,7 +114,7 @@ def test_validate_json_preserves_unicode(monkeypatch, encoding, tmp_path) -> Non
         commands,
         "validate_skillevaluators",
         lambda _: [
-            SimpleNamespace(path=_UNICODE, status="warning", message=_UNICODE),
+            SimpleNamespace(path=text, status="warning", message=text),
         ],
     )
     monkeypatch.setattr(commands, "dataset_coverage_result", lambda _: None)
@@ -114,6 +124,13 @@ def test_validate_json_preserves_unicode(monkeypatch, encoding, tmp_path) -> Non
         cli_module.cli.main(["tier3", "validate", str(tmp_path), "--json"], standalone_mode=False)
     assert exc.value.code == 0
     stdout.flush()
-    assert json.loads(output.getvalue().decode(encoding)) == [
-        {"path": _UNICODE, "status": "warning", "message": _UNICODE},
+    rendered = output.getvalue().decode(encoding)
+    assert json.loads(rendered) == [
+        {"path": text, "status": "warning", "message": text},
     ]
+    if readable:
+        assert text in rendered
+
+
+def test_json_without_stream_encoding_remains_readable() -> None:
+    assert json_needs_ascii({"value": _UNICODE}, None) is False

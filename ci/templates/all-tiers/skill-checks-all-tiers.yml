@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Opt-in candidate template. Use a capability-bearing release, replacing pins.
+# Model routing options require a release declaring ci-model-routing-v1.
 # Tier 1 is required; Tier 2 and Tier 3 are advisory.
 name: Skill checks (all tiers)
 on:
@@ -26,9 +27,26 @@ jobs:
       scan-mode: auto
       env-mode: docker
       provider: openai
+      # Optional with ci-model-routing-v1; omit unused inputs for older pins.
+      # tier1-llm: true
+      # tier1-provider: openai
+      # tier1-model: YOUR_TIER1_MODEL
+      # base-url: https://gateway.example/v1
+      # embedding-provider: openai-compatible
+      # embedding-base-url: https://embedding.example/v1
+      # tier3-provider: openai-compatible
+      # tier3-model: YOUR_JUDGE_MODEL
+      # tier3-base-url: https://gateway.example/v1
+      # agent-models: |
+      #   claude-code=YOUR_CLAUDE_AGENT_MODEL
+      #   codex=YOUR_CODEX_AGENT_MODEL
       runner: ubuntu-24.04
       environment: skillevaluator
     secrets:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      # Add only when provider or tier3-provider is openai-compatible:
+      # LLM_API_KEY: ${{ secrets.SKILL_EVAL_LLM_API_KEY }}
+      # Add only when embedding-provider is openai-compatible:
+      # EMBEDDING_API_KEY: ${{ secrets.SKILL_EVAL_EMBEDDING_API_KEY }}

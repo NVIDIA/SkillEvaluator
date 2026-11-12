@@ -80,6 +80,7 @@ from skillevaluator.tier3.results_location import (
     resolve_results_root,
 )
 from skillevaluator.tier3.toml_utils import toml_quote
+from skillevaluator.utils.json_output import json_needs_ascii
 from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
 
 # emoji=False: ":name:" codes in untrusted text must print literally.
@@ -991,13 +992,11 @@ def validate_evals(skill_path: Path, *, as_json: bool, strict: bool, harbor_cont
 
     coverage = dataset_coverage_result(skill_path)
     if as_json:
+        data = [{"path": r.path, "status": r.status, "message": r.message} for r in results]
+        data += [coverage] if coverage is not None else []
         console.print_json(
-            json.dumps(
-                [{"path": r.path, "status": r.status, "message": r.message} for r in results]
-                + ([coverage] if coverage is not None else []),
-                indent=2,
-            ),
-            ensure_ascii=True,
+            data=data,
+            ensure_ascii=json_needs_ascii(data, getattr(console.file, "encoding", None)),
         )
     else:
         _print_validate_results(skill_path, results)

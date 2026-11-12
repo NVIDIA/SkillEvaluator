@@ -97,3 +97,33 @@ def test_admission_auth_failure_reports_only_numeric_status(mr_env, monkeypatch,
     assert module.main() == 2
     output = capsys.readouterr().out
     assert "HTTP 404" in output and "job-test-token" not in output
+
+
+@pytest.mark.parametrize("source", ["merge_request_event", "push"])
+@pytest.mark.parametrize("read_token", [None, "read-only-test-token"])
+def test_forbidden_current_head_check_explains_separate_read_token(mr_env, monkeypatch, capsys, source, read_token):
+    module = gate()
+    for key, value in {
+        "CI_PIPELINE_SOURCE": source,
+        "CI_COMMIT_BRANCH": "main",
+        "CI_DEFAULT_BRANCH": "main",
+        "CI_COMMIT_REF_PROTECTED": "true",
+    }.items():
+        monkeypatch.setenv(key, value)
+    if read_token:
+        monkeypatch.setenv("SKILLEVALUATOR_GITLAB_READ_TOKEN", read_token)
+
+    class Opener:
+        def open(self, request, *_args, **_kwargs):
+            resource = "merge_requests/1" if source == "merge_request_event" else "repository/branches/main"
+            assert request.full_url.endswith("/projects/42/" + resource)
+            raise urllib.error.HTTPError(request.full_url, 403, "job-test-token read-only-test-token", {}, None)
+
+    monkeypatch.setattr(module.urllib.request, "build_opener", lambda *_handlers: Opener())
+
+    assert module.main() == 2
+    output = capsys.readouterr().out
+    assert "HTTP 403" in output
+    assert "SKILLEVALUATOR_GITLAB_READ_TOKEN" in output
+    assert "Reporter/read_api" in output
+    assert "job-test-token" not in output and "read-only-test-token" not in output

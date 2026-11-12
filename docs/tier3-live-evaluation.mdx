@@ -696,6 +696,19 @@ reports mark it publication-incomplete when cases were skipped. By contrast,
 `--n-concurrent` and `--max-agents` control parallelism and elapsed time; they
 do not reduce the total planned trials or model work.
 
+With `--stop-on-pass`, an attempt that hits Harbor's agent execution timeout
+does not end the case: the next attempt runs, and when a later attempt of the
+same case completes with a score, it recovers the timeout. The timed-out
+attempt is never scored, and its failure stays in the agent's results under
+`recovered_trial_failures`. It still used one of the case's attempts, so
+reports count it on its own: the HTML **Attempt Details** row shows it as
+`A1: timed out, recovered`, or as a count (`1 timed out, recovered`) when the
+report did not keep its attempt number, and keeps it in the attempt total. A
+case that timed out on attempt 1 and passed on attempt 2 of 3 reads
+`1 of 3 scored` and `passed on attempt 2`, and `tier3 evaluate` prints one
+line for each agent with recovered timeouts. Without `--stop-on-pass` there is
+no recovery: a timed-out attempt leaves the arm's attempt coverage incomplete.
+
 ### Cost and local mode
 
 `--env-mode local` avoids managed cloud-sandbox charges by running the agent
@@ -746,6 +759,24 @@ passing score. The with-skill and without-skill arms run one after the other,
 and each uses the full `--n-concurrent` budget. For example, two agents with
 `--n-concurrent 4` run up to eight trials at once, fewer when fewer cases
 remain.
+
+In a terminal, `--progress auto` uses the `rich` view: one table of the run
+plan and its stages that keeps the same height for the whole run. Each row is
+one line, and a long value ends in an ellipsis instead of wrapping. The agent
+models, provider and run plan are also printed in full above the table
+whenever they change. The table shows the most recently updated stages in a
+fixed number of rows, at least six and at least one per agent. When the run
+ends, the table left on screen lists every stage. Its details wrap in full
+when the terminal leaves the Detail column at least 20 columns; in a narrower
+terminal each row stays on one line. The view redraws only when a stage
+changes or a heartbeat updates elapsed times. If drawing fails, including a
+terminal write that would block, the table stops updating with its stages as
+they were, a line says that the run continues, and no further progress is
+shown for that run; the final results still print. When the terminal also
+refuses that line, or the write that shows the cursor again, a line saying
+that the run went on is printed and the cursor is shown when the run ends.
+Frames the terminal refused are dropped then, so they are never drawn over
+output printed since.
 
 Every `tier3 evaluate` flag, including resource overrides and Dockerfile
 modes, is in the [CLI Reference](cli-reference.mdx).
@@ -840,6 +871,17 @@ grades each trial after the agent finishes. `security`, `skill_execution`, and
 `behavior_check` combines the behavior judge with directly evaluated declared
 checks; a checks-only case makes no behavior judge call. `custom_only` runs
 none of them.
+
+`skill_efficiency` averages skill routing with tool efficiency, the share of
+scored tool calls that did productive work. For Claude Code, Codex and OpenCode
+tool names, reading, searching, listing, writing, editing or patching files,
+running commands and activating a skill are productive, and so are MCP tools
+named `mcp__server__tool` (Claude Code). Codex and OpenCode MCP calls are not
+recognized as MCP calls yet, so most of them count as wasted. Help, version and
+install commands and searches rooted at `/` are wasted. Planning and
+bookkeeping calls, such as `TodoWrite`, `update_plan`, task lists,
+background-shell polling and sub-agent calls, are not counted, and a trial with
+only such calls scores 0.0. [Reports](/skills/skillevaluator/reports) lists the tool classes.
 
 The three LLM judges return verdicts only, and the verifier computes the
 scores. A `score` field in a judge reply is ignored.
@@ -985,11 +1027,20 @@ in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
   `judge_attempts.json` next to the trial's `skill_evaluator_reward.json` as it
   happens, so the file also explains a judge that failed. Each entry records
   the metric, attempt number, method (`llm`, `ragas`, or `salvage`), judge
-  model, status (`accepted`, `rejected`, or `error`), and problem, along with
-  the prompt and reply. When `behavior_check` is scored from a truncated
-  reply, the LLM attempts keep their own status (`rejected`, or `error` if the
-  retry failed in transport), and an `accepted` `salvage` entry, numbered like
-  the truncated attempt, holds the rebuilt results.
+  model, status (`accepted`, `rejected`, `replied`, or `error`), and problem,
+  along with the prompt and reply. When `behavior_check` is scored from a
+  truncated reply, the LLM attempts keep their own status (`rejected`, or
+  `error` if the retry failed in transport), and an `accepted` `salvage`
+  entry, numbered like the truncated attempt, holds the rebuilt results.
+  When the RAGAS goal scorer runs, each request it sends is saved as a
+  `ragas` entry with its messages as the prompt and the model named in the
+  request: `replied` with the judge's reply, which is the text or the
+  tool-call arguments RAGAS parses, or `error` with the HTTP status and body,
+  or with the reason the reply was not received. A request that fails before
+  any response arrives, such as a refused connection, saves no entry of its
+  own. A last `ragas` entry is `accepted` with the score RAGAS computed, or
+  `error` with the reason the prompt judge ran instead. Only that last entry
+  counts toward `--max-judge-calls`; the request entries do not.
   Configured credentials, common key shapes, URL userinfo, `Authorization`,
   API-key, token and `Cookie` header values, and credential flag values
   (`--token`, `--password`, `curl -u user:password`) are masked, and long
@@ -1110,6 +1161,39 @@ Every evaluator score and dimension score is on a 0.0 to 1.0 scale. The
 generated standard grader rejects non-finite values and clamps numeric scores
 with `max(0.0, min(1.0, score))`. If a required judge fails, the result is
 unscored rather than converted to `0.0`.
+
+A metric can also be N/A (not applicable) for an eval case. It never counts as
+`1.0` or `0.0`:
+
+- `behavior_check` is N/A when the case has no `assertions` (legacy
+  `expected_behavior`), and `accuracy` and `goal_accuracy` when it has no
+  `expected_output` (legacy `ground_truth`). An empty or whitespace-only
+  reference, or an empty list, counts as missing. The verifier does not call
+  those judges. `skillevaluator tier3 ./my-skill` and `tier3 init-harbor-task`
+  reject an empty `expected_output`, so with them only legacy cases without
+  `ground_truth` make `accuracy` and `goal_accuracy` N/A.
+- `skill_execution` and `skill_efficiency` are N/A in a baseline arm that has
+  no skill it could activate.
+- Security is never N/A.
+
+In `skill_evaluator_reward.json` an N/A metric's value is `null`, and
+`details.<metric>` records `status: "not_applicable"` and a `reason`.
+Harbor's numeric `reward.json` leaves the metric out. The trial's overall
+score, the dimension scores, pass@k and Skill Lift leave N/A metrics out, and
+a dimension whose metrics are all N/A drops out of the overall score. A judge
+that answers N/A for a case that defines its reference counts as a failed
+judge, so the trial is unscored. Each arm's `summary.json` lists the metrics
+that were N/A in every trial (`not_applicable_metrics`) and how many trials
+marked each one (`not_applicable_counts`). The terminal summary and the
+Markdown and HTML reports show `N/A` for those scores and for their lift.
+
+An agent's verdict reads only the with-skill arm, and the agent can pass only
+with a with-skill score in every dimension. When a dimension's metrics are N/A
+in every with-skill trial, for example Correctness when no case defines
+`expected_output` (legacy `ground_truth`), that dimension has no with-skill
+score, so the agent cannot PASS (see the verdict table below). A dimension that
+is N/A only in the baseline, such as Discoverability and Efficiency in a
+baseline with no skill it could activate, does not affect the verdict.
 
 | Dimension | Key question | Maps to | Weights | Source |
 | --- | --- | --- | --- | --- |
@@ -1343,6 +1427,12 @@ agent passes only when every dimension passes. The top-level Tier 3 verdict is:
 | Neutral | No agent passes, but at least one has no dimension below 0.40 |
 | Fail | Every successful agent has a dimension below 0.40 |
 
+A dimension with no score, such as Correctness when no case defines
+`ground_truth`, keeps that agent from passing. It does not hide another
+dimension below 0.40: that agent still counts as Fail, unless its skill never
+activated. A never-activated agent stays INCONCLUSIVE (see
+[What a live eval measures](#what-a-live-eval-measures)).
+
 Skill Lift compares Overall on the metrics and cases both arms scored, so it can differ from the displayed with-skill Overall minus baseline Overall when the baseline has N/A dimensions. Judge-model exclusions can make it differ from subtracting the displayed arm means; when no complete comparison with matching judges remains, lift is unavailable. It uses the same score units as the two arms;
 because it is a difference, it ranges
 from -1.0 to +1.0. Its independent band is **PASS** at +0.05 or above,
@@ -1359,6 +1449,15 @@ Missing metrics are never coerced to `0.0`: an unscored run reports an
 `overall_score` of `None`, averages omit unscored metrics, and the affected
 cells render **NO SCORE**. `compare` likewise ignores stored summaries whose
 `execution_status` is not `succeeded`.
+
+The verdict table above applies only when the run succeeds. When one of several
+agents fails, the run's `execution_status` is `failed`, its `overall_score` is
+`None` and its `verdict` is `neutral`, even if another agent completed. The
+same holds when every agent finished but they were scored on different metric
+sets. If one of several agents fails and the run's best agent completed with
+full evidence, the HTML report and `tier3-benchmark.md` still show that agent's
+score and mark it as needing attention; see
+[Completed agents in an incomplete run](/skills/skillevaluator/reports#completed-agents-in-an-incomplete-run).
 
 The canonical Tier 3 payload embedded by both standalone `evaluate` and
 `validate --agent-eval` reports uses schema version 2.0. A completed

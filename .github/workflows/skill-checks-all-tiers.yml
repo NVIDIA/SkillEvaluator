@@ -21,7 +21,7 @@ permissions:
   actions: read
 jobs:
   skills:
-    uses: NVIDIA/SkillEvaluator/.github/workflows/evaluate-all-tiers.yml@c3b298c2b1a1a89d520bb22009f2668520127931
+    uses: NVIDIA/SkillEvaluator/.github/workflows/evaluate-all-tiers.yml@e56ced7f72904e055b04a5024c688d7603d5b49a
     with:
       tiers: 1,2,3
       paths: skills
@@ -32,16 +32,26 @@ jobs:
       embedding-provider: nv_build
       model: nvidia/nemotron-3.5-lightning-30b-a3b
       embedding-model: ''
-      agents: ''
+      agents: codex,claude-code
       runner: ubuntu-24.04
       tools-repository: NVIDIA/SkillEvaluator
-      tools-ref: c3b298c2b1a1a89d520bb22009f2668520127931
+      tools-ref: e56ced7f72904e055b04a5024c688d7603d5b49a
       image: ghcr.io/nvidia/skillevaluator-tier1@sha256:9d5483243918937be4f2178f74cf7c622a531dee41e3176906994d52fa14950a
       n-attempts: 1
       n-concurrent: 1
       timeout-minutes: 300
       environment: skillevaluator
+      tier1-llm: true
+      tier1-provider: nv_build
+      tier1-model: nvidia/nemotron-3.5-super-vl-120b-a12b
+      tier3-provider: openai-compatible
+      tier3-model: us/aws/anthropic/eccn-claude-opus-4-8
+      tier3-base-url: ${{ vars.SKILL_EVAL_TIER3_BASE_URL }}
+      agent-models: |-
+        codex=openai/openai/eccn-gpt-6.1-sol
+        claude-code=aws/anthropic/eccn-claude-opus-5-5
     secrets:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      LLM_API_KEY: ${{ secrets[vars.SKILL_EVAL_GATEWAY_SECRET] }}

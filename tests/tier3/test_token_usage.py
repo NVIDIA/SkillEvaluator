@@ -112,6 +112,33 @@ def test_invalid_counters_are_rejected_and_named_without_their_values(field: str
     assert "100" not in json.dumps(normalized["invalid_counters"])
 
 
+def test_a_counter_the_trajectory_recorded_invalid_is_rejected_although_tokens_leave_it_out() -> None:
+    # A report trial's ``tokens`` leave out an invalid counter; ``invalid_token_counters`` names it.
+    normalized = normalize_token_counts({"prompt": 100, "completion": 20}, invalid_counters=["cached_tokens"])
+    assert normalized is not None
+    assert (normalized["complete"], normalized["cached_tokens"], normalized["invalid_counters"]) == (
+        False,
+        None,
+        ["cached_tokens"],
+    )
+    without_tokens = normalize_token_counts(None, invalid_counters=["prompt_tokens"])
+    assert without_tokens is not None
+    assert (without_tokens["complete"], without_tokens["invalid_counters"]) == (False, ["prompt_tokens"])
+    # Anything but known counter names is ignored.
+    assert normalize_token_counts(None, invalid_counters=["steps", {"x": 1}]) is None
+
+    trial = {**_trial("case-1", 100, 20), "invalid_token_counters": ["cached_tokens"]}
+    usage = build_token_usage({"codex": _agent([trial, _trial("case-2", 50, 5)], [_trial("case-1", 90, 10)])})
+
+    assert usage is not None
+    with_skill = usage["agents"]["codex"]["with_skill"]
+    assert (with_skill["coverage"]["measured_attempts"], with_skill["coverage"]["reason_codes"]) == (
+        1,
+        ["invalid_token_counters"],
+    )
+    assert with_skill["totals"]["total_tokens"] == 55
+
+
 def test_cached_above_prompt_is_invalid() -> None:
     normalized = normalize_token_counts({"prompt": 10, "completion": 5, "cached": 11})
     assert normalized is not None

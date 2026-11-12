@@ -214,7 +214,65 @@ def test_unscored_attempt_with_invalid_cached_tokens_is_not_measured(tmp_path: P
     baseline = result.metadata["agent_eval"]["token_usage"]["agents"]["claude-code"]["baseline"]
     assert baseline["coverage"]["status"] == "partial"
     assert baseline["coverage"]["measured_attempts"] == 1
+    assert baseline["coverage"]["reason_codes"] == ["invalid_token_counters"]
     assert baseline["totals"]["total_tokens"] == 1650
+
+
+def _set_cached_tokens(run: Path, trial: str, cached: object) -> None:
+    trajectory_path = run / trial / "trajectory.json"
+    trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
+    trajectory["final_metrics"]["total_cached_tokens"] = cached
+    trajectory_path.write_text(json.dumps(trajectory), encoding="utf-8")
+
+
+@pytest.mark.parametrize("cached", [-5, True, "400", 1.5, 2**60])
+def test_a_scored_attempt_whose_arm_failed_with_invalid_cached_tokens_is_not_measured(
+    tmp_path: Path, cached: object
+) -> None:
+    run = _run(tmp_path)
+    # Claude Code's baseline failed, so the loader keeps this scored attempt for usage only.
+    _set_cached_tokens(run, "claude-code/without-skill/trials/case-1__a", cached)
+
+    assert load_agent_data(run)["claude-code"]["usage_only_attempts_baseline"][0] == {
+        "entry_id": "case-1",
+        "trial_id": "case-1__a",
+        "scored": True,
+        "tokens": {"prompt": 1500, "completion": 150},
+        "invalid_token_counters": ["cached_tokens"],
+    }
+    result = agent_eval_result_from_directory(tmp_path, run, use_llm_judge=False)
+
+    assert result is not None
+    baseline = result.metadata["agent_eval"]["token_usage"]["agents"]["claude-code"]["baseline"]
+    assert (baseline["coverage"]["status"], baseline["coverage"]["measured_attempts"]) == ("partial", 1)
+    assert baseline["coverage"]["reason_codes"] == ["invalid_token_counters"]
+    # Only the timed-out attempt is measured.
+    assert baseline["totals"]["total_tokens"] == 48422
+
+
+@pytest.mark.parametrize("cached", [-5, True, "400", 1.5, 2**60])
+def test_a_scored_attempt_with_invalid_cached_tokens_is_not_measured_and_resources_keep_it(
+    tmp_path: Path, cached: object
+) -> None:
+    run = _run(tmp_path)
+    _set_cached_tokens(run, "codex/with-skill/trials/case-1__a", cached)
+
+    result = agent_eval_result_from_directory(tmp_path, run, use_llm_judge=False)
+
+    assert result is not None
+    payload = result.metadata["agent_eval"]
+    codex = payload["token_usage"]["agents"]["codex"]
+    assert (codex["with_skill"]["coverage"]["status"], codex["with_skill"]["coverage"]["measured_attempts"]) == (
+        "partial",
+        1,
+    )
+    assert codex["with_skill"]["coverage"]["reason_codes"] == ["invalid_token_counters"]
+    assert codex["with_skill"]["totals"]["total_tokens"] == 660
+    assert codex["delta"]["reason_codes"] == ["with_skill_tokens_incomplete"]
+    trial = next(trial for trial in payload["agents"]["codex"]["trials"] if trial["entry_id"] == "case-1")
+    assert (trial["tokens"], trial["invalid_token_counters"]) == ({"prompt": 500, "completion": 50}, ["cached_tokens"])
+    # ``resources`` totals prompt plus completion, which stay valid.
+    assert payload["agents"]["codex"]["resources"]["tokens"]["with_skill"]["total"] == 1210
 
 
 def test_an_unscored_attempt_of_a_case_id_with_double_underscores_keeps_its_case(tmp_path: Path) -> None:

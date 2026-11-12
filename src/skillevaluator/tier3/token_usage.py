@@ -75,29 +75,39 @@ _ACCOUNTING = {
 }
 
 
+# Each counter's payload name and its short name in a report trial's ``tokens``.
+_COUNTERS = {"prompt_tokens": "prompt", "completion_tokens": "completion", "cached_tokens": "cached"}
+
+
 def _count(value: object) -> int | None:
     """Return a non-negative whole token count; bools, strings, fractions and NaN are not counts."""
     return int(value) if _is_measurement(value) and float(value).is_integer() else None
 
 
-def normalize_token_counts(raw: object) -> dict[str, Any] | None:
+def normalize_token_counts(raw: object, *, invalid_counters: object = ()) -> dict[str, Any] | None:
     """Normalize one attempt's token counters, or return ``None`` when it recorded none.
 
     ``raw`` is a report trial's ``tokens`` object (``prompt``, ``completion``,
     ``cached``) or ATIF-style counters (``prompt_tokens`` and so on). Harbor
     omits a zero cache counter, so a missing cached count is 0 once the prompt
-    count is present. ``complete`` is ``False`` when a counter is missing or
-    invalid, or when cached exceeds prompt; ``invalid_counters`` names the
-    rejected fields, never their values.
+    count is present. ``invalid_counters`` is the trial's
+    ``invalid_token_counters``: counters its trajectory recorded with an
+    invalid value, which ``tokens`` leaves out. ``complete`` is ``False`` when
+    a counter is missing or invalid, or when cached exceeds prompt; the
+    result's ``invalid_counters`` names the rejected fields, never their values.
     """
+    names = invalid_counters if isinstance(invalid_counters, list | tuple) else ()
+    rejected = {name for name in names if isinstance(name, str) and name in _COUNTERS}
     if not isinstance(raw, Mapping):
-        return None
+        if not rejected:
+            return None
+        raw = {}
     counts: dict[str, int | None] = {}
     invalid: list[str] = []
-    for field, short in (("prompt_tokens", "prompt"), ("completion_tokens", "completion"), ("cached_tokens", "cached")):
+    for field, short in _COUNTERS.items():
         value = raw.get(short, raw.get(field))
-        counts[field] = _count(value)
-        if value is not None and counts[field] is None:
+        counts[field] = None if field in rejected else _count(value)
+        if field in rejected or (value is not None and counts[field] is None):
             invalid.append(field)
     if all(count is None for count in counts.values()) and not invalid:
         return None
@@ -173,6 +183,11 @@ def _matching_case(label: str, trial_id: str, known_cases: set[str]) -> str:
     return label
 
 
+def _attempt_tokens(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Normalize a report trial's or usage-only attempt's ``tokens`` and its ``invalid_token_counters``."""
+    return normalize_token_counts(row.get("tokens"), invalid_counters=row.get("invalid_token_counters", ()))
+
+
 def _pass_at_k_branch(agent: Mapping[str, Any], condition: str) -> Mapping[str, Any]:
     return _mapping(_mapping(agent.get("pass_at_k")).get(condition))
 
@@ -184,10 +199,7 @@ def _agent_attempts(agent: Mapping[str, Any]) -> dict[str, list[_Attempt]]:
         known_cases.update(_case_label(row) for row in _rows(agent.get(usage_key)) if row.get("scored") is True)
     attempts: dict[str, list[_Attempt]] = {}
     for arm, _condition, key, usage_key in _ARMS:
-        attempts[arm] = [
-            _Attempt(_case_label(trial), normalize_token_counts(trial.get("tokens")), True)
-            for trial in _rows(agent.get(key))
-        ]
+        attempts[arm] = [_Attempt(_case_label(trial), _attempt_tokens(trial), True) for trial in _rows(agent.get(key))]
         for row in _rows(agent.get(usage_key)):
             scored = row.get("scored") is True
             # A scored attempt names its case; an unscored one has its task directory or trial name.
@@ -197,7 +209,7 @@ def _agent_attempts(agent: Mapping[str, Any]) -> dict[str, list[_Attempt]]:
                 if scored
                 else _matching_case(_case_label(row), trial_id if isinstance(trial_id, str) else "", known_cases)
             )
-            attempts[arm].append(_Attempt(case, normalize_token_counts(row.get("tokens")), scored))
+            attempts[arm].append(_Attempt(case, _attempt_tokens(row), scored))
     return attempts
 
 

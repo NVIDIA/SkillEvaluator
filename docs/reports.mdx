@@ -1078,7 +1078,9 @@ or gate.
   starts with. `resources` keeps its own totals, which need every attempt of an
   arm scored and measured.
 - Nothing is estimated. An attempt with a missing or invalid counter adds no
-  tokens. Its arm's `coverage.status` is then `partial` (other attempts were
+  tokens. A report trial whose trajectory recorded an invalid counter names
+  it, never its value, in `invalid_token_counters`, and its `tokens` leave
+  that counter out. Its arm's `coverage.status` is then `partial` (other attempts were
   measured) or `unavailable` (none were), and the totals cover only the measured
   attempts. An arm that did not run is `not_run`, and its `totals` are `null`:
   a skipped arm, or an arm without attempts that the agent has no record of or

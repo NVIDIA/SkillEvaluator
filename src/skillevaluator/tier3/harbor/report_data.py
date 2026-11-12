@@ -694,6 +694,21 @@ def _condition_status(agent_info: dict[str, Any], condition: str) -> str:
     return str(data.get("execution_status") or "unknown") if isinstance(data, dict) else "unknown"
 
 
+def _invalid_token_counters(final_metrics: dict[str, Any]) -> list[str]:
+    """Name the token counters a trajectory recorded with a value that is not a count.
+
+    ``_trajectory_token_counter`` reads such a value as ``None``, as it reads a
+    counter Harbor left out. Harbor leaves out only a zero cache counter, so
+    token usage needs these names to keep an invalid cache counter from
+    counting as 0. Only names are kept, never values.
+    """
+    return [
+        name
+        for name in _USAGE_COUNTERS
+        if (value := final_metrics.get(f"total_{name}")) is not None and _trajectory_token_counter(value) is None
+    ]
+
+
 def _usage_tokens(counters: dict[str, Any]) -> dict[str, int] | None:
     """Return a report trial's ``tokens`` object, or ``None`` without prompt and completion counts."""
     prompt = _trajectory_token_counter(counters.get("prompt_tokens"))
@@ -701,14 +716,26 @@ def _usage_tokens(counters: dict[str, Any]) -> dict[str, int] | None:
     if prompt is None or completion is None:
         return None
     tokens = {"prompt": prompt, "completion": completion}
-    raw_cached = counters.get("cached_tokens")
-    cached = _trajectory_token_counter(raw_cached)
-    if raw_cached is not None and cached is None:
-        # An invalid recorded counter is not Harbor's omitted zero cache.
-        return None
+    cached = _trajectory_token_counter(counters.get("cached_tokens"))
     if cached is not None:
         tokens["cached"] = cached
     return tokens
+
+
+def _attempt_usage(counters: dict[str, Any], invalid_counters: list[str]) -> dict[str, Any]:
+    """Return an attempt's token fields as a report trial carries them.
+
+    ``tokens`` holds the valid counters, and ``invalid_token_counters`` names
+    the counters the trajectory recorded with an invalid value. Token usage
+    leaves such an attempt unmeasured.
+    """
+    usage: dict[str, Any] = {}
+    tokens = _usage_tokens(counters)
+    if tokens is not None:
+        usage["tokens"] = tokens
+    if invalid_counters:
+        usage["invalid_token_counters"] = sorted(invalid_counters)
+    return usage
 
 
 def _harbor_task_directory(trial_dir: Path) -> str | None:
@@ -753,9 +780,8 @@ def _unscored_attempt_usage(trial_dir: Path) -> dict[str, Any]:
     trajectory = _load_bounded_json(trajectory_file, [], artifact="trajectory") if trajectory_file.exists() else None
     final_metrics = trajectory.get("final_metrics") if isinstance(trajectory, dict) else None
     if isinstance(final_metrics, dict):
-        tokens = _usage_tokens({name: final_metrics.get(f"total_{name}") for name in _USAGE_COUNTERS})
-        if tokens is not None:
-            attempt["tokens"] = tokens
+        counters = {name: final_metrics.get(f"total_{name}") for name in _USAGE_COUNTERS}
+        attempt.update(_attempt_usage(counters, _invalid_token_counters(final_metrics)))
     return attempt
 
 
@@ -770,9 +796,9 @@ def _withheld_attempt_usage(rewards: list[dict[str, Any]]) -> list[dict[str, Any
         reward = group[0]
         row: dict[str, Any] = {"entry_id": reward.get("entry_id"), "trial_id": reward.get("trial_id"), "scored": True}
         counters = reward.get("_traj")
-        tokens = _usage_tokens(counters) if len(group) == 1 and isinstance(counters, dict) else None
-        if tokens is not None:
-            row["tokens"] = tokens
+        if len(group) == 1 and isinstance(counters, dict):
+            invalid_counters = reward.get("_invalid_token_counters")
+            row.update(_attempt_usage(counters, invalid_counters if isinstance(invalid_counters, list) else []))
         rows.append(row)
     return rows
 
@@ -1035,6 +1061,9 @@ def load_agent_data(
                                 ),
                                 "cached_tokens": _trajectory_token_counter(final_metrics.get("total_cached_tokens")),
                             }
+                            if invalid_counters := _invalid_token_counters(final_metrics):
+                                # ``_traj`` reads them as absent; token usage must not read a bad cache as 0.
+                                reward["_invalid_token_counters"] = invalid_counters
                             timing = trajectory_timing(trajectory)
                             if timing is not None:
                                 reward["_traj"]["timing"] = timing

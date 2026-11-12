@@ -79,8 +79,10 @@ def test_harbor_role_log_lifecycle_preserves_local_files(
     assert retained_log.read_text(encoding="utf-8") == '{"message":"retained"}\n'
 
 
+@pytest.mark.parametrize("destination", [None, "logs/artifacts"])
 def test_harbor_collects_local_convention_artifacts_without_recursive_copy(
     local_output_environment: SkillEvaluatorLocalEnvironment,
+    destination: str | None,
 ) -> None:
     environment = local_output_environment
     published_file = environment._resolve_path("/logs/artifacts/answer.txt")
@@ -93,15 +95,71 @@ def test_harbor_collects_local_convention_artifacts_without_recursive_copy(
         handler._download_artifact(
             source_env=environment,
             artifacts_dir=environment.trial_paths.artifacts_dir,
-            artifact=ArtifactConfig(source="/logs/artifacts"),
+            artifact=ArtifactConfig(source="/logs/artifacts", destination=destination),
             convention_source="/logs/artifacts",
         )
     )
 
     assert entry.status == "ok"
     recorded_file = environment.trial_paths.artifacts_dir / "logs" / "artifacts" / "answer.txt"
+    assert published_file != recorded_file
+    assert not environment.is_path_mounted("/logs/artifacts", recorded_file.parent)
     assert recorded_file.read_text(encoding="utf-8") == "agent answer"
     assert published_file.read_text(encoding="utf-8") == "agent answer"
+    asyncio.run(environment.stop(delete=True))
+    assert not published_file.exists()
+    assert recorded_file.read_text(encoding="utf-8") == "agent answer"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Native Windows local mode is unsupported")
+def test_local_exec_writes_and_reads_logical_artifact_paths(
+    local_output_environment: SkillEvaluatorLocalEnvironment,
+) -> None:
+    environment = local_output_environment
+
+    async def exercise():
+        await environment.start()
+        try:
+            return await environment.exec(
+                "printf agent-answer > /logs/artifacts/answer.txt && "
+                'cat /logs/artifacts/answer.txt && cat "$HARBOR_ARTIFACTS_DIR/answer.txt"'
+            )
+        finally:
+            await environment.stop(delete=False)
+
+    result = asyncio.run(exercise())
+
+    assert result.return_code == 0, result.stderr
+    assert result.stdout == "agent-answeragent-answer"
+    assert environment._resolve_path("/logs/artifacts/answer.txt").read_text(encoding="utf-8") == "agent-answer"
+
+
+def test_local_artifact_collection_retains_source_and_separate_step_snapshots(
+    local_output_environment: SkillEvaluatorLocalEnvironment,
+) -> None:
+    environment = local_output_environment
+    source = environment._resolve_path("/logs/artifacts/answer.txt")
+    source.parent.mkdir(parents=True, exist_ok=True)
+    handler = ArtifactHandler(artifacts=[], logger=logging.getLogger(__name__))
+
+    async def collect_steps() -> None:
+        for step_name, answer in (("first", "first answer"), ("second", "second answer")):
+            source.write_text(answer, encoding="utf-8")
+            handler.begin_collection()
+            entry = await handler._download_artifact(
+                source_env=environment,
+                artifacts_dir=environment.trial_paths.step_artifacts_dir(step_name),
+                artifact=ArtifactConfig(source="/logs/artifacts", destination="logs/artifacts"),
+                convention_source="/logs/artifacts",
+            )
+            assert entry.status == "ok"
+            assert source.read_text(encoding="utf-8") == answer
+
+    asyncio.run(collect_steps())
+
+    for step_name, answer in (("first", "first answer"), ("second", "second answer")):
+        recorded = environment.trial_paths.step_artifacts_dir(step_name) / "logs" / "artifacts" / "answer.txt"
+        assert recorded.read_text(encoding="utf-8") == answer
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Native Windows local mode is unsupported")

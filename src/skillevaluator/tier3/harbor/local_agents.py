@@ -434,7 +434,7 @@ class SkillEvaluatorGatewayCodex(SkillEvaluatorCodex):
         if not model_name or "/" not in model_name or not (env or {}).get("OPENAI_BASE_URL"):
             return command
 
-        runtime_models = {model_name.rsplit("/", 1)[-1], self._resolved_model_name()}
+        runtime_models = {model_name.rsplit("/", 1)[-1], self._parse_model_name(model_name)[1]}
 
         def replace(match: re.Match[str]) -> str:
             if match.group("model") not in runtime_models:
@@ -979,7 +979,7 @@ class SkillEvaluatorNvidiaBuildCodex(_NvidiaBuildBridgeAgent, SkillEvaluatorCode
         )
         if not model_name or "/" not in model_name:
             return command
-        runtime_models = {model_name.rsplit("/", 1)[-1], self._resolved_model_name()}
+        runtime_models = {model_name.rsplit("/", 1)[-1], self._parse_model_name(model_name)[1]}
 
         def replace(match: re.Match[str]) -> str:
             if match.group("model") not in runtime_models:

@@ -547,9 +547,11 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         )
 
     @property
-    def _artifact_publish_dir(self) -> Path:
-        """Match Harbor's host destination for the main /logs/artifacts convention."""
-        return self.trial_paths.artifacts_dir / "logs" / "artifacts"
+    def _artifact_staging_dir(self) -> Path:
+        """Keep sandbox writes separate from Harbor's collected output destinations."""
+        # Explicit destinations also copy the convention directory. Sharing
+        # their host path would make a transfer delete its own source.
+        return self._root / "artifacts"
 
     @classmethod
     def preflight(cls) -> None:
@@ -584,7 +586,7 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
             self.trial_paths.agent_dir,
             self.trial_paths.verifier_dir,
             self.trial_paths.artifacts_dir,
-            self._artifact_publish_dir,
+            self._artifact_staging_dir,
             self._solution,
             self._installed_agent,
             self._tmp,
@@ -1365,7 +1367,7 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
             "HARBOR_LOGS_DIR": str(self.trial_paths.trial_dir),
             "HARBOR_AGENT_LOGS_DIR": str(self.trial_paths.agent_dir),
             "HARBOR_VERIFIER_DIR": str(self.trial_paths.verifier_dir),
-            "HARBOR_ARTIFACTS_DIR": str(self._artifact_publish_dir),
+            "HARBOR_ARTIFACTS_DIR": str(self._artifact_staging_dir),
             "HARBOR_SOLUTION_DIR": str(self._solution),
             "HARBOR_INSTALLED_AGENT_DIR": str(self._installed_agent),
             "HARBOR_SKILLS_DIR": str(self._workspace / "skills"),
@@ -1758,7 +1760,7 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         return [
             ("/logs/agent", self.trial_paths.agent_dir),
             ("/logs/verifier", self.trial_paths.verifier_dir),
-            ("/logs/artifacts", self._artifact_publish_dir),
+            ("/logs/artifacts", self._artifact_staging_dir),
             ("/logs", self.trial_paths.trial_dir),
             ("/workspace", self._workspace),
             ("/tests", self._tests),

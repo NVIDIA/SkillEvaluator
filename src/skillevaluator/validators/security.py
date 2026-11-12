@@ -39,6 +39,7 @@ from urllib.parse import unquote
 import yaml
 from yaml.events import ScalarEvent
 
+from skillevaluator import finding_verification_policy
 from skillevaluator.config import load_pii_patterns
 from skillevaluator.constants import (
     HOME_PATH_SUBMITTER_ENV_VARS,
@@ -2101,8 +2102,7 @@ def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
     """Glob patterns for the path parts of the words in *texts* that a shell or Windows expands or unquotes.
 
     A word with ``*``, ``?``, ``[``, ``{``, ``$``, ``%``, ``!``, ``^``, ``#``,
-    ``~``, a quote, a backslash or a group read in the line, other than one
-    made only of ``*`` such as a list marker, is read as a POSIX shell and as
+    ``~``, a quote, a backslash or a group read in the line is read as a POSIX shell and as
     cmd.exe or PowerShell would (:func:`_skillspector_shell_word`). Each part
     between ``/`` is a pattern, and so is each piece of it between ``=``,
     ``:`` and ``,``, as written and without the dots and punctuation that end
@@ -2110,10 +2110,16 @@ def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
     (:func:`_skillspector_tilde_forms`), each read with the zsh
     ``EXTENDED_GLOB`` operators (:func:`_skillspector_zsh_pattern`).
     """
-    words = {word for text in texts for word in _SKILLSPECTOR_LINE_WORD_RE.findall(text)}
+    # Ignore only a leading Markdown bullet. A standalone wildcard elsewhere
+    # (for example ``bash *``) can name every uninspected file.
+    words = {
+        word
+        for text in texts
+        for word in _SKILLSPECTOR_LINE_WORD_RE.findall(re.sub(r"^[ \t]*\*(?=[ \t])", "", text, count=1))
+    }
     patterns: set[str] = set()
     for word in words:
-        if _SKILLSPECTOR_SHELL_SYNTAX.isdisjoint(word) or not word.strip("*"):
+        if _SKILLSPECTOR_SHELL_SYNTAX.isdisjoint(word):
             continue
         for reading in _skillspector_shell_word(word):
             for index, part in enumerate(reading.split("/")):
@@ -5849,15 +5855,19 @@ class SecurityValidator(ValidatorBase):
             finding.metadata["llm_confidence"] = confidence
             finding.metadata["llm_reasoning"] = reasoning
 
-            if verdict == "false_positive" and confidence == "high":
-                finding.severity = Severity.INFO
+            if finding_verification_policy.should_downgrade(verdict, confidence):
+                finding.severity = finding_verification_policy.DOWNGRADE_SEVERITY
                 finding.metadata["downgraded"] = True
                 finding.metadata["confidence"] = "low"
                 suppressed += 1
 
         if suppressed:
             result.recalculate_from_findings()
-            result.add_message(f"LLM verification downgraded {suppressed} finding(s) to INFO (false positives)")
+            target_severity = finding_verification_policy.DOWNGRADE_SEVERITY.value.upper()
+            verdict_label = finding_verification_policy.DOWNGRADE_VERDICT.replace("_", " ")
+            result.add_message(
+                f"LLM verification downgraded {suppressed} finding(s) to {target_severity} ({verdict_label}s)"
+            )
 
         unverified = len(findings) - verified
         if unverified:
@@ -5870,7 +5880,11 @@ class SecurityValidator(ValidatorBase):
                 f"{unverified} {noun} {verb} not verified{cause}"
             )
         elif not suppressed:
-            result.add_message("LLM verification reviewed all findings; no high-confidence false positives identified")
+            confidence_label = finding_verification_policy.DOWNGRADE_CONFIDENCE
+            verdict_label = finding_verification_policy.DOWNGRADE_VERDICT.replace("_", " ")
+            result.add_message(
+                f"LLM verification reviewed all findings; no {confidence_label}-confidence {verdict_label}s identified"
+            )
 
     # ------------------------------------------------------------------
     # File utilities

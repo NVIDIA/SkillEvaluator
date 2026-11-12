@@ -9025,6 +9025,34 @@ class _InlineCatalogExecutor:
 class TestSkillspectorMissingReferences:
     """SkillSpector records a reference to a file the skill does not bundle as a ``partial`` analysis."""
 
+    @pytest.mark.parametrize("version", ["2.11.2", "2.12.0", "2.13.3"])
+    @pytest.mark.parametrize(
+        ("line", "complete"),
+        [
+            ("Run `bash *` then write the summary to `output/notes.md`.", False),
+            ("* Write the summary to `output/notes.md`.", True),
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_shell_glob_and_markdown_marker_preserve_missing_reference_coverage(
+        self, mock_tools, tmp_path: Path, version: str, line: str, complete: bool
+    ) -> None:
+        original = "Write the summary to `output/notes.md` and keep it short."
+        files = {
+            **_NOTES_WRITER_FILES,
+            "SKILL.md": _NOTES_WRITER_FILES["SKILL.md"].replace(original, line),
+            "helper.sh": "#!/bin/sh\nprintf 'uninspected helper\\n'\n",
+        }
+        skill = _write_skill(tmp_path / "notes-writer", files)
+        payload = json.loads(json.dumps(_reference_report(version)).replace(original, line))
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert result.passed is complete
+        assert result.incomplete_scans == ([] if complete else ["skillspector"])
+        if not complete:
+            assert "skillspector_reference_caveats" not in result.metadata
+
     @pytest.mark.parametrize(
         ("version", "reason_code"),
         [("2.11.2", "reference_unresolved"), ("2.12.0", "reference_missing"), ("2.13.3", "reference_missing")],
@@ -10031,6 +10059,9 @@ class TestSkillspectorMissingReferences:
             ("Run [it](v[[:alpha:]]rsions/setup) now.", "versions", True),
             ("Run `ver\\sions/setup` now.", "versions", True),
             ("Run `bash v*/*.sh`, then write `output/notes.md`.", "install.sh", True),
+            ("Run `bash *` then write `output/notes.md`.", "install.sh", True),
+            ("Run bash ** and write output/notes.md.", "install.sh", True),
+            ("* Run `bash *` then write `output/notes.md`.", "install.sh", True),
             ("Write `output/*.md` files.", "readme.md", True),
             ("Write `output/*.md` files.", "evals", False),
             ("* Write the summary to `output/notes.md`.", "evals", False),

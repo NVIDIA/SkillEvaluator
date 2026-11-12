@@ -696,6 +696,19 @@ reports mark it publication-incomplete when cases were skipped. By contrast,
 `--n-concurrent` and `--max-agents` control parallelism and elapsed time; they
 do not reduce the total planned trials or model work.
 
+With `--stop-on-pass`, an attempt that hits Harbor's agent execution timeout
+does not end the case: the next attempt runs, and when a later attempt of the
+same case completes with a score, it recovers the timeout. The timed-out
+attempt is never scored, and its failure stays in the agent's results under
+`recovered_trial_failures`. It still used one of the case's attempts, so
+reports count it on its own: the HTML **Attempt Details** row shows it as
+`A1: timed out, recovered`, or as a count (`1 timed out, recovered`) when the
+report did not keep its attempt number, and keeps it in the attempt total. A
+case that timed out on attempt 1 and passed on attempt 2 of 3 reads
+`1 of 3 scored` and `passed on attempt 2`, and `tier3 evaluate` prints one
+line for each agent with recovered timeouts. Without `--stop-on-pass` there is
+no recovery: a timed-out attempt leaves the arm's attempt coverage incomplete.
+
 ### Cost and local mode
 
 `--env-mode local` avoids managed cloud-sandbox charges by running the agent

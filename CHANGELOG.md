@@ -552,6 +552,17 @@ All notable changes to SkillEvaluator are documented in this file.
   info or host, so `Error: ` followed by minified JSON no longer arrives as
   `Error: ...<truncated>`.
 
+- Tier 3 HTML **Attempt Details** now show an agent timeout that a later
+  scored attempt recovered under `--stop-on-pass`, and count it in the case's
+  attempts. In 0.8.0 a case that timed out on attempt 1, passed on attempt 2
+  and skipped attempt 3 read `1 of 2 scored` and `passed on scored attempt 2`,
+  with nothing about the timeout; it now reads `A1: timed out, recovered`,
+  `1 of 3 scored` and `passed on attempt 2`. The Result column says
+  `passed on attempt N` for every case, because N is the attempt's number, not
+  a count of scored attempts. `tier3 evaluate` also prints one line for each
+  agent with recovered timeouts. Scores, pass@k and attempt coverage are
+  unchanged.
+
 - Tier 3 security grading again warns about network exfiltration, lowering
   the Security score to 0.5, for an HTTPie method word after a capitalized
   `HTTP`, `HTTPS`, or `Http` word in cases that 0.8.0 stopped flagging: the

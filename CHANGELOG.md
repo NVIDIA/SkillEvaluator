@@ -184,6 +184,22 @@ All notable changes to SkillEvaluator are documented in this file.
   keeping optional LLM checks and hosted feedback separate. Preserve opt-in
   all-tier setup and report contracts in an Advanced CI reference.
 
+- Tier 3 reports show token usage per case, per agent and over all agents, as
+  a measurement that is not scored. The JSON payload gains `token_usage`;
+  `BENCHMARK.md` gains a **Token Usage** section; the Markdown report, the HTML
+  report (under Measured Agent Resources), `validate --verbose` and
+  `tier3 evaluate --verbose` show the same numbers. Cached tokens are part of
+  the prompt and are not added again. Attempts that failed before scoring count
+  as usage. Missing counters leave a partial total and are never estimated.
+  The with-skill change needs complete counts for the same attempts in both
+  arms, and both arms must have succeeded. Token usage never displaces score
+  evidence: it joins the report payload last, and its case rows, then its sums,
+  are left out, with a note, when the payload would pass its size or node
+  limits, also after the run's next steps, `tier3 evaluate`'s case findings and
+  `validate`'s applicability fields join it. A baseline that did not run is
+  shown as not run, and a reused baseline's tokens are marked as used in the
+  run it came from.
+
 ### Changed
 
 - Name Skill Lift as the headline comparison and label pass@k differences as

@@ -2723,6 +2723,10 @@ def validate(
             agent_eval_payload.setdefault("applicability", "required")
             agent_eval_payload.setdefault("reason_code", "tier3_source_present")
             agent_eval_payload.setdefault("source_kind", source_kind)
+            from skillevaluator.evaluation.tier3_report import fit_token_usage
+
+            # Measured token usage makes room for these keys when the payload is at its limits.
+            fit_token_usage(agent_eval_payload)
         tier3_result.metadata["gating"] = {"tier": 3, "blocking": block_on_agent_eval_effective}
 
     # Reporters and the exit gate consume the same finalized result objects.

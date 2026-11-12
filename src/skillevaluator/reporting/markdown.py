@@ -53,6 +53,8 @@ if TYPE_CHECKING:
 
 
 _SKIP_REASON_MAX_CHARS = 1024
+# Case rows of the Tier 3 token usage table; the JSON payload keeps every case.
+_MAX_TOKEN_USAGE_CASE_ROWS = 50
 
 
 def _markdown_safe_characters(value: str, *, preserve_newlines: bool = False) -> str:
@@ -440,6 +442,18 @@ class MarkdownReporter(ReporterBase):
                         f"| {ws_text} | {bl_text} | {lift_text} |"
                     )
                 lines.append("")
+
+            from skillevaluator.reporting.tier3_token_usage import token_usage_markdown_lines
+
+            lines.extend(
+                token_usage_markdown_lines(
+                    ae.get("token_usage"),
+                    heading="### Token Usage",
+                    agent_label=lambda agent: _markdown_untrusted_table_cell("All agents" if agent is None else agent),
+                    cell=_markdown_untrusted_table_cell,
+                    max_case_rows=_MAX_TOKEN_USAGE_CASE_ROWS,
+                )
+            )
 
             insights = _mapping(ae.get("insights"))
             insight_rows = [

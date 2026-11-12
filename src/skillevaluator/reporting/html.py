@@ -99,6 +99,7 @@ from skillevaluator.reporting.presentation import (
 from skillevaluator.reporting.run_status import Status, result_status, result_tier
 from skillevaluator.reporting.tier2_views import tier2_scope_views
 from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
+from skillevaluator.reporting.tier3_token_usage import token_usage_table
 from skillevaluator.reporting.trial_charts import steps_by_case_chart
 from skillevaluator.skillspector_provenance import skillspector_provenance_records
 from skillevaluator.source_identity import recorded_evaluated_source
@@ -1443,7 +1444,9 @@ def _bounded_tier3_preview(payload: dict[str, Any] | None) -> tuple[dict[str, An
     if not payload:
         return payload, {}
     # A private copy: the caller embeds ``payload`` itself as the canonical data.
-    slim = json.loads(_compact_json(payload))
+    # The token usage table reads the full payload, so ``token_usage`` neither
+    # triggers the preview nor spends its budget.
+    slim = json.loads(_compact_json({key: value for key, value in payload.items() if key != "token_usage"}))
     # Activation diagnostics belong to the canonical export. The template does
     # not render them, so duplicate per-trial copies must not spend overview or
     # failure-reason space before the preview budget is applied.
@@ -3574,6 +3577,11 @@ class HTMLReporter(ReporterBase):
             tier3_truncation=tier3_truncation,
             tier3_dataset_sufficiency=tier3_dataset_sufficiency,
             tier3_preview_notice=tier3_preview_notice,
+            # Measured, not scored. From the full display payload, with its own
+            # per-agent cap: the preview walk can blank strings of late keys.
+            tier3_token_usage=token_usage_table(
+                tier3_data.get("token_usage") if isinstance(tier3_data, dict) else None
+            ),
             # From the full display payload: the bounded preview can cap rows
             # unevenly per condition and blank identity fields of late rows.
             steps_by_case_chart=steps_by_case_chart(

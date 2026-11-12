@@ -636,6 +636,11 @@ class CLIReporter(ReporterBase):
                 console.print(f"  • {escape_markup(message)}", soft_wrap=True)
             console.print()
 
+        from skillevaluator.reporting.tier3_token_usage import VALIDATE_CASE_POINTER, render_token_usage_table
+
+        if render_token_usage_table(console, agent_eval.get("token_usage"), case_pointer=VALIDATE_CASE_POINTER):
+            console.print()
+
         recommendations = agent_eval.get("recommendations") or []
         if recommendations:
             printed = False

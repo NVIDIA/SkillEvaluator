@@ -308,7 +308,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- The unknown-artifact CLI guidance links to the published content-types documentation route.
+
+- Public MCP URL probes handle modern SDK client and stream APIs while retaining
+  checked-address connections, header grants, response limits, and bounded
+  cleanup. Redirect responses are refused before SDK-level redirect handling.
+  Isolated wheel tests cover SDK 1.28.1 and 2.3.0; the supported Tier 3 dependency
+  range remains unchanged.
 
 - Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
   the PR or merge request's target revision. Policy files from the proposed
@@ -317,6 +322,23 @@ All notable changes to SkillEvaluator are documented in this file.
   excluding generated outputs. Fully inspected skills with only missing-path
   reference caveats retain visible warnings instead of an incomplete-scan
   failure; actual coverage gaps and analyzer failures still block.
+
+- `skillevaluator validate` on a target with no skill, rules, workflows, or
+  plugin, such as an ordinary source repository, no longer fails Tier 1 with
+  three `No skills found` errors and exit 1 when every content scan passes.
+  When `--type auto` detects the type as `unknown`, the `schema`, `version`,
+  and `quality` checks are now recorded as not applicable, never as passes:
+  the terminal summary and the HTML report count them as N/A, and the JSON
+  and Markdown reports list them as skipped with a `not applicable` reason.
+  The JSON report of every such run adds a root `tier1_applicability` object.
+  The content scans still run with their unrestricted scope, so a real
+  finding still fails the run; such a run is never eligible for publication.
+  A target folder whose own `SKILL.md`, `workflow-rules.mdc`,
+  `agent_plugin.yaml`/`.yml`, or `.claude-plugin/plugin.json` is mis-cased
+  (such as `Skill.md`) or a dangling symlink still fails its manifest checks,
+  and `--type skill` still validates the target as a skill.
+
+- The unknown-artifact CLI guidance links to the published content-types documentation route.
 - PII findings clarify that required author attribution is accepted while
   duplicate contact addresses need removal, replacement, or a reviewed waiver.
 
@@ -482,20 +504,6 @@ All notable changes to SkillEvaluator are documented in this file.
   Missing lift data is shown as `-`; custom-only and legacy agents retain their
   arm-difference comparison.
 
-- `skillevaluator validate` on a target with no skill, rules, workflows, or
-  plugin, such as an ordinary source repository, no longer fails Tier 1 with
-  three `No skills found` errors and exit 1 when every content scan passes.
-  When `--type auto` detects the type as `unknown`, the `schema`, `version`,
-  and `quality` checks are now recorded as not applicable, never as passes:
-  the terminal summary and the HTML report count them as N/A, and the JSON
-  and Markdown reports list them as skipped with a `not applicable` reason.
-  The JSON report of every such run adds a root `tier1_applicability` object.
-  The content scans still run with their unrestricted scope, so a real
-  finding still fails the run; such a run is never eligible for publication.
-  A target folder whose own `SKILL.md`, `workflow-rules.mdc`,
-  `agent_plugin.yaml`/`.yml`, or `.claude-plugin/plugin.json` is mis-cased
-  (such as `Skill.md`) or a dangling symlink still fails its manifest checks,
-  and `--type skill` still validates the target as a skill.
 
 - The Tier 3 verdict is now FAIL when a scored dimension is below 0.40 and
   another dimension has no score. In 0.8.0 a dimension with no score made the

@@ -6,6 +6,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- HTML, Markdown, and terminal findings show recorded LLM verification verdicts,
+  confidence, and reasoning, with an explanation of retained or downgraded severity.
+  Medium-confidence false positives and uncertain verdicts retain existing gates.
+  Repeated occurrences with the same verification decision remain grouped in HTML.
+
 - A reproducible public terminal starter runs the released CLI against the
   bundled text-analyzer skill, checks real script/report output and a seeded
   quality regression, and retains an editable task, fixture and run receipt.
@@ -303,9 +308,37 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Public MCP URL probes handle modern SDK client and stream APIs while retaining
+  checked-address connections, header grants, response limits, and bounded
+  cleanup. Redirect responses are refused before SDK-level redirect handling.
+  Isolated wheel tests cover SDK 1.28.1 and 2.3.0; the supported Tier 3 dependency
+  range remains unchanged.
+
+- Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
+  the PR or merge request's target revision. Policy files from the proposed
+  changes cannot approve their own exceptions.
+- Security checks preserve authored evaluation files and their findings while
+  excluding generated outputs. Fully inspected skills with only missing-path
+  reference caveats retain visible warnings instead of an incomplete-scan
+  failure; actual coverage gaps and analyzer failures still block.
+- PII findings clarify that required author attribution is accepted while
+  duplicate contact addresses need removal, replacement, or a reviewed waiver.
+
 - A `tier3 evaluate --skip-with-skill` run with two or more agents now records
   the dataset-size status in `result.json` and the `tier3 evaluate` summary. It
   is taken from the agent with the best baseline score, as in the reports.
+
+- A default Tier 3 run with a baseline can reach a PASS or NEUTRAL publication
+  verdict in BENCHMARK.md again. The baseline arm has no skill under test, so
+  it records `skill_execution` and `skill_efficiency` as not applicable and has
+  no Discoverability or Efficiency baseline. The publication check treated
+  those two dimensions as missing evidence and compared Skill Lift with the
+  five-dimension score, so those cards said INCOMPLETE instead. Discoverability
+  and Efficiency now count as not applicable for the baseline when it recorded
+  their skill metrics that way, and Skill Lift is checked over the dimensions
+  both arms scored. On the card those two rows say `baseline N/A` instead of
+  `baseline not run`. Any other missing or inconsistent baseline still makes
+  the card INCOMPLETE.
 
 - `BENCHMARK.md` no longer publishes an Overall uplift that disagrees with
   `lift.json` and the JSON, HTML, Markdown and terminal reports when a metric is
@@ -353,6 +386,18 @@ All notable changes to SkillEvaluator are documented in this file.
   confirm a guess for the masked part. Redaction now removes a digest that no
   longer matches the reported value.
 
+- Tier 3 HTML evaluator cards now say when a judge metric's lift left out cases
+  whose arms were scored by different judge models, for example after a judge
+  fallback in one arm. The arm scores keep those cases, so a card could show
+  Baseline 0.20 and With skill 0.50 next to a -0.40 lift with nothing
+  explaining the gap. The card now notes `Lift leaves out 1 case scored by
+  different judge models; the arm scores include it.`, or says that no
+  comparable result remains when the card has no lift, and labels those cases
+  `Left out of lift: different judge models` in its per-trial evidence. In the
+  canonical JSON the evaluator records the count in `lift_excluded_cases`, its
+  card lists the cases in `comparison_basis`, and the matching evidence entries
+  carry `comparison_excluded: true`. Scores and lift are unchanged.
+
 - Tier 2 context deduplication now numbers `SHARED CONTENT n` blocks from the
   most repeated text, ties in first-seen order, instead of in first-seen order
   alone. In 0.8.0 a text repeated hundreds of times could get block 10 or later,
@@ -381,6 +426,21 @@ All notable changes to SkillEvaluator are documented in this file.
   `problem` of its `judge_attempts.json` entry, it now reads
   `Bedrock request failed`, like a Bedrock error that ends the judge and like
   the default `legacy` policy.
+
+- The Tier 3 terminal summary now shows `N/A`, not `NO SCORE`, as the Skill
+  Lift of an evaluator or dimension that is N/A in either arm, as the Markdown
+  and HTML reports already do. Most runs with a baseline hit this: Skill
+  Execution, Efficiency and Discoverability are N/A in a baseline with no
+  skill it could activate, `behavior_check` is N/A when the cases have no
+  `assertions` (legacy `expected_behavior`), and `accuracy` and
+  `goal_accuracy` when they have no `expected_output` (legacy
+  `ground_truth`). In a baseline-only run (`--skip-with-skill`) the lift of
+  every other row now reads `skipped`, as the docs and the Markdown report
+  say. A lift that is missing for another reason still reads `NO SCORE`. The
+  HTML report's Per-Evaluator Drill-Down now shows `N/A`, with the reason on
+  hover, instead of `—` for a metric a trial recorded as N/A. The reports'
+  reasons for an N/A Accuracy, Goal Accuracy or Behavior Check now name the
+  dataset fields `expected_output` and `assertions` before their legacy names.
 
 - `skillevaluator tier3 feedback` now writes the evaluated skill's directory
   (known from `--skill` or a run in the skill's `evals/results`) as its name and
@@ -441,6 +501,28 @@ All notable changes to SkillEvaluator are documented in this file.
   `scripts/apt-packages.txt` or a custom `evals/environment/Dockerfile`.
   Generated images rebuild once for the new package list: the per-task images,
   or the shared base image when `harbor.base_image_mode` is `reuse`.
+
+- The Tier 3 verdict is now FAIL when a scored dimension is below 0.40 and
+  another dimension has no score. In 0.8.0 a dimension with no score made the
+  agent NEUTRAL before the 0.40 check ran. Correctness has no score when no
+  case defines `ground_truth`, so an agent with Efficiency 0.1 got a NEUTRAL
+  verdict. For such a run the overall verdict in `BENCHMARK.md` is now FAIL
+  (was INCOMPLETE). The JSON report's `tier3.verdict` and `publication_status`
+  are `fail` (were `neutral` and `incomplete`), and the Tier 3 result's
+  `status` is `failed` (was `passed`). The terminal's Tier 3 line reads failed.
+  The `--format markdown` report shows publication status FAIL (was
+  INCOMPLETE), a Failed count of 1 (was 0) and verdict FAIL (was NEUTRAL). The
+  `tier3-benchmark.md` that `tier3 evaluate` writes reads FAIL (was NEUTRAL).
+  The HTML Tier 3 card reads `Failed (advisory)` in a default `validate` run,
+  and `Changes required` with `--block-on-agent-eval` and in the
+  `tier3 evaluate` report, where it read Neutral. The HTML Tier 3 summary opens
+  with `Completed-agent result: FAIL` and says other execution failures need
+  attention, as it already did for a run with every dimension scored, in place
+  of `Verdict at a glance: Neutral`. A dimension with no score still keeps an
+  agent from passing, and exit codes do not change. This FAIL also applies when
+  every required check passes. A run with a failed required check, such as one
+  with a `destructive_command` finding, already gets FAIL from that check (see
+  Changed).
 
 ## 0.8.0 - 2026-11-05
 

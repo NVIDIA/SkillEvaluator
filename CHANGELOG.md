@@ -308,6 +308,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Rubric retry guidance links to the published environment-variable documentation route.
+
 - Rubric retry diagnostics redact judge-supplied credentials before logging or truncating the rejection reason.
 
 - Repository CI can opt in to reviewed, per-skill SkillSpector baselines from

@@ -478,6 +478,37 @@ All notable changes to SkillEvaluator are documented in this file.
   `lift_overall`, and notes when they differ from the arm overall scores. A
   cross-format test reconciles Overall and lift across every output of one run.
 
+- The `dependency` check now reports each pip-audit and Safety advisory as a
+  `DEPENDENCY` finding named by its advisory ID, at the requirements file and
+  line, or the `pyproject.toml`, that pins the package. In 0.8.0 an advisory
+  was only an error string such as `[CVE-HIGH] pyyaml==5.3: ...`: it failed
+  the run, but JSON `findings`, the severity counts and SARIF results left it
+  out, and a policy overlay could not change its severity. The finding
+  metadata binds the scanned version to the declared exact pin, or marks a
+  Safety advisory that matches no audited pin `unbound`, and records the
+  advisory source, fixed versions, aliases, and a runtime, dev, test, docs, or
+  build role from the requirements file name or optional group. Safety's
+  severity now also comes from the CVSS object it prints with an API key, so
+  a CVSS 9.8 advisory is `critical` and fails the run, and a score that is
+  not a number from 0 to 10 is skipped; in 0.8.0 that object stopped the
+  check with an `AttributeError`. A Safety advisory that
+  pip-audit already reported under the same ID or CVE is not repeated. Safety
+  JSON with a null `severity` or a top-level list, and a pip-audit advisory
+  with a null `severity`, no longer stop the check with an `AttributeError`.
+  A Safety `advisory` that is a number or null no longer stops it with a
+  `TypeError`, and one that is an object no longer stops it with a
+  `KeyError`. A pin on the line after a comment line that ends in a
+  backslash is now audited; in 0.8.0 it was read as part of the comment, even
+  though `pip install -r` installs it. A critical advisory does not stop a
+  folder run before the remaining skills are audited. Line numbers in
+  findings and warnings now count only line breaks an editor shows, so
+  `--hash` continuation lines or a form feed before a pin no longer shift
+  them. For every check, the CLI report now lists warnings that no finding
+  repeats next to the findings, the Markdown report does so for an
+  `INCOMPLETE` check without an error, escaping HTML in them as it does in
+  errors, and a policy overlay that changes a finding's severity keeps those
+  warnings, so the reason a scan is `INCOMPLETE` stays visible.
+
 - Tier 3 dataset summaries honor explicit `should_trigger` routing labels before
   legacy `expected_skill` values. Report insights distinguish unavailable trial
   scores from scored attempts that miss the pass threshold. Dataset snapshots

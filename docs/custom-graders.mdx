@@ -85,6 +85,13 @@ optional — the config already selects it.
 
 ### The reward contract
 
+`custom_only` still requires a numeric overall score. Qualitative reasons can
+accompany it, but prose alone is not a reward. For a manual, evidence-linked
+assessment alongside current scores, see the
+[qualitative assessment review contract](reports.mdx#qualitative-assessment-review-contract).
+Its worksheet is a documentation prototype, not input to your grader or a
+scoreless runtime mode.
+
 Inside the container, your grader reads two inputs and writes one result:
 
 1. **Read** `/logs/agent/trajectory.json` — the agent's trajectory.
@@ -319,6 +326,114 @@ Custom scores flow into the same results tree as everything else:
 Custom lift needs both arms — a `--skip-baseline` run reports your custom
 scores but no lift. [Reports & Results](reports.mdx) covers the full on-disk
 layout and the machine-readable contract.
+
+## Import precomputed custom metrics
+
+Use `tier3 import-metrics` when evaluation already happened outside
+SkillEvaluator, such as a hardware simulator that cannot run in the standard
+sandbox. The initial import contract accepts **per-case, per-attempt precomputed
+scores**, not executable graders, predictions, raw trajectories, arbitrary
+physical quantities, or aggregate-only benchmark results. Continue using the
+grading modes above to execute custom grading logic against live trajectories.
+
+Imports reuse the existing `custom_metrics` reward envelope, numeric bounds,
+reserved-name protection and custom-score averaging. They do **not** select a
+grading mode, supply `overall`, or replace canonical dimensions. In particular,
+an import does not imply that `custom_only` grading or a standard verifier ran.
+
+### Run the simulator example
+
+From a repository checkout, import the bundled
+[synthetic simulator results](assets/simulator-metrics.json):
+
+```bash
+uv run skillevaluator tier3 import-metrics docs/assets/simulator-metrics.json \
+  --output-dir reports/imported-simulator
+```
+
+No provider key, agent, Docker or Tier 3 extra is needed. The output directory
+must not exist; imports never overwrite live reports or a previous import.
+The command creates `external_metrics.json` and `external_metrics.md`. These are
+external-only artifacts, not a live run's `result.json`; `view`, `compare`, the
+dashboard and publication gates do not consume them. Exit 0 means the import
+was valid and reports were written, **not** that the external evaluation passed.
+
+The example is fabricated data, not a simulator run. Its Markdown report includes:
+
+| Custom metric | Version | Unit | Direction | With skill (n/total) | Without skill (n/total) | Paired delta | Improvement | Paired cases/attempts |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| convergence\_rate | 1 | fraction | higher\_is\_better | 0.8500 (2/2) | 0.6500 (2/2) | 0.2000 | 0.2000 | 2/2 |
+| timing\_error\_fraction | 1 | fraction\_of\_budget | lower\_is\_better | 0.1500 (2/2) | 0.3000 (2/2) | -0.1500 | 0.1500 | 2/2 |
+
+Both reports label the observations as external. SkillEvaluator performs only
+input validation, aggregation and paired comparison, not test execution or
+independent verification of the producer's claims. JSON records
+`executed_by_skillevaluator: false`, the declared provenance, import time,
+SHA-256 of the exact input bytes, definitions, observations and coverage counts.
+It assigns no Overall, pass/fail result or publication evidence.
+
+### Input contract (version 1)
+
+The input is a UTF-8 JSON object with exactly these fields:
+
+| Field | Contract |
+| --- | --- |
+| `schema_version` | String `"1"`. Unknown versions are rejected. |
+| `evaluation` | Required nonempty strings: `dataset_id`, `dataset_version`, `skill_id`, `skill_version`, `agent`, `agent_version`, `model`, `environment`. Use stable versions or content digests for datasets, skills, models and environment configurations. A non-model producer may explicitly use `model: "not_applicable"`. |
+| `provenance` | Required nonempty strings: `producer` (exporter identity/version), `run_id` (external source run), `created_at` (ISO 8601 timestamp including timezone). |
+| `metric_definitions` | Map of custom names to `{ "version": "1", "unit": "fraction", "direction": "higher_is_better", "aggregation": "mean" }`, for example. Version and unit are required nonempty strings; direction is `higher_is_better` or `lower_is_better`; only mean aggregation is supported. |
+| `observations` | Nonempty list of `{ "case_id": "adder", "attempt": 1, "arm": "with_skill", "custom_metrics": { "convergence_rate": 0.9 } }`, for example. Each score references a declared definition. |
+
+Scores must be finite JSON numbers in **[0, 1]**, the same scale as executable
+custom graders. Booleans, numeric strings and `{ "score": ... }` wrappers are
+not accepted by this initial import format. `unit` describes the normalized
+quantity; the importer does not convert units or normalize raw measurements.
+For example, export timing error divided by a fixed budget, and version that
+normalization formula. Values above 1 must be transformed by an explicitly
+documented, versioned scoring formula before export; never silently clip them.
+Raw milliseconds, unrestricted counts and arbitrary ranges are not supported.
+Change the metric version whenever its meaning, normalization or unit changes.
+
+An omitted metric or `null` means **unscored**, never zero. Every observation
+must have a nonempty `custom_metrics` object, but its declared metrics may all
+be null. Arm means exclude missing values and report a scored count per metric
+against total observations. All-missing metrics render `NO SCORE`.
+
+Case IDs are strings following the [dataset identity rules](eval-datasets.mdx). Attempts are
+integers from 1 through 1000, not booleans. Only `with_skill` and `without_skill`
+arms are accepted; duplicate case/attempt/arm identities and case IDs differing
+only in capitalization are rejected. Standard metric names, metadata names
+reserved by custom graders, and canonical dimension names cannot be custom
+names. Names retain the existing bounded, publishable-name protections.
+
+Unknown fields (including per-row context/definition overrides), duplicate JSON
+keys and invalid values fail the whole import before creating output. Text
+identities are printable, trimmed strings of at most 256 characters. Inputs are
+bounded to 4 MiB, 1000 observations, 128 metric definitions, 128 metrics per
+observation, 12 nesting levels and 500,000 parser tokens. Do not put credentials,
+private data or sensitive infrastructure identifiers in exported metadata.
+
+### Compatible paired custom lift
+
+One document declares **one** dataset/version, skill/version, agent/version,
+model, environment and metric-definition set, shared by both arms. Export only
+comparable observations into that document: in particular, a case/attempt pair
+must use the same workload and seed. These are producer assertions, not facts
+SkillEvaluator can independently verify. Export different contexts or metric
+versions separately; this initial path does not merge files or compare imports
+with retained live runs.
+
+For each metric, pair only matching case IDs **and attempt numbers** with finite
+scores in both arms. Compute with-skill minus without-skill for each pair, mean
+the matched attempts within each case, then equally weight cases. Unmatched
+observations still contribute to arm means, not paired lift, so paired lift can
+differ from subtraction of arm means. Reports show matched case and attempt
+counts and make no statistical significance claim.
+
+`custom_lift[NAME].delta` preserves the existing custom lift sign convention
+(with minus without). `improvement` reverses it for lower-is-better metrics, so
+positive always means better. A missing baseline, disjoint attempts or missing
+scores produce null delta/improvement and `NO SCORE`, not a fabricated zero.
 
 ## Troubleshooting
 

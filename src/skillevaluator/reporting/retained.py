@@ -20,6 +20,7 @@ from skillevaluator.reporting.html import HTMLReporter
 from skillevaluator.reporting.json_reporter import _tier1_scope_strings
 from skillevaluator.reporting.run_status import resolve_run_status, result_status
 from skillevaluator.skillspector_provenance import sanitize_skillspector_provenance_metadata
+from skillevaluator.skillspector_reference_caveats import sanitize_reference_caveat_metadata
 
 
 class RetainedReportError(ValueError):
@@ -251,6 +252,10 @@ def retained_results(
             metadata["skillspector_version"] = _text(row["skillspector_version"], "skillspector_version")
         # Revalidated like every report boundary; a non-canonical record is left out.
         metadata.update(sanitize_skillspector_provenance_metadata(row))
+        if "skillspector_reference_caveats" in row:
+            reference_caveats = sanitize_reference_caveat_metadata(row["skillspector_reference_caveats"])
+            _require(reference_caveats is not None, "Invalid skillspector_reference_caveats")
+            metadata["skillspector_reference_caveats"] = reference_caveats
         if "publication_target_conflict" in row:
             metadata["publication_target_conflict"] = _text(
                 row["publication_target_conflict"], "publication_target_conflict"

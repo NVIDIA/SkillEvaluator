@@ -630,6 +630,13 @@ _ACCURACY_CRITERIA = (
         "if the response gives an answer and false if it gives none.",
     ),
 )
+_ACCURACY_DEDUCTION_SENTENCES = {
+    "ACTION_CORRECT": "The agent did not take the action the expected answer calls for",
+    "FACTUALLY_ACCURATE": "The answer's facts do not match the expected answer",
+    "TASK_ADDRESSED": "The answer does not address what the user asked",
+    "ACTIONABLE": "The answer does not give the user a result they can act on",
+    "FORMAT_FOLLOWED": "The answer does not follow the output format the question requires",
+}
 _ACCURACY_CRITERIA_KEYS = frozenset(key for key, _question in _ACCURACY_CRITERIA)
 
 ACCURACY_JSON_SCHEMA: dict[str, Any] = {

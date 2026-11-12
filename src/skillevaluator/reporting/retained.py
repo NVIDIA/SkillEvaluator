@@ -19,6 +19,7 @@ from skillevaluator.reporting.html import HTMLReporter
 from skillevaluator.reporting.run_status import resolve_run_status, result_status
 from skillevaluator.skillspector_provenance import sanitize_skillspector_provenance_metadata
 from skillevaluator.skillspector_reference_caveats import sanitize_reference_caveat_metadata
+from skillevaluator.skillspector_references import REFERENCE_SUMMARY_KEY, reference_summary_record
 
 
 class RetainedReportError(ValueError):
@@ -274,6 +275,10 @@ def retained_results(
                 "scanners must map scanner names to versions",
             )
             metadata["scanners"] = dict(row["scanners"])
+        # Only the valid counts are kept; a failed result's reports show them.
+        reference_summary = reference_summary_record(row.get(REFERENCE_SUMMARY_KEY))
+        if reference_summary is not None:
+            metadata[REFERENCE_SUMMARY_KEY] = reference_summary
         if "dependency_coverage" in row:
             _require(
                 isinstance(row["dependency_coverage"], list)

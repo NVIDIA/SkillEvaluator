@@ -38,6 +38,7 @@ from skillevaluator.reporting.finding_summary import (
 from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
 from skillevaluator.skillspector_provenance import sanitize_skillspector_provenance_metadata
 from skillevaluator.skillspector_reference_caveats import sanitize_reference_caveat_metadata
+from skillevaluator.skillspector_references import reference_summary_record
 from skillevaluator.source_identity import recorded_evaluated_source
 
 if TYPE_CHECKING:
@@ -345,6 +346,12 @@ class JSONReporter(ReporterBase):
         skillspector_applicability = result.metadata.get("skillspector_applicability")
         if isinstance(skillspector_applicability, dict):
             data["skillspector_applicability"] = skillspector_applicability
+
+        # Tier 1 SkillSpector AE1 counts: referenced artifacts it did not
+        # completely inspect and the reference lines that name them.
+        reference_summary = reference_summary_record(result.metadata.get("skillspector_reference_summary"))
+        if reference_summary is not None:
+            data["skillspector_reference_summary"] = reference_summary
 
         qs = result.metadata.get("quality_scores")
         if qs:

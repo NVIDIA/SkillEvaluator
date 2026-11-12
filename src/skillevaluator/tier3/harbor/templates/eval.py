@@ -2833,9 +2833,14 @@ _JUDGE_EVIDENCE_KEY_HEADER_RE = re.compile(
     re.IGNORECASE,
 )
 # A Cookie header holds "name=value" pairs joined by ";", and every pair is masked.
+# Cookie values can be quoted, including shell-escaped quotes inside a header.
+_JUDGE_EVIDENCE_COOKIE_ITEM = (
+    r"(?:[^\s'\"`,;\\=]+=(?:\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\"|(?=[\r\n]|\Z))"
+    r"|\"(?:\\.|[^\"\\\r\n])*(?:\"|(?=[\r\n]|\Z)))|[^\s'\"`,;\\]+)"
+)
 _JUDGE_EVIDENCE_COOKIE_HEADER_RE = re.compile(
     r"(\bcookie" + _JUDGE_EVIDENCE_HEADER_SEPARATOR + r")"
-    r"[^\s'\"`,;\\]+(?:;[ \t]{0,8}[^\s'\"`,;\\]+){0,64}",
+    + _JUDGE_EVIDENCE_COOKIE_ITEM + r"(?:;[ \t]{0,8}" + _JUDGE_EVIDENCE_COOKIE_ITEM + r"){0,64}",
     re.IGNORECASE,
 )
 _JUDGE_EVIDENCE_CREDENTIAL_FLAG_RE = re.compile(

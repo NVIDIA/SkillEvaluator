@@ -465,8 +465,9 @@ All notable changes to SkillEvaluator are documented in this file.
   such as `~/.bashrc`, and the longest one when several match, so a write to
   `/etc/profile.d/npm.sh` records `/etc/profile.d`. The other findings mask, as
   a best effort, private key blocks, URL user info, `Authorization`, API-key,
-  and `Cookie` header values, credential flags and assignments, `.netrc`
-  passwords, and common token prefixes, and keep the rest of the command
+  and `Cookie` header values (including quoted and shell-escaped cookie values),
+  credential flags and assignments, `.netrc` passwords, and common token
+  prefixes, and keep the rest of the command
   readable; a credential in another form, such as a `.pgpass` line, can still
   appear. Scores are unchanged. Because path findings name the entry, the
   without-skill baseline comparison now matches them by entry: a with-skill

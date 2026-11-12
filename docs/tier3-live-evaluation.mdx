@@ -859,6 +859,17 @@ grades each trial after the agent finishes. `security`, `skill_execution`, and
 checks; a checks-only case makes no behavior judge call. `custom_only` runs
 none of them.
 
+`skill_efficiency` averages skill routing with tool efficiency, the share of
+scored tool calls that did productive work. For Claude Code, Codex and OpenCode
+tool names, reading, searching, listing, writing, editing or patching files,
+running commands and activating a skill are productive, and so are MCP tools
+named `mcp__server__tool` (Claude Code). Codex and OpenCode MCP calls are not
+recognized as MCP calls yet, so most of them count as wasted. Help, version and
+install commands and searches rooted at `/` are wasted. Planning and
+bookkeeping calls, such as `TodoWrite`, `update_plan`, task lists,
+background-shell polling and sub-agent calls, are not counted, and a trial with
+only such calls scores 0.0. [Reports](/skills/skillevaluator/reports) lists the tool classes.
+
 The three LLM judges return verdicts only, and the verifier computes the
 scores. A `score` field in a judge reply is ignored.
 

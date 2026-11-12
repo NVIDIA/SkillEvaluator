@@ -105,7 +105,19 @@ def _environment(workspace: Path, image: str, source: dict[str, str]) -> dict[st
     key = selected.get(PROVIDER_KEYS[provider], "")
     if not key.strip():
         raise ValueError("key")
+    # The enriched evidence replaces the keyless Tier 1 gate, so it must apply
+    # the same reviewed baselines. The image validates the policy commit's
+    # manifest; an inherited POLICY_SOURCE_SHA is ignored unless opted in.
+    baselines = source.get("SECURITY_BASELINES", "false")
+    if baselines not in {"true", "false"}:
+        raise ValueError
+    policy = source.get("POLICY_SOURCE_SHA", "") if baselines == "true" else ""
+    if baselines == "true" and not SHA.fullmatch(policy):
+        raise ValueError
     child = {name: source[name] for name in CONTEXT if name in source}
+    child["SECURITY_BASELINES"] = baselines
+    if policy:
+        child["POLICY_SOURCE_SHA"] = policy
     child.update(
         REPORT_COMMIT=head,
         DIFF_HEAD_SHA=head,

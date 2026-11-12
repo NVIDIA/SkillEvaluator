@@ -132,3 +132,82 @@ def test_benchmark_publisher_is_separate_from_read_only_pr_feedback():
     assert "secrets." not in str(job)
     feedback = yaml.load((ROOT / ".github/workflows/feedback-all-tiers.yml").read_text(), Loader=yaml.BaseLoader)
     assert feedback["permissions"]["contents"] == "read"
+
+
+def test_github_enriched_tier1_applies_the_keyless_scan_baselines():
+    """The enriched gate evidence must honor security-baselines exactly like the keyless scan."""
+    document = workflow()
+    assert document["jobs"]["tier1"]["with"]["security-baselines"] == "${{ inputs.security-baselines }}"
+    enriched = document["jobs"]["tier1-llm"]
+    keyless = yaml.load((ROOT / ".github/workflows/evaluate-skills.yml").read_text(), Loader=yaml.BaseLoader)
+    scan_env = next(
+        step["env"] for step in keyless["jobs"]["tier1"]["steps"] if "POLICY_SOURCE_SHA" in step.get("env", {})
+    )
+    assert enriched["env"]["SECURITY_BASELINES"] == "${{ inputs.security-baselines }}"
+    assert enriched["env"]["POLICY_SOURCE_SHA"] == scan_env["POLICY_SOURCE_SHA"]
+    candidate = next(step for step in enriched["steps"] if step.get("with", {}).get("path") == "candidate")
+    # The image cannot fetch, so baseline runs keep the policy commit's blobs.
+    assert candidate["with"]["fetch-depth"] == "0"
+    assert candidate["with"]["filter"] == "${{ !inputs.security-baselines && 'blob:none' || '' }}"
+
+
+def _run_gitlab_enriched(tmp_path, extra_env):
+    import os
+
+    document = yaml.safe_load((ROOT / "ci/gitlab/all-tiers.yml").read_text())
+    script = "\n".join(document["skill-evaluation-tier1-llm"]["script"])
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "python"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'case "$2" in\n'
+        "  */eligible_gitlab.py) exit 0 ;;\n"
+        f"  */prepare_security_baselines.py) printf '%s\\n' {'d' * 40}; exit 0 ;;\n"
+        "esac\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = --reports ]; then shift; report_dir=$1; fi\n'
+        "  shift\n"
+        "done\n"
+        'printf \'%s\\n%s\\n\' "$SECURITY_BASELINES" "${POLICY_SOURCE_SHA:-}" > "$report_dir/baselines.txt"\n'
+    )
+    stub.chmod(0o755)
+    outer = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("CI_", "GITLAB_", "SKILL_EVAL_"))
+        and key not in {"SECURITY_BASELINES", "POLICY_SOURCE_SHA"}
+    }
+    env = {
+        **outer,
+        "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+        "CI_PROJECT_DIR": str(workspace),
+        "SKILL_EVAL_TOOLS_DIR": str(tmp_path / "tools"),
+        "SKILL_EVAL_IMAGE": "ghcr.io/nvidia/skillevaluator-tier1@sha256:" + "a" * 64,
+        **extra_env,
+    }
+    result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, check=False)
+    evidence = workspace / "skill-evaluator-enriched-tier1/baselines.txt"
+    return result, evidence.read_text().splitlines() if evidence.exists() else None
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        ({"SKILL_EVAL_SECURITY_BASELINES": "true"}, ["true", "d" * 40]),
+        ({"SKILL_EVAL_SECURITY_BASELINES": "false", "POLICY_SOURCE_SHA": "a" * 40}, ["false", ""]),
+        ({"POLICY_SOURCE_SHA": "a" * 40}, ["false", ""]),
+    ],
+)
+def test_gitlab_enriched_tier1_applies_the_keyless_job_baselines(tmp_path, extra, expected):
+    result, evidence = _run_gitlab_enriched(tmp_path, extra)
+    assert result.returncode == 0, result.stderr
+    assert evidence == expected
+
+
+def test_gitlab_enriched_tier1_rejects_noncanonical_baseline_opt_in(tmp_path):
+    result, evidence = _run_gitlab_enriched(tmp_path, {"SKILL_EVAL_SECURITY_BASELINES": "TRUE"})
+    assert result.returncode != 0
+    assert evidence is None

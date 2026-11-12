@@ -364,6 +364,8 @@ jobs:
       SKILL_EVAL_TIER1_MODEL: ${{ inputs.tier1-model }}
       DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
       DIFF_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      SECURITY_BASELINES: ${{ inputs.security-baselines }}
+      POLICY_SOURCE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
       REPORT_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
       REPORT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
@@ -378,7 +380,8 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: candidate
           fetch-depth: 0
-          filter: blob:none
+          # Reviewed baselines read policy-commit blobs; the container cannot fetch.
+          filter: ${{ !inputs.security-baselines && 'blob:none' || '' }}
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:

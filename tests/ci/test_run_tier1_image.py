@@ -259,3 +259,44 @@ def test_runtime_exceptions_are_fixed_diagnostics(launch, monkeypatch, capsys):
     monkeypatch.setattr(runner.subprocess, "run", fail)
     assert runner.main(args) == 1
     assert "selected-secret" not in str(capsys.readouterr())
+
+
+def test_reviewed_baselines_reach_the_enriched_scan_only_when_opted_in(launch):
+    """The enriched evidence replaces the keyless gate, so it applies the same baselines."""
+    runner, args, calls, env, *_ = launch
+    env.update(SECURITY_BASELINES="true", POLICY_SOURCE_SHA="c" * 40)
+    assert runner.main(args) == 0
+    command, kwargs = calls[-1]
+    assert kwargs["env"]["SECURITY_BASELINES"] == "true"
+    assert kwargs["env"]["POLICY_SOURCE_SHA"] == "c" * 40
+    assert {"SECURITY_BASELINES", "POLICY_SOURCE_SHA"} <= {
+        command[index + 1] for index, arg in enumerate(command) if arg == "--env"
+    }
+    calls.clear()
+    env.update(SECURITY_BASELINES="false")
+    assert runner.main(args) == 0
+    child = calls[-1][1]["env"]
+    assert child["SECURITY_BASELINES"] == "false"
+    assert "POLICY_SOURCE_SHA" not in child  # An inherited policy commit is never forwarded.
+    calls.clear()
+    del env["SECURITY_BASELINES"]
+    assert runner.main(args) == 0
+    assert calls[-1][1]["env"]["SECURITY_BASELINES"] == "false"
+
+
+@pytest.mark.parametrize(
+    "baselines",
+    [
+        {"SECURITY_BASELINES": "TRUE"},
+        {"SECURITY_BASELINES": "true"},
+        {"SECURITY_BASELINES": "true", "POLICY_SOURCE_SHA": "main"},
+    ],
+)
+def test_invalid_baseline_opt_in_fails_before_credential_launch(launch, baselines, capsys):
+    runner, args, calls, env, *_ = launch
+    env.pop("POLICY_SOURCE_SHA", None)
+    env.update(baselines)
+    assert runner.main(args) == 1
+    assert not calls
+    output = capsys.readouterr()
+    assert "secret" not in output.err + output.out

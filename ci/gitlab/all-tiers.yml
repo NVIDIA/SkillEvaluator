@@ -285,6 +285,17 @@ skill-evaluation-tier1-llm:
       set -eu
       python -I "$SKILL_EVAL_TOOLS_DIR/ci/eligible_gitlab.py"
       unset SKILLEVALUATOR_GITLAB_READ_TOKEN
+      # The enriched evidence replaces the keyless gate; apply the same baselines.
+      export SECURITY_BASELINES="${SKILL_EVAL_SECURITY_BASELINES:-false}"
+      unset POLICY_SOURCE_SHA
+      case "$SECURITY_BASELINES" in
+        true|false) ;;
+        *) echo "SKILL_EVAL_SECURITY_BASELINES must be true or false." >&2; exit 1 ;;
+      esac
+      if [ "$SECURITY_BASELINES" = true ]; then
+        POLICY_SOURCE_SHA="$(python -I /opt/skillevaluator/ci/prepare_security_baselines.py)"
+        export POLICY_SOURCE_SHA
+      fi
       reports_dir="$(mktemp -d /tmp/skillevaluator-enriched-tier1.XXXXXX)"
       trap 'rm -rf "$reports_dir"' EXIT
       set +e

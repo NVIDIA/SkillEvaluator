@@ -1014,11 +1014,20 @@ in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
   `judge_attempts.json` next to the trial's `skill_evaluator_reward.json` as it
   happens, so the file also explains a judge that failed. Each entry records
   the metric, attempt number, method (`llm`, `ragas`, or `salvage`), judge
-  model, status (`accepted`, `rejected`, or `error`), and problem, along with
-  the prompt and reply. When `behavior_check` is scored from a truncated
-  reply, the LLM attempts keep their own status (`rejected`, or `error` if the
-  retry failed in transport), and an `accepted` `salvage` entry, numbered like
-  the truncated attempt, holds the rebuilt results.
+  model, status (`accepted`, `rejected`, `replied`, or `error`), and problem,
+  along with the prompt and reply. When `behavior_check` is scored from a
+  truncated reply, the LLM attempts keep their own status (`rejected`, or
+  `error` if the retry failed in transport), and an `accepted` `salvage`
+  entry, numbered like the truncated attempt, holds the rebuilt results.
+  When the RAGAS goal scorer runs, each request it sends is saved as a
+  `ragas` entry with its messages as the prompt and the model named in the
+  request: `replied` with the judge's reply, which is the text or the
+  tool-call arguments RAGAS parses, or `error` with the HTTP status and body,
+  or with the reason the reply was not received. A request that fails before
+  any response arrives, such as a refused connection, saves no entry of its
+  own. A last `ragas` entry is `accepted` with the score RAGAS computed, or
+  `error` with the reason the prompt judge ran instead. Only that last entry
+  counts toward `--max-judge-calls`; the request entries do not.
   Configured credentials, common key shapes, URL userinfo, `Authorization`,
   API-key, token and `Cookie` header values, and credential flag values
   (`--token`, `--password`, `curl -u user:password`) are masked, and long

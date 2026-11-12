@@ -194,6 +194,17 @@ All notable changes to SkillEvaluator are documented in this file.
   keeping optional LLM checks and hosted feedback separate. Preserve opt-in
   all-tier setup and report contracts in an Advanced CI reference.
 
+- When the RAGAS goal scorer judges `goal_accuracy`, `judge_attempts.json`
+  now saves each request it sends and the judge's reply, so a RAGAS score can
+  be audited like the prompt judges' scores. Each request is a `ragas` entry
+  with status `replied`, or `error` with the HTTP status and body or the
+  reason the reply was not received, before the entry that holds the score or
+  the problem. The prompts and replies are redacted and shortened like the
+  other judge evidence. A failure while saving this evidence is only logged
+  and never changes a score. The request entries do not count toward
+  `--max-judge-calls`; the entry with the score or the problem is the one
+  counted RAGAS call, as before.
+
 ### Changed
 
 - Name Skill Lift as the headline comparison and label pass@k differences as

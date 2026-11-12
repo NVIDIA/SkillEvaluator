@@ -4662,6 +4662,22 @@ def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
         )
 
 
+def _counts_as_judge_call(attempt: object) -> bool:
+    """Return whether a ``judge_attempts.json`` entry counts toward ``--max-judge-calls``.
+
+    A ``salvage`` entry rebuilds an earlier reply, so it is not a call. A
+    ``ragas`` entry with a prompt saves one HTTP request RAGAS made internally,
+    including transport retries; the ``ragas`` entry without a prompt, which
+    holds RAGAS's score or failure, is the one counted call.
+    """
+    if not isinstance(attempt, dict):
+        return False
+    method = attempt.get("method")
+    if method == "salvage":
+        return False
+    return not (method == "ragas" and "prompt_sha256" in attempt)
+
+
 def _budget_usage(job_dir: Path) -> dict[str, Any]:
     """Read attempt usage from Harbor's retained trajectory and judge artifacts."""
     usage: dict[str, Any] = {}
@@ -4693,9 +4709,7 @@ def _budget_usage(job_dir: Path) -> dict[str, Any]:
             continue
         attempts = payload.get("attempts") if isinstance(payload, dict) else payload
         if isinstance(attempts, list):
-            judge_calls += sum(
-                1 for attempt in attempts if isinstance(attempt, dict) and attempt.get("method") != "salvage"
-            )
+            judge_calls += sum(1 for attempt in attempts if _counts_as_judge_call(attempt))
     if saw_judge_artifact:
         usage["judge_calls"] = judge_calls
     return usage

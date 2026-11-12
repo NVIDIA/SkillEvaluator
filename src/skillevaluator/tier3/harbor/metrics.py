@@ -93,9 +93,10 @@ DIMENSION_QUESTIONS = {
 }
 
 # A judged metric is "not applicable" when its dataset case has nothing to
-# judge against (no ground_truth / expected_behavior). The skill metrics are
-# not applicable in an arm that has no skill under test to discover or route to
-# (the no-skill or no-plugin baseline). The verifier records the metric as
+# judge against (no expected_output / assertions, which the legacy format calls
+# ground_truth / expected_behavior). The skill metrics are not applicable in an
+# arm that has no skill under test to discover or route to (the no-skill or
+# no-plugin baseline). The verifier records the metric as
 # ``null`` with ``details[metric].status == "not_applicable"``; N/A metrics are
 # excluded from the trial overall, the arm averages, and lift. Security never
 # becomes N/A, and an absent or non-finite metric without the explicit marker
@@ -105,9 +106,11 @@ NOT_APPLICABLE_ELIGIBLE_METRICS = ("skill_execution", "skill_efficiency", "accur
 NOT_APPLICABLE_REASONS = {
     "skill_execution": "This arm has no skill under test installed, so there is no skill to discover or run",
     "skill_efficiency": "This arm has no skill under test installed, so there is no skill to route to",
-    "accuracy": "No ground_truth defined, so there is no reference answer to judge against",
-    "goal_accuracy": "No ground_truth defined, so there is no expected outcome to judge against",
-    "behavior_check": "No expected_behavior defined, so there is no workflow to check",
+    "accuracy": "No expected_output (legacy ground_truth) defined, so there is no reference answer to judge against",
+    "goal_accuracy": (
+        "No expected_output (legacy ground_truth) defined, so there is no expected outcome to judge against"
+    ),
+    "behavior_check": "No assertions (legacy expected_behavior) defined, so there is no workflow to check",
 }
 
 _RESERVED_METADATA_KEYS = {

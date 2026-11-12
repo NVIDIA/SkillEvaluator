@@ -151,7 +151,20 @@ def test_pull_requests_read_but_never_write_the_layer_cache():
         document = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
         triggers = document["on"]
         triggers = [triggers] if isinstance(triggers, str) else triggers
-        assert {"pull_request_target", "issue_comment"}.isdisjoint(triggers), path.name
+        assert "pull_request_target" not in triggers, path.name
+        if "issue_comment" in triggers:
+            # NVSkills requests pass metadata to an immutable trusted service;
+            # they must not gain local steps, PR checkouts, or cache writers.
+            assert path.name == "request-nvskills-ci.yml"
+            assert set(triggers) == {"issue_comment", "pull_request", "push"}
+            assert document["on"]["issue_comment"] == {"types": ["created"]}
+            assert document["permissions"] == {"contents": "read"}
+            assert set(document["jobs"]) == {"request"}
+            caller = document["jobs"]["request"]
+            assert set(caller) == {"if", "permissions", "uses", "secrets"}
+            assert re.fullmatch(r"NVIDIA/skills/\.github/workflows/team-request\.yml@[0-9a-f]{40}", caller["uses"])
+            assert caller["permissions"] == {"contents": "read", "pull-requests": "read", "statuses": "read"}
+            assert caller["secrets"] == {"NVSKILLS_CI_DISPATCH_TOKEN": "${{ secrets.NVSKILLS_CI_DISPATCH_TOKEN }}"}
         if "workflow_run" in triggers:
             # The consumer listener calls only the immutable trusted publisher;
             # it has no local steps, candidate checkout or image build/cache job.

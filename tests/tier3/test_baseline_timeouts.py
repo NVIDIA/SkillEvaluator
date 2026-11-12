@@ -797,6 +797,7 @@ def test_verdict_comes_from_the_complete_peer_not_a_tolerated_agent(
     tmp_path: Path, peer: str, verdict: str, lead: str
 ) -> None:
     from skillevaluator.evaluation.tier3_report import _agent_quality_verdict
+    from skillevaluator.tier3.result_display import render_result
 
     # opencode activates the skill and passes every dimension and required
     # check (goal accuracy 1.0), but its baseline timed out. codex completes
@@ -827,6 +828,12 @@ def test_verdict_comes_from_the_complete_peer_not_a_tolerated_agent(
         assert payload["conclusions"][0]["message"].startswith(
             "The skill was never activated in any positive with-skill trial of an agent with a complete baseline."
         )
+    # The run verdict that `tier3 evaluate` prints reads the same agents.
+    terminal = render_result(results)
+    assert "Tier 3 Evaluation: DEGRADED" in terminal
+    assert [line.strip() for line in terminal.splitlines() if line.startswith("RUN QUALITY VERDICT:")] == [
+        f"RUN QUALITY VERDICT: {verdict.upper()}"
+    ]
 
 
 def test_verdict_counts_come_from_a_complete_agent_that_set_the_verdict(tmp_path: Path) -> None:
@@ -857,12 +864,20 @@ def test_verdict_counts_come_from_a_complete_agent_that_set_the_verdict(tmp_path
 
 
 @pytest.mark.parametrize(
-    ("tolerated", "panel_agent"),
-    [((), "opencode"), (("opencode",), None), (("opencode", "claude-code"), None)],
+    ("tolerated", "panel_agent", "run_verdict"),
+    [
+        ((), "opencode", "FAIL"),
+        (("opencode",), None, "INCONCLUSIVE"),
+        (("opencode", "claude-code"), None, "INCONCLUSIVE"),
+    ],
     ids=["none-tolerated", "one-tolerated", "two-tolerated"],
 )
 def test_terminal_findings_panel_never_shows_a_tolerated_agent(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], tolerated: tuple[str, ...], panel_agent: str | None
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    tolerated: tuple[str, ...],
+    panel_agent: str | None,
+    run_verdict: str,
 ) -> None:
     from skillevaluator.tier3.result_display import render_result
 
@@ -883,8 +898,14 @@ def test_terminal_findings_panel_never_shows_a_tolerated_agent(
     results.update({"skill_name": SKILL, "run_dir": str(tmp_path / "results")})
 
     capsys.readouterr()
-    render_result(results)
+    rendered = render_result(results)
     printed = capsys.readouterr().out
+    # The run verdict reads only codex once every activated agent is tolerated
+    # (codex never activated). Without tolerance, opencode misses its goals
+    # (goal accuracy 0.8), so the run fails, as on main.
+    assert [line for line in rendered.splitlines() if line.startswith("RUN QUALITY VERDICT:")] == [
+        f"RUN QUALITY VERDICT: {run_verdict}"
+    ]
     written = sorted(path.parent.name for path in (tmp_path / "results").glob("*/findings.json"))
     if panel_agent is None:
         # The canonical best agent is codex, which has no findings to show. No

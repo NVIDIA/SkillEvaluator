@@ -386,6 +386,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Read JSON, JSONL and YAML evaluation datasets as UTF-8 so Unicode prompts and
   answers load correctly on hosts with a non-UTF-8 default text encoding.
 
+- Grader qualification resolves verifier source paths before provenance hashing,
+  so source-directory aliases (including macOS `/tmp`) retain the same relative
+  file identities and hashes while files outside the source root are rejected.
+
 - Estimate Tier 1 instruction tokens from the parsed Markdown body, so `---`
   inside YAML values or comments does not count frontmatter as instructions.
   Body separators without valid frontmatter no longer produce a spurious estimate.

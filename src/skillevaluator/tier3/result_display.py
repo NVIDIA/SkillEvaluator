@@ -1011,6 +1011,13 @@ def _case_first_summary(result: Mapping[str, Any], *, console: Console, skill_pa
     return shown
 
 
+def _render_token_usage(console: Console, result: Mapping[str, Any], safe: Any) -> None:
+    """Print the per-agent token sums that the report step recorded: measured, not scored."""
+    from skillevaluator.reporting.tier3_token_usage import EVALUATE_CASE_POINTER, render_token_usage_table
+
+    render_token_usage_table(console, result.get("token_usage"), case_pointer=EVALUATE_CASE_POINTER, text=safe)
+
+
 def render_evaluation_result(
     result: Mapping[str, Any],
     *,
@@ -1184,10 +1191,7 @@ def render_evaluation_result(
 
         _render_dimensions(console=console, agents=agents, safe=safe)
 
-        from skillevaluator.reporting.tier3_token_usage import EVALUATE_CASE_POINTER, render_token_usage_table
-
-        # Measured, not scored: per-agent token sums the report step recorded.
-        render_token_usage_table(console, result.get("token_usage"), case_pointer=EVALUATE_CASE_POINTER, text=safe)
+        _render_token_usage(console, result, safe)
 
         # The per-evaluator findings report — evaluator reasonings, evidence
         # pointers, and next-step suggestions — is the feedback surface that
@@ -1211,6 +1215,9 @@ def render_evaluation_result(
             )
         except Exception:  # advisory panel: never break the run summary
             logging.getLogger(__name__).debug("Findings report skipped", exc_info=True)
+    elif incomplete and detailed:
+        # A run whose arms all failed has no scores to show, but its attempts still used tokens.
+        _render_token_usage(console, result, safe)
 
     # A recovered timeout is neither a failure nor a score; say so instead of staying silent.
     for line in _recovered_timeout_lines(agents) if isinstance(agents, Mapping) else []:

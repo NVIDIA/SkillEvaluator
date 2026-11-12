@@ -1135,7 +1135,9 @@ payload. The full terminal report (`validate --verbose` or `-r cli`) and
 hold the case rows: the HTML, Markdown and JSON reports for `validate`, and
 `report.html` and `tier3-benchmark.md` in the run directory for
 `tier3 evaluate`. When the payload left the case rows out, they say instead
-that no report has them.
+that no report has them. `tier3 evaluate` also prints the agent rows for a run
+whose arms all failed, after the panel that says the evaluation did not
+complete.
 
 ### Failure reasons and per-trial rows
 

@@ -48,7 +48,7 @@ from skillevaluator.tier3 import token_usage as token_usage_module
 from skillevaluator.tier3.harbor.collector import collect_harbor_results
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 from skillevaluator.tier3.harbor.report_data import load_agent_data
-from skillevaluator.tier3.result_display import render_result
+from skillevaluator.tier3.result_display import render_evaluation_result, render_result
 from skillevaluator.tier3.token_usage import drop_token_usage_cases, per_agent_token_usage
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -764,6 +764,38 @@ def test_tier3_evaluate_terminal_prints_the_agent_sums_the_report_step_recorded(
     assert "Token Usage (measured, not scored)" in output
     assert re.search(r"claude-code\s+│\s+3,300\s+│\s+50,072\s+│\s+N/A", output)
     assert EVALUATE_CASE_POINTER in " ".join(output.split())
+
+
+def test_tier3_evaluate_terminal_prints_the_token_usage_of_a_run_whose_arms_all_failed(tmp_path: Path) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    run = tmp_path / "run"
+    attempts = {
+        "with-skill": [("case-1__a", (1000, 100, 400), False), ("case-2__a", (2000, 200, 0), False)],
+        "without-skill": [("case-1__b", (1500, 150, 0), False), ("case-2__b", (900, 47522, 0), False)],
+    }
+    for variant, trials in attempts.items():
+        _arm(run, "codex", variant, trials, status="failed")
+    conditions = {"with_skill": {"execution_status": "failed"}, "without_skill": {"execution_status": "failed"}}
+    engine_result: dict[str, Any] = {
+        "execution_status": "failed",
+        "run_dir": str(run),
+        "agents": {"codex": {"execution_status": "failed", "conditions": conditions}},
+    }
+
+    report = render_agent_eval_html_report(skill, run, engine_result=engine_result, use_llm_judge=False)
+
+    assert "Token usage by case" in report.read_text(encoding="utf-8")
+    for verbose in (False, True):
+        stream = io.StringIO()
+        render_evaluation_result(
+            engine_result, console=Console(file=stream, width=220, color_system=None), verbose=verbose
+        )
+        output = stream.getvalue()
+        assert "Evaluation did not complete" in output
+        assert "Token Usage (measured, not scored)" in output
+        assert re.search(r"codex\s+│\s+3,300\s+│\s+50,072\s+│\s+N/A", output)
+        assert EVALUATE_CASE_POINTER in " ".join(output.split())
 
 
 def test_terminals_say_no_report_has_the_case_rows_the_payload_left_out(

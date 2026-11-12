@@ -388,6 +388,18 @@ All notable changes to SkillEvaluator are documented in this file.
   confirm a guess for the masked part. Redaction now removes a digest that no
   longer matches the reported value.
 
+- Tier 3 HTML evaluator cards now say when a judge metric's lift left out cases
+  whose arms were scored by different judge models, for example after a judge
+  fallback in one arm. The arm scores keep those cases, so a card could show
+  Baseline 0.20 and With skill 0.50 next to a -0.40 lift with nothing
+  explaining the gap. The card now notes `Lift leaves out 1 case scored by
+  different judge models; the arm scores include it.`, or says that no
+  comparable result remains when the card has no lift, and labels those cases
+  `Left out of lift: different judge models` in its per-trial evidence. In the
+  canonical JSON the evaluator records the count in `lift_excluded_cases`, its
+  card lists the cases in `comparison_basis`, and the matching evidence entries
+  carry `comparison_excluded: true`. Scores and lift are unchanged.
+
 - Tier 2 context deduplication now numbers `SHARED CONTENT n` blocks from the
   most repeated text, ties in first-seen order, instead of in first-seen order
   alone. In 0.8.0 a text repeated hundreds of times could get block 10 or later,
@@ -496,6 +508,28 @@ All notable changes to SkillEvaluator are documented in this file.
   arms have different metric applicability, matching the canonical report.
   Missing lift data is shown as `-`; custom-only and legacy agents retain their
   arm-difference comparison.
+
+- The Tier 3 verdict is now FAIL when a scored dimension is below 0.40 and
+  another dimension has no score. In 0.8.0 a dimension with no score made the
+  agent NEUTRAL before the 0.40 check ran. Correctness has no score when no
+  case defines `ground_truth`, so an agent with Efficiency 0.1 got a NEUTRAL
+  verdict. For such a run the overall verdict in `BENCHMARK.md` is now FAIL
+  (was INCOMPLETE). The JSON report's `tier3.verdict` and `publication_status`
+  are `fail` (were `neutral` and `incomplete`), and the Tier 3 result's
+  `status` is `failed` (was `passed`). The terminal's Tier 3 line reads failed.
+  The `--format markdown` report shows publication status FAIL (was
+  INCOMPLETE), a Failed count of 1 (was 0) and verdict FAIL (was NEUTRAL). The
+  `tier3-benchmark.md` that `tier3 evaluate` writes reads FAIL (was NEUTRAL).
+  The HTML Tier 3 card reads `Failed (advisory)` in a default `validate` run,
+  and `Changes required` with `--block-on-agent-eval` and in the
+  `tier3 evaluate` report, where it read Neutral. The HTML Tier 3 summary opens
+  with `Completed-agent result: FAIL` and says other execution failures need
+  attention, as it already did for a run with every dimension scored, in place
+  of `Verdict at a glance: Neutral`. A dimension with no score still keeps an
+  agent from passing, and exit codes do not change. This FAIL also applies when
+  every required check passes. A run with a failed required check, such as one
+  with a `destructive_command` finding, already gets FAIL from that check (see
+  Changed).
 
 ## 0.8.0 - 2026-11-05
 

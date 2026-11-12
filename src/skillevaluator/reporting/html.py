@@ -822,6 +822,19 @@ def _sanitize_tier3_pass_at_k(value: object) -> dict[str, Any]:
     return pass_at_k
 
 
+def _sanitize_tier3_comparison_basis(value: object) -> dict[str, Any] | None:
+    """Keep an evaluator card's judge-model lift exclusions only when they name a case count."""
+    if not isinstance(value, dict) or not (excluded_cases := _nonnegative_count(value.get("excluded_cases"))):
+        return None
+    return {
+        "excluded_cases": excluded_cases,
+        "case_ids": _tier3_identifier_list(value.get("case_ids")),
+        "excluded_attempts": _strict_nonnegative_count(value.get("excluded_attempts")),
+        "contributing_attempts": _strict_nonnegative_count(value.get("contributing_attempts")),
+        "reason": _json_safe_tier3_text(value["reason"]) if isinstance(value.get("reason"), str) else "",
+    }
+
+
 def _sanitize_tier3_evaluator_card(
     value: dict[str, Any],
     *,
@@ -851,6 +864,8 @@ def _sanitize_tier3_evaluator_card(
         for key in FAILURE_REASON_EVIDENCE_KEYS:
             if not (isinstance(entry.get(key), str) and entry[key]):
                 entry.pop(key, None)
+        if entry.pop("comparison_excluded", None) is True:
+            entry["comparison_excluded"] = True
         if (
             include_evidence_unavailable_default
             and card.get("id") in _METRIC_EVIDENCE_REF_METRICS
@@ -867,6 +882,9 @@ def _sanitize_tier3_evaluator_card(
             entry.pop("evidence_unavailable_reason", None)
         evidence.append(entry)
     card["evidence"] = evidence
+    comparison_basis = _sanitize_tier3_comparison_basis(card.pop("comparison_basis", None))
+    if comparison_basis:
+        card["comparison_basis"] = comparison_basis
     sampling = card.get("evidence_sampling") if isinstance(card.get("evidence_sampling"), dict) else {}
     for key in ("represented_cases", "represented_trials", "total_trials", "scanned_trials"):
         if key in sampling:

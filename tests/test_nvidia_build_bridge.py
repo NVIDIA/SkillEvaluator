@@ -1133,14 +1133,21 @@ def test_dynamic_bridge_ignores_prebound_old_port_and_checker_authenticates_heal
             text=True,
         )
         deadline = time.monotonic() + 5
-        while not ready_file.exists() and process.poll() is None and time.monotonic() < deadline:
-            time.sleep(0.025)
+        ready_origin = None
+        while process.poll() is None and time.monotonic() < deadline:
+            try:
+                ready_origin = bridge.check_ready_file(ready_file)
+            except (OSError, RuntimeError):
+                time.sleep(0.025)
+            else:
+                break
         assert process.poll() is None, process.communicate(timeout=1)
-        assert ready_file.exists()
+        assert ready_origin is not None, "bridge did not pass its authenticated readiness check"
         ready = json.loads(ready_file.read_text(encoding="utf-8"))
         origin = ready["origin"]
         readiness_token = ready["readiness_token"]
 
+        assert origin == ready_origin
         assert origin != "http://127.0.0.1:18080"
         assert _request("http://127.0.0.1:18080/healthz")[0] == 200
         assert _request(f"{origin}/healthz")[0] == 403

@@ -14,8 +14,10 @@ from functools import partial
 from typing import Any
 
 from skillevaluator.models import Finding, SuccessDetail, ValidationResult, ValidationSummary
+from skillevaluator.publication_evidence import TIER1_REQUIRED_CHECKS_KEY, TIER1_UNSCANNED_PATHS_KEY
 from skillevaluator.reporting.base import is_cleanly_skipped, is_tier2_result, is_tier3_result, passes_required_gate
 from skillevaluator.reporting.html import HTMLReporter
+from skillevaluator.reporting.json_reporter import _tier1_scope_strings
 from skillevaluator.reporting.run_status import resolve_run_status, result_status
 from skillevaluator.skillspector_provenance import sanitize_skillspector_provenance_metadata
 from skillevaluator.skillspector_reference_caveats import sanitize_reference_caveat_metadata
@@ -268,6 +270,12 @@ def retained_results(
         for key in ("incomplete_scans", "gate_failures"):
             if key in row:
                 metadata[key] = _strings(row[key], key)
+        for key in (TIER1_REQUIRED_CHECKS_KEY, TIER1_UNSCANNED_PATHS_KEY):
+            if key in row:
+                try:
+                    metadata[key] = _tier1_scope_strings(row[key], key)
+                except ValueError as exc:
+                    raise RetainedReportError(str(exc)) from exc
         if "scanners" in row:
             _require(
                 isinstance(row["scanners"], dict)

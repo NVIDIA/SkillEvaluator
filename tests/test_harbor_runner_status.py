@@ -220,9 +220,40 @@ def test_bounded_harbor_process_contains_tree_after_stdin_delivery_error() -> No
     assert time.monotonic() - started < 3
 
 
-def test_bounded_harbor_process_timeout_preserves_redacted_diagnostic_tail() -> None:
+def test_bounded_harbor_process_timeout_preserves_redacted_diagnostic_tail(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     secret = "synthetic-timeout-secret"
-    script = f"import os,time;os.write(2,{f'useful timeout diagnostic {secret}'.encode()!r});time.sleep(30)"
+    ready_path = tmp_path / "diagnostic-ready"
+    script = (
+        "import os,pathlib,time;"
+        f"os.write(2,{f'useful timeout diagnostic {secret}'.encode()!r});"
+        f"pathlib.Path({str(ready_path)!r}).touch();"
+        "time.sleep(30)"
+    )
+    real_popen = runner.subprocess.Popen
+
+    def ready_popen(*args: object, **kwargs: object) -> object:
+        process = real_popen(*args, **kwargs)
+        # This test needs emitted output, not a guarantee that Python starts
+        # within 100 ms on a loaded runner. Leave the real output pipe unread.
+        deadline = time.monotonic() + 10
+        try:
+            while not ready_path.exists():
+                if process.poll() is not None or time.monotonic() >= deadline:
+                    raise RuntimeError("diagnostic fixture did not become ready")
+                time.sleep(0.01)
+        except BaseException:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+            if process.stdout is not None:
+                process.stdout.close()
+            raise
+        return process
+
+    monkeypatch.setattr(runner.subprocess, "Popen", ready_popen)
 
     with pytest.raises(RuntimeError, match="timed out") as raised:
         runner._run_bounded_harbor_process(

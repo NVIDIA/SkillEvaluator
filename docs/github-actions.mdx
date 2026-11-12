@@ -84,6 +84,28 @@ Failed scans retain their available reports too. The HTML separates the
 **verdict** from the **quality score**: a high score does not override a failed
 required security or schema check.
 
+<AccordionGroup>
+  <Accordion title="Why is an author email reported as PII?">
+    The required `metadata.author` attribution is accepted. Extra copies in
+    contact fields, body text, or reference documents are checked separately.
+    Keep the author field and use a handle or contact-directory link for extra
+    contact information. See [author attribution and approved exceptions](/skills/skillevaluator/tier1-validation#author-attribution-and-contact-emails).
+  </Accordion>
+  <Accordion title="Use reviewed security baselines">
+    This requires a workflow and image version that include baseline support;
+    existing released templates do not gain it automatically.
+
+    Set `security-baselines: true` in the reusable scan job and add a reviewed
+    `.skillevaluator/skillspector-baselines.yaml` mapping each skill to its
+    baseline. For PRs, CI reads both the mapping and baseline from the target
+    branch, so merge the approved policy before expecting it to apply.
+
+    Regenerate and review fingerprint exceptions when the scanner version
+    changes. Baselines do not waive PII checks or incomplete analysis. The [baseline setup guide](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/README.md#reviewed-security-baselines)
+    covers the file format and shared-component forwarding.
+  </Accordion>
+</AccordionGroup>
+
 <Frame caption="Report example: the skill scored 98.2 but did not meet a configured 100-point threshold. The shared renderer is used by both GitHub and GitLab.">
   <img src="./assets/repository-ci-results-example.png" alt="SkillEvaluator report table showing the skill verdict, score and link to its detailed report" />
 </Frame>

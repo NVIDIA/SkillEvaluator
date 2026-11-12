@@ -434,13 +434,17 @@ _PATH_COMPONENT_END = r"(?=/|$|[\s'\"`;|&<>(),:])"
 # target word of an output redirection (">", ">>", ">|", "&>", "N>"), the
 # operands of tee, and the operands of a sed with -i or --in-place. A
 # redirection inside a quoted string (a "bash -c" script, or the arrow of
-# "echo 'a -> b'") has a target that ends with that string. A double quote
-# escaped with a backslash does not end the string, as in
-# bash -c "echo x >> \"$HOME/.zprofile\"", and a backslash in a word escapes
-# the character after it, so \" does not start a quoted string either. Without
-# an option that gives the script (-e, -f, --expression, --file, or a short
-# option cluster in which e or f comes before i, whose attached text is the
-# backup suffix), the first sed operand is the script and is left out; with
+# "echo 'a -> b'") has a target that ends with that string, and one in a "#"
+# comment or a here-document body line has a target that ends with that line.
+# _shell_text_regions finds the quoted strings as the shell reads them, left to
+# right: a backslash outside single quotes escapes the next character, so
+# neither \" nor \' starts a string and \" does not end one, as in
+# bash -c "echo x >> \"$HOME/.zprofile\""; $'...' ends at an unescaped quote;
+# and no string opens in a comment or a body. Quotes there pair within their
+# line, so the apostrophe of "# it's" does not shift the strings after it.
+# Without an option that gives the script (-e, -f, --expression, --file, or a
+# short option cluster in which e or f comes before i, whose attached text is
+# the backup suffix), the first sed operand is the script and is left out; with
 # one, every operand counts, the script too. sed options are read
 # case-sensitively, so -E is not -e. An empty operand is the suffix of BSD
 # sed's "-i ''". A read such as "cat ~/.gitconfig 2>/dev/null" writes
@@ -450,7 +454,15 @@ _PATH_COMPONENT_END = r"(?=/|$|[\s'\"`;|&<>(),:])"
 # at an unquoted word that starts with "#", which begins a comment; a backslash
 # line continuation joins two lines first.
 _SHELL_WORD = r"(?:\\.|\"[^\"]*\"|'[^']*'|[^\s;|&<>()'\"`\\])+"
-_QUOTED_STRING_RE = re.compile(r"\"[^\"]*\"|'[^']*'")
+_QUOTED_STRING_RE = re.compile(r"'[^']*'|\"[^\"\\]*(?:\\.[^\"\\]*)*\"|\$'[^'\\]*(?:\\.[^'\\]*)*'", re.DOTALL)
+# Where _shell_text_regions looks next: an escape, a quote, a "#", a
+# here-document or here-string operator, or a new line.
+_SHELL_SCAN_RE = re.compile(r"[\\'\"#\n]|\$'|<<<?")
+# A "#" after one of these, or at the start of the text, starts a word and so a comment.
+_COMMENT_WORD_BREAKS = frozenset(" \t\r\n;|&()<>")
+# The delimiter word after a "<<" operator, read on its own line, as
+# _HEREDOC_DELIMITER_RE reads it.
+_HEREDOC_OPERAND_RE = re.compile(r"(-?)[ \t]*((?:[^\s;&|<>()'\"`\\]|\\.|'[^'\n]*'|\"[^\"\n]*\")+)")
 _REDIRECT_TARGET_RE = re.compile(r"(?:&>>?|(?<![0-9])[0-9]*>>?[|&]?)\s*(" + _SHELL_WORD + ")")
 _FD_REDIRECT_TARGET_RE = re.compile(r"[0-9]*-?")
 _TEE_OPERANDS_RE = re.compile(r"(?<![\w.-])tee((?:[ \t]+(?!#)" + _SHELL_WORD + r")+)", re.IGNORECASE)
@@ -874,19 +886,89 @@ def _sensitive_path_match(text: Any, paths: tuple[str, ...] | list[str]) -> str 
     )
 
 
+def _shell_text_regions(text: str) -> tuple[list[int], list[int]]:
+    """Return the closed quoted strings and the comment and here-document body lines of shell *text*.
+
+    Each is a flat list of start and end offsets, in order. The text is read
+    left to right as the shell reads it: a backslash outside single quotes
+    escapes the next character, a "#" that starts a word begins a comment that
+    runs to the end of its line, and the lines after the line of a "<<"
+    operator are its body, up to the line that holds only its delimiter. No
+    quoted string opens in a comment or a body line; quotes there pair within
+    that line.
+    """
+    quoted: list[int] = []
+    lines: list[int] = []
+    bodies: list[tuple[str, bool]] = []
+
+    def line_end(start: int) -> int:
+        end = text.find("\n", start)
+        return len(text) if end < 0 else end
+
+    def read_line(start: int, end: int) -> None:
+        if start < end:
+            lines.extend((start, end))
+        index = start
+        while (token := _SHELL_SCAN_RE.search(text, index, end)) is not None:
+            index = token.start()
+            if token.group() == "\\":
+                index += 2
+            elif token.group() in ("'", '"', "$'") and (quote := _QUOTED_STRING_RE.match(text, index, end)):
+                quoted.extend(quote.span())
+                index = quote.end()
+            else:
+                index += len(token.group())
+
+    index = 0
+    while (token := _SHELL_SCAN_RE.search(text, index)) is not None:
+        index, char = token.start(), token.group()
+        if char == "\\":
+            index += 2
+        elif char in ("'", '"', "$'"):
+            if quote := _QUOTED_STRING_RE.match(text, index):
+                quoted.extend(quote.span())
+                index = quote.end()
+            else:
+                index += len(char)
+        elif char == "#" and (not index or text[index - 1] in _COMMENT_WORD_BREAKS):
+            read_line(index, end := line_end(index))
+            index = end
+        elif char == "<<":
+            if delimiter := _HEREDOC_OPERAND_RE.match(text, index + 2):
+                bodies.append((delimiter.group(2).strip("\"'").replace("\\", ""), bool(delimiter.group(1))))
+            index += 2
+        elif char == "\n" and bodies:
+            # The bodies of the line's here-documents follow it, in order.
+            index += 1
+            for terminator, strip_tabs in bodies:
+                while index < len(text):
+                    start, end = index, line_end(index)
+                    index = end + 1
+                    line = text[start:end]
+                    if (line.lstrip("\t") if strip_tabs else line).rstrip("\r") == terminator:
+                        break
+                    read_line(start, end)
+            bodies.clear()
+        else:
+            index += len(char)
+    return quoted, lines
+
+
 def _shell_write_targets(command: str) -> list[str]:
     """Return the files *command* writes through a redirection, tee, or sed -i."""
     text = _LINE_CONTINUATION_RE.sub(" ", str(command))
-    # The start and end offsets of each closed quoted string, in order.
-    quoted = [offset for quote in _QUOTED_STRING_RE.finditer(text) for offset in quote.span()]
+    quoted, lines = _shell_text_regions(text)
 
     def argument_text(match: re.Match[str]) -> str:
         # A redirection, tee or sed inside a quoted string ends with that
-        # string, unless the quote that ends it is an escaped \".
-        index = bisect.bisect_right(quoted, match.start())
-        if index % 2 and text[quoted[index] - 2 : quoted[index]] != '\\"':
-            return text[match.start(1) : min(match.end(1), quoted[index] - 1)]
-        return text[match.start(1) : match.end(1)]
+        # string, and one in a comment or here-document body line ends with
+        # that line.
+        end = match.end(1)
+        for regions, closing in ((quoted, 1), (lines, 0)):
+            index = bisect.bisect_right(regions, match.start())
+            if index % 2:
+                end = min(end, regions[index] - closing)
+        return text[match.start(1) : end]
 
     targets = [
         target

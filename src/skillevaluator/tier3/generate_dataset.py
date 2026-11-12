@@ -1137,7 +1137,12 @@ async def _refine_with_llm(
 
         provider = resolve_llm_provider()
     except ProviderConfigurationError as exc:
-        print(f"  Public LLM provider is not configured ({exc}). Applying template-based refinement.")
+        if skill.get("_generation_auto_trace"):
+            skill["_generation_mode"] = "template_fallback"
+            skill["_generation_fallback_reason"] = "public LLM provider is not configured"
+            print("  Public LLM provider is not configured. Applying template-based refinement.")
+        else:
+            print(f"  Public LLM provider is not configured ({exc}). Applying template-based refinement.")
         return _refine_from_trajectory_template(
             cases,
             trajectories,
@@ -1272,7 +1277,15 @@ Return ONLY the refined JSON array. No other text."""
         return refined_cases
 
     except Exception as e:
-        print(f"  LLM refinement failed ({e}). Applying template-based refinement.")
+        if skill.get("_generation_auto_trace"):
+            from skillevaluator.inference.diagnostics import llm_failure_diagnostic
+
+            diagnostic = llm_failure_diagnostic(e)
+            skill["_generation_mode"] = "template_fallback"
+            skill["_generation_fallback_reason"] = diagnostic
+        else:
+            diagnostic = str(e)
+        print(f"  LLM refinement failed ({diagnostic}). Applying template-based refinement.")
         return _refine_from_trajectory_template(
             cases,
             trajectories,
@@ -1783,6 +1796,7 @@ Agent-refined mode (--refine):
             output_path.chmod(original_mode)
 
     skill["grounding"] = grounding
+    skill["_generation_auto_trace"] = auto_evidence is not None
     skill["_generation_mode"] = "template_requested" if args.no_llm else "llm"
     print(f"Skill: {skill['name']}")
     print(f"  Description: {skill['description'][:80]}")

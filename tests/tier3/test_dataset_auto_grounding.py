@@ -404,6 +404,7 @@ def test_auto_trace_preserves_authored_prompt_metadata_and_review_history(tmp_pa
     assert result.dataset["source"] == {"kind": "reviewed_import"}
     assert "cases" not in result.dataset
     assert result.dataset["generation"]["grounding"] == "trace"
+    assert result.dataset["generation"]["mode"] == ("llm" if use_llm else "template_requested")
     assert {"kind": "dataset", "path": "evals/evals.json", "sha256": original_hash} in result.dataset["generation"][
         "inputs"
     ]
@@ -458,3 +459,102 @@ def test_auto_rejects_linked_case_identity_before_reading(tmp_path, monkeypatch,
     with pytest.raises(DatasetGenerationError, match="--grounding auto requires"):
         generate_dataset.main([str(skill), "--no-llm"])
     assert not (skill / "evals" / "evals.json").exists()
+
+
+@pytest.mark.parametrize("existing_authored", [False, True])
+@pytest.mark.parametrize(
+    ("provider_behavior", "expected_reason"),
+    [
+        ("unconfigured", "public LLM provider is not configured"),
+        (
+            "request_failure",
+            "Unexpected LLM request error. Check the selected provider and model configuration, then retry.",
+        ),
+    ],
+)
+def test_cli_auto_trace_fallback_records_template_mode_and_preserves_sources(
+    tmp_path,
+    monkeypatch,
+    existing_authored,
+    provider_behavior,
+    expected_reason,
+):
+    from skillevaluator.inference import client as inference_client
+    from skillevaluator.provider_config import resolve_llm_provider
+    from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
+
+    skill = _skill(tmp_path)
+    source = _trace(skill, tmp_path / "results")
+    output = skill / "evals" / "evals.json"
+    original_hash = None
+    if existing_authored:
+        output.parent.mkdir()
+        output.write_text(
+            json.dumps(
+                {
+                    "skill_name": skill.name,
+                    "dataset_version": "author-v3",
+                    "source": {"kind": "authored"},
+                    "evals": [
+                        {
+                            "id": "sample-skill-001",
+                            "prompt": "Keep this authored invoice task",
+                            "expected_output": "Keep this independent human expectation",
+                            "expected_skill": skill.name,
+                            "assertions": ["Keep the authored acceptance behavior"],
+                            "files": ["files/invoice.csv"],
+                            "review": {"status": "needs_review", "reasons": ["Keep the original review concern"]},
+                        }
+                    ],
+                }
+            )
+        )
+        original_hash = hashlib.sha256(output.read_bytes()).hexdigest()
+
+    def resolve_provider():
+        environment = {"SKILL_EVAL_LLM_PROVIDER": "openai"}
+        if provider_behavior != "unconfigured":
+            environment["OPENAI_API_KEY"] = "test-provider-key"
+        return resolve_llm_provider(environment)
+
+    class FailingClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def completions(self, *_args):
+            if provider_behavior == "unconfigured":
+                pytest.fail("unconfigured provider must not attempt inference")
+            raise RuntimeError("private-provider-detail")
+
+    monkeypatch.setattr("skillevaluator.provider_config.resolve_llm_provider", resolve_provider)
+    monkeypatch.setattr(inference_client, "LLMClient", FailingClient)
+    result = CliRunner().invoke(cli, ["create-eval-dataset", str(skill), "--results-dir", str(tmp_path / "results")])
+
+    assert result.exit_code == 0, result.output
+    dataset = json.loads(output.read_text())
+    generation = dataset["generation"]
+    assert generation["mode"] == "template_fallback"
+    assert generation["grounding"] == "trace"
+    assert generation["fallback_reason"] == expected_reason
+    assert generation["refined"] is True
+    assert generation["review_state"] == "needs_review"
+    assert "private-provider-detail" not in json.dumps(generation)
+    assert "private-provider-detail" not in result.output
+    assert hashlib.sha256(source.read_bytes()).hexdigest() in json.dumps(generation["inputs"])
+    case = dataset["evals"][0]
+    assert case["review"]["status"] == "needs_review"
+    if existing_authored:
+        assert case["prompt"] == "Keep this authored invoice task"
+        assert case["expected_output"] == "Keep this independent human expectation"
+        assert "Keep the authored acceptance behavior" in case["assertions"]
+        assert case["files"] == ["files/invoice.csv"]
+        assert "Keep the original review concern" in case["review"]["reasons"]
+        assert dataset["dataset_version"] == "author-v3"
+        assert dataset["source"] == {"kind": "authored"}
+        assert {"kind": "dataset", "path": "evals/evals.json", "sha256": original_hash} in generation["inputs"]
+    else:
+        assert "expected outcome taken from an observed run; confirm it is correct" in case["review"]["reasons"]
+    display, warning = dataset_provenance_display(generation)
+    assert "generated from templates (fallback:" in display
+    assert expected_reason in display
+    assert warning is True

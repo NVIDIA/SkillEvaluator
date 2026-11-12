@@ -327,7 +327,10 @@ source, relative input paths and SHA-256 digests, generation time, and review
 state. The mode is `llm`, `template_requested`, or `template_fallback`. After
 reviewing the generated cases, authors can set
 `generation.review_state: reviewed`.
-Fallback records include a safe reason. Trace-refined datasets keep their
+Fallback records include a safe reason. Automatic trace refinement records
+`template_fallback` when its planned LLM refinement is unavailable or fails,
+and `llm` when that refinement succeeds. Retained authored expectations and
+review history are preserved in either case. Trace-refined datasets keep their
 effective grounding (`intent` or `trace` for automatic selection), rather than
 `auto`, and set `refined: true`. Autopilot records `llm` or
 `template_fallback` with `skill` grounding. Cases whose authored expectations conflict with an observed answer, or

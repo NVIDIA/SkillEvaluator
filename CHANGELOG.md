@@ -4,20 +4,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
-### Changed
-
-- Standalone `create-eval-dataset` and `DatasetOptions` now default to `auto`
-  grounding: nonblank author guidance first, then usable matching retained
-  trajectories from completed skill-scoped runs. Missing input fails before
-  provider access, collection, or writes; existing skill-only scripts must pass
-  `--grounding skill`, even with `--no-llm`. Auto trace selection preserves
-  authored cases and flags unmatched coverage and observed answers for review;
-  retained identity and trace files are checked before reading, and legacy
-  `cases` wrappers retain root metadata when converted to `evals`.
-  Provenance records the effective grounding and retained source hashes.
-  Explicit grounding modes and refinement remain available. Unattended
-  autopilot keeps its skill-grounded one-case starter behavior.
-
 ### Added
 
 - HTML, Markdown, and terminal findings show recorded LLM verification verdicts,
@@ -290,6 +276,21 @@ All notable changes to SkillEvaluator are documented in this file.
   `tier3-required` input and GitLab's `SKILL_EVAL_TIER3_REQUIRED` variable;
   none can make Tier 3 block CI. Standalone validation and benchmark
   publication policies are unchanged.
+
+- Standalone `create-eval-dataset` and `DatasetOptions` now default to `auto`
+  grounding: nonblank author guidance first, then usable matching retained
+  trajectories from completed skill-scoped runs. Missing input fails before
+  provider access, collection, or writes; existing skill-only scripts must pass
+  `--grounding skill`, even with `--no-llm`. Auto trace selection preserves
+  authored cases and flags unmatched coverage and observed answers for review;
+  retained identity and trace files are checked before reading, and legacy
+  `cases` wrappers retain root metadata when converted to `evals`.
+  Provenance records the effective grounding and retained source hashes; auto
+  trace refinement records template fallback and a safe reason when its LLM
+  operation is unavailable or fails, preserving authored expectations and review
+  state.
+  Explicit grounding modes and refinement remain available. Unattended
+  autopilot keeps its skill-grounded one-case starter behavior.
 
 - Give staged Tier 3 main images a fixed liveness healthcheck so Docker Compose
   2 can wait for readiness while authored image healthchecks remain suppressed.

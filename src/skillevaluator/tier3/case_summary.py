@@ -875,7 +875,12 @@ def _run_error(trial_dir: Path, run_dir: Path) -> str:
 
 
 def _diagnose_agent_case(
-    run_dir: Path, agent_name: str, agent: Mapping[str, Any], case_id: str
+    run_dir: Path,
+    agent_name: str,
+    agent: Mapping[str, Any],
+    case_id: str,
+    *,
+    entry: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     with_case = _cases(agent, "with_skill").get(case_id)
     with_marks, without_marks = _marks(with_case), _marks(_cases(agent, "without_skill").get(case_id))
@@ -883,7 +888,9 @@ def _diagnose_agent_case(
     bp, bn = _attempt_rate(without_marks)
     errors = with_marks.count(ERROR)
     # Negative controls must avoid the skill; an agent-wide positive miss does not apply to them.
-    should_trigger = resolve_should_trigger(dict(_dataset_entries(run_dir).get(case_id, {})))
+    if entry is None:
+        entry = _dataset_entries(run_dir).get(case_id, {})
+    should_trigger = resolve_should_trigger(dict(entry))
     not_used = should_trigger is not False and _never_activated(agent)
     failed_trials = []
     for attempt in with_case.get("attempts", []) if isinstance(with_case, Mapping) else []:
@@ -1163,10 +1170,11 @@ def what_to_fix(
 ) -> list[dict[str, Any]]:
     """Rank failed test cases across agents by attempts lost and attach one fix each."""
     agents = {str(k): v for k, v in (result.get("agents") or {}).items() if isinstance(v, Mapping)}
+    dataset = _dataset_entries(run_dir)
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for case_id in _case_ids(agents):
         for name, agent in agents.items():
-            for issue in _diagnose_agent_case(run_dir, name, agent, case_id):
+            for issue in _diagnose_agent_case(run_dir, name, agent, case_id, entry=dataset.get(case_id, {})):
                 grouped.setdefault((case_id, issue["kind"]), []).append(issue)
     issues = []
     for items in grouped.values():
@@ -1184,7 +1192,6 @@ def what_to_fix(
             env_errors=list(dict.fromkeys(e for item in items for e in item["env_errors"])),
         )
         issues.append(merged)
-    dataset = _dataset_entries(run_dir)
     description = _skill_description(skill_path)
     for issue in issues:
         entry = dataset.get(issue["case"], {})

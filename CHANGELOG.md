@@ -311,6 +311,7 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 3 improvement recommendations respect each case's expected skill routing:
   passing negative controls no longer inherit activation-loss advice from positive
   cases, while failed negatives retain task, environment, and run-error diagnostics.
+  The dataset snapshot is read once per recommendation pass across all cases and agents.
 
 - Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
   the PR or merge request's target revision. Policy files from the proposed

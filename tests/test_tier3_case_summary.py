@@ -502,6 +502,62 @@ def test_unlabeled_snapshot_preserves_legacy_activation_diagnosis(
         assert fixes == []
 
 
+@pytest.mark.parametrize("case_count", [20, 100])
+@pytest.mark.parametrize("agent_count", [1, 2])
+@pytest.mark.parametrize("scenario", ["passing", "mixed negative", "empty snapshot"])
+def test_case_advice_reads_snapshot_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case_count: int, agent_count: int, scenario: str
+) -> None:
+    from skillevaluator.utils.secure_fs import SecureRoot
+
+    case_ids = [f"case-{i:03d}" for i in range(case_count)]
+    entries = [
+        {"id": case_id, "should_trigger": bool(i % 2), "expected_skill": "release-review"}
+        for i, case_id in enumerate(case_ids)
+    ]
+    (tmp_path / "dataset_snapshot.json").write_text(
+        json.dumps({"dataset": [] if scenario == "empty snapshot" else entries})
+    )
+    cases = {case_id: _case(scenario != "mixed negative" or i % 2 == 0) for i, case_id in enumerate(case_ids)}
+    agents = {f"agent-{i}": _agent(cases, {}) for i in range(agent_count)}
+    for agent in agents.values():
+        agent["skill_activation"] = {"status": "unknown" if scenario == "passing" else "never_activated"}
+    snapshot_reads = 0
+    read_bytes = SecureRoot.read_bytes
+
+    def count_reads(self, path, *args, **kwargs):
+        nonlocal snapshot_reads
+        if str(path) == "dataset_snapshot.json":
+            snapshot_reads += 1
+        return read_bytes(self, path, *args, **kwargs)
+
+    monkeypatch.setattr(SecureRoot, "read_bytes", count_reads)
+
+    fixes = what_to_fix({"agents": agents}, run_dir=tmp_path, use_llm=False)
+
+    if scenario == "passing":
+        assert fixes == []
+    else:
+        [fix] = fixes
+        expected_cases = case_ids[1::2] if scenario == "mixed negative" else case_ids
+        assert fix["cases"] == expected_cases
+        assert fix["kind"] == "skill not used"
+        assert fix["attempts_lost"] == len(expected_cases) * agent_count
+    assert snapshot_reads == 1
+
+
+def test_direct_case_diagnosis_still_loads_snapshot(tmp_path: Path) -> None:
+    from skillevaluator.tier3.case_summary import _diagnose_agent_case
+
+    (tmp_path / "dataset_snapshot.json").write_text(
+        json.dumps({"dataset": [{"id": "negative", "should_trigger": False, "expected_skill": "release-review"}]})
+    )
+    agent = _agent({"negative": _case(True)}, {})
+    agent["skill_activation"] = {"status": "never_activated"}
+
+    assert _diagnose_agent_case(tmp_path, "a", agent, "negative") == []
+
+
 def test_truncated_attempts_cannot_produce_a_complete_effect_or_clean_bill(tmp_path: Path) -> None:
     case = {**_case(True), "attempt_details_total": 2, "attempt_details_truncated": True}
     agent = _agent({"c": case}, {"c": _case(False, False)})

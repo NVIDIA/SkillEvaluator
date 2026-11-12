@@ -2375,6 +2375,8 @@
             .t3-eval-evidence li .t3-ev-notes { color:var(--text-secondary); font-size:0.78rem; }
             .t3-eval-evidence li .t3-ev-detail { grid-column:1 / -1; display:flex; flex-wrap:wrap; align-items:center; gap:0.5rem; }
             .t3-ev-excerpt { font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-size:0.76rem; padding:0.15rem 0.4rem; border-radius:4px; background:var(--bg-tertiary); color:var(--text-secondary); overflow-wrap:anywhere; }
+            .t3-eval-evidence li .t3-ev-lift-excluded { color:var(--text-secondary); font-size:0.76rem; font-weight:600; }
+            .t3-eval-lift-note { max-width:16rem; }
             .t3-score-reason { border-bottom:1px dotted currentColor; cursor:help; }
 
             /* Attempt Details: SkillEvaluator-style chip table for per-case attempt scores */
@@ -3658,6 +3660,19 @@
                                     {% set ev_lift_class = 'up' if card.lift >= tier3_lift_pass_threshold else ('down' if card.lift <= tier3_lift_fail_threshold else 'flat') %}
                                     <div class="t3-delta {{ ev_lift_class }}" style="margin-top:0.4rem; display:inline-block;">{{ "%+.2f" | format(card.lift) }} lift</div>
                                 {% endif %}
+                                {% set lift_excluded_cases = card.comparison_basis.excluded_cases if card.comparison_basis else 0 %}
+                                {% if lift_excluded_cases %}
+                                    {% set one_lift_excluded_case = lift_excluded_cases == 1 %}
+                                    {% set lift_excluded_label = lift_excluded_cases ~ (' case' if one_lift_excluded_case else ' cases') %}
+                                    {# Only a card with both arm scores can say they include the cases. #}
+                                    <div class="t3-dim-hint t3-eval-lift-note">
+                                        {%- if card.lift is none -%}
+                                            No lift: {{ lift_excluded_label }} {{ 'was' if one_lift_excluded_case else 'were' }} scored by different judge models and no comparable result remains
+                                        {%- else -%}
+                                            Lift leaves out {{ lift_excluded_label }} scored by different judge models
+                                        {%- endif -%}
+                                        {%- if card.baseline is not none %}; the arm scores include {{ 'it' if one_lift_excluded_case else 'them' }}{% endif %}.</div>
+                                {% endif %}
                             </div>
                         </div>
                         <div class="t3-eval-bars">
@@ -3678,7 +3693,7 @@
                             {% set eid = ev.entry_id or 'trial' %}
                             {% if eid not in dedup_map %}
                                 {% set _ = dedup_order.append(eid) %}
-                            {% set _ = dedup_map.update({eid: {'count': 0, 'sum': 0.0, 'with_score': 0, 'notes': [], 'failures': [], 'checks': [], 'evidence_refs': [], 'evidence_unavailable_reason': none, 'excerpt': none, 'reason': none, 'reason_score': none}}) %}
+                            {% set _ = dedup_map.update({eid: {'count': 0, 'sum': 0.0, 'with_score': 0, 'notes': [], 'failures': [], 'checks': [], 'evidence_refs': [], 'evidence_unavailable_reason': none, 'excerpt': none, 'reason': none, 'reason_score': none, 'comparison_excluded': false}}) %}
                             {% endif %}
                             {% set entry = dedup_map[eid] %}
                             {% set ev_occurrences = ev.occurrences or 1 %}
@@ -3698,6 +3713,7 @@
                             {% endif %}
                             {% if ev.checks and not entry.checks %}{% set _ = entry.update({'checks': ev.checks}) %}{% endif %}
                             {% if ev.evidence_refs and not entry.evidence_refs %}{% set _ = entry.update({'evidence_refs': ev.evidence_refs}) %}{% endif %}
+                            {% if ev.comparison_excluded %}{% set _ = entry.update({'comparison_excluded': true}) %}{% endif %}
                             {% if ev.evidence_unavailable_reason and not entry.evidence_unavailable_reason %}{% set _ = entry.update({'evidence_unavailable_reason': ev.evidence_unavailable_reason}) %}{% endif %}
                         {% endfor %}
                         {% set evidence_totals = namespace(trials=0) %}
@@ -3731,6 +3747,7 @@
                                     {% endif %}
                                     {% if ev.reason %}<div class="t3-ev-detail t3-ev-reason">{{ ev.reason }}</div>{% endif %}
                                     {% if ev.excerpt %}<div class="t3-ev-detail"><code class="t3-ev-excerpt">{{ ev.excerpt }}</code></div>{% endif %}
+                                    {% if ev.comparison_excluded %}<div class="t3-ev-detail t3-ev-lift-excluded">Left out of lift: different judge models</div>{% endif %}
                                 </li>
                             {% endfor %}
                             </ul>

@@ -406,6 +406,49 @@ def test_ragas_evidence_reads_every_request_message_and_tool_call_replies(verifi
     assert verifier._ragas_reply_text(b"not a chat completion") == "not a chat completion"
 
 
+def _tool_call_reply(arguments: str, *, content: str | None = None) -> dict[str, Any]:
+    reply = _chat_reply("")
+    reply["choices"][0]["message"] = {
+        "role": "assistant",
+        "content": content,
+        "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "Verdict", "arguments": arguments}}],
+    }
+    reply["choices"][0]["finish_reason"] = "tool_calls"
+    return reply
+
+
+def test_ragas_evidence_masks_credentials_at_json_escaped_line_starts(
+    verifier: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RAGAS writes the agent's messages into its prompt as JSON, and tool-call arguments are JSON too.
+
+    Each line break in the agent's text is therefore saved escaped, as the two
+    characters backslash and n, before the next line's header or flag.
+    """
+    agent_text = (
+        "HTTP/1.1 200 OK\nAuthorization: Bearer bbbbbbbbbbbb\nCookie: session=cccccccccccc\n--token tttttttttttt"
+    )
+    prompt = "Judge whether the agent reached the goal.\ninput: " + json.dumps(
+        {"user_input": [{"content": agent_text, "type": "ai"}]}, indent=4
+    )
+    _install_ragas(monkeypatch, messages=[{"role": "user", "content": prompt}])
+    reply = _tool_call_reply(json.dumps({"end_state": agent_text, "verdict": 1}))
+    received = _stub_provider(monkeypatch, [reply])
+
+    with _judge_evidence(verifier):
+        result = verifier.judge_goal_accuracy("question", "expected", "agent answer")
+
+    assert (result["score"], result["method"]) == (1.0, "ragas")
+    assert len(received) == 1
+    exchange, outcome = _attempts(verifier)
+    assert [exchange["status"], outcome["status"]] == ["replied", "accepted"]
+    for field in ("prompt", "reply"):
+        assert "\\nAuthorization: Bearer <redacted>\\nCookie: <redacted>\\n--token <redacted>" in exchange[field]
+    saved = (verifier.VERIFIER_DIR / "judge_attempts.json").read_text(encoding="utf-8")
+    for secret in ("bbbbbbbbbbbb", "cccccccccccc", "tttttttttttt"):
+        assert secret not in saved
+
+
 @pytest.mark.parametrize("broken", ["request-parser", "http-client"])
 def test_ragas_evidence_failure_never_changes_the_score(
     verifier: ModuleType, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, broken: str

@@ -2831,7 +2831,8 @@ def _judge_retry_feedback(problem):
 # ("-H 'Name: value'"), JSON ('"name": "value"') and Python subscript
 # ('headers["Name"] = f"value"') forms, also with the quotes JSON-escaped
 # ('\"Name\": \"value\"'), as tool-call arguments appear in the behavior and
-# goal prompts.
+# goal prompts. The flag patterns accept a JSON-escaped quoted value too
+# ('--token \"value\"').
 _JUDGE_EVIDENCE_URL_USERINFO_RE = re.compile(r"(://)[^\s/?#@'\"`<>]{1,256}@")
 _JUDGE_EVIDENCE_HEADER_SEPARATOR = r"\\?[\"']?\]?[ \t]{0,8}[:=][ \t]{0,8}(?:[bfru]{0,2}\\?[\"'])?"
 # Digest values hold quoted fields (username="...", response="..."), so the rest
@@ -2865,23 +2866,28 @@ _JUDGE_EVIDENCE_COOKIE_HEADER_RE = re.compile(
 )
 _JUDGE_EVIDENCE_CREDENTIAL_FLAG_RE = re.compile(
     r"((?<![^\s'\"])--?(?:password|passwd|token|api-key|apikey|secret|access-token|auth-token)(?:[ \t]{1,8}|=))"
-    r"(?:\"[^\"\r\n]+\"|'[^'\r\n]+'|[^\s'\"`\\]+)",
+    r"(?:\\?\"[^\"\r\n]+\"|'[^'\r\n]+'|[^\s'\"`\\]+)",
     re.IGNORECASE,
 )
 # "-u"/"--user" also name ordinary options (python -u, pip --user), so only a
 # user:password value is masked.
 _JUDGE_EVIDENCE_USER_FLAG_RE = re.compile(
     r"((?<![^\s'\"])(?:-u|--user)(?:[ \t]{1,8}|=))"
-    r"(?:\"[^\"\r\n:]+:[^\"\r\n]+\"|'[^'\r\n:]+:[^'\r\n]+'|[^\s'\"`:\\]{1,256}:[^\s'\"`\\]+)"
+    r"(?:\\?\"[^\"\r\n:]+:[^\"\r\n]+\"|'[^'\r\n:]+:[^'\r\n]+'|[^\s'\"`:\\]{1,256}:[^\s'\"`\\]+)"
 )
+# RAGAS writes its input into the prompt as JSON, and tool-call arguments are
+# JSON, so a line break or tab in the quoted text arrives as the two characters
+# "\n", "\r" or "\t". The patterns check the character before a credential,
+# which is then the letter of that escape, so the text after each escaped break
+# is redacted again as the start of a line.
+_JUDGE_EVIDENCE_ESCAPED_BREAK_RE = re.compile(r"(\\[nrt])")
 
 
-def _redact_judge_evidence(text):
-    """Mask credentials in a judge prompt, reply, or problem before it is saved."""
-    redacted = _redact_configured_credentials(_redact_evidence_text(text))
+def _redact_judge_evidence_patterns(text):
+    """Mask key shapes, URL userinfo, credential header values and credential flag values."""
     for pattern in _SECRET_PATTERNS:
-        redacted = pattern.sub("<redacted>", redacted)
-    redacted = _JUDGE_EVIDENCE_URL_USERINFO_RE.sub(r"\1<redacted>@", redacted)
+        text = pattern.sub("<redacted>", text)
+    text = _JUDGE_EVIDENCE_URL_USERINFO_RE.sub(r"\1<redacted>@", text)
     for pattern in (
         _JUDGE_EVIDENCE_DIGEST_AUTH_HEADER_RE,
         _JUDGE_EVIDENCE_AUTH_HEADER_RE,
@@ -2890,8 +2896,19 @@ def _redact_judge_evidence(text):
         _JUDGE_EVIDENCE_CREDENTIAL_FLAG_RE,
         _JUDGE_EVIDENCE_USER_FLAG_RE,
     ):
-        redacted = pattern.sub(r"\1<redacted>", redacted)
-    return redacted
+        text = pattern.sub(r"\1<redacted>", text)
+    return text
+
+
+def _redact_judge_evidence(text):
+    """Mask credentials in a judge prompt, reply, or problem before it is saved."""
+    redacted = _redact_judge_evidence_patterns(_redact_configured_credentials(_redact_evidence_text(text)))
+    # Text and escaped breaks alternate; the text before the first break was redacted above.
+    parts = _JUDGE_EVIDENCE_ESCAPED_BREAK_RE.split(redacted)
+    for index in range(2, len(parts), 2):
+        if parts[index]:
+            parts[index] = _redact_judge_evidence_patterns(redact_secrets_in_log_line(parts[index]))
+    return "".join(parts)
 
 
 def _verifier_output_dir():

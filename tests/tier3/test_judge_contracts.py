@@ -740,6 +740,65 @@ def test_judge_evidence_masks_json_escaped_tool_call_headers(command: str, secre
 
 
 @pytest.mark.parametrize(
+    ("command", "secret"),
+    [
+        pytest.param('deploy --token "tttt tttt"', "tttt tttt", id="token-flag"),
+        pytest.param('tool --user "admin:pppp pppp"', "pppp pppp", id="user-flag"),
+    ],
+)
+def test_judge_evidence_masks_json_escaped_quoted_flag_values(command: str, secret: str) -> None:
+    trajectory = {
+        "steps": [
+            {"source": "agent", "tool_calls": [{"function_name": "Bash", "arguments": {"command": command}}]},
+        ]
+    }
+    summary = eval_template.build_conversation_summary(trajectory, "Deploy the service.")
+    assert secret + '\\"' in summary
+
+    redacted = eval_template._redact_judge_evidence(summary)
+
+    assert secret not in redacted
+    assert "<redacted>" in redacted
+
+
+# RAGAS writes the agent's messages into its prompt as JSON, and tool-call
+# arguments are JSON, so a line that starts with a credential follows an
+# escaped "\n" (or "\r\n", or "\n\t") there, once or twice escaped.
+@pytest.mark.parametrize(
+    ("line", "secret", "kept"),
+    [
+        pytest.param(
+            "Authorization: Bearer bbbbbbbbbbbb", "bbbbbbbbbbbb", "Authorization: Bearer <redacted>", id="authorization"
+        ),
+        pytest.param(
+            'Authorization: Digest username="u", response="dddddddddddd"',
+            "dddddddddddd",
+            "Authorization: Digest <redacted>",
+            id="authorization-digest",
+        ),
+        pytest.param("Cookie: session=cccccccccccc", "cccccccccccc", "Cookie: <redacted>", id="cookie"),
+        pytest.param("Api-Key: kkkkkkkkkkkk", "kkkkkkkkkkkk", "Api-Key: <redacted>", id="api-key"),
+        pytest.param("--token tttttttttttt", "tttttttttttt", "--token <redacted>", id="token-flag"),
+        pytest.param("-u uuuu:pppppppppppp", "pppppppppppp", "-u <redacted>", id="user-flag"),
+        pytest.param("sk-proj-" + "a" * 24, "a" * 24, "sk-<redacted>", id="openai-key"),
+        pytest.param("ghp_" + "g" * 36, "g" * 36, "ghp_<redacted>", id="github-token"),
+    ],
+)
+@pytest.mark.parametrize("line_break", ["\n", "\r\n", "\n\t"], ids=["lf", "crlf", "lf-tab"])
+def test_judge_evidence_masks_credentials_after_json_escaped_line_breaks(
+    line: str, secret: str, kept: str, line_break: str
+) -> None:
+    text = f"HTTP/1.1 200 OK{line_break}{line}{line_break}done"
+    assert secret not in eval_template._redact_judge_evidence(text)
+
+    for escaped in (json.dumps({"reply": text}), json.dumps(json.dumps({"reply": text}))):
+        redacted = eval_template._redact_judge_evidence(escaped)
+
+        assert secret not in redacted
+        assert kept in redacted
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "python -u script.py && pip install -U pkg && pip install --user pkg && git push -u origin main",
@@ -747,6 +806,10 @@ def test_judge_evidence_masks_json_escaped_tool_call_headers(command: str, secre
         "see https://example.com/docs?a=b@c and mailto:user@example.com",
         "Authorization is required for this endpoint.",
         "curl --cookie-jar cookies.txt https://x; see the api-key rotation docs",
+        # JSON-escaped lines, as in RAGAS prompts and tool-call arguments.
+        json.dumps(
+            "Authorization is required.\npython -u script.py\n--token-limit 5\n\tcookie-jar ready\r\nC:\\new\\temp"
+        ),
     ],
 )
 def test_judge_evidence_keeps_ordinary_text(text: str) -> None:

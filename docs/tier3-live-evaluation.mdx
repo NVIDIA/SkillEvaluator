@@ -1116,7 +1116,8 @@ in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
   counts toward `--max-judge-calls`; the request entries do not.
   Configured credentials, common key shapes, URL userinfo, `Authorization`,
   API-key, token and `Cookie` header values, and credential flag values
-  (`--token`, `--password`, `curl -u user:password`) are masked, and long
+  (`--token`, `--password`, `curl -u user:password`) are masked, also in
+  JSON-escaped text such as RAGAS prompts and tool-call arguments, and long
   prompts and replies are shortened. The prompts contain the task question,
   expected answer, and agent evidence. Pass `--harbor-keep-jobs` to keep the
   Harbor trial directories that hold this file.

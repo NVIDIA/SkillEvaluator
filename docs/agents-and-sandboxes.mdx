@@ -788,6 +788,19 @@ helpers stay explicit in `include`; the selector does not infer prerequisites.
 A collision between a selected skill and an explicitly included skill is an
 error.
 
+Selection and group-mode evaluation read the `name` and `description` of the
+target and of each selected skill as `similarity-check` does, within the same
+[frontmatter structure limits](/skills/skillevaluator/tier2-deduplication#defaults-and-safety-limits).
+The command fails, and says the skill needs a root `SKILL.md` whose frontmatter
+is a valid YAML mapping with a non-empty string name and description, when that
+file or its frontmatter is missing, the frontmatter is invalid YAML or not a
+mapping, or either value is empty or not a string. A value that is not a string,
+such as `name: yes` or `name: 2048`, is never converted to text. Quote such a
+value, as in `name: "yes"`, and quote a value that contains a colon followed by
+a space, as in `description: "Use when: debugging logs"`. Frontmatter over a
+structure limit, or a value longer than 16,384 characters, fails with an error
+that names the manifest, such as `my-skill/SKILL.md`.
+
 The manifest records catalog and model identity, scores, the target manifest
 hash, and selected skill runtime hashes. Evaluation verifies the hashes and
 uses one snapshot of the selected skills in both arms; it makes no embedding

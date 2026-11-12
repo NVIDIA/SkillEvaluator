@@ -501,6 +501,13 @@ def _tier3_score_reasons(value: object) -> dict[str, str]:
     return reasons
 
 
+def _tier3_not_applicable_reason(metric: object) -> str:
+    """Return why a Tier 3 metric can be N/A, for the tooltip of an N/A drill-down cell."""
+    from skillevaluator.tier3.harbor.metrics import NOT_APPLICABLE_REASONS
+
+    return NOT_APPLICABLE_REASONS.get(str(metric), "Not applicable to this eval case")
+
+
 def _tier3_text_mapping(value: object) -> dict[str, str]:
     """Normalize public label maps without silently overwriting aliases."""
     if not isinstance(value, dict):
@@ -578,6 +585,8 @@ def _sanitize_tier3_pass_condition(value: object) -> dict[str, Any]:
             case = dict(raw_case)
             for key in ("attempts_used", "attempts_missing", "attempts_skipped"):
                 case[key] = _nonnegative_count(case.get(key))
+            if "attempts_recovered" in case:
+                case["attempts_recovered"] = _nonnegative_count(case.get("attempts_recovered"))
             case["best_score"] = _finite_number(case.get("best_score"), minimum=0.0, maximum=1.0)
             first_pass = case.get("first_pass_attempt")
             case["first_pass_attempt"] = (
@@ -815,6 +824,19 @@ def _sanitize_tier3_pass_at_k(value: object) -> dict[str, Any]:
     return pass_at_k
 
 
+def _sanitize_tier3_comparison_basis(value: object) -> dict[str, Any] | None:
+    """Keep an evaluator card's judge-model lift exclusions only when they name a case count."""
+    if not isinstance(value, dict) or not (excluded_cases := _nonnegative_count(value.get("excluded_cases"))):
+        return None
+    return {
+        "excluded_cases": excluded_cases,
+        "case_ids": _tier3_identifier_list(value.get("case_ids")),
+        "excluded_attempts": _strict_nonnegative_count(value.get("excluded_attempts")),
+        "contributing_attempts": _strict_nonnegative_count(value.get("contributing_attempts")),
+        "reason": _json_safe_tier3_text(value["reason"]) if isinstance(value.get("reason"), str) else "",
+    }
+
+
 def _sanitize_tier3_evaluator_card(
     value: dict[str, Any],
     *,
@@ -844,6 +866,8 @@ def _sanitize_tier3_evaluator_card(
         for key in FAILURE_REASON_EVIDENCE_KEYS:
             if not (isinstance(entry.get(key), str) and entry[key]):
                 entry.pop(key, None)
+        if entry.pop("comparison_excluded", None) is True:
+            entry["comparison_excluded"] = True
         if (
             include_evidence_unavailable_default
             and card.get("id") in _METRIC_EVIDENCE_REF_METRICS
@@ -860,6 +884,9 @@ def _sanitize_tier3_evaluator_card(
             entry.pop("evidence_unavailable_reason", None)
         evidence.append(entry)
     card["evidence"] = evidence
+    comparison_basis = _sanitize_tier3_comparison_basis(card.pop("comparison_basis", None))
+    if comparison_basis:
+        card["comparison_basis"] = comparison_basis
     sampling = card.get("evidence_sampling") if isinstance(card.get("evidence_sampling"), dict) else {}
     for key in ("represented_cases", "represented_trials", "total_trials", "scanned_trials"):
         if key in sampling:
@@ -1008,6 +1035,11 @@ def _sanitize_tier3_trial(value: dict[str, Any], *, fill_defaults: bool = True) 
     score_reasons = _tier3_score_reasons(trial.pop("score_reasons", None))
     if score_reasons:
         trial["score_reasons"] = score_reasons
+    if "not_applicable_metrics" in trial:
+        from skillevaluator.tier3.harbor.metrics import not_applicable_list
+
+        # Only metrics that can be N/A count, so a malformed payload cannot mark security N/A.
+        trial["not_applicable_metrics"] = not_applicable_list(trial["not_applicable_metrics"])
     # Unavailable telemetry stays absent rather than becoming zero, so the
     # template can omit charts and show "—" instead of reporting no usage.
     raw_tokens = trial.pop("tokens", None)
@@ -1927,6 +1959,7 @@ class HTMLReporter(ReporterBase):
         environment.filters["adaptive_percent"] = _adaptive_percent
         environment.filters["adaptive_interval_percent"] = _adaptive_interval_percent
         environment.filters["skip_reason"] = get_skip_reason
+        environment.filters["not_applicable_reason"] = _tier3_not_applicable_reason
         return environment
 
     @staticmethod

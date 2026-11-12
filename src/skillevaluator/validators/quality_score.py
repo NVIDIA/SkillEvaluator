@@ -874,7 +874,7 @@ class QualityScoreValidator(ValidatorBase):
     ) -> None:
         dim = qs.efficiency
 
-        # Token estimates
+        # Token estimates (characters / 4); not a tokenizer count
         qs.total_tokens = len(content) // 4
         fm_match = FRONTMATTER_PATTERN.match(content)
         if fm_match and _frontmatter:
@@ -888,7 +888,8 @@ class QualityScoreValidator(ValidatorBase):
                 15,
                 "warning",
                 (
-                    f"Large skill ({qs.total_tokens} tokens, recommended max <{QUALITY_RECOMMENDED_MAX_TOKENS}). "
+                    f"Large skill (~{qs.total_tokens} estimated tokens at 4 characters per token, "
+                    f"recommended max <{QUALITY_RECOMMENDED_MAX_TOKENS}; a real tokenizer may count more). "
                     f"Per agentskills.io, SKILL.md should be concise (~500 lines) — "
                     f"large skill bodies increase token cost after invocation; long or unfocused "
                     f"top-level descriptions can degrade agent routing accuracy"

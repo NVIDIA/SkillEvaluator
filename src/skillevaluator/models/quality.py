@@ -159,6 +159,8 @@ class QualityScoreResult:
             },
             "metrics": {
                 "total_tokens": self.total_tokens,
+                "estimated_tokens": self.total_tokens,
+                "token_estimate_method": "characters/4",
                 "recommended_max_tokens": QUALITY_RECOMMENDED_MAX_TOKENS,
                 "frontmatter_tokens": self.frontmatter_tokens,
                 "instructions_tokens": self.instructions_tokens,

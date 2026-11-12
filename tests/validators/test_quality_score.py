@@ -603,6 +603,7 @@ class TestQualityScoreValidator:
         assert len(large_findings) >= 1, "Expected a finding about large skill size"
         assert large_findings[0].severity == Severity.MEDIUM
         assert "recommended max <5000" in large_findings[0].message
+        assert "estimated tokens" in large_findings[0].message
         assert "long or unfocused top-level descriptions" in large_findings[0].message
         assert "Keep required sections concise" in large_findings[0].suggestion
         assert "references/" in large_findings[0].suggestion
@@ -1507,6 +1508,8 @@ def test_instruction_token_estimate_uses_frontmatter_boundary(tmp_path, newline,
     assert metrics["instructions_tokens"] == len(body) // 4
     assert metrics["frontmatter_tokens"] == len(frontmatter.rstrip("\n")) // 4
     assert metrics["total_tokens"] == len(content) // 4
+    assert metrics["estimated_tokens"] == metrics["total_tokens"]
+    assert metrics["token_estimate_method"] == "characters/4"
 
 
 @pytest.mark.parametrize(

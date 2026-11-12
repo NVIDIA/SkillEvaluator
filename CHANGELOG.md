@@ -4,6 +4,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- Tier 1 now labels the `SKILL.md` token count as an estimate (characters / 4)
+  in the Large skill finding, HTML report and docs, and adds
+  `metrics.estimated_tokens` and `metrics.token_estimate_method` to the quality
+  JSON. `metrics.total_tokens` is unchanged. The estimate and scoring are
+  unchanged.
+
 ### Added
 
 - Capability-gated CI onboarding for protected Tier 1 `--llm`/SkillSpector

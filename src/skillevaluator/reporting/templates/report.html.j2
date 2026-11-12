@@ -1846,7 +1846,7 @@
                         </table>
                         {% if skill_data.quality.metrics is defined %}
                         <div style="margin-top: 0.5rem; font-size: 0.8rem; color: var(--text-secondary);">
-                            Tokens: {{ skill_data.quality.metrics.total_tokens }}
+                            Est. tokens (chars/4): {{ skill_data.quality.metrics.total_tokens }}
                             {% if skill_data.quality.metrics.recommended_max_tokens is defined %}
                             (recommended max: &lt;{{ skill_data.quality.metrics.recommended_max_tokens }})
                             {% endif %}

@@ -6,6 +6,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- HTML, Markdown, and terminal findings show recorded LLM verification verdicts,
+  confidence, and reasoning, with an explanation of retained or downgraded severity.
+  Medium-confidence false positives and uncertain verdicts retain existing gates.
+  Repeated occurrences with the same verification decision remain grouped in HTML.
+
 - A reproducible public terminal starter runs the released CLI against the
   bundled text-analyzer skill, checks real script/report output and a seeded
   quality regression, and retains an editable task, fixture and run receipt.
@@ -302,6 +307,10 @@ All notable changes to SkillEvaluator are documented in this file.
   after a `;`, which starts a new command.
 
 ### Fixed
+
+- The hook gate guidance links to the published final-status documentation route.
+
+- Missing-reference coverage checks retain standalone shell wildcards while ignoring leading Markdown bullets, so commands cannot hide uninspected files.
 
 - Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
   the PR or merge request's target revision. Policy files from the proposed

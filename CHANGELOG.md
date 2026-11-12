@@ -308,9 +308,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Rubric retry guidance links to the published environment-variable documentation route.
-
-- Rubric retry diagnostics redact judge-supplied credentials before logging or truncating the rejection reason.
+- Public MCP URL probes handle modern SDK client and stream APIs while retaining
+  checked-address connections, header grants, response limits, and bounded
+  cleanup. Redirect responses are refused before SDK-level redirect handling.
+  Isolated wheel tests cover SDK 1.28.1 and 2.3.0; the supported Tier 3 dependency
+  range remains unchanged.
 
 - Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
   the PR or merge request's target revision. Policy files from the proposed
@@ -378,11 +380,41 @@ All notable changes to SkillEvaluator are documented in this file.
   inside YAML values or comments does not count frontmatter as instructions.
   Body separators without valid frontmatter no longer produce a spurious estimate.
 
+- `rubric-eval` now asks the judge once more, naming the problem, when its
+  reply is not valid JSON or its criterion evidence cannot be scored: a
+  criterion is missing, repeated or unknown, or has a score outside 0 to 10 or
+  a pass flag that is not a boolean. In 0.8.0 the first such reply failed
+  Tier 1 with a HIGH `llm_invalid_response` or `llm_unavailable` finding; now
+  only a second one does. The LLM client still retries transient provider
+  errors as set by `SKILL_EVAL_LLM_MAX_RETRIES`; a request that still fails
+  after those retries, a refusal or a truncated reply is not asked again. The
+  JSON report records `judge_attempts`, the number of times the judge was
+  asked (1, or 2 after a rejected reply, not counting the client's retries),
+  in the skill's `rubric_eval` success detail or `llm_*` finding and, for a
+  single skill, also in the `rubric_eval` object. It is left out when the
+  first request fails, for example with no provider configured.
+
+- Rubric retry diagnostics redact judge-supplied credentials before logging or truncating the rejection reason.
+
+- Rubric retry guidance links to the published environment-variable documentation route.
+
 - A PII finding no longer keeps its `evidence_sha256` after CI redaction masks
   a credential inside the value the finding reports. In 0.8.0 the finding kept
   the digest of the unmasked value, so anyone holding the redacted report could
   confirm a guess for the masked part. Redaction now removes a digest that no
   longer matches the reported value.
+
+- Tier 3 HTML evaluator cards now say when a judge metric's lift left out cases
+  whose arms were scored by different judge models, for example after a judge
+  fallback in one arm. The arm scores keep those cases, so a card could show
+  Baseline 0.20 and With skill 0.50 next to a -0.40 lift with nothing
+  explaining the gap. The card now notes `Lift leaves out 1 case scored by
+  different judge models; the arm scores include it.`, or says that no
+  comparable result remains when the card has no lift, and labels those cases
+  `Left out of lift: different judge models` in its per-trial evidence. In the
+  canonical JSON the evaluator records the count in `lift_excluded_cases`, its
+  card lists the cases in `comparison_basis`, and the matching evidence entries
+  carry `comparison_excluded: true`. Scores and lift are unchanged.
 
 - Tier 2 context deduplication now numbers `SHARED CONTENT n` blocks from the
   most repeated text, ties in first-seen order, instead of in first-seen order
@@ -412,6 +444,21 @@ All notable changes to SkillEvaluator are documented in this file.
   `problem` of its `judge_attempts.json` entry, it now reads
   `Bedrock request failed`, like a Bedrock error that ends the judge and like
   the default `legacy` policy.
+
+- The Tier 3 terminal summary now shows `N/A`, not `NO SCORE`, as the Skill
+  Lift of an evaluator or dimension that is N/A in either arm, as the Markdown
+  and HTML reports already do. Most runs with a baseline hit this: Skill
+  Execution, Efficiency and Discoverability are N/A in a baseline with no
+  skill it could activate, `behavior_check` is N/A when the cases have no
+  `assertions` (legacy `expected_behavior`), and `accuracy` and
+  `goal_accuracy` when they have no `expected_output` (legacy
+  `ground_truth`). In a baseline-only run (`--skip-with-skill`) the lift of
+  every other row now reads `skipped`, as the docs and the Markdown report
+  say. A lift that is missing for another reason still reads `NO SCORE`. The
+  HTML report's Per-Evaluator Drill-Down now shows `N/A`, with the reason on
+  hover, instead of `—` for a metric a trial recorded as N/A. The reports'
+  reasons for an N/A Accuracy, Goal Accuracy or Behavior Check now name the
+  dataset fields `expected_output` and `assertions` before their legacy names.
 
 - `skillevaluator tier3 feedback` now writes the evaluated skill's directory
   (known from `--skill` or a run in the skill's `evals/results`) as its name and
@@ -457,19 +504,28 @@ All notable changes to SkillEvaluator are documented in this file.
   Missing lift data is shown as `-`; custom-only and legacy agents retain their
   arm-difference comparison.
 
-- `rubric-eval` now asks the judge once more, naming the problem, when its
-  reply is not valid JSON or its criterion evidence cannot be scored: a
-  criterion is missing, repeated or unknown, or has a score outside 0 to 10 or
-  a pass flag that is not a boolean. In 0.8.0 the first such reply failed
-  Tier 1 with a HIGH `llm_invalid_response` or `llm_unavailable` finding; now
-  only a second one does. The LLM client still retries transient provider
-  errors as set by `SKILL_EVAL_LLM_MAX_RETRIES`; a request that still fails
-  after those retries, a refusal or a truncated reply is not asked again. The
-  JSON report records `judge_attempts`, the number of times the judge was
-  asked (1, or 2 after a rejected reply, not counting the client's retries),
-  in the skill's `rubric_eval` success detail or `llm_*` finding and, for a
-  single skill, also in the `rubric_eval` object. It is left out when the
-  first request fails, for example with no provider configured.
+
+- The Tier 3 verdict is now FAIL when a scored dimension is below 0.40 and
+  another dimension has no score. In 0.8.0 a dimension with no score made the
+  agent NEUTRAL before the 0.40 check ran. Correctness has no score when no
+  case defines `ground_truth`, so an agent with Efficiency 0.1 got a NEUTRAL
+  verdict. For such a run the overall verdict in `BENCHMARK.md` is now FAIL
+  (was INCOMPLETE). The JSON report's `tier3.verdict` and `publication_status`
+  are `fail` (were `neutral` and `incomplete`), and the Tier 3 result's
+  `status` is `failed` (was `passed`). The terminal's Tier 3 line reads failed.
+  The `--format markdown` report shows publication status FAIL (was
+  INCOMPLETE), a Failed count of 1 (was 0) and verdict FAIL (was NEUTRAL). The
+  `tier3-benchmark.md` that `tier3 evaluate` writes reads FAIL (was NEUTRAL).
+  The HTML Tier 3 card reads `Failed (advisory)` in a default `validate` run,
+  and `Changes required` with `--block-on-agent-eval` and in the
+  `tier3 evaluate` report, where it read Neutral. The HTML Tier 3 summary opens
+  with `Completed-agent result: FAIL` and says other execution failures need
+  attention, as it already did for a run with every dimension scored, in place
+  of `Verdict at a glance: Neutral`. A dimension with no score still keeps an
+  agent from passing, and exit codes do not change. This FAIL also applies when
+  every required check passes. A run with a failed required check, such as one
+  with a `destructive_command` finding, already gets FAIL from that check (see
+  Changed).
 
 ## 0.8.0 - 2026-11-05
 

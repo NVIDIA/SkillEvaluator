@@ -126,9 +126,9 @@ are missing; Semgrep is optional. See [scanners](docs/installation.mdx#system-to
 security scanning; [Harbor](https://github.com/harbor-framework/harbor), the
 open-source agent evaluation framework, powers sandboxed agent runs.
 
-Tier 2 reports when inter-skill comparison did not run. Tier 3 reuses evaluation
-sources or creates one starter case with limited coverage. See the
-[tier guides](https://docs.nvidia.com/skills/skillevaluator/) for details.
+Tier 2 reports when inter-skill comparison did not run. Tier 3 autopilot reuses
+sources or creates one skill-grounded case with limited coverage. See
+[tier guides](https://docs.nvidia.com/skills/skillevaluator/).
 
 ## Run the combined pipeline
 
@@ -148,17 +148,13 @@ Tier 1 always gates `validate`. Tier 2 gates unless `--no-block-on-dedup` is set
 Tier 3 gates only with `--block-on-agent-eval`. Model and managed-sandbox usage
 can incur charges; see [runtime and cost](docs/tier3-live-evaluation.mdx#plan-for-cost).
 
-For broader coverage, write author guidance in `evals/EVAL.md` (or pass
-`--prompt PATH`), then generate and review additional cases. Standalone generation
-prefers that guidance, then matching retained traces; without either it asks for
-input. Templates omit negatives unless authored in `EVAL.md`:
+Standalone generation prefers `evals/EVAL.md` guidance, then matching retained
+traces. Explicit `--grounding skill` permits skill-only starters. Review cases;
+templates omit negatives unless authored.
 
 ```bash
 uv run --python 3.13 --extra tier3 skillevaluator tier3 create-eval-dataset ./my-skill --full
 ```
-
-For the previous skill-only workflow, explicitly add `--grounding skill`.
-Unattended autopilot keeps its existing one-case skill-grounded starter.
 
 ## Run from a source checkout
 

@@ -3211,7 +3211,7 @@
                     {# Agent -> case -> condition, so each case's with/without rows sit together. #}
                     {% for case_id in t3_case_ids | sort %}
                         {% for cond_label, branch in t3_branches if case_id in branch.cases %}
-                            {% set _ = t3_attempt_rows.append({'agent': agent_name, 'condition': cond_label, 'case_id': case_id, 'case': branch.cases[case_id]}) %}
+                            {% set _ = t3_attempt_rows.append({'agent': agent_name, 'condition': cond_label, 'arm': 'with_skill' if branch is sameas pak.with_skill else 'without_skill', 'case_id': case_id, 'case': branch.cases[case_id]}) %}
                         {% endfor %}
                     {% endfor %}
                 {% endfor %}
@@ -3228,6 +3228,8 @@
                     {% endfor %}
                 {% endfor %}
             {% endfor %}
+            {% set t3_recovered_rows = namespace(any=false) %}
+            {% for row in t3_attempt_rows %}{% if (row.case.get('attempts_recovered') or 0) > 0 %}{% set t3_recovered_rows.any = true %}{% endif %}{% endfor %}
 
             {% if t3_attempt_rows %}
             <details class="t3-details" id="tier3-attempt-details" open>
@@ -3235,13 +3237,17 @@
                 <div class="t3-details-body">
                 <p class="t3-section-hint">
                     Each row is one eval case for one agent under one condition. Attempt Scores
-                    lists the scored attempts only; a score at or above
+                    lists the scored attempts {% if t3_recovered_rows.any %}and any recovered timeouts{% else %}only{% endif %}; a score at or above
                     {{ "%.2f" | format(t3_pass_threshold) }} counts as passed for Pass@{{ t3_max_attempts }}
                     when scored goal accuracy is at least
                     {{ "%.2f" | format(t3_verdict_policy.get('goal_accuracy_pass_threshold', 1.0)) }}
                     and scored security is at least
                     {{ "%.2f" | format(t3_verdict_policy.get('security_pass_threshold', 1.0)) }}.
                     "Not scored" means no reward was found for that expected attempt; it is excluded from pass/fail.
+                    {% if t3_recovered_rows.any %}"Timed out, recovered" marks an agent timeout that a later scored
+                    attempt of the same case recovered; the chip shows the attempt number when the report has it,
+                    and otherwise a count. It is not scored, but it used one of the case's attempts, so it counts
+                    in the attempt total under Scored Attempts (the second number), not in the scored count.{% endif %}
                 </p>
                 <div class="t3-filter-bar">
                     <input class="t3-filter-input" type="search" placeholder="Filter by agent, case, condition, score..." oninput="tier3FilterTable(this, 't3-attempts-table')" aria-label="Filter attempt details">
@@ -3264,8 +3270,26 @@
                         {% set attempts_used = attempts_used_value | int if attempts_used_value is not none else (attempts | length) %}
                         {% set attempts_missing = attempts_missing_value | int if attempts_missing_value is not none else 0 %}
                         {% set attempts_skipped = attempts_skipped_value | int if attempts_skipped_value is not none else 0 %}
-                        {% set total_expected = attempts_used + attempts_missing + attempts_skipped %}
+                        {% set attempts_recovered_value = case_data.get('attempts_recovered') %}
+                        {% set attempts_recovered = attempts_recovered_value | int if attempts_recovered_value is not none else 0 %}
+                        {# A recovered agent timeout is unscored but used a physical attempt: count it so the
+                           denominator stays the case's attempt budget, matching the attempt numbers shown. #}
+                        {% set total_expected = attempts_used + attempts_missing + attempts_skipped + attempts_recovered %}
                         {% if total_expected == 0 %}{% set total_expected = t3_max_attempts %}{% endif %}
+                        {# Attempt numbers of recovered timeouts come from the arm's bounded recovery list;
+                           when that list does not account for every recovery, show the count instead. #}
+                        {% set recovered_ordinals = [] %}
+                        {% if attempts_recovered > 0 %}
+                            {% set row_conditions = t3_agents[row.agent].conditions %}
+                            {% set row_condition = row_conditions.get(row.arm) if row_conditions is mapping else none %}
+                            {% set recovered_items = row_condition.get('recovered_attempts') if row_condition is mapping else none %}
+                            {% if recovered_items is sequence and recovered_items is not string and recovered_items is not mapping %}
+                                {% for item in recovered_items if item is mapping and item.get('case_id') == row.case_id and item.get('attempt') is integer and item.get('attempt') > 0 %}
+                                    {% if item.get('attempt') not in recovered_ordinals %}{% set _ = recovered_ordinals.append(item.get('attempt')) %}{% endif %}
+                                {% endfor %}
+                            {% endif %}
+                        {% endif %}
+                        {% set recovered_ordinals = recovered_ordinals | sort if recovered_ordinals | length == attempts_recovered else [] %}
                         {% set best_score = case_data.get('best_score') %}
                         {% set passed = case_data.get('passed') %}
                         {% set first_pass_attempt = case_data.get('first_pass_attempt') %}
@@ -3274,12 +3298,17 @@
                             <td>{{ row.condition }}</td>
                             <td style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:0.82rem;">{{ row.case_id }}</td>
                             <td>
-                                {% if attempts %}
+                                {% if attempts or attempts_recovered %}
                                 <div class="t3-attempt-list">
+                                    {% set pending_recovered = namespace(ordinals=recovered_ordinals) %}
                                     {% for att in attempts %}
                                         {% set sc = att.get('score') %}
                                         {% set att_idx_value = att.get('attempt') %}
                                         {% set att_idx = att_idx_value | int if att_idx_value is not none else loop.index %}
+                                        {% for ordinal in pending_recovered.ordinals if ordinal < att_idx %}
+                                            <span class="t3-attempt-chip muted" title="Attempt {{ ordinal }}: agent timed out; a later scored attempt recovered it. Not scored.">A{{ ordinal }}: timed out, recovered</span>
+                                        {% endfor %}
+                                        {% set pending_recovered.ordinals = pending_recovered.ordinals | reject('lt', att_idx) | list %}
                                         {% set attempt_verdict = t3_attempt_verdict_by_trial.get((row.agent, row.condition, att.get('trial'))) or {} %}
                                         {% set attempt_passed = att.get('passed') and attempt_verdict.get('passed', true) %}
                                         {% set attempt_reason = attempt_verdict.get('reason') or att.get('reason') %}
@@ -3291,12 +3320,27 @@
                                             <span class="t3-attempt-chip {{ chip_cls }}" title="{{ attempt_reason or '' }}">A{{ att_idx }}: {{ "%.2f" | format(sc) }} {{ chip_label }}</span>
                                         {% endif %}
                                     {% endfor %}
+                                    {% for ordinal in pending_recovered.ordinals %}
+                                        <span class="t3-attempt-chip muted" title="Attempt {{ ordinal }}: agent timed out; a later scored attempt recovered it. Not scored.">A{{ ordinal }}: timed out, recovered</span>
+                                    {% endfor %}
+                                    {% if attempts_recovered and not recovered_ordinals %}
+                                        <span class="t3-attempt-chip muted" title="Agent timeouts that later scored attempts recovered. Not scored.">{{ attempts_recovered }} timed out, recovered</span>
+                                    {% endif %}
+                                    {# Published attempt rows are capped per run, so a recovered case can arrive with no
+                                       rows; say so instead of letting the recovered chip read as the whole history. #}
+                                    {% if not attempts %}
+                                        {% if attempts_used > 0 %}
+                                            <span class="t3-attempt-chip muted" title="The report keeps details for a limited number of attempts; this case's {{ attempts_used }} scored attempt{{ 's' if attempts_used != 1 else '' }} still count{{ 's' if attempts_used == 1 else '' }} but {{ 'is' if attempts_used == 1 else 'are' }} not listed.">scored attempt details omitted</span>
+                                        {% else %}
+                                            <span class="t3-attempt-chip muted">no attempts recorded</span>
+                                        {% endif %}
+                                    {% endif %}
                                 </div>
                                 {% else %}
                                 <span class="t3-attempt-chip muted">no attempts recorded</span>
                                 {% endif %}
                             </td>
-                            <td style="font-variant-numeric:tabular-nums;">{{ attempts_used }} of {{ total_expected }} scored</td>
+                            <td style="font-variant-numeric:tabular-nums;"{% if attempts_recovered %} title="Includes {{ attempts_recovered }} recovered agent timeout{{ 's' if attempts_recovered != 1 else '' }}, which {{ 'are' if attempts_recovered != 1 else 'is' }} not scored"{% endif %}>{{ attempts_used }} of {{ total_expected }} scored</td>
                             <td>
                                 {% if best_score is not none %}
                                     {% set bg = 'rgba(34,197,94,0.18)' if best_score >= t3_pass_threshold else ('rgba(234,179,8,0.18)' if best_score >= 0.4 else 'rgba(239,68,68,0.18)') %}
@@ -3326,7 +3370,7 @@
                                     {% endfor %}
                                 {% endif %}
                                 {% if outcome.passed and outcome.first_pass is not none %}
-                                    <span class="t3-pill ok">passed on scored attempt {{ outcome.first_pass | int }}</span>
+                                    <span class="t3-pill ok">passed on attempt {{ outcome.first_pass | int }}</span>
                                 {% elif outcome.passed %}
                                     <span class="t3-pill ok">passed</span>
                                 {% elif attempts_used > 0 and outcome.reason %}

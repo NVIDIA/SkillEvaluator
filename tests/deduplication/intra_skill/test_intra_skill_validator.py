@@ -69,10 +69,11 @@ class TestIntraSkillValidatorProperties:
 
 
 class TestEffectiveChunkLimit:
-    def test_scalar_budget_lets_2048_dimensional_embeddings_reach_the_chunk_ceiling(self) -> None:
-        assert constants.CONTENT_DEDUP_MAX_CHUNKS == 512
-        assert constants.CONTENT_DEDUP_MAX_PAIR_COMPARISONS == 512 * 511 // 2
-        assert constants.CONTENT_DEDUP_MAX_SCALAR_COMPARISONS == 267_911_168
+    def test_scalar_budget_lets_1024_dimensional_embeddings_reach_the_chunk_ceiling(self) -> None:
+        assert constants.CONTENT_DEDUP_MAX_CHUNKS == 1024
+        assert constants.CONTENT_DEDUP_MAX_PAIR_COMPARISONS == 1024 * 1023 // 2
+        assert constants.CONTENT_DEDUP_SCALAR_BUDGET_DIMENSION == 1024
+        assert constants.CONTENT_DEDUP_MAX_SCALAR_COMPARISONS == 536_346_624
         assert (
             constants.CONTENT_DEDUP_MAX_SCALAR_COMPARISONS
             == constants.CONTENT_DEDUP_MAX_PAIR_COMPARISONS * constants.CONTENT_DEDUP_SCALAR_BUDGET_DIMENSION
@@ -80,10 +81,57 @@ class TestEffectiveChunkLimit:
 
     @pytest.mark.parametrize(
         ("vector_dimension", "expected_limit"),
-        [(1, 512), (1024, 512), (1536, 512), (2048, 512), (2049, 511), (3072, 418), (4096, 362)],
+        [
+            (1, 1024),
+            (768, 1024),
+            (1024, 1024),
+            (1025, 1023),
+            (1536, 836),
+            (2048, 724),
+            (3072, 591),
+            (4096, 512),
+        ],
     )
     def test_limit_depends_on_vector_dimension(self, vector_dimension: int, expected_limit: int) -> None:
         assert effective_chunk_limit(vector_dimension) == expected_limit
+
+    @pytest.mark.parametrize(
+        "environ",
+        [
+            pytest.param({"SKILL_EVAL_EMBEDDING_PROVIDER": "openai", "OPENAI_API_KEY": "test-key"}, id="openai"),
+            pytest.param({"SKILL_EVAL_EMBEDDING_PROVIDER": "nv_build", "NVIDIA_API_KEY": "nvapi-test"}, id="nv-build"),
+            pytest.param(
+                {
+                    "SKILL_EVAL_EMBEDDING_PROVIDER": "openai-compatible",
+                    "SKILL_EVAL_EMBEDDING_API_KEY": "test-key",
+                    "SKILL_EVAL_EMBEDDING_BASE_URL": "https://gateway.example/v1",
+                },
+                id="openai-compatible",
+            ),
+        ],
+    )
+    def test_docs_give_the_chunk_limit_of_each_default_embedding_model(self, environ: dict[str, str]) -> None:
+        """The limits table names the limit a user of a default model gets, not only the ceiling."""
+        from skillevaluator.provider_config import resolve_embedding_provider
+
+        # Native output width of each default model; the embedding client requests no other width.
+        default_model_widths = {
+            "text-embedding-3-small": 1536,
+            "nvidia/nemotron-3-embed-1b": 2048,
+            "nvidia/nvidia/nemotron-3-embed-1b": 2048,
+        }
+        model = resolve_embedding_provider(environ).model
+        vector_dimension = default_model_widths[model]
+        guide = Path(__file__).resolve().parents[3] / "docs" / "tier2-deduplication.mdx"
+        (row,) = [
+            line
+            for line in guide.read_text(encoding="utf-8").splitlines()
+            if line.startswith("| Intra-skill comparison work |")
+        ]
+
+        (width_entry,) = [entry for entry in row.split(", ") if f"`{model}`" in entry]
+        assert width_entry.startswith(f"{effective_chunk_limit(vector_dimension):,} ")
+        assert f" at {vector_dimension:,} (" in width_entry
 
     def test_limit_is_the_largest_chunk_count_within_budget_for_every_width(self) -> None:
         budget = constants.CONTENT_DEDUP_MAX_SCALAR_COMPARISONS
@@ -185,6 +233,29 @@ class TestIntraSkillValidatorValidate:
         assert finding.suggestion is not None
         assert "replace" in finding.suggestion.lower()
 
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_frontmatter_merge_chain_fails_closed_before_embedding(self, mock_embed, tmp_path: Path) -> None:
+        # Each level merges the previous mapping ten times, so unbounded YAML
+        # builds 10**(level + 1) key-value pairs, about 180 MB at six levels.
+        # Four levels keep this test cheap if the bound ever regresses.
+        lines = ["m0: &m0 {" + ", ".join(f"k{index}: {index}" for index in range(10)) + "}"]
+        lines += [f"m{level}: &m{level} {{<<: [{', '.join([f'*m{level - 1}'] * 10)}]}}" for level in range(1, 5)]
+        skill_dir = tmp_path / "skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: skill\n" + "\n".join(lines) + "\n---\n" + _numbered_sections(3), encoding="utf-8"
+        )
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        assert result.passed is False
+        assert len(result.findings) == 1
+        finding = result.findings[0]
+        assert finding.severity == Severity.CRITICAL
+        assert finding.check_name == "manifest_complexity_limit"
+        assert finding.file_path == "SKILL.md"
+        mock_embed.assert_not_called()
+
     @staticmethod
     def _assert_work_limit_incomplete(result, work_limit: dict) -> None:
         """A tripped work limit is missing coverage, never a duplicate-content finding."""
@@ -277,22 +348,24 @@ class TestIntraSkillValidatorValidate:
 
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.build_clusters")
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
-    def test_chunk_ceiling_is_reachable_with_2048_dimensional_embeddings(
+    def test_1024_chunks_complete_in_sixteen_embedding_batches(
         self, mock_embed, mock_build_clusters, tmp_path: Path
     ) -> None:
         skill_dir = tmp_path / "boundary-skill"
         skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text(_numbered_sections(512))
-        mock_embed.return_value.embed.side_effect = _unit_embeddings(2048)
+        (skill_dir / "SKILL.md").write_text(_numbered_sections(1024), encoding="utf-8")
+        mock_embed.return_value.embed.side_effect = _unit_embeddings(1024)
         mock_build_clusters.return_value = []
 
         result = IntraSkillValidator().validate(skill_dir)
 
         assert result.passed is True
+        assert result.status == "passed"
         assert result.findings == []
-        assert len(mock_build_clusters.call_args.args[0]) == 512
+        assert [len(call.args[0]) for call in mock_embed.return_value.embed.call_args_list] == [64] * 16
+        assert len(mock_build_clusters.call_args.args[0]) == 1024
 
-    @pytest.mark.parametrize(("vector_dimension", "chunk_limit"), [(3072, 418), (4096, 362)])
+    @pytest.mark.parametrize(("vector_dimension", "chunk_limit"), [(1536, 836), (2048, 724), (3072, 591), (4096, 512)])
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.build_clusters")
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
     def test_wider_embeddings_report_their_effective_chunk_limit(
@@ -308,13 +381,15 @@ class TestIntraSkillValidatorValidate:
         mock_embed.return_value.embed.side_effect = _unit_embeddings(vector_dimension)
         mock_build_clusters.return_value = []
 
-        (skill_dir / "SKILL.md").write_text(_numbered_sections(chunk_limit))
+        (skill_dir / "SKILL.md").write_text(_numbered_sections(chunk_limit), encoding="utf-8")
         assert IntraSkillValidator().validate(skill_dir).passed is True
+        assert len(mock_build_clusters.call_args.args[0]) == chunk_limit
 
         chunk_count = chunk_limit + 1
         pair_count = chunk_count * (chunk_count - 1) // 2
-        (skill_dir / "SKILL.md").write_text(_numbered_sections(chunk_count))
+        (skill_dir / "SKILL.md").write_text(_numbered_sections(chunk_count), encoding="utf-8")
         mock_build_clusters.reset_mock()
+        mock_embed.return_value.embed.reset_mock()
         result = IntraSkillValidator().validate(skill_dir)
 
         self._assert_work_limit_incomplete(
@@ -324,7 +399,7 @@ class TestIntraSkillValidatorValidate:
                 "pair_count": pair_count,
                 "vector_dimension": vector_dimension,
                 "scalar_work": pair_count * vector_dimension,
-                "limit": 267_911_168,
+                "limit": 536_346_624,
                 "effective_chunk_limit": chunk_limit,
                 "chunk_count": chunk_count,
             },
@@ -333,6 +408,37 @@ class TestIntraSkillValidatorValidate:
             f"effective chunk limit is {chunk_limit} for {vector_dimension}-dimensional embeddings; "
             f"this skill has {chunk_count} chunks."
         ) in result.errors[0]
+        # The first batch sets the width; no further batch is requested.
+        assert mock_embed.return_value.embed.call_count == 1
+        mock_build_clusters.assert_not_called()
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.build_clusters")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_2048_dimensional_skill_at_the_chunk_ceiling_stops_after_the_first_batch(
+        self, mock_embed, mock_build_clusters, tmp_path: Path
+    ) -> None:
+        """Between the width's limit and the ceiling, the scan stops on comparison work, not chunk count."""
+        skill_dir = tmp_path / "default-width-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(_numbered_sections(1024), encoding="utf-8")
+        mock_embed.return_value.embed.side_effect = _unit_embeddings(2048)
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        pair_count = 1024 * 1023 // 2
+        self._assert_work_limit_incomplete(
+            result,
+            {
+                "check_name": "scalar_comparison_limit",
+                "pair_count": pair_count,
+                "vector_dimension": 2048,
+                "scalar_work": pair_count * 2048,
+                "limit": 536_346_624,
+                "effective_chunk_limit": 724,
+                "chunk_count": 1024,
+            },
+        )
+        assert [len(call.args[0]) for call in mock_embed.return_value.embed.call_args_list] == [64]
         mock_build_clusters.assert_not_called()
 
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.build_clusters")
@@ -366,14 +472,15 @@ class TestIntraSkillValidatorValidate:
     def test_absolute_chunk_ceiling_fails_before_embedding(self, mock_embed, tmp_path: Path) -> None:
         skill_dir = tmp_path / "many-headings"
         skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text(_numbered_sections(513))
+        (skill_dir / "SKILL.md").write_text(_numbered_sections(1025), encoding="utf-8")
 
         result = IntraSkillValidator().validate(skill_dir)
 
         self._assert_work_limit_incomplete(
             result,
-            {"check_name": "chunk_count_limit", "file_path": "SKILL.md", "actual": 513, "limit": 512},
+            {"check_name": "chunk_count_limit", "file_path": "SKILL.md", "actual": 1025, "limit": 1024},
         )
+        assert "more than 1024 content chunks" in result.errors[0]
         mock_embed.assert_not_called()
 
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
@@ -459,7 +566,7 @@ class TestIntraSkillValidatorValidate:
         mock_llm.assert_not_called()
 
     def test_cluster_member_limit_is_the_chunk_ceiling(self) -> None:
-        assert intra_skill_validator.CONTENT_DEDUP_MAX_CLUSTER_MEMBERS == constants.CONTENT_DEDUP_MAX_CHUNKS == 512
+        assert intra_skill_validator.CONTENT_DEDUP_MAX_CLUSTER_MEMBERS == constants.CONTENT_DEDUP_MAX_CHUNKS == 1024
         assert llm_analyzer.MAX_PROMPT_CHARS == 64_000
         # The validator reads llm_analyzer.MAX_PROMPT_CHARS; a stale copy here
         # would let a patched budget move one threshold and not the other.
@@ -622,7 +729,7 @@ class TestIntraSkillValidatorValidate:
     @pytest.mark.parametrize(
         ("member_count", "text", "check_name"),
         [
-            pytest.param(513, "content " * 10, "llm_cluster_member_limit", id="member-limit"),
+            pytest.param(1025, "content " * 10, "llm_cluster_member_limit", id="member-limit"),
             pytest.param(500, "x" * 80, "llm_prompt_size_limit", id="prompt-limit"),
         ],
     )
@@ -651,7 +758,7 @@ class TestIntraSkillValidatorValidate:
         cluster = ContentCluster(members, 1.0, 1.0, False, {"markdown"})
         mock_clusters.return_value = [cluster]
         if check_name == "llm_cluster_member_limit":
-            actual, limit = member_count, 512
+            actual, limit = member_count, 1024
         else:
             actual, limit = len(SYSTEM_PROMPT) + len(build_user_prompt(cluster)), 64_000
             assert "SHARED CONTENT" not in build_user_prompt(cluster)

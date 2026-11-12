@@ -30,7 +30,9 @@ def _skill(root: Path, name: str) -> Path:
 
 
 def _source(root: Path, config: str = "") -> Path:
-    skill = _skill(root, "reviewed-suite")
+    # Keep the source checkout separate from the test operator's key, even with an in-repo TMPDIR.
+    skill = _skill(root / "suite-repo", "reviewed-suite")
+    subprocess.run(["git", "init", "-q", str(skill.parent)], check=True)
     (skill / "evals").mkdir()
     (skill / "evals" / "evals.json").write_text(
         json.dumps(
@@ -154,6 +156,22 @@ def test_compares_paired_outcomes_and_keeps_trial_evidence(tmp_path):
     assert score["classification"] == "negative"
     assert score["cases"]["case-1"]["interaction"] == pytest.approx(-0.30)
     assert Path(score["evidence"]["config-0"]["case-1"][0]["reward_path"]).is_file()
+
+
+def test_catalog_probe_status_does_not_change_judge_identity(tmp_path):
+    matrix = _matrix(tmp_path)
+    for arm in matrix:
+        arm["result"]["run_config"]["judge"]["catalog_verification"] = "verified"
+    judge = matrix[-1]["result"]["run_config"]["judge"]
+    judge["catalog_verification"] = "degraded"
+
+    report = compare_configurations(matrix, metric="goal_accuracy", n_attempts=1)
+    assert report["status"] == "complete"
+    assert judge["catalog_verification"] == "degraded"
+
+    judge["override_applied"] = True
+    report = compare_configurations(matrix, metric="goal_accuracy", n_attempts=1)
+    assert report["status"] == "incomparable"
 
 
 def _edit_reward(config, change):
@@ -416,6 +434,7 @@ def test_native_harbor_source_reuses_the_reviewed_tasks(monkeypatch, tmp_path):
     from skillevaluator.tier3.harbor.adapter import stage_native_harbor_tasks
 
     source = _skill(tmp_path, "reviewed-native")
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
     init_harbor_task(source, force=False, case_id="case-1", mode="default", language="python", with_config=True)
     skills = [_skill(tmp_path, name) for name in ("a", "b")]
     staged = []
@@ -448,10 +467,27 @@ def test_interrupted_experiment_retains_explicit_incomplete_report(monkeypatch, 
     monkeypatch.setattr(EvaluationService, "evaluate", interrupt)
     with pytest.raises(KeyboardInterrupt):
         run_interaction(skills, eval_source=source, options=EvaluationOptions(source))
-    saved = json.loads(next((tmp_path / "interaction-results").glob("*/interaction.json")).read_text())
+    saved = json.loads(next((source.parent / "interaction-results").glob("*/interaction.json")).read_text())
     assert saved["status"] == "incomplete"
     assert "interrupted" in saved["reasons"][0]
     assert "interaction" not in saved
+
+
+@pytest.mark.parametrize("location", ["source", "repo", "second_skill", "results"])
+def test_checks_original_provenance_key_location_before_snapshot(monkeypatch, tmp_path, location):
+    source = _source(tmp_path)
+    skills = [_skill(tmp_path, name) for name in ("a", "b")]
+    results = tmp_path / "results"
+    roots = {"source": source, "repo": source.parent, "second_skill": skills[1], "results": results}
+    monkeypatch.setenv("SKILLEVALUATOR_OUTPUT_PROVENANCE_KEY_FILE", str(roots[location] / "marker.key"))
+
+    def unexpected_snapshot(*args, **kwargs):
+        pytest.fail("Input validation must finish before snapshotting")
+
+    monkeypatch.setattr("skillevaluator.tier3.harbor.adapter.private_evaluator_skill_snapshot", unexpected_snapshot)
+    with pytest.raises(ValueError, match="Output provenance key must be outside"):
+        run_interaction(skills, eval_source=source, options=EvaluationOptions(source, results_dir=results))
+    assert not results.exists()
 
 
 @pytest.mark.parametrize(
@@ -466,6 +502,8 @@ def test_interrupted_experiment_retains_explicit_incomplete_report(monkeypatch, 
         "partial",
         "standard_overall",
         "missing_source",
+        "missing_evals_dir",
+        "malformed_environment_kwarg",
     ],
 )
 @pytest.mark.parametrize("via_cli", [False, True])
@@ -494,11 +532,17 @@ def test_rejects_invalid_experiments_before_execution(monkeypatch, tmp_path, inv
         metric = "overall"
     elif invalid == "missing_source":
         (source / "evals" / "evals.json").unlink()
+    elif invalid == "missing_evals_dir":
+        (source / "evals").rename(source / "unused")
+    elif invalid == "malformed_environment_kwarg":
+        options.environment_kwarg = ("malformed",)
     calls = _fake_engine(monkeypatch)
     if via_cli:
         args = ["tier3", "interact", *(str(path) for path in skills), "--eval-source", str(source), "--metric", metric]
         if options.results_dir:
             args.extend(["--results-dir", str(options.results_dir)])
+        for value in options.environment_kwarg:
+            args.extend(["--ek", value])
         result = CliRunner().invoke(cli, args)
         assert result.exit_code == 2, result.output
         assert "Usage:" in result.stderr
@@ -506,6 +550,7 @@ def test_rejects_invalid_experiments_before_execution(monkeypatch, tmp_path, inv
         with pytest.raises((OSError, ValueError)):
             run_interaction(skills, eval_source=source, options=options, metric=metric)
     assert calls == []
+    assert not (source.parent / "interaction-results").exists()
 
 
 @pytest.mark.parametrize(

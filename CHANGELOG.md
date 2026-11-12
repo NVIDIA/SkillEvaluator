@@ -6,12 +6,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
-- Add opt-in `tier3 interact` experiments for two or more skills. Reuse one
-  reviewed task source for baseline, individual, and combined configurations;
-  report signed departure from additive task-outcome gains with fixed attempt
-  budgets, retained source identities and trial evidence, and explicit
-  incomplete or incomparable results.
-
 - Capability-gated CI onboarding for protected Tier 1 `--llm`/SkillSpector
   checks, independent Tier 3 gateway/judge settings and native agent models.
   Combined reports retain source-bound `BENCHMARK.md` cards for every outcome;
@@ -39,6 +33,13 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 3 `evaluate --compare-to RUN` and read-only `compare-versions` compare
   compatible retained skill versions, report paired per-agent deltas and
   regressions, and keep version comparisons separate from no-skill Skill Lift.
+
+- Add opt-in `tier3 interact` experiments for two or more skills. The command
+  uses one reviewed task suite and a fixed attempt budget to compare baseline,
+  individual, and combined performance. It reports the departure from additive
+  gains and retains source identities and trial evidence. Invalid inputs exit
+  with code 2. Incomplete or incomparable experiments and output I/O failures
+  exit with code 1.
 
 - Read-only Tier 3 `history` lists retained Skill Lift runs chronologically,
   separates incompatible configurations into segments, preserves unavailable
@@ -394,14 +395,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- `tier3 interact` retains incomplete reports when a configuration raises an
-  exception without a message, and handles missing configuration results safely.
-  Invalid experiment inputs use usage-error exit code 2; incomplete experiments
-  and output I/O failures continue to use exit code 1.
-
-- Honor `TMPDIR` for temporary GitLab scan reports, with `/tmp` as the default,
-  so scans work with configurable temporary storage.
-
 - `skillevaluator view` no longer asks the LLM again when it regenerates a
   missing `report.html` for a Tier 3 run that saved its report feedback in
   `result.json`. The regenerated report shows the conclusions,
@@ -427,6 +420,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
   the PR or merge request's target revision. Policy files from the proposed
   changes cannot approve their own exceptions.
+
+- The `ci/gitlab/skill-evaluation.yml` template honors `TMPDIR` for temporary
+  scan reports and defaults to `/tmp`.
 
 - `skillevaluator validate` on a target with no skill, rules, workflows, or
   plugin, such as an ordinary source repository, no longer fails Tier 1 with

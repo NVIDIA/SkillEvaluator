@@ -183,12 +183,16 @@ def compare_configurations(
                     raise IncomparableInteraction(
                         "Use overall only for custom_only grading; otherwise select an outcome metric"
                     )
-                if not run_config.get("judge") or not harbor.get("environment") or not result.get("evaluator_version"):
+                judge_identity = run_config.get("judge")
+                if isinstance(judge_identity, Mapping):
+                    # Each arm probes the model catalog independently.
+                    judge_identity = {k: v for k, v in judge_identity.items() if k != "catalog_verification"}
+                if not judge_identity or not harbor.get("environment") or not result.get("evaluator_version"):
                     raise IncomparableInteraction("Missing scorer, environment, or evaluator identity")
                 signatures.append(
                     (
                         info["model"],
-                        run_config.get("judge"),
+                        judge_identity,
                         grading,
                         harbor.get("environment"),
                         result.get("evaluator_version"),
@@ -287,13 +291,20 @@ def run_interaction(
     on_configuration: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Freeze reviewed inputs once, then delegate every arm to the Tier 3 service."""
-    from skillevaluator.tier3.harbor.adapter import private_evaluator_skill_snapshot
+    from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
+    from skillevaluator.tier3.harbor.adapter import (
+        private_evaluator_skill_snapshot,
+        validate_output_provenance_key_location,
+    )
     from skillevaluator.tier3.harbor.runner import _reserve_run_dir
     from skillevaluator.tier3.workflow import _validate_skill_root
 
     selected = _selected_skills(skills)
     _validate_skill_root(eval_source)
     source = eval_source.resolve()
+    if not (source / "evals").is_dir():
+        raise ValueError(f"No evaluator source directory found at {source / 'evals'}")
+    parse_environment_kwarg_overrides(options.environment_kwarg, env_mode=options.env_mode)
     if (
         options.include_skills
         or options.copy_repo
@@ -308,6 +319,7 @@ def run_interaction(
     root = (options.results_dir or source.parent / "interaction-results").absolute()
     if any(root.resolve().is_relative_to(path) or path.is_relative_to(root.resolve()) for path in [source, *selected]):
         raise ValueError("Save interaction results outside the evaluation source and selected skill roots")
+    validate_output_provenance_key_location(source, root, reference_skills_dir=None, workspace_skill_paths=selected)
     service = EvaluationService()
     with (
         private_evaluator_skill_snapshot(source) as evaluator,

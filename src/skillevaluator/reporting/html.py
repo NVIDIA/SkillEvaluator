@@ -501,6 +501,13 @@ def _tier3_score_reasons(value: object) -> dict[str, str]:
     return reasons
 
 
+def _tier3_not_applicable_reason(metric: object) -> str:
+    """Return why a Tier 3 metric can be N/A, for the tooltip of an N/A drill-down cell."""
+    from skillevaluator.tier3.harbor.metrics import NOT_APPLICABLE_REASONS
+
+    return NOT_APPLICABLE_REASONS.get(str(metric), "Not applicable to this eval case")
+
+
 def _tier3_text_mapping(value: object) -> dict[str, str]:
     """Normalize public label maps without silently overwriting aliases."""
     if not isinstance(value, dict):
@@ -1008,6 +1015,11 @@ def _sanitize_tier3_trial(value: dict[str, Any], *, fill_defaults: bool = True) 
     score_reasons = _tier3_score_reasons(trial.pop("score_reasons", None))
     if score_reasons:
         trial["score_reasons"] = score_reasons
+    if "not_applicable_metrics" in trial:
+        from skillevaluator.tier3.harbor.metrics import not_applicable_list
+
+        # Only metrics that can be N/A count, so a malformed payload cannot mark security N/A.
+        trial["not_applicable_metrics"] = not_applicable_list(trial["not_applicable_metrics"])
     # Unavailable telemetry stays absent rather than becoming zero, so the
     # template can omit charts and show "—" instead of reporting no usage.
     raw_tokens = trial.pop("tokens", None)
@@ -1927,6 +1939,7 @@ class HTMLReporter(ReporterBase):
         environment.filters["adaptive_percent"] = _adaptive_percent
         environment.filters["adaptive_interval_percent"] = _adaptive_interval_percent
         environment.filters["skip_reason"] = get_skip_reason
+        environment.filters["not_applicable_reason"] = _tier3_not_applicable_reason
         return environment
 
     @staticmethod

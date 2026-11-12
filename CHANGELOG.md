@@ -409,6 +409,21 @@ All notable changes to SkillEvaluator are documented in this file.
   `Bedrock request failed`, like a Bedrock error that ends the judge and like
   the default `legacy` policy.
 
+- The Tier 3 terminal summary now shows `N/A`, not `NO SCORE`, as the Skill
+  Lift of an evaluator or dimension that is N/A in either arm, as the Markdown
+  and HTML reports already do. Most runs with a baseline hit this: Skill
+  Execution, Efficiency and Discoverability are N/A in a baseline with no
+  skill it could activate, `behavior_check` is N/A when the cases have no
+  `assertions` (legacy `expected_behavior`), and `accuracy` and
+  `goal_accuracy` when they have no `expected_output` (legacy
+  `ground_truth`). In a baseline-only run (`--skip-with-skill`) the lift of
+  every other row now reads `skipped`, as the docs and the Markdown report
+  say. A lift that is missing for another reason still reads `NO SCORE`. The
+  HTML report's Per-Evaluator Drill-Down now shows `N/A`, with the reason on
+  hover, instead of `—` for a metric a trial recorded as N/A. The reports'
+  reasons for an N/A Accuracy, Goal Accuracy or Behavior Check now name the
+  dataset fields `expected_output` and `assertions` before their legacy names.
+
 - `skillevaluator tier3 feedback` now writes the evaluated skill's directory
   (known from `--skill` or a run in the skill's `evals/results`) as its name and
   the home directory as `~` in the evidence it sends to the LLM, so an error

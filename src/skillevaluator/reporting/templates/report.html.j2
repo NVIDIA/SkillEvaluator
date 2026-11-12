@@ -3385,9 +3385,10 @@
                             </td>
                             {% for eval_id in t3_eval_ids %}
                                 {% set s = scores.get(eval_id) %}
-                                {% set cell_reason = reasons.get(eval_id) if s is not none else none %}
-                                {% set cell_text = "%.2f" | format(s) if s is not none else "—" %}
-                                <td style="{% if s is not none %}background:{{ 'rgba(34,197,94,0.14)' if s >= 0.7 else ('rgba(234,179,8,0.14)' if s >= 0.4 else 'rgba(239,68,68,0.14)') }}; color:{{ 'var(--success-color)' if s >= 0.7 else ('var(--warning-color)' if s >= 0.4 else 'var(--danger-color)') }}; font-weight:600;{% endif %}"{% if cell_reason %} title="{{ eval_id | replace('_', ' ') | title }}: {{ cell_reason }}"{% endif %}>{% if cell_reason %}<span class="t3-score-reason">{{ cell_text }}</span>{% else %}{{ cell_text }}{% endif %}</td>
+                                {% set cell_na = s is none and eval_id in (trial.not_applicable_metrics or []) %}
+                                {% set cell_reason = reasons.get(eval_id) if s is not none else (("Not applicable: " ~ (eval_id | not_applicable_reason)) if cell_na else none) %}
+                                {% set cell_text = "%.2f" | format(s) if s is not none else ("N/A" if cell_na else "—") %}
+                                <td style="{% if s is not none %}background:{{ 'rgba(34,197,94,0.14)' if s >= 0.7 else ('rgba(234,179,8,0.14)' if s >= 0.4 else 'rgba(239,68,68,0.14)') }}; color:{{ 'var(--success-color)' if s >= 0.7 else ('var(--warning-color)' if s >= 0.4 else 'var(--danger-color)') }}; font-weight:600;{% elif cell_na %}color:var(--text-secondary);{% endif %}"{% if cell_na %} data-not-applicable="true"{% endif %}{% if cell_reason %} title="{{ eval_id | replace('_', ' ') | title }}: {{ cell_reason }}"{% endif %}>{% if cell_reason %}<span class="t3-score-reason">{{ cell_text }}</span>{% else %}{{ cell_text }}{% endif %}</td>
                             {% endfor %}
                             <td>{{ trial.steps if trial.steps is number else "—" }}</td>
                             <td>{% if tokens.prompt is number and tokens.completion is number %}{{ tokens.prompt + tokens.completion }}{% else %}—{% endif %}</td>

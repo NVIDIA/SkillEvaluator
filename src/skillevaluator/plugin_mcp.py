@@ -10,7 +10,7 @@ reader (:mod:`skillevaluator.plugin_paths`). It normalizes Codex and Agent
 Plugins entries and records the config-source findings and the per-server
 static checks, including server code launched from a folder Tier 1 scans skip.
 The component inventory
-(:mod:`skillevaluator.plugin_components`) turns the collection into ``mcp``
+(:mod:`skillevaluator.plugin_inventory`) turns the collection into ``mcp``
 components.
 """
 

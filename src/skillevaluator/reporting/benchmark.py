@@ -28,6 +28,7 @@ from skillevaluator.publication_text import publication_confusable_skeleton
 from skillevaluator.reporting.base import (
     PublicationTargetIdentity,
     ReporterBase,
+    agent_eval_baseline_not_applicable,
     agent_eval_dimension_verdict,
     agent_eval_publication_dataset_provenance,
     agent_eval_publication_evaluated_at,
@@ -1470,6 +1471,7 @@ def _score_transition(
     dimension: dict[str, Any] | None,
     *,
     skill_never_activated: bool = False,
+    baseline_not_applicable: bool = False,
     baseline_only: bool = False,
 ) -> str:
     if not dimension:
@@ -1478,6 +1480,7 @@ def _score_transition(
         dimension.get("baseline"),
         dimension.get("with_skill", dimension.get("score")),
         skill_never_activated=skill_never_activated,
+        baseline_not_applicable=baseline_not_applicable,
         baseline_only=baseline_only,
     )
 
@@ -1538,7 +1541,12 @@ def _dimension_cell(
     """Render one Results at a Glance dimension cell, explaining a missing score."""
     dimension = _agent_dimension(agent, dim_id)
     if dimension is not None:
-        return _score_transition(dimension, skill_never_activated=skill_never_activated, baseline_only=baseline_only)
+        return _score_transition(
+            dimension,
+            skill_never_activated=skill_never_activated,
+            baseline_only=baseline_only,
+            baseline_not_applicable=agent_eval_baseline_not_applicable(agent, dimension),
+        )
     not_applicable = agent.get("not_applicable_dimensions")
     if isinstance(not_applicable, list) and any(
         isinstance(entry, dict) and entry.get("id") == dim_id for entry in not_applicable
@@ -1554,13 +1562,15 @@ def _score_transition_values(
     score: object,
     *,
     skill_never_activated: bool = False,
+    baseline_not_applicable: bool = False,
     baseline_only: bool = False,
 ) -> str:
     """Render ``baseline → score (uplift)`` so the visible arithmetic is exact.
 
     Scores are fractions in [0, 1]. A missing, non-finite, or out-of-range score,
     or a recorded baseline that is not a valid score, is reported as unavailable
-    rather than clamped or published.
+    rather than clamped or published. ``baseline_not_applicable`` marks a
+    dimension the baseline ran but could not score because it has no skill.
     """
     parsed_score = _number(score)
     parsed_baseline = _number(baseline)
@@ -1590,6 +1600,8 @@ def _score_transition_values(
     if isinstance(baseline, IncompleteArm):
         return f"{skill_label} — {baseline}; uplift unavailable"
     if parsed_baseline is None:
+        if baseline_not_applicable:
+            return f"{skill_label} — baseline N/A (no skill in the baseline arm)"
         return f"{skill_label} — baseline not run; uplift unavailable"
     # Subtract the displayed values, not the raw scores, so a rounding carry can
     # never publish an uplift that disagrees with the two numbers beside it.

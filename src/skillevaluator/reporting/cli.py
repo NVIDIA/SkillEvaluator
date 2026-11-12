@@ -46,6 +46,7 @@ from skillevaluator.reporting.base import (
     source_validation_errors,
     source_validation_preview,
 )
+from skillevaluator.reporting.finding_verification import finding_verification
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
     harbor_job_links,
@@ -773,6 +774,13 @@ class CLIReporter(ReporterBase):
         )
         console.print(f"     [dim]File:[/dim]    {escape_markup(str(finding.location))}")
         console.print(f"     [dim]Check:[/dim]   {escape_markup(str(finding.check_name))}")
+        verification = finding_verification(finding)
+        if verification:
+            label = f"{verification.verdict} ({verification.confidence} confidence)"
+            console.print(f"     [dim]LLM verification:[/dim] {escape_markup(label)}")
+            if verification.reasoning:
+                console.print(f"     [dim]Reasoning:[/dim] {escape_markup(verification.reasoning)}")
+            console.print(f"     [dim]{escape_markup(verification.severity_effect)}[/dim]")
         related_paths = _related_paths(finding)
         if related_paths:
             console.print(f"     [dim]Related paths:[/dim] {escape_markup(' <-> '.join(related_paths))}")

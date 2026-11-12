@@ -491,6 +491,17 @@ class RichProgressReporter(PlainProgressReporter):
                                 live.update(self._build_live_table(final=True), refresh=False)
                             finally:
                                 live.stop()
+                    elif (
+                        after_failure
+                        and self._live is None
+                        and self._live_plan is not None
+                        and self._failed_stop is None
+                    ):
+                        # Drawing failed before Live started, for example on a
+                        # plan line printed above where the frame goes. There
+                        # is no frame to stop, but progress is off for the run
+                        # all the same, so the notice is due.
+                        self._stop_live_after_failure(None)
                 finally:
                     # Reset even when Live never started, so a failed start
                     # leaves no plan or rows behind for the next run.
@@ -509,21 +520,25 @@ class RichProgressReporter(PlainProgressReporter):
         """Stop the live view after a drawing failure and say that the run goes on.
 
         The full final frame could fail the same way, so Live keeps the last
-        frame it drew. Runs under the reporter lock and records the outcome in
-        the same lock hold, so the run's close() either stops Live itself or
-        finds the record.
+        frame it drew. ``live`` is ``None`` when drawing failed before Live
+        started, and then only the notice is printed. Runs under the reporter
+        lock and records the outcome in the same lock hold, so the run's
+        close() either stops Live itself or finds the record.
         """
-        try:
-            live.stop()
-        except Exception:
-            # A terminal that refused the redraw can refuse Live's stop too,
-            # and with it the write that shows the cursor again.
-            logger.debug("Tier 3 progress display stop failed", exc_info=True)
-            self._failed_stop = _FailedDisplayStop(stop_refused=True, notice_shown=False)
-            return
+        if live is not None:
+            try:
+                live.stop()
+            except Exception:
+                # A terminal that refused the redraw can refuse Live's stop too,
+                # and with it the write that shows the cursor again.
+                logger.debug("Tier 3 progress display stop failed", exc_info=True)
+                self._failed_stop = _FailedDisplayStop(stop_refused=True, notice_shown=False)
+                return
         try:
             # Live keeps the last frame it drew, with its stages still running,
-            # so explain why it no longer updates.
+            # so explain why it no longer updates. Before Live started, this
+            # thread's console holds at most a refused plan line, which moves
+            # no cursor, so sending it first does no harm.
             self._write_line(_DISPLAY_STOPPED_NOTICE)
         except Exception:
             logger.debug("Tier 3 progress stop notice failed", exc_info=True)

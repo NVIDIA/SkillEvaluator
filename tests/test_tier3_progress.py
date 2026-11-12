@@ -1488,6 +1488,71 @@ def test_refused_first_frame_and_stop_leave_the_cursor_shown(
         assert "Harbor Run Configuration" in output
 
 
+@pytest.mark.parametrize(
+    ("refused_writes", "notice"),
+    [
+        ({1}, _STOP_NOTICE),
+        ({2}, _STOP_NOTICE),
+        ({3}, _STOP_NOTICE),
+        ({1, 2}, _LATE_STOP_NOTICE),
+    ],
+    ids=["agents-line-refused", "provider-line-refused", "run-plan-line-refused", "agents-line-and-notice-refused"],
+)
+def test_a_refused_plan_line_before_the_frame_turns_progress_off_with_a_notice(
+    monkeypatch: pytest.MonkeyPatch,
+    refused_writes: set[int],
+    notice: str,
+) -> None:
+    from rich.console import Console
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    writes: list[str] = []
+
+    class NonBlockingTerminal(_TTYBuffer):
+        """Refuses some of the first writes, which print the plan lines before Live starts."""
+
+        def write(self, text: str) -> int:
+            writes.append(text)
+            if len(writes) in refused_writes:
+                raise BlockingIOError(errno.EAGAIN, "write could not complete without blocking", 0)
+            return super().write(text)
+
+    stream = NonBlockingTerminal()
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=60)
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    # The plan line was refused before Live existed, so there is no frame to stop.
+    assert reporter.is_active is False
+    assert rich_reporter._live is None
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="complete", detail="agent finished"))
+    reporter.close()
+    first_run = stream.getvalue()
+
+    # Progress is off for the run, and a line of its own says so: on time when
+    # the terminal took it, or when the run ends.
+    assert "Harbor Run Configuration" not in first_run
+    assert "agent finished" not in first_run
+    assert first_run.count("Tier 3 progress display stopped after a drawing error") == 1
+    assert f"\n{first_run}".endswith(f"\n{notice}\n")
+    assert first_run.count("Agents / models:") <= 1
+
+    # The refused plan line is not sent again with the next run's plan.
+    reporter.start(_plan(progress))
+    reporter.close()
+    second_run = stream.getvalue()[len(first_run) :]
+    assert second_run.count("Agents / models:") == 1
+    assert "display stopped" not in second_run
+
+
 class _InterleavingLock:
     """A reentrant lock that runs a hook once, when the arming thread next releases it fully."""
 

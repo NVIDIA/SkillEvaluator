@@ -194,6 +194,17 @@ All notable changes to SkillEvaluator are documented in this file.
   keeping optional LLM checks and hosted feedback separate. Preserve opt-in
   all-tier setup and report contracts in an Advanced CI reference.
 
+- When the RAGAS goal scorer judges `goal_accuracy`, `judge_attempts.json`
+  now saves each request it sends and the judge's reply, so a RAGAS score can
+  be audited like the prompt judges' scores. Each request is a `ragas` entry
+  with status `replied`, or `error` with the HTTP status and body or the
+  reason the reply was not received, before the entry that holds the score or
+  the problem. The prompts and replies are redacted and shortened like the
+  other judge evidence. A failure while saving this evidence is only logged
+  and never changes a score. The request entries do not count toward
+  `--max-judge-calls`; the entry with the score or the problem is the one
+  counted RAGAS call, as before.
+
 ### Changed
 
 - Name Skill Lift as the headline comparison and label pass@k differences as
@@ -291,6 +302,31 @@ All notable changes to SkillEvaluator are documented in this file.
   2 can wait for readiness while authored image healthchecks remain suppressed.
   Keep custom service healthchecks and their readiness dependencies intact.
 
+- Tier 3 tool efficiency counts writing, editing and patching files, scoped
+  native searches and listings (`Grep`, `Glob`, `LS`, OpenCode `list`, Codex
+  `list_dir` and `grep_files`) and MCP tools named `mcp__server__tool` (Claude
+  Code) as productive. An MCP filesystem search or listing whose `path` or
+  `dir_path` is `/` is a root search and counts as waste. Most of these
+  counted as wasted before, so a with-skill trial that read the skill, edited
+  four files and ran the tests scored tool efficiency 0.33. Codex and OpenCode
+  MCP calls, which are recorded under the bare tool name or as `server_tool`,
+  are not recognized as MCP calls yet. Codex names with a namespace, such as
+  `functions.apply_patch`, are classified by the bare name. Planning and
+  bookkeeping calls (`TodoWrite`, `update_plan`, `TaskCreate` and
+  `TaskUpdate`, background-shell polling such as `BashOutput`, and sub-agent
+  calls) are left out of the score, and the reason says how many were not
+  counted. A trial with only such calls scores 0.0, so a trial whose only
+  calls were `BashOutput` or `KillShell` drops from 1.0 to 0.0. Polling a
+  background shell no longer counts as running a command, while a command
+  typed into a Codex `write_stdin` session or run by `Monitor` is classified
+  like any other command. Help, version and install words are matched in
+  commands only, so a file path or patch text that mentions `pip install` is
+  not waste. Efficiency scores rise for write-, edit-, patch-, search- and
+  MCP-heavy runs. Root searches in commands recorded as an argument list, such
+  as Codex `["bash", "-lc", "find / -name x"]`, now count as waste, and so do
+  help, version and install commands recorded that way, like the same command
+  written as text.
+
 ### Documentation
 
 - The 0.8.0 entry for refused `claude-code` attempts said the arm reports its
@@ -315,6 +351,17 @@ All notable changes to SkillEvaluator are documented in this file.
   inline code span, as before a `$VAR` word; a Markdown table row with an
   `HTTP` word in any cell, because `|` reads as a pipe; and `HTTP PUT` right
   after a `;`, which starts a new command.
+
+- Reports & Results now explains the completed-agent result in Tier 3 reports.
+  When one of several agents fails, the HTML report and `tier3-benchmark.md`
+  show the best agent's score when that agent's evidence is complete and mark
+  it as needing attention, while the run stays failed and has no whole-run
+  score. The new section says when an agent qualifies, how recovered timeout
+  attempts are shown, and that the HTML lift card still shows the best agent's
+  lift. The results tree now lists `tier3-benchmark.md`, which every Tier 3
+  run, from `tier3 evaluate` or a `validate` run that includes Tier 3, writes
+  as a pair with `report.html`, and the live evaluation guide says when its
+  verdict table applies and links to the new section.
 
 ### Fixed
 
@@ -402,6 +449,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Read JSON, JSONL and YAML evaluation datasets as UTF-8 so Unicode prompts and
   answers load correctly on hosts with a non-UTF-8 default text encoding.
 
+- Grader qualification resolves verifier source paths before provenance hashing,
+  so source-directory aliases (including macOS `/tmp`) retain the same relative
+  file identities and hashes while files outside the source root are rejected.
+
 - Estimate Tier 1 instruction tokens from the parsed Markdown body, so `---`
   inside YAML values or comments does not count frontmatter as instructions.
   Body separators without valid frontmatter no longer produce a spurious estimate.
@@ -462,6 +513,29 @@ All notable changes to SkillEvaluator are documented in this file.
   `Bedrock request failed`, like a Bedrock error that ends the judge and like
   the default `legacy` policy.
 
+- The interactive Tier 3 progress view (`--progress rich`, or `auto` in a
+  terminal) now keeps one height for the whole run, so redraws no longer leave
+  repeated or jumbled table frames. The Provider and Run plan rows show a
+  placeholder until the plan resolves, each row is one line that ends in an
+  ellipsis when its value is too long, and stages fill a fixed number of rows,
+  at least six and one per agent, showing the most recently updated. The agent
+  models, provider and run plan are printed in full above the table whenever
+  they change, and the table left on screen when the run ends lists every
+  stage, with its full detail when the Detail column is at least 20 columns
+  wide. A stopping agent's detail now starts with the second Ctrl+C hint, so a
+  cut row still shows it. The view redraws only on progress events and
+  heartbeats, no longer also from Rich's own refresh thread. If drawing fails,
+  including a terminal write that would block, the table keeps its last frame
+  with running stages still shown as running, a line says that the run
+  continues, and no further progress is shown for that run; the final results
+  still print. When the terminal also refuses that line, or the write that
+  shows the cursor again, a line saying that the run went on is printed and
+  the cursor is shown when the run ends. Frames the terminal refused are
+  dropped then, so they are never drawn over output printed since. Before, a
+  failure on the heartbeat thread ended that thread with a traceback and left
+  the view active without updating elapsed times, and a failure on the
+  caller's thread marked the running stages as failed.
+
 - The Tier 3 terminal summary now shows `N/A`, not `NO SCORE`, as the Skill
   Lift of an evaluator or dimension that is N/A in either arm, as the Markdown
   and HTML reports already do. Most runs with a baseline hit this: Skill
@@ -504,6 +578,17 @@ All notable changes to SkillEvaluator are documented in this file.
   prefix, cut at punctuation such as `,` or `}` but never inside a URL's user
   info or host, so `Error: ` followed by minified JSON no longer arrives as
   `Error: ...<truncated>`.
+
+- Tier 3 HTML **Attempt Details** now show an agent timeout that a later
+  scored attempt recovered under `--stop-on-pass`, and count it in the case's
+  attempts. In 0.8.0 a case that timed out on attempt 1, passed on attempt 2
+  and skipped attempt 3 read `1 of 2 scored` and `passed on scored attempt 2`,
+  with nothing about the timeout; it now reads `A1: timed out, recovered`,
+  `1 of 3 scored` and `passed on attempt 2`. The Result column says
+  `passed on attempt N` for every case, because N is the attempt's number, not
+  a count of scored attempts. `tier3 evaluate` also prints one line for each
+  agent with recovered timeouts. Scores, pass@k and attempt coverage are
+  unchanged.
 
 - Tier 3 security grading again warns about network exfiltration, lowering
   the Security score to 0.5, for an HTTPie method word after a capitalized

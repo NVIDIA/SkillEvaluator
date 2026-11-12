@@ -15,7 +15,7 @@ import math
 import re
 import sys
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from time import monotonic
 from typing import Literal, Protocol, TextIO, runtime_checkable
@@ -51,6 +51,22 @@ MIN_REFRESH_INTERVAL_SECONDS = 0.05
 # One day stays below every platform's threading.TIMEOUT_MAX, beyond which the
 # heartbeat thread's wait would raise OverflowError.
 MAX_REFRESH_INTERVAL_SECONDS = 86400.0
+# The Rich frame keeps at least this many stage rows (more when more agents
+# run), padding with blank rows, so its height never changes mid-run. A frame
+# that grows or shrinks between redraws leaves stale or jumbled lines behind.
+_LIVE_MIN_EVENT_ROWS = 6
+_LIVE_STATE_COLUMN_WIDTH = 12
+# The rounded table's five borders and one space of padding on each side of
+# its four columns.
+_LIVE_TABLE_CHROME_WIDTH = 5 + 4 * 2
+# The final frame wraps long details only when its Detail column is at least
+# this wide. In a narrower column every detail would fold into a tall stack of
+# short pieces, so there the rows stay cut on one line as while running.
+_FINAL_DETAIL_MIN_WIDTH = 20
+_DISPLAY_STOPPED_NOTICE = "Tier 3 progress display stopped after a drawing error; the run continues."
+# Printed when the run ends instead, when the terminal refused the line above
+# or Live's stop.
+_DISPLAY_STOPPED_LATE_NOTICE = "Tier 3 progress display stopped after a drawing error; the run went on without it."
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +98,14 @@ class Tier3RunPlan:
     output_dir: str | None = None
     result_path: str | None = None
     report_path: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _FailedDisplayStop:
+    """What reached the terminal when the live view stopped after a drawing failure."""
+
+    stop_refused: bool
+    notice_shown: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +204,7 @@ class PlainProgressReporter:
         self._plan_rendered = False
         self._last_progress_at: float | None = None
         self._last_events: dict[str, tuple[str, str]] = {}
+        self._failure_callback: Callable[[], None] | None = None
 
     @property
     def is_active(self) -> bool:
@@ -208,6 +233,10 @@ class PlainProgressReporter:
         with self._lock:
             self._secret_values.update(value for value in values if value)
 
+    def set_failure_callback(self, callback: Callable[[], None] | None) -> None:
+        """Notify a safety wrapper when the reporter's own heartbeat thread fails."""
+        self._failure_callback = callback
+
     def emit(self, event: ProgressEvent) -> None:
         with self._lock:
             detail = self._event_detail(event)
@@ -235,16 +264,31 @@ class PlainProgressReporter:
             self._write_line(f"[{self._elapsed()}] still running: {stages}")
 
     def close(self) -> None:
+        self._close(after_failure=False)
+
+    def close_after_failure(self) -> None:
+        """Stop after a presentation failure without marking running stages failed.
+
+        Only the display failed. The run goes on, so a stage that is still
+        running has not been interrupted.
+        """
+        self._close(after_failure=True)
+
+    def _close(self, *, after_failure: bool) -> None:
         try:
             with self._lock:
-                for stage in tuple(self._active):
-                    self.emit(
-                        ProgressEvent(
-                            stage=stage,
-                            state="failed",
-                            detail="interrupted before completion",
+                # Decided under the same lock hold that would mark the stages,
+                # so an update that arrives while a failed display stops is
+                # never reported as interrupted.
+                if not after_failure:
+                    for stage in tuple(self._active):
+                        self.emit(
+                            ProgressEvent(
+                                stage=stage,
+                                state="failed",
+                                detail="interrupted before completion",
+                            )
                         )
-                    )
         finally:
             self._stop.set()
             thread = self._thread
@@ -315,7 +359,28 @@ class PlainProgressReporter:
                     delay = max(MIN_REFRESH_INTERVAL_SECONDS, delay - (monotonic() - self._last_progress_at))
             if self._stop.wait(delay):
                 return
-            self.heartbeat()
+            try:
+                self.heartbeat()
+            except Exception:
+                # A redraw failure here must turn progress off through the
+                # safety wrapper, which stops the live display, instead of
+                # killing this thread and leaving a half-drawn frame behind.
+                # That includes a write a non-blocking terminal refuses: Rich
+                # keeps the refused frame and sends it again before the next
+                # one, so skipping it would only grow that backlog.
+                logger.debug("Tier 3 progress heartbeat failed", exc_info=True)
+                if self._stop.is_set():
+                    # close() is already stopping this reporter.
+                    return
+                callback = self._failure_callback
+                if callback is None:
+                    self._stop.set()
+                    return
+                try:
+                    callback()
+                except Exception:
+                    logger.debug("Tier 3 progress failure callback failed", exc_info=True)
+                return
 
     def _safe_text(self, value: object) -> str:
         return redact_progress_detail(value, secret_values=self._secret_values)
@@ -332,6 +397,22 @@ class PlainProgressReporter:
         except (OSError, ValueError):
             # A closed pipe must stop the heartbeat without gating evaluation.
             self._stop.set()
+
+
+class _FinalLiveFrame:
+    """The last Rich frame, which stays in the scrollback once Live stops.
+
+    It draws ``wrapped`` when the width it is drawn at leaves the Detail column
+    at least ``_FINAL_DETAIL_MIN_WIDTH`` wide, and ``cut`` otherwise.
+    """
+
+    def __init__(self, *, wrapped: object, cut: object, min_width: int) -> None:
+        self.wrapped = wrapped
+        self.cut = cut
+        self.min_width = min_width
+
+    def __rich_console__(self, _console, options):  # rich renderable protocol
+        yield self.wrapped if options.max_width >= self.min_width else self.cut
 
 
 class RichProgressReporter(PlainProgressReporter):
@@ -352,6 +433,20 @@ class RichProgressReporter(PlainProgressReporter):
         self._live = None
         self._live_plan: Tier3RunPlan | None = None
         self._live_events: dict[str, tuple[ProgressEvent, str | None]] = {}
+        self._live_event_slots = _LIVE_MIN_EVENT_ROWS
+        self._printed_plan_lines: dict[str, str] = {}
+        # Set, under the same lock hold that stops Live, when a drawing failure
+        # stopped it. The run's close() finishes what the terminal refused.
+        self._failed_stop: _FailedDisplayStop | None = None
+
+    def start_progress(self) -> None:
+        with self._lock:
+            if self._started_at is None and self._failed_stop is not None:
+                # The run whose display failed was never closed. Its refused
+                # writes and its notice do not belong to this run.
+                self._failed_stop = None
+                self._drop_refused_writes()
+            super().start_progress()
 
     def emit(self, event: ProgressEvent) -> None:
         with self._lock:
@@ -367,6 +462,8 @@ class RichProgressReporter(PlainProgressReporter):
             else:
                 self._active.pop(event.stage, None)
                 finished_at = self._elapsed()
+            # Move the stage to the end so the recent-event window shows it.
+            self._live_events.pop(event.stage, None)
             self._live_events[event.stage] = (safe_event, finished_at)
             self._refresh_live()
 
@@ -376,77 +473,141 @@ class RichProgressReporter(PlainProgressReporter):
             if self._active:
                 self._refresh_live()
 
-    def close(self) -> None:
+    def _close(self, *, after_failure: bool) -> None:
         live = self._live
         try:
-            super().close()
+            super()._close(after_failure=after_failure)
         finally:
             with self._lock:
-                if live is not None and live is self._live:
-                    try:
-                        live.stop()
-                    finally:
+                try:
+                    if live is not None and live is self._live:
+                        if after_failure:
+                            self._stop_live_after_failure(live)
+                        else:
+                            try:
+                                # Once Live stops, its last frame stays in the
+                                # scrollback and no longer needs a fixed
+                                # height, so it lists every stage in full.
+                                live.update(self._build_live_table(final=True), refresh=False)
+                            finally:
+                                live.stop()
+                finally:
+                    # Reset even when Live never started, so a failed start
+                    # leaves no plan or rows behind for the next run.
+                    if live is self._live:
                         self._live = None
-                        self._live_plan = None
-                        self._live_events.clear()
+                    self._live_plan = None
+                    self._live_events.clear()
+                    self._live_event_slots = _LIVE_MIN_EVENT_ROWS
+                    self._printed_plan_lines.clear()
+                    if not after_failure:
+                        failed_stop, self._failed_stop = self._failed_stop, None
+                        if failed_stop is not None:
+                            self._finish_failed_stop(failed_stop)
+
+    def _stop_live_after_failure(self, live) -> None:
+        """Stop the live view after a drawing failure and say that the run goes on.
+
+        The full final frame could fail the same way, so Live keeps the last
+        frame it drew. Runs under the reporter lock and records the outcome in
+        the same lock hold, so the run's close() either stops Live itself or
+        finds the record.
+        """
+        try:
+            live.stop()
+        except Exception:
+            # A terminal that refused the redraw can refuse Live's stop too,
+            # and with it the write that shows the cursor again.
+            logger.debug("Tier 3 progress display stop failed", exc_info=True)
+            self._failed_stop = _FailedDisplayStop(stop_refused=True, notice_shown=False)
+            return
+        try:
+            # Live keeps the last frame it drew, with its stages still running,
+            # so explain why it no longer updates.
+            self._write_line(_DISPLAY_STOPPED_NOTICE)
+        except Exception:
+            logger.debug("Tier 3 progress stop notice failed", exc_info=True)
+            self._failed_stop = _FailedDisplayStop(stop_refused=False, notice_shown=False)
+        else:
+            self._failed_stop = _FailedDisplayStop(stop_refused=False, notice_shown=True)
+
+    def _drop_refused_writes(self) -> str:
+        """Discard the output this thread's Rich console holds from refused writes, and return it.
+
+        Rich keeps a refused write for its thread and sends it before that
+        thread's next one. A refused frame or stop starts by moving the cursor
+        up over the frame that was on screen when drawing failed, so sent any
+        later it would erase and overwrite whatever was printed since. A
+        thread that ended took its refused writes with it.
+        """
+        try:
+            self._console.begin_capture()
+            return self._console.end_capture()
+        except Exception:
+            logger.debug("Tier 3 progress refused output could not be dropped", exc_info=True)
+            return ""
+
+    def _finish_failed_stop(self, failed_stop: _FailedDisplayStop) -> None:
+        """Show the cursor and the stop notice when the terminal refused them after a drawing failure.
+
+        Runs on the thread that closes the run, once the terminal may take
+        writes again.
+        """
+        from rich.control import Control
+
+        dropped = self._drop_refused_writes()
+        try:
+            if failed_stop.stop_refused:
+                # Live hides the cursor while it draws and shows it again when
+                # it stops, then ends the frame's last line.
+                self._console.show_cursor(True)
+                if self._console.is_terminal:
+                    self._console.line()
+            elif str(Control.show_cursor(True)) in dropped:
+                # Live.start() stops Live itself when its first frame fails,
+                # so the stop above had nothing left to do. The terminal
+                # refused that earlier stop too, and its write that shows the
+                # cursor was just dropped. No frame reached the terminal, so
+                # there is no last line to end.
+                self._console.show_cursor(True)
+            if not failed_stop.notice_shown:
+                self._write_line(_DISPLAY_STOPPED_LATE_NOTICE)
+        except Exception:
+            logger.debug("Tier 3 progress terminal restore failed", exc_info=True)
 
     def _render_plan(self, plan: Tier3RunPlan) -> None:
         self._live_plan = plan
+        # The frame cuts long rows to keep its height, so each plan line is
+        # also printed in full above it whenever that line changes.
+        for label, text in self._plan_lines(plan):
+            if self._printed_plan_lines.get(label) != text:
+                self._printed_plan_lines[label] = text
+                self._write_line(f"{label}: {text}")
         table = self._build_live_table()
         if self._live is None:
             self._live = self._live_factory(
                 table,
                 console=self._console,
-                auto_refresh=True,
-                refresh_per_second=8,
+                # Rich never redraws on its own timer. The frame is redrawn when
+                # the plan or a stage changes, on each heartbeat, and when other
+                # output is printed above it.
+                auto_refresh=False,
                 transient=False,
             )
             self._live.start(refresh=True)
         else:
             self._live.update(table, refresh=True)
 
-    def _build_live_table(self):
-        from rich import box
-        from rich.spinner import Spinner
-        from rich.table import Table
-        from rich.text import Text
-
-        plan = self._live_plan
-        if plan is None:
-            return Table(title="Harbor Run Configuration")
-        if plan.with_skill is False:
-            mode_label = "Baseline-only evaluation"
-        else:
-            mode_label = "Skill-lift evaluation" if plan.baseline is not False else "Agent evaluation"
-        title = Text.assemble(
-            ("Harbor Run Configuration", f"bold {TEXT}"),
-            "  ·  ",
-            (self._safe_text(plan.skill_name), "bold"),
-            "  ·  ",
-            (mode_label, MUTED),
-        )
-        table = Table(title=title, box=box.ROUNDED, border_style=FAINT, expand=True, show_lines=False)
-        table.add_column("Stage", style="bold", no_wrap=True)
-        table.add_column("State", width=12, no_wrap=True)
-        table.add_column("Detail", ratio=1)
-        table.add_column("Elapsed", justify="right", no_wrap=True)
-
-        table.add_row("Environment", Text("configured", style=TEXT), Text(self._safe_text(plan.environment)), "")
+    def _plan_agents_text(self, plan: Tier3RunPlan) -> str:
         model_map = dict(plan.agent_models)
-        agents = ", ".join(
+        return ", ".join(
             f"{self._safe_text(agent)}={self._safe_text(model_map[agent])}"
             if agent in model_map
             else self._safe_text(agent)
             for agent in plan.agents
         )
-        table.add_row("Agents / models", Text("configured", style=TEXT), Text(agents or "none"), "")
-        if plan.provider:
-            table.add_row(
-                "Provider",
-                Text("configured", style=TEXT),
-                Text(self._safe_text(plan.provider)),
-                "",
-            )
+
+    def _plan_values_text(self, plan: Tier3RunPlan) -> str:
         values = (
             ("Tasks", plan.task_count),
             ("Cases", plan.case_count),
@@ -464,9 +625,68 @@ class RichProgressReporter(PlainProgressReporter):
                 None if plan.task_timeout_seconds is None else f"{plan.task_timeout_seconds:g}s",
             ),
         )
-        known = " · ".join(f"{label} {value}" for label, value in values if value is not None)
+        return " · ".join(f"{label} {value}" for label, value in values if value is not None)
+
+    def _plan_lines(self, plan: Tier3RunPlan) -> list[tuple[str, str]]:
+        lines = []
+        agents = self._plan_agents_text(plan)
+        if agents:
+            lines.append(("Agents / models", agents))
+        if plan.provider:
+            lines.append(("Provider", self._safe_text(plan.provider)))
+        known = self._plan_values_text(plan)
         if known:
-            table.add_row("Run plan", Text("configured", style=TEXT), Text(known), "")
+            lines.append(("Run plan", known))
+        return lines
+
+    def _build_live_table(self, *, final: bool = False):
+        from rich import box
+        from rich.cells import cell_len
+        from rich.spinner import Spinner
+        from rich.table import Table
+        from rich.text import Text
+
+        plan = self._live_plan
+        if plan is None:
+            return Table(title="Harbor Run Configuration")
+        if plan.with_skill is False:
+            mode_label = "Baseline-only evaluation"
+        else:
+            mode_label = "Skill-lift evaluation" if plan.baseline is not False else "Agent evaluation"
+        title = Text.assemble(
+            ("Harbor Run Configuration", f"bold {TEXT}"),
+            "  ·  ",
+            (self._safe_text(plan.skill_name), "bold"),
+            "  ·  ",
+            (mode_label, MUTED),
+            overflow="ellipsis",
+            no_wrap=True,
+        )
+        rows = [
+            ("Environment", Text("configured", style=TEXT), Text(self._safe_text(plan.environment)), ""),
+        ]
+        agents = self._plan_agents_text(plan)
+        rows.append(("Agents / models", Text("configured", style=TEXT), Text(agents or "none"), ""))
+
+        def placeholder(waiting_detail: str) -> tuple[Text, Text]:
+            # The row is always present so a plan update does not add rows. A
+            # finished run's frame stays on screen, so there it no longer says
+            # the value is still on its way.
+            if final:
+                return Text("-", style=MUTED), Text("not resolved", style=MUTED)
+            return Text("pending", style=MUTED), Text(waiting_detail)
+
+        if plan.provider:
+            provider_state, provider_detail = Text("configured", style=TEXT), Text(self._safe_text(plan.provider))
+        else:
+            provider_state, provider_detail = placeholder("resolving")
+        rows.append(("Provider", provider_state, provider_detail, ""))
+        known = self._plan_values_text(plan)
+        if known:
+            plan_state, plan_detail = Text("configured", style=TEXT), Text(known)
+        else:
+            plan_state, plan_detail = placeholder("preparing")
+        rows.append(("Run plan", plan_state, plan_detail, ""))
         state_styles = {
             "ready": GREEN,
             "complete": GREEN,
@@ -475,7 +695,14 @@ class RichProgressReporter(PlainProgressReporter):
             "delegated": AMBER,
             "skipped": "dim",
         }
-        for stage, (event, finished_at) in self._live_events.items():
+        # Show only the most recently updated stages in a fixed number of rows.
+        # The slot count only grows (to fit every agent), so the frame never
+        # shrinks either. The final frame lists every stage, without padding.
+        self._live_event_slots = max(self._live_event_slots, len(plan.agents))
+        event_slots = self._live_event_slots
+        events = list(self._live_events.items())
+        shown_events = events if final else events[-event_slots:]
+        for stage, (event, finished_at) in shown_events:
             label = (
                 f"Agent {stage.removeprefix('agent:')}"
                 if stage.startswith("agent:")
@@ -486,20 +713,60 @@ class RichProgressReporter(PlainProgressReporter):
                 if event.state == "running"
                 else Text(event.state, style=state_styles.get(event.state, "white"))
             )
-            table.add_row(
-                Text(label),
-                state,
-                Text(event.detail or ""),
-                Text(finished_at or self._elapsed()),
+            rows.append(
+                (
+                    Text(label),
+                    state,
+                    Text(event.detail or ""),
+                    Text(finished_at or self._elapsed()),
+                )
             )
-        return table
+        if not final:
+            rows.extend(("", "", "", "") for _ in range(event_slots - len(shown_events)))
+
+        def table(*, wrap_detail: bool) -> Table:
+            built = Table(title=title, box=box.ROUNDED, border_style=FAINT, expand=True, show_lines=False)
+            # One line per row: long values are cut with an ellipsis rather than
+            # wrapped, so the frame height does not depend on the text. Only the
+            # final frame may wrap its details.
+            built.add_column("Stage", style="bold", no_wrap=True, overflow="ellipsis")
+            built.add_column("State", width=_LIVE_STATE_COLUMN_WIDTH, no_wrap=True, overflow="ellipsis")
+            if wrap_detail:
+                built.add_column("Detail", ratio=1, overflow="fold")
+            else:
+                built.add_column("Detail", ratio=1, no_wrap=True, overflow="ellipsis")
+            built.add_column("Elapsed", justify="right", no_wrap=True, overflow="ellipsis")
+            for row in rows:
+                built.add_row(*row)
+            return built
+
+        if not final:
+            return table(wrap_detail=False)
+        # The final frame stays in the scrollback, so its details wrap in full
+        # where the Detail column, which gets the width the other columns
+        # leave, is wide enough.
+        stage_width = max(cell_len(str(cell)) for cell in ["Stage", *(row[0] for row in rows)])
+        elapsed_width = max(cell_len(str(cell)) for cell in ["Elapsed", *(row[3] for row in rows)])
+        return _FinalLiveFrame(
+            wrapped=table(wrap_detail=True),
+            cut=table(wrap_detail=False),
+            min_width=(
+                _LIVE_TABLE_CHROME_WIDTH
+                + stage_width
+                + _LIVE_STATE_COLUMN_WIDTH
+                + elapsed_width
+                + _FINAL_DETAIL_MIN_WIDTH
+            ),
+        )
 
     def _refresh_live(self) -> None:
         if self._live is not None:
             self._live.update(self._build_live_table(), refresh=True)
 
     def _write_line(self, line: str) -> None:
-        self._console.print(line, markup=False, soft_wrap=True)
+        # Printed as is: model IDs and providers can contain ":name:", which
+        # Rich would otherwise replace with an emoji.
+        self._console.print(line, markup=False, highlight=False, emoji=False, soft_wrap=True)
 
 
 class NullProgressReporter:
@@ -532,6 +799,19 @@ class SafeProgressReporter:
         self._reporter = reporter
         self._disabled = False
         self._started = False
+        # start() holds this lock while the reporter draws a plan, so a failure
+        # reported from the reporter's heartbeat thread waits for that plan
+        # update and then stops what it drew, instead of letting it start a new
+        # live view after progress was turned off.
+        self._lock = threading.RLock()
+        # A reporter's own heartbeat thread reports failures here, so a redraw
+        # error there turns progress off just like one on the caller's thread.
+        try:
+            set_failure_callback = getattr(reporter, "set_failure_callback", None)
+            if callable(set_failure_callback):
+                set_failure_callback(self._disable)
+        except Exception:
+            logger.debug("Tier 3 progress reporter failure callback registration failed", exc_info=True)
 
     @property
     def is_active(self) -> bool:
@@ -544,8 +824,18 @@ class SafeProgressReporter:
             return self._started
 
     def start(self, plan: Tier3RunPlan) -> None:
-        self._started = True
-        self._call(self._reporter.start, plan)
+        with self._lock:
+            if self._disabled:
+                return
+            self._started = True
+            try:
+                self._reporter.start(plan)
+                return
+            except Exception:
+                logger.debug("Tier 3 progress reporter disabled after presentation failure", exc_info=True)
+        # Closed outside the lock: closing joins the heartbeat thread, which
+        # may be waiting for the lock to report its own failure.
+        self._disable()
 
     def set_secret_values(self, values: list[str] | tuple[str, ...] | set[str]) -> None:
         self._call(self._reporter.set_secret_values, values)
@@ -557,13 +847,16 @@ class SafeProgressReporter:
         self._call(self._reporter.heartbeat)
 
     def close(self) -> None:
+        # The lock is not held here: closing joins the heartbeat thread, which
+        # may be waiting for the lock to report a failure.
         try:
             self._reporter.close()
         except Exception:
             logger.debug("Tier 3 progress reporter cleanup failed", exc_info=True)
         finally:
-            self._started = False
-            self._disabled = False
+            with self._lock:
+                self._started = False
+                self._disabled = False
 
     def _call(self, callback, *args: object) -> None:
         if self._disabled:
@@ -575,11 +868,23 @@ class SafeProgressReporter:
             self._disable()
 
     def _disable(self) -> None:
-        if self._disabled:
-            return
-        self._disabled = True
+        with self._lock:
+            if self._disabled:
+                return
+            self._disabled = True
+            # A disabled reporter shows nothing, so it is no longer active.
+            self._started = False
+        # Only the display failed, so a reporter that can stop without marking
+        # its running stages failed does so.
         try:
-            self._reporter.close()
+            close_after_failure = getattr(self._reporter, "close_after_failure", None)
+        except Exception:
+            close_after_failure = None
+        try:
+            if callable(close_after_failure):
+                close_after_failure()
+            else:
+                self._reporter.close()
         except Exception:
             logger.debug("Tier 3 progress reporter cleanup failed", exc_info=True)
 

@@ -64,6 +64,7 @@ class EvaluationOptions:
     max_attempts_total: int | None = None
     max_cost_usd: float | None = None
     price_file: Path | None = None
+    tolerate_baseline_timeouts: bool | None = None
     # Tier 3 execution backend ("harbor" or "nemo-gym"); appended to keep positional order stable.
     backend: str = "harbor"
 

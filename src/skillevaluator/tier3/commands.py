@@ -624,7 +624,7 @@ skills_dir = {toml_quote("/workspace/skills")}
             """FROM python:3.12-slim
 
 RUN apt-get -o Acquire::Retries=3 update && \\
-    apt-get -o Acquire::Retries=3 install -y --no-install-recommends bash curl git jq ripgrep && \\
+    apt-get -o Acquire::Retries=3 install -y --no-install-recommends bash curl git jq procps ripgrep && \\
     rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /workspace/skills /logs/agent /logs/verifier
@@ -692,6 +692,7 @@ def evaluate(
     results_dir: Path | None,
     harbor_keep_jobs: bool,
     agent_runtime_preflight: bool | None = None,
+    tolerate_baseline_timeouts: bool | None = None,
     timeout_multiplier: float | None,
     override_cpus: int | None,
     override_memory_mb: int | None,
@@ -854,6 +855,7 @@ def evaluate(
             output_dir=output_dir,
             keep_harbor_jobs=harbor_keep_jobs,
             agent_runtime_preflight=agent_runtime_preflight,
+            tolerate_baseline_timeouts=tolerate_baseline_timeouts,
             env_mode=env_mode,
             env_mode_source="CLI",
             environment_kwargs=merged_environment_kwargs,
@@ -1253,7 +1255,25 @@ def view_results(skill_path: Path, *, results_dir: Path | None = None) -> Path:
     target = latest.resolve() if latest.is_symlink() else latest
     report_path = target / "report.html"
     if not report_path.exists():
-        report_path = render_agent_eval_html_report(skill_path, target)
+        from skillevaluator.evaluation.tier3_feedback_chat import _read_result_json, saved_feedback_for_run
+        from skillevaluator.evaluation.tier3_report import _TIER3_FEEDBACK_FIELDS
+
+        saved_result = _read_result_json(target)
+        saved_feedback = saved_feedback_for_run(saved_result, target)
+        # A run saves every feedback field; anything less is rebuilt as before.
+        if saved_feedback and saved_feedback.keys() == set(_TIER3_FEEDBACK_FIELDS):
+            # Rebuild with the feedback this run saved. Asking the judge again
+            # costs tokens and can change the advice; with no provider it
+            # silently drops the advice the run saved.
+            report_path = render_agent_eval_html_report(
+                skill_path,
+                target,
+                engine_result=saved_result,
+                use_llm_judge=False,
+                saved_feedback=saved_feedback,
+            )
+        else:
+            report_path = render_agent_eval_html_report(skill_path, target)
     console.print(f"Opening: [cyan]{escape_markup(str(report_path))}[/cyan]")
     webbrowser.open(report_path.as_uri())
     return report_path

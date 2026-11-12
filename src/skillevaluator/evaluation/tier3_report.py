@@ -667,8 +667,14 @@ def render_agent_eval_html_report(
     engine_result: dict[str, Any] | None = None,
     use_llm_judge: bool = True,
     include_benchmark: bool = False,
+    saved_feedback: dict[str, list[Any]] | None = None,
 ) -> Path:
-    """Render a standalone Tier 3 HTML report and optional standard benchmark."""
+    """Render a standalone Tier 3 HTML report and optional standard benchmark.
+
+    ``saved_feedback`` is the report feedback a completed run saved in
+    ``result.json``. It replaces the rebuilt feedback fields and nothing calls
+    an LLM; see ``_apply_saved_feedback``.
+    """
     from skillevaluator.reporting import BenchmarkReporter, HTMLReporter
 
     skill_path = skill_path.expanduser().resolve()
@@ -678,14 +684,17 @@ def render_agent_eval_html_report(
         run_dir,
         env_mode=env_mode,
         engine_result=engine_result,
-        use_llm_judge=use_llm_judge,
+        use_llm_judge=use_llm_judge and not saved_feedback,
     )
     if result is None:
         raise ValueError(f"No agent results found in {run_dir}")
 
     canonical_payload = result.metadata.get("agent_eval")
     if isinstance(canonical_payload, dict):
-        _apply_case_findings(canonical_payload, engine_result, run_dir, skill_path, use_llm=use_llm_judge)
+        if saved_feedback:
+            _apply_saved_feedback(canonical_payload, saved_feedback, engine_result, run_dir, skill_path)
+        else:
+            _apply_case_findings(canonical_payload, engine_result, run_dir, skill_path, use_llm=use_llm_judge)
     if engine_result is not None and isinstance(canonical_payload, dict):
         # Persist only the compact feedback contract needed by the CLI. The
         # complete canonical payload remains in the HTML report and can be much
@@ -901,8 +910,10 @@ def build_agent_eval_payload(
     overall_score = _finite_float(raw_overall_score) if execution_status == "succeeded" else None
     overall_lift = _finite_float(best.get("lift"))
     # Baseline calibration scores measure no skill, so they never set a skill verdict.
+    # The verdict reads the agents the best agent is picked from.
+    verdict_agents = _headline_agents(agent_payloads, score_field=score_field)
     verdict = (
-        _overall_verdict_from_agents(agent_payloads)
+        _overall_verdict_from_agents(verdict_agents)
         if overall_score is not None and not baseline_only
         else VERDICT_NEUTRAL
     )
@@ -990,8 +1001,9 @@ def build_agent_eval_payload(
     if best_agent and _agent_quality_verdict(agent_payloads.get(best_agent, {})) == verdict:
         verdict_source = agent_payloads[best_agent]
     else:
+        # The reason and counts come from an agent the verdict was read from.
         verdict_source = next(
-            (agent for agent in agent_payloads.values() if _agent_quality_verdict(agent) == verdict),
+            (agent for agent in verdict_agents.values() if _agent_quality_verdict(agent) == verdict),
             None,
         )
 
@@ -1064,7 +1076,12 @@ def build_agent_eval_payload(
             {
                 "severity": "warn",
                 "title": "Inconclusive: skill never activated",
-                "message": "The skill was never activated in any positive with-skill trial. Scores are diagnostic only; no lift verdict was computed.",
+                "message": (
+                    "The skill was never activated in any positive with-skill trial"
+                    # An agent kept with a failed baseline did not decide this verdict.
+                    + ("" if len(verdict_agents) == len(agent_payloads) else " of an agent with a complete baseline")
+                    + ". Scores are diagnostic only; no lift verdict was computed."
+                ),
             }
         ]
         deterministic_suggestions = ["Check skill loading and agent support, then rerun the evaluation."]
@@ -1872,15 +1889,19 @@ def _not_applicable_evaluators(
     metrics: list[str],
     with_scores: dict[str, Any],
     not_applicable: list[str],
+    *,
+    with_skill: bool = True,
 ) -> list[dict[str, str]]:
-    """Evaluators with no with-skill score because no eval case gave them a reference."""
-    from skillevaluator.tier3.harbor.metrics import METRIC_DISPLAY, NOT_APPLICABLE_REASONS
+    """Evaluators with no score in the reported arm because every trial recorded them as N/A."""
+    from skillevaluator.tier3.harbor.metrics import METRIC_DISPLAY, not_applicable_reason
 
     return [
         {
             "id": metric,
             "label": METRIC_DISPLAY.get(metric, metric.replace("_", " ").title()),
-            "reason": NOT_APPLICABLE_REASONS.get(metric, "Not applicable to these eval cases"),
+            "reason": not_applicable_reason(
+                metric, with_skill=with_skill, default="Not applicable to these eval cases"
+            ),
         }
         for metric in metrics
         if metric in not_applicable and _finite_float(with_scores.get(metric)) is None
@@ -2206,7 +2227,7 @@ def _build_agent(
     # N/A notes describe the scored arm: the baseline in a baseline-only run.
     if baseline_only:
         not_applicable_evaluators = _not_applicable_evaluators(
-            baseline_metrics, without_scores, baseline_not_applicable
+            baseline_metrics, without_scores, baseline_not_applicable, with_skill=False
         )
         not_applicable_dimensions = _not_applicable_dimensions(dimensions, baseline_not_applicable)
     else:
@@ -4079,6 +4100,52 @@ def _recommendation_category_from(text: str) -> str:
     return _RECO_CATEGORY_HINTS.get(first, "Action")
 
 
+def _is_case_verdict(conclusion: object) -> bool:
+    """Whether a conclusion is the per-case verdict that ``_apply_case_findings`` adds (the report headline)."""
+    return isinstance(conclusion, dict) and conclusion.get("title") == "Skill effect"
+
+
+def _saved_case_fixes(run_dir: Path) -> list[dict[str, Any]] | None:
+    """The run's ``what_to_fix.json`` when the report can show it as is, else ``None``."""
+    from skillevaluator.tier3.case_summary import load_case_findings
+
+    fixes = load_case_findings(run_dir)
+    if fixes is None or any(
+        not all(isinstance(fix.get(key), str) for key in ("case", "scope", "kind", "what"))
+        or not all(isinstance(fix.get(key) or "", str) for key in ("action", "evidence"))
+        for fix in fixes
+    ):
+        return None
+    return fixes
+
+
+def _apply_saved_feedback(
+    payload: dict[str, Any],
+    saved_feedback: dict[str, list[Any]],
+    engine_result: dict[str, Any] | None,
+    run_dir: Path,
+    skill_path: Path,
+) -> None:
+    """Show the report feedback a completed run saved, with no LLM call.
+
+    The case-findings pass still runs without the LLM, on the run's own
+    ``what_to_fix.json`` when it is usable (otherwise it writes the rule-based
+    fixes), so what it adds beyond the saved fields stays. Saved conclusions
+    that carry the per-case verdict replace the pass's verdict and fixes, so
+    rule-based fixes written then can differ from the saved recommendations;
+    feedback saved before the verdict existed gets both added, as a fresh
+    render shows them.
+    """
+    saved = {field: list(saved_feedback[field]) for field in _TIER3_FEEDBACK_FIELDS if field in saved_feedback}
+    fixes = _saved_case_fixes(run_dir)
+    if any(_is_case_verdict(item) for item in saved.get("conclusions", [])):
+        _apply_case_findings(payload, engine_result, run_dir, skill_path, use_llm=False, fixes=fixes)
+        payload.update(saved)
+    else:
+        payload.update(saved)
+        _apply_case_findings(payload, engine_result, run_dir, skill_path, use_llm=False, fixes=fixes)
+
+
 def _apply_case_findings(
     payload: dict[str, Any],
     engine_result: dict[str, Any] | None,
@@ -4086,8 +4153,12 @@ def _apply_case_findings(
     skill_path: Path,
     *,
     use_llm: bool,
+    fixes: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Lead the report with the case-based verdict and fixes; also saves them as what_to_fix.json for the CLI."""
+    """Lead the report with the case-based verdict and fixes; also saves them as what_to_fix.json for the CLI.
+
+    ``fixes`` already saved for the run are reused as they are and not written again.
+    """
     from skillevaluator.tier3.case_summary import goal_not_met_count, save_case_findings, what_to_fix
     from skillevaluator.tier3.case_summary import verdict as case_verdict
 
@@ -4098,8 +4169,9 @@ def _apply_case_findings(
     if not isinstance(source, dict) or not isinstance(source.get("agents"), dict):
         return
     try:
-        fixes = what_to_fix(source, run_dir=run_dir, skill_path=skill_path, use_llm=use_llm)
-        save_case_findings(run_dir, fixes)
+        if fixes is None:
+            fixes = what_to_fix(source, run_dir=run_dir, skill_path=skill_path, use_llm=use_llm)
+            save_case_findings(run_dir, fixes)
     except Exception:  # advisory: the report keeps its metric-based insights
         logger.debug("Case findings skipped", exc_info=True)
         return
@@ -4539,10 +4611,27 @@ def _build_baseline_only_conclusions(
     return conclusions
 
 
+def _headline_agents(
+    agents: dict[str, dict[str, Any]], *, score_field: str = "with_skill"
+) -> dict[str, dict[str, Any]]:
+    """Return the agents that set the run's best agent and verdict.
+
+    An agent kept by --tolerate-baseline-timeouts is set aside whenever an
+    agent with a complete baseline ranks, so the headline score and verdict
+    both come from complete evidence.
+    """
+    from skillevaluator.tier3.harbor.baseline_timeouts import kept_with_failed_baseline
+
+    complete = {name: agent for name, agent in agents.items() if not kept_with_failed_baseline(agent)}
+    if any(_canonical_agent_rank(agent, score_field=score_field) is not None for agent in complete.values()):
+        return complete
+    return agents
+
+
 def _pick_best_agent(agents: dict[str, dict[str, Any]], *, score_field: str = "with_skill") -> str:
     eligible = {
         name: rank
-        for name, agent in agents.items()
+        for name, agent in _headline_agents(agents, score_field=score_field).items()
         if (rank := _canonical_agent_rank(agent, score_field=score_field)) is not None
     }
     activated = {name: rank for name, rank in eligible.items() if not _never_activated(agents[name])}

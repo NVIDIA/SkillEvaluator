@@ -147,6 +147,7 @@ def _preflight_options(skill_path: Path, params: dict[str, Any], *, harbor_runti
         "price_file",
         "timeout_multiplier",
         "agent_runtime_preflight",
+        "tolerate_baseline_timeouts",
         "custom_dockerfile_mode",
     ):
         if params.get(name) is not None:

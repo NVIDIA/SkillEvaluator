@@ -10,7 +10,7 @@ reader (:mod:`skillevaluator.plugin_paths`). It normalizes Codex and Agent
 Plugins entries and records the config-source findings and the per-server
 static checks, including server code launched from a folder Tier 1 scans skip.
 The component inventory
-(:mod:`skillevaluator.plugin_components`) turns the collection into ``mcp``
+(:mod:`skillevaluator.plugin_inventory`) turns the collection into ``mcp``
 components.
 """
 
@@ -58,6 +58,7 @@ from skillevaluator.validators.mcp_static import (
     CODEX_UNAPPLIED_MCP_FIELDS,
     McpPinning,
     classify_mcp_pinning,
+    openclaw_ssl_verification_enabled,
     validate_mcp_server_declaration,
 )
 from skillevaluator.validators.url_policy import (
@@ -260,7 +261,7 @@ def collect_mcp_declarations(
                 )
             )
 
-    # 3. Dialect normalization (Codex, Agent Plugins) before any static check.
+    # 3. Dialect normalization (Codex, Agent Plugins, OpenClaw) before any static check.
     if profile.mcp_dialect != "claude":
         _normalize_dialect(reader, collection, profile, manifest)
 
@@ -565,7 +566,8 @@ def _unscanned_server_files(
         return []
     seen: set[str] = set()
     findings: list[Finding] = []
-    for rel, is_cwd in _server_launch_files(config, relative_cwd=profile.mcp_dialect == "codex", root=reader.root):
+    relative_cwd = profile.mcp_dialect in {"codex", "openclaw"}
+    for rel, is_cwd in _server_launch_files(config, relative_cwd=relative_cwd, root=reader.root):
         folder = _unscanned_folder(rel, reader.root)
         if folder is None or rel.as_posix() in seen:
             continue
@@ -608,6 +610,15 @@ def _normalize_dialect(
     the same version as ``plugin.json`` (otherwise clients disable MCP), and
     each server must declare ``type`` (``stdio``, ``streamable-http``, or
     ``sse``); ``streamable-http`` is checked as ``http``.
+
+    OpenClaw (inline ``mcpServers``): a command wins over URL fields and
+    launches from the plugin root unless ``cwd``/``workingDirectory`` says
+    otherwise; that working directory is kept so Tier 3 refuses the launch
+    instead of running it elsewhere. For a URL server the canonical
+    ``transport`` wins over the legacy ``type``, ``streamable-http`` means
+    ``http`` and the default is SSE. Host-only fields (auth, TLS, tool policy)
+    are recorded as unapplied; a plugin-declared ``enabled: false`` is not an
+    operator switch, so the server stays declared.
     """
     if profile.mcp_dialect == "agent_plugins":
         plugin_version = agent_plugins_schema_version((manifest or {}).get("$schema"))
@@ -632,6 +643,8 @@ def _normalize_dialect(
         if not isinstance(config, dict):
             continue
         normalized = dict(config)
+        if profile.mcp_dialect == "openclaw":
+            _normalize_openclaw_server(reader, collection, declaration, config, normalized)
         raw_type = normalized.get("type")
         if isinstance(raw_type, str) and raw_type.strip() in _HTTP_TYPE_ALIASES:
             normalized["type"] = "http"
@@ -668,6 +681,66 @@ def _normalize_dialect(
                 )
                 normalized.pop("bearer_token", None)
         declaration.config = normalized
+
+
+# OpenClaw server fields the evaluation can stage or must keep for the static policy.
+_OPENCLAW_PORTABLE_FIELDS = frozenset(
+    {"command", "args", "url", "transport", "type", "env", "headers", "cwd", "workingDirectory", "enabled"}
+)
+
+
+def _normalize_openclaw_server(
+    reader: PluginRootReader,
+    collection: McpCollection,
+    declaration: McpDeclaration,
+    config: dict[str, Any],
+    normalized: dict[str, Any],
+) -> None:
+    """Map one native OpenClaw server onto the shared fields (see :func:`_normalize_dialect`)."""
+    if normalized.get("command"):
+        # OpenClaw absolutizes a string cwd/workingDirectory before its launch
+        # config chooses between them, so an empty cwd becomes the plugin root
+        # and still wins over a nonempty legacy alias.
+        cwd = config.get("cwd")
+        if not isinstance(cwd, str):
+            cwd = config.get("workingDirectory")
+        normalized["cwd"] = (cwd or ".") if isinstance(cwd, str) else "."
+    elif "workingDirectory" in normalized:
+        normalized["cwd"] = normalized["workingDirectory"]
+    transport = config.get("transport")
+    legacy = config.get("type")
+    effective = transport if isinstance(transport, str) and transport.strip() else legacy
+    if isinstance(effective, str):
+        effective = effective.strip().lower()
+    if config.get("command"):
+        normalized["transport"] = "stdio"
+    elif effective == "streamable-http" or (not transport and effective == "http"):
+        normalized["transport"] = "http"
+    else:
+        normalized["transport"] = effective or "sse"
+    normalized.pop("type", None)
+    if (
+        not config.get("command")
+        and isinstance(transport, str)
+        and transport.strip().lower() not in {"sse", "streamable-http", ""}
+    ):
+        collection.findings.append(
+            _plugin_finding(
+                Severity.HIGH,
+                "mcp_transport_invalid",
+                f"OpenClaw MCP server '{declaration.name}' has an unsupported canonical transport",
+                reader.display(declaration.file),
+                "Use transport: sse or streamable-http for a URL server.",
+                category=MCP_CATEGORY,
+                metadata={"mcp_server": declaration.name},
+            )
+        )
+    # Never silently discard host-specific auth, TLS, tool policy or future
+    # fields. Effective verified TLS is the runtime default, not dropped config.
+    portable = set(_OPENCLAW_PORTABLE_FIELDS)
+    if openclaw_ssl_verification_enabled(config):
+        portable.update({"sslVerify", "ssl_verify"})
+    declaration.unapplied = tuple(sorted(key for key in config if key not in portable))
 
 
 def _codex_headers(headers: Any, http_headers: Any) -> Any:

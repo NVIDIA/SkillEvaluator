@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 import re
 import shutil
@@ -8,6 +9,7 @@ import stat
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -61,6 +63,26 @@ def test_discover_trajectories_opencode_txt_fallback(tmp_path):
     trajectories = _discover_trajectories(skill, results_dir=results_root)
     assert "case-001" in trajectories
     assert trajectories["case-001"].get("steps")
+
+
+def test_discover_trajectories_finds_hermes_only_run(tmp_path):
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    results_root = tmp_path / "results"
+    skill_results = results_root / "demo"
+    run_id = "20260709_120000"
+    run_dir = skill_results / run_id
+    trial = run_dir / "hermes" / "with-skill" / "trials" / "lookup-positive"
+    trial.mkdir(parents=True)
+    trajectory = {"steps": [{"tool_calls": [{"tool": "Read"}]}]}
+    (trial / "trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+    (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
+    (run_dir / "result.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    (skill_results / "latest").symlink_to(run_id)
+
+    found = _discover_trajectories(skill, results_dir=results_root)
+
+    assert found == {"lookup-positive": trajectory}
 
 
 def test_discover_trajectories_opencode_maps_harbor_folder_via_result_metadata(tmp_path):
@@ -298,26 +320,35 @@ def test_to_agentskills_dataset_preserves_aces_metadata():
     assert dataset["evals"][0]["expected_script"] == "main.py"
 
 
-def test_dry_run_refine_does_not_write_dataset_when_no_trajectory(tmp_path, monkeypatch):
+def test_dry_run_plain_refine_uses_generated_cases_without_a_trajectory(tmp_path):
     skill = tmp_path / "my-skill"
     skill.mkdir()
     (skill / "SKILL.md").write_text(
         "---\nname: my-skill\ndescription: Does useful work\n---\n",
         encoding="utf-8",
     )
-    result = generate_dataset.main(
-        [
-            str(skill),
-            "--no-llm",
-            "--dry-run",
-            "--refine",
-        ]
-    )
+    result = generate_dataset.main([str(skill), "--no-llm", "--dry-run", "--refine"])
 
-    assert not (skill / "evals" / "evals.json").exists()
     assert result.status == "preview"
     assert result.cases_count == 1
-    assert result.dataset is not None
+    assert not (skill / "evals" / "evals.json").exists()
+
+
+def test_plain_refine_keeps_generated_cases_when_collection_is_unavailable(tmp_path, monkeypatch):
+    skill = tmp_path / "my-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: my-skill\ndescription: Does useful work\n---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(generate_dataset, "_discover_trajectories", lambda *_args, **_kwargs: ({}, {}))
+    monkeypatch.setattr(generate_dataset, "_run_agent_collect_trajectories", lambda *_args, **_kwargs: ({}, {}))
+
+    result = generate_dataset.main([str(skill), "--no-llm", "--refine"])
+
+    assert result.status == "created"
+    assert result.cases_count == 1
+    assert result.dataset["evals"][0]["expected_output"].startswith("The agent used the my-skill skill")
 
 
 def test_main_invalid_skill_raises_domain_error_without_printing(tmp_path, capsys):
@@ -433,10 +464,10 @@ def test_command_uses_explicit_argv_without_mutating_process_state(tmp_path, mon
     original_argv = sys.argv[:]
     monkeypatch.setattr(generate_dataset, "main", lambda argv=None: observed.append(list(argv or ())) or sentinel)
 
-    result = commands.create_dataset(tmp_path, no_llm=True, dry_run=True)
+    result = commands.create_dataset(tmp_path, no_llm=True, dry_run=True, grounding="intent")
 
     assert result is sentinel
-    assert observed == [[str(tmp_path.resolve()), "--no-llm", "--dry-run"]]
+    assert observed == [[str(tmp_path.resolve()), "--no-llm", "--dry-run", "--grounding", "intent"]]
     assert sys.argv == original_argv
 
 
@@ -462,6 +493,35 @@ def test_concurrent_programmatic_generation_has_no_cross_talk(tmp_path):
     assert [result.status for result in results] == ["created", "created"]
     assert [result.path.parent.parent for result in results] == skills
     assert [result.dataset["skill_name"] for result in results] == ["alpha-skill", "beta-skill"]
+
+
+def test_agent_collect_returns_discovered_trajectory_sources(tmp_path, monkeypatch):
+    skill = tmp_path / "my-skill"
+    skill.mkdir()
+    cases = [{"id": "case-001", "question": "Use my-skill.", "expected_skill": "my-skill"}]
+    trajectory = {"steps": [{"source": "agent", "message": "A sufficiently detailed observed response."}]}
+    source_path = tmp_path / "trajectory.json"
+    source_path.write_text(json.dumps(trajectory), encoding="utf-8")
+    discovered = ({"case-001": trajectory}, {"case-001": source_path})
+
+    monkeypatch.setattr("skillevaluator.utils.tool_runner.resolve_tool_path", lambda *_args: "/usr/bin/harbor")
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/docker" if name == "docker" else None)
+    monkeypatch.setattr(
+        "skillevaluator.provider_config.resolve_llm_provider",
+        lambda: SimpleNamespace(provider="test", model="test"),
+    )
+    monkeypatch.setattr(
+        "skillevaluator.tier3.harbor.runner.run_harbor_eval",
+        lambda **_kwargs: {"agents": {}},
+    )
+    monkeypatch.setattr(
+        "skillevaluator.tier3.generate_dataset._discover_trajectories",
+        lambda *_args, **_kwargs: discovered,
+    )
+
+    result = _run_agent_collect_trajectories(skill, cases, return_sources=True)
+
+    assert result == discovered
 
 
 def test_agent_collect_stages_agentskills_dataset(tmp_path, monkeypatch):
@@ -531,7 +591,6 @@ def test_parse_skill_falls_back_to_defaults_on_malformed_frontmatter(tmp_path):
     parsed = _parse(tmp_path, "name: [unclosed\ndescription: broken")
     assert parsed["name"] == "my-skill"
     assert parsed["description"] == ""
-
 
 
 def test_no_llm_negative_case_does_not_name_the_skill():
@@ -665,3 +724,85 @@ def test_refine_resolves_result_case_ids_without_the_tier3_extra(tmp_path: Path)
 
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout) == {"case_id": "case-007", "harbor_loaded": False}
+
+
+def test_llm_generation_writes_null_for_placeholder_expected_script(tmp_path, monkeypatch):
+    skill = tmp_path / "my-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: my-skill\ndescription: Does useful work\n---\n",
+        encoding="utf-8",
+    )
+    response = [
+        {
+            "id": "case-1",
+            "question": "Do useful work.",
+            "expected_skill": "my-skill",
+            "expected_script": "None",
+            "ground_truth": "The work is complete.",
+            "expected_behavior": ["None", "  "],
+        }
+    ]
+    monkeypatch.setattr(
+        "skillevaluator.provider_config.resolve_llm_provider",
+        lambda: SimpleNamespace(provider="test", model="test-model"),
+    )
+
+    class FakeLLMClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def completions(self, *_args, **_kwargs):
+            return json.dumps(response)
+
+    monkeypatch.setattr("skillevaluator.inference.client.LLMClient", FakeLLMClient)
+
+    dataset_path = generate_dataset.generate_one_case(skill, use_llm=True)
+
+    payload = json.loads(dataset_path.read_text(encoding="utf-8"))
+    assert payload["evals"][0]["expected_script"] is None
+    assert "assertions" not in payload["evals"][0]
+
+
+def test_llm_generation_falls_back_for_non_string_expected_script(tmp_path, monkeypatch, capsys):
+    skill_path = tmp_path / "my-skill"
+    skill_path.mkdir()
+    (skill_path / "SKILL.md").write_text(
+        "---\nname: my-skill\ndescription: Does useful work\n---\n",
+        encoding="utf-8",
+    )
+    response = [
+        {
+            "id": "case-1",
+            "question": "Do useful work.",
+            "expected_skill": "my-skill",
+            "expected_script": ["calc.py"],
+            "ground_truth": "The work is complete.",
+            "expected_behavior": ["The agent completes the work."],
+        }
+    ]
+    monkeypatch.setattr(
+        "skillevaluator.provider_config.resolve_llm_provider",
+        lambda: SimpleNamespace(provider="test", model="test-model"),
+    )
+
+    class FakeLLMClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def completions(self, *_args, **_kwargs):
+            return json.dumps(response)
+
+    monkeypatch.setattr("skillevaluator.inference.client.LLMClient", FakeLLMClient)
+
+    cases = asyncio.run(
+        generate_dataset._generate_with_llm(
+            generate_dataset._parse_skill(skill_path),
+            fallback_to_template=True,
+            announce_provider=False,
+        )
+    )
+
+    assert cases
+    assert cases[0]["expected_script"] is None
+    assert "Warning: LLM generation failed: LLM configuration or response was invalid." in capsys.readouterr().out

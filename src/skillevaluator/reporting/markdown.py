@@ -36,12 +36,17 @@ from skillevaluator.reporting.finding_summary import (
     summarize_findings,
     summarize_messages,
 )
+from skillevaluator.reporting.finding_verification import finding_verification
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
-    normalize_harbor_viewer_for_display,
+    harbor_job_links,
     safe_url,
 )
 from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
+from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION, pass_at_k_summary
+from skillevaluator.tier3.baseline_store import baseline_description
+from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
+from skillevaluator.tier3.version_comparison import version_comparison_lines
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
@@ -353,18 +358,42 @@ class MarkdownReporter(ReporterBase):
 
             lines.append("## Tier 3: Agent Evaluation")
             lines.append("")
+            if ae.get("baseline"):
+                lines.append(baseline_description(ae["baseline"]))
+                lines.append("")
+            if comparison := ae.get("prior_version_comparison"):
+                lines.extend(html.escape(line) for line in version_comparison_lines(comparison))
+                lines.append("")
             composite_text = _format_report_number(composite, signed=True)
-            lines.append(f"**Verdict:** {verdict} (composite lift = {composite_text})")
+            lines.append(f"**Verdict:** {verdict} (Skill Lift = {composite_text})")
+            if _finite_report_number(composite) is not None:
+                lines.append(SKILL_LIFT_DEFINITION)
+            if pass_summary := pass_at_k_summary(ae.get("pass_at_k"), ae.get("attempt_policy")):
+                lines.append(pass_summary)
+            provenance_line, _ = dataset_provenance_display(ae.get("dataset_provenance"))
+            if provenance_line:
+                lines.append(_markdown_inline_text(provenance_line))
             if verdict == "INCONCLUSIVE":
                 lines.append("Skill never activated. Scores are diagnostic only; no lift verdict was computed.")
             runtime_number = _finite_report_number(runtime)
             runtime_text = f"{runtime_number:.1f}s" if runtime_number is not None else "N/A"
             lines.append(f"**Runtime:** {runtime_text}")
-            harbor_viewer = normalize_harbor_viewer_for_display(ae)
-            if job_url := _markdown_safe_url(harbor_viewer.get("job_url")):
-                lines.append(f"**Harbor logs:** [Open Harbor logs]({job_url})")
-            if analysis_url := _markdown_safe_url(harbor_viewer.get("analysis_url")):
-                lines.append(f"**Harbor analysis:** [Open Harbor analysis]({analysis_url})")
+            # One list item per job, so CommonMark keeps each job's links separate.
+            job_lines = []
+            for job in harbor_job_links(ae):
+                links = [
+                    f"[{label}]({url})"
+                    for label, url in (
+                        ("Harbor logs", _markdown_safe_url(job.get("url"))),
+                        ("Harbor analysis", _markdown_safe_url(job.get("analysis_url"))),
+                    )
+                    if url
+                ]
+                if links:
+                    job_lines.append(f"- **{_markdown_inline_text(job['name'])}:** " + " · ".join(links))
+            if job_lines:
+                lines.append("")
+                lines.extend(job_lines)
             lines.append("")
 
             evaluators = ae.get("evaluators", {})
@@ -471,6 +500,24 @@ class MarkdownReporter(ReporterBase):
                         if url:
                             label = _markdown_inline_text(harbor_evidence_link_text(evidence)) or "Evidence"
                             lines.append(f"   - Evidence: [{label}]({url})")
+                lines.append("")
+
+            if next_steps := _dict_items(ae.get("next_steps")):
+                lines.append("### Next Steps")
+                lines.append("")
+                for idx, step in enumerate(next_steps, start=1):
+                    problem = _markdown_inline_text(step.get("problem"))
+                    action = _markdown_inline_text(step.get("action"))
+                    if not problem or not action:
+                        continue
+                    target = _markdown_inline_text(step.get("target")) or "evaluation"
+                    strength = _markdown_inline_text(step.get("strength"))
+                    label = target if strength in ("", "supported") else f"{target} · {strength}"
+                    lines.append(f"{idx}. **{problem}** [{label}]: {action}")
+                    if check := _markdown_inline_text(step.get("check")):
+                        lines.append(f"   - Check: {check}")
+                    if evidence := _markdown_inline_text(step.get("evidence")):
+                        lines.append(f"   - Evidence: {evidence}")
                 lines.append("")
 
         # Results per validator
@@ -581,6 +628,13 @@ class MarkdownReporter(ReporterBase):
             emoji = finding.severity.emoji
             severity_upper = finding.severity.value.upper()
             message = _markdown_table_cell(finding.message)
+            verification = finding_verification(finding)
+            if verification:
+                label = f"{verification.verdict} ({verification.confidence} confidence)"
+                message += f"<br><strong>LLM verification:</strong> {_markdown_untrusted_table_cell(label)}"
+                if verification.reasoning:
+                    message += f"<br>Reasoning: {_markdown_untrusted_table_cell(verification.reasoning)}"
+                message += f"<br>{_markdown_untrusted_table_cell(verification.severity_effect)}"
             location = _markdown_table_cell(finding.location)
             lines.append(f"| {emoji} {severity_upper} | {message} | <code>{location}</code> |")
 

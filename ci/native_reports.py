@@ -81,10 +81,14 @@ def _trusted_inline_code() -> frozenset[str]:
 
 def constrain_native_html(document: str) -> str:
     """Reject executable markup absent from the trusted Tier 1 template."""
+    return _constrain_native_html(document, _trusted_inline_code())
+
+
+def _constrain_native_html(document: str, trusted_code: frozenset[str]) -> str:
     parser = _InlineCode()
     parser.feed(document)
     code = {*parser.scripts, *parser.handlers}
-    if parser.external_script or not code <= _trusted_inline_code():
+    if parser.external_script or not code <= trusted_code:
         raise ValueError("Unexpected executable markup in the native report")
     hashes = sorted(
         {"'sha256-" + base64.b64encode(hashlib.sha256(code.encode()).digest()).decode() + "'" for code in code}
@@ -107,6 +111,51 @@ def constrain_native_html(document: str) -> str:
         + '">'
         + document[position:]
     )
+
+
+def render_native_retained_report(
+    payload: dict,
+    *,
+    skill_name: str,
+    expected_skill_name: str | None = None,
+    context: dict | None = None,
+    scan_root: str | None = None,
+) -> str:
+    """Render every tier from typed JSON, then constrain trusted generated code.
+
+    Tier 3 templates contain JSON-escaped data in dynamic scripts and handlers.
+    Their CSP hashes must be calculated from a fresh trusted template render,
+    never from artifact-supplied markup. This entrypoint accepts JSON only. The
+    public ``constrain_native_html`` remains strict for legacy supplied HTML.
+    Remote chart code is omitted; native score tables and local UI remain usable
+    offline, and no external network access is authorized by the CSP.
+    """
+    context = dict(context or {})
+    canonical = context.pop("canonical_json_url", None)
+    index = context.pop("report_index_url", None)
+    if canonical is not None:
+        if canonical not in {f"skillevaluator-tier{tier}.json" for tier in (1, 2, 3)}:
+            raise ValueError("Invalid canonical native report filename")
+        context["canonical_json_url"] = "skillevaluator-tier1.json"
+    if index is not None:
+        if index not in {"../index.html", "../../index.html"}:
+            raise ValueError("Invalid native report index path")
+        context["report_index_url"] = "../index.html"
+    document = render_retained_report(
+        payload,
+        skill_name=skill_name,
+        expected_skill_name=expected_skill_name,
+        context=context,
+        scan_root=scan_root,
+    )
+    if canonical is not None:
+        document = document.replace('href="skillevaluator-tier1.json"', f'href="{canonical}"')
+    if index is not None:
+        document = document.replace('href="../index.html"', f'href="{index}"')
+    document = re.sub(r"<script\b[^>]*\bsrc=[^>]*>\s*</script\s*>", "", document, flags=re.IGNORECASE)
+    generated = _InlineCode()
+    generated.feed(document)
+    return _constrain_native_html(document, frozenset([*generated.scripts, *generated.handlers]))
 
 
 _STYLE = """

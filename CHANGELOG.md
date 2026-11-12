@@ -6,6 +6,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Capability-gated CI onboarding for protected Tier 1 `--llm`/SkillSpector
+  checks, independent Tier 3 gateway/judge settings and native agent models.
+  Combined reports retain source-bound `BENCHMARK.md` cards for every outcome;
+  GitHub can optionally propose eligible cards through a separate trusted
+  benchmark-update PR. Tier 2/3 remain advisory for CI. Retained JSON preserves
+  Tier 1 required-check and unscanned-content scope for publication decisions.
+  The repository's own candidate CI selects Build for Tier 1/2 and separate
+  gateway-backed Claude Code/Codex models for Tier 3, without changing upstream
+  provider defaults.
+
 - HTML, Markdown, and terminal findings show recorded LLM verification verdicts,
   confidence, and reasoning, with an explanation of retained or downgraded severity.
   Medium-confidence false positives and uncertain verdicts retain existing gates.
@@ -134,7 +144,7 @@ All notable changes to SkillEvaluator are documented in this file.
   onboarding and status recognize this filename collision without replacing
   reusable workflow definitions. Automatic comments activate after the
   listener reaches the default branch.
-   Document the shared chat/judge/agent model input and model-availability
+  Document independent chat, judge and agent model settings and model-availability
   troubleshooting for provider-backed CI.
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI

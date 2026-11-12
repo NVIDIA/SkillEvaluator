@@ -45,7 +45,7 @@ def test_aggregate_retains_every_tier_after_failure():
     workflow = load(".github/workflows/evaluate-all-tiers.yml")
     aggregate = workflow["jobs"]["aggregate"]
     assert aggregate["if"] == "${{ always() }}"
-    assert set(aggregate["needs"]) == {"tier1", "paid-tiers"}
+    assert set(aggregate["needs"]) == {"tier1", "tier1-llm", "paid-tiers"}
     downloads = [s for s in aggregate["steps"] if s.get("uses", "").startswith("actions/download-artifact@")]
     assert [s["with"]["pattern"] for s in downloads] == ["skill-evaluator-tier[123]-attempt-*"]
     assert downloads[0]["with"]["path"] == "${{ runner.temp }}/skill-artifacts"
@@ -68,7 +68,9 @@ def test_aggregate_reuses_tier_evidence_from_jobs_not_rerun():
     pattern = download["with"]["pattern"]
     tier1 = load(".github/workflows/evaluate-skills.yml")["jobs"]["tier1"]["steps"]
     produced = [
-        s["with"]["name"].replace("${{ inputs.artifact-name }}", workflow["jobs"]["tier1"]["with"]["artifact-name"])
+        # The default/fork path retains canonical static evidence. Protected
+        # enrichment emits the same canonical name from its separate job.
+        s["with"]["name"].replace("${{ inputs.artifact-name }}", "skill-evaluator-tier1")
         for s in tier1
         if s.get("uses", "").startswith("actions/upload-artifact@")
     ]
@@ -300,6 +302,7 @@ def test_gitlab_aggregate_downloads_evidence_from_both_advisory_tiers():
         {"job": "skill-evaluation", "artifacts": "true", "optional": "true"},
         {"job": "skill-evaluation-native", "artifacts": "true", "optional": "true"},
         {"job": "skill-evaluation-native-tier2", "artifacts": "true", "optional": "true"},
+        {"job": "skill-evaluation-tier1-llm", "artifacts": "true", "optional": "true"},
     ]
 
 

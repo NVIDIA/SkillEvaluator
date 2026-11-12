@@ -24,6 +24,7 @@ from rich.text import Text
 from skillevaluator.reporting.summary_copy import pass_at_k_summary
 from skillevaluator.reporting.terminal_styles import AMBER
 from skillevaluator.tier3.attempt_verdict import attempt_verdict, scored_goal_accuracy
+from skillevaluator.tier3.eval_core.checks import resolve_should_trigger
 from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
 from skillevaluator.utils.redaction import redact_sensitive_text
 from skillevaluator.utils.secret_redaction import Redactor
@@ -874,14 +875,23 @@ def _run_error(trial_dir: Path, run_dir: Path) -> str:
 
 
 def _diagnose_agent_case(
-    run_dir: Path, agent_name: str, agent: Mapping[str, Any], case_id: str
+    run_dir: Path,
+    agent_name: str,
+    agent: Mapping[str, Any],
+    case_id: str,
+    *,
+    entry: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     with_case = _cases(agent, "with_skill").get(case_id)
     with_marks, without_marks = _marks(with_case), _marks(_cases(agent, "without_skill").get(case_id))
     wp, wn = _attempt_rate(with_marks)
     bp, bn = _attempt_rate(without_marks)
     errors = with_marks.count(ERROR)
-    not_used = _never_activated(agent)
+    # Negative controls must avoid the skill; an agent-wide positive miss does not apply to them.
+    if entry is None:
+        entry = _dataset_entries(run_dir).get(case_id, {})
+    should_trigger = resolve_should_trigger(dict(entry))
+    not_used = should_trigger is not False and _never_activated(agent)
     failed_trials = []
     for attempt in with_case.get("attempts", []) if isinstance(with_case, Mapping) else []:
         if isinstance(attempt, Mapping) and attempt.get("passed") is not True:
@@ -932,7 +942,7 @@ def _diagnose_agent_case(
     elif finals and all(_ASKS_FOR_INPUT.search(f) for f in finals):
         kind = "missing input"
         what = f'the agent stopped to ask for input the case does not provide: "{_short(finals[0], 140)}"'
-    elif activations and all(a is False for a in activations):
+    elif should_trigger is not False and activations and all(a is False for a in activations):
         kind, what = "skill not used", "the agent never loaded the skill in the failed attempts"
         if reasons:
             what += f"; {reasons.most_common(1)[0][0]}"
@@ -1160,10 +1170,11 @@ def what_to_fix(
 ) -> list[dict[str, Any]]:
     """Rank failed test cases across agents by attempts lost and attach one fix each."""
     agents = {str(k): v for k, v in (result.get("agents") or {}).items() if isinstance(v, Mapping)}
+    dataset = _dataset_entries(run_dir)
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for case_id in _case_ids(agents):
         for name, agent in agents.items():
-            for issue in _diagnose_agent_case(run_dir, name, agent, case_id):
+            for issue in _diagnose_agent_case(run_dir, name, agent, case_id, entry=dataset.get(case_id, {})):
                 grouped.setdefault((case_id, issue["kind"]), []).append(issue)
     issues = []
     for items in grouped.values():
@@ -1181,7 +1192,6 @@ def what_to_fix(
             env_errors=list(dict.fromkeys(e for item in items for e in item["env_errors"])),
         )
         issues.append(merged)
-    dataset = _dataset_entries(run_dir)
     description = _skill_description(skill_path)
     for issue in issues:
         entry = dataset.get(issue["case"], {})

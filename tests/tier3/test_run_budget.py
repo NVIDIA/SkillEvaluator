@@ -145,6 +145,27 @@ def test_budget_usage_reads_cached_tokens_and_excludes_salvage(tmp_path):
     }
 
 
+def test_budget_usage_counts_one_judge_call_per_ragas_score_not_per_ragas_request(tmp_path):
+    verifier_dir = tmp_path / "trial" / "verifier"
+    verifier_dir.mkdir(parents=True)
+    (verifier_dir / "judge_attempts.json").write_text(
+        json.dumps(
+            {
+                "attempts": [
+                    {"metric": "accuracy", "method": "llm", "status": "accepted", "prompt_sha256": "a" * 64},
+                    # Requests RAGAS sent itself, the first one retried by the SDK after a 503.
+                    {"metric": "goal_accuracy", "method": "ragas", "status": "error", "prompt_sha256": "b" * 64},
+                    {"metric": "goal_accuracy", "method": "ragas", "status": "replied", "prompt_sha256": "b" * 64},
+                    # The outcome entry holds the score and has no prompt.
+                    {"metric": "goal_accuracy", "method": "ragas", "status": "accepted", "score": 1.0},
+                ]
+            }
+        )
+    )
+
+    assert runner._budget_usage(tmp_path) == {"judge_calls": 2}
+
+
 def test_budgeted_attempts_use_real_cancellation_object(monkeypatch, tmp_path):
     cancellation = runner._HarborRunCancellation()
     cancellation.requested.set()

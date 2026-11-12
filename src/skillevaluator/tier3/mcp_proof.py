@@ -425,8 +425,9 @@ def _capped_client(
     connect_timeout: float,
     read_timeout: float,
     on_failure: Callable[[str], None] | None = None,
+    http_stack: tuple[Any, Any] | None = None,
 ):
-    """An httpx client that never follows redirects, ignores proxy/.netrc settings, and caps bodies.
+    """A client that never follows redirects, ignores proxy/.netrc settings, and caps bodies.
 
     Its TCP connections go only to ``addresses`` (the endpoint policy's checked
     addresses) and only for ``url``'s host and port. TLS still verifies the
@@ -436,8 +437,11 @@ def _capped_client(
     told first: the ``mcp`` client catches transport errors and would otherwise
     wait for a reply until the total timeout.
     """
-    import httpcore
-    import httpx
+    if http_stack is None:
+        import httpcore
+        import httpx
+    else:
+        httpx, httpcore = http_stack
 
     target = httpx.URL(url)
     pinned_host = target.raw_host.decode("ascii").lower()
@@ -509,6 +513,14 @@ def _capped_client(
         async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
             request.headers["Accept-Encoding"] = "identity"
             response = await self._inner.handle_async_request(request)
+            if 300 <= response.status_code < 400:
+                # SDK2 follows some redirects itself, ignoring follow_redirects.
+                # Refuse before its transport can replay headers or requests.
+                await response.aclose()
+                message = "redirect responses are not followed"
+                if on_failure is not None:
+                    on_failure(message)
+                raise _ResponseRefused(message)
             encoding = response.headers.get("content-encoding", "identity").strip().casefold()
             if encoding != "identity":
                 # Inspect headers before exposing the stream to HTTPX's decoder.
@@ -615,8 +627,16 @@ async def _probe_session(
 ) -> tuple[list[str], dict[str, dict[str, Any]]]:
     import anyio
     from mcp import ClientSession
+    from mcp.client import streamable_http
     from mcp.client.sse import sse_client
-    from mcp.client.streamable_http import streamable_http_client
+
+    # Read the SDK's module alias without constructing its unconstrained default
+    # client. Both transports must use the same matching HTTP client/core stack.
+    http_stack = None
+    if (sdk_http := getattr(streamable_http, "httpx2", None)) is not None:
+        import httpcore2
+
+        http_stack = (sdk_http, httpcore2)
 
     abort = _ProbeAbort()
 
@@ -629,6 +649,7 @@ async def _probe_session(
             connect_timeout=CONNECT_TIMEOUT_S,
             read_timeout=READ_TIMEOUT_S,
             on_failure=abort.fail,
+            http_stack=http_stack,
         )
 
     listed: Any = None
@@ -650,8 +671,8 @@ async def _probe_session(
                 else:
                     async with (
                         factory(headers) as client,
-                        streamable_http_client(url, http_client=client) as (read, write, _session_id),
-                        ClientSession(read, write) as session,
+                        streamable_http.streamable_http_client(url, http_client=client) as streams,
+                        ClientSession(*streams[:2]) as session,
                     ):
                         await session.initialize()
                         listed = await session.list_tools()
@@ -668,7 +689,10 @@ async def _probe_session(
         if isinstance(name, str) and name and len(names) < MAX_PROBE_TOOLS:
             safe = _detail(name)[:MAX_TOOL_NAME_CHARS]
             names.append(safe)
-            schema = _input_schema(getattr(tool, "inputSchema", None))
+            raw_schema = getattr(tool, "inputSchema", None)
+            if raw_schema is None:  # SDK2 uses native snake-case model attributes.
+                raw_schema = getattr(tool, "input_schema", None)
+            schema = _input_schema(raw_schema)
             if schema is not None and safe == name:
                 schemas[name] = schema
     return names, schemas
@@ -713,7 +737,6 @@ def probe_mcp_server(
     note = _header_note(missing, withheld, sent, _target_host(url))
     try:
         import anyio
-        import httpx  # noqa: F401 -- availability check
         import mcp  # noqa: F401 -- availability check
     except ImportError:
         return _entry(

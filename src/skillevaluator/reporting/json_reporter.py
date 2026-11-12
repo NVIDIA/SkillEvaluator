@@ -276,6 +276,21 @@ class JSONReporter(ReporterBase):
         if rubric_results:
             data["rubric_eval"] = rubric_results[0]
 
+        # Tier 1 applicability: ``--type auto`` found no supported artifact, so
+        # the manifest checks were recorded as not applicable. Every result of
+        # such a run carries the record, whatever --checks selected, so CI can
+        # read this instead of parsing skip reasons.
+        tier1_applicability = next(
+            (
+                result.metadata.get("tier1_applicability")
+                for result in results
+                if isinstance(result.metadata.get("tier1_applicability"), dict)
+            ),
+            None,
+        )
+        if tier1_applicability is not None:
+            data["tier1_applicability"] = tier1_applicability
+
         # Tier 3: Agent evaluation summary
         if emitted_agent_eval:
             data["tier3"] = emitted_agent_eval

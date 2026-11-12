@@ -396,10 +396,29 @@ All notable changes to SkillEvaluator are documented in this file.
 - Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
   the PR or merge request's target revision. Policy files from the proposed
   changes cannot approve their own exceptions.
+
+- `skillevaluator validate` on a target with no skill, rules, workflows, or
+  plugin, such as an ordinary source repository, no longer fails Tier 1 with
+  three `No skills found` errors and exit 1 when every content scan passes.
+  When `--type auto` detects the type as `unknown`, the `schema`, `version`,
+  and `quality` checks are now recorded as not applicable, never as passes:
+  the terminal summary and the HTML report count them as N/A, and the JSON
+  and Markdown reports list them as skipped with a `not applicable` reason.
+  The JSON report of every such run adds a root `tier1_applicability` object.
+  The content scans still run with their unrestricted scope, so a real
+  finding still fails the run; such a run is never eligible for publication.
+  A target folder whose own `SKILL.md`, `workflow-rules.mdc`,
+  `agent_plugin.yaml`/`.yml`, or `.claude-plugin/plugin.json` is mis-cased
+  (such as `Skill.md`) or a dangling symlink still fails its manifest checks,
+  and `--type skill` still validates the target as a skill.
+
+- The unknown-artifact CLI guidance links to the published content-types documentation route.
+
 - Security checks preserve authored evaluation files and their findings while
   excluding generated outputs. Fully inspected skills with only missing-path
   reference caveats retain visible warnings instead of an incomplete-scan
   failure; actual coverage gaps and analyzer failures still block.
+
 - PII findings clarify that required author attribution is accepted while
   duplicate contact addresses need removal, replacement, or a reviewed waiver.
 

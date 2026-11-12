@@ -34,10 +34,17 @@ def test_pr_history_mode_and_attempt_artifact_wiring():
     )
     # Only changed mode fetches history, and it skips old file contents.
     # The numbers are ordered so that 0, which is falsy, is never the && operand.
-    assert checkout["with"]["fetch-depth"] == "${{ env.SCAN_MODE != 'changed' && 1 || 0 }}"
-    assert checkout["with"]["filter"] == "${{ env.SCAN_MODE == 'changed' && 'blob:none' || '' }}"
+    assert (
+        checkout["with"]["fetch-depth"] == "${{ !inputs.security-baselines && env.SCAN_MODE != 'changed' && 1 || 0 }}"
+    )
+    assert (
+        checkout["with"]["filter"]
+        == "${{ !inputs.security-baselines && env.SCAN_MODE == 'changed' && 'blob:none' || '' }}"
+    )
     assert checkout["with"]["ref"] == env["DIFF_HEAD_SHA"] == "${{ github.event.pull_request.head.sha || github.sha }}"
     assert env["DIFF_BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
+    assert env["POLICY_SOURCE_SHA"] == "${{ github.event.pull_request.base.sha || github.sha }}"
+    assert env["SECURITY_BASELINES"] == "${{ inputs.security-baselines }}"
     assert env["LLM_API_KEY"] == "${{ inputs.llm && secrets.LLM_API_KEY || '' }}"
     assert env["CALLER_WORKFLOW_SHA"] == "${{ github.workflow_sha }}"
     assert env["SCAN_WORKERS"] == "${{ inputs.scan-workers }}"
@@ -70,7 +77,15 @@ def test_real_workflow_shell_preserves_container_boundary_and_secret_selection(t
     subprocess.run(["bash", "-e", "-o", "pipefail", "-c", scan["run"]], env=env, check=True, capture_output=True)
     args = json.loads(captured.read_text())
     passed_environment = [args[index + 1] for index, arg in enumerate(args) if arg == "--env"]
-    assert {"SCAN_MODE", "DIFF_BASE_SHA", "DIFF_HEAD_SHA", "MIN_SCORE", "SCAN_WORKERS"}.issubset(passed_environment)
+    assert {
+        "SCAN_MODE",
+        "DIFF_BASE_SHA",
+        "DIFF_HEAD_SHA",
+        "MIN_SCORE",
+        "SCAN_WORKERS",
+        "POLICY_SOURCE_SHA",
+        "SECURITY_BASELINES",
+    }.issubset(passed_environment)
     assert ("LLM_API_KEY" in args) is (llm == "true")
     for flag in ("--read-only", "--user", "--cap-drop", "--security-opt"):
         assert flag in args

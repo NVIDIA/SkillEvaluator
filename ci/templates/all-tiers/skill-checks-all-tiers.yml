@@ -22,6 +22,7 @@ jobs:
       tiers: '1,2,3'
       paths: skills
       min-score: 70
+      security-baselines: false
       scan-mode: auto
       env-mode: docker
       provider: openai

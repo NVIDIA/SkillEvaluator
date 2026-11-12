@@ -198,6 +198,25 @@ def test_loader_keeps_usage_of_attempts_that_scores_never_read(tmp_path: Path) -
     assert agents["codex"]["usage_only_attempts_baseline"] == []
 
 
+@pytest.mark.parametrize("cached", [-1, True, "10", 1.5, 2**60])
+def test_unscored_attempt_with_invalid_cached_tokens_is_not_measured(tmp_path: Path, cached: object) -> None:
+    run = _run(tmp_path)
+    trajectory_path = run / "claude-code/without-skill/trials/case-2__b/trajectory.json"
+    trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
+    trajectory["final_metrics"]["total_cached_tokens"] = cached
+    trajectory_path.write_text(json.dumps(trajectory), encoding="utf-8")
+    skill = tmp_path / "demo"
+    skill.mkdir()
+
+    result = agent_eval_result_from_directory(skill, run, use_llm_judge=False)
+
+    assert result is not None
+    baseline = result.metadata["agent_eval"]["token_usage"]["agents"]["claude-code"]["baseline"]
+    assert baseline["coverage"]["status"] == "partial"
+    assert baseline["coverage"]["measured_attempts"] == 1
+    assert baseline["totals"]["total_tokens"] == 1650
+
+
 def test_an_unscored_attempt_of_a_case_id_with_double_underscores_keeps_its_case(tmp_path: Path) -> None:
     run = tmp_path / "run"
     _arm(run, "codex", "with-skill", [("auth__login__a1b2c3d", (100, 10, 0), True)])

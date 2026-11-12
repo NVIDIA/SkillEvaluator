@@ -673,7 +673,11 @@ def _usage_tokens(counters: dict[str, Any]) -> dict[str, int] | None:
     if prompt is None or completion is None:
         return None
     tokens = {"prompt": prompt, "completion": completion}
-    cached = _trajectory_token_counter(counters.get("cached_tokens"))
+    raw_cached = counters.get("cached_tokens")
+    cached = _trajectory_token_counter(raw_cached)
+    if raw_cached is not None and cached is None:
+        # An invalid recorded counter is not Harbor's omitted zero cache.
+        return None
     if cached is not None:
         tokens["cached"] = cached
     return tokens

@@ -470,7 +470,9 @@ All notable changes to SkillEvaluator are documented in this file.
   `similarity-check` now excludes a manifest whose `name`, `title`, or
   `description` is a non-empty value that is not a string, such as `name: 2048`
   or `name: yes`, with the coverage reason `non_string_name_or_description`
-  instead of converting the value. An empty, zero, or false value such as `0`,
+  instead of converting the value. Its debug diagnostic omits the absolute
+  manifest path, keeping private host-directory names out of logs.
+  An empty, zero, or false value such as `0`,
   `false`, or `[]` still gets `missing_name_or_description`. Either way, like
   any excluded manifest, it makes the scan incomplete. It stops with an error
   that names the manifest when a value is longer than 16,384 characters, the

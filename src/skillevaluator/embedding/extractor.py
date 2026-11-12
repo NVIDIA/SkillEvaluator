@@ -397,12 +397,7 @@ def _extract_from_file(
     if not (isinstance(name, str) and isinstance(description, str)):
         if budget is not None:
             budget.exclude(file_path, "non_string_name_or_description")
-        logger.debug(
-            "%s or %s is not a string in %s",
-            name_field,
-            description_field,
-            file_path,
-        )
+        logger.debug("Frontmatter %s or %s is not a string", name_field, description_field)
         return None
     try:
         name = require_bounded_string(name, name_field, max_chars=MAX_FRONTMATTER_FIELD_CHARS, allow_empty=True)

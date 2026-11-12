@@ -77,6 +77,26 @@ def test_discovery_debug_log_uses_root_label_without_host_path(tmp_path: Path, m
     assert root.name in rendered
 
 
+@pytest.mark.parametrize("field", ["name", "description"])
+def test_non_string_frontmatter_debug_log_omits_host_path(tmp_path: Path, monkeypatch, field: str) -> None:
+    skill_dir = tmp_path / "private-ancestor" / "typed-skill"
+    skill_dir.mkdir(parents=True)
+    values = {"name": "typed-skill", "description": "A test skill"}
+    values[field] = "[not, a, string]"
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {values['name']}\ndescription: {values['description']}\n---\n", encoding="utf-8"
+    )
+    debug = MagicMock()
+    monkeypatch.setattr(extractor_module.logger, "debug", debug)
+
+    assert extract_from_skill(skill_dir) is None
+
+    rendered = "\n".join(call.args[0] % call.args[1:] for call in debug.call_args_list)
+    assert "is not a string" in rendered
+    assert str(tmp_path) not in rendered
+    assert "private-ancestor" not in rendered
+
+
 def _write_rule(root: Path, filename: str, title: str, description: str) -> Path:
     rule_file = root / filename
     rule_file.parent.mkdir(parents=True, exist_ok=True)

@@ -308,6 +308,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Public MCP URL probes handle modern SDK client and stream APIs while retaining
+  checked-address connections, header grants, response limits, and bounded
+  cleanup. Redirect responses are refused before SDK-level redirect handling.
+  Isolated wheel tests cover SDK 1.28.1 and 2.3.0; the supported Tier 3 dependency
+  range remains unchanged.
+
 - Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
   the PR or merge request's target revision. Policy files from the proposed
   changes cannot approve their own exceptions.

@@ -98,6 +98,8 @@ for skills. Its Tier 1 LLM checks still run only when requested.
   ```
 
   Confirmed findings keep their original severity. High-confidence false positives stay visible but are downgraded to INFO and carry verification metadata explaining the review. Static scanning always runs first — if a requested LLM stage is unavailable or returns unusable evidence, the run does not silently turn green. `security-scan` and `pii-scan` accept `--llm-verify` too.
+
+  HTML, Markdown, and terminal reports show the recorded verification verdict, confidence, and reasoning beside each finding, together with its reported severity.
 </Steps>
 
 Direct `tier1 PATH` and `tier1 validate PATH` print the terminal report and
@@ -117,6 +119,18 @@ Reports for any of these runs are selected with `-r`/`--report` (`cli`, `json`, 
 | Plugin | `plugin` | A bundle-reference `agent_plugin.yaml`/`.yml` manifest, or a contained `.claude-plugin/plugin.json` manifest |
 
 Plugins are validated against their public contract; the `quality`, `lint`, and `version` checks are skill-only and are skipped for plugins, rules, and workflows.
+
+When `--type auto` finds none of these signals, for example in an ordinary source repository, the target's type is `unknown`. There is no manifest to check, so Tier 1:
+
+- Records `schema`, `version`, and `quality` as not applicable instead of failing them with `No skills found`. The terminal summary and the HTML report count them as N/A. The JSON and Markdown reports list them as skipped, with a skip reason that starts with `not applicable`. No report counts them as passes.
+- Still runs the content scans (`security`, `pii`, `license`, `code-integrity`, `unicode`, `lint`, and `dependency` when selected), so a real secret or card number still fails the run. The security scan keeps its unrestricted scope.
+- Passes when those scans pass. A misspelled `--checks` name still fails. Tier 2 deduplication still runs on the target unless you pass `--no-dedup` or `--tiers 1`, and can still fail the run.
+- Adds a root `tier1_applicability` object to the JSON report, whichever checks `--checks` and `--skip` select: `applicability` (`not_applicable`), `reason_code` (`unsupported_content_type`), `detected_content_type` (`unknown`), and `supported_content_types`.
+- Is never eligible for publication, because a not-applicable check is not evidence.
+
+Auto-detection also reads the directory names in the target's absolute path. A repository whose path includes a directory named `skills`, `team-skills`, `team-rules`, `workflows`, or `team-workflows`, such as a CI checkout at `/home/runner/work/skills/skills`, is detected as that type, not as `unknown`, and Tier 1 validates it as that type, as before. `--type` forces a type but cannot select `unknown`.
+
+A target folder that itself holds a manifest entry in any letter case (`SKILL.md`, `workflow-rules.mdc`, `agent_plugin.yaml`, `agent_plugin.yml`, or `.claude-plugin/plugin.json`), such as `Skill.md`, or a manifest symlink whose target is missing, is a broken artifact rather than a folder without one, so its manifest checks still run and fail. A `.claude-plugin` folder without a `plugin.json`, such as a marketplace's, does not count. This applies only to the target's own entries: a mis-cased manifest below the target is not discovered; validate that folder directly. Pass `--type skill` (or another type) to validate any target as that type; a missing `SKILL.md` then fails as before. A folder that holds skills below it, such as `.claude/skills/<name>/SKILL.md` or `.agents/skills/<name>/SKILL.md`, is still validated as a collection of skills.
 
 For collections, pass a folder containing skills under `skills/` or `team-skills/`. Folder-level validation discovers each live `SKILL.md` below the target while excluding configured names such as `evals`, `results`, `versions`, `.git`, `.venv`, `node_modules`, and `__pycache__`.
 

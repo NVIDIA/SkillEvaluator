@@ -85,7 +85,8 @@
               "choices": [
                 "openai",
                 "anthropic",
-                "nv_build"
+                "nv_build",
+                "openai-compatible"
               ],
               "default": "openai",
               "name": "provider",
@@ -97,7 +98,8 @@
             {
               "choices": [
                 "openai",
-                "nv_build"
+                "nv_build",
+                "openai-compatible"
               ],
               "name": "embedding_provider",
               "opts": [
@@ -120,6 +122,114 @@
               ],
               "param_type": "option",
               "type": "text"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "tier1_llm",
+              "opts": [
+                "--tier1-llm"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "choices": [
+                "openai",
+                "anthropic",
+                "nv_build"
+              ],
+              "name": "tier1_provider",
+              "opts": [
+                "--tier1-provider"
+              ],
+              "param_type": "option"
+            },
+            {
+              "default": "",
+              "name": "tier1_model",
+              "opts": [
+                "--tier1-model"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "default": "",
+              "name": "base_url",
+              "opts": [
+                "--base-url"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "default": "",
+              "name": "embedding_base_url",
+              "opts": [
+                "--embedding-base-url"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "choices": [
+                "openai",
+                "anthropic",
+                "nv_build",
+                "openai-compatible"
+              ],
+              "name": "tier3_provider",
+              "opts": [
+                "--tier3-provider"
+              ],
+              "param_type": "option"
+            },
+            {
+              "default": "",
+              "name": "tier3_model",
+              "opts": [
+                "--tier3-model"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "default": "",
+              "name": "tier3_base_url",
+              "opts": [
+                "--tier3-base-url"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "multiple": true,
+              "name": "agent_model",
+              "opts": [
+                "--agent-model"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "default": "SKILL_EVAL_LLM_API_KEY",
+              "name": "gateway_secret",
+              "opts": [
+                "--gateway-secret"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "benchmark_pr",
+              "opts": [
+                "--benchmark-pr"
+              ],
+              "param_type": "option",
+              "type": "boolean"
             },
             {
               "name": "agents",
@@ -1028,6 +1138,18 @@
           "param_type": "option",
           "secondary_opts": [
             "--no-agent-runtime-preflight"
+          ],
+          "type": "boolean"
+        },
+        {
+          "is_flag": true,
+          "name": "tolerate_baseline_timeouts",
+          "opts": [
+            "--tolerate-baseline-timeouts"
+          ],
+          "param_type": "option",
+          "secondary_opts": [
+            "--no-tolerate-baseline-timeouts"
           ],
           "type": "boolean"
         },
@@ -3233,6 +3355,18 @@
               "type": "boolean"
             },
             {
+              "is_flag": true,
+              "name": "tolerate_baseline_timeouts",
+              "opts": [
+                "--tolerate-baseline-timeouts"
+              ],
+              "param_type": "option",
+              "secondary_opts": [
+                "--no-tolerate-baseline-timeouts"
+              ],
+              "type": "boolean"
+            },
+            {
               "name": "timeout_multiplier",
               "opts": [
                 "--timeout-multiplier"
@@ -4328,6 +4462,18 @@
             "type": "boolean"
           },
           {
+            "is_flag": true,
+            "name": "tolerate_baseline_timeouts",
+            "opts": [
+              "--tolerate-baseline-timeouts"
+            ],
+            "param_type": "option",
+            "secondary_opts": [
+              "--no-tolerate-baseline-timeouts"
+            ],
+            "type": "boolean"
+          },
+          {
             "name": "timeout_multiplier",
             "opts": [
               "--timeout-multiplier"
@@ -4917,6 +5063,18 @@
           "param_type": "option",
           "secondary_opts": [
             "--no-agent-runtime-preflight"
+          ],
+          "type": "boolean"
+        },
+        {
+          "is_flag": true,
+          "name": "tolerate_baseline_timeouts",
+          "opts": [
+            "--tolerate-baseline-timeouts"
+          ],
+          "param_type": "option",
+          "secondary_opts": [
+            "--no-tolerate-baseline-timeouts"
           ],
           "type": "boolean"
         },

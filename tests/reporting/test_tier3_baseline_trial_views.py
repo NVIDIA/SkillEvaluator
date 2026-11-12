@@ -291,6 +291,136 @@ def test_drilldown_adds_a_column_for_a_metric_only_baseline_rows_scored() -> Non
     assert _cell(table, "With skill", "Security") == "—"
 
 
+def _na(reward: dict[str, Any], *metrics: str) -> dict[str, Any]:
+    """Record *metrics* as N/A the way the Harbor verifier does: no score plus the sidecar marker."""
+    details = reward.setdefault("details", {})
+    for metric in metrics:
+        reward[metric] = None
+        details[metric] = {"score": None, "status": "not_applicable", "reason": "No reference"}
+    return reward
+
+
+def _raw_cell(table: str, condition: str, column: str) -> str:
+    headers = re.findall(r"<th>(.*?)</th>", table)
+    cells = re.findall(r"<td[^>]*>.*?</td>", _row(table, condition), re.DOTALL)
+    return cells[headers.index(column)]
+
+
+def test_drilldown_reads_na_for_not_applicable_trial_cells() -> None:
+    # Each arm records a metric as N/A that the other arm scores, so both keep its column.
+    with_reward = _na(_reward("case-1__attempt1", "case-1", score=0.9, steps=5, prompt=10), "accuracy")
+    # A metric that is missing without the N/A marker is unscored, not N/A.
+    with_reward["goal_accuracy"] = None
+    baseline_reward = _na(
+        _reward("case-1__baseline1", "case-1", score=0.5, steps=4, prompt=10), "skill_execution", "skill_efficiency"
+    )
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+                "with_skill": {**dict.fromkeys(METRICS, 0.9), "accuracy": None},
+                "without_skill": {**dict.fromkeys(METRICS, 0.5), "skill_execution": None, "skill_efficiency": None},
+                "rewards": [with_reward],
+                "rewards_baseline": [baseline_reward],
+                "num_trials": 1,
+                "num_trials_baseline": 1,
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    table = _drilldown_table(_render(payload))
+
+    assert _cell(table, "With skill", "Accuracy") == "N/A"
+    assert 'data-not-applicable="true"' in _raw_cell(table, "With skill", "Accuracy")
+    assert 'title="Accuracy: Not applicable: No expected_output (legacy ground_truth) defined' in _raw_cell(
+        table, "With skill", "Accuracy"
+    )
+    assert _cell(table, "With skill", "Goal Accuracy") == "—"
+    assert "data-not-applicable" not in _raw_cell(table, "With skill", "Goal Accuracy")
+    assert _cell(table, "With skill", "Skill Execution") == "0.90"
+    for column in ("Skill Execution", "Skill Efficiency"):
+        assert _cell(table, "Without skill", column) == "N/A"
+        assert 'data-not-applicable="true"' in _raw_cell(table, "Without skill", column)
+    assert 'title="Skill Execution: Not applicable: No applicable skill is available in this arm' in _raw_cell(
+        table, "Without skill", "Skill Execution"
+    )
+    assert _cell(table, "Without skill", "Accuracy") == "0.50"
+
+
+def test_drilldown_explains_with_skill_skill_metric_na_by_the_eval_case() -> None:
+    # With the skill installed, a negative case leaves Efficiency N/A and a positive case scores it.
+    # The baseline has no skill at all.
+    with_rewards = [
+        _na(_reward("negative__attempt1", "negative", score=0.9, steps=5, prompt=10), "skill_efficiency"),
+        _reward("positive__attempt1", "positive", score=0.9, steps=5, prompt=10),
+    ]
+    baseline_rewards = [
+        _na(_reward(f"{case}__baseline1", case, score=0.5, steps=4, prompt=10), "skill_execution", "skill_efficiency")
+        for case in ("negative", "positive")
+    ]
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": 4,
+                "scored_attempts": 4,
+                "with_skill": dict.fromkeys(METRICS, 0.9),
+                "without_skill": {**dict.fromkeys(METRICS, 0.5), "skill_execution": None, "skill_efficiency": None},
+                "rewards": with_rewards,
+                "rewards_baseline": baseline_rewards,
+                "num_trials": 2,
+                "num_trials_baseline": 2,
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+
+    table = _drilldown_table(_render(payload))
+
+    assert _cell(table, "With skill", "Skill Efficiency") == "N/A"
+    assert (
+        'title="Skill Efficiency: Not applicable: Negative case or no expected_skill defined, '
+        'so there is no skill use to measure"'
+    ) in _raw_cell(table, "With skill", "Skill Efficiency")
+    assert _cell(table, "Without skill", "Skill Efficiency") == "N/A"
+    assert 'title="Skill Efficiency: Not applicable: No applicable skill is available in this arm' in _raw_cell(
+        table, "Without skill", "Skill Efficiency"
+    )
+    assert _cell(table, "With skill", "Skill Execution") == "0.90"
+
+
+@pytest.mark.parametrize(
+    ("recorded", "kept"),
+    [
+        (["security", "accuracy", "unknown"], ["accuracy"]),
+        ("accuracy", []),
+        ({"accuracy": True}, []),
+    ],
+    ids=["ineligible-names", "string", "mapping"],
+)
+def test_display_keeps_only_eligible_na_metric_names(recorded: object, kept: list[str]) -> None:
+    payload = _payload()
+    payload["agents"]["codex"]["trials_baseline"][0]["not_applicable_metrics"] = recorded
+    payload["agents"]["codex"]["trials_baseline"][0]["scores"] = {}
+    result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Live evaluation")
+    result.metadata["agent_eval"] = payload
+
+    data = HTMLReporter(include_timestamp=False)._tier3_report_data([result])
+
+    assert data is not None
+    assert data["agents"]["codex"]["trials_baseline"][0]["not_applicable_metrics"] == kept
+    table = _drilldown_table(_render(payload))
+    assert _cell(table, "Without skill", "Security") == "—"
+    assert _cell(table, "Without skill", "Accuracy") == ("N/A" if kept else "—")
+
+
 def test_drilldown_columns_include_metrics_scored_only_on_baseline_rows() -> None:
     payload = _payload()
     with_trial = payload["trials"][0]

@@ -111,6 +111,7 @@ def validate_manifest(payload: dict) -> dict:
         "Invalid expected_tiers",
     )
     seen = set()
+    known_skills = set()
     for record in tiers:
         _require(isinstance(record, dict), "Tier must be an object")
         tier = record.get("tier")
@@ -136,12 +137,18 @@ def validate_manifest(payload: dict) -> dict:
             _require(isinstance(record["metrics"], dict), "Invalid tier metrics")
         skills = record.get("skills")
         _require(isinstance(skills, list) and len(skills) <= 1000, "Invalid skills")
+        if "selected" in record:
+            selected = record["selected"]
+            _require(isinstance(selected, list) and len(selected) <= 1000, "Invalid selected skill paths")
+            for selected_path in selected:
+                known_skills.add(_path(selected_path, "selected skill path", skill=True))
         paths = set()
         for skill in skills:
             _require(isinstance(skill, dict), "Skill must be an object")
             path = _path(skill.get("path"), "skill path", skill=True)
             _require(path not in paths, "Duplicate skill path")
             paths.add(path)
+            known_skills.add(path)
             _require(isinstance(skill.get("status"), str) and skill["status"] in _STATUSES, "Invalid skill status")
             for key in ("report_json", "report_html"):
                 _require(key in skill, f"Missing {key}")
@@ -157,6 +164,28 @@ def validate_manifest(payload: dict) -> dict:
             _require(
                 not record.get("error") and not any(skill.get("error") for skill in skills),
                 "Passed tier contains execution errors",
+            )
+    if "benchmarks" in payload:
+        cards = payload["benchmarks"]
+        _require(isinstance(cards, list) and len(cards) <= 100, "Invalid benchmark cards")
+        card_skills, card_paths = set(), set()
+        for card in cards:
+            _require(isinstance(card, dict), "Invalid benchmark card")
+            skill = _path(card.get("path"), "benchmark skill path", skill=True)
+            _require(skill in known_skills and skill not in card_skills, "Foreign or duplicate benchmark skill")
+            card_skills.add(skill)
+            combined = _path(card.get("combined_json"), "combined report path")
+            match = re.fullmatch(r"(benchmarks/skill-[0-9]{3})/skillevaluator\.json", combined)
+            _require(match is not None and combined not in card_paths, "Invalid or duplicate combined report path")
+            card_paths.add(combined)
+            _require(card.get("benchmark_md") == match[1] + "/BENCHMARK.md", "Invalid benchmark Markdown path")
+            _require(
+                card.get("publication_status") in {"pass", "fail", "neutral", "incomplete"},
+                "Invalid publication status",
+            )
+            _require(type(card.get("eligible")) is bool, "Invalid publication eligibility")
+            _require(
+                not card["eligible"] or card["publication_status"] == "pass", "Contradictory publication eligibility"
             )
     required = [record for record in tiers if record["required"]]
     missing = set(expected) & {1} - seen
@@ -376,6 +405,24 @@ def render_markdown(payload: dict, report_url: str = "") -> str:
             lines.append(
                 f"| {_md(skill['path'])} | {skill['status']} | {' · '.join(links) or 'Unavailable'} | {_md(detail) or '—'} |"
             )
+    if payload.get("benchmarks"):
+        lines.extend(
+            [
+                "",
+                "## Benchmark cards",
+                "",
+                "Publication eligibility is separate from the required CI gate.",
+                "",
+                "| Skill | Publication | Reports |",
+                "| --- | --- | --- |",
+            ]
+        )
+        for card in payload["benchmarks"]:
+            links = " · ".join(
+                f"[{label}]({base + quote(card[field], safe='/-._~')})"
+                for field, label in (("benchmark_md", "BENCHMARK.md"), ("combined_json", "Combined JSON"))
+            )
+            lines.append(f"| {_md(card['path'])} | {card['publication_status']} | {links} |")
     lines.extend(["", f"Commit: `{payload['commit']}` · Environment: {payload['environment']}", ""])
     return "\n".join(lines)
 
@@ -414,6 +461,21 @@ def _render_html(payload: dict) -> str:
             lines.append(
                 f"<tr><td>{h(skill['path'])}</td><td>{skill['status']}</td><td>{' · '.join(links) or 'Unavailable'}</td><td>{h(detail)}</td></tr>"
             )
+        lines.append("</tbody></table></div>")
+    if payload.get("benchmarks"):
+        lines.extend(
+            [
+                "<h2>Benchmark cards</h2>",
+                "<p>Publication eligibility is separate from the required CI gate.</p>",
+                '<div class="table"><table><thead><tr><th>Skill</th><th>Publication</th><th>Reports</th></tr></thead><tbody>',
+            ]
+        )
+        for card in payload["benchmarks"]:
+            links = " · ".join(
+                f'<a href="{h(quote(card[field], safe="/-._~"), quote=True)}">{label}</a>'
+                for field, label in (("benchmark_md", "BENCHMARK.md"), ("combined_json", "Combined JSON"))
+            )
+            lines.append(f"<tr><td>{h(card['path'])}</td><td>{card['publication_status']}</td><td>{links}</td></tr>")
         lines.append("</tbody></table></div>")
     lines.append(
         f'<p>Commit: <code>{payload["commit"]}</code> · Environment: {payload["environment"]}</p><p><a href="ci-results.json">Run manifest (JSON)</a> · <a href="summary.md">Markdown summary</a></p></body></html>'

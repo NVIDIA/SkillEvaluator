@@ -5,16 +5,18 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
-from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
+from skillevaluator.evaluation.tier3_report import VERDICT_NEUTRAL, VERDICT_PASS, build_agent_eval_payload
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRIC_SET,
     DEFAULT_METRICS,
     DEFAULT_SCORE_POLICY,
     average_metrics,
     dimension_scores,
+    mark_not_applicable,
     not_applicable_metrics,
     overall_score,
 )
@@ -311,3 +313,128 @@ def test_saved_run_does_not_renormalize_a_missing_metric_without_validated_na(tm
     assert agent["evaluators"]["behavior_check"]["with_skill_status"] == "missing"
     assert agent["with_skill"] is None
     assert not any(row["id"] == "effectiveness" and row["with_skill"] is not None for row in agent["dimensions"])
+
+
+def _uniform_run(root, *, with_na=(), baseline_na=(), with_scores=None):
+    """Write a two-case saved run scoring 0.95 with the skill and 0.50 without it on every metric not N/A.
+
+    ``with_scores`` overrides individual with-skill metric scores.
+    """
+    for condition, value, na_metrics, overrides in (
+        ("with-skill", 0.95, with_na, with_scores or {}),
+        ("without-skill", 0.5, baseline_na, {}),
+    ):
+        rows = []
+        for case in ("a", "b"):
+            row = dict.fromkeys(DEFAULT_METRICS, value)
+            row.update(overrides)
+            row.update(
+                entry_id=case,
+                trial_id=f"{case}-trial",
+                metric_set=DEFAULT_METRIC_SET,
+                score_policy=DEFAULT_SCORE_POLICY,
+                details={},
+            )
+            for metric in na_metrics:
+                row[metric] = None
+                row["details"][metric] = {"score": None, "status": "not_applicable", "reason": "No reference"}
+            rows.append(row)
+        scores = average_metrics(rows)[0]
+        na = not_applicable_metrics(rows)
+        directory = root / "codex" / condition
+        directory.mkdir(parents=True)
+        summary = {
+            "scores": scores,
+            "metrics": list(DEFAULT_METRICS),
+            "metric_set": DEFAULT_METRIC_SET,
+            "score_policy": DEFAULT_SCORE_POLICY,
+            "not_applicable_metrics": na,
+            "dimensions": dimension_scores(scores, na),
+            "num_trials": 2,
+            "num_reward_rows": 2,
+            "execution_status": "succeeded",
+            "overall_score": sum(overall_score(row) for row in rows) / 2,
+        }
+        (directory / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+        for row in rows:
+            trial = directory / "trials" / row["entry_id"]
+            trial.mkdir(parents=True)
+            (trial / "reward.json").write_text(json.dumps(row), encoding="utf-8")
+    return root
+
+
+@pytest.mark.parametrize(
+    ("with_na", "verdict", "with_skill_na_dimension"),
+    [
+        ((), VERDICT_PASS, None),
+        (("accuracy", "goal_accuracy"), VERDICT_NEUTRAL, "correctness"),
+    ],
+    ids=["baseline-only-na-dimensions", "with-skill-na-correctness"],
+)
+def test_verdict_reads_only_with_skill_na_dimensions(tmp_path, with_na, verdict, with_skill_na_dimension):
+    # Discoverability and Efficiency are N/A in a baseline with no skill it could activate.
+    root = _uniform_run(tmp_path, with_na=with_na, baseline_na=("skill_execution", "skill_efficiency"))
+
+    payload = _report(root)
+
+    dimensions = {row["id"]: row for row in payload["agents"]["codex"]["dimensions"]}
+    for dimension in ("discoverability", "efficiency"):
+        assert dimensions[dimension]["baseline"] is None
+        assert dimensions[dimension]["with_skill"] == pytest.approx(0.95)
+    for dimension_id, row in dimensions.items():
+        assert (row["with_skill"] is None) is (dimension_id == with_skill_na_dimension)
+    assert payload["verdict"] == verdict
+
+
+@pytest.mark.parametrize(
+    ("with_scores", "activation"),
+    [({}, None), ({"security": 0.1}, None), ({}, "never_activated")],
+    ids=["other-dimensions-pass", "security-below-0.40", "skill-never-activated"],
+)
+def test_with_skill_na_dimension_never_lets_the_agent_pass(tmp_path, with_scores, activation):
+    # The docs promise only that the agent cannot PASS. Which other verdict it gets depends on the
+    # rest of the run, such as a dimension below 0.40 or a skill that never activated.
+    root = _uniform_run(tmp_path, with_na=("accuracy", "goal_accuracy"), with_scores=with_scores)
+    loaded = load_agent_data(root)
+    if activation:
+        loaded["codex"]["skill_activation"] = {"status": activation}
+
+    payload = build_agent_eval_payload("demo", loaded, use_llm_judge=False)
+
+    assert payload is not None
+    agent = payload["agents"]["codex"]
+    dimensions = {row["id"]: row for row in agent["dimensions"]}
+    assert dimensions["correctness"]["with_skill"] is None
+    assert dimensions["security"]["with_skill"] == pytest.approx(with_scores.get("security", 0.95))
+    assert (agent["skill_activation"].get("status") == "never_activated") is (activation == "never_activated")
+    assert payload["verdict"] != VERDICT_PASS
+
+
+def test_docs_name_only_the_shared_outcome_of_a_with_skill_na_dimension():
+    # The other dimensions and the skill's activation decide which verdict other than PASS applies,
+    # so the N/A paragraph must not name one; the verdict table covers that.
+    docs = (Path(__file__).resolve().parents[2] / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
+    normalized = " ".join(docs.split())
+    start = normalized.index("An agent's verdict reads only the with-skill arm")
+    paragraph = normalized[start : normalized.index("does not affect the verdict.", start)]
+
+    assert "that dimension has no with-skill score, so the agent cannot PASS" in paragraph
+    for verdict in ("NEUTRAL", "FAIL", "INCONCLUSIVE"):
+        assert verdict not in paragraph
+
+
+def test_na_evaluator_reasons_name_the_dataset_field_and_its_legacy_name(tmp_path):
+    root = _uniform_run(tmp_path, with_na=("accuracy", "goal_accuracy", "behavior_check"))
+
+    reasons = {item["id"]: item["reason"] for item in _report(root)["not_applicable_evaluators"]}
+
+    assert set(reasons) == {"accuracy", "goal_accuracy", "behavior_check"}
+    for metric, field, legacy in (
+        ("accuracy", "expected_output", "ground_truth"),
+        ("goal_accuracy", "expected_output", "ground_truth"),
+        ("behavior_check", "assertions", "expected_behavior"),
+    ):
+        assert reasons[metric].startswith(f"No {field} (legacy {legacy}) defined, so there is no ")
+        reward: dict = {}
+        mark_not_applicable(reward, metric)
+        assert reward["details"][metric]["reason"] == reasons[metric]

@@ -859,6 +859,17 @@ ALL_TIER_ONLY_OPTIONS = (
     "n_concurrent",
     "timeout_minutes",
     "environment",
+    "tier1_llm",
+    "tier1_provider",
+    "tier1_model",
+    "base_url",
+    "embedding_base_url",
+    "tier3_provider",
+    "tier3_model",
+    "tier3_base_url",
+    "agent_model",
+    "gateway_secret",
+    "benchmark_pr",
 )
 
 
@@ -866,10 +877,25 @@ ALL_TIER_ONLY_OPTIONS = (
 @click.option("--tiers", default=None, help="Opt in with 1,2,3; requires a compatible candidate/release descriptor.")
 @click.option("--platform", type=click.Choice(["auto", "github", "gitlab"]), default="auto")
 @click.option("--env-mode", type=click.Choice(["docker", "local"]), default="docker")
-@click.option("--provider", type=click.Choice(["openai", "anthropic", "nv_build"]), default="openai")
-@click.option("--embedding-provider", type=click.Choice(["openai", "nv_build"]), default=None)
+@click.option(
+    "--provider", type=click.Choice(["openai", "anthropic", "nv_build", "openai-compatible"]), default="openai"
+)
+@click.option("--embedding-provider", type=click.Choice(["openai", "nv_build", "openai-compatible"]), default=None)
 @click.option("--model", default=None)
 @click.option("--embedding-model", default=None)
+@click.option("--tier1-llm", is_flag=True, help="Opt into protected Tier 1 LLM checks.")
+@click.option("--tier1-provider", type=click.Choice(["openai", "anthropic", "nv_build"]), default=None)
+@click.option("--tier1-model", default="")
+@click.option("--base-url", default="", help="Chat API root for the selected provider.")
+@click.option("--embedding-base-url", default="")
+@click.option(
+    "--tier3-provider", type=click.Choice(["openai", "anthropic", "nv_build", "openai-compatible"]), default=None
+)
+@click.option("--tier3-model", default="")
+@click.option("--tier3-base-url", default="")
+@click.option("--agent-model", multiple=True, metavar="AGENT=MODEL", help="Repeat for native agent model overrides.")
+@click.option("--gateway-secret", default="SKILL_EVAL_LLM_API_KEY", help="CI secret name for the generic gateway key.")
+@click.option("--benchmark-pr", is_flag=True, help="Opt into benchmark-update PR publication on GitHub.")
 @click.option("--agents", default=None)
 @click.option("--runner", default=None, help="GitHub runner label or GitLab runner tag.")
 @click.option(
@@ -913,6 +939,17 @@ def init(
     embedding_provider,
     model,
     embedding_model,
+    tier1_llm,
+    tier1_provider,
+    tier1_model,
+    base_url,
+    embedding_base_url,
+    tier3_provider,
+    tier3_model,
+    tier3_base_url,
+    agent_model,
+    gateway_secret,
+    benchmark_pr,
     agents,
     runner,
     tier3_required,
@@ -962,6 +999,17 @@ def init(
                 embedding_provider=embedding_provider,
                 model=model,
                 embedding_model=embedding_model,
+                tier1_llm=tier1_llm,
+                tier1_provider=tier1_provider,
+                tier1_model=tier1_model,
+                base_url=base_url,
+                embedding_base_url=embedding_base_url,
+                tier3_provider=tier3_provider,
+                tier3_model=tier3_model,
+                tier3_base_url=tier3_base_url,
+                agent_model=agent_model,
+                gateway_secret=gateway_secret,
+                benchmark_pr=benchmark_pr,
                 agents=agents,
                 runner=runner,
                 tier3_required=False,

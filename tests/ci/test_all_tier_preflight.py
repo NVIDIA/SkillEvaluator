@@ -29,7 +29,20 @@ def test_docker_bootstrap_uses_selected_mode_without_host_agent_install(monkeypa
     )
     assert bootstrap.main() == 0
     assert calls == [
-        [sys.executable, "-I", "-m", "skillevaluator.cli", "doctor", "--env-mode", "docker", "--agents", "codex"]
+        [
+            sys.executable,
+            "-I",
+            "-m",
+            "skillevaluator.cli",
+            "doctor",
+            "--tier",
+            "3",
+            "--verify-models",
+            "--env-mode",
+            "docker",
+            "--agents",
+            "codex",
+        ]
     ]
 
 
@@ -55,7 +68,20 @@ def test_local_bootstrap_installs_only_the_selected_native_runtime(monkeypatch):
     assert bootstrap.main() == 0
     assert calls == [
         "claude-code",
-        [sys.executable, "-I", "-m", "skillevaluator.cli", "doctor", "--env-mode", "local", "--agents", "claude-code"],
+        [
+            sys.executable,
+            "-I",
+            "-m",
+            "skillevaluator.cli",
+            "doctor",
+            "--tier",
+            "3",
+            "--verify-models",
+            "--env-mode",
+            "local",
+            "--agents",
+            "claude-code",
+        ],
     ]
 
 
@@ -95,9 +121,11 @@ def test_gitlab_admission_allows_only_protected_default_branch_without_mr():
         "CI_COMMIT_BRANCH": "main",
         "CI_DEFAULT_BRANCH": "main",
         "CI_COMMIT_REF_PROTECTED": "true",
+        "CI_COMMIT_SHA": "a" * 40,
     }
-    assert gate.eligible(env, None)
-    assert not gate.eligible({**env, "CI_COMMIT_REF_PROTECTED": "false"}, None)
+    current = {"name": "main", "protected": True, "commit": {"id": "a" * 40}}
+    assert gate.eligible(env, current)
+    assert not gate.eligible({**env, "CI_COMMIT_REF_PROTECTED": "false"}, current)
 
 
 def test_actual_workflow_bootstrap_ignores_consumer_pythonpath(tmp_path):
@@ -215,3 +243,33 @@ def test_provider_child_excludes_both_gitlab_read_and_feedback_credentials():
     assert not any(
         key in child for key in ("SKILLEVALUATOR_GITLAB_READ_TOKEN", "SKILLEVALUATOR_GITLAB_TOKEN", "CI_JOB_TOKEN")
     )
+
+
+def test_bootstrap_doctor_uses_isolated_tier3_gateway_and_native_model_choices(monkeypatch):
+    bootstrap = module("bootstrap_tiers")
+    captured = []
+    monkeypatch.setenv("SKILL_EVAL_ENV_MODE", "docker")
+    monkeypatch.setenv("SKILL_EVAL_PROVIDER", "nv_build")
+    monkeypatch.setenv("SKILL_EVAL_TIER3_PROVIDER", "openai-compatible")
+    monkeypatch.setenv("SKILL_EVAL_TIER3_MODEL", "catalog/judge")
+    monkeypatch.setenv("SKILL_EVAL_TIER3_BASE_URL", "https://gateway.example/v1")
+    monkeypatch.setenv("SKILL_EVAL_LLM_API_KEY", "gateway-secret")
+    monkeypatch.setenv("SKILL_EVAL_AGENTS", "claude-code,codex")
+    monkeypatch.setenv("SKILL_EVAL_AGENT_MODELS", "claude-code=aws/anthropic/opus,codex=openai/openai/gpt")
+    monkeypatch.setenv("GITHUB_TOKEN", "must-not-leak")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-leak")
+    monkeypatch.setenv("HOME", "/home/runner")
+
+    def doctor(args, **kwargs):
+        captured.append((args, kwargs["env"]))
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", doctor)
+    assert bootstrap.main() == 0
+    args, child = captured[0]
+    assert args[-4:] == ["--agent-model", "claude-code=aws/anthropic/opus", "--agent-model", "codex=openai/openai/gpt"]
+    assert child["SKILL_EVAL_LLM_PROVIDER"] == "openai-compatible"
+    assert child["SKILL_EVAL_LLM_MODEL"] == "catalog/judge"
+    assert child["SKILL_EVAL_LLM_API_KEY"] == "gateway-secret"
+    assert child["HOME"] == "/home/runner"
+    assert not set(child) & {"GITHUB_TOKEN", "ANTHROPIC_API_KEY", "SKILL_EVAL_AGENT_MODELS"}

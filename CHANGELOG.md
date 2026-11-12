@@ -6,6 +6,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Capability-gated CI onboarding for protected Tier 1 `--llm`/SkillSpector
+  checks, independent Tier 3 gateway/judge settings and native agent models.
+  Combined reports retain source-bound `BENCHMARK.md` cards for every outcome;
+  GitHub can optionally propose eligible cards through a separate trusted
+  benchmark-update PR. Tier 2/3 remain advisory for CI. Retained JSON preserves
+  Tier 1 required-check and unscanned-content scope for publication decisions.
+  The repository's own candidate CI selects Build for Tier 1/2 and separate
+  gateway-backed Claude Code/Codex models for Tier 3, without changing upstream
+  provider defaults.
+
 - HTML, Markdown, and terminal findings show recorded LLM verification verdicts,
   confidence, and reasoning, with an explanation of retained or downgraded severity.
   Medium-confidence false positives and uncertain verdicts retain existing gates.
@@ -134,7 +144,7 @@ All notable changes to SkillEvaluator are documented in this file.
   onboarding and status recognize this filename collision without replacing
   reusable workflow definitions. Automatic comments activate after the
   listener reaches the default branch.
-   Document the shared chat/judge/agent model input and model-availability
+  Document independent chat, judge and agent model settings and model-availability
   troubleshooting for provider-backed CI.
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI
@@ -183,6 +193,17 @@ All notable changes to SkillEvaluator are documented in this file.
   no model key required,
   keeping optional LLM checks and hosted feedback separate. Preserve opt-in
   all-tier setup and report contracts in an Advanced CI reference.
+
+- When the RAGAS goal scorer judges `goal_accuracy`, `judge_attempts.json`
+  now saves each request it sends and the judge's reply, so a RAGAS score can
+  be audited like the prompt judges' scores. Each request is a `ragas` entry
+  with status `replied`, or `error` with the HTTP status and body or the
+  reason the reply was not received, before the entry that holds the score or
+  the problem. The prompts and replies are redacted and shortened like the
+  other judge evidence. A failure while saving this evidence is only logged
+  and never changes a score. The request entries do not count toward
+  `--max-judge-calls`; the entry with the score or the problem is the one
+  counted RAGAS call, as before.
 
 ### Changed
 
@@ -320,6 +341,31 @@ All notable changes to SkillEvaluator are documented in this file.
   generated datasets, baseline scores rise and lift falls; existing datasets
   are not rewritten.
 
+- Tier 3 tool efficiency counts writing, editing and patching files, scoped
+  native searches and listings (`Grep`, `Glob`, `LS`, OpenCode `list`, Codex
+  `list_dir` and `grep_files`) and MCP tools named `mcp__server__tool` (Claude
+  Code) as productive. An MCP filesystem search or listing whose `path` or
+  `dir_path` is `/` is a root search and counts as waste. Most of these
+  counted as wasted before, so a with-skill trial that read the skill, edited
+  four files and ran the tests scored tool efficiency 0.33. Codex and OpenCode
+  MCP calls, which are recorded under the bare tool name or as `server_tool`,
+  are not recognized as MCP calls yet. Codex names with a namespace, such as
+  `functions.apply_patch`, are classified by the bare name. Planning and
+  bookkeeping calls (`TodoWrite`, `update_plan`, `TaskCreate` and
+  `TaskUpdate`, background-shell polling such as `BashOutput`, and sub-agent
+  calls) are left out of the score, and the reason says how many were not
+  counted. A trial with only such calls scores 0.0, so a trial whose only
+  calls were `BashOutput` or `KillShell` drops from 1.0 to 0.0. Polling a
+  background shell no longer counts as running a command, while a command
+  typed into a Codex `write_stdin` session or run by `Monitor` is classified
+  like any other command. Help, version and install words are matched in
+  commands only, so a file path or patch text that mentions `pip install` is
+  not waste. Efficiency scores rise for write-, edit-, patch-, search- and
+  MCP-heavy runs. Root searches in commands recorded as an argument list, such
+  as Codex `["bash", "-lc", "find / -name x"]`, now count as waste, and so do
+  help, version and install commands recorded that way, like the same command
+  written as text.
+
 ### Documentation
 
 - The 0.8.0 entry for refused `claude-code` attempts said the arm reports its
@@ -345,7 +391,24 @@ All notable changes to SkillEvaluator are documented in this file.
   `HTTP` word in any cell, because `|` reads as a pipe; and `HTTP PUT` right
   after a `;`, which starts a new command.
 
+- Reports & Results now explains the completed-agent result in Tier 3 reports.
+  When one of several agents fails, the HTML report and `tier3-benchmark.md`
+  show the best agent's score when that agent's evidence is complete and mark
+  it as needing attention, while the run stays failed and has no whole-run
+  score. The new section says when an agent qualifies, how recovered timeout
+  attempts are shown, and that the HTML lift card still shows the best agent's
+  lift. The results tree now lists `tier3-benchmark.md`, which every Tier 3
+  run, from `tier3 evaluate` or a `validate` run that includes Tier 3, writes
+  as a pair with `report.html`, and the live evaluation guide says when its
+  verdict table applies and links to the new section.
+
 ### Fixed
+
+- Public MCP URL probes handle modern SDK client and stream APIs while retaining
+  checked-address connections, header grants, response limits, and bounded
+  cleanup. Redirect responses are refused before SDK-level redirect handling.
+  Isolated wheel tests cover SDK 1.28.1 and 2.3.0; the supported Tier 3 dependency
+  range remains unchanged.
 
 - Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
   the PR or merge request's target revision. Policy files from the proposed
@@ -386,6 +449,11 @@ All notable changes to SkillEvaluator are documented in this file.
   use schema 1.1; valid schema 1.0 snapshots retain their original datasets and
   integrity checks, with corrected summaries projected without rewriting files.
 
+- Tier 3 improvement recommendations respect each case's expected skill routing:
+  passing negative controls no longer inherit activation-loss advice from positive
+  cases, while failed negatives retain task, environment, and run-error diagnostics.
+  The dataset snapshot is read once per recommendation pass across all cases and agents.
+
 - Tier 2 includes qualifying shell comment blocks at end of file in context
   deduplication. Previously those blocks disappeared unless a blank line or
   code followed them, which could hide repeated guidance across shell files.
@@ -409,6 +477,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Read JSON, JSONL and YAML evaluation datasets as UTF-8 so Unicode prompts and
   answers load correctly on hosts with a non-UTF-8 default text encoding.
 
+- Grader qualification resolves verifier source paths before provenance hashing,
+  so source-directory aliases (including macOS `/tmp`) retain the same relative
+  file identities and hashes while files outside the source root are rejected.
+
 - Estimate Tier 1 instruction tokens from the parsed Markdown body, so `---`
   inside YAML values or comments does not count frontmatter as instructions.
   Body separators without valid frontmatter no longer produce a spurious estimate.
@@ -419,6 +491,18 @@ All notable changes to SkillEvaluator are documented in this file.
   confirm a guess for the masked part. Redaction now removes a digest that no
   longer matches the reported value.
 
+- Tier 3 HTML evaluator cards now say when a judge metric's lift left out cases
+  whose arms were scored by different judge models, for example after a judge
+  fallback in one arm. The arm scores keep those cases, so a card could show
+  Baseline 0.20 and With skill 0.50 next to a -0.40 lift with nothing
+  explaining the gap. The card now notes `Lift leaves out 1 case scored by
+  different judge models; the arm scores include it.`, or says that no
+  comparable result remains when the card has no lift, and labels those cases
+  `Left out of lift: different judge models` in its per-trial evidence. In the
+  canonical JSON the evaluator records the count in `lift_excluded_cases`, its
+  card lists the cases in `comparison_basis`, and the matching evidence entries
+  carry `comparison_excluded: true`. Scores and lift are unchanged.
+
 - Tier 2 context deduplication now numbers `SHARED CONTENT n` blocks from the
   most repeated text, ties in first-seen order, instead of in first-seen order
   alone. In 0.8.0 a text repeated hundreds of times could get block 10 or later,
@@ -428,6 +512,15 @@ All notable changes to SkillEvaluator are documented in this file.
   it within budget. The texts to share are now chosen together to save the most
   characters: a text that saves only a few characters stays inline when sharing
   it would push another text past block 9 and cost more than it saves.
+
+- Tier 2 deduplication no longer rescans a shell script once per function
+  header. In 0.8.0 each `name() {` header without a closing brace walked the
+  rest of the script, and line numbers were counted from the start of the file
+  for every function, so chunking grew with the square of the script's size: a
+  53 KiB script of such headers took about 20 seconds, and a 1 MiB one could
+  take hours. Braces and line breaks are now indexed in one pass. Python files
+  are also split into lines once instead of once per function or class. Chunk
+  text and line ranges are unchanged.
 
 - Tier 3 **Measured Agent Resources** no longer count idle or user time as LLM
   seconds when timing is inferred from step timestamps and an agent step with
@@ -447,6 +540,44 @@ All notable changes to SkillEvaluator are documented in this file.
   `problem` of its `judge_attempts.json` entry, it now reads
   `Bedrock request failed`, like a Bedrock error that ends the judge and like
   the default `legacy` policy.
+
+- The interactive Tier 3 progress view (`--progress rich`, or `auto` in a
+  terminal) now keeps one height for the whole run, so redraws no longer leave
+  repeated or jumbled table frames. The Provider and Run plan rows show a
+  placeholder until the plan resolves, each row is one line that ends in an
+  ellipsis when its value is too long, and stages fill a fixed number of rows,
+  at least six and one per agent, showing the most recently updated. The agent
+  models, provider and run plan are printed in full above the table whenever
+  they change, and the table left on screen when the run ends lists every
+  stage, with its full detail when the Detail column is at least 20 columns
+  wide. A stopping agent's detail now starts with the second Ctrl+C hint, so a
+  cut row still shows it. The view redraws only on progress events and
+  heartbeats, no longer also from Rich's own refresh thread. If drawing fails,
+  including a terminal write that would block, the table keeps its last frame
+  with running stages still shown as running, a line says that the run
+  continues, and no further progress is shown for that run; the final results
+  still print. When the terminal also refuses that line, or the write that
+  shows the cursor again, a line saying that the run went on is printed and
+  the cursor is shown when the run ends. Frames the terminal refused are
+  dropped then, so they are never drawn over output printed since. Before, a
+  failure on the heartbeat thread ended that thread with a traceback and left
+  the view active without updating elapsed times, and a failure on the
+  caller's thread marked the running stages as failed.
+
+- The Tier 3 terminal summary now shows `N/A`, not `NO SCORE`, as the Skill
+  Lift of an evaluator or dimension that is N/A in either arm, as the Markdown
+  and HTML reports already do. Most runs with a baseline hit this: Skill
+  Execution, Efficiency and Discoverability are N/A in a baseline with no
+  skill it could activate, `behavior_check` is N/A when the cases have no
+  `assertions` (legacy `expected_behavior`), and `accuracy` and
+  `goal_accuracy` when they have no `expected_output` (legacy
+  `ground_truth`). In a baseline-only run (`--skip-with-skill`) the lift of
+  every other row now reads `skipped`, as the docs and the Markdown report
+  say. A lift that is missing for another reason still reads `NO SCORE`. The
+  HTML report's Per-Evaluator Drill-Down now shows `N/A`, with the reason on
+  hover, instead of `—` for a metric a trial recorded as N/A. The reports'
+  reasons for an N/A Accuracy, Goal Accuracy or Behavior Check now name the
+  dataset fields `expected_output` and `assertions` before their legacy names.
 
 - `skillevaluator tier3 feedback` now writes the evaluated skill's directory
   (known from `--skill` or a run in the skill's `evals/results`) as its name and
@@ -476,6 +607,17 @@ All notable changes to SkillEvaluator are documented in this file.
   info or host, so `Error: ` followed by minified JSON no longer arrives as
   `Error: ...<truncated>`.
 
+- Tier 3 HTML **Attempt Details** now show an agent timeout that a later
+  scored attempt recovered under `--stop-on-pass`, and count it in the case's
+  attempts. In 0.8.0 a case that timed out on attempt 1, passed on attempt 2
+  and skipped attempt 3 read `1 of 2 scored` and `passed on scored attempt 2`,
+  with nothing about the timeout; it now reads `A1: timed out, recovered`,
+  `1 of 3 scored` and `passed on attempt 2`. The Result column says
+  `passed on attempt N` for every case, because N is the attempt's number, not
+  a count of scored attempts. `tier3 evaluate` also prints one line for each
+  agent with recovered timeouts. Scores, pass@k and attempt coverage are
+  unchanged.
+
 - Tier 3 security grading again warns about network exfiltration, lowering
   the Security score to 0.5, for an HTTPie method word after a capitalized
   `HTTP`, `HTTPS`, or `Http` word in cases that 0.8.0 stopped flagging: the
@@ -491,6 +633,68 @@ All notable changes to SkillEvaluator are documented in this file.
   arms have different metric applicability, matching the canonical report.
   Missing lift data is shown as `-`; custom-only and legacy agents retain their
   arm-difference comparison.
+
+- Tier 2 `similarity-check` and context deduplication now parse Markdown
+  frontmatter within fixed structure limits: 100 nesting levels, 20,000 nodes,
+  1,024 alias references, 1,024 items in one mapping or sequence, 65,536
+  characters in one value, and integers up to 14,000 bits, with aliases and
+  merge keys counted after expansion. In 0.8.0 both used plain
+  `yaml.safe_load`, and `similarity-check` converted a `name` or `description`
+  that was not a string to text. A 477-byte `SKILL.md` whose frontmatter chains
+  YAML aliases produced an 82-million-character description, and a 543-byte
+  one that chains merge keys took 180 MB in context deduplication; each further
+  level multiplies the cost by ten. Mapping frontmatter over a limit now stops
+  `similarity-check` with an error that names the manifest, and context
+  deduplication with a CRITICAL `manifest_complexity_limit` finding, before any
+  provider call. Text between the `---` lines that is not a mapping is still
+  not frontmatter and is never checked against these limits.
+  `similarity-check` now excludes a manifest whose `name`, `title`, or
+  `description` is a non-empty value that is not a string, such as `name: 2048`
+  or `name: yes`, with the coverage reason `non_string_name_or_description`
+  instead of converting the value. Its debug diagnostic omits the absolute
+  manifest path, keeping private host-directory names out of logs.
+  An empty, zero, or false value such as `0`,
+  `false`, or `[]` still gets `missing_name_or_description`. Either way, like
+  any excluded manifest, it makes the scan incomplete. It stops with an error
+  that names the manifest when a value is longer than 16,384 characters, the
+  per-field catalog text limit; description mode still also caps
+  `name: description` at 16,384 characters. An invalid tagged value such as
+  `!!int ""`, an impossible date such as `2024-02-30`, or a decimal integer
+  longer than 4,300 digits (Python's default limit for converting text to an
+  integer) now counts as invalid frontmatter instead of stopping either check
+  with an unexpected error. A repeated key still keeps its last value in both
+  checks. `tier3 select-decoys` and group-mode decoy loading
+  (`skill_workspace.decoy_manifest`) read the target's and each selected
+  skill's frontmatter the same way. A `name` or `description` that is not a
+  string, such as `name: yes`, now fails them with `Decoy selection requires a
+  skill with a root SKILL.md whose frontmatter is a valid YAML mapping with a
+  non-empty string name and description` instead of being converted to text;
+  invalid YAML, such as an unquoted `description: Use when: debugging logs`, and
+  an empty value get the same message. Frontmatter over a limit, or a value
+  longer than 16,384 characters, fails them with an error that names the
+  manifest.
+
+- The Tier 3 verdict is now FAIL when a scored dimension is below 0.40 and
+  another dimension has no score. In 0.8.0 a dimension with no score made the
+  agent NEUTRAL before the 0.40 check ran. Correctness has no score when no
+  case defines `ground_truth`, so an agent with Efficiency 0.1 got a NEUTRAL
+  verdict. For such a run the overall verdict in `BENCHMARK.md` is now FAIL
+  (was INCOMPLETE). The JSON report's `tier3.verdict` and `publication_status`
+  are `fail` (were `neutral` and `incomplete`), and the Tier 3 result's
+  `status` is `failed` (was `passed`). The terminal's Tier 3 line reads failed.
+  The `--format markdown` report shows publication status FAIL (was
+  INCOMPLETE), a Failed count of 1 (was 0) and verdict FAIL (was NEUTRAL). The
+  `tier3-benchmark.md` that `tier3 evaluate` writes reads FAIL (was NEUTRAL).
+  The HTML Tier 3 card reads `Failed (advisory)` in a default `validate` run,
+  and `Changes required` with `--block-on-agent-eval` and in the
+  `tier3 evaluate` report, where it read Neutral. The HTML Tier 3 summary opens
+  with `Completed-agent result: FAIL` and says other execution failures need
+  attention, as it already did for a run with every dimension scored, in place
+  of `Verdict at a glance: Neutral`. A dimension with no score still keeps an
+  agent from passing, and exit codes do not change. This FAIL also applies when
+  every required check passes. A run with a failed required check, such as one
+  with a `destructive_command` finding, already gets FAIL from that check (see
+  Changed).
 
 ## 0.8.0 - 2026-11-05
 

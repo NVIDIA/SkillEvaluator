@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ import pytest
 from skillevaluator import __version__
 from skillevaluator.constants import (
     DEFAULT_SCORE_POLICY,
+    DIMENSION_MAPPING,
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
     DIMENSION_VERDICT_PASS_THRESHOLD,
     TIER3_LIFT_FAIL_THRESHOLD,
@@ -20,9 +22,12 @@ from skillevaluator.constants import (
 )
 from skillevaluator.evaluation.tier3_report import (
     VERDICT_FAIL,
+    VERDICT_INCONCLUSIVE,
     VERDICT_NEUTRAL,
     VERDICT_PASS,
     _advisory_agent_eval_payload,
+    _agent_quality_verdict,
+    _overall_verdict_from_agents,
     _verdict_from_lift,
     agent_eval_result_from_run,
     build_agent_eval_payload,
@@ -351,6 +356,112 @@ def test_overall_dimension_gate_is_not_overridden_by_neutral_lift() -> None:
     assert payload is not None
     assert payload["overall_lift"] == 0.0
     assert payload["verdict"] == VERDICT_PASS
+
+
+def _dimension_agent(**scores: object) -> dict:
+    """Return a succeeded agent with one with-skill score per named dimension."""
+    return {
+        "execution_status": "succeeded",
+        "dimensions": [{"id": dimension_id, "with_skill": score} for dimension_id, score in scores.items()],
+    }
+
+
+def _passing_dimensions(**overrides: object) -> dict[str, object]:
+    return {**dict.fromkeys(DIMENSION_MAPPING, 0.9), **overrides}
+
+
+def _missing_correctness_agent(*, security: float) -> dict:
+    """Return a succeeded agent with no Correctness dimension, as when no case defines ground_truth."""
+    scores = _passing_dimensions(security=security)
+    del scores["correctness"]
+    return _dimension_agent(**scores)
+
+
+@pytest.mark.parametrize("security", [0.3, 0.0])
+def test_agent_quality_failure_takes_precedence_over_missing_dimension(security: float) -> None:
+    agent = _missing_correctness_agent(security=security)
+
+    assert _agent_quality_verdict(agent) == VERDICT_FAIL
+    assert _overall_verdict_from_agents({"codex": agent}) == VERDICT_FAIL
+
+
+@pytest.mark.parametrize(
+    ("security", "expected"),
+    [
+        pytest.param(DIMENSION_VERDICT_NEUTRAL_THRESHOLD, VERDICT_NEUTRAL, id="at-threshold"),
+        pytest.param(DIMENSION_VERDICT_NEUTRAL_THRESHOLD - 1e-4, VERDICT_FAIL, id="just-below"),
+    ],
+)
+def test_missing_dimension_keeps_the_neutral_threshold_exclusive(security: float, expected: str) -> None:
+    agent = _missing_correctness_agent(security=security)
+
+    assert _agent_quality_verdict(agent) == expected
+    assert _overall_verdict_from_agents({"codex": agent}) == expected
+
+
+@pytest.mark.parametrize(
+    ("peer_scores", "expected"),
+    [
+        pytest.param(_passing_dimensions(security=0.45), VERDICT_NEUTRAL, id="neutral-peer"),
+        pytest.param(_passing_dimensions(security=0.1), VERDICT_FAIL, id="failing-peer"),
+        pytest.param(_passing_dimensions(), VERDICT_PASS, id="passing-peer"),
+    ],
+)
+def test_missing_dimension_failure_combines_with_other_agents(peer_scores: dict[str, object], expected: str) -> None:
+    agents = {"codex": _missing_correctness_agent(security=0.0), "claude-code": _dimension_agent(**peer_scores)}
+
+    assert _overall_verdict_from_agents(agents) == expected
+
+
+def test_missing_dimension_failure_beside_a_never_activated_agent_fails_the_run() -> None:
+    never_activated = _dimension_agent(**_passing_dimensions())
+    never_activated["skill_activation"] = {"status": "never_activated"}
+    agents = {"codex": _missing_correctness_agent(security=0.0), "claude-code": never_activated}
+
+    assert _overall_verdict_from_agents(agents) == VERDICT_FAIL
+
+
+@pytest.mark.parametrize("correctness", [None, math.nan, math.inf, True])
+def test_agent_quality_failure_takes_precedence_over_non_finite_dimension(correctness: object) -> None:
+    agent = _dimension_agent(**_passing_dimensions(security=0.0, correctness=correctness))
+
+    assert _agent_quality_verdict(agent) == VERDICT_FAIL
+    assert _overall_verdict_from_agents({"codex": agent}) == VERDICT_FAIL
+
+
+@pytest.mark.parametrize("correctness", ["missing", None, math.nan])
+def test_missing_dimension_never_passes(correctness: object) -> None:
+    scores = _passing_dimensions(correctness=correctness)
+    if correctness == "missing":
+        del scores["correctness"]
+    agent = _dimension_agent(**scores)
+
+    assert _agent_quality_verdict(agent) == VERDICT_NEUTRAL
+    assert _overall_verdict_from_agents({"codex": agent}) == VERDICT_NEUTRAL
+
+
+def test_never_activated_agent_stays_inconclusive_beside_a_failing_dimension() -> None:
+    agent = _missing_correctness_agent(security=0.0)
+    agent["skill_activation"] = {"status": "never_activated"}
+
+    assert _agent_quality_verdict(agent) == VERDICT_INCONCLUSIVE
+    assert _overall_verdict_from_agents({"codex": agent}) == VERDICT_INCONCLUSIVE
+
+
+def test_no_ground_truth_payload_fails_when_security_is_below_neutral() -> None:
+    """The agent has no pass@k required-check counts, so only the dimension gate can fail it."""
+    agents = _agents()
+    for arm in ("with_skill", "without_skill"):
+        agents["codex"][arm]["accuracy"] = None
+    agents["codex"]["with_skill"]["security"] = 0.0
+
+    payload = build_agent_eval_payload("demo", agents, use_llm_judge=False)
+
+    assert payload is not None
+    dimension_ids = [dimension["id"] for dimension in payload["agents"]["codex"]["dimensions"]]
+    assert "correctness" not in dimension_ids
+    assert payload["verdict"] == VERDICT_FAIL
+    assert payload["summary"]["verdict"] == VERDICT_FAIL
 
 
 def test_run_wrapper_defers_timestamp_lookup_to_directory_loader(monkeypatch, tmp_path: Path) -> None:

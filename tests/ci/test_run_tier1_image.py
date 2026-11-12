@@ -337,32 +337,34 @@ def test_explicit_full_scan_does_not_skip_without_a_skill_change(launch):
 
 
 def test_skills_changed_cli_matches_the_launcher_decision(launch, capsys):
-    """The GitLab aggregate recomputes the skip with this exact command."""
-    runner, _, calls, env, workspace, _, git = launch
+    """The GitLab aggregate and paid tiers recompute the skip with this exact command."""
+    _, _, calls, env, workspace, _, git = launch
+    selector = importlib.import_module("ci.select_changed_skills")
     cli = ["--skills-changed", "--workspace", str(workspace)]
-    assert runner.main(cli) == 0
+    assert selector.main(cli) == 0
     assert capsys.readouterr().out == "true\n"  # Default-branch and manual runs keep the enriched scan.
     _setup_only_change(env, workspace, git)
     env["CI_PIPELINE_SOURCE"] = "merge_request_event"
-    assert runner.main(cli) == 0
+    assert selector.main(cli) == 0
     assert capsys.readouterr().out == "false\n"
     env["SKILL_EVAL_SCAN_MODE"] = "all"
-    assert runner.main(cli) == 0
+    assert selector.main(cli) == 0
     assert capsys.readouterr().out == "true\n"
     del env["SKILL_EVAL_SCAN_MODE"]
     (workspace / "skills" / "SKILL.md").write_text("changed again")
     git("commit", "-qam", "skill")
     env.update(REPORT_COMMIT=git("rev-parse", "HEAD"), DIFF_HEAD_SHA=git("rev-parse", "HEAD"))
-    assert runner.main(cli) == 0
+    assert selector.main(cli) == 0
     assert capsys.readouterr().out == "true\n"
     env["DIFF_BASE_SHA"] = "not-a-commit"
-    assert runner.main(cli) == 2
+    assert selector.main(cli) == 2
     assert not calls
 
 
 def test_committed_submodule_ignore_cannot_hide_a_skill_change(launch, capsys):
     """A gitlink update under a skill root still needs the enriched scan."""
-    runner, _, _, env, workspace, _, git = launch
+    _, _, _, env, workspace, _, git = launch
+    selector = importlib.import_module("ci.select_changed_skills")
     base = env["REPORT_COMMIT"]
     (workspace / ".gitmodules").write_text(
         '[submodule "vendor"]\n\tpath = skills/vendor\n\turl = ./vendor\n\tignore = all\n'
@@ -372,5 +374,5 @@ def test_committed_submodule_ignore_cannot_hide_a_skill_change(launch, capsys):
     git("commit", "-qm", "vendor skill")
     head = git("rev-parse", "HEAD")
     env.update(CI_PIPELINE_SOURCE="merge_request_event", DIFF_BASE_SHA=base, REPORT_COMMIT=head, DIFF_HEAD_SHA=head)
-    assert runner.main(["--skills-changed", "--workspace", str(workspace)]) == 0
+    assert selector.main(["--skills-changed", "--workspace", str(workspace)]) == 0
     assert capsys.readouterr().out == "true\n"

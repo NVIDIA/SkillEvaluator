@@ -23,10 +23,17 @@ if not __package__:
 
 try:
     from model_config import PROVIDER_KEYS, model_environment
-    from select_changed_skills import _git, _paths, setup_changed, skill_root_changed, skill_roots
+    from select_changed_skills import _git, changed_paths, pull_request, setup_changed, skill_root_changed, skill_roots
 except ModuleNotFoundError:
     from ci.model_config import PROVIDER_KEYS, model_environment
-    from ci.select_changed_skills import _git, _paths, setup_changed, skill_root_changed, skill_roots
+    from ci.select_changed_skills import (
+        _git,
+        changed_paths,
+        pull_request,
+        setup_changed,
+        skill_root_changed,
+        skill_roots,
+    )
 
 IMAGE = re.compile(r"ghcr\.io/nvidia/skillevaluator-tier1@sha256:[0-9a-f]{64}")
 SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
@@ -49,52 +56,6 @@ HOST_ENV = frozenset({"PATH", "LANG", "LC_ALL", "LC_CTYPE", "SYSTEMROOT"})
 
 class NoSkillChanges(Exception):
     """An automatic PR/MR scan changed no file under a configured skill root."""
-
-
-def _pull_request(source: dict[str, str]) -> bool:
-    return (
-        source.get("GITHUB_EVENT_NAME") in {"pull_request", "pull_request_target"}
-        or source.get("CI_PIPELINE_SOURCE") == "merge_request_event"
-        or bool(source.get("DIFF_BASE_SHA"))
-    )
-
-
-def _changed(workspace: Path, source: dict[str, str], head: str) -> list[str]:
-    base = source.get("DIFF_BASE_SHA", "")
-    if not SHA.fullmatch(base):
-        raise ValueError
-    # A committed .gitmodules "ignore" setting must not hide a changed gitlink
-    # under a skill root and so skip the paid scan.
-    return _paths(
-        _git(
-            workspace,
-            "diff",
-            "--name-only",
-            "-z",
-            "--no-renames",
-            "--ignore-submodules=none",
-            f"{base}...{head}",
-            "--",
-        )
-    )
-
-
-def skills_changed(workspace: Path, source: dict[str, str]) -> bool:
-    """Return False only when an automatic PR/MR scan changes no skill-root file.
-
-    The enriched job then skips its paid scan. The GitLab aggregate recomputes
-    this from the checkout with the pinned tools; it never trusts an artifact.
-    """
-    head = source.get("REPORT_COMMIT") or source.get("DIFF_HEAD_SHA", "")
-    if not SHA.fullmatch(head):
-        raise ValueError
-    mode = source.get("SKILL_EVAL_SCAN_MODE", "auto")
-    if mode not in {"auto", "all"}:
-        raise ValueError
-    if mode != "auto" or not _pull_request(source):
-        return True
-    configured = skill_roots(workspace, source.get("SKILL_EVAL_PATHS", "skills"))
-    return skill_root_changed(_changed(workspace, source, head), configured)
 
 
 def _paths_safe(workspace: Path, reports: Path) -> tuple[Path, Path]:
@@ -130,10 +91,10 @@ def _environment(workspace: Path, image: str, source: dict[str, str]) -> dict[st
     mode = source.get("SKILL_EVAL_SCAN_MODE", "auto")
     if mode not in {"auto", "all"}:
         raise ValueError
-    mode = "changed" if mode == "auto" and _pull_request(source) else "all"
+    mode = "changed" if mode == "auto" and pull_request(source) else "all"
     if mode == "changed":
-        changed = _changed(workspace, source, head)
-        # The paid LLM pass needs a changed skill (same rule as skills_changed).
+        changed = changed_paths(workspace, source, head)
+        # The paid LLM pass needs a changed skill (select_changed_skills.skills_changed).
         # A setup-only change keeps the keyless scan of every skill as the gate.
         if not skill_root_changed(changed, configured):
             raise NoSkillChanges
@@ -184,27 +145,10 @@ def main(argv: list[str] | None = None) -> int:
     """Run the immutable image or its installed entrypoint; never execute candidate code."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", required=True, type=Path)
-    parser.add_argument("--reports", type=Path)
-    parser.add_argument("--image")
+    parser.add_argument("--reports", required=True, type=Path)
+    parser.add_argument("--image", required=True)
     parser.add_argument("--in-image", action="store_true")
-    parser.add_argument(
-        "--skills-changed",
-        action="store_true",
-        help="print true when the enriched scan is needed, false when no skill changed",
-    )
     args = parser.parse_args(argv)
-    if args.skills_changed:
-        try:
-            workspace = args.workspace.resolve(strict=True)
-            if not workspace.is_dir():
-                raise ValueError
-            print("true" if skills_changed(workspace, dict(os.environ)) else "false")
-        except (OSError, ValueError):
-            print("Could not determine whether a skill changed.", file=sys.stderr)
-            return 2
-        return 0
-    if args.reports is None or args.image is None:
-        parser.error("--reports and --image are required")
     try:
         if not IMAGE.fullmatch(args.image):
             raise ValueError

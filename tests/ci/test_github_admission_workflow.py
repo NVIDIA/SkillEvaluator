@@ -247,3 +247,49 @@ def test_enriched_job_and_gate_artifact_share_the_skill_change_condition():
     assert condition in jobs["tier1-llm"]["if"]
     assert condition in jobs["tier1"]["with"]["artifact-name"]
     assert jobs["eligibility"]["steps"][0]["env"]["SKILL_PATHS"] == "${{ inputs.paths }}"
+
+
+def test_paid_tiers_share_the_skill_change_condition_and_aggregate_reason():
+    workflow = yaml.load((ROOT / ".github/workflows/evaluate-all-tiers.yml").read_text(), Loader=yaml.BaseLoader)
+    jobs = workflow["jobs"]
+    condition = "needs.eligibility.outputs.skills-changed == 'true'"
+    assert condition in jobs["paid-tiers"]["if"]
+    assert "needs.eligibility.outputs.allowed == 'true'" in jobs["paid-tiers"]["if"]
+    assert "eligibility" in jobs["aggregate"]["needs"]
+    assert jobs["aggregate"]["env"]["SKILL_EVAL_SKILLS_CHANGED"] == "${{ needs.eligibility.outputs.skills-changed }}"
+
+
+def test_fork_prs_never_claim_that_no_skill_changed(tmp_path, monkeypatch):
+    """Fork file lists are not read, so their skipped paid tiers keep the withheld-job reason."""
+    workflow = yaml.load((ROOT / ".github/workflows/evaluate-all-tiers.yml").read_text(), Loader=yaml.BaseLoader)
+    shell = workflow["jobs"]["eligibility"]["steps"][0]["run"]
+    event_path = tmp_path / "event.json"
+    event_path.write_text(
+        json.dumps({"pull_request": {"number": 7, "head": {"sha": SHA, "repo": {"full_name": "outsider/fork"}}}})
+    )
+    output = tmp_path / "outputs"
+    for key, value in {
+        "TOOLS_REF": SHA,
+        "ENV_MODE": "docker",
+        "TIERS": "1,2,3",
+        "SCAN_MODE": "auto",
+        "SKILL_PATHS": "skills",
+        "GH_TOKEN": "read-only-token",
+        "API_URL": "https://api.github.example",
+        "GITHUB_REPOSITORY": "acme/skills",
+        "GITHUB_ACTOR": "alice",
+        "GITHUB_EVENT_PATH": str(event_path),
+        "GITHUB_OUTPUT": str(output),
+        "GITHUB_EVENT_NAME": "pull_request",
+    }.items():
+        monkeypatch.setenv(key, value)
+
+    def respond(request, **_kwargs):
+        if request.full_url.endswith("/permission"):
+            return io.BytesIO(json.dumps({"permission": "write"}).encode())
+        raise AssertionError(f"Fork PR eligibility must not list files: {request.full_url}")
+
+    monkeypatch.setattr(urllib.request, "urlopen", respond)
+    exec(compile("\n".join(shell.splitlines()[1:-1]), "<workflow eligibility>", "exec"), {})
+    outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert outputs == {"allowed": "false", "scan-mode": "auto", "skills-changed": "true"}

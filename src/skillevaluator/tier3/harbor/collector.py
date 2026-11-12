@@ -1482,6 +1482,21 @@ def _looks_like_trial_dir(path: Path) -> bool:
     return any((path / name).exists() for name in TRIAL_DIAGNOSTIC_ARTIFACTS) or (path / "agent").exists()
 
 
+def _unscored_trial_case_id(trial_src: Path, case_id_by_task_selector: dict[str, str]) -> str:
+    """Return the case of a Harbor trial without a scored reward, from the task it ran.
+
+    The task comes from the trial's ``result.json``, or from its ``config.json``
+    when the trial stopped before Harbor wrote a result.
+    """
+    for name in ("result.json", "config.json"):
+        data = _read_json(trial_src / name)
+        if isinstance(data, dict):
+            result = data if name == "result.json" else {"config": data}
+            if case_id := _entry_id_from_harbor_result(result, case_id_by_task_selector):
+                return case_id
+    return ""
+
+
 def _save_unscored_trials(
     rewards: list[dict[str, Any]],
     trials_dir: Path,
@@ -1586,15 +1601,10 @@ def _save_unscored_trials(
         if agent_model:
             error_summary.pop("model", None)
         failure.update(error_summary)
-        if case_id_by_task_selector is not None:
-            trial_result = _read_json(trial_src / "result.json")
-            case_id = (
-                _entry_id_from_harbor_result(trial_result, case_id_by_task_selector)
-                if isinstance(trial_result, dict)
-                else ""
-            )
-            if case_id:
-                failure["entry_id"] = case_id
+        if case_id_by_task_selector is not None and (
+            case_id := _unscored_trial_case_id(trial_src, case_id_by_task_selector)
+        ):
+            failure["entry_id"] = case_id
         failure_file = trial_out / "failure.json"
         try:
             _write_bounded_failure_artifact(failure_file, failure)

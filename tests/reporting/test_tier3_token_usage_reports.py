@@ -320,15 +320,21 @@ def test_a_stop_on_pass_unscored_attempt_takes_its_case_from_its_harbor_files(tm
     assert codex["delta"]["total_tokens"] == 0
 
 
-def test_the_collector_records_the_case_of_an_unscored_native_task_attempt(tmp_path: Path) -> None:
+@pytest.mark.parametrize("harbor_file", ["result.json", "config.json"])
+def test_the_collector_records_the_case_of_an_unscored_native_task_attempt(tmp_path: Path, harbor_file: str) -> None:
     # A native task's directory (``login-task``) differs from its ``[metadata] entry_id`` (``auth-login``).
     jobs = tmp_path / "jobs"
     trial = jobs / "demo-opencode-with" / "login-task__a1b2c3d"
     (trial / "agent").mkdir(parents=True)
     task = {"path": "/runs/x/_harbor-tasks/opencode/with/login-task"}
     timeout = {"exception_type": "AgentTimeoutError", "exception_message": "Agent timed out after 600 seconds"}
-    result = {"task_id": task, "config": {"task": task}, "exception_info": timeout}
-    (trial / "result.json").write_text(json.dumps(result), encoding="utf-8")
+    # A trial that stopped before Harbor wrote its result has only its config.
+    harbor_record = (
+        {"task_id": task, "config": {"task": task}, "exception_info": timeout}
+        if harbor_file == "result.json"
+        else {"task": task}
+    )
+    (trial / harbor_file).write_text(json.dumps(harbor_record), encoding="utf-8")
     trajectory = {
         "schema_version": "ATIF-v1.4",
         "session_id": "session-1",

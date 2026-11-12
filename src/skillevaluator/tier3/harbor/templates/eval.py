@@ -308,6 +308,8 @@ normalize_optional_reference = _shared_checks.normalize_optional_reference
 normalize_expected_behaviors = _shared_checks.normalize_expected_behaviors
 resolve_should_trigger = _shared_checks.resolve_should_trigger
 score_skill_execution = _shared_checks.score_skill_execution
+skill_efficiency_not_applicable_reason = _shared_checks.skill_efficiency_not_applicable_reason
+skill_execution_not_applicable_reason = _shared_checks.skill_execution_not_applicable_reason
 
 # All 148 constant initializers are AST-identical at the fixed base; shared
 # constants added since are aliased here too.
@@ -3838,9 +3840,22 @@ def skill_metrics_applicable(
     return any(str(name).strip().lower() in staged for name in candidates if name and str(name).strip())
 
 
-def _skill_metric_not_applicable():
-    """Scoreless ``skill_execution`` / ``skill_efficiency`` result for an arm without the skill."""
-    return {"score": None, "status": NOT_APPLICABLE_STATUS, "reason": SKILL_METRICS_NOT_APPLICABLE_REASON}
+def _skill_metric_not_applicable(reason=SKILL_METRICS_NOT_APPLICABLE_REASON):
+    """Scoreless ``skill_execution`` / ``skill_efficiency`` result.
+
+    The default reason covers an arm without the skill. An eval case that gives
+    the metric nothing to score passes its own reason.
+    """
+    return {"score": None, "status": NOT_APPLICABLE_STATUS, "reason": reason}
+
+
+def _case_skill_metric_reasons(should_trigger, expected_skill):
+    """Return the skill metrics this eval case leaves N/A, each with its reason."""
+    reasons = {
+        "skill_execution": skill_execution_not_applicable_reason(should_trigger, expected_skill),
+        "skill_efficiency": skill_efficiency_not_applicable_reason(should_trigger, expected_skill),
+    }
+    return {metric: reason for metric, reason in reasons.items() if reason}
 
 
 def _reward_overall(result, details):
@@ -4003,6 +4018,11 @@ def main():
                 skill_execution=_skill_metric_not_applicable(),
                 skill_efficiency=_skill_metric_not_applicable(),
             )
+        else:
+            # A skill metric the case gives nothing to score stays N/A, as on the judged path.
+            for metric, na_reason in _case_skill_metric_reasons(should_trigger, expected_skill).items():
+                skill_scores[metric] = None
+                judge_details[metric] = _skill_metric_not_applicable(na_reason)
         result = {
             "security": 0,
             **skill_scores,
@@ -4113,8 +4133,10 @@ def main():
         sef_score = None
         details["skill_efficiency"] = _skill_metric_not_applicable()
     elif not should_trigger or not expected_skill:
-        sef_score = 1.0
-        details["skill_efficiency"] = {"message": "Skipped (negative or no expected_skill)"}
+        sef_score = None
+        details["skill_efficiency"] = _skill_metric_not_applicable(
+            skill_efficiency_not_applicable_reason(should_trigger, expected_skill)
+        )
     elif not tool_calls:
         sef_score = 0.0
         details["skill_efficiency"] = {"message": "No tool calls in trajectory"}

@@ -390,8 +390,9 @@ def _verdict(html: str) -> str:
     return " ".join(re.sub(r"<[^>]+>", " ", hero).split())
 
 
+@pytest.mark.parametrize("reuse_saved_feedback", [False, True], ids=["fresh-feedback", "saved-feedback"])
 def test_case_findings_after_the_budget_never_cost_a_payload_with_token_usage_its_report_limits(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reuse_saved_feedback: bool
 ) -> None:
     skill = tmp_path / "demo"
     skill.mkdir()
@@ -410,11 +411,23 @@ def test_case_findings_after_the_budget_never_cost_a_payload_with_token_usage_it
         rendered.append(payload)
 
     monkeypatch.setattr(tier3_report, "_apply_case_findings", keep_payload)
+    saved_conclusion = {
+        "severity": "fail",
+        "title": "Skill effect",
+        "message": "per-case result: FAIL (saved-budget-replay).",
+        "source": "deterministic",
+    }
 
     def render(name: str) -> tuple[dict[str, Any], str]:
         engine_result = _failed_case_findings("agent-1", 3)
+        saved_feedback = {"conclusions": [saved_conclusion]} if reuse_saved_feedback else None
         report = render_agent_eval_html_report(
-            skill, run, output_path=tmp_path / name, engine_result=engine_result, use_llm_judge=False
+            skill,
+            run,
+            output_path=tmp_path / name,
+            engine_result=engine_result,
+            use_llm_judge=False,
+            saved_feedback=saved_feedback,
         )
         return rendered[-1], report.read_text(encoding="utf-8")
 
@@ -432,6 +445,9 @@ def test_case_findings_after_the_budget_never_cost_a_payload_with_token_usage_it
     assert _verdict(html) == _verdict(plain_html)
     assert "Passed" in _verdict(html)
     assert "Incomplete" not in _verdict(html)
+    if reuse_saved_feedback:
+        assert payload["conclusions"] == [saved_conclusion]
+        assert "saved-budget-replay" in html
 
 
 @pytest.mark.parametrize("run_next_steps", [False, True])

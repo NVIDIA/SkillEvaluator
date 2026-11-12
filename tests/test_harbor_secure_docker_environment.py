@@ -29,6 +29,7 @@ from harbor.environments.docker.docker import DockerEnvironment
 from harbor.models.task.config import EnvironmentConfig
 from harbor.models.trial.paths import TrialPaths
 
+from skillevaluator.tier3.harbor import DOCKER_AGENT_IMPORT_PATHS
 from skillevaluator.tier3.harbor import stream_redaction as stream_redaction_module
 from skillevaluator.tier3.harbor.adapter import generate_harbor_tasks
 from skillevaluator.tier3.harbor.runner import build_harbor_run_command
@@ -1601,7 +1602,7 @@ def test_docker_command_uses_secure_environment_import_path() -> None:
 
     assert "--agent-import-path" not in command
     assert "--environment-import-path" not in command
-    assert command[command.index("--agent") + 1] == "opencode"
+    assert command[command.index("--agent") + 1] == DOCKER_AGENT_IMPORT_PATHS["opencode"]
     assert command[command.index("--env") + 1] == SECURE_DOCKER_ENV_IMPORT_PATH
 
 

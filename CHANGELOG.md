@@ -19,6 +19,10 @@ All notable changes to SkillEvaluator are documented in this file.
   the section. A custom file's digest covers only the rules that file sets, so
   existing custom files keep their digests and a digest changes only when the
   file's rules change.
+- HTML, Markdown, and terminal findings show recorded LLM verification verdicts,
+  confidence, and reasoning, with an explanation of retained or downgraded severity.
+  Medium-confidence false positives and uncertain verdicts retain existing gates.
+  Repeated occurrences with the same verification decision remain grouped in HTML.
 
 - A reproducible public terminal starter runs the released CLI against the
   bundled text-analyzer skill, checks real script/report output and a seeded

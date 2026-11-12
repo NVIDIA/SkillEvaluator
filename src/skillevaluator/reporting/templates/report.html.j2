@@ -2277,6 +2277,7 @@
             .t3-conclusion.fail { border-left-color:var(--danger-color); }
             .t3-agent-scorecards-row { display:grid; grid-template-columns:minmax(220px,0.85fr) repeat(2,minmax(260px,1fr)); gap:1.25rem; align-items:stretch; margin-top:0.75rem; }
             .t3-agent-scorecard-list { display:grid; gap:1rem; align-content:start; }
+            .t3-overview-lead .tolerated-baseline { display:block; margin-top:0.35rem; }
             .t3-overview-lead { background:linear-gradient(135deg,var(--bg),var(--bg-secondary)); border:1px solid var(--border-color); border-left:4px solid var(--secondary-color); border-radius:12px; padding:1rem 1.15rem; box-shadow:var(--shadow); color:var(--dark-text); line-height:1.55; margin:0 0 1rem; }
             .t3-dataset-provenance { margin:0 0 1rem; padding:0.7rem 0.9rem; border-left:4px solid var(--border-color); border-radius:6px; background:var(--bg-secondary); color:var(--dark-text); }
             .t3-dataset-provenance.warning { border-left-color:var(--warning-color); background:var(--badge-warn-bg); color:var(--badge-warn-tx); }
@@ -2546,6 +2547,9 @@
                 {% endif %}
                 {% endif %}
                 {% endif %}
+                {% if completed_agent %}{% for tolerated in completed_agent.baseline_timeouts_tolerated or [] %}
+                <span class="tolerated-baseline">Baseline incomplete for <strong>{{ tolerated.name }}</strong>{% if tolerated.scored_attempts is not none and tolerated.expected_attempts is not none %} ({{ tolerated.scored_attempts }} of {{ tolerated.expected_attempts }} attempts scored){% endif %}: kept by <code>--tolerate-baseline-timeouts</code>, so its baseline and uplift are not reported.</span>
+                {% endfor %}{% endif %}
             </div>
             {% if tier3_dataset_sufficiency and tier3_dataset_sufficiency.coverage_summary %}
             <p class="t3-dataset-sufficiency{% if tier3_dataset_sufficiency.status == 'provisional' %} warning{% endif %}"

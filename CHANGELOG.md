@@ -52,6 +52,23 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Tier 3 evaluations support token, judge-call, attempt, and priced-cost budgets.
 
+- `--tolerate-baseline-timeouts` (and `harbor.tolerate_baseline_timeouts` in
+  `evals/config.yml`) keeps a Tier 3 agent scored on its clean with-skill arm
+  when its only baseline failures are attempts that hit the agent execution
+  timeout while the agent was still producing output. By default one such
+  attempt still fails the agent and the whole run. The option needs both arms
+  run in the same run (not a `--reuse-baseline` baseline), standard dimension
+  grading, every other agent completed (at least one with both arms) and no
+  other launch errors; attempts a cost limit left `not_run` are not counted as
+  missing. It refuses a timeout whose logs show a known provider overload,
+  rate limit, quota or authentication error, and it does not cover native
+  multi-step tasks. The baseline condition stays
+  `failed`, baseline scores and Skill Lift are not reported for that agent, the
+  run's best agent, overall score and verdict come from the agents with a
+  complete baseline, reports name the tolerated agent in a "Baseline
+  incomplete" note, the run lists a warning, and the run is still not complete
+  publication evidence.
+
 - Tier 3 reports list up to three run-level **Next steps** under the per-case
   fixes in the terminal, `report.html` and the Markdown report: re-run an
   incomplete run, add attempts for inconsistent cases, add cases or negative

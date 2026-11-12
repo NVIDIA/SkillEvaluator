@@ -746,6 +746,7 @@ The high-signal flags, with defaults:
 | `--skip-with-skill` | off | Run only the without-skill arm, for example to calibrate a task set; the report shows baseline scores with no Skill Lift or skill verdict |
 | `--stop-on-pass` | off | Stop a case's remaining attempts once one passes |
 | `--agent-runtime-preflight` | off | Add one agent-only execution of the first staged task per agent before the full A/B matrix; `--no-agent-runtime-preflight` overrides a config value that enables it |
+| `--tolerate-baseline-timeouts` | off | Keep an agent scored on its with-skill arm when only baseline attempts hit the agent execution timeout; see [Baseline timeouts](#baseline-timeouts) |
 | `--progress` | `auto` | Progress rendering: `auto`, `rich` (live TTY view with secret redaction), `plain`, or `off` |
 | `--progress-interval` | mode default | Seconds between progress heartbeats: 1 for `rich`, 60 for `plain` lines in CI and redirected output |
 | `--autopilot` | off | When no evaluation source exists, generate exactly one eval case — with the configured provider, falling back to a deterministic keyless template — never overwriting an existing source |
@@ -864,6 +865,75 @@ exclusive, and baseline isolation rules still apply: a config that sets
 baseline arm must stay isolated from skill-owned setup commands. `validate`
 does not accept `--skip-with-skill`, so a baseline-only run can never satisfy a
 Tier 3 gate.
+
+### Baseline timeouts
+
+By default, any attempt that errors or goes unscored fails its agent, and any
+failed agent fails the whole run: one baseline attempt that hits the agent
+execution timeout leaves the run with no overall score or verdict, even though
+the verdict reads only with-skill dimensions. `--tolerate-baseline-timeouts` (or
+`harbor.tolerate_baseline_timeouts: true` in `evals/config.yml`) keeps such an
+agent scored on its with-skill arm. `--no-tolerate-baseline-timeouts`
+overrides a config value that enables it.
+
+```bash title="Keep agents whose baseline timed out"
+skillevaluator tier3 evaluate ./my-skill --agents claude-code,codex --tolerate-baseline-timeouts
+```
+
+The option applies only to an agent whose with-skill arm completed and whose
+baseline has at least one attempt that ended in `AgentTimeoutError` (an attempt
+a later `--stop-on-pass` attempt recovered does not count). The agent stays
+scored only when every one of these holds; otherwise it fails as before, and
+the run warning names the rule that did not hold:
+
+- Its with-skill arm scored every attempt with no errors.
+- Every missing baseline attempt is a trial that ended in Harbor's
+  `AgentTimeoutError`, matched case by case and, with `--stop-on-pass` or a
+  cost limit (each attempt then runs as its own job), attempt by attempt.
+  Attempts that a [cost limit](#cost-limits) left `not_run` are not expected,
+  so they are not missing. A setup timeout,
+  process exit, verifier failure or any other baseline error is not
+  tolerated. Native multi-step tasks are not covered: Harbor records their
+  agent timeouts on the step rather than on the trial, so such a baseline is
+  refused (`step_timeout_not_supported`).
+- Every timed-out attempt shows agent output (output tokens above zero).
+- Each timed-out attempt left an agent log, and no log shows a known provider
+  overload, rate limit, quota or authentication error identifier (such as
+  `rate_limit_error`, `insufficient_quota`, `Error code: 429` or a `429`
+  status field). This is a best-effort check: a provider error worded in a
+  way it does not know is not caught.
+- Every other agent completed, at least one of them completed both arms, and
+  the run has no other launch errors. A single-agent run never qualifies.
+- The run grades standard dimensions (not `custom_only`) and runs both arms.
+  A baseline reused with `--reuse-baseline` did not run in this run, so the
+  option does not apply to it.
+
+For a tolerated agent, the baseline condition stays `failed` with its errors,
+and its baseline scores, Skill Lift, pass@k lift and security attribution are
+not reported. The reports, and the findings panel that `tier3 evaluate` prints
+with `--verbose`, rank it below every agent with a complete baseline, so the
+best agent, overall score and lift come from complete evidence. The run's
+verdict reads the same agents: a tolerated agent that passes every dimension
+does not make the run PASS, and when every agent with a complete baseline
+never activated the skill the verdict is INCONCLUSIVE. When the best agent
+never activated the skill, the findings panel is left out rather than showing
+a tolerated agent's findings. `BENCHMARK.md` and `report.html` keep the "Needs
+attention" note and name each tolerated agent on its own line, for example
+`Baseline incomplete for opencode (1 of 2 attempts scored)`.
+
+`result.json` records the timed-out attempts under the agent's
+`baseline_timeout_tolerance` (also written to
+`<agent>/baseline_timeout_tolerance.json`; at most 32 attempts are listed, and
+`failed_attempts` is the exact count). An agent that was refused gets
+`baseline_timeout_tolerance_rejection` with the rule's code. The run-level
+`baseline_timeout_tolerance` lists the tolerated agents and the launch errors
+their timeouts explain (at most 32, with `explained_launch_errors_total`). The
+run lists a warning for each tolerated or refused agent, and `run_config.json`
+records `harbor.tolerate_baseline_timeouts`. The option changes no execution,
+so `--reuse-baseline`, `--compare-to` and `tier3 history` do not compare it:
+runs with and without it still pair. The missing baseline attempts
+still count, so the run is not complete publication evidence and does not
+satisfy a blocking Tier 3 gate.
 
 ## How standard grading judges a trial
 

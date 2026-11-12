@@ -554,6 +554,13 @@ completed run directly:
   `behavior_check`, the final-response section limit
   (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`). For `behavior_check`, the
   record's `reason` names each setting that applied.
+- **`<agent>/baseline_timeout_tolerance.json`** — written only for an agent
+  kept scored by `--tolerate-baseline-timeouts`: the baseline attempts that hit
+  the agent execution timeout. `result.json` carries the same record as
+  `agents.<agent>.baseline_timeout_tolerance`, a refused agent's
+  `agents.<agent>.baseline_timeout_tolerance_rejection` code, and the run-level
+  `baseline_timeout_tolerance` (tolerated agents and the launch errors they
+  explain). See [Baseline timeouts](/skills/skillevaluator/tier3-live-evaluation#baseline-timeouts).
 
 <Note>
   Read commands (`view`, `compare`, `create-eval-dataset --refine`) honor the

@@ -864,8 +864,10 @@ def build_agent_eval_payload(
     overall_score = _finite_float(raw_overall_score) if execution_status == "succeeded" else None
     overall_lift = _finite_float(best.get("lift"))
     # Baseline calibration scores measure no skill, so they never set a skill verdict.
+    # The verdict reads the agents the best agent is picked from.
+    verdict_agents = _headline_agents(agent_payloads, score_field=score_field)
     verdict = (
-        _overall_verdict_from_agents(agent_payloads)
+        _overall_verdict_from_agents(verdict_agents)
         if overall_score is not None and not baseline_only
         else VERDICT_NEUTRAL
     )
@@ -953,8 +955,9 @@ def build_agent_eval_payload(
     if best_agent and _agent_quality_verdict(agent_payloads.get(best_agent, {})) == verdict:
         verdict_source = agent_payloads[best_agent]
     else:
+        # The reason and counts come from an agent the verdict was read from.
         verdict_source = next(
-            (agent for agent in agent_payloads.values() if _agent_quality_verdict(agent) == verdict),
+            (agent for agent in verdict_agents.values() if _agent_quality_verdict(agent) == verdict),
             None,
         )
 
@@ -1027,7 +1030,12 @@ def build_agent_eval_payload(
             {
                 "severity": "warn",
                 "title": "Inconclusive: skill never activated",
-                "message": "The skill was never activated in any positive with-skill trial. Scores are diagnostic only; no lift verdict was computed.",
+                "message": (
+                    "The skill was never activated in any positive with-skill trial"
+                    # An agent kept with a failed baseline did not decide this verdict.
+                    + ("" if len(verdict_agents) == len(agent_payloads) else " of an agent with a complete baseline")
+                    + ". Scores are diagnostic only; no lift verdict was computed."
+                ),
             }
         ]
         deterministic_suggestions = ["Check skill loading and agent support, then rerun the evaluation."]
@@ -4557,10 +4565,27 @@ def _build_baseline_only_conclusions(
     return conclusions
 
 
+def _headline_agents(
+    agents: dict[str, dict[str, Any]], *, score_field: str = "with_skill"
+) -> dict[str, dict[str, Any]]:
+    """Return the agents that set the run's best agent and verdict.
+
+    An agent kept by --tolerate-baseline-timeouts is set aside whenever an
+    agent with a complete baseline ranks, so the headline score and verdict
+    both come from complete evidence.
+    """
+    from skillevaluator.tier3.harbor.baseline_timeouts import kept_with_failed_baseline
+
+    complete = {name: agent for name, agent in agents.items() if not kept_with_failed_baseline(agent)}
+    if any(_canonical_agent_rank(agent, score_field=score_field) is not None for agent in complete.values()):
+        return complete
+    return agents
+
+
 def _pick_best_agent(agents: dict[str, dict[str, Any]], *, score_field: str = "with_skill") -> str:
     eligible = {
         name: rank
-        for name, agent in agents.items()
+        for name, agent in _headline_agents(agents, score_field=score_field).items()
         if (rank := _canonical_agent_rank(agent, score_field=score_field)) is not None
     }
     activated = {name: rank for name, rank in eligible.items() if not _never_activated(agents[name])}

@@ -286,16 +286,23 @@ def test_native_bootstrap_preserves_unknown_dependency_validation(tmp_path: Path
 
 
 @pytest.mark.parametrize(
-    ("agent_name", "agent_class", "model_name"),
+    ("agent_name", "agent_class", "model_name", "reported_model_name", "reported_provider"),
     [
-        ("codex", SkillEvaluatorCodex, "openai/test-model"),
-        ("claude-code", ContainerClaudeCode, "anthropic/test-model"),
-        ("opencode", SkillEvaluatorOpenCode, "nvidia/test-model"),
+        ("codex", SkillEvaluatorCodex, "openai/test-model", "test-model", "openai"),
+        ("claude-code", ContainerClaudeCode, "anthropic/test-model", "test-model", "anthropic"),
+        # Harbor 0.25 keeps OpenCode's native provider/model selector intact.
+        ("opencode", SkillEvaluatorOpenCode, "nvidia/test-model", "nvidia/test-model", None),
     ],
 )
 @pytest.mark.parametrize("config_field", ["name", "import_path"])
 def test_docker_import_routes_resolve_and_preserve_report_identity(
-    tmp_path: Path, agent_name: str, agent_class: type, model_name: str, config_field: str
+    tmp_path: Path,
+    agent_name: str,
+    agent_class: type,
+    model_name: str,
+    reported_model_name: str,
+    reported_provider: str | None,
+    config_field: str,
 ) -> None:
     config = AgentConfig(
         **{config_field: DOCKER_AGENT_IMPORT_PATHS[agent_name]},
@@ -312,8 +319,8 @@ def test_docker_import_routes_resolve_and_preserve_report_identity(
     assert info.name == agent_name
     assert info.version == "1.2.3"
     assert info.model_info is not None
-    assert info.model_info.name == "test-model"
-    assert info.model_info.provider == model_name.split("/", maxsplit=1)[0]
+    assert info.model_info.name == reported_model_name
+    assert info.model_info.provider == reported_provider
 
 
 @pytest.mark.parametrize(

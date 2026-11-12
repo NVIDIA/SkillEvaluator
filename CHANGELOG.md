@@ -207,6 +207,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Upgrade the Tier 3 backend to Harbor 0.25.0. Align supported sandbox
+  constructor options with the release while reserving automatic mounts and
+  host Compose environment forwarding for evaluator policy. Preserve local
+  agent, verifier, and artifact evidence under Harbor's new mount checks, and
+  retain explicit Codex gateway URLs, credential aliases, and full model identifiers.
+
 - Name Skill Lift as the headline comparison and label pass@k differences as
   supporting reliability across reports and terminal output.
 
@@ -365,21 +371,21 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Docker OpenCode containers no longer get the distribution `nodejs` and
-  `npm` packages from agent setup, except on Alpine images, and generated
-  images now include `procps`. Before, OpenCode, the default agent with NVIDIA
-  Build, installed Debian's Node.js and npm with `apt-get` in every trial and
-  then its own Node.js with nvm, and Claude Code installed `procps` (for
-  `pgrep`) in every trial. Both took time from the 360-second agent setup
-  timeout, and a package mirror error failed the trial. Like Claude Code and
-  Codex containers since 0.6.0, OpenCode containers on Debian-based images now
-  have no `gcc`, `g++`, or `make`, and OpenCode's Node.js is on `PATH` only for
-  the OpenCode process and the commands it runs, including its stdio MCP
-  servers. Skills whose scripts, tasks, or verifier need these tools, or whose
-  stdio MCP servers need `gcc`, `g++`, or `make`, must install them through
-  `scripts/apt-packages.txt` or a custom `evals/environment/Dockerfile`.
-  Generated images rebuild once for the new package list: the per-task images,
-  or the shared base image when `harbor.base_image_mode` is `reuse`.
+- `skillevaluator view` no longer asks the LLM again when it regenerates a
+  missing `report.html` for a Tier 3 run that saved its report feedback in
+  `result.json`. The regenerated report shows the conclusions,
+  recommendations, and suggestions that run produced, makes no LLM call, and
+  reuses the run's `what_to_fix.json` when it has one. It also takes the run's
+  duration and any Harbor log links recorded in `result.json`, which the 0.8.0
+  rebuild left out. In 0.8.0 the Insights judge and the what-to-fix writer ran
+  again: with a provider configured that cost tokens and could change the
+  advice, without one the run's saved LLM advice was dropped, and either way
+  `what_to_fix.json` was overwritten. Feedback saved by 0.6.0 or earlier has
+  no per-case verdict, so the regenerated report adds the verdict and lists
+  the case fixes as its recommendations and suggestions, without the LLM, as a
+  new report does. A run that saved no feedback still has its feedback
+  rebuilt, with the LLM when a provider is configured, and its
+  `what_to_fix.json` rewritten.
 
 - Public MCP URL probes handle modern SDK client and stream APIs while retaining
   checked-address connections, header grants, response limits, and bounded
@@ -396,6 +402,22 @@ All notable changes to SkillEvaluator are documented in this file.
   failure; actual coverage gaps and analyzer failures still block.
 - PII findings clarify that required author attribution is accepted while
   duplicate contact addresses need removal, replacement, or a reviewed waiver.
+
+- Docker OpenCode containers no longer get the distribution `nodejs` and
+  `npm` packages from agent setup, except on Alpine images, and generated
+  images now include `procps`. Before, OpenCode, the default agent with NVIDIA
+  Build, installed Debian's Node.js and npm with `apt-get` in every trial and
+  then its own Node.js with nvm, and Claude Code installed `procps` (for
+  `pgrep`) in every trial. Both took time from the 360-second agent setup
+  timeout, and a package mirror error failed the trial. Like Claude Code and
+  Codex containers since 0.6.0, OpenCode containers on Debian-based images now
+  have no `gcc`, `g++`, or `make`, and OpenCode's Node.js is on `PATH` only for
+  the OpenCode process and the commands it runs, including its stdio MCP
+  servers. Skills whose scripts, tasks, or verifier need these tools, or whose
+  stdio MCP servers need `gcc`, `g++`, or `make`, must install them through
+  `scripts/apt-packages.txt` or a custom `evals/environment/Dockerfile`.
+  Generated images rebuild once for the new package list: the per-task images,
+  or the shared base image when `harbor.base_image_mode` is `reuse`.
 
 - A `tier3 evaluate --skip-with-skill` run with two or more agents now records
   the dataset-size status in `result.json` and the `tier3 evaluate` summary. It
@@ -425,6 +447,11 @@ All notable changes to SkillEvaluator are documented in this file.
   scores from scored attempts that miss the pass threshold. Dataset snapshots
   use schema 1.1; valid schema 1.0 snapshots retain their original datasets and
   integrity checks, with corrected summaries projected without rewriting files.
+
+- Tier 3 improvement recommendations respect each case's expected skill routing:
+  passing negative controls no longer inherit activation-loss advice from positive
+  cases, while failed negatives retain task, environment, and run-error diagnostics.
+  The dataset snapshot is read once per recommendation pass across all cases and agents.
 
 - Tier 2 includes qualifying shell comment blocks at end of file in context
   deduplication. Previously those blocks disappeared unless a blank line or

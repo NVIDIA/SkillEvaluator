@@ -6,6 +6,15 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- JSON reports record the SkillEvaluator `version` that wrote them, the
+  `target_path` (the absolute path or Git remote URL from `validate`, the path
+  as given from `tier1` and `tier2`, and `null` from single-check commands such
+  as `security-scan`), and `top_issues`, the grouped issue rows across every
+  tier that the HTML report data carries, without their page anchors. Each
+  `gating.tiers` entry adds `validator_policies`, which says for each check
+  whether it gates the exit code; the tier's `blocking` is `true` when any one
+  of them does. The keys are additive, and existing keys keep their shape.
+
 - Capability-gated CI onboarding for protected Tier 1 `--llm`/SkillSpector
   checks, independent Tier 3 gateway/judge settings and native agent models.
   Combined reports retain source-bound `BENCHMARK.md` cards for every outcome;
@@ -194,14 +203,6 @@ All notable changes to SkillEvaluator are documented in this file.
   keeping optional LLM checks and hosted feedback separate. Preserve opt-in
   all-tier setup and report contracts in an Advanced CI reference.
 
-- JSON reports record the SkillEvaluator `version` that wrote them, the
-  `target_path` (the absolute path or Git remote URL from `validate`, the path
-  as given from `tier1` and `tier2`, and `null` from single-check commands such
-  as `security-scan`), and `top_issues`, the grouped issue rows across every
-  tier that the HTML report data carries, without their page anchors. Each
-  `gating.tiers` entry adds `validator_policies`, which says for each check
-  whether it gates the exit code; the tier's `blocking` is `true` when any one
-  of them does. The keys are additive, and existing keys keep their shape.
 
 ### Changed
 
@@ -327,6 +328,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The JSON report of `skillevaluator validate`, `tier1` or `tier2` on one skill
+  folder lists that skill in `skills` and under its author in `contributors`.
+  A clean run with a narrowed check list, such as `--checks schema`, has no
+  finding path or quality score to name the skill by, so the report listed one
+  skill per check ID (`manifest_exists`, `frontmatter_valid` and so on). It
+  now uses the folder's name. The `BENCHMARK.md` of a run without a recorded
+  Tier 3 version, such as `--tiers 1`, now records the evaluator version
+  instead of `Evaluator version: not recorded (legacy or non-live result)`; a
+  version recorded by a Tier 3 run still wins.
+
 
 - Public MCP URL probes handle modern SDK client and stream APIs while retaining
   checked-address connections, header grants, response limits, and bounded
@@ -445,6 +456,15 @@ All notable changes to SkillEvaluator are documented in this file.
   characters: a text that saves only a few characters stays inline when sharing
   it would push another text past block 9 and cost more than it saves.
 
+- Tier 2 deduplication no longer rescans a shell script once per function
+  header. In 0.8.0 each `name() {` header without a closing brace walked the
+  rest of the script, and line numbers were counted from the start of the file
+  for every function, so chunking grew with the square of the script's size: a
+  53 KiB script of such headers took about 20 seconds, and a 1 MiB one could
+  take hours. Braces and line breaks are now indexed in one pass. Python files
+  are also split into lines once instead of once per function or class. Chunk
+  text and line ranges are unchanged.
+
 - Tier 3 **Measured Agent Resources** no longer count idle or user time as LLM
   seconds when timing is inferred from step timestamps and an agent step with
   tool calls is followed by a user or system step. The whole gap up to that
@@ -523,6 +543,45 @@ All notable changes to SkillEvaluator are documented in this file.
   Missing lift data is shown as `-`; custom-only and legacy agents retain their
   arm-difference comparison.
 
+- Tier 2 `similarity-check` and context deduplication now parse Markdown
+  frontmatter within fixed structure limits: 100 nesting levels, 20,000 nodes,
+  1,024 alias references, 1,024 items in one mapping or sequence, 65,536
+  characters in one value, and integers up to 14,000 bits, with aliases and
+  merge keys counted after expansion. In 0.8.0 both used plain
+  `yaml.safe_load`, and `similarity-check` converted a `name` or `description`
+  that was not a string to text. A 477-byte `SKILL.md` whose frontmatter chains
+  YAML aliases produced an 82-million-character description, and a 543-byte
+  one that chains merge keys took 180 MB in context deduplication; each further
+  level multiplies the cost by ten. Mapping frontmatter over a limit now stops
+  `similarity-check` with an error that names the manifest, and context
+  deduplication with a CRITICAL `manifest_complexity_limit` finding, before any
+  provider call. Text between the `---` lines that is not a mapping is still
+  not frontmatter and is never checked against these limits.
+  `similarity-check` now excludes a manifest whose `name`, `title`, or
+  `description` is a non-empty value that is not a string, such as `name: 2048`
+  or `name: yes`, with the coverage reason `non_string_name_or_description`
+  instead of converting the value. Its debug diagnostic omits the absolute
+  manifest path, keeping private host-directory names out of logs.
+  An empty, zero, or false value such as `0`,
+  `false`, or `[]` still gets `missing_name_or_description`. Either way, like
+  any excluded manifest, it makes the scan incomplete. It stops with an error
+  that names the manifest when a value is longer than 16,384 characters, the
+  per-field catalog text limit; description mode still also caps
+  `name: description` at 16,384 characters. An invalid tagged value such as
+  `!!int ""`, an impossible date such as `2024-02-30`, or a decimal integer
+  longer than 4,300 digits (Python's default limit for converting text to an
+  integer) now counts as invalid frontmatter instead of stopping either check
+  with an unexpected error. A repeated key still keeps its last value in both
+  checks. `tier3 select-decoys` and group-mode decoy loading
+  (`skill_workspace.decoy_manifest`) read the target's and each selected
+  skill's frontmatter the same way. A `name` or `description` that is not a
+  string, such as `name: yes`, now fails them with `Decoy selection requires a
+  skill with a root SKILL.md whose frontmatter is a valid YAML mapping with a
+  non-empty string name and description` instead of being converted to text;
+  invalid YAML, such as an unquoted `description: Use when: debugging logs`, and
+  an empty value get the same message. Frontmatter over a limit, or a value
+  longer than 16,384 characters, fails them with an error that names the
+  manifest.
 
 - The Tier 3 verdict is now FAIL when a scored dimension is below 0.40 and
   another dimension has no score. In 0.8.0 a dimension with no score made the
@@ -546,15 +605,6 @@ All notable changes to SkillEvaluator are documented in this file.
   with a `destructive_command` finding, already gets FAIL from that check (see
   Changed).
 
-- The JSON report of `skillevaluator validate`, `tier1` or `tier2` on one skill
-  folder lists that skill in `skills` and under its author in `contributors`.
-  A clean run with a narrowed check list, such as `--checks schema`, has no
-  finding path or quality score to name the skill by, so the report listed one
-  skill per check ID (`manifest_exists`, `frontmatter_valid` and so on). It
-  now uses the folder's name. The `BENCHMARK.md` of a run without a recorded
-  Tier 3 version, such as `--tiers 1`, now records the evaluator version
-  instead of `Evaluator version: not recorded (legacy or non-live result)`; a
-  version recorded by a Tier 3 run still wins.
 
 ## 0.8.0 - 2026-11-05
 

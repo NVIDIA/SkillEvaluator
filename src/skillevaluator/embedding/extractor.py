@@ -13,9 +13,7 @@ from __future__ import annotations
 import os
 import stat
 from dataclasses import dataclass, field
-from pathlib import Path
-
-import yaml
+from pathlib import Path, PurePosixPath
 
 from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_FILE_BYTES,
@@ -30,9 +28,19 @@ from skillevaluator.constants import (
     SKILL_MANIFEST_VARIANTS,
     WORKFLOWS_MANIFEST_FILE,
 )
-from skillevaluator.deduplication.utils.skill_collector import _SecureReadError, _SecureRoot
+from skillevaluator.deduplication.utils.skill_collector import (
+    _frontmatter_root_kind,
+    _SecureReadError,
+    _SecureRoot,
+)
 from skillevaluator.embedding.limits import validate_max_entries
 from skillevaluator.logging_config import get_logger
+from skillevaluator.utils.structured_data import (
+    StructuredDataLimitError,
+    StructuredDataSyntaxError,
+    load_bounded_yaml,
+    require_bounded_string,
+)
 from skillevaluator.utils.tier2_paths import (
     contained_directory_alias_target,
     is_contained_compatibility_alias,
@@ -48,6 +56,12 @@ MAX_DISCOVERED_PATHS = SIMILARITY_MAX_DISCOVERED_PATHS
 DISCOVERY_EXCLUDED_DIRS = SCAN_EXCLUDED_DIRS
 MAX_EXTRACTION_EXCLUSIONS = 100
 MAX_EXCLUSION_PATH_CHARS = 512
+# Longest name or description read from frontmatter, in every embedding mode.
+# It bounds the memory one field can take and equals the registry's per-field
+# catalog text limit (MAX_CATALOG_TEXT_LENGTH). The registry still enforces the
+# combined description embedding-text limit and the catalog limits, and the
+# Tier 1 length rules stay with Tier 1.
+MAX_FRONTMATTER_FIELD_CHARS = 16_384
 
 
 @dataclass
@@ -162,6 +176,7 @@ def extract_from_skill(skill_dir: Path, *, budget: _ExtractionBudget | None = No
                         budget=budget,
                         secure_root=secure_root,
                         relative_path=Path(variant),
+                        label=_manifest_label(skill_dir, variant),
                     )
     except _SecureReadError as exc:
         raise ValueError(f"Skill root is a symlink, reparse point, or cannot be securely opened: {skill_dir}") from exc
@@ -188,6 +203,7 @@ def extract_from_rule(rule_path: Path, *, budget: _ExtractionBudget | None = Non
                 budget=budget,
                 secure_root=secure_root,
                 relative_path=Path(rule_path.name),
+                label=_manifest_label(rule_path.parent, rule_path.name),
             )
     except _SecureReadError as exc:
         raise ValueError(
@@ -212,6 +228,7 @@ def extract_from_workflow(workflow_dir: Path, *, budget: _ExtractionBudget | Non
                 budget=budget,
                 secure_root=secure_root,
                 relative_path=Path(WORKFLOWS_MANIFEST_FILE),
+                label=_manifest_label(workflow_dir, WORKFLOWS_MANIFEST_FILE),
             )
     except _SecureReadError as exc:
         raise ValueError(
@@ -264,6 +281,16 @@ def discover_and_extract_detailed(
 # ---------------------------------------------------------------------------
 
 
+def _manifest_label(directory: Path, manifest_name: str) -> str:
+    """Name a manifest read on its own by its directory, such as ``my-skill/SKILL.md``.
+
+    The directory is made absolute and ``..`` is removed lexically, without
+    following links, so ``Path(".")`` or ``Path("..")`` is named by the real
+    directory name.
+    """
+    return PurePosixPath(Path(os.path.normpath(directory.absolute())).name, manifest_name).as_posix()
+
+
 def _is_symlink_or_reparse(path: Path) -> bool:
     """Return whether *path* redirects traversal through a link or reparse point."""
     try:
@@ -308,8 +335,12 @@ def _extract_from_file(
     budget: _ExtractionBudget | None = None,
     secure_root: _SecureRoot | None = None,
     relative_path: Path | None = None,
+    label: str | None = None,
 ) -> ContentEntry | None:
-    """Read once, parse frontmatter, and build a bounded content entry."""
+    """Read once, parse frontmatter, and build a bounded content entry.
+
+    Errors name the manifest by *label*, or else by its path under the scan root.
+    """
     full_text = _read_bounded_manifest(
         file_path,
         budget,
@@ -324,13 +355,24 @@ def _extract_from_file(
         return None
 
     frontmatter_yaml, _markdown_content = match.groups()
+    if label is None:
+        label = relative_path.as_posix() if relative_path is not None else file_path.name
+    # Only the parser events up to the root node are read first. A root that
+    # is not a mapping is never built; it is excluded like an empty mapping,
+    # even when the YAML after the root node is also malformed. YAML that is
+    # malformed before its root node goes to the loader, which rejects it as
+    # invalid YAML.
+    root_kind = _frontmatter_root_kind(frontmatter_yaml)
     try:
-        data = yaml.safe_load(frontmatter_yaml)
-    except yaml.YAMLError as exc:
+        # Agent clients keep the last value of a repeated frontmatter key.
+        data = load_bounded_yaml(frontmatter_yaml, last_key_wins=True) if root_kind != "other" else None
+    except StructuredDataSyntaxError as exc:
         if budget is not None:
             budget.exclude(file_path, "invalid_yaml")
         logger.debug("Invalid YAML frontmatter in %s: %s", file_path, exc)
         return None
+    except StructuredDataLimitError as exc:
+        raise ValueError(f"Manifest structured-data complexity limit exceeded: {label}") from exc
     if not data or not isinstance(data, dict):
         if budget is not None:
             budget.exclude(file_path, "invalid_frontmatter_mapping")
@@ -349,10 +391,25 @@ def _extract_from_file(
             file_path,
         )
         return None
+    # Never call str() on a frontmatter value: a list or mapping built from
+    # YAML aliases renders to a string far larger than the manifest. A value
+    # that is not a string makes the entry invalid, with its own reason.
+    if not (isinstance(name, str) and isinstance(description, str)):
+        if budget is not None:
+            budget.exclude(file_path, "non_string_name_or_description")
+        logger.debug("Frontmatter %s or %s is not a string", name_field, description_field)
+        return None
+    try:
+        name = require_bounded_string(name, name_field, max_chars=MAX_FRONTMATTER_FIELD_CHARS, allow_empty=True)
+        description = require_bounded_string(
+            description, description_field, max_chars=MAX_FRONTMATTER_FIELD_CHARS, allow_empty=True
+        )
+    except ValueError as exc:
+        raise ValueError(f"Manifest frontmatter {exc}: {label}") from exc
 
     return ContentEntry(
-        name=str(name),
-        description=str(description),
+        name=name,
+        description=description,
         path=str(file_path.parent if content_type == CONTENT_TYPE_SKILL else file_path),
         content_type=content_type,
         full_text=full_text,

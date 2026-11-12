@@ -308,6 +308,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 improvement recommendations respect each case's expected skill routing:
+  passing negative controls no longer inherit activation-loss advice from positive
+  cases, while failed negatives retain task, environment, and run-error diagnostics.
+
 - Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
   the PR or merge request's target revision. Policy files from the proposed
   changes cannot approve their own exceptions.

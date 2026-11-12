@@ -24,6 +24,7 @@ from rich.text import Text
 from skillevaluator.reporting.summary_copy import pass_at_k_summary
 from skillevaluator.reporting.terminal_styles import AMBER
 from skillevaluator.tier3.attempt_verdict import attempt_verdict, scored_goal_accuracy
+from skillevaluator.tier3.eval_core.checks import resolve_should_trigger
 from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
 from skillevaluator.utils.redaction import redact_sensitive_text
 from skillevaluator.utils.secret_redaction import Redactor
@@ -881,7 +882,9 @@ def _diagnose_agent_case(
     wp, wn = _attempt_rate(with_marks)
     bp, bn = _attempt_rate(without_marks)
     errors = with_marks.count(ERROR)
-    not_used = _never_activated(agent)
+    # Negative controls must avoid the skill; an agent-wide positive miss does not apply to them.
+    should_trigger = resolve_should_trigger(dict(_dataset_entries(run_dir).get(case_id, {})))
+    not_used = should_trigger is not False and _never_activated(agent)
     failed_trials = []
     for attempt in with_case.get("attempts", []) if isinstance(with_case, Mapping) else []:
         if isinstance(attempt, Mapping) and attempt.get("passed") is not True:
@@ -932,7 +935,7 @@ def _diagnose_agent_case(
     elif finals and all(_ASKS_FOR_INPUT.search(f) for f in finals):
         kind = "missing input"
         what = f'the agent stopped to ask for input the case does not provide: "{_short(finals[0], 140)}"'
-    elif activations and all(a is False for a in activations):
+    elif should_trigger is not False and activations and all(a is False for a in activations):
         kind, what = "skill not used", "the agent never loaded the skill in the failed attempts"
         if reasons:
             what += f"; {reasons.most_common(1)[0][0]}"

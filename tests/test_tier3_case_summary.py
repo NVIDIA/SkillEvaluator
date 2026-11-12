@@ -6,6 +6,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from rich.console import Console
 
 from skillevaluator.tier3.case_summary import render_case_summary, verdict, what_to_fix
@@ -403,6 +404,102 @@ def test_never_activated_scores_do_not_claim_a_skill_effect(tmp_path: Path) -> N
     output = render_result({"execution_status": "succeeded", "agents": {"a": agent}})
     assert "skill hurts" not in output
     assert "inconclusive" in output
+
+
+@pytest.mark.parametrize(
+    "negative_routing",
+    [{"expected_skill": None}, {"should_trigger": False, "expected_skill": "release-review"}],
+)
+def test_mixed_activation_miss_does_not_blame_passing_negative(tmp_path: Path, negative_routing: dict) -> None:
+    from skillevaluator.tier3.harbor.activation import summarize_skill_activation
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+
+    negative = {
+        **dict.fromkeys(DEFAULT_METRICS, 1.0),
+        "_trial_name": "n0",
+        "details": {"skill_execution": {"should_trigger": False, "negative_check": {"passed": True}}},
+    }
+    positive = {
+        **dict.fromkeys(DEFAULT_METRICS, 0.2),
+        "_trial_name": "p0",
+        "details": {"skill_execution": {"should_trigger": True, "activation": {"passed": False, "score": 0.0}}},
+    }
+    agent = _agent(
+        {"negative": _case(True, prefix="n"), "positive": _case(False, prefix="p")},
+        {"negative": _case(True), "positive": _case(False)},
+    )
+    agent["skill_activation"] = summarize_skill_activation([negative, positive])
+    (tmp_path / "dataset_snapshot.json").write_text(
+        json.dumps(
+            {
+                "dataset": [
+                    {"id": "negative", **negative_routing},
+                    {"id": "positive", "expected_skill": "release-review"},
+                ]
+            }
+        )
+    )
+    _trial(tmp_path, "a", "n0", negative)
+    _trial(tmp_path, "a", "p0", positive)
+
+    [fix] = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+
+    assert (fix["case"], fix["kind"], fix["attempts_lost"]) == ("positive", "skill not used", 1)
+    assert "frontmatter description" in fix["action"]
+    console = Console(record=True, width=160)
+    render_case_summary({"agents": {"a": agent}}, console=console, fixes=[fix])
+    advice = console.export_text().split("How to improve", 1)[1]
+    assert "positive" in advice and "negative" not in advice
+
+
+@pytest.mark.parametrize("activation_status", ["never_activated", "unknown"])
+@pytest.mark.parametrize("failure_kind", ["skill", "environment", "run error"])
+def test_failed_negative_keeps_task_diagnostics(tmp_path: Path, activation_status: str, failure_kind: str) -> None:
+    case = _case(missing=1) if failure_kind == "run error" else _case(False)
+    agent = _agent({"negative": case}, {})
+    agent["skill_activation"] = {"status": activation_status}
+    (tmp_path / "dataset_snapshot.json").write_text(
+        json.dumps({"dataset": [{"id": "negative", "should_trigger": False, "expected_skill": "release-review"}]})
+    )
+    if failure_kind == "run error":
+        trial = tmp_path / "a" / "with-skill" / "trials" / "negative__attempt1"
+        trial.mkdir(parents=True)
+        (trial / "failure.json").write_text(json.dumps({"error": {"type": "AgentTimeoutError", "message": "900s"}}))
+    else:
+        reward = _reward(False, "the answer omitted the requested total")
+        reward["details"]["skill_execution"]["should_trigger"] = False
+        observation = "ModuleNotFoundError: No module named 'pypdf'" if failure_kind == "environment" else ""
+        _trial(tmp_path, "a", "t0", reward, observation)
+
+    [fix] = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+
+    assert (fix["case"], fix["kind"], fix["attempts_lost"]) == ("negative", failure_kind, 1)
+    assert "frontmatter description" not in fix["action"]
+    if failure_kind == "environment":
+        assert "No module named 'pypdf'" in fix["what"]
+    elif failure_kind == "run error":
+        assert "AgentTimeoutError" in fix["what"]
+    else:
+        assert "omitted the requested total" in fix["what"]
+
+
+@pytest.mark.parametrize("snapshot", [None, "{broken", '{"dataset": [{"id": "c"}]}'])
+@pytest.mark.parametrize("activation_status", ["never_activated", "unknown"])
+def test_unlabeled_snapshot_preserves_legacy_activation_diagnosis(
+    tmp_path: Path, snapshot: str | None, activation_status: str
+) -> None:
+    agent = _agent({"c": _case(True)}, {})
+    agent["skill_activation"] = {"status": activation_status}
+    if snapshot is not None:
+        (tmp_path / "dataset_snapshot.json").write_text(snapshot)
+
+    fixes = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+
+    if activation_status == "never_activated":
+        [fix] = fixes
+        assert (fix["case"], fix["kind"], fix["attempts_lost"]) == ("c", "skill not used", 1)
+    else:
+        assert fixes == []
 
 
 def test_truncated_attempts_cannot_produce_a_complete_effect_or_clean_bill(tmp_path: Path) -> None:

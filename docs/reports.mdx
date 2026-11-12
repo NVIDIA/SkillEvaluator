@@ -572,9 +572,15 @@ A finished `tier3 evaluate` run prints two tables and closes with a compact
 with its per-arm scores and Skill Lift; **Results by Dimension** rolls those
 signals up into the five dimensions below. A metric the run couldn't score
 renders as `NO SCORE` — it is never coerced to 0.0 — and unscored metrics are
-omitted from the averages, so `overall_score` can be `null` in the JSON. In a
-baseline-only run (`--skip-with-skill`) the with-skill and Skill Lift cells read
-`skipped` instead, because that arm never ran. The
+omitted from the averages, so `overall_score` can be `null` in the JSON. A
+metric that does not apply to an arm renders as `N/A`, and so does its Skill
+Lift: for example Behavior Check when the cases have no `assertions` (legacy
+`expected_behavior`), Accuracy when they have no `expected_output` (legacy
+`ground_truth`), or Skill Execution in a baseline with no skill it could
+activate. N/A metrics are left out of the scores and the lift. In a
+baseline-only run (`--skip-with-skill`) the with-skill cells read `skipped`,
+because that arm never ran, and so does the Skill Lift of every row that is
+not N/A. The
 Artifacts panel shows the HTML report path, the output directory, and — only
 when a retained Harbor jobs directory exists — a ready-to-paste `harbor-view`
 command.
@@ -885,7 +891,18 @@ cases, while evaluator, dimension, and overall lift use the eligible
 comparisons. A reported lift can therefore differ from subtracting the two
 displayed arm scores, even reversing their apparent direction. When no complete
 comparison with matching judge models remains, the affected metric, dimension,
-and overall lift are unavailable rather than zero.
+and overall lift are unavailable rather than zero. The HTML report's evaluator
+card says how many cases its lift left out, or, when it has no lift, that no
+comparable result remains, and its per-trial evidence labels those cases
+**Left out of lift: different judge models**. In the canonical JSON the
+evaluator records that count in `lift_excluded_cases`. Its card's
+`comparison_basis` lists in `case_ids` the lift's keys for the cases the loaded
+rewards identify: each case ID without an `-attemptN` or `_attemptN` suffix,
+cut to 256 characters and listed once, at most 64 keys. It also gives the
+with-skill `excluded_attempts` and `contributing_attempts`, which are both
+`null` unless both arms' rewards loaded completely and identify every left-out
+case. The matching evidence entries carry `comparison_excluded: true`. A
+never-activated agent has no lift, so it gets none of these fields.
 
 If every positive with-skill trial has confirmed zero activation, the agent's
 result is **INCONCLUSIVE: skill never activated**. Reports keep its arm scores
@@ -952,7 +969,9 @@ list. A case that scored below 0.80 also quotes a short excerpt of the
 offending command or artifact when the grader recorded one. When the attempts
 of one case disagree, the lowest-scoring attempt's reason is shown. In the
 **Per-Evaluator Drill-Down** table, hover a dotted-underlined score below 0.80
-to read the reason for that trial.
+to read the reason for that trial. A metric the trial recorded as N/A reads
+`N/A`, and hovering it says why; a score missing for any other reason reads
+`—`.
 
 Reasons are built from each trial's `reward.json` `details`, joining up to
 three distinct parts from the grader's `reason` or `message`, failing findings

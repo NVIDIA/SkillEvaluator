@@ -358,6 +358,17 @@ All notable changes to SkillEvaluator are documented in this file.
   `HTTP` word in any cell, because `|` reads as a pipe; and `HTTP PUT` right
   after a `;`, which starts a new command.
 
+- Reports & Results now explains the completed-agent result in Tier 3 reports.
+  When one of several agents fails, the HTML report and `tier3-benchmark.md`
+  show the best agent's score when that agent's evidence is complete and mark
+  it as needing attention, while the run stays failed and has no whole-run
+  score. The new section says when an agent qualifies, how recovered timeout
+  attempts are shown, and that the HTML lift card still shows the best agent's
+  lift. The results tree now lists `tier3-benchmark.md`, which every Tier 3
+  run, from `tier3 evaluate` or a `validate` run that includes Tier 3, writes
+  as a pair with `report.html`, and the live evaluation guide says when its
+  verdict table applies and links to the new section.
+
 ### Fixed
 
 - Public MCP URL probes handle modern SDK client and stream APIs while retaining
@@ -557,6 +568,17 @@ All notable changes to SkillEvaluator are documented in this file.
   prefix, cut at punctuation such as `,` or `}` but never inside a URL's user
   info or host, so `Error: ` followed by minified JSON no longer arrives as
   `Error: ...<truncated>`.
+
+- Tier 3 HTML **Attempt Details** now show an agent timeout that a later
+  scored attempt recovered under `--stop-on-pass`, and count it in the case's
+  attempts. In 0.8.0 a case that timed out on attempt 1, passed on attempt 2
+  and skipped attempt 3 read `1 of 2 scored` and `passed on scored attempt 2`,
+  with nothing about the timeout; it now reads `A1: timed out, recovered`,
+  `1 of 3 scored` and `passed on attempt 2`. The Result column says
+  `passed on attempt N` for every case, because N is the attempt's number, not
+  a count of scored attempts. `tier3 evaluate` also prints one line for each
+  agent with recovered timeouts. Scores, pass@k and attempt coverage are
+  unchanged.
 
 - Tier 3 security grading again warns about network exfiltration, lowering
   the Security score to 0.5, for an HTTPie method word after a capitalized

@@ -696,6 +696,19 @@ reports mark it publication-incomplete when cases were skipped. By contrast,
 `--n-concurrent` and `--max-agents` control parallelism and elapsed time; they
 do not reduce the total planned trials or model work.
 
+With `--stop-on-pass`, an attempt that hits Harbor's agent execution timeout
+does not end the case: the next attempt runs, and when a later attempt of the
+same case completes with a score, it recovers the timeout. The timed-out
+attempt is never scored, and its failure stays in the agent's results under
+`recovered_trial_failures`. It still used one of the case's attempts, so
+reports count it on its own: the HTML **Attempt Details** row shows it as
+`A1: timed out, recovered`, or as a count (`1 timed out, recovered`) when the
+report did not keep its attempt number, and keeps it in the attempt total. A
+case that timed out on attempt 1 and passed on attempt 2 of 3 reads
+`1 of 3 scored` and `passed on attempt 2`, and `tier3 evaluate` prints one
+line for each agent with recovered timeouts. Without `--stop-on-pass` there is
+no recovery: a timed-out attempt leaves the arm's attempt coverage incomplete.
+
 ### Cost and local mode
 
 `--env-mode local` avoids managed cloud-sandbox charges by running the agent
@@ -1436,6 +1449,15 @@ Missing metrics are never coerced to `0.0`: an unscored run reports an
 `overall_score` of `None`, averages omit unscored metrics, and the affected
 cells render **NO SCORE**. `compare` likewise ignores stored summaries whose
 `execution_status` is not `succeeded`.
+
+The verdict table above applies only when the run succeeds. When one of several
+agents fails, the run's `execution_status` is `failed`, its `overall_score` is
+`None` and its `verdict` is `neutral`, even if another agent completed. The
+same holds when every agent finished but they were scored on different metric
+sets. If one of several agents fails and the run's best agent completed with
+full evidence, the HTML report and `tier3-benchmark.md` still show that agent's
+score and mark it as needing attention; see
+[Completed agents in an incomplete run](/skills/skillevaluator/reports#completed-agents-in-an-incomplete-run).
 
 The canonical Tier 3 payload embedded by both standalone `evaluate` and
 `validate --agent-eval` reports uses schema version 2.0. A completed

@@ -99,6 +99,10 @@ publication eligibility. Standalone Tier 3 reports show **Not assessed (Tier 3
 only)**. **Best agent score** describes one evaluated agent, rather than approval
 of the whole validation run.
 
+When one of several Tier 3 agents fails, the run fails, and a score shown for
+it belongs to one completed agent; see
+[Completed agents in an incomplete run](#completed-agents-in-an-incomplete-run).
+
 Each tier counts its own passed, failed, incomplete, skipped, and N/A results.
 Skipped and explicitly inapplicable checks are excluded from executed-check
 denominators. A tier that produced no results is **Not run**; presentation of an
@@ -483,6 +487,7 @@ completed run directly:
       - run_config.json
       - attempt_policy.json
       - report.html
+      - tier3-benchmark.md
       - comparison.json
       - codex/
         - lift.json
@@ -517,6 +522,17 @@ completed run directly:
   configured: environment, attempts, concurrency, grading mode, pass threshold.
 - **`report.html`** — the human-readable report, generated automatically at
   the end of every run.
+- **`tier3-benchmark.md`** — a Tier 3-only benchmark written with
+  `report.html`. It leads with the
+  [completed agent's result](#completed-agents-in-an-incomplete-run) and shows
+  publication as **NOT ASSESSED**, because it covers Tier 3 only, even when it
+  comes from a `validate` run that also ran Tiers 1 and 2; its name keeps
+  publication tooling from reading it as a `BENCHMARK.md` card. At the end of
+  every Tier 3 run, from `tier3 evaluate` or a `validate` run that includes
+  Tier 3, the two files are written as a pair: if `tier3-benchmark.md` cannot
+  be written, `report.html` is removed too, and `result.json` records the
+  reason in `warnings` with `report_status: "degraded"`. [`view`](#view)
+  regenerates only a missing `report.html`, never `tier3-benchmark.md`.
 - **`comparison.json`** — the cross-agent comparison table; written only when
   you ran more than one agent.
 - **`<agent>/lift.json`** and **`<agent>/pass_at_k_lift.json`** — per-metric
@@ -1228,6 +1244,59 @@ These uncertainty fields describe the cases in one configured run. They do not
 make heterogeneous cases independent, correct dataset leakage, or promote a
 small p-value into proof that a skill generalizes. Keep the dataset, attempt
 policy, agent, model, and environment fixed when interpreting them.
+
+### Completed agents in an incomplete run
+
+When you evaluate several agents and one of them fails, the Tier 3 run fails.
+The run's `execution_status` is `failed`, the payload's whole-run
+`summary.overall_score` is `null`, and the publication assessment does not
+change: one agent's result cannot stand for the whole run. The reports still
+show the result of the run's best agent when its evidence is complete. The best
+agent is the successful agent with the highest with-skill score; an agent that
+never activated the skill is chosen only when no other successful agent has a
+score.
+
+- The HTML Tier 3 hero shows that agent's score and the warning
+  **Completed-agent result. Other execution failures need attention**. The
+  overview's score card reads **Completed Agent Score**.
+- `tier3-benchmark.md` names the agent and gives its score and, when its
+  baseline is comparable, its lift, followed by **Needs attention: other
+  execution failures remain**. In a `validate` run, `BENCHMARK.md` shows the
+  same lines under its unchanged overall verdict.
+- When `--stop-on-pass` recovered a timeout of that agent with a later scored
+  attempt, the HTML report (in the collapsed **Run details & provenance**
+  panel), `tier3-benchmark.md` and, in a `validate` run, `BENCHMARK.md` give
+  its number of recovered attempts. Timeouts that other agents recovered are
+  not counted. The timed-out attempts stay in the failure history and are not
+  scored. The HTML report and `tier3-benchmark.md` also give this count when
+  every agent finished.
+
+In a standalone report, the **Tier 3 quality** chip and the **Quality Verdict**
+card follow the run's verdict. A failed run keeps `neutral`, which the HTML
+labels **Changes required**, even when the completed agent's own dimension
+verdict passes. The completed-agent details still describe that agent, and
+the command status in the same hero also reads **Changes required**.
+
+The evidence is complete when the agent succeeded with no execution errors, has
+a with-skill score from 0 to 1, and scored every expected attempt of every case
+in each arm. `tier3-benchmark.md` shows lift only when the baseline arm also
+succeeded and used the same metric set; after `--skip-baseline`, it shows the
+score without a baseline or lift. If the best agent's evidence is incomplete,
+the reports do not fall back to another agent. When no agent qualifies, for
+example because every agent failed or the agents were scored on different
+metric sets, no completed-agent score is shown. The benchmark's leading
+verdict follows the run, so a neutral run still reads
+**Tier 3 completed-agent result: NEUTRAL** when no agent qualifies.
+
+When the run has a best agent, the HTML report names it as **Best performing
+agent**, and its **Skill Lift** card and the **Best-agent lift** line under
+**Run details & provenance** show that agent's lift when it has one, even when
+its evidence is incomplete. The payload keeps this lift in
+`summary.overall_lift` and records the failed run's `verdict` as `neutral`.
+The lift is diagnostic evidence for one agent, not a whole-run lift.
+
+To get a whole-run result, fix the failed agent and rerun the evaluation with
+every agent.
 
 ## Browse results
 

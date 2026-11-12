@@ -412,6 +412,26 @@ All notable changes to SkillEvaluator are documented in this file.
   now reported as incomplete, and so is a `DUPLICATE` reply with a `"0.9"`
   confidence, which made a HIGH finding in 0.8.0.
 
+- Tier 2 context deduplication now accepts more content chunks per skill. With
+  NVIDIA Build's default embedding model (`nvidia/nemotron-3-embed-1b`, 2,048
+  dimensions) and the OpenAI-compatible default
+  (`nvidia/nvidia/nemotron-3-embed-1b`, the same model) the limit is now 724
+  chunks, and with OpenAI's default `text-embedding-3-small` (1,536
+  dimensions) it is 836. All three were 512. In 0.8.0 a skill with more than
+  512 chunks stopped the scan as incomplete with `chunk_count_limit`, and
+  `validate` exited 1 because Tier 2 gates by default. The chunk ceiling is now
+  1,024 and the scalar-comparison budget 536,346,624, so embeddings of up to
+  1,024 dimensions reach all 1,024 chunks. At 3,072 dimensions the limit is now
+  591, and at 4,096 it is 512, up from 418 and 362. A skill above its width's
+  limit but within 1,024 chunks, such as 725 to 1,024 chunks with either
+  2,048-dimensional default, now stops after the first embedding batch with
+  `scalar_comparison_limit` instead of before any embedding request with
+  `chunk_count_limit`. It is still reported as incomplete, with the same exit
+  code. The cluster member limit follows the chunk ceiling to 1,024. The most
+  clustering work one skill can need doubles with the budget, and the most
+  embedding input it can send doubles with the ceiling, from 512 to 1,024
+  texts (724 with either 2,048-dimensional default).
+
 - Tier 3 HTML evaluator cards now say when a judge metric's lift left out cases
   whose arms were scored by different judge models, for example after a judge
   fallback in one arm. The arm scores keep those cases, so a card could show

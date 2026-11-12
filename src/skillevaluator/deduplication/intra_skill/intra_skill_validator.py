@@ -55,7 +55,7 @@ _CONFIG_KV_RE = re.compile(r"^[\w.\-/]+\s*[=:]\s*\S")
 CONTENT_DEDUP_MAX_CLUSTER_MEMBERS = CONTENT_DEDUP_MAX_CHUNKS
 CONTENT_DEDUP_MAX_TOTAL_LLM_PROMPT_CHARS = 1_000_000
 # Most member locations and source files named in one finding message. The
-# rest are counted, so a finding for a 512-member cluster stays a few kilobytes.
+# rest are counted, so a finding for a 1,024-member cluster stays a few kilobytes.
 _MAX_REPORTED_LOCATIONS = 64
 
 # Scan label recorded when a work limit stops duplicate analysis early.

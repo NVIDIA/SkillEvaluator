@@ -239,9 +239,18 @@ def _arm_expected(agent: Mapping[str, Any], condition: str, observed: int) -> in
 
 
 def _case_expected(agent: Mapping[str, Any], condition: str, case: str, observed: int) -> int:
-    """Return the attempts a case should have run, from pass@k: ``k`` minus attempts skipped after a pass."""
+    """Return the attempts a case should have run, from its pass@k record.
+
+    The collector counts the case's scored, recovered and missing attempts,
+    which leave out attempts skipped after a pass and attempts a run budget
+    refused. A record without those counts gives ``k`` minus the attempts
+    skipped after a pass.
+    """
     branch = _pass_at_k_branch(agent, condition)
     record = _mapping(_mapping(branch.get("cases")).get(case))
+    used, missing = _count(record.get("attempts_used")), _count(record.get("attempts_missing"))
+    if used is not None and missing is not None:
+        return max(observed, used + (_count(record.get("attempts_recovered")) or 0) + missing)
     k = _count(branch.get("k"))
     if not record or k is None:
         return observed

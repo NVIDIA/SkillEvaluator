@@ -5,11 +5,14 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from typing import Any
 
 import pytest
 
+from skillevaluator.tier3.harbor.collector import _pass_summary
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 from skillevaluator.tier3.token_usage import build_token_usage, normalize_token_counts
 
 
@@ -50,6 +53,26 @@ def _agent(
         },
         "execution_status": "failed" if "failed" in (with_status, baseline_status) else "succeeded",
     }
+
+
+def _collector_pass_at_k(
+    scored: dict[str, int], *, k: int, planned: dict[str, int] | None = None
+) -> dict[str, Any]:
+    """One arm's pass@k as the collector records it: ``scored`` attempts per case, ``planned`` under a run budget."""
+    scores = dict.fromkeys(DEFAULT_METRICS, 0.9)
+    rewards = [
+        {"entry_id": case, "_trial_name": f"{case}__{index}", **scores}
+        for case, count in scored.items()
+        for index in range(count)
+    ]
+    return _pass_summary(
+        rewards,
+        n_attempts=k,
+        pass_threshold=0.5,
+        expected_cases=len(scored),
+        expected_case_ids=list(scored),
+        expected_attempts_by_case=planned,
+    )
 
 
 def _scopes(usage: dict[str, Any], agent: str = "codex") -> list[dict[str, Any]]:
@@ -226,10 +249,19 @@ def test_partial_coverage_sums_only_measured_attempts_and_never_estimates() -> N
     assert cases["case-2"]["with_skill"]["coverage"]["status"] == "unavailable"
 
 
-def test_an_attempt_that_never_ran_leaves_the_arm_partial() -> None:
+@pytest.mark.parametrize(
+    "pass_at_k",
+    [
+        _collector_pass_at_k({"case-1": 1}, k=2),
+        # A result file from before the collector counted each case's attempts.
+        {"k": 2, "cases": {"case-1": {"attempts_skipped": 0}}},
+    ],
+    ids=["collector", "k-only"],
+)
+def test_an_attempt_that_never_ran_leaves_the_arm_partial(pass_at_k: dict[str, Any]) -> None:
     agent = _agent([_trial("case-1", 100, 20)], [_trial("case-1", 90, 10)])
     agent["conditions"]["with_skill"]["expected_attempts"] = 2
-    agent["pass_at_k"] = {"with_skill": {"k": 2, "cases": {"case-1": {"attempts_skipped": 0}}}}
+    agent["pass_at_k"] = {"with_skill": pass_at_k}
 
     usage = build_token_usage({"codex": agent})
 
@@ -280,6 +312,28 @@ def test_attempts_skipped_after_a_pass_are_not_missing() -> None:
     [case] = usage["agents"]["codex"]["cases"]
     assert case["with_skill"]["coverage"]["status"] == "complete"
     assert case["delta"]["total_tokens"] == 20
+
+
+def test_a_case_that_a_run_budget_cut_short_expects_only_the_attempts_it_admitted() -> None:
+    # The budget admitted all 3 attempts of case-1 but only 1 of case-2, in both arms.
+    trials = [
+        {**_trial(case, 100, 10), "trial_id": f"{case}__{index}"}
+        for case, count in (("case-1", 3), ("case-2", 1))
+        for index in range(count)
+    ]
+    agent = _agent(trials, copy.deepcopy(trials))
+    pass_at_k = _collector_pass_at_k({"case-1": 3, "case-2": 1}, k=3, planned={"case-1": 3, "case-2": 1})
+    agent["pass_at_k"] = {"with_skill": pass_at_k, "without_skill": copy.deepcopy(pass_at_k)}
+
+    usage = build_token_usage({"codex": agent})
+
+    assert usage is not None
+    cases = {row["entry_id"]: row for row in usage["agents"]["codex"]["cases"]}
+    for arm in ("with_skill", "baseline"):
+        coverage = cases["case-2"][arm]["coverage"]
+        assert (coverage["status"], coverage["expected_attempts"], coverage["reason_codes"]) == ("complete", 1, [])
+    assert cases["case-2"]["delta"]["total_tokens"] == 0
+    assert usage["agents"]["codex"]["delta"]["status"] == "available"
 
 
 def test_a_recovered_timeout_attempt_is_expected_usage() -> None:

@@ -466,8 +466,11 @@ def test_registered_native_env_modes_are_supported_subset_of_pinned_harbor_relea
         "cua-cloud",
         "opensandbox",
         "hf-sandbox",
+        "kernel",
         "podman",
         "prime",
+        "sail",
+        "sbx",
         "smol",
     }
 
@@ -1000,7 +1003,8 @@ def test_nvidia_build_codex_bridge_isolated_from_client_and_cleans_up(
         **_kwargs: object,
     ) -> SimpleNamespace:
         calls.append((command, dict(env or {})))
-        return SimpleNamespace(return_code=0)
+        stdout = "CODEX_RUNTIME_ID 1000 1000\n" if "CODEX_RUNTIME_ID" in command else ""
+        return SimpleNamespace(return_code=0, stdout=stdout, stderr="")
 
     async def root_exec(
         _self: Codex,
@@ -1807,7 +1811,13 @@ def test_nested_background_shell_is_blocked_before_process_survives(tmp_path: Pa
 
 @pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
 @pytest.mark.parametrize(
-    "name", ["SAFE_TASK_VALUE", "HARBOR_INSTRUCTION", "HARBOR_CLAUDE_CODE_INSTRUCTION_0123456789ABCDEF0123456789ABCDEF"]
+    "name",
+    [
+        "SAFE_TASK_VALUE",
+        "HARBOR_INSTRUCTION",
+        "HARBOR_CLAUDE_CODE_INSTRUCTION_0123456789ABCDEF0123456789ABCDEF",
+        "CLAUDE_CODE_INSTRUCTION_0123456789ABCDEF0123456789ABCDEF",
+    ],
 )
 def test_task_env_is_hidden_from_launcher_but_reaches_inner_command(tmp_path: Path, name: str) -> None:
     environment = _local_environment(tmp_path)
@@ -1897,6 +1907,37 @@ def test_local_instruction_env_does_not_allow_unrecognized_harbor_values(tmp_pat
     assert name not in environment._exec_env({name: "untrusted"})
 
 
+def test_local_claude_instruction_env_preserves_literal_prompt_paths(tmp_path: Path) -> None:
+    environment = _local_environment(tmp_path)
+    name = "CLAUDE_CODE_INSTRUCTION_0123456789ABCDEF0123456789ABCDEF"
+    instruction = 'Read /workspace/SKILL.md and /tests/test.sh; keep "quotes", $(printf literal), and π.\n'
+
+    child_env = environment._exec_env({name: instruction, "HOME": "/outside"})
+
+    assert child_env[name] == instruction
+    assert child_env["HOME"] == str(environment._home)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "CLAUDE_CODE_INSTRUCTION",
+        "CLAUDE_CODE_INSTRUCTION_",
+        "CLAUDE_CODE_INSTRUCTION_ABCDEF",
+        "CLAUDE_CODE_INSTRUCTION_" + "A" * 31,
+        "CLAUDE_CODE_INSTRUCTION_" + "A" * 33,
+        "CLAUDE_CODE_INSTRUCTION_" + "G" * 32,
+        "CLAUDE_CODE_INSTRUCTION_" + "a" * 32,
+        "CLAUDE_CODE_INSTRUCTION_" + "A" * 32 + "_PATH",
+        "CLAUDE_CODE_INSTRUCTION_" + "A" * 32 + "\n",
+    ],
+)
+def test_local_instruction_env_rejects_malformed_claude_channels(tmp_path: Path, name: str) -> None:
+    environment = _local_environment(tmp_path)
+
+    assert name not in environment._exec_env({name: "untrusted"})
+
+
 @pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
 @pytest.mark.parametrize("sandbox_mode", ["off", pytest.param("require", marks=pytest.mark.integration)])
 def test_harbor_claude_run_delivers_instruction_to_local_cli(
@@ -1914,7 +1955,9 @@ def test_harbor_claude_run_delivers_instruction_to_local_cli(
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-only")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://provider.example/v1")
     instruction = (
-        "Explain argparse's nargs='?' in two lines.\nKeep \"quotes\", $(touch injected), `touch injected`, and π."
+        "Explain argparse's nargs='?' in two lines.\n"
+        "Keep /workspace/SKILL.md, /tests/test.sh, --permission-mode=bypassPermissions, "
+        '"quotes", $(touch injected), `touch injected`, and π.\n'
     )
     agent = SkillEvaluatorLocalClaudeCode(logs_dir=tmp_path / "agent", model_name="anthropic/test-model")
 
@@ -1927,7 +1970,8 @@ def test_harbor_claude_run_delivers_instruction_to_local_cli(
                 f"#!{sys.executable}\n"
                 "import json, os, sys\n"
                 "json.dump({'prompt': sys.stdin.read(), 'argv': sys.argv[1:], "
-                "'instruction_env': [key for key in os.environ if key.startswith('HARBOR_') and '_INSTRUCTION_' in key]}, sys.stdout)\n",
+                "'instruction_env': [key for key in os.environ if key.startswith("
+                "('CLAUDE_CODE_INSTRUCTION_', 'claude_code_instruction_', 'HARBOR_CLAUDE_CODE_INSTRUCTION_'))]}, sys.stdout)\n",
                 encoding="utf-8",
             )
             cli.chmod(0o755)

@@ -1450,6 +1450,15 @@ Missing metrics are never coerced to `0.0`: an unscored run reports an
 cells render **NO SCORE**. `compare` likewise ignores stored summaries whose
 `execution_status` is not `succeeded`.
 
+The verdict table above applies only when the run succeeds. When one of several
+agents fails, the run's `execution_status` is `failed`, its `overall_score` is
+`None` and its `verdict` is `neutral`, even if another agent completed. The
+same holds when every agent finished but they were scored on different metric
+sets. If one of several agents fails and the run's best agent completed with
+full evidence, the HTML report and `tier3-benchmark.md` still show that agent's
+score and mark it as needing attention; see
+[Completed agents in an incomplete run](/skills/skillevaluator/reports#completed-agents-in-an-incomplete-run).
+
 The canonical Tier 3 payload embedded by both standalone `evaluate` and
 `validate --agent-eval` reports uses schema version 2.0. A completed
 standard-grading payload includes the summary, five dimensions, per-agent

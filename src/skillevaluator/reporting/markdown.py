@@ -36,6 +36,7 @@ from skillevaluator.reporting.finding_summary import (
     summarize_findings,
     summarize_messages,
 )
+from skillevaluator.reporting.finding_verification import finding_verification
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
     harbor_job_links,
@@ -641,6 +642,13 @@ class MarkdownReporter(ReporterBase):
             emoji = finding.severity.emoji
             severity_upper = finding.severity.value.upper()
             message = _markdown_table_cell(finding.message)
+            verification = finding_verification(finding)
+            if verification:
+                label = f"{verification.verdict} ({verification.confidence} confidence)"
+                message += f"<br><strong>LLM verification:</strong> {_markdown_untrusted_table_cell(label)}"
+                if verification.reasoning:
+                    message += f"<br>Reasoning: {_markdown_untrusted_table_cell(verification.reasoning)}"
+                message += f"<br>{_markdown_untrusted_table_cell(verification.severity_effect)}"
             location = _markdown_table_cell(finding.location)
             lines.append(f"| {emoji} {severity_upper} | {message} | <code>{location}</code> |")
 

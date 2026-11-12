@@ -644,6 +644,7 @@ def run_nemo_gym_eval(
     progress_reporter: ProgressReporter | None = None,
     skip_with_skill: bool = False,
     max_cases: int | None = None,
+    max_agents: int | None = None,
     stop_on_pass: bool | None = None,
     agent_runtime_preflight: bool | None = None,
     custom_dockerfile_mode: str | None = None,
@@ -737,6 +738,10 @@ def run_nemo_gym_eval(
         ),
     )
     errors += nemo_gym_harbor_only_option_errors(harbor_config, from_config=True)
+    # Gym runs agents one at a time, so the cap always holds; it is still validated as on Harbor.
+    effective_max_agents = max_agents if max_agents is not None else harbor_config.get("max_agents", 1)
+    if isinstance(effective_max_agents, bool) or not isinstance(effective_max_agents, int) or effective_max_agents < 1:
+        errors.append("max_agents must be >= 1")
     from skillevaluator.tier3.harbor.runner import _validated_timeout_multiplier
 
     try:
@@ -832,6 +837,18 @@ def run_nemo_gym_eval(
         if url_error := model_url_credential_error(endpoints[agent][1]):
             return _config_failure(url_error)
 
+    # Judge credentials reach only the verifier: tasks carry ${NAME} templates that the
+    # Gym environment server resolves from its own process environment. Resolved before the
+    # run folder is reserved, so a bad harbor.runtime_env leaves nothing behind, as on Harbor.
+    try:
+        judge_verifier_env, judge_process_env = verifier_judge_env(skill_path, effective_grading, env_mode)
+    except ValueError as exc:
+        return _config_failure(str(exc))
+    reporter.set_secret_values(set(judge_process_env.values()))
+    # harbor.runtime_env reaches the agent as ${NAME} templates, resolved from Gym's environment.
+    runtime_values, _runtime_errors = _resolve_runtime_env(harbor_config.get("runtime_env"), env_mode=env_mode)
+    agent_runtime_env = {name: f"${{{name}}}" for name in runtime_values}
+
     run_dir = _reserve_run_dir(output_dir, datetime.now(UTC).strftime("%Y%m%d_%H%M%S"))
     # As on Harbor, the results root never enters a --copy-repo or base-image build context.
     repo_context_exclude_paths = (Path(output_dir), *(Path(path) for path in repo_context_exclude_paths))
@@ -855,16 +872,6 @@ def run_nemo_gym_eval(
                 if value is not None
             },
         }
-        # Judge credentials reach only the verifier: tasks carry ${NAME} templates that the
-        # Gym environment server resolves from its own process environment.
-        try:
-            judge_verifier_env, judge_process_env = verifier_judge_env(skill_path, effective_grading, env_mode)
-        except ValueError as exc:
-            return _config_failure(str(exc))
-        reporter.set_secret_values(set(judge_process_env.values()))
-        # harbor.runtime_env reaches the agent as ${NAME} templates, resolved from Gym's environment.
-        runtime_values, _runtime_errors = _resolve_runtime_env(harbor_config.get("runtime_env"), env_mode=env_mode)
-        agent_runtime_env = {name: f"${{{name}}}" for name in runtime_values}
         reporter.emit(ProgressEvent(stage="configuration", state="ready", detail="evaluation config validated"))
         judge_job_env = {
             name: value

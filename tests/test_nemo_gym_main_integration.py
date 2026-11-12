@@ -132,3 +132,32 @@ def test_gym_rejects_config_budget_before_generation_or_execution(monkeypatch, t
         assert not dataset.exists()
     assert not (tmp_path / "results").exists()
     assert not env_log.exists()
+
+
+@pytest.mark.parametrize(
+    "runtime_env",
+    ["FOO: ${SKILL_EVAL_TEST_UNSET_RUNTIME_VAR}", "MY_API_KEY: ${SKILL_EVAL_TEST_UNSET_RUNTIME_VAR}"],
+)
+def test_gym_rejects_bad_runtime_env_before_reserving_a_run_folder(monkeypatch, tmp_path, runtime_env):
+    monkeypatch.delenv("SKILL_EVAL_TEST_UNSET_RUNTIME_VAR", raising=False)
+    skill, env_log = _fake_gym_skill(
+        tmp_path, monkeypatch, f"schema_version: 1\nharbor:\n  runtime_env:\n    {runtime_env}\n"
+    )
+    result = _run_fake_gym(skill, tmp_path)
+    assert result.get("error"), result
+    assert not (tmp_path / "results").exists()
+    assert not env_log.exists()
+
+
+@pytest.mark.parametrize(("cli_value", "config"), [(0, ""), (None, "schema_version: 1\nharbor:\n  max_agents: 0\n")])
+def test_gym_rejects_max_agents_below_one_like_harbor(monkeypatch, tmp_path, cli_value, config):
+    skill, env_log = _fake_gym_skill(tmp_path, monkeypatch, config)
+    result = _run_fake_gym(skill, tmp_path, max_agents=cli_value)
+    assert "max_agents must be >= 1" in "; ".join(result.get("error") or []), result
+    assert not (tmp_path / "results").exists()
+    assert not env_log.exists()
+
+
+def test_gym_dispatch_passes_max_agents(monkeypatch, tmp_path):
+    calls = _evaluate(monkeypatch, tmp_path, backend="nemo-gym", max_agents=3)
+    assert calls["nemo-gym"]["max_agents"] == 3

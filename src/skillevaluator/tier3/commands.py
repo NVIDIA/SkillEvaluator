@@ -807,6 +807,7 @@ def evaluate(
                 stop_on_pass=stop_on_pass,
                 n_concurrent=n_concurrent,
                 max_cases=max_cases,
+                max_agents=max_agents,
                 model=model,
                 agent_models={agent: models[0] for agent, models in agent_models.items()} or None,
                 custom_dockerfile_mode=custom_dockerfile_mode,

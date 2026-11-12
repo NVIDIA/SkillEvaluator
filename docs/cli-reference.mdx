@@ -284,6 +284,8 @@ The [evaluated source provenance](#evaluated-source-provenance) flags also appea
 
 Auto-detection recognizes: a `SKILL.md` for skills, `.mdc` files for rules, `workflow-rules.mdc` for workflows, and — for plugins — a bundle-reference `agent_plugin.yaml`/`.yml` manifest or a contained `.claude-plugin/plugin.json` manifest. Plugins are validated against their public contract; quality, lint, and version checks are skill-only and skipped for plugins.
 
+When auto-detection finds none of these, the type is `unknown`. Tier 1 then records the `schema`, `version`, and `quality` checks as not applicable (N/A) instead of failing them with `No skills found`, and still runs the content scans. Tier 1 passes when those scans pass; Tier 2 still runs on the target unless `--no-dedup` or `--tiers 1`. The JSON report adds a root `tier1_applicability` object, whichever checks the run selects. Auto-detection also reads the directory names in the target's absolute path, so a repository whose path includes a directory named `skills`, `team-skills`, `team-rules`, `workflows`, or `team-workflows` is detected as that type, not `unknown`. A target folder whose own `SKILL.md`, `workflow-rules.mdc`, `agent_plugin.yaml`/`.yml`, or `.claude-plugin/plugin.json` is mis-cased (such as `Skill.md`) or a dangling symlink still runs the manifest checks, and fails them. A mis-cased manifest below the target is not discovered; validate that folder directly. Pass `--type` to validate the target as a given type anyway. See [Content types](/skills/skillevaluator/tier1-validation#content-types).
+
 `validate` also takes the standard `-r/--report` and `-o/--output-dir` options described under [Global conventions](#global-conventions).
 
 ### Tier 1 · Static & Security
@@ -677,7 +679,7 @@ skillevaluator init-harbor-task ./my-skill
 
 ## view
 
-Open the latest HTML live-evaluation report for a skill. If the results exist but `report.html` is missing, `view` regenerates it before opening.
+Open the latest HTML live-evaluation report for a skill. If the results exist but `report.html` is missing, `view` regenerates it before opening. It reuses the feedback the run saved in `result.json`, and the run's `what_to_fix.json` when there is one, and makes no LLM call. A run that saved no feedback still has its feedback rebuilt, with the LLM when a provider is configured, and its `what_to_fix.json` rewritten.
 
 ```bash title="Open the latest report"
 skillevaluator view ./my-skill

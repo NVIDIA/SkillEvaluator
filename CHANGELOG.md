@@ -308,6 +308,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 baseline N/A explanations cover case-level applicability when a staged
+  skill is available, including negative cases, instead of claiming no skill is
+  installed. Dimension tooltips use the same explanation as evaluator summaries.
+
 - Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
   the PR or merge request's target revision. Policy files from the proposed
   changes cannot approve their own exceptions.

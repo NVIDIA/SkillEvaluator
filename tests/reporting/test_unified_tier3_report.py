@@ -843,8 +843,8 @@ def test_no_skill_baseline_dimension_na_explains_why_in_html() -> None:
     html = _render_agent_payload(payload)
 
     for title in (
-        "No-skill baseline: This arm has no skill under test installed, so there is no skill to discover or run",
-        "No-skill baseline: This arm has no skill under test installed, so there is no skill to route to",
+        "No-skill baseline: No applicable skill is available in this arm, or the eval case names no expected_skill",
+        "No-skill baseline: No applicable skill is available in this arm, or the case is negative or names no expected_skill",
     ):
         cell_start = html.index(f'<td title="{title}">')
         cell_end = html.index("</td>", cell_start)

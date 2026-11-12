@@ -520,7 +520,62 @@ def _collect(tmp_path, cases, **options):
     return _report(tmp_path / "results")
 
 
-def test_baseline_only_run_explains_na_skill_metrics_by_the_missing_skill(tmp_path):
+@pytest.mark.parametrize("baseline_only", [True, False], ids=["baseline-only", "paired-arms"])
+@pytest.mark.parametrize("view", ["saved-report", "html"])
+def test_staged_negative_baseline_na_explains_case_context_in_saved_report_and_html(tmp_path, baseline_only, view):
+    from skillevaluator.models import ValidationResult
+    from skillevaluator.reporting import HTMLReporter
+    from skillevaluator.tier3.eval_core import checks
+    from skillevaluator.tier3.harbor.templates.eval import skill_metrics_applicable
+
+    entry = {"has_skill": False, "workspace_skill_names": ["demo"], "evaluated_skill": "demo", "expected_skill": None}
+    should_trigger = checks.resolve_should_trigger(entry)
+    assert skill_metrics_applicable(
+        entry["has_skill"],
+        should_trigger,
+        entry["expected_skill"],
+        evaluated_skill=entry["evaluated_skill"],
+        workspace_skill_names=entry["workspace_skill_names"],
+    )
+    execution = checks.score_skill_execution(
+        [], entry["expected_skill"], should_trigger=should_trigger, evaluated_skill=entry["evaluated_skill"]
+    )
+    efficiency = checks.score_skill_efficiency([], entry["expected_skill"], should_trigger=should_trigger)
+    assert execution["score"] == 1.0
+    assert efficiency["score"] is None and efficiency["details"]["status"] == "not_applicable"
+    row = _trial_row("negative", has_skill=False, na=("skill_efficiency",), skill_execution=execution["score"])
+    row.update(entry)
+    row["details"]["skill_execution"] = execution["details"]
+    row["details"]["skill_efficiency"] = {"score": None, **efficiency["details"]}
+    _write_job(tmp_path / "jobs" / "demo-codex-without", [row])
+    if not baseline_only:
+        _write_job(tmp_path / "jobs" / "demo-codex-with", [{**row, "has_skill": True}])
+
+    payload = _collect(tmp_path, ("negative",), skip_with_skill=baseline_only)
+
+    agent = payload["agents"]["codex"]
+    assert agent["evaluators"]["skill_execution"]["baseline"] == 1.0
+    assert agent["evaluators"]["skill_execution"]["baseline_status"] == "scored"
+    assert agent["evaluators"]["skill_efficiency"]["baseline"] is None
+    assert agent["evaluators"]["skill_efficiency"]["baseline_status"] == "not_applicable"
+    dimensions = {item["id"]: item for item in agent["dimensions"]}
+    assert dimensions["discoverability"]["baseline"] == 1.0
+    assert {item["id"] for item in payload["not_applicable_dimensions"]} == {"efficiency"}
+    reason = next(item["reason"] for item in payload["not_applicable_evaluators"] if item["id"] == "skill_efficiency")
+    if view == "saved-report":
+        assert "case" in reason.lower()
+        assert "no skill under test installed" not in reason.lower()
+        return
+
+    result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Live evaluation")
+    result.metadata["agent_eval"] = payload
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    assert "skill_efficiency" in html
+    assert reason in html
+    assert "no skill under test installed" not in html.lower()
+
+
+def test_baseline_only_run_explains_both_arm_and_case_skill_na(tmp_path):
     # --skip-with-skill scores only the baseline, which has no skill under test installed.
     cases = ("a", "b")
     _write_job(
@@ -533,8 +588,8 @@ def test_baseline_only_run_explains_na_skill_metrics_by_the_missing_skill(tmp_pa
     assert payload["mode"] == "baseline_only"
     reasons = {item["id"]: item["reason"] for item in payload["not_applicable_evaluators"]}
     assert reasons == {
-        "skill_execution": "This arm has no skill under test installed, so there is no skill to discover or run",
-        "skill_efficiency": "This arm has no skill under test installed, so there is no skill to route to",
+        "skill_execution": "No applicable skill is available in this arm, or the eval case names no expected_skill",
+        "skill_efficiency": "No applicable skill is available in this arm, or the case is negative or names no expected_skill",
     }
     assert {item["id"] for item in payload["not_applicable_dimensions"]} == {"discoverability", "efficiency"}
 

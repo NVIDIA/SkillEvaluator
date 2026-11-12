@@ -2790,7 +2790,7 @@
                             <div class="t3-dim-hint">{{ "with-skill arm not run" if t3_baseline_only else "not scored with the skill" }}</div>
                             {% endif %}
                         </td>
-                        <td{% if dim.id == 'discoverability' and 'skill_execution' in baseline_na_metrics %} title="No-skill baseline: This arm has no skill under test installed, so there is no skill to discover or run"{% elif dim.id == 'efficiency' and 'skill_efficiency' in baseline_na_metrics %} title="No-skill baseline: This arm has no skill under test installed, so there is no skill to route to"{% endif %}>
+                        <td{% if dim.id == 'discoverability' and 'skill_execution' in baseline_na_metrics %} title="No-skill baseline: {{ 'skill_execution' | not_applicable_reason }}"{% elif dim.id == 'efficiency' and 'skill_efficiency' in baseline_na_metrics %} title="No-skill baseline: {{ 'skill_efficiency' | not_applicable_reason }}"{% endif %}>
                             {% if dim.baseline is not none %}{{ "%.2f" | format(dim.baseline) }}{% else %}N/A
                             <div class="t3-dim-hint">{{ "baseline not scored" if t3_best and t3_best.baseline is not none else "baseline not run" }}</div>{% endif %}
                         </td>

@@ -346,7 +346,7 @@ def test_drilldown_reads_na_for_not_applicable_trial_cells() -> None:
     for column in ("Skill Execution", "Skill Efficiency"):
         assert _cell(table, "Without skill", column) == "N/A"
         assert 'data-not-applicable="true"' in _raw_cell(table, "Without skill", column)
-    assert 'title="Skill Execution: Not applicable: This arm has no skill under test installed' in _raw_cell(
+    assert 'title="Skill Execution: Not applicable: No applicable skill is available in this arm' in _raw_cell(
         table, "Without skill", "Skill Execution"
     )
     assert _cell(table, "Without skill", "Accuracy") == "0.50"
@@ -390,7 +390,7 @@ def test_drilldown_explains_with_skill_skill_metric_na_by_the_eval_case() -> Non
         'so there is no skill use to measure"'
     ) in _raw_cell(table, "With skill", "Skill Efficiency")
     assert _cell(table, "Without skill", "Skill Efficiency") == "N/A"
-    assert 'title="Skill Efficiency: Not applicable: This arm has no skill under test installed' in _raw_cell(
+    assert 'title="Skill Efficiency: Not applicable: No applicable skill is available in this arm' in _raw_cell(
         table, "Without skill", "Skill Efficiency"
     )
     assert _cell(table, "With skill", "Skill Execution") == "0.90"

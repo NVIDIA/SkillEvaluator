@@ -122,12 +122,24 @@ WITH_SKILL_NOT_APPLICABLE_REASONS = {
 }
 
 
+# Reporting may have only an arm-level N/A marker, without the verifier's reason.
+# A baseline that stages a matching candidate still follows the eval-case rules.
+BASELINE_NOT_APPLICABLE_REASONS = {
+    "skill_execution": ("No applicable skill is available in this arm, or the eval case names no expected_skill"),
+    "skill_efficiency": (
+        "No applicable skill is available in this arm, or the case is negative or names no expected_skill"
+    ),
+}
+
+
 def not_applicable_reason(
     metric: str, *, with_skill: bool = False, default: str = "Not applicable to this eval case"
 ) -> str:
     """Return why *metric* can be N/A in an arm with or without the skill under test."""
     if with_skill and metric in WITH_SKILL_NOT_APPLICABLE_REASONS:
         return WITH_SKILL_NOT_APPLICABLE_REASONS[metric]
+    if not with_skill and metric in BASELINE_NOT_APPLICABLE_REASONS:
+        return BASELINE_NOT_APPLICABLE_REASONS[metric]
     return NOT_APPLICABLE_REASONS.get(metric, default)
 
 

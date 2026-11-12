@@ -994,7 +994,7 @@ def test_create_eval_dataset_warns_about_cases_that_grade_skill_use(tmp_path: Pa
     eval_md = "## Behaviors\n- The agent reads SKILL.md before acting\n- The agent lists every blocker\n"
     skill = _write_skill(tmp_path, "Reviews release manifests for policy problems.", eval_md)
 
-    result = generate_dataset.main([str(skill), "--no-llm", "--dry-run"])
+    result = generate_dataset.main([str(skill), "--grounding", "skill", "--no-llm", "--dry-run"])
 
     output = capsys.readouterr().out
     assert "Warning: case release-review-001: assertions grades skill use ('reads SKILL.md')" in output
@@ -1008,7 +1008,7 @@ def test_create_eval_dataset_prints_no_warning_for_outcome_cases(tmp_path: Path,
     # A description that names a skill script is not quoted in graded text, whatever the script's language.
     skill = _write_skill(tmp_path, description, scripts=_SCRIPT_FILES)
 
-    generate_dataset.main([str(skill), "--no-llm", "--full", "--dry-run"])
+    generate_dataset.main([str(skill), "--grounding", "skill", "--no-llm", "--full", "--dry-run"])
 
     assert "Warning:" not in capsys.readouterr().out
 
@@ -1034,7 +1034,7 @@ def test_create_eval_dataset_warns_when_a_refined_case_has_an_invalid_expected_s
         lambda *_args, **_kwargs: ({"release-review-001": {"steps": []}}, {}),
     )
 
-    result = generate_dataset.main([str(skill), "--refine"])
+    result = generate_dataset.main([str(skill), "--grounding", "skill", "--refine"])
 
     assert result.status == "created"
     assert "Warning: case release-review-001: assertions grades skill use" in capsys.readouterr().out

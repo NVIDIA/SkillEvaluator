@@ -622,14 +622,14 @@ conversion without changing fixture paths.
 
 ## create-eval-dataset
 
-Create synthetic eval datasets for agent skill evaluation, written to `evals/evals.json`. Uses the configured LLM provider unless you pass `--no-llm`. Dataset anatomy and the four case buckets are documented in [Eval Datasets](eval-datasets.mdx).
+Create eval datasets in `evals/evals.json`. The default `auto` grounding prefers nonblank author guidance, then matching retained traces from a completed run scoped to the skill. If neither exists, it fails before provider access, collection, or writes. Add `evals/EVAL.md`, use `--prompt`, or explicitly choose `--grounding skill` for the previous skill-only workflow. Uses the configured LLM provider unless you pass `--no-llm`. See [Eval Datasets](/skills/skillevaluator/eval-datasets#choose-a-grounding-source) for source selection and migration details.
 
 ```bash title="Generate the full dataset"
-skillevaluator create-eval-dataset ./my-skill --full
+skillevaluator create-eval-dataset ./my-skill --full --prompt eval-guidance.md
 ```
 
 <Warning>
-`--force` overwrites an existing `evals/evals.json`, including any hand-edited cases. `--refine` normally regenerates the dataset, but `--grounding trace` refines an existing file in place and preserves its authored cases. Use `--dry-run` first if you are unsure.
+`--force` overwrites an existing `evals/evals.json`, including any hand-edited cases. `--refine` normally regenerates the dataset, but effective trace grounding (explicit or selected by `auto`) refines an existing file in place and preserves its authored cases and IDs. Use `--dry-run` first if you are unsure.
 </Warning>
 
 | Flag | Default | Effect |
@@ -639,10 +639,10 @@ skillevaluator create-eval-dataset ./my-skill --full
 | `--dry-run` | off | Preview without writing. |
 | `--force` | off | Overwrite existing `evals/evals.json`. |
 | `--prompt PATH` | none | Developer eval-guidance file for generation (default: auto-detects `evals/EVAL.md`). |
-| `--grounding {skill,intent,trace}` | `skill` | Choose `SKILL.md`, author guidance (`evals/EVAL.md` or `--prompt`), or agent trajectories as the primary grounding source. |
-| `--refine` | off | Refine generated cases with trajectories on top of the selected grounding source. Without `--grounding trace`, it regenerates the dataset; with trace grounding and an existing dataset, it refines those cases in place. If no trajectory exists, collection runs `claude-code` through Harbor and needs the `tier3` extra, Docker, and a configured provider (see [Eval Datasets](eval-datasets.mdx)). |
-| `--from-results PATH` | none | With `--grounding trace` or `--refine`: results path containing agent trajectories (default: latest results). |
-| `--results-dir DIRECTORY` | unset | With `--grounding trace` or `--refine`: external results root to search for trajectories. |
+| `--grounding {auto,skill,intent,trace}` | `auto` | Prefer author guidance, then usable matching retained traces. Explicit `skill` permits skill-only generation; `intent` requires guidance; `trace` may collect trajectories when none exists. |
+| `--refine` | off | Refine generated cases with trajectories on top of the selected grounding source. With effective intent or skill grounding it regenerates the dataset; with trace grounding and an existing dataset, it refines those cases in place. Auto selection must find guidance or matching retained traces first; `--refine` does not collect evidence to bypass missing input. After selection, if no trajectory exists, collection runs `claude-code` through Harbor and needs the `tier3` extra, Docker, and a configured provider (see [Eval Datasets](eval-datasets.mdx)). |
+| `--from-results PATH` | none | With `auto`, `trace`, or `--refine`: results path containing agent trajectories (default: latest results). Auto requires a completed run scoped to the skill. |
+| `--results-dir DIRECTORY` | unset | With `auto`, `trace`, or `--refine`: external results root to search for trajectories under the skill's directory. |
 
 ## init-custom-grader
 

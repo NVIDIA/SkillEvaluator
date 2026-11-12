@@ -94,8 +94,11 @@ Full flag tables: [Tier 1](references/commands-tier1.md),
    CRITICAL and HIGH findings before anything else; `lint` findings are advisory.
 4. **Add LLM checks** when a provider is set: `skillevaluator tier1 <skill-dir>`
    (rubric, LLM security, verification) and `skillevaluator tier2 <skill-dir>`.
-5. **Prepare Tier 3 cases.** If `<skill-dir>/evals/evals.json` is missing, generate one with
-   `skillevaluator create-eval-dataset <skill-dir> --full`, then review it:
+5. **Prepare Tier 3 cases.** If `<skill-dir>/evals/evals.json` is missing, first
+   capture author guidance in `evals/EVAL.md` or a file passed with `--prompt`.
+   Generate with `skillevaluator create-eval-dataset <skill-dir> --full`, then review it.
+   The default prefers author guidance, then matching retained traces. Skill-only
+   generation requires explicit opt-in with `--grounding skill`. Review:
    positive cases (explicit, implicit, contextual) and at least one negative
    case with `"expected_skill": null`. Required shape: top-level `skill_name`
    and an `evals` array; each case has `id`, `prompt`, `expected_output`, and

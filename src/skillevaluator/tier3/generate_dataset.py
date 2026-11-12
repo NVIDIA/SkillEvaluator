@@ -10,11 +10,16 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 Generate eval dataset for a skill.
 
 Workflows (from simplest to highest quality):
-  1. Quick start:    skillevaluator create-eval-dataset ./skill          (1 case)
-  2. Full buckets:   skillevaluator create-eval-dataset ./skill --full   (up to 4 cases)
-  3. Template only:  skillevaluator create-eval-dataset ./skill --no-llm (no API key)
+  1. Guided start:   skillevaluator create-eval-dataset ./skill --prompt guidance.md
+  2. Full buckets:   skillevaluator create-eval-dataset ./skill --full   (requires guidance or retained traces)
+  3. Skill starters: skillevaluator create-eval-dataset ./skill --no-llm --grounding skill
   4. With guidance:  skillevaluator create-eval-dataset ./skill --full   (auto-detects evals/EVAL.md)
   5. Agent-refined:  skillevaluator create-eval-dataset ./skill --full --refine
+
+Standalone auto grounding prefers nonblank author intent, then meaningful
+matching retained traces; otherwise it fails before provider access or writes.
+Explicit --grounding skill opts into skill-only starters. Unattended
+generate_one_case/autopilot generation retains its skill-grounded contract.
 
 Context fed to LLM (cumulative — each layer adds more grounding):
   Layer 1: SKILL.md name + description + script filenames (always)
@@ -59,7 +64,7 @@ from skillevaluator.constants import EXECUTABLE_SKILL_DIRS
 from skillevaluator.evaluation.results import DatasetGenerationError, DatasetGenerationResult
 from skillevaluator.tier3 import evals_spec
 from skillevaluator.tier3.dataset_utils import load_dataset_entries, normalize_dataset_entries
-from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
+from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_has_text, atif_content_text
 from skillevaluator.tier3.eval_core.optional_reference import normalize_expected_behaviors, normalize_optional_reference
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
@@ -78,15 +83,26 @@ def _to_agentskills_dataset(
     skill_name: str,
     cases: list[dict[str, Any]],
     generation: dict[str, Any] | None = None,
+    *,
+    preserve_authored_metadata: bool = False,
 ) -> dict[str, Any]:
     """Convert SkillEvaluator's runtime case shape to the preferred agentskills.io file shape."""
     evals: list[dict[str, Any]] = []
     for case in cases:
-        entry: dict[str, Any] = {
-            "id": case.get("id"),
-            "prompt": case.get("question", ""),
-            "expected_output": case.get("ground_truth", ""),
-        }
+        entry: dict[str, Any] = {}
+        if preserve_authored_metadata:
+            entry = {
+                key: value
+                for key, value in case.items()
+                if key not in {"question", "ground_truth", "expected_behavior"}
+            }
+        entry.update(
+            {
+                "id": case.get("id"),
+                "prompt": case.get("question", ""),
+                "expected_output": case.get("ground_truth", ""),
+            }
+        )
         behaviors = case.get("expected_behavior")
         if behaviors:
             entry["assertions"] = behaviors
@@ -842,11 +858,14 @@ def _discover_trajectories(
     results_dir: str | Path | None = None,
     *,
     return_sources: bool = False,
+    case_ids: set[str] | None = None,
+    require_usable_steps: bool = False,
 ) -> dict[str, dict[str, Any]] | tuple[dict[str, dict[str, Any]], dict[str, Path]]:
     """Find agent trajectories from existing eval results.
 
     Checks --from-results path first, then resolved latest results.
-    Returns dict mapping case_id to ATIF trajectory data.
+    Returns dict mapping case_id to ATIF trajectory data. Automatic grounding
+    filters for matching, usable retained evidence before selecting an agent.
     """
     _ensure_project_imports()
     try:
@@ -888,18 +907,24 @@ def _discover_trajectories(
             if not trial_dir.is_dir():
                 continue
             case_id = _case_id_from_trial_dir(trial_dir)
-            if not case_id:
+            if not case_id or (case_ids is not None and case_id not in case_ids):
                 continue
             traj_path = trial_dir / "trajectory.json"
             traj, meta = load_trajectory_with_fallback(traj_path, logs_dir=trial_dir)
             if traj and traj.get("steps"):
-                trajectories[case_id] = traj
+                if require_usable_steps and not _usable_auto_trajectory(traj):
+                    continue
                 source_name = meta.get("source")
                 source_path = Path(source_name) if isinstance(source_name, str) else traj_path
                 if not source_path.is_absolute():
                     source_path = trial_dir / source_path
                 if not source_path.is_file():
                     source_path = traj_path
+                if require_usable_steps and (
+                    not source_path.is_file() or not source_path.resolve().is_relative_to(results_dir.resolve())
+                ):
+                    continue
+                trajectories[case_id] = traj
                 if source_path.is_file():
                     sources[case_id] = source_path
                 last_good_source = meta.get("source", "unknown")
@@ -1420,6 +1445,104 @@ def _load_existing_cases(output_path: Path) -> list[dict[str, Any]]:
     return cases
 
 
+def _discover_auto_trace_evidence(
+    skill_path: Path,
+    cases: list[dict[str, Any]],
+    *,
+    from_results: str | None,
+    results_dir: str | None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Path]]:
+    """Select retained, meaningful evidence from a completed run scoped to this skill.
+
+    Automatic selection must not treat an arbitrary same-ID trajectory as input.
+    Historical runs can be scoped by the existing per-skill directory contract;
+    explicitly exported runs must identify the skill in their result metadata.
+    """
+    from skillevaluator.tier3.results_location import (
+        iter_candidate_results_roots,
+        resolve_explicit_or_latest_results,
+        run_directory_sort_key,
+    )
+
+    run = resolve_explicit_or_latest_results(skill_path, from_results=from_results, cli_results_dir=results_dir)
+    run = run.resolve()
+    if run_directory_sort_key(run, require_completed_result=True) is None:
+        return {}, {}
+    try:
+        result = json.loads((run / "result.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        result = {}
+    recorded_skill = result.get("skill_name") if isinstance(result, dict) else None
+    if recorded_skill is not None and recorded_skill != skill_path.name:
+        return {}, {}
+    scoped_root = any(run.parent == root.resolve() for root in iter_candidate_results_roots(skill_path, results_dir))
+    if not scoped_root and recorded_skill != skill_path.name:
+        return {}, {}
+
+    case_ids = {case["id"] for case in cases}
+    trajectories, sources = _discover_trajectories(
+        skill_path, from_results=str(run), return_sources=True, case_ids=case_ids, require_usable_steps=True
+    )
+    matching: dict[str, dict[str, Any]] = {}
+    matching_sources: dict[str, Path] = {}
+    for case_id, trajectory in trajectories.items():
+        source = sources.get(case_id)
+        if (
+            case_id not in case_ids
+            or source is None
+            or not source.is_file()
+            or not source.resolve().is_relative_to(run)
+        ):
+            continue
+        matching[case_id] = trajectory
+        matching_sources[case_id] = source
+    return matching, matching_sources
+
+
+def _usable_auto_trajectory(trajectory: dict[str, Any]) -> bool:
+    """Require real agent text/actions and the shape consumed by refinement."""
+    steps = trajectory.get("steps")
+    if not isinstance(steps, list):
+        return False
+    meaningful = False
+    for step in steps:
+        if not isinstance(step, dict):
+            return False
+        calls = step.get("tool_calls", [])
+        if not isinstance(calls, list) or any(
+            not isinstance(call, dict) or not isinstance(call.get("arguments", {}), dict) for call in calls
+        ):
+            return False
+        if step.get("source") != "agent":
+            continue
+        message = step.get("message")
+        if isinstance(message, str | list) and atif_content_has_text(message):
+            meaningful = True
+        if any(isinstance(call.get("function_name"), str) and call["function_name"].strip() for call in calls):
+            meaningful = True
+    return meaningful
+
+
+def _preserve_auto_authored_cases(
+    cases: list[dict[str, Any]],
+    authored_dataset: Any,
+) -> list[dict[str, Any]]:
+    """Keep authored tasks and execution metadata while proposing refined expectations."""
+    authored_by_id = {case["id"]: case for case in normalize_dataset_entries(authored_dataset)}
+    preserved = []
+    for case in cases:
+        authored = dict(authored_by_id[case["id"]])
+        for field in ("ground_truth", "expected_behavior"):
+            if field in case:
+                authored[field] = case[field]
+        review = case.get("review")
+        if isinstance(review, dict) and review.get("status") == "needs_review":
+            for reason in review.get("reasons", []):
+                _mark_case_for_review(authored, reason)
+        preserved.append(authored)
+    return preserved
+
+
 def _case_needs_review(case: dict[str, Any]) -> bool:
     review = case.get("review")
     return isinstance(review, dict) and review.get("status") == "needs_review"
@@ -1474,12 +1597,18 @@ def main(argv: Sequence[str] | None = None) -> DatasetGenerationResult:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  skillevaluator create-eval-dataset ./my-skill              # 1 test case
-  skillevaluator create-eval-dataset ./my-skill --full        # 4-bucket (LLM) or 3-4 template
-  skillevaluator create-eval-dataset ./my-skill --no-llm      # Template only
+  skillevaluator create-eval-dataset ./my-skill --prompt guidance.md  # Author intent
+  skillevaluator create-eval-dataset ./my-skill --full        # Guidance or matching retained traces
+  skillevaluator create-eval-dataset ./my-skill --no-llm --grounding skill  # Skill-only templates
   skillevaluator create-eval-dataset ./my-skill --dry-run     # Preview
   skillevaluator create-eval-dataset ./my-skill --prompt hints.md  # Custom eval guidance
-  skillevaluator create-eval-dataset ./my-skill --full --refine    # Agent-refined
+  skillevaluator create-eval-dataset ./my-skill --full --refine --prompt guidance.md
+
+Default grounding (--grounding auto):
+  Prefer nonblank --prompt or evals/EVAL.md, then meaningful matching retained
+  traces from a completed run scoped to this skill. Otherwise supply guidance,
+  retained results, or explicitly choose --grounding skill. --refine and
+  --no-llm do not bypass this preflight. Auto never collects its own input.
 
 Developer eval guidance (auto-detected from evals/EVAL.md if present):
   Place an EVAL.md in your skill's evals/ directory to provide the LLM
@@ -1490,7 +1619,8 @@ Agent-refined mode (--refine):
   Checks the latest eval results for existing agent trajectories. If found,
   uses them to refine ground_truth and expected_behavior based on real
   agent behavior. If no trajectory exists, runs claude-code agent via
-  Harbor to collect one, then refines. Produces the highest-quality evals.
+  Harbor to collect one after grounding selection. Observed expectations
+  require human review before being treated as ground truth.
         """,
     )
     parser.add_argument("path", type=Path, help="Path to the skill directory")
@@ -1505,9 +1635,10 @@ Agent-refined mode (--refine):
     parser.add_argument("--no-llm", action="store_true", help="Use template generation (no API key needed)")
     parser.add_argument(
         "--grounding",
-        choices=("skill", "intent", "trace"),
-        default="skill",
-        help="Primary grounding source for generated eval cases.",
+        choices=("auto", "skill", "intent", "trace"),
+        default="auto",
+        help="Primary grounding source (default: auto prefers author intent, then matching retained traces; "
+        "skill-only generation requires --grounding skill).",
     )
     parser.add_argument("--dry-run", action="store_true", help="Preview without writing")
     parser.add_argument("--force", action="store_true", help="Overwrite existing dataset")
@@ -1527,34 +1658,81 @@ Agent-refined mode (--refine):
         "--from-results",
         type=str,
         default=None,
-        help="With --refine: path to results directory containing agent trajectories "
+        help="With auto/trace grounding or --refine: completed results directory containing agent trajectories "
         "(default: auto-detects latest resolved results)",
     )
     parser.add_argument(
         "--results-dir",
         type=str,
         default=None,
-        help="With --refine: external results root to search before the legacy skill directory",
+        help="With auto/trace grounding or --refine: external results root to search before the legacy skill directory",
     )
 
     args = parser.parse_args(argv)
     skill_path = args.path.resolve()
-    refine_requested = args.refine or args.grounding == "trace"
+    grounding = args.grounding
+    refine_requested = args.refine or grounding == "trace"
 
     if not (skill_path / "SKILL.md").exists():
         _abort(f"{skill_path} does not contain a SKILL.md")
 
-    if args.from_results and not refine_requested:
-        _abort("--from-results requires --grounding trace or --refine")
-    if args.results_dir and not refine_requested:
-        _abort("--results-dir requires --grounding trace or --refine")
+    if args.from_results and not (refine_requested or grounding == "auto"):
+        _abort("--from-results requires --grounding auto, --grounding trace or --refine")
+    if args.results_dir and not (refine_requested or grounding == "auto"):
+        _abort("--results-dir requires --grounding auto, --grounding trace or --refine")
 
     evals_dir = skill_path / "evals"
     output_path = evals_dir / "evals.json"
-    trace_requested = args.grounding == "trace"
+    skill = _parse_skill(skill_path, prompt_file=args.prompt)
+    auto_cases: list[dict[str, Any]] | None = None
+    auto_evidence: tuple[dict[str, dict[str, Any]], dict[str, Path]] | None = None
+    if grounding == "auto":
+        if skill.get("eval_prompt"):
+            grounding = "intent"
+        else:
+            if output_path.is_file():
+                try:
+                    auto_cases = _load_existing_cases(output_path)
+                except DatasetGenerationError:
+                    if args.force or args.refine:
+                        raise
+                    # Keep the existing no-overwrite contract even for an empty
+                    # or invalid source. Explicit refinement still validates it.
+                    print(f"Dataset already exists: {output_path}")
+                    print("Use --force to overwrite.")
+                    return DatasetGenerationResult(status="unchanged", path=output_path)
+            else:
+                auto_cases = _generate_full(skill) if args.full else _generate_simple(skill)
+            auto_evidence = _discover_auto_trace_evidence(
+                skill_path, auto_cases, from_results=args.from_results, results_dir=args.results_dir
+            )
+            if auto_evidence[0]:
+                grounding = "trace"
+                refine_requested = True
+            elif not (output_path.exists() and not args.force and not args.refine):
+                _abort(
+                    "--grounding auto requires nonblank author guidance in evals/EVAL.md or --prompt, "
+                    "or a matching retained agent trace from this skill's completed results "
+                    "(--from-results / --results-dir). To generate skill-only starters explicitly, "
+                    "use --grounding skill."
+                )
+
+    if grounding == "intent" and not skill.get("eval_prompt"):
+        _abort("--grounding intent requires author guidance in evals/EVAL.md or --prompt")
+
+    # Refinement bypasses the unchanged-dataset guard.
+    if output_path.exists() and not args.force and not refine_requested:
+        print(f"Dataset already exists: {output_path}")
+        print("Use --force to overwrite.")
+        return DatasetGenerationResult(status="unchanged", path=output_path)
+
+    trace_requested = grounding == "trace"
     trace_existing = trace_requested and output_path.is_file()
-    original_dataset = output_path.read_bytes() if trace_requested and output_path.is_file() else None
+    original_dataset = output_path.read_bytes() if trace_existing else None
     original_mode = stat.S_IMODE(output_path.stat().st_mode) if original_dataset is not None else None
+    auto_authored_dataset = (
+        json.loads(original_dataset) if auto_evidence is not None and original_dataset is not None else None
+    )
 
     def restore_original_dataset() -> None:
         if not trace_requested:
@@ -1566,34 +1744,19 @@ Agent-refined mode (--refine):
         if original_mode is not None:
             output_path.chmod(original_mode)
 
-    skill = None
-    if args.grounding == "intent":
-        skill = _parse_skill(skill_path, prompt_file=args.prompt)
-        if not skill.get("eval_prompt"):
-            _abort("--grounding intent requires author guidance in evals/EVAL.md or --prompt")
-
-    # Refinement bypasses the unchanged-dataset guard.
-    if output_path.exists() and not args.force and not refine_requested:
-        print(f"Dataset already exists: {output_path}")
-        print("Use --force to overwrite.")
-        return DatasetGenerationResult(status="unchanged", path=output_path)
-
-    # Parse skill
-    if skill is None:
-        skill = _parse_skill(skill_path, prompt_file=args.prompt)
-    skill["grounding"] = args.grounding
+    skill["grounding"] = grounding
     skill["_generation_mode"] = "template_requested" if args.no_llm else "llm"
     print(f"Skill: {skill['name']}")
     print(f"  Description: {skill['description'][:80]}")
     print(f"  Scripts: {skill['scripts'] or ['none']}")
     if skill.get("eval_prompt"):
         print(f"  Eval guidance: {skill['eval_prompt_source']}")
-    if args.grounding == "intent":
+    if grounding == "intent":
         source = skill.get("eval_prompt_source")
         is_prompt = args.prompt is not None and source and Path(str(source)).resolve() == Path(args.prompt).resolve()
         grounding_source = "prompt file" if is_prompt else "evals/EVAL.md"
         print(f"  Grounding: author intent from {grounding_source}")
-    elif args.grounding == "trace":
+    elif grounding == "trace":
         print("  Grounding: agent trace")
     else:
         print("  Grounding: SKILL.md")
@@ -1610,9 +1773,11 @@ Agent-refined mode (--refine):
 
     authored_case_ids: set[str] = set()
     if trace_existing:
-        cases = _load_existing_cases(output_path)
+        cases = auto_cases if auto_cases is not None else _load_existing_cases(output_path)
         authored_case_ids = {case["id"] for case in cases}
         print(f"  Loaded {len(cases)} authored case(s) from {output_path}")
+    elif auto_cases is not None:
+        cases = auto_cases
     elif args.no_llm:
         cases = _generate_full(skill) if args.full else _generate_simple(skill)
     else:
@@ -1628,11 +1793,15 @@ Agent-refined mode (--refine):
     if refine_requested:
         print("\nRefining with agent trajectory...")
 
-        discovered = _discover_trajectories(
-            skill_path,
-            from_results=args.from_results,
-            results_dir=args.results_dir,
-            return_sources=True,
+        discovered = (
+            auto_evidence
+            if auto_evidence is not None
+            else _discover_trajectories(
+                skill_path,
+                from_results=args.from_results,
+                results_dir=args.results_dir,
+                return_sources=True,
+            )
         )
         trajectories, trajectory_paths = discovered if isinstance(discovered, tuple) else (discovered, {})
 
@@ -1686,6 +1855,10 @@ Agent-refined mode (--refine):
                     )
                 )
                 print(f"  Refined {len(cases)} case(s) with LLM + trajectory")
+            if auto_evidence is not None:
+                for case in cases:
+                    if case["id"] not in matched_case_ids:
+                        _mark_case_for_review(case, "no matching retained trajectory for this case")
             skill["_generation_refined"] = True
         elif trace_requested:
             restore_original_dataset()
@@ -1694,16 +1867,27 @@ Agent-refined mode (--refine):
         else:
             print("  No trajectory available — using initial cases as-is.")
 
+    if auto_authored_dataset is not None:
+        cases = _preserve_auto_authored_cases(cases, auto_authored_dataset)
+
     generation = _generation_record(
         skill_path,
         mode=str(skill.get("_generation_mode", "template_requested")),
-        grounding=args.grounding,
+        grounding=grounding,
         skill=skill,
         prompt_path=Path(args.prompt) if args.prompt else None,
         trajectory_paths=trajectory_paths,
         cases=cases,
     )
-    dataset = _to_agentskills_dataset(skill["name"], cases, generation)
+    if auto_authored_dataset is not None and original_dataset is not None:
+        generation["inputs"].append(
+            {"kind": "dataset", "path": "evals/evals.json", "sha256": hashlib.sha256(original_dataset).hexdigest()}
+        )
+    dataset = _to_agentskills_dataset(
+        skill["name"], cases, generation, preserve_authored_metadata=auto_authored_dataset is not None
+    )
+    if isinstance(auto_authored_dataset, dict) and isinstance(auto_authored_dataset.get("evals"), list):
+        dataset = {**auto_authored_dataset, **dataset}
     needs_review = sum(1 for case in cases if _case_needs_review(case))
     print(f"  {needs_review} case(s) flagged needs_review")
 

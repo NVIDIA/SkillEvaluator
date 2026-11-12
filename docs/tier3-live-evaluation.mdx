@@ -72,7 +72,7 @@ failures visible with `--skip-baseline`.
 
 Use the existing dataset generator, runner and trusted trajectory collector to
 check activation separately from answer quality. Start with
-`skillevaluator create-eval-dataset ./my-skill --full`, review the generated
+`skillevaluator create-eval-dataset ./my-skill --full --prompt eval-guidance.md`, review the generated
 cases, and retain a versioned dataset with these four buckets:
 
 | Bucket | Authored expectation | What to check |
@@ -312,7 +312,8 @@ unchanged; invalid sources produce an error rather than being replaced.
 A generated one-case starter is a starting point, not a representative
 evaluation. Generation prints its concrete coverage gaps to stderr, such as
 the absence of a negative/non-trigger case or missing expected outcomes and
-assertions. Replace the starter with a full dataset using
+assertions. Add author guidance in `evals/EVAL.md` or pass `--prompt` before
+replacing the starter with a full dataset using
 `skillevaluator create-eval-dataset ./my-skill --full --force`. `--force`
 overwrites the starter and discards any edits to it. Then inspect the counts
 and gaps with `skillevaluator tier3 validate ./my-skill`. Larger case counts
@@ -356,7 +357,7 @@ both in depth.
 ### Generate an eval dataset
 
 ```bash title="Write the four-bucket dataset to evals/evals.json"
-skillevaluator create-eval-dataset ./my-skill --full
+skillevaluator create-eval-dataset ./my-skill --full --prompt eval-guidance.md
 ```
 
 `--full` with an LLM provider generates all four buckets (explicit, implicit,
@@ -1394,7 +1395,9 @@ machine-readable JSON contract, and how to judge whether a given lift is good.
     `skillevaluator doctor` with the same agent and environment.
   </Accordion>
   <Accordion title="No eval dataset or native task source found">
-    Run `skillevaluator create-eval-dataset ./my-skill`, or add an accepted
+    Run `skillevaluator create-eval-dataset ./my-skill --prompt eval-guidance.md`
+    with your author guidance, or explicitly add `--grounding skill` for skill-only
+    generation, or add an accepted
     dataset file under `evals/`. See [Eval Datasets](eval-datasets.mdx).
   </Accordion>
   <Accordion title="Agent model is rejected">

@@ -4,6 +4,18 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- Standalone `create-eval-dataset` and `DatasetOptions` now default to `auto`
+  grounding: nonblank author guidance first, then usable matching retained
+  trajectories from completed skill-scoped runs. Missing input fails before
+  provider access, collection, or writes; existing skill-only scripts must pass
+  `--grounding skill`, even with `--no-llm`. Auto trace selection preserves
+  authored cases and flags unmatched coverage and observed answers for review;
+  provenance records the effective grounding and retained source hashes.
+  Explicit grounding modes and refinement remain available. Unattended
+  autopilot keeps its skill-grounded one-case starter behavior.
+
 ### Added
 
 - HTML, Markdown, and terminal findings show recorded LLM verification verdicts,

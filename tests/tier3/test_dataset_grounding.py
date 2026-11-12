@@ -536,12 +536,12 @@ def test_llm_refinement_falls_back_and_flags_missing_case_ids(monkeypatch):
     assert generate_dataset.SECURITY_BEHAVIOR in prompts[0]
 
 
-def test_default_skill_grounding_keeps_template_cases_and_records_generation(tmp_path):
+def test_explicit_skill_grounding_keeps_template_cases_and_records_generation(tmp_path):
     skill = _skill_dir(tmp_path)
     parsed = generate_dataset._parse_skill(skill)
     expected_cases = generate_dataset._generate_simple(parsed)
 
-    result = generate_dataset.main([str(skill), "--no-llm"])
+    result = generate_dataset.main([str(skill), "--no-llm", "--grounding", "skill"])
 
     assert result.dataset["generation"]["grounding"] == "skill"
     assert result.dataset["generation"]["mode"] == "template_requested"
@@ -622,7 +622,7 @@ def test_template_fallback_records_safe_reason(tmp_path, monkeypatch):
         raise ProviderConfigurationError("credential-value-that-must-not-leak")
 
     monkeypatch.setattr("skillevaluator.provider_config.resolve_llm_provider", provider_unavailable)
-    result = generate_dataset.main([str(skill), "--dry-run"])
+    result = generate_dataset.main([str(skill), "--dry-run", "--grounding", "skill"])
 
     record = result.dataset["generation"]
     assert record["mode"] == "template_fallback"

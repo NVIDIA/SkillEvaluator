@@ -414,7 +414,9 @@ def test_tier1_lint_scripts_fixture() -> None:
 
 
 def test_create_dataset_dry_run_no_llm() -> None:
-    result = CliRunner().invoke(cli, ["create-eval-dataset", str(FIXTURE), "--no-llm", "--dry-run"])
+    result = CliRunner().invoke(
+        cli, ["create-eval-dataset", str(FIXTURE), "--no-llm", "--dry-run", "--grounding", "skill"]
+    )
 
     assert result.exit_code == 0, result.output
     assert "Dry run" in result.output

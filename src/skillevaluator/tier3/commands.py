@@ -433,7 +433,7 @@ def create_dataset(
     dry_run: bool = False,
     force: bool = False,
     prompt: Path | None = None,
-    grounding: str = "skill",
+    grounding: str = "auto",
     refine: bool = False,
     from_results: Path | None = None,
     results_dir: Path | None = None,
@@ -452,7 +452,7 @@ def create_dataset(
         argv.append("--force")
     if prompt:
         argv.extend(["--prompt", str(prompt.resolve())])
-    if grounding != "skill":
+    if grounding != "auto":
         argv.extend(["--grounding", grounding])
     if refine:
         argv.append("--refine")

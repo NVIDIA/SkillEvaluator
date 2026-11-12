@@ -148,12 +148,17 @@ Tier 1 always gates `validate`. Tier 2 gates unless `--no-block-on-dedup` is set
 Tier 3 gates only with `--block-on-agent-eval`. Model and managed-sandbox usage
 can incur charges; see [runtime and cost](docs/tier3-live-evaluation.mdx#plan-for-cost).
 
-For broader coverage, generate and review additional cases. Templates omit
-negatives unless authored in `EVAL.md`:
+For broader coverage, write author guidance in `evals/EVAL.md` (or pass
+`--prompt PATH`), then generate and review additional cases. Standalone generation
+prefers that guidance, then matching retained traces; without either it asks for
+input. Templates omit negatives unless authored in `EVAL.md`:
 
 ```bash
 uv run --python 3.13 --extra tier3 skillevaluator tier3 create-eval-dataset ./my-skill --full
 ```
+
+For the previous skill-only workflow, explicitly add `--grounding skill`.
+Unattended autopilot keeps its existing one-case skill-grounded starter.
 
 ## Run from a source checkout
 

@@ -3624,7 +3624,13 @@ def evaluate(
 @click.option("--dry-run", is_flag=True, help="Preview without writing.")
 @click.option("--force", is_flag=True, help="Overwrite existing evals/evals.json.")
 @click.option("--prompt", type=click.Path(exists=True, path_type=Path), default=None)
-@click.option("--grounding", type=click.Choice(["skill", "intent", "trace"]), default="skill")
+@click.option(
+    "--grounding",
+    type=click.Choice(["auto", "skill", "intent", "trace"]),
+    default="auto",
+    show_default=True,
+    help="Prefer author intent, then matching retained traces; use skill for skill-only starters.",
+)
 @click.option("--refine", is_flag=True, help="Refine cases using existing or collected trajectories.")
 @click.option("--from-results", type=click.Path(exists=True, path_type=Path), default=None)
 @click.option("--results-dir", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=None)

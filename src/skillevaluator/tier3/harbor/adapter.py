@@ -87,6 +87,12 @@ _VERIFIER_FILES = (
     _EVAL_CORE_DIR.parent.parent / "evidence.py",
 )
 _EVALUATOR_TESTS_SUBDIR = "skill_evaluator"
+# Harbor's agent setup checks each prerequisite command (curl, bash, pgrep, rg,
+# stdbuf) in every trial and apt-installs the missing ones. Claude Code's setup
+# needs pgrep, so procps in every generated image removes that per-trial apt
+# step and its package mirror dependency. The starter Dockerfile that
+# `tier3 init-harbor-task` writes (tier3/commands.py) lists the same packages.
+_BASE_APT_PACKAGES = "bash curl git jq procps ripgrep"
 _BASE_IMAGE_PREFIX = "skillevaluator-base"
 # Compose 2 treats HEALTHCHECK NONE as a configured check, then fails its
 # readiness wait because Docker supplies no health state. Replace authored
@@ -1535,7 +1541,7 @@ def build_eval_base_image(
         "",
         "RUN apt-get -o Acquire::Retries=3 update && \\",
         "    apt-get -o Acquire::Retries=3 install -y --no-install-recommends \\",
-        "    bash curl git jq ripgrep \\",
+        f"    {_BASE_APT_PACKAGES} \\",
     ]
     if extra_apt:
         lines[-1] += " \\"
@@ -3932,8 +3938,8 @@ def _rebase_custom_dockerfile_content(
 ) -> tuple[str, str]:
     """Return custom Dockerfile content layered on top of the eval base image.
 
-    The base image already contains: python:3.12-slim, system packages
-    (bash/curl/git/jq), verifier dependencies, and the
+    The base image already contains: python:3.12-slim, the system packages in
+    ``_BASE_APT_PACKAGES``, verifier dependencies, and the
     standard directory structure (/workspace/skills, /logs, etc.).
 
     The custom Dockerfile's FROM line is replaced so the skill author's
@@ -4367,7 +4373,7 @@ def _write_dockerfile(
         "",
         "RUN apt-get -o Acquire::Retries=3 update && \\",
         "    apt-get -o Acquire::Retries=3 install -y --no-install-recommends \\",
-        "    bash curl git jq ripgrep \\",
+        f"    {_BASE_APT_PACKAGES} \\",
     ]
     if apt_pkgs:
         dockerfile_lines[-1] += " \\"
@@ -4503,7 +4509,7 @@ def _write_default_environment_dockerfile(
         "",
         "RUN apt-get -o Acquire::Retries=3 update && \\",
         "    apt-get -o Acquire::Retries=3 install -y --no-install-recommends \\",
-        "    bash curl git jq ripgrep \\",
+        f"    {_BASE_APT_PACKAGES} \\",
     ]
     if apt_pkgs:
         dockerfile_lines[-1] += " \\"

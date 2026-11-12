@@ -439,6 +439,22 @@ All notable changes to SkillEvaluator are documented in this file.
 - PII findings clarify that required author attribution is accepted while
   duplicate contact addresses need removal, replacement, or a reviewed waiver.
 
+- Docker OpenCode containers no longer get the distribution `nodejs` and
+  `npm` packages from agent setup, except on Alpine images, and generated
+  images now include `procps`. Before, OpenCode, the default agent with NVIDIA
+  Build, installed Debian's Node.js and npm with `apt-get` in every trial and
+  then its own Node.js with nvm, and Claude Code installed `procps` (for
+  `pgrep`) in every trial. Both took time from the 360-second agent setup
+  timeout, and a package mirror error failed the trial. Like Claude Code and
+  Codex containers since 0.6.0, OpenCode containers on Debian-based images now
+  have no `gcc`, `g++`, or `make`, and OpenCode's Node.js is on `PATH` only for
+  the OpenCode process and the commands it runs, including its stdio MCP
+  servers. Skills whose scripts, tasks, or verifier need these tools, or whose
+  stdio MCP servers need `gcc`, `g++`, or `make`, must install them through
+  `scripts/apt-packages.txt` or a custom `evals/environment/Dockerfile`.
+  Generated images rebuild once for the new package list: the per-task images,
+  or the shared base image when `harbor.base_image_mode` is `reuse`.
+
 - A `tier3 evaluate --skip-with-skill` run with two or more agents now records
   the dataset-size status in `result.json` and the `tier3 evaluate` summary. It
   is taken from the agent with the best baseline score, as in the reports.

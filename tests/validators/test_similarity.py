@@ -413,6 +413,34 @@ class TestLocalCatalogWorkflow:
         assert any("root SKILL.md" in error for error in result.errors)
         mock_registry_cls.return_value.query_entry.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "frontmatter",
+        [
+            pytest.param("name: 2048\ndescription: Numeric name", id="integer-name"),
+            pytest.param("name: my-skill\ndescription: Use when: debugging logs", id="unquoted-colon"),
+            pytest.param("name: ''\ndescription: Empty name", id="empty-name"),
+        ],
+    )
+    @patch("skillevaluator.validators.similarity.EmbeddingRegistry")
+    @patch("skillevaluator.validators.similarity.EmbeddingClient")
+    def test_catalog_target_with_unusable_frontmatter_explains_the_frontmatter_rule(
+        self, _mock_client_cls, mock_registry_cls, tmp_path: Path, frontmatter: str
+    ) -> None:
+        catalog = tmp_path / "catalog.json"
+        catalog.write_text("{}")
+        target = tmp_path / "target"
+        target.mkdir()
+        (target / "SKILL.md").write_text(f"---\n{frontmatter}\n---\n", encoding="utf-8")
+
+        result = SimilarityValidator(content_type="skill", catalog_path=catalog).validate(target)
+
+        assert not result.passed
+        assert result.errors == [
+            "Catalog comparison requires a skill directory with a root SKILL.md whose "
+            "frontmatter is a valid YAML mapping with a non-empty string name and description"
+        ]
+        mock_registry_cls.return_value.query_entry.assert_not_called()
+
     @patch("skillevaluator.validators.similarity.EmbeddingRegistry")
     @patch("skillevaluator.validators.similarity.EmbeddingClient")
     def test_catalog_extracts_only_the_root_skill(self, _mock_client_cls, mock_registry_cls, tmp_path: Path) -> None:

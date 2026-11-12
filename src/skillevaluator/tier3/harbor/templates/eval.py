@@ -3278,10 +3278,90 @@ def _ragas_goal_accuracy_enabled():
     return _is_native_openai_chat_url("openai", request_url)
 
 
+def _ragas_message_text(message):
+    content = message.get("content")
+    if not isinstance(content, str):
+        content = json.dumps(message.get("tool_calls") if content is None else content, default=str)
+    return f"[{message.get('role', 'unknown')}]\n{content}"
+
+
+def _ragas_request_text(body):
+    """Return the judge model and the messages of one RAGAS chat-completions request as text."""
+    try:
+        request = json.loads(body)
+        return request.get("model"), "\n\n".join(_ragas_message_text(message) for message in request["messages"])
+    except (ValueError, LookupError, TypeError, AttributeError):
+        return None, body.decode("utf-8", "replace")
+
+
+def _ragas_reply_text(body):
+    """Return the judge's answer in one chat-completions reply: its text, or the tool-call arguments RAGAS parses."""
+    try:
+        message = json.loads(body)["choices"][0]["message"]
+        if message.get("content") or not message.get("tool_calls"):
+            return str(message.get("content") or "")
+        return "\n".join(str(call["function"]["arguments"]) for call in message["tool_calls"])
+    except (ValueError, LookupError, TypeError, AttributeError):
+        return body.decode("utf-8", "replace")
+
+
+def _record_ragas_exchange(response, problem=None):
+    """Save one RAGAS judge request and its reply, or the HTTP error, as a goal_accuracy attempt.
+
+    _record_judge_attempt redacts the full texts before it shortens them, so the
+    error body is not cut here.
+    """
+    try:
+        model, prompt = _ragas_request_text(response.request.content)
+        reply = None
+        if problem is None and response.is_success:
+            reply = _ragas_reply_text(response.content)
+        elif problem is None:
+            problem = f"HTTP {response.status_code}: {response.text}"
+        _record_judge_attempt(
+            "goal_accuracy",
+            1,
+            prompt=prompt,
+            reply=reply,
+            problem=problem,
+            method="ragas",
+            model=model or _judge_attempt_model(),
+            status="replied" if reply is not None else None,
+        )
+    except TimeoutError:
+        # The required-judge deadline alarm, not an evidence failure.
+        raise
+    except Exception as error:
+        # Saving evidence must never change a score or hide a provider error.
+        logger.warning("Could not save RAGAS judge evidence: %s", type(error).__name__)
+
+
+async def _save_ragas_exchange(response):
+    """httpx response hook: RAGAS builds its own prompts and parses its own replies, so save both here."""
+    try:
+        await response.aread()
+    except Exception as error:
+        _record_ragas_exchange(response, f"the reply was not received ({type(error).__name__})")
+        raise
+    _record_ragas_exchange(response)
+
+
+def _ragas_evidence_http_client(openai_module):
+    """Return the SDK's default async HTTP client with the evidence hook, or None to score without evidence."""
+    try:
+        return openai_module.DefaultAsyncHttpxClient(event_hooks={"response": [_save_ragas_exchange]})
+    except TimeoutError:
+        raise
+    except Exception as error:
+        logger.warning("Could not save RAGAS judge evidence: %s", type(error).__name__)
+        return None
+
+
 def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary):
     """Use RAGAS AgentGoalAccuracyWithReference for high-quality two-step evaluation."""
     import asyncio
 
+    import openai
     from openai import AsyncOpenAI
     from ragas.llms.base import llm_factory
     from ragas.messages import AIMessage as RagasAI
@@ -3298,7 +3378,14 @@ def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary)
     suffix = "/chat/completions"
     if not request_url.endswith(suffix) or not _is_native_openai_chat_url("openai", request_url):
         raise RuntimeError("RAGAS goal accuracy requires the selected canonical OpenAI provider")
-    client = AsyncOpenAI(api_key=api_key, base_url=request_url[: -len(suffix)])
+    # The response hook saves each RAGAS request and reply to judge_attempts.json.
+    # It runs in the loop below, whose tasks copy this context, so it sees the
+    # verifier's judge evidence list. Closing the client also closes this one.
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url=request_url[: -len(suffix)],
+        http_client=_ragas_evidence_http_client(openai),
+    )
     loop = asyncio.new_event_loop()
     try:
         # Build the scorer inside the try so a setup failure still closes the client.

@@ -1,4 +1,14 @@
 <!DOCTYPE html>
+{% macro verification_detail(finding) -%}
+{% set verification = finding | finding_verification %}
+{% if verification %}
+<div class="llm-verification">
+    <p><strong>LLM verification:</strong> {{ verification.verdict }} ({{ verification.confidence }} confidence)</p>
+    {% if verification.reasoning %}<p><strong>Reasoning:</strong> {{ verification.reasoning }}</p>{% endif %}
+    <p>{{ verification.severity_effect }}</p>
+</div>
+{% endif %}
+{%- endmacro %}
 {% from "logo.svg.j2" import se_logo %}<html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -419,6 +429,8 @@
         @media screen { [data-theme="dark"] .severity-info { background: #1e3a8a; color: #93c5fd; } }
         .finding-meta { display: flex; flex-wrap: wrap; gap: 0.75rem; color: var(--text-secondary); font-size: 0.8rem; margin-top: 0.375rem; }
         .finding-meta span { display: flex; align-items: center; gap: 0.25rem; }
+        .llm-verification { margin-top: 0.625rem; padding: 0.5rem 0.75rem; border: 1px solid var(--border-color); border-radius: 6px; font-size: 0.8rem; overflow-wrap: anywhere; }
+        .llm-verification p { margin: 0.25rem 0; }
         .meta-icon { width: 0.8rem; height: 0.8rem; flex-shrink: 0; }
         .code-snippet {
             font-family: 'SF Mono', Monaco, Consolas, 'Liberation Mono', monospace;
@@ -1915,6 +1927,7 @@
                                                 <span class="severity-tag severity-{{ finding.severity }}" style="margin-left: 0.5rem;">{{ finding.severity | upper }}</span>
                                             </div>
                                             {% if finding.suggestion %}<div class="finding-suggestion"><strong>Fix:</strong> {{ finding.suggestion }}</div>{% endif %}
+                                            {{ verification_detail(finding) }}
                                         </div>
                                         {% endfor %}
                                     </div>
@@ -1943,6 +1956,7 @@
                                         </div>
                                         {% if finding.line_content %}<div class="code-snippet" style="margin: 0.5rem 0;">{{ finding.line_content | truncate(200) }}</div>{% endif %}
                                         {% if finding.suggestion %}<div class="finding-suggestion {{ 'truncatable' if finding.suggestion | length > 150 else '' }}" {% if finding.suggestion | length > 150 %}onclick="this.classList.toggle('expanded')"{% endif %}><strong>Fix:</strong> {{ finding.suggestion }}</div>{% endif %}
+                                        {{ verification_detail(finding) }}
                                     </div>
                                     {% endfor %}
                                     {% else %}
@@ -2049,6 +2063,7 @@
                             <span>{{ icons.search | safe }} {{ finding.check_name }}</span>
                         </div>
                         {% if finding.suggestion %}<div class="suggestion"><strong>Suggestion:</strong> {{ finding.suggestion }}</div>{% endif %}
+                        {{ verification_detail(finding) }}
                     </div>
                     {% endfor %}
                     </div>
@@ -2071,6 +2086,7 @@
                         </div>
                         {% if finding.line_content %}<div class="code-snippet">{{ finding.line_content | truncate(200) }}</div>{% endif %}
                         {% if finding.suggestion %}<div class="suggestion"><strong>Suggestion:</strong> {{ finding.suggestion }}</div>{% endif %}
+                        {{ verification_detail(finding) }}
                     </div>
                     {% endfor %}{% endif %}
                 </div>

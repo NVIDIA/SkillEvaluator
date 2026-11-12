@@ -152,8 +152,9 @@ def test_documented_labels_match_a_run_with_a_failed_peer() -> None:
     ):
         assert label in section
         assert label in html
-    # The standalone hero: the quality chip shows the agent, the command status the run.
-    assert "Tier 3 quality: Passed" in html
+    # The standalone quality labels follow the run; completed-agent details keep its score.
+    assert "card follow the run's verdict" in section
+    assert "Tier 3 quality: Changes required" in html
     assert "Changes required" in section
     assert _hero_command_status(raw) == "Changes required"
     assert "Skill Lift +0.40" in html
@@ -203,12 +204,12 @@ def test_no_fallback_to_a_lower_complete_agent() -> None:
     raw = HTMLReporter(report_scope="tier3").render(result)
     html = _plain(raw)
     scoped_md = BenchmarkReporter(report_scope="tier3").render(result)
-    line = "Tier 3: No complete agent result"
+    line = "Tier 3 completed-agent result: NEUTRAL"
 
     assert "the reports do not fall back to another agent" in section
     assert line in section
     assert line in _plain(scoped_md)
-    assert [row for row in scoped_md.splitlines() if "Completed agent" in row or "claude-code" in row] == []
+    assert "Completed agent:" not in scoped_md
     assert "Recovered timeout attempts" not in scoped_md
     assert "Completed Agent Score" not in html
     assert "Completed-agent result" not in html
@@ -350,7 +351,7 @@ def test_results_tree_and_tier3_guide_point_to_the_section() -> None:
     every_run = "At the end of every Tier 3 run, from `tier3 evaluate` or a `validate` run that includes Tier 3"
     assert every_run in _plain(page)
     assert f"(#{ANCHOR})" in page
-    assert f"(reports.mdx#{ANCHOR})" in guide
+    assert f"(/skills/skillevaluator/reports#{ANCHOR})" in guide
     assert "The verdict table above applies only when the run succeeds." in guide
 
 

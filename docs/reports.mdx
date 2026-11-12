@@ -1216,8 +1216,10 @@ score.
   every agent finished.
 
 In a standalone report, the **Tier 3 quality** chip and the **Quality Verdict**
-card show that agent's own dimension verdict. They describe one agent, not the
-run, and the command status in the same hero still reads **Changes required**.
+card follow the run's verdict. A failed run keeps `neutral`, which the HTML
+labels **Changes required**, even when the completed agent's own dimension
+verdict passes. The completed-agent details still describe that agent, and
+the command status in the same hero also reads **Changes required**.
 
 The evidence is complete when the agent succeeded with no execution errors, has
 a with-skill score from 0 to 1, and scored every expected attempt of every case
@@ -1226,8 +1228,9 @@ succeeded and used the same metric set; after `--skip-baseline`, it shows the
 score without a baseline or lift. If the best agent's evidence is incomplete,
 the reports do not fall back to another agent. When no agent qualifies, for
 example because every agent failed or the agents were scored on different
-metric sets, no completed-agent score is shown and `tier3-benchmark.md` reads
-**Tier 3: No complete agent result**.
+metric sets, no completed-agent score is shown. The benchmark's leading
+verdict follows the run, so a neutral run still reads
+**Tier 3 completed-agent result: NEUTRAL** when no agent qualifies.
 
 When the run has a best agent, the HTML report names it as **Best performing
 agent**, and its **Skill Lift** card and the **Best-agent lift** line under

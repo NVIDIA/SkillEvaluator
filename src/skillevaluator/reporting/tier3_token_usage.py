@@ -142,6 +142,21 @@ def dropped_case_rows_note(usage: object) -> str | None:
     )
 
 
+def dropped_case_rows_pointer(usage: object) -> str | None:
+    """For a terminal summary: say that no report has the case rows the payload dropped, if it dropped any.
+
+    The payload that every report reads drops the case rows of every agent, so
+    a pointer to the reports would send readers to rows that are not there.
+    """
+    count = _count(_mapping(usage).get("case_rows_omitted"))
+    if not count:
+        return None
+    return (
+        f"{count:,} case row(s) were left out of every report to keep the reports within their size limits, "
+        "so no report has token usage per case; the agent sums cover every attempt."
+    )
+
+
 def token_usage_rows(
     usage: object,
     *,
@@ -237,8 +252,10 @@ def render_token_usage_table(
     """Print one row per agent and the all-agent row, then the notes; return whether anything printed.
 
     ``case_pointer`` names the files of the calling command that hold the
-    case rows. ``text`` makes agent names and notes safe for the console, for
-    example by redacting secrets. Cells are plain text, never console markup.
+    case rows; when the payload left the case rows out, the table says that no
+    report has them instead. ``text`` makes agent names and notes safe for the
+    console, for example by redacting secrets. Cells are plain text, never
+    console markup.
     """
     rows, _omitted = token_usage_rows(usage, include_cases=False)
     if not rows:
@@ -262,7 +279,7 @@ def render_token_usage_table(
     for row in rows:
         if row.note:
             console.print(Text(f"  {text(row.agent if row.agent is not None else 'All agents')}: {text(row.note)}"))
-    pointer = " ".join(part for part in (case_pointer, dropped_case_rows_note(usage)) if part)
+    pointer = dropped_case_rows_pointer(usage) or case_pointer
     console.print(Text(f"  {TOKEN_USAGE_NOTE} {COVERAGE_NOTE} {pointer}", style="dim"))
     return True
 

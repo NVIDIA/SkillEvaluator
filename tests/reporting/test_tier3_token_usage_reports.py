@@ -364,7 +364,9 @@ def test_the_collector_records_the_case_of_an_unscored_native_task_attempt(tmp_p
 def test_an_unscored_attempt_takes_the_case_its_failure_record_names(tmp_path: Path) -> None:
     # Native tasks: ``fix-login-bug`` has entry_id ``auth-001`` and ``add-logout`` has ``auth-002``.
     run = tmp_path / "run"
-    _arm(run, "codex", "with-skill", [("fix-login-bug__a", (1000, 100, 0), True), ("add-logout__a", (900, 90, 0), True)])
+    _arm(
+        run, "codex", "with-skill", [("fix-login-bug__a", (1000, 100, 0), True), ("add-logout__a", (900, 90, 0), True)]
+    )
     _arm(
         run,
         "codex",
@@ -762,6 +764,48 @@ def test_tier3_evaluate_terminal_prints_the_agent_sums_the_report_step_recorded(
     assert "Token Usage (measured, not scored)" in output
     assert re.search(r"claude-code\s+│\s+3,300\s+│\s+50,072\s+│\s+N/A", output)
     assert EVALUATE_CASE_POINTER in " ".join(output.split())
+
+
+def test_terminals_say_no_report_has_the_case_rows_the_payload_left_out(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    run = _cases_run(tmp_path, agents=2, cases=6)
+    full = agent_eval_result_from_directory(
+        skill, run, engine_result=_failed_case_findings("agent-1", 3), use_llm_judge=False
+    )
+    assert full is not None
+    # The case findings that the report step adds leave no room for the token case rows.
+    monkeypatch.setattr(reporting_base, "AGENT_EVAL_REPORT_MAX_NODES", _nodes(full.metadata["agent_eval"]) + 1)
+    engine_result = _failed_case_findings("agent-1", 3)
+    report = render_agent_eval_html_report(
+        skill, run, output_path=tmp_path / "report.html", engine_result=engine_result, use_llm_judge=False
+    )
+    assert "Token usage by case" in report.read_text(encoding="utf-8")
+    recorded = engine_result["token_usage"]
+    assert recorded["case_rows_omitted"] == 12
+    # ``validate`` fits the payload the same way after its applicability fields.
+    payload = copy.deepcopy(full.metadata["agent_eval"])
+    assert drop_token_usage_cases(payload["token_usage"]) == 12
+
+    outputs = {
+        "validate": _cli_output(_validation_result_from_payload(payload)),
+        "tier3 evaluate": render_result(
+            {
+                "execution_status": "succeeded",
+                "agents": {"codex": {"execution_status": "succeeded"}},
+                "token_usage": recorded,
+            }
+        ),
+    }
+
+    for name, output in outputs.items():
+        text = " ".join(output.split())
+        assert "Token Usage (measured, not scored)" in text, name
+        assert VALIDATE_CASE_POINTER not in text and EVALUATE_CASE_POINTER not in text, name
+        assert "12 case row(s) were left out of every report" in text, name
+        assert "left out of this report" not in text, name
 
 
 def test_terminal_tables_print_agent_names_as_text_not_markup() -> None:

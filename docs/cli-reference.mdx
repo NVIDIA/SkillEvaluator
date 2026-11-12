@@ -348,7 +348,7 @@ The following flags are forwarded to the live-eval engine when Tier 3 is enabled
 | `--timeout-multiplier FLOAT` | unset | Scale Harbor's agent, verifier, and environment-build timeouts (built-in default `1.0`). Must be a finite number greater than 0. |
 | `--harbor-keep-jobs` | off | Retain Harbor job dirs and artifacts after the run for inspection. |
 | `--agent-runtime-preflight / --no-agent-runtime-preflight` | disabled | Opt into an extra agent-only execution of the first staged task before the measured A/B matrix. The CLI value overrides `harbor.agent_runtime_preflight`; without either, no extra agent runs. |
-| `--tolerate-baseline-timeouts / --no-tolerate-baseline-timeouts` | disabled | Keep an agent scored on its clean with-skill arm when only baseline attempts hit the agent execution timeout; its baseline and Skill Lift are not reported, and the run is not complete publication evidence. The CLI value overrides `harbor.tolerate_baseline_timeouts`. See [Baseline timeouts](tier3-live-evaluation.mdx#baseline-timeouts). |
+| `--tolerate-baseline-timeouts / --no-tolerate-baseline-timeouts` | disabled | Keep an agent scored on its clean with-skill arm when only baseline attempts hit the agent execution timeout; its baseline and Skill Lift are not reported, and the run is not complete publication evidence. The CLI value overrides `harbor.tolerate_baseline_timeouts`. See [Baseline timeouts](/skills/skillevaluator/tier3-live-evaluation#baseline-timeouts). |
 
 Flags marked "unset" fall back to their matching keys in `evals/config.yml` where one exists, then to the built-in defaults ([Eval Datasets](eval-datasets.mdx) documents the config keys and precedence). The exception is `--results-dir`, which resolves independently of `evals/config.yml` (see [Reports & Results](reports.mdx)).
 
@@ -583,7 +583,7 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 | `--harbor-keep-jobs` | off | Retain Harbor job dirs and artifacts for inspection with [harbor-view](#harbor-view). |
 | `--verbose` | off | Also print the per-evaluator and per-dimension tables and the metric findings after the case summary. |
 | `--agent-runtime-preflight / --no-agent-runtime-preflight` | disabled | Opt into an extra agent-only execution of the first staged task before the full A/B evaluation matrix. |
-| `--tolerate-baseline-timeouts / --no-tolerate-baseline-timeouts` | disabled | Keep an agent scored on its clean with-skill arm when only baseline attempts hit the agent execution timeout; its baseline and Skill Lift are not reported. The CLI value overrides `harbor.tolerate_baseline_timeouts`. See [Baseline timeouts](tier3-live-evaluation.mdx#baseline-timeouts). |
+| `--tolerate-baseline-timeouts / --no-tolerate-baseline-timeouts` | disabled | Keep an agent scored on its clean with-skill arm when only baseline attempts hit the agent execution timeout; its baseline and Skill Lift are not reported. The CLI value overrides `harbor.tolerate_baseline_timeouts`. See [Baseline timeouts](/skills/skillevaluator/tier3-live-evaluation#baseline-timeouts). |
 | `--timeout-multiplier FLOAT` | unset | Scale Harbor's agent, verifier, and environment-build timeouts (built-in default `1.0`). Must be a finite number greater than 0. |
 | `--override-cpus INTEGER` | unset | Override eval-environment CPU allocation (passed through to Harbor). |
 | `--override-memory-mb INTEGER` | unset | Override eval-environment memory in MB (passed through to Harbor). |

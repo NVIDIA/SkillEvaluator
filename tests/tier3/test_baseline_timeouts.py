@@ -306,6 +306,26 @@ def test_reports_reload_the_tolerated_agent_from_disk(tmp_path: Path) -> None:
     assert load_agent_data(tmp_path / "results")["opencode"]["execution_status"] == "failed"
 
 
+@pytest.mark.parametrize("source", ["harbor_result", "trajectory"])
+def test_oversized_completion_counter_rejects_tolerance_without_aborting_collection(
+    tmp_path: Path, source: str
+) -> None:
+    huge_count = 10**400
+    launch_errors = _two_agent_jobs(tmp_path / "jobs", output_tokens=huge_count if source == "harbor_result" else None)
+    if source == "trajectory":
+        trial = tmp_path / "jobs" / f"{SKILL}-opencode-without" / "case-002__without1"
+        _write_json(
+            trial / "agent" / "trajectory.json",
+            {"steps": [], "final_metrics": {"total_completion_tokens": huge_count}},
+        )
+
+    results = _collect(tmp_path, launch_errors)
+
+    assert results["execution_status"] == "failed"
+    assert RECORD_KEY not in results["agents"]["opencode"]
+    assert results["agents"]["opencode"][REJECTION_KEY] == "no_progress_evidence"
+
+
 def test_trajectory_completion_tokens_prove_progress(tmp_path: Path) -> None:
     launch_errors = _two_agent_jobs(tmp_path / "jobs", output_tokens=None)
     trial = tmp_path / "jobs" / f"{SKILL}-opencode-without" / "case-002__without1"

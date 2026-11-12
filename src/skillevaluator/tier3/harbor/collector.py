@@ -7112,7 +7112,11 @@ def _positive_token_count(value: Any) -> int | None:
     """Return a positive whole token count, or None for anything else (never bool)."""
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    if not math.isfinite(value) or value < 1 or value != int(value):
+    try:
+        if not math.isfinite(value) or value < 1 or value != int(value):
+            return None
+    except OverflowError:
+        # JSON integers can exceed the float range used to check finiteness.
         return None
     return int(value)
 

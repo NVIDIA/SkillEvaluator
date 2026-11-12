@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -46,6 +46,8 @@ MAX_MANIFEST_BYTES = CONTENT_DEDUP_MAX_FILE_BYTES
 MAX_COLLECTION_BYTES = CONTENT_DEDUP_MAX_TOTAL_BYTES
 MAX_DISCOVERED_PATHS = SIMILARITY_MAX_DISCOVERED_PATHS
 DISCOVERY_EXCLUDED_DIRS = SCAN_EXCLUDED_DIRS
+MAX_EXTRACTION_EXCLUSIONS = 100
+MAX_EXCLUSION_PATH_CHARS = 512
 
 
 @dataclass
@@ -73,12 +75,50 @@ class ContentEntry:
 
 
 @dataclass
+class ExtractionResult:
+    """Selected-manifest coverage, with a bounded inventory of exclusions.
+
+    ``indexed_count`` counts entries eligible for embedding; provider and index
+    errors still abort the build independently. Paths are relative to the scan
+    root and reasons never include manifest content or YAML parser excerpts.
+    """
+
+    entries: list[ContentEntry]
+    selected_count: int
+    exclusions: list[dict[str, str]]
+
+    @property
+    def indexed_count(self) -> int:
+        return len(self.entries)
+
+    @property
+    def skipped_count(self) -> int:
+        return self.selected_count - self.indexed_count
+
+    def to_metadata(self) -> dict[str, object]:
+        return {
+            "selected_count": self.selected_count,
+            "indexed_count": self.indexed_count,
+            "skipped_count": self.skipped_count,
+            "exclusions": self.exclusions,
+            "omitted_exclusions": self.skipped_count - len(self.exclusions),
+        }
+
+
+@dataclass
 class _ExtractionBudget:
     """Tracks collection bounds before any embedding request is made."""
 
     max_entries: int = SIMILARITY_DEFAULT_MAX_ENTRIES
     entry_count: int = 0
     total_bytes: int = 0
+    root: Path | None = None
+    exclusions: list[dict[str, str]] = field(default_factory=list)
+
+    def exclude(self, path: Path, reason: str) -> None:
+        if len(self.exclusions) < MAX_EXTRACTION_EXCLUSIONS:
+            label = path.relative_to(self.root).as_posix() if self.root is not None else path.name
+            self.exclusions.append({"path": label[:MAX_EXCLUSION_PATH_CHARS], "reason": reason})
 
     def reserve(self, file_path: Path, declared_bytes: int) -> None:
         self.entry_count += 1
@@ -197,15 +237,26 @@ def discover_and_extract(
     Returns:
         List of successfully extracted ContentEntry objects.
     """
+    return discover_and_extract_detailed(root, content_type, max_entries=max_entries).entries
+
+
+def discover_and_extract_detailed(
+    root: Path, content_type: str, *, max_entries: int = SIMILARITY_DEFAULT_MAX_ENTRIES
+) -> ExtractionResult:
+    """Extract entries while accounting for every selected manifest.
+
+    Unsafe paths, read failures and resource limits continue to abort discovery;
+    only malformed frontmatter is excluded with a structured reason.
+    """
     validate_max_entries(max_entries)
     strategy = _DISCOVERY_STRATEGIES.get(content_type)
     if strategy is None:
         logger.warning("Unknown content type '%s' for discovery", content_type)
-        return []
-
-    entries = strategy(root, _ExtractionBudget(max_entries=max_entries))
+        return ExtractionResult([], 0, [])
+    budget = _ExtractionBudget(max_entries=max_entries, root=root)
+    entries = strategy(root, budget)
     logger.debug("Discovered %d %s entries in %s", len(entries), content_type, safe_path_label(root))
-    return entries
+    return ExtractionResult(entries, budget.entry_count, budget.exclusions)
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +318,8 @@ def _extract_from_file(
     )
     match = FRONTMATTER_PATTERN.match(full_text)
     if not match:
+        if budget is not None:
+            budget.exclude(file_path, "missing_frontmatter")
         logger.debug("Missing YAML frontmatter in %s", file_path)
         return None
 
@@ -274,15 +327,21 @@ def _extract_from_file(
     try:
         data = yaml.safe_load(frontmatter_yaml)
     except yaml.YAMLError as exc:
+        if budget is not None:
+            budget.exclude(file_path, "invalid_yaml")
         logger.debug("Invalid YAML frontmatter in %s: %s", file_path, exc)
         return None
     if not data or not isinstance(data, dict):
+        if budget is not None:
+            budget.exclude(file_path, "invalid_frontmatter_mapping")
         logger.debug("Frontmatter in %s is not a non-empty mapping", file_path)
         return None
     name = data.get(name_field)
     description = data.get(description_field)
 
     if not name or not description:
+        if budget is not None:
+            budget.exclude(file_path, "missing_name_or_description")
         logger.debug(
             "Missing %s or %s in %s",
             name_field,

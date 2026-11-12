@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Render retained Tier 1 JSON with trusted templates, without reading skill paths.
+"""Render retained public JSON with trusted templates, without reading skill paths.
 
 The caller must bound the incoming JSON byte size. This adapter additionally
 bounds its shape and rejects malformed typed evidence instead of inventing it.
@@ -18,6 +18,7 @@ from skillevaluator.reporting.base import is_cleanly_skipped, is_tier2_result, i
 from skillevaluator.reporting.html import HTMLReporter
 from skillevaluator.reporting.run_status import resolve_run_status, result_status
 from skillevaluator.skillspector_provenance import sanitize_skillspector_provenance_metadata
+from skillevaluator.skillspector_reference_caveats import sanitize_reference_caveat_metadata
 
 
 class RetainedReportError(ValueError):
@@ -66,7 +67,7 @@ def _strings(value: Any, field: str) -> list[str]:
 
 
 def _typed_metadata(metadata: dict) -> None:
-    """Validate nested containers dereferenced by the native Tier 1 template."""
+    """Validate nested containers dereferenced by native report templates."""
     workflow = metadata.get("workflow")
     if workflow is not None:
         stages = workflow.get("stages", {})
@@ -110,13 +111,63 @@ def _typed_metadata(metadata: dict) -> None:
                 and all(isinstance(value, str) for value in policy["severity_overrides"].values()),
                 "Invalid severity overrides",
             )
+    agent_eval = metadata.get("agent_eval")
+    if agent_eval is not None:
+        for key in (
+            "summary",
+            "agents",
+            "dataset_summary",
+            "attempt_policy",
+            "evaluators",
+            "insights",
+            "metric_labels",
+            "verdict_policy",
+            "provenance",
+        ):
+            if key in agent_eval:
+                _require(isinstance(agent_eval[key], dict), f"Invalid tier3.{key}")
+        for key in (
+            "dimensions",
+            "dataset",
+            "trials",
+            "cases",
+            "evaluator_cards",
+            "timing",
+            "agents_run",
+            "execution_errors",
+            "suggestions",
+            "suggestions_v2",
+            "metric_ids",
+        ):
+            if key in agent_eval:
+                _require(isinstance(agent_eval[key], list), f"Invalid tier3.{key}")
+        for key in ("verdict", "execution_status", "skill_name"):
+            if key in agent_eval:
+                _text(agent_eval[key], f"tier3.{key}")
+        for agent in agent_eval.get("agents", {}).values():
+            _require(isinstance(agent, dict), "Invalid tier3 agent")
+            if "conditions" in agent:
+                _require(isinstance(agent["conditions"], dict), "Invalid tier3 agent.conditions")
+            for key in ("with_skill", "without_skill"):
+                if agent.get(key) is not None:
+                    _require(type(agent[key]) in (int, float) and 0 <= agent[key] <= 1, f"Invalid tier3 agent.{key}")
+        for record in (agent_eval, agent_eval.get("summary", {})):
+            for key in ("expected_attempts", "scored_attempts"):
+                if key in record:
+                    _require(type(record[key]) is int and record[key] >= 0, f"Invalid tier3.{key}")
+            for key in ("overall_score", "overall_lift", "composite_lift"):
+                if record.get(key) is not None:
+                    minimum = 0 if key == "overall_score" else -1
+                    _require(type(record[key]) in (int, float) and minimum <= record[key] <= 1, f"Invalid tier3.{key}")
     benchmark = metadata.get("benchmark_policy")
     if benchmark is not None:
         _require(all(type(value) is bool for value in benchmark.values()), "Invalid benchmark policy")
 
 
-def retained_results(payload: dict, *, copy_metadata: bool = True) -> list[ValidationResult]:
-    """Rehydrate the JSONReporter's Tier 1 contract using explicit field maps.
+def retained_results(
+    payload: dict, *, copy_metadata: bool = True, allowed_tiers: set[int] | None = None
+) -> list[ValidationResult]:
+    """Rehydrate the JSONReporter's public contract using explicit field maps.
 
     Results own deep copies of the payload's metadata by default. A caller that
     only validates and discards the results can pass copy_metadata=False; the
@@ -139,6 +190,10 @@ def retained_results(payload: dict, *, copy_metadata: bool = True) -> list[Valid
         "publication_target": "publication_target",
         "publication_evidence": "publication_evidence",
         "llm_analysis": "llm_analysis",
+        "work_limit": "work_limit",
+        "tier3": "agent_eval",
+        "skillspector_applicability": "skillspector_applicability",
+        "skillspector_baseline": "skillspector_baseline",
     }
     for row in rows:
         _require(isinstance(row, dict), "Result must be an object")
@@ -195,6 +250,10 @@ def retained_results(payload: dict, *, copy_metadata: bool = True) -> list[Valid
             metadata["skillspector_version"] = _text(row["skillspector_version"], "skillspector_version")
         # Revalidated like every report boundary; a non-canonical record is left out.
         metadata.update(sanitize_skillspector_provenance_metadata(row))
+        if "skillspector_reference_caveats" in row:
+            reference_caveats = sanitize_reference_caveat_metadata(row["skillspector_reference_caveats"])
+            _require(reference_caveats is not None, "Invalid skillspector_reference_caveats")
+            metadata["skillspector_reference_caveats"] = reference_caveats
         if "publication_target_conflict" in row:
             metadata["publication_target_conflict"] = _text(
                 row["publication_target_conflict"], "publication_target_conflict"
@@ -231,6 +290,8 @@ def retained_results(payload: dict, *, copy_metadata: bool = True) -> list[Valid
             metadata["confirmed_failure"] = row["confirmed_failure"]
         if row.get("skip_reason") is not None:
             metadata["skip_reason"] = _text(row["skip_reason"], "skip_reason")
+        if "agent_eval" in metadata and payload.get("tier3_applicability") is not None:
+            metadata["tier3_applicability"] = mapping(payload["tier3_applicability"], "tier3_applicability")
         _typed_metadata(metadata)
         result = ValidationResult(
             validator_name=name,
@@ -247,16 +308,17 @@ def retained_results(payload: dict, *, copy_metadata: bool = True) -> list[Valid
                 not result.passed and result.summary.errors > 0 and bool(result.errors),
                 "Confirmed failure requires failing diagnostics",
             )
+        tier = 3 if is_tier3_result(result) else 2 if is_tier2_result(result) else 1
         _require(
-            not is_tier2_result(result) and not is_tier3_result(result) and "tier3" not in row,
-            "Only retained Tier 1 reports are supported",
+            allowed_tiers is None or tier in allowed_tiers,
+            "Only retained Tier 1 reports are supported" if allowed_tiers == {1} else "Result tier is not allowed",
         )
         if "gating" in metadata:
             _require(
                 type(metadata["gating"].get("tier")) is int
-                and metadata["gating"]["tier"] == 1
+                and metadata["gating"]["tier"] == tier
                 and type(metadata["gating"].get("blocking")) is bool,
-                "Invalid Tier 1 gating",
+                f"Invalid Tier {tier} gating",
             )
         if "quality_scores" in metadata:
             quality = metadata["quality_scores"]
@@ -271,6 +333,15 @@ def retained_results(payload: dict, *, copy_metadata: bool = True) -> list[Valid
             if expected_status == "skipped"
             else result.passed == (expected_status == "passed")
         )
+        if tier == 3 and result.passed:
+            # Native Tier 3's boolean records completed execution; quality can
+            # still fail or be inconclusive after both arms produced scores.
+            agent = metadata.get("agent_eval") or {}
+            quality_verdict = agent.get("verdict") or (agent.get("summary") or {}).get("verdict")
+            verdict_consistent = verdict_consistent or (
+                agent.get("execution_status") == "succeeded"
+                and (expected_status, quality_verdict) in {("failed", "fail"), ("incomplete", "inconclusive")}
+            )
         _require(verdict_consistent, "Result verdict contradicts evidence")
         results.append(result)
     if "overall_passed" in payload:

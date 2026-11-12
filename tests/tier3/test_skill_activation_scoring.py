@@ -75,6 +75,13 @@ def test_supported_activation_preserves_subcheck_average(
     assert result["score"] == execution_score
 
 
+@pytest.mark.parametrize("placeholder", ["None", "N/A", "-"])
+def test_placeholder_expected_script_matches_no_expectation_in_composite_score(scorer, placeholder) -> None:
+    calls = [{"action": "Read", "action_input": {"file_path": "/skills/demo/SKILL.md"}}]
+
+    assert scorer.score_skill_execution(calls, "demo", placeholder) == scorer.score_skill_execution(calls, "demo", None)
+
+
 def test_unsupported_activation_is_unknown_and_not_forced_to_zero(scorer: ModuleType) -> None:
     call = {
         "action": "functions.exec",

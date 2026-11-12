@@ -170,6 +170,64 @@ def test_character_facts_keep_numeric_dataset_answers_scoreable(tmp_path, monkey
     assert overall_score(collected) == numeric["overall"]
 
 
+def test_staged_dependency_context_is_bounded(tmp_path):
+    verifier = _load_verifier(tmp_path)
+    root = tmp_path / "skills" / "demo"
+    scripts = root / "nested" / "scripts"
+    scripts.mkdir(parents=True)
+    (root / "SKILL.md").write_text("Use jq")
+    (scripts / "apt-packages.txt").write_text("# tools\njq=1.7 # JSON\n")
+    (scripts / "requirements.txt").write_text("Some-Package[extra]>=1\n")
+    (scripts / "run.py").write_text("x" * (128 * 1024) + "excluded_tail")
+    (scripts / "outside.py").symlink_to(verifier.ENTRY_PATH)
+    context = verifier._dependency_context("demo", skills_root=root.parent)
+    assert context["apt"] == ["jq=1.7"]
+    assert context["pip"] == ["Some-Package[extra]>=1"]
+    assert "Use jq" in context["skill_text"]
+    assert "excluded_tail" not in context["skill_text"]
+    assert "judge-artifact-case" not in context["skill_text"]
+    assert verifier._dependency_context("../demo", skills_root=root.parent)["skill_text"] == ""
+    assert verifier._dependency_context("absent", skills_root=root.parent)["apt"] == []
+
+
+@pytest.mark.parametrize("declared", [True, False])
+def test_missing_dependency_is_unscored_before_judging(tmp_path, monkeypatch, declared):
+    verifier = _load_verifier(tmp_path)
+    entry = json.loads(verifier.ENTRY_PATH.read_text())
+    entry.update(expected_skill="demo", evaluated_skill="demo", should_trigger=True, expected_script="scripts/run.py")
+    verifier.ENTRY_PATH.write_text(json.dumps(entry))
+    if declared:
+        monkeypatch.setattr(verifier, "_dependency_context", lambda _skill: {"apt": ["jq"]})
+    monkeypatch.setattr(
+        verifier,
+        "extract_tool_calls_as_dicts",
+        lambda _traj: [
+            {
+                "action": "bash",
+                "action_input": {"command": "python scripts/run.py"},
+                "observation": "bash: line 1: jq: command not found\nexit code 127",
+            }
+        ],
+    )
+    monkeypatch.setattr(verifier, "_call_required_judge", lambda *_a, **_kw: pytest.fail("Judge must not run"))
+    with pytest.raises(SystemExit, match="1"):
+        verifier.main()
+    sidecar = json.loads(verifier.SKILL_EVALUATOR_REWARD_JSON.read_text())
+    assert sidecar["evaluation_status"] == "failed"
+    assert "jq" in sidecar["evaluation_errors"]["environment"]
+    assert sidecar["environment_issues"][0]["fault_kind"] == (
+        "declared_dependency_unavailable" if declared else "undeclared_dependency"
+    )
+    collected = json.loads(verifier.REWARD_JSON.read_text())
+    collector._merge_reward_sidecars(collected, verifier.VERIFIER_DIR)
+    assert overall_score(collected) is None
+    reason = collector._unscoreable_reward_reason(collected)
+    assert "[environment]" in reason
+    assert "jq" in reason
+    assert "evals/environment/Dockerfile" in reason
+    assert "judge evaluation failed" not in reason
+
+
 def test_verifier_main_fails_closed_after_collecting_every_required_judge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

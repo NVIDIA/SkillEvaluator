@@ -761,18 +761,35 @@ def _harbor_task_directory(trial_dir: Path) -> str | None:
     return None
 
 
+def _recorded_case_id(trial_dir: Path) -> str | None:
+    """Return the case ID the collector recorded in an unscored attempt's ``failure.json``.
+
+    Older runs have no such record. The file is optional, so an unreadable or
+    oversized one only gives ``None``.
+    """
+    path = trial_dir / "failure.json"
+    failure = _load_bounded_json(path, [], artifact="failure") if path.is_file() else None
+    entry_id = failure.get("entry_id") if isinstance(failure, dict) else None
+    return entry_id if isinstance(entry_id, str) and entry_id.strip() else None
+
+
 def _unscored_attempt_usage(trial_dir: Path) -> dict[str, Any]:
     """Read the token counters of an attempt that has no usable reward.
 
-    The attempt is not scored, but it ran and used tokens. Its case is the task
-    directory its Harbor result or config names. Without one, it is the trial
-    name before Harbor's ``__<id>`` suffix, which never contains ``__`` while a
-    case ID may. Its trajectory is optional telemetry, so an unreadable or
-    oversized file only leaves the counters out and does not mark score
-    evidence truncated.
+    The attempt is not scored, but it ran and used tokens. Its case is the one
+    the collector recorded in its ``failure.json``, which also holds for a
+    native task whose ``entry_id`` differs from its directory. A run without
+    that record gives the task directory its Harbor result or config names, or
+    else the trial name before Harbor's ``__<id>`` suffix, which never contains
+    ``__`` while a case ID may. Its trajectory is optional telemetry, so an
+    unreadable or oversized file only leaves the counters out and does not
+    mark score evidence truncated.
     """
     attempt: dict[str, Any] = {
-        "entry_id": _harbor_task_directory(trial_dir) or trial_dir.name.rsplit("__", 1)[0] or "unknown",
+        "entry_id": _recorded_case_id(trial_dir)
+        or _harbor_task_directory(trial_dir)
+        or trial_dir.name.rsplit("__", 1)[0]
+        or "unknown",
         "trial_id": trial_dir.name,
         "scored": False,
     }

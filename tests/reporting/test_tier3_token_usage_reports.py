@@ -45,6 +45,7 @@ from skillevaluator.reporting.tier3_token_usage import (
     VALIDATE_CASE_POINTER,
 )
 from skillevaluator.tier3 import token_usage as token_usage_module
+from skillevaluator.tier3.harbor.collector import collect_harbor_results
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 from skillevaluator.tier3.harbor.report_data import load_agent_data
 from skillevaluator.tier3.result_display import render_result
@@ -317,6 +318,76 @@ def test_a_stop_on_pass_unscored_attempt_takes_its_case_from_its_harbor_files(tm
     assert codex["with_skill"]["coverage"]["unscored_attempts"] == 1
     assert codex["delta"]["status"] == "available"
     assert codex["delta"]["total_tokens"] == 0
+
+
+def test_the_collector_records_the_case_of_an_unscored_native_task_attempt(tmp_path: Path) -> None:
+    # A native task's directory (``login-task``) differs from its ``[metadata] entry_id`` (``auth-login``).
+    jobs = tmp_path / "jobs"
+    trial = jobs / "demo-opencode-with" / "login-task__a1b2c3d"
+    (trial / "agent").mkdir(parents=True)
+    task = {"path": "/runs/x/_harbor-tasks/opencode/with/login-task"}
+    timeout = {"exception_type": "AgentTimeoutError", "exception_message": "Agent timed out after 600 seconds"}
+    result = {"task_id": task, "config": {"task": task}, "exception_info": timeout}
+    (trial / "result.json").write_text(json.dumps(result), encoding="utf-8")
+    trajectory = {
+        "schema_version": "ATIF-v1.4",
+        "session_id": "session-1",
+        "agent": {"name": "opencode", "version": "1"},
+        "steps": [{"step_id": 1, "source": "user", "message": "Fix the login."}],
+        "final_metrics": {"total_prompt_tokens": 14000, "total_completion_tokens": 100},
+    }
+    (trial / "agent" / "trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+
+    for name, mapping in (("native", {"login-task": "auth-login"}), ("legacy", None)):
+        results = tmp_path / name
+        collect_harbor_results(
+            skill_name="demo",
+            agents=["opencode"],
+            output_dir=results,
+            jobs_dir=jobs,
+            skip_baseline=True,
+            expected_cases=1,
+            expected_case_ids=["auth-login"] if mapping else ["login-task"],
+            case_id_by_task_selector=mapping,
+        )
+        failure_file = results / "opencode" / "with-skill" / "trials" / trial.name / "failure.json"
+        failure = json.loads(failure_file.read_text(encoding="utf-8"))
+        [attempt] = load_agent_data(results)["opencode"]["usage_only_attempts"]
+        if mapping:
+            assert (failure["entry_id"], attempt["entry_id"]) == ("auth-login", "auth-login")
+        else:
+            # Without the mapping nothing is recorded, and the loader keeps the task directory.
+            assert ("entry_id" not in failure, attempt["entry_id"]) == (True, "login-task")
+        assert attempt["tokens"] == {"prompt": 14000, "completion": 100}
+
+
+def test_an_unscored_attempt_takes_the_case_its_failure_record_names(tmp_path: Path) -> None:
+    # Native tasks: ``fix-login-bug`` has entry_id ``auth-001`` and ``add-logout`` has ``auth-002``.
+    run = tmp_path / "run"
+    _arm(run, "codex", "with-skill", [("fix-login-bug__a", (1000, 100, 0), True), ("add-logout__a", (900, 90, 0), True)])
+    _arm(
+        run,
+        "codex",
+        "without-skill",
+        [("fix-login-bug__b", (1200, 120, 0), True), ("add-logout__b", (40000, 900, 0), False)],
+        status="failed",
+    )
+    for variant, trial in (("with-skill", "fix-login-bug__a"), ("without-skill", "fix-login-bug__b")):
+        _set_reward_case(run, "codex", variant, trial, "auth-001")
+    _set_reward_case(run, "codex", "with-skill", "add-logout__a", "auth-002")
+    timed_out = run / "codex" / "without-skill" / "trials" / "add-logout__b"
+    failure = json.loads((timed_out / "failure.json").read_text(encoding="utf-8"))
+    (timed_out / "failure.json").write_text(json.dumps({**failure, "entry_id": "auth-002"}), encoding="utf-8")
+    task = {"path": "/runs/x/_harbor-tasks/codex/without/add-logout"}
+    (timed_out / "result.json").write_text(json.dumps({"task_id": task}), encoding="utf-8")
+
+    usage = build_agent_eval_payload("demo", load_agent_data(run), use_llm_judge=False)["token_usage"]
+
+    codex = usage["agents"]["codex"]
+    assert [case["entry_id"] for case in codex["cases"]] == ["auth-001", "auth-002"]
+    auth_002 = codex["cases"][1]["baseline"]
+    assert (auth_002["totals"]["total_tokens"], auth_002["coverage"]["unscored_attempts"]) == (40900, 1)
+    assert codex["delta"]["reason_codes"] == ["baseline_failed"]
 
 
 def test_payload_counts_the_failed_attempt_and_keeps_resources_complete_only(run_result: tuple[Path, Any]) -> None:

@@ -1492,7 +1492,15 @@ def _save_unscored_trials(
     agent_model: str | None = None,
     agent_model_source: str | None = None,
     persisted_names: dict[str, str] | None = None,
+    case_id_by_task_selector: dict[str, str] | None = None,
 ) -> None:
+    """Persist each Harbor trial without a scored reward with a ``failure.json`` record.
+
+    With the trusted ``case_id_by_task_selector`` mapping, the record names the
+    attempt's case in ``entry_id``. Harbor names a trial after its task
+    directory, which for a native task with its own ``[metadata] entry_id`` is
+    not the case ID, so readers cannot derive the case from the name.
+    """
     if job_dir is None or not job_dir.exists():
         return
     agent = _bounded_reward_metadata_text(agent) or "unknown"
@@ -1578,6 +1586,15 @@ def _save_unscored_trials(
         if agent_model:
             error_summary.pop("model", None)
         failure.update(error_summary)
+        if case_id_by_task_selector is not None:
+            trial_result = _read_json(trial_src / "result.json")
+            case_id = (
+                _entry_id_from_harbor_result(trial_result, case_id_by_task_selector)
+                if isinstance(trial_result, dict)
+                else ""
+            )
+            if case_id:
+                failure["entry_id"] = case_id
         failure_file = trial_out / "failure.json"
         try:
             _write_bounded_failure_artifact(failure_file, failure)
@@ -6376,6 +6393,7 @@ def _save_trials(
     agent_model: str | None = None,
     agent_model_source: str | None = None,
     expected_case_ids: list[str] | set[str] | None = None,
+    case_id_by_task_selector: dict[str, str] | None = None,
 ) -> None:
     """Save per-trial reward.json and trajectory.json into the results directory."""
     agent = _bounded_reward_metadata_text(agent) or "unknown"
@@ -6499,6 +6517,7 @@ def _save_trials(
         agent_model=agent_model,
         agent_model_source=agent_model_source,
         persisted_names=unscored_names,
+        case_id_by_task_selector=case_id_by_task_selector,
     )
 
 
@@ -7661,6 +7680,7 @@ def collect_harbor_results(
                 agent_model=agent_model,
                 agent_model_source=agent_model_source,
                 expected_case_ids=expected_case_ids,
+                case_id_by_task_selector=case_id_by_task_selector,
             )
             with_summary = {
                 "agent": agent,
@@ -7919,6 +7939,7 @@ def collect_harbor_results(
                         agent_model=agent_model,
                         agent_model_source=agent_model_source,
                         expected_case_ids=expected_case_ids,
+                        case_id_by_task_selector=case_id_by_task_selector,
                     )
                 without_summary = {
                     "reused": reused_baseline_dir is not None,
@@ -8163,6 +8184,7 @@ def collect_harbor_results(
                     agent_model=agent_model,
                     agent_model_source=agent_model_source,
                     expected_case_ids=expected_case_ids,
+                    case_id_by_task_selector=case_id_by_task_selector,
                 )
 
         agent_execution = _aggregate_execution([with_execution, without_execution])

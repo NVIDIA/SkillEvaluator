@@ -308,6 +308,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Grader qualification resolves verifier source paths before provenance hashing,
+  so source-directory aliases (including macOS `/tmp`) retain the same relative
+  file identities and hashes while files outside the source root are rejected.
+
 - Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
   the PR or merge request's target revision. Policy files from the proposed
   changes cannot approve their own exceptions.

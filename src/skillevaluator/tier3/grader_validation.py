@@ -469,7 +469,8 @@ def qualify(root, suite, cases, output, repeats, concurrency, timeout, split, pr
     source_root = Path(__file__).resolve().parents[2]
     verifier_file_sha256 = {}
     verifier_digest = hashlib.sha256()
-    for path in sorted(_VERIFIER_FILES, key=lambda item: item.relative_to(source_root).as_posix()):
+    verifier_paths = (path.resolve() for path in _VERIFIER_FILES)
+    for path in sorted(verifier_paths, key=lambda item: item.relative_to(source_root).as_posix()):
         name = path.relative_to(source_root).as_posix()
         content = path.read_bytes()
         verifier_file_sha256[name] = hashlib.sha256(content).hexdigest()

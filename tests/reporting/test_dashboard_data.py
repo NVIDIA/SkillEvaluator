@@ -854,7 +854,9 @@ def test_retained_run_keeps_non_best_agent_trials_beyond_embedded_budget(tmp_pat
         summary["agent"] = "codex"
         summary_path.write_text(json.dumps(summary), encoding="utf-8")
     # A budget just below the full payload prunes only the non-best agent's details.
-    budget = tier3_report._serialized_payload_size(_canonical_export(run)) - 200
+    # Token usage joins after the budget and drops its own rows first, so it is not measured.
+    export = {key: value for key, value in _canonical_export(run).items() if key != "token_usage"}
+    budget = tier3_report._serialized_payload_size(export) - 200
     monkeypatch.setattr(tier3_report, "_MAX_EMBEDDED_REPORT_BYTES", budget)
     canonical = _canonical_export(run)
     assert canonical["report_truncation"]["omitted"]["non_best_agent_details"]

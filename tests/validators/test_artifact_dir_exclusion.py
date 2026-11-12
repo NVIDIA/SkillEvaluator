@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Artifact dirs (evals/, results/, ...) must be skipped, not just filtered.
+"""Generated output dirs must be skipped, not just filtered.
 
 A skill that has been through Tier 3 accumulates hundreds of MB under
 ``evals/results/``. Tier 1 must never traverse those subtrees
 (``iter_scannable_files`` pruning), never hand them to scanners that lack
 exclude flags (skillspector scans a filtered copy), and never report
 findings from them (gitleaks config allowlist, skillspector issue filter).
+SkillSpector retains authored evals/ inputs while pruning their results/.
 Regression source: a real skill dir with 798MB / 53k artifact files took
 ~25 minutes to validate and reported 270 artifact-only secret findings.
 """
@@ -136,7 +137,8 @@ class TestSkillspectorFilteredCopy:
             seen["path"] = scanned
             seen["has_manifest"] = (scanned / "SKILL.md").is_file()
             seen["has_payload"] = (scanned / "payload.py").is_file()
-            seen["artifact_dirs"] = sorted(d.name for d in scanned.iterdir() if d.name in SCAN_EXCLUDED_DIRS)
+            seen["root_results"] = (scanned / "results").exists()
+            seen["eval_results"] = (scanned / "evals" / "results").exists()
             return _clean_spector_result()
 
         mock_run.side_effect = capture
@@ -145,7 +147,7 @@ class TestSkillspectorFilteredCopy:
         assert seen["path"] != skill_with_artifacts.resolve()
         assert seen["path"].name == "my-skill"
         assert seen["has_manifest"] and seen["has_payload"]
-        assert seen["artifact_dirs"] == []
+        assert not seen["root_results"] and not seen["eval_results"]
         assert not seen["path"].exists()  # temp copy cleaned up afterwards
 
     @patch.object(Tools.skillspector, "_path", "/usr/bin/skillspector")
@@ -273,8 +275,9 @@ class TestSkillspectorFilteredCopy:
         ("relative", "passes_staged_copy"),
         [
             ("config/skillspector-baseline.yaml", True),
+            ("evals/skillspector-baseline.yaml", True),
             # Excluded from the staged copy, so it is outside the scan either way.
-            ("evals/skillspector-baseline.yaml", False),
+            ("evals/results/skillspector-baseline.yaml", False),
         ],
     )
     @patch.object(Tools.skillspector, "_path", "/usr/bin/skillspector")
@@ -399,7 +402,7 @@ class TestSkillspectorArtifactIssueFilter:
         assert SecurityValidator._is_generated_artifact_issue(issue) is True
 
     def test_issue_under_absolute_artifact_path_is_filtered(self):
-        issue = {"location": {"file": "/home/u/skill/evals/leak.py", "start_line": 3}}
+        issue = {"location": {"file": "/home/u/skill/evals/results/leak.py", "start_line": 3}}
         assert SecurityValidator._is_generated_artifact_issue(issue) is True
 
     def test_live_issue_is_kept(self):

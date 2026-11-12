@@ -554,6 +554,13 @@ completed run directly:
   `behavior_check`, the final-response section limit
   (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`). For `behavior_check`, the
   record's `reason` names each setting that applied.
+- **`<agent>/baseline_timeout_tolerance.json`** — written only for an agent
+  kept scored by `--tolerate-baseline-timeouts`: the baseline attempts that hit
+  the agent execution timeout. `result.json` carries the same record as
+  `agents.<agent>.baseline_timeout_tolerance`, a refused agent's
+  `agents.<agent>.baseline_timeout_tolerance_rejection` code, and the run-level
+  `baseline_timeout_tolerance` (tolerated agents and the launch errors they
+  explain). See [Baseline timeouts](/skills/skillevaluator/tier3-live-evaluation#baseline-timeouts).
 
 <Note>
   Read commands (`view`, `compare`, `create-eval-dataset --refine`) honor the
@@ -1303,7 +1310,17 @@ every agent.
 ### view
 
 Opens the newest `report.html` for a skill in your browser, regenerating it
-from the stored run data if the file is missing.
+from the stored run data if the file is missing. The regenerated report reuses
+the conclusions, recommendations, and suggestions the run saved in
+`result.json`, so it shows the advice the run produced and makes no LLM call.
+It also reuses the run's `what_to_fix.json`. When that file is missing or
+unusable, `view` writes the rule-based fixes, which can differ from the
+recommendations the run saved. The report also takes the run's duration and any
+Harbor log links recorded in `result.json`. Feedback saved by 0.6.0 or earlier
+has no per-case verdict, so the report adds the verdict and lists the case
+fixes as its recommendations and suggestions, without the LLM, as a new report
+does. A run that saved no feedback still has its feedback rebuilt, with the LLM
+when a provider is configured, and its `what_to_fix.json` rewritten.
 
 ```bash title="Open the latest HTML report"
 skillevaluator view ./my-skill
@@ -1394,6 +1411,16 @@ For CI and tooling, two JSON entry points matter:
   different sources abort the run before any report file is written, so a
   contradictory identity is never published in one format and reported in
   another.
+- **Tier 1 applicability**: when `validate --type auto` finds no skill,
+  rules, workflows, or plugin in the target, the JSON report carries a
+  top-level `tier1_applicability` object (`applicability: not_applicable`,
+  `reason_code: unsupported_content_type`, `detected_content_type: unknown`,
+  `supported_content_types`), whichever checks the run selected. Each of
+  `schema`, `version`, and `quality` that the run selected and did not
+  `--skip` is then `skipped`, with a `skip_reason` that starts with
+  `not applicable`. The key is absent when Tier 1 ran those checks, as it
+  does for a detected artifact, a forced `--type`, or a folder with a
+  mis-cased or dangling manifest such as `SKILL.md`.
 
 Both paths speak the same dialect: standalone `tier3 evaluate` and
 `validate --tier3` share one HTML renderer for `report.html`, and both embed

@@ -52,6 +52,23 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Tier 3 evaluations support token, judge-call, attempt, and priced-cost budgets.
 
+- `--tolerate-baseline-timeouts` (and `harbor.tolerate_baseline_timeouts` in
+  `evals/config.yml`) keeps a Tier 3 agent scored on its clean with-skill arm
+  when its only baseline failures are attempts that hit the agent execution
+  timeout while the agent was still producing output. By default one such
+  attempt still fails the agent and the whole run. The option needs both arms
+  run in the same run (not a `--reuse-baseline` baseline), standard dimension
+  grading, every other agent completed (at least one with both arms) and no
+  other launch errors; attempts a cost limit left `not_run` are not counted as
+  missing. It refuses a timeout whose logs show a known provider overload,
+  rate limit, quota or authentication error, and it does not cover native
+  multi-step tasks. The baseline condition stays
+  `failed`, baseline scores and Skill Lift are not reported for that agent, the
+  run's best agent, overall score and verdict come from the agents with a
+  complete baseline, reports name the tolerated agent in a "Baseline
+  incomplete" note, the run lists a warning, and the run is still not complete
+  publication evidence.
+
 - Tier 3 reports list up to three run-level **Next steps** under the per-case
   fixes in the terminal, `report.html` and the Markdown report: re-run an
   incomplete run, add attempts for inconsistent cases, add cases or negative
@@ -220,6 +237,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Upgrade the Tier 3 backend to Harbor 0.25.0. Align supported sandbox
+  constructor options with the release while reserving automatic mounts and
+  host Compose environment forwarding for evaluator policy. Preserve local
+  agent, verifier, and artifact evidence under Harbor's new mount checks, and
+  retain explicit Codex gateway URLs, credential aliases, and full model identifiers.
+
 - Name Skill Lift as the headline comparison and label pass@k differences as
   supporting reliability across reports and terminal output.
 
@@ -378,6 +401,22 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `skillevaluator view` no longer asks the LLM again when it regenerates a
+  missing `report.html` for a Tier 3 run that saved its report feedback in
+  `result.json`. The regenerated report shows the conclusions,
+  recommendations, and suggestions that run produced, makes no LLM call, and
+  reuses the run's `what_to_fix.json` when it has one. It also takes the run's
+  duration and any Harbor log links recorded in `result.json`, which the 0.8.0
+  rebuild left out. In 0.8.0 the Insights judge and the what-to-fix writer ran
+  again: with a provider configured that cost tokens and could change the
+  advice, without one the run's saved LLM advice was dropped, and either way
+  `what_to_fix.json` was overwritten. Feedback saved by 0.6.0 or earlier has
+  no per-case verdict, so the regenerated report adds the verdict and lists
+  the case fixes as its recommendations and suggestions, without the LLM, as a
+  new report does. A run that saved no feedback still has its feedback
+  rebuilt, with the LLM when a provider is configured, and its
+  `what_to_fix.json` rewritten.
+
 - Public MCP URL probes handle modern SDK client and stream APIs while retaining
   checked-address connections, header grants, response limits, and bounded
   cleanup. Redirect responses are refused before SDK-level redirect handling.
@@ -387,10 +426,29 @@ All notable changes to SkillEvaluator are documented in this file.
 - Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
   the PR or merge request's target revision. Policy files from the proposed
   changes cannot approve their own exceptions.
+
+- `skillevaluator validate` on a target with no skill, rules, workflows, or
+  plugin, such as an ordinary source repository, no longer fails Tier 1 with
+  three `No skills found` errors and exit 1 when every content scan passes.
+  When `--type auto` detects the type as `unknown`, the `schema`, `version`,
+  and `quality` checks are now recorded as not applicable, never as passes:
+  the terminal summary and the HTML report count them as N/A, and the JSON
+  and Markdown reports list them as skipped with a `not applicable` reason.
+  The JSON report of every such run adds a root `tier1_applicability` object.
+  The content scans still run with their unrestricted scope, so a real
+  finding still fails the run; such a run is never eligible for publication.
+  A target folder whose own `SKILL.md`, `workflow-rules.mdc`,
+  `agent_plugin.yaml`/`.yml`, or `.claude-plugin/plugin.json` is mis-cased
+  (such as `Skill.md`) or a dangling symlink still fails its manifest checks,
+  and `--type skill` still validates the target as a skill.
+
+- The unknown-artifact CLI guidance links to the published content-types documentation route.
+
 - Security checks preserve authored evaluation files and their findings while
   excluding generated outputs. Fully inspected skills with only missing-path
   reference caveats retain visible warnings instead of an incomplete-scan
   failure; actual coverage gaps and analyzer failures still block.
+
 - PII findings clarify that required author attribution is accepted while
   duplicate contact addresses need removal, replacement, or a reviewed waiver.
 
@@ -422,6 +480,11 @@ All notable changes to SkillEvaluator are documented in this file.
   scores from scored attempts that miss the pass threshold. Dataset snapshots
   use schema 1.1; valid schema 1.0 snapshots retain their original datasets and
   integrity checks, with corrected summaries projected without rewriting files.
+
+- Tier 3 improvement recommendations respect each case's expected skill routing:
+  passing negative controls no longer inherit activation-loss advice from positive
+  cases, while failed negatives retain task, environment, and run-error diagnostics.
+  The dataset snapshot is read once per recommendation pass across all cases and agents.
 
 - Tier 2 includes qualifying shell comment blocks at end of file in context
   deduplication. Previously those blocks disappeared unless a blank line or
@@ -583,6 +646,34 @@ All notable changes to SkillEvaluator are documented in this file.
   hover, instead of `—` for a metric a trial recorded as N/A. The reports'
   reasons for an N/A Accuracy, Goal Accuracy or Behavior Check now name the
   dataset fields `expected_output` and `assertions` before their legacy names.
+
+- Tier 3 no longer scores a with-skill skill metric `1.0` when the eval case
+  gives it nothing to score. `skill_efficiency` (Efficiency) is now N/A for a
+  negative case, such as the one `create-eval-dataset --full` writes, and both
+  `skill_execution` (Discoverability) and `skill_efficiency` are N/A for a case
+  that is not negative and names no `expected_skill`, such as a legacy case
+  without `expected_skill` and `should_trigger`. The same holds in a baseline
+  arm that stages a skill the case could activate. The trial overall, pass@k
+  and the arm's averages leave N/A metrics out, so absolute with-skill scores
+  of these cases change: a negative case scoring 1.0 on Security and
+  Discoverability and 0.8 on Correctness and Effectiveness now has an overall
+  of 0.90, not 0.92. If no case is a positive case that names an
+  `expected_skill`, for example when every case is negative, Efficiency has no
+  with-skill score and the agent cannot PASS; Discoverability has none either
+  unless some case is negative. A trial without a trajectory keeps these
+  metrics N/A too. A positive case with no tool calls still scores `0.0`, and
+  Skill Lift is unchanged when the baseline has no skill it could activate,
+  because both metrics are already N/A there. The HTML report now explains a
+  with-skill N/A skill metric by the eval case, not by a missing skill, and a
+  multi-step trial's collected reward keeps the N/A reason its steps' verifier
+  recorded.
+
+- The per-arm Tier 3 applicability table reflects negative-case Efficiency N/A
+  and the expected-skill requirement for positive-case skill metrics.
+
+- Tier 3 baseline N/A explanations cover case-level applicability when a staged
+  skill is available, including negative cases, instead of claiming no skill is
+  installed. Dimension tooltips use the same explanation as evaluator summaries.
 
 - `skillevaluator tier3 feedback` now writes the evaluated skill's directory
   (known from `--skill` or a run in the skill's `evals/results`) as its name and

@@ -3580,7 +3580,7 @@ def evaluate(
                 console.print(
                     Panel(
                         Text(
-                            "Intended for trusted skills and least-privilege service accounts. Harbor 0.24.0 single-pod "
+                            "Intended for trusted skills and least-privilege service accounts. Harbor 0.25.0 single-pod "
                             "GKE execution shares the pod service account and metadata server with evaluated skill commands.",
                             style="yellow",
                         ),

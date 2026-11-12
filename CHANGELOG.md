@@ -216,6 +216,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Upgrade the Tier 3 backend to Harbor 0.25.0. Align supported sandbox
+  constructor options with the release while reserving automatic mounts and
+  host Compose environment forwarding for evaluator policy. Preserve local
+  agent, verifier, and artifact evidence under Harbor's new mount checks, and
+  retain explicit Codex gateway URLs, credential aliases, and full model identifiers.
+
 - Name Skill Lift as the headline comparison and label pass@k differences as
   supporting reliability across reports and terminal output.
 
@@ -447,6 +453,11 @@ All notable changes to SkillEvaluator are documented in this file.
   Tier 3 version, such as `--tiers 1`, now records the evaluator version
   instead of `Evaluator version: not recorded (legacy or non-live result)`; a
   version recorded by a Tier 3 run still wins.
+
+- Tier 3 improvement recommendations respect each case's expected skill routing:
+  passing negative controls no longer inherit activation-loss advice from positive
+  cases, while failed negatives retain task, environment, and run-error diagnostics.
+  The dataset snapshot is read once per recommendation pass across all cases and agents.
 
 - Tier 2 includes qualifying shell comment blocks at end of file in context
   deduplication. Previously those blocks disappeared unless a blank line or

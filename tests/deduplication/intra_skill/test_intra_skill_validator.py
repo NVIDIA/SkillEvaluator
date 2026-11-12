@@ -231,6 +231,29 @@ class TestIntraSkillValidatorValidate:
         assert finding.suggestion is not None
         assert "replace" in finding.suggestion.lower()
 
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_frontmatter_merge_chain_fails_closed_before_embedding(self, mock_embed, tmp_path: Path) -> None:
+        # Each level merges the previous mapping ten times, so unbounded YAML
+        # builds 10**(level + 1) key-value pairs, about 180 MB at six levels.
+        # Four levels keep this test cheap if the bound ever regresses.
+        lines = ["m0: &m0 {" + ", ".join(f"k{index}: {index}" for index in range(10)) + "}"]
+        lines += [f"m{level}: &m{level} {{<<: [{', '.join([f'*m{level - 1}'] * 10)}]}}" for level in range(1, 5)]
+        skill_dir = tmp_path / "skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: skill\n" + "\n".join(lines) + "\n---\n" + _numbered_sections(3), encoding="utf-8"
+        )
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        assert result.passed is False
+        assert len(result.findings) == 1
+        finding = result.findings[0]
+        assert finding.severity == Severity.CRITICAL
+        assert finding.check_name == "manifest_complexity_limit"
+        assert finding.file_path == "SKILL.md"
+        mock_embed.assert_not_called()
+
     @staticmethod
     def _assert_work_limit_incomplete(result, work_limit: dict) -> None:
         """A tripped work limit is missing coverage, never a duplicate-content finding."""

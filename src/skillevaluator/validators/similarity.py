@@ -129,7 +129,10 @@ class SimilarityValidator(ValidatorBase):
                 )
                 target = extract_from_skill(skill_path)
                 if target is None:
-                    result.add_error("Catalog comparison requires a skill directory with a root SKILL.md")
+                    result.add_error(
+                        "Catalog comparison requires a skill directory with a root SKILL.md whose "
+                        "frontmatter is a valid YAML mapping with a non-empty string name and description"
+                    )
                     return result
                 # A catalog built from the tree that holds the target records the
                 # target itself; never report it as its own duplicate. Copies

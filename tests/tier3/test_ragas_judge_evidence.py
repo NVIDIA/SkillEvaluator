@@ -449,6 +449,52 @@ def test_ragas_evidence_masks_credentials_at_json_escaped_line_starts(
         assert secret not in saved
 
 
+@pytest.mark.parametrize(
+    ("message", "finish_reason", "kept"),
+    [
+        pytest.param(
+            {"role": "assistant", "content": None, "refusal": "I can't help with that request."},
+            "stop",
+            "I can't help with that request.",
+            id="refusal",
+        ),
+        pytest.param(
+            {"role": "assistant", "content": None},
+            "content_filter",
+            '"finish_reason": "content_filter"',
+            id="content-filter",
+        ),
+        pytest.param({"role": "assistant", "content": ""}, "length", '"finish_reason": "length"', id="empty-text"),
+    ],
+)
+def test_ragas_reply_without_text_or_tool_calls_is_saved_as_the_reply_body(
+    verifier: ModuleType, message: dict[str, Any], finish_reason: str, kept: str
+) -> None:
+    """A refusal or a filtered reply is what makes RAGAS fail, so the entry keeps why there was no answer."""
+    reply = _chat_reply("")
+    reply["choices"][0].update(message=message, finish_reason=finish_reason)
+    request = httpx.Request("POST", _CHAT_URL, json={"model": "gpt-4.1", "messages": _JUDGE_MESSAGES})
+
+    with _judge_evidence(verifier):
+        verifier._record_ragas_exchange(httpx.Response(200, content=json.dumps(reply).encode(), request=request))
+
+    (exchange,) = _attempts(verifier)
+    assert exchange["status"] == "replied"
+    assert kept in exchange["reply"]
+    assert exchange["reply_chars"] == len(exchange["reply"])
+
+
+def test_ragas_reply_keeps_tool_call_arguments_next_to_text(verifier: ModuleType) -> None:
+    reply = _tool_call_reply('{"verdict": 0}', content="Calling the verdict tool.")
+    two_calls = _tool_call_reply('{"verdict": 0}')
+    two_calls["choices"][0]["message"]["tool_calls"].append(
+        {"id": "call-2", "type": "function", "function": {"name": "Verdict", "arguments": '{"verdict": 1}'}}
+    )
+
+    assert verifier._ragas_reply_text(json.dumps(reply).encode()) == 'Calling the verdict tool.\n{"verdict": 0}'
+    assert verifier._ragas_reply_text(json.dumps(two_calls).encode()) == '{"verdict": 0}\n{"verdict": 1}'
+
+
 @pytest.mark.parametrize("broken", ["request-parser", "http-client"])
 def test_ragas_evidence_failure_never_changes_the_score(
     verifier: ModuleType, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, broken: str

@@ -1107,9 +1107,10 @@ in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
   entry, numbered like the truncated attempt, holds the rebuilt results.
   When the RAGAS goal scorer runs, each request it sends is saved as a
   `ragas` entry with its messages as the prompt and the model named in the
-  request: `replied` with the judge's reply, which is the text or the
-  tool-call arguments RAGAS parses, or `error` with the HTTP status and body,
-  or with the reason the reply was not received. A request that fails before
+  request. A `replied` entry holds the judge's reply: the text and the
+  tool-call arguments RAGAS parses, or the whole reply body when it has
+  neither, such as a refusal. An `error` entry holds the HTTP status and
+  body, or the reason the reply was not received. A request that fails before
   any response arrives, such as a refused connection, saves no entry of its
   own. A last `ragas` entry is `accepted` with the score RAGAS computed, or
   `error` with the reason the prompt judge ran instead. Only that last entry

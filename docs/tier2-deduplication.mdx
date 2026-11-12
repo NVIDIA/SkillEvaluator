@@ -133,6 +133,15 @@ vocabulary.
 | `.sh` | Function bodies and comment blocks of at least three consecutive comment lines |
 | Other extensions | Skipped |
 
+Tier 2 parses Markdown frontmatter, the text between a file's opening `---` line
+and the next `---` line, only when it is a YAML mapping. It parses a mapping
+within the [frontmatter structure limits](#defaults-and-safety-limits), so YAML
+aliases and merge keys are never expanded past them. A file whose mapping
+frontmatter exceeds a limit fails the scan with a CRITICAL
+`manifest_complexity_limit` finding that names the file, before any provider
+call. Text between the `---` lines that is not a mapping, such as a list or
+prose after a thematic break, is never checked against these limits.
+
 Valid mapping frontmatter is removed from Markdown before chunking. Malformed,
 empty, or non-mapping frontmatter remains part of the analyzed text. Every
 retained chunk keeps its source file and line range, so findings point you to
@@ -270,19 +279,38 @@ skills with 2,048-dimensional embeddings need 255,488,000 scalar comparisons:
 skillevaluator similarity-check ./skills --max-entries 500 --max-scalar-comparisons 256000000
 ```
 
+`similarity-check` reads `name` (`title` for rules and workflows) and
+`description` from each manifest's frontmatter, within the same
+[frontmatter structure limits](#defaults-and-safety-limits) as context
+deduplication. A manifest whose frontmatter exceeds a limit stops the scan with
+an error that names it, before any embedding request. So does a `name` or
+`description` longer than 16,384 characters, the per-field limit for catalog
+text, in every embedding mode. Description mode embeds `name: description`, so
+there the two values together must also fit in 16,384 characters. A list,
+mapping, number, date, or boolean is never converted to text. Such a value, for
+example `name: 2048` or `name: yes`, excludes the manifest with the reason
+`non_string_name_or_description`. A missing value, or one that is empty, zero,
+or false (`""`, `[]`, `{}`, `0`, `false`, `no`), excludes it with the reason
+`missing_name_or_description` instead. Invalid YAML and frontmatter that is not
+a mapping have their own reasons. Quote a value such as `name: "2048"` or
+`name: "yes"` to keep it a string. Errors name a manifest by its path under the
+scan root, or by its directory and file name when one manifest is read on its
+own, such as a catalog query target.
+
 The entry budget counts selected manifests even when their frontmatter is
 invalid. It applies before any embedding request and never truncates a scan.
 Every selected manifest is accounted for: reports include `collection_coverage`
 with `selected_count`, `indexed_count`, and `skipped_count`. Here indexed means
 valid manifests eligible for embedding; a provider or work-limit error can still
 stop the index build. Missing frontmatter, malformed YAML, a non-mapping header,
-or missing name/title or description produces an exclusion reason. Up to 100
-exclusions are listed with collection-relative paths (each bounded to 512
-characters); `omitted_exclusions` counts additional diagnostics. An excluded
-manifest makes the scan **INCOMPLETE** and blocking, even when the indexed subset
-has no matches. Matches in the valid subset remain available. Fix excluded
-manifests and rerun; an incomplete collection cannot replace or create a saved
-catalog. Unsafe paths and input limits continue to stop discovery outright.
+a missing name/title or description, or one that is not a string, produces an
+exclusion reason. Up to 100 exclusions are listed with collection-relative paths
+(each bounded to 512 characters); `omitted_exclusions` counts additional
+diagnostics. An excluded manifest makes the scan **INCOMPLETE** and blocking,
+even when the indexed subset has no matches. Matches in the valid subset remain
+available. Fix excluded manifests and rerun; an incomplete collection cannot
+replace or create a saved catalog. Unsafe paths and input limits continue to
+stop discovery outright.
 
 For Python callers reusing an `EmbeddingRegistry`, each successful
 `build_from_directory()` or `build_from_paths()` replaces the entire indexed
@@ -449,6 +477,8 @@ you intend to skip Tier 2 entirely.
 | Minimum content chunk | 80 characters | Drops sections and chunks too small to compare usefully; short paragraphs of an oversized section stay attached to a neighbour |
 | Embedding input cap | 3,000 characters | Caps every Markdown, Python, and shell embedding input; oversized Markdown sections are packed at paragraph boundaries |
 | High-confidence duplicate boundary | `0.70` | Maps actionable duplicate verdicts to HIGH rather than MEDIUM |
+| Frontmatter structure | 100 nesting levels, 20,000 nodes, 1,024 alias references, 1,024 items per mapping or sequence, 65,536 characters per value, integers up to 14,000 bits (about 4,200 digits) | Bounds every Markdown mapping frontmatter Tier 2 parses; aliases and merge keys count after expansion. A decimal integer longer than 4,300 digits, Python's default limit for converting text to an integer, counts as invalid YAML, not as a limit failure |
+| Inter-skill name and description | 16,384 characters each | Per-field catalog text limit, in every embedding mode; description mode also caps `name: description` at 16,384 characters. A value that is not a string excludes the manifest and makes the scan incomplete |
 | Intra-skill content chunks | 512 | Per-skill ceiling, checked before any embedding request |
 | Intra-skill comparison work | 267,911,168 scalar comparisons | Bounds all-pairs clustering; allows all 512 chunks with embeddings of up to 2,048 dimensions, 418 chunks at 3,072, and 362 at 4,096 |
 | Intra-skill LLM review clusters | 50 | Most candidate clusters sent for chat-LLM review in one skill |
@@ -480,7 +510,8 @@ that target as a regular directory. The alias is never followed, so the target
 directory is scanned once. Absolute links and Windows junctions, broken links,
 links that escape the root, and aliases that point at another link remain
 rejected. Explicit limits bound
-discovered paths, file counts, per-file and total input bytes, content chunks,
+discovered paths, file counts, per-file and total input bytes, frontmatter
+structure, content chunks,
 candidate clusters, catalog size and entry count, vector length, returned
 matches, and pairwise scalar work. Catalog loading also rejects duplicate JSON
 keys, unexpected fields, invalid identities, non-finite vectors, and
@@ -523,6 +554,8 @@ handling terms before sending confidential skill content to a hosted endpoint.
     | A directory is a Windows junction, other reparse point, or a symbolic link that does not qualify as a contained alias | Rejected during the walk, before descent |
     | Embedding or chat-LLM analysis is incomplete | Reports an error; does not claim a clean result |
     | Skill exceeds the content-chunk, comparison-work, or LLM-review limit (candidate clusters or prompt size) | Stops before the remaining analysis and reports the scan as incomplete; no duplicate-content finding is added |
+    | Markdown mapping frontmatter exceeds a structure limit, for example through chained YAML aliases or merge keys | Fails closed with a CRITICAL `manifest_complexity_limit` finding before any provider call |
+    | Text between the `---` lines is a list, prose, or other YAML that is not a mapping | Stays in the analyzed text and is never checked against the frontmatter structure limits |
     | The chat LLM declines to classify a cluster | Reports an advisory MEDIUM `llm_refused` finding for that cluster's sections |
   </Accordion>
   <Accordion title="Inter-skill analysis">
@@ -531,7 +564,9 @@ handling terms before sending confidential skill content to a hosted endpoint.
     | Direct collection has fewer than two skills | Returns an actionable input error |
     | Catalog source collection is empty | Refuses to save an empty catalog |
     | Catalog path is missing | Returns an error and does not rebuild it silently |
-    | Candidate lacks a root `SKILL.md` | Rejects the catalog query |
+    | Candidate lacks a root `SKILL.md`, or its frontmatter is not a valid YAML mapping with a non-empty string name and description | Rejects the catalog query and says what the frontmatter needs |
+    | A manifest's frontmatter exceeds a structure limit, or its name or description is longer than 16,384 characters | Fails with an error that names the manifest, before any embedding request |
+    | A manifest's name or description is not a string, such as `name: 2048`, or its frontmatter is not a mapping | Excludes the manifest with a coverage reason, as for invalid YAML, and reports the scan as incomplete |
     | A skill contains an exactly named, single-link regular `AGENTS.md` plus `CLAUDE.md -> AGENTS.md` | Validates and skips the unrelated compatibility alias while discovering `SKILL.md` |
     | The collection contains a relative directory alias such as `.agents -> .claude` whose target is a regular directory in the same collection | Skips the alias without following it, so manifests in the target are discovered once |
     | Candidate matches multiple catalog entries | Reports matches in descending similarity order |

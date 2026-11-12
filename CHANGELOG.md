@@ -505,6 +505,46 @@ All notable changes to SkillEvaluator are documented in this file.
   Missing lift data is shown as `-`; custom-only and legacy agents retain their
   arm-difference comparison.
 
+- Tier 2 `similarity-check` and context deduplication now parse Markdown
+  frontmatter within fixed structure limits: 100 nesting levels, 20,000 nodes,
+  1,024 alias references, 1,024 items in one mapping or sequence, 65,536
+  characters in one value, and integers up to 14,000 bits, with aliases and
+  merge keys counted after expansion. In 0.8.0 both used plain
+  `yaml.safe_load`, and `similarity-check` converted a `name` or `description`
+  that was not a string to text. A 477-byte `SKILL.md` whose frontmatter chains
+  YAML aliases produced an 82-million-character description, and a 543-byte
+  one that chains merge keys took 180 MB in context deduplication; each further
+  level multiplies the cost by ten. Mapping frontmatter over a limit now stops
+  `similarity-check` with an error that names the manifest, and context
+  deduplication with a CRITICAL `manifest_complexity_limit` finding, before any
+  provider call. Text between the `---` lines that is not a mapping is still
+  not frontmatter and is never checked against these limits.
+  `similarity-check` now excludes a manifest whose `name`, `title`, or
+  `description` is a non-empty value that is not a string, such as `name: 2048`
+  or `name: yes`, with the coverage reason `non_string_name_or_description`
+  instead of converting the value. Its debug diagnostic omits the absolute
+  manifest path, keeping private host-directory names out of logs.
+  An empty, zero, or false value such as `0`,
+  `false`, or `[]` still gets `missing_name_or_description`. Either way, like
+  any excluded manifest, it makes the scan incomplete. It stops with an error
+  that names the manifest when a value is longer than 16,384 characters, the
+  per-field catalog text limit; description mode still also caps
+  `name: description` at 16,384 characters. An invalid tagged value such as
+  `!!int ""`, an impossible date such as `2024-02-30`, or a decimal integer
+  longer than 4,300 digits (Python's default limit for converting text to an
+  integer) now counts as invalid frontmatter instead of stopping either check
+  with an unexpected error. A repeated key still keeps its last value in both
+  checks. `tier3 select-decoys` and group-mode decoy loading
+  (`skill_workspace.decoy_manifest`) read the target's and each selected
+  skill's frontmatter the same way. A `name` or `description` that is not a
+  string, such as `name: yes`, now fails them with `Decoy selection requires a
+  skill with a root SKILL.md whose frontmatter is a valid YAML mapping with a
+  non-empty string name and description` instead of being converted to text;
+  invalid YAML, such as an unquoted `description: Use when: debugging logs`, and
+  an empty value get the same message. Frontmatter over a limit, or a value
+  longer than 16,384 characters, fails them with an error that names the
+  manifest.
+
 - The Tier 3 verdict is now FAIL when a scored dimension is below 0.40 and
   another dimension has no score. In 0.8.0 a dimension with no score made the
   agent NEUTRAL before the 0.40 check ran. Correctness has no score when no

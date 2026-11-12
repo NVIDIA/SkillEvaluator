@@ -55,9 +55,7 @@ def _agent(
     }
 
 
-def _collector_pass_at_k(
-    scored: dict[str, int], *, k: int, planned: dict[str, int] | None = None
-) -> dict[str, Any]:
+def _collector_pass_at_k(scored: dict[str, int], *, k: int, planned: dict[str, int] | None = None) -> dict[str, Any]:
     """One arm's pass@k as the collector records it: ``scored`` attempts per case, ``planned`` under a run budget."""
     scores = dict.fromkeys(DEFAULT_METRICS, 0.9)
     rewards = [

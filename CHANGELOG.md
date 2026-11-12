@@ -702,6 +702,17 @@ All notable changes to SkillEvaluator are documented in this file.
   `Bedrock request failed`, like a Bedrock error that ends the judge and like
   the default `legacy` policy.
 
+- `judge_attempts.json` now masks credentials at the start of a JSON-escaped
+  line, as in RAGAS prompts and in the tool-call arguments that judge prompts
+  quote. A line break there is the two characters `\n`, so an
+  `Authorization`, API-key or `Cookie` header value, a `--token` or
+  `-u user:password` flag value, or a key such as `sk-proj-...` that started
+  the next line was saved in clear. A flag value in JSON-escaped quotes
+  (`--token \"value\"`) is masked too. RAGAS `replied` entries now keep the
+  tool-call arguments when the reply also has text, and save the whole reply
+  body when it has neither, such as a refusal or a content-filter stop,
+  instead of an empty reply.
+
 - The interactive Tier 3 progress view (`--progress rich`, or `auto` in a
   terminal) now keeps one height for the whole run, so redraws no longer leave
   repeated or jumbled table frames. The Provider and Run plan rows show a
@@ -884,17 +895,6 @@ All notable changes to SkillEvaluator are documented in this file.
   every required check passes. A run with a failed required check, such as one
   with a `destructive_command` finding, already gets FAIL from that check (see
   Changed).
-
-- `judge_attempts.json` now masks credentials at the start of a JSON-escaped
-  line, as in RAGAS prompts and in the tool-call arguments that judge prompts
-  quote. A line break there is the two characters `\n`, so an
-  `Authorization`, API-key or `Cookie` header value, a `--token` or
-  `-u user:password` flag value, or a key such as `sk-proj-...` that started
-  the next line was saved in clear. A flag value in JSON-escaped quotes
-  (`--token \"value\"`) is masked too. RAGAS `replied` entries now keep the
-  tool-call arguments when the reply also has text, and save the whole reply
-  body when it has neither, such as a refusal or a content-filter stop,
-  instead of an empty reply.
 
 ## 0.8.0 - 2026-11-05
 

@@ -98,6 +98,8 @@ for skills. Its Tier 1 LLM checks still run only when requested.
   ```
 
   Confirmed findings keep their original severity. High-confidence false positives stay visible but are downgraded to INFO and carry verification metadata explaining the review. Static scanning always runs first — if a requested LLM stage is unavailable or returns unusable evidence, the run does not silently turn green. `security-scan` and `pii-scan` accept `--llm-verify` too.
+
+  HTML, Markdown, and terminal reports show the recorded verification verdict, confidence, and reasoning beside each finding, together with its reported severity.
 </Steps>
 
 Direct `tier1 PATH` and `tier1 validate PATH` print the terminal report and
@@ -457,6 +459,18 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     ```
   </Accordion>
 </AccordionGroup>
+
+## Author attribution and contact emails
+
+Keep the required `metadata.author: Name <email>` attribution in `SKILL.md`.
+The PII check accepts that recognized author line. The same address in another
+field, body text, or a reference document is a separate occurrence and can still
+fail the check.
+
+Use a name, team handle, or contact-directory link for additional contact
+information. If a real address must remain, record a reviewed, time-limited
+[PII waiver](#pii-waivers) for that occurrence. An organization-owned email
+domain does not automatically exempt every address in the repository.
 
 ## PII waivers
 

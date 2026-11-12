@@ -1158,6 +1158,22 @@ def _anthropic_message(index: int, model: str, text: str) -> dict:
 class TestInvalidReplyRetry:
     """One judge reply that cannot be scored gets one more request that names the problem."""
 
+    @pytest.mark.parametrize("padding", ["", "x" * 410 + " "])
+    def test_retry_problem_redacts_credentials_before_logging_and_truncation(
+        self, tmp_path, padding, caplog, monkeypatch
+    ):
+        secret = "sk-syntheticcredential123456789"
+        checks = _complete_checks()
+        checks.append({**checks[0], "id": padding + secret})
+
+        monkeypatch.setattr(rubric_eval.logger, "propagate", True)
+        result, requests = _validate_with(tmp_path, _reply(checks), _reply())
+
+        assert "Rubric judge reply rejected" in caplog.text
+        assert "sk-synthetic" not in caplog.text
+        assert "sk-synthetic" not in requests[1]["user"].removeprefix(requests[0]["user"])
+        assert result.passed
+
     @pytest.mark.parametrize(
         ("first_reply", "problem"),
         [

@@ -38,6 +38,7 @@ from skillevaluator.inference.client import LLMClient
 from skillevaluator.inference.diagnostics import llm_failure_diagnostic, safe_llm_labels
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Finding, Severity, ValidationResult
+from skillevaluator.utils.redaction import redact_sensitive_text
 from skillevaluator.utils.secure_fs import SecureRoot
 from skillevaluator.validators.base import ValidatorBase
 from skillevaluator.validators.markdown import markdown_link_targets, normalized_local_path
@@ -216,6 +217,7 @@ def _bounded_problem(problem: str) -> str:
     The reason quotes the judge's own text, such as an invented criterion id,
     which has no length limit.
     """
+    problem = redact_sensitive_text(problem)
     if len(problem) <= _MAX_RETRY_PROBLEM_CHARS:
         return problem
     return f"{problem[:_MAX_RETRY_PROBLEM_CHARS]} ... [truncated]"

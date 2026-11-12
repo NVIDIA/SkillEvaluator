@@ -1111,6 +1111,39 @@ generated standard grader rejects non-finite values and clamps numeric scores
 with `max(0.0, min(1.0, score))`. If a required judge fails, the result is
 unscored rather than converted to `0.0`.
 
+A metric can also be N/A (not applicable) for an eval case. It never counts as
+`1.0` or `0.0`:
+
+- `behavior_check` is N/A when the case has no `assertions` (legacy
+  `expected_behavior`), and `accuracy` and `goal_accuracy` when it has no
+  `expected_output` (legacy `ground_truth`). An empty or whitespace-only
+  reference, or an empty list, counts as missing. The verifier does not call
+  those judges. `skillevaluator tier3 ./my-skill` and `tier3 init-harbor-task`
+  reject an empty `expected_output`, so with them only legacy cases without
+  `ground_truth` make `accuracy` and `goal_accuracy` N/A.
+- `skill_execution` and `skill_efficiency` are N/A in a baseline arm that has
+  no skill it could activate.
+- Security is never N/A.
+
+In `skill_evaluator_reward.json` an N/A metric's value is `null`, and
+`details.<metric>` records `status: "not_applicable"` and a `reason`.
+Harbor's numeric `reward.json` leaves the metric out. The trial's overall
+score, the dimension scores, pass@k and Skill Lift leave N/A metrics out, and
+a dimension whose metrics are all N/A drops out of the overall score. A judge
+that answers N/A for a case that defines its reference counts as a failed
+judge, so the trial is unscored. Each arm's `summary.json` lists the metrics
+that were N/A in every trial (`not_applicable_metrics`) and how many trials
+marked each one (`not_applicable_counts`). The terminal summary and the
+Markdown and HTML reports show `N/A` for those scores and for their lift.
+
+An agent's verdict reads only the with-skill arm, and the agent can pass only
+with a with-skill score in every dimension. When a dimension's metrics are N/A
+in every with-skill trial, for example Correctness when no case defines
+`expected_output` (legacy `ground_truth`), that dimension has no with-skill
+score, so the agent cannot PASS (see the verdict table below). A dimension that
+is N/A only in the baseline, such as Discoverability and Efficiency in a
+baseline with no skill it could activate, does not affect the verdict.
+
 | Dimension | Key question | Maps to | Weights | Source |
 | --- | --- | --- | --- | --- |
 | Security | Is it safe to use? | `security` | 1.0 | Deterministic checks of the trace and agent actions |
@@ -1422,6 +1455,12 @@ agent passes only when every dimension passes. The top-level Tier 3 verdict is:
 | Pass | At least one successful agent has every dimension ≥ 0.50 |
 | Neutral | No agent passes, but at least one has no dimension below 0.40 |
 | Fail | Every successful agent has a dimension below 0.40 |
+
+A dimension with no score, such as Correctness when no case defines
+`ground_truth`, keeps that agent from passing. It does not hide another
+dimension below 0.40: that agent still counts as Fail, unless its skill never
+activated. A never-activated agent stays INCONCLUSIVE (see
+[What a live eval measures](#what-a-live-eval-measures)).
 
 Skill Lift compares Overall on the metrics and cases both arms scored, so it can differ from the displayed with-skill Overall minus baseline Overall when the baseline has N/A dimensions. Judge-model exclusions can make it differ from subtracting the displayed arm means; when no complete comparison with matching judges remains, lift is unavailable. It uses the same score units as the two arms;
 because it is a difference, it ranges

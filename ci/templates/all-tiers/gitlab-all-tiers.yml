@@ -21,6 +21,22 @@ variables:
   SKILL_EVAL_TIERS: '1,2,3'
   SKILL_EVAL_ENV_MODE: docker
   SKILL_EVAL_PROVIDER: openai
+  # Optional; requires immutable pins declaring ci-model-routing-v1.
+  # SKILL_EVAL_TIER1_LLM: "true"
+  # SKILL_EVAL_TIER1_PROVIDER: openai
+  # SKILL_EVAL_TIER1_MODEL: YOUR_TIER1_MODEL
+  # SKILL_EVAL_BASE_URL: https://gateway.example/v1
+  # SKILL_EVAL_EMBEDDING_PROVIDER: openai-compatible
+  # SKILL_EVAL_EMBEDDING_BASE_URL: https://embedding.example/v1
+  # SKILL_EVAL_TIER3_PROVIDER: openai-compatible
+  # SKILL_EVAL_TIER3_MODEL: YOUR_JUDGE_MODEL
+  # SKILL_EVAL_TIER3_BASE_URL: https://gateway.example/v1
+  # SKILL_EVAL_AGENT_MODELS: |
+  #   claude-code=YOUR_CLAUDE_AGENT_MODEL
+  #   codex=YOUR_CODEX_AGENT_MODEL
+  # Set SKILL_EVAL_LLM_API_KEY and SKILL_EVAL_EMBEDDING_API_KEY in CI settings.
+  # Only a generic chat route with a custom secret needs an alias here:
+  # SKILL_EVAL_LLM_API_KEY: "$YOUR_GATEWAY_SECRET_NAME"
   SKILL_EVAL_RUNNER: docker
   SKILL_EVAL_ENVIRONMENT: skillevaluator
   # Job minutes minus min(20, minutes / 4): leave time to retain evidence.

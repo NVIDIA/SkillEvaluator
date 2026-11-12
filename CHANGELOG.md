@@ -6,6 +6,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Capability-gated CI onboarding for protected Tier 1 `--llm`/SkillSpector
+  checks, independent Tier 3 gateway/judge settings and native agent models.
+  Combined reports retain source-bound `BENCHMARK.md` cards for every outcome;
+  GitHub can optionally propose eligible cards through a separate trusted
+  benchmark-update PR. Tier 2/3 remain advisory for CI. Retained JSON preserves
+  Tier 1 required-check and unscanned-content scope for publication decisions.
+  The repository's own candidate CI selects Build for Tier 1/2 and separate
+  gateway-backed Claude Code/Codex models for Tier 3, without changing upstream
+  provider defaults.
+
 - HTML, Markdown, and terminal findings show recorded LLM verification verdicts,
   confidence, and reasoning, with an explanation of retained or downgraded severity.
   Medium-confidence false positives and uncertain verdicts retain existing gates.
@@ -134,7 +144,7 @@ All notable changes to SkillEvaluator are documented in this file.
   onboarding and status recognize this filename collision without replacing
   reusable workflow definitions. Automatic comments activate after the
   listener reaches the default branch.
-   Document the shared chat/judge/agent model input and model-availability
+  Document independent chat, judge and agent model settings and model-availability
   troubleshooting for provider-backed CI.
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI
@@ -308,6 +318,28 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `skillevaluator view` no longer asks the LLM again when it regenerates a
+  missing `report.html` for a Tier 3 run that saved its report feedback in
+  `result.json`. The regenerated report shows the conclusions,
+  recommendations, and suggestions that run produced, makes no LLM call, and
+  reuses the run's `what_to_fix.json` when it has one. It also takes the run's
+  duration and any Harbor log links recorded in `result.json`, which the 0.8.0
+  rebuild left out. In 0.8.0 the Insights judge and the what-to-fix writer ran
+  again: with a provider configured that cost tokens and could change the
+  advice, without one the run's saved LLM advice was dropped, and either way
+  `what_to_fix.json` was overwritten. Feedback saved by 0.6.0 or earlier has
+  no per-case verdict, so the regenerated report adds the verdict and lists
+  the case fixes as its recommendations and suggestions, without the LLM, as a
+  new report does. A run that saved no feedback still has its feedback
+  rebuilt, with the LLM when a provider is configured, and its
+  `what_to_fix.json` rewritten.
+
+- Public MCP URL probes handle modern SDK client and stream APIs while retaining
+  checked-address connections, header grants, response limits, and bounded
+  cleanup. Redirect responses are refused before SDK-level redirect handling.
+  Isolated wheel tests cover SDK 1.28.1 and 2.3.0; the supported Tier 3 dependency
+  range remains unchanged.
+
 - Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
   the PR or merge request's target revision. Policy files from the proposed
   changes cannot approve their own exceptions.
@@ -402,6 +434,15 @@ All notable changes to SkillEvaluator are documented in this file.
   characters: a text that saves only a few characters stays inline when sharing
   it would push another text past block 9 and cost more than it saves.
 
+- Tier 2 deduplication no longer rescans a shell script once per function
+  header. In 0.8.0 each `name() {` header without a closing brace walked the
+  rest of the script, and line numbers were counted from the start of the file
+  for every function, so chunking grew with the square of the script's size: a
+  53 KiB script of such headers took about 20 seconds, and a 1 MiB one could
+  take hours. Braces and line breaks are now indexed in one pass. Python files
+  are also split into lines once instead of once per function or class. Chunk
+  text and line ranges are unchanged.
+
 - Tier 3 **Measured Agent Resources** no longer count idle or user time as LLM
   seconds when timing is inferred from step timestamps and an agent step with
   tool calls is followed by a user or system step. The whole gap up to that
@@ -480,21 +521,45 @@ All notable changes to SkillEvaluator are documented in this file.
   Missing lift data is shown as `-`; custom-only and legacy agents retain their
   arm-difference comparison.
 
-- `skillevaluator view` no longer asks the LLM again when it regenerates a
-  missing `report.html` for a Tier 3 run that saved its report feedback in
-  `result.json`. The regenerated report shows the conclusions,
-  recommendations, and suggestions that run produced, makes no LLM call, and
-  reuses the run's `what_to_fix.json` when it has one. It also takes the run's
-  duration and any Harbor log links recorded in `result.json`, which the 0.8.0
-  rebuild left out. In 0.8.0 the Insights judge and the what-to-fix writer ran
-  again: with a provider configured that cost tokens and could change the
-  advice, without one the run's saved LLM advice was dropped, and either way
-  `what_to_fix.json` was overwritten. Feedback saved by 0.6.0 or earlier has
-  no per-case verdict, so the regenerated report adds the verdict and lists
-  the case fixes as its recommendations and suggestions, without the LLM, as a
-  new report does. A run that saved no feedback still has its feedback
-  rebuilt, with the LLM when a provider is configured, and its
-  `what_to_fix.json` rewritten.
+- Tier 2 `similarity-check` and context deduplication now parse Markdown
+  frontmatter within fixed structure limits: 100 nesting levels, 20,000 nodes,
+  1,024 alias references, 1,024 items in one mapping or sequence, 65,536
+  characters in one value, and integers up to 14,000 bits, with aliases and
+  merge keys counted after expansion. In 0.8.0 both used plain
+  `yaml.safe_load`, and `similarity-check` converted a `name` or `description`
+  that was not a string to text. A 477-byte `SKILL.md` whose frontmatter chains
+  YAML aliases produced an 82-million-character description, and a 543-byte
+  one that chains merge keys took 180 MB in context deduplication; each further
+  level multiplies the cost by ten. Mapping frontmatter over a limit now stops
+  `similarity-check` with an error that names the manifest, and context
+  deduplication with a CRITICAL `manifest_complexity_limit` finding, before any
+  provider call. Text between the `---` lines that is not a mapping is still
+  not frontmatter and is never checked against these limits.
+  `similarity-check` now excludes a manifest whose `name`, `title`, or
+  `description` is a non-empty value that is not a string, such as `name: 2048`
+  or `name: yes`, with the coverage reason `non_string_name_or_description`
+  instead of converting the value. Its debug diagnostic omits the absolute
+  manifest path, keeping private host-directory names out of logs.
+  An empty, zero, or false value such as `0`,
+  `false`, or `[]` still gets `missing_name_or_description`. Either way, like
+  any excluded manifest, it makes the scan incomplete. It stops with an error
+  that names the manifest when a value is longer than 16,384 characters, the
+  per-field catalog text limit; description mode still also caps
+  `name: description` at 16,384 characters. An invalid tagged value such as
+  `!!int ""`, an impossible date such as `2024-02-30`, or a decimal integer
+  longer than 4,300 digits (Python's default limit for converting text to an
+  integer) now counts as invalid frontmatter instead of stopping either check
+  with an unexpected error. A repeated key still keeps its last value in both
+  checks. `tier3 select-decoys` and group-mode decoy loading
+  (`skill_workspace.decoy_manifest`) read the target's and each selected
+  skill's frontmatter the same way. A `name` or `description` that is not a
+  string, such as `name: yes`, now fails them with `Decoy selection requires a
+  skill with a root SKILL.md whose frontmatter is a valid YAML mapping with a
+  non-empty string name and description` instead of being converted to text;
+  invalid YAML, such as an unquoted `description: Use when: debugging logs`, and
+  an empty value get the same message. Frontmatter over a limit, or a value
+  longer than 16,384 characters, fails them with an error that names the
+  manifest.
 
 - The Tier 3 verdict is now FAIL when a scored dimension is below 0.40 and
   another dimension has no score. In 0.8.0 a dimension with no score made the

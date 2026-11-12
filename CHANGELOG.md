@@ -324,17 +324,9 @@ All notable changes to SkillEvaluator are documented in this file.
   Isolated wheel tests cover SDK 1.28.1 and 2.3.0; the supported Tier 3 dependency
   range remains unchanged.
 
-- Tier 3 baseline N/A explanations cover case-level applicability when a staged
-  skill is available, including negative cases, instead of claiming no skill is
-  installed. Dimension tooltips use the same explanation as evaluator summaries.
-
 - Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
   the PR or merge request's target revision. Policy files from the proposed
   changes cannot approve their own exceptions.
-
-- The per-arm Tier 3 applicability table reflects negative-case Efficiency N/A
-  and the expected-skill requirement for positive-case skill metrics.
-
 - Security checks preserve authored evaluation files and their findings while
   excluding generated outputs. Fully inspected skills with only missing-path
   reference caveats retain visible warnings instead of an incomplete-scan
@@ -480,6 +472,13 @@ All notable changes to SkillEvaluator are documented in this file.
   with-skill N/A skill metric by the eval case, not by a missing skill, and a
   multi-step trial's collected reward keeps the N/A reason its steps' verifier
   recorded.
+
+- The per-arm Tier 3 applicability table reflects negative-case Efficiency N/A
+  and the expected-skill requirement for positive-case skill metrics.
+
+- Tier 3 baseline N/A explanations cover case-level applicability when a staged
+  skill is available, including negative cases, instead of claiming no skill is
+  installed. Dimension tooltips use the same explanation as evaluator summaries.
 
 - `skillevaluator tier3 feedback` now writes the evaluated skill's directory
   (known from `--skill` or a run in the skill's `evals/results`) as its name and

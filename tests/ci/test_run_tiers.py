@@ -107,6 +107,38 @@ def test_ci_chat_model_uses_native_agent_provider_resolution(consumer, tmp_path)
     assert options.model is None
 
 
+def test_native_agent_models_survive_the_serialized_execution_boundary(consumer, tmp_path, monkeypatch):
+    requested = "codex=openai/example-gpt\nclaude-code=anthropic/example-claude"
+    observed = []
+    doctors = []
+    monkeypatch.setattr(run_tiers, "dataset_preflight", lambda _skill: {})
+
+    def execute(args, **_kwargs):
+        if "doctor" in args:
+            doctors.append(args)
+            return 0
+        config_path = Path(args[args.index("--config") + 1])
+        saved = json.loads(config_path.read_text())
+        options = run_tiers.tier3_options(consumer / "skills/alpha", config_path.parent, saved)
+        observed.append(options.agent_model)
+        return 1  # No model calls; missing evidence must remain advisory.
+
+    monkeypatch.setattr(run_tiers, "run_command", execute)
+    environment = env_for(
+        consumer,
+        NVIDIA_API_KEY="fixture-build-key",
+        SKILL_EVAL_AGENTS="codex,claude-code",
+        SKILL_EVAL_AGENT_MODELS=requested,
+    )
+    assert run_tiers.evaluate(3, consumer, tmp_path / "reports", environment) == 0
+    expected = tuple(requested.splitlines())
+    assert observed == [expected, expected]
+    checked = tuple(
+        args[index + 1] for args in doctors for index, value in enumerate(args[:-1]) if value == "--agent-model"
+    )
+    assert checked == expected
+
+
 def test_native_tier3_engine_failure_still_emits_incomplete_evidence(consumer, tmp_path, monkeypatch):
     from skillevaluator.evaluation.service import EvaluationService
 

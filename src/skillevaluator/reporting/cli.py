@@ -46,6 +46,7 @@ from skillevaluator.reporting.base import (
     source_validation_errors,
     source_validation_preview,
 )
+from skillevaluator.reporting.finding_verification import finding_verification
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
     harbor_job_links,
@@ -58,6 +59,7 @@ from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, RED, T
 from skillevaluator.tier3.baseline_store import baseline_description
 from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
 from skillevaluator.tier3.evidence_volume import format_evidence_volume
+from skillevaluator.tier3.version_comparison import version_comparison_lines
 from skillevaluator.utils.rich_markup import escape_markup
 
 if TYPE_CHECKING:
@@ -747,6 +749,13 @@ class CLIReporter(ReporterBase):
         )
         console.print(f"     [dim]File:[/dim]    {escape_markup(str(finding.location))}")
         console.print(f"     [dim]Check:[/dim]   {escape_markup(str(finding.check_name))}")
+        verification = finding_verification(finding)
+        if verification:
+            label = f"{verification.verdict} ({verification.confidence} confidence)"
+            console.print(f"     [dim]LLM verification:[/dim] {escape_markup(label)}")
+            if verification.reasoning:
+                console.print(f"     [dim]Reasoning:[/dim] {escape_markup(verification.reasoning)}")
+            console.print(f"     [dim]{escape_markup(verification.severity_effect)}[/dim]")
         related_paths = _related_paths(finding)
         if related_paths:
             console.print(f"     [dim]Related paths:[/dim] {escape_markup(' <-> '.join(related_paths))}")
@@ -872,6 +881,12 @@ class CLIReporter(ReporterBase):
             table.add_row(escape_markup(str(result.validator_name)), status, details)
 
         console.print(table)
+
+        for result in results:
+            agent_eval = result.metadata.get("agent_eval")
+            if isinstance(agent_eval, dict) and (comparison := agent_eval.get("prior_version_comparison")):
+                for line in version_comparison_lines(comparison):
+                    console.print(escape_markup(line))
 
     @staticmethod
     def _static_test_evidence_message(result: ValidationResult) -> str | None:

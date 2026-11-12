@@ -669,6 +669,7 @@ def evaluate(
     skip_baseline: bool,
     skip_with_skill: bool = False,
     reuse_baseline: str | None = None,
+    compare_to: str | None = None,
     n_attempts: int | None,
     max_agent_tokens: int | None = None,
     max_judge_calls: int | None = None,
@@ -734,6 +735,8 @@ def evaluate(
             raise ValueError("--skip-baseline and --skip-with-skill are mutually exclusive (no arm would run)")
         if reuse_baseline and (skip_baseline or skip_with_skill):
             raise ValueError("--reuse-baseline is mutually exclusive with --skip-baseline and --skip-with-skill")
+        if compare_to and skip_with_skill:
+            raise ValueError("--compare-to is mutually exclusive with --skip-with-skill")
         unknown = validate_agents(agent_list)
         if unknown:
             supported = ", ".join(sorted(HARBOR_AGENTS_SUPPORTED))
@@ -764,6 +767,7 @@ def evaluate(
             skip_baseline=skip_baseline,
             skip_with_skill=skip_with_skill,
             reuse_baseline=reuse_baseline,
+            compare_to=compare_to,
             n_attempts=n_attempts,
             max_agent_tokens=max_agent_tokens,
             max_judge_calls=max_judge_calls,

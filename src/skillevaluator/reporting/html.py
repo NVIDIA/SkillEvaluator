@@ -87,6 +87,7 @@ from skillevaluator.reporting.finding_summary import (
     summarize_messages,
     total_issue_count,
 )
+from skillevaluator.reporting.finding_verification import finding_verification
 from skillevaluator.reporting.harbor_viewer import harbor_job_links, normalize_agent_eval_harbor_links
 from skillevaluator.reporting.presentation import (
     FinalRenderContext,
@@ -104,6 +105,7 @@ from skillevaluator.source_identity import recorded_evaluated_source
 from skillevaluator.tier3.baseline_store import baseline_description
 from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
 from skillevaluator.tier3.evidence_volume import format_evidence_volume
+from skillevaluator.tier3.version_comparison import version_comparison_lines
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
@@ -1290,6 +1292,8 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
     baseline = payload.get("baseline")
     if isinstance(baseline, dict) and baseline:
         payload["baseline_description"] = baseline_description(baseline)
+    if comparison := payload.get("prior_version_comparison"):
+        payload["prior_version_lines"] = version_comparison_lines(comparison)
     payload["summary"]["runtime_seconds"] = (
         _finite_number(payload["summary"].get("runtime_seconds"), minimum=0.0) or 0.0
     )
@@ -1918,6 +1922,7 @@ class HTMLReporter(ReporterBase):
         environment.filters["cleanly_skipped"] = is_cleanly_skipped
         environment.filters["execution_status"] = _result_display_status
         environment.filters["related_paths"] = _related_paths
+        environment.filters["finding_verification"] = finding_verification
         environment.filters["additional_errors"] = additional_errors
         environment.filters["adaptive_percent"] = _adaptive_percent
         environment.filters["adaptive_interval_percent"] = _adaptive_interval_percent
@@ -2253,8 +2258,10 @@ class HTMLReporter(ReporterBase):
         (e.g., "Personal macOS user path") fires on many lines in the same file.
         A finding's ``occurrence_id`` becomes an ``occurrence_ids`` list on the
         merged entry, so every merged location keeps its identity. The key
-        also holds ``finding_id`` when present, so two different checks with
-        the same text never merge and an entry's IDs all belong to it.
+        also holds ``finding_id`` and the verification decision when present,
+        so different checks or decisions never merge. The first occurrence's
+        rationale represents the group; individual rationales remain in the
+        validator view and JSON export.
         """
         groups: dict[tuple, dict[str, Any]] = {}
         seen_occurrences: dict[tuple, set[str]] = {}
@@ -2262,11 +2269,16 @@ class HTMLReporter(ReporterBase):
         for finding in findings:
             # Normalize message for deduplication (strip trailing whitespace/newlines)
             norm_msg = HTMLReporter._normalize_message(finding.get("message", ""))
+            verification = finding_verification(finding)
+            decision = (
+                (verification.verdict, verification.confidence, verification.severity_effect) if verification else None
+            )
             key = (
                 norm_msg,
                 finding.get("file_path", ""),
                 finding.get("suggestion", ""),
                 finding.get("finding_id"),
+                decision,
             )
 
             if key in groups:

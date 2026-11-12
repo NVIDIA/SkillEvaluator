@@ -56,9 +56,15 @@ navigation:
       - page: "Tier 3: Live Evaluation"
         path: ../docs/tier3-live-evaluation.mdx
         slug: tier3-live-evaluation
+      - page: Grader Validation
+        path: ../docs/grader-validation.mdx
+        slug: grader-validation
       - page: Eval Datasets
         path: ../docs/eval-datasets.mdx
         slug: eval-datasets
+      - page: Trace Datasets
+        path: ../docs/trace-datasets.mdx
+        slug: trace-datasets
       - page: Agents & Sandboxes
         path: ../docs/agents-and-sandboxes.mdx
         slug: agents-and-sandboxes

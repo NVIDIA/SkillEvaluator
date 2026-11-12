@@ -6,6 +6,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- HTML, Markdown, and terminal findings show recorded LLM verification verdicts,
+  confidence, and reasoning, with an explanation of retained or downgraded severity.
+  Medium-confidence false positives and uncertain verdicts retain existing gates.
+  Repeated occurrences with the same verification decision remain grouped in HTML.
+
 - A reproducible public terminal starter runs the released CLI against the
   bundled text-analyzer skill, checks real script/report output and a seeded
   quality regression, and retains an editable task, fixture and run receipt.
@@ -15,9 +20,25 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Tier 3 datasets can declare deterministic behavior checks for script invocation and success, workspace files, and final-response text.
 
+- Tier 3 `evaluate --compare-to RUN` and read-only `compare-versions` compare
+  compatible retained skill versions, report paired per-agent deltas and
+  regressions, and keep version comparisons separate from no-skill Skill Lift.
+
+- Read-only Tier 3 `history` lists retained Skill Lift runs chronologically,
+  separates incompatible configurations into segments, preserves unavailable
+  lift as missing, and exports JSON, CSV, or Markdown summaries.
+
 - Tier 3 `evaluate --reuse-baseline RUN` reuses compatible retained fresh
   without-skill evidence, preserving lift calculations and baseline provenance.
   `latest` searches completed runs and falls back to a fresh baseline when needed.
+
+- `tier3 validate-grader` qualifies the shipped verifier against independent
+  versioned labels, with offline suite checks, repeated-grading statistics,
+  provenance, optional rate gates and a bundled public reference suite.
+
+- Import production trace exports into redacted review candidates with
+  `tier3 import-traces`, then promote only explicitly human-reviewed expectations
+  and replay fixtures with `tier3 accept-traces`.
 
 - Tier 3 evaluations support token, judge-call, attempt, and priced-cost budgets.
 
@@ -68,6 +89,14 @@ All notable changes to SkillEvaluator are documented in this file.
 - `tier3 validate` reports informational dataset coverage counts and concrete
   gaps in text and JSON. Generated one-case starters now explain their limits
   and point authors to full dataset generation and coverage validation.
+
+- Collection similarity reports selected, indexed and skipped manifests with bounded
+  exclusion reasons. Malformed selected manifests now make the scan incomplete and
+  block catalog writes. A standalone synthetic scale benchmark records limits and
+  stage measurements without provider requests. Reused Python registries now
+  replace the complete selection on successful builds and preserve committed
+  entries, vector dimensions and coverage together on failure; callers that
+  relied on undocumented merging must pass their complete intended selection.
 
 - Document an additive qualitative assessment review worksheet with bounded
   evidence from real successful, failed-setup and invalid-judge runs. Preserve
@@ -278,6 +307,32 @@ All notable changes to SkillEvaluator are documented in this file.
   after a `;`, which starts a new command.
 
 ### Fixed
+
+- Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
+  the PR or merge request's target revision. Policy files from the proposed
+  changes cannot approve their own exceptions.
+- Security checks preserve authored evaluation files and their findings while
+  excluding generated outputs. Fully inspected skills with only missing-path
+  reference caveats retain visible warnings instead of an incomplete-scan
+  failure; actual coverage gaps and analyzer failures still block.
+- PII findings clarify that required author attribution is accepted while
+  duplicate contact addresses need removal, replacement, or a reviewed waiver.
+
+- A `tier3 evaluate --skip-with-skill` run with two or more agents now records
+  the dataset-size status in `result.json` and the `tier3 evaluate` summary. It
+  is taken from the agent with the best baseline score, as in the reports.
+
+- A default Tier 3 run with a baseline can reach a PASS or NEUTRAL publication
+  verdict in BENCHMARK.md again. The baseline arm has no skill under test, so
+  it records `skill_execution` and `skill_efficiency` as not applicable and has
+  no Discoverability or Efficiency baseline. The publication check treated
+  those two dimensions as missing evidence and compared Skill Lift with the
+  five-dimension score, so those cards said INCOMPLETE instead. Discoverability
+  and Efficiency now count as not applicable for the baseline when it recorded
+  their skill metrics that way, and Skill Lift is checked over the dimensions
+  both arms scored. On the card those two rows say `baseline N/A` instead of
+  `baseline not run`. Any other missing or inconsistent baseline still makes
+  the card INCOMPLETE.
 
 - `BENCHMARK.md` no longer publishes an Overall uplift that disagrees with
   `lift.json` and the JSON, HTML, Markdown and terminal reports when a metric is

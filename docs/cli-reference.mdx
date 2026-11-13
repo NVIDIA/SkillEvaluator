@@ -149,7 +149,7 @@ errors, such as an option the workflow does not accept, exit `2`.
 | `--skip CHECKS` | none | Comma-separated checks to leave out, e.g. `secrets` for the Gitleaks scan. Skipped checks are shown and reported as skipped, nothing is installed for them, and the run cannot certify Tier 1 for publication |
 | `--llm / --no-llm` | Enabled when a provider is configured | Enable or skip rubric, LLM security, and finding verification; explicit `--llm` requires valid provider configuration |
 | `--min-score INTEGER` | `70` | Minimum passing quality and rubric score, from 0 to 100; quality severity overrides cannot waive the minimum |
-| `--quality-config PATH` | packaged `quality-default.yaml` | YAML file that replaces the quality check's expected-heading rules. See [Tier 1: Validation](tier1-validation.mdx#the-checks). |
+| `--quality-config PATH` | packaged `quality-default.yaml` | YAML file that adjusts the quality check's expected headings and error-handling rules; settings it omits keep their packaged values. See [Tier 1: Validation](tier1-validation.mdx#the-checks). |
 | `--pii-waivers PATH` | none | Reviewed, expiring PII waivers applied by the `pii` check. See [PII waivers](tier1-validation.mdx#pii-waivers). |
 | `--profile TEXT` | `SKILLEVALUATOR_PROFILE`, then `default` | Validation policy; `external` is a compatibility alias |
 | `--policy FILE` | none | Explicit policy overlay, including reviewed ownership-contact severity. See [Tier 1 policies](tier1-validation.mdx#validation-profiles-and-policies). |
@@ -304,7 +304,7 @@ Static checks; LLM-free by default. Tier 1 gates the exit code and always runs.
 | `--llm-verify` | off | Run a second LLM pass to suppress false-positive findings. |
 | `--skillspector-baseline FILE` | unset | Audited SkillSpector suppression baseline for the `security` check; never discovered from the skill. See [Audited SkillSpector baselines](tier1-validation.mdx#audited-skillspector-baselines). |
 | `--min-score INTEGER` | `70` | Minimum quality score (0–100) required per skill when the `quality` check runs; policy severity overrides cannot waive this gate. |
-| `--quality-config PATH` | packaged `quality-default.yaml` | YAML file that replaces the quality check's expected-heading rules. See [Tier 1: Validation](tier1-validation.mdx#the-checks). |
+| `--quality-config PATH` | packaged `quality-default.yaml` | YAML file that adjusts the quality check's expected headings and error-handling rules; settings it omits keep their packaged values. See [Tier 1: Validation](tier1-validation.mdx#the-checks). |
 | `--pii-waivers PATH` | none | Reviewed, expiring PII waivers applied by the `pii` check; forwarded to each skill of a catalog run. See [PII waivers](tier1-validation.mdx#pii-waivers). |
 
 ### Tier 2 · Deduplication
@@ -376,7 +376,7 @@ skillevaluator quality-check ./my-skill
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `--min-score INTEGER` | `70` | Minimum composite score required per skill; passing also requires no HIGH or CRITICAL quality findings. |
-| `--quality-config PATH` | packaged `quality-default.yaml` | YAML file with expected section headers and rules for grading. |
+| `--quality-config PATH` | packaged `quality-default.yaml` | YAML file that adjusts the expected headings and error-handling rules used for grading; settings it omits keep their packaged values. |
 
 Plus the standard report options. A collection's displayed average does not
 replace the minimum required of each skill. Scoring weights, grade bands, the

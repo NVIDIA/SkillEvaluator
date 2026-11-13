@@ -28,6 +28,7 @@ from skillevaluator.constants import (
     SIMILARITY_MAX_ENTRIES,
 )
 from skillevaluator.doctor import DEFAULT_PROBE_TIMEOUT_SEC, MAX_PROBE_TIMEOUT_SEC
+from skillevaluator.harness.report import harness_block, write_json_block
 from skillevaluator.logging_config import setup_logging
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.quality_config import QualityConfigError, load_quality_config
@@ -1381,6 +1382,10 @@ def _catalog_child_argv_from_ctx(
         argv.extend(["--skip", str(params["skip"])])
     if params.get("previous_version"):
         argv.extend(["--previous-version", str(params["previous_version"])])
+    if params.get("harness"):
+        argv.extend(["--harness", str(params["harness"])])
+    if params.get("harness_profiles"):
+        argv.extend(["--harness-profiles", str(params["harness_profiles"])])
     if params.get("fail_fast"):
         argv.append("--fail-fast")
     if params.get("continue_on_failure"):
@@ -2084,9 +2089,26 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     cls=GroupedOption,
     help_group=_TIER1_GROUP,
     help="Comma-separated subset of Tier 1 checks to run (default: all applicable). "
-    "Choices: schema, version, security, pii, license, code-integrity, unicode, quality, lint; "
+    "Choices: schema, version, security, pii, license, code-integrity, unicode, quality, lint, harness; "
     "opt-in (not run by default): dependency. "
     "quality/lint/version are skill-only and skipped for rules/workflows.",
+)
+@click.option(
+    "--harness",
+    "harness",
+    default=None,
+    cls=GroupedOption,
+    help_group=_RUN_GROUP,
+    help="Harnesses for the advisory harness check (default: all), e.g. --harness codex,claude-code.",
+)
+@click.option(
+    "--harness-profiles",
+    "harness_profiles",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    default=None,
+    cls=GroupedOption,
+    help_group=_RUN_GROUP,
+    help="Directory of harness profile YAMLs to use instead of the packaged ones.",
 )
 @click.option(
     "--skip",
@@ -2522,6 +2544,8 @@ def validate(
     evaluator_container_revision: str | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
+    harness: str | None = None,
+    harness_profiles: Path | None = None,
 ) -> None:
     """Validate a skill through all three tiers, with automatic dataset preparation.
 
@@ -2540,6 +2564,13 @@ def validate(
     skill-only and skipped for plugins.
     """
     _record_validate_json_report(None)
+    if harness:
+        from skillevaluator.harness import load_profiles
+
+        try:
+            load_profiles(harness, harness_profiles)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="--harness") from exc
     if dedup:
         _reject_linked_tier2_root(target_path)
     target_path = target_path.resolve()
@@ -2732,6 +2763,8 @@ def validate(
         fail_fast=fail_fast,
         continue_on_failure=continue_on_failure,
         on_check=_on_check if quiet else None,
+        harness=harness,
+        harness_profiles=harness_profiles,
         skip=skip,
     )
     # The raw pass/fail signal drives --fail-fast identically in both modes;
@@ -2742,6 +2775,7 @@ def validate(
     if quiet:
         apply_policy(results, policy)
     tier1_ok, tier1_rows = summarize_tier1(results, lineup=check_lineup)
+    harness_rows = harness_block(results)
     view.tier_done(0, failed=not tier1_ok, rows=tier1_rows)
     tier1_gate_results = list(results)
     tier2_gate_results: list[ValidationResult] = []
@@ -2983,6 +3017,8 @@ def validate(
         sarif_repository_root=sarif_repository_root,
     )
     _record_validate_json_report(f"{report_basename_value}.json" if "json" in effective_formats else None)
+    if harness_rows and "json" in effective_formats:
+        write_json_block(output_dir / f"{report_basename_value}.json", harness_rows)
 
     # BENCHMARK.md is generated compulsorily for skills (matches SkillEvaluator), even on
     # failure, so the publication card always reflects the latest evaluation --

@@ -1,0 +1,14 @@
+harness: claude-code
+display_name: Claude Code
+verified: {version: 2.1.316, source: closed (bundled JS inspected), date: 2026-11-01, method: proxy-captured canary probes x3, os: linux}
+roots:
+  project: [.claude/skills]
+  user: [~/.claude/skills]
+  not_scanned: [.agents/skills, ~/.agents/skills]
+listing: {cut: 1536}
+rules:
+  - {id: CC-ROOT, when: "install_root not in roots", effect: not_loaded, outcome: not found, message: "Claude Code reads only .claude/skills and ~/.claude/skills; .agents/skills is not scanned.", fix: "Install it under .claude/skills or ~/.claude/skills (a symlink from .agents/skills works)."}
+notes:
+  - "Follows symlinked skill folders and symlinked SKILL.md files, inside or outside the root."
+  - "Nested SKILL.md, CRLF, BOM, tabs, uppercase names: no effect observed."
+  - "New skills and edited bodies are picked up mid-session without restart."

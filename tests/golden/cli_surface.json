@@ -4714,6 +4714,22 @@
           "type": "text"
         },
         {
+          "name": "harness",
+          "opts": [
+            "--harness"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "name": "harness_profiles",
+          "opts": [
+            "--harness-profiles"
+          ],
+          "param_type": "option",
+          "type": "directory"
+        },
+        {
           "name": "skip",
           "opts": [
             "--skip"

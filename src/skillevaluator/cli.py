@@ -9,6 +9,7 @@ import copy
 import json
 import logging
 import math
+import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextvars import ContextVar
 from datetime import UTC, datetime
@@ -21,6 +22,7 @@ from skillevaluator import __version__
 from skillevaluator.cli_help import GroupedOption, RichGroup
 from skillevaluator.config import load_pii_patterns
 from skillevaluator.constants import (
+    QUALITY_DEFAULT_MIN_SCORE,
     SIMILARITY_DEFAULT_MAX_ENTRIES,
     SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
     SIMILARITY_MAX_ENTRIES,
@@ -63,6 +65,7 @@ from skillevaluator.tier1.commands import (
 )
 from skillevaluator.tier3_environments import all_env_modes
 from skillevaluator.tier_group import TierGroup
+from skillevaluator.utils.json_output import json_needs_ascii
 from skillevaluator.utils.path_security import resolve_repo_context_root
 from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
 from skillevaluator.utils.tier2_paths import (
@@ -262,8 +265,17 @@ _TOP_LEVEL_COMMAND_HELP_GROUPS = (
 )
 
 
+class _EncodingSafeGroup(RichGroup):
+    """Configure output before Click parses eager options such as --help."""
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(errors="replace")
+        return super().parse_args(ctx, args)
+
+
 @click.group(
-    cls=RichGroup,
+    cls=_EncodingSafeGroup,
     context_settings=CONTEXT_SETTINGS,
     help_command_groups=_TOP_LEVEL_COMMAND_HELP_GROUPS,
     show_banner=True,
@@ -1386,8 +1398,8 @@ def _catalog_child_argv_from_ctx(
         argv.append("--block-on-dedup")
     elif block_on_dedup is False:
         argv.append("--no-block-on-dedup")
-    min_score = params.get("min_score", 70)
-    if min_score != 70:
+    min_score = params.get("min_score", QUALITY_DEFAULT_MIN_SCORE)
+    if min_score != QUALITY_DEFAULT_MIN_SCORE:
         argv.extend(["--min-score", str(min_score)])
     if params.get("quality_config"):
         argv.extend(["--quality-config", str(Path(params["quality_config"]).resolve())])
@@ -1990,7 +2002,7 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
 @click.option(
     "--min-score",
     type=int,
-    default=70,
+    default=QUALITY_DEFAULT_MIN_SCORE,
     show_default=True,
     cls=GroupedOption,
     help_group=_TIER1_GROUP,
@@ -2879,7 +2891,7 @@ validate.help_group_descriptions = {
 
 @cli.command("quality-check")
 @_target_argument
-@click.option("--min-score", type=int, default=70, show_default=True)
+@click.option("--min-score", type=int, default=QUALITY_DEFAULT_MIN_SCORE, show_default=True)
 @click.option(
     "--quality-config",
     type=QUALITY_CONFIG_PATH,
@@ -2907,7 +2919,7 @@ def quality_check(
 
 @cli.command("rubric-eval")
 @_target_argument
-@click.option("--min-score", type=int, default=70, show_default=True)
+@click.option("--min-score", type=int, default=QUALITY_DEFAULT_MIN_SCORE, show_default=True)
 @_report_options
 def rubric_eval(target_path: Path, min_score: int, report_formats: tuple[str, ...], output_dir: Path) -> None:
     """Run LLM-as-judge rubric evaluation for a skill."""
@@ -3187,7 +3199,7 @@ def _workflow_report_options(func):
 @click.option(
     "--llm/--no-llm", default=None, help="Include rubric, LLM security, and verification [default: when configured]."
 )
-@click.option("--min-score", type=click.IntRange(0, 100), default=70, show_default=True)
+@click.option("--min-score", type=click.IntRange(0, 100), default=QUALITY_DEFAULT_MIN_SCORE, show_default=True)
 @click.option(
     "--quality-config",
     type=QUALITY_CONFIG_PATH,
@@ -3197,6 +3209,10 @@ def _workflow_report_options(func):
 @click.option("--pii-waivers", type=PII_WAIVERS_PATH, default=None, help=_PII_WAIVERS_HELP)
 @click.option(
     "--profile", default=None, help="Validation policy [default: default; external is a compatibility alias]."
+)
+@click.option(
+    "--policy", "policy_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None,
+    help="Custom policy YAML overlaid on top of --profile.",
 )
 @click.option("--previous-version", default=None, help="Previous version for version checks.")
 @click.option(
@@ -3212,6 +3228,7 @@ def _tier1_workflow(
     quality_config: Path | None,
     pii_waivers: Path | None,
     profile: str | None,
+    policy_path: Path | None,
     previous_version: str | None,
     skillspector_baseline: Path | None,
     report_formats: tuple[str, ...],
@@ -3222,7 +3239,7 @@ def _tier1_workflow(
     from skillevaluator.validators.policy import resolve_policy
 
     try:
-        policy = resolve_policy(profile=profile)
+        policy = resolve_policy(profile=profile, policy_path=policy_path)
     except (FileNotFoundError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     _offer_scanner_install(checks, skip)
@@ -4067,7 +4084,8 @@ def tier3_migrate_dataset(source: Path, skill_name: str | None, destination: Pat
     except (OSError, ValueError, TypeError) as exc:
         raise click.ClickException(str(exc)) from exc
     if destination is None:
-        click.echo(json.dumps(result.dataset, indent=2, ensure_ascii=False))
+        ensure_ascii = json_needs_ascii(result.dataset, getattr(sys.stdout, "encoding", None))
+        click.echo(json.dumps(result.dataset, indent=2, ensure_ascii=ensure_ascii))
     else:
         click.echo(f"Wrote {len(result.dataset['evals'])} cases to {destination}; source preserved.")
 
@@ -4218,6 +4236,10 @@ from skillevaluator.tier3.grader_validation import validate_grader
 
 tier3.add_command(select_decoys_command, "select-decoys")
 tier3.add_command(validate_grader, "validate-grader")
+
+from skillevaluator.tier3.interaction_commands import interact_command
+
+tier3.add_command(interact_command, "interact")
 
 from skillevaluator.tier3.workflow import build_tier3_workflow
 

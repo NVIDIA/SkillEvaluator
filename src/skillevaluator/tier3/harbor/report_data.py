@@ -709,6 +709,15 @@ def _invalid_token_counters(final_metrics: dict[str, Any]) -> list[str]:
     ]
 
 
+def _token_counter_names(value: object) -> list[str]:
+    """Return the token counter names that ``value`` lists, in ``_USAGE_COUNTERS`` order.
+
+    Anything that is not such a name is dropped, so a report trial and a
+    usage-only attempt name the same counters in the same order.
+    """
+    return [name for name in _USAGE_COUNTERS if isinstance(value, list) and name in value]
+
+
 def _usage_tokens(counters: dict[str, Any]) -> dict[str, int] | None:
     """Return a report trial's ``tokens`` object, or ``None`` without prompt and completion counts."""
     prompt = _trajectory_token_counter(counters.get("prompt_tokens"))
@@ -722,7 +731,7 @@ def _usage_tokens(counters: dict[str, Any]) -> dict[str, int] | None:
     return tokens
 
 
-def _attempt_usage(counters: dict[str, Any], invalid_counters: list[str]) -> dict[str, Any]:
+def _attempt_usage(counters: dict[str, Any], invalid_counters: object) -> dict[str, Any]:
     """Return an attempt's token fields as a report trial carries them.
 
     ``tokens`` holds the valid counters, and ``invalid_token_counters`` names
@@ -733,8 +742,8 @@ def _attempt_usage(counters: dict[str, Any], invalid_counters: list[str]) -> dic
     tokens = _usage_tokens(counters)
     if tokens is not None:
         usage["tokens"] = tokens
-    if invalid_counters:
-        usage["invalid_token_counters"] = sorted(invalid_counters)
+    if names := _token_counter_names(invalid_counters):
+        usage["invalid_token_counters"] = names
     return usage
 
 
@@ -814,8 +823,7 @@ def _withheld_attempt_usage(rewards: list[dict[str, Any]]) -> list[dict[str, Any
         row: dict[str, Any] = {"entry_id": reward.get("entry_id"), "trial_id": reward.get("trial_id"), "scored": True}
         counters = reward.get("_traj")
         if len(group) == 1 and isinstance(counters, dict):
-            invalid_counters = reward.get("_invalid_token_counters")
-            row.update(_attempt_usage(counters, invalid_counters if isinstance(invalid_counters, list) else []))
+            row.update(_attempt_usage(counters, reward.get("_invalid_token_counters")))
         rows.append(row)
     return rows
 
@@ -1041,6 +1049,8 @@ def load_agent_data(
                         rewards_complete = False
                         unscored_attempts.append(_unscored_attempt_usage(trial_dir))
                         continue
+                    # Only the trajectory read below names invalid token counters, never the reward file.
+                    reward.pop("_invalid_token_counters", None)
                     # Derive links from the bounded, admitted on-disk layout rather
                     # than accepting verifier-authored paths as provenance.
                     reward["_activation_artifacts"] = {"reward": reward_file.relative_to(results_dir).as_posix()}

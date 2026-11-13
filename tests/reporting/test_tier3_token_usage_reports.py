@@ -276,6 +276,59 @@ def test_a_scored_attempt_with_invalid_cached_tokens_is_not_measured_and_resourc
     assert payload["agents"]["codex"]["resources"]["tokens"]["with_skill"]["total"] == 1210
 
 
+@pytest.mark.parametrize("cached", [0, -5], ids=["valid-cache", "invalid-cache"])
+@pytest.mark.parametrize(
+    "names", [[1, "a"], ["cached_tokens"], ["x" * 50]], ids=["mixed-types", "a-counter", "not-a-counter"]
+)
+def test_only_the_trajectory_names_the_invalid_token_counters_of_a_scored_attempt(
+    tmp_path: Path, names: list[Any], cached: int
+) -> None:
+    run = _run(tmp_path)
+    # A scored attempt of Claude Code's failed baseline, kept for usage only, and one of a succeeded arm.
+    for trial in ("claude-code/without-skill/trials/case-1__a", "codex/with-skill/trials/case-1__a"):
+        # The collector writes no ``_`` keys to reward.json, but an edited results directory can hold them.
+        reward_file = run / trial / "reward.json"
+        reward = json.loads(reward_file.read_text(encoding="utf-8"))
+        reward_file.write_text(json.dumps({**reward, "_invalid_token_counters": names}), encoding="utf-8")
+        _set_cached_tokens(run, trial, cached)
+    invalid = ["cached_tokens"] if cached < 0 else []
+
+    usage_row = load_agent_data(run)["claude-code"]["usage_only_attempts_baseline"][0]
+    assert (usage_row["trial_id"], usage_row.get("invalid_token_counters", [])) == ("case-1__a", invalid)
+    result = agent_eval_result_from_directory(tmp_path, run, use_llm_judge=False)
+
+    assert result is not None
+    payload = result.metadata["agent_eval"]
+    trial = next(trial for trial in payload["agents"]["codex"]["trials"] if trial["entry_id"] == "case-1")
+    assert trial.get("invalid_token_counters", []) == invalid
+    usage = payload["token_usage"]["agents"]
+    coverage = [usage["claude-code"]["baseline"]["coverage"], usage["codex"]["with_skill"]["coverage"]]
+    expected = ("partial", ["invalid_token_counters"]) if invalid else ("complete", [])
+    assert [(arm["status"], arm["reason_codes"]) for arm in coverage] == [expected, expected]
+
+
+def test_report_trials_and_usage_only_attempts_name_only_token_counters_in_one_order(tmp_path: Path) -> None:
+    run = _run(tmp_path)
+    for trial in ("claude-code/without-skill/trials/case-1__a", "codex/with-skill/trials/case-1__a"):
+        trajectory_path = run / trial / "trajectory.json"
+        trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
+        trajectory["final_metrics"].update(total_prompt_tokens="1500", total_cached_tokens=-5)
+        trajectory_path.write_text(json.dumps(trajectory), encoding="utf-8")
+    agents = load_agent_data(run)
+    usage_row = agents["claude-code"]["usage_only_attempts_baseline"][0]
+    assert usage_row["invalid_token_counters"] == ["prompt_tokens", "cached_tokens"]
+    reward = next(reward for reward in agents["codex"]["rewards"] if reward["entry_id"] == "case-1")
+    assert reward["_invalid_token_counters"] == ["prompt_tokens", "cached_tokens"]
+    # Agent data that the loader did not build can hold any list.
+    reward["_invalid_token_counters"] = [1, "x" * 50, "cached_tokens", "prompt_tokens"]
+
+    payload = build_agent_eval_payload("demo", agents, use_llm_judge=False)
+
+    assert payload is not None
+    trial = next(trial for trial in payload["agents"]["codex"]["trials"] if trial["entry_id"] == "case-1")
+    assert trial["invalid_token_counters"] == ["prompt_tokens", "cached_tokens"]
+
+
 def test_an_unscored_attempt_of_a_case_id_with_double_underscores_keeps_its_case(tmp_path: Path) -> None:
     run = tmp_path / "run"
     _arm(run, "codex", "with-skill", [("auth__login__a1b2c3d", (100, 10, 0), True)])

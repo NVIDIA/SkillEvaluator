@@ -3425,7 +3425,7 @@ def _normalize_trials(
         metric_value,
         overall_score,
     )
-    from skillevaluator.tier3.harbor.report_data import logical_trial_reward_groups
+    from skillevaluator.tier3.harbor.report_data import _token_counter_names, logical_trial_reward_groups
     from skillevaluator.tier3.harbor.resource_usage import normalized_trial_timing
 
     out: list[dict[str, Any]] = []
@@ -3492,10 +3492,9 @@ def _normalize_trials(
                 }
                 if cached_tokens is not None:
                     trial["tokens"]["cached"] = cached_tokens
-            invalid_counters = reward.get("_invalid_token_counters")
-            if isinstance(invalid_counters, list) and invalid_counters:
+            if invalid_counters := _token_counter_names(reward.get("_invalid_token_counters")):
                 # Names only: token usage counts the attempt as unmeasured, not as a zero cache.
-                trial["invalid_token_counters"] = [str(name) for name in invalid_counters]
+                trial["invalid_token_counters"] = invalid_counters
             timing = normalized_trial_timing(traj.get("timing"))
             if timing is not None:
                 trial["timing"] = timing

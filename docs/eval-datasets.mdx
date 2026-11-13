@@ -107,9 +107,10 @@ Its LLM prompts ask for outcome checks. It prints a warning for each generated
 case that still grades skill use, and the autopilot starter case leaves such
 text out. `tier3 validate` warns when a prompt points at `skills/<name>`,
 `<name>/SKILL.md`, reading or following `SKILL.md`, the named skill, or one of
-its scripts. It also checks every string in nested expected outputs and
+its scripts. It also checks strings in nested prompts, expected outputs and
 assertions for skill use, using the skill's directory and frontmatter names
-as well as the dataset's declared alias. It is a wording heuristic: it skips
+as well as the dataset's declared alias. Fields with more than 1,000 values
+or cyclic references warn that checking is incomplete. It is a wording heuristic: it skips
 immediately negated checks such as "did not read `SKILL.md`", normalizes
 compatibility spellings and invisible format characters, and can miss other
 wording or lookalike letters from another alphabet. The warnings fail

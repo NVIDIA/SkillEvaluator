@@ -18,14 +18,16 @@ import functools
 import logging
 import re
 import unicodedata
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
+from itertools import chain
 from pathlib import Path
 from typing import Any
 
 from skillevaluator.constants import EXECUTABLE_SKILL_DIRS
 from skillevaluator.tier3.case_ids import validate_case_ids
+from skillevaluator.utils.redaction import redact_printable_text
 
 logger = logging.getLogger(__name__)
 
@@ -679,7 +681,10 @@ _SKILL_SCRIPT_SUFFIXES = frozenset({".py", ".sh", ".bash", ".js", ".mjs", ".cjs"
 # Clause events are consumed once, so "not ... without first reading" can be
 # recognized as requiring a read without rescanning every growing prefix.
 _CLAUSE_STATE_RE = re.compile(
-    r"(?P<break>[.,;:!?\n]|\b(?:and|but|then)\b)|(?P<negative>\b(?:not|never|without)\b|n['\u2019]t\b)",
+    r"(?P<break>[.,;:!?\n]|\b(?:and|but|then)\b)"
+    r"|(?P<cancel>\b(?:before|until|till|unless|prior\s+to|ahead\s+of|skip(?:s|ped|ping)?"
+    r"|forget(?:s|ting)?|forgot|fail(?:s|ed|ing)?|neglect(?:s|ed|ing)?)\b)"
+    r"|(?P<negative>\b(?:no|not|never|without)\b|n['\u2019]t\b)",
     re.IGNORECASE,
 )
 _NEGATED_PREFIX_RE = re.compile(
@@ -691,10 +696,16 @@ _NEGATIVE_SUBJECT_RE = re.compile(
     r"\bno\s+(?:(?!(?:before|until|without|and|or|but|then)\b)[\w-]+\s+){0,3}(?:agents?|trials?)\s+$",
     re.IGNORECASE,
 )
+_INDIRECT_NEGATED_PREFIX_RE = re.compile(
+    r"(?:\b(?:not|never|without)\b|n['\u2019]t\b)\s+"
+    r"(?:need\s+to|required\s+to|ask(?:\s+the\s+user)?\s+to|ask\s+questions?\s+or)\s+$",
+    re.IGNORECASE,
+)
 # Dataset aliases are literal data, never regex source. One fixed marker keeps
 # compiled patterns independent of the number and size of expected_skill values.
 _SKILL_NAME_MARKER = "\x00name\x00"
 _MATCH_EXCERPT_CHARS = 80
+_MAX_FIELD_VALUES = 1000
 
 
 def _skill_files_re(skill_name: str | None) -> str:
@@ -725,7 +736,7 @@ def _prompt_skill_files_re(skill_name: str | None, skill_scripts: tuple[str, ...
 
 @functools.lru_cache(maxsize=64)
 def _skill_use_assertion_re(
-    skill_name: str, skill_scripts: tuple[str, ...] = (), *, prompt: bool = False
+    skill_name: str | None, skill_scripts: tuple[str, ...] = (), *, prompt: bool = False
 ) -> re.Pattern[str]:
     """Graded text about using the skill: its files, its name called a skill, "used <name>", or running its scripts.
 
@@ -739,7 +750,7 @@ def _skill_use_assertion_re(
     ends the clause or CLI arguments follow it, or when the text names it under
     scripts/ or tools/.
     """
-    name = re.escape(skill_name)
+    name = re.escape(skill_name or "")
     alternatives = [
         _skill_files_re(skill_name),
         rf"\b(?:{_SKILL_USE_VERB_RE}|{_READ_VERB_RE})\s+(?:the|this|its|that)\s+skill\b"
@@ -775,16 +786,16 @@ def _first_unnegated_match(pattern: re.Pattern[str], text: str) -> str | None:
     negatives = 0
     for match in pattern.finditer(text):
         while event is not None and event.start() < match.start():
-            negatives = 0 if event.lastgroup == "break" else negatives + 1
+            negatives = negatives + 1 if event.lastgroup == "negative" else 0
             event = next(events, None)
         prefix_start = max(0, match.start() - 256)
         # Report interpretation can describe absent activation: "no positive
         # with-skill trial loaded the skill". Keep this direct subject bounded;
         # "no agent proceeds before reading" still requires a read.
-        if _NEGATIVE_SUBJECT_RE.search(text, prefix_start, match.start()):
-            continue
+        negative_subject = _NEGATIVE_SUBJECT_RE.search(text, prefix_start, match.start())
+        indirect_negative = _INDIRECT_NEGATED_PREFIX_RE.search(text, prefix_start, match.start())
         negated = _NEGATED_PREFIX_RE.search(text, prefix_start, match.start())
-        if negated is None or (negated["negative"].lower() == "without" and negatives > 1):
+        if not (negative_subject or indirect_negative or negated) or negatives % 2 == 0:
             return text[match.start() : min(match.end(), match.start() + _MATCH_EXCERPT_CHARS)]
     return None
 
@@ -867,7 +878,7 @@ def _prompt_skill_files_match(prompt: str, skill_name: str | None, skill_scripts
     return _match_skill_text(prompt, skill_name, skill_scripts, prompt=True)
 
 
-def _skill_use_match(text: str, skill_name: str, skill_scripts: Sequence[str] = ()) -> str | None:
+def _skill_use_match(text: str, skill_name: str | None, skill_scripts: Sequence[str] = ()) -> str | None:
     """The expected-output or assertion text that grades skill use, or None."""
     return _match_skill_text(text, skill_name, skill_scripts, prompt=False)
 
@@ -895,21 +906,49 @@ def _authored_field(entry: dict[str, Any], runtime_key: str, agentskills_key: st
     return runtime_key
 
 
-def _string_leaves(value: Any) -> Iterator[str]:
-    """Strings the judge renders, including mapping keys; visit shared/cyclic containers once."""
-    pending = [value]
-    seen = set()
+def _field_string_leaves(value: Any) -> tuple[list[str], str | None]:
+    """Read at most 1000 values without copying huge containers or expanding aliases."""
+    pending: list[tuple[Iterator[Any], int | None]] = [(iter((value,)), None)]
+    visited: set[int] = set()
+    active: set[int] = set()
+    leaves: list[str] = []
+    values_read = 0
     while pending:
-        item = pending.pop()
+        iterator, identity = pending[-1]
+        try:
+            item = next(iterator)
+        except StopIteration:
+            pending.pop()
+            if identity is not None:
+                active.remove(identity)
+            continue
+        values_read += 1
+        if values_read > _MAX_FIELD_VALUES:
+            return leaves, "limit"
         if isinstance(item, str):
-            yield item
-        elif isinstance(item, (dict, list, tuple)) and id(item) not in seen:
-            seen.add(id(item))
-            if isinstance(item, dict):
-                pending.extend(reversed(list(item.values())))
-                pending.extend(reversed(list(item)))
-            else:
-                pending.extend(reversed(item))
+            leaves.append(item)
+        elif isinstance(item, (Mapping, list, tuple)):
+            identity = id(item)
+            if identity in active:
+                return leaves, "cycle"
+            if identity in visited:
+                continue
+            visited.add(identity)
+            active.add(identity)
+            children = chain(item, item.values()) if isinstance(item, Mapping) else iter(item)
+            pending.append((children, identity))
+    return leaves, None
+
+
+def _string_leaves(value: Any) -> tuple[list[str], bool]:
+    """Strings in a field and whether checking was incomplete (including a cycle)."""
+    leaves, reason = _field_string_leaves(value)
+    return leaves, reason is not None
+
+
+def _quoted(text: str) -> str:
+    """A bounded, printable and credential-redacted diagnostic excerpt."""
+    return repr(redact_printable_text(" ".join(text.split()), max_len=_MATCH_EXCERPT_CHARS, max_input_chars=320))
 
 
 def _baseline_fairness_warnings(
@@ -930,42 +969,54 @@ def _baseline_fairness_warnings(
     ) or (None,)
     prepared_names = tuple(_prepared_skill_name(name) for name in names)
     scripts = tuple(skill_scripts)
-    matched = None
-    if isinstance(prompt, str):
+
+    def read(field_name: str, value: Any) -> list[tuple[str, str]]:
+        leaves, reason = _field_string_leaves(value)
+        if reason == "limit":
+            warnings.append(
+                f"{field_name} has more than {_MAX_FIELD_VALUES} values, so it was not fully checked for skill use. "
+                "Keep it to a short string or a list of strings."
+            )
+        elif reason == "cycle":
+            warnings.append(
+                f"{field_name} contains a cyclic value, so it was not fully checked for skill use. "
+                "Use a finite string or list of strings."
+            )
+        return [(field_name, leaf) for leaf in leaves]
+
+    for field_name, prompt_text in read(_authored_field(entry, "question", "prompt"), prompt):
         matched = next(
             (
                 match
                 for name in prepared_names
-                if (match := _match_skill_text(prompt, None, scripts, prompt=True, prepared_name=name))
+                if (match := _match_skill_text(prompt_text, None, scripts, prompt=True, prepared_name=name))
             ),
             None,
         )
-    if matched:
-        warnings.append(
-            f"{_authored_field(entry, 'question', 'prompt')} points at the skill's files ({matched[:80]!r}). The no-skill "
-            "baseline gets the same prompt without the skill, so it cannot follow it. Describe the task instead; "
-            "skill_execution measures whether the skill was used."
-        )
-    texts = [
-        (_authored_field(entry, "ground_truth", "expected_output"), entry.get("ground_truth")),
-        (_authored_field(entry, "expected_behavior", "assertions"), entry.get("expected_behavior")),
-    ]
-    for field_name, value in texts:
-        for text in _string_leaves(value):
-            matched = next(
-                (
-                    match
-                    for name in prepared_names
-                    if (match := _match_skill_text(text, None, scripts, prompt=False, prepared_name=name))
-                ),
-                None,
+        if matched:
+            warnings.append(
+                f"{field_name} points at the skill's files ({_quoted(matched)}). The no-skill "
+                "baseline gets the same prompt without the skill, so it cannot follow it. Describe the task instead; "
+                "skill_execution measures whether the skill was used."
             )
-            if matched:
-                warnings.append(
-                    f"{field_name} grades skill use ({matched[:80]!r}), which the no-skill baseline is also graded "
-                    "on. Keep it about the task outcome; skill_execution scores skill use separately."
-                )
-                return warnings
+            break
+    texts = read(_authored_field(entry, "ground_truth", "expected_output"), entry.get("ground_truth"))
+    texts += read(_authored_field(entry, "expected_behavior", "assertions"), entry.get("expected_behavior"))
+    for field_name, text in texts:
+        matched = next(
+            (
+                match
+                for name in prepared_names
+                if (match := _match_skill_text(text, None, scripts, prompt=False, prepared_name=name))
+            ),
+            None,
+        )
+        if matched:
+            warnings.append(
+                f"{field_name} grades skill use ({_quoted(matched)}), which the no-skill baseline is also graded "
+                "on. Keep it about the task outcome; skill_execution scores skill use separately."
+            )
+            break
     return warnings
 
 

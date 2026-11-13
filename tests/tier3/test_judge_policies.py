@@ -187,6 +187,55 @@ def test_default_policies_keep_the_builtin_anthropic_refusal_fallback(
 
 
 @pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, [{"model": "claude-opus-4-8"}]),
+        ("", [{"model": "claude-opus-4-8"}]),
+        ("claude-opus-5", [{"model": "claude-opus-5"}]),
+        ("none", None),
+        ("Off", None),
+        ("claude-opus-5-5", None),
+    ],
+)
+def test_refusal_fallback_model_env_for_the_anthropic_judge(verifier, monkeypatch, value, expected):
+    monkeypatch.delenv("SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL", raising=False)
+    if value is not None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL", value)
+
+    request = _anthropic_request(verifier, monkeypatch)
+
+    payload = json.loads(request.data)
+    assert payload.get("fallbacks") == expected
+    assert (request.get_header("Anthropic-beta") is not None) == (expected is not None)
+
+
+def test_refusal_fallback_model_env_for_the_bedrock_judge(verifier, monkeypatch):
+    import boto3
+
+    monkeypatch.setenv("SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL", "claude-opus-5")
+    client = MagicMock()
+    client.converse.side_effect = [
+        {"stopReason": "content_filtered", "output": {"message": {"content": []}}},
+        {"stopReason": "end_turn", "output": {"message": {"content": [{"text": "Done"}]}}},
+    ]
+    monkeypatch.setattr(boto3, "client", lambda *_args, **_kwargs: client)
+
+    verifier._call_bedrock("prompt", "us.anthropic.claude-opus-5-5", 4096, 0.0)
+
+    assert [call.kwargs["modelId"] for call in client.converse.call_args_list] == [
+        "us.anthropic.claude-opus-5-5",
+        "us.anthropic.claude-opus-5",
+    ]
+
+    monkeypatch.setenv("SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL", "none")
+    client.converse.reset_mock()
+    client.converse.side_effect = [{"stopReason": "content_filtered", "output": {"message": {"content": []}}}]
+    with pytest.raises(verifier._JudgeRefusedError):
+        verifier._call_bedrock("prompt", "us.anthropic.claude-opus-5-5", 4096, 0.0)
+    assert client.converse.call_count == 1
+
+
+@pytest.mark.parametrize(
     ("name", "value"), [("LLM_JUDGE_FALLBACK_POLICY", "replace"), ("LLM_JUDGE_RETRY_POLICY", "strict")]
 )
 def test_policy_turns_off_the_builtin_bedrock_refusal_fallback(verifier, monkeypatch, name, value):

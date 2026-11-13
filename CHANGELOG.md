@@ -470,6 +470,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Add `SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL` to set the model that Claude 5.5
+  or later requests name as the server-side refusal fallback, or to turn it off
+  with `none`, `off`, `disabled`, `false` or `0`. The Claude API answers HTTP
+  400 (`'claude-opus-4-8' is not a valid fallback target for
+  'claude-sonnet-5-5'`) when the fixed `claude-opus-4-8` target does not suit
+  the request model, which made such a model unusable for LLM checks and as a
+  Tier 3 judge. A fallback equal to the request model is no longer sent. The
+  default is unchanged. The Harbor verifier receives the variable like
+  `LLM_JUDGE_FALLBACK_MODELS`; its Bedrock refusal retry uses it too.
+
 - Configure CLI stdout to replace characters that its encoding cannot
   represent, so reports and root help complete on legacy Windows code pages.
   JSON dataset previews and validation output preserve Unicode values, using

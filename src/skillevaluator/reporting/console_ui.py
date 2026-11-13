@@ -34,6 +34,7 @@ import textwrap
 import threading
 import time
 import unicodedata
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
@@ -51,6 +52,7 @@ from skillevaluator.reporting.base import (
     source_validation_errors,
     source_validation_preview,
 )
+from skillevaluator.reporting.presentation import result_execution_status
 from skillevaluator.reporting.terminal_styles import (
     AMBER,
     BRIGHT,
@@ -1132,15 +1134,11 @@ def _quality_stats(results: list[ValidationResult]) -> tuple[str, float] | None:
     return None
 
 
-def summarize_tier1(
-    results: list[ValidationResult], lineup: list[str] | None = None, *, stopped_early: bool = False
-) -> tuple[bool, list[TierRow]]:
+def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = None) -> tuple[bool, list[TierRow]]:
     """Build the Tier 1 section rows from its validator results.
 
     When *lineup* is given, the per-check ticker stays in the completed
-    section with each check's final state (failed checks in red). When
-    *stopped_early* is set (``--fail-fast`` ended the run at its first failure),
-    the lineup checks that have no result are counted as not run.
+    section with each check's final state (failed checks in red).
     """
     # A check recorded as not applicable did not run: it is neither a pass nor
     # a failure, so it is listed on its own row and left out of the counts.
@@ -1165,31 +1163,21 @@ def summarize_tier1(
         rows.append(final_check_ticker_row(lineup, results))
         rows += scanners
 
-    # Count the named checks the lineup shows, not validators: code-integrity alone is three.
-    def check_of(r: ValidationResult) -> str:
-        return _check_key(r.validator_name) or _short_name(r.validator_name)
-
-    ran = [r for r in results if not _is_user_skipped(r)]
-    checks = set(map(check_of, ran))
-    broken_checks = set(map(check_of, broken))
-    incomplete_checks = set(map(check_of, incomplete)) - broken_checks
-    # A --skip inside a check that still ran (secrets within code-integrity) counts under its own name.
-    skipped_checks = {_skip_name(r.validator_name) if check_of(r) in checks else check_of(r) for r in user_skipped}
-    # --fail-fast returns before the later checks produce a result; the lineup above still lists them.
-    seen = set(map(check_of, results))
-    not_run = [name for name in lineup or () if name not in seen] if stopped_early else []
-    passed_checks = len(checks) - len(broken_checks) - len(incomplete_checks)
-    checks_segments: list[tuple[str, str]] = [(f"{passed_checks}/{len(checks) + len(not_run)} checks passed", TEXT)]
-    if sub_checks := sum(r.summary.checks_performed for r in ran):
+    # Count validators with the verdict line's own classification (TierPresentation), so the two agree.
+    outcome = {id(r): result_execution_status(r) for r in results}
+    count = Counter(outcome.values())
+    executed = count["pass"] + count["fail"] + count["incomplete"]
+    checks_segments: list[tuple[str, str]] = [(f"{count['pass']}/{executed} checks passed", TEXT)]
+    if sub_checks := sum(
+        r.summary.checks_performed for r in results if outcome[id(r)] in {"pass", "fail", "incomplete"}
+    ):
         checks_segments.append((f" ({sub_checks} sub-checks)", MUTED))
-    if broken_checks:
-        checks_segments += [("  ·  ", FAINT), (f"{len(broken_checks)} failed", f"bold {RED}")]
-    if incomplete_checks:
-        checks_segments += [("  ·  ", FAINT), (f"{len(incomplete_checks)} didn't run", f"bold {RED}")]
-    if not_run:
-        checks_segments += [("  ·  ", FAINT), (f"{len(not_run)} not run", MUTED)]
-    if skipped_checks:
-        checks_segments += [("  ·  ", FAINT), (f"{len(skipped_checks)} skipped", MUTED)]
+    if count["fail"]:
+        checks_segments += [("  ·  ", FAINT), (f"{count['fail']} failed", f"bold {RED}")]
+    if count["incomplete"]:
+        checks_segments += [("  ·  ", FAINT), (f"{count['incomplete']} didn't run", f"bold {RED}")]
+    if count["skipped"]:
+        checks_segments += [("  ·  ", FAINT), (f"{count['skipped']} skipped", MUTED)]
     if warnings:
         checks_segments += [("  ·  ", FAINT), (f"{warnings} warning{'s' if warnings != 1 else ''}", MUTED)]
     rows.append(TierRow("summary" if lineup else "checks", checks_segments))

@@ -302,6 +302,49 @@ def test_missing_skillspector_with_llm_still_gets_the_install_fix():
     assert "LLM review" not in text
 
 
+@pytest.mark.parametrize("nvidia_key", [None, "set-for-the-test"])
+@pytest.mark.parametrize("how", ["not-installed", "bad-path-override", "bad-baseline"])
+def test_llm_scan_that_never_started_gets_the_scanner_fix_not_a_provider_fix(monkeypatch, tmp_path, how, nvidia_key):
+    """``--llm`` records skillspector-llm before any scan runs; the real validator paths must not read as LLM-only."""
+    from skillevaluator.reporting.console_ui import summarize_tier1
+    from skillevaluator.utils.tool_runner import Tools
+    from skillevaluator.validators.security import SecurityValidator
+
+    for name in ("SKILL_EVAL_LLM_PROVIDER", "SKILL_EVAL_LLM_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+    if nvidia_key:
+        monkeypatch.setenv("NVIDIA_API_KEY", nvidia_key)
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: demo\ndescription: A demo skill.\n---\n\nBody.\n", encoding="utf-8")
+    baseline = None
+    try:
+        if how == "bad-path-override":
+            monkeypatch.setenv("SKILLEVALUATOR_SKILLSPECTOR_PATH", str(tmp_path / "no-such-skillspector"))
+            Tools.skillspector.refresh()
+        elif how == "not-installed":
+            monkeypatch.setattr(Tools.skillspector, "_path", None)
+        else:
+            # Installed, but the baseline cannot be parsed, so no scan starts.
+            monkeypatch.setattr(Tools.skillspector, "_path", "/bin/true")
+            baseline = tmp_path / "baseline.yaml"
+            baseline.write_text("rules: [unclosed\n", encoding="utf-8")
+        result = SecurityValidator(use_llm=True, skillspector_baseline=baseline).validate_security_only(skill)
+    finally:
+        monkeypatch.undo()
+        Tools.skillspector.refresh()
+
+    result.validator_name = "Security Scan"  # run_validation names the result this way
+    assert result.incomplete_scans == ["skillspector-llm"]
+    assert "skillspector" not in result.scanners
+    text = _text(summarize_tier1([result])[1])
+    assert "security didn't run" in text
+    assert "→ or skip it: --skip security" in text
+    for provider_advice in ("LLM review", "No provider is configured", "provider call failed", "doctor --tier 2"):
+        assert provider_advice not in text
+
+
 def test_llm_fix_with_openai_and_no_key_names_both_accepted_variables(monkeypatch):
     from skillevaluator.reporting.console_ui import _llm_fix
 
@@ -345,6 +388,33 @@ def test_llm_fix_follows_a_skillspector_adapter_chosen_directly(monkeypatch):
     assert item.actions[0] == "check your AWS credentials and SKILLSPECTOR_MODEL for SKILLSPECTOR_PROVIDER=bedrock"
 
 
+def test_llm_fix_for_bedrock_set_through_skillspector_gives_no_public_provider_advice(monkeypatch):
+    from skillevaluator.reporting.console_ui import _llm_fix
+
+    for name in ("SKILL_EVAL_LLM_PROVIDER", "SKILL_EVAL_LLM_API_KEY", "NVIDIA_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SKILLSPECTOR_PROVIDER", "bedrock")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "set-for-the-test")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "set-for-the-test")
+    security = _security_without_llm()
+    security.metadata["incomplete_scans"] = ["skillspector-llm"]
+    item = _llm_fix([security])
+    assert item.problem == "security LLM review didn't run: SkillSpector's bedrock provider call failed"
+    assert item.actions == [
+        "check your AWS credentials and SKILLSPECTOR_MODEL for SKILLSPECTOR_PROVIDER=bedrock",
+        "or rerun without --llm",
+    ]
+
+    # With both stages failed, both lines appear: --llm-verify still runs on the public provider.
+    item = _llm_fix([_security_without_llm()])
+    assert item.problem.startswith("security LLM review didn't run: SkillSpector's bedrock provider call failed; ")
+    assert item.actions == [
+        "check your AWS credentials and SKILLSPECTOR_MODEL for SKILLSPECTOR_PROVIDER=bedrock",
+        "export SKILL_EVAL_LLM_PROVIDER=nv_build NVIDIA_API_KEY='your-api-key'",
+        "or rerun without --llm / --llm-verify",
+    ]
+
+
 def test_llm_fix_still_covers_the_public_provider_for_llm_verify_with_a_direct_adapter(monkeypatch):
     from skillevaluator.reporting.console_ui import _llm_fix
 
@@ -378,7 +448,7 @@ def test_scanners_row_keeps_the_version_when_only_the_llm_stage_failed():
     assert not _only_llm_stages_missing(security)
 
 
-def test_tier1_summary_counts_named_checks_and_their_sub_checks():
+def test_tier1_summary_counts_validators_and_their_sub_checks():
     from skillevaluator.models.result import ValidationResult
     from skillevaluator.reporting.console_ui import summarize_tier1
 
@@ -390,18 +460,42 @@ def test_tier1_summary_counts_named_checks_and_their_sub_checks():
     secrets.errors.append("leaked token")
     results.append(secrets)
     _ok, rows = summarize_tier1(results, lineup=["code-integrity", "schema", "security"])
-    assert "1/3 checks passed (13 sub-checks)  ·  1 failed  ·  1 didn't run" in _text(rows)
+    assert "2/4 checks passed (13 sub-checks)  ·  1 failed  ·  1 didn't run" in _text(rows)
 
 
-def test_tier1_summary_after_fail_fast_counts_the_checks_that_never_ran():
+def test_tier1_summary_row_agrees_with_the_verdict_line():
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.reporting.console_ui import summarize_tier1
+    from skillevaluator.reporting.presentation import build_final_render_context
+    from skillevaluator.tier1.commands import run_validation
+
+    skill = Path(__file__).resolve().parents[2] / "src/skillevaluator/tier3/reference_skills/text-analyzer"
+    # A pass, a check that is not applicable (no previous version), and a user-skipped check ...
+    results = run_validation(skill, checks="schema,version,unicode", skip="unicode")
+    # ... plus a failure and an incomplete scan, so every count has a value.
+    broken = ValidationResult(validator_name="Secrets Detection", passed=False)
+    broken.errors.append("leaked token")
+    results += [broken, _security_without_llm()]
+
+    tier = build_final_render_context(results, requested_tiers=[1]).tiers[1]
+    assert (tier.passed, tier.failed, tier.incomplete, tier.skipped, tier.not_applicable) == (1, 1, 1, 1, 1)
+    text = _text(summarize_tier1(results, lineup=["schema", "version", "unicode"])[1])
+    assert f"{tier.passed}/{tier.executed} checks passed" in text
+    assert f"{tier.failed} failed  ·  {tier.incomplete} didn't run  ·  {tier.skipped} skipped" in text
+    assert tier.summary.startswith(f"{tier.passed} of {tier.executed} checks passed; {tier.failed} failed, ")
+
+
+def test_tier1_summary_after_a_whole_check_skip_counts_its_validators_once_each():
     from skillevaluator.models.result import ValidationResult
     from skillevaluator.reporting.console_ui import summarize_tier1
 
-    lineup = ["schema", "version", "security", "pii", "license", "code-integrity", "unicode", "quality", "lint"]
-    schema = ValidationResult(validator_name="Schema & Repository Governance", passed=False)
-    schema.errors.append("Author not specified in metadata")
-    _ok, rows = summarize_tier1([schema], lineup=lineup, stopped_early=True)
-    assert "0/9 checks passed  ·  1 failed  ·  8 not run" in _text(rows)
-    # A full run, or a call without a lineup, still counts only the checks that returned results.
-    assert "0/1 checks passed  ·  1 failed" in _text(summarize_tier1([schema], lineup=lineup)[1])
-    assert "0/1 checks passed  ·  1 failed" in _text(summarize_tier1([schema], stopped_early=True)[1])
+    def skipped(name):
+        meta = {"skipped": True, "skipped_by_user": True, "skip_reason": "skipped with --skip"}
+        return ValidationResult(validator_name=name, metadata=meta)
+
+    results = [ValidationResult(validator_name="Schema & Repository Governance")]
+    results += [skipped(n) for n in ("Code Risk Analysis", "Secrets Detection", "Code Integrity & Hygiene")]
+    text = _text(summarize_tier1(results, lineup=["schema", "code-integrity"])[1])
+    # The same three validators the verdict line counts and the skipped row names.
+    assert "1/1 checks passed  ·  3 skipped" in text
+    assert "code, secrets, integrity  with --skip, not checked" in text

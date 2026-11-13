@@ -2561,9 +2561,7 @@ def validate(
     tier1_raw_failed = any(not r.passed for r in results)
     if quiet:
         apply_policy(results, policy)
-    tier1_ok, tier1_rows = summarize_tier1(
-        results, lineup=check_lineup, stopped_early=fail_fast and not continue_on_failure and tier1_raw_failed
-    )
+    tier1_ok, tier1_rows = summarize_tier1(results, lineup=check_lineup)
     view.tier_done(0, failed=not tier1_ok, rows=tier1_rows)
     tier1_gate_results = list(results)
     tier2_gate_results: list[ValidationResult] = []

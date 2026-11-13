@@ -1119,9 +1119,12 @@ in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
   API-key, token and `Cookie` header values, and credential flag values
   (`--token`, `--password`, `curl -u user:password`) are masked, also in
   JSON-escaped text such as RAGAS prompts and tool-call arguments, and long
-  prompts and replies are shortened. The prompts contain the task question,
-  expected answer, and agent evidence. Pass `--harbor-keep-jobs` to keep the
-  Harbor trial directories that hold this file.
+  prompts and replies are shortened. In JSON-escaped text, `Cookie` pairs
+  after an escaped tab (`\t`) are not masked when the tab follows a `;`, or
+  when the header itself follows an escape such as a line break (`\n`). The
+  prompts contain the task question, expected answer, and agent evidence.
+  Pass `--harbor-keep-jobs` to keep the Harbor trial directories that hold
+  this file.
 - **Reasoning models.** GPT-5 and GPT-6 judges get no `temperature` and at
   least 32,768 output tokens, because reasoning tokens count against the
   limit; other judges get 16,384. GPT-6 judges and Claude 5.5 or later judges

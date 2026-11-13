@@ -550,6 +550,12 @@ class RichProgressReporter(PlainProgressReporter):
                 self._failed_stop = _FailedDisplayStop(stop_refused=True, notice_shown=False)
                 return
         try:
+            # A stream can keep what the terminal refused, as standard error's
+            # buffer does, and send it later. It would then also keep a refused
+            # notice and send it before the late one, so while the terminal
+            # still refuses what the stream holds, the notice waits for the
+            # run's close().
+            self._console.file.flush()
             # Live keeps the last frame it drew, with its stages still running,
             # so explain why it no longer updates.
             self._write_line(_DISPLAY_STOPPED_NOTICE)

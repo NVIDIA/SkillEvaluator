@@ -1681,11 +1681,11 @@ class _WouldBlockTerminal(io.RawIOBase):
         ({1}, "Agents / models:", _STOP_NOTICE),
         ({2}, "Provider:", _STOP_NOTICE),
         ({3}, "Run plan:", _STOP_NOTICE),
-        # The terminal stays full: it also refuses the stream's flush before
-        # the notice and then the notice.
+        # The terminal stays full until start() returns: it refuses the plan
+        # line and every flush after it, so the notice waits for close().
         ({1, 2, 3}, "Agents / models:", _LATE_STOP_NOTICE),
     ],
-    ids=["agents-line-refused", "provider-line-refused", "run-plan-line-refused", "agents-line-and-notice-refused"],
+    ids=["agents-line-refused", "provider-line-refused", "run-plan-line-refused", "terminal-full-during-start"],
 )
 def test_a_plan_line_refused_by_a_buffered_terminal_stream_is_printed_once(
     monkeypatch: pytest.MonkeyPatch,
@@ -1721,11 +1721,11 @@ def test_a_plan_line_refused_by_a_buffered_terminal_stream_is_printed_once(
     output = terminal.received.decode("utf-8")
 
     # The refused line reaches the terminal once, from the stream's buffer,
-    # and the run's output ends with the stop notice. When the notice is
-    # refused too, the stream still sends the copy of it that it took, so
-    # only the late notice is counted then.
+    # and one stop notice ends the run's output. The stream would also keep a
+    # notice the terminal refused and send it before the late one, so the
+    # notice is not written while the terminal still refuses the line.
     assert output.count(plan_line) == 1
-    assert output.count(notice) == 1
+    assert output.count("Tier 3 progress display stopped after a drawing error") == 1
     assert f"\n{output}".endswith(f"\n{notice}\n")
     assert "Harbor Run Configuration" not in output
     assert "agent finished" not in output

@@ -758,6 +758,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - The unknown-artifact CLI guidance links to the published content-types documentation route.
 
+- Code Risk Analysis reports Semgrep file-level parse errors as one partial-scan
+  error that names up to 20 unparsed files, relative to the skill and with the
+  line of the first error, instead of the first three truncated messages. The
+  check stays `incomplete` because Semgrep skips the code it cannot parse. The
+  JSON report lists the files in `semgrep_unparsed_files` (up to 1,000, with
+  `semgrep_unparsed_files_omitted` counting the rest); other Semgrep errors are
+  reported as before.
+
 - Security checks preserve authored evaluation files and their findings while
   excluding generated outputs. Fully inspected skills with only missing-path
   reference caveats retain visible warnings instead of an incomplete-scan

@@ -2250,6 +2250,14 @@
               "type": "text"
             },
             {
+              "name": "policy_path",
+              "opts": [
+                "--policy"
+              ],
+              "param_type": "option",
+              "type": "file"
+            },
+            {
               "name": "previous_version",
               "opts": [
                 "--previous-version"
@@ -2367,6 +2375,14 @@
             ],
             "param_type": "option",
             "type": "text"
+          },
+          {
+            "name": "policy_path",
+            "opts": [
+              "--policy"
+            ],
+            "param_type": "option",
+            "type": "file"
           },
           {
             "name": "previous_version",

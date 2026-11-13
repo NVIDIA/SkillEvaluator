@@ -5146,3 +5146,91 @@ def test_runtime_projection_skips_linked_generated_entries(tmp_path: Path, link_
     assert (staged / "SKILL.md").is_file()
     assert (staged / "scripts" / "run.sh").is_file()
     assert not os.path.lexists(staged / link_name)
+
+
+@pytest.mark.parametrize("scope", ["verifier.environment", "steps.verifier.environment"])
+@pytest.mark.parametrize("grant", ["runtime_only", "verifier_only"])
+def test_native_verifier_mcp_references_use_the_verifier_environment_grants(
+    tmp_path: Path, scope: str, grant: str
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
+    name = "AGENT_FLAG" if grant == "runtime_only" else "VERIFIER_FLAG"
+    step = '\n[[steps]]\nname = "step-one"\n' if scope.startswith("steps.") else ""
+    original = (
+        task_toml.read_text(encoding="utf-8")
+        + step
+        + f'\n[[{scope}.mcp_servers]]\nname = "fixture-mcp"\ntransport = "stdio"\n'
+        + f'command = "python3"\nargs = ["--flag", "${{{name}}}"]\n'
+    )
+    task_toml.write_text(original, encoding="utf-8")
+    output = tmp_path / "native-verifier-mcp-grants"
+    options = {"runtime_env": {"AGENT_FLAG": "agent-value"}, "verifier_env": {"VERIFIER_FLAG": "verifier-value"}}
+    if grant == "runtime_only":
+        with pytest.raises(ValueError, match=r"MCP|runtime|environment"):
+            stage_native_harbor_tasks(target, output, grading_mode="custom_only", **options)
+        assert not output.exists()
+    else:
+        [staged] = stage_native_harbor_tasks(target, output, grading_mode="custom_only", **options)
+        assert "${VERIFIER_FLAG}" in (staged / "task.toml").read_text(encoding="utf-8")
+    assert task_toml.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize(
+    ("scope", "verifier_env"),
+    [("environment", None), ("verifier.environment", None), ("environment", {"VERIFIER_FLAG": "verifier"})],
+)
+def test_native_mcp_keeps_agent_grants_and_legacy_verifier_defaults(
+    tmp_path: Path, scope: str, verifier_env: dict[str, str] | None
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
+    task_toml.write_text(
+        task_toml.read_text(encoding="utf-8")
+        + f'\n[[{scope}.mcp_servers]]\nname = "fixture-mcp"\ntransport = "stdio"\n'
+        + 'command = "python3"\nargs = ["--flag", "${SAFE_FLAG}"]\n',
+        encoding="utf-8",
+    )
+    [staged] = stage_native_harbor_tasks(
+        target,
+        tmp_path / "legacy-native-mcp-grants",
+        grading_mode="custom_only",
+        runtime_env={"SAFE_FLAG": "safe"},
+        verifier_env=verifier_env,
+    )
+    assert "${SAFE_FLAG}" in (staged / "task.toml").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("declaration", "hint"),
+    [
+        ('headers = { Authorization = "Bearer $SAFE_MCP_TOKEN" }\n', "${VAR}"),
+        ('headers = "CANARY_INVALID_SHAPE"\n', "field types"),
+        ('private_unsupported_field = "CANARY_INVALID_SHAPE"\n', "supported MCP field names"),
+    ],
+)
+def test_native_mcp_validation_hints_do_not_echo_authored_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declaration: str, hint: str
+) -> None:
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_HOSTS", "mcp.example.test")
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", "SAFE_MCP_TOKEN")
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
+    task_toml.write_text(
+        task_toml.read_text(encoding="utf-8")
+        + '\n[[environment.mcp_servers]]\nname = "fixture-mcp"\ntransport = "streamable-http"\n'
+        + 'url = "https://mcp.example.test/mcp"\n'
+        + declaration,
+        encoding="utf-8",
+    )
+    output = tmp_path / "native-mcp-safe-hints"
+    with pytest.raises(ValueError, match=r"MCP|mcp_servers") as error:
+        stage_native_harbor_tasks(target, output, grading_mode="custom_only")
+    message = str(error.value)
+    assert hint in message
+    assert "CANARY_INVALID_SHAPE" not in message
+    assert "private_unsupported_field" not in message
+    assert not output.exists()

@@ -1671,6 +1671,110 @@ as in `ls  # then run: echo x >> ~/.zprofile`.
 Other writes, such as `cp /tmp/x /home/agent/.bashrc` without a redirection
 or interpreter code that opens the file, do not receive the finding.
 
+Security findings keep credentials out of their `evidence`, which is saved in
+the verifier's `skill_evaluator_reward.json`, the collected results, and the
+reports. A sensitive-path or sensitive-file-write finding records only the
+protected entry it matched, such as `~/.bashrc` or `/root/.ssh`, never the
+command or tool input. When the text holds more than one entry, the longest
+wins, so a write to `/etc/profile.d/npm.sh` records `/etc/profile.d`, not
+`/etc/profile`. A path found through a home spelling, such as
+`/home/agent/.ssh/id_rsa` or `$HOME/.ssh`, records the `~/.ssh` entry, so the
+evidence holds no user name or home directory. The without-skill baseline
+comparison therefore matches these findings by entry: a with-skill write to
+`~/.bashrc` is attributed to the baseline prompt or environment when the
+baseline run also wrote to `~/.bashrc`, whatever each command wrote there.
+
+Destructive-command, network, prompt-injection, and refusal findings keep their
+command, prompt, or response text with credentials masked. The masking is a
+best effort over these forms. Public findings, private-plugin findings, and
+saved judge evidence use the same credential masker:
+
+- private key blocks, and the key shapes that log redaction masks, such as
+  `sk-`, `nvapi-`, `AKIA`, GitHub tokens, and JWTs;
+- URL user info, as in `https://user:token@host`, also when the password holds an
+  `@` (`https://user:p@ss@host`): the user info runs to the last `@` before the
+  host;
+- `Authorization` header values (the `Bearer`, `Basic`, `Token`, or `Digest`
+  word stays, and any other scheme, such as `ApiKey` or `SSWS`, is masked with
+  its value), API-key and token headers such as `X-API-Key`, and `Cookie`
+  header values. A quoted header value is masked to its closing quote; an
+  unquoted one, as in `curl -H Authorization:$TOKEN -d @.env URL`, is masked to
+  the end of its word, so the rest of the command stays readable;
+- the values of long flags whose name holds a credential word, such as
+  `--password`, `--token`, `--client-secret`, `--db-password`, or `--cookie`,
+  and a `curl -b name=value` cookie. A flag that takes a file or nothing, such
+  as `--password-stdin`, `--token-file`, or `--cookie-jar`, and token-count
+  flags `--max-tokens` and `--token-limit`, keep the word after them. A
+  `-b cookies.txt` cookie jar keeps its path too. A shell operator after a flag
+  is no value (`gh auth login --with-token < token.txt`);
+- a `-u`, `-U`, `--user`, or `--proxy-user` value that holds a colon, such as
+  `user:password` or an API key with an empty password (`KEY:`), also attached
+  (`-uuser:password`) or at the end of a flag group (`curl -su user:password`);
+  `python -u`, `pip --user`, a URL such as `pip install -U git+https://...`,
+  a remote path such as `rsync -u host:/data`, and a date format such as
+  `date -u +%H:%M:%S` are left alone;
+- `-p` after a login subcommand (`docker login -u bot -p ...`, also attached as
+  `-p...`) or `sshpass`, and attached to a MySQL client run by name or from a
+  `bin` directory (`mysql -p...`); `mkdir -p`, `ssh -p 2222`,
+  `git log --author=login -p`, and `find /var/lib/mysql -path ...` are left
+  alone;
+- the same flags as elements of an argument list, as in
+  `subprocess.run(["tool", "--password", "..."])`: the element after a
+  credential flag, after `-u`, `--user`, or `--proxy-user` when it holds a
+  colon, after `-b` when it holds `=`, and after `-p` that follows a `login`
+  element or comes right after an `sshpass` element, and an attached `-p...`
+  element after a `login` or MySQL client element, also when each element is
+  on its own line;
+- credentials set with `aws configure set`, `npm config set` (or `npm set`),
+  `pnpm config set`, `yarn config set`, or `git config`, also after options
+  such as `--location=global` (`_authToken`, `npmAuthToken`, `github.token`);
+  `git config --get` and `--unset` take no value. A `.netrc` `password` value
+  is masked too, also when the entry spans lines in a here-document or a
+  `printf` string;
+- values assigned to a credential name, such as `_authToken=...`,
+  `aws_secret_access_key = ...`, `"password": "..."`, `token := "..."`,
+  `os.environ["API_KEY"] = "..."`, `PASS=...`, `DB_PASS=...`, or
+  `MYSQLPWD=...`, also JSON-escaped inside a shell string. A bare `PASS` is
+  left alone as test output or a counter, such as `PASS: 3`,
+  `--- PASS: TestName`, `PASS=0`, or `"pass": true`, but OpenSSL's `pass:...`
+  and a quoted `"pass"` key or value are masked. Inside a quoted string,
+  wherever the name sits in it, the value runs to the closing quote, a `\n`
+  escape, or the `&` before the next field of a form body, so the values in
+  `echo '  password: correct horse battery staple'`,
+  `curl -d "username=bob&password=..."`, and
+  `curl -d'username=bob&password=...'` are masked whole. Inside a `sh -c` or
+  `eval` string, a remote `ssh` command, or a `node`, `perl`, or `ruby` `-e`
+  program, a value is one word, so the command after it stays readable. A
+  name that ends in `_URL`, `_DIR`, `_PATH`, `_FILE`, or a similar location
+  word keeps its value unless it also names a secret or password, as do
+  `token_type` and a count such as `max_tokens=100`. `grep "token=" ...`
+  keeps the rest of the command, because that quote closes the pattern;
+- `ghp_`-style, `github_pat_`, `glpat-`, `npm_`, `xox*-`, and `hf_` tokens. An
+  identifier such as `hf_hub_download` or `npm_config_registry` is left alone.
+
+Escaped quotes inside double-quoted values are consumed with the value. Shell
+backslash-newline continuations are joined before masking; ordinary newlines
+are preserved.
+
+A credential in another form can still appear, such as free prose (`my password
+is ...` or `use token ...`), a `.pgpass` line, a standalone `pypi-` token, URL
+query parameters named only `key`, `sig`, or `signature`, a `redis-cli -a` or
+`unzip -P` password, a
+password after an unknown flag, an unquoted `PASS: value`, an `npm config set`
+option with a separate value (`--location global`), or all but the first word
+of a value with spaces on an unquoted here-document line or inside a `sh -c`
+or `ssh` command string. Some ordinary words are masked, such as the
+path in `grep -r token: /etc`, the words after a `.netrc`-like
+`login NAME password` phrase in prose, or, after an unmatched quote, the rest
+of the line after a credential name. Quotes are read from the start of each
+line, and unlike in a shell, a line break ends a quoted string here, so a
+quoted value ends at its closing quote or at the end of its line.
+For security findings, only the first 2,000 characters are scanned. Judge
+evidence retains the separate judge evidence budgets described above.
+A word that the security-finding scan limit cuts in
+half is replaced with `<truncated>`, keeping a URL's scheme and host. The
+evidence is then cut to 500 characters, or 300 for prompt and response text.
+
 `token_efficiency` is a standalone report signal, not a dimension source. It
 never changes a dimension score or the overall verdict.
 

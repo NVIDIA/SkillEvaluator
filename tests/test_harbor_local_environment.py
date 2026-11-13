@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import logging
 import os
 import shutil
@@ -249,15 +250,42 @@ def test_local_parent_logs_transfers_fail_before_mutating_files(
     assert role_log.read_text() == "retained role log"
 
 
-def _record_harbor_directory_downloads(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
-    """Replace Harbor's tar/find downloads so a test sees whether they were reached."""
+def _stub_harbor_directory_downloads(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Replace Harbor's tar/find downloads with a host copy that honors the filters.
+
+    Harbor stages its transfer archive under /tmp, which local mode refuses, so
+    the real implementations cannot finish here. The stand-ins record each call
+    and copy the selected files, so a test can check what reached the target.
+    """
     reached: list[tuple[str, str]] = []
+
+    def copy_selected(
+        environment: SkillEvaluatorLocalEnvironment, source_dir: str, target_dir: Path | str, keep
+    ) -> None:
+        source = environment._resolve_path(source_dir)
+        target = Path(target_dir)
+        target.mkdir(parents=True, exist_ok=True)
+        for path in sorted(source.rglob("*")):
+            relative = path.relative_to(source)
+            if path.is_file() and keep(relative.as_posix()):
+                (target / relative).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, target / relative)
 
     async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
         reached.append(("excluded", source_dir))
+        copy_selected(self, source_dir, target_dir, lambda name: not any(fnmatch.fnmatch(name, p) for p in exclude))
 
     async def download_dir_filtered(self, *, source_dir, target_dir, include=None, exclude=None, protect=None):
         reached.append(("filtered", source_dir))
+        copy_selected(
+            self,
+            source_dir,
+            target_dir,
+            lambda name: (
+                any(fnmatch.fnmatch(name, p) for p in include or ["*"])
+                and not any(fnmatch.fnmatch(name, p) for p in exclude or [])
+            ),
+        )
 
     monkeypatch.setattr(BaseEnvironment, "download_dir_with_exclusions", download_dir_with_exclusions)
     monkeypatch.setattr(BaseEnvironment, "download_dir_filtered", download_dir_filtered)
@@ -280,7 +308,7 @@ async def _download_directory(
 
 @pytest.mark.skipif(os.name == "nt", reason="Native Windows local mode is unsupported")
 @pytest.mark.parametrize("transfer", ["download", "excluded", "filtered"])
-@pytest.mark.parametrize("spelling", ["workspace", "logs", "home", "relative", "absolute"])
+@pytest.mark.parametrize("spelling", ["workspace", "logs", "home", "relative", "absolute", "symlink"])
 def test_local_directory_downloads_reject_sources_outside_the_run_directory(
     local_output_environment: SkillEvaluatorLocalEnvironment,
     monkeypatch: pytest.MonkeyPatch,
@@ -290,7 +318,7 @@ def test_local_directory_downloads_reject_sources_outside_the_run_directory(
 ) -> None:
     """Every directory download applies the allowed-roots check, not only download_dir."""
     environment = local_output_environment
-    reached = _record_harbor_directory_downloads(monkeypatch)
+    reached = _stub_harbor_directory_downloads(monkeypatch)
     outside = tmp_path.resolve() / "outside"
     outside.mkdir()
     secret = outside / "secret.txt"
@@ -305,6 +333,11 @@ def test_local_directory_downloads_reject_sources_outside_the_run_directory(
     }
     if spelling == "absolute":
         source = str(outside)
+    elif spelling == "symlink":
+        # A link inside the run directory must not lead out of it either.
+        environment._workspace.mkdir(parents=True, exist_ok=True)
+        (environment._workspace / "escape").symlink_to(outside, target_is_directory=True)
+        source = "/workspace/escape"
     else:
         prefix, host_base = mapped[spelling]
         relative = os.path.relpath(outside, host_base)
@@ -328,11 +361,15 @@ def test_local_directory_downloads_still_accept_sources_inside_the_run_directory
     tmp_path: Path,
     transfer: str,
 ) -> None:
+    """Sources inside the run directory keep their files, and the filters still apply."""
     environment = local_output_environment
-    reached = _record_harbor_directory_downloads(monkeypatch)
+    reached = _stub_harbor_directory_downloads(monkeypatch)
     kept = environment._workspace / "kept"
-    kept.mkdir(parents=True)
+    (kept / "nested").mkdir(parents=True)
     (kept / "answer.txt").write_text("inside", encoding="utf-8")
+    (kept / "notes.md").write_text("notes", encoding="utf-8")
+    (kept / "run.log").write_text("noise", encoding="utf-8")
+    (kept / "nested" / "summary.txt").write_text("nested", encoding="utf-8")
     (environment._workspace / "skills").mkdir()
     # ".." that stays inside the run directory is fine; only escaping it is not.
     source = "/workspace/skills/../kept"
@@ -340,11 +377,18 @@ def test_local_directory_downloads_still_accept_sources_inside_the_run_directory
 
     asyncio.run(_download_directory(environment, transfer, source, target))
 
-    if transfer == "download":
-        assert reached == []
-        assert (target / "answer.txt").read_text(encoding="utf-8") == "inside"
-    else:
-        assert reached == [(transfer, source)]
+    expected = {
+        "download": {"answer.txt": "inside", "notes.md": "notes", "run.log": "noise", "nested/summary.txt": "nested"},
+        "excluded": {"answer.txt": "inside", "notes.md": "notes", "nested/summary.txt": "nested"},
+        "filtered": {"answer.txt": "inside", "nested/summary.txt": "nested"},
+    }[transfer]
+    downloaded = {
+        path.relative_to(target).as_posix(): path.read_text(encoding="utf-8")
+        for path in sorted(target.rglob("*"))
+        if path.is_file()
+    }
+    assert downloaded == expected
+    assert reached == ([] if transfer == "download" else [(transfer, source)])
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Native Windows local mode is unsupported")

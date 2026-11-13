@@ -56,7 +56,7 @@ def run_public_plugin_validation(
         result.add_error(f"Unknown Tier 1 check(s): {', '.join(sorted(unknown))}")
         return [result]
     active = enabled - skipped
-    selected = active - {"dependency"}
+    selected = active - {"dependency", "harness"}
     if "code-integrity" in active:
         selected |= {"hygiene", "secrets"} - skipped
     selected = frozenset(selected)
@@ -161,6 +161,16 @@ def run_public_plugin_validation(
         if loaded_waivers.applied:
             waiver_result.add_message(f"PII waivers suppressed {len(loaded_waivers.applied)} reviewed PII value(s)")
         results.append(waiver_result)
+    if "harness" in active:
+        # Native-plugin profiles are exposed through harness-check; combined
+        # validation does not yet run that separate advisory.
+        harness = ValidationResult(validator_name="Harness Compatibility", metadata={"plugin_check": "harness"})
+        harness.add_success(
+            "harness_applicability",
+            "Not applicable in combined validation; use harness-check to assess native plugin loading.",
+            not_applicable=True,
+        )
+        results.append(harness)
     public_names = {
         "Private Manifest and Component Checks": "Plugin Schema & Component Checks",
         "Private Tree Coverage": "Plugin Tree Coverage",
@@ -200,7 +210,7 @@ def run_public_plugin_validation(
         elif result.validator_name == "Dependency Vulnerability Audit":
             check = "dependency"
         public.stamp_publication_evidence([result], tier=1, check_id=check)
-        public.stamp_tier1_required_checks([result], skill_like=False)
+        public.stamp_tier1_required_checks([result], skill_like=skill_members_present)
     omitted = [(check, name) for check in enabled & skipped for name in public._SKIPPED_VALIDATORS[check]]
     if "code-integrity" in active and "secrets" in skipped:
         omitted.append(("code-integrity", "Secrets Detection"))
@@ -214,7 +224,7 @@ def run_public_plugin_validation(
             },
         )
         public.stamp_publication_evidence([result], tier=1, check_id=check)
-        public.stamp_tier1_required_checks([result], skill_like=False)
+        public.stamp_tier1_required_checks([result], skill_like=skill_members_present)
         results.append(result)
     public._stamp_tier1_scan_scope(results, root)
     public.finalize_publication_target(results, root, initial_target)

@@ -2130,10 +2130,10 @@ def _finish_pipeline_view(
             by_tier.setdefault((result.metadata.get("gating") or {}).get("tier"), []).append(result)
         parts = []
         for tier_no, results in by_tier.items():
-            broken = sum(1 for r in results if not r.is_incomplete)
+            broken = sum(1 for r in results if context.result_statuses[id(r)] != "incomplete")
             counts = [
                 f"{broken} failed" if broken else "",
-                f"{len(results) - broken} didn't run" if broken < len(results) else "",
+                f"{len(results) - broken} incomplete" if broken < len(results) else "",
             ]
             parts.append((f"Tier {tier_no}: " if tier_no is not None else "") + ", ".join(c for c in counts if c))
         headline = " · ".join(parts) or "validation failed"

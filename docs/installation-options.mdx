@@ -214,7 +214,10 @@ Missing required scanner evidence is reported as `INCOMPLETE`.
 
   SkillEvaluator 1.0.1 accepts an automatically discovered SkillSpector only when it
   matches the pinned version; otherwise it provisions the pinned release.
-  Explicit scanner path overrides are checked separately. To manage the tools yourself:
+  A rejected installed version and the selected fallback are reported explicitly.
+  An absolute `SKILLEVALUATOR_SKILLSPECTOR_PATH` override keeps the chosen
+  executable and is not replaced by automatic version selection. Installed
+  Semgrep and Gitleaks executables retain their normal precedence. To manage the tools yourself:
 
   ```bash title="Optional scanner installation"
   uv tool install semgrep

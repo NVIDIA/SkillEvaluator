@@ -722,13 +722,15 @@ class QualityScoreValidator(ValidatorBase):
             desc = str(frontmatter.get("description", "")).strip()
 
         if desc:
-            if len(desc) < 20:
-                dim.deduct(
-                    20,
-                    "warning",
-                    f"Description too short ({len(desc)} chars, recommend 50-150)",
-                    "Add more context: what tasks does this skill handle?",
-                )
+            too_short = self.quality_config["discoverability"]["description_too_short"]
+            if len(desc) < too_short["min_chars"]:
+                if too_short["points"]:
+                    dim.deduct(
+                        too_short["points"],
+                        "warning",
+                        f"{too_short['message']}: {len(desc)} chars, minimum {too_short['min_chars']}",
+                        too_short["suggestion"],
+                    )
             elif len(desc) > 200:
                 dim.deduct(
                     5,

@@ -76,12 +76,28 @@ class EfficiencyConfig(TypedDict):
     token_budget: TokenBudgetRule
 
 
+class DescriptionTooShortRule(TypedDict):
+    """Deduction when the frontmatter description is shorter than min_chars."""
+
+    points: int | float
+    message: str
+    suggestion: str
+    min_chars: int
+
+
+class DiscoverabilityConfig(TypedDict):
+    """Discoverability rules; a rule with points 0 is skipped."""
+
+    description_too_short: DescriptionTooShortRule
+
+
 class QualityConfig(TypedDict):
     """Validated deterministic quality configuration."""
 
     expected_headers: list[ExpectedHeader]
     error_handling: ErrorHandlingConfig
     efficiency: EfficiencyConfig
+    discoverability: DiscoverabilityConfig
 
 
 class QualityConfigProvenance(TypedDict):
@@ -157,6 +173,9 @@ _RULE_SECTIONS: dict[str, dict[str, _RuleSetting]] = {
     },
     "efficiency": {
         "token_budget": ("max_tokens", _validate_positive_int),
+    },
+    "discoverability": {
+        "description_too_short": ("min_chars", _validate_positive_int),
     },
 }
 _TOP_LEVEL_KEYS = frozenset({"expected_headers", *_RULE_SECTIONS})

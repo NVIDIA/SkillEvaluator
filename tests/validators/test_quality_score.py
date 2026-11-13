@@ -1776,6 +1776,87 @@ class TestEfficiencyTokenBudgetConfig:
         assert "recommended_max_tokens" not in QualityScoreResult(skill_name="test").to_dict()["metrics"]
 
 
+def _write_described_skill(tmp_path: Path, description: str) -> Path:
+    skill_dir = tmp_path / "described-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: described-skill\ndescription: {description}\n---\n\n"
+        "# Described Skill\n\n## Instructions\n\n1. Run the skill\n",
+        encoding="utf-8",
+    )
+    return skill_dir
+
+
+def _short_description_issues(result) -> list[dict]:
+    issues = result.metadata["quality_scores"]["dimensions"]["discoverability"]["issues"]
+    return [issue for issue in issues if "chars, minimum" in issue["message"]]
+
+
+class TestDiscoverabilityDescriptionTooShortConfig:
+    def test_packaged_rule_fires_only_below_20_characters(self, tmp_path: Path):
+        at_minimum = _validate_with(_write_described_skill(tmp_path / "at", "Use for parsing logs"), tmp_path)
+        below = _validate_with(_write_described_skill(tmp_path / "below", "Use for parsing log"), tmp_path)
+
+        assert _short_description_issues(at_minimum) == []
+        (issue,) = _short_description_issues(below)
+        assert issue["message"] == "Description too short (recommend 50-150 chars): 19 chars, minimum 20"
+        assert issue["suggestion"] == "Add more context: what tasks does this skill handle?"
+        assert issue["deduction"] == 20
+        assert issue["severity"] == "warning"
+
+    def test_length_ignores_surrounding_whitespace(self, tmp_path: Path):
+        result = _validate_with(_write_described_skill(tmp_path, '"   Use for logs        "'), tmp_path)
+
+        (issue,) = _short_description_issues(result)
+        assert issue["message"].endswith(": 12 chars, minimum 20")
+
+    def test_custom_minimum_moves_the_threshold(self, tmp_path: Path):
+        skill_dir = _write_described_skill(tmp_path, "Use for parsing application logs")
+        config = "discoverability:\n  description_too_short:\n    min_chars: {}\n"
+
+        raised = _validate_with(skill_dir, tmp_path, config.format(40))
+        default = _validate_with(skill_dir, tmp_path)
+
+        (issue,) = _short_description_issues(raised)
+        assert issue["message"].endswith(": 32 chars, minimum 40")
+        assert _short_description_issues(default) == []
+
+    def test_custom_points_message_and_suggestion_are_used(self, tmp_path: Path):
+        config = (
+            "discoverability:\n  description_too_short:\n    points: 7\n"
+            "    message: Description is too thin\n    suggestion: Say what it does and when\n"
+        )
+
+        result = _validate_with(_write_described_skill(tmp_path, "Use for logs"), tmp_path, config)
+
+        (issue,) = _short_description_issues(result)
+        assert issue["message"] == "Description is too thin: 12 chars, minimum 20"
+        assert issue["suggestion"] == "Say what it does and when"
+        assert issue["deduction"] == 7
+
+    def test_zero_points_turns_the_rule_off_without_changing_other_rules(self, tmp_path: Path):
+        skill_dir = _write_described_skill(tmp_path, "Use for logs")
+        default = _validate_with(skill_dir, tmp_path)
+
+        disabled = _validate_with(skill_dir, tmp_path, "discoverability:\n  description_too_short:\n    points: 0\n")
+
+        def other_issues(result) -> list[str]:
+            issues = result.metadata["quality_scores"]["dimensions"]["discoverability"]["issues"]
+            return [issue["message"] for issue in issues if "chars, minimum" not in issue["message"]]
+
+        assert _short_description_issues(disabled) == []
+        assert other_issues(disabled) == other_issues(default)
+        scores = [r.metadata["quality_scores"]["dimensions"]["discoverability"]["score"] for r in (default, disabled)]
+        assert scores[1] == scores[0] + 20
+
+    def test_missing_description_is_not_reported_as_too_short(self, tmp_path: Path):
+        skill_dir = tmp_path / "undescribed-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("---\nname: undescribed-skill\n---\n\n# Undescribed\n", encoding="utf-8")
+
+        assert _short_description_issues(_validate_with(skill_dir, tmp_path)) == []
+
+
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])
 @pytest.mark.parametrize(
     "extra_yaml",

@@ -54,3 +54,14 @@ efficiency:
     message: "Large skill. Per agentskills.io, SKILL.md should be concise (~500 lines) — large skill bodies increase token cost after invocation; long or unfocused top-level descriptions can degrade agent routing accuracy"
     suggestion: "Keep required sections concise; move detailed examples, reference material, and supporting docs to the references/ directory"
     max_tokens: 5000
+
+# Discoverability rules. They overlay the same way as error_handling and efficiency.
+discoverability:
+  # The frontmatter description, with surrounding whitespace removed, has fewer than min_chars
+  # characters. A skill with no description is not checked here. The finding appends the
+  # length and the minimum to the message.
+  description_too_short:
+    points: 20
+    message: "Description too short (recommend 50-150 chars)"
+    suggestion: "Add more context: what tasks does this skill handle?"
+    min_chars: 20

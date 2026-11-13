@@ -107,6 +107,17 @@ All notable changes to SkillEvaluator are documented in this file.
   cannot be confirmed stopped after a timeout or interruption, no further arm starts
   beside it and the failure is reported. After a timeout, the failed run still keeps
   the scores of the arms that finished.
+- Add a `discoverability` section to the `--quality-config` file with a
+  `description_too_short` rule, so the 20-character minimum for the
+  frontmatter description is no longer fixed in code. The rule sets
+  `min_chars`, `points`, `message`, and `suggestion`; `points: 0` turns it off.
+  The section is optional and overlays the packaged values the same way
+  `error_handling` and `efficiency` do. Scores are unchanged without a custom
+  file. The finding message is reworded: the length and the minimum now follow
+  the message (`Description too short (recommend 50-150 chars): 12 chars,
+  minimum 20`). The packaged `quality_config` digest changes once, because
+  `quality-default.yaml` gained the section. The other Discoverability rules
+  stay in code for now.
 - Add an `efficiency` section to the `--quality-config` file with a
   `token_budget` rule, so the 5,000-token recommendation for `SKILL.md` is no
   longer fixed in code. The rule sets `max_tokens`, `points`, `message`, and

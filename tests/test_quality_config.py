@@ -567,3 +567,64 @@ def test_custom_digest_declares_only_the_efficiency_keys_the_file_sets(tmp_path:
     assert _digest(both_sections) == quality_config_digest(
         {"efficiency": {"token_budget": {"max_tokens": 8000}}, "error_handling": {"lib": {"points": 0}}}
     )
+
+
+PACKAGED_DESCRIPTION_TOO_SHORT = {
+    "points": 20,
+    "message": "Description too short (recommend 50-150 chars)",
+    "suggestion": "Add more context: what tasks does this skill handle?",
+    "min_chars": 20,
+}
+
+
+def test_packaged_description_too_short_matches_former_hard_coded_values() -> None:
+    rule = load_quality_config()["discoverability"]["description_too_short"]
+
+    assert rule == PACKAGED_DESCRIPTION_TOO_SHORT
+    assert type(rule["points"]) is int
+
+
+def test_custom_file_with_only_a_description_minimum_keeps_every_other_packaged_value(tmp_path: Path) -> None:
+    config_path = tmp_path / "quality.yaml"
+    config_path.write_text("discoverability:\n  description_too_short:\n    min_chars: 40\n", encoding="utf-8")
+    packaged = load_quality_config()
+
+    config = load_quality_config(config_path)
+
+    assert config["discoverability"]["description_too_short"] == {**PACKAGED_DESCRIPTION_TOO_SHORT, "min_chars": 40}
+    assert {key: value for key, value in config.items() if key != "discoverability"} == {
+        key: value for key, value in packaged.items() if key != "discoverability"
+    }
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        ("discoverability: []\n", r"discoverability must be a mapping"),
+        ("discoverability:\n  description_too_long: {}\n", r"unknown key\(s\) in discoverability: description_too_long"),
+        ("discoverability:\n  description_too_short: 20\n", r"discoverability\.description_too_short must be a mapping"),
+        (
+            "discoverability:\n  description_too_short:\n    min_char: 30\n",
+            r"unknown key\(s\) in discoverability\.description_too_short: min_char "
+            r"\(allowed: message, min_chars, points, suggestion\)",
+        ),
+        ("discoverability:\n  description_too_short:\n    min_chars: 0\n", r"\.min_chars must be a positive integer"),
+        ("discoverability:\n  description_too_short:\n    min_chars: 20.5\n", r"\.min_chars must be a positive integer"),
+        ("discoverability:\n  description_too_short:\n    min_chars: true\n", r"\.min_chars must be a positive integer"),
+        ("discoverability:\n  description_too_short:\n    points: -5\n", r"\.points must be a non-negative"),
+    ],
+)
+def test_quality_config_rejects_invalid_discoverability(tmp_path: Path, body: str, match: str) -> None:
+    config_path = _write_config(tmp_path, body)
+
+    with pytest.raises(QualityConfigError, match=rf"^{tmp_path}.*{match}"):
+        load_quality_config(config_path)
+
+
+def test_custom_digest_declares_only_the_discoverability_keys_the_file_sets(tmp_path: Path) -> None:
+    config_path = tmp_path / "quality.yaml"
+    config_path.write_text("discoverability: {description_too_short: {min_chars: 40}}\n", encoding="utf-8")
+
+    assert _digest(config_path) == quality_config_digest(
+        {"discoverability": {"description_too_short": {"min_chars": 40}}}
+    )

@@ -2080,7 +2080,11 @@ def _bedrock_refusal_fallback_model(model):
     if prefix is None or not _is_claude_5_5_or_later(model):
         return None
     target = _refusal_fallback_target(model)
-    return prefix.group(0) + target if target else None
+    if not target:
+        return None
+    # Compare the resolved Bedrock ID, not the configured leaf name, with the request model.
+    bedrock_target = prefix.group(0) + target
+    return None if bedrock_target == str(model).strip() else bedrock_target
 
 
 def _call_bedrock(prompt, model, max_tokens, temperature, timeout=90, provenance=None):

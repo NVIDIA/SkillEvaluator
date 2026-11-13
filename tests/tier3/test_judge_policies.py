@@ -235,6 +235,23 @@ def test_refusal_fallback_model_env_for_the_bedrock_judge(verifier, monkeypatch)
     assert client.converse.call_count == 1
 
 
+def test_bedrock_refusal_fallback_equal_to_the_request_model_is_not_sent(verifier, monkeypatch):
+    import boto3
+
+    monkeypatch.setenv("SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL", "claude-opus-5-5")
+    client = MagicMock()
+    client.converse.side_effect = [
+        {"stopReason": "content_filtered", "output": {"message": {"content": []}}},
+        {"stopReason": "content_filtered", "output": {"message": {"content": []}}},
+    ]
+    monkeypatch.setattr(boto3, "client", lambda *_args, **_kwargs: client)
+
+    with pytest.raises(verifier._JudgeRefusedError):
+        verifier._call_bedrock("prompt", "us.anthropic.claude-opus-5-5", 4096, 0.0)
+
+    assert [call.kwargs["modelId"] for call in client.converse.call_args_list] == ["us.anthropic.claude-opus-5-5"]
+
+
 @pytest.mark.parametrize(
     ("name", "value"), [("LLM_JUDGE_FALLBACK_POLICY", "replace"), ("LLM_JUDGE_RETRY_POLICY", "strict")]
 )

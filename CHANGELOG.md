@@ -6,6 +6,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- The README opens with a three-column **Get started** section: run the CLI
+  directly (`pip install skillevaluator`, then `skillevaluator validate`), add
+  checks to your repository with `skillevaluator ci init` or a CI template, or
+  install the agent skill with `npx skills add NVIDIA/SkillEvaluator`.
+
 - Add an `error_handling` section to the `--quality-config` file for
   Reliability's three error-handling rules: the `SKILL.md` mention check and
   the `scripts` and `lib` code checks. Each sets `points`, `message`,

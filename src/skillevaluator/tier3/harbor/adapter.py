@@ -1544,7 +1544,6 @@ def build_eval_base_image(
         f"    {_BASE_APT_PACKAGES} \\",
     ]
     if extra_apt:
-        lines[-1] += " \\"
         lines.append("    " + " ".join(extra_apt) + " \\")
     lines.append("    && rm -rf /var/lib/apt/lists/*")
 
@@ -3556,7 +3555,14 @@ def _custom_compose_path(environment_dir: Path) -> Path | None:
 
 
 _VERIFIER_DEPS = "ragas~=0.4.0 langchain-community<0.4.2 openai>=1.0 anthropic>=0.40 boto3>=1.34 idna>=3.10,<4"
+# Run this check with the interpreter and flags test.sh uses for eval.py (see
+# _write_test_sh). `python3 -I` ignores PYTHONPATH and the user site, so
+# packages installed only there fail the image build instead of every trial's
+# verifier. It covers each third-party module the verifier imports: idna at
+# startup, openai and ragas for RAGAS, and boto3 for the Bedrock judge.
 _VERIFIER_IMPORT_SMOKE = (
+    "import boto3, idna; "
+    "from openai import AsyncOpenAI; "
     "from ragas.llms.base import llm_factory; "
     "from ragas.messages import AIMessage, HumanMessage; "
     "from ragas.metrics.collections import AgentGoalAccuracyWithReference"
@@ -3569,13 +3575,17 @@ def _managed_run(command: str, *args: str) -> str:
     return "RUN " + json.dumps(["/bin/sh", "-c", _MANAGED_PATH_SHELL, "skillevaluator", command, *args])
 
 
-def _verifier_install_lines(extra_requirements: Sequence[str] = ()) -> list[str]:
-    """Install verifier and skill requirements in one resolver transaction."""
+def _verifier_install_lines(extra_requirements: Sequence[str] = (), *, import_check: bool = True) -> list[str]:
+    """Install verifier and skill requirements in one resolver transaction.
+
+    ``import_check=False`` skips the eval.py import check for custom_only
+    grading, whose test.sh never runs eval.py.
+    """
     requirements = [*_VERIFIER_DEPS.split(), *extra_requirements]
-    return [
-        _managed_run("python", "-m", "pip", "install", "--no-cache-dir", *requirements),
-        _managed_run("python", "-c", _VERIFIER_IMPORT_SMOKE),
-    ]
+    lines = [_managed_run("python", "-m", "pip", "install", "--no-cache-dir", *requirements)]
+    if import_check:
+        lines.append(_managed_run("python3", "-I", "-c", _VERIFIER_IMPORT_SMOKE))
+    return lines
 
 
 _WORKSPACE_SKILL_PATH = "COPY skills/ /workspace/skills/"
@@ -3948,6 +3958,7 @@ def _rebase_custom_dockerfile_content(
     include_repo: bool = False,
     include_repo_linked_root: bool = False,
     agent_workdir: str | None = None,
+    verifier_import_check: bool = True,
 ) -> tuple[str, str]:
     """Return custom Dockerfile content layered on top of the eval base image.
 
@@ -3966,7 +3977,7 @@ def _rebase_custom_dockerfile_content(
     rebased_content = _append_evaluator_runtime_lines(
         rebased_source + f"\n# SkillEvaluator: original base was {original_from}\n",
         [
-            *_verifier_install_lines(),
+            *_verifier_install_lines(import_check=verifier_import_check),
             *_runtime_copy_lines(
                 agent_config_lines,
                 include_input,
@@ -3994,12 +4005,13 @@ def _ensure_verifier_deps(
     include_repo: bool = False,
     include_repo_linked_root: bool = False,
     agent_workdir: str | None = None,
+    verifier_import_check: bool = True,
 ) -> None:
     """Append verifier deps and runtime COPY lines to a custom Dockerfile."""
     content = dockerfile_path.read_text(encoding="utf-8")
     restore_user = _dockerfile_final_explicit_user(content)
     user_prefix = "USER root\n" if restore_user is not None else ""
-    additions = f"\n{user_prefix}" + "\n".join(_verifier_install_lines()) + "\n"
+    additions = f"\n{user_prefix}" + "\n".join(_verifier_install_lines(import_check=verifier_import_check)) + "\n"
     updated = _append_evaluator_runtime_lines(
         content + additions,
         _runtime_copy_lines(
@@ -4184,6 +4196,7 @@ def _write_dockerfile(
     repo_context_exclude_paths: Sequence[Path] = (),
     agent_workdir: str | None = None,
     baseline_aliases_prevalidated: bool = False,
+    grading_mode: str = "default",
 ) -> None:
     """Generate a Dockerfile that installs skills into the container.
 
@@ -4195,6 +4208,7 @@ def _write_dockerfile(
     """
     env_dir = task_dir / "environment"
     env_dir.mkdir(parents=True, exist_ok=True)
+    verifier_import_check = grading_mode != "custom_only"
 
     if not has_skill and skill_path is not None and not baseline_aliases_prevalidated:
         _check_baseline_skill_candidates_do_not_alias_target(
@@ -4335,6 +4349,7 @@ def _write_dockerfile(
                         include_repo=include_repo,
                         include_repo_linked_root=include_repo_linked_root,
                         agent_workdir=agent_workdir,
+                        verifier_import_check=verifier_import_check,
                     )
                     if rebased is not None:
                         rebased_content, original_from = rebased
@@ -4352,6 +4367,7 @@ def _write_dockerfile(
                         include_repo=include_repo,
                         include_repo_linked_root=include_repo_linked_root,
                         agent_workdir=agent_workdir,
+                        verifier_import_check=verifier_import_check,
                     )
                 return
         finally:
@@ -4389,11 +4405,10 @@ def _write_dockerfile(
         f"    {_BASE_APT_PACKAGES} \\",
     ]
     if apt_pkgs:
-        dockerfile_lines[-1] += " \\"
         dockerfile_lines.append("    " + " ".join(apt_pkgs) + " \\")
     dockerfile_lines.append("    && rm -rf /var/lib/apt/lists/*")
 
-    dockerfile_lines.extend(["", *_verifier_install_lines(pip_reqs)])
+    dockerfile_lines.extend(["", *_verifier_install_lines(pip_reqs, import_check=verifier_import_check)])
 
     dockerfile_lines.extend(
         [
@@ -4525,7 +4540,6 @@ def _write_default_environment_dockerfile(
         f"    {_BASE_APT_PACKAGES} \\",
     ]
     if apt_pkgs:
-        dockerfile_lines[-1] += " \\"
         dockerfile_lines.append("    " + " ".join(apt_pkgs) + " \\")
     dockerfile_lines.append("    && rm -rf /var/lib/apt/lists/*")
     if include_verifier_deps:
@@ -4631,6 +4645,7 @@ def _prepare_native_environment(
                 include_repo=include_repo,
                 include_repo_linked_root=include_repo_linked_root,
                 agent_workdir=agent_workdir,
+                verifier_import_check=grading_mode != "custom_only",
             )
             if rebased is not None:
                 rebased_content, original_from = rebased
@@ -6325,6 +6340,7 @@ def _generate_harbor_tasks_into(
             repo_context_exclude_paths=effective_excluded_roots,
             agent_workdir=agent_workdir,
             baseline_aliases_prevalidated=baseline_aliases_prevalidated,
+            grading_mode=grading_mode,
         )
 
         task_dirs.append(case_id)

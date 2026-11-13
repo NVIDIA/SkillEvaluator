@@ -518,6 +518,13 @@ All notable changes to SkillEvaluator are documented in this file.
   rebuilt, with the LLM when a provider is configured, and its
   `what_to_fix.json` rewritten.
 
+- Generated Tier 3 images now build when any staged skill declares packages
+  in `apt-packages.txt`. The generated `apt-get install` line ended the base
+  package list with `\ \`, so the shell passed apt-get a package named " "
+  and the build failed with `Unable to locate package`. This affected the
+  shared eval base image, generated task Dockerfiles and the default
+  Dockerfile for native Harbor tasks.
+
 - Public MCP URL probes handle modern SDK client and stream APIs while retaining
   checked-address connections, header grants, response limits, and bounded
   cleanup. Redirect responses are refused before SDK-level redirect handling.
@@ -538,6 +545,17 @@ All notable changes to SkillEvaluator are documented in this file.
   `HARBOR_ARTIFACTS_DIR` on the same private staging tree. Artifact collection
   preserves source files and retained role logs; local whole-log-tree transfers
   fail before modifying their destination.
+
+- With default or default-plus-custom grading, a Tier 3 task image now fails
+  to build when `python3 -I` cannot import the verifier's packages: idna,
+  openai, ragas or boto3. This happens, for example, when a custom Dockerfile
+  sets `ENV PIP_USER=1`, or when the packages are reachable only through
+  `PYTHONPATH`. The build-time import check ran plain `python`, which sees
+  those locations. `test.sh` runs the verifier as `python3 -I`, which does not.
+  Such images built, and then every trial's verifier failed on `import idna`,
+  or the goal-accuracy judge fell back from RAGAS to the custom judge when only
+  ragas was hidden. The check now runs as `python3 -I`. `custom_only` grading
+  never runs that verifier, so its images no longer run the check.
 
 - Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
   the PR or merge request's target revision. Policy files from the proposed
@@ -820,8 +838,12 @@ All notable changes to SkillEvaluator are documented in this file.
   (`reference_unresolved` from v2.12.0), a fatal or other ledger row, an
   uninspected file, a degraded analyzer, a limitation, or fewer findings
   counted after filtering than before still leaves the scan `INCOMPLETE`.
-
-- Missing-reference coverage checks retain standalone shell wildcards while ignoring leading Markdown bullets, so commands cannot hide uninspected files.
+  Every missing reference must match an accepted ledger location; ambiguous
+  references, unknown completeness fields and truncated evidence remain
+  `INCOMPLETE`. Nonfatal exclusions must name real uninspected paths. Line
+  checks retain standalone shell wildcards and recognize escaped spaces, and
+  accepted-reference warnings survive static/LLM finding deduplication. A
+  refused reference includes a short acceptance hint and documentation link.
 
 - Estimate Tier 1 instruction tokens from the parsed Markdown body, so `---`
   inside YAML values or comments does not count frontmatter as instructions.

@@ -79,6 +79,16 @@ All notable changes to SkillEvaluator are documented in this file.
   equal concurrency/budget or judge-model agreement, and reused telemetry is
   historical. Scoring, raw deltas and reuse eligibility are unchanged.
 
+### Changed
+
+- Root help shows the SkillEvaluator wordmark in more terminals: the
+  one-line wordmark still needs 115 columns, 76-114 columns now get the same
+  letters stacked (SKILL over EVALUATOR), and 60-75 columns get a two-row
+  wordmark. Narrower terminals keep the plain title. A wordmark that the
+  terminal's output encoding cannot print is skipped: gbk and big5hkscs lack
+  the half blocks of the two-row one, so they get the plain title at 60-75
+  columns.
+
 ### Documentation
 
 - A new Metrics Reference page defines every number the CLI, HTML report, JSON
@@ -99,6 +109,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Code Risk Analysis reports Semgrep file-level parse errors as one partial-scan
+  error that names up to 20 unparsed files, relative to the skill and with the
+  line of the first error, instead of the first three truncated messages. The
+  check stays `incomplete` because Semgrep skips the code it cannot parse. The
+  JSON report lists the files in `semgrep_unparsed_files` (up to 1,000, with
+  `semgrep_unparsed_files_omitted` counting the rest); other Semgrep errors are
+  reported as before.
 - The supporting Tier 3 Pass@k table displays an unavailable or skipped
   baseline rate as `N/A`, preserving an observed baseline rate of `0%`.
 - Tier 3 budget summaries disclose measured usage above configured limits,
@@ -563,14 +580,6 @@ All notable changes to SkillEvaluator are documented in this file.
   include accessible descriptions, links to data tables and visible fallbacks
   when canvas initialization is unavailable; Tier 1 reports omit chart assets.
 
-- Root help shows the SkillEvaluator wordmark in more terminals: the
-  one-line wordmark still needs 115 columns, 76-114 columns now get the same
-  letters stacked (SKILL over EVALUATOR), and 60-75 columns get a two-row
-  wordmark. Narrower terminals keep the plain title. A wordmark that the
-  terminal's output encoding cannot print is skipped: gbk and big5hkscs lack
-  the half blocks of the two-row one, so they get the plain title at 60-75
-  columns.
-
 - Separate HTML Tier 2 evidence into within-skill and across-skill comparisons,
   with recorded completion, duplicate, affected-path, and catalog counts. Keep
   skipped or unavailable comparisons distinct from completed zero-match scans.
@@ -806,14 +815,6 @@ All notable changes to SkillEvaluator are documented in this file.
   and `--type skill` still validates the target as a skill.
 
 - The unknown-artifact CLI guidance links to the published content-types documentation route.
-
-- Code Risk Analysis reports Semgrep file-level parse errors as one partial-scan
-  error that names up to 20 unparsed files, relative to the skill and with the
-  line of the first error, instead of the first three truncated messages. The
-  check stays `incomplete` because Semgrep skips the code it cannot parse. The
-  JSON report lists the files in `semgrep_unparsed_files` (up to 1,000, with
-  `semgrep_unparsed_files_omitted` counting the rest); other Semgrep errors are
-  reported as before.
 
 - Security checks preserve authored evaluation files and their findings while
   excluding generated outputs. Fully inspected skills with only missing-path

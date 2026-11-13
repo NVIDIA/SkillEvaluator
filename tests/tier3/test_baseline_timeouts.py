@@ -867,10 +867,25 @@ def test_verdict_comes_from_the_complete_peer_not_a_tolerated_agent(
     assert f"> **Tier 3 completed-agent result: {verdict.upper()}**" in benchmark
     assert f"| Tier 3 | Live agent evaluation | **{verdict.upper()}** |" in benchmark
     assert lead in html
+    # The HTML overview says once that the tolerated baseline needs attention:
+    # in the completed-agent lead, or in its own note when the lead reads
+    # inconclusive, as BENCHMARK.md does in both cases.
+    overview = html.split('<div class="t3-overview-lead">', 1)[1].split("</div>", 1)[0]
+    lead_attention = "Other execution failures need attention."
+    tolerated_attention = "<strong>Needs attention:</strong> baseline timeouts were tolerated."
+    assert (lead_attention in overview) is (verdict == "fail")
+    assert (tolerated_attention in overview) is (verdict == "inconclusive")
+    assert "Baseline incomplete for <strong>opencode</strong> (1 of 2 attempts scored)" in overview
+    assert "**Needs attention:** other execution failures remain." in benchmark
     if verdict == "inconclusive":
         # The tolerated agent did activate the skill, so Insights names whose trials never did.
         assert payload["conclusions"][0]["message"].startswith(
             "The skill was never activated in any positive with-skill trial of an agent with a complete baseline."
+        )
+        entry = _changelog_entry("- `--tolerate-baseline-timeouts` (added in 0.9.0) now follows its own rules")
+        assert (
+            "`report.html` also keeps the note when its overview reads Inconclusive because the complete agent "
+            "never activated the skill." in entry
         )
     # The run verdict that `tier3 evaluate` prints reads the same agents.
     terminal = render_result(results)

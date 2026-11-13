@@ -4199,6 +4199,10 @@ from skillevaluator.tier3.grader_validation import validate_grader
 tier3.add_command(select_decoys_command, "select-decoys")
 tier3.add_command(validate_grader, "validate-grader")
 
+from skillevaluator.tier3.interaction_commands import interact_command
+
+tier3.add_command(interact_command, "interact")
+
 from skillevaluator.tier3.workflow import build_tier3_workflow
 
 tier3.workflow = build_tier3_workflow(evaluate)

@@ -1567,9 +1567,9 @@ the finding, and `echo "Step 1 -> check"; cat "$HOME/.zshrc"` does not. A
 double quote escaped with a backslash does not end the string, so
 `bash -c "echo x >> \"$HOME/.zprofile\""` receives the finding too. Quoted
 strings are found as the shell finds them: an escaped quote, as in
-`echo It\'s done`, starts none, and none starts in a `#` comment or a
-here-document body, where quotes pair within their line and a target ends
-with the line. So the apostrophe in `# Show what's in the profile` does not
+`echo It\'s done`, starts none, and in a `#` comment or a here-document
+body, quotes pair only within their line and a target ends with the line.
+So the apostrophe in `# Show what's in the profile` does not
 change how the commands after it are read. As the text is read as written,
 text that only holds a write to a protected file receives the finding, as it
 does for `~/.bashrc` under the earlier rule: printed text such as

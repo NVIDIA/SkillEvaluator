@@ -1131,7 +1131,10 @@ or gate.
   example a name that two dataset IDs cut to alike, which is never guessed.
   Such a row keeps its recorded name, is marked `case_id_in_dataset: false`,
   and every report shows it as an unverified case ID rather than as coverage
-  of a dataset case. A run with no dataset to check against carries no
+  of a dataset case. A table that renders no such row — the terminal table,
+  which shows no case rows, or one whose row caps or payload pruning dropped
+  them — names the unmatched case IDs instead of explaining a mark it does not
+  carry. A run with no dataset to check against carries no
   `case_id_validation` and claims nothing about its case IDs.
 - A run that reused an earlier run's baseline
   (`tier3 evaluate --reuse-baseline`) has `baseline_reused: true`. Its baseline

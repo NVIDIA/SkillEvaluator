@@ -686,3 +686,23 @@ def test_a_pass_at_k_case_named_by_its_cut_name_is_one_canonical_row() -> None:
     [row] = usage["agents"]["codex"]["cases"]
     assert row["entry_id"] == _LONG_CASE
     assert row["with_skill"]["coverage"]["expected_attempts"] == 2
+
+
+@pytest.mark.parametrize("cut_first", [True, False], ids=["cut-first", "dataset-id-first"])
+def test_two_pass_at_k_keys_for_one_case_merge_the_same_way_in_either_order(cut_first: bool) -> None:
+    # Harbor's cut name and the dataset ID canonicalize onto one case. Which
+    # record survives must not depend on the order the payload lists them in:
+    # the key that is already a dataset ID wins, whichever comes first.
+    agent = _agent([_trial(_LONG_CASE, 100, 20)], [_trial(_LONG_CASE, 90, 10)])
+    records = [(_CUT_CASE, {"attempts_skipped": 2}), (_LONG_CASE, {"attempts_skipped": 0})]
+    agent["pass_at_k"] = {
+        "with_skill": {"k": 3, "cases": dict(records if cut_first else reversed(records))},
+    }
+
+    usage = build_token_usage({"codex": agent}, dataset_case_ids=[_LONG_CASE])
+
+    assert usage is not None
+    [row] = usage["agents"]["codex"]["cases"]
+    assert row["entry_id"] == _LONG_CASE
+    assert row["with_skill"]["coverage"]["expected_attempts"] == 3
+

@@ -161,7 +161,11 @@ def _stop_on_pass_case(trial_id: str, case: str) -> bool:
 
 
 def _matching_case(label: str, trial_id: str, known_cases: set[str]) -> str:
-    """Map an unscored attempt to its case when exactly one case matches.
+    """Map an attempt to its case when exactly one case matches.
+
+    Every attempt is resolved against the dataset's IDs, scored or not: a
+    scored attempt whose ``entry_id`` fell back to Harbor's cut of the case
+    name needs the same canonicalization as an unscored one.
 
     ``label`` is the case directory the attempt's Harbor result names, or its
     trial name without Harbor's ``__<id>`` suffix. Without a known case of that
@@ -215,7 +219,10 @@ def _agent_attempts(agent: Mapping[str, Any], known_cases: set[str]) -> dict[str
             )
         for row in _rows(agent.get(usage_key)):
             scored = row.get("scored") is True
-            # A scored attempt names its case; an unscored one has its task directory or trial name.
+            # Scored or not, the name an attempt carries is its case directory,
+            # its recorded entry_id or its trial name, and any of the three may
+            # be Harbor's cut of the case name, so every one is resolved
+            # against the dataset's IDs.
             trial_id = row.get("trial_id")
             attempts[arm].append(
                 _Attempt(
@@ -265,11 +272,24 @@ def _arm_expected(agent: Mapping[str, Any], condition: str, observed: int) -> in
 
 
 def _pass_at_k_cases(agent: Mapping[str, Any], condition: str, known_cases: set[str]) -> dict[str, Mapping[str, Any]]:
-    """Return an arm's pass@k record per case, under the case names the rows use."""
-    cases: dict[str, Mapping[str, Any]] = {}
+    """Return an arm's pass@k record per case, under the case names the rows use.
+
+    Two keys can canonicalize onto one case, Harbor's cut of a name beside the
+    full name. Today's collector lists a dataset ID before an unmatched cut
+    name, so keeping the first would keep the canonical record, but that
+    ordering belongs to a neighbouring module and holds only while it has
+    expected case IDs. The merge here does not depend on it: a key that is
+    already a dataset ID wins, and otherwise the larger ``attempts_skipped``
+    does, so the merged row cannot claim attempts that never had to run.
+    """
+    ranked: dict[str, tuple[tuple[int, int], Mapping[str, Any]]] = {}
     for case, record in _mapping(_pass_at_k_branch(agent, condition).get("cases")).items():
-        cases.setdefault(_matching_case(str(case), "", known_cases), _mapping(record))
-    return cases
+        name = _matching_case(str(case), "", known_cases)
+        fields = _mapping(record)
+        rank = (int(str(case) in known_cases), _count(fields.get("attempts_skipped")) or 0)
+        if name not in ranked or rank > ranked[name][0]:
+            ranked[name] = (rank, fields)
+    return {name: fields for name, (_rank, fields) in ranked.items()}
 
 
 def _case_expected(

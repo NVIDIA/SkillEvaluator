@@ -1408,10 +1408,13 @@ def test_cli_checks_gym_settings_before_autopilot_writes_a_dataset(
 def test_missing_dataset_is_rejected_before_a_run_dir_is_reserved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from skillevaluator.tier3.harbor.runner import _MISSING_EVALS_DATASET_ERROR
+
     skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch)
     (skill / "evals" / "evals.json").unlink()
     result = _run_fake_gym(skill, tmp_path)
-    assert "No evals/evals.json found" in json.dumps(result)
+    # The same advice as Harbor: create-eval-dataset needs EVAL.md, --prompt or --grounding skill.
+    assert result == {"error": [_MISSING_EVALS_DATASET_ERROR]}
     results_root = tmp_path / "results"
     assert not results_root.exists() or not any(results_root.iterdir())
 

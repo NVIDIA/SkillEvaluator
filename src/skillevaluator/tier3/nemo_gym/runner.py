@@ -717,6 +717,7 @@ def run_nemo_gym_eval(
     from skillevaluator.tier3.harbor.progress import Tier3RunPlan
     from skillevaluator.tier3.harbor.report_data import dataset_snapshot_manifest
     from skillevaluator.tier3.harbor.runner import (
+        _MISSING_EVALS_DATASET_ERROR,
         _VERIFIER_JUDGE_CONTROL_ENV_VARS,
         _VERIFIER_JUDGE_MODEL_ENV_VARS,
         _apply_retention_outcome,
@@ -814,7 +815,7 @@ def run_nemo_gym_eval(
     if task_source == "native_harbor" and not (skill_path / "evals" / "harbor").is_dir():
         errors.append("No native Harbor task source found at evals/harbor.")
     if task_source == "evals_json" and find_evals_file(skill_path) is None:
-        errors.append("No evals/evals.json found. Run create-eval-dataset or add a dataset.")
+        errors.append(_MISSING_EVALS_DATASET_ERROR)
     if mcp_servers_declared(skill_path):
         errors.append(MCP_SERVERS_ERROR)
     if task_source == "native_harbor" and native_mcp_servers_declared(skill_path):

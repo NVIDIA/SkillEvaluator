@@ -275,7 +275,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     `validate` also shows a "Harness compatibility" panel after Tier 1, `! harness` in the checks line when a harness drops or degrades the skill, a `harness` line in the Tier 1 summary (kept out of the advisories count) and a note in the result box. `skillevaluator harness-check <skill>` runs only this check and shows the same panel, updated as each harness is checked. It accepts a folder of skills, `--harness`, `-v` and `--json PATH`, always exits 0, and points to `validate --tiers 1` when Tier 1 schema also fails. By default the panel is compact: one line per harness with its most serious finding (not loaded, then degraded, then note; ties go to the rule listed first in the profile) labelled with its outcome (`not found`, `rejected`, `listing shortened`, `delivery truncated` and so on), then `+N more` and the number of notes. `-v` (also on `validate`) lists every finding with its fix and each harness's verified version.
 
-    Frontmatter rules: duplicate keys and tab indentation (Codex, Copilot CLI, OpenClaw and OpenCode drop the skill), a UTF-8 BOM (Codex), no front matter (Copilot CLI), and long custom frontmatter that never reaches the model.
+    Frontmatter rules: duplicate keys (Codex, Copilot CLI, OpenClaw and OpenCode drop the skill), tab indentation (Codex, Copilot CLI and OpenClaw), a UTF-8 BOM (Codex), no front matter (Copilot CLI), and long custom frontmatter that never reaches the model.
   </Accordion>
 
   <Accordion title="security — vulnerability scanning">

@@ -141,8 +141,7 @@ def skill_facts(skill_path: Path) -> dict[str, Any]:
         "description_type": type(description).__name__ if description is not None else "none",
         "frontmatter_bom": raw.startswith(b"\xef\xbb\xbf"),
         "frontmatter_duplicate_keys": bool(_duplicate_frontmatter_keys(fm_yaml)),
-        "frontmatter_tab_indent": any(line.startswith("\t") for line in fm_yaml.splitlines()),
-        "yaml_lenient_only": False,
+        "frontmatter_tab_indent": any("\t" in line[: len(line) - len(line.lstrip())] for line in fm_yaml.splitlines()),
         "custom_fields": ", ".join(map(str, custom)),
         "custom_field_chars": sum(len(v) if isinstance(v, str) else len(yaml.safe_dump(v)) for v in custom.values()),
     }

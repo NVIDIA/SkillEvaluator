@@ -576,6 +576,165 @@ def test_native_tasks_reject_unstaged_parent_env_templates_in_every_harbor_scope
         )
 
 
+@pytest.mark.parametrize(
+    "scope",
+    [
+        "environment",
+        "verifier.environment",
+        "steps.verifier.environment",
+    ],
+)
+@pytest.mark.parametrize(
+    "header",
+    ["Bearer ${OPENAI_API_KEY}", "Bearer ${DEDICATED_MCP_TOKEN}", "plainPrivateCredential2024"],
+)
+def test_native_task_mcp_policy_is_checked_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str, header: str
+) -> None:
+    monkeypatch.delenv("SKILLEVALUATOR_ALLOWED_MCP_HOSTS", raising=False)
+    monkeypatch.delenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", raising=False)
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
+    step = '\n[[steps]]\nname = "step-one"\n' if scope.startswith("steps.") else ""
+    original = (
+        task_toml.read_text(encoding="utf-8")
+        + step
+        + f'\n[[{scope}.mcp_servers]]\nname = "remote-mcp"\ntransport = "streamable-http"\n'
+        + 'url = "https://mcp.example.test/mcp"\n'
+        + f"headers = {{ Authorization = {json.dumps(header)} }}\n"
+    )
+    task_toml.write_text(original, encoding="utf-8")
+    output = tmp_path / "native-mcp-output"
+    output.mkdir()
+    (output / "previous.txt").write_text("previous publication", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"MCP|mcp_servers") as error:
+        stage_native_harbor_tasks(target, output, grading_mode="custom_only")
+
+    assert "plainPrivateCredential2024" not in str(error.value)
+    assert task_toml.read_text(encoding="utf-8") == original
+    assert [path.name for path in output.iterdir()] == ["previous.txt"]
+    assert (output / "previous.txt").read_text(encoding="utf-8") == "previous publication"
+
+
+@pytest.mark.parametrize("header", ["Bearer $DEDICATED_MCP_TOKEN", "Bearer ${DEDICATED_MCP_TOKEN}"])
+def test_generated_mcp_headers_parse_in_pinned_harbor_without_changing_rich_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, header: str
+) -> None:
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_HOSTS", "mcp.example.test")
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", "DEDICATED_MCP_TOKEN")
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    source = target / "evals" / "environment" / "mcp_servers.toml"
+    original = (
+        '[[mcp_servers]]\nname = "remote-mcp"\ntransport = "streamable-http"\n'
+        'url = "https://mcp.example.test/mcp"\n'
+        f"headers = {{ Authorization = {json.dumps(header)} }}\n"
+    )
+    source.write_text(original, encoding="utf-8")
+
+    [staged] = generate_harbor_tasks(target, tmp_path / "generated-mcp")
+
+    config = TaskConfig.model_validate_toml((staged / "task.toml").read_text(encoding="utf-8"))
+    assert config.environment.mcp_servers[0].headers == {"Authorization": "Bearer ${DEDICATED_MCP_TOKEN}"}
+    rich_servers = json.loads((staged / "mcp_servers.json").read_text(encoding="utf-8"))
+    assert rich_servers[0]["headers"] == {"Authorization": header}
+    assert source.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize(
+    "authored_config",
+    [
+        'mcp_servers = { name = "remote-mcp" }\n',
+        'mcp_servers = ["private-malformed-value"]\n',
+        '[[environment.mcp_servers]]\nname = "remote-mcp"\nurl = "https://mcp.example.test/mcp"\n'
+        'headers = "private-malformed-value"\n',
+        '[[environment.mcp_servers]]\nname = "remote-mcp"\nurl = "https://mcp.example.test/mcp"\n'
+        'unsupported_field = "private-malformed-value"\n',
+    ],
+)
+def test_native_tasks_reject_malformed_or_unsupported_mcp_without_echoing_values(
+    tmp_path: Path, authored_config: str
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
+    original = task_toml.read_text(encoding="utf-8") + authored_config
+    task_toml.write_text(original, encoding="utf-8")
+    output = tmp_path / "native-invalid-mcp"
+
+    with pytest.raises(ValueError, match="mcp_servers") as error:
+        stage_native_harbor_tasks(target, output, grading_mode="custom_only")
+
+    assert "private-malformed-value" not in str(error.value)
+    assert task_toml.read_text(encoding="utf-8") == original
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("transport", ["streamable-http", "stdio"])
+def test_native_tasks_preserve_approved_mcp_and_safe_runtime_references(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transport: str
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
+    if transport == "streamable-http":
+        monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_HOSTS", "mcp.example.test")
+        monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", "DEDICATED_MCP_TOKEN")
+        declaration = (
+            'url = "https://mcp.example.test/mcp"\nheaders = { Authorization = "Bearer ${DEDICATED_MCP_TOKEN}" }\n'
+        )
+    else:
+        declaration = 'command = "python3"\nargs = ["--flag", "${SAFE_FLAG}"]\n'
+    original = (
+        task_toml.read_text(encoding="utf-8")
+        + f'[[environment.mcp_servers]]\nname = "fixture-mcp"\ntransport = "{transport}"\n'
+        + declaration
+    )
+    task_toml.write_text(original, encoding="utf-8")
+
+    [staged] = stage_native_harbor_tasks(target, tmp_path / "native-approved-mcp", runtime_env={"SAFE_FLAG": "yes"})
+
+    config = TaskConfig.model_validate_toml((staged / "task.toml").read_text(encoding="utf-8"))
+    server = config.environment.mcp_servers[0]
+    if transport == "streamable-http":
+        assert server.headers == {"Authorization": "Bearer ${DEDICATED_MCP_TOKEN}"}
+    else:
+        assert server.args == ["--flag", "${SAFE_FLAG}"]
+    assert task_toml.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "Bearer $${DEDICATED_MCP_TOKEN}",
+        "Bearer $$DEDICATED_MCP_TOKEN",
+        "Bearer ${DEDICATED_MCP_TOKEN:-private-fallback}",
+        "Bearer ${DEDICATED_MCP_TOKEN",
+    ],
+)
+def test_generated_mcp_header_normalization_keeps_escaped_and_malformed_templates_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, header: str
+) -> None:
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_HOSTS", "mcp.example.test")
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", "DEDICATED_MCP_TOKEN")
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    source = target / "evals" / "environment" / "mcp_servers.toml"
+    original = (
+        '[[mcp_servers]]\nname = "remote-mcp"\ntransport = "streamable-http"\n'
+        'url = "https://mcp.example.test/mcp"\n'
+        f"headers = {{ Authorization = {json.dumps(header)} }}\n"
+    )
+    source.write_text(original, encoding="utf-8")
+    output = tmp_path / "generated-invalid-mcp"
+
+    with pytest.raises(ValueError, match="MCP"):
+        generate_harbor_tasks(target, output)
+
+    assert source.read_text(encoding="utf-8") == original
+    assert not output.exists()
+
+
 def test_native_tasks_allow_only_role_staged_host_env_templates(tmp_path: Path) -> None:
     _, target, _, _ = _write_projection_fixture(tmp_path)
     _write_minimal_native_task(target)
@@ -2446,6 +2605,12 @@ def test_final_projection_clears_effective_workdir_ancestors_and_home(tmp_path: 
     assert ".config/goose/skills" in dockerfile
     assert ".cline/skills" in dockerfile
     assert ".qwen/skills" in dockerfile
+    runtime_reset = next(line for line in dockerfile.splitlines() if line.startswith('RUN ["/bin/rm", "-rf"'))
+    runtime_mkdir = next(line for line in dockerfile.splitlines() if line.startswith('RUN ["/bin/mkdir", "-p"'))
+    assert '"/tmp/hermes"' in runtime_reset
+    assert '"/tmp/hermes/skills"' not in runtime_reset
+    assert '"/tmp/hermes"' not in runtime_mkdir
+    assert '"/tmp/hermes/skills"' not in runtime_mkdir
     assert "WORKDIR /opt/task/subdir" in dockerfile[final_projection:]
     assert dockerfile.rindex("current=$(/bin/pwd -P)") > dockerfile.rindex("COPY input/ /workspace/input/")
     task_toml = (task / "task.toml").read_text(encoding="utf-8")

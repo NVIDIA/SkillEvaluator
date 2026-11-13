@@ -1482,3 +1482,52 @@ class TestQualityScoreDeterministicContracts:
         )
 
         assert "Instructions lack clear action verbs" not in messages
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+@pytest.mark.parametrize(
+    "extra_yaml",
+    [
+        'description: "Use --- when separating sections in Markdown."\n',
+        'description: Use for testing instruction token estimates.\nmetadata:\n  notes: "first---second"\n',
+        "description: Use for testing instruction token estimates.\n# --- is not a frontmatter delimiter here\n",
+    ],
+)
+def test_instruction_token_estimate_uses_frontmatter_boundary(tmp_path, newline, extra_yaml):
+    skill_dir = tmp_path / "token-boundary"
+    skill_dir.mkdir()
+    body = "## Instructions\n\n- Run the documented task.\n"
+    frontmatter = "name: token-boundary\n" + extra_yaml
+    content = "---\n" + frontmatter + "---\n" + body
+    (skill_dir / "SKILL.md").write_bytes(content.replace("\n", newline).encode())
+
+    result = QualityScoreValidator(min_score=0).validate(skill_dir)
+    metrics = result.metadata["quality_scores"]["metrics"]
+
+    assert metrics["instructions_tokens"] == len(body) // 4
+    assert metrics["frontmatter_tokens"] == len(frontmatter.rstrip("\n")) // 4
+    assert metrics["total_tokens"] == len(content) // 4
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "## Instructions\n\n- Run the task.\n\n---\nSupporting prose.\n",
+        "---\nname: unclosed-frontmatter\n",
+        "---\nname: unclosed-frontmatter\n\n## Instructions\n\n- Run the task.\n\n---\nSupporting prose.\n",
+        "---\n---\n## Instructions\n\n- Run the task.\n\n---\nSupporting prose.\n",
+        "---\nname: [invalid-yaml\n---\n## Instructions\n\n- Run the task.\n",
+    ],
+    ids=["body-separator", "unclosed", "unclosed-with-body-separator", "empty-with-body-separator", "invalid-yaml"],
+)
+def test_instruction_tokens_do_not_infer_frontmatter_from_body_separators(tmp_path, content):
+    skill_dir = tmp_path / "no-frontmatter"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+
+    result = QualityScoreValidator(min_score=0).validate(skill_dir)
+    metrics = result.metadata["quality_scores"]["metrics"]
+
+    assert metrics["has_frontmatter"] is False
+    assert metrics["frontmatter_tokens"] == 0
+    assert metrics["instructions_tokens"] == 0

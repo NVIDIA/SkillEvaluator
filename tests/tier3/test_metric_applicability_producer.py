@@ -44,6 +44,29 @@ def test_false_and_zero_are_real_reference_answers(value):
     assert _has_judge_reference(value)
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (0, True),
+        (0.0, True),
+        (False, True),
+        ([False], True),
+        ("0", True),
+        (None, False),
+        ("", False),
+        ("  ", False),
+        ([], False),
+        (["", None], False),
+    ],
+    ids=["0", "0.0", "False", "list-False", "string-0", "None", "empty", "blank", "empty-list", "blank-items"],
+)
+def test_template_reference_check_counts_false_and_zero_but_not_empty_values(value, expected):
+    from skillevaluator.tier3.harbor.templates import eval as verifier
+
+    # The Harbor verifier keeps its own copy of the check, and that copy decides N/A in a trial.
+    assert verifier._has_judge_reference(value) is expected
+
+
 def test_only_explicit_markers_skip_eligible_metrics():
     payload = reward(accuracy=None, goal_accuracy=None, behavior_check=None)
     assert metrics.overall_score(payload) == 1.0
@@ -141,6 +164,29 @@ def test_shared_metric_pass_comparison_does_not_credit_activation_alone():
     assert comparison["basis"] == "shared_metrics"
     assert comparison["delta"] == 0.0
     assert comparison["excluded_metrics"] == ["skill_execution", "skill_efficiency"]
+
+
+def test_shared_metric_pass_applies_goal_gate_only_when_goal_accuracy_is_shared():
+    from skillevaluator.tier3.harbor.collector import _shared_metric_pass_lift
+
+    treatment = reward(goal_accuracy=0.0)
+    control = reward()
+    metrics.mark_not_applicable(control, "goal_accuracy")
+
+    comparison = _shared_metric_pass_lift(
+        [treatment],
+        [control],
+        n_attempts=1,
+        pass_threshold=0.5,
+        stop_on_pass=False,
+        expected_cases=1,
+        expected_case_ids=["a"],
+    )
+
+    assert comparison["basis"] == "shared_metrics"
+    assert comparison["excluded_metrics"] == ["goal_accuracy"]
+    assert comparison["with_skill"] == 1.0
+    assert comparison["without_skill"] == 1.0
 
 
 def test_shared_metric_pass_comparison_preserves_canonical_policy_when_nothing_is_excluded():
@@ -259,6 +305,104 @@ def test_template_no_reference_main_writes_numeric_reward_and_rich_na(tmp_path, 
     rich = json.loads((tmp_path / "skill_evaluator_reward.json").read_text())
     assert numeric == {"security": 1.0, "overall": 1.0}
     assert all(rich[metric] is None for metric in metrics.NOT_APPLICABLE_ELIGIBLE_METRICS)
+
+
+def _template_verifier(tmp_path, monkeypatch, entry, *, trajectory=True, judges=None):
+    """Point the Harbor verifier at tmp_path, with stubbed trajectory, security and judges."""
+    from skillevaluator.tier3.harbor.templates import eval as verifier
+
+    entry_path = tmp_path / "entry.json"
+    entry_path.write_text(json.dumps(entry), encoding="utf-8")
+    loaded = (
+        ({"steps": [{"source": "agent", "message": "done"}]}, {"source": "trajectory.json"})
+        if trajectory
+        else (None, {"source": None})
+    )
+    monkeypatch.setattr(verifier, "ENTRY_PATH", entry_path)
+    monkeypatch.setattr(verifier, "load_trajectory_with_fallback", lambda *_args: loaded)
+    monkeypatch.setattr(verifier, "check_security", lambda *_a: {"score": 1.0})
+    monkeypatch.setattr(verifier, "REWARD_JSON", tmp_path / "reward.json")
+    monkeypatch.setattr(verifier, "REWARD_TXT", tmp_path / "reward.txt")
+    monkeypatch.setattr(verifier, "SKILL_EVALUATOR_REWARD_JSON", tmp_path / "skill_evaluator_reward.json")
+    monkeypatch.setattr(verifier, "call_public_llm", lambda *_a, **_k: pytest.fail("Unexpected LLM call"))
+    for name, judge in (judges or {}).items():
+        monkeypatch.setattr(verifier, name, judge)
+    return verifier
+
+
+def _template_outputs(tmp_path):
+    numeric = json.loads((tmp_path / "reward.json").read_text(encoding="utf-8"))
+    rich = json.loads((tmp_path / "skill_evaluator_reward.json").read_text(encoding="utf-8"))
+    return numeric, rich
+
+
+def test_template_trial_without_trajectory_keeps_reference_less_judges_na(tmp_path, monkeypatch):
+    entry = {"id": "a", "question": "q", "expected_behavior": ["Answers"], "expected_skill": "demo", "has_skill": True}
+    verifier = _template_verifier(tmp_path, monkeypatch, entry, trajectory=False)
+
+    verifier.main()
+
+    numeric, rich = _template_outputs(tmp_path)
+    # The crashed trial fails every metric the case defines ...
+    assert numeric == {
+        "security": 0.0,
+        "skill_execution": 0.0,
+        "skill_efficiency": 0.0,
+        "behavior_check": 0.0,
+        "overall": 0.0,
+    }
+    # ... but a judge without its reference stays N/A, so it cannot pull the arm's mean down to 0.0.
+    for metric in ("accuracy", "goal_accuracy"):
+        assert rich[metric] is None
+        assert metrics.metric_is_not_applicable(rich, metric)
+    scores, _, _ = metrics.average_metrics([reward("b", accuracy=0.9, goal_accuracy=None), rich])
+    assert scores["accuracy"] == 0.9
+    assert "goal_accuracy" not in scores
+
+
+def test_template_baseline_trial_without_trajectory_keeps_skill_metrics_na(tmp_path, monkeypatch):
+    entry = {"id": "a", "question": "q", "ground_truth": "42", "expected_skill": "demo", "has_skill": False}
+    verifier = _template_verifier(tmp_path, monkeypatch, entry, trajectory=False)
+
+    verifier.main()
+
+    numeric, rich = _template_outputs(tmp_path)
+    # A crashed baseline trial has no skill to activate, so its skill metrics stay N/A like the
+    # other baseline trials. A 0.0 here would hand the with-skill arm lift from activation alone.
+    for metric in ("skill_execution", "skill_efficiency"):
+        assert metric not in numeric
+        assert rich[metric] is None
+        assert metrics.metric_is_not_applicable(rich, metric)
+    assert numeric["accuracy"] == 0.0
+
+
+@pytest.mark.parametrize("metric", ["accuracy", "goal_accuracy", "behavior_check"])
+def test_template_trial_is_unscored_when_a_judge_claims_na_for_a_defined_reference(tmp_path, monkeypatch, metric):
+    from skillevaluator.tier3.harbor.collector import _merge_reward_sidecars, _partition_scoreable_rewards
+
+    def scored(*_args, **_kwargs):
+        return {"score": 1.0, "reason": "ok", "results": []}
+
+    def claims_na(*_args, **_kwargs):
+        return {"score": None, "status": "not_applicable", "reason": "Nothing to judge"}
+
+    judges = dict.fromkeys(("judge_accuracy", "judge_goal_accuracy", "judge_behavior_check"), scored)
+    judges[f"judge_{metric}"] = claims_na
+    entry = {"id": "a", "question": "q", "ground_truth": "42", "expected_behavior": ["Answers"], "has_skill": False}
+    verifier = _template_verifier(tmp_path, monkeypatch, entry, judges=judges)
+
+    with pytest.raises(SystemExit) as stopped:
+        verifier.main()
+
+    assert stopped.value.code == 1
+    numeric, rich = _template_outputs(tmp_path)
+    assert rich["evaluation_status"] == "failed"
+    assert "although the eval case defines its reference" in rich["evaluation_errors"][metric]
+    assert not metrics.metric_is_not_applicable(rich, metric)
+    _merge_reward_sidecars(numeric, tmp_path)
+    scoreable, failed = _partition_scoreable_rewards([numeric])
+    assert scoreable == []
+    assert len(failed) == 1
 
 
 def test_authoritative_multistep_na_requires_every_constituent_sidecar(tmp_path):

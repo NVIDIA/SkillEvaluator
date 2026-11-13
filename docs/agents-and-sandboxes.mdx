@@ -18,14 +18,82 @@ local, and cloud environment backends.
 
 Pass agents as a comma-separated list with `-a/--agents`. Without that option,
 SkillEvaluator selects the provider-native default: `opencode` for NVIDIA Build,
-`codex` for OpenAI, and `claude-code` for Anthropic. Three agents are supported:
+`codex` for OpenAI, and `claude-code` for Anthropic. Three agents are supported,
+with Hermes available as an explicit experimental option:
 
 | Agent | Notes |
 | --- | --- |
 | `claude-code` | Anthropic's Claude Code CLI. `claude` is an accepted alias. Harbor installs Claude Code 2.1.292. Claude 5.5 and later models run with `reasoning_effort=medium`; older models keep Claude Code's default effort. |
 | `codex` | OpenAI's Codex CLI. The OpenAI-provider default. Harbor installs Codex 0.161.0. Runs with `reasoning_effort=high` so scores and cost stay comparable across Harbor releases. |
-| `opencode` | The OpenCode CLI. |
+| `opencode` | The OpenCode CLI. Harbor installs OpenCode 1.19.5. |
+| `hermes` | Experimental. Hermes v2026.9.24, Docker with NVIDIA Build only; no OpenRouter fallback. |
 
+### Experimental Hermes
+
+Hermes uses NVIDIA Build directly, not a protocol bridge. The initial matrix is
+`--agents hermes --env-mode docker` with `SKILL_EVAL_LLM_PROVIDER=nv_build` and
+`NVIDIA_API_KEY`. Local mode, Kata, cloud backends, and other evaluator providers
+are rejected before execution. OpenCode remains the NVIDIA Build default.
+The compatibility smoke uses Linux amd64, Docker Engine 29.9.3, Harbor 0.24.0,
+and the Hermes/model versions below.
+
+```bash title="Run Hermes with NVIDIA Build"
+export SKILL_EVAL_LLM_PROVIDER=nv_build
+export NVIDIA_API_KEY='nvapi-...'
+skillevaluator doctor --agents hermes --env-mode docker
+skillevaluator tier3 evaluate ./my-skill --agents hermes --env-mode docker \
+  --harbor-keep-jobs
+```
+
+The Hermes default is `nvidia/nemotron-3.5-super-vl-120b-a12b`. Override it with
+`--agent-model hermes=publisher/model` or `harbor.agents.hermes.model` in
+`evals/config.yml`; model IDs must be full NVIDIA Build catalog IDs, without an
+extra agent-provider prefix. Account access and tool support still depend on
+the selected model. The grader model is independent; set
+`SKILL_EVAL_LLM_MODEL` to a model your Build account can invoke for grading.
+
+Harbor 0.24.0 supplies session export and ATIF conversion. SkillEvaluator pins
+both the installer and checkout to Hermes commit
+`f97608f178d1ffeca59860195ab7da295f7c8e5f` (v2026.9.24). The installer needs
+GitHub and Python/Node package download access; first installs may take several
+minutes. Browser and computer-use dependencies are not installed. Only the
+selected NVIDIA credential reaches the agent; an ambient `OPENROUTER_API_KEY`
+does not enable fallback.
+
+Both arms use the same cases, inputs, model and grader. Hermes starts without
+bundled skills or persistent memories; only evaluator-staged skills are copied
+to `/tmp/hermes/skills`. Successful `skill_view` manifest reads and terminal
+calls are normalized for the existing activation and grading checks. Failed
+reads and support-file reads do not establish activation. Session export is
+attempted on errors and timeouts too; a missing/malformed session or a session
+without an agent response is an execution failure, not a scored skill defect.
+
+Retained jobs include `trajectory.json` and `hermes.txt`; normal bounded,
+redacted diagnostic retention applies. Token counts come from Hermes session
+totals (or per-message usage when present); cost, cached tokens and other unreported fields remain
+unknown rather than estimated as zero. Tool approval is noninteractive inside
+the Docker sandbox, as for the other installed harnesses.
+
+The repeatable smoke dataset is
+[`tests/fixtures/skills/lookup-code`](https://github.com/NVIDIA/SkillEvaluator/tree/main/tests/fixtures/skills/lookup-code):
+one script-backed skill lookup and one arithmetic non-trigger case. To validate
+your own installation, run both arms without early stopping:
+
+```bash title="Hermes compatibility smoke from a source checkout"
+SKILL_EVAL_LLM_MODEL=nvidia/nemotron-3.5-super-vl-120b-a12b \
+  skillevaluator tier3 evaluate tests/fixtures/skills/lookup-code \
+  --agents hermes --env-mode docker --n-attempts 1 --n-concurrent 1 \
+  --no-stop-on-pass --harbor-keep-jobs
+```
+
+An opt-in integration test checks the four trials, native activation, terminal
+conversion, diagnostics and nonzero token usage. It installs the harness in
+Docker and makes real API calls (including grading):
+
+```bash
+SKILL_EVAL_HERMES_INTEGRATION=1 python -m pytest -m integration \
+  tests/test_hermes_agent.py -k real_hermes
+```
 The pinned CLI releases apply wherever Harbor installs the agent: Docker and
 the remote environments. [Local mode](#local-mode) runs the CLI already on your
 machine instead.
@@ -185,37 +253,37 @@ Anthropic evaluator with `opencode` also does not support local mode.
 
 SkillEvaluator exposes 27 environment modes: 26 Harbor-native backends,
 including Docker, plus SkillEvaluator's own `local` host-execution mode.
-Docker is the default. The `tier3` extra installs base `harbor==0.24.0`; install
+Docker is the default. The `tier3` extra installs base `harbor==0.25.0`; install
 the environment extra shown below when a managed backend needs one.
 
 | Mode | Type | Harbor extra or system prerequisite |
 | --- | --- | --- |
 | `docker` | Harbor-native | No additional Python extra. Requires Docker Engine and Docker Compose v2 — see [Docker mode](#docker-mode). |
 | `kata` | Harbor-native | No additional Python extra. Requires a Linux host with `/dev/kvm` and a Kata Containers runtime registered with Docker — see [Kata mode](#kata-mode). |
-| `daytona` | Harbor-native | `harbor[daytona]==0.24.0` |
-| `e2b` | Harbor-native | `harbor[e2b]==0.24.0` |
-| `modal` | Harbor-native | `harbor[modal]==0.24.0` |
-| `runloop` | Harbor-native | `harbor[runloop]==0.24.0` |
-| `langsmith` | Harbor-native | `harbor[langsmith]==0.24.0` |
-| `ec2` | Harbor-native | `harbor[ec2]==0.24.0` |
-| `gke` | Harbor-native | `harbor[gke]==0.24.0` |
-| `ack` | Harbor-native | `harbor[gke]==0.24.0` |
+| `daytona` | Harbor-native | `harbor[daytona]==0.25.0` |
+| `e2b` | Harbor-native | `harbor[e2b]==0.25.0` |
+| `modal` | Harbor-native | `harbor[modal]==0.25.0` |
+| `runloop` | Harbor-native | `harbor[runloop]==0.25.0` |
+| `langsmith` | Harbor-native | `harbor[langsmith]==0.25.0` |
+| `ec2` | Harbor-native | `harbor[ec2]==0.25.0` |
+| `gke` | Harbor-native | `harbor[gke]==0.25.0` |
+| `ack` | Harbor-native | `harbor[gke]==0.25.0` |
 | `openshift` | Harbor-native | No Harbor Python extra; install and authenticate the OpenShift `oc` CLI. |
-| `novita` | Harbor-native | `harbor[novita]==0.24.0` |
+| `novita` | Harbor-native | `harbor[novita]==0.25.0` |
 | `apple-container` | Harbor-native | No Harbor Python extra; install the Apple `container` CLI. |
 | `singularity` | Harbor-native | No Harbor Python extra; install the `singularity` CLI Harbor invokes. |
-| `islo` | Harbor-native | `harbor[islo]==0.24.0` |
-| `tensorlake` | Harbor-native | `harbor[tensorlake]==0.24.0` |
-| `cwsandbox` | Harbor-native | `harbor[cwsandbox]==0.24.0` |
-| `wandb` | Harbor-native | `harbor[cwsandbox]==0.24.0` |
-| `use-computer` | Harbor-native | `harbor[use-computer]==0.24.0` |
-| `blaxel` | Harbor-native | `harbor[blaxel]==0.24.0` |
-| `beam` | Harbor-native | `harbor[beam]==0.24.0` |
-| `skypilot` | Harbor-native | `harbor[skypilot]==0.24.0` |
-| `hyperbrowser` | Harbor-native | `harbor[hyperbrowser]==0.24.0` |
-| `vercel` | Harbor-native | `harbor[vercel]==0.24.0` |
-| `runta` | Harbor-native | `harbor[runta]==0.24.0` |
-| `mosaic` | Harbor-native | `harbor[mosaic]==0.24.0` |
+| `islo` | Harbor-native | `harbor[islo]==0.25.0` |
+| `tensorlake` | Harbor-native | `harbor[tensorlake]==0.25.0` |
+| `cwsandbox` | Harbor-native | `harbor[cwsandbox]==0.25.0` |
+| `wandb` | Harbor-native | `harbor[cwsandbox]==0.25.0` |
+| `use-computer` | Harbor-native | `harbor[use-computer]==0.25.0` |
+| `blaxel` | Harbor-native | `harbor[blaxel]==0.25.0` |
+| `beam` | Harbor-native | `harbor[beam]==0.25.0` |
+| `skypilot` | Harbor-native | `harbor[skypilot]==0.25.0` |
+| `hyperbrowser` | Harbor-native | `harbor[hyperbrowser]==0.25.0` |
+| `vercel` | Harbor-native | `harbor[vercel]==0.25.0` |
+| `runta` | Harbor-native | `harbor[runta]==0.25.0` |
+| `mosaic` | Harbor-native | `harbor[mosaic]==0.25.0` |
 | `local` | SkillEvaluator | Your machine, under an OS sandbox policy — see [Local mode](#local-mode). |
 
 Installed packages can add more modes, for example an organization's internal
@@ -234,9 +302,9 @@ authentication (`auth=wandb`), using `WANDB_API_KEY` or the netrc file that
 `wandb login` writes. Because SkillEvaluator sets `auth` itself, `--ek auth=...`
 is rejected for both `cwsandbox` and `wandb`.
 
-Harbor 0.24 also defines `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`,
-`prime`, and `smol`, but those backends are not exposed until SkillEvaluator
-can project the complete task bundle — skill, verifier, dependencies, and
+Harbor 0.25 also defines `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`,
+`prime`, `smol`, `sbx`, `sail`, and `kernel`, but those backends are not exposed
+until SkillEvaluator can project the complete task bundle — skill, verifier, dependencies, and
 inputs — through a trusted image or backend-native provisioning path, with
 credentials and constructor options reviewed per backend. Selecting one of those
 names is rejected before a run starts. Prime cannot build a Dockerfile-only
@@ -317,7 +385,7 @@ in-cluster service account and performs a bounded, namespaced pod-list probe
 before launching trials. `KUBERNETES_SERVICE_HOST` and
 `KUBERNETES_SERVICE_PORT` are forwarded only for this ACK client path.
 
-Harbor 0.24 Modal preflight requires `~/.modal.toml` or `MODAL_TOKEN_ID` plus
+Harbor 0.25 Modal preflight requires `~/.modal.toml` or `MODAL_TOKEN_ID` plus
 `MODAL_TOKEN_SECRET`. SkillEvaluator validates and forwards an explicitly set
 `MODAL_CONFIG_PATH`, but Harbor's child-process preflight does not recognize a
 custom config path by itself; configure one of Harbor's supported credential
@@ -354,8 +422,14 @@ never deletes snapshots. Run evaluations in a Mosaic account that only trusted
 operators can write to, and delete old `harbor-*` snapshots when you no longer
 need the staged skills and inputs they contain.
 
+Harbor's `auto_mounts` and `auto_mounting` output controls are reserved for
+SkillEvaluator's runtime policy. The `cwsandbox` and `wandb` modes also reserve
+`forward_compose_env`, which could copy operator environment values into the
+task's Compose configuration. Credentials continue to use the evaluator's
+controlled handoff.
+
 Other eligible, backend-specific constructor options are forwarded after
-validation. A key that the selected backend's Harbor 0.24.0 constructor does not
+validation. A key that the selected backend's Harbor 0.25.0 constructor does not
 accept is rejected before the run starts; for example, Harbor 0.24 removed
 Modal's `modal_sandbox_v2` option, so drop it from existing `--ek` flags. ACK
 scheduling options such as `node_selector` and `tolerations` are accepted, and
@@ -364,6 +438,10 @@ object—not credential contents. Credential-bearing options such as LangSmith's
 `api_key` and Vercel's `credential_injection` are rejected. Use the same
 `--environment-kwarg` values and eligible non-Docker mode with `doctor` or
 `health-check` to preflight the configuration you intend to evaluate.
+
+Harbor 0.25 adds eligible `dockerd_wait_sec` for Daytona,
+`sandbox_timeout_secs` for E2B, `connection_pool_maxsize` for Runta, and
+`dind_image` for `cwsandbox` and `wandb`.
 
 A few Harbor options contain provider-managed secret **references**, not secret
 values. These narrow shapes are allowed; every other credential-shaped kwarg,
@@ -414,7 +492,7 @@ directory, verifier, and trial paths as a Harbor-native backend.
 
 ### What a backend must provide
 
-- Support the Harbor release SkillEvaluator pins (`harbor==0.24.0`), including
+- Support the Harbor release SkillEvaluator pins (`harbor==0.25.0`), including
   its environment constructor options.
 - Run the evaluator-staged image: build each task's `environment/Dockerfile` as
   written, or an equivalent image with the same layers. Do not substitute a
@@ -528,6 +606,15 @@ agent process killed is the classic out-of-memory symptom; raise
 `--override-memory-mb` first.
 
 ### Custom Dockerfiles
+
+Declare system tools in `scripts/apt-packages.txt` and Python packages in
+`scripts/requirements.txt` anywhere under the skill directory. These files are
+auto-installed only when there is no custom `evals/environment/Dockerfile`.
+With a custom Dockerfile, install those dependencies there yourself. A required
+tool or module that is unavailable makes the case `environment_invalid` and
+UNSCORED, not a skill defect; the report names the missing dependency and fix.
+When an import or executable name differs from its package name, the report
+asks you to install the package that provides it or ship it with the skill.
 
 When a skill ships its own `evals/environment/Dockerfile`,
 `--custom-dockerfile-mode` decides how it combines with the eval image:
@@ -710,6 +797,19 @@ eligible skills remain. Required
 helpers stay explicit in `include`; the selector does not infer prerequisites.
 A collision between a selected skill and an explicitly included skill is an
 error.
+
+Selection and group-mode evaluation read the `name` and `description` of the
+target and of each selected skill as `similarity-check` does, within the same
+[frontmatter structure limits](/skills/skillevaluator/tier2-deduplication#defaults-and-safety-limits).
+The command fails, and says the skill needs a root `SKILL.md` whose frontmatter
+is a valid YAML mapping with a non-empty string name and description, when that
+file or its frontmatter is missing, the frontmatter is invalid YAML or not a
+mapping, or either value is empty or not a string. A value that is not a string,
+such as `name: yes` or `name: 2048`, is never converted to text. Quote such a
+value, as in `name: "yes"`, and quote a value that contains a colon followed by
+a space, as in `description: "Use when: debugging logs"`. Frontmatter over a
+structure limit, or a value longer than 16,384 characters, fails with an error
+that names the manifest, such as `my-skill/SKILL.md`.
 
 The manifest records catalog and model identity, scores, the target manifest
 hash, and selected skill runtime hashes. Evaluation verifies the hashes and

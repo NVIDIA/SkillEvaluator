@@ -22,7 +22,7 @@ from typing import Any
 
 #: The exact Harbor release whose CLI, models, and environment interfaces this
 #: SkillEvaluator release targets; the ``tier3`` extra pins it.
-HARBOR_VERSION = "0.24.0"
+HARBOR_VERSION = "0.25.0"
 
 HARBOR_ENVIRONMENTS = (
     "docker",
@@ -111,10 +111,12 @@ HARBOR_ENVIRONMENT_EXTRAS: dict[str, str | None] = {
 # importing the base SkillEvaluator CLI never imports Harbor or optional provider
 # SDKs. The packaging parity test AST-reads the pinned Harbor sources and catches
 # additions, removals, and provider kwargs that are consumed through **kwargs.
-# Registry-only entries (cua-cloud, opensandbox, hf-sandbox, podman, prime, smol)
-# keep that parity exact; those modes are not exposed.
+# Registry-only entries (cua-cloud, opensandbox, hf-sandbox, podman, prime, smol,
+# sbx, sail, kernel) keep that parity exact; those modes are not exposed.
 _HARBOR_BASE_ENVIRONMENT_KWARGS = frozenset(
     {
+        "auto_mounting",
+        "auto_mounts",
         "cpu_enforcement_policy",
         "enable_environment_dir_upload",
         "environment_dir",
@@ -143,10 +145,10 @@ _HARBOR_BACKEND_ENVIRONMENT_KWARGS = {
     "docker": "keep_containers",
     "daytona": (
         "assume_global_snapshot auto_delete_interval_mins auto_labels auto_snapshot auto_stop_interval_mins "
-        "connection_pool_maxsize dind_image dind_snapshot expose_sandbox_id labels network_block_all secrets "
-        "snapshot_template_name"
+        "connection_pool_maxsize dind_image dind_snapshot dockerd_wait_sec expose_sandbox_id labels network_block_all "
+        "secrets snapshot_template_name"
     ),
-    "e2b": "",
+    "e2b": "sandbox_timeout_secs",
     "modal": (
         "app_name auto_labels dind_image keepalive labels modal_vm_runtime region registry_secret "
         "sandbox_idle_timeout_secs sandbox_timeout_secs secrets volumes"
@@ -181,8 +183,8 @@ _HARBOR_BACKEND_ENVIRONMENT_KWARGS = {
     "islo": "delete_after_seconds gateway gateway_profile",
     "tensorlake": "dind_image is_public preinstall_packages snapshot_id timeout_secs use_oci_image_build",
     "cwsandbox": (
-        "auth base_url docker_image max_lifetime_seconds max_timeout_seconds mounts_json request_timeout_seconds "
-        "secrets tags"
+        "auth base_url dind_image docker_image forward_compose_env max_lifetime_seconds max_timeout_seconds "
+        "mounts_json request_timeout_seconds secrets tags"
     ),
     "use-computer": (
         "api_key base_url device_type family gateway_url host keepalive_interval mode override_exec_timeout platform "
@@ -209,12 +211,19 @@ _HARBOR_BACKEND_ENVIRONMENT_KWARGS = {
     ),
     "podman": "keep_containers",
     "kata": "kata_dns kata_runtime keep_containers",
-    "runta": "endpoint mode request_timeout_sec startup_timeout_sec token",
+    "runta": "connection_pool_maxsize endpoint mode request_timeout_sec startup_timeout_sec token",
     "prime": "api_key compose_host_image gpu_type region team_id timeout_minutes",
     "mosaic": "build_args build_target enable_ssh metadata persist replicas secrets ttl_seconds volume",
     "smol": (
         "api_key auto_checkpoint base_url checkpoints fork_batch_size fork_batch_window_ms gpu_mode ready_timeout_sec "
         "target"
+    ),
+    "sbx": "target",
+    "sail": "app_name max_lifetime_seconds",
+    "kernel": (
+        "browser_create_overrides browser_memory chrome_policy extensions gpu headless hypeman_create_attempts "
+        "kiosk_mode memory name network profile profile_id profile_name proxy proxy_id region start_url stealth tags "
+        "telemetry timeout_seconds vaults video_memory viewport viewport_height viewport_width"
     ),
 }
 HARBOR_ENVIRONMENT_KWARGS: dict[str, frozenset[str]] = {

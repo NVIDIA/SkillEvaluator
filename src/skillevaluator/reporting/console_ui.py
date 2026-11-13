@@ -923,6 +923,13 @@ def _is_user_skipped(result: ValidationResult) -> bool:
     return isinstance(result.metadata, dict) and bool(result.metadata.get("skipped_by_user"))
 
 
+def _is_not_applicable(result: ValidationResult) -> bool:
+    """True when a check was recorded as not applicable to the target instead of run."""
+    return (
+        _is_skipped(result) and not _is_user_skipped(result) and "not applicable" in get_skip_reason(result).casefold()
+    )
+
+
 def _is_skipped(result: ValidationResult) -> bool:
     """True when a validator was recorded without executing (OSS conventions)."""
     if bool(getattr(result, "skipped", False)):
@@ -1135,6 +1142,11 @@ def summarize_tier1(
     *stopped_early* is set (``--fail-fast`` ended the run at its first failure),
     the lineup checks that have no result are counted as not run.
     """
+    # A check recorded as not applicable did not run: it is neither a pass nor
+    # a failure, so it is listed on its own row and left out of the counts.
+    not_applicable = [r for r in results if _is_not_applicable(r)]
+    results = [r for r in results if not _is_not_applicable(r)]
+
     user_skipped = [r for r in results if _is_user_skipped(r)]
     failed = [r for r in results if not r.passed and not _is_skipped(r)]
     incomplete = [r for r in failed if r.is_incomplete]
@@ -1186,6 +1198,12 @@ def summarize_tier1(
     if user_skipped:
         names = ", ".join(dict.fromkeys(_short_name(r.validator_name) for r in user_skipped))
         rows.append(TierRow("skipped", [(names, MUTED), ("  with --skip, not checked", FAINT)]))
+    if not_applicable:
+        names = ", ".join(
+            dict.fromkeys(_check_key(r.validator_name) or _short_name(r.validator_name) for r in not_applicable)
+        )
+        reason = _bounded_console_line(get_skip_reason(not_applicable[0]))
+        rows += [TierRow("n/a", [(names, MUTED)]), TierRow("", [(reason, FAINT)], fit="wrap")]
 
     if advisory:
         detail = " · ".join(f"{name} {count}" for name, count in sorted(advisory.items(), key=lambda kv: -kv[1]))

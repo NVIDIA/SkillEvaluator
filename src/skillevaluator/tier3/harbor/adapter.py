@@ -72,8 +72,32 @@ logger = logging.getLogger(__name__)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 _EVAL_CORE_DIR = Path(__file__).resolve().parent.parent / "eval_core"
+_VERIFIER_FILES = (
+    TEMPLATES_DIR / "eval.py",
+    _EVAL_CORE_DIR / "log_converters.py",
+    _EVAL_CORE_DIR / "atif_helpers.py",
+    _EVAL_CORE_DIR / "shell_lexing.py",
+    _EVAL_CORE_DIR / "script_invocation.py",
+    _EVAL_CORE_DIR / "declarative_checks.py",
+    _EVAL_CORE_DIR / "optional_reference.py",
+    _EVAL_CORE_DIR / "checks.py",
+    _EVAL_CORE_DIR / "secret_redaction.py",
+    _EVAL_CORE_DIR / "codex_tool_call_normalizer.py",
+    _EVAL_CORE_DIR / "character_facts.py",
+    _EVAL_CORE_DIR.parent.parent / "evidence.py",
+)
 _EVALUATOR_TESTS_SUBDIR = "skill_evaluator"
+# Harbor's agent setup checks each prerequisite command (curl, bash, pgrep, rg,
+# stdbuf) in every trial and apt-installs the missing ones. Claude Code's setup
+# needs pgrep, so procps in every generated image removes that per-trial apt
+# step and its package mirror dependency. The starter Dockerfile that
+# `tier3 init-harbor-task` writes (tier3/commands.py) lists the same packages.
+_BASE_APT_PACKAGES = "bash curl git jq procps ripgrep"
 _BASE_IMAGE_PREFIX = "skillevaluator-base"
+# Compose 2 treats HEALTHCHECK NONE as a configured check, then fails its
+# readiness wait because Docker supplies no health state. Replace authored
+# checks with this constant exec-form probe; do not run authored healthcheck commands.
+_MAIN_CONTAINER_READINESS_HEALTHCHECK = 'HEALTHCHECK --interval=1s --timeout=5s --retries=3 CMD ["/bin/true"]'
 _MAX_REPO_CONTEXT_FILE_BYTES = 10 * 1024 * 1024
 _MAX_REPO_CONTEXT_TOTAL_BYTES = 200 * 1024 * 1024
 _MAX_EVALUATOR_FILE_BYTES = 64 * 1024 * 1024
@@ -1517,7 +1541,7 @@ def build_eval_base_image(
         "",
         "RUN apt-get -o Acquire::Retries=3 update && \\",
         "    apt-get -o Acquire::Retries=3 install -y --no-install-recommends \\",
-        "    bash curl git jq ripgrep \\",
+        f"    {_BASE_APT_PACKAGES} \\",
     ]
     if extra_apt:
         lines[-1] += " \\"
@@ -2101,6 +2125,17 @@ def validate_mcp_server_declarations(
     return servers
 
 
+def _harbor_mcp_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    """Use Harbor's braced placeholders after validating the original headers."""
+    return {
+        name: _MCP_COMPLETE_PLACEHOLDER_RE.sub(
+            lambda match: f"${{{match.group(3)}}}" if match.group(3) and not match.group(1) else match.group(0),
+            value,
+        )
+        for name, value in headers.items()
+    }
+
+
 def _load_mcp_servers(
     skill_path: Path,
     *,
@@ -2244,6 +2279,8 @@ skills_dir = "/workspace/skills"
             for key, val in srv.items():
                 if not isinstance(key, str):
                     raise TypeError("MCP TOML keys must be strings")
+                if key == "headers":
+                    val = _harbor_mcp_headers(val)
                 content += f"{_toml_quote(key)} = {_toml_value(val)}\n"
         (task_dir / "mcp_servers.json").write_text(json.dumps(mcp_servers, indent=2), encoding="utf-8")
 
@@ -2392,23 +2429,11 @@ def _copy_verifier(task_dir: Path) -> None:
     tests_dir = task_dir / "tests"
     tests_dir.mkdir(parents=True, exist_ok=True)
     evaluator_dir = _replace_evaluator_tests_dir(task_dir)
-    sources = (
-        (TEMPLATES_DIR / "eval.py", "Verifier template"),
-        (_EVAL_CORE_DIR / "log_converters.py", "log_converters helper"),
-        (_EVAL_CORE_DIR / "atif_helpers.py", "ATIF evidence helpers"),
-        (_EVAL_CORE_DIR / "shell_lexing.py", "Shell lexical helper"),
-        (_EVAL_CORE_DIR / "script_invocation.py", "Shell invocation helper"),
-        (_EVAL_CORE_DIR / "checks.py", "Deterministic grading checks"),
-        (_EVAL_CORE_DIR / "secret_redaction.py", "Deterministic redaction helper"),
-        (_EVAL_CORE_DIR / "codex_tool_call_normalizer.py", "Codex tool-call normalizer"),
-        (_EVAL_CORE_DIR / "character_facts.py", "Judge character-facts helper"),
-        (_EVAL_CORE_DIR.parent.parent / "evidence.py", "Evidence-reference helper"),
-    )
-    for src, label in sources:
+    for src in _VERIFIER_FILES:
         if src.exists():
             shutil.copy2(src, evaluator_dir / src.name)
         else:
-            logger.warning("%s not found at %s", label, src)
+            logger.warning("Verifier source not found at %s", src)
 
 
 def _has_symlink_component(path: Path, root: Path) -> bool:
@@ -3560,6 +3585,8 @@ _AGENT_SKILL_PATHS = [
     "COPY skills/ /root/.config/opencode/skills/",
 ]
 _RUNTIME_SKILL_DIRS = (
+    "/tmp/hermes/skills",
+    "/root/.hermes/skills",
     "/etc/codex/skills",
     "/tmp/codex-home/skills",
     "/workspace/skills",
@@ -3588,6 +3615,7 @@ _RUNTIME_SKILL_DIRS = (
     "/tmp/agent-home/sessions/skills",
 )
 _PROJECT_SKILL_RELATIVE_DIRS = (
+    ".hermes/skills",
     ".agents/skills",
     ".claude/commands",
     ".claude/skills",
@@ -3791,9 +3819,11 @@ def _validate_runtime_loader_env(runtime_env: dict[str, str] | None) -> None:
 
 def _runtime_skill_reset_lines(agent_workdir: str | None = None) -> list[str]:
     """Replace fixed, effective-home, and project-ancestor skill roots."""
+    runtime_dirs_to_reset = ["/tmp/hermes" if path == "/tmp/hermes/skills" else path for path in _RUNTIME_SKILL_DIRS]
+    runtime_dirs_to_create = [path for path in _RUNTIME_SKILL_DIRS if path != "/tmp/hermes/skills"]
     lines = [
-        "RUN " + json.dumps(["/bin/rm", "-rf", *_RUNTIME_SKILL_DIRS]),
-        "RUN " + json.dumps(["/bin/mkdir", "-p", *_RUNTIME_SKILL_DIRS]),
+        "RUN " + json.dumps(["/bin/rm", "-rf", *runtime_dirs_to_reset]),
+        "RUN " + json.dumps(["/bin/mkdir", "-p", *runtime_dirs_to_create]),
         "RUN " + json.dumps(["/bin/sh", "-c", _PROJECT_SKILL_ANCESTOR_RESET]),
         "RUN " + json.dumps(["/bin/sh", "-c", _HOME_SKILL_RESET]),
         "RUN " + json.dumps(["/bin/sh", "-c", _PASSWD_HOME_SKILL_RESET]),
@@ -3861,6 +3891,7 @@ def _append_task_input_projection(
             _RUNTIME_POLICY_ENV_RESET,
             "ENTRYPOINT []",
             "HEALTHCHECK NONE",
+            _MAIN_CONTAINER_READINESS_HEALTHCHECK,
         ]
     )
     if restore_user is not None and restore_user.casefold() != "root":
@@ -3890,6 +3921,7 @@ def _extend_task_input_projection(lines: list[str], *, include_input: bool, agen
             _RUNTIME_POLICY_ENV_RESET,
             "ENTRYPOINT []",
             "HEALTHCHECK NONE",
+            _MAIN_CONTAINER_READINESS_HEALTHCHECK,
         ]
     )
 
@@ -3919,8 +3951,8 @@ def _rebase_custom_dockerfile_content(
 ) -> tuple[str, str]:
     """Return custom Dockerfile content layered on top of the eval base image.
 
-    The base image already contains: python:3.12-slim, system packages
-    (bash/curl/git/jq), verifier dependencies, and the
+    The base image already contains: python:3.12-slim, the system packages in
+    ``_BASE_APT_PACKAGES``, verifier dependencies, and the
     standard directory structure (/workspace/skills, /logs, etc.).
 
     The custom Dockerfile's FROM line is replaced so the skill author's
@@ -4354,7 +4386,7 @@ def _write_dockerfile(
         "",
         "RUN apt-get -o Acquire::Retries=3 update && \\",
         "    apt-get -o Acquire::Retries=3 install -y --no-install-recommends \\",
-        "    bash curl git jq ripgrep \\",
+        f"    {_BASE_APT_PACKAGES} \\",
     ]
     if apt_pkgs:
         dockerfile_lines[-1] += " \\"
@@ -4490,7 +4522,7 @@ def _write_default_environment_dockerfile(
         "",
         "RUN apt-get -o Acquire::Retries=3 update && \\",
         "    apt-get -o Acquire::Retries=3 install -y --no-install-recommends \\",
-        "    bash curl git jq ripgrep \\",
+        f"    {_BASE_APT_PACKAGES} \\",
     ]
     if apt_pkgs:
         dockerfile_lines[-1] += " \\"
@@ -5124,6 +5156,51 @@ def _validate_native_task_host_env_boundaries(
         validate_verifier(step.get("verifier", {}), f"steps[{index}].verifier")
 
 
+def _validate_native_task_mcp_policy(
+    task_toml: Path,
+    data: dict[str, Any],
+    *,
+    runtime_env: dict[str, str] | None,
+) -> None:
+    """Check native MCP declarations before Harbor can resolve their headers."""
+    from harbor.models.task.config import MCPServerConfig
+
+    def validate_environment(environment: object, field: str) -> None:
+        # Harbor's task schema diagnoses malformed surrounding tables.
+        if not isinstance(environment, dict) or "mcp_servers" not in environment:
+            return
+        servers = environment["mcp_servers"]
+        source = f"Native Harbor task [{field}.mcp_servers]: {task_toml}"
+        if not isinstance(servers, list) or any(not isinstance(server, dict) for server in servers):
+            raise ValueError(f"{source} must be an array of MCP server tables")
+        for server in servers:
+            if server.keys() - MCPServerConfig.model_fields.keys():
+                raise ValueError(f"{source} contains unsupported MCP server fields")
+            try:
+                McpServerDeclaration.model_validate(server)
+            except ValidationError:
+                raise ValueError(f"{source} contains an invalid MCP server declaration") from None
+        validate_mcp_server_declarations(servers, allowed_runtime_env=runtime_env, source_label=source)
+        for server in servers:
+            try:
+                MCPServerConfig.model_validate(server)
+            except ValidationError:
+                raise ValueError(f"{source} contains an invalid MCP server declaration") from None
+
+    validate_environment(data.get("environment", {}), "environment")
+
+    def validate_verifier(verifier: object, field: str) -> None:
+        if isinstance(verifier, dict):
+            validate_environment(verifier.get("environment"), f"{field}.environment")
+
+    validate_verifier(data.get("verifier", {}), "verifier")
+    steps = data.get("steps")
+    if isinstance(steps, list):
+        for index, step in enumerate(steps):
+            if isinstance(step, dict):
+                validate_verifier(step.get("verifier", {}), f"steps[{index}].verifier")
+
+
 def _validate_native_verifier_compose_boundaries(
     task_dir: Path,
     data: dict[str, Any],
@@ -5441,6 +5518,7 @@ def _native_task_workdir(
     environment = data.get("environment", {}) if isinstance(data, dict) else {}
     if not isinstance(environment, dict):
         raise ValueError(f"Native Harbor task [environment] must be a table: {task_dir / 'task.toml'}")
+    _validate_native_task_mcp_policy(task_dir / "task.toml", data, runtime_env=runtime_env)
     _validate_native_task_execution_compatibility(
         task_dir,
         data,

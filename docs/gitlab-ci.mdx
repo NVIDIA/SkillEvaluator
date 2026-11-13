@@ -1,9 +1,10 @@
 ---
 title: "GitLab CI/CD"
-description: "Add reusable SkillEvaluator Tier 1 checks to a GitLab repository."
+description: "Add quality and security checks to GitLab with no model key required."
 ---
 
-Bring skill evaluation to GitLab with a reusable CI job. Point it at your skills
+Bring quality and security checks to your repository. No model key required.
+Optional LLM checks are available. Point the reusable GitLab CI job at your skills
 and choose a quality threshold; merge requests evaluate changed skills
 without installing scanners or adding evaluation code to your repository.
 The shared container includes SkillSpector security scanning.
@@ -103,6 +104,19 @@ Skill result: "skills/glossary-builder" — FAILED
 </Tabs>
 
 <AccordionGroup>
+  <Accordion title="Author emails and reviewed security exceptions">
+    Keep the required `metadata.author` attribution. Extra email copies in
+    contact fields or documents are checked separately; use a handle or a
+    contact-directory link instead. See [author attribution](/skills/skillevaluator/tier1-validation#author-attribution-and-contact-emails).
+
+    For reviewed SkillSpector exceptions, set
+    `SKILL_EVAL_SECURITY_BASELINES: "true"` and add
+    `.skillevaluator/skillspector-baselines.yaml` using a template and image
+    version that include baseline support. CI reads the approved mapping
+    and baseline files from the merge request's target revision. Regenerate and
+    review fingerprint exceptions when the scanner version changes. Baselines
+    do not waive PII or incomplete analysis. Follow the [baseline setup guide](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/README.md#reviewed-security-baselines).
+  </Accordion>
   <Accordion title="When does it run?">
     `SKILL_EVAL_SCAN_MODE: auto` evaluates changed skills in detached
     merge-request pipelines and all configured skills on the default branch or
@@ -124,9 +138,10 @@ Skill result: "skills/glossary-builder" — FAILED
   </Accordion>
   <Accordion title="Scores, reports and privacy">
     The threshold applies to the quality score; security, schema and other
-    required checks remain independent gates. The first version runs Tier 1
-    only. This integration does not host reports or post merge-request comments
-    automatically. Known values detected by credential patterns, NVIDIA API
+    required checks remain independent gates. The scanner runs quality and
+    security checks and saves reports as job artifacts; it does not host reports
+    or post merge-request comments automatically. Known values detected by
+    credential patterns, NVIDIA API
     keys, and unquoted `KEY=value` and `Bearer` credentials are redacted,
     including parts of them that a scanner cuts or escapes, but not every
     secret or transformation is detectable. Raw scanner logs are
@@ -136,3 +151,12 @@ Skill result: "skills/glossary-builder" — FAILED
 </AccordionGroup>
 
 For GitHub and other CI systems, see [Repository Integration](/skills/skillevaluator/repository-integration).
+
+<div id="three-tier-checks-and-feedback">
+<div id="merge-into-an-existing-root-configuration">
+
+For the explicit all-tier opt-in and its prerequisites, see [Advanced CI](/skills/skillevaluator/advanced-ci).
+The [GitLab setup](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/all-tiers/README.md#gitlab-checks-and-feedback) and [all-tier pipeline migration](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/all-tiers/README.md#merge-into-an-existing-root-configuration) references preserve the detailed contracts.
+
+</div>
+</div>

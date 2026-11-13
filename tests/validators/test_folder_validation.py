@@ -77,7 +77,7 @@ Example two.
         skill1_dir.mkdir()
         (skill1_dir / "SKILL.md").write_text("""---
 name: valid-skill
-description: Valid skill
+description: Use when checking that a valid skill passes folder validation
 metadata:
   author: Test User <test@nvidia.com>
 ---

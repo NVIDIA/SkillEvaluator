@@ -20,6 +20,8 @@ import hashlib
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from skillevaluator.skillspector_diagnostics import merge_completeness
+
 
 class Severity(StrEnum):
     """Standardized severity levels for validation findings.
@@ -647,7 +649,12 @@ class ValidationResult:
         incomplete = list(dict.fromkeys([*self.incomplete_scans, *other.incomplete_scans]))
         gate_failures = [*self.gate_failures, *other.gate_failures]
         scanners = {**self.scanners, **other.scanners}
+        completeness = merge_completeness(
+            self.metadata.get("skillspector_completeness"), other.metadata.get("skillspector_completeness")
+        )
         self.metadata.update(other.metadata)
+        if completeness:
+            self.metadata["skillspector_completeness"] = completeness
         if incomplete:
             self.metadata["incomplete_scans"] = incomplete
         if scanners:
@@ -667,6 +674,13 @@ class ValidationResult:
 
     def merge_with_prefix(self, other: ValidationResult, prefix: str) -> None:
         """Merge another result, prefixing all errors/warnings with skill name."""
+        completeness = merge_completeness(
+            self.metadata.get("skillspector_completeness"),
+            other.metadata.get("skillspector_completeness"),
+            prefix=prefix,
+        )
+        if completeness:
+            self.metadata["skillspector_completeness"] = completeness
         if not other.passed:
             self.passed = False
 

@@ -338,7 +338,7 @@ def _sha256(path: Path) -> str:
 
 
 def _assert_hook_critical(result: ValidationResult, root: Path, manifest: str = "hooks/hooks.json") -> None:
-    """One accurate Critical and one gate failure for the manifest."""
+    """One accurate Critical and manifest gate beside any independent completeness gates."""
     [finding] = _unverified(result)
     assert finding.severity == Severity.CRITICAL
     assert finding.category == "SECURITY"
@@ -351,7 +351,8 @@ def _assert_hook_critical(result: ValidationResult, root: Path, manifest: str = 
     [row] = finding.metadata["ledger_exceptions"]
     assert {key: row[key] for key in _HOOK_ROW} == {**_HOOK_ROW, "path": manifest}
     assert finding.metadata["manifest_sha256"] == _sha256(root / manifest)
-    assert result.gate_failures == [_gate(manifest)]
+    completeness_errors = [error for error in result.errors if "reports incomplete analysis" in error]
+    assert sorted(result.gate_failures) == sorted([*completeness_errors, _gate(manifest)])
     assert result.errors.count(_gate(manifest)) == 1
     assert not result.passed
 
@@ -714,13 +715,18 @@ class TestFolderScans:
 
         assert mock_tools.skillspector.run.call_count == 2
         _assert_failed_with_incomplete_scan(result)
-        assert [error for error in result.errors if "did not complete" in error] == [
+        expected_incomplete_errors = [
             f"[{name}] skillspector JSON field 'analysis_completeness' reports incomplete analysis (status "
             "'partial'): SKILL.md:7 [reference_resolution; reference_missing]; security scan did not complete"
             for name in ("a", "b")
         ]
+        assert [error for error in result.errors if "did not complete" in error] == expected_incomplete_errors
         assert not [warning for warning in result.warnings if "does not bundle" in warning]
-        assert result.gate_failures == [f"[{name}] {_gate('.claude/settings.json')}" for name in ("a", "b")]
+        assert result.gate_failures == [
+            gate
+            for name, error in zip(("a", "b"), expected_incomplete_errors, strict=True)
+            for gate in (error, f"[{name}] {_gate('.claude/settings.json')}")
+        ]
         assert [finding.file_path for finding in _unverified(result)] == [
             f"[{name}] .claude/settings.json" for name in ("a", "b")
         ]
@@ -757,7 +763,7 @@ class TestPartlyReadManifests:
         # Without the Critical, nothing confirms a failure, so the check itself is INCOMPLETE.
         assert resolve_run_status([result]).of(result) == Status.INCOMPLETE
         assert _unverified(result) == []
-        assert result.gate_failures == []
+        assert result.gate_failures == [result.errors[0]]
         assert result.errors[0] == (
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
             f"{_SETTINGS_HOOK_ROW}; security scan did not complete"
@@ -875,7 +881,7 @@ class TestOtherGapsStayIncomplete:
 
         assert result.incomplete_scans == ["skillspector"]
         assert _unverified(result) == []
-        assert result.gate_failures == []
+        assert result.gate_failures == [result.errors[0]]
         assert result.errors[0] == (
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
             f"{label}; security scan did not complete"
@@ -913,7 +919,7 @@ class TestOtherGapsStayIncomplete:
 
         assert result.incomplete_scans == ["skillspector"]
         assert _unverified(result) == []
-        assert result.gate_failures == []
+        assert result.gate_failures == [result.errors[0]]
         assert result.errors[0].startswith(
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
             "hooks/hooks.json [static; opaque_content; analyzers=bundled_execution_surface]"
@@ -1072,3 +1078,33 @@ class TestHookRowHelpers:
         mutate(report)
 
         assert _skillspector_without_hook_surface(report) is None
+
+
+@pytest.mark.parametrize("case", ["parse-limit", "limitation-without-row"])
+def test_hook_projection_retains_only_residual_completeness_diagnostics(tmp_path: Path, case: str) -> None:
+    from skillevaluator.reporting import JSONReporter
+
+    if case == "parse-limit":
+        root = _timeout_plugin(tmp_path)
+        report = _report(_TIMEOUT_REPORT)
+    else:
+        root = _plugin(tmp_path)
+        report = _report(_PLUGIN_REPORT)
+        report["analysis_completeness"]["limitations"].append("Transitive traversal stopped early.")
+
+    result = _replay(root, report)
+
+    _assert_failed_with_incomplete_scan(result)
+    record = json.loads(JSONReporter().render(result))["skillspector_completeness"]["records"][0]
+    assert all(row["reason_code"] != "opaque_content" for row in record["ledger_exceptions"])
+    assert "Analyzer bundled_execution_surface status: degraded." not in record["limitations"]
+    if case == "parse-limit":
+        assert {row["reason_code"] for row in record["ledger_exceptions"]} == {"static_parse_limit"}
+    else:
+        assert record["ledger_exceptions"] == []
+        assert record["limitations"] == ["Transitive traversal stopped early."]
+    incomplete_error = next(error for error in result.errors if "reports incomplete analysis" in error)
+    assert "opaque_content" not in incomplete_error
+    result.recalculate_from_findings()
+    assert incomplete_error in result.errors
+    assert _gate("hooks/hooks.json") in result.gate_failures

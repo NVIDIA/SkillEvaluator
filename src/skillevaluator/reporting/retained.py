@@ -19,6 +19,7 @@ from skillevaluator.reporting.base import is_cleanly_skipped, is_tier2_result, i
 from skillevaluator.reporting.html import HTMLReporter
 from skillevaluator.reporting.json_reporter import _tier1_scope_strings
 from skillevaluator.reporting.run_status import resolve_run_status, result_status
+from skillevaluator.skillspector_diagnostics import sanitize_completeness
 from skillevaluator.skillspector_provenance import sanitize_skillspector_provenance_metadata
 from skillevaluator.skillspector_reference_caveats import sanitize_reference_caveat_metadata
 from skillevaluator.skillspector_references import REFERENCE_SUMMARY_KEY, reference_summary_record
@@ -253,6 +254,9 @@ def retained_results(
             metadata["skillspector_version"] = _text(row["skillspector_version"], "skillspector_version")
         # Revalidated like every report boundary; a non-canonical record is left out.
         metadata.update(sanitize_skillspector_provenance_metadata(row))
+        completeness = sanitize_completeness(row.get("skillspector_completeness"))
+        if completeness:
+            metadata["skillspector_completeness"] = completeness
         if "skillspector_reference_caveats" in row:
             reference_caveats = sanitize_reference_caveat_metadata(row["skillspector_reference_caveats"])
             _require(reference_caveats is not None, "Invalid skillspector_reference_caveats")

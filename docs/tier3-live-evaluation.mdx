@@ -1611,8 +1611,9 @@ saved judge evidence use the same credential masker:
 - the values of long flags whose name holds a credential word, such as
   `--password`, `--token`, `--client-secret`, `--db-password`, or `--cookie`,
   and a `curl -b name=value` cookie. A flag that takes a file or nothing, such
-  as `--password-stdin`, `--token-file`, or `--cookie-jar`, and
-  `-b cookies.txt` keep the word after them, and a shell operator after a flag
+  as `--password-stdin`, `--token-file`, or `--cookie-jar`, and token-count
+  flags `--max-tokens` and `--token-limit`, keep the word after them. A
+  `-b cookies.txt` cookie jar keeps its path too. A shell operator after a flag
   is no value (`gh auth login --with-token < token.txt`);
 - a `-u`, `-U`, `--user`, or `--proxy-user` value that holds a colon, such as
   `user:password` or an API key with an empty password (`KEY:`), also attached

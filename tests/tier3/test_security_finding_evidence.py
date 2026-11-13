@@ -1537,3 +1537,18 @@ def test_masking_the_continuation_at_and_escape_forms_stays_fast_on_adversarial_
     for _ in range(3):
         eval_core_checks._redact_finding_evidence(text)
     assert time.perf_counter() - started < 2.0
+
+
+@pytest.mark.parametrize("copy", ["template", "eval_core", "private_plugin"])
+def test_token_count_flags_remain_readable_in_saved_findings(copy: str) -> None:
+    command = "judge --max-tokens 100 --token-limit 5 && rm -rf /srv/app"
+    tool_call = {"action": "Bash", "action_input": {"command": command}}
+    if copy == "private_plugin":
+        from skillevaluator.tier3.eval_core import plugin_security
+
+        result = plugin_security.scan_plugin_security([tool_call])
+    else:
+        result = _security(copy, tool_call)
+    findings = [finding for finding in result["findings"] if finding["type"] == "destructive_command"]
+    assert findings
+    assert all(finding["evidence"] == command for finding in findings)

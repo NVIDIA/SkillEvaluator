@@ -2826,7 +2826,7 @@ def _redact_judge_evidence(text):
     """Mask credentials in a judge prompt, reply, or problem before it is saved."""
     # Share finding credential semantics without imposing the finding scanner's
     # 2,000-character input budget on the longer judge prompt and reply budgets.
-    redacted = _shared_checks._mask_finding_evidence_credentials(str(text))
+    redacted = _shared_checks._mask_finding_evidence_credentials(str(text), preserve_header_format=True)
     redacted = _redact_configured_credentials(_redact_evidence_text(redacted))
     for pattern in _SECRET_PATTERNS:
         redacted = pattern.sub("<redacted>", redacted)

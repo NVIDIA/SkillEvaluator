@@ -3204,7 +3204,7 @@ def _redact_finding_evidence(text: Any, limit: int = 500) -> str:
     return redacted[:limit]
 
 
-def _mask_finding_evidence_credentials(text: str) -> str:
+def _mask_finding_evidence_credentials(text: str, *, preserve_header_format: bool = False) -> str:
     """Mask supported credential forms without imposing a caller's evidence budget."""
     # Remove shell continuations before matching values: they can join an
     # attached password to its flag. Ordinary line breaks stay intact.
@@ -3228,7 +3228,7 @@ def _mask_finding_evidence_credentials(text: str) -> str:
     ):
         redacted = pattern.sub(r"\1<redacted>", redacted)
     redacted = _FINDING_EVIDENCE_CONFIG_SET_RE.sub(_mask_config_set_value, redacted)
-    redacted = _mask_credential_assignments(redacted)
+    redacted = _mask_credential_assignments(redacted, preserve_header_format=preserve_header_format)
     # Structured values are masked before known token substrings, so a token
     # prefix inside a longer password cannot leave the password's tail behind.
     redacted = _redact_network_evidence(redacted).replace("[redacted secret exposure]", "<redacted>")
@@ -3306,7 +3306,8 @@ def _mask_credential_flags(text: str) -> str:
 
 def _is_credential_flag_name(name: str) -> bool:
     return (
-        _FINDING_EVIDENCE_CREDENTIAL_FLAG_WORD_RE.search(name) is not None
+        name.lower() not in {"--max-tokens", "--token-limit"}
+        and _FINDING_EVIDENCE_CREDENTIAL_FLAG_WORD_RE.search(name) is not None
         and _FINDING_EVIDENCE_FLAG_LOCATION_RE.search(name) is None
     )
 
@@ -3380,7 +3381,16 @@ def _mask_token_prefix(match: re.Match[str]) -> str:
     return "<redacted>"
 
 
-def _mask_credential_assignments(text: str) -> str:
+# Headers have already passed the header masker. Judge evidence keeps their
+# surrounding JSON/subscript/string syntax, while still remasking the entire
+# quoted value so an escaped quote cannot leave a credential suffix behind.
+_FINDING_EVIDENCE_HEADER_FIELD_NAME_RE = re.compile(
+    r"authorization|(?:[\w.-]+-)?(?:api-key|auth-token|access-token|private-token)|cookie", re.IGNORECASE
+)
+_FINDING_EVIDENCE_HEADER_VALUE_PREFIX_RE = re.compile(r"[bfru]{0,2}(\\?[\"'])", re.IGNORECASE)
+
+
+def _mask_credential_assignments(text: str, *, preserve_header_format: bool = False) -> str:
     """Mask the value of each assignment whose name holds a credential word ("_authToken=...", "api_key: ...")."""
     parts: list[str] = []
     pos = 0
@@ -3439,7 +3449,14 @@ def _mask_credential_assignments(text: str) -> str:
             # Inside a quoted string "name= value" is not a shell assignment,
             # so the value may follow spaces ("echo 'password= VALUE' >> f").
             start = _FINDING_EVIDENCE_SPACES_RE.match(text, start).end()
-        if in_quotes and text.startswith(closers, start):
+        header_prefix = (
+            _FINDING_EVIDENCE_HEADER_VALUE_PREFIX_RE.match(text, start)
+            if preserve_header_format and _FINDING_EVIDENCE_HEADER_FIELD_NAME_RE.fullmatch(name)
+            else None
+        )
+        if header_prefix is not None:
+            value = _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE.match(text, header_prefix.start(1))
+        elif in_quotes and text.startswith(closers, start):
             # The value is empty and the quote after it closes the string that
             # opened before the name ('grep "token=" ...', "printf 'password: '"),
             # so it is not the opening quote of a value.
@@ -3461,7 +3478,16 @@ def _mask_credential_assignments(text: str) -> str:
         if value is None:
             continue
         parts.append(text[pos : value.start()])
-        parts.append("<redacted>")
+        replacement = "<redacted>"
+        if header_prefix is not None:
+            opening = header_prefix.group(1)
+            body = value.group()[len(opening) :]
+            closing = opening if body.endswith(opening) else ""
+            scheme = ""
+            if name.lower() == "authorization":
+                scheme = re.match(_FINDING_EVIDENCE_AUTH_SCHEME, body, re.IGNORECASE).group()
+            replacement = opening + scheme + replacement + closing
+        parts.append(replacement)
         pos = value.end()
     parts.append(text[pos:])
     return "".join(parts)

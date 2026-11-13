@@ -9184,11 +9184,17 @@ def _missing_reference_notes(payload: dict, scanned_root: Path | None, **options
         completeness["scope_exclusions"],
         payload["components"],
         scanned_root,
-        completeness=completeness,
         references=completeness.get("references"),
         skillspector_version=version,
+        analysis_completeness=completeness,
         **options,
     )
+
+
+_REFERENCE_REJECTION_HELP = (
+    ". Missing references require a standalone target with complete, matching reference and scan evidence. "
+    "See https://docs.nvidia.com/skills/skillevaluator/tier1-validation."
+)
 
 
 def _missing_reference_warning(labels: str, count: int = 1) -> str:
@@ -9287,6 +9293,175 @@ class _InlineCatalogExecutor:
 class TestSkillspectorMissingReferences:
     """SkillSpector records a reference to a file the skill does not bundle as a ``partial`` analysis."""
 
+    def test_finding_deduplication_preserves_independent_errors_and_gates(self) -> None:
+        from skillevaluator.models.result import Finding, Severity, ValidationResult
+
+        result = ValidationResult()
+        finding = Finding(
+            category="SECURITY", severity=Severity.LOW, check_name="advisory", message="Repeated", file_path="SKILL.md"
+        )
+        result.add_structured_finding(finding)
+        result.add_structured_finding(finding)
+        result.fail_gate("Required scope failed")
+        result.add_error("Scanner omitted evidence")
+        result.mark_scan_incomplete("skillspector")
+
+        SecurityValidator._deduplicate_skillspector_findings(result)
+
+        assert len(result.findings) == 1
+        assert result.errors == ["Required scope failed", "Scanner omitted evidence"]
+        assert result.summary.errors == 2
+        assert result.is_incomplete
+        assert not result.passed
+
+    @pytest.mark.parametrize("version", ["2.12.0", "2.13.3", "2.13.4"])
+    @pytest.mark.parametrize(
+        "gap",
+        [
+            "unmapped-missing",
+            "unmapped-ambiguous",
+            "ledger-truncated",
+            "references-truncated",
+            "unknown-field",
+            "unknown-exclusion",
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_missing_reference_requires_complete_report_evidence(
+        self, mock_tools, tmp_path: Path, version: str, gap: str
+    ) -> None:
+        files = dict(_NOTES_WRITER_FILES)
+        payload = _reference_report(version)
+        completeness = payload["analysis_completeness"]
+        if gap.startswith("unmapped-"):
+            line = "Run `versions/install.sh` before writing the notes."
+            files["SKILL.md"] += line + "\n"
+            files["versions/install.sh"] = "#!/bin/sh\nexit 0\n"
+            payload["components"][0].update(lines=11, size_bytes=len(files["SKILL.md"].encode()))
+            completeness["references"].append(
+                {
+                    **completeness["references"][-1],
+                    "line": 11,
+                    "evidence": line,
+                    "status": "missing" if gap == "unmapped-missing" else "ambiguous",
+                }
+            )
+        elif gap == "ledger-truncated":
+            completeness["ledger_exceptions_truncated"] = True
+        elif gap == "references-truncated":
+            completeness["references_truncated"] = True
+        elif gap == "unknown-field":
+            completeness["unknown_evidence"] = False
+        else:
+            completeness["scope_exclusions"].append(
+                {"path": "not-an-unscanned-entry", "outcome": "out_of_scope", "fatal": False}
+            )
+        skill = _write_skill(tmp_path / "notes-writer", files)
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert not result.passed
+        assert result.incomplete_scans == ["skillspector"]
+        assert not any("does not bundle" in warning for warning in result.warnings)
+        assert "skillspector_reference_caveats" not in result.metadata
+
+    @pytest.mark.parametrize("version", ["2.12.0", "2.13.3", "2.13.4"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_nonfatal_exclusion_must_name_an_actual_unscanned_entry(
+        self, mock_tools, tmp_path: Path, version: str
+    ) -> None:
+        skill = _write_skill(
+            tmp_path / "notes-writer", {**_NOTES_WRITER_FILES, "versions/install.sh": "#!/bin/sh\nexit 0\n"}
+        )
+        payload = _reference_report(version)
+        payload["analysis_completeness"]["scope_exclusions"].append(
+            {"path": "versions/install.sh", "outcome": "out_of_scope", "fatal": False}
+        )
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert result.passed
+        assert not result.is_incomplete
+        assert any("does not bundle" in warning for warning in result.warnings)
+
+    @pytest.mark.parametrize("version", ["2.12.0", "2.13.3", "2.13.4"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_refused_missing_reference_explains_acceptance_requirements(
+        self, mock_tools, tmp_path: Path, version: str
+    ) -> None:
+        skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
+        payload = _reference_report(version)
+        payload["analysis_completeness"]["references_truncated"] = True
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert result.is_incomplete
+        assert any("standalone target" in error for error in result.errors)
+        assert any("https://docs.nvidia.com/skills/skillevaluator/tier1-validation" in error for error in result.errors)
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX shell escapes and symlinks")
+    @pytest.mark.parametrize("version", ["2.11.2", "2.12.0", "2.13.3", "2.13.4"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_shell_escaped_space_cannot_hide_an_uninspected_name(
+        self, mock_tools, tmp_path: Path, version: str
+    ) -> None:
+        original = "Write the summary to `output/notes.md` and keep it short."
+        line = r"Run `bash my\ script.sh` then write the summary to `output/notes.md`."
+        skill = _write_skill(
+            tmp_path / "notes-writer",
+            {**_NOTES_WRITER_FILES, "SKILL.md": _NOTES_WRITER_FILES["SKILL.md"].replace(original, line)},
+        )
+        outside = tmp_path / "outside.sh"
+        outside.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (skill / "my script.sh").symlink_to(outside)
+        payload = _reference_report(version)
+        for reference in payload["analysis_completeness"]["references"]:
+            if reference.get("evidence") == original:
+                reference["evidence"] = line
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert not result.passed
+        assert result.incomplete_scans == ["skillspector"]
+
+    @pytest.mark.parametrize("version", ["2.11.2", "2.12.0", "2.13.3", "2.13.4"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_reference_warning_survives_deduplicated_static_and_llm_findings(
+        self, mock_tools, tmp_path: Path, version: str
+    ) -> None:
+        skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
+        static, enriched = _reference_report(version), _reference_report(version)
+        for report in (static, enriched):
+            report["issues"] = [
+                {
+                    "id": "TM1",
+                    "finding_id": "finding-reference-advisory",
+                    "match_fingerprint": "reference-advisory-fingerprint",
+                    "severity": "LOW",
+                    "confidence": 1.0,
+                    "finding": "Duplicate low finding",
+                    "location": {"file": "SKILL.md", "start_line": 8},
+                }
+            ]
+            report["risk_assessment"].update(score=10, max_issue_severity="LOW")
+            report["analysis_completeness"].update(findings_before_filtering=1, findings_after_filtering=1)
+        enriched["metadata"].update(llm_requested=True, llm_available=True)
+        for status in enriched["analysis_completeness"]["analyzer_statuses"]:
+            if status["status"] == "disabled":
+                status.update(status="completed", planned_work=1, completed=1, reason_code=None)
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.side_effect = [
+            ToolResult(success=True, stdout=json.dumps(report), stderr="", exit_code=0) for report in (static, enriched)
+        ]
+
+        result = SecurityValidator(use_llm=True).validate_security_only(skill)
+
+        assert result.passed
+        assert not result.is_incomplete
+        assert len([finding for finding in result.findings if finding.message == "Duplicate low finding"]) == 1
+        marker = "missing-reference caveat" if version == "2.13.3" else "does not bundle"
+        assert any(marker in warning for warning in result.warnings)
+
     @pytest.mark.parametrize("version", ["2.11.2", "2.12.0", "2.13.3", "2.13.4"])
     @pytest.mark.parametrize(
         ("line", "complete"),
@@ -9372,7 +9547,7 @@ class TestSkillspectorMissingReferences:
         assert result.incomplete_scans == ["skillspector"]
         assert result.errors == [
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
-            "SKILL.md:8 [reference_resolution; reference_unresolved]; security scan did not complete"
+            "SKILL.md:8 [reference_resolution; reference_unresolved]; security scan did not complete" + _REFERENCE_REJECTION_HELP
         ]
         assert not result.warnings
 
@@ -9545,7 +9720,7 @@ class TestSkillspectorMissingReferences:
             _caveat_error(row)
             if version == "2.13.4"
             else f"skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
-            f"{row}; security scan did not complete"
+            f"{row}; security scan did not complete{_REFERENCE_REJECTION_HELP}"
         ]
         assert not result.warnings
         assert "skillspector_reference_caveats" not in result.metadata
@@ -9617,32 +9792,14 @@ class TestSkillspectorMissingReferences:
 
         self._assert_refused(result, version)
 
-    @pytest.mark.parametrize("value", [False, None])
-    @pytest.mark.parametrize("flag", ["ledger_exceptions_truncated", "references_truncated"])
-    @pytest.mark.parametrize("version", ["2.12.0", "2.13.3", "2.13.4"])
-    @patch("skillevaluator.validators.security.Tools")
-    def test_truncation_flag_that_is_not_set_does_not_block(
-        self, mock_tools, tmp_path: Path, version: str, flag: str, value: object
-    ) -> None:
-        skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
-        payload = _reference_report(version)
-        payload["analysis_completeness"][flag] = value
-
-        result = _validate_skillspector_payload(mock_tools, skill, payload)
-
-        assert result.passed
-        assert result.incomplete_scans == []
-        assert len(result.warnings) == 1
-
-    def test_every_missing_reference_needs_a_row_on_its_line_and_no_list_is_truncated(self, tmp_path: Path) -> None:
+    def test_every_missing_reference_needs_a_row_on_its_line(self, tmp_path: Path) -> None:
         skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
         missing = {"source_path": "SKILL.md", "line": 8, "status": "missing"}
         evidence = "Write the summary to `output/notes.md` and keep it short."
 
-        def refused(*extra: object, **flags: object) -> bool:
+        def refused(*extra: object) -> bool:
             payload = _reference_report("2.13.3")
             payload["analysis_completeness"]["references"].extend(extra)
-            payload["analysis_completeness"].update(flags)
             return _missing_reference_notes(payload, skill) is None
 
         assert not refused()
@@ -9659,11 +9816,6 @@ class TestSkillspectorMissingReferences:
         # No reference elsewhere may be ambiguous either.
         assert refused({**missing, "status": "ambiguous"})
         assert refused({**missing, "line": 10, "status": "ambiguous"})
-        for flag in ("ledger_exceptions_truncated", "references_truncated", "scope_exclusions_truncated"):
-            for value in (True, 1, "yes", ["x"]):
-                assert refused(**{flag: value}), (flag, value)
-            for value in (False, None):
-                assert not refused(**{flag: value}), (flag, value)
 
     def test_reference_evidence_without_a_row_is_unmatched(self) -> None:
         resolved = {"source_path": "SKILL.md", "line": 8, "status": "resolved"}
@@ -9671,7 +9823,8 @@ class TestSkillspectorMissingReferences:
 
         assert not _skillspector_reference_evidence_unmatched({})
         assert not _skillspector_reference_evidence_unmatched({"references": None})
-        assert not _skillspector_reference_evidence_unmatched({"references": [resolved, {"status": "rejected"}, "x"]})
+        assert not _skillspector_reference_evidence_unmatched({"references": [resolved, {"status": "rejected"}]})
+        assert _skillspector_reference_evidence_unmatched({"references": [resolved, "x"]})
         assert not _skillspector_reference_evidence_unmatched({"references": [resolved], "references_truncated": False})
         assert _skillspector_reference_evidence_unmatched({"references": [resolved, missing]})
         assert _skillspector_reference_evidence_unmatched({"references": [{**missing, "status": "ambiguous"}]})
@@ -9761,7 +9914,7 @@ class TestSkillspectorMissingReferences:
         assert result.errors == [
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
             "SKILL.md:8 [reference_resolution; reference_missing]; "
-            "SKILL.md:10 [reference_resolution; reference_missing]; security scan did not complete"
+            "SKILL.md:10 [reference_resolution; reference_missing]; security scan did not complete" + _REFERENCE_REJECTION_HELP
         ]
         assert not result.warnings
 
@@ -9862,7 +10015,7 @@ class TestSkillspectorMissingReferences:
         assert result.incomplete_scans == ["skillspector"]
         assert result.errors == [
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
-            "SKILL.md:8 [reference_resolution; reference_missing]; security scan did not complete"
+            "SKILL.md:8 [reference_resolution; reference_missing]; security scan did not complete" + _REFERENCE_REJECTION_HELP
         ]
         assert not result.warnings
 
@@ -9920,7 +10073,7 @@ class TestSkillspectorMissingReferences:
         assert result.incomplete_scans == ["skillspector"]
         assert result.errors == [
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
-            "SKILL.md:10 [reference_resolution; reference_missing]; security scan did not complete"
+            "SKILL.md:10 [reference_resolution; reference_missing]; security scan did not complete" + _REFERENCE_REJECTION_HELP
         ]
         assert not result.warnings
 
@@ -10118,7 +10271,7 @@ class TestSkillspectorMissingReferences:
         assert rerun.incomplete_scans == ["skillspector"]
         assert rerun.errors == [
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
-            "SKILL.md:10 [reference_resolution; reference_missing]; security scan did not complete"
+            "SKILL.md:10 [reference_resolution; reference_missing]; security scan did not complete" + _REFERENCE_REJECTION_HELP
         ]
         assert not rerun.warnings
 
@@ -10142,7 +10295,7 @@ class TestSkillspectorMissingReferences:
         assert result.incomplete_scans == ["skillspector"]
         assert result.errors == [
             "[setup-helper] skillspector JSON field 'analysis_completeness' reports incomplete analysis "
-            "(status 'partial'): SKILL.md:8 [reference_resolution; reference_missing]; security scan did not complete"
+            "(status 'partial'): SKILL.md:8 [reference_resolution; reference_missing]; security scan did not complete" + _REFERENCE_REJECTION_HELP
         ]
         assert _missing_reference_notes(payload, skill.resolve(), reference_root=root.resolve()) is None
         assert _missing_reference_notes(payload, skill.resolve(), reference_root=skill.resolve()) is not None
@@ -10186,7 +10339,7 @@ class TestSkillspectorMissingReferences:
         assert result.incomplete_scans == ["skillspector"]
         assert (
             "[setup-helper] skillspector JSON field 'analysis_completeness' reports incomplete analysis "
-            "(status 'partial'): SKILL.md:8 [reference_resolution; reference_missing]; security scan did not complete"
+            "(status 'partial'): SKILL.md:8 [reference_resolution; reference_missing]; security scan did not complete" + _REFERENCE_REJECTION_HELP
         ) in result.errors
         assert not any("does not bundle" in warning for warning in result.warnings)
         # The folder is the reference root only while it is scanned; the skill on its own still passes.
@@ -10258,7 +10411,7 @@ class TestSkillspectorMissingReferences:
         assert result.incomplete_scans == ["skillspector"]
         assert result.errors == [
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
-            "SKILL.md:10 [reference_resolution; reference_missing]; security scan did not complete"
+            "SKILL.md:10 [reference_resolution; reference_missing]; security scan did not complete" + _REFERENCE_REJECTION_HELP
         ]
         assert _missing_reference_notes(payload, skill, reference_root=None) is None
         assert validator.validate_security_only(skill).incomplete_scans == []
@@ -10723,10 +10876,11 @@ _OVERRIDE_NOTES_SKILL = (
 
 
 def _caveat_error(labels: str, *, description: str = "caveats that SkillEvaluator does not accept") -> str:
-    return (
+    message = (
         f"skillspector JSON field 'analysis_completeness' reports {description} "
         f"(status 'complete_with_caveats'): {labels}; security scan did not complete"
     )
+    return message + _REFERENCE_REJECTION_HELP if description == "caveats that SkillEvaluator does not accept" else message
 
 
 def _other_caveat_error(labels: str) -> str:
@@ -11167,10 +11321,10 @@ class TestSkillspectorCompleteWithCaveats:
                 completeness["scope_exclusions"],
                 payload["components"],
                 skill,
-                completeness=completeness,
                 references=completeness["references"],
                 skillspector_version=(2, 13, 4),
                 reference_root=skill,
+                analysis_completeness=completeness,
             )
 
         row = completeness["ledger_exceptions"][0]

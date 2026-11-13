@@ -217,9 +217,7 @@ def main():
     if args.spec and args.operation:
         spec = fetch_openapi_spec(args.spec)
         if not spec:
-            _print_json(
-                {"success": False, "error": f"Failed to fetch OpenAPI spec from {args.spec}"}, file=sys.stderr
-            )
+            _print_json({"success": False, "error": f"Failed to fetch OpenAPI spec from {args.spec}"}, file=sys.stderr)
             sys.exit(1)
 
         path, spec_method, _operation = find_operation(spec, args.operation)

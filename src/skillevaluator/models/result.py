@@ -692,14 +692,17 @@ class ValidationResult:
         # Prefix findings with skill name in file_path
         for finding in other.findings:
             metadata = finding.metadata
-            listed = metadata.get("occurrences") if isinstance(metadata, dict) else None
-            if isinstance(listed, list):
+            for key in ("occurrences", "skillspector_occurrences"):
+                listed = metadata.get(key) if isinstance(metadata, dict) else None
+                if not isinstance(listed, list):
+                    continue
                 # A check that folds repeats (the PII scan) lists each location
-                # in metadata; prefix those like file_path so the finding's own
-                # location still matches its first listed one.
+                # in metadata, and a SkillSpector AE1 finding lists the lines
+                # that name its file; prefix those like file_path so the
+                # finding's own location still matches its first listed one.
                 metadata = {
                     **metadata,
-                    "occurrences": [
+                    key: [
                         {**item, "file": f"[{prefix}] {item['file']}"}
                         if isinstance(item, dict) and isinstance(item.get("file"), str)
                         else item
@@ -736,6 +739,21 @@ class ValidationResult:
             self.metadata["gate_failures"] = gate_failures
         if scanners := {**self.scanners, **other.scanners}:
             self.metadata["scanners"] = scanners
+        # Keep each skill's unparsed files, prefixed like errors and findings so
+        # skills stay distinguishable when a folder holds several.
+        unparsed = other.metadata.get("semgrep_unparsed_files")
+        if isinstance(unparsed, list) and unparsed:
+            carried = self.metadata.get("semgrep_unparsed_files")
+            self.metadata["semgrep_unparsed_files"] = [
+                *(carried if isinstance(carried, list) else []),
+                *(f"[{prefix}] {path}" for path in unparsed if isinstance(path, str)),
+            ]
+        omitted = other.metadata.get("semgrep_unparsed_files_omitted")
+        if type(omitted) is int and omitted > 0:
+            carried_omitted = self.metadata.get("semgrep_unparsed_files_omitted")
+            self.metadata["semgrep_unparsed_files_omitted"] = omitted + (
+                carried_omitted if type(carried_omitted) is int else 0
+            )
 
         # Merge summary
         self.summary.errors += other.summary.errors

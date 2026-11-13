@@ -210,7 +210,8 @@ PROTECTED_WRITES = [
     pytest.param(_bash("echo x >> /home/agent/project/../.bashrc"), id="parent-segment"),
     pytest.param(_bash('echo x >> "${GIT_CONFIG:-$HOME/.gitconfig}"'), id="default-word-target"),
     pytest.param(_bash("sed -i 's/a/b/' ${PROFILE-/home/agent/.zprofile}"), id="default-word-sed-target"),
-    # An apostrophe in a comment, a here-document body or an escape does not open a quoted string.
+    # An escaped apostrophe opens no quoted string, and one in a comment or a here-document body
+    # opens none that runs past its line.
     pytest.param(
         _bash("# Don't keep the old PATH line\nsed -i '/old-path/d' $HOME/.zprofile"), id="comment-apostrophe"
     ),
@@ -621,7 +622,7 @@ def test_a_url_tilde_user_is_not_a_home_directory() -> None:
         ("sed -i 's/a/b/' README.md  # was in ~/.gitconfig", None),
         ("sed -i 's/a/b/' /home/agent/.gitconfig  # fix the name", "~/.gitconfig"),
         ("sed -i 's/#.*//' ~/.zprofile", "~/.zprofile"),
-        # No quoted string opens in a comment or a here-document body, nor at an escaped quote.
+        # No quoted string opens at an escaped quote or runs past a comment or here-document body line.
         ("# Don't keep it\nsed -i '/x/d' $HOME/.zprofile", "~/.zprofile"),
         ("echo It\\'s done; sed -i 's/a/b/' ~/.gitconfig", "~/.gitconfig"),
         ("cat <<'EOF'\nit's here\nEOF\nsed -i 's/a/b/' ~/.zprofile", "~/.zprofile"),

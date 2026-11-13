@@ -445,8 +445,9 @@ _PATH_COMPONENT_END = r"(?=/|$|[\s'\"`;|&<>(),:])"
 # right: a backslash outside single quotes escapes the next character, so
 # neither \" nor \' starts a string and \" does not end one, as in
 # bash -c "echo x >> \"$HOME/.zprofile\""; $'...' ends at an unescaped quote;
-# and no string opens in a comment or a body. Quotes there pair within their
-# line, so the apostrophe of "# it's" does not shift the strings after it.
+# and in a comment or a here-document body line, quotes pair only within that
+# line, so no quoted string runs past it and the apostrophe of "# it's" does
+# not shift the strings after it.
 # Without an option that gives the script (-e, -f, --expression, --file, or a
 # short option cluster in which e or f comes before i, whose attached text is
 # the backup suffix), the first sed operand is the script and is left out; with
@@ -907,9 +908,9 @@ def _shell_text_regions(text: str) -> tuple[list[int], list[int]]:
     left to right as the shell reads it: a backslash outside single quotes
     escapes the next character, a "#" that starts a word begins a comment that
     runs to the end of its line, and the lines after the line of a "<<"
-    operator are its body, up to the line that holds only its delimiter. No
-    quoted string opens in a comment or a body line; quotes there pair within
-    that line.
+    operator are its body, up to the line that holds only its delimiter. In a
+    comment or a here-document body line, quotes pair only within that line,
+    so no quoted string runs past it.
     """
     quoted: list[int] = []
     lines: list[int] = []

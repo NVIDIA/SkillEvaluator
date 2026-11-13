@@ -16,6 +16,8 @@ from skillevaluator.inference.types import (
     LLMClientTruncatedError,
     LLMConfigError,
     LLMVerdict,
+    parse_bounded_llm_verdict,
+    require_bounded_llm_string,
 )
 
 __all__ = [
@@ -27,4 +29,6 @@ __all__ = [
     "LLMClientTruncatedError",
     "LLMConfigError",
     "LLMVerdict",
+    "parse_bounded_llm_verdict",
+    "require_bounded_llm_string",
 ]

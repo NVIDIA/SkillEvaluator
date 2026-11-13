@@ -354,8 +354,8 @@ using Harbor 0.25:
   stopping; a second Ctrl+C skips the wait. On Windows the Harbor task tree is
   stopped immediately. The progress view marks unfinished stages as
   interrupted.
-- A skipped or exceeded wait, a Windows run, or a SkillEvaluator process that
-  is killed rather than interrupted with Ctrl+C (for example with `kill` or by
+- A skipped or exceeded Ctrl+C wait, a Ctrl+C on Windows, or a SkillEvaluator
+  process that is killed rather than interrupted (for example with `kill` or by
   a cancelled CI job) can leave trial containers or in-container agent
   processes running, and the trials' Compose networks behind. Each leftover
   network keeps a subnet from Docker's limited default address pools. Harbor's

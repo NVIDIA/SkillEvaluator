@@ -39,6 +39,7 @@ from skillevaluator.inference.diagnostics import llm_failure_diagnostic, safe_ll
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.utils.redaction import redact_sensitive_text
+from skillevaluator.utils.rich_markup import strip_terminal_controls
 from skillevaluator.utils.secure_fs import SecureRoot
 from skillevaluator.validators.base import ValidatorBase
 from skillevaluator.validators.markdown import markdown_link_targets, normalized_local_path
@@ -212,12 +213,13 @@ def _rubric_report_problem(report: Any, criteria: list[dict]) -> str | None:
 
 
 def _bounded_problem(problem: str) -> str:
-    """Shorten a rejection reason for the log line and the retry note.
+    """Make a rejection reason safe for logs, retry notes and failure reports.
 
     The reason quotes the judge's own text, such as an invented criterion id,
     which has no length limit.
     """
-    problem = redact_sensitive_text(problem)
+    problem = strip_terminal_controls(redact_sensitive_text(problem))
+    problem = " ".join("".join(char if char.isprintable() else " " for char in problem).split())
     if len(problem) <= _MAX_RETRY_PROBLEM_CHARS:
         return problem
     return f"{problem[:_MAX_RETRY_PROBLEM_CHARS]} ... [truncated]"
@@ -796,7 +798,7 @@ class RubricEvalValidator(ValidatorBase):
                 report=report,
                 skill_path=skill_path,
                 manifest=manifest,
-                message=validation_error,
+                message=_bounded_problem(validation_error),
                 check_name="llm_invalid_response",
                 suggestion="Retry rubric evaluation; the judge response did not contain valid complete criterion evidence",
                 judge_attempts=judge_attempts,

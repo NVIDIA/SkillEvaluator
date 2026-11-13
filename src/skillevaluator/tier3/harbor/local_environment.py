@@ -18,6 +18,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
@@ -850,18 +851,11 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
 
-    def _resolve_download_dir_source(self, source_dir: str) -> Path:
-        # Every directory download goes through here, including the Harbor
-        # tar/find based variants, so a ".." path through a mapped prefix
-        # cannot reach outside the run directory.
+    async def download_dir(self, source_dir: str, target_dir: Path | str) -> None:
         source = self._resolve_path(source_dir)
         if not self._path_is_within_allowed_local_roots(source):
             raise ValueError(f"local mode download source is outside the run directory: {source_dir}")
         self._reject_logs_parent_transfer(source)
-        return source
-
-    async def download_dir(self, source_dir: str, target_dir: Path | str) -> None:
-        source = self._resolve_download_dir_source(source_dir)
         target = Path(target_dir)
         if target.exists():
             shutil.rmtree(target)
@@ -874,8 +868,24 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         target_dir: Path | str,
         exclude: list[str],
     ) -> None:
-        self._resolve_download_dir_source(source_dir)
+        self._reject_logs_parent_transfer(self._resolve_path(source_dir))
         await super().download_dir_with_exclusions(source_dir=source_dir, target_dir=target_dir, exclude=exclude)
+
+    async def _download_dir_with_exclusions_impl(
+        self,
+        *,
+        source_dir: str,
+        target_dir: Path | str,
+        exclude: list[str],
+        service: str | None,
+    ) -> None:
+        if not self.is_main_service(service):
+            from harbor.environments.base import ServiceOperationsUnsupportedError
+
+            raise ServiceOperationsUnsupportedError(self._service_unsupported_message(service))
+        await self._download_local_directory(
+            source_dir=source_dir, target_dir=target_dir, exclude=exclude, filter_files=False
+        )
 
     async def download_dir_filtered(
         self,
@@ -886,10 +896,111 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         exclude: Sequence[str] | None = None,
         protect: Sequence[str] | None = None,
     ) -> None:
-        self._resolve_download_dir_source(source_dir)
-        await super().download_dir_filtered(
-            source_dir=source_dir, target_dir=target_dir, include=include, exclude=exclude, protect=protect
+        self._reject_logs_parent_transfer(self._resolve_path(source_dir))
+        await self._download_local_directory(
+            source_dir=source_dir,
+            target_dir=target_dir,
+            include=include,
+            exclude=exclude,
+            protect=protect,
+            filter_files=True,
         )
+
+    async def _download_local_directory(
+        self,
+        *,
+        source_dir: str,
+        target_dir: Path | str,
+        include: Sequence[str] | None = None,
+        exclude: Sequence[str] | None = None,
+        protect: Sequence[str] | None = None,
+        filter_files: bool,
+    ) -> None:
+        """Keep Harbor's directory-transfer scratch files within the local run."""
+        from harbor.environments.base import transfer_tar_filter
+        from harbor.utils.path_filter import filter_paths_by_patterns
+
+        source = self._resolve_path(source_dir)
+        if not self._path_is_within_allowed_local_roots(source):
+            raise ValueError(f"local mode download source is outside the run directory: {source_dir}")
+        self._reject_logs_parent_transfer(source)
+        source_metadata = source.lstat()
+        if not stat.S_ISDIR(source_metadata.st_mode) or stat_is_link_or_reparse(source_metadata):
+            raise ValueError("local directory transfer source must be a non-linked directory")
+        source_root = source.resolve()
+        selected: list[str] | None = None
+        if filter_files:
+
+            def raise_walk_error(error: OSError) -> None:
+                raise error
+
+            paths = []
+            for directory, _subdirectories, filenames in os.walk(source, followlinks=False, onerror=raise_walk_error):
+                for filename in filenames:
+                    path = Path(directory) / filename
+                    metadata = path.lstat()
+                    if stat.S_ISREG(metadata.st_mode) and not stat_is_link_or_reparse(metadata):
+                        paths.append(path.relative_to(source).as_posix())
+            paths.sort()
+            selected = filter_paths_by_patterns(paths, include=include, exclude=exclude)
+            protected = set(protect or ()) - set(selected)
+            selected += [path for path in paths if path in protected]
+
+        # The SDK uses host /tmp for its archive/list. That location is outside
+        # local mode's grant, so use a private per-call directory under the run
+        # instead; never change the SDK's module-global transfer directory.
+        temporary_metadata = self._tmp.lstat()
+        if (
+            not self._path_is_within_allowed_local_roots(self._tmp)
+            or not stat.S_ISDIR(temporary_metadata.st_mode)
+            or stat_is_link_or_reparse(temporary_metadata)
+        ):
+            raise ValueError("local directory transfer staging must remain inside the run")
+        with tempfile.TemporaryDirectory(prefix=".hb-local-transfer-", dir=self._tmp) as temporary:
+            staging = Path(temporary)
+            unpacked = staging / "unpacked"
+            unpacked.mkdir()
+            if selected != []:
+                archive = staging / "transfer.tar.gz"
+                # TMPDIR is a protected local-backend value. Refer to it in
+                # the shell instead of feeding host paths through the logical
+                # /workspace rewrite a second time.
+                archive_argument = f'"$TMPDIR"/{shlex.quote(staging.name)}/transfer.tar.gz'
+                if selected is not None:
+                    listing = staging / "files.list"
+                    # NUL records retain literal newlines/leading dashes. A
+                    # ./ prefix also prevents filenames from becoming options.
+                    listing.write_bytes(b"".join(os.fsencode("./" + name) + b"\0" for name in selected))
+                    listing_argument = f'"$TMPDIR"/{shlex.quote(staging.name)}/files.list'
+                    command = f"tar czf {archive_argument} --null -T {listing_argument}"
+                else:
+                    patterns = list(exclude or ())
+                    if staging.is_relative_to(source_root):
+                        patterns.append("./" + staging.relative_to(source_root).as_posix())
+                    excludes = " ".join(f"--exclude={shlex.quote(pattern)}" for pattern in patterns)
+                    command = f"tar czf {archive_argument} {excludes} ."
+                result = await self.exec(command, cwd=str(source), timeout_sec=600, user="root")
+                if result.return_code != 0:
+                    raise RuntimeError(f"Failed to pack local directory transfer (exit code {result.return_code})")
+                with tarfile.open(archive, "r:gz") as transfer:
+                    for member in transfer.getmembers():
+                        parts = PurePosixPath(member.name)
+                        if parts.is_absolute() or ".." in parts.parts or member.issym() or member.islnk():
+                            raise ValueError("local directory transfer refuses unsafe paths or linked files")
+                        if member.isfile():
+                            original = source.joinpath(*parts.parts)
+                            metadata = original.lstat()
+                            if (
+                                not original.resolve().is_relative_to(source_root)
+                                or not stat.S_ISREG(metadata.st_mode)
+                                or stat_is_link_or_reparse(metadata)
+                                or metadata.st_nlink != 1
+                            ):
+                                raise ValueError("local directory transfer requires regular non-linked files")
+                    transfer.extractall(path=unpacked, filter=transfer_tar_filter)
+            # Secure publication retains the existing no-follow/hard-link
+            # restrictions for destinations, including pre-existing outputs.
+            copytree_secure(unpacked, Path(target_dir), dirs_exist_ok=True)
 
     async def exec(
         self,

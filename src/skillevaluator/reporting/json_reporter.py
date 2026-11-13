@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from skillevaluator import __version__
@@ -44,6 +45,7 @@ from skillevaluator.reporting.run_status import Status, resolve_run_status, resu
 from skillevaluator.skillspector_diagnostics import sanitize_completeness
 from skillevaluator.skillspector_provenance import sanitize_skillspector_provenance_metadata
 from skillevaluator.skillspector_reference_caveats import sanitize_reference_caveat_metadata
+from skillevaluator.skillspector_references import reference_summary_record
 from skillevaluator.source_identity import recorded_evaluated_source
 
 if TYPE_CHECKING:
@@ -67,6 +69,9 @@ def _json_safe_benchmark_policy(value: object) -> dict[str, bool] | None:
         if isinstance((candidate := value.get(key)), bool)
     }
     return policy or None
+
+
+_MAX_SEMGREP_UNPARSED_FILES = 1000
 
 
 def _tier1_scope_strings(value: object, field: str) -> list[str]:
@@ -153,8 +158,15 @@ class JSONReporter(ReporterBase):
         # The explicit name keeps a single-skill run to one ``skills`` entry
         # when no finding path or quality score names the skill, and the
         # target path is the same fallback the HTML report uses.
+        identity_target = self.target_path
+        if identity_target and "://" not in identity_target:
+            local_target = Path(identity_target)
+            if (local_target / "SKILL.md").exists() or (local_target / "skill.md").exists():
+                # Preserve the requested target in JSON while resolving aliases
+                # such as "." for the shared single-skill identity fallback.
+                identity_target = str(local_target.resolve())
         html_reporter = HTMLReporter(
-            target_path=self.target_path,
+            target_path=identity_target,
             explicit_skill_name=self.explicit_skill_name,
             expected_skill_name=self.expected_skill_name,
         )
@@ -421,11 +433,33 @@ class JSONReporter(ReporterBase):
         if isinstance(coverage, list):
             data["dependency_coverage"] = coverage
 
+        # Files Semgrep could not fully parse. The error message names at most 20;
+        # this keeps up to _MAX_SEMGREP_UNPARSED_FILES and counts the rest, so a
+        # report that was cut short says so instead of looking complete.
+        unparsed_files = result.metadata.get("semgrep_unparsed_files")
+        if isinstance(unparsed_files, list):
+            paths = [item for item in unparsed_files if isinstance(item, str) and 0 < len(item) <= 4096]
+            if paths:
+                data["semgrep_unparsed_files"] = paths[:_MAX_SEMGREP_UNPARSED_FILES]
+                # A report restored from JSON already carries the count of files it left out.
+                carried = result.metadata.get("semgrep_unparsed_files_omitted")
+                omitted = max(0, len(paths) - _MAX_SEMGREP_UNPARSED_FILES)
+                if type(carried) is int and carried > 0:
+                    omitted += carried
+                if omitted:
+                    data["semgrep_unparsed_files_omitted"] = omitted
+
         # Tier 1 SkillSpector file-role scoping: retained and suppressed issue
         # counts, and the raw versus applicable aggregate risk score.
         skillspector_applicability = result.metadata.get("skillspector_applicability")
         if isinstance(skillspector_applicability, dict):
             data["skillspector_applicability"] = skillspector_applicability
+
+        # Tier 1 SkillSpector AE1 counts: referenced artifacts it did not
+        # completely inspect and the reference lines that name them.
+        reference_summary = reference_summary_record(result.metadata.get("skillspector_reference_summary"))
+        if reference_summary is not None:
+            data["skillspector_reference_summary"] = reference_summary
 
         qs = result.metadata.get("quality_scores")
         if qs:

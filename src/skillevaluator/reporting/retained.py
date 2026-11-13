@@ -22,6 +22,7 @@ from skillevaluator.reporting.run_status import resolve_run_status, result_statu
 from skillevaluator.skillspector_diagnostics import sanitize_completeness
 from skillevaluator.skillspector_provenance import sanitize_skillspector_provenance_metadata
 from skillevaluator.skillspector_reference_caveats import sanitize_reference_caveat_metadata
+from skillevaluator.skillspector_references import REFERENCE_SUMMARY_KEY, reference_summary_record
 
 
 class RetainedReportError(ValueError):
@@ -270,9 +271,13 @@ def retained_results(
         # Retain source identity under the exact carrier consumed by reporters.
         if payload.get("evaluated_source") is not None:
             metadata["evaluated_source"] = mapping(payload["evaluated_source"], "evaluated_source")
-        for key in ("incomplete_scans", "gate_failures"):
+        for key in ("incomplete_scans", "gate_failures", "semgrep_unparsed_files"):
             if key in row:
                 metadata[key] = _strings(row[key], key)
+        if "semgrep_unparsed_files_omitted" in row:
+            omitted = row["semgrep_unparsed_files_omitted"]
+            _require(type(omitted) is int and omitted >= 0, "Invalid semgrep_unparsed_files_omitted")
+            metadata["semgrep_unparsed_files_omitted"] = omitted
         for key in (TIER1_REQUIRED_CHECKS_KEY, TIER1_UNSCANNED_PATHS_KEY):
             if key in row:
                 try:
@@ -286,6 +291,10 @@ def retained_results(
                 "scanners must map scanner names to versions",
             )
             metadata["scanners"] = dict(row["scanners"])
+        # Only the valid counts are kept; a failed result's reports show them.
+        reference_summary = reference_summary_record(row.get(REFERENCE_SUMMARY_KEY))
+        if reference_summary is not None:
+            metadata[REFERENCE_SUMMARY_KEY] = reference_summary
         if "dependency_coverage" in row:
             _require(
                 isinstance(row["dependency_coverage"], list)

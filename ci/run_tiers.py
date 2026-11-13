@@ -41,7 +41,7 @@ try:
     from select_changed_skills import (
         SelectionError,
         _git,
-        _paths,
+        changed_paths,
         select_changed_skills,
         setup_changed,
         skill_roots,
@@ -55,7 +55,7 @@ except ModuleNotFoundError:
     from ci.select_changed_skills import (
         SelectionError,
         _git,
-        _paths,
+        changed_paths,
         select_changed_skills,
         setup_changed,
         skill_roots,
@@ -108,7 +108,8 @@ def select_skills(workspace: Path, env: dict) -> tuple[list[Path], dict]:
     if base and mode == "auto":
         selected, selection = select_changed_skills(workspace, roots, base, head)
         # Tier 1 applies the same setup predicate, so every tier that runs selects the same skills.
-        changed = _paths(_git(workspace, "diff", "--name-only", "-z", "--no-renames", f"{base}...{head}", "--"))
+        # The shared list is the one the paid-job skip reads (gitlinks included).
+        changed = changed_paths(workspace, env, head)
         if not setup_changed(changed):
             return selected, selection
         reason = "ci_configuration_changed"
@@ -275,7 +276,7 @@ def native_tier3(skill: Path, output: Path, env: dict) -> int:
     result.metadata["evaluated_source"] = options.evaluated_source
     if service.failure_reason(engine):
         result.mark_scan_incomplete("Tier 3 execution")
-    document = JSONReporter(expected_skill_name=skill.name).render_all([result])
+    document = JSONReporter(expected_skill_name=skill.name, explicit_skill_name=skill.name).render_all([result])
     (output / "skillevaluator-tier3.json").write_text(document, encoding="utf-8")
     return int(resolve_run_status([result]).headline.value != "passed")
 

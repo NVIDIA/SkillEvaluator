@@ -6,6 +6,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Dataset fairness validation checks the evaluated skill's own names and nested
+  graded text, distinguishes negated reads from required reads, and bounds
+  warning excerpts and repeated-match scanning. Common Unicode, Markdown and
+  script references are checked too; generated prompts avoid skill scripts.
+  Older datasets may need outcome-only wording to pass strict CI preflight.
+
 - Capability-gated CI onboarding for protected Tier 1 `--llm`/SkillSpector
   checks, independent Tier 3 gateway/judge settings and native agent models.
   Combined reports retain source-bound `BENCHMARK.md` cards for every outcome;

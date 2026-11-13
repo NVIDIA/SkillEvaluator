@@ -577,8 +577,6 @@ All notable changes to SkillEvaluator are documented in this file.
   a `static_parse_limit` row on the manifest, so that scan is recorded as
   incomplete in the same way.
 
-- The hook gate guidance links to the published final-status documentation route.
-
 - Tier 3 HTML evaluator cards now say when a judge metric's lift left out cases
   whose arms were scored by different judge models, for example after a judge
   fallback in one arm. The arm scores keep those cases, so a card could show

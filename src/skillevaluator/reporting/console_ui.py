@@ -1131,11 +1131,14 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
     When *lineup* is given, the per-check ticker stays in the completed
     section with each check's final state (failed checks in red).
     """
+    from skillevaluator.reporting.run_status import Status, result_status
+
     user_skipped = [r for r in results if _is_user_skipped(r)]
     total = len(results) - len(user_skipped)
     failed = [r for r in results if not r.passed and not _is_skipped(r)]
-    incomplete = [r for r in failed if r.is_incomplete]
-    broken = [r for r in failed if not r.is_incomplete]
+    # A blocking finding or failed gate outranks an incomplete scan, as on every other surface.
+    incomplete = [r for r in failed if result_status(r) is Status.INCOMPLETE]
+    broken = [r for r in failed if result_status(r) is not Status.INCOMPLETE]
     # Warnings from passing validators surface as advisories below; only the
     # failing validators' warnings belong on the headline checks row.
     warnings = sum(len(r.warnings) for r in failed)
@@ -1192,8 +1195,6 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
     if quality:
         grade, score = quality
         quality_result = next((r for r in results if _quality_stats([r])), None)
-        from skillevaluator.reporting.run_status import result_status
-
         status = result_status(quality_result).value if quality_result else "unavailable"
         rows.append(
             TierRow("quality", [(grade, f"bold {grade_style(grade, status=status)}"), (f"  {score:.1f} / 100", TEXT)])

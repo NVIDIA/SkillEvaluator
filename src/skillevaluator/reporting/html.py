@@ -98,7 +98,11 @@ from skillevaluator.reporting.presentation import (
 )
 from skillevaluator.reporting.run_status import Status, result_status, result_tier
 from skillevaluator.reporting.tier2_views import tier2_scope_views
-from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
+from skillevaluator.reporting.tier3_scope import (
+    completed_agent_result,
+    tolerated_baseline_agents,
+    validate_report_scope,
+)
 from skillevaluator.reporting.tier3_token_usage import token_usage_table
 from skillevaluator.reporting.trial_charts import steps_by_case_chart
 from skillevaluator.skillspector_provenance import skillspector_provenance_records
@@ -3549,6 +3553,7 @@ class HTMLReporter(ReporterBase):
             report_scope=self.report_scope,
             presentation=context,
             completed_agent=completed_agent,
+            tolerated_baselines=tolerated_baseline_agents(tier3_data),
             title=self.title,
             ci_context=self.ci_context,
             explicit_skill_name=self.explicit_skill_name,

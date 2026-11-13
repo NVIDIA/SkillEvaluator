@@ -1750,3 +1750,47 @@ class TestModelProvenance:
 
         assert client.last_failure is not None
         assert client.model_used is None
+
+
+@pytest.mark.parametrize("reply", ['{"index": 0, "verdict": "false_pos', "partial", "{}", "[]"])
+def test_truncated_verifier_reply_without_complete_verdicts_names_no_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reply: str
+) -> None:
+    _use_provider(monkeypatch, "anthropic", "claude-opus-5-5")
+    sdk = MagicMock()
+    sdk.messages.create.return_value = _anthropic_truncated_fallback_response(reply)
+    verifier = FindingVerifier()
+
+    with patch("anthropic.Anthropic", return_value=sdk):
+        assert verifier.verify([], tmp_path) == {}
+
+    assert verifier.last_failure is not None
+    assert "output-token limit" in verifier.last_failure
+    assert verifier.model_used is None
+
+
+def test_generic_truncated_parser_can_keep_a_complete_empty_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Client(LLMClient):
+        salvage_truncated_response = True
+
+        def get_system_prompt(self) -> str:
+            return "system"
+
+        def create_user_prompt(self, **_kwargs) -> str:
+            return "user"
+
+        def parse_response(self, _response_text: str, **_kwargs) -> dict:
+            return {}
+
+        def get_fallback_response(self, **_kwargs) -> str:
+            return "fallback"
+
+    _use_provider(monkeypatch, "anthropic", "claude-opus-5-5")
+    sdk = MagicMock()
+    sdk.messages.create.return_value = _anthropic_truncated_fallback_response("{}")
+    with patch("anthropic.Anthropic", return_value=sdk):
+        client = Client()
+        assert client.process() == {}
+
+    assert client.last_failure is not None
+    assert client.model_used == ANTHROPIC_REFUSAL_FALLBACK_MODEL

@@ -40,7 +40,21 @@ All notable changes to SkillEvaluator are documented in this file.
   beside it and the failure is reported. After a timeout, the failed run still keeps
   the scores of the arms that finished.
 
+### Changed
+
+- Install Bandit with the base package, so `pip install skillevaluator` or
+  `uv tool install skillevaluator` runs every default Tier 1 check without an
+  extra. pip-audit, used only by the opt-in dependency audit
+  (`--check dependency`), stays in the `security` extra. The Bandit install hint
+  now says to reinstall SkillEvaluator.
+
 ### Documentation
+
+- The README opens with a three-column **Get started** section: run the CLI
+  directly (`pip install skillevaluator`, then
+  `skillevaluator validate ./my-skill --tiers 1`), add checks to your repository
+  with `skillevaluator ci init` or a CI template, or install the agent skill with
+  `npx skills add NVIDIA/SkillEvaluator`.
 
 - A new Metrics Reference page defines every number the CLI, HTML report, JSON
   report and `BENCHMARK.md` show: the six Tier 3 evaluator signals, the five
@@ -60,6 +74,19 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Behavior checks no longer score a final answer that the evidence limits
+  shortened. The final-response allowance rises from 800 to 8,000 characters,
+  with the total behavior evidence budget reconciled to 12,000, so an ordinary
+  answer reaches the judge whole instead of losing its middle; the user request
+  is reserved alongside it, ahead of the optional exploration output in the
+  compact tool history. The `behavior_check` evidence record now reports
+  whether the required evidence is complete, not only whether something was
+  dropped. When the final answer still cannot fit, the judge returns an
+  explicit evaluation error and no behavior score, rather than grading the
+  evidence loss as a behavior failure, and that missing score stays missing
+  instead of being averaged in as a zero.
+  `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT` and
+  `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET` still override both limits.
 - The supporting Tier 3 Pass@k table displays an unavailable or skipped
   baseline rate as `N/A`, preserving an observed baseline rate of `0%`.
 - Tier 3 budget summaries disclose measured usage above configured limits,
@@ -79,6 +106,13 @@ All notable changes to SkillEvaluator are documented in this file.
   `/bin/bash -lc 'cat skills/x/SKILL.md'`, which some agent harnesses record
   instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL
   config.json'`) are still not counted.
+- A Tier 1 security scan keeps a SkillSpector `partial` report `INCOMPLETE` when
+  its only ledger row is a referenced image but its `references` list records a
+  `missing` reference on a line without a ledger row, an `ambiguous` reference,
+  or a list flagged as truncated with a key that ends in `_truncated`, such as
+  `ledger_exceptions_truncated`. Such a report no longer passes with the image
+  warning alone, because nothing reads the line of that reference for a file
+  left out of the scanned copy.
 
 - `validate` Tier 1 output: when only the `--llm` / `--llm-verify` stage
   can't run, `what to fix` gives the exact `export` lines for the missing

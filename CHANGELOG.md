@@ -33,6 +33,19 @@ All notable changes to SkillEvaluator are documented in this file.
   beside it and the failure is reported. After a timeout, the failed run still keeps
   the scores of the arms that finished.
 
+### Changed
+
+- The rubric judge's reference supplement budget is configurable through
+  `SKILLEVALUATOR_RUBRIC_SUPPLEMENT_BYTES` and defaults to one mebibyte instead
+  of 30,000 bytes, which a real linked guide graph outgrows. Required linked
+  Markdown is bounded only by that budget, so a guide larger than an optional
+  preview is collected whole; optional script and reference previews keep their
+  own small per-file bound. The budget decides how many bytes of the skill's own
+  guidance are collected, never which paths may be read: every reference is still
+  confined to the skill's declared root by the same secure reader, and guidance
+  that does not fit still stops the evaluation with an explicit unsafe-input
+  finding rather than being dropped from the judge's prompt.
+
 ### Fixed
 
 - A failed Tier 3 execution (for example a backend launch failure) now marks the

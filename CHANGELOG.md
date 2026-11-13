@@ -373,6 +373,14 @@ All notable changes to SkillEvaluator are documented in this file.
   through the live view's console. The progress line now prints once, above
   the final verdict.
 
+- Tier 3 `evals/config.yml` loading rejects a repeated key (also inside a YAML
+  merge source) or a cyclic merge instead of keeping the last value, and
+  reports a non-string key such as `yes:` or a non-UTF-8 file as a config
+  error instead of crashing `validate`. Checks before the Harbor run now read
+  the file as the run does, rejecting a symlink (even a broken one), a hard
+  link, a FIFO or a file over 4 MiB, and YAML errors give the line, column and
+  problem without the source line.
+
 ## 0.9.0 - 2026-11-13
 
 ### Fixed

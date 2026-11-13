@@ -966,8 +966,9 @@ def _passing_skill_suggestions(
     if num_trials < 4:
         suggestions.append(
             f"Expand evals.json with more test cases (currently {num_trials}). "
-            "Use 'skillevaluator create-eval-dataset --full' to generate the full bucket set "
-            "strategy covering explicit, implicit, contextual, and negative cases."
+            "Author task and negative-case guidance in guidance.md, then preview drafts with "
+            "'skillevaluator create-eval-dataset <skill> --full --prompt guidance.md --dry-run --force'; "
+            "keep the existing reviewed cases and expectations."
         )
 
     suggestions.append(

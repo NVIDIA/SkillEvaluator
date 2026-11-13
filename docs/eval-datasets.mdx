@@ -276,8 +276,9 @@ require an existing source instead of generating one.
 <Warning>
   `--force` overwrites `evals/evals.json` without a backup. Plain `--refine`
   regenerates the dataset when the effective grounding is `intent` or `skill`.
-  With `--grounding trace`, or when `auto` selects traces, an existing
-  `evals/evals.json` is refined in place without `--force`, preserving its
+  Explicit `--grounding trace` refines an existing `evals/evals.json` in place.
+  With `auto`, modifying an existing dataset requires `--refine` or `--force`,
+  even when matching traces exist. Trace refinement preserves its
   authored cases and IDs.
 </Warning>
 
@@ -286,7 +287,8 @@ require an existing source instead of generating one.
 `--grounding auto` is the standalone command and `DatasetOptions` default:
 
 1. Prefer nonblank author guidance from `--prompt`, then `evals/EVAL.md`, with
-   `SKILL.md` as supporting context. The effective grounding is `intent`.
+   `SKILL.md` as supporting context. Headings without task content do not qualify.
+   The effective grounding is `intent`.
 2. Otherwise use meaningful matching agent steps from retained, completed
    results scoped to this skill. Discovery uses `--from-results`, the external
    `--results-dir` / `SKILLEVALUATOR_RESULTS_DIR` root, and the legacy in-skill
@@ -305,8 +307,11 @@ case IDs can be matched before any LLM work; `--full` controls that seed set.
 The LLM may refine those seeds after selection. Existing cases are retained
 regardless of `--full`. Cases without a matching retained trajectory are marked
 `needs_review`; observed answers are proposals requiring human review, not
-accepted ground truth. An existing dataset without `--force` or refinement is
-left unchanged when no matching trace is found.
+accepted ground truth. An existing dataset without `--force` or `--refine` is
+left unchanged by `auto`, including when matching traces are available. Newly
+observed answers that describe skill use are left empty with a review reason;
+the author must provide an independent expected outcome. Authored expectations,
+including numeric and structured values, stay intact.
 
 Explicit modes remain available: `intent` requires author guidance; `trace`
 refines an existing dataset or generates cases first and may collect a new

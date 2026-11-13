@@ -26,9 +26,13 @@ Unknown keys fail the load. CLI flags override config values.
 
 ## Run sequence
 
+Write independent task questions and expected outcomes in `guidance.md` first.
+Existing datasets stay unchanged unless `--refine` or `--force` is explicit.
+Use `--grounding skill` explicitly when a skill-only starter is wanted instead.
+
 ```bash
 skillevaluator doctor --env-mode docker --verify-models
-skillevaluator create-eval-dataset <skill-dir> --full
+skillevaluator create-eval-dataset <skill-dir> --full --prompt guidance.md
 skillevaluator tier3 validate <skill-dir> --strict
 skillevaluator tier3 evaluate <skill-dir> -a opencode --max-cases 1   # smoke
 skillevaluator tier3 evaluate <skill-dir> -a opencode --n-attempts 3

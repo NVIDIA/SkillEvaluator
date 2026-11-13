@@ -598,7 +598,8 @@ def _check_dataset(skill_path: Path, results: list[CheckResult]) -> bool:
             CheckResult(
                 "evals/",
                 "missing",
-                "No evals/ directory found. Create one with: skillevaluator create-eval-dataset <path>",
+                "No evals/ directory found. Add task guidance in evals/EVAL.md or pass --prompt, then run "
+                "skillevaluator create-eval-dataset <path>. For a skill-only starter, add --grounding skill.",
             )
         )
         return False
@@ -622,7 +623,8 @@ def _check_dataset(skill_path: Path, results: list[CheckResult]) -> bool:
             "error",
             "REQUIRED dataset file missing. Accepted names: "
             + ", ".join(f"evals{e}" for e in DATASET_EXTENSIONS)
-            + ". Generate with: skillevaluator create-eval-dataset <path>",
+            + ". Add task guidance in evals/EVAL.md or pass --prompt, then run "
+            "skillevaluator create-eval-dataset <path>. For a skill-only starter, add --grounding skill.",
         )
     )
     return False

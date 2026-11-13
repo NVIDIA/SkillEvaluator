@@ -191,11 +191,14 @@ def _parse_skill(skill_path: Path, prompt_file: str | None = None) -> dict[str, 
             eval_prompt_source = str(pf)
         else:
             print(f"Warning: --prompt file not found: {prompt_file}")
-    if not eval_prompt:
+    if not _guidance_has_content(eval_prompt):
         eval_md = skill_path / "evals" / "EVAL.md"
         if eval_md.exists():
             eval_prompt = eval_md.read_text(encoding="utf-8").strip()
             eval_prompt_source = str(eval_md)
+    if not _guidance_has_content(eval_prompt):
+        eval_prompt = ""
+        eval_prompt_source = None
 
     return {
         "name": name,
@@ -328,6 +331,11 @@ def _extract_eval_hints(eval_prompt: str) -> dict[str, list[str]]:
             hints[current_section].append(stripped)
 
     return hints
+
+
+def _guidance_has_content(text: str) -> bool:
+    """Headings and empty Markdown placeholders do not supply an authored task."""
+    return any(re.search(r"\w", hint) for hints in _extract_eval_hints(text).values() for hint in hints)
 
 
 def _description_lower(skill: dict[str, Any]) -> str:
@@ -1109,6 +1117,11 @@ def _run_agent_collect_trajectories(
     return discovered[0] if isinstance(discovered, tuple) else discovered
 
 
+def _has_authored_ground_truth(value: Any) -> bool:
+    """Only null or blank text lacks an authored reference; zero and structured values remain valid."""
+    return value is not None and (not isinstance(value, str) or bool(value.strip()))
+
+
 async def _refine_with_llm(
     skill: dict[str, Any],
     cases: list[dict[str, Any]],
@@ -1265,7 +1278,7 @@ Return ONLY the refined JSON array. No other text."""
             ground_truth = authored.get("ground_truth") if is_authored else None
             proposed = case.get("ground_truth")
             final_message = _extract_agent_final_message(trajectory) if trajectory is not None else ""
-            if isinstance(ground_truth, str) and ground_truth.strip():
+            if _has_authored_ground_truth(ground_truth):
                 if trajectory is not None and proposed != ground_truth:
                     _mark_case_for_review(case, "agent answer differs from authored ground truth")
                 case["ground_truth"] = ground_truth
@@ -1433,8 +1446,8 @@ def _refine_from_trajectory_template(
         if final_msg:
             truncated = final_msg[:400] if len(final_msg) > 400 else final_msg
             ground_truth = case.get("ground_truth") if is_authored else None
-            if isinstance(ground_truth, str) and ground_truth.strip():
-                if truncated.strip() != ground_truth.strip():
+            if _has_authored_ground_truth(ground_truth):
+                if truncated.strip() != str(ground_truth).strip():
                     _mark_case_for_review(case, "agent answer differs from authored ground truth")
                 case["ground_truth"] = ground_truth
             else:
@@ -1734,6 +1747,10 @@ Agent-refined mode (--refine):
 
     evals_dir = skill_path / "evals"
     output_path = evals_dir / "evals.json"
+    if output_path.exists() and not args.force and not args.refine and grounding in {"auto", "skill"}:
+        print(f"Dataset already exists: {output_path}")
+        print("Use --refine to update existing cases or --force to overwrite.")
+        return DatasetGenerationResult(status="unchanged", path=output_path)
     skill = _parse_skill(skill_path, prompt_file=args.prompt)
     auto_cases: list[dict[str, Any]] | None = None
     auto_evidence: tuple[dict[str, dict[str, Any]], dict[str, Path]] | None = None
@@ -1744,14 +1761,12 @@ Agent-refined mode (--refine):
             if output_path.is_file():
                 try:
                     auto_cases = _load_existing_cases(output_path)
-                except DatasetGenerationError:
-                    if args.force or args.refine:
-                        raise
-                    # Keep the existing no-overwrite contract even for an empty
-                    # or invalid source. Explicit refinement still validates it.
-                    print(f"Dataset already exists: {output_path}")
-                    print("Use --force to overwrite.")
-                    return DatasetGenerationResult(status="unchanged", path=output_path)
+                except DatasetGenerationError as error:
+                    _abort(
+                        f"Automatic trace grounding could not load the existing dataset: {error} "
+                        "Provide author guidance to replace it, or use --grounding skill --force "
+                        "for an explicit skill-only starter."
+                    )
             else:
                 auto_cases = _generate_full(skill) if args.full else _generate_simple(skill)
             auto_evidence = _discover_auto_trace_evidence(
@@ -1918,6 +1933,28 @@ Agent-refined mode (--refine):
             _abort(f"--grounding trace requires a trajectory, but {cause}.")
         else:
             print("  No trajectory available — using initial cases as-is.")
+
+    if auto_evidence is not None:
+        authored_references = (
+            {case["id"]: case.get("ground_truth") for case in normalize_dataset_entries(auto_authored_dataset)}
+            if auto_authored_dataset is not None
+            else {}
+        )
+        skill_names = dict.fromkeys((skill_path.name, skill["name"]))
+        skill_scripts = _script_file_names(skill)
+        for case in cases:
+            if case["id"] not in auto_evidence[0]:
+                continue
+            if _has_authored_ground_truth(authored_references.get(case["id"])):
+                continue
+            observed = case.get("ground_truth")
+            if isinstance(observed, str) and any(
+                evals_spec._skill_use_match(observed, name, skill_scripts) for name in skill_names
+            ):
+                case["ground_truth"] = ""
+                _mark_case_for_review(
+                    case, "observed expected output describes skill use; supply an independent outcome"
+                )
 
     if auto_authored_dataset is not None:
         cases = _preserve_auto_authored_cases(cases, auto_authored_dataset)

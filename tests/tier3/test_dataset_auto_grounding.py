@@ -78,6 +78,125 @@ def test_auto_prompt_overrides_eval_guidance_and_records_effective_source(tmp_pa
     assert not [item for item in sources if item["kind"] == "eval_md"]
 
 
+@pytest.mark.parametrize("entrypoint", ["direct", "service", "cli"])
+def test_auto_keeps_existing_dataset_without_explicit_refinement(tmp_path, monkeypatch, entrypoint):
+    skill = _skill(tmp_path, "\n")
+    output = skill / "evals" / "evals.json"
+    original = (
+        b'{"skill_name":"sample-skill","evals":'
+        b'[{"id":"authored","prompt":"Reconcile","expected_output":"Keep","assertions":["Keep"]}]}\n'
+    )
+    output.write_bytes(original)
+    _trace(skill, tmp_path / "results", case_id="authored")
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(tmp_path / "results"))
+    monkeypatch.setattr(generate_dataset, "_generate_with_llm", _forbid_generation)
+    monkeypatch.setattr(generate_dataset, "_run_agent_collect_trajectories", _forbid_generation)
+
+    if entrypoint == "direct":
+        result = generate_dataset.main([str(skill), "--no-llm"])
+        assert result.status == "unchanged"
+    elif entrypoint == "service":
+        result = EvaluationService().create_dataset(DatasetOptions(skill_path=skill, no_llm=True))
+        assert result.status == "unchanged"
+    else:
+        result = CliRunner().invoke(cli, ["create-eval-dataset", str(skill), "--no-llm"])
+        assert result.exit_code == 0, result.output
+        assert "Dataset already exists" in result.output
+    assert output.read_bytes() == original
+
+
+def test_auto_unchanged_dataset_does_not_parse_the_skill(tmp_path, monkeypatch):
+    skill = _skill(tmp_path, "\n")
+    output = skill / "evals" / "evals.json"
+    original = b'{"evals": []}'
+    output.write_bytes(original)
+    monkeypatch.setattr(generate_dataset, "_parse_skill", _forbid_generation)
+
+    result = generate_dataset.main([str(skill)])
+
+    assert result.status == "unchanged"
+    assert output.read_bytes() == original
+
+
+@pytest.mark.parametrize("use_llm", [False, True])
+@pytest.mark.parametrize("authored", [False, True])
+def test_auto_trace_keeps_skill_use_out_of_new_expected_outputs(tmp_path, monkeypatch, use_llm, authored):
+    skill = _skill(tmp_path, "\n")
+    observed = "Using the sample-skill skill I read SKILL.md and ran reconcile.py: 42 invoices reconciled"
+    if authored:
+        (skill / "evals" / "evals.json").write_text(
+            json.dumps(
+                {
+                    "skill_name": "sample-skill",
+                    "evals": [{"id": "sample-skill-001", "prompt": "Reconcile", "expected_output": observed}],
+                }
+            )
+        )
+    _trace(skill, tmp_path / "results", steps=[{"source": "agent", "message": observed}])
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(tmp_path / "results"))
+
+    async def refine(_skill, cases, _trajectories, **_kwargs):
+        return [{**case, "ground_truth": observed} for case in cases]
+
+    monkeypatch.setattr(generate_dataset, "_refine_with_llm", refine)
+    result = generate_dataset.main(
+        [str(skill), *([] if use_llm else ["--no-llm"]), *(["--refine"] if authored else [])]
+    )
+
+    case = result.dataset["evals"][0]
+    assert case["expected_output"] == (observed if authored else "")
+    if not authored:
+        assert any("skill use" in reason for reason in case["review"]["reasons"])
+        assert case["review"]["status"] == "needs_review"
+
+
+@pytest.mark.parametrize("retained_trace", [False, True])
+def test_auto_does_not_treat_headings_alone_as_author_guidance(tmp_path, monkeypatch, retained_trace):
+    skill = _skill(tmp_path, "# Evaluation\n\n## Questions\n\n## Behaviors\n\n## Notes\n")
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(tmp_path / "results"))
+    if retained_trace:
+        _trace(skill, tmp_path / "results")
+        result = generate_dataset.main([str(skill), "--no-llm"])
+        assert result.dataset["generation"]["grounding"] == "trace"
+    else:
+        with pytest.raises(DatasetGenerationError, match="--grounding auto requires"):
+            generate_dataset.main([str(skill), "--no-llm"])
+        assert not (skill / "evals" / "evals.json").exists()
+
+
+def test_auto_force_invalid_dataset_explains_the_explicit_starter_option(tmp_path, monkeypatch):
+    skill = _skill(tmp_path, "\n")
+    output = skill / "evals" / "evals.json"
+    original = b"{}"
+    output.write_bytes(original)
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(tmp_path / "absent"))
+
+    with pytest.raises(DatasetGenerationError) as error:
+        generate_dataset.main([str(skill), "--no-llm", "--force"])
+
+    assert "--grounding skill --force" in str(error.value)
+    assert output.read_bytes() == original
+
+
+@pytest.mark.parametrize("authored_output", [42, 0, False, {"answer": 42}, ["42"]])
+def test_auto_refine_preserves_typed_authored_expected_outputs(tmp_path, monkeypatch, authored_output):
+    skill = _skill(tmp_path, "\n")
+    (skill / "evals" / "evals.json").write_text(
+        json.dumps(
+            {
+                "skill_name": "sample-skill",
+                "evals": [{"id": "authored", "prompt": "Reconcile", "expected_output": authored_output}],
+            }
+        )
+    )
+    _trace(skill, tmp_path / "results", case_id="authored")
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(tmp_path / "results"))
+
+    result = generate_dataset.main([str(skill), "--no-llm", "--refine"])
+
+    assert result.dataset["evals"][0]["expected_output"] == authored_output
+
+
 @pytest.mark.parametrize("options", [[], ["--refine"], ["--no-llm"], ["--no-llm", "--refine", "--force"]])
 def test_auto_missing_input_fails_before_provider_collection_or_writes(tmp_path, monkeypatch, options):
     skill = _skill(tmp_path, " \n\t")
@@ -184,7 +303,7 @@ def test_auto_trace_preserves_authored_cases_and_flags_unmatched_coverage(tmp_pa
     source = _trace(skill, tmp_path / "results", case_id="authored")
     monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(tmp_path / "results"))
 
-    result = generate_dataset.main([str(skill), "--no-llm"])
+    result = generate_dataset.main([str(skill), "--no-llm", "--refine"])
 
     assert [case["id"] for case in result.dataset["evals"]] == ["authored", "unmatched"]
     first, second = result.dataset["evals"]
@@ -391,7 +510,7 @@ def test_auto_trace_preserves_authored_prompt_metadata_and_review_history(tmp_pa
     )
     monkeypatch.setattr(inference_client, "LLMClient", FakeLLMClient)
 
-    result = generate_dataset.main([str(skill), *([] if use_llm else ["--no-llm"])])
+    result = generate_dataset.main([str(skill), "--refine", *([] if use_llm else ["--no-llm"])])
 
     case = result.dataset["evals"][0]
     assert case["prompt"] == "Check this exact authored invoice"
@@ -528,7 +647,16 @@ def test_cli_auto_trace_fallback_records_template_mode_and_preserves_sources(
 
     monkeypatch.setattr("skillevaluator.provider_config.resolve_llm_provider", resolve_provider)
     monkeypatch.setattr(inference_client, "LLMClient", FailingClient)
-    result = CliRunner().invoke(cli, ["create-eval-dataset", str(skill), "--results-dir", str(tmp_path / "results")])
+    result = CliRunner().invoke(
+        cli,
+        [
+            "create-eval-dataset",
+            str(skill),
+            "--results-dir",
+            str(tmp_path / "results"),
+            *(["--refine"] if existing_authored else []),
+        ],
+    )
 
     assert result.exit_code == 0, result.output
     dataset = json.loads(output.read_text())

@@ -150,10 +150,11 @@ can incur charges; see [runtime and cost](docs/tier3-live-evaluation.mdx#plan-fo
 
 Standalone generation prefers `evals/EVAL.md` guidance, then matching retained
 traces. Explicit `--grounding skill` permits skill-only starters. Review cases;
-templates omit negatives unless authored.
+templates omit negatives unless authored. Write independent task guidance in
+`guidance.md` before running this example:
 
 ```bash
-uv run --python 3.13 --extra tier3 skillevaluator tier3 create-eval-dataset ./my-skill --full
+uv run --python 3.13 --extra tier3 skillevaluator tier3 create-eval-dataset ./my-skill --full --prompt guidance.md
 ```
 
 ## Run from a source checkout

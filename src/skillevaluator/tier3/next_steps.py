@@ -235,8 +235,9 @@ def next_steps(
                 f"{100 / max(len(skill_cases), 1):.0f} pp",
                 _listed(skill_cases),
                 "Add realistic requests the skill should handle to evals/evals.json, covering inputs and "
-                "phrasings the current cases miss (`skillevaluator create-eval-dataset <skill> --full --dry-run` "
-                "previews drafts); keep the existing cases and their expectations.",
+                "phrasings the current cases miss. Write those tasks in guidance.md; "
+                "`skillevaluator create-eval-dataset <skill> --full --prompt guidance.md --dry-run --force` "
+                "previews drafts without replacing the existing cases and their expectations.",
                 f"With {_MIN_SKILL_CASES} or more skill cases the verdict keeps its direction.",
                 observed,
             )

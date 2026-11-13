@@ -74,7 +74,8 @@ For the prior skill-only starter workflow, explicitly opt in:
 skillevaluator create-eval-dataset ./my-skill --full --no-llm --grounding skill
 ```
 
-Auto trace grounding preserves existing authored case IDs and expectations;
+Auto never modifies an existing dataset without explicit `--refine` or `--force`.
+With refinement enabled, auto trace grounding preserves existing authored case IDs and expectations;
 unmatched cases and observed answer proposals need review. Generation provenance
 records the effective `intent` or `trace` grounding and input hashes. Explicit
 `intent`, `trace`, and `skill` modes remain available. Unattended autopilot retains

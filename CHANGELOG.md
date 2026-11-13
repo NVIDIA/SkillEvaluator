@@ -316,6 +316,9 @@ All notable changes to SkillEvaluator are documented in this file.
   trace refinement records template fallback and a safe reason when its LLM
   operation is unavailable or fails, preserving authored expectations and review
   state.
+  Existing datasets require explicit `--refine` or `--force` before auto mode
+  writes them. Typed authored expectations are retained; newly observed answers
+  that describe skill use stay empty with a review reason for the author.
   Explicit grounding modes and refinement remain available. Unattended
   autopilot keeps its skill-grounded one-case starter behavior.
 

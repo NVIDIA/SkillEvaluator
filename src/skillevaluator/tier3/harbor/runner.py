@@ -92,6 +92,7 @@ from skillevaluator.tier3.harbor import (
     HERMES_VERSION,
     LOCAL_CODEX_HOME_DIRNAME,
     LOCAL_CODEX_SECRETS_DIRNAME,
+    baseline_timeouts,
 )
 from skillevaluator.tier3.harbor.adapter import (
     _RUNTIME_PROCESS_CONTROL_ENV_NAMES,
@@ -5369,6 +5370,7 @@ def _run_harbor_eval_impl(
     output_dir: Path | None = None,
     keep_harbor_jobs: bool = False,
     agent_runtime_preflight: bool | None = None,
+    tolerate_baseline_timeouts: bool | None = None,
     env_mode: str = DEFAULT_ENV_MODE,
     env_mode_source: str = "CLI",
     environment_kwargs: Mapping[str, Any] | None = None,
@@ -5496,6 +5498,11 @@ def _run_harbor_eval_impl(
         agent_runtime_preflight
         if agent_runtime_preflight is not None
         else harbor_config.get("agent_runtime_preflight", False)
+    )
+    tolerate_baseline_timeouts = bool(
+        tolerate_baseline_timeouts
+        if tolerate_baseline_timeouts is not None
+        else harbor_config.get("tolerate_baseline_timeouts", False)
     )
     grading_mode = grading_mode or grading_config.get("mode", "default")
     workspace_mode = skill_workspace_mode or workspace_config.get("mode", "isolated")
@@ -5914,6 +5921,8 @@ def _run_harbor_eval_impl(
         # source tree that was evaluated, not the evaluator build that ran it.
         "evaluated_source": normalized_evaluated_source(evaluated_source),
     }
+    if tolerate_baseline_timeouts:
+        run_config["harbor"]["tolerate_baseline_timeouts"] = True
     if max_cases is not None:
         run_config["harbor"]["max_cases"] = max_cases
     verifier_env = {**configured_runtime_env, **provider_env}
@@ -6687,6 +6696,7 @@ def _run_harbor_eval_impl(
             agent_models=model_resolution,
             launch_errors=errors,
             grading_mode=grading_mode,
+            tolerate_baseline_timeouts=tolerate_baseline_timeouts,
             budget_not_run=active_budget.not_run if active_budget is not None else [],
         )
     except Exception:
@@ -6808,6 +6818,9 @@ def _run_harbor_eval_impl(
         keep_requested=keep_harbor_jobs,
         result=results,
     )
+    # A tolerated baseline's own launch errors are its timeouts, already on its
+    # baseline condition; every other launch error still fails the run.
+    errors = baseline_timeouts.unexplained_launch_errors(results, errors)
     if errors:
         _merge_launch_execution_errors(results, errors)
     if prior_version is not None:

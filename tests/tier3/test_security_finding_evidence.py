@@ -175,7 +175,8 @@ CREDENTIAL_CALLS = [
             )
         },
         _BASIC_PASSWORD,
-        None,
+        # ~/.netrc is a credential store, so the command also gets a path finding.
+        "~/.netrc",
         id="network-netrc-printf",
     ),
     pytest.param(

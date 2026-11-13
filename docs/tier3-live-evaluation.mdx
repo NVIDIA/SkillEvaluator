@@ -978,6 +978,22 @@ and each uses the full `--n-concurrent` budget. For example, two agents with
 `--n-concurrent 4` run up to eight trials at once, fewer when fewer cases
 remain.
 
+Run budgets (`--max-agent-tokens`, `--max-judge-calls`,
+`--max-attempts-total`, and priced `--max-cost-usd`) control admission between
+logical units of work. Already admitted work can take measured usage above a
+cap, including on the final unit. These are admission boundaries, so a priced
+cost budget does not guarantee a hard dollar cap.
+
+`budget.status` and `exhausted_limit` describe admission decisions;
+`budget.partial` records attempts left not run. Separately,
+`budget.observed_overruns` maps each exceeded limit to its measured `used`,
+configured `limit`, and `excess` (with attempts measured by started attempts).
+Only usage strictly above a cap is an overrun; completion exactly at a cap
+remains within it. Summaries derive these facts from usage and limits,
+including for older saved runs. Missing or partially measured bounded usage
+is reported as unverified, and unconfigured limits are not checked. An observed
+overrun alone does not change scores, execution success, or partial-run status.
+
 In a terminal, `--progress auto` uses the `rich` view: one table of the run
 plan and its stages that keeps the same height for the whole run. Each row is
 one line, and a long value ends in an ellipsis instead of wrapping. The agent

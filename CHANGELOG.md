@@ -106,6 +106,13 @@ All notable changes to SkillEvaluator are documented in this file.
   `/bin/bash -lc 'cat skills/x/SKILL.md'`, which some agent harnesses record
   instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL
   config.json'`) are still not counted.
+- A Tier 1 security scan keeps a SkillSpector `partial` report `INCOMPLETE` when
+  its only ledger row is a referenced image but its `references` list records a
+  `missing` reference on a line without a ledger row, an `ambiguous` reference,
+  or a list flagged as truncated with a key that ends in `_truncated`, such as
+  `ledger_exceptions_truncated`. Such a report no longer passes with the image
+  warning alone, because nothing reads the line of that reference for a file
+  left out of the scanned copy.
 
 - `validate` Tier 1 output: when only the `--llm` / `--llm-verify` stage
   can't run, `what to fix` gives the exact `export` lines for the missing

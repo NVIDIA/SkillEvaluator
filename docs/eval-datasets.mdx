@@ -9,7 +9,7 @@ the dataset format `tier3 evaluate` reads, and how to generate and refine
 cases.
 You can generate a starter dataset with no API key; LLM-backed generation and
 refinement need a configured provider (see
-[Providers & Credentials](configuration.mdx)).
+[Providers & Credentials](/skills/skillevaluator/configuration)).
 
 Tier 3 reports also assess dataset sufficiency under the
 `dataset-sufficiency-v1` policy: at least 10 distinct cases, at least 1
@@ -30,7 +30,7 @@ alternative to the `evals.json` dataset described below.
 Use `tier3 import-traces` to create a redacted review bundle outside the skill,
 then `tier3 accept-traces` to promote only explicitly reviewed expectations.
 Observed production behavior never automatically becomes an expected answer.
-See [Trace Datasets](trace-datasets.mdx) for the export contract and review decisions.
+See [Trace Datasets](/skills/skillevaluator/trace-datasets) for the export contract and review decisions.
 
 ## The evals/ directory
 
@@ -65,8 +65,8 @@ Only the dataset is required. Everything else is optional and additive:
 | `evals/EVAL.md` | Developer guidance that steers dataset generation. | Yes |
 | `evals/files/` | Input fixtures, staged into `/workspace/input/` in the container. | Yes |
 | `evals/environment/` | Custom container environment: Dockerfile, sidecars, MCP servers. | Yes |
-| `evals/harbor/` | Bring-your-own-task native Harbor tasks — see [Custom Graders & Tasks](custom-graders.mdx). | Yes |
-| `evals/grader.py` or `evals/grader.sh` | Bring-your-own-grader script — see [Custom Graders & Tasks](custom-graders.mdx). | Yes |
+| `evals/harbor/` | Bring-your-own-task native Harbor tasks — see [Custom Graders & Tasks](/skills/skillevaluator/custom-graders). | Yes |
+| `evals/grader.py` or `evals/grader.sh` | Bring-your-own-grader script — see [Custom Graders & Tasks](/skills/skillevaluator/custom-graders). | Yes |
 | `evals/results/` | Run output, written by `tier3 evaluate`. Never author it by hand. | No — output only |
 
 Unrecognized files in `evals/` are ignored, and the validator warns about them
@@ -244,13 +244,26 @@ conversion.
 
 ## Generate a dataset
 
-`create-eval-dataset` writes `evals/evals.json` using author guidance first,
-then matching retained agent traces. Add nonblank `evals/EVAL.md` guidance
-(see below), or pass a guidance file with `--prompt`:
+`create-eval-dataset` writes `evals/evals.json` using substantive author guidance
+first, then usable matching retained agent traces. Guidance needs real content
+beyond headings. Write task requests and observable outcomes in `evals/EVAL.md`
+(see below), or create a file to pass with `--prompt`:
 
-```bash title="Generate the full bucket dataset"
+```bash title="Author guidance and generate the full bucket dataset"
+cat > eval-guidance.md <<'EOF'
+## Questions
+- Summarize the failing checks in build.log.
+
+## Behaviors
+- Lists every failing check and quotes its error line.
+EOF
 skillevaluator create-eval-dataset ./my-skill --full --prompt eval-guidance.md
 ```
+
+Auto leaves an existing dataset unchanged unless you explicitly pass `--force`
+or `--refine`, even when matching retained traces exist. After an autopilot run,
+add `--force` to the command above to replace its starter, or use `--refine` with
+matching retained results to refine existing cases.
 
 | Flag | Effect |
 | --- | --- |
@@ -284,19 +297,18 @@ require an existing source instead of generating one.
 <Warning>
   `--force` overwrites `evals/evals.json` without a backup. Plain `--refine`
   regenerates the dataset when the effective grounding is `intent` or `skill`.
-  Explicit `--grounding trace` refines an existing `evals/evals.json` in place.
-  With `auto`, modifying an existing dataset requires `--refine` or `--force`,
-  even when matching traces exist. Trace refinement preserves its
-  authored cases and IDs.
+  With `auto`, modifying an existing dataset requires `--force` or `--refine`.
+  When auto selects traces, refinement preserves authored cases and IDs.
+  Explicit `--grounding trace` continues to opt into in-place refinement
+  without either flag.
 </Warning>
 
 ### Choose a grounding source
 
 `--grounding auto` is the standalone command and `DatasetOptions` default:
 
-1. Prefer nonblank author guidance from `--prompt`, then `evals/EVAL.md`, with
-   `SKILL.md` as supporting context. Headings without task content do not qualify.
-   The effective grounding is `intent`.
+1. Prefer author guidance with content beyond headings from `--prompt`, then
+   `evals/EVAL.md`, with `SKILL.md` as supporting context. The effective grounding is `intent`.
 2. Otherwise use meaningful matching agent steps from retained, completed
    results scoped to this skill. Discovery uses `--from-results`, the external
    `--results-dir` / `SKILLEVALUATOR_RESULTS_DIR` root, and the legacy in-skill
@@ -307,20 +319,19 @@ require an existing source instead of generating one.
    or explicitly opt in to `--grounding skill`. `--force`, `--no-llm`, and
    `--refine` do not bypass this requirement.
 
-When `auto` selects traces, it preserves existing cases and authored
-expectations, prompts, fixture/check metadata, and review history. The prior
-dataset hash is retained as a provenance input. Without a dataset, it prepares
-deterministic template seeds so
-case IDs can be matched before any LLM work; `--full` controls that seed set.
+When `auto` selects traces and you pass `--refine` or `--force`, it preserves
+existing cases and authored expectations, prompts, fixture/check metadata, and
+review history. The prior dataset hash is retained as a provenance input.
+Without a dataset, it prepares deterministic template seeds so case IDs can be
+matched before any LLM work; `--full` controls that seed set.
 The LLM may refine those seeds after selection. Existing cases are retained
 regardless of `--full`. Cases without a matching retained trajectory are marked
 `needs_review`; observed answers are proposals requiring human review, not
-accepted ground truth. An existing dataset without `--force` or `--refine` is
-left unchanged by `auto`, including when matching traces are available. Newly
-observed answers that describe skill use, or are too large to check fully, are
-left empty with a review reason; the author must provide an independent expected
-outcome. Authored expectations,
-including numeric and structured values, stay intact.
+accepted ground truth. When auto selects traces, an answer proposal that describes
+skill use leaves its inferred `expected_output` empty and flagged for an independently
+authored outcome. Existing authored expectations are preserved. An existing
+dataset without `--force` or `--refine` is left unchanged whether or not matching
+retained traces exist.
 
 Explicit modes remain available: `intent` requires author guidance; `trace`
 refines an existing dataset or generates cases first and may collect a new
@@ -328,6 +339,11 @@ trajectory when none exists; `skill` permits generation from `SKILL.md` alone.
 The existing `--refine` flag adds trajectory refinement to the selected source.
 For `auto --refine`, selection must first find author intent or retained trace
 evidence. Once intent is selected, `--refine` may collect trajectories as before.
+
+Newly inferred outcomes are checked across nested values and dictionary keys.
+If they describe skill use or are too large to check fully, the outcome is left
+empty with a review reason so the author can supply an independent expectation.
+Authored outcomes remain intact.
 
 ### Compatibility with skill-only generation
 
@@ -377,7 +393,8 @@ supported negative heading (see below).
 ### Guide generation with EVAL.md
 
 Place an `EVAL.md` in `evals/` and the generator picks it up automatically.
-Four headings are parsed as structured hints; everything else is general
+It must contain substantive guidance; an empty file or headings alone does not
+qualify. Four headings are parsed as structured hints; everything else is general
 context:
 
 ```markdown title="evals/EVAL.md"
@@ -402,6 +419,17 @@ no-skill baseline is graded on them too: describe the task outcome, not reading
 lines and warns about them; the autopilot starter case leaves them out.
 
 ### Refine from real runs
+
+To refine an existing dataset from completed matching skill-scoped results:
+
+```bash title="Refine from retained results"
+skillevaluator create-eval-dataset ./my-skill --refine --from-results ./saved-run
+```
+
+The run must contain usable matching trajectories. Auto still selects author
+guidance first if it exists. Explicit `--grounding trace --from-results ./saved-run`
+opts into trace refinement directly, preserving the prior implicit-refinement
+behavior of that explicit mode.
 
 After selecting author intent or explicitly choosing `--grounding skill`,
 `--refine` adds evidence from real agent behavior. It looks for existing
@@ -484,10 +512,10 @@ grading:
 | `harbor.runtime_env` | list or mapping | Non-credential task values passed into the container. Prefer a list of plain names — each expands to `${NAME}` from your shell; a mapping sets explicit templates. Entries that name or reference operator-owned credentials (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, base-URL variables, AWS credential variables) fail with a hard error. Alias: `passthrough_env`. |
 | `harbor.pre_agent_setup` | string or list | Shell commands run in the container before the agent starts. This skill-owned code is allowed only for with-skill-only runs (`--skip-baseline`); paired runs reject it so setup cannot distinguish or alter the baseline arm. Alias: `setup_commands`. Both spellings normalize to the same policy. |
 | `harbor.agents.<name>.model` | string | Per-agent model override; whitespace is trimmed. `claude` is accepted as an alias of `claude-code`, but configuring both spellings in one config is an error. |
-| `skill_workspace.mode` | `isolated`, `group` | Whether sibling skills are visible — see [Agents & Sandboxes](agents-and-sandboxes.mdx). |
+| `skill_workspace.mode` | `isolated`, `group` | Whether sibling skills are visible — see [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes). |
 | `skill_workspace.include` | list of paths | Extra skills staged into a `group` workspace. |
-| `skill_workspace.decoy_manifest` | path | Optional frozen selection from `tier3 select-decoys`; requires `group` mode. Relative paths resolve against the target skill's parent directory, as with `include`. Selected runtime-content hashes are checked before evaluation; evaluator-only files do not affect them. See [Workspace modes](agents-and-sandboxes.mdx#select-a-reproducible-decoy-set). |
-| `grading.mode` | `default`, `default_plus_custom`, `custom_only` | Grading pipeline — see [Custom Graders & Tasks](custom-graders.mdx). Legacy spellings `aces_default` and `aces_plus_custom` are accepted and normalized to `default` and `default_plus_custom`. |
+| `skill_workspace.decoy_manifest` | path | Optional frozen selection from `tier3 select-decoys`; requires `group` mode. Relative paths resolve against the target skill's parent directory, as with `include`. Selected runtime-content hashes are checked before evaluation; evaluator-only files do not affect them. See [Workspace modes](/skills/skillevaluator/agents-and-sandboxes#select-a-reproducible-decoy-set). |
+| `grading.mode` | `default`, `default_plus_custom`, `custom_only` | Grading pipeline — see [Custom Graders & Tasks](/skills/skillevaluator/custom-graders). Legacy spellings `aces_default` and `aces_plus_custom` are accepted and normalized to `default` and `default_plus_custom`. |
 
 Environment constructor kwargs are deliberately not accepted in this
 skill-owned file. Operators can pass non-secret kwargs for Harbor-native
@@ -501,7 +529,7 @@ reserved.
   config load instead of silently running with defaults. Use only one of each
   alias pair. Agent and provider credentials never go through `runtime_env` —
   they come only from your host environment; see the two-credential-roles
-  section in [Providers & Credentials](configuration.mdx).
+  section in [Providers & Credentials](/skills/skillevaluator/configuration).
 </Note>
 
 ## Fixtures and custom environments
@@ -578,7 +606,7 @@ skillevaluator tier3 validate ./my-skill
 | --- | --- |
 | `--json` | Emit JSON output. |
 | `--strict` | Treat warnings as failures. |
-| `--harbor-contract` | Validate the Harbor task and reward contract for BYOT/BYOG setups — see [Custom Graders & Tasks](custom-graders.mdx). |
+| `--harbor-contract` | Validate the Harbor task and reward contract for BYOT/BYOG setups — see [Custom Graders & Tasks](/skills/skillevaluator/custom-graders). |
 
 Run it in CI or before a long evaluation: it catches an empty dataset, missing
 required fields, duplicate case IDs, and invalid config in seconds.

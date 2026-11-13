@@ -16,7 +16,7 @@ Workflows (from simplest to highest quality):
   4. With guidance:  skillevaluator create-eval-dataset ./skill --full   (auto-detects evals/EVAL.md)
   5. Agent-refined:  skillevaluator create-eval-dataset ./skill --full --refine
 
-Standalone auto grounding prefers nonblank author intent, then meaningful
+Standalone auto grounding prefers substantive author intent, then meaningful
 matching retained traces; otherwise it fails before provider access or writes.
 Explicit --grounding skill opts into skill-only starters. Unattended
 generate_one_case/autopilot generation retains its skill-grounded contract.
@@ -127,6 +127,14 @@ def _to_agentskills_dataset(
     return dataset
 
 
+def _has_substantive_guidance(text: str) -> bool:
+    """Require authored content beyond Markdown headings and HTML comments."""
+    content = re.sub(r"<!--.*?(?:-->|\Z)", "", text, flags=re.DOTALL)
+    content = re.sub(r"(?m)^.*\n[ \t]*(?:={3,}|-{3,})[ \t]*$", "", content)
+    content = re.sub(r"(?m)^[ \t]*#{1,6}(?:[ \t]+.*)?$", "", content)
+    return bool(re.search(r"\w", content))
+
+
 def _parse_skill(skill_path: Path, prompt_file: str | None = None) -> dict[str, Any]:
     """Parse SKILL.md for name, description, scripts, interactive hints, and developer eval guidance.
 
@@ -191,12 +199,14 @@ def _parse_skill(skill_path: Path, prompt_file: str | None = None) -> dict[str, 
             eval_prompt_source = str(pf)
         else:
             print(f"Warning: --prompt file not found: {prompt_file}")
-    if not _guidance_has_content(eval_prompt):
+    if not _has_substantive_guidance(eval_prompt):
+        eval_prompt = ""
+        eval_prompt_source = None
         eval_md = skill_path / "evals" / "EVAL.md"
         if eval_md.exists():
             eval_prompt = eval_md.read_text(encoding="utf-8").strip()
             eval_prompt_source = str(eval_md)
-    if not _guidance_has_content(eval_prompt):
+    if not _has_substantive_guidance(eval_prompt):
         eval_prompt = ""
         eval_prompt_source = None
 
@@ -331,11 +341,6 @@ def _extract_eval_hints(eval_prompt: str) -> dict[str, list[str]]:
             hints[current_section].append(stripped)
 
     return hints
-
-
-def _guidance_has_content(text: str) -> bool:
-    """Headings and empty Markdown placeholders do not supply an authored task."""
-    return any(re.search(r"\w", hint) for hints in _extract_eval_hints(text).values() for hint in hints)
 
 
 def _description_lower(skill: dict[str, Any]) -> str:
@@ -1123,7 +1128,7 @@ def _run_agent_collect_trajectories(
 
 
 def _has_authored_ground_truth(value: Any) -> bool:
-    """Only null or blank text lacks an authored reference; zero and structured values remain valid."""
+    """Only null and blank strings leave an authored expected outcome unspecified."""
     return value is not None and (not isinstance(value, str) or bool(value.strip()))
 
 
@@ -1452,7 +1457,8 @@ def _refine_from_trajectory_template(
             truncated = final_msg[:400] if len(final_msg) > 400 else final_msg
             ground_truth = case.get("ground_truth") if is_authored else None
             if _has_authored_ground_truth(ground_truth):
-                if truncated.strip() != str(ground_truth).strip():
+                comparable_truth = ground_truth.strip() if isinstance(ground_truth, str) else ground_truth
+                if truncated.strip() != comparable_truth:
                     _mark_case_for_review(case, "agent answer differs from authored ground truth")
                 case["ground_truth"] = ground_truth
             else:
@@ -1674,10 +1680,11 @@ Examples:
   skillevaluator create-eval-dataset ./my-skill --full --refine --prompt guidance.md
 
 Default grounding (--grounding auto):
-  Prefer nonblank --prompt or evals/EVAL.md, then meaningful matching retained
+  Prefer substantive --prompt or evals/EVAL.md, then meaningful matching retained
   traces from a completed run scoped to this skill. Otherwise supply guidance,
   retained results, or explicitly choose --grounding skill. --refine and
   --no-llm do not bypass this preflight. Auto never collects its own input.
+  Existing datasets require --refine or --force before auto can modify them.
 
 Developer eval guidance (auto-detected from evals/EVAL.md if present):
   Place an EVAL.md in your skill's evals/ directory to provide the LLM
@@ -1752,13 +1759,22 @@ Agent-refined mode (--refine):
 
     evals_dir = skill_path / "evals"
     output_path = evals_dir / "evals.json"
-    if output_path.exists() and not args.force and not args.refine and grounding in {"auto", "skill"}:
+    # Explicit trace grounding opts into refinement; automatic trace discovery
+    # must not authorize an in-place change or read skill/guidance first.
+    if output_path.exists() and not args.force and not refine_requested:
         print(f"Dataset already exists: {output_path}")
-        print("Use --refine to update existing cases or --force to overwrite.")
+        print("Use --refine to apply matching retained traces, or --force to overwrite.")
         return DatasetGenerationResult(status="unchanged", path=output_path)
+
     skill = _parse_skill(skill_path, prompt_file=args.prompt)
     auto_cases: list[dict[str, Any]] | None = None
     auto_evidence: tuple[dict[str, dict[str, Any]], dict[str, Path]] | None = None
+    auto_input_required = (
+        "--grounding auto requires substantive author guidance in evals/EVAL.md or --prompt, "
+        "or a matching retained agent trace from this skill's completed results "
+        "(--from-results / --results-dir). To generate skill-only starters explicitly, "
+        "use --grounding skill --force to overwrite an existing dataset, or --grounding skill for a new dataset."
+    )
     if grounding == "auto":
         if skill.get("eval_prompt"):
             grounding = "intent"
@@ -1766,11 +1782,9 @@ Agent-refined mode (--refine):
             if output_path.is_file():
                 try:
                     auto_cases = _load_existing_cases(output_path)
-                except DatasetGenerationError as error:
+                except DatasetGenerationError:
                     _abort(
-                        f"Automatic trace grounding could not load the existing dataset: {error} "
-                        "Provide author guidance to replace it, or use --grounding skill --force "
-                        "for an explicit skill-only starter."
+                        f"{auto_input_required} The existing dataset cannot supply valid case ids for matching traces."
                     )
             else:
                 auto_cases = _generate_full(skill) if args.full else _generate_simple(skill)
@@ -1780,22 +1794,11 @@ Agent-refined mode (--refine):
             if auto_evidence[0]:
                 grounding = "trace"
                 refine_requested = True
-            elif not (output_path.exists() and not args.force and not args.refine):
-                _abort(
-                    "--grounding auto requires nonblank author guidance in evals/EVAL.md or --prompt, "
-                    "or a matching retained agent trace from this skill's completed results "
-                    "(--from-results / --results-dir). To generate skill-only starters explicitly, "
-                    "use --grounding skill."
-                )
+            else:
+                _abort(auto_input_required)
 
     if grounding == "intent" and not skill.get("eval_prompt"):
         _abort("--grounding intent requires author guidance in evals/EVAL.md or --prompt")
-
-    # Refinement bypasses the unchanged-dataset guard.
-    if output_path.exists() and not args.force and not refine_requested:
-        print(f"Dataset already exists: {output_path}")
-        print("Use --force to overwrite.")
-        return DatasetGenerationResult(status="unchanged", path=output_path)
 
     trace_requested = grounding == "trace"
     trace_existing = trace_requested and output_path.is_file()

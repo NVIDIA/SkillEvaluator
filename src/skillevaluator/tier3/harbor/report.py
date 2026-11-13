@@ -996,9 +996,9 @@ def _passing_skill_suggestions(
     if num_trials < 4:
         suggestions.append(
             f"Expand evals.json with more test cases (currently {num_trials}). "
-            "Author task and negative-case guidance in guidance.md, then preview drafts with "
-            "'skillevaluator create-eval-dataset <skill> --full --prompt guidance.md --dry-run --force'; "
-            "keep the existing reviewed cases and expectations."
+            "Write task requests and observable outcomes in <skill-dir>/evals/EVAL.md, then preview "
+            "'skillevaluator create-eval-dataset <skill-dir> --full --force --dry-run'. "
+            "Merge reviewed drafts into evals.json, keep existing cases, and add negative controls."
         )
 
     suggestions.append(

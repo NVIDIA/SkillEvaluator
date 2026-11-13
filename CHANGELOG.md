@@ -271,7 +271,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Root help shows the SkillEvaluator wordmark in more terminals: the
   one-line wordmark still needs 115 columns, 76-114 columns now get the same
   letters stacked (SKILL over EVALUATOR), and 60-75 columns get a two-row
-  wordmark. Narrower terminals keep the plain title.
+  wordmark. Narrower terminals keep the plain title. A wordmark that the
+  terminal's output encoding cannot print is skipped: gbk and big5hkscs lack
+  the half blocks of the two-row one, so they get the plain title at 60-75
+  columns.
 
 - Upgrade the Tier 3 backend to Harbor 0.25.0. Align supported sandbox
   constructor options with the release while reserving automatic mounts and

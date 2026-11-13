@@ -69,6 +69,14 @@ _WORDMARK_SMALL = """█▀ █▄▀ █ █   █     █▀▀ █ █ ▄▀
 _WORDMARK_MIN_WIDTH = 60
 
 
+def _encodes(text: str, encoding: str) -> bool:
+    try:
+        text.encode(encoding)
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _welcome_banner(command: click.Command, ctx: click.Context, *, width: int) -> RenderableType | None:
     """Brand interactive root help without adding output to command execution."""
     if (
@@ -80,18 +88,15 @@ def _welcome_banner(command: click.Command, ctx: click.Context, *, width: int) -
     ):
         return None
 
-    try:
-        _WORDMARK.encode(sys.stdout.encoding or "utf-8")
-        supports_blocks = True
-    except UnicodeEncodeError:
-        supports_blocks = False
+    encoding = sys.stdout.encoding or "utf-8"
     tagline = "Static checks · Deduplication · Live evaluation"
     subtitle = f"v{__version__}  ·  {tagline}"
     wordmark = next(
         (
             art
             for art in (_WORDMARK, _WORDMARK_STACKED, _WORDMARK_SMALL)
-            if supports_blocks and width >= max(_WORDMARK_MIN_WIDTH, len(subtitle), *map(len, art.splitlines()))
+            # Each art needs its own glyphs: gbk and big5hkscs take the full letters but not the half blocks.
+            if _encodes(art, encoding) and width >= max(_WORDMARK_MIN_WIDTH, len(subtitle), *map(len, art.splitlines()))
         ),
         None,
     )

@@ -3,6 +3,7 @@
 
 """The welcome banner must not change the CLI's output contracts."""
 
+import io
 import os
 import shutil
 import sys
@@ -78,6 +79,26 @@ def test_narrow_help_uses_compact_banner(terminal, monkeypatch, formatter_width,
     assert "SKILLEVALUATOR" in banner
     assert f"v{__version__}" in banner
     assert all(len(line) <= terminal_width for line in banner.splitlines())
+
+
+class _TtyTextStream(io.TextIOWrapper):
+    def isatty(self):
+        return True
+
+
+@pytest.mark.parametrize(
+    "encoding,terminal_width,art_rows",
+    [("gbk", 70, 0), ("big5hkscs", 70, 0), ("gbk", 80, 10), ("gbk", 120, 5), ("cp437", 70, 2)],
+)
+def test_wordmark_must_fit_the_stdout_encoding(terminal, monkeypatch, encoding, terminal_width, art_rows):
+    monkeypatch.setattr(sys, "stdout", _TtyTextStream(io.BytesIO(), encoding=encoding))
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda: os.terminal_size((terminal_width, 40)))
+    banner = root_help(78).split("Usage:", 1)[0]
+
+    assert len([line for line in banner.splitlines() if "█" in line]) == art_rows
+    assert f"v{__version__}" in banner
+    # The two-row art adds half blocks that gbk and big5hkscs lack; printing it would raise.
+    banner.encode(encoding)
 
 
 @pytest.mark.parametrize("redirected", ["stdout", "stderr"])

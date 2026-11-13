@@ -1635,10 +1635,19 @@ class TestSchemaPortabilityChecks:
         assert len(findings) == 1
         assert "references/inner/SKILL.md" in findings[0].message
 
-    def test_nested_manifest_under_excluded_dir_is_ignored(self, tmp_path: Path):
+    def test_nested_manifest_under_evals_is_reported(self, tmp_path: Path):
         skill_dir = _write_skill(tmp_path, _BASE_FM)
         (skill_dir / "evals" / "snapshot").mkdir(parents=True)
         (skill_dir / "evals" / "snapshot" / "SKILL.md").write_text("---\nname: snapshot\n---\n")
+
+        findings = _checks(SchemaValidator().validate(skill_dir), "nested_manifest")
+
+        assert [f.file_path for f in findings] == [str(skill_dir / "evals" / "snapshot" / "SKILL.md")]
+
+    def test_nested_manifest_under_dependency_dir_is_ignored(self, tmp_path: Path):
+        skill_dir = _write_skill(tmp_path, _BASE_FM)
+        (skill_dir / "node_modules" / "pkg").mkdir(parents=True)
+        (skill_dir / "node_modules" / "pkg" / "SKILL.md").write_text("---\nname: pkg\n---\n")
 
         assert not _checks(SchemaValidator().validate(skill_dir), "nested_manifest")
 

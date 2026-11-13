@@ -752,6 +752,10 @@ PLUGIN_CONFIG_MAX_BYTES = 256 * 1024
 
 SCAN_ARTIFACT_DIRS = frozenset({"evals", ".evals", "results", ".results", "versions", ".versions"})
 
+# Folders no harness reads as part of a skill: VCS data, caches and dependencies. The artifact
+# folders above are not in this set because harnesses scan them like any other folder.
+SKILL_NOT_SHIPPED_DIRS = SCAN_EXCLUDED_DIRS - SCAN_ARTIFACT_DIRS
+
 PLUGIN_TREE_PRUNED_DIRS = SCAN_EXCLUDED_DIRS - {"__pycache__"}
 
 PLUGIN_TREE_MAX_DISCOVERED_PATHS = 20_000

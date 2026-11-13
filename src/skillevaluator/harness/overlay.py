@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 
-from skillevaluator.constants import DESCRIPTION_TRIGGER_PATTERN, SKILL_MANIFEST_VARIANTS
+from skillevaluator.constants import DESCRIPTION_TRIGGER_PATTERN, SKILL_MANIFEST_VARIANTS, SKILL_NOT_SHIPPED_DIRS
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 from skillevaluator.validators.schema import _duplicate_frontmatter_keys
 
@@ -164,7 +164,7 @@ def _shipped_paths(skill_path: Path) -> list[Path]:
     """Files and symlinks a skill ships, without descending into VCS or cache folders."""
     found = []
     for folder, dirs, files in os.walk(skill_path):
-        dirs[:] = [d for d in dirs if d not in _NOT_SHIPPED_DIRS]
+        dirs[:] = [d for d in dirs if d not in SKILL_NOT_SHIPPED_DIRS]
         here = Path(folder)
         found.extend(here / name for name in files)
         found.extend(here / name for name in dirs if (here / name).is_symlink())
@@ -175,8 +175,6 @@ def _bundle_files(skill_path: Path, manifest: Path) -> list[Path]:
     return [path for path in _shipped_paths(skill_path) if path != manifest]
 
 
-# Harnesses read every file a skill ships, evals/ included; only VCS and caches are skipped.
-_NOT_SHIPPED_DIRS = frozenset({".git", "__pycache__", "node_modules", ".venv"})
 _HERMES_LINKED_DIRS = ("references", "templates", "assets", "scripts")
 
 

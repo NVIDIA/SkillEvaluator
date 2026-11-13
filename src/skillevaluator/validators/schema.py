@@ -25,11 +25,11 @@ from skillevaluator.constants import (
     MAX_SKILL_MD_LINES,
     RECOMMENDED_BODY_SECTIONS,
     REQUIRED_BODY_SECTIONS,
-    SCAN_EXCLUDED_DIRS,
     SCAN_EXCLUDED_FILES,
     SCHEMA_ALLOWED_DIRS_ENV,
     SKILL_MANIFEST_FILE,
     SKILL_MANIFEST_VARIANTS,
+    SKILL_NOT_SHIPPED_DIRS,
 )
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Finding, Severity
@@ -752,12 +752,13 @@ class SchemaValidator(ValidatorBase):
                     "Save SKILL.md as UTF-8 without BOM",
                 )
             )
+        # Same folders the harness check skips: evals/ and versions/ are scanned like any other folder.
         nested = sorted(
             path
             for name in SKILL_MANIFEST_VARIANTS
             for path in skill_path.rglob(name)
             if path.parent != skill_path
-            and not any(part in SCAN_EXCLUDED_DIRS for part in path.relative_to(skill_path).parts)
+            and not any(part in SKILL_NOT_SHIPPED_DIRS for part in path.relative_to(skill_path).parts)
         )
         for path in nested:
             findings.append(
@@ -788,7 +789,11 @@ class SchemaValidator(ValidatorBase):
 
         trigger = _TRIGGER_RE.search(description)
         if trigger is None or trigger.end() > DESCRIPTION_TRIGGER_WINDOW:
-            where = "no 'Use when ...' trigger" if trigger is None else f"its trigger at characters {trigger.start()}-{trigger.end()}"
+            where = (
+                "no 'Use when ...' trigger"
+                if trigger is None
+                else f"its trigger at characters {trigger.start()}-{trigger.end()}"
+            )
             findings.append(
                 self._portability_finding(
                     "description_trigger",

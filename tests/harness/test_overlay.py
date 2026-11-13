@@ -16,6 +16,7 @@ from skillevaluator.models.result import Severity
 from skillevaluator.reporting.console_ui import final_check_ticker_row, summarize_tier1
 from skillevaluator.tier1.commands import DEFAULT_CHECKS, run_validation
 from skillevaluator.validators.harness import HarnessValidator
+from skillevaluator.validators.schema import SchemaValidator
 
 HARNESSES = ["claude-code", "codex", "copilot-cli", "hermes", "openclaw", "opencode"]
 BODY = "\n# Demo\n\n## Instructions\n\n1. Step\n\n## Examples\n\nExample.\n"
@@ -460,6 +461,21 @@ def test_nested_manifest_under_evals_is_reported(tmp_path: Path):
     (skill / "evals" / "fixture" / "SKILL.md").write_text("---\nname: fixture\n---\n", encoding="utf-8")
 
     assert skill_facts(skill)["nested_skill_md"] is True
+
+
+@pytest.mark.parametrize(
+    ("folder", "reported"),
+    [("evals", True), ("versions", True), ("references", True), ("node_modules", False), (".git", False)],
+)
+def test_schema_and_harness_agree_on_where_a_nested_manifest_counts(tmp_path: Path, folder: str, reported: bool):
+    skill = _rooted(tmp_path)
+    (skill / folder / "fixture").mkdir(parents=True)
+    (skill / folder / "fixture" / "SKILL.md").write_text("---\nname: fixture\n---\n", encoding="utf-8")
+
+    schema = [f for f in SchemaValidator().validate(skill).findings if f.check_name == "nested_manifest"]
+
+    assert skill_facts(skill)["nested_skill_md"] is reported
+    assert bool(schema) is reported
 
 
 def test_lowercase_nested_manifest_is_not_a_second_skill_in_codex(tmp_path: Path):

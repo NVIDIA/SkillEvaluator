@@ -56,7 +56,7 @@ human-readable dimensions:
 | Efficiency | Does it route correctly and use tools productively? |
 
 In `custom_only` mode, your own grader defines the score instead — see
-[Custom Graders & Tasks](custom-graders.mdx).
+[Custom Graders & Tasks](/skills/skillevaluator/custom-graders).
 
 If every positive with-skill trial has a confirmed activation score of zero,
 the result is **INCONCLUSIVE: skill never activated**. Tier 3 keeps the arm
@@ -288,10 +288,10 @@ depth.
 
 | Requirement | How to check | Covered in |
 | --- | --- | --- |
-| The `tier3` extra installed (`[all]` includes it) | `skillevaluator health-check` | [Installation](installation.mdx) |
-| An evaluator LLM provider key | `skillevaluator doctor --env-mode docker` names any missing key | [Providers & Credentials](configuration.mdx) |
-| The agent and its credential | Same `doctor` run, with your agents; `tier3 evaluate` re-validates before any run | [Agents & Sandboxes](agents-and-sandboxes.mdx) |
-| Docker running (the default environment) | `docker info` | [Agents & Sandboxes](agents-and-sandboxes.mdx) |
+| The `tier3` extra installed (`[all]` includes it) | `skillevaluator health-check` | [Installation](/skills/skillevaluator/installation) |
+| An evaluator LLM provider key | `skillevaluator doctor --env-mode docker` names any missing key | [Providers & Credentials](/skills/skillevaluator/configuration) |
+| The agent and its credential | Same `doctor` run, with your agents; `tier3 evaluate` re-validates before any run | [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes) |
+| Docker running (the default environment) | `docker info` | [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes) |
 
 ## Harbor 0.25 compatibility
 
@@ -375,7 +375,7 @@ using Harbor 0.25:
   uploaded tests. SkillEvaluator validates the verifier's Compose model against
   its environment allowlist, and rejects `docker-compose.yml` verifier
   definitions, which Harbor ignores. Standard grading modes reject separate
-  verifiers entirely; see [Custom Graders & Tasks](custom-graders.mdx).
+  verifiers entirely; see [Custom Graders & Tasks](/skills/skillevaluator/custom-graders).
 - Harbor 0.25 rejects a `reward.json` whose top-level values are not all
   finite numbers. SkillEvaluator's verifier and wrapped custom graders already
   write numeric rewards; a native task's own test script must do the same. When
@@ -385,7 +385,7 @@ using Harbor 0.25:
 
 ## Start with one command
 
-After the [provider setup](configuration.mdx) and runtime prerequisites above:
+After the [provider setup](/skills/skillevaluator/configuration) and runtime prerequisites above:
 
 ```bash title="Run Tier 3"
 skillevaluator tier3 ./my-skill
@@ -437,7 +437,7 @@ before the measured matrix, `--agent-runtime-preflight` adds an agent-only
 execution of the first staged task. It does not invoke a separate
 standard-grader-only route before the evaluation reaches grading.
 `skillevaluator health-check` is the quicker
-CLI-and-backend variant; [Agents & Sandboxes](agents-and-sandboxes.mdx) covers
+CLI-and-backend variant; [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes) covers
 both in depth.
 
 ### Generate an eval dataset
@@ -452,7 +452,7 @@ positive buckets and adds a negative case only when `evals/EVAL.md` supplies an
 off-skill prompt under a supported negative heading. Generation uses your
 configured evaluator provider by default; `--no-llm` falls back to keyless local
 templates. The dataset format, `EVAL.md` guidance, and refinement options live
-in [Eval Datasets](eval-datasets.mdx).
+in [Eval Datasets](/skills/skillevaluator/eval-datasets).
 
 ### Review the cases
 
@@ -587,10 +587,10 @@ skillevaluator compare ./my-skill
 ```
 
 `view` opens the latest HTML report; `compare` summarizes stored results across
-agents and arms. [Reports & Results](reports.mdx) explains everything the run
+agents and arms. [Reports & Results](/skills/skillevaluator/reports) explains everything the run
 wrote and how to interpret it. To ask follow-up questions about one run and get
 grounded advice on skill changes, pass its run directory to
-[`tier3 feedback`](cli-reference.mdx#tier3-feedback).
+[`tier3 feedback`](/skills/skillevaluator/cli-reference#tier3-feedback).
 
 </Steps>
 
@@ -632,7 +632,7 @@ can never supply, replace, or reroute them:
 
 | Credential | Used for | How to set |
 | --- | --- | --- |
-| Evaluator LLM provider | Dataset generation and standard grading | `SKILL_EVAL_LLM_PROVIDER` plus the provider key — see [Providers & Credentials](configuration.mdx) |
+| Evaluator LLM provider | Dataset generation and standard grading | `SKILL_EVAL_LLM_PROVIDER` plus the provider key — see [Providers & Credentials](/skills/skillevaluator/configuration) |
 | Live agent credential | The agent actually performing the task | Export it in the host environment where you run `skillevaluator` |
 
 ```bash title="Agent credentials are host-environment exports, never config entries"
@@ -647,7 +647,7 @@ operator-owned credential (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
 `NVIDIA_API_KEY`, the base-URL variables, `AWS_*`) fails the run with a hard
 error. This prevents a skill from swapping a credential or routing a trusted
 key to an attacker-controlled endpoint. [Providers &
-Credentials](configuration.mdx) lists every blocked name.
+Credentials](/skills/skillevaluator/configuration) lists every blocked name.
 
 `runtime_env` also cannot override host launcher, language-runtime, Docker,
 Compose, proxy, or tracing controls. Configure the selected backend in the
@@ -677,7 +677,7 @@ skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker \
 On cloud env-modes the bridges are
 unavailable: `opencode` still works with `NVIDIA_API_KEY` directly, but
 `codex` and `claude-code` fall back to their own native credentials and
-explicit models — see [Agents & Sandboxes](agents-and-sandboxes.mdx).
+explicit models — see [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes).
 
 ## Where agents run
 
@@ -718,7 +718,7 @@ through constructor kwargs. GKE requires
 for its default ephemeral launch mode or `instance_id` with
 `launch_mode=attach`. The complete environment/extra matrix, examples, Docker
 resource tuning, local-mode safety controls, and workspace modes live in
-[Agents & Sandboxes](agents-and-sandboxes.mdx).
+[Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes).
 
 <Warning>
 Local mode executes the agent on your host rather than in a container. It is
@@ -754,7 +754,7 @@ skillevaluator validate ./my-skill --agents codex \
 `--grading-mode`, and the rest) to the live-eval engine whenever Tier 3 is
 enabled, which is the default for skills. `--agent-eval` remains a supported
 alias for `--tier3`; explicit tier selection and disable flags control the
-scope. See the [CLI Reference](cli-reference.mdx) for the full group.
+scope. See the [CLI Reference](/skills/skillevaluator/cli-reference) for the full group.
 </Note>
 
 ## Plan for cost
@@ -844,7 +844,7 @@ The high-signal flags, with defaults:
 | `--progress` | `auto` | Progress rendering: `auto`, `rich` (live TTY view with secret redaction), `plain`, or `off` |
 | `--progress-interval` | mode default | Seconds between progress heartbeats: 1 for `rich`, 60 for `plain` lines in CI and redirected output |
 | `--autopilot` | off | When no evaluation source exists, generate exactly one eval case — with the configured provider, falling back to a deterministic keyless template — never overwriting an existing source |
-| `--grading-mode` | `default` | `default`, `default_plus_custom`, or `custom_only` — see [Custom Graders & Tasks](custom-graders.mdx) |
+| `--grading-mode` | `default` | `default`, `default_plus_custom`, or `custom_only` — see [Custom Graders & Tasks](/skills/skillevaluator/custom-graders) |
 | `--results-dir` | `evals/results`, or `SKILLEVALUATOR_RESULTS_DIR` when set | Write results under an external root instead of the skill directory; custom in-skill roots are rejected |
 | `--harbor-keep-jobs` | off | Retain Harbor job directories for inspection |
 | `--timeout-multiplier` | `1.0` | Scale Harbor's agent, verifier, and environment-build timeouts; must be a finite number greater than 0 whose scaled timeouts stay finite |
@@ -877,7 +877,7 @@ Frames the terminal refused are dropped then, so they are never drawn over
 output printed since.
 
 Every `tier3 evaluate` flag, including resource overrides and Dockerfile
-modes, is in the [CLI Reference](cli-reference.mdx).
+modes, is in the [CLI Reference](/skills/skillevaluator/cli-reference).
 
 <Tip>
 While iterating on a dataset, `--skip-baseline` roughly halves the runtime.
@@ -907,6 +907,11 @@ diagnostics. Reports identify the source and timestamp when reuse succeeds.
 The new run retains its own baseline rows. Fresh execution counts and reused
 trial counts are separate; reused evidence is not another independent attempt.
 Cost savings depend on the run, including agent, judge, and environment usage.
+Baseline compatibility deliberately excludes concurrency and budget. It does
+not establish actual judge-model agreement. Reused resource measurements are
+historical observations from the source run, not fresh consumption or independent
+evidence in this run; consider these limits alongside task outcomes when
+interpreting resource differences.
 
 ### Compare skill versions
 
@@ -1169,7 +1174,7 @@ limit. Larger budgets send longer judge prompts and use more evaluator
 tokens. The behavior budget never falls below the final-response limit plus
 4,000 characters, so raising the limit leaves room for the tool history. Set these variables in the host environment;
 SkillEvaluator forwards them to the verifier. Defaults and accepted values are
-in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
+in [Judge evidence budgets](/skills/skillevaluator/environment-variables#judge-evidence-budgets).
 
 ### Judge requests and retries
 
@@ -1260,11 +1265,11 @@ in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
 
 Retry counts, delays, and the per-judge budget come from the host environment
 and are forwarded to the verifier; see
-[LLM retries and judge time budget](environment-variables.mdx#llm-retries-and-judge-time-budget).
+[LLM retries and judge time budget](/skills/skillevaluator/environment-variables#llm-retries-and-judge-time-budget).
 Retries and downgrades do not change scoring formulas. A judge that still fails
 is an evaluation infrastructure failure, not a `0.0` score, and the affected
 condition publishes no scores; see
-[Tier 3 judge failure semantics](environment-variables.mdx#tier-3-judge-failure-semantics).
+[Tier 3 judge failure semantics](/skills/skillevaluator/environment-variables#tier-3-judge-failure-semantics).
 
 ### Judge fallback and retry policies
 
@@ -1473,7 +1478,7 @@ the configuration that produced it. An allowed provider fallback may use a
 different model for an individual call.
 
 This provenance does not establish that the LLM judgments are correct. The
-[grader validation workflow](grader-validation.mdx) runs the shipped verifier
+[grader validation workflow](/skills/skillevaluator/grader-validation) runs the shipped verifier
 against independently labelled cases and reports agreement, abstentions,
 errors and repeat variability. The bundled reference suite is not a published
 claim of inter-rater agreement or universal judge reliability.
@@ -1545,7 +1550,7 @@ resolved `should_trigger` label also leaves both skill metrics N/A.
 
 Skill Lift per dimension and overall uses only cases and metrics both arms
 scored; the `basis` block in `lift.json` records the shared comparison ([Skill
-Lift reporting](reports.mdx#skill-lift)). A baseline is never credited or
+Lift reporting](/skills/skillevaluator/reports#skill-lift)). A baseline is never credited or
 penalized for a skill it was not given.
 
 The Security trace check excludes plain `rm -rf` commands whose operands are
@@ -1674,14 +1679,19 @@ completion tokens and Harbor's measured agent execution seconds. Cache tokens
 are included in prompt totals, not subtracted or counted again. Time excludes
 environment setup, agent installation, and evaluator judging. Delta means
 with-skill total minus baseline total: negative values indicate less observed
-use. A delta requires complete telemetry, complete successful arms, and matching
+use. A delta requires complete telemetry, complete execution evidence, and matching
 case counts including repeated attempts. Missing measurements, skipped baselines,
 partial runs, and unsupported multi-step timing remain `N/A`; they are not zero.
 The same table splits each trial's trajectory time into LLM seconds and tool
 seconds, from native ATIF timing or inferred from step timestamps and Codex
 tool wall times, and says which source each arm used. See
-[Reports & Results](reports.mdx) for the timing rules.
-These are observations for this run, not a graded efficiency or cost claim.
+[Reports & Results](/skills/skillevaluator/reports) for the timing rules.
+These observations include failed task outcomes. Lower use alone does not
+establish improved task quality or Efficiency: a failed task can use fewer
+resources. Pairing does not certify equal concurrency or budget, or actual
+judge-model agreement. Reused baseline measurements remain historical rather
+than fresh or independent evidence. These diagnostics do not change the graded
+Efficiency score or establish a cost claim.
 
 Each dimension receives a score and a diagnostic band: **PASS** at 0.50 or
 above, **NEUTRAL** from 0.40 to below 0.50, and **FAIL** below 0.40. A supported
@@ -1734,10 +1744,10 @@ skipped payloads may leave live-evidence sections empty.
 
 Generated `BENCHMARK.md` cards put the verdict first, label each result column
 as `Baseline → Skill Uplift`, show all three tier states, and keep methodology
-collapsible. See the [rollout and backfill runbook](benchmark-rollout.mdx) before
+collapsible. See the [rollout and backfill runbook](/skills/skillevaluator/benchmark-rollout) before
 regenerating already-published cards.
 
-[Reports & Results](reports.mdx) covers the full on-disk layout, the
+[Reports & Results](/skills/skillevaluator/reports) covers the full on-disk layout, the
 machine-readable JSON contract, and how to judge whether a given lift is good.
 
 ## Troubleshooting
@@ -1745,7 +1755,7 @@ machine-readable JSON contract, and how to judge whether a given lift is good.
 <AccordionGroup>
   <Accordion title="A public LLM provider is required for live evaluation">
     Set `SKILL_EVAL_LLM_PROVIDER` and the corresponding evaluator-provider key.
-    See [Providers & Credentials](configuration.mdx).
+    See [Providers & Credentials](/skills/skillevaluator/configuration).
   </Accordion>
   <Accordion title="Agent authentication fails">
     Export the agent's credential in the host environment where you run
@@ -1760,7 +1770,7 @@ machine-readable JSON contract, and how to judge whether a given lift is good.
   </Accordion>
   <Accordion title="No eval dataset or native task source found">
     Run `skillevaluator create-eval-dataset ./my-skill`, or add an accepted
-    dataset file under `evals/`. See [Eval Datasets](eval-datasets.mdx).
+    dataset file under `evals/`. See [Eval Datasets](/skills/skillevaluator/eval-datasets).
   </Accordion>
   <Accordion title="Agent model is rejected">
     Supply a model valid for that agent with `--agent-model AGENT=MODEL`. The
@@ -1783,7 +1793,7 @@ machine-readable JSON contract, and how to judge whether a given lift is good.
     case rather than an infrastructure failure. Review the case prompt and the
     skill content that the agent read, then rerun, or run the arm with another
     model through `--agent-model claude-code=MODEL`. See
-    [Agents & Sandboxes](agents-and-sandboxes.mdx#supported-agents).
+    [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes#supported-agents).
   </Accordion>
   <Accordion title="Results look wrong or a case is hard to diagnose">
     Re-run with `--harbor-keep-jobs` — Harbor artifacts are transient and

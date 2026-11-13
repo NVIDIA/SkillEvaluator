@@ -176,6 +176,37 @@ Precedence, highest to lowest: `--policy` overlay, `--profile` flag, `SKILLEVALU
   `QUALITY.*: info` leaves a below-minimum quality score failing.
 </Accordion>
 
+<Accordion title="Permit reviewed ownership contacts without allowing other email addresses">
+  Contacts in the single-line `metadata.pic` and `metadata.email` fields of
+  the skill's own `SKILL.md` (the one at the root of the scanned skill) use the
+  separate `PII.ownership_emails` check. Both that check and ordinary
+  `PII.emails` findings remain **HIGH and blocking by default**.
+
+  If your repository policy permits those ownership contacts, pass an explicit
+  policy file. The finding stays visible in the report as informational.
+
+  ```yaml title="ownership-policy.yaml"
+  severity_overrides:
+    PII.ownership_emails: info
+  ```
+
+  ```bash
+  skillevaluator tier1 ./skills/my-skill --no-llm --policy ./ownership-policy.yaml
+  ```
+
+  Supported values are one address or `Name <address>` in valid YAML. The same
+  address in body text, a people directory, another metadata field, or another
+  file (including a `SKILL.md` nested in a subdirectory) still uses the ordinary
+  email policy. Ambiguous YAML, aliases, and block scalars also retain that
+  policy. Credential checks remain blocking.
+
+  Keep this policy under repository-owner review; the scanner does not discover
+  or trust a policy from the skill automatically. Existing `PII.emails` overrides
+  apply to ordinary emails; use `PII.ownership_emails` explicitly for these contacts.
+  This option is available on `tier1`, `tier1 validate`, and `validate`. The
+  released reusable CI templates do not yet expose a custom-policy input.
+</Accordion>
+
 <Note>
   The active profile name is stamped into the HTML report header and JSON report, and printed in the run banner under `--verbose`, so reviewers can see which gate was applied.
 </Note>
@@ -704,6 +735,26 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
 ## Troubleshooting
 
 <AccordionGroup>
+  <Accordion title="Why is SkillSpector analysis incomplete?">
+    Open the security check's execution error in the CLI, HTML, or Markdown
+    report. It now shows up to three file/line locations with their scanner
+    phase and reason, for example:
+
+    ```text
+    SKILL.md:14 [reference_resolution; reference_missing]
+    ```
+
+    This means the scanner could not resolve or inspect a reference; it is not
+    itself proof of a vulnerability. Review the named source line and whether
+    the reference should be bundled. If the scanner mistook a version or API
+    name for a file, report that detection issue to SkillSpector.
+
+    For more detail, each JSON result's `skillspector_completeness.records`
+    retains the scan stage, up to 20 ledger exceptions, analyzer names, and up
+    to eight limitations. Omission counts make truncation explicit. Folder
+    reports retain the skill name with each record. These diagnostics never
+    turn an incomplete scan into a pass.
+  </Accordion>
   <Accordion title="Gitleaks is not installed">
     Install it with `brew install gitleaks` or download a binary from the official [Gitleaks releases](https://github.com/gitleaks/gitleaks/releases).
   </Accordion>

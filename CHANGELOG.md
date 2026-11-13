@@ -584,11 +584,10 @@ All notable changes to SkillEvaluator are documented in this file.
   asked (1, or 2 after a rejected reply, not counting the client's retries),
   in the skill's `rubric_eval` success detail or `llm_*` finding and, for a
   single skill, also in the `rubric_eval` object. It is left out when the
-  first request fails, for example with no provider configured. The problem
-  named in the log, the retry note, the `llm_invalid_response` finding and the
-  `rubric_eval` summary quotes the judge's own criterion ids, so it has
-  credentials redacted, newlines and other control characters replaced by a
-  space, and is cut to 500 characters.
+  first request fails, for example with no provider configured. Rejection
+  diagnostics redact judge-supplied credentials before shortening the reason,
+  and collapse whitespace and controls to printable single-line text in logs,
+  retry notes and final invalid-response findings and summaries.
 
 - A default Tier 3 run with a baseline can reach a PASS or NEUTRAL publication
   verdict in BENCHMARK.md again. The baseline arm has no skill under test, so

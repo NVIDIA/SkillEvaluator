@@ -20,7 +20,6 @@ import os
 import posixpath
 import re
 import stat
-import unicodedata
 from collections import Counter, deque
 from pathlib import Path
 from typing import Any
@@ -40,6 +39,7 @@ from skillevaluator.inference.diagnostics import llm_failure_diagnostic, safe_ll
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.utils.redaction import redact_sensitive_text
+from skillevaluator.utils.rich_markup import strip_terminal_controls
 from skillevaluator.utils.secure_fs import SecureRoot
 from skillevaluator.validators.base import ValidatorBase
 from skillevaluator.validators.markdown import markdown_link_targets, normalized_local_path
@@ -213,20 +213,13 @@ def _rubric_report_problem(report: Any, criteria: list[dict]) -> str | None:
 
 
 def _bounded_problem(problem: str) -> str:
-    """Make a rejection reason safe to log, send back to the judge and report.
+    """Make a rejection reason safe for logs, retry notes and failure reports.
 
     The reason quotes the judge's own text, such as an invented criterion id,
-    which has no length limit and can hold a credential, a newline or another
-    control character. Credentials are redacted, control characters and runs
-    of whitespace become one space (as in ``finding_verification`` for
-    reasoning), and the result is cut to ``_MAX_RETRY_PROBLEM_CHARS``. Used for
-    the log line, the retry note, and the finding and summary of a second
-    invalid reply.
+    which has no length limit.
     """
-    problem = redact_sensitive_text(problem)
-    problem = " ".join(
-        "".join(" " if unicodedata.category(character).startswith("C") else character for character in problem).split()
-    )
+    problem = strip_terminal_controls(redact_sensitive_text(problem))
+    problem = " ".join("".join(char if char.isprintable() else " " for char in problem).split())
     if len(problem) <= _MAX_RETRY_PROBLEM_CHARS:
         return problem
     return f"{problem[:_MAX_RETRY_PROBLEM_CHARS]} ... [truncated]"

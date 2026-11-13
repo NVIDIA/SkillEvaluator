@@ -35,6 +35,7 @@ from skillevaluator.tier3.harbor.adapter import generate_harbor_tasks
 from skillevaluator.tier3.harbor.runner import build_harbor_run_command
 from skillevaluator.tier3.harbor.secure_docker_environment import (
     _REDACTION_SENTINEL_CANDIDATES,
+    _SENSITIVE_ENV_NAME_RE,
     NVIDIA_BUILD_STDIN_SENTINEL,
     SECURE_DOCKER_ENV_IMPORT_PATH,
     SkillEvaluatorDockerEnvironment,
@@ -51,6 +52,7 @@ from skillevaluator.tier3.harbor.secure_docker_environment import (
 )
 from skillevaluator.tier3.harbor.sensitive_stdin import NVIDIA_BUILD_KEY_STDIN_ENV
 from skillevaluator.tier3.harbor.stream_redaction import CommandOutputLimitError
+from skillevaluator.tier3.output_provenance import OUTPUT_PROVENANCE_KEY_ENV
 
 _SENTINEL = "sentinel-never-visible-in-argv-or-files"
 
@@ -94,6 +96,17 @@ def _initialized_secure_docker_environment(
         task_env_config=EnvironmentConfig(),
         persistent_env=persistent_env,
     )
+
+
+def _isolate_host_sensitive_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the sidecar Compose check away from sensitive-named variables of the host shell."""
+    # The check protects the value of every sensitive-named host variable, whatever its
+    # length, so an ambient ``SOME_SESSION=1`` would decide whether a fixture value such as
+    # ``127.0.0.1`` is retained. Call this before setting the variables the test controls.
+    for name in list(os.environ):
+        # conftest points the provenance key at tmp_path; leave that isolation in place.
+        if name != OUTPUT_PROVENANCE_KEY_ENV and _SENSITIVE_ENV_NAME_RE.search(name):
+            monkeypatch.delenv(name)
 
 
 class _BufferedComposeProcess:
@@ -897,6 +910,22 @@ def test_streaming_redactor_does_not_starve_event_loop_on_repeated_prefix() -> N
     assert asyncio.run(exercise()) < 1.0
 
 
+def _single_secret_scan_seconds(text: str) -> float:
+    """Return how long this interpreter takes to redact ``text`` with one secret.
+
+    Coverage tracing slows the pure-Python scan several times over. Nested-secret
+    time bounds therefore fall back to a multiple of this linear baseline: tracing
+    scales both alike, while a scan that grows with the nested secrets does not.
+
+    Linear matching of the 1,000 nested secrets used below costs about two of these
+    scans (the extra is mostly building the trie), so ten leaves room for noise.
+    Walking every nested match at each position costs more than twenty.
+    """
+    started = time.perf_counter()
+    _redact(text, {"a" * 8})
+    return time.perf_counter() - started
+
+
 def test_streaming_redactor_nested_terminal_matching_work_is_linear() -> None:
     secrets = {"a" * length for length in range(8, 1008)}
     text = "a" * 20_000
@@ -905,7 +934,7 @@ def test_streaming_redactor_nested_terminal_matching_work_is_linear() -> None:
 
     output = redactor.feed(text) + redactor.finish()
     elapsed = time.perf_counter() - started
-    assert elapsed < 1.0
+    assert elapsed < 1.0 or elapsed < 10 * _single_secret_scan_seconds(text)
     assert output == _collision_safe_redaction_marker(secrets)
     assert redactor.match_work_count <= 10 * len(text)
 
@@ -989,7 +1018,7 @@ def test_compose_stream_nested_secret_union_does_not_starve_event_loop(
 
     expected = _collision_safe_redaction_marker({"a" * length for length in range(8, 1008)})
     assert "".join(callback_chunks) == result.stdout == expected
-    assert maximum_gap < 1.0
+    assert maximum_gap < 1.0 or maximum_gap < 10 * _single_secret_scan_seconds("a" * 20_000)
 
 
 def _reference_union_redaction(text: str, secrets: set[str]) -> str:
@@ -2682,6 +2711,7 @@ def test_sidecar_retains_only_structurally_required_nonsecret_compose_task_value
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _isolate_host_sensitive_environment(monkeypatch)
     environment = _initialized_secure_docker_environment(tmp_path)
     compose_path = environment.environment_dir / "docker-compose.yaml"
     compose_path.write_text(
@@ -2946,6 +2976,7 @@ def test_sidecar_retains_structurally_required_nonsecret_host_compose_value(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _isolate_host_sensitive_environment(monkeypatch)
     environment = _initialized_secure_docker_environment(tmp_path)
     compose_path = environment.environment_dir / "docker-compose.yaml"
     compose_path.write_text(

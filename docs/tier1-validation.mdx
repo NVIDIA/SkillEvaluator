@@ -357,9 +357,9 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     | Correctness | 35% | Frontmatter, naming, examples, paths, and skill-type-specific structure |
     | Discoverability | 25% | Description quality, trigger wording, purpose, scope, and naming |
     | Reliability | 25% | Error handling, prerequisites, limitations, troubleshooting, and implementation safeguards |
-    | Efficiency | 15% | Token budget, body length, repetition, instruction clarity, and reference use |
+    | Efficiency | 15% | Estimated token budget, body length, repetition, instruction clarity, and reference use |
 
-    The 5,000-token budget for `SKILL.md` is a recommendation, not a hard limit. A larger `SKILL.md` gets a MEDIUM `quality_efficiency` finding and a 15-point Efficiency deduction. The finding does not fail the check by itself, but the deduction can still take the score below `--min-score`.
+    The 5,000-token budget for `SKILL.md` is a recommendation, not a hard limit. Token counts are estimates (characters divided by 4), not tokenizer output: each model family counts differently, and dense files with tables, identifiers or code spans usually have fewer than 4 characters per token, so the estimate runs low. `metrics.estimated_tokens` holds the estimate and `metrics.estimate_method` names how it was made; `metrics.total_tokens` is kept as the same value for existing consumers. A larger `SKILL.md` gets a MEDIUM `quality_efficiency` finding and a 15-point Efficiency deduction. The finding does not fail the check by itself, but the deduction can still take the score below `--min-score`.
 
     Grades are A for scores of at least 90, B for at least 80, C for at least 70, D for at least 60, and F below 60. The default `--min-score` is 70. Passing requires the score to reach that minimum and no HIGH or CRITICAL quality findings under the active policy.
 
@@ -380,7 +380,9 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
       If a quality score changes unexpectedly, inspect the finding message rather than adding keywords. The checker rewards usable instructions and evidence in their relevant context, not vocabulary alone.
     </Tip>
 
-    **Expected headings.** Reliability deducts points when `SKILL.md` lacks an expected heading. The packaged `quality-default.yaml` expects `## Prerequisites` (or `## Requirements`), `## Limitations`, and `## Troubleshooting` (or `## Common Issues` or `## FAQ`), each worth 5 points. Pass `--quality-config PATH` to `quality-check`, `tier1`, or `validate` to use your own list instead. The file replaces the packaged defaults rather than merging with them, so copy any default entries you want to keep.
+    **Quality config file.** Pass `--quality-config PATH` to `quality-check`, `tier1`, or `validate` to adjust the Reliability rules below. The file has two optional sections, `expected_headers` and `error_handling`. Anything you leave out keeps its packaged value from `quality-default.yaml`, and any list you set replaces the packaged list rather than merging with it.
+
+    **Expected headings.** Reliability deducts points when `SKILL.md` lacks an expected heading. The packaged `quality-default.yaml` expects `## Prerequisites` (or `## Requirements`), `## Limitations`, and `## Troubleshooting` (or `## Common Issues` or `## FAQ`), each worth 5 points. Omit `expected_headers` to keep that list. A list you set replaces it, so copy any default entries you want to keep. Set `expected_headers: []` to turn heading checks off.
 
     ```yaml title="quality.yaml"
     expected_headers:
@@ -407,7 +409,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     | --- | --- | --- |
     | `heading` | Yes | A single ATX Markdown heading, such as `## Security` |
     | `alternatives` | No | Other headings that satisfy the same entry |
-    | `points` | No (default `5`) | Non-negative number deducted from Reliability when no accepted heading is found |
+    | `points` | No (default `5`) | Non-negative number deducted from Reliability when no accepted heading is found. With `points: 0` the missing heading is still reported as a zero-point (advisory) finding, but the score does not change |
     | `message` | No | Finding message reported when the heading is missing. Defaults to `Missing expected heading: '## Examples'`, listing any alternatives |
     | `suggestion` | No | Fix suggestion attached to the finding. Defaults to `Add a '## Examples' section`, or `Add one of these sections: ...` when there are alternatives |
 
@@ -415,7 +417,25 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     An entry is satisfied when the heading or any alternative appears anywhere in `SKILL.md` as text, so `## Security` also matches `### Security Notes` or a heading inside a code block.
 
-    The file is checked before any validation runs. A file that is missing, unreadable, not UTF-8, invalid YAML, has an unknown key (such as `point` instead of `points`), or lists the same heading twice is a usage error: the command exits with code 2 and names the file and the problem. `validate` checks the file even when `--checks` leaves out `quality`.
+    **Error-handling checks.** Reliability also runs three error-handling rules, set in the `error_handling` section of the same file. An omitted rule, or an omitted key within a rule, keeps its packaged value. Set `points: 0` to turn a rule off; it then adds no finding. This differs from `expected_headers`, where an entry with `points: 0` still reports a zero-point finding that does not change the score.
+
+    ```yaml title="quality.yaml"
+    error_handling:
+      mentioned:
+        terms: [error, failure, rollback, retry]
+      scripts:
+        points: 0
+    ```
+
+    | Rule | Deducts when | Packaged points | List field |
+    | --- | --- | --- | --- |
+    | `mentioned` | `SKILL.md` contains none of the `terms` | `10` | `terms`: whole words, any case. `error` matches `Error` but not `errorless`. A term with spaces, such as `exit code`, also matches when its words are split by a line break or several spaces |
+    | `scripts` | A `.py` file directly in `scripts/` or `tools/` has neither a `try:`/`except` pair nor any of the `markers` | `5` | `markers`: case-sensitive text found anywhere in the file, such as `raise` or `if not ` |
+    | `lib` | A module in the skill's Python package, for skills with no `.py` or `.sh` files directly in `scripts/` or `tools/`, has neither a `try:`/`except` pair nor any of the `markers` | `5` | `markers`: as for `scripts` |
+
+    Each rule also takes `message` and `suggestion`. The `scripts` and `lib` findings append up to three file names to the message, as in `Scripts may lack error handling: run.py`. The `try:`/`except` pair always counts as error handling and is not configurable. See the packaged `quality-default.yaml` for every default term and marker. The `quality_config` digest in the report covers only the rules your file sets, not the packaged values it leaves out, so the digest changes only when your file's rules change.
+
+    The file is checked before any validation runs. A file that is missing, unreadable, not UTF-8, invalid YAML, has an unknown key (such as `point` instead of `points`), lists the same heading twice, has a negative or non-numeric `points`, an empty `terms` or `markers` list, or a repeated entry in one of those lists is a usage error: the command exits with code 2 and names the file and the problem. `validate` checks the file even when `--checks` leaves out `quality`.
 
     ```text title="Example error"
     Error: Invalid value for '--quality-config': quality.yaml: unknown key(s) in expected_headers[0]: point (allowed: alternatives, heading, message, points, suggestion)

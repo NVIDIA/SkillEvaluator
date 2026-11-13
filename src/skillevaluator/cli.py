@@ -62,6 +62,7 @@ from skillevaluator.tier1.commands import (
     run_rubric_eval,
     run_security_scan,
     run_validation,
+    runs_schema_check,
 )
 from skillevaluator.tier3_environments import all_env_modes
 from skillevaluator.tier_group import TierGroup
@@ -1620,14 +1621,22 @@ def _catalog_metadata_id_conflicts(
     skill_dirs: list[Path],
     catalog_root: Path,
     discovery_problems: dict[Path, str],
+    *,
+    schema_enabled: bool = True,
 ) -> tuple[list[dict[str, object]], list[tuple[str, str]]]:
     """Find ``metadata.id`` values shared by catalog skills.
 
     Catalog runs validate each skill on its own, so uniqueness across the
     catalog is checked here. Returns the conflicts for the catalog summary and,
     when the policy makes a duplicate blocking, one failure per affected skill.
+
+    This is part of the schema check, so it runs only when that check is
+    selected: ``--checks`` and ``--skip`` run exactly the checks they name.
     """
     from skillevaluator.validators.policy import default_policy
+
+    if not schema_enabled:
+        return [], []
     from skillevaluator.validators.schema import (
         declared_metadata_id,
         duplicate_metadata_ids,
@@ -1754,7 +1763,13 @@ def _validate_catalog(
             ctx.meta.pop(meta_key, None)
         else:
             ctx.meta[meta_key] = previous_catalog_root
-    id_conflicts, id_failures = _catalog_metadata_id_conflicts(policy, skill_dirs, resolved_target, discovery_problems)
+    id_conflicts, id_failures = _catalog_metadata_id_conflicts(
+        policy,
+        skill_dirs,
+        resolved_target,
+        discovery_problems,
+        schema_enabled=runs_schema_check(ctx.params.get("checks"), ctx.params.get("skip")),
+    )
     failures = _record_metadata_id_failures(failures, id_failures)
     failure_map = dict(failures)
     skill_entries = [
@@ -1823,7 +1838,13 @@ def _validate_catalog_parallel(
             if not passed:
                 failures.append((skill_name, reason))
 
-    id_conflicts, id_failures = _catalog_metadata_id_conflicts(policy, skill_dirs, catalog_root, discovery_problems)
+    id_conflicts, id_failures = _catalog_metadata_id_conflicts(
+        policy,
+        skill_dirs,
+        catalog_root,
+        discovery_problems,
+        schema_enabled=runs_schema_check(ctx.params.get("checks"), ctx.params.get("skip")),
+    )
     failures = _record_metadata_id_failures(failures, id_failures)
     failures.sort(key=lambda item: item[0])
     failure_map = dict(failures)

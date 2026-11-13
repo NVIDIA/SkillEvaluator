@@ -1270,3 +1270,53 @@ Example.
         assert not [f for f in result.findings if f.check_name == "metadata_id_duplicate"]
         detail = next(d for d in result.success_details if d.check_name == "metadata_id_unique")
         assert detail.message == "2 declared metadata.id value(s) are unique within this collection"
+
+
+class TestMetadataIdPreviewBounds:
+    """A rejected ``metadata.id`` must never be rendered by expanding its value."""
+
+    @staticmethod
+    def _alias_bomb(levels: int) -> str:
+        lines = ["a0: &a0 [x, x]"]
+        lines += [f"a{i}: &a{i} [*a{i - 1}, *a{i - 1}]" for i in range(1, levels + 1)]
+        lines.append(f"id: *a{levels}")
+        return "\n".join(lines)
+
+    def test_non_string_id_is_described_by_type_not_rendered(self):
+        from skillevaluator.validators.schema import _display_metadata_id
+
+        assert _display_metadata_id([1, 2, 3]) == "<list>"
+        assert _display_metadata_id(123) == "<int>"
+        assert _display_metadata_id(None) == "<NoneType>"
+        assert _display_metadata_id(True) == "<bool>"
+
+    def test_yaml_alias_graph_does_not_expand_into_the_finding(self):
+        import yaml
+
+        from skillevaluator.validators.schema import _display_metadata_id
+
+        # 30 doubling aliases: repr() of this value is ~2**30 elements, which
+        # would exhaust memory. The preview must not build it.
+        value = yaml.safe_load(self._alias_bomb(30))["id"]
+
+        preview = _display_metadata_id(value)
+
+        assert preview == "<list>"
+        assert len(preview) <= 16
+
+    def test_alias_graph_id_is_rejected_with_a_bounded_finding(self, tmp_path: Path):
+        skill_dir = tmp_path / "alias-id"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: alias-id\ndescription: A skill whose metadata.id is a YAML alias graph\nmetadata:\n"
+            + "\n".join(f"  {line}" for line in self._alias_bomb(20).splitlines())
+            + "\n---\n\n# Alias\n\n## Instructions\n\n1. Run.\n",
+            encoding="utf-8",
+        )
+
+        result = SchemaValidator().validate(skill_dir)
+
+        findings = [f for f in result.findings if f.check_name == "metadata_id_format"]
+        assert len(findings) == 1
+        assert "must be a string (got list)" in findings[0].message
+        assert len(findings[0].line_content) <= 32

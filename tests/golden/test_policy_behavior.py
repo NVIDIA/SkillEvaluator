@@ -189,3 +189,48 @@ def test_parallel_catalog_applies_the_registry_id_conflict(tmp_path: Path) -> No
     summary = json.loads((tmp_path / "out" / "catalog-summary.json").read_text(encoding="utf-8"))
     assert [skill["passed"] for skill in summary["skills"]] == [False, False]
     assert summary["metadata_id_conflicts"][0]["skills"] == ["first-skill", "second-skill"]
+
+
+def test_catalog_id_check_runs_only_when_the_schema_check_is_selected(tmp_path: Path) -> None:
+    # --checks and --skip run exactly the checks they name: a catalog-wide
+    # metadata.id conflict must not fail a run that did not select schema.
+    catalog = tmp_path / "catalog"
+    _write_skill_with_id(catalog, "first-skill", "Demo Author <author@example.com>", "shared-id")
+    _write_skill_with_id(catalog, "second-skill", "Demo Author <author@example.com>", "shared-id")
+
+    # schema selected: the duplicate blocks under registry, as before.
+    assert _validate(catalog, tmp_path / "schema-on", "--profile", "registry") == 1
+
+    # schema deselected: the per-skill version checks pass, so the run passes.
+    assert (
+        CliRunner()
+        .invoke(
+            cli,
+            [
+                "validate", str(catalog), "--tiers", "1", "--no-llm",
+                "--checks", "version", "--profile", "registry",
+                "-r", "json", "-o", str(tmp_path / "checks-version"),
+            ],
+        )
+        .exit_code
+        == 0
+    )
+    summary = json.loads((tmp_path / "checks-version" / "catalog-summary.json").read_text(encoding="utf-8"))
+    assert summary["metadata_id_conflicts"] == []
+
+    # --skip schema is the same contract.
+    assert (
+        CliRunner()
+        .invoke(
+            cli,
+            [
+                "validate", str(catalog), "--tiers", "1", "--no-llm",
+                "--skip", "schema", "--profile", "registry",
+                "-r", "json", "-o", str(tmp_path / "skip-schema"),
+            ],
+        )
+        .exit_code
+        == 0
+    )
+    summary = json.loads((tmp_path / "skip-schema" / "catalog-summary.json").read_text(encoding="utf-8"))
+    assert summary["metadata_id_conflicts"] == []

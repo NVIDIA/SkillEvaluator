@@ -131,10 +131,20 @@ def metadata_id_duplicate_severity(policy: ValidationPolicy) -> Severity:
 
 
 def _display_metadata_id(value: Any) -> str:
-    text = repr(value) if not isinstance(value, str) else value
-    if len(text) > _METADATA_ID_DISPLAY_LIMIT:
-        return text[:_METADATA_ID_DISPLAY_LIMIT] + "…"
-    return text
+    """Render a bounded preview of a ``metadata.id`` value for a finding.
+
+    A non-string value is described by its type alone and never rendered.
+    ``metadata.id`` accepts arbitrary YAML before this check rejects a
+    non-string, and ``repr`` expands a YAML alias graph eagerly: a 445-byte
+    manifest with 20 doubling aliases builds a 14,680,060-character string,
+    and a slightly deeper graph exhausts memory. Truncating afterwards is too
+    late, because the whole string is built first.
+    """
+    if not isinstance(value, str):
+        return f"<{type(value).__name__}>"
+    if len(value) > _METADATA_ID_DISPLAY_LIMIT:
+        return value[:_METADATA_ID_DISPLAY_LIMIT] + "…"
+    return value
 
 
 class SchemaValidator(ValidatorBase):

@@ -81,6 +81,17 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- The rubric judge's reference supplement budget is configurable through
+  `SKILLEVALUATOR_RUBRIC_SUPPLEMENT_BYTES` and defaults to one mebibyte instead
+  of 30,000 bytes, which a real linked guide graph outgrows. Required linked
+  Markdown is bounded only by that budget, so a guide larger than an optional
+  preview is collected whole; optional script and reference previews keep their
+  own small per-file bound. The budget decides how many bytes of the skill's own
+  guidance are collected, never which paths may be read: every reference is still
+  confined to the skill's declared root by the same secure reader, and guidance
+  that does not fit still stops the evaluation with an explicit unsafe-input
+  finding rather than being dropped from the judge's prompt.
+
 - The `default` policy no longer blocks a skill for its author attribution,
   because the Agent Skills baseline requires only `name` and `description`
   (#43). A missing `metadata.author` is now a LOW advisory, and a person, team,
@@ -145,6 +156,11 @@ All notable changes to SkillEvaluator are documented in this file.
   grader suite, so retuning any of them fails CI instead of rotting the page.
 
 ### Fixed
+
+- Accuracy and Behavior judge prompts clarify that explicit final-answer formats
+  apply to the entire final response, independently of correct values in tool
+  output or references. Scoring and thresholds are unchanged; an Accuracy format
+  failure alone can still score 0.8 and pass the default threshold.
 
 - Folder validation preserves author and metadata ID advisories from passing
   skills. Catalog summaries include duplicate ID severity counts and consistent
@@ -224,6 +240,23 @@ All notable changes to SkillEvaluator are documented in this file.
   `/bin/bash -lc 'cat skills/x/SKILL.md'`, which some agent harnesses record
   instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL
   config.json'`) are still not counted.
+- Tier 3 reads the native Codex wrapper that runs a literal command array
+  through `.map`, so a skill read batched that way is graded instead of scoring
+  as an unsupported wrapper. The decoder stays a bounded static one: every array
+  element is still a literal, the callback may only hand that element to one
+  named tool, and a reused or shadowed binding, a changed index or payload, a
+  computed key or tool name, or a duplicate, missing, extra, reordered or
+  truncated result record leaves the whole wrapper unsupported. Each command is
+  matched to the settled result at its own position and carries that result's
+  own exit code or rejection. The form that prints inside the callback settles
+  out of array order, so it is read only for a single command and otherwise
+  stops grading rather than guessing which result belongs to which command.
+  That inline form is graded only on evidence it actually produced: the callback
+  must `await` the call, because an un-awaited one prints a pending promise
+  rather than the tool's result, and it must print something, because
+  `Promise.allSettled` swallows a rejection and would otherwise let a call that
+  never ran exit cleanly and read as a successful command.
+
 - A Tier 1 security scan keeps a SkillSpector `partial` report `INCOMPLETE` when
   its only ledger row is a referenced image but its `references` list records a
   `missing` reference on a line without a ledger row, an `ambiguous` reference,

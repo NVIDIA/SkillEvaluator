@@ -98,6 +98,17 @@ def test_copilot_shows_body_for_missing_description_but_drops_non_string(tmp_pat
     assert "CP-STRICT-YAML" in _ids(_rows(listed), "copilot-cli")
 
 
+def test_symlinked_manifest(tmp_path: Path):
+    skill = _skill(tmp_path)
+    target = tmp_path / "real.md"
+    (skill / "SKILL.md").rename(target)
+    (skill / "SKILL.md").symlink_to(target)
+
+    status = _status(skill)
+
+    assert {h for h, s in status.items() if s == "not_loaded"} == {"codex", "hermes", "openclaw"}
+
+
 def test_install_root_only_applies_inside_known_harness_roots(tmp_path: Path):
     skill = tmp_path / ".claude" / "skills" / "demo-skill"
     skill.parent.mkdir(parents=True)
@@ -318,6 +329,20 @@ def test_listed_description_projection(tmp_path: Path):
     assert rows["codex"]["listed"]["limit"] == 1024
     assert rows["copilot-cli"]["listed"]["mode"] == "dropped"
     assert rows["opencode"]["listed"]["mode"] == rows["openclaw"]["listed"]["mode"] == "full"
+
+
+def test_bundle_files_symlinks_and_large_references(tmp_path: Path):
+    skill = _skill(tmp_path)
+    (skill / "references").mkdir()
+    (skill / "references" / "big.md").write_text("line\n" * 20000)
+    outside = tmp_path / "shared.md"
+    outside.write_text("shared")
+    (skill / "references" / "shared.md").symlink_to(outside)
+    facts = skill_facts(skill)
+    rows = _rows(skill)
+
+    assert facts["resource_symlinks"] == facts["resource_symlink_escapes"] == 1
+    assert "HM-RESOURCE-SYMLINK" in _ids(rows, "hermes")
 
 
 def test_fix_reaches_findings_and_panels(tmp_path: Path):

@@ -1614,6 +1614,34 @@ class TestSchemaPortabilityChecks:
         assert result.passed, result.errors
         assert [f.severity for f in _checks(result, "manifest_bom")] == ["medium"]
 
+    def test_symlinked_manifest_is_medium(self, tmp_path: Path):
+        skill_dir = _write_skill(tmp_path, _BASE_FM)
+        target = tmp_path / "real.md"
+        (skill_dir / "SKILL.md").rename(target)
+        (skill_dir / "SKILL.md").symlink_to(target)
+
+        result = SchemaValidator().validate(skill_dir)
+
+        assert result.passed, result.errors
+        assert len(_checks(result, "manifest_symlink")) == 1
+
+    def test_nested_manifest_is_medium(self, tmp_path: Path):
+        skill_dir = _write_skill(tmp_path, _BASE_FM)
+        (skill_dir / "references" / "inner").mkdir(parents=True)
+        (skill_dir / "references" / "inner" / "SKILL.md").write_text("---\nname: inner\n---\n")
+
+        findings = _checks(SchemaValidator().validate(skill_dir), "nested_manifest")
+
+        assert len(findings) == 1
+        assert "references/inner/SKILL.md" in findings[0].message
+
+    def test_nested_manifest_under_excluded_dir_is_ignored(self, tmp_path: Path):
+        skill_dir = _write_skill(tmp_path, _BASE_FM)
+        (skill_dir / "evals" / "snapshot").mkdir(parents=True)
+        (skill_dir / "evals" / "snapshot" / "SKILL.md").write_text("---\nname: snapshot\n---\n")
+
+        assert not _checks(SchemaValidator().validate(skill_dir), "nested_manifest")
+
     def test_description_over_utf16_limit_is_medium(self, tmp_path: Path):
         description = "Use when testing. " + "\U0001f600" * 600
         fm = _BASE_FM.replace("Use when checking harness portability of a skill.", description)

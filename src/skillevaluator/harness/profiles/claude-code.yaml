@@ -11,6 +11,7 @@ rules:
   - {id: CC-DESC-CUT, when: "description_codepoints > 1536", effect: degraded, outcome: listing shortened, message: "Description cut at 1,536 characters.", fix: "Keep the description at or under 1,536 characters."}
   - {id: CC-DESC-MISSING, when: "description_missing or description_empty or description_type != 'str'", effect: degraded, message: "No usable description: Claude Code shows body text instead.", fix: "Add a non-empty string description."}
   - {id: CC-DUP-KEY, when: "frontmatter_duplicate_keys", effect: advisory, message: "Duplicate keys: Claude Code keeps the last value (four other harnesses drop the skill).", fix: "Remove the duplicate frontmatter key."}
+  - {id: CC-CASING, when: "not manifest_name_exact", effect: degraded, message: "Non-canonical name (skill.md/Skill.md): loaded on case-insensitive filesystems (macOS default APFS, 3/3), ignored on case-sensitive Linux (3/3). Works or breaks depending on the OS.", fix: "Rename the file to SKILL.md (exact casing)."}
   - {id: CC-FM-STRIPPED, when: "custom_field_chars > 200", effect: advisory, message: "Frontmatter is stripped when the skill is used, so the text in {custom_fields} never reaches the model.", fix: "Move instructions from frontmatter into the SKILL.md body."}
 notes:
   - "Follows symlinked skill folders and symlinked SKILL.md files, inside or outside the root."

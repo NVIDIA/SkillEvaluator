@@ -25,9 +25,11 @@ from skillevaluator.constants import (
     MAX_SKILL_MD_LINES,
     RECOMMENDED_BODY_SECTIONS,
     REQUIRED_BODY_SECTIONS,
+    SCAN_EXCLUDED_DIRS,
     SCAN_EXCLUDED_FILES,
     SCHEMA_ALLOWED_DIRS_ENV,
     SKILL_MANIFEST_FILE,
+    SKILL_MANIFEST_VARIANTS,
 )
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Finding, Severity
@@ -390,8 +392,9 @@ class SchemaValidator(ValidatorBase):
                     message=(
                         "Skill manifest uses non-canonical name 'skill.md' — "
                         "the agentskills.io spec requires 'SKILL.md' (uppercase). "
-                        "On case-sensitive filesystems (Linux), this will not be "
-                        "recognized by spec-compliant tooling"
+                        "Codex and Hermes never load it; Claude Code, OpenCode, Copilot CLI "
+                        "and OpenClaw load it only on case-insensitive filesystems (macOS), "
+                        "so it can work locally and be missing on Linux"
                     ),
                     file_path=str(skill_md),
                     suggestion="Rename 'skill.md' to 'SKILL.md' to comply with the agentskills.io spec",
@@ -416,7 +419,7 @@ class SchemaValidator(ValidatorBase):
             result.merge(self._validate_name_matches_directory(skill_path, frontmatter))
             result.merge(self._validate_author(frontmatter, str(skill_md)))
             result.merge(self._validate_metadata_id(frontmatter, str(skill_md)))
-            result.merge(self._validate_portability(skill_md, frontmatter))
+            result.merge(self._validate_portability(skill_path, skill_md, frontmatter))
 
         return result
 
@@ -716,11 +719,24 @@ class SchemaValidator(ValidatorBase):
             metadata=dict(metadata),
         )
 
-    def _validate_portability(self, skill_md: Path, frontmatter: SkillFrontmatter) -> ValidationResult:
+    def _validate_portability(
+        self, skill_path: Path, skill_md: Path, frontmatter: SkillFrontmatter
+    ) -> ValidationResult:
         """Flag spec-valid patterns that common agent harnesses load differently or not at all."""
         result = ValidationResult()
         file_path = str(skill_md)
         findings: list[Finding] = []
+
+        if skill_md.is_symlink():
+            findings.append(
+                self._portability_finding(
+                    "manifest_symlink",
+                    Severity.MEDIUM,
+                    "SKILL.md is a symlink; Codex, Hermes and OpenClaw do not load symlinked manifests",
+                    file_path,
+                    "Replace the symlink with a regular SKILL.md file",
+                )
+            )
 
         try:
             raw = skill_md.read_bytes()
@@ -736,6 +752,25 @@ class SchemaValidator(ValidatorBase):
                     "Save SKILL.md as UTF-8 without BOM",
                 )
             )
+        nested = sorted(
+            path
+            for name in SKILL_MANIFEST_VARIANTS
+            for path in skill_path.rglob(name)
+            if path.parent != skill_path
+            and not any(part in SCAN_EXCLUDED_DIRS for part in path.relative_to(skill_path).parts)
+        )
+        for path in nested:
+            findings.append(
+                self._portability_finding(
+                    "nested_manifest",
+                    Severity.MEDIUM,
+                    f"Nested skill manifest '{path.relative_to(skill_path).as_posix()}' inside this skill; "
+                    "Codex, OpenCode and Hermes load it as a separate skill, others ignore it",
+                    str(path),
+                    "Rename the nested file or move it out of the skill folder",
+                )
+            )
+
         description = frontmatter.description
         utf16_units = len(description.encode("utf-16-le")) // 2
         if len(description) <= DESCRIPTION_MAX_LENGTH < utf16_units:

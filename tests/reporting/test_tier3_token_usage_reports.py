@@ -1021,6 +1021,14 @@ def test_docs_and_changelog_describe_the_token_usage_contract() -> None:
         "left out without a record",
     ):
         assert field in section, field
+    assert [line for line in section.splitlines() if len(line) > 80] == []
     unreleased = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8").split("\n## ", 2)[1]
     added = unreleased.split("### Added\n", 1)[1].split("\n### ", 1)[0]
     assert "token usage per case" in added
+    fixed = unreleased.split("### Fixed\n", 1)[1].split("\n### ", 1)[0]
+    entries = [" ".join(entry.split()) for entry in fixed.split("\n- ")]
+    (entry,) = [entry for entry in entries if entry.startswith("Tier 3 token usage per case")]
+    assert "now counts each attempt in the case it belongs to." in entry
+    # The table needs no --verbose: a run whose arms all failed never shows a case summary.
+    assert "`tier3 evaluate` prints the agent token sums for a run whose arms all failed" in entry
+    assert "--verbose" not in entry

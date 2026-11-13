@@ -694,17 +694,17 @@ All notable changes to SkillEvaluator are documented in this file.
   agent and the run, and the notes say so.
 
 - Tier 3 token usage per case, per agent and over all agents now counts each
-  attempt in its own case. An unscored attempt of a native task whose
+  attempt in the case it belongs to. An unscored attempt of a native task whose
   `[metadata] entry_id` differs from its directory joins that case's row
   instead of a row of its own; the collector records the case in the attempt's
   `failure.json`. A scored attempt whose trajectory recorded an invalid cache
   counter is no longer counted with 0 cached tokens: it adds no tokens, and
   the trial names the counter in `invalid_token_counters`. A case that a run
   budget cut short expects only the attempts the budget admitted, so its row
-  is no longer partial with missing attempts. `tier3 evaluate --verbose`
-  prints the agent token sums for a run whose arms all failed, and once the
-  report payload left the case rows out, the terminal tables say that no
-  report has them instead of naming the report files.
+  is no longer partial with missing attempts. `tier3 evaluate` prints the
+  agent token sums for a run whose arms all failed, and once the report
+  payload left the case rows out, the terminal tables say that no report has
+  them instead of naming the report files.
 
 - Tier 3 standard judges under `LLM_JUDGE_RETRY_POLICY=strict` with Bedrock
   as the provider no longer label a Bedrock error that the policy treats as an

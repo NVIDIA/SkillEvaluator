@@ -186,6 +186,41 @@ def test_scaffold_rejects_contract_invalid_existing_dataset_before_publish(
     assert not (evals / "harbor").exists()
 
 
+def test_docs_limit_the_empty_expected_output_rejection_to_the_object_shape(tmp_path: Path) -> None:
+    # Only the {"skill_name", "evals"} shape requires a reference; a flat dataset is
+    # legacy, so an empty one is accepted and leaves accuracy and goal_accuracy N/A.
+    docs = (Path(__file__).resolve().parents[1] / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
+    normalized = " ".join(docs.split())
+    assert 'reject an empty `expected_output` only in a `{"skill_name", "evals"}` dataset' in normalized
+    assert (
+        'A flat dataset (a JSON or YAML list, `{"cases": [...]}`, or any `evals.jsonl`) is legacy: there an empty '
+        "or whitespace-only `expected_output` or `ground_truth` is accepted and makes `accuracy` and "
+        "`goal_accuracy` N/A."
+    ) in normalized
+
+    entry = {"id": "case-001", "prompt": "Q", "expected_output": " "}
+    for index, (name, content, accepted) in enumerate(
+        (
+            ("evals.json", json.dumps({"skill_name": "sample-skill", "evals": [entry]}), False),
+            ("evals.json", json.dumps([entry]), True),
+            ("evals.json", json.dumps({"cases": [{**entry, "expected_output": ""}]}), True),
+            ("evals.yaml", yaml.safe_dump([{**entry, "ground_truth": ""}]), True),
+            ("evals.jsonl", json.dumps(entry) + "\n", True),
+        )
+    ):
+        root = tmp_path / str(index)
+        root.mkdir()
+        skill = _skill(root)
+        evals = skill / "evals"
+        evals.mkdir()
+        (evals / name).write_text(content, encoding="utf-8")
+
+        result = CliRunner().invoke(cli, ["init-harbor-task", str(skill), "--case-id", "case-001"])
+
+        assert (result.exit_code == 0) is accepted, (name, content, result.output)
+        assert (evals / "harbor").exists() is accepted
+
+
 def test_force_late_config_failure_preserves_complete_old_scaffold(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

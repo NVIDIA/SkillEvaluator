@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import json
+import random
+import string
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -150,6 +152,131 @@ def test_accuracy_prompt_gives_no_free_criterion_to_a_response_without_an_answer
     assert "unless the expected answer is itself a refusal" in prompt
 
 
+@pytest.mark.parametrize(
+    ("requirement", "final_response"),
+    [
+        ("Return only a number.", "83"),
+        ("Return only a number.", "82"),
+        ("Return only a number.", "83\nFinished processing."),
+        ("Return only a number.", "The computed quantity is 83.\nCalculation finished."),
+        ("Return only a number.", "Quantity: 83"),
+        ("Return only a number.", "```text\n83\n```"),
+        ("Explain the quantity.", "The computed quantity is 83."),
+        ("Use the prefix COUNT= before the quantity.", "COUNT=83"),
+        ("Return the quantity with units and a short explanation.", "83 items remain after counting."),
+    ],
+    ids=[
+        "bare-number",
+        "wrong-value-valid-format",
+        "valid-first-line-extra-line",
+        "prose",
+        "label",
+        "fence",
+        "no-format",
+        "required-prefix",
+        "required-units-prose",
+    ],
+)
+def test_format_judges_receive_complete_final_response_separate_from_tool_and_reference(
+    monkeypatch, requirement: str, final_response: str
+) -> None:
+    # Catch response extraction, evidence misframing, or drift between deployed
+    # prompts. The provider is stopped at its boundary; no semantic verdict is faked.
+    question = f"Count the available items. {requirement}"
+    trajectory = {
+        "steps": [
+            {"source": "user", "message": question},
+            {
+                "source": "agent",
+                "tool_calls": [{"tool_call_id": "count-1", "function_name": "count_items", "arguments": {}}],
+                "observation": {"results": [{"source_call_id": "count-1", "content": "83"}]},
+            },
+            {"source": "agent", "message": final_response},
+        ]
+    }
+    captured = []
+    for module, builder in (
+        (llm_judge, atif_helpers.build_metric_evidence_bundles),
+        (eval_template, eval_template.build_metric_evidence_bundles),
+    ):
+        bundles = builder(trajectory, question, ground_truth="83", expected_behavior=[requirement])
+        prompts = _capture_prompts(module, monkeypatch)
+        module.judge_accuracy(question, "83", bundles["accuracy"]["prompt_evidence"])
+        module.judge_behavior_check(bundles["behavior_check"]["prompt_evidence"], [requirement])
+        assert len(prompts) == 2
+        accuracy, behavior = prompts
+        assert "EXPECTED ANSWER:\n83\n" in accuracy
+        assert f"FINAL RESPONSE\n{final_response}\n\nKEY OBSERVATIONS\n83" in accuracy
+        assert f"FINAL RESPONSE\n{final_response}\n\nUSER REQUEST\n{question}" in behavior
+        assert "COMPACT TOOL HISTORY\n" in behavior
+        assert "count_items" in behavior
+        assert "83" in behavior.split("COMPACT TOOL HISTORY\n", 1)[1]
+        assert f"EXPECTED BEHAVIORS:\n1. {requirement}" in behavior
+        for prompt in prompts:
+            assert "judge the entire final response literally" in prompt
+            assert "independently of factual correctness" in prompt
+            assert "Do not extract a compliant answer" in prompt
+            assert "extra prose, a label, or a code fence violates that requirement" in prompt
+            assert "Required prefixes, units, or prose are valid when they match the stated format" in prompt
+            assert "Inspect every line of the final response, including text after an initially valid answer" in prompt
+            assert "Line breaks do not end the final response" in prompt
+            assert "Do not mentally remove labels or Markdown fence characters" in prompt
+        assert "Wording leniency does not relax explicit format constraints" in accuracy
+        assert "When the complete final response establishes a format violation, mark that behavior false" in behavior
+        assert "keep null when missing or incomplete evidence prevents checking it" in behavior
+        captured.append(prompts)
+    assert captured[0] == captured[1]
+
+
+def test_format_only_behavior_is_separate_from_a_stated_correctness_behavior(monkeypatch) -> None:
+    # The same wrong value can satisfy structure but violate a separate factual
+    # requirement. Capture the actual evidence/prompt, without faking a verdict.
+    question = "Count the stored entries. Return only a number."
+    behaviors = ["Return only a number.", "Return the correct count."]
+    trajectory = {
+        "steps": [
+            {"source": "user", "message": question},
+            {"source": "agent", "message": "82"},
+        ]
+    }
+    captured = []
+    for module, builder in (
+        (llm_judge, atif_helpers.build_metric_evidence_bundles),
+        (eval_template, eval_template.build_metric_evidence_bundles),
+    ):
+        bundles = builder(trajectory, question, ground_truth="83", expected_behavior=behaviors)
+        prompts = _capture_prompts(module, monkeypatch)
+        module.judge_behavior_check(bundles["behavior_check"]["prompt_evidence"], behaviors)
+        prompt = prompts[0]
+        assert f"FINAL RESPONSE\n82\n\nUSER REQUEST\n{question}" in prompt
+        assert "EXPECTED BEHAVIORS:\n1. Return only a number.\n2. Return the correct count." in prompt
+        assert "For each numbered behavior, check only what that behavior requires" in prompt
+        assert "A format-only behavior does not require the answer's value to be factually correct" in prompt
+        assert "If a behavior also requires factual correctness, evaluate that requirement too" in prompt
+        assert "ensure each passed value agrees with its reason" in prompt
+        assert "a reason establishing a violation requires false, not true" in prompt
+        assert "an evidence gap that prevents checking requires null" in prompt
+        captured.append(prompts)
+    assert captured[0] == captured[1]
+
+
+def test_format_judges_keep_direct_unsectioned_inputs_compatible(judge_module, monkeypatch) -> None:
+    prompts = _capture_prompts(judge_module, monkeypatch)
+    direct_response = "COUNT=83"
+
+    judge_module.judge_accuracy("Use the prefix COUNT=.", "83", direct_response)
+    judge_module.judge_behavior_check(direct_response, ["Use the prefix COUNT=."])
+
+    assert prompts[0].endswith(
+        "SELECTED EVIDENCE (final response + produced artifacts; low-relevance steps may be omitted):\nCOUNT=83"
+    )
+    assert "CONVERSATION:\nCOUNT=83\n\nEXPECTED BEHAVIORS:" in prompts[1]
+    for prompt in prompts:
+        assert "When a FINAL RESPONSE section is supplied" in prompt
+        assert "its contents are the final answer" in prompt
+        assert "context, not part of that answer" in prompt
+
+
 def test_goal_prompt_omits_empty_tool_section_and_keeps_real_one(judge_module, monkeypatch) -> None:
     calls: list[dict[str, Any]] = []
     _use_goal_script(judge_module, monkeypatch, [(_GOAL_RESPONSE, None)], calls)
@@ -253,10 +380,53 @@ def _never_called(*args: Any, **kwargs: Any):
     raise AssertionError("the judge must not call a model on incomplete evidence")
 
 
-def _behavior_bundle(module: ModuleType, traj: dict[str, Any]) -> dict[str, Any]:
+def _behavior_bundle(
+    module: ModuleType,
+    traj: dict[str, Any],
+    expected_behavior: list[str] | None = None,
+) -> dict[str, Any]:
     """Build the behavior_check bundle with the module the judge belongs to."""
     builder = atif_helpers if module is llm_judge else module
-    return builder.build_metric_evidence_bundles(traj, "Explain the migration.")["behavior_check"]
+    return builder.build_metric_evidence_bundles(
+        traj, "Explain the migration.", expected_behavior=expected_behavior
+    )["behavior_check"]
+
+
+_VERIFIED_PATH = "/workspace/output/report.md"
+_VERIFIED_BEHAVIOR = f"writes the file `{_VERIFIED_PATH}`"
+
+
+def _traj_with_verified_write_and_long_answer(answer_chars: int = 9000) -> dict[str, Any]:
+    """A run whose one expected behavior is provable from the write alone.
+
+    The final answer is long enough that the final-response limit cuts its
+    middle, which is the condition the evidence gate fires on.
+    """
+    return {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {
+                        "tool_call_id": "write-1",
+                        "function_name": "Write",
+                        "arguments": {"file_path": _VERIFIED_PATH, "content": "# Report\nAll good.\n"},
+                    }
+                ],
+                "observation": {"results": [{"source_call_id": "write-1", "content": "File written"}]},
+            },
+            {"source": "agent", "message": _distinct_answer(answer_chars)},
+        ]
+    }
+
+
+def _distinct_answer(length: int) -> str:
+    """Build non-repetitive text, so a cut middle cannot be matched elsewhere."""
+    rng = random.Random(20234)
+    words: list[str] = []
+    while sum(len(word) + 1 for word in words) < length:
+        words.append("".join(rng.choice(string.ascii_lowercase) for _ in range(rng.randint(3, 9))))
+    return " ".join(words)[:length]
 
 
 def test_incomplete_required_behavior_evidence_errors_without_a_model_call(judge_module, monkeypatch) -> None:
@@ -329,6 +499,85 @@ def test_oversized_final_answer_reaches_the_judge_gate_as_an_error(judge_module,
         bundle["prompt_evidence"], ["explains the migration"], evidence_omitted=bundle["omitted"]
     )
 
+    assert result["score"] is None
+    assert result["status"] == "error"
+
+
+def test_cut_answer_still_scores_when_verified_facts_settle_every_behavior(judge_module, monkeypatch) -> None:
+    # The gate exists to stop a score being read off evidence the limits cut.
+    # It must not discard a score the surviving evidence supports: here the one
+    # expected behavior is a path the deterministic fact list already marks
+    # OBSERVED, so the missing middle of the answer cannot change the answer.
+    calls: list[dict[str, Any]] = []
+    response = json.dumps({"results": [{"step": 1, "passed": True, "reason": "wrote the report"}]})
+    monkeypatch.setattr(judge_module, "call_public_llm", _script([(response, None)], calls))
+
+    bundle = _behavior_bundle(judge_module, _traj_with_verified_write_and_long_answer(), [_VERIFIED_BEHAVIOR])
+
+    # The evidence really is incomplete — the gate's own precondition holds.
+    assert bundle["omitted"]["required_complete"] is False
+    assert bundle["omitted"]["required_missing"] == ["final response"]
+    # And the deterministic facts settle the expectation regardless.
+    assert bundle["omitted"]["expected_behaviors_verified"] is True
+    assert f"[OBSERVED step 0] {_VERIFIED_PATH}" in bundle["prompt_evidence"]
+
+    result = judge_module.judge_behavior_check(
+        bundle["prompt_evidence"], [_VERIFIED_BEHAVIOR], evidence_omitted=bundle["omitted"]
+    )
+
+    assert len(calls) == 1
+    assert result.get("status") != "error"
+    assert result["score"] == 1.0
+
+    # And the case keeps an overall score, instead of dropping out of every
+    # gate and comparison keyed on one.
+    from skillevaluator.tier3.harbor.metrics import overall_score_from_metrics
+
+    scores = {
+        "security": 1.0,
+        "skill_execution": 1.0,
+        "skill_efficiency": 1.0,
+        "accuracy": 1.0,
+        "goal_accuracy": 1.0,
+        "behavior_check": result["score"],
+    }
+    assert overall_score_from_metrics(scores) == 1.0
+
+
+def test_cut_answer_is_still_gated_when_any_behavior_needs_the_answer(judge_module, monkeypatch) -> None:
+    # A prose expectation names nothing checkable, so it can only be judged
+    # from the text the limits cut. One such expectation keeps the gate, even
+    # beside a behavior the facts do settle.
+    monkeypatch.setattr(judge_module, "call_public_llm", _never_called)
+    traj = _traj_with_verified_write_and_long_answer()
+
+    for expectations in (
+        ["explains the migration trade-offs"],
+        [_VERIFIED_BEHAVIOR, "explains the migration trade-offs"],
+    ):
+        bundle = _behavior_bundle(judge_module, traj, expectations)
+        assert bundle["omitted"]["required_complete"] is False
+        assert bundle["omitted"]["expected_behaviors_verified"] is False
+
+        result = judge_module.judge_behavior_check(
+            bundle["prompt_evidence"], expectations, evidence_omitted=bundle["omitted"]
+        )
+
+        assert result["score"] is None
+        assert result["status"] == "error"
+
+
+def test_behavior_evidence_gap_treats_an_absent_verified_flag_as_unknown(judge_module, monkeypatch) -> None:
+    # Records written before the flag existed, and records assembled by hand,
+    # must keep the gate rather than skip it by default.
+    monkeypatch.setattr(judge_module, "call_public_llm", _never_called)
+    omitted = {"required_complete": False, "required_missing": ["final response"], "reason": "cut"}
+
+    assert judge_module.behavior_evidence_gap(omitted)
+    assert judge_module.behavior_evidence_gap({**omitted, "expected_behaviors_verified": False})
+    assert judge_module.behavior_evidence_gap({**omitted, "expected_behaviors_verified": True}) == ""
+
+    result = judge_module.judge_behavior_check("conversation", ["b1"], evidence_omitted=omitted)
     assert result["score"] is None
     assert result["status"] == "error"
 

@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,24 @@ from skillevaluator.tier3.case_summary import live_case_marks
 @pytest.fixture(autouse=True)
 def _no_skillspector_provider(monkeypatch):
     monkeypatch.delenv("SKILLSPECTOR_PROVIDER", raising=False)
+
+
+class _TtyStream(io.StringIO):
+    """A stream that reports itself as a terminal, which the live view requires."""
+
+    def isatty(self):
+        return True
+
+
+def _live_console(out, **kwargs):
+    """A Rich console the live view will draw on.
+
+    ``color_system=None`` keeps the test from caching a colour code on Rich's shared Style
+    objects, which later tests (the banner colour test) would then read instead of their own.
+    """
+    from rich.console import Console
+
+    return Console(file=out, force_terminal=True, color_system=None, **kwargs)
 
 
 def _text(rows):
@@ -328,6 +347,21 @@ def test_llm_fix_without_a_provider_gives_every_export(monkeypatch):
     assert item.actions[0] == "export SKILL_EVAL_LLM_PROVIDER=nv_build NVIDIA_API_KEY='your-api-key'"
 
 
+def test_live_view_prints_log_records_through_its_own_console(monkeypatch):
+    from skillevaluator.logging_config import get_logger
+    from skillevaluator.reporting.console_ui import ValidateView
+
+    monkeypatch.setenv("TERM", "xterm-256color")
+    out = _TtyStream()
+    view = ValidateView("skill: x", [(1, "Static", "static")], console=_live_console(out, width=100))
+    view.start()
+    get_logger("skillevaluator.test_live_view").warning("LLM call failed")
+    view.stop()
+    get_logger("skillevaluator.test_live_view").warning("after the view")
+    assert "LLM call failed" in out.getvalue()
+    assert "after the view" not in out.getvalue()
+
+
 def test_llm_fix_points_at_doctor_when_the_provider_call_fails(monkeypatch):
     from skillevaluator import provider_config
     from skillevaluator.reporting.console_ui import _llm_fix
@@ -520,6 +554,29 @@ def test_tier1_summary_counts_validators_and_their_sub_checks():
     results.append(secrets)
     _ok, rows = summarize_tier1(results, lineup=["code-integrity", "schema", "security"])
     assert "2/4 checks passed (13 sub-checks)  ·  1 failed  ·  1 didn't run" in _text(rows)
+
+
+def test_live_view_draws_the_header_and_finished_tiers_once(monkeypatch):
+    import re
+
+    from skillevaluator.reporting.console_ui import TierRow, ValidateView, Verdict
+
+    monkeypatch.setenv("TERM", "xterm-256color")
+    out = _TtyStream()
+    console = _live_console(out, width=100, height=10)
+    view = ValidateView("x", [(1, "Static", "static"), (2, "Dedup", "dedup")], console=console)
+    view.start()
+    for index in range(2):
+        view.tier_start(index)
+        for step in range(5):
+            view.tier_progress(index, [TierRow("checks", [(f"step {step}", "")])])
+            view._live.refresh()
+        view.tier_done(index, rows=[TierRow("summary", [(f"tier {index} done", "")])])
+    view.finish(Verdict(passed=True, headline="all passed"), [])
+    text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out.getvalue())
+    assert text.count("skillevaluator validate") == 1
+    assert text.count("tier 0 done") == 1
+    assert text.count("tier 1 done") == 1
 
 
 def test_tier1_summary_row_agrees_with_the_verdict_line():

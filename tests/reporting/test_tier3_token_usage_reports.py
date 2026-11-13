@@ -42,7 +42,13 @@ from skillevaluator.reporting.dashboard_data import comparison_rows, parse_dashb
 from skillevaluator.reporting.tier3_token_usage import (
     EVALUATE_CASE_POINTER,
     REUSED_BASELINE_NOTE,
+    UNVERIFIED_CASE_MARK,
+    UNVERIFIED_CASE_NOTE,
     VALIDATE_CASE_POINTER,
+    token_usage_markdown_lines,
+    token_usage_rows,
+    token_usage_table,
+    unverified_case_ids_note,
 )
 from skillevaluator.tier3 import token_usage as token_usage_module
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
@@ -52,6 +58,27 @@ from skillevaluator.tier3.token_usage import drop_token_usage_cases, per_agent_t
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GOLDEN = REPO_ROOT / "tests" / "golden" / "benchmark_token_usage" / "TOKEN_USAGE.md"
+
+
+def _usage_arm(total: int, attempts: int) -> dict[str, Any]:
+    """One arm of a token usage row, measured and complete."""
+    return {
+        "totals": {
+            "prompt_tokens": total,
+            "cached_tokens": 0,
+            "uncached_prompt_tokens": total,
+            "completion_tokens": 0,
+            "total_tokens": total,
+        },
+        "coverage": {
+            "status": "complete",
+            "expected_attempts": attempts,
+            "observed_attempts": attempts,
+            "measured_attempts": attempts,
+            "unscored_attempts": 0,
+            "reason_codes": [],
+        },
+    }
 
 
 def _arm(
@@ -805,6 +832,9 @@ def test_docs_and_changelog_describe_the_token_usage_contract() -> None:
         "baseline_not_run",
         "baseline_reused",
         "--reuse-baseline",
+        "case_id_validation",
+        "case_id_in_dataset",
+        "unmatched_case_ids",
         "case findings",
         "applicability fields",
         "left out without a record",
@@ -817,3 +847,147 @@ def test_docs_and_changelog_describe_the_token_usage_contract() -> None:
         if "### Added\n" in section
     ]
     assert any("token usage per case" in section for section in added_sections)
+
+
+def test_an_unverified_case_id_is_marked_in_every_table_and_explained() -> None:
+    usage = {
+        "schema_version": "1",
+        "scored": False,
+        "case_id_validation": {
+            "status": "unverified_case_ids",
+            "dataset_case_ids": 1,
+            "unmatched_case_ids": ["huggingface-factory-peft-sft-loc"],
+        },
+        "agents": {
+            "codex": {
+                "with_skill": _usage_arm(120, 1),
+                "baseline": _usage_arm(100, 1),
+                "delta": {"status": "unavailable", "total_tokens": None, "reason_codes": [], "reason": None},
+                "cases": [
+                    {
+                        "entry_id": "huggingface-factory-peft-sft-local-return",
+                        "with_skill": _usage_arm(120, 1),
+                        "baseline": _usage_arm(100, 1),
+                        "delta": {"status": "unavailable", "total_tokens": None, "reason_codes": [], "reason": None},
+                    },
+                    {
+                        "entry_id": "huggingface-factory-peft-sft-loc",
+                        "case_id_in_dataset": False,
+                        "with_skill": _usage_arm(40, 1),
+                        "baseline": _usage_arm(30, 1),
+                        "delta": {"status": "unavailable", "total_tokens": None, "reason_codes": [], "reason": None},
+                    },
+                ],
+            }
+        },
+    }
+
+    rows, _omitted = token_usage_rows(usage)
+    cases = [row.case for row in rows if row.is_case]
+    assert cases == [
+        "huggingface-factory-peft-sft-local-return",
+        "huggingface-factory-peft-sft-loc" + UNVERIFIED_CASE_MARK,
+    ]
+    assert unverified_case_ids_note(usage, rows) == UNVERIFIED_CASE_NOTE
+
+    lines = token_usage_markdown_lines(
+        usage,
+        heading="### Token Usage",
+        agent_label=lambda agent: "All agents" if agent is None else agent,
+        cell=str,
+        max_case_rows=50,
+    )
+    assert any(UNVERIFIED_CASE_MARK in line for line in lines)
+    assert UNVERIFIED_CASE_NOTE in lines
+
+    table = token_usage_table(usage)
+    assert table is not None
+    assert table["unverified_cases"] == UNVERIFIED_CASE_NOTE
+
+
+def test_a_validated_run_carries_no_unverified_case_note() -> None:
+    usage = {
+        "schema_version": "1",
+        "scored": False,
+        "case_id_validation": {"status": "validated", "dataset_case_ids": 1, "unmatched_case_ids": []},
+        "agents": {
+            "codex": {
+                "with_skill": _usage_arm(120, 1),
+                "baseline": _usage_arm(100, 1),
+                "delta": {"status": "unavailable", "total_tokens": None, "reason_codes": [], "reason": None},
+                "cases": [
+                    {
+                        "entry_id": "case-1",
+                        "with_skill": _usage_arm(120, 1),
+                        "baseline": _usage_arm(100, 1),
+                        "delta": {"status": "unavailable", "total_tokens": None, "reason_codes": [], "reason": None},
+                    }
+                ],
+            }
+        },
+    }
+
+    rows, _omitted = token_usage_rows(usage)
+    assert [row.case for row in rows if row.is_case] == ["case-1"]
+    assert unverified_case_ids_note(usage, rows) is None
+    assert token_usage_table(usage)["unverified_cases"] is None
+
+
+def _unverified_usage(cases: list[dict]) -> dict:
+    return {
+        "schema_version": "1",
+        "scored": False,
+        "case_id_validation": {
+            "status": "unverified_case_ids",
+            "dataset_case_ids": 1,
+            "unmatched_case_ids": ["huggingface-factory-peft-sft-loc"],
+        },
+        "agents": {
+            "codex": {
+                "with_skill": _usage_arm(120, 1),
+                "baseline": _usage_arm(100, 1),
+                "delta": {"status": "unavailable", "total_tokens": None, "reason_codes": [], "reason": None},
+                "cases": cases,
+            }
+        },
+    }
+
+
+def _unverified_case(entry_id: str, *, in_dataset: bool = True) -> dict:
+    case: dict = {
+        "entry_id": entry_id,
+        "with_skill": _usage_arm(40, 1),
+        "baseline": _usage_arm(30, 1),
+        "delta": {"status": "unavailable", "total_tokens": None, "reason_codes": [], "reason": None},
+    }
+    if not in_dataset:
+        case["case_id_in_dataset"] = False
+    return case
+
+
+def test_a_table_without_the_marked_row_names_the_unmatched_case_ids_instead() -> None:
+    # The mark lives on a case row, so the note that explains it must not be
+    # printed over a table that holds no such row.
+    usage = _unverified_usage([_unverified_case("huggingface-factory-peft-sft-loc", in_dataset=False)])
+
+    # (1) The terminal table renders no case row at all.
+    rows, _omitted = token_usage_rows(usage, include_cases=False)
+    note = unverified_case_ids_note(usage, rows)
+    assert note is not None
+    assert UNVERIFIED_CASE_MARK.strip() not in note
+    assert "huggingface-factory-peft-sft-loc" in note
+
+    # (2) A row cap pushed the marked row out of the table.
+    capped, omitted = token_usage_rows(usage, max_case_rows=0)
+    assert omitted == 1
+    assert unverified_case_ids_note(usage, capped) == note
+
+    # (3) drop_token_usage_cases emptied the case rows for payload size.
+    pruned = _unverified_usage([])
+    pruned_rows, _ = token_usage_rows(pruned)
+    assert unverified_case_ids_note(pruned, pruned_rows) == note
+    assert token_usage_table(pruned)["unverified_cases"] == note
+
+    # A rendered marked row still gets the explanation of the mark.
+    full, _ = token_usage_rows(usage)
+    assert unverified_case_ids_note(usage, full) == UNVERIFIED_CASE_NOTE

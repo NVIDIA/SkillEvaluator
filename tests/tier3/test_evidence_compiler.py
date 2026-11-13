@@ -406,6 +406,43 @@ def test_behavior_bundle_keeps_a_realistic_final_answer_at_the_default_limit() -
         assert bundle["omitted"]["incomplete_sections"] == []
 
 
+def test_behavior_bundle_reports_sections_cut_by_their_own_per_entry_caps() -> None:
+    # FILE CHANGES clips each write body to 1,800 characters and each tool
+    # result to 500, and the compact tool history clips arguments, results and
+    # agent messages, all before any budget applies. Completeness is compared
+    # against the unclipped rendering, so content those caps dropped is
+    # reported rather than counted as having reached the judge.
+    content = "HEAD_MARK " + "a" * 2000 + " MIDDLE_MARK " + "b" * 2000 + " TAIL_MARK"
+    assert len(content) > 1800
+    traj = {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {
+                        "tool_call_id": "write-1",
+                        "function_name": "Write",
+                        "arguments": {"file_path": "/workspace/output/x.txt", "content": content},
+                    }
+                ],
+                "observation": {"results": [{"source_call_id": "write-1", "content": "ok"}]},
+            },
+            {"source": "agent", "message": "Done, wrote the file."},
+        ]
+    }
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundle = module.build_metric_evidence_bundles(traj, "Write x")["behavior_check"]
+        evidence = bundle["prompt_evidence"]
+        assert "HEAD_MARK" in evidence
+        assert "MIDDLE_MARK" not in evidence
+        assert "file changes" in bundle["omitted"]["incomplete_sections"]
+        # Only the final response withholds a score, so a per-entry cap is a
+        # diagnostic, not a gate: the answer itself still arrived whole.
+        assert bundle["omitted"]["required_complete"] is True
+        assert bundle["omitted"]["required_missing"] == []
+
+
 def test_behavior_bundle_completeness_follows_the_final_response_limit_env_var(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -518,20 +555,21 @@ def test_behavior_bundle_final_answer_split_across_history_and_section(
 
 
 @pytest.mark.parametrize(
-    ("env", "reason"),
+    ("env", "reason", "incomplete"),
     [
-        ({}, f"{_BUDGET_REASON}; {_LIMIT_REASON}"),
-        ({"SKILL_EVAL_BEHAVIOR_CHECK_BUDGET": "100000"}, _LIMIT_REASON),
-        ({"SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT": "20000"}, _BUDGET_REASON),
+        ({}, f"{_BUDGET_REASON}; {_LIMIT_REASON}", ["final response", "compact tool history"]),
+        ({"SKILL_EVAL_BEHAVIOR_CHECK_BUDGET": "100000"}, _LIMIT_REASON, ["final response", "compact tool history"]),
+        ({"SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT": "20000"}, _BUDGET_REASON, ["compact tool history"]),
         (
             {"SKILL_EVAL_BEHAVIOR_CHECK_BUDGET": "100000", "SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT": "20000"},
             "",
+            [],
         ),
     ],
     ids=["both", "limit-only", "budget-only", "neither"],
 )
 def test_behavior_bundle_reason_names_each_setting_that_cut_evidence(
-    monkeypatch: pytest.MonkeyPatch, env: dict[str, str], reason: str
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str], reason: str, incomplete: list[str]
 ) -> None:
     # A long tool history overflows the default behavior budget, and a final
     # answer past the 8,000-character default also loses its middle to the
@@ -564,3 +602,7 @@ def test_behavior_bundle_reason_names_each_setting_that_cut_evidence(
         # the final-response section, so completeness is the coverage check,
         # not a contiguous substring. Only the final-response limit loses it.
         assert bundle["omitted"]["required_complete"] is (_LIMIT_REASON not in reason)
+        # incomplete_sections is the diagnostic half of the same accounting and
+        # reports non-required losses too, so the budget-only case names the
+        # tool history while the required evidence is still complete.
+        assert bundle["omitted"]["incomplete_sections"] == incomplete

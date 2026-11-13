@@ -47,6 +47,7 @@ from skillevaluator.utils.rich_markup import escape_markup
 from skillevaluator.validators.base import continue_on_failure_scope
 from skillevaluator.validators.code_risk import CodeRiskValidator
 from skillevaluator.validators.dependencies import DependencySecurityValidator
+from skillevaluator.validators.harness import HarnessValidator
 from skillevaluator.validators.hygiene import HygieneValidator
 from skillevaluator.validators.license import LicenseValidator
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
@@ -85,7 +86,10 @@ DEFAULT_CHECKS = (
     "unicode",
     "quality",
     "lint",
+    "harness",
 )
+# Advisory checks never gate and are not part of the publication lineup.
+ADVISORY_CHECKS = ("harness",)
 # Opt-in checks: recognized by ``--checks`` but excluded from the default run.
 # The dependency CVE audit is also available through the standalone
 # ``dependency-audit`` command; the version check above runs by default.
@@ -119,6 +123,7 @@ _SKIPPED_VALIDATORS = {
     "unicode": ("Unicode Smuggling Detection",),
     "quality": ("Quality Score (4-Dimension Analysis)",),
     "lint": ("Script Lint (Advisory)",),
+    "harness": ("Harness Compatibility",),
 }
 # Checks that read a skill manifest (SKILL.md frontmatter, its version, its
 # quality). A target that ``--type auto`` detects as ``unknown`` and that holds
@@ -248,6 +253,11 @@ def skipped_checks(skip: str | None) -> set[str]:
     return _parse_checks(skip)
 
 
+def runs_schema_check(checks: str | None, skip: str | None) -> bool:
+    """True when a run with these ``--checks``/``--skip`` values runs the schema check."""
+    return "schema" in _enabled_checks(checks) and "schema" not in skipped_checks(skip)
+
+
 def runs_secrets_scan(checks: str | None, skip: str | None) -> bool:
     """True when a run with these ``--checks``/``--skip`` values executes the Gitleaks scan."""
     return "code-integrity" in _enabled_checks(checks) and not {"code-integrity", "secrets"} & skipped_checks(skip)
@@ -303,6 +313,8 @@ def run_validation(
     fail_fast: bool = False,
     continue_on_failure: bool = False,
     on_check: Callable[[str], None] | None = None,
+    harness: str | None = None,
+    harness_profiles: Path | None = None,
     skillspector_baseline: Path | None = None,
     skip: str | None = None,
 ) -> list[ValidationResult]:
@@ -439,6 +451,10 @@ def run_validation(
         v = LicenseValidator()
         return [_run_result("license", v.name, v.description, v.validate)]
 
+    def _harness_results() -> list[ValidationResult]:
+        v = HarnessValidator(harness, harness_profiles)
+        return [_run_result("harness", v.name, v.description, v.validate)]
+
     def _dependency_results() -> list[ValidationResult]:
         v = DependencySecurityValidator()
         return [_run_result("dependency", v.name, v.description, v.validate)]
@@ -459,6 +475,7 @@ def run_validation(
         ("unicode", _unicode_results, True),
         ("quality", _quality_results, skill_like),
         ("lint", _lint_results, skill_like),
+        ("harness", _harness_results, skill_like),
     )
     active = [
         (check_name, builder) for check_name, builder, applicable in steps if check_name in enabled and applicable

@@ -43,7 +43,8 @@ pin, model or secret change, skips the provider-backed jobs. Their prerequisites
 are first checked by the push to the default branch after it merges, a manual
 run there, or the next skill change. To check them before merging, set
 `scan-mode: all` (GitLab: `SKILL_EVAL_SCAN_MODE: all`) on that pull request and
-restore `auto` before merging.
+restore `auto` before merging. `skillevaluator ci demo` works only after the setup
+has merged.
 
 Reports retain native evidence and an aggregate artifact for 14 days. Feedback
 links to the authenticated artifact for that run; download and extract it,

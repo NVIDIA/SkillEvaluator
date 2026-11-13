@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# SkillEvaluator registry validation policy
+#
+# For registries with a documented publication contract: every skill needs a
+# contact author in `Name <email@host>` form and a stable `metadata.id`.
+# Select it with `--profile registry`, or overlay a custom policy on it with
+# `--profile registry --policy PATH` (for example to restrict the email domain).
+
+profile: registry
+
+identity:
+  author_email_regex: null
+  # Missing, invalid, or duplicate metadata.id values block.
+  metadata_id_requirement: require
+
+severity_overrides:
+  SCHEMA.author_missing: high
+  SCHEMA.author_without_email: high
+  SCHEMA.author_format: high
+
+  # Workflows
+  WORKFLOWS.author_format: high
+
+  # License issues block publication.
+  LICENSE.*: critical

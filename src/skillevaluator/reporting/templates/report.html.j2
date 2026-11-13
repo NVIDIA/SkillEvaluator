@@ -2208,7 +2208,7 @@
         {% set t3_evidence_links = t3_harbor.get('evidence_links') or [] %}
         {% set t3_agent_anchor_ids = {} %}
         {% set t3_agent_panel_ids = {} %}
-        {% if t3_budget.status == 'exhausted' and tier3.budget_summary %}
+        {% if tier3.budget_summary and (t3_budget.status == 'exhausted' or 'overrun observed' in tier3.budget_summary or 'not fully verified' in tier3.budget_summary) %}
             <p class="warning">{{ tier3.budget_summary }}</p>
         {% endif %}
         {% for name, _agent in t3_agents.items() %}
@@ -2537,6 +2537,8 @@
         {# ---------- Overview ---------- #}
         <section class="t3-page active" id="tier3-page-overview" role="tabpanel" aria-labelledby="tier3-tab-overview" tabindex="0">
             {% set t3_effect = (tier3.conclusions or []) | selectattr('title', 'equalto', 'Skill effect') | first %}
+            {# Set when the lead itself says that other failures need attention. #}
+            {% set t3_lead_needs_attention = false %}
             <div class="t3-overview-lead">
                 {% if tier3_is_skipped %}
                 <strong>Live evaluation skipped:</strong> {{ tier3_skip_message }}
@@ -2552,6 +2554,7 @@
                 No with-skill arm was run (<code>--skip-with-skill</code>), so no skill lift was measured.
                 {% else %}
                 {% if completed_agent and completed_agent.needs_attention %}
+                {% set t3_lead_needs_attention = true %}
                 <strong>Completed-agent result: {{ completed_agent.verdict | upper }}.</strong>
                 {{ completed_agent.name }} scored {{ "%.2f" | format(completed_agent.score) }}.
                 Other execution failures need attention. This is not a whole-run or publication PASS.
@@ -2564,9 +2567,12 @@
                 {% endif %}
                 {% endif %}
                 {% endif %}
-                {% if completed_agent %}{% for tolerated in completed_agent.baseline_timeouts_tolerated or [] %}
+                {% if tolerated_baselines and not t3_lead_needs_attention %}
+                <span class="tolerated-baseline"><strong>Needs attention:</strong> baseline timeouts were tolerated.</span>
+                {% endif %}
+                {% for tolerated in tolerated_baselines or [] %}
                 <span class="tolerated-baseline">Baseline incomplete for <strong>{{ tolerated.name }}</strong>{% if tolerated.scored_attempts is not none and tolerated.expected_attempts is not none %} ({{ tolerated.scored_attempts }} of {{ tolerated.expected_attempts }} attempts scored){% endif %}: kept by <code>--tolerate-baseline-timeouts</code>, so its baseline and uplift are not reported.</span>
-                {% endfor %}{% endif %}
+                {% endfor %}
             </div>
             {% if tier3_dataset_sufficiency and tier3_dataset_sufficiency.coverage_summary %}
             <p class="t3-dataset-sufficiency{% if tier3_dataset_sufficiency.status == 'provisional' %} warning{% endif %}"
@@ -3081,7 +3087,7 @@
                         {% set bi = bp.rate_interval or {} %}
                         {% set paired = lf.paired_comparison if lf.paired_comparison is mapping else {} %}
                         {% set wp_rate = wp.get('rate') %}
-                        {% set bp_rate = bp.get('rate') %}
+                        {% set bp_rate = bp.get('rate') if (tier3.baseline or {}).get('mode') != 'skipped' else none %}
                         {% set arm_delta = wp_rate - bp_rate if wp_rate is number and bp_rate is number else none %}
                         {% if wp %}
                         <tr>
@@ -3103,7 +3109,7 @@
                         <tr>
                             <td></td>
                             <td>Without skill</td>
-                            <td>{{ "%.0f%%" | format((bp_rate or 0.0) * 100) }}</td>
+                            <td>{% if bp_rate is number and bp_rate is not boolean %}{{ "%.0f%%" | format(bp_rate * 100) }}{% else %}N/A{% endif %}</td>
                             <td>{% if bi %}{{ bi | adaptive_interval_percent }}{% else %}—{% endif %}</td>
                             <td>{{ bp.passed_cases or 0 }} of {{ bp.total_cases or 0 }}</td>
                             <td>{{ t3_attempts_passed(bp) }}</td>
@@ -3207,7 +3213,7 @@
                 {% for row in tier3_token_usage.rows if row.note %}
                 <p class="t3-section-hint">{{ row.agent if row.agent is not none else 'All agents' }}: {{ row.note }}</p>
                 {% endfor %}
-                {% for note in [tier3_token_usage.more_cases, tier3_token_usage.dropped_cases] if note %}
+                {% for note in [tier3_token_usage.more_cases, tier3_token_usage.dropped_cases, tier3_token_usage.unverified_cases] if note %}
                 <p class="t3-section-hint">{{ note }}</p>
                 {% endfor %}
                 </div>

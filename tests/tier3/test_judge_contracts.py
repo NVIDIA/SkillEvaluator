@@ -1333,3 +1333,65 @@ def test_judge_header_format_preservation_masks_escaped_secret_suffixes(text: st
     evidence = eval_template._redact_judge_evidence(text)
     assert "CANARY_JUDGE_SUFFIX" not in evidence
     assert "<redacted>" in evidence
+
+
+_GATE_FACTS = [
+    {"claim": "report.py", "observed": True},
+    {"claim": "summary.md", "observed": True},
+]
+
+
+@pytest.mark.parametrize(
+    ("expected_behavior", "verified", "why"),
+    [
+        (["writes `report.py`"], True, "a single observed artifact settles the expectation"),
+        (
+            ["writes `report.py`, `summary.md`"],
+            True,
+            "several observed artifacts in one clause still settle it",
+        ),
+        (["explains the trade-offs"], False, "plain prose names nothing checkable"),
+        (["writes `missing.py`"], False, "an unobserved artifact settles nothing"),
+        (
+            ["writes `report.py` and explains why each column was dropped"],
+            False,
+            "the prose half needs the final response the limits cut",
+        ),
+        (["writes `report.py` then explains the result"], False, "clause joined by 'then'"),
+        (["writes `report.py`; explains why"], False, "clause joined by a semicolon"),
+        (["writes `report.py`. Explains why."], False, "a second sentence"),
+        (["writes `report.py`", "explains why"], False, "a prose expectation beside an artifact one"),
+    ],
+)
+def test_expected_behaviors_verified_requires_every_clause_to_be_checkable(
+    expected_behavior: list[str], verified: bool, why: str
+) -> None:
+    # The gate exists to stop a score being withheld when the deterministic
+    # facts already settle the expectation. Naming an observed artifact is not
+    # enough on its own: an expectation that also asks for prose is settled
+    # only in its artifact half, and the other half is exactly what the cut
+    # final response would have answered. Keeping the gate withholds a score;
+    # lifting it wrongly keeps a score the evidence does not support, so an
+    # unrecognized clause shape must fall on the withholding side.
+    assert atif_helpers._expected_behaviors_verified(expected_behavior, _GATE_FACTS) is verified, why
+
+
+def test_expected_behaviors_verified_mixed_clause_does_not_lift_the_evidence_gate() -> None:
+    # End-to-end through behavior_evidence_gap: the mixed expectation must
+    # leave the gap in place, so behavior_check still withholds its score.
+    omitted = {
+        "required_complete": False,
+        "required_missing": ["final response"],
+        "reason": "final response truncated",
+        "expected_behaviors_verified": atif_helpers._expected_behaviors_verified(
+            ["writes `report.py` and explains why each column was dropped"], _GATE_FACTS
+        ),
+    }
+    assert omitted["expected_behaviors_verified"] is False
+    assert atif_helpers.behavior_evidence_gap(omitted) != ""
+
+    omitted["expected_behaviors_verified"] = atif_helpers._expected_behaviors_verified(
+        ["writes `report.py`"], _GATE_FACTS
+    )
+    assert omitted["expected_behaviors_verified"] is True
+    assert atif_helpers.behavior_evidence_gap(omitted) == ""

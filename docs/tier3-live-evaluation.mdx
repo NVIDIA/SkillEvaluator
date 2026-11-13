@@ -158,8 +158,9 @@ available for inspection.
 ## Repeatable activation validation
 
 Use the existing dataset generator, runner and trusted trajectory collector to
-check activation separately from answer quality. Start with
-`skillevaluator create-eval-dataset ./my-skill --full`, review the generated
+check activation separately from answer quality. Write task requests and
+observable outcomes in `eval-guidance.md`, then run
+`skillevaluator create-eval-dataset ./my-skill --full --prompt eval-guidance.md`, review the generated
 cases, and retain a versioned dataset with these four buckets:
 
 | Bucket | Authored expectation | What to check |
@@ -399,8 +400,9 @@ unchanged; invalid sources produce an error rather than being replaced.
 A generated one-case starter is a starting point, not a representative
 evaluation. Generation prints its concrete coverage gaps to stderr, such as
 the absence of a negative/non-trigger case or missing expected outcomes and
-assertions. Replace the starter with a full dataset using
-`skillevaluator create-eval-dataset ./my-skill --full --force`. `--force`
+assertions. Write task requests and observable outcomes in `eval-guidance.md`
+before replacing the starter with a full dataset using
+`skillevaluator create-eval-dataset ./my-skill --full --force --prompt eval-guidance.md`. `--force`
 overwrites the starter and discards any edits to it. Then inspect the counts
 and gaps with `skillevaluator tier3 validate ./my-skill`. Larger case counts
 do not by themselves establish representative coverage. Native Harbor task
@@ -442,8 +444,14 @@ both in depth.
 
 ### Generate an eval dataset
 
+Write task requests and observable outcomes in `eval-guidance.md` first; headings
+alone do not qualify. If you already ran autopilot, add `--force` to replace its
+starter, or `--refine --from-results ./saved-run` to refine from matching retained
+results. Auto leaves existing datasets unchanged without either overwrite flag.
+See [Grounding sources](/skills/skillevaluator/eval-datasets#choose-a-grounding-source).
+
 ```bash title="Write the four-bucket dataset to evals/evals.json"
-skillevaluator create-eval-dataset ./my-skill --full
+skillevaluator create-eval-dataset ./my-skill --full --prompt eval-guidance.md
 ```
 
 `--full` with an LLM provider generates all four buckets (explicit, implicit,
@@ -1863,8 +1871,12 @@ machine-readable JSON contract, and how to judge whether a given lift is good.
     `skillevaluator doctor` with the same agent and environment.
   </Accordion>
   <Accordion title="No eval dataset or native task source found">
-    Run `skillevaluator create-eval-dataset ./my-skill`, or add an accepted
-    dataset file under `evals/`. See [Eval Datasets](eval-datasets.mdx).
+    Write task requests and observable outcomes in `eval-guidance.md`, then run
+    `skillevaluator create-eval-dataset ./my-skill --prompt eval-guidance.md`.
+    For explicit skill-only generation, use
+    `skillevaluator create-eval-dataset ./my-skill --grounding skill`, or author an
+    accepted dataset file under `evals/`. See
+    [Eval Datasets](/skills/skillevaluator/eval-datasets).
   </Accordion>
   <Accordion title="Agent model is rejected">
     Supply a model valid for that agent with `--agent-model AGENT=MODEL`. The

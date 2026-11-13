@@ -1447,6 +1447,13 @@ def _anthropic_fallback_response(text: str, served_by: object):
     return response
 
 
+def _anthropic_truncated_fallback_response(text: str):
+    """Return a reply cut off at the token limit, written by the server-side fallback model."""
+    response = _anthropic_response(text, stop_reason="max_tokens")
+    response.content.insert(0, SimpleNamespace(type="fallback", to={"model": ANTHROPIC_REFUSAL_FALLBACK_MODEL}))
+    return response
+
+
 class TestModelProvenance:
     def test_model_used_names_the_configured_model_after_a_success_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _use_provider(monkeypatch, "openai", CHAT_DEFAULT_OPENAI)
@@ -1654,3 +1661,92 @@ class TestModelProvenance:
 
         assert {dimension["model"] for dimension in written} == {CHAT_DEFAULT_OPENAI}
         assert not any("model" in dimension for dimension in deterministic)
+
+    @pytest.mark.parametrize(
+        ("provider", "model", "make_response", "expected"),
+        [
+            (
+                "openai",
+                CHAT_DEFAULT_OPENAI,
+                lambda: _openai_choice_response('{"partial": ', finish_reason="length"),
+                CHAT_DEFAULT_OPENAI,
+            ),
+            (
+                "anthropic",
+                "claude-opus-5-5",
+                lambda: _anthropic_truncated_fallback_response('{"partial": '),
+                ANTHROPIC_REFUSAL_FALLBACK_MODEL,
+            ),
+        ],
+        ids=["openai-configured", "anthropic-fallback"],
+    )
+    def test_truncation_error_names_the_model_that_wrote_the_partial_reply(
+        self, monkeypatch: pytest.MonkeyPatch, provider: str, model: str, make_response, expected: str
+    ) -> None:
+        _use_provider(monkeypatch, provider, model)
+        sdk = MagicMock()
+        sdk.chat.completions.create.return_value = make_response()
+        sdk.messages.create.return_value = make_response()
+        client = LLMClient()
+
+        with (
+            patch("openai.OpenAI", return_value=sdk),
+            patch("anthropic.Anthropic", return_value=sdk),
+            pytest.raises(LLMClientTruncatedError) as exc_info,
+        ):
+            client.completions("system", "user")
+
+        assert exc_info.value.model_used == expected
+        # The call itself failed, so the client still names no model for it.
+        assert client.model_used is None
+
+    def test_verdicts_kept_from_a_truncated_reply_name_the_model_that_wrote_it(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _use_provider(monkeypatch, "anthropic", "claude-opus-5-5")
+        reply = (
+            '{"index": 0, "verdict": "false_positive", "confidence": "high", "rationale": "Test card."}\n'
+            '{"index": 1, "verdict": "true_pos'
+        )
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.return_value = _anthropic_truncated_fallback_response(reply)
+        verifier = FindingVerifier()
+
+        with patch("anthropic.Anthropic", return_value=mock_anthropic):
+            verdicts = verifier.process(findings=[], skill_path=tmp_path)
+
+        assert sorted(verdicts) == [0]
+        assert verifier.last_failure is not None
+        assert "output-token limit" in verifier.last_failure
+        assert verifier.model == "claude-opus-5-5"
+        assert verifier.model_used == ANTHROPIC_REFUSAL_FALLBACK_MODEL
+
+    @pytest.mark.parametrize("salvage", [False, True], ids=["salvage-off", "salvage-fails"])
+    def test_a_truncated_reply_that_is_not_kept_names_no_model(
+        self, monkeypatch: pytest.MonkeyPatch, salvage: bool
+    ) -> None:
+        class Client(LLMClient):
+            salvage_truncated_response = salvage
+
+            def get_system_prompt(self) -> str:
+                return "system"
+
+            def create_user_prompt(self, **_kwargs) -> str:
+                return "user"
+
+            def parse_response(self, _response_text: str, **_kwargs) -> str:
+                raise ValueError("no complete entries")
+
+            def get_fallback_response(self, **_kwargs) -> str:
+                return "fallback"
+
+        _use_provider(monkeypatch, "anthropic", "claude-opus-5-5")
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.return_value = _anthropic_truncated_fallback_response("partial")
+
+        with patch("anthropic.Anthropic", return_value=mock_anthropic):
+            client = Client()
+            assert client.process() == "fallback"
+
+        assert client.last_failure is not None
+        assert client.model_used is None

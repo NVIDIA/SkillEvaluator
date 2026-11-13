@@ -8,7 +8,9 @@ from __future__ import annotations
 import json
 import logging
 import math
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -20,7 +22,7 @@ from skillevaluator.deduplication.intra_skill.llm_analyzer import SYSTEM_PROMPT,
 from skillevaluator.deduplication.intra_skill.semantic_clustering import ContentCluster
 from skillevaluator.deduplication.utils.chunker import ContentChunk
 from skillevaluator.embedding.client import MAX_EMBEDDING_VECTOR_DIMENSION, SimilarityConfigError
-from skillevaluator.inference import LLMClientError, LLMClientRefusedError, LLMVerdict
+from skillevaluator.inference import LLMClient, LLMClientError, LLMClientRefusedError, LLMVerdict
 from skillevaluator.models.result import Severity
 from skillevaluator.reporting.json_reporter import JSONReporter
 
@@ -1410,3 +1412,220 @@ class TestIntraSkillValidatorValidate:
         v = IntraSkillValidator(embedding_model="custom/embed", llm_model="custom/llm")
         assert v._embedding_model == "custom/embed"
         assert v._llm_model == "custom/llm"
+
+
+def _section_skill(tmp_path: Path, letters: str) -> Path:
+    """A skill with one 200-character section per letter, in SKILL.md."""
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "\n".join(f"## Section {letter}\n{letter.lower() * 200}" for letter in letters), encoding="utf-8"
+    )
+    return skill_dir
+
+
+# Sections A/B and C/D of a four-section skill form two clusters.
+_TWO_CLUSTER_VECTORS = [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]]
+
+
+def _configure_llm(mock_llm, provider: str = "anthropic", model: str = "claude-opus-5-5") -> None:
+    mock_llm.return_value._resolved_config.return_value = SimpleNamespace(provider=provider, model=model)
+
+
+class TestAnsweringModelProvenance:
+    """A verdict names the model that answered, which can be a server-side fallback model."""
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_duplicate_finding_names_the_model_that_answered(
+        self, mock_embed, mock_llm, mock_analyze, tmp_path: Path
+    ) -> None:
+        skill_dir = _section_skill(tmp_path, "AB")
+        mock_embed.return_value.embed.return_value = [[1.0, 0.0], [1.0, 0.0]]
+        _configure_llm(mock_llm)
+        mock_analyze.return_value = LLMVerdict("DUPLICATE", 0.9, "Same content", "Remove one", model="claude-opus-4-8")
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        assert result.status == "failed"
+        [finding] = result.findings
+        assert (finding.check_name, finding.severity) == ("duplicate", Severity.HIGH)
+        assert finding.metadata["llm_provider"] == "anthropic"
+        assert finding.metadata["llm_model_used"] == "claude-opus-4-8"
+        analysis = result.metadata["llm_analysis"]
+        # "model" stays the configured model; "models_used" names the models that answered.
+        assert analysis["model"] == "claude-opus-5-5"
+        assert analysis["models_used"] == ["claude-opus-4-8"]
+        data = json.loads(JSONReporter(include_timestamp=False).render(result))
+        assert data["findings"][0]["metadata"]["llm_model_used"] == "claude-opus-4-8"
+        assert data["llm_analysis"]["model"] == "claude-opus-5-5"
+        assert data["llm_analysis"]["models_used"] == ["claude-opus-4-8"]
+
+    @pytest.mark.parametrize(
+        "answered_by",
+        ["https://proxy.example.test/v1", "sk-test", "model with spaces"],
+        ids=["url", "key-like", "spaces"],
+    )
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_unsafe_answering_model_is_reported_as_unresolved(
+        self, mock_embed, mock_llm, mock_analyze, tmp_path: Path, answered_by: str
+    ) -> None:
+        skill_dir = _section_skill(tmp_path, "AB")
+        mock_embed.return_value.embed.return_value = [[1.0, 0.0], [1.0, 0.0]]
+        _configure_llm(mock_llm)
+        mock_analyze.return_value = LLMVerdict("DUPLICATE", 0.9, "Same content", "Remove one", model=answered_by)
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        [finding] = result.findings
+        assert finding.metadata["llm_model_used"] == "unresolved"
+        assert result.metadata["llm_analysis"]["models_used"] == ["unresolved"]
+        assert answered_by not in JSONReporter(include_timestamp=False).render(result)
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_verdict_without_a_model_adds_no_model_fields(
+        self, mock_embed, mock_llm, mock_analyze, tmp_path: Path
+    ) -> None:
+        skill_dir = _section_skill(tmp_path, "AB")
+        mock_embed.return_value.embed.return_value = [[1.0, 0.0], [1.0, 0.0]]
+        _configure_llm(mock_llm)
+        mock_analyze.return_value = LLMVerdict("DUPLICATE", 0.9, "Same content", "Remove one")
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        [finding] = result.findings
+        assert set(finding.metadata) == {"reasoning", "confidence", "source_files"}
+        assert "models_used" not in result.metadata["llm_analysis"]
+        assert result.metadata["llm_analysis"]["model"] == "claude-opus-5-5"
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_refusal_advisory_keeps_the_configured_model_beside_a_fallback_verdict(
+        self, mock_embed, mock_llm, mock_analyze, tmp_path: Path
+    ) -> None:
+        skill_dir = _section_skill(tmp_path, "ABCD")
+        mock_embed.return_value.embed.return_value = _TWO_CLUSTER_VECTORS
+        _configure_llm(mock_llm)
+
+        def analyze(_client, cluster):
+            if any("Section A" in member.heading for member in cluster.members):
+                return LLMVerdict("DUPLICATE", 0.9, "Same content", "Remove one", model="claude-opus-4-8")
+            raise LLMClientRefusedError("private provider refusal text")
+
+        mock_analyze.side_effect = analyze
+        result = IntraSkillValidator().validate(skill_dir)
+
+        by_check = {finding.check_name: finding for finding in result.findings}
+        assert set(by_check) == {"duplicate", "llm_refused"}
+        assert by_check["duplicate"].metadata["llm_model_used"] == "claude-opus-4-8"
+        # A refusal has no answering model; its advisory still names the configured one.
+        assert by_check["llm_refused"].metadata == {
+            "source_files": ["SKILL.md"],
+            "llm_provider": "anthropic",
+            "llm_model": "claude-opus-5-5",
+        }
+        analysis = result.metadata["llm_analysis"]
+        assert (analysis["clusters_completed"], analysis["clusters_refused"]) == (1, 1)
+        assert analysis["models_used"] == ["claude-opus-4-8"]
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_failed_cluster_adds_no_model_beside_a_fallback_verdict(
+        self, mock_embed, mock_llm, mock_analyze, tmp_path: Path
+    ) -> None:
+        skill_dir = _section_skill(tmp_path, "ABCD")
+        mock_embed.return_value.embed.return_value = _TWO_CLUSTER_VECTORS
+        _configure_llm(mock_llm)
+
+        def analyze(_client, cluster):
+            if any("Section A" in member.heading for member in cluster.members):
+                return LLMVerdict("DUPLICATE", 0.9, "Same content", "Remove one", model="claude-opus-4-8")
+            raise RuntimeError("private provider response")
+
+        mock_analyze.side_effect = analyze
+        result = IntraSkillValidator().validate(skill_dir)
+
+        assert result.status == "incomplete"
+        [finding] = result.findings
+        assert finding.metadata["llm_model_used"] == "claude-opus-4-8"
+        analysis = result.metadata["llm_analysis"]
+        assert (analysis["clusters_completed"], analysis["clusters_failed"]) == (1, 1)
+        assert analysis["models_used"] == ["claude-opus-4-8"]
+        assert "(provider: anthropic; model: claude-opus-5-5)" in result.errors[0]
+
+    def test_concurrent_clusters_keep_their_own_answering_model(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Through the real client: each worker thread reads the model that answered its own call."""
+        pytest.importorskip("anthropic")
+        httpx = pytest.importorskip("httpx")
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "claude-opus-5-5")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        for name in ("SKILL_EVAL_LLM_BASE_URL", "ANTHROPIC_BASE_URL"):
+            monkeypatch.delenv(name, raising=False)
+        skill_dir = _section_skill(tmp_path, "ABCD")
+        reply = json.dumps(
+            {"verdict": "DUPLICATE", "confidence": 0.9, "rationale": "Same content", "suggestion": "Remove one"}
+        )
+
+        def handler(request):
+            prompt = json.loads(request.content)["messages"][0]["content"]
+            content = [{"type": "text", "text": reply}]
+            answered_by = "claude-opus-5-5"
+            if "Section A" in prompt:
+                # The configured model refused and the fallback answered in the same call.
+                answered_by = "claude-opus-4-8"
+                content.insert(
+                    0, {"type": "fallback", "from": {"model": "claude-opus-5-5"}, "to": {"model": answered_by}}
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": answered_by,
+                    "content": content,
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            )
+
+        # Both calls finish before either cluster reads its answering model, so
+        # one label shared by the threads would give both clusters the same model.
+        both_answered = threading.Barrier(2, timeout=30)
+
+        class BarrierClient(LLMClient):
+            def extract_json_from_response(self, *args, **kwargs):
+                data = super().extract_json_from_response(*args, **kwargs)
+                both_answered.wait()
+                return data
+
+        with (
+            httpx.Client(transport=httpx.MockTransport(handler)) as http_client,
+            patch.object(
+                intra_skill_validator, "LLMClient", lambda **kwargs: BarrierClient(http_client=http_client, **kwargs)
+            ),
+            patch.object(intra_skill_validator, "EmbeddingClient") as mock_embed,
+        ):
+            mock_embed.return_value.embed.return_value = _TWO_CLUSTER_VECTORS
+            result = IntraSkillValidator().validate(skill_dir)
+
+        assert result.status == "failed"
+        assert result.incomplete_scans == []
+        models = {"Section A" in finding.message: finding.metadata["llm_model_used"] for finding in result.findings}
+        assert models == {True: "claude-opus-4-8", False: "claude-opus-5-5"}
+        assert {finding.metadata["llm_provider"] for finding in result.findings} == {"anthropic"}
+        analysis = result.metadata["llm_analysis"]
+        assert analysis["clusters_completed"] == 2
+        assert (analysis["provider"], analysis["model"]) == ("anthropic", "claude-opus-5-5")
+        assert analysis["models_used"] == ["claude-opus-4-8", "claude-opus-5-5"]

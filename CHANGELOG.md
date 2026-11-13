@@ -114,6 +114,19 @@ All notable changes to SkillEvaluator are documented in this file.
   provenance and source hashes, and compute custom lift only on matched
   case/attempt pairs, without assigning standard scores or claiming execution.
 
+- Tier 2 context deduplication and `--llm-verify` name the model that
+  answered. On the native Claude API, a server-side fallback model can answer
+  in place of a configured Claude 5.5 or later model. A duplicate finding
+  records the model that gave its verdict as `llm_model_used`, with
+  `llm_provider`, in its metadata, and the Tier 2 `llm_analysis` object adds
+  `models_used`, every model that gave a cluster's verdict.
+  `llm_analysis.model` stays the configured model, and an `llm_refused`
+  finding still names the configured model as `llm_model`. Each finding that
+  gets an `--llm-verify` verdict records `llm_provider` and `llm_model_used`
+  as well, including a verdict kept from a reply cut off at the output-token
+  limit. A model name that is not a plain identifier, such as a URL or a key,
+  reads `unresolved`.
+
 - Show per-agent evidence volume next to Tier 3 scores: distinct cases, planned
   and scored attempts, execution and judge failures, and per-arm counts when a
   baseline ran. Flag limited case coverage or incomplete attempt coverage;

@@ -4909,6 +4909,7 @@ class SecurityValidator(ValidatorBase):
             return
 
         from skillevaluator.inference import FindingVerifier
+        from skillevaluator.inference.diagnostics import safe_llm_labels
 
         logger.info(f"Running LLM verification on {len(findings)} finding(s)")
         verifier = FindingVerifier()
@@ -4919,6 +4920,13 @@ class SecurityValidator(ValidatorBase):
             cause = f": {verifier.last_failure}" if verifier.last_failure else ""
             result.add_message(f"LLM finding verification was skipped (no verdicts returned{cause})")
             return
+
+        # The provider and model that gave the verdicts: the configured model,
+        # or a server-side fallback model that answered in its place.
+        model_labels: dict[str, str] = {}
+        if verifier.model_used is not None:
+            provider, model = safe_llm_labels(verifier.provider, verifier.model_used)
+            model_labels = {"llm_provider": provider, "llm_model_used": model}
 
         suppressed = 0
         verified = 0
@@ -4944,6 +4952,7 @@ class SecurityValidator(ValidatorBase):
             finding.metadata["llm_verdict"] = verdict
             finding.metadata["llm_confidence"] = confidence
             finding.metadata["llm_reasoning"] = reasoning
+            finding.metadata.update(model_labels)
 
             if finding_verification_policy.should_downgrade(verdict, confidence):
                 finding.severity = finding_verification_policy.DOWNGRADE_SEVERITY

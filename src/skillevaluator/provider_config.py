@@ -122,6 +122,26 @@ REASONING_MAX_COMPLETION_TOKENS = 32768
 # native Claude API then retries the request on this model in the same call.
 ANTHROPIC_REFUSAL_FALLBACK_MODEL = "claude-opus-4-8"
 ANTHROPIC_SERVER_SIDE_FALLBACK_BETA = "server-side-fallback-2026-07-01"
+# The Claude API accepts only some fallback targets for a given request model
+# and answers HTTP 400 "'<fallback>' is not a valid fallback target for
+# '<model>'" otherwise. This variable overrides the target, or turns the
+# server-side fallback off with one of the values below.
+ANTHROPIC_REFUSAL_FALLBACK_MODEL_ENV = "SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL"
+_REFUSAL_FALLBACK_DISABLED_VALUES = frozenset({"none", "off", "disabled", "false", "0"})
+
+
+def anthropic_refusal_fallback_model(model: str, environ: Mapping[str, str] | None = None) -> str | None:
+    """Return the server-side refusal fallback target for ``model``, or ``None`` for no fallback.
+
+    ``SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL`` replaces the built-in target; ``none``,
+    ``off``, ``disabled``, ``false`` or ``0`` (any case) turns the fallback off. An
+    empty value counts as unset. A target equal to ``model`` is never sent.
+    """
+    value = str((os.environ if environ is None else environ).get(ANTHROPIC_REFUSAL_FALLBACK_MODEL_ENV, "")).strip()
+    if value.casefold() in _REFUSAL_FALLBACK_DISABLED_VALUES:
+        return None
+    target = value or ANTHROPIC_REFUSAL_FALLBACK_MODEL
+    return None if target == str(model or "").strip() else target
 
 
 def _model_leaf(model: str) -> str:

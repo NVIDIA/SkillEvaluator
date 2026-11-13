@@ -1402,7 +1402,9 @@ the case is judged and scored normally.
 - **Refusals.** A safety-classifier refusal is never scored as an answer. On
   the native Claude API, Claude 5.5 or later judges use server-side fallback to
   `claude-opus-4-8`, and on Bedrock a filtered Claude 5.5 reply is retried
-  once on Claude Opus 4.8 in the same geography. A refusal or an empty reply
+  once on Claude Opus 4.8 in the same geography.
+  `SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL` changes that target, or turns it off
+  with `none`; a target equal to the judge model is never sent. A refusal or an empty reply
   then moves on to the next `LLM_JUDGE_FALLBACK_MODELS` entry, if any.
   Each judge's details in the trial's `skill_evaluator_reward.json` record
   `judge_model_used`, `judge_reasoning_effort`, and `judge_fallback_used`.
@@ -1454,8 +1456,9 @@ like `LLM_JUDGE_FALLBACK_MODELS`: only to standard verifier jobs, never to the
 agent environment or `custom_only` runs.
 
 - **`LLM_JUDGE_FALLBACK_POLICY=replace`.** Only the judge model and your
-  `LLM_JUDGE_FALLBACK_MODELS` entries answer. The built-in `claude-opus-4-8`
-  refusal fallback for Claude 5.5 or later judges is not used, on the native
+  `LLM_JUDGE_FALLBACK_MODELS` entries answer. The built-in refusal fallback
+  for Claude 5.5 or later judges (`SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL`,
+  default `claude-opus-4-8`) is not used, on the native
   Claude API or on Bedrock. The default, `append`, keeps it.
 - **`LLM_JUDGE_RETRY_POLICY=strict`.** Each judge tries at most three models:
   the judge model, then the first two `LLM_JUDGE_FALLBACK_MODELS` entries. It

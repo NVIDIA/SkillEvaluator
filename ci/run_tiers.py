@@ -317,7 +317,9 @@ def _combined(statuses: list[str]) -> str:
     )
 
 
-def _retain(raw: Path, destination: Path, tier: int, tokens: set[str], skill: Path, code: int) -> dict:
+def _retain(
+    raw: Path, destination: Path, tier: int, tokens: set[str], skill: Path, code: int, target_path: str | None = None
+) -> dict:
     from skillevaluator.reporting.retained import retained_results
 
     try:
@@ -330,6 +332,10 @@ def _retain(raw: Path, destination: Path, tier: int, tokens: set[str], skill: Pa
     if len(documents) != 1:
         raise ConfigurationError("The evaluator did not produce one canonical JSON report.")
     report = Redactor(tokens).object(read_json(documents[0]))
+    if target_path is not None and isinstance(report.get("target_path"), str):
+        # The evaluator records the target as the CI passed it, an absolute path
+        # in the runner's workspace; the retained report keeps the repository path.
+        report["target_path"] = target_path
     results = retained_results(report, allowed_tiers={tier})
     if tier == 2:
         # Standalone Tier 2 gates its CLI exit; CI keeps the same evidence and
@@ -562,7 +568,7 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
                 )
                 if code == 124:
                     skill_row["error"] = "Evaluation exceeded the configured time budget."
-                retained = _retain(raw, leaf, tier, tokens, skill, code)
+                retained = _retain(raw, leaf, tier, tokens, skill, code, skill_row["path"])
                 complete = retained.pop("complete")
                 skill_row.update(retained)
                 if tier == 3 and dataset_preflight(skill) != digests:

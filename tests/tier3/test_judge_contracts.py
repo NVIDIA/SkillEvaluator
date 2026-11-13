@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import json
+import random
+import string
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -253,10 +255,53 @@ def _never_called(*args: Any, **kwargs: Any):
     raise AssertionError("the judge must not call a model on incomplete evidence")
 
 
-def _behavior_bundle(module: ModuleType, traj: dict[str, Any]) -> dict[str, Any]:
+def _behavior_bundle(
+    module: ModuleType,
+    traj: dict[str, Any],
+    expected_behavior: list[str] | None = None,
+) -> dict[str, Any]:
     """Build the behavior_check bundle with the module the judge belongs to."""
     builder = atif_helpers if module is llm_judge else module
-    return builder.build_metric_evidence_bundles(traj, "Explain the migration.")["behavior_check"]
+    return builder.build_metric_evidence_bundles(
+        traj, "Explain the migration.", expected_behavior=expected_behavior
+    )["behavior_check"]
+
+
+_VERIFIED_PATH = "/workspace/output/report.md"
+_VERIFIED_BEHAVIOR = f"writes the file `{_VERIFIED_PATH}`"
+
+
+def _traj_with_verified_write_and_long_answer(answer_chars: int = 9000) -> dict[str, Any]:
+    """A run whose one expected behavior is provable from the write alone.
+
+    The final answer is long enough that the final-response limit cuts its
+    middle, which is the condition the evidence gate fires on.
+    """
+    return {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {
+                        "tool_call_id": "write-1",
+                        "function_name": "Write",
+                        "arguments": {"file_path": _VERIFIED_PATH, "content": "# Report\nAll good.\n"},
+                    }
+                ],
+                "observation": {"results": [{"source_call_id": "write-1", "content": "File written"}]},
+            },
+            {"source": "agent", "message": _distinct_answer(answer_chars)},
+        ]
+    }
+
+
+def _distinct_answer(length: int) -> str:
+    """Build non-repetitive text, so a cut middle cannot be matched elsewhere."""
+    rng = random.Random(20234)
+    words: list[str] = []
+    while sum(len(word) + 1 for word in words) < length:
+        words.append("".join(rng.choice(string.ascii_lowercase) for _ in range(rng.randint(3, 9))))
+    return " ".join(words)[:length]
 
 
 def test_incomplete_required_behavior_evidence_errors_without_a_model_call(judge_module, monkeypatch) -> None:
@@ -329,6 +374,85 @@ def test_oversized_final_answer_reaches_the_judge_gate_as_an_error(judge_module,
         bundle["prompt_evidence"], ["explains the migration"], evidence_omitted=bundle["omitted"]
     )
 
+    assert result["score"] is None
+    assert result["status"] == "error"
+
+
+def test_cut_answer_still_scores_when_verified_facts_settle_every_behavior(judge_module, monkeypatch) -> None:
+    # The gate exists to stop a score being read off evidence the limits cut.
+    # It must not discard a score the surviving evidence supports: here the one
+    # expected behavior is a path the deterministic fact list already marks
+    # OBSERVED, so the missing middle of the answer cannot change the answer.
+    calls: list[dict[str, Any]] = []
+    response = json.dumps({"results": [{"step": 1, "passed": True, "reason": "wrote the report"}]})
+    monkeypatch.setattr(judge_module, "call_public_llm", _script([(response, None)], calls))
+
+    bundle = _behavior_bundle(judge_module, _traj_with_verified_write_and_long_answer(), [_VERIFIED_BEHAVIOR])
+
+    # The evidence really is incomplete — the gate's own precondition holds.
+    assert bundle["omitted"]["required_complete"] is False
+    assert bundle["omitted"]["required_missing"] == ["final response"]
+    # And the deterministic facts settle the expectation regardless.
+    assert bundle["omitted"]["expected_behaviors_verified"] is True
+    assert f"[OBSERVED step 0] {_VERIFIED_PATH}" in bundle["prompt_evidence"]
+
+    result = judge_module.judge_behavior_check(
+        bundle["prompt_evidence"], [_VERIFIED_BEHAVIOR], evidence_omitted=bundle["omitted"]
+    )
+
+    assert len(calls) == 1
+    assert result.get("status") != "error"
+    assert result["score"] == 1.0
+
+    # And the case keeps an overall score, instead of dropping out of every
+    # gate and comparison keyed on one.
+    from skillevaluator.tier3.harbor.metrics import overall_score_from_metrics
+
+    scores = {
+        "security": 1.0,
+        "skill_execution": 1.0,
+        "skill_efficiency": 1.0,
+        "accuracy": 1.0,
+        "goal_accuracy": 1.0,
+        "behavior_check": result["score"],
+    }
+    assert overall_score_from_metrics(scores) == 1.0
+
+
+def test_cut_answer_is_still_gated_when_any_behavior_needs_the_answer(judge_module, monkeypatch) -> None:
+    # A prose expectation names nothing checkable, so it can only be judged
+    # from the text the limits cut. One such expectation keeps the gate, even
+    # beside a behavior the facts do settle.
+    monkeypatch.setattr(judge_module, "call_public_llm", _never_called)
+    traj = _traj_with_verified_write_and_long_answer()
+
+    for expectations in (
+        ["explains the migration trade-offs"],
+        [_VERIFIED_BEHAVIOR, "explains the migration trade-offs"],
+    ):
+        bundle = _behavior_bundle(judge_module, traj, expectations)
+        assert bundle["omitted"]["required_complete"] is False
+        assert bundle["omitted"]["expected_behaviors_verified"] is False
+
+        result = judge_module.judge_behavior_check(
+            bundle["prompt_evidence"], expectations, evidence_omitted=bundle["omitted"]
+        )
+
+        assert result["score"] is None
+        assert result["status"] == "error"
+
+
+def test_behavior_evidence_gap_treats_an_absent_verified_flag_as_unknown(judge_module, monkeypatch) -> None:
+    # Records written before the flag existed, and records assembled by hand,
+    # must keep the gate rather than skip it by default.
+    monkeypatch.setattr(judge_module, "call_public_llm", _never_called)
+    omitted = {"required_complete": False, "required_missing": ["final response"], "reason": "cut"}
+
+    assert judge_module.behavior_evidence_gap(omitted)
+    assert judge_module.behavior_evidence_gap({**omitted, "expected_behaviors_verified": False})
+    assert judge_module.behavior_evidence_gap({**omitted, "expected_behaviors_verified": True}) == ""
+
+    result = judge_module.judge_behavior_check("conversation", ["b1"], evidence_omitted=omitted)
     assert result["score"] is None
     assert result["status"] == "error"
 

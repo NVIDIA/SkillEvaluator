@@ -232,11 +232,21 @@ Larger budgets give judges more context and cost more prompt tokens.
 | --- | --- | --- |
 | `SKILL_EVAL_ACCURACY_BUDGET` | `8000` characters | Evidence budget for the `accuracy` judge: the agent's final response, files it wrote, and up to 6 recent tool results. |
 | `SKILL_EVAL_GOAL_ACCURACY_BUDGET` | `12000` characters | Evidence budget for the `goal_accuracy` judge, including the RAGAS goal scorer: the final response, end-state file changes, and up to 12 recent tool results. |
-| `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET` | `8000` characters | Evidence budget for the `behavior_check` judge: file changes, the final response, the user request, and a compact tool history. The effective budget is never less than `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT` plus 4000. |
-| `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT` | `800` characters | Maximum length of the agent's final response within the `behavior_check` evidence. Values above 4000 can also raise the effective behavior-check budget. |
+| `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET` | `12000` characters | Evidence budget for the `behavior_check` judge: file changes, the final response, the user request, and a compact tool history. A value you set is used exactly as set, up or down. Only the default is reconciled upwards, to `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT` plus 4000, so raising that limit alone still leaves room for the tool history. |
+| `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT` | `8000` characters | Maximum length of the agent's final response within the `behavior_check` evidence. It also caps the reserved USER REQUEST section, which is otherwise 2000 characters. Raising it above 8000 also raises the *default* behavior-check budget, but never a budget you set yourself. |
+
+Setting `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET` below `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`
+plus 1600 is honoured, but logs a warning: the final response will not fit
+beside any tool history, and `behavior_check` then reports incomplete evidence
+instead of a score (see
+[behavior evidence completeness](tier3-live-evaluation.mdx#evidence-budgets)).
+Lower the final-response limit alongside the budget to cap the judge prompt
+without losing the answer.
 
 Each value must be an integer. Values below `1` are treated as `1`, and
-non-integer values such as `8k` or `1.5` use the default. Set these variables in
+non-integer values such as `8k` or `1.5` use the default; neither is a budget
+you set, so `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET` falls back to its reconciled
+default in both cases. Set these variables in
 the host environment that runs `skillevaluator`. As with the
 [retry settings](#llm-retries-and-judge-time-budget), Tier 3 stages any that
 are set into the generated task's `[verifier.env]`, and never into the agent's

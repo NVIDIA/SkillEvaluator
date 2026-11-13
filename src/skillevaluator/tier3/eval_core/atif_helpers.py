@@ -12,6 +12,7 @@ OpenHands, and Opencode.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from typing import Any
@@ -52,6 +53,8 @@ else:  # Standalone helper staged beside the verifier.
     )
     from evidence import evidence_ref_identity
     from secret_redaction import redact_secrets_in_log_line
+
+logger = logging.getLogger(__name__)
 
 
 def get_all_tool_calls(traj: dict[str, Any]) -> list[dict[str, Any]]:
@@ -155,11 +158,21 @@ def get_output_tokens(traj: dict[str, Any]) -> int:
     return last
 
 
-def build_conversation_summary(traj: dict[str, Any], question: str) -> str:
+def build_conversation_summary(traj: dict[str, Any], question: str, *, full: bool = False) -> str:
     """Build a human-readable conversation summary for LLM judges.
 
     The summary is optimized for behavior-check and goal-accuracy prompts.
+
+    Each entry is clipped to a per-entry allowance so one noisy tool result
+    cannot crowd out the rest of the run. Pass ``full=True`` for the same
+    rendering with those per-entry clips lifted: the completeness accounting
+    compares against that, so content this function drops is not mistaken for
+    content that reached the judge.
     """
+
+    def clip(text: str, limit: int) -> str:
+        return text if full else text[:limit]
+
     parts = [f"User: {question}"]
 
     for step in traj.get("steps", []):
@@ -168,26 +181,26 @@ def build_conversation_summary(traj: dict[str, Any], question: str) -> str:
 
         reasoning = step.get("reasoning_content") or ""
         if reasoning:
-            parts.append(f"Agent reasoning: {str(reasoning)[:200]}")
+            parts.append(f"Agent reasoning: {clip(str(reasoning), 200)}")
 
         for _, tc in iter_tool_calls({"steps": [step]}):
             fn = tc.get("function_name", "")
             args = tc.get("arguments") or {}
-            parts.append(f"Agent called: {fn}({json.dumps(args)[:200]})")
+            parts.append(f"Agent called: {fn}({clip(json.dumps(args), 200)})")
 
         obs = step.get("observation") or {}
         for r in obs.get("results") or []:
             content = atif_content_text(r.get("content"))
             if content:
-                parts.append(f"Tool returned: {content[:400]}")
+                parts.append(f"Tool returned: {clip(content, 400)}")
 
         msg = atif_content_text(step.get("message"))
         if msg.strip() and not step.get("tool_calls"):
-            parts.append(f"Agent: {msg[:1500]}")
+            parts.append(f"Agent: {clip(msg, 1500)}")
 
     final = get_final_response(traj)
     if final and not any(final[:50] in p for p in parts):
-        parts.append(f"Agent final answer: {final[:1500]}")
+        parts.append(f"Agent final answer: {clip(final, 1500)}")
 
     return "\n".join(parts)
 
@@ -201,6 +214,13 @@ _DEFAULT_BEHAVIOR_FINAL_RESPONSE_LIMIT = 8000
 _DEFAULT_BEHAVIOR_CHECK_BUDGET = _DEFAULT_BEHAVIOR_FINAL_RESPONSE_LIMIT + 4000
 _DEFAULT_TOOL_HISTORY_HEADROOM = 4000
 _MIN_BEHAVIOR_HISTORY_HEADROOM = 1600
+# The user request is also repeated, in full, at the head of the compact tool
+# history, so its own section is a convenience copy rather than the only one.
+# Giving it the whole final-response allowance therefore buys a duplicate at
+# the tool history's expense, which is the one place a non-file behavior
+# ("ran the tests before finishing") is observable. Cap it well below the
+# answer's allowance instead.
+_DEFAULT_BEHAVIOR_USER_REQUEST_LIMIT = 2000
 _SECTION_COMPACT_TOOL_HISTORY = "COMPACT TOOL HISTORY"
 _SECTION_FILE_CHANGES = "FILE CHANGES"
 _SECTION_FINAL_RESPONSE = "FINAL RESPONSE"
@@ -223,22 +243,68 @@ def _behavior_final_response_limit() -> int:
     return _env_positive_int("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", _DEFAULT_BEHAVIOR_FINAL_RESPONSE_LIMIT)
 
 
+def _env_int_or_none(name: str) -> int | None:
+    """Return environment variable *name* as an int, or ``None`` when unusable."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+_warned_behavior_budgets: set[tuple[int, int]] = set()
+
+
 def _behavior_check_budget() -> int:
-    """Return the configured behavior check evidence budget or reconciled default."""
+    """Return the behavior check evidence budget.
+
+    A usable ``SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`` is honoured exactly as set.
+    Operators pin it to cap the judge prompt for a small-context model or a
+    token budget, so quietly raising it past what they asked for defeats the
+    only reason to set it. A value too small to hold the final response beside
+    some tool history is warned about rather than dropped, and the behavior
+    judge's evidence gate then reports the loss instead of scoring it. Only
+    the *default* is reconciled upwards with the final-response limit, so
+    raising that limit alone still leaves room for the tool history.
+    Unparseable and non-positive values are not budgets at all and fall back
+    to that reconciled default.
+    """
     final_limit = _behavior_final_response_limit()
-    base_budget = _env_positive_int("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", _DEFAULT_BEHAVIOR_CHECK_BUDGET)
-    return max(base_budget, final_limit + _DEFAULT_TOOL_HISTORY_HEADROOM)
+    configured = _env_int_or_none("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET")
+    if configured is None or configured < 1:
+        base_budget = _env_positive_int("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", _DEFAULT_BEHAVIOR_CHECK_BUDGET)
+        return max(base_budget, final_limit + _DEFAULT_TOOL_HISTORY_HEADROOM)
+    if configured < final_limit + _MIN_BEHAVIOR_HISTORY_HEADROOM:
+        key = (configured, final_limit)
+        if key not in _warned_behavior_budgets:
+            _warned_behavior_budgets.add(key)
+            logger.warning(
+                "SKILL_EVAL_BEHAVIOR_CHECK_BUDGET=%d leaves under %d characters beside a "
+                "SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT of %d. The budget is honoured as set, so behavior "
+                "evidence will be cut and behavior_check may report incomplete evidence instead of a score. "
+                "Lower SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT as well, or raise the budget to at least %d.",
+                configured,
+                _MIN_BEHAVIOR_HISTORY_HEADROOM,
+                final_limit,
+                final_limit + _MIN_BEHAVIOR_HISTORY_HEADROOM,
+            )
+    return configured
 
 
 def _behavior_user_request_limit() -> int:
     """Return the behavior evidence allowance for the user request section.
 
-    The request the agent answered is required evidence, like the answer
-    itself, so it gets the same allowance instead of a fixed 800 characters.
-    It is still appended before the optional exploration output in the compact
-    tool history, so a long request costs history, never the final answer.
+    The old fixed 800 characters cut ordinary Tier 3 task prompts, but the
+    whole final-response allowance is too much: ``build_conversation_summary``
+    already opens the compact tool history with ``User: {question}``, so every
+    character spent here is a second copy, and the history — appended after
+    this section — absorbs the entire loss. Cap it at
+    ``_DEFAULT_BEHAVIOR_USER_REQUEST_LIMIT``, never above the final-response
+    limit so that lowering that limit still shrinks the whole bundle.
     """
-    return _behavior_final_response_limit()
+    return min(_DEFAULT_BEHAVIOR_USER_REQUEST_LIMIT, _behavior_final_response_limit())
 
 
 _BEHAVIOR_WRITE_TOOLS = {
@@ -330,7 +396,16 @@ def _tool_name_looks_like_write(fn_lower: str) -> bool:
     return any(candidate in _BEHAVIOR_WRITE_TOOLS for candidate in candidates)
 
 
-def _collect_file_change_evidence(traj: dict[str, Any]) -> list[str]:
+def _collect_file_change_evidence(traj: dict[str, Any], *, full: bool = False) -> list[str]:
+    """Render one entry per write the agent made.
+
+    Each write body and tool result is clipped to a per-entry allowance. Pass
+    ``full=True`` for the same entries with those clips lifted, which is what
+    the completeness accounting compares against so a body this function
+    shortened is not reported as having reached the judge.
+    """
+    body_limit = 10**9 if full else 1800
+    observation_limit = 10**9 if full else 500
     changes: list[str] = []
     for step in traj.get("steps", []):
         if step.get("source") != "agent":
@@ -362,9 +437,9 @@ def _collect_file_change_evidence(traj: dict[str, Any]) -> list[str]:
             if file_path:
                 entry_parts.append(f"Path: {file_path}")
             if body:
-                entry_parts.append(_truncate_for_behavior(body, 1800))
+                entry_parts.append(_truncate_for_behavior(body, body_limit))
             if obs:
-                entry_parts.append(f"Tool returned: {_truncate_for_behavior(obs, 500)}")
+                entry_parts.append(f"Tool returned: {_truncate_for_behavior(obs, observation_limit)}")
             changes.append("\n".join(entry_parts))
     return changes
 
@@ -870,6 +945,33 @@ _VERIFIED_FACTS_MAX = 12
 _VERIFIED_FACT_LINE_MAX = 200
 
 
+def _checkable_tokens(text: str, seen_claims: set[str] | None = None) -> list[tuple[str, str]]:
+    """Extract ``(claim, match_mode)`` pairs from *text*.
+
+    Modes are ``"path"`` for an artifact path and ``"ci"`` for a
+    backtick-quoted snippet of four or more characters. Claims already in
+    *seen_claims* are skipped, and new ones are added to it, so a caller can
+    deduplicate across several sources.
+    """
+    if seen_claims is None:
+        seen_claims = set()
+    tokens: list[tuple[str, str]] = []
+    body = str(text or "")
+    # a. artifact paths
+    for match in _EXPECTED_ARTIFACT_PATH_RE.finditer(body):
+        claim = match.group(0).rstrip(".,;:)]}'\"")
+        if claim and claim not in seen_claims:
+            seen_claims.add(claim)
+            tokens.append((claim, "path"))
+    # b. backtick-quoted snippets >= 4 chars (strip backticks)
+    for match in _BACKTICK_TOKEN_RE.finditer(body):
+        claim = match.group(1)  # strip the backticks
+        if claim and claim not in seen_claims:
+            seen_claims.add(claim)
+            tokens.append((claim, "ci"))
+    return tokens
+
+
 def build_verified_facts(
     traj: dict[str, Any],
     expected_behavior: list[str] | None,
@@ -890,19 +992,7 @@ def build_verified_facts(
 
     sources = list(expected_behavior) + ([ground_truth] if ground_truth else [])
     for source in sources:
-        text = str(source or "")
-        # a. artifact paths
-        for match in _EXPECTED_ARTIFACT_PATH_RE.finditer(text):
-            claim = match.group(0).rstrip(".,;:)]}'\"")
-            if claim and claim not in seen_claims:
-                seen_claims.add(claim)
-                tokens.append((claim, "path"))
-        # b. backtick-quoted snippets >= 4 chars (strip backticks)
-        for match in _BACKTICK_TOKEN_RE.finditer(text):
-            claim = match.group(1)  # strip the backticks
-            if claim and claim not in seen_claims:
-                seen_claims.add(claim)
-                tokens.append((claim, "ci"))
+        tokens.extend(_checkable_tokens(source, seen_claims))
 
     if not tokens:
         return []
@@ -1045,14 +1135,18 @@ def _behavior_evidence_completeness(
 
     Every section is compared against its complete source rather than against
     another budgeted rendering, so a cut the budget and the final-response cap
-    both applied cannot hide behind either one. Returns
-    ``(required_complete, required_missing, incomplete_sections)``.
+    both applied cannot hide behind either one. File changes and the tool
+    history are rendered with ``full=True`` for the same reason: their own
+    per-entry allowances clip write bodies and tool results before any budget
+    applies, and comparing against those clipped renderings reported a section
+    complete while thousands of characters of a written file had been dropped.
+    Returns ``(required_complete, required_missing, incomplete_sections)``.
     """
     sources = {
         _SECTION_FINAL_RESPONSE: get_final_response(traj),
         _SECTION_USER_REQUEST: question,
-        _SECTION_FILE_CHANGES: "\n\n".join(_collect_file_change_evidence(traj)),
-        _SECTION_COMPACT_TOOL_HISTORY: build_conversation_summary(traj, question),
+        _SECTION_FILE_CHANGES: "\n\n".join(_collect_file_change_evidence(traj, full=True)),
+        _SECTION_COMPACT_TOOL_HISTORY: build_conversation_summary(traj, question, full=True),
     }
     required_missing: list[str] = []
     incomplete: list[str] = []
@@ -1066,14 +1160,46 @@ def _behavior_evidence_completeness(
     return not required_missing, required_missing, incomplete
 
 
+def _expected_behaviors_verified(expected_behavior: Any, facts: list[dict[str, Any]]) -> bool:
+    """Return True when deterministic facts already settle every expected behavior.
+
+    An expectation is settled when every checkable token it names — an
+    artifact path or a backtick-quoted snippet — appears in *facts* marked
+    observed. Those facts are computed from the trajectory, not from the
+    budgeted evidence, and they head the judge's prompt, so for such a case
+    the judge's answer does not depend on the final response surviving the
+    limits: withholding the score would discard a result the evidence
+    supports. An expectation that names nothing checkable (plain prose such
+    as "explains the trade-offs") is never settled this way, so prose
+    expectations keep the gate.
+    """
+    if not isinstance(expected_behavior, list) or not expected_behavior:
+        return False
+    observed = {str(fact.get("claim")) for fact in facts if fact.get("observed")}
+    for behavior in expected_behavior:
+        claims = [claim for claim, _mode in _checkable_tokens(behavior)]
+        if not claims or any(claim not in observed for claim in claims):
+            return False
+    return True
+
+
 def behavior_evidence_gap(omitted: Any) -> str:
     """Describe the required behavior evidence missing from a bundle, or ``""``.
 
     A behavior score read off evidence whose final answer was silently
     shortened grades the evidence loss, not the agent, so callers use this to
     withhold the score and raise an explicit evaluation error instead.
+
+    Nothing is withheld when the bundle reports
+    ``expected_behaviors_verified``: the deterministic facts at the head of
+    the evidence already settle every expectation, so the missing text cannot
+    change the outcome. The key is absent from records built before it
+    existed and from records assembled by hand, and absence means "not
+    known", which keeps the gate.
     """
     if not isinstance(omitted, dict) or omitted.get("required_complete", True):
+        return ""
+    if omitted.get("expected_behaviors_verified", False):
         return ""
     missing = [str(item).strip() for item in omitted.get("required_missing") or [] if str(item).strip()]
     names = ", ".join(missing) or "required evidence"
@@ -1191,6 +1317,10 @@ def build_metric_evidence_bundles(
     # is ordinary. Completeness says whether the evidence the judge must read
     # survived, so the judge can refuse to score an evidence-loss artifact.
     bc_required_ok, bc_required_missing, bc_incomplete = _behavior_evidence_completeness(traj, question, bc_evidence)
+    # Whether the gap matters is a separate question from whether there is
+    # one. When the deterministic facts above already settle every expected
+    # behavior, the judge's answer does not rest on the text the limits cut.
+    bc_behaviors_verified = _expected_behaviors_verified(expected_behavior, facts)
     bundles["behavior_check"] = {
         "prompt_evidence": bc_evidence,
         "evidence_refs": refs["behavior_check"],
@@ -1201,6 +1331,7 @@ def build_metric_evidence_bundles(
             "required_complete": bc_required_ok,
             "required_missing": bc_required_missing,
             "incomplete_sections": bc_incomplete,
+            "expected_behaviors_verified": bc_behaviors_verified,
         },
         "verified": facts,
     }

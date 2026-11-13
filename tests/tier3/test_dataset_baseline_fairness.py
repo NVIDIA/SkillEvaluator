@@ -1415,6 +1415,23 @@ def test_single_adverb_does_not_turn_a_negated_read_into_a_requirement(adverb):
     )
 
 
+@pytest.mark.parametrize(
+    ("text", "warns"),
+    [
+        ("The agent used the skill.", True),
+        ("The agent used installed skill.", True),
+        ("The agent used the installed skill.", True),
+        ("The agent used the release-review skill.", True),
+        ("The agent loaded the skill.json", False),
+        ("The agent used installed skill.json", False),
+        ("The agent used the release-review skill.json", False),
+    ],
+)
+def test_terminal_punctuation_does_not_hide_skill_use_or_match_metadata(text, warns):
+    warnings = _baseline_fairness_warnings(_case(prompt="Check manifest.yaml", assertions=[text]))
+    assert bool(warnings) is warns
+
+
 # --- Negation that covers something else, odd shapes, names and bounds --------
 
 

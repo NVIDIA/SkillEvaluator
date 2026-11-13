@@ -756,13 +756,13 @@ def _skill_use_assertion_re(
     alternatives = [
         _skill_files_re(skill_name),
         rf"\b(?:{_SKILL_USE_VERB_RE}|{_READ_VERB_RE})\s+(?:(?:the|this|its|that)(?:\s+installed)?|installed)\s+skill\b"
-        rf"(?![.\w-]|\s+(?:levels?|sets?)\b)",
+        rf"(?![\w-]|\.\w|\s+(?:levels?|sets?)\b)",
     ]
     if skill_name:
         alternatives.extend(
             [
                 rf"(?<![\w-]){name}(?![\w-])(?:\s+(?:as|is)(?:\s+(?:the|a))?(?:\s+right)?)?"
-                rf"\s+skill\b(?![.\w-]|\s+(?:levels?|sets?)\b)",
+                rf"\s+skill\b(?![\w-]|\.\w|\s+(?:levels?|sets?)\b)",
                 rf"\bskill\s+(?:named\s+|called\s+)?[`'\"]?{name}(?![\w-])",
             ]
         )

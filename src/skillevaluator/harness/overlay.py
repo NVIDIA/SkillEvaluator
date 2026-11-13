@@ -68,12 +68,15 @@ def load_profiles(names: str | list[str] = "all", profiles_dir: Path | None = No
 
 
 def _install_root(skill_path: Path) -> tuple[str | None, int]:
-    parts = skill_path.resolve().parts
+    # Harnesses scan the folder a skill is installed in, so a symlinked skill counts where the link is.
+    parts = skill_path.absolute().parts
+    home = Path.home().absolute().parts
     for root in sorted(_KNOWN_ROOTS, key=lambda r: -len(r.split("/"))):
         size = len(root.split("/"))
         for index in range(len(parts) - size - 1, -1, -1):
             if "/".join(parts[index : index + size]) == root:
-                return root, len(parts) - (index + size) - 1
+                user = parts[:index] == home
+                return f"~/{root}" if user else root, len(parts) - (index + size) - 1
     return None, 0
 
 

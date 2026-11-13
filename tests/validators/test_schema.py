@@ -1058,10 +1058,16 @@ Example.
         [
             ("jane@example.com", "contains an email address"),
             ("Jane Doe jane@example.com", "contains an email address"),
+            # An intranet host has no dot, but the value is still only an email.
+            ("root@buildhost", "contains an email address"),
+            ("jane@example", "contains an email address"),
+            ("Jos\u00e9@example.com", "contains an email address"),
             ("Jane Doe <jane>", "angle brackets"),
             ("Jane Doe <jane@example.com> and team", "angle brackets"),
-            ("Jane\u202eDoe", "control or invisible formatting"),
-            ("Jane\tDoe", "control or invisible formatting"),
+            ("Jane\u202eDoe", "control, private-use, or bidirectional formatting"),
+            ("Jane\tDoe", "control, private-use, or bidirectional formatting"),
+            ("Jane\u2066Doe", "control, private-use, or bidirectional formatting"),
+            ("Jane\ue000Doe", "control, private-use, or bidirectional formatting"),
             ("---", "no letters or digits"),
             ("J" * 257, "longer than 256 characters"),
         ],
@@ -1123,7 +1129,79 @@ Example.
         assert len(findings) == 1
         assert findings[0].severity == Severity.HIGH
         assert "has no email address matching the required domain" in findings[0].message
+        assert findings[0].metadata.get("shape_ok") is False
         assert SchemaValidator(policy=policy).validate(member).passed
+
+    def test_domain_restriction_rejects_well_formed_author_outside_the_domain(self, tmp_path: Path):
+        """The other half of the domain branch: a correct shape in the wrong domain still blocks.
+
+        The domain check is the only blocking author rule an organization
+        policy keeps, so a regression that accepted any domain has to fail a
+        test rather than only the bare-name case above.
+        """
+        import re
+
+        from skillevaluator.models.result import Severity
+        from skillevaluator.validators.policy import ValidationPolicy, default_policy
+
+        policy = ValidationPolicy(
+            profile="org",
+            author_email_regex=re.compile(r"@example\.org>$"),
+            severity_overrides=dict(default_policy().severity_overrides),
+        )
+        outsider = self._write_skill(tmp_path, name="org-outsider", author_line="Jane Doe <jane@other.com>")
+
+        result = SchemaValidator(policy=policy).validate(outsider)
+
+        findings = [f for f in result.findings if f.check_name == "author_format"]
+        assert len(findings) == 1
+        assert findings[0].severity == Severity.HIGH
+        assert "Author email does not match the required domain" in findings[0].message
+        assert findings[0].metadata.get("shape_ok") is True
+        assert findings[0].metadata.get("domain_ok") is False
+        assert not result.passed
+
+    @pytest.mark.parametrize(
+        "author",
+        [
+            "Jane\u200cDoe",  # ZWNJ: required by Persian and Devanagari names
+            "Jane\u200dDoe",  # ZWJ
+            "Jane\u00adDoe",  # soft hyphen
+            "Jane\u0530Doe",  # unassigned in Unicode 16, assigned in some later version
+        ],
+    )
+    def test_joiners_and_unassigned_code_points_are_accepted_in_an_author(self, tmp_path: Path, author: str):
+        """The character guard rejects spoofing characters, not every Unicode category C.
+
+        ZWNJ/ZWJ are needed to render Persian, Arabic and Devanagari names, and
+        an unassigned code point would make the verdict depend on the running
+        interpreter's Unicode data rather than on the value.
+        """
+        from skillevaluator.validators.policy import load_profile
+
+        skill_dir = self._write_skill(tmp_path, name="joiner-author", author_line=f'"{author} <jane@example.com>"')
+
+        result = SchemaValidator(policy=load_profile("default")).validate(skill_dir)
+
+        assert not [f for f in result.findings if f.check_name.startswith("author")], result.errors
+        assert result.passed, result.errors
+
+    @pytest.mark.parametrize(
+        "author",
+        ["Jane Doe (@jdoe)", "Team (@org-handle)", "@jdoe", "Platform Team @ Example"],
+    )
+    def test_social_handles_are_not_mistaken_for_a_bare_email(self, tmp_path: Path, author: str):
+        """Widening the bare-email pattern must not turn a documented handle into a HIGH finding."""
+        from skillevaluator.models.result import Severity
+        from skillevaluator.validators.policy import load_profile
+
+        skill_dir = self._write_skill(tmp_path, name="handle-author", author_line=f'"{author}"')
+
+        result = SchemaValidator(policy=load_profile("default")).validate(skill_dir)
+
+        assert result.passed, result.errors
+        findings = [f for f in result.findings if f.check_name.startswith("author")]
+        assert [(f.check_name, f.severity) for f in findings] == [("author_without_email", Severity.INFO)]
 
     def test_default_validator_uses_public_profile(self, tmp_path: Path):
         """Constructing SchemaValidator() without a policy accepts public domains."""
@@ -1325,6 +1403,83 @@ Example.
         assert self._id_findings(result) == [("metadata_id_missing", "low")]
         assert result.summary.warnings == len(result.warnings) == 1
         assert result.summary.low_count == 1
+
+
+class TestCollectionAdvisoryIdentity:
+    """A preserved advisory must say which skill in the collection produced it.
+
+    Collection validation keeps the advisories of the skills that passed, but
+    a consumer reading the collection result also has to be able to attribute
+    each one, which a finding carried over unchanged does not allow.
+    """
+
+    @staticmethod
+    def _write_skill(root: Path, name: str, *, author_line: str, id_line: str | None) -> Path:
+        skill_dir = root / name
+        skill_dir.mkdir(parents=True)
+        id_block = f"  id: {id_line}\n" if id_line is not None else ""
+        (skill_dir / "SKILL.md").write_text(
+            f"""---
+name: {name}
+description: A skill used by the test suite to check collection-level advisory handling
+metadata:
+  author: {author_line}
+{id_block}---
+
+# {name}
+
+## Instructions
+
+1. Run.
+
+## Examples
+
+Example.
+""",
+            encoding="utf-8",
+        )
+        return skill_dir
+
+    def test_carried_advisory_names_its_skill(self, tmp_path: Path):
+        from skillevaluator.models.result import Severity
+        from skillevaluator.validators.policy import load_profile
+
+        skills = tmp_path / "skills"
+        self._write_skill(skills, "advisory-skill", author_line="Example Team", id_line="INVALID_ID")
+
+        skill_result = SchemaValidator(policy=load_profile("default")).validate(skills / "advisory-skill")
+        collection = SchemaValidator(policy=load_profile("default")).validate(tmp_path)
+
+        assert skill_result.passed, skill_result.errors
+        carried = {f.check_name: f for f in collection.findings if f.metadata.get("collection_skill")}
+        assert carried.keys() >= {"author_without_email", "metadata_id_format"}
+        assert carried["author_without_email"].severity == Severity.INFO
+        assert carried["metadata_id_format"].severity == Severity.MEDIUM
+        for finding in carried.values():
+            assert finding.metadata["collection_skill"] == "advisory-skill"
+            assert finding.file_path.startswith("[advisory-skill] ")
+        assert any("[advisory-skill] " in warning for warning in collection.warnings)
+        # An advisory from a passing child stays advisory: it cannot fail the collection.
+        assert collection.passed, collection.errors
+        assert not collection.errors
+        assert not [f for f in collection.findings if f.severity.is_error()]
+        # The roll-up must not claim everything passed while advisories exist.
+        rollup = next(d for d in collection.success_details if d.check_name == "advisory-skill")
+        assert rollup.metadata["advisory_findings"] == len(skill_result.findings)
+        assert "advisory finding(s)" in rollup.message
+
+    def test_collection_of_clean_skills_carries_no_advisories(self, tmp_path: Path):
+        """Negative case: nothing is invented for a skill with no findings of its own."""
+        skills = tmp_path / "skills"
+        self._write_skill(skills, "clean-skill", author_line="Jane Doe <jane@example.com>", id_line="clean-skill")
+
+        collection = SchemaValidator().validate(tmp_path)
+
+        assert collection.passed, collection.errors
+        assert not [f for f in collection.findings if f.metadata.get("collection_skill")]
+        rollup = next(d for d in collection.success_details if d.check_name == "clean-skill")
+        assert rollup.message == "All schema and structure checks passed"
+        assert rollup.metadata["advisory_findings"] == 0
 
 
 class TestMetadataIdPreviewBounds:

@@ -88,6 +88,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- The HTTP 404 message for an unavailable LLM model now says the provider's default
+  may not be callable with the key and points to `SKILL_EVAL_LLM_MODEL` (`llm-model`
+  in the reusable workflow); `ci/README.md` notes the same.
+- Update the managed SkillSpector scanner and Tier 1 CI image from 2.13.3 to
+  the latest release, 2.13.4, with matching verified wheel and source hashes.
+  This fixes false LP1 findings for scoped `allowed-tools` grants and improves
+  recovery of malformed LLM responses. SkillSpector 2.13.4 can still report
+  JSON files containing a `timeout` key as partial analysis; those scans
+  remain incomplete rather than being treated as successful.
+
 - The rubric judge's reference supplement budget is configurable through
   `SKILLEVALUATOR_RUBRIC_SUPPLEMENT_BYTES` and defaults to one mebibyte instead
   of 30,000 bytes, which a real linked guide graph outgrows. Required linked
@@ -169,11 +179,45 @@ All notable changes to SkillEvaluator are documented in this file.
   scores and runtime evidence to the returned run, retains partial scores when
   latest changes, and never borrows another run's scores for missing artifacts.
 
+- The behavior evidence gate no longer keeps a score for an expectation that
+  names an observed artifact but also asks for something only the final answer
+  could show. "Writes `report.py` and explains why each column was dropped" was
+  treated as settled by the artifact alone, so a case kept a score whose second
+  half was never checked. Every clause of an expectation must now name a
+  checkable artifact of its own; one that does not keeps the gate, as a wholly
+  prose expectation already did.
 - Accuracy and Behavior judge prompts clarify that explicit final-answer formats
   apply to the entire final response, independently of correct values in tool
   output or references. Scoring and thresholds are unchanged; an Accuracy format
   failure alone can still score 0.8 and pass the default threshold.
 
+- An author value is no longer rejected for containing a Unicode joiner. The
+  character guard matched all of category `C`, so ZWNJ (U+200C) and ZWJ
+  (U+200D), which Persian, Arabic and Devanagari names need to render, plus a
+  soft hyphen and any code point unassigned in the running interpreter's
+  Unicode data, all failed `SCHEMA.author_format` at HIGH under both bundled
+  profiles. The guard now rejects controls, surrogates and private-use code
+  points plus the bidirectional marks, embeddings, overrides, isolates and the
+  byte-order mark, and its message says so. An unassigned code point no longer
+  makes the verdict depend on the interpreter's Unicode version.
+- A bare email address whose domain has no dot, such as `root@buildhost`, is
+  reported as a malformed author rather than as "Author has no email address".
+  The bare-email pattern required a dotted domain, so an intranet address took
+  the plain-attribution path. The discriminator is now a word character on each
+  side of the `@`, which still leaves a social handle such as
+  `Jane Doe (@jdoe)`, a bare `@jdoe` or `Platform Team @ Example` alone, and
+  now also catches a non-ASCII local part.
+- An advisory carried from a passing skill into a collection result now names
+  the skill it came from, in its location and in `metadata.collection_skill`.
+  The findings were preserved but attributed to nothing, so a collection run
+  could not say which member produced one. The per-skill roll-up also stops
+  reporting "All schema and structure checks passed" next to a list of that
+  skill's advisories.
+- A `catalog-summary.json` entry lists the catalog-wide findings behind its
+  verdict under `catalog_findings`. The duplicate `metadata.id` check already
+  failed the member and bumped its `severity_counts`, but a catalog validates
+  each skill on its own, so nothing in that skill's output said what caused
+  either.
 - Folder validation preserves author and metadata ID advisories from passing
   skills. Catalog summaries include duplicate ID severity counts and consistent
   member verdicts, while explicitly labeling linked reports as single-skill

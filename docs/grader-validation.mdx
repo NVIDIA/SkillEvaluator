@@ -121,6 +121,13 @@ Scores at or above the metric threshold pass. Defaults are accuracy 0.8,
 goal accuracy 1.0, security/execution/efficiency/behavior 1.0, and overall 0.5
 (the Harbor pass threshold). Suite thresholds override defaults.
 
+Accuracy and Behavior judge prompts instruct the judge to check explicit
+final-answer formats against the entire final response. Correct values in tool
+output or references do not establish format compliance. This clarification
+does not add a critical-failure gate or establish improved semantic accuracy.
+Accuracy still averages five criteria: if only `FORMAT_FOLLOWED` is false, its
+score is 0.8 and passes the default accuracy threshold.
+
 `overall` is the score policy's dimension mean, compared with the default 0.5
 threshold. The shipped policy averages security, accuracy, skill execution,
 goal achievement (the mean of goal_accuracy and behavior_check), and skill

@@ -3399,10 +3399,11 @@ def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary)
             RagasAI(content=agent_text),
         ]
         # Collections metrics take the messages and reference as keywords, not a SingleTurnSample.
+        scorer_timeout = _remaining_judge_timeout(_resolve_judge_wall_time_budget())
         result = loop.run_until_complete(
             asyncio.wait_for(
                 metric.ascore(user_input=user_input, reference=ground_truth),
-                timeout=_remaining_judge_timeout(_resolve_judge_wall_time_budget()),
+                timeout=scorer_timeout,
             )
         )
     finally:

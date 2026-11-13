@@ -45,7 +45,8 @@ def test_aggregate_retains_every_tier_after_failure():
     workflow = load(".github/workflows/evaluate-all-tiers.yml")
     aggregate = workflow["jobs"]["aggregate"]
     assert aggregate["if"] == "${{ always() }}"
-    assert set(aggregate["needs"]) == {"tier1", "tier1-llm", "paid-tiers"}
+    # Eligibility tells the aggregate when the paid tiers were skipped for no skill change.
+    assert set(aggregate["needs"]) == {"eligibility", "tier1", "tier1-llm", "paid-tiers"}
     downloads = [s for s in aggregate["steps"] if s.get("uses", "").startswith("actions/download-artifact@")]
     assert [s["with"]["pattern"] for s in downloads] == ["skill-evaluator-tier[123]-attempt-*"]
     assert downloads[0]["with"]["path"] == "${{ runner.temp }}/skill-artifacts"

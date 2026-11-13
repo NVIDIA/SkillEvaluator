@@ -203,6 +203,10 @@ def analyze_cluster(client: LLMClient, cluster: ContentCluster) -> LLMVerdict:
     ``VALID_VERDICTS``, a confidence that is not a number from 0 to 1, or a
     rationale or suggestion that is not a bounded string raises
     :class:`~skillevaluator.inference.LLMClientError`.
+
+    The verdict's ``model`` is the client's ``model_used`` right after the
+    call. The client keeps it per thread, so concurrent clusters keep their
+    own answering model.
     """
     user_prompt = build_user_prompt(cluster)
     data = client.extract_json_from_response(
@@ -211,7 +215,12 @@ def analyze_cluster(client: LLMClient, cluster: ContentCluster) -> LLMVerdict:
         response_schema=VERDICT_JSON_SCHEMA,
         schema_name="dedup_verdict",
     )
-    return parse_bounded_llm_verdict(data, valid_verdicts=VALID_VERDICTS, context="Content deduplication LLM")
+    return parse_bounded_llm_verdict(
+        data,
+        valid_verdicts=VALID_VERDICTS,
+        context="Content deduplication LLM",
+        model=getattr(client, "model_used", None),
+    )
 
 
 def verdict_to_severity(verdict: LLMVerdict) -> Severity:

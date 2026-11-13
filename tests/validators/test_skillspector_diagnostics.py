@@ -152,3 +152,20 @@ def test_malformed_saved_stage_cannot_crash_json_or_retained_reports(stage):
     assert retained.is_incomplete
     assert retained.metadata["skillspector_completeness"]["records"][0]["stage"] == "unknown"
     assert "reference_missing" in HTMLReporter().render(retained)
+
+
+def test_limitation_only_partial_report_keeps_its_reason_in_the_error():
+    payload = json.loads((Path(__file__).parents[1] / "fixtures" / "skillspector-2.13.3-safe-no-llm.json").read_text())
+    payload["risk_assessment"]["recommendation"] = "CAUTION"
+    payload["analysis_completeness"].update(
+        is_complete=False,
+        status="partial",
+        ledger_exceptions=[],
+        limitations=["Binary assets were not inspected"],
+    )
+    result = ValidationResult(validator_name="Security Scan")
+
+    SecurityValidator._validate_skillspector_report(payload, 0, False, "skillspector", result)
+
+    assert result.status == "incomplete"
+    assert any("Limitation: Binary assets were not inspected" in error for error in result.errors)

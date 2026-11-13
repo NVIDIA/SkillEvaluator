@@ -3719,9 +3719,11 @@ class SecurityValidator(ValidatorBase):
                         result.metadata["skillspector_completeness"] = merge_completeness(
                             result.metadata.get("skillspector_completeness"), {"records": [diagnostic]}
                         )
-                        result.fail_gate(
-                            _skillspector_incomplete_analysis_error(completeness_status, ledger_exceptions)
-                        )
+                        message = _skillspector_incomplete_analysis_error(completeness_status, ledger_exceptions)
+                        if not ledger_exceptions and diagnostic["limitations"]:
+                            # No incomplete file to name: the limitation is the only stated reason.
+                            message = f"{message}. Limitation: {diagnostic['limitations'][0]}"
+                        result.fail_gate(message)
                         result.mark_scan_incomplete(stage_name)
 
         status = data.get("status")

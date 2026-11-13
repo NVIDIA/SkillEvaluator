@@ -1350,7 +1350,7 @@ def test_redaction_preserves_ordinary_newlines() -> None:
             id="long-flag-equals-escaped-quote",
         ),
         pytest.param(
-            f'curl -u "admin:{_ESCAPED_QUOTE_PASSWORD}" https://h.example/x',
+            f'curl -u "{"admin:" + _ESCAPED_QUOTE_PASSWORD}" https://h.example/x',
             "curl -u <redacted> https://h.example/x",
             id="user-flag-escaped-quote",
         ),

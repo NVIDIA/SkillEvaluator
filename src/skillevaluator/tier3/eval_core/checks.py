@@ -3344,10 +3344,10 @@ def _mask_argv_credentials(text: str) -> str:
         parts.append("<redacted>")
         pos = value.end()
     parts.append(text[pos:])
-    return _mask_argv_attached_password("".join(parts))
+    return _mask_attached_argv_values("".join(parts))
 
 
-def _mask_argv_attached_password(text: str) -> str:
+def _mask_attached_argv_values(text: str) -> str:
     """Mask an attached "-pVALUE" element that follows a login or MySQL client element."""
     parts: list[str] = []
     pos = 0

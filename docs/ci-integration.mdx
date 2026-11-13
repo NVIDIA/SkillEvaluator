@@ -243,7 +243,7 @@ When the exit code is not enough — dashboards, custom thresholds, badge genera
 | Field | Type | Contents |
 | --- | --- | --- |
 | `version` | string | SkillEvaluator version that wrote the report |
-| `target_path` | string or null | The validated target. `validate` records its absolute path, or its browsable URL when it is in a Git checkout with an `origin` remote. `tier1` and `tier2` record the path as given on the command line. The single-check commands such as `security-scan` give `null` |
+| `target_path` | string or null | The validated target. `validate` records its absolute path, or its browsable URL when it is in a Git checkout with an `origin` remote. `tier1` and `tier2` record the path as given on the command line; in a report that CI retains, the path is the skill's path relative to the repository root, never the runner's absolute path. The single-check commands such as `security-scan` give `null` |
 | `overall_passed` | boolean | `true` when every check passed |
 | `overall_status` | string | `passed`, `failed`, or `incomplete` (a required scanner produced no evidence) |
 | `publication_status` | string | `pass`, `neutral`, `fail`, or `incomplete`; use this field for publication eligibility |

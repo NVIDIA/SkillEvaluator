@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -244,11 +245,16 @@ def test_tier2_without_catalog_does_not_manufacture_a_similarity_pass(skill, tmp
     ("tier", "validator"),
     [("tier1", "Schema Validation"), ("tier2", "Context Deduplication")],
 )
+@pytest.mark.parametrize(
+    ("directory", "target"),
+    [("parent", "sample"), ("parent", "sample/"), ("skill", ".")],
+)
 def test_direct_tier_json_names_the_clean_skill_and_records_the_target_as_given(
-    tier, validator, skill, tmp_path, monkeypatch
+    tier, validator, directory, target, skill, tmp_path, monkeypatch
 ):
     """A clean result names no file and has no quality score, so the JSON
-    names the skill from the target path, which records the path as typed."""
+    names the skill from the target path, which records the path as typed.
+    ``.`` has no folder name of its own, so the folder it opens names the skill."""
     from skillevaluator.tier1 import commands as tier1_commands
     from skillevaluator.tier2 import commands as tier2_commands
 
@@ -260,15 +266,15 @@ def test_direct_tier_json_names_the_clean_skill_and_records_the_target_as_given(
         monkeypatch.setattr(tier2_commands, "run_context_optimization_check", lambda *_a, **_kw: _result(validator))
         monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
         monkeypatch.setenv("NVIDIA_API_KEY", "test-credential")
-    monkeypatch.chdir(skill.parent)
+    monkeypatch.chdir({"parent": skill.parent, "skill": skill}[directory])
 
-    result = CliRunner().invoke(cli, [tier, skill.name, *options, "-r", "json", "-o", str(tmp_path / "reports")])
+    result = CliRunner().invoke(cli, [tier, target, *options, "-r", "json", "-o", str(tmp_path / "reports")])
 
     assert result.exit_code == 0, result.output
     payload = _report(tmp_path / "reports")
     assert payload["skills"] == [{"name": "sample", "passed": True, "issue_count": 0}]
     assert [item["name"] for contributor in payload["contributors"] for item in contributor["items"]] == ["sample"]
-    assert payload["target_path"] == "sample"
+    assert payload["target_path"] == str(Path(target))
     number = tier.removeprefix("tier")
     assert payload["gating"]["tiers"] == {
         number: {

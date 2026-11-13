@@ -2043,7 +2043,9 @@ class HTMLReporter(ReporterBase):
         if self.target_path:
             tp = Path(self.target_path)
             if (tp / "SKILL.md").exists() or (tp / "skill.md").exists():
-                return tp.name
+                # ``.`` and ``..`` (``tier1 .`` from inside the skill folder) have
+                # no folder name of their own; the folder they open does.
+                return (tp.resolve().name if tp.name in {"", ".", ".."} else tp.name) or None
 
         return None
 

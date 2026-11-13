@@ -6,6 +6,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Canonical `comment-skill-checks.yml` reusable workflow and source template for
+  the standard scored Tier 1 PR comment without hosted reports. It verifies the
+  existing signed receipts and native evidence, reuses the shared report and
+  comment helpers, and needs no Pages configuration or history branch. Future
+  generated bundles include the template; archived bundles and the released
+  onboarding CLI retain their existing hosted publisher setup.
 - `harness` rules for where `SKILL.md` lives: casing, nested manifests, symlinked
   manifests and resources, OpenClaw symlink escapes, Codex scan depth, and files
   Hermes leaves out of its file list. Tier 1 `schema` now reports a symlinked or

@@ -449,6 +449,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Required Tier 3 judges recheck their wall-time deadline before accepting a
+  result, including when a dependency or logging handler swallowed the timeout
+  exception. Expired calls remain scoreless errors and restore their caller's
+  deadline context.
+
 - `skillevaluator view` no longer asks the LLM again when it regenerates a
   missing `report.html` for a Tier 3 run that saved its report feedback in
   `result.json`. The regenerated report shows the conclusions,

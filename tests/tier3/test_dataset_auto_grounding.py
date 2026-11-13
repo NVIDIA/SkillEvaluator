@@ -205,6 +205,84 @@ def test_auto_tool_only_trace_checks_nested_inferred_outcomes(tmp_path, monkeypa
         assert any(reason in value for value in case["review"]["reasons"])
 
 
+@pytest.mark.parametrize(
+    "proposed",
+    [
+        "The agent read SKILL.md and used the sample-skill skill.",
+        {"summary": ["The agent read SKILL.md and used the sample-skill skill."]},
+        [{"The agent read SKILL.md": {"answer": "42 invoices reconciled"}}],
+    ],
+    ids=["string", "nested-values", "nested-keys"],
+)
+@pytest.mark.parametrize("authored", [False, True])
+def test_auto_partial_trace_checks_unmatched_inferred_outcomes(tmp_path, monkeypatch, proposed, authored):
+    from skillevaluator.inference.client import LLMClient
+
+    skill = _skill(tmp_path, "\n")
+    output = skill / "evals" / "evals.json"
+    if authored:
+        output.write_text(
+            json.dumps(
+                {
+                    "skill_name": skill.name,
+                    "owner": "human",
+                    "evals": [
+                        {"id": "sample-skill-001", "prompt": "Reconcile invoice one", "expected_output": "Keep"},
+                        {
+                            "id": "sample-skill-002",
+                            "prompt": "Reconcile invoice two",
+                            "expected_output": proposed,
+                            "assertions": ["Keep the authored acceptance criterion"],
+                            "files": ["files/invoice-two.csv"],
+                        },
+                    ],
+                }
+            )
+        )
+    source = _trace(skill, tmp_path / "results")
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(tmp_path / "results"))
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    def complete(*_args, **_kwargs):
+        return json.dumps(
+            [
+                {
+                    "id": f"sample-skill-{number:03}",
+                    "question": f"Reconcile invoice {number}",
+                    "expected_skill": skill.name,
+                    "ground_truth": proposed if number == 2 else "42 invoices reconciled",
+                    "expected_behavior": ["Reports the invoice totals"],
+                }
+                for number in (1, 2, 3)
+            ]
+        )
+
+    monkeypatch.setattr(LLMClient, "completions", complete)
+    result = generate_dataset.main([str(skill), "--full", *(["--refine"] if authored else [])])
+
+    dataset = json.loads(output.read_text())
+    case = next(case for case in dataset["evals"] if case["id"] == "sample-skill-002")
+    assert result.dataset == dataset
+    assert dataset["generation"]["grounding"] == "trace"
+    assert dataset["generation"]["mode"] == "llm"
+    assert {
+        "kind": "trajectory",
+        "path": "trajectory.json",
+        "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+    } in dataset["generation"]["inputs"]
+    assert "no matching retained trajectory for this case" in case["review"]["reasons"]
+    assert case["expected_output"] == (proposed if authored else "")
+    if authored:
+        assert "Keep the authored acceptance criterion" in case["assertions"]
+        assert case["files"] == ["files/invoice-two.csv"]
+        assert dataset["owner"] == "human"
+    else:
+        assert any("skill use" in reason for reason in case["review"]["reasons"])
+        validation = CliRunner().invoke(cli, ["tier3", "validate", str(skill), "--strict", "--json"])
+        assert validation.exit_code == 0, validation.output
+
+
 @pytest.mark.parametrize("retained_trace", [False, True])
 def test_auto_does_not_treat_headings_alone_as_author_guidance(tmp_path, monkeypatch, retained_trace):
     skill = _skill(tmp_path, "# Evaluation\n\n## Questions\n\n## Behaviors\n\n## Notes\n")

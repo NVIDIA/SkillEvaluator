@@ -1951,8 +1951,6 @@ Agent-refined mode (--refine):
         skill_names = dict.fromkeys((skill_path.name, skill["name"]))
         skill_scripts = _script_file_names(skill)
         for case in cases:
-            if case["id"] not in auto_evidence[0]:
-                continue
             if _has_authored_ground_truth(authored_references.get(case["id"])):
                 continue
             observed_strings, truncated = evals_spec._string_leaves(case.get("ground_truth"))

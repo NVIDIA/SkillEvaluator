@@ -740,6 +740,9 @@ def test_retained_tier2_reports_apply_ci_advisory_policy(consumer, tmp_path, fai
     original = json.loads(document)
     assert original["overall_passed"] is False
     assert original["results"][0]["gating"] == {"tier": 2, "blocking": True}
+    assert original["gating"]["tiers"]["2"]["validator_policies"] == [
+        {"validator": "Context Deduplication", "blocking": True}
+    ]
     raw = tmp_path / "raw"
     raw.mkdir()
     (raw / "skillevaluator-tier2.json").write_text(document)
@@ -751,6 +754,9 @@ def test_retained_tier2_reports_apply_ci_advisory_policy(consumer, tmp_path, fai
     assert outcome == {"status": status, "metrics": {"findings": int(failed)}, "complete": not incomplete}
     retained = json.loads((destination / "skillevaluator-tier2.json").read_text())
     assert retained["gating"]["tiers"]["2"]["blocking"] is False
+    assert retained["gating"]["tiers"]["2"]["validator_policies"] == [
+        {"validator": "Context Deduplication", "blocking": False}
+    ]
     assert retained["overall_passed"] is True
     assert retained["overall_status"] == "passed"
     assert retained["results"][0]["gating"] == {"tier": 2, "blocking": False}
@@ -901,3 +907,39 @@ def test_tier_diagnostics_budget_is_shared_by_every_skill(consumer, tmp_path, mo
     assert not (second / "command.log").exists()
     index = json.loads((second / "index.json").read_text())
     assert index["omitted"] == [{"path": "command.log", "reason": "tier_limit"}]
+
+
+@pytest.mark.parametrize(
+    ("skills_changed", "advisory"), [("false", "skipped"), ("true", "incomplete"), (None, "incomplete")]
+)
+def test_paid_tiers_skipped_for_no_skill_change_are_reported_as_skipped(consumer, tmp_path, skills_changed, advisory):
+    """Only the trusted "false" turns missing Tier 2/3 evidence into a skip; Tier 1 stays required."""
+    from ci.run_tier1 import _summary
+
+    env = env_for(consumer)
+    if skills_changed is not None:
+        env["SKILL_EVAL_SKILLS_CHANGED"] = skills_changed
+    reports = tmp_path / "reports"
+    (reports / "tier1").mkdir(parents=True)
+    legacy = _summary([], None)
+    legacy.update(overall_status="skipped", execution={"commit": env["REPORT_COMMIT"]})
+    _, legacy["selection"] = run_tiers.select_changed_skills(
+        consumer, "skills", env["REPORT_COMMIT"], env["REPORT_COMMIT"]
+    )
+    (reports / "tier1/summary.json").write_text(json.dumps(legacy))
+    assert run_tiers.aggregate(reports, (1, 2, 3), env) == 0
+    rows = {row["tier"]: row for row in json.loads((reports / "ci-results.json").read_text())["tiers"]}
+    assert rows[2]["status"] == rows[3]["status"] == advisory
+    if advisory == "skipped":
+        assert "No file under a configured skill root changed" in rows[3]["reason"]
+    assert rows[1]["required"] is True
+
+
+def test_no_skill_change_never_excuses_missing_tier1_evidence(consumer, tmp_path):
+    env = env_for(consumer, SKILL_EVAL_SKILLS_CHANGED="false")
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    assert run_tiers.aggregate(reports, (1, 2), env) == 1
+    rows = {row["tier"]: row for row in json.loads((reports / "ci-results.json").read_text())["tiers"]}
+    assert rows[1]["status"] == "incomplete"
+    assert rows[2]["status"] == "skipped"

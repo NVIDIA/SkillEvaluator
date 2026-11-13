@@ -1506,7 +1506,7 @@
         {% set contributors = tier1_contributors %}
         {% set total_validators = ui_t1_executed %}
         {% set passed_count = ui_t1_pass %}
-        {% set skipped_count = tier1_display_summary.skipped_count %}
+        {% set skipped_count = ui_t1.get('skipped', tier1_display_summary.skipped_count) %}
         {% set failed_count = ui_t1.get('fail', tier1_display_summary.failed_count) %}
         {% set incomplete_count = ui_t1.get('incomplete', 0) %}
         {% set total_issues = tier1_display_summary.total_issues %}
@@ -2281,6 +2281,7 @@
             .t3-conclusion.fail { border-left-color:var(--danger-color); }
             .t3-agent-scorecards-row { display:grid; grid-template-columns:minmax(220px,0.85fr) repeat(2,minmax(260px,1fr)); gap:1.25rem; align-items:stretch; margin-top:0.75rem; }
             .t3-agent-scorecard-list { display:grid; gap:1rem; align-content:start; }
+            .t3-overview-lead .tolerated-baseline { display:block; margin-top:0.35rem; }
             .t3-overview-lead { background:linear-gradient(135deg,var(--bg),var(--bg-secondary)); border:1px solid var(--border-color); border-left:4px solid var(--secondary-color); border-radius:12px; padding:1rem 1.15rem; box-shadow:var(--shadow); color:var(--dark-text); line-height:1.55; margin:0 0 1rem; }
             .t3-dataset-provenance { margin:0 0 1rem; padding:0.7rem 0.9rem; border-left:4px solid var(--border-color); border-radius:6px; background:var(--bg-secondary); color:var(--dark-text); }
             .t3-dataset-provenance.warning { border-left-color:var(--warning-color); background:var(--badge-warn-bg); color:var(--badge-warn-tx); }
@@ -2433,6 +2434,7 @@
             .t3-truncation-notice { background:var(--badge-warn-bg); border:1px solid var(--warning-color); border-left:4px solid var(--warning-color); border-radius:10px; color:var(--dark-text); margin:0 0 1rem; padding:0.8rem 1rem; }
             .t3-truncation-notice strong { display:block; margin-bottom:0.3rem; }
             .t3-truncation-notice ul { display:flex; flex-wrap:wrap; gap:0.25rem 1rem; margin:0.35rem 0 0; padding-left:1.2rem; font-size:0.82rem; color:var(--text-secondary); }
+            .t3-coverage-notice ul { display:block; font-size:0.88rem; color:var(--dark-text); }
             /* Insight source tag (deterministic vs LLM) */
             .t3-insight-source { display:inline-block; padding:0.05rem 0.4rem; border-radius:4px; font-size:0.65rem; font-weight:800; text-transform:uppercase; letter-spacing:0.04em; vertical-align:middle; margin-left:0.35rem; }
             .insight-source-deterministic { background:var(--bg-secondary); color:var(--text-secondary); border:1px solid var(--border-color); }
@@ -2520,6 +2522,18 @@
         </div>
         {% endif %}
 
+        {% set t3_coverage_messages = (tier3.coverage_notices or []) | selectattr('message', 'string') | map(attribute='message') | select | list %}
+        {% if t3_coverage_messages %}
+        <div class="t3-truncation-notice t3-coverage-notice" id="tier3-coverage-notices" role="status">
+            <strong>Agent coverage notes</strong>
+            <ul>
+                {% for message in t3_coverage_messages %}
+                <li>{{ message }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
         {# ---------- Overview ---------- #}
         <section class="t3-page active" id="tier3-page-overview" role="tabpanel" aria-labelledby="tier3-tab-overview" tabindex="0">
             {% set t3_effect = (tier3.conclusions or []) | selectattr('title', 'equalto', 'Skill effect') | first %}
@@ -2550,6 +2564,9 @@
                 {% endif %}
                 {% endif %}
                 {% endif %}
+                {% if completed_agent %}{% for tolerated in completed_agent.baseline_timeouts_tolerated or [] %}
+                <span class="tolerated-baseline">Baseline incomplete for <strong>{{ tolerated.name }}</strong>{% if tolerated.scored_attempts is not none and tolerated.expected_attempts is not none %} ({{ tolerated.scored_attempts }} of {{ tolerated.expected_attempts }} attempts scored){% endif %}: kept by <code>--tolerate-baseline-timeouts</code>, so its baseline and uplift are not reported.</span>
+                {% endfor %}{% endif %}
             </div>
             {% if tier3_dataset_sufficiency and tier3_dataset_sufficiency.coverage_summary %}
             <p class="t3-dataset-sufficiency{% if tier3_dataset_sufficiency.status == 'provisional' %} warning{% endif %}"
@@ -2796,7 +2813,7 @@
                             <div class="t3-dim-hint">{{ "with-skill arm not run" if t3_baseline_only else "not scored with the skill" }}</div>
                             {% endif %}
                         </td>
-                        <td{% if dim.id == 'discoverability' and 'skill_execution' in baseline_na_metrics %} title="No-skill baseline: This arm has no skill under test installed, so there is no skill to discover or run"{% elif dim.id == 'efficiency' and 'skill_efficiency' in baseline_na_metrics %} title="No-skill baseline: This arm has no skill under test installed, so there is no skill to route to"{% endif %}>
+                        <td{% if dim.id == 'discoverability' and 'skill_execution' in baseline_na_metrics %} title="No-skill baseline: {{ 'skill_execution' | not_applicable_reason }}"{% elif dim.id == 'efficiency' and 'skill_efficiency' in baseline_na_metrics %} title="No-skill baseline: {{ 'skill_efficiency' | not_applicable_reason }}"{% endif %}>
                             {% if dim.baseline is not none %}{{ "%.2f" | format(dim.baseline) }}{% else %}N/A
                             <div class="t3-dim-hint">{{ "baseline not scored" if t3_best and t3_best.baseline is not none else "baseline not run" }}</div>{% endif %}
                         </td>
@@ -3174,6 +3191,27 @@
                 <p class="t3-section-hint">{{ name }} timing source: with skill {{ t3_timing_source_text(t3_timing_sources.with_skill or []) }}; baseline {{ t3_timing_source_text(t3_timing_sources.baseline or []) }}.{% if 'mixed_timing_sources' in (agent.resources.caveats or []) %} The measurements mix native and inferred timing, so LLM and tool seconds are not like-for-like.{% endif %}</p>
                 {% endif %}
                 {% endfor %}
+                {% if tier3_token_usage %}
+                <div id="t3-token-usage">
+                <p class="t3-section-hint"><strong>Token usage by case.</strong> {{ tier3_token_usage.note }}</p>
+                <div class="table-scroll"><table class="summary-table">
+                    <thead><tr><th>Agent</th><th>Case</th><th>With skill</th><th>Baseline</th><th>Change</th><th>Measured attempts</th></tr></thead>
+                    <tbody>
+                    {% for row in tier3_token_usage.rows %}
+                    <tr{% if not row.is_case %} style="font-weight:600"{% endif %}><td>{{ row.agent if row.agent is not none else 'All agents' }}</td><td>{{ row.case }}</td><td>{{ row.with_skill }}</td><td>{{ row.baseline }}</td><td>{{ row.change }}</td><td>{{ row.coverage }}</td></tr>
+                    {% endfor %}
+                    </tbody>
+                </table></div>
+                <p class="t3-section-hint">{{ tier3_token_usage.coverage_note }}</p>
+                {% if tier3_token_usage.reused_baseline %}<p class="t3-section-hint">{{ tier3_token_usage.reused_baseline }}</p>{% endif %}
+                {% for row in tier3_token_usage.rows if row.note %}
+                <p class="t3-section-hint">{{ row.agent if row.agent is not none else 'All agents' }}: {{ row.note }}</p>
+                {% endfor %}
+                {% for note in [tier3_token_usage.more_cases, tier3_token_usage.dropped_cases] if note %}
+                <p class="t3-section-hint">{{ note }}</p>
+                {% endfor %}
+                </div>
+                {% endif %}
                 </div>
             </details>
             {% endif %}
@@ -3436,7 +3474,7 @@
                             {% for eval_id in t3_eval_ids %}
                                 {% set s = scores.get(eval_id) %}
                                 {% set cell_na = s is none and eval_id in (trial.not_applicable_metrics or []) %}
-                                {% set cell_reason = reasons.get(eval_id) if s is not none else (("Not applicable: " ~ (eval_id | not_applicable_reason)) if cell_na else none) %}
+                                {% set cell_reason = reasons.get(eval_id) if s is not none else (("Not applicable: " ~ (eval_id | not_applicable_reason(row.condition == 'With skill'))) if cell_na else none) %}
                                 {% set cell_text = "%.2f" | format(s) if s is not none else ("N/A" if cell_na else "—") %}
                                 <td style="{% if s is not none %}background:{{ 'rgba(34,197,94,0.14)' if s >= 0.7 else ('rgba(234,179,8,0.14)' if s >= 0.4 else 'rgba(239,68,68,0.14)') }}; color:{{ 'var(--success-color)' if s >= 0.7 else ('var(--warning-color)' if s >= 0.4 else 'var(--danger-color)') }}; font-weight:600;{% elif cell_na %}color:var(--text-secondary);{% endif %}"{% if cell_na %} data-not-applicable="true"{% endif %}{% if cell_reason %} title="{{ eval_id | replace('_', ' ') | title }}: {{ cell_reason }}"{% endif %}>{% if cell_reason %}<span class="t3-score-reason">{{ cell_text }}</span>{% else %}{{ cell_text }}{% endif %}</td>
                             {% endfor %}

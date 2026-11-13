@@ -5994,6 +5994,269 @@ assert cap is not None and get_max_output_tokens(model) <= cap, (cap, get_max_ou
         assert result.metadata["incomplete_scans"] == ["llm-verification"]
         assert f"LLM finding verification was skipped (no verdicts returned: {cause})" in result.messages
 
+    def test_llm_verdicts_name_the_model_that_answered(self, tmp_path: Path) -> None:
+        """A verdict from a server-side fallback model is labeled with that model and its provider."""
+        result = ValidationResult()
+        for index in range(3):
+            result.add_structured_finding(
+                Finding(
+                    category="PII",
+                    severity=Severity.HIGH,
+                    check_name=f"finding-{index}",
+                    message=f"Finding {index}",
+                    file_path="SKILL.md",
+                ),
+                is_error=True,
+            )
+
+        with patch("skillevaluator.inference.FindingVerifier") as verifier_cls:
+            verifier_cls.return_value.verify.return_value = {
+                0: {"verdict": "false_positive", "confidence": "high", "rationale": "Documentation example."},
+                1: {"verdict": "true_positive", "confidence": "high", "rationale": "Real address."},
+            }
+            verifier_cls.return_value.provider = "anthropic"
+            verifier_cls.return_value.model_used = "claude-opus-4-8"
+            verifier_cls.return_value.last_failure = None
+            SecurityValidator(verify_llm=True)._verify_findings_with_llm(result, tmp_path)
+
+        by_check = {finding.check_name: finding for finding in result.findings}
+        labels = {"llm_provider": "anthropic", "llm_model_used": "claude-opus-4-8"}
+        assert by_check["finding-0"].severity == Severity.INFO
+        assert by_check["finding-0"].metadata.items() >= labels.items()
+        assert by_check["finding-1"].severity == Severity.HIGH
+        assert by_check["finding-1"].metadata.items() >= labels.items()
+        # A finding the verifier returned no verdict for names no provider or model either.
+        assert not by_check["finding-2"].metadata.keys() & labels.keys()
+
+    @pytest.mark.parametrize(
+        ("provider", "model_used", "expected"),
+        [
+            (
+                "anthropic",
+                "https://proxy.example.test/v1",
+                {"llm_provider": "anthropic", "llm_model_used": "unresolved"},
+            ),
+            ("anthropic", "sk-test", {"llm_provider": "anthropic", "llm_model_used": "unresolved"}),
+            (
+                "https://proxy.example.test",
+                "claude-opus-4-8",
+                {"llm_provider": "unresolved", "llm_model_used": "claude-opus-4-8"},
+            ),
+            ("anthropic", None, {}),
+        ],
+        ids=["url-model", "key-like-model", "url-provider", "no-model"],
+    )
+    def test_llm_verdict_labels_are_sanitized_or_left_out(
+        self, tmp_path: Path, provider: str, model_used: str | None, expected: dict[str, str]
+    ) -> None:
+        result = ValidationResult()
+        result.add_structured_finding(
+            Finding(category="PII", severity=Severity.HIGH, check_name="email", message="Email", file_path="SKILL.md"),
+            is_error=True,
+        )
+
+        with patch("skillevaluator.inference.FindingVerifier") as verifier_cls:
+            verifier_cls.return_value.verify.return_value = {
+                0: {"verdict": "true_positive", "confidence": "high", "rationale": "Real address."}
+            }
+            verifier_cls.return_value.provider = provider
+            verifier_cls.return_value.model_used = model_used
+            verifier_cls.return_value.last_failure = None
+            SecurityValidator(verify_llm=True)._verify_findings_with_llm(result, tmp_path)
+
+        metadata = result.findings[0].metadata
+        assert metadata["llm_verdict"] == "true_positive"
+        assert {key: metadata[key] for key in ("llm_provider", "llm_model_used") if key in metadata} == expected
+        reported = json.dumps(metadata)
+        for raw, label in ((provider, "llm_provider"), (model_used, "llm_model_used")):
+            if expected.get(label) == "unresolved":
+                assert raw not in reported
+
+    @pytest.mark.parametrize(
+        ("provider", "configured", "reply_model", "fallback_block", "expected"),
+        [
+            ("anthropic", "claude-opus-5-5", "claude-opus-4-8", True, "claude-opus-4-8"),
+            ("anthropic", "claude-opus-5-5", "claude-opus-5-5", False, "claude-opus-5-5"),
+            ("anthropic", "claude-opus-5-5", "claude-opus-5-5-20261101", False, "claude-opus-5-5-20261101"),
+            ("openai", "gpt-5.4-mini", "gpt-5.4-mini-snapshot", False, "gpt-5.4-mini"),
+        ],
+        ids=["anthropic-fallback", "anthropic-configured", "anthropic-reply-names-model", "openai-configured"],
+    )
+    def test_llm_verify_through_the_client_names_the_answering_model(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        provider: str,
+        configured: str,
+        reply_model: str,
+        fallback_block: bool,
+        expected: str,
+    ) -> None:
+        """The real verifier reports the model a Claude 5.5 reply names, and the configured model on OpenAI."""
+        pytest.importorskip(provider)
+        httpx = pytest.importorskip("httpx")
+        from skillevaluator.inference.finding_verifier import FindingVerifier
+
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", provider)
+        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", configured)
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        for name in ("SKILL_EVAL_LLM_BASE_URL", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL"):
+            monkeypatch.delenv(name, raising=False)
+        (tmp_path / "SKILL.md").write_text("# Example\n\nExample text.\n", encoding="utf-8")
+        result = ValidationResult()
+        result.add_structured_finding(
+            Finding(category="PII", severity=Severity.HIGH, check_name="email", message="Email", file_path="SKILL.md"),
+            is_error=True,
+        )
+        reply = json.dumps(
+            {"index": 0, "verdict": "false_positive", "confidence": "high", "rationale": "Documentation example."}
+        )
+
+        def handler(request):
+            usage = {"input_tokens": 1, "output_tokens": 1}
+            if provider == "openai":
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "chatcmpl-test",
+                        "object": "chat.completion",
+                        "created": 0,
+                        "model": reply_model,
+                        "choices": [
+                            {"index": 0, "message": {"role": "assistant", "content": reply}, "finish_reason": "stop"}
+                        ],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                    },
+                )
+            content = [{"type": "text", "text": reply}]
+            if fallback_block:
+                content.insert(0, {"type": "fallback", "from": {"model": configured}, "to": {"model": reply_model}})
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": reply_model,
+                    "content": content,
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": usage,
+                },
+            )
+
+        with (
+            httpx.Client(transport=httpx.MockTransport(handler)) as http_client,
+            patch("skillevaluator.inference.FindingVerifier", lambda: FindingVerifier(http_client=http_client)),
+        ):
+            SecurityValidator(verify_llm=True)._verify_findings_with_llm(result, tmp_path)
+
+        [finding] = result.findings
+        assert (finding.metadata["llm_verdict"], finding.severity) == ("false_positive", Severity.INFO)
+        assert finding.metadata["llm_provider"] == provider
+        assert finding.metadata["llm_model_used"] == expected
+
+    def test_llm_verify_docs_state_the_answering_model_rule_of_rubric_evaluation(self) -> None:
+        """Both labels come from the same client, so the two docs paragraphs state one rule."""
+        page = Path(__file__).parents[2] / "docs" / "tier1-validation.mdx"
+        paragraphs = [" ".join(block.split()) for block in page.read_text(encoding="utf-8").split("\n\n")]
+        [verify] = [text for text in paragraphs if "`llm_model_used`" in text and "`--llm-verify`" in text]
+        [rubric] = [text for text in paragraphs if "`llm_model_used`" in text and "`rubric_eval`" in text]
+        rule = (
+            "For a Claude 5.5 or later model on the native Claude API, the model is the one the reply names; "
+            "otherwise it is the configured model, unless a server-side `fallback` block in the reply names "
+            "another model."
+        )
+
+        assert rule in rubric
+        assert rule in verify
+        assert "Verdicts kept from a reply cut off at the output-token limit name the model that wrote that reply." in (
+            verify
+        )
+
+    def test_llm_verify_names_the_fallback_model_for_verdicts_kept_from_a_truncated_reply(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fallback model's reply cut off at the token limit still labels the verdicts kept from it."""
+        pytest.importorskip("anthropic")
+        httpx = pytest.importorskip("httpx")
+        from skillevaluator.inference.finding_verifier import FindingVerifier
+
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "claude-opus-5-5")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        for name in ("SKILL_EVAL_LLM_BASE_URL", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL"):
+            monkeypatch.delenv(name, raising=False)
+        (tmp_path / "SKILL.md").write_text("# Example\n\nExample text.\n", encoding="utf-8")
+        result = ValidationResult()
+        for index in range(2):
+            result.add_structured_finding(
+                Finding(
+                    category="PII",
+                    severity=Severity.HIGH,
+                    check_name=f"finding-{index}",
+                    message=f"Finding {index}",
+                    file_path="SKILL.md",
+                ),
+                is_error=True,
+            )
+        complete = json.dumps(
+            {"index": 0, "verdict": "false_positive", "confidence": "high", "rationale": "Documentation example."}
+        )
+        reply = complete + '\n{"index": 1, "verdict": "true_pos'
+
+        def handler(request):
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-opus-4-8",
+                    "content": [
+                        {"type": "fallback", "from": {"model": "claude-opus-5-5"}, "to": {"model": "claude-opus-4-8"}},
+                        {"type": "text", "text": reply},
+                    ],
+                    "stop_reason": "max_tokens",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            )
+
+        with (
+            httpx.Client(transport=httpx.MockTransport(handler)) as http_client,
+            patch("skillevaluator.inference.FindingVerifier", lambda: FindingVerifier(http_client=http_client)),
+        ):
+            SecurityValidator(verify_llm=True)._verify_findings_with_llm(result, tmp_path)
+
+        by_check = {finding.check_name: finding for finding in result.findings}
+        downgraded = by_check["finding-0"]
+        assert (downgraded.severity, downgraded.metadata["downgraded"]) == (Severity.INFO, True)
+        assert downgraded.metadata["llm_provider"] == "anthropic"
+        assert downgraded.metadata["llm_model_used"] == "claude-opus-4-8"
+        # The cut-off verdict is not kept, so that finding stays unverified and unlabeled.
+        assert by_check["finding-1"].severity == Severity.HIGH
+        assert not any(key.startswith("llm_") for key in by_check["finding-1"].metadata)
+        assert result.metadata["incomplete_scans"] == ["llm-verification"]
+
+    def test_importing_the_security_validator_leaves_the_llm_client_unloaded(self) -> None:
+        """--llm-verify loads the LLM client only when it runs."""
+        script = (
+            "import sys\n"
+            "import skillevaluator.validators.security\n"
+            "print(sorted(name for name in sys.modules if name.startswith('skillevaluator.inference')))\n"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=True,
+        )
+
+        assert completed.stdout.strip() == "[]"
+
     def test_validate_security_only(self, sample_skill_dir: Path):
         """Test validate_security_only method runs only skillspector scan."""
         validator = SecurityValidator()

@@ -107,7 +107,7 @@ def select_skills(workspace: Path, env: dict) -> tuple[list[Path], dict]:
         raise ConfigurationError("The evaluated commit must match the checkout HEAD.")
     if base and mode == "auto":
         selected, selection = select_changed_skills(workspace, roots, base, head)
-        # Tier 1 applies the same setup predicate, so every tier selects the same skills.
+        # Tier 1 applies the same setup predicate, so every tier that runs selects the same skills.
         changed = _paths(_git(workspace, "diff", "--name-only", "-z", "--no-renames", f"{base}...{head}", "--"))
         if not setup_changed(changed):
             return selected, selection
@@ -337,7 +337,16 @@ def _retain(raw: Path, destination: Path, tier: int, tokens: set[str], skill: Pa
         for result, row in zip(results, report["results"], strict=True):
             result.metadata["gating"] = {**result.metadata.get("gating", {}), "tier": 2, "blocking": False}
             row["gating"] = result.metadata["gating"]
-        report["gating"] = {"tiers": {"2": {"blocking": False, "validators": [r.validator_name for r in results]}}}
+        report["gating"] = {
+            "tiers": {
+                "2": {
+                    "blocking": False,
+                    "validators": [r.validator_name for r in results],
+                    # Keep the reporter's per-check policy list, now advisory too.
+                    "validator_policies": [{"validator": r.validator_name, "blocking": False} for r in results],
+                }
+            }
+        }
     run_status = resolve_run_status(results)
     if tier == 2:
         report.update(overall_passed=run_status.headline.value == "passed", overall_status=run_status.headline.value)
@@ -730,6 +739,16 @@ def aggregate(reports: Path, tiers: tuple[int, ...], env: dict) -> int:
             _keep_selected(row, selection.get("selected") if isinstance(selection, dict) else None)
             if tier in recorded:
                 row["source_attempt"] = recorded[tier]
+        elif not required and env.get("SKILL_EVAL_SKILLS_CHANGED") == "false":
+            # The trusted workflow decided no skill changed, so this paid
+            # advisory tier did not run. That is a skip, not a failed job.
+            row = {
+                "tier": tier,
+                "required": False,
+                "status": "skipped",
+                "skills": [],
+                "reason": "No file under a configured skill root changed; this paid tier did not run.",
+            }
         else:
             row = {
                 "tier": tier,

@@ -525,6 +525,8 @@ class ValidationResult:
         Call after mutating finding severities (e.g. LLM verification downgrade)
         so that result state is consistent with the actual finding objects.
         Independent gate failures remain errors regardless of those severities.
+        HIGH and CRITICAL findings are errors, and so is a MEDIUM finding whose
+        metadata sets ``fail_on_medium`` (a dependency audit with that option).
         """
         self.errors.clear()
         self.warnings.clear()
@@ -540,7 +542,8 @@ class ValidationResult:
             )
             self.summary.tally_severity(sev)
 
-            is_error = sev in (Severity.CRITICAL, Severity.HIGH)
+            fail_on_medium = isinstance(finding.metadata, dict) and finding.metadata.get("fail_on_medium") is True
+            is_error = sev.is_error(fail_on_medium=fail_on_medium)
             legacy_msg = finding.to_legacy_string()
             if is_error:
                 self.errors.append(legacy_msg)
@@ -549,6 +552,30 @@ class ValidationResult:
             else:
                 self.warnings.append(legacy_msg)
                 self.summary.warnings += 1
+
+    def _finding_legacy_lines(self) -> set[str]:
+        """Return the legacy error and warning lines that only repeat a structured finding."""
+        represented = {finding.to_legacy_string() for finding in self.findings}
+        for finding in self.findings:
+            # merge_with_prefix puts skill labels before legacy messages but inside
+            # structured finding paths. Recognize both forms, including nested merges.
+            location = finding.location
+            prefix = ""
+            while location.startswith("[") and "] " in location:
+                label, _, location = location.partition("] ")
+                prefix += label + "] "
+                represented.add(f"{prefix}{finding.tag} {finding.message} in {location}")
+        return represented
+
+    def independent_errors(self) -> list[str]:
+        """Return errors no structured finding repeats, such as execution diagnostics."""
+        represented = self._finding_legacy_lines()
+        return [error for error in self.errors if error not in represented]
+
+    def independent_warnings(self) -> list[str]:
+        """Return warnings no structured finding repeats, such as why a scanner did not complete."""
+        represented = self._finding_legacy_lines()
+        return [warning for warning in self.warnings if warning not in represented]
 
     def add_error(self, message: str) -> None:
         """Add a legacy error string and mark validation as failed.

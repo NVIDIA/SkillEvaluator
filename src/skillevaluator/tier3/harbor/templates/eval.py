@@ -3236,17 +3236,17 @@ def _ragas_request_text(body):
 
 
 def _ragas_reply_text(body):
-    """Return the judge's answer in one chat-completions reply: its text and the tool-call arguments RAGAS parses.
+    """Return the judge's answer in one chat-completions reply: its text, or the tool-call arguments RAGAS parses.
 
-    A reply with neither, such as a refusal or a filtered reply, is returned
-    whole, so the refusal or the finish reason is kept.
+    A reply with neither, such as a refusal or a content-filter stop, is
+    returned whole, so the refusal or the finish reason is kept.
     """
     try:
         message = json.loads(body)["choices"][0]["message"]
-        answer = [str(message["content"])] if message.get("content") else []
-        answer.extend(str(call["function"]["arguments"]) for call in message.get("tool_calls") or ())
-        if answer:
-            return "\n".join(answer)
+        if message.get("content"):
+            return str(message["content"])
+        if message.get("tool_calls"):
+            return "\n".join(str(call["function"]["arguments"]) for call in message["tool_calls"])
     except (ValueError, LookupError, TypeError, AttributeError):
         pass
     return body.decode("utf-8", "replace")

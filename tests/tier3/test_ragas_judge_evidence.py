@@ -521,17 +521,6 @@ def test_ragas_reply_without_text_or_tool_calls_is_saved_as_the_reply_body(
     assert exchange["reply_chars"] == len(exchange["reply"])
 
 
-def test_ragas_reply_keeps_tool_call_arguments_next_to_text(verifier: ModuleType) -> None:
-    reply = _tool_call_reply('{"verdict": 0}', content="Calling the verdict tool.")
-    two_calls = _tool_call_reply('{"verdict": 0}')
-    two_calls["choices"][0]["message"]["tool_calls"].append(
-        {"id": "call-2", "type": "function", "function": {"name": "Verdict", "arguments": '{"verdict": 1}'}}
-    )
-
-    assert verifier._ragas_reply_text(json.dumps(reply).encode()) == 'Calling the verdict tool.\n{"verdict": 0}'
-    assert verifier._ragas_reply_text(json.dumps(two_calls).encode()) == '{"verdict": 0}\n{"verdict": 1}'
-
-
 @pytest.mark.parametrize("broken", ["request-parser", "http-client"])
 def test_ragas_evidence_failure_never_changes_the_score(
     verifier: ModuleType, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, broken: str

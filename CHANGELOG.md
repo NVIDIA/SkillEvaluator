@@ -54,10 +54,10 @@ All notable changes to SkillEvaluator are documented in this file.
   `Authorization` or API-key header value or a flag value after an escaped
   tab (`\t`), also when the header or flag starts a line, for a flag value in
   escaped quotes (`--token \"value\"`), and for a quoted header or flag value
-  escaped twice, as when a RAGAS prompt repeats an earlier tool call. RAGAS
-  `replied` entries now keep the tool-call arguments when the reply also has
-  text, and save the whole reply body when it has neither, such as a refusal
-  or a content-filter stop, instead of an empty reply.
+  escaped twice, as when a RAGAS prompt repeats an earlier tool call. A RAGAS
+  `replied` entry for a reply with no text and no tool call, such as a
+  refusal or a content-filter stop, now saves the whole reply body instead of
+  an empty reply.
 
 ## 0.9.0 - 2026-11-13
 

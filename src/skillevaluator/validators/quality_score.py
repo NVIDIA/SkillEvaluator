@@ -28,6 +28,8 @@ import yaml
 
 from skillevaluator.constants import (
     EXECUTABLE_SKILL_DIRS,
+    QUALITY_CHARS_PER_TOKEN,
+    QUALITY_DEFAULT_MIN_SCORE,
     QUALITY_EXCLUDED_DIRS,
     QUALITY_RECOMMENDED_MAX_TOKENS,
     QUALITY_RESERVED_NAMES,
@@ -248,7 +250,7 @@ class QualityScoreValidator(ValidatorBase):
     existing SkillEvaluator SchemaValidator checks.
     """
 
-    def __init__(self, min_score: int = 70, quality_config: Path | None = None) -> None:
+    def __init__(self, min_score: int = QUALITY_DEFAULT_MIN_SCORE, quality_config: Path | None = None) -> None:
         self.min_score = min_score
         self.quality_config, self.quality_config_provenance = load_quality_config_with_provenance(quality_config)
 
@@ -836,12 +838,12 @@ class QualityScoreValidator(ValidatorBase):
     ) -> None:
         dim = qs.efficiency
 
-        # Token estimates
-        qs.total_tokens = len(content) // 4
+        # Token estimates (characters / QUALITY_CHARS_PER_TOKEN); not a tokenizer count
+        qs.total_tokens = len(content) // QUALITY_CHARS_PER_TOKEN
         fm_match = FRONTMATTER_PATTERN.match(content)
         if fm_match and _frontmatter:
-            qs.frontmatter_tokens = len(fm_match.group(1)) // 4
-            qs.instructions_tokens = len(fm_match.group(2)) // 4
+            qs.frontmatter_tokens = len(fm_match.group(1)) // QUALITY_CHARS_PER_TOKEN
+            qs.instructions_tokens = len(fm_match.group(2)) // QUALITY_CHARS_PER_TOKEN
 
         # The token budget is a recommendation: exceeding it is advisory (MEDIUM),
         # and the deduction still counts toward the --min-score gate.
@@ -850,7 +852,8 @@ class QualityScoreValidator(ValidatorBase):
                 15,
                 "warning",
                 (
-                    f"Large skill ({qs.total_tokens} tokens, recommended max <{QUALITY_RECOMMENDED_MAX_TOKENS}). "
+                    f"Large skill (~{qs.total_tokens} estimated tokens at {QUALITY_CHARS_PER_TOKEN} characters per token, "
+                    f"recommended max <{QUALITY_RECOMMENDED_MAX_TOKENS}; a real tokenizer may count more). "
                     f"Per agentskills.io, SKILL.md should be concise (~500 lines) — "
                     f"large skill bodies increase token cost after invocation; long or unfocused "
                     f"top-level descriptions can degrade agent routing accuracy"

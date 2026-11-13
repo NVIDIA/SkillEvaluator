@@ -42,6 +42,20 @@ def _plugin(root):
     return root
 
 
+@pytest.mark.parametrize("backend", ["nemo-gym", "gym"])
+def test_plugin_backend_is_rejected_before_preparation_or_execution(tmp_path, monkeypatch, backend):
+    root = _plugin(tmp_path / "plugin")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Unsupported plugin backend reached preparation or execution")
+
+    monkeypatch.setattr("skillevaluator.tier3.plugin_prepare.prepare_runtime_package", forbidden)
+    monkeypatch.setattr(EvaluationService, "evaluate", forbidden)
+
+    with pytest.raises(ValueError, match=r"Plugin evaluation requires.*harbor"):
+        EvaluationService().evaluate_plugin(EvaluationOptions(root, agents="claude-code", backend=backend))
+
+
 def test_public_workflow_uses_real_preparation_and_cleans_up(tmp_path, monkeypatch):
     from skillevaluator.tier3 import plugin_execution
 

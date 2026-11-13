@@ -14,7 +14,7 @@ skillevaluator validate ./my-plugin --tiers 1 -r cli,json,html
 ```
 
 The base installation provides manifest and component checks. Complete scanner
-coverage needs the same external scanners as [skill validation](tier1-validation.mdx).
+coverage needs the same external scanners as [skill validation](/skills/skillevaluator/tier1-validation).
 A missing scanner remains incomplete.
 
 Automatic detection recognizes these profiles, in selection order:
@@ -72,14 +72,16 @@ skillevaluator tier2 similarity-check ./my-plugin --catalog ./catalog.json
 ```
 
 Tier 2 checks duplicate references, member overlap, and local catalog comparisons
-using [existing comparison machinery](tier2-deduplication.mdx). Plugin comparisons
+using [existing comparison machinery](/skills/skillevaluator/tier2-deduplication). Plugin comparisons
 are advisory; unsafe inputs fail closed. Existing v1 skill catalogs remain readable.
 Plugin catalogs compare descriptions; `--full-body` is refused for this path.
 
 ## Run supported agents
 
-Install the `tier3` extra and configure [credentials](configuration.mdx) and a
-[sandbox](agents-and-sandboxes.mdx). Author and review an `evals/evals.json`,
+Plugin runtime assessment requires Harbor (`--backend harbor`, the default).
+
+Install the `tier3` extra and configure [credentials](/skills/skillevaluator/configuration) and a
+[sandbox](/skills/skillevaluator/agents-and-sandboxes). Author and review an `evals/evals.json`,
 JSONL, or YAML dataset under the plugin root, or provide datasets in its member
 skills. A root dataset takes precedence. Authored config and custom graders are
 retained during staging. Native Harbor task directories are currently unsupported
@@ -145,7 +147,7 @@ eligibility is not reassessed from a display snapshot.
 File formats use the `plugin-report` basename; the benchmark card is `BENCHMARK.md`.
 JSON uses `plugin_runtime`; SARIF uses `runs[0].properties.pluginRuntime`. Unknown
 usage stays unknown, recorded zero remains zero, and bounded sections retain
-omission counts. See [Reports & Results](reports.mdx).
+omission counts. See [Reports & Results](/skills/skillevaluator/reports).
 
 ## Evidence limits
 

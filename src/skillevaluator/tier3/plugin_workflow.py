@@ -59,6 +59,7 @@ def evaluate_plugin(
     from skillevaluator.provider_config import resolve_llm_provider
     from skillevaluator.tier3.commands import parse_agents, resolve_agents, validate_agents
     from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS
+    from skillevaluator.tier3.nemo_gym.backend import HARBOR_BACKEND, normalize_backend
     from skillevaluator.tier3.plugin_comparisons import ComparisonOptions
     from skillevaluator.tier3.plugin_evidence import EvidenceOptions
     from skillevaluator.tier3.plugin_execution import evaluate_prepared_plugin
@@ -66,6 +67,8 @@ def evaluate_plugin(
     from skillevaluator.tier3.results_location import plugin_results_directory
     from skillevaluator.validators.private_plugin_schema import validate_inventory_schema
 
+    if normalize_backend(options.backend) != HARBOR_BACKEND:
+        raise ValueError("Plugin evaluation requires --backend harbor; other backends cannot load plugin components")
     if options.skip_with_skill:
         raise ValueError("Plugin runs require the with-plugin arm; omit --skip-with-skill")
     inventory = plugin_inventory_for_root(

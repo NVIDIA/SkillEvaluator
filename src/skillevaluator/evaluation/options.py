@@ -65,6 +65,8 @@ class EvaluationOptions:
     max_cost_usd: float | None = None
     price_file: Path | None = None
     tolerate_baseline_timeouts: bool | None = None
+    # Tier 3 execution backend ("harbor" or "nemo-gym"); appended to keep positional order stable.
+    backend: str = "harbor"
 
     def engine_kwargs(self) -> dict[str, Any]:
         """Return keyword arguments (excluding ``skill_path``) for the engine."""
@@ -84,7 +86,7 @@ class DatasetOptions:
     dry_run: bool = False
     force: bool = False
     prompt: Path | None = None
-    grounding: str = "skill"
+    grounding: str = "auto"
     refine: bool = False
     from_results: Path | None = None
     results_dir: Path | None = None

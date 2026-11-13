@@ -1917,6 +1917,7 @@ def test_catalog_child_argv_forwards_every_validate_option() -> None:
     from skillevaluator.cli import _catalog_child_argv_from_ctx, validate
 
     not_forwarded = {
+        "catalog_root": "each child is given the folder it was found in, not the parent's own value",
         "target_path": "the child is given one skill directory, not the catalog root",
         "content_type": "the child re-detects the type of the single skill it is handed",
         "workers": "forwarding it would make each child fan out again",

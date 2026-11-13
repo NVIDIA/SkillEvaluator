@@ -639,9 +639,76 @@ All notable changes to SkillEvaluator are documented in this file.
   so source-directory aliases (including macOS `/tmp`) retain the same relative
   file identities and hashes while files outside the source root are rejected.
 
+- A Tier 1 security scan no longer stops as `INCOMPLETE` with `skillspector
+  JSON field 'analysis_completeness' reports incomplete analysis (status
+  'partial')` when the skill's instructions name a file that SkillSpector did
+  not scan, such as a file the skill writes at run time or a source file
+  elsewhere in the repository. SkillSpector v2.12.0 to v2.13.3 record such a
+  reference as a nonfatal `reference_missing` row, and v2.10 and v2.11 as
+  `reference_unresolved`. When these references are the report's only gaps, or
+  the only gaps besides accepted referenced images, the scan now passes with a
+  warning that names the file and line of up to three of them. A v2.13.3
+  report whose only gaps are such references, which the missing-path reference
+  caveat above accepts from the report alone, now also has to meet the
+  conditions below whenever the scan has a known target, as through
+  `validate`, `tier1` or `security-scan`, and it keeps that caveat instead of
+  this warning. Each row must be in a regular, single-link file that the
+  report lists once and that is inside the skill and not reached through a
+  symlink, and the report's `references` list must record a `missing`
+  reference on that line. The line must not name a symlink, a file the report
+  does not list, a directory left out of the scanned copy, such as `versions/`
+  or `node_modules/`, anything in it, or a directory that holds any of these,
+  also after Markdown escapes, character references and percent-escapes are
+  decoded, or through a shell glob, expansion or quotes, a zsh group, numeric
+  range, globbing flag or `EXTENDED_GLOB` operator, a bash extended glob, a
+  cmd.exe `^` escape, variable or batch parameter such as `%DIR%`, `!DIR!` or
+  `%~dp0`, a PowerShell backtick escape, a `\` separator or a Windows 8.3
+  short name such as `NODE_M~1`. Only that line is read, and a command in it
+  is not run, so a name on another line or one that a command prints, such as
+  the output of a span in backticks, is not detected: the check keeps an
+  instruction that names a left-out file `INCOMPLETE`, but does not catch a
+  skill written to hide one. Inside `.git`, Git's own files and directories,
+  such as `HEAD`, `config` or `refs`, do not count, but hooks other than
+  `*.sample` templates and any other file there do. A lone file such as
+  `SKILL.md` is scanned on its own, so a line that names a file beside it
+  keeps the scan `INCOMPLETE`. Tier 3 output in the default
+  `<skill>/evals/results` location, such as `results`, `report.html` or
+  `summary.json`, or with `--harbor-keep-jobs` a copy of every bundled file,
+  counts as not inspected too, so a line that names it keeps the scan
+  `INCOMPLETE` after a Tier 3 run, although it passed before. Keeping results
+  outside the skill with `--results-dir` or `SKILLEVALUATOR_RESULTS_DIR`
+  avoids that. Every missing reference in a skill scanned on its own inside a
+  folder or plugin, such as `security-scan` or `validate` on a folder of
+  skills, or `validate` on a plugin, also keeps that skill's scan
+  `INCOMPLETE`. A reference that matches several bundled files
+  (`reference_unresolved` from v2.12.0), a fatal or other ledger row, an
+  uninspected file, a degraded analyzer, a limitation, or fewer findings
+  counted after filtering than before still leaves the scan `INCOMPLETE`.
+
+- Missing-reference coverage checks retain standalone shell wildcards while ignoring leading Markdown bullets, so commands cannot hide uninspected files.
+
 - Estimate Tier 1 instruction tokens from the parsed Markdown body, so `---`
   inside YAML values or comments does not count frontmatter as instructions.
   Body separators without valid frontmatter no longer produce a spurious estimate.
+
+- A Tier 1 security scan with SkillSpector v2.13.4 or later no longer stops as
+  `INCOMPLETE` with `skillspector JSON field 'analysis_completeness.status' is
+  not recognized` when the skill's instructions name a file that the skill
+  does not bundle. These releases report such a scan as
+  `complete_with_caveats` instead of `partial`. SkillEvaluator now accepts the
+  caveats under the same conditions as the missing references above and shows
+  the same missing-reference warning, and checks the report's findings as in
+  any other complete scan. A caveat that fails one of those conditions, such
+  as a line that names a file left out of the scanned copy, leaves the scan
+  `INCOMPLETE` and, as for a `partial` report, still reports the findings.
+  Unlike the v2.13.3 missing-path reference caveat, these caveats are never
+  accepted from the report alone, so they leave a scan without a known target
+  `INCOMPLETE`, and an accepted report carries no
+  `skillspector_reference_caveats` entry. A report with that status and no
+  caveat, or with a caveat that is not a nonfatal `reference_missing` row in
+  phase `reference_resolution`, is not trusted: the scan is `INCOMPLETE`
+  without its findings, as with `complete_with_caveats` from an earlier
+  release.
 
 - A PII finding no longer keeps its `evidence_sha256` after CI redaction masks
   a credential inside the value the finding reports. In 0.8.0 the finding kept

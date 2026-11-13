@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import urlparse
 
-from jinja2 import BaseLoader, Environment
+from jinja2 import BaseLoader, Environment, pass_context
 
 from skillevaluator import __version__
 from skillevaluator.constants import (
@@ -99,6 +99,7 @@ from skillevaluator.reporting.presentation import (
 from skillevaluator.reporting.run_status import Status, result_status, result_tier
 from skillevaluator.reporting.tier2_views import tier2_scope_views
 from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
+from skillevaluator.reporting.tier3_token_usage import token_usage_table
 from skillevaluator.reporting.trial_charts import steps_by_case_chart
 from skillevaluator.skillspector_provenance import skillspector_provenance_records
 from skillevaluator.source_identity import recorded_evaluated_source
@@ -131,6 +132,9 @@ _TIER3_JSON_SAFE_PRIORITY_KEYS = (
     "schema_version",
     "verdict",
     "execution_status",
+    # A few hundred bytes that explain a failed agent arm. Walked before the
+    # bulky keys, so the bounded HTML preview keeps every message whole.
+    "coverage_notices",
     "summary",
     "correct_answers",
     "skill_name",
@@ -501,11 +505,12 @@ def _tier3_score_reasons(value: object) -> dict[str, str]:
     return reasons
 
 
-def _tier3_not_applicable_reason(metric: object) -> str:
-    """Return why a Tier 3 metric can be N/A, for the tooltip of an N/A drill-down cell."""
-    from skillevaluator.tier3.harbor.metrics import NOT_APPLICABLE_REASONS
+@pass_context
+def _tier3_not_applicable_reason(_context: Any, metric: object, with_skill: bool = False) -> str:
+    """Describe N/A metrics at render time, keeping Tier 3 imports out of base template compilation."""
+    from skillevaluator.tier3.harbor.metrics import not_applicable_reason
 
-    return NOT_APPLICABLE_REASONS.get(str(metric), "Not applicable to this eval case")
+    return not_applicable_reason(str(metric), with_skill=with_skill is True)
 
 
 def _tier3_text_mapping(value: object) -> dict[str, str]:
@@ -1298,6 +1303,16 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
         payload[key] = _tier3_identifier_list(payload.get(key))
     for key in ("execution_errors", "suggestions"):
         payload[key] = _string_list(payload.get(key))
+    # The template lists each notice's message; drop entries without one.
+    coverage_notices = [
+        notice
+        for notice in _dict_list(payload.get("coverage_notices"))
+        if isinstance(notice.get("message"), str) and notice["message"]
+    ]
+    if coverage_notices:
+        payload["coverage_notices"] = coverage_notices
+    else:
+        payload.pop("coverage_notices", None)
     # ``skill_name`` was already validated above as an exact NFC filesystem
     # identity. Do not pass it through compatibility-normalizing display text.
     for key in ("best_agent", "verdict", "execution_status"):
@@ -1462,7 +1477,9 @@ def _bounded_tier3_preview(payload: dict[str, Any] | None) -> tuple[dict[str, An
     if not payload:
         return payload, {}
     # A private copy: the caller embeds ``payload`` itself as the canonical data.
-    slim = json.loads(_compact_json(payload))
+    # The token usage table reads the full payload, so ``token_usage`` neither
+    # triggers the preview nor spends its budget.
+    slim = json.loads(_compact_json({key: value for key, value in payload.items() if key != "token_usage"}))
     # Activation diagnostics belong to the canonical export. The template does
     # not render them, so duplicate per-trial copies must not spend overview or
     # failure-reason space before the preview budget is applied.
@@ -3594,6 +3611,11 @@ class HTMLReporter(ReporterBase):
             tier3_truncation=tier3_truncation,
             tier3_dataset_sufficiency=tier3_dataset_sufficiency,
             tier3_preview_notice=tier3_preview_notice,
+            # Measured, not scored. From the full display payload, with its own
+            # per-agent cap: the preview walk can blank strings of late keys.
+            tier3_token_usage=token_usage_table(
+                tier3_data.get("token_usage") if isinstance(tier3_data, dict) else None
+            ),
             # From the full display payload: the bounded preview can cap rows
             # unevenly per condition and blank identity fields of late rows.
             steps_by_case_chart=steps_by_case_chart(

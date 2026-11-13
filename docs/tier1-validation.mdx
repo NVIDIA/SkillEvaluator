@@ -120,6 +120,18 @@ Reports for any of these runs are selected with `-r`/`--report` (`cli`, `json`, 
 
 Plugins are validated against their public contract; the `quality`, `lint`, and `version` checks are skill-only and are skipped for plugins, rules, and workflows.
 
+When `--type auto` finds none of these signals, for example in an ordinary source repository, the target's type is `unknown`. There is no manifest to check, so Tier 1:
+
+- Records `schema`, `version`, and `quality` as not applicable instead of failing them with `No skills found`. The terminal summary and the HTML report count them as N/A. The JSON and Markdown reports list them as skipped, with a skip reason that starts with `not applicable`. No report counts them as passes.
+- Still runs the content scans (`security`, `pii`, `license`, `code-integrity`, `unicode`, `lint`, and `dependency` when selected), so a real secret or card number still fails the run. The security scan keeps its unrestricted scope.
+- Passes when those scans pass. A misspelled `--checks` name still fails. Tier 2 deduplication still runs on the target unless you pass `--no-dedup` or `--tiers 1`, and can still fail the run.
+- Adds a root `tier1_applicability` object to the JSON report, whichever checks `--checks` and `--skip` select: `applicability` (`not_applicable`), `reason_code` (`unsupported_content_type`), `detected_content_type` (`unknown`), and `supported_content_types`.
+- Is never eligible for publication, because a not-applicable check is not evidence.
+
+Auto-detection also reads the directory names in the target's absolute path. A repository whose path includes a directory named `skills`, `team-skills`, `team-rules`, `workflows`, or `team-workflows`, such as a CI checkout at `/home/runner/work/skills/skills`, is detected as that type, not as `unknown`, and Tier 1 validates it as that type, as before. `--type` forces a type but cannot select `unknown`.
+
+A target folder that itself holds a manifest entry in any letter case (`SKILL.md`, `workflow-rules.mdc`, `agent_plugin.yaml`, `agent_plugin.yml`, or `.claude-plugin/plugin.json`), such as `Skill.md`, or a manifest symlink whose target is missing, is a broken artifact rather than a folder without one, so its manifest checks still run and fail. A `.claude-plugin` folder without a `plugin.json`, such as a marketplace's, does not count. This applies only to the target's own entries: a mis-cased manifest below the target is not discovered; validate that folder directly. Pass `--type skill` (or another type) to validate any target as that type; a missing `SKILL.md` then fails as before. A folder that holds skills below it, such as `.claude/skills/<name>/SKILL.md` or `.agents/skills/<name>/SKILL.md`, is still validated as a collection of skills.
+
 For collections, pass a folder containing skills under `skills/` or `team-skills/`. Folder-level validation discovers each live `SKILL.md` below the target while excluding configured names such as `evals`, `results`, `versions`, `.git`, `.venv`, `node_modules`, and `__pycache__`.
 
 ```bash title="Validate a skill or a collection"
@@ -443,12 +455,75 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     nonmatching declarations are reported as skipped. Version ranges, URL/path
     dependencies, dynamic or Poetry metadata, malformed declarations, and
     missing or failed scanner evidence leave the audit `INCOMPLETE`. Supply
-    pinned `requirements.txt` for unresolved declarations. `pip-audit` is the
+    pinned `requirements.txt` for unresolved declarations. A requirements line
+    that ends in a backslash continues on the next line unless it is a comment
+    line, as in `pip install -r`, so a pin after a comment line that ends in a
+    backslash is audited. `pip-audit` is the
     primary scanner; Safety supplies secondary coverage for requirements files
     when installed separately. The audit may use network-backed vulnerability databases.
     JSON and HTML export data retain `dependency_coverage` per target, including
     requested and actually audited pins. Unreadable declarations have unknown
     declaration counts and an empty audited inventory, not a completed scan.
+
+    Each advisory is a `DEPENDENCY` finding whose check name is the advisory ID
+    (a numeric Safety ID reads `SAFETY-<id>`). It points at the requirements
+    file and the line that pins the package, or at `pyproject.toml`, so it
+    appears in JSON `findings`, the severity counts, and SARIF results.
+    `validate` on a folder of skills validates each skill as its own job, so
+    each skill's report lists its advisories. When one dependency check covers
+    several skills, as with `validate --type rules` or `--type workflows` on a
+    folder, or `DependencySecurityValidator().validate()` on a folder in
+    Python, a skill whose audit passes is summarized as one passed check, so
+    its medium or low advisories are not listed; validate that skill on its own
+    to see them. The finding metadata records:
+
+    - `package_name` and `resolved_version`: the package and version the
+      scanner checked.
+    - `declared_constraint` and `declaration`: the exact pin as the target
+      spells it, such as `PyYAML==5.3`, and where it is declared (`line 3`, or
+      `optional group docs, declaration 2` in `pyproject.toml`). The raw line,
+      with its markers and options, is never copied.
+    - `resolution_status` and `dependency_relationship`: `resolved` and
+      `direct` when the advisory matches an audited exact pin. Only exact pins
+      are audited, with `--no-deps`, so the advisory applies to the version the
+      target declares. Safety reads the raw requirements file, so it can
+      report a version that no audited pin declares, such as a pin skipped
+      because its marker does not match the scanner platform. That advisory is
+      `unbound`: `declared_constraint`, `declaration`, and
+      `dependency_relationship` are `null`, and the finding has no line.
+    - `dependency_role`: `runtime`, `dev`, `test`, `docs`, or `build`, from a
+      whole word of the requirements file name or the optional group name.
+      Words are split at `-`, `_`, and `.`. `dev`, `devel`, `develop`,
+      `development`, `devtools`, `lint`, and `linting` mean `dev`; `test`,
+      `tests`, `testing`, `testutils`, `pytest`, and `unittest` mean `test`;
+      `doc`, `docs`, and `documentation` mean `docs`; `build` means `build`.
+      So `requirements-dev.txt` is `dev`, while `requirements-latest.txt` and
+      `requirements-docker.txt` are `runtime`.
+    - `advisory_id`, `advisory_source` (`pip-audit` or `Safety`),
+      `affected_range` (Safety only; `null` for pip-audit), `fixed_versions`,
+      and `aliases`.
+
+    A `high` or `critical` advisory fails the run. A Python caller that builds
+    `DependencySecurityValidator(fail_on_medium=True)` also fails on a `medium`
+    pip-audit advisory; those findings record `fail_on_medium: true` in their
+    metadata, so a policy overlay keeps that rule. Safety's severity is its
+    level word or, when Safety runs with an API key, its CVSS object: the
+    CVSS v3 level, then the v3 score, then the v2 score and level. A score
+    that is not a number from 0 to 10 is skipped, and a Safety advisory with
+    none of these is `medium`. When pip-audit already reported
+    the same advisory ID or CVE for that package version, Safety's copy is
+    left out, so one vulnerability is one finding. A critical advisory does not
+    stop a folder run at that skill, as a critical finding of other checks
+    does without `--continue-on-failure`: every skill is audited.
+
+    A policy overlay can change one advisory with `DEPENDENCY.<advisory-id>`,
+    such as `DEPENDENCY.PYSEC-2020-176: low`, or every advisory with
+    `DEPENDENCY.*`. When one dependency check covers several skills, the
+    overlay sees only the advisories that check lists, so it cannot raise a
+    medium or low advisory of a skill whose audit passed. The warnings that say
+    why an audit is `INCOMPLETE`, such as a line without an exact pin, still
+    appear in the CLI and Markdown reports next to the advisories, and after a
+    policy overlay changes an advisory's severity.
 
     ```bash title="Opt-in dependency audit"
     skillevaluator validate ./my-skill --checks dependency

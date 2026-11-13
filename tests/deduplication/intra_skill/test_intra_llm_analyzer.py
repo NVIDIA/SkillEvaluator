@@ -493,6 +493,130 @@ class TestAnalyzeCluster:
         assert result.suggestion == "The suggestion text"
         assert result.confidence == 0.77
 
+    @pytest.mark.parametrize(
+        "confidence",
+        [float("nan"), float("inf"), -0.1, 1.1, 85, True, "0.5", "NaN", None, 10**400],
+        ids=[
+            "nan",
+            "inf",
+            "negative",
+            "above-one",
+            "percent",
+            "bool",
+            "numeric-string",
+            "nan-string",
+            "null",
+            "huge-int",
+        ],
+    )
+    def test_confidence_outside_zero_to_one_is_rejected(self, make_cluster, confidence: object) -> None:
+        mock_client = MagicMock(spec=LLMClient)
+        mock_client.extract_json_from_response.return_value = {
+            "verdict": "DUPLICATE",
+            "confidence": confidence,
+            "rationale": "Reason",
+            "suggestion": "Suggestion",
+        }
+
+        with pytest.raises(LLMClientError, match=r"confidence must be a finite number within \[0, 1\]"):
+            analyze_cluster(mock_client, make_cluster())
+
+    @pytest.mark.parametrize(("confidence", "expected"), [(0, 0.0), (1, 1.0), (0.0, 0.0), (1.0, 1.0)])
+    def test_confidence_bounds_are_accepted_as_floats(self, make_cluster, confidence: object, expected: float) -> None:
+        mock_client = MagicMock(spec=LLMClient)
+        mock_client.extract_json_from_response.return_value = {
+            "verdict": "DUPLICATE",
+            "confidence": confidence,
+            "rationale": "Reason",
+            "suggestion": "Suggestion",
+        }
+
+        result = analyze_cluster(mock_client, make_cluster())
+
+        assert type(result.confidence) is float
+        assert result.confidence == expected
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("verdict", ["DUPLICATE"], "verdict must be a string"),
+            ("verdict", None, "verdict must be a string"),
+            ("rationale", ["Reason"], "rationale must be a string"),
+            ("rationale", None, "rationale must be a string"),
+            ("suggestion", {"text": "Suggestion"}, "suggestion must be a string"),
+            ("suggestion", 3, "suggestion must be a string"),
+            ("rationale", "x" * 8_193, "rationale exceeds the 8192-character limit"),
+            ("suggestion", "x" * 8_193, "suggestion exceeds the 8192-character limit"),
+        ],
+        ids=[
+            "verdict-list",
+            "verdict-null",
+            "rationale-list",
+            "rationale-null",
+            "suggestion-object",
+            "suggestion-number",
+            "rationale-too-long",
+            "suggestion-too-long",
+        ],
+    )
+    def test_non_string_or_oversized_reply_fields_are_rejected(
+        self, make_cluster, field: str, value: object, message: str
+    ) -> None:
+        mock_client = MagicMock(spec=LLMClient)
+        reply: dict[str, object] = {
+            "verdict": "DUPLICATE",
+            "confidence": 0.9,
+            "rationale": "Reason",
+            "suggestion": "Suggestion",
+        }
+        reply[field] = value
+        mock_client.extract_json_from_response.return_value = reply
+
+        with pytest.raises(LLMClientError, match=message):
+            analyze_cluster(mock_client, make_cluster())
+
+    def test_legacy_reasoning_field_is_bounded_too(self, make_cluster) -> None:
+        mock_client = MagicMock(spec=LLMClient)
+        mock_client.extract_json_from_response.return_value = {
+            "verdict": "DUPLICATE",
+            "confidence": 0.9,
+            "reasoning": {"text": "Reason"},
+            "suggestion": "Suggestion",
+        }
+
+        with pytest.raises(LLMClientError, match="rationale must be a string"):
+            analyze_cluster(mock_client, make_cluster())
+
+    def test_reply_fields_at_the_length_limit_are_kept_whole(self, make_cluster) -> None:
+        mock_client = MagicMock(spec=LLMClient)
+        mock_client.extract_json_from_response.return_value = {
+            "verdict": "DUPLICATE",
+            "confidence": 0.9,
+            "rationale": "r" * 8_192,
+            "suggestion": "s" * 8_192,
+        }
+
+        result = analyze_cluster(mock_client, make_cluster())
+
+        assert result.reasoning == "r" * 8_192
+        assert result.suggestion == "s" * 8_192
+
+    def test_missing_confidence_and_text_fields_keep_their_defaults(self, make_cluster) -> None:
+        mock_client = MagicMock(spec=LLMClient)
+        mock_client.extract_json_from_response.return_value = {"verdict": "RELATED_BUT_DISTINCT"}
+
+        result = analyze_cluster(mock_client, make_cluster())
+
+        assert result == LLMVerdict("RELATED_BUT_DISTINCT", 0.0, "", "")
+
+    @pytest.mark.parametrize("reply", [["DUPLICATE"], "DUPLICATE", 0.9, None], ids=["list", "string", "number", "null"])
+    def test_reply_that_is_not_a_json_object_is_rejected(self, make_cluster, reply: object) -> None:
+        mock_client = MagicMock(spec=LLMClient)
+        mock_client.extract_json_from_response.return_value = reply
+
+        with pytest.raises(LLMClientError, match="response must be a JSON object"):
+            analyze_cluster(mock_client, make_cluster())
+
 
 class TestVerdictToSeverity:
     def test_duplicate_high_confidence(self) -> None:

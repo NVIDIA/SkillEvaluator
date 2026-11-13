@@ -554,6 +554,13 @@ completed run directly:
   `behavior_check`, the final-response section limit
   (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`). For `behavior_check`, the
   record's `reason` names each setting that applied.
+- **`<agent>/baseline_timeout_tolerance.json`** — written only for an agent
+  kept scored by `--tolerate-baseline-timeouts`: the baseline attempts that hit
+  the agent execution timeout. `result.json` carries the same record as
+  `agents.<agent>.baseline_timeout_tolerance`, a refused agent's
+  `agents.<agent>.baseline_timeout_tolerance_rejection` code, and the run-level
+  `baseline_timeout_tolerance` (tolerated agents and the launch errors they
+  explain). See [Baseline timeouts](/skills/skillevaluator/tier3-live-evaluation#baseline-timeouts).
 
 <Note>
   Read commands (`view`, `compare`, `create-eval-dataset --refine`) honor the
@@ -924,9 +931,11 @@ Score, and publication eligibility.
 
 When the HTML report has no lift for an agent or dimension, its label says
 why. **no baseline** means that row has no baseline score, for example after
-`--skip-baseline`. **comparison unavailable** means a baseline score was
-recorded but cannot be compared with the with-skill score, for example because
-the arms used different score policies or no case kept matching judge models.
+`--skip-baseline`, or after a baseline arm that ran but failed; the
+**Agent coverage notes** described below tell the two apart.
+**comparison unavailable** means a baseline score was recorded but cannot be
+compared with the with-skill score, for example because the arms used
+different score policies or no case kept matching judge models.
 
 For each LLM metric (`accuracy`, `goal_accuracy`, and `behavior_check`), cases
 that used different judge models across the arms are excluded from that
@@ -957,6 +966,47 @@ and pass@k lift comparisons and skill-quality advice. Negative controls do not
 count as activation opportunities; missing or unsupported evidence remains
 unknown. Eligibility is determined separately for each agent, so another
 agent with observed activation can still contribute a comparison.
+
+An arm that ran but failed, for example because one baseline attempt hit the
+agent timeout, fails the agent and the run, and the other arm keeps its
+scores. Reports describe such an arm by how many of its attempts scored,
+never as not run. In `BENCHMARK.md`, the agent's Overall and dimension cells
+read `90.0% — baseline incomplete (1 of 2 attempts scored); uplift unavailable`, or
+`baseline unavailable` when no baseline attempt scored. They read
+`baseline failed (2 of 2 attempts scored)` when the arm failed with no attempt
+missing, and `baseline failed` with no counts when its recorded counts are
+unusable. A baseline skipped with `--skip-baseline` still reads
+`baseline not run`. An **Agent coverage** list under the table names each
+failed arm, how many of its attempts scored, and the first Harbor exception
+type it recorded, in words such as `agent timeout error`. When the agent is
+marked failed, the entry also says that the agent and the Tier 3 run are
+marked failed. The Tier 3 row of the tier status table names the agent and
+arm.
+
+The canonical JSON payload lists the same facts in `coverage_notices`, one
+entry per failed arm:
+
+- `code`: `baseline_failed` or `with_skill_failed`, the arm whose recorded
+  status is `failed`.
+- `agent` and `condition` (`without_skill` or `with_skill`).
+- `state`: `incomplete` when some attempts scored, `unavailable` when none
+  scored, or `failed` when no attempt is missing or the counts are unusable.
+- `scored_attempts` and `expected_attempts`: `null`, with `state` `failed`,
+  when the arm's counters are missing or inconsistent, for example more scored
+  than expected attempts, or no expected attempts after a job failure.
+- `failure`: the first Harbor exception type in words, or `null`.
+- `message`: the sentence the reports show.
+
+The HTML report lists each message under **Agent coverage notes** at the top
+of the Tier 3 section. Its agent details label an agent whose baseline arm
+failed the way they label a skipped baseline, for example **no baseline** and
+`baseline N/A`, so the callout is what tells the two apart. The full terminal
+report, from `validate --verbose` or an explicit `-r cli`, prints the notes
+under **Agent coverage notes** in the Tier 3 block, also when Tier 3 is
+non-blocking (the default). The compact default view of `validate` does not
+print them and leaves them to the HTML and JSON reports and `BENCHMARK.md`.
+`tier3 evaluate` lists each agent's failed condition with its errors, as
+before.
 
 ### Measured agent resources
 
@@ -1006,6 +1056,80 @@ validation failed) and multi-step trials scored per step have no timing.
 Missing timing stays `N/A` (`null` in JSON), never zero, and follows the same
 complete-arm and matching-case rules as tokens. Timing is diagnostic and does
 not change scores, verdicts, or gates.
+
+### Token usage
+
+The canonical JSON payload also carries a `token_usage` object when at least
+one attempt recorded token counts and the report limits leave room for it (see
+below). It sums the agent's own tokens per case, per
+agent arm, and over all agents, and says how many attempts each sum covers. It
+is a measurement: it is not scored and changes no metric, dimension, verdict,
+or gate.
+
+- Tokens are prompt plus completion (`total_tokens`). Prompt counts include
+  cached tokens, so cached tokens are never added again;
+  `uncached_prompt_tokens` is prompt minus cached. A missing cache counter
+  counts as 0.
+- Attempts that failed before scoring, such as an attempt that hit the agent
+  timeout, still used tokens and are counted. So are the scored attempts of an
+  arm that failed. `coverage.unscored_attempts` counts the attempts without a
+  score. Such an attempt belongs to the case whose task directory its Harbor
+  `result.json` or `config.json` names, or else to the case its trial name
+  starts with. `resources` keeps its own totals, which need every attempt of an
+  arm scored and measured.
+- Nothing is estimated. An attempt with a missing or invalid counter adds no
+  tokens. Its arm's `coverage.status` is then `partial` (other attempts were
+  measured) or `unavailable` (none were), and the totals cover only the measured
+  attempts. An arm that did not run is `not_run`, and its `totals` are `null`:
+  a skipped arm, or an arm without attempts that the agent has no record of or
+  that the payload `mode` leaves out (`with_skill_only` or `baseline_only`).
+  The score tables show such a baseline as not run. A sum above
+  9,007,199,254,740,991 (`2^53 - 1`), the largest integer JSON keeps exact, is
+  `unavailable` with `total_out_of_range` and `null` totals.
+- `coverage` also gives `expected_attempts`, `observed_attempts`,
+  `measured_attempts`, and `reason_codes` such as `missing_token_counters`,
+  `invalid_token_counters`, and `missing_attempts`.
+- `delta.total_tokens` is with skill minus baseline, and
+  `delta.total_tokens_change_percent` divides it by the baseline. A change needs
+  complete counts in both arms for the same cases and attempts, and both arms
+  must have succeeded, because the report withholds the scores of any other arm.
+  Otherwise `delta.status` is `unavailable` and `delta.reason_codes` and
+  `delta.reason` say why, for example `baseline_not_run`, `baseline_failed`,
+  `baseline_status_unknown` (the arm ran attempts without a recognized run
+  status), `baseline_tokens_incomplete`, `baseline_total_out_of_range`,
+  `case_scope_mismatch` (both arms ran attempts, for different cases or
+  numbers of attempts per case), or `agent_scope_mismatch` for the sum over all
+  agents.
+- A run that reused an earlier run's baseline
+  (`tier3 evaluate --reuse-baseline`) has `baseline_reused: true`. Its baseline
+  counts come from the trajectories copied from that run: they are the tokens
+  the baseline used there, not tokens used in this run, and every token usage
+  table says so.
+
+Token usage joins the payload after the report size budget, so it never
+displaces trials or other score evidence. It also never pushes the payload past
+the embedded size budget or the report limits that every report checks, such as
+100,000 JSON values, including after the run's next steps, the case findings
+that `tier3 evaluate` adds and `validate`'s applicability fields join it. When
+it does not fit, its case rows go first: `token_usage.case_rows_omitted` and
+`report_truncation.omitted.token_usage_case_rows` count them, and every report
+says so. If the agent sums do not fit either, `token_usage` is left out and
+`report_truncation.omitted.token_usage` is 1. If the payload cannot carry even
+that record, for example because it exceeds the report limits without token
+usage, `token_usage` is left out without a record, and every report marks the
+payload as it would without token usage.
+
+`BENCHMARK.md` has a **Token Usage** section after Results at a Glance: one row
+per agent and one for all agents, with the case rows in a collapsed table that
+shows the first 50 case rows. The Markdown report has the same table under its
+Tier 3 section. The HTML report lists the case rows under **Measured Agent
+Resources**, at most 64 per agent, read from the full Tier 3 data rather than
+its bounded preview. Each table says how many more case rows are in the JSON
+payload. The full terminal report (`validate --verbose` or `-r cli`) and
+`tier3 evaluate --verbose` print the agent rows only and name the files that
+hold the case rows: the HTML, Markdown and JSON reports for `validate`, and
+`report.html` and `tier3-benchmark.md` in the run directory for
+`tier3 evaluate`.
 
 ### Failure reasons and per-trial rows
 
@@ -1303,7 +1427,17 @@ every agent.
 ### view
 
 Opens the newest `report.html` for a skill in your browser, regenerating it
-from the stored run data if the file is missing.
+from the stored run data if the file is missing. The regenerated report reuses
+the conclusions, recommendations, and suggestions the run saved in
+`result.json`, so it shows the advice the run produced and makes no LLM call.
+It also reuses the run's `what_to_fix.json`. When that file is missing or
+unusable, `view` writes the rule-based fixes, which can differ from the
+recommendations the run saved. The report also takes the run's duration and any
+Harbor log links recorded in `result.json`. Feedback saved by 0.6.0 or earlier
+has no per-case verdict, so the report adds the verdict and lists the case
+fixes as its recommendations and suggestions, without the LLM, as a new report
+does. A run that saved no feedback still has its feedback rebuilt, with the LLM
+when a provider is configured, and its `what_to_fix.json` rewritten.
 
 ```bash title="Open the latest HTML report"
 skillevaluator view ./my-skill
@@ -1394,6 +1528,16 @@ For CI and tooling, two JSON entry points matter:
   different sources abort the run before any report file is written, so a
   contradictory identity is never published in one format and reported in
   another.
+- **Tier 1 applicability**: when `validate --type auto` finds no skill,
+  rules, workflows, or plugin in the target, the JSON report carries a
+  top-level `tier1_applicability` object (`applicability: not_applicable`,
+  `reason_code: unsupported_content_type`, `detected_content_type: unknown`,
+  `supported_content_types`), whichever checks the run selected. Each of
+  `schema`, `version`, and `quality` that the run selected and did not
+  `--skip` is then `skipped`, with a `skip_reason` that starts with
+  `not applicable`. The key is absent when Tier 1 ran those checks, as it
+  does for a detected artifact, a forced `--type`, or a folder with a
+  mis-cased or dangling manifest such as `SKILL.md`.
 
 Both paths speak the same dialect: standalone `tier3 evaluate` and
 `validate --tier3` share one HTML renderer for `report.html`, and both embed

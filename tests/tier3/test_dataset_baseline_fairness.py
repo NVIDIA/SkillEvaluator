@@ -10,6 +10,7 @@ import json
 import re
 import shutil
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -729,6 +730,10 @@ def test_skill_md_in_the_skill_itself_still_warns(assertion):
         "The agent does not run any command without first reading SKILL.md",
         "The agent should not proceed until it has read SKILL.md",
         "The agent doesn't act before it reads SKILL.md",
+        "The agent did not modify files while reading SKILL.md",
+        "The agent did not touch the output while it read SKILL.md",
+        "The agent did not change files yet read SKILL.md",
+        "The agent did not modify files after reading SKILL.md",
         "The agent used the skill",
         "The agent followed the skill's instructions",
         "The agent read the contents of SKILL.md",
@@ -791,7 +796,6 @@ def test_validation_checks_directory_and_frontmatter_names(tmp_path, expected_sk
     [
         _entry(question="read" + " " * 200_000 + "SKILL.md"),
         _entry(expected_behavior=["read" + " " * 200_000 + "SKILL.md"]),
-        {"expected_skill": "x" * 200_000, "expected_behavior": ["used " + "x" * 200_000]},
     ],
 )
 def test_fairness_warning_excerpts_are_bounded(entry):
@@ -1211,3 +1215,318 @@ def test_agent_skill_dataset_passes_the_strict_validate_its_docs_recommend():
     result = CliRunner().invoke(cli, ["tier3", "validate", str(_REPO / "skills" / "skillevaluator"), "--strict"])
 
     assert result.exit_code == 0, result.output
+
+
+# --- Negation that covers something else, odd shapes, names and bounds --------
+
+
+_REQUIRES_READING_SKILL_MD = [
+    "The agent never edits files before reading SKILL.md",
+    "The agent does not run any command without first reading SKILL.md",
+    "The agent should not proceed until it has read SKILL.md",
+    "The agent doesn't act before it reads SKILL.md",
+    "The agent does not act unless it has read SKILL.md",
+    "The agent will not edit files till it reads SKILL.md",
+    "The agent never acts prior to reading SKILL.md",
+    "The agent never skips reading SKILL.md",
+    "The agent does not fail to read SKILL.md",
+    "The agent must not edit anything if it has not read SKILL.md",
+]
+
+
+@pytest.mark.parametrize("text", _REQUIRES_READING_SKILL_MD)
+@pytest.mark.parametrize("field", ["prompt", "expected_output", "assertions"])
+def test_a_negation_over_another_action_still_requires_reading_skill_md(field, text):
+    # These forbid acting until SKILL.md was read, so they require what the
+    # baseline cannot do. Only a negation of the read itself is met by it.
+    fields = {"prompt": "Check manifest.yaml", "expected_output": "Two blockers", "assertions": ["Lists them"]}
+    fields[field] = [text] if field == "assertions" else text
+
+    (warning,) = _baseline_fairness_warnings(_case(**fields))
+
+    assert warning.startswith(f"{field} ")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The agent did not answer until it ran scripts/review.py",
+        "The agent never answers before using release-review",
+        "The agent does not edit files without first using the release-review skill",
+    ],
+)
+def test_a_negation_over_another_action_still_requires_running_a_script_or_using_the_skill(text):
+    entry = _case(prompt="Check manifest.yaml", expected_output="Two blockers", assertions=[text])
+
+    (warning,) = _baseline_fairness_warnings(entry, skill_scripts=["review.py"])
+
+    assert warning.startswith("assertions grades skill use")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The agent did not read SKILL.md",
+        "The agent didn't read SKILL.md",
+        "The agent never reads SKILL.md",
+        "Answers directly, without reading SKILL.md",
+        "The agent answered without first reading SKILL.md",
+        "The agent does not need to read SKILL.md",
+        "The agent is not required to read SKILL.md",
+        "The agent did not ask questions or read SKILL.md",
+        "The agent did not read SKILL.md before acting",
+        "The agent did not ask the user to read SKILL.md",
+        "The agent did not run review.py before answering",
+        "The agent answered without running review.py",
+        "The agent never used release-review",
+        "The agent did not use release-review before answering",
+        "A direct answer; no release-review commands or skill workflow",
+    ],
+)
+def test_a_negated_skill_use_is_still_met_by_the_baseline(text):
+    entry = _case(prompt="Check manifest.yaml", expected_output=text, assertions=[text])
+
+    assert _baseline_fairness_warnings(entry, skill_scripts=["review.py"]) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("assertions", [{"text": "The agent read SKILL.md"}]),
+        ("assertions", [["The agent read SKILL.md"]]),
+        ("assertions", [{"checks": ["Lists blockers", ["The agent read SKILL.md"]]}]),
+        ("assertions", [{"The agent read SKILL.md": True}]),
+        ("assertions", "The agent read SKILL.md"),
+        ("expected_output", ["The agent read SKILL.md"]),
+        ("expected_output", {"text": "The agent read SKILL.md"}),
+        ("expected_output", {"steps": [["The agent read SKILL.md"]]}),
+        ("prompt", ["Read SKILL.md, then check manifest.yaml"]),
+        ("prompt", {"text": "Read SKILL.md, then check manifest.yaml"}),
+    ],
+)
+def test_skill_use_is_found_in_a_field_of_any_shape(field, value):
+    # The judge renders a list or mapping as written, so these are graded too.
+    fields = {"prompt": "Check manifest.yaml", "expected_output": "Two blockers", "assertions": ["Lists them"]}
+    fields[field] = value
+
+    (warning,) = _baseline_fairness_warnings(_case(**fields))
+
+    assert warning.startswith(f"{field} ")
+
+
+def test_outcome_text_in_an_odd_shape_does_not_warn():
+    entry = _case(
+        prompt={"text": "Check manifest.yaml"},
+        expected_output=["Two blockers", {"detail": "missing SBOM"}],
+        assertions=[{"text": "Lists both blockers"}, ["Names the file of each"], 3],
+    )
+
+    assert _baseline_fairness_warnings(entry) == []
+
+
+def test_a_field_with_too_many_values_is_reported_instead_of_skipped():
+    padded = ["Lists a blocker"] * 1000 + ["The agent read SKILL.md"]
+    cyclic: list = []
+    cyclic.append(cyclic)
+
+    for assertions in (padded, cyclic):
+        (warning,) = _baseline_fairness_warnings(_case(prompt="Check manifest.yaml", assertions=assertions))
+        assert warning.startswith("assertions has more than 1000 values")
+
+
+def _write_dataset_skill(tmp_path: Path, entry: dict, *, dirname: str = "release-review", name: str | None = None):
+    skill = tmp_path / dirname
+    (skill / "evals").mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        f"---\nname: {name or dirname}\ndescription: Review releases\n---\n", encoding="utf-8"
+    )
+    entry = {"id": "case-001", "question": "Review manifest.yaml", "ground_truth": "Two blockers", **entry}
+    (skill / "evals" / "evals.json").write_text(json.dumps([entry]), encoding="utf-8")
+    return skill
+
+
+def _fairness_warnings(skill: Path) -> list[str]:
+    return [
+        result.message
+        for result in validate_skillevaluators(skill)
+        if result.status == "warning" and ("skill use" in result.message or "skill's files" in result.message)
+    ]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {},
+        {"expected_skill": None},
+        {"expected_skill": ""},
+        {"expected_skill": 7},
+        {"expected_skill": ["release-review"]},
+        {"expected_skill": {"name": "release-review"}},
+        {"expected_skill": "rr"},
+        {"expected_skill": "x" * 5000},
+    ],
+    ids=["missing", "null", "empty", "int", "list", "dict", "other-name", "huge"],
+)
+def test_validate_checks_against_the_skills_own_name_whatever_the_entry_says(tmp_path: Path, entry):
+    entry = {
+        **entry,
+        "question": "Use the skill at skills/release-review to review manifest.yaml",
+        "expected_behavior": ["The agent used the release-review skill", "Lists the blockers"],
+    }
+
+    warnings = _fairness_warnings(_write_dataset_skill(tmp_path, entry))
+
+    assert len(warnings) == 2
+    assert warnings[0].startswith("question points at the skill's files")
+    assert warnings[1].startswith("expected_behavior grades skill use")
+
+
+def test_validate_checks_against_the_name_in_the_skill_frontmatter(tmp_path: Path):
+    entry = {"expected_skill": None, "expected_behavior": ["The agent used release-review and found 2 blockers"]}
+
+    skill = _write_dataset_skill(tmp_path, entry, dirname="release-review-v2", name="release-review")
+
+    (warning,) = _fairness_warnings(skill)
+    assert warning.startswith("expected_behavior grades skill use")
+
+
+def test_validate_passes_a_negative_case_that_names_the_skill_in_negated_text(tmp_path: Path):
+    # The shape of the cases in skills/skillevaluator/evals/evals.json: no skill expected, and the
+    # text says what the agent does not do with it.
+    entry = {
+        "expected_skill": None,
+        "ground_truth": "A direct implementation; no release-review commands or skill workflow.",
+        "expected_behavior": ["Provides a working function", "Does not run or recommend release-review"],
+    }
+
+    assert _fairness_warnings(_write_dataset_skill(tmp_path, entry)) == []
+
+
+def test_validate_checks_an_expected_skill_that_names_the_skill_another_way(tmp_path: Path):
+    entry = {"expected_skill": "rr", "expected_behavior": ["The agent used rr to review the manifest"]}
+
+    (warning,) = _fairness_warnings(_write_dataset_skill(tmp_path, entry, dirname="release-review"))
+
+    assert warning.startswith("expected_behavior grades skill use")
+
+
+def test_validate_reports_skill_use_in_odd_shapes_for_an_entry_with_no_skill_name(tmp_path: Path):
+    entry = {"expected_behavior": [{"text": "The agent read SKILL.md"}, [["Lists the blockers"]]]}
+
+    (warning,) = _fairness_warnings(_write_dataset_skill(tmp_path, entry))
+
+    assert warning.startswith("expected_behavior grades skill use")
+
+
+def test_the_generation_warning_uses_the_skills_own_name(capsys):
+    dataset = {
+        "skill_name": "something-else",
+        "evals": [
+            {"id": "case-1", "prompt": "Review it", "expected_output": "x", "assertions": ["Used release-review"]}
+        ],
+    }
+
+    generate_dataset._print_baseline_fairness_warnings(dataset, [], ("release-review",))
+
+    assert "Warning: case case-1: assertions grades skill use" in capsys.readouterr().out
+
+
+# The text a warning quotes comes from the dataset, so it is cut and cleaned.
+_QUOTE_LIMIT = 400
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "read" + " " * 200_000 + "SKILL.md",
+        "read " + "the " * 100_000 + "SKILL.md",
+        "The agent read\n\n" + "\t " * 50_000 + "SKILL.md before acting",
+    ],
+    ids=["spaces", "articles", "newlines-and-tabs"],
+)
+@pytest.mark.parametrize("field", ["prompt", "expected_output", "assertions"])
+def test_warnings_quote_a_bounded_amount_of_dataset_text(field, text):
+    fields = {"prompt": "Check manifest.yaml", "expected_output": "Two blockers", "assertions": ["Lists them"]}
+    fields[field] = [text] if field == "assertions" else text
+
+    (warning,) = _baseline_fairness_warnings(_case(**fields))
+
+    assert warning.startswith(f"{field} ")
+    assert len(warning) < _QUOTE_LIMIT
+    assert "read" in warning
+
+
+def test_quoted_dataset_text_drops_terminal_controls_and_credentials():
+    from skillevaluator.tier3.evals_spec import _quoted
+
+    quoted = _quoted("read \x1b]8;;http://evil.example\x07\x1b[31mSKILL.md\x1b[0m ghp_" + "a1B2c3D4" * 5)
+
+    assert "\x1b" not in quoted
+    assert "\x07" not in quoted
+    assert "a1B2c3D4a1B2c3D4" not in quoted
+
+
+# A generous bound: the checks below take about a second or less, and the
+# quadratic negation scan took from tens of seconds to minutes on inputs this size.
+_TIME_LIMIT_S = 10.0
+
+
+def _timed(call) -> tuple[object, float]:
+    started = time.perf_counter()
+    result = call()
+    return result, time.perf_counter() - started
+
+
+def test_many_negated_matches_are_scanned_in_linear_time():
+    text = "not read SKILL.md " * 8_000  # 144 KB; the quadratic scan took about a minute
+
+    warnings, elapsed = _timed(lambda: _baseline_fairness_warnings(_case(prompt=text, assertions=[text])))
+
+    assert warnings == []
+    assert elapsed < _TIME_LIMIT_S
+
+
+def test_a_large_dataset_entry_is_validated_in_bounded_time(tmp_path: Path):
+    text = "The agent did not read SKILL.md and did not run review.py. " * 4_000  # 236 KB of negated matches
+    entry = {"expected_behavior": [text], "ground_truth": text, "question": text}
+    skill = _write_dataset_skill(tmp_path, entry)
+
+    warnings, elapsed = _timed(lambda: _fairness_warnings(skill))
+
+    assert warnings == []
+    assert elapsed < _TIME_LIMIT_S
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "read" + " " * 200_000 + "x",
+        "read " + "the " * 100_000 + "x",
+        "used" + " " * 200_000 + "release-review-x",
+        "ran " + "a/" * 100_000 + "x",
+        "skill " * 50_000,
+        "release-review " * 20_000,
+        "scripts/ " * 20_000,
+        "read SKILL.md in " * 10_000,
+        "read the SKILL.md files " * 10_000,
+        "x" * 300_000,
+    ],
+    ids=[
+        "read-spaces",
+        "read-articles",
+        "used-spaces",
+        "run-path",
+        "skill-words",
+        "skill-name-words",
+        "script-dirs",
+        "elsewhere",
+        "generic-noun",
+        "one-long-word",
+    ],
+)
+def test_adversarial_text_is_scanned_in_bounded_time(text):
+    entry = _case(prompt=text, expected_output=text, assertions=[text])
+
+    _, elapsed = _timed(lambda: _baseline_fairness_warnings(entry, skill_scripts=["review.py"]))
+
+    assert elapsed < _TIME_LIMIT_S

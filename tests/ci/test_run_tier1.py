@@ -402,6 +402,29 @@ def test_successful_rollup_preserves_all_counts(tmp_path):
     assert summary["skills"][0]["path"] == "skills/a"
 
 
+@pytest.mark.parametrize("recorded", [True, False])
+def test_retained_report_records_the_repository_relative_target_not_the_runner_path(tmp_path, recorded):
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/a")
+    reports = tmp_path / "reports"
+
+    def invoke(argv, **_kwargs):
+        # The evaluator records the target as the CI passed it: an absolute
+        # path in the runner's workspace. An older evaluator image records none.
+        report = {**payload(), "target_path": argv[argv.index("tier1") + 1]}
+        if not recorded:
+            report.pop("target_path")
+        output = Path(argv[argv.index("-o") + 1])
+        (output / "skillevaluator-tier1.json").write_text(json.dumps(report), encoding="utf-8")
+        return CompletedProcess(argv, 0)
+
+    assert runner.run(workspace, reports, {"SKILL_PATHS": "skills"}, execute=invoke) == 0
+
+    retained = json.loads((reports / "skill-001" / "skillevaluator-tier1.json").read_text())
+    assert retained.get("target_path") == ("skills/a" if recorded else None)
+    assert str(workspace) not in json.dumps(retained)
+
+
 def test_invalid_json_is_reported_and_later_skills_still_run(tmp_path):
     workspace = tmp_path / "workspace"
     skill(workspace, "skills/a")

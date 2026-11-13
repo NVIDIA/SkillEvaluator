@@ -458,7 +458,7 @@ def evaluate_skill(
                 process = execute(
                     argv, cwd=workspace, env=env, stdout=stdout, stderr=stderr, check=False, timeout=timeout
                 )
-            safe = sanitized_outputs(raw, tokens)
+            safe = sanitized_outputs(raw, tokens, target_path=target.relative_to(workspace).as_posix())
         for name, content in safe.items():
             (output / name).write_bytes(content)
         fields["exit_code"] = process.returncode

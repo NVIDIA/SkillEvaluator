@@ -597,6 +597,14 @@ All notable changes to SkillEvaluator are documented in this file.
   instead of `Evaluator version: not recorded (legacy or non-live result)`; a
   version recorded by a Tier 3 run still wins.
 
+- `skillevaluator tier1 .` and `tier2 .`, run from inside the skill folder, name
+  the skill in the JSON `skills` and `contributors` lists, as `tier1 <folder>`
+  does. The report took the name from the path as typed, which is empty for
+  `.`, so a clean run with a narrowed check list, such as `--checks pii`,
+  listed no skill or one skill per check ID. The JSON that CI retains records
+  the skill's path relative to the repository root as `target_path`, no longer
+  the absolute path of the runner's workspace.
+
 - Tier 3 improvement recommendations respect each case's expected skill routing:
   passing negative controls no longer inherit activation-loss advice from positive
   cases, while failed negatives retain task, environment, and run-error diagnostics.
@@ -1017,7 +1025,6 @@ All notable changes to SkillEvaluator are documented in this file.
   every required check passes. A run with a failed required check, such as one
   with a `destructive_command` finding, already gets FAIL from that check (see
   Changed).
-
 
 ## 0.8.0 - 2026-11-05
 

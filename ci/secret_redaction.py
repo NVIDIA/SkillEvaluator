@@ -105,8 +105,13 @@ def collect_sensitive_bytes(contents: Iterable[bytes]) -> set[str]:
     return tokens
 
 
-def sanitized_outputs(raw: Path, tokens: set[str]) -> dict[str, bytes]:
-    """Read and sanitize bounded outputs before writing any shared artifact."""
+def sanitized_outputs(raw: Path, tokens: set[str], *, target_path: str | None = None) -> dict[str, bytes]:
+    """Read and sanitize bounded outputs before writing any shared artifact.
+
+    The evaluator records the target as the CI passed it, an absolute path in
+    the runner's workspace. When *target_path* is given, the JSON keeps that
+    repository-relative path instead.
+    """
     allowed = (
         "skillevaluator-tier1.json",
         "skillevaluator-tier1.html",
@@ -157,6 +162,8 @@ def sanitized_outputs(raw: Path, tokens: set[str]) -> dict[str, bytes]:
             if name.endswith(".json"):
                 document = redactor.object(json.loads(text))
                 if isinstance(document, dict):
+                    if target_path is not None and isinstance(document.get("target_path"), str):
+                        document["target_path"] = target_path
                     # IDs hashed from the unredacted text could confirm a guessed
                     # value. Refresh even without collected tokens: the redactor
                     # also masks database userinfo that no token names.

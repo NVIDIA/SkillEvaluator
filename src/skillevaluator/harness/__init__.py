@@ -10,6 +10,7 @@ advisory: it never changes Tier 1 findings or the exit code.
 
 from skillevaluator.harness.overlay import (
     HARNESS_STATUSES,
+    Catalog,
     HarnessResult,
     evaluate_harnesses,
     evaluate_profile,
@@ -22,6 +23,7 @@ from skillevaluator.harness.overlay import (
 
 __all__ = [
     "HARNESS_STATUSES",
+    "Catalog",
     "HarnessResult",
     "evaluate_harnesses",
     "evaluate_profile",

@@ -5,7 +5,7 @@ roots:
   project: [.agents/skills, .codex/skills]
   user: [~/.agents/skills, ~/.codex/skills]
 limits: {scan_depth: 6, skips_hidden_dirs: true, catalog_desc_codepoints: 1024, list_budget: "2% of context, 8,000 chars if unknown, max 10,000 tokens"}
-listing: {cut: 1024}
+listing: {cut: 1024, budget: {desc_chars: 8000, chars_per_context_token: 0.08}}
 rules:
   - {id: CX-ROOT, when: "install_root not in roots", effect: not_loaded, outcome: not found, message: "Codex reads .agents/skills and .codex/skills (project and user).", fix: "Install it under .agents/skills or .codex/skills."}
   - {id: CX-DESC-CUT, when: "description_codepoints > 1024", effect: degraded, outcome: listing shortened, message: "Description cut to 1,021 chars + '...' in the skill list ({description_codepoints} chars, {description_over} over 1,024).", fix: "Cut the description by at least {description_over} characters."}
@@ -15,6 +15,8 @@ rules:
   - {id: CX-NESTED, when: "nested_skill_md_exact", effect: degraded, message: "The nested SKILL.md is loaded as a second, separate skill.", fix: "Move the nested skill to its own folder under the skills root, or rename its SKILL.md."}
   - {id: CX-DEPTH, when: "grouping_depth > 5", effect: not_loaded, outcome: not found, message: "Beyond Codex's scan depth of 6.", fix: "Install the skill at most 5 folders below the skills root."}
   - {id: CX-SYMLINK-FILE, when: "skill_md_symlink", effect: not_loaded, message: "Symlinked SKILL.md files are skipped (codex#15756).", fix: "Copy SKILL.md into the folder instead of symlinking the file (a symlinked folder works)."}
+  - {id: CX-LIST-BUDGET, when: "catalog_desc_chars > list_budget_chars", effect: degraded, outcome: listing shortened, message: "The {catalog_size} skills in this folder have {catalog_desc_chars} description chars; Codex's skill list fits about {list_budget_chars} (2% of the context window at 4 bytes per token; 8,000 chars if unknown), so descriptions get shortened, then removed, then skills left out.", fix: "Shorten descriptions (trigger first) or install fewer skills here."}
+  - {id: CX-DUP-NAME, when: "duplicate_name", effect: advisory, message: "Another skill is also named '{skill_name}' ({duplicate_paths}); Codex lists both, so the model sees two.", fix: "Give each skill a unique name."}
   - {id: CX-CASING, when: "not manifest_name_exact", effect: not_loaded, message: "Non-canonical name (skill.md/Skill.md): never loaded, on Linux or macOS (3/3 each).", fix: "Rename the file to SKILL.md (exact casing)."}
 notes:
   - "Explicit $skill injects the whole SKILL.md (145 KB tested)."

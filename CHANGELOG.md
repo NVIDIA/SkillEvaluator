@@ -12,6 +12,10 @@ All notable changes to SkillEvaluator are documented in this file.
   comment helpers, and needs no Pages configuration or history branch. Future
   generated bundles include the template; archived bundles and the released
   onboarding CLI retain their existing hosted publisher setup.
+- The `harness` check measures a skill together with the skills installed beside
+  it: list budgets (scaled by the context window), duplicate names and which copy
+  each harness uses, and OpenClaw's prompt cap and compact list. A `catalog` line
+  in the panel names the folder measured.
 - `harness` rules for where `SKILL.md` lives: casing, nested manifests, symlinked
   manifests and resources, OpenClaw symlink escapes, Codex scan depth, and files
   Hermes leaves out of its file list. Tier 1 `schema` now reports a symlinked or

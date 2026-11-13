@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Callable
+from copy import deepcopy
 from pathlib import Path
 
 from rich.console import Console
@@ -17,8 +19,13 @@ from skillevaluator.constants import (
     CONTENT_TYPE_SKILL,
     CONTENT_TYPE_UNKNOWN,
     CONTENT_TYPE_WORKFLOWS,
+    PLUGIN_CONTAINED_MANIFEST_DIR,
+    PLUGIN_CONTAINED_MANIFEST_FILE,
+    PLUGIN_MANIFEST_FILES,
     SCAN_EXCLUDED_DIRS,
     SCAN_EXCLUDED_FILES,
+    SKILL_MANIFEST_FILE,
+    WORKFLOWS_MANIFEST_FILE,
 )
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.publication_evidence import (
@@ -112,6 +119,29 @@ _SKIPPED_VALIDATORS = {
     "quality": ("Quality Score (4-Dimension Analysis)",),
     "lint": ("Script Lint (Advisory)",),
 }
+# Checks that read a skill manifest (SKILL.md frontmatter, its version, its
+# quality). A target that ``--type auto`` detects as ``unknown`` and that holds
+# no artifact manifest entry has no manifest, so these are recorded as not
+# applicable rather than run.
+_MANIFEST_CHECKS = ("schema", "version", "quality")
+# Root manifests that auto-detection looks for, compared in any letter case.
+# Detection matches them by exact name with ``exists()``, so a mis-cased name
+# or a dangling symlink leaves the target ``unknown``.
+_ROOT_MANIFEST_NAMES = frozenset(
+    name.casefold() for name in (SKILL_MANIFEST_FILE, WORKFLOWS_MANIFEST_FILE, *PLUGIN_MANIFEST_FILES)
+)
+UNKNOWN_CONTENT_SKIP_REASON = (
+    "not applicable: no supported skill, rules, workflows or plugin artifact detected; use --type to force"
+)
+# Machine-readable form of the applicability decision. Every result of such a
+# run carries it, and the JSON report emits it at the root as
+# ``tier1_applicability``.
+UNKNOWN_CONTENT_APPLICABILITY = {
+    "applicability": "not_applicable",
+    "reason_code": "unsupported_content_type",
+    "detected_content_type": CONTENT_TYPE_UNKNOWN,
+    "supported_content_types": [CONTENT_TYPE_SKILL, CONTENT_TYPE_RULES, CONTENT_TYPE_WORKFLOWS, CONTENT_TYPE_PLUGIN],
+}
 REPORTERS = {
     "json": JSONReporter,
     "html": HTMLReporter,
@@ -125,6 +155,57 @@ def _stamp_tier1_scan_scope(results: list[ValidationResult], target: Path) -> No
     skipped = publication_paths_skipped_by_scan(target, SCAN_EXCLUDED_DIRS, SCAN_EXCLUDED_FILES)
     for result in results:
         result.metadata[TIER1_UNSCANNED_PATHS_KEY] = list(skipped)
+
+
+def _entry_names(folder: Path) -> list[str] | None:
+    """Return the entry names of *folder*, or ``None`` when it cannot be listed."""
+    try:
+        with os.scandir(folder) as entries:
+            return [entry.name for entry in entries]
+    except OSError:
+        return None
+
+
+def _has_manifest_entry(target: Path) -> bool:
+    """Return whether *target* is, or directly holds, an artifact manifest entry in any letter case.
+
+    The manifests are ``SKILL.md``, ``workflow-rules.mdc``,
+    ``agent_plugin.yaml``/``.yml`` and ``.claude-plugin/plugin.json``. Entry
+    names are compared instead of calling ``exists()``, so a dangling symlink
+    and a mis-cased name such as ``Skill.md`` count on every filesystem: such
+    a folder is a broken artifact, not a target without one. A directory that
+    cannot be listed also counts, and so does a ``.claude-plugin`` entry that
+    is not a listable directory, so the manifest checks run and report the
+    problem instead of being recorded as not applicable. A ``.claude-plugin``
+    folder without a ``plugin.json``, such as a marketplace's, does not count.
+    """
+    contained_dir = PLUGIN_CONTAINED_MANIFEST_DIR.casefold()
+    contained_file = PLUGIN_CONTAINED_MANIFEST_FILE.casefold()
+    name = target.name.casefold()
+    if os.path.lexists(target) and (
+        name in _ROOT_MANIFEST_NAMES or (name == contained_file and target.parent.name.casefold() == contained_dir)
+    ):
+        return True
+    if not target.is_dir():
+        return False
+    names = _entry_names(target)
+    if names is None:
+        return True
+    for entry in names:
+        folded = entry.casefold()
+        if folded in _ROOT_MANIFEST_NAMES:
+            return True
+        if folded == contained_dir:
+            contained = _entry_names(target / entry)
+            if contained is None or any(item.casefold() == contained_file for item in contained):
+                return True
+    return False
+
+
+def _stamp_tier1_applicability(results: list[ValidationResult]) -> None:
+    """Record on every result that the manifest checks do not apply to the target."""
+    for result in results:
+        result.metadata["tier1_applicability"] = deepcopy(UNKNOWN_CONTENT_APPLICABILITY)
 
 
 def _as_result(
@@ -180,8 +261,10 @@ def _schema_validator_for(content_type: str | None, policy: ValidationPolicy | N
     """Return the schema validator matching the (forced or detected) content type.
 
     Rules, workflows, and plugins use their dedicated schema validators; skill
-    and unknown content fall back to the skill :class:`SchemaValidator` (the
-    historical default).
+    content, ``None`` and an ``unknown`` folder that holds an artifact
+    manifest entry fall back to the skill :class:`SchemaValidator` (the
+    historical default). ``run_validation`` records the schema check as not
+    applicable for any other ``unknown`` target instead of calling this.
     """
     if content_type == CONTENT_TYPE_RULES:
         return RulesSchemaValidator()
@@ -215,6 +298,7 @@ def run_validation(
     previous_version: str | None = None,
     policy: ValidationPolicy | None = None,
     content_type: str | None = None,
+    target_root: Path | None = None,
     fail_fast: bool = False,
     continue_on_failure: bool = False,
     on_check: Callable[[str], None] | None = None,
@@ -236,7 +320,15 @@ def run_validation(
     *content_type* (``skill`` | ``rules`` | ``workflows`` | ``plugin`` |
     ``unknown`` | ``None``) selects the schema validator and gates skill-only
     checks (``quality`` and ``lint`` are skipped for rules, workflows, and
-    plugins). When *fail_fast* is set, the
+    plugins). For ``unknown`` (``--type auto`` found no supported artifact) the
+    manifest checks ``schema``, ``version`` and ``quality`` are recorded as not
+    applicable instead of run, and every result carries the
+    ``tier1_applicability`` record, while the content scans still run. A target
+    that holds an artifact manifest entry (``SKILL.md``, ``workflow-rules.mdc``,
+    ``agent_plugin.yaml``/``.yml`` or ``.claude-plugin/plugin.json``) in any
+    letter case, including a dangling symlink, is a broken artifact, so its
+    manifest checks still run and fail.
+    ``None`` keeps the historical skill behavior. When *fail_fast* is set, the
     run stops after the first failing check. *continue_on_failure* overrides
     *fail_fast* and also keeps batch folder validation scanning every skill past
     a CRITICAL finding (parity with SkillEvaluator ``--continue-on-failure``).
@@ -248,6 +340,11 @@ def run_validation(
     *pii_waivers* is an optional PII waiver file applied by the ``pii`` check.
     *skillspector_baseline* is an audited SkillSpector suppression baseline
     applied to the ``security`` check; it is never discovered from the target.
+    *target_root* is the folder that *target_path* belongs to when a caller
+    validates that folder one skill at a time, as ``validate`` does for a
+    folder of skills. The ``security`` check then accepts no SkillSpector
+    missing reference in the skill, because its instructions may name a file
+    elsewhere in the folder that its scan did not inspect.
     """
     if content_type == CONTENT_TYPE_PLUGIN:
         from skillevaluator.tier1.plugin_public import run_public_plugin_validation
@@ -276,6 +373,7 @@ def run_validation(
     results: list[ValidationResult] = []
     initial_target = publication_target_from_path(target_path)
     skill_like = content_type in (None, CONTENT_TYPE_SKILL, CONTENT_TYPE_UNKNOWN)
+    manifest_not_applicable = content_type == CONTENT_TYPE_UNKNOWN and not _has_manifest_entry(target_path)
 
     def _run_result(
         check_id: str,
@@ -303,6 +401,18 @@ def run_validation(
         stamp_tier1_required_checks([result], skill_like=skill_like)
         return result
 
+    def _not_applicable_result(check_id: str) -> ValidationResult:
+        # Recorded, never executed: a skipped result is not publication
+        # evidence, so a run with one of these can never certify Tier 1.
+        result = ValidationResult(
+            validator_name=_SKIPPED_VALIDATORS[check_id][0],
+            validator_description=UNKNOWN_CONTENT_SKIP_REASON,
+            metadata={"skipped": True, "skip_reason": UNKNOWN_CONTENT_SKIP_REASON},
+        )
+        stamp_publication_evidence([result], tier=1, check_id=check_id)
+        stamp_tier1_required_checks([result], skill_like=skill_like)
+        return result
+
     def _schema_results() -> list[ValidationResult]:
         v = _schema_validator_for(content_type, policy)
         return [_run_result("schema", v.name, v.description, v.validate)]
@@ -317,6 +427,7 @@ def run_validation(
             content_type=content_type if content_type in _AGENT_ARTIFACT_CONTENT_TYPES else None,
             skillspector_reference_root=target_path if content_type == CONTENT_TYPE_PLUGIN else None,
             skillspector_baseline=skillspector_baseline,
+            target_root=target_root,
         )
         return [_run_result("security", "Security Scan", v.description, v.validate_security_only)]
 
@@ -358,9 +469,9 @@ def run_validation(
 
     # (check name, builder, applies-to-this-content-type). Quality scoring and
     # script linting are skill-oriented and skipped for rules/workflows. Finding
-    # severities (incl. the LICENSE.* / CVE findings added below) are normalized
-    # centrally by the active policy in emit_reports, so they honor the
-    # selected validation profile.
+    # severities (incl. the LICENSE.* and DEPENDENCY.* advisory findings added
+    # below) are normalized centrally by the active policy in emit_reports, so
+    # they honor the selected validation profile.
     steps = (
         ("schema", _schema_results, True),
         ("version", _version_results, skill_like),
@@ -379,6 +490,13 @@ def run_validation(
     for check_name, _builder in [step for step in active if step[0] in skipped]:
         active.remove((check_name, _builder))
         results.extend(_skipped_result(check_name, name) for name in _SKIPPED_VALIDATORS[check_name])
+    if manifest_not_applicable:
+        # No skill, rules, workflows or plugin layout was detected, so there is
+        # no manifest to validate: each manifest check would only report "No
+        # skills found". The content scans below keep their unrestricted scope.
+        for check_name, _builder in [step for step in active if step[0] in _MANIFEST_CHECKS]:
+            active.remove((check_name, _builder))
+            results.append(_not_applicable_result(check_name))
     with continue_on_failure_scope(continue_on_failure):
         for step_number, (check_name, builder) in enumerate(active, 1):
             if on_check is not None:
@@ -406,6 +524,8 @@ def run_validation(
                 )
 
             if fail_fast and not continue_on_failure and any(not r.passed for r in results):
+                if manifest_not_applicable:
+                    _stamp_tier1_applicability(results)
                 _stamp_tier1_scan_scope(results, target_path)
                 finalize_publication_target(results, target_path, initial_target)
                 return results
@@ -419,6 +539,11 @@ def run_validation(
         result.add_error(f"Unknown Tier 1 check(s): {', '.join(sorted(unknown))}")
         results.insert(0, result)
 
+    if manifest_not_applicable:
+        # Recorded whatever --checks/--skip selected, so CI can read the
+        # applicability of the target from any run, including one narrowed to
+        # the content scans.
+        _stamp_tier1_applicability(results)
     _stamp_tier1_scan_scope(results, target_path)
     finalize_publication_target(results, target_path, initial_target)
     return results
@@ -522,6 +647,7 @@ def emit_reports(
     policy: ValidationPolicy | None = None,
     target_path: str | None = None,
     expected_skill_name: str | None = None,
+    explicit_skill_name: str | None = None,
     content_label: str = "Skill",
     announce_paths: bool = True,
     sarif_scan_root: Path | None = None,
@@ -540,6 +666,10 @@ def emit_reports(
     forwarded to the HTML reporter so the report shows a Target link and the
     correct content noun. HTML navigation tabs are derived from the tiers
     present in *results*, matching SkillEvaluator's combined report.
+
+    The JSON report records *target_path* too. *explicit_skill_name* names
+    the one skill a single-skill run validated, so the JSON ``skills`` list
+    names it even when no finding path or quality score does.
     """
     if policy is not None:
         apply_policy(results, policy)
@@ -572,6 +702,12 @@ def emit_reports(
             reporter = reporter_cls(
                 workspace_root=sarif_repository_root,
                 scan_root=sarif_scan_root,
+            )
+        elif fmt == "json":
+            reporter = reporter_cls(
+                expected_skill_name=expected_skill_name,
+                target_path=target_path,
+                explicit_skill_name=explicit_skill_name,
             )
         else:
             reporter = reporter_cls(expected_skill_name=expected_skill_name)

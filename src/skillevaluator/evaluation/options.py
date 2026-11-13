@@ -64,6 +64,7 @@ class EvaluationOptions:
     max_attempts_total: int | None = None
     max_cost_usd: float | None = None
     price_file: Path | None = None
+    tolerate_baseline_timeouts: bool | None = None
 
     def engine_kwargs(self) -> dict[str, Any]:
         """Return keyword arguments (excluding ``skill_path``) for the engine."""

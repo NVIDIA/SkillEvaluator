@@ -131,6 +131,42 @@ NVIDIA Build uses OpenCode. CI installs Tier 2 or Tier 3 extras from the reviewe
 tools commit. Tier 3 checks the selected environment with `doctor`; local mode
 also installs pinned native CLIs into an isolated runtime directory.
 
+For a reviewed candidate with `ci-model-routing-v1`, independently configure
+Tier 1 LLM checks and Tier 3 gateway agents. These options run locally during
+setup; CI later reads the committed configuration:
+
+```bash
+skillevaluator ci init --tiers 1,2,3 --mode preview --no-input \
+  --paths skills --provider nv_build --embedding-provider nv_build \
+  --model "$DEDUP_MODEL" \
+  --tier1-llm --tier1-provider nv_build --tier1-model "$SECURITY_MODEL" \
+  --tier3-provider openai-compatible --tier3-base-url "$GATEWAY_API_ROOT" \
+  --tier3-model "$JUDGE_MODEL" --gateway-secret MY_INFERENCE_KEY \
+  --agents claude-code,codex \
+  --agent-model "claude-code=$CLAUDE_MODEL" --agent-model "codex=$CODEX_MODEL"
+```
+
+Set those model variables to exact accessible catalog IDs and the gateway
+variable to its API root, commonly ending in `/v1`. `MY_INFERENCE_KEY` is the
+name of a CI secret, not its value. Configure that repository Actions secret
+and the Build secret `NVIDIA_API_KEY`; never pass a key value to `ci init`.
+Use `--mode pr` after reviewing the preview. `--base-url` and
+`--embedding-base-url` configure shared chat and embedding endpoints when
+needed. Tier 1's immutable image uses native provider endpoints, so choose a
+supported `--tier1-provider` when other tiers use a custom gateway.
+
+The separate `--tier3-model` selects judging. Repeatable `--agent-model`
+selects each native agent's model without replacing it with the judge's model.
+`--tier1-model` also reaches SkillSpector; an empty value keeps the image's
+provider defaults. Confirm that the pinned image supports the selected model.
+
+Every combined report retains benchmark cards. On GitHub, add
+`--benchmark-pr` with a `ci-benchmark-pr-v1` candidate to propose eligible cards
+beside their skills through a dedicated update PR after default-branch runs.
+The setup still contains two entry files. GitLab retains cards in its aggregate
+artifact; automated benchmark-update MRs are not provided by this option.
+Older descriptors reject these new options before writing unsupported CI files.
+
 `--timeout-minutes` sets the native job duration (10 to 360, 300 by default).
 The evaluator's runtime budget ends 20 minutes, or a quarter of a shorter
 duration, earlier so setup and retained evidence fit. If setup outlasts that
@@ -146,6 +182,11 @@ certificates. Local mode needs a compatible native runner with Node/npm;
 the generated GitLab local configuration removes the Docker service. Cloud
 sandbox backends are outside this onboarding path.
 
+`--runner` selects the native Tier 2/3 runner. Static and LLM-enriched Tier 1
+keep their separate image-capable runner: GitHub uses `ubuntu-24.04`, and
+GitLab uses an untagged image runner. Choosing a local Tier 3 runner therefore
+does not add a Docker prerequisite to that native runner.
+
 Merge both generated files onto the default branch **before opening the demo**.
 The first setup PR/MR can show evaluation checks, but automatic comments need
 the trusted feedback entrypoint to exist on the default branch. GitLab also
@@ -153,9 +194,13 @@ needs a protected default branch and a project access token with `api` scope
 and the Maintainer role, stored as a scoped, protected
 `SKILLEVALUATOR_GITLAB_TOKEN` limited to the `skillevaluator-feedback`
 environment. GitLab before 18.4 also needs a separate project Reporter/read_api
-`SKILLEVALUATOR_GITLAB_READ_TOKEN`, scoped to the protected execution environment
-(`skillevaluator` by default). The read credential is removed before provider work.
-Newer servers use `CI_JOB_TOKEN` by default. Online init/status report the server
+`SKILLEVALUATOR_GITLAB_READ_TOKEN` for current-MR admission, scoped to the protected
+execution environment (`skillevaluator` by default). The same read token is needed
+on any GitLab version when the current protected default-branch API check rejects
+`CI_JOB_TOKEN`, for example with HTTP 403. Configure or verify the read token's
+project access rather than using the feedback publisher token. The read credential
+is removed before provider work. Newer servers use `CI_JOB_TOKEN` by default where
+the endpoint permits it. Online init/status report the server
 version prerequisite; offline preview/save leave admission readiness unverified.
 The MR jobs receive no comment token. GitLab's feedback request uses its
 short-lived job token; the initiating user needs permission to create a pipeline
@@ -221,17 +266,31 @@ publisher at `.github/workflows/feedback-all-tiers.yml`. The CLI selects this
 alternate filename when the conventional feedback file already defines a
 reusable workflow, and `ci status --tiers 1,2,3` recognizes it.
 
-The repository callers pin a reviewed `main` commit for the evaluator workflows
-and tools, and the verified released Tier 1 image. They use Docker, NVIDIA Build,
-one attempt and one concurrent task, and the committed native datasets. The
-caller's explicit `model` input selects chat, judging and the default live-agent
-model together; embeddings use the separate `embedding-model` input. Add
-`NVIDIA_API_KEY` as a repository Actions secret before expecting provider-backed
-results. Without it, Tier 2 and Tier 3
-remain incomplete/advisory; a passing Tier 1 gate is not an all-tier evaluation
-pass. Forks retain keyless Tier 1 checks. On PRs, ordinary software changes
+The repository callers pin reviewed evaluator workflows and tools, and the
+verified released Tier 1 image. They use Docker, one attempt and one concurrent
+task, and the committed native datasets. Tier 1 enables `--llm` and SkillSpector
+with its own NVIDIA Build model. Tier 2 uses a separate NVIDIA Build chat model
+and embeddings. Tier 3 selects both Codex and Claude Code through a configured
+gateway, with explicit agent models and a separate judge model.
+
+For this repository's profile, `NVIDIA_API_KEY` is a repository Actions
+**secret**. Set the repository Actions **variable** `SKILL_EVAL_TIER3_BASE_URL`
+to the gateway's versioned API root, and `SKILL_EVAL_GATEWAY_SECRET` to the name
+of the existing repository Actions secret holding the gateway key. The selector
+contains only a secret name, never the key itself. The caller resolves
+`secrets[vars.SKILL_EVAL_GATEWAY_SECRET]` into the reusable workflow's generic
+`LLM_API_KEY`; other repositories can select their own gateway and secret names
+during local onboarding. Missing
+prerequisites remain visible in the reports. A passing Tier 1 gate is not an
+all-tier evaluation pass. Forks retain keyless Tier 1 checks. On PRs, ordinary software changes
 select no skills, skill changes select the affected skills, and CI configuration
 changes select the collection. Pushes to `main` and manual runs scan the collection.
+With `scan-mode: auto`, the paid jobs (LLM-enriched Tier 1, Tier 2 and Tier 3)
+run on a PR only when it changes a file under a configured skill root. A
+same-repository configuration-only PR runs the keyless Tier 1 scan of every
+skill, and its report lists Tier 2 and Tier 3 as skipped because no skill
+changed. Fork PRs never run the paid tiers, so their reports keep the existing
+Tier 2 and Tier 3 reason.
 
 If a provider returns HTTP 404, verify that the selected model accepts chat
 requests with your account. Presence in the public model catalog alone does not
@@ -291,13 +350,56 @@ preferring one whose marker verifies, and leaves any other report comments
 untouched. Report comments with unverifiable markers are never deferred to.
 Merge this feedback file onto the default branch before expecting the first
 automatic comment. Changes to the caller must refresh its approved Git blob in
-`trusted-caller-blobs`.
+`trusted-caller-blobs` in both trusted jobs. An upgrade that changes the approved
+caller or producer revision starts automatic feedback only after the updated
+listener reaches the default branch; earlier candidate runs retain their artifacts.
 
 A missing provider key, unavailable runtime, or missing committed native dataset
 must remain visible as an incomplete or needs-action result. Local `ci init`,
 `ci status`, and `ci demo` are setup and inspection commands; a successful setup
 is not evidence that the three tiers passed. Optional Pages hosting remains a
 separate opt-in; artifact feedback works without it.
+
+### LLM security, gateway agents and benchmark cards
+
+A candidate descriptor advertising `ci-model-routing-v1` supports
+`--tier1-llm`, independent Tier 1 provider/model inputs, and separate Tier 3
+gateway and judge settings. The protected Tier 1 job reuses the hardened image
+with LLM security, SkillSpector semantic findings, verification and rubric
+checks. An unconditional keyless baseline remains available for forks and
+denied admission. For an authorized LLM run, missing or failed enriched evidence
+fails the required Tier 1 gate; it is never replaced with a passing static scan.
+With the default `scan-mode: auto`, a PR runs the enriched job only when it
+changes a file under a configured skill root. CI configuration or unrelated
+changes skip it, and the keyless scan, which covers every skill for a setup
+change, remains the Tier 1 gate. Pushes to the default branch, manual runs and
+`scan-mode: all` keep the enriched job.
+The image supports OpenAI, Anthropic and NVIDIA Build at their native endpoints.
+
+Tier 2 chat/embeddings can use one provider while Tier 3 uses an
+`openai-compatible` gateway. Set `tier3-provider`, `tier3-base-url` and
+`tier3-model` for the judge, then `agents` and `agent-models` for the actual
+Claude Code/Codex models. A gateway must serve Chat Completions for judging,
+Responses for Codex, and Anthropic Messages for Claude Code, including tool
+calls. A model catalog listing alone does not verify these APIs or your key's
+model access. The generic `LLM_API_KEY` reusable-workflow secret maps to the
+repository secret selected by local `ci init --gateway-secret`.
+
+The combined artifact includes `benchmarks/skill-NNN/BENCHMARK.md` and its
+combined native JSON. The index links to both. Failed or incomplete evidence
+retains a card with its actual publication status. Publication still requires
+complete required-tier evidence even when Tier 2/3 are advisory CI jobs.
+Older Tier 1 images that omit required-check scope cannot certify a passing
+card; use a compatible image rather than inferring coverage from a green gate.
+
+With capability `ci-benchmark-pr-v1`, `ci init --benchmark-pr` adds an optional
+job to the same feedback file. After a verified current default-branch run, a
+separate trusted publisher regenerates eligible cards from native JSON and
+opens a benchmark-update PR. It never changes the evaluated source PR or pushes
+to the default branch. This job needs `contents: write` and
+`pull-requests: write`; the existing comment job keeps read-only contents
+permission. GitHub must allow Actions to create PRs. If that setting is
+disabled, the job reports its prepared branch and a manual PR action.
 
 ## GitLab checks and feedback
 
@@ -378,6 +480,33 @@ retains `skill-evaluator-results/ci-results.json`, `index.html`, `summary.md`,
 and each tier's native reports for 14 days. Reports stay behind your normal
 GitLab artifact access controls.
 
+A reviewed `ci-model-routing-v1` candidate can opt into
+`SKILL_EVAL_TIER1_LLM: "true"`, with independent
+`SKILL_EVAL_TIER1_PROVIDER` and `SKILL_EVAL_TIER1_MODEL` settings. The additional
+Tier 1 image job runs in the protected execution environment, rechecks current
+MR/default-branch eligibility, and uses no Docker-in-Docker service. Its
+enriched evidence determines the Tier 1 gate for an eligible run; missing
+evidence cannot fall back to a passing static baseline. Default-branch enrichment
+is limited to `push` and `web` pipelines, matching provider admission. Scheduled,
+API, trigger and downstream default-branch pipelines retain the keyless Tier 1
+baseline, as do forks. With `SKILL_EVAL_SCAN_MODE: auto`, an MR that changes no
+file under a configured skill root skips the paid jobs (enriched Tier 1, Tier 2
+and Tier 3) before reading a provider key. The aggregate recomputes that decision
+from the checkout with the pinned tools, never from an artifact. It then keeps
+the keyless report as the Tier 1 gate and records Tier 2 and Tier 3 as skipped.
+
+Use `SKILL_EVAL_TIER3_PROVIDER`, `SKILL_EVAL_TIER3_BASE_URL` and
+`SKILL_EVAL_TIER3_MODEL` for a separate live-agent/judge route, and
+`SKILL_EVAL_AGENT_MODELS` for newline-separated `AGENT=MODEL` selections.
+Generic gateways use environment-scoped `SKILL_EVAL_LLM_API_KEY`; chat and
+embedding settings can remain independent. These variables are also generated
+by the [local onboarding options](#opt-in-to-three-tier-ci).
+
+The aggregate retains source-bound `BENCHMARK.md` cards and combined JSON under
+`benchmarks/skill-NNN/`. Publication requirements remain separate from advisory
+CI policy. GitLab currently publishes these cards as authenticated artifacts;
+the optional `--benchmark-pr` source-update feature is GitHub-only.
+
 Trusted MR feedback uses one summary table with a row per skill. Each row has
 one-line results for Static and Security Validation, Deduplication, and Live
 Agent Evaluation, with status, recorded issue count and the main finding or
@@ -426,8 +555,14 @@ uses this read credential once, refuses HTTP redirects, and the job removes it
 before runtime installation, doctor or provider execution.
 
 GitLab 18.4 and later support the default short-lived `CI_JOB_TOKEN` path for
-this MR endpoint; the separate read token remains optional. `ci init --mode pr`
-and `ci status` check the server version through the local authenticated API.
+this MR endpoint. Admission also verifies the current protected default-branch
+head through the repository branches API. If a job token cannot read either
+endpoint, such as an HTTP 403 response, configure or verify the same separate
+`SKILLEVALUATOR_GITLAB_READ_TOKEN` with project Reporter/read_api access. This
+default-branch prerequisite can apply on newer GitLab versions too; use the
+execution environment's read credential, never the feedback publisher token.
+`ci init --mode pr` and `ci status` check the server version through the local
+authenticated API.
 Offline preview/save keep the version unverified. These local commands report
 the prerequisite and do not claim to validate a stored CI secret's privileges.
 The setup still consists of two consumer files.
@@ -529,6 +664,13 @@ names it `skill-evaluator-results-attempt-N`; GitLab retains the aggregate job's
 actual artifact download for that run. Authentication and artifact expiry still
 apply; this link does not imply publicly hosted HTML.
 
+Current candidate aggregates also retain `benchmarks/skill-NNN/BENCHMARK.md`
+and `benchmarks/skill-NNN/skillevaluator.json` for each selected skill. The
+index links these source-bound cards and combined JSON alongside native tier
+reports. Cards retain failed and incomplete publication states. A passing
+Tier 1 CI gate does not certify benchmark eligibility; inspect the combined
+JSON's `publication.status` and `publication.eligible`.
+
 The PR or MR comment presents one summary table with a row for each skill.
 Each row shows a one-line status, issue count and the most important available
 finding or blocker for **Tier 1 — Static and Security Validation**,
@@ -551,11 +693,15 @@ configuration-only scope notices are excluded. Incomplete or missing evidence
 shows an unknown count; it cannot imply zero findings or a completed check.
 The Tier 1 gate and each advisory tier's status stay separate, so this example
 can pass the required CI gate while still needing review of Tier 2 and Tier 3.
-Every tier selects the same skills: the changed skills, or every skill when
-the pull request changes CI setup under `.github/`, `.gitlab/`,
+Every tier that runs selects the same skills: the changed skills, or every
+skill when the pull request changes CI setup under `.github/`, `.gitlab/`,
 `.skillevaluator/ci` or `.gitlab-ci.yml` (on GitHub, also when it changes more
 files than the API can list). A cell for a skill that its tier did not select
-reads `Skipped · issues unknown · Not selected for this tier`.
+reads `Skipped · issues unknown · Not selected for this tier`. With
+`scan-mode: auto`, a merge request or same-repository pull request that changes
+no file under a configured skill root skips Tier 2 and Tier 3. Only Tier 1 then
+scans, covering every skill for a setup change, and the Tier 2 and Tier 3 cells read
+`Skipped · issues unknown · No file under a configured skill root changed; this paid tier did not run.`
 
 ```text
 ci-results.json

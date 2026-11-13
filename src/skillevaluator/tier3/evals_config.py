@@ -47,6 +47,7 @@ _HARBOR_KEYS = {
     "max_cases",
     "timeout_multiplier",
     "agent_runtime_preflight",
+    "tolerate_baseline_timeouts",
     "agent_workdir",
     "resources",
     "runtime_env",
@@ -251,6 +252,12 @@ def _validate_config(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
                 harbor_raw["agent_runtime_preflight"],
                 config_path,
                 "harbor.agent_runtime_preflight",
+            )
+        if "tolerate_baseline_timeouts" in harbor_raw:
+            harbor["tolerate_baseline_timeouts"] = _bool(
+                harbor_raw["tolerate_baseline_timeouts"],
+                config_path,
+                "harbor.tolerate_baseline_timeouts",
             )
         if "agent_workdir" in harbor_raw:
             harbor["agent_workdir"] = _non_empty_string(

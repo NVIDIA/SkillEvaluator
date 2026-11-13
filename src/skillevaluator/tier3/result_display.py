@@ -79,8 +79,11 @@ def _score_cell(value: object, *, unavailable: str = "NO SCORE") -> tuple[Text, 
     return Text(f"{numeric:.2f}", style=f"bold {style}"), Text(_score_bar(numeric), style=style)
 
 
+_NOT_APPLICABLE_LABEL = "N/A"
+
+
 def _not_applicable_cell() -> tuple[Text, Text]:
-    return Text("N/A", style="dim italic"), Text("")
+    return Text(_NOT_APPLICABLE_LABEL, style="dim italic"), Text("")
 
 
 def _not_applicable_metrics(data: Mapping[str, Any], variant: str) -> frozenset[str]:
@@ -91,9 +94,15 @@ def _not_applicable_metrics(data: Mapping[str, Any], variant: str) -> frozenset[
     return frozenset(not_applicable_list(raw))
 
 
-def _delta_cell(value: object) -> Text:
+def _delta_cell(value: object, *, not_applicable: bool = False, skipped: bool = False) -> Text:
+    """Lift cell. With no delta it reads N/A for a row that is N/A in either arm, then
+    ``skipped`` when the with-skill arm never ran, then NO SCORE, like the other reporters."""
     numeric = _finite_number(value)
     if numeric is None:
+        if not_applicable:
+            return Text(_NOT_APPLICABLE_LABEL, style="dim italic")
+        if skipped:
+            return Text("skipped", style="dim")
         return Text("NO SCORE", style="dim")
     style = lift_style(numeric)
     return Text(f"{numeric:+.2f}", style=f"bold {style}")
@@ -242,6 +251,30 @@ def _attempt_coverage(data: Mapping[str, Any]) -> str:
     if all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in (scored, expected)):
         return f"{scored}/{expected}"
     return ""
+
+
+def _recovered_timeout_lines(agents: Mapping[str, Any]) -> list[str]:
+    """One line per agent whose agent timeouts a later scored attempt recovered."""
+    lines = []
+    for agent, raw in agents.items():
+        conditions = raw.get("conditions") if isinstance(raw, Mapping) else None
+        if not isinstance(conditions, Mapping):
+            continue
+        counts: dict[str, int] = {}
+        for variant, label in (("with_skill", "with skill"), ("without_skill", "baseline")):
+            condition = conditions.get(variant)
+            count = condition.get("recovered_attempts_total") if isinstance(condition, Mapping) else None
+            if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                counts[label] = count
+        total = sum(counts.values())
+        if total:
+            arms = ", ".join(f"{count} {label}" for label, count in counts.items())
+            subject = "the timed-out attempt is" if total == 1 else "timed-out attempts are"
+            lines.append(
+                f"{agent}: {total} agent timeout{'s' if total != 1 else ''} recovered by a later scored "
+                f"attempt ({arms}); {subject} not scored and stay{'s' if total == 1 else ''} in the run history."
+            )
+    return lines
 
 
 def _concise_trial_reason(reason: str) -> str:
@@ -551,7 +584,8 @@ def _render_agent_scores(
 ) -> None:
     with_usable = _condition_usable(data, "with_skill")
     # A baseline-only run (--skip-with-skill) deliberately leaves the with-skill arm unscored.
-    with_unavailable = "skipped" if _condition_status(data, "with_skill") == "skipped" else "NO SCORE"
+    with_skipped = _condition_status(data, "with_skill") == "skipped"
+    with_unavailable = "skipped" if with_skipped else "NO SCORE"
     baseline_status = _condition_status(data, "without_skill")
     baseline_skipped = baseline_status == "skipped"
     baseline_usable = _condition_usable(data, "without_skill") and not baseline_skipped
@@ -603,14 +637,18 @@ def _render_agent_scores(
                 else None
             )
             baseline_score, baseline_bar = _not_applicable_cell() if baseline_na else _score_cell(baseline_value)
-            row.extend([baseline_score, baseline_bar, _delta_cell(delta)])
+            lift_cell = _delta_cell(delta, not_applicable=with_na or baseline_na, skipped=with_skipped)
+            row.extend([baseline_score, baseline_bar, lift_cell])
         table.add_row(*row)
 
     basis = lift.get("basis")
     if isinstance(basis, Mapping) and basis.get("pairing") == "same_cases_per_metric":
         table.caption = "Lift compares the cases scored by both arms for each evaluator."
     if _not_applicable_metrics(data, "with_skill") or _not_applicable_metrics(data, "without_skill"):
-        table.caption = (str(table.caption or "") + " N/A: no applicable reference or skill in this arm.").strip()
+        table.caption = (
+            str(table.caption or "")
+            + " N/A: no applicable reference or skill in this arm, so it is left out of scores and lift."
+        ).strip()
     if custom_with or custom_without:
         if metrics:
             table.add_section()
@@ -628,7 +666,7 @@ def _render_agent_scores(
                     else None
                 )
                 baseline_score, baseline_bar = _score_cell(baseline_value)
-                row.extend([baseline_score, baseline_bar, _delta_cell(delta)])
+                row.extend([baseline_score, baseline_bar, _delta_cell(delta, skipped=with_skipped)])
             table.add_row(*row)
 
     if not metrics and not custom_with and not custom_without and not show_baseline:
@@ -820,7 +858,7 @@ def _render_dimensions(
                 with_bar,
                 baseline_cell,
                 baseline_bar,
-                _delta_cell(delta),
+                _delta_cell(delta, not_applicable=with_na or baseline_na, skipped=with_skipped),
             ]
             table.add_row(*row)
 
@@ -1146,6 +1184,11 @@ def render_evaluation_result(
 
         _render_dimensions(console=console, agents=agents, safe=safe)
 
+        from skillevaluator.reporting.tier3_token_usage import EVALUATE_CASE_POINTER, render_token_usage_table
+
+        # Measured, not scored: per-agent token sums the report step recorded.
+        render_token_usage_table(console, result.get("token_usage"), case_pointer=EVALUATE_CASE_POINTER, text=safe)
+
         # The per-evaluator findings report — evaluator reasonings, evidence
         # pointers, and next-step suggestions — is the feedback surface that
         # follows the score tables.
@@ -1168,6 +1211,10 @@ def render_evaluation_result(
             )
         except Exception:  # advisory panel: never break the run summary
             logging.getLogger(__name__).debug("Findings report skipped", exc_info=True)
+
+    # A recovered timeout is neither a failure nor a score; say so instead of staying silent.
+    for line in _recovered_timeout_lines(agents) if isinstance(agents, Mapping) else []:
+        console.print(Text(safe(line), style="yellow"))
 
     errors = result.get("execution_errors") or result.get("error") or []
     if isinstance(errors, str):

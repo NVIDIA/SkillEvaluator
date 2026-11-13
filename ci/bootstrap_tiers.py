@@ -8,6 +8,16 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from pathlib import Path
+
+# Trust only the pinned tools sibling when isolated Python omits its directory.
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+try:
+    from model_config import agent_model_overrides, model_environment
+except ModuleNotFoundError:
+    from ci.model_config import agent_model_overrides, model_environment
 
 from skillevaluator.tier3.commands import resolve_agents
 from skillevaluator.tier3.harbor.local_runtime import managed_install_argv, managed_runtime_prefix
@@ -31,17 +41,19 @@ def main() -> int:
         print("Three-tier CI supports docker and local environments only.")
         return 2
     try:
+        doctor_env = model_environment(dict(os.environ), 3)
+        models = agent_model_overrides(dict(os.environ))
         agents = resolve_agents(
-            os.environ.get("SKILL_EVAL_AGENTS") or None, provider=os.environ.get("SKILL_EVAL_PROVIDER", "openai")
+            os.environ.get("SKILL_EVAL_AGENTS") or None, provider=doctor_env["SKILL_EVAL_LLM_PROVIDER"]
         )
         if mode == "local":
             for agent in agents:
                 install_agent(agent)
-        doctor_env = dict(os.environ)
-        doctor_env["SKILL_EVAL_LLM_PROVIDER"] = os.environ.get("SKILL_EVAL_PROVIDER", "openai")
-        doctor_env["PYTHON_DOTENV_DISABLED"] = "1"
-        if model := os.environ.get("SKILL_EVAL_MODEL"):
-            doctor_env["SKILL_EVAL_LLM_MODEL"] = model
+        # Native local runtimes were installed under the runner's home. Keep that
+        # location without inheriting the runner's arbitrary environment.
+        if os.environ.get("HOME"):
+            doctor_env["HOME"] = os.environ["HOME"]
+        model_args = [argument for model in models for argument in ("--agent-model", model)]
         result = subprocess.run(
             [
                 sys.executable,
@@ -49,10 +61,14 @@ def main() -> int:
                 "-m",
                 "skillevaluator.cli",
                 "doctor",
+                "--tier",
+                "3",
+                "--verify-models",
                 "--env-mode",
                 mode,
                 "--agents",
                 ",".join(agents),
+                *model_args,
             ],
             check=False,
             env=doctor_env,

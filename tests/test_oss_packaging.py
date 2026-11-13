@@ -155,7 +155,7 @@ def test_harbor_dependency_contract_keeps_base_install_isolated() -> None:
     assert base_names.isdisjoint({"harbor", "litellm"})
     assert len(harbor_requirements) == 1
     assert harbor_requirements[0].extras == {"gke"}
-    assert HARBOR_VERSION == "0.24.0"
+    assert HARBOR_VERSION == "0.25.0"
     assert str(harbor_requirements[0].specifier) == f"=={HARBOR_VERSION}"
     assert len(litellm_requirements) == 1
     litellm_specifier = litellm_requirements[0].specifier

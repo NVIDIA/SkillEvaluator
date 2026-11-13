@@ -35,6 +35,7 @@ from skillevaluator.utils.secret_redaction import Redactor
 try:
     from diagnostics import TierBudget, retain_diagnostics
     from github_api import strict_json
+    from model_config import CREDENTIAL_KEYS, agent_model_overrides, model_environment, required_credentials
     from run_tier1 import discover_skills
     from secret_redaction import collect_sensitive_values
     from select_changed_skills import (
@@ -48,6 +49,7 @@ try:
 except ModuleNotFoundError:
     from ci.diagnostics import TierBudget, retain_diagnostics
     from ci.github_api import strict_json
+    from ci.model_config import CREDENTIAL_KEYS, agent_model_overrides, model_environment, required_credentials
     from ci.run_tier1 import discover_skills
     from ci.secret_redaction import collect_sensitive_values
     from ci.select_changed_skills import (
@@ -61,31 +63,6 @@ except ModuleNotFoundError:
 
 SHA = re.compile(r"[0-9a-f]{40}")
 MAX_JSON_BYTES = 32 * 1024 * 1024
-PROVIDER_KEYS = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "nv_build": "NVIDIA_API_KEY"}
-SAFE_ENV = {
-    "PATH",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "SSL_CERT_FILE",
-    "SSL_CERT_DIR",
-    "REQUESTS_CA_BUNDLE",
-    "CURL_CA_BUNDLE",
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "NO_PROXY",
-    "http_proxy",
-    "https_proxy",
-    "no_proxy",
-    "DOCKER_HOST",
-    "DOCKER_CONTEXT",
-    "DOCKER_CONFIG",
-    "DOCKER_TLS_VERIFY",
-    "DOCKER_CERT_PATH",
-    "XDG_RUNTIME_DIR",
-    "SYSTEMROOT",
-    "SKILLEVALUATOR_RUNTIME_DIR",
-}
 SUCCESS = {"passed", "skipped"}
 # Worker diagnostics explain execution problems, not complete failed or neutral verdicts.
 EXECUTION_FAILURES = {"incomplete", "not_run"}
@@ -111,39 +88,12 @@ def boolean(env: dict, key: str, default: bool = False) -> bool:
     return value == "true"
 
 
-def child_environment(env: dict[str, str]) -> dict[str, str]:
-    """Forward explicit provider configuration, never CI or publisher tokens."""
-    child = {key: value for key, value in env.items() if key in SAFE_ENV}
-    provider = env.get("SKILL_EVAL_PROVIDER", "openai")
-    embedding = env.get("SKILL_EVAL_EMBEDDING_PROVIDER") or ("openai" if provider == "anthropic" else provider)
-    if provider not in PROVIDER_KEYS or embedding not in {"openai", "nv_build"}:
-        raise ConfigurationError("Select supported chat and embedding providers.")
-    for selected in {provider, embedding}:
-        key = PROVIDER_KEYS[selected]
-        if env.get(key):
-            child[key] = env[key]
-    child.update(
-        {
-            "SKILL_EVAL_LLM_PROVIDER": provider,
-            "SKILL_EVAL_EMBEDDING_PROVIDER": embedding,
-            "PYTHON_DOTENV_DISABLED": "1",
-            "PYTHONUNBUFFERED": "1",
-            "NO_COLOR": "1",
-            "SKILLEVALUATOR_TELEMETRY_DISABLED": "1",
-            "SKILLEVALUATOR_HARBOR_VIEWER_UPLOAD": "false",
-        }
-    )
-    for source, target in (
-        ("SKILL_EVAL_MODEL", "SKILL_EVAL_LLM_MODEL"),
-        ("SKILL_EVAL_MODEL", "LLM_JUDGE_MODEL"),
-        ("SKILL_EVAL_EMBEDDING_MODEL", "SKILL_EVAL_EMBEDDING_MODEL"),
-    ):
-        if env.get(source):
-            value = env[source]
-            if len(value) > 256 or any(ord(c) < 32 for c in value):
-                raise ConfigurationError("Model configuration contains an unsupported value.")
-            child[target] = value
-    return child
+def child_environment(env: dict[str, str], tier: int = 2) -> dict[str, str]:
+    """Forward explicit selected provider configuration without CI credentials."""
+    try:
+        return model_environment(env, tier)
+    except ValueError as exc:
+        raise ConfigurationError(str(exc)) from None
 
 
 def select_skills(workspace: Path, env: dict) -> tuple[list[Path], dict]:
@@ -157,7 +107,7 @@ def select_skills(workspace: Path, env: dict) -> tuple[list[Path], dict]:
         raise ConfigurationError("The evaluated commit must match the checkout HEAD.")
     if base and mode == "auto":
         selected, selection = select_changed_skills(workspace, roots, base, head)
-        # Tier 1 applies the same setup predicate, so every tier selects the same skills.
+        # Tier 1 applies the same setup predicate, so every tier that runs selects the same skills.
         changed = _paths(_git(workspace, "diff", "--name-only", "-z", "--no-renames", f"{base}...{head}", "--"))
         if not setup_changed(changed):
             return selected, selection
@@ -290,6 +240,7 @@ def tier3_options(skill: Path, output: Path, env: dict):
         # Native resolution adds adapter namespaces and honors authored agent
         # overrides; a global CLI override would bypass that resolution.
         model=None,
+        agent_model=agent_model_overrides(env),
         skip_baseline=False,
         skip_with_skill=False,
         max_cases=None,
@@ -317,7 +268,7 @@ def native_tier3(skill: Path, output: Path, env: dict) -> int:
     )
     if result is None:
         reason = service.failure_reason(engine) or "Tier 3 did not retain a canonical live evaluation result."
-        secrets = {os.environ[key] for key in PROVIDER_KEYS.values() if os.environ.get(key)}
+        secrets = {os.environ[key] for key in CREDENTIAL_KEYS if os.environ.get(key)}
         result = advisory_skip_result(Redactor(secrets).text(reason)[:2000], skill_name=skill.name)
         result.mark_scan_incomplete("Tier 3 execution")
     result.metadata["gating"] = {"tier": 3, "blocking": False}
@@ -386,7 +337,16 @@ def _retain(raw: Path, destination: Path, tier: int, tokens: set[str], skill: Pa
         for result, row in zip(results, report["results"], strict=True):
             result.metadata["gating"] = {**result.metadata.get("gating", {}), "tier": 2, "blocking": False}
             row["gating"] = result.metadata["gating"]
-        report["gating"] = {"tiers": {"2": {"blocking": False, "validators": [r.validator_name for r in results]}}}
+        report["gating"] = {
+            "tiers": {
+                "2": {
+                    "blocking": False,
+                    "validators": [r.validator_name for r in results],
+                    # Keep the reporter's per-check policy list, now advisory too.
+                    "validator_policies": [{"validator": r.validator_name, "blocking": False} for r in results],
+                }
+            }
+        }
     run_status = resolve_run_status(results)
     if tier == 2:
         report.update(overall_passed=run_status.headline.value == "passed", overall_status=run_status.headline.value)
@@ -484,11 +444,9 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
         row["reason"] = "Use native per-skill evals directories; central dataset mappings require explicit conversion."
         retain()
         return int(required)
-    child = child_environment(env)
-    provider_tokens = {child[key] for key in PROVIDER_KEYS.values() if child.get(key)}
-    needed = {PROVIDER_KEYS[child["SKILL_EVAL_LLM_PROVIDER"]]}
-    if tier == 2:
-        needed.add(PROVIDER_KEYS[child["SKILL_EVAL_EMBEDDING_PROVIDER"]])
+    child = child_environment(env, tier)
+    provider_tokens = {child[key] for key in CREDENTIAL_KEYS if child.get(key)}
+    needed = required_credentials(child, tier)
     if tier > 1 and not all(child.get(key) for key in needed):
         row["reason"] = "A required provider credential is missing; configure CI secrets before evaluation."
         retain()
@@ -564,6 +522,8 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
                     ]
                     if env.get("SKILL_EVAL_AGENTS"):
                         args += ["--agents", env["SKILL_EVAL_AGENTS"]]
+                    for model in agent_model_overrides(env):
+                        args += ["--agent-model", model]
                     command_log = scratch / "doctor.log"
                     if run_command(
                         args,
@@ -580,6 +540,7 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
                     config_keys = (
                         "SKILL_EVAL_ENV_MODE",
                         "SKILL_EVAL_AGENTS",
+                        "SKILL_EVAL_AGENT_MODELS",
                         "SKILL_EVAL_MODEL",
                         "SKILL_EVAL_N_ATTEMPTS",
                         "SKILL_EVAL_N_CONCURRENT",
@@ -778,6 +739,16 @@ def aggregate(reports: Path, tiers: tuple[int, ...], env: dict) -> int:
             _keep_selected(row, selection.get("selected") if isinstance(selection, dict) else None)
             if tier in recorded:
                 row["source_attempt"] = recorded[tier]
+        elif not required and env.get("SKILL_EVAL_SKILLS_CHANGED") == "false":
+            # The trusted workflow decided no skill changed, so this paid
+            # advisory tier did not run. That is a skip, not a failed job.
+            row = {
+                "tier": tier,
+                "required": False,
+                "status": "skipped",
+                "skills": [],
+                "reason": "No file under a configured skill root changed; this paid tier did not run.",
+            }
         else:
             row = {
                 "tier": tier,
@@ -788,6 +759,12 @@ def aggregate(reports: Path, tiers: tuple[int, ...], env: dict) -> int:
             }
         result["tiers"].append(row)
     result["overall_passed"] = all(not r["required"] or r["status"] in SUCCESS for r in result["tiers"])
+    try:
+        from benchmark_reports import write_benchmark_reports
+    except ModuleNotFoundError:
+        from ci.benchmark_reports import write_benchmark_reports
+    result = validate_manifest(result)
+    result["benchmarks"] = write_benchmark_reports(reports, result)
     write_reports(reports, validate_manifest(result))
     return int(not result["overall_passed"])
 

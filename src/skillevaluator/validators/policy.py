@@ -420,17 +420,23 @@ def apply_policy(
     if policy is None:
         return results
     for result in results:
-        changed = False
+        independent_warnings: list[str] | None = None
         for finding in result.findings:
             current = (
                 finding.severity if isinstance(finding.severity, Severity) else Severity(str(finding.severity).lower())
             )
             new_severity = policy.severity_for(finding.category, finding.check_name, current)
             if new_severity != current:
+                if independent_warnings is None:
+                    # Read before any change: a mirrored line names the old severity.
+                    independent_warnings = result.independent_warnings()
                 finding.severity = new_severity
-                changed = True
-        if changed:
+        if independent_warnings is not None:
             result.recalculate_from_findings()
+            # Rebuilding from findings drops every warning. Keep those no
+            # finding mirrors, such as why a scanner did not complete.
+            for warning in independent_warnings:
+                result.add_warning(warning)
         if isinstance(result.metadata, dict):
             result.metadata["policy"] = policy.to_dict()
     return results

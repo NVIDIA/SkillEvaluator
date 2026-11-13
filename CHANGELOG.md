@@ -6,6 +6,31 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Canonical `comment-skill-checks.yml` reusable workflow and source template for
+  the standard scored Tier 1 PR comment without hosted reports. It verifies the
+  existing signed receipts and native evidence, reuses the shared report and
+  comment helpers, and needs no Pages configuration or history branch. Future
+  generated bundles include the template; archived bundles and the released
+  onboarding CLI retain their existing hosted publisher setup.
+- `harness` rules for frontmatter parsing: duplicate keys and tab indentation
+  (strict YAML parsers drop the skill), a UTF-8 BOM (Codex), no front matter
+  (Copilot CLI) and long custom frontmatter that never reaches the model. Tier 1
+  `schema` now reports duplicate frontmatter keys (HIGH) and a UTF-8 BOM (MEDIUM).
+- New `skillevaluator harness-check <skill>` command and a "Harness compatibility"
+  panel after the Tier 1 results of `validate`: one line per harness with its most
+  serious finding and an outcome label (`not found`, `rejected`, `listing
+  shortened`, ...), then `+N more` and the note count; `-v` shows every finding
+  with its fix. The checks line shows `! harness`, Tier 1 gets a `harness` summary
+  line, and the result box names the harnesses that won't load the skill.
+  `harness-check` always exits 0; `--json PATH` writes the block.
+- New advisory Tier 1 `harness` check: for each agent harness (`claude-code`,
+  `codex`, `copilot-cli`, `hermes`, `openclaw`, `opencode`) it reports whether the
+  skill `loads`, is `degraded` or is `not_loaded`, from versioned profiles shipped
+  with the package. It runs by default, never fails the run, lists its findings in
+  every report and adds a `harness_compatibility` block to JSON. `--harness
+  codex,claude-code` narrows the harnesses and `--harness-profiles DIR` loads
+  profiles from a directory. The first rules flag a skill installed outside the
+  folders a harness scans.
 - A separate four-case synthetic grader pilot adds forbidden-startup-write and
   root-search challenges with quoted/read-only and scoped controls, an independent
   label worksheet, content/source manifest and explicit security/Efficiency

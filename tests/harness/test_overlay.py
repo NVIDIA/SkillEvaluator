@@ -440,3 +440,34 @@ def test_trigger_cut_at_the_listing_window_counts_as_missing(tmp_path: Path):
     facts = skill_facts(_skill(tmp_path, desc="x" * 55 + " Use when checking harness compatibility."))
 
     assert facts["trigger_end"] > 60
+
+
+def test_grouped_skill_linked_to_a_sibling_group_stays_inside_the_root(tmp_path: Path):
+    root = tmp_path / ".agents" / "skills"
+    real = root / "group-b" / "demo-skill"
+    real.parent.mkdir(parents=True)
+    _skill(tmp_path / "src").rename(real)
+    link = root / "group-a" / "demo-skill"
+    link.parent.mkdir()
+    link.symlink_to(real, target_is_directory=True)
+
+    assert skill_facts(link)["skill_dir_symlink_target"] == "inside_root"
+
+
+def test_nested_manifest_under_evals_is_reported(tmp_path: Path):
+    skill = _rooted(tmp_path)
+    (skill / "evals" / "fixture").mkdir(parents=True)
+    (skill / "evals" / "fixture" / "SKILL.md").write_text("---\nname: fixture\n---\n", encoding="utf-8")
+
+    assert skill_facts(skill)["nested_skill_md"] is True
+
+
+def test_lowercase_nested_manifest_is_not_a_second_skill_in_codex(tmp_path: Path):
+    skill = _rooted(tmp_path)
+    (skill / "sub").mkdir()
+    (skill / "sub" / "skill.md").write_text("---\nname: sub\n---\n", encoding="utf-8")
+
+    facts = skill_facts(skill)
+    assert facts["nested_skill_md"] is True
+    assert facts["nested_skill_md_exact"] is False
+    assert _status(skill)["codex"] == "loads"

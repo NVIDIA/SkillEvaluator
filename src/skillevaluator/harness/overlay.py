@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import ast
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,7 +13,7 @@ from typing import Any
 
 import yaml
 
-from skillevaluator.constants import DESCRIPTION_TRIGGER_PATTERN, SCAN_EXCLUDED_DIRS, SKILL_MANIFEST_VARIANTS
+from skillevaluator.constants import DESCRIPTION_TRIGGER_PATTERN, SKILL_MANIFEST_VARIANTS
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 from skillevaluator.validators.schema import _duplicate_frontmatter_keys
 
@@ -159,15 +160,19 @@ def _tab_indent_breaks_yaml(fm_yaml: str) -> bool:
     return False
 
 
+def _shipped_paths(skill_path: Path) -> list[Path]:
+    """Files and symlinks a skill ships, without descending into VCS or cache folders."""
+    found = []
+    for folder, dirs, files in os.walk(skill_path):
+        dirs[:] = [d for d in dirs if d not in _NOT_SHIPPED_DIRS]
+        here = Path(folder)
+        found.extend(here / name for name in files)
+        found.extend(here / name for name in dirs if (here / name).is_symlink())
+    return sorted(found)
+
+
 def _bundle_files(skill_path: Path, manifest: Path) -> list[Path]:
-    files = []
-    for path in sorted(skill_path.rglob("*")):
-        parts = path.relative_to(skill_path).parts
-        if path == manifest or any(part in _NOT_SHIPPED_DIRS for part in parts):
-            continue
-        if path.is_symlink() or path.is_file():
-            files.append(path)
-    return files
+    return [path for path in _shipped_paths(skill_path) if path != manifest]
 
 
 # Harnesses read every file a skill ships, evals/ included; only VCS and caches are skipped.
@@ -211,9 +216,14 @@ def skill_facts(skill_path: Path) -> dict[str, Any]:
     target = "none"
     if skill_path.is_symlink():
         resolved = skill_path.resolve()
-        base = skill_path.parent.resolve()
+        base = (Path(*_link_location_parts(skill_path)).parents[depth] if root else skill_path.parent).resolve()
         target = "inside_root" if base in resolved.parents else "outside_root"
     names = {p.name for p in skill_path.iterdir()} if skill_path.is_dir() else set()
+    nested = (
+        [p for p in _shipped_paths(skill_path) if p.name in SKILL_MANIFEST_VARIANTS and p.parent != skill_path]
+        if skill_path.is_dir()
+        else []
+    )
     custom = {k: v for k, v in data.items() if str(k) not in _KNOWN_FIELDS}
     name = _skill_name(skill_path, data)
     return {
@@ -222,11 +232,8 @@ def skill_facts(skill_path: Path) -> dict[str, Any]:
         "install_root": root,
         "grouping_depth": depth,
         "manifest_name_exact": "SKILL.md" in names,
-        "nested_skill_md": any(
-            p.parent != skill_path and not any(part in SCAN_EXCLUDED_DIRS for part in p.relative_to(skill_path).parts)
-            for n in SKILL_MANIFEST_VARIANTS
-            for p in skill_path.rglob(n)
-        ),
+        "nested_skill_md": bool(nested),
+        "nested_skill_md_exact": any(p.name == "SKILL.md" and not p.is_symlink() for p in nested),
         "skill_md_symlink": manifest.is_symlink(),
         "skill_dir_symlink_target": target,
         "frontmatter_missing": manifest.is_file() and FRONTMATTER_PATTERN.match(text) is None,
@@ -244,7 +251,7 @@ def skill_facts(skill_path: Path) -> dict[str, Any]:
         "custom_fields": ", ".join(map(str, custom)),
         "custom_field_chars": sum(len(v) if isinstance(v, str) else len(yaml.safe_dump(v)) for v in custom.values()),
         "description_over": max(0, (len(description) if isinstance(description, str) else 0) - 1024),
-        "utf16_over": max(0, (len(description.encode("utf-16-le")) // 2 if isinstance(description, str) else 0) - 1024),
+        "utf16_over": max(0, (_utf16_units(description)) - 1024),
         **_bundle_facts(skill_path, manifest),
     }
 

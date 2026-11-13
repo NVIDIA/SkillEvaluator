@@ -4,6 +4,8 @@
 """Quality thresholds remain binding when policies reclassify findings."""
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -34,6 +36,49 @@ def below_threshold_skill(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return skill
+
+
+def test_changing_quality_default_updates_library_and_plugin_gates(below_threshold_skill: Path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import json
+import sys
+from pathlib import Path
+from skillevaluator import constants
+
+constants.QUALITY_DEFAULT_MIN_SCORE = 67
+
+from skillevaluator.tier1.commands import run_quality_check, run_validation
+from skillevaluator.tier1.plugin_checks import _skill_checks
+from skillevaluator.validators.quality_score import QualityScoreValidator
+
+skill = Path(sys.argv[1])
+results = [
+    QualityScoreValidator().validate(skill),
+    _skill_checks()['quality'].validate(skill),
+    run_quality_check(skill)[0],
+    run_validation(skill, checks='quality')[0],
+]
+print(json.dumps({
+    'passed': [result.passed for result in results],
+    'scores': [result.metadata['quality_scores']['overall_score'] for result in results],
+    'explicit_override_passed': QualityScoreValidator(min_score=80).validate(skill).passed,
+}))
+""",
+            str(below_threshold_skill),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(result.stdout) == {
+        "passed": [True, True, True, True],
+        "scores": [67.8, 67.8, 67.8, 67.8],
+        "explicit_override_passed": False,
+    }
 
 
 def test_raising_efficiency_severity_keeps_cli_minimum_score_failure(

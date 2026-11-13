@@ -100,7 +100,7 @@ skill-evaluation:
       base, head = os.environ["DIFF_BASE_SHA"], os.environ["DIFF_HEAD_SHA"]
       if any(not re.fullmatch(r"[0-9a-f]{40}", value) for value in (base, head)):
           raise SystemExit("Changed mode requires exact base and head commits")
-      changed = _git(Path(os.environ["CI_PROJECT_DIR"]).resolve(), "diff", "--name-only", "-z", "--no-renames", base, head, "--").split(b"\0")
+      changed = _git(Path(os.environ["CI_PROJECT_DIR"]).resolve(), "diff", "--name-only", "-z", "--no-renames", "--ignore-submodules=none", base, head, "--").split(b"\0")
       setup = any(path.startswith((b".github/", b".gitlab/", b".skillevaluator/ci")) or path == b".gitlab-ci.yml" for path in changed)
       print("all" if setup else "changed")
       PYTHON

@@ -187,6 +187,23 @@ def test_setup_workflow_only_change_selects_full_collection(consumer):
     assert selection["reason"] == "ci_configuration_changed"
 
 
+def test_hidden_setup_gitlink_still_selects_full_collection(consumer):
+    """Setup detection reads the same list as the paid-job skip, so .gitmodules cannot hide it."""
+    base = subprocess.check_output(["git", "-C", str(consumer), "rev-parse", "HEAD"], text=True).strip()
+    (consumer / ".gitmodules").write_text(
+        '[submodule "actions"]\n\tpath = .github/actions\n\turl = ./actions\n\tignore = all\n'
+    )
+    git = ["git", "-C", str(consumer), "-c", "user.name=CI tests", "-c", "user.email=ci@example.com"]
+    subprocess.run([*git, "add", ".gitmodules"], check=True)
+    subprocess.run([*git, "update-index", "--add", "--cacheinfo", f"160000,{'b' * 40},.github/actions"], check=True)
+    subprocess.run([*git, "commit", "-m", "setup gitlink"], check=True, capture_output=True)
+    selected, selection = run_tiers.select_skills(
+        consumer, env_for(consumer, DIFF_BASE_SHA=base, SKILL_EVAL_SCAN_MODE="auto")
+    )
+    assert [p.name for p in selected] == ["alpha", "beta"]
+    assert selection["reason"] == "ci_configuration_changed"
+
+
 def test_changed_selection_without_changes_is_explicitly_skipped(consumer, tmp_path):
     env = env_for(consumer)
     env["DIFF_BASE_SHA"] = env["REPORT_COMMIT"]

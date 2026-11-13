@@ -22,6 +22,7 @@ from skillevaluator import __version__
 from skillevaluator.cli_help import GroupedOption, RichGroup
 from skillevaluator.config import load_pii_patterns
 from skillevaluator.constants import (
+    QUALITY_DEFAULT_MIN_SCORE,
     SIMILARITY_DEFAULT_MAX_ENTRIES,
     SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
     SIMILARITY_MAX_ENTRIES,
@@ -1384,8 +1385,8 @@ def _catalog_child_argv_from_ctx(
         argv.append("--block-on-dedup")
     elif block_on_dedup is False:
         argv.append("--no-block-on-dedup")
-    min_score = params.get("min_score", 70)
-    if min_score != 70:
+    min_score = params.get("min_score", QUALITY_DEFAULT_MIN_SCORE)
+    if min_score != QUALITY_DEFAULT_MIN_SCORE:
         argv.extend(["--min-score", str(min_score)])
     if params.get("quality_config"):
         argv.extend(["--quality-config", str(Path(params["quality_config"]).resolve())])
@@ -1988,7 +1989,7 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
 @click.option(
     "--min-score",
     type=int,
-    default=70,
+    default=QUALITY_DEFAULT_MIN_SCORE,
     show_default=True,
     cls=GroupedOption,
     help_group=_TIER1_GROUP,
@@ -2877,7 +2878,7 @@ validate.help_group_descriptions = {
 
 @cli.command("quality-check")
 @_target_argument
-@click.option("--min-score", type=int, default=70, show_default=True)
+@click.option("--min-score", type=int, default=QUALITY_DEFAULT_MIN_SCORE, show_default=True)
 @click.option(
     "--quality-config",
     type=QUALITY_CONFIG_PATH,
@@ -2905,7 +2906,7 @@ def quality_check(
 
 @cli.command("rubric-eval")
 @_target_argument
-@click.option("--min-score", type=int, default=70, show_default=True)
+@click.option("--min-score", type=int, default=QUALITY_DEFAULT_MIN_SCORE, show_default=True)
 @_report_options
 def rubric_eval(target_path: Path, min_score: int, report_formats: tuple[str, ...], output_dir: Path) -> None:
     """Run LLM-as-judge rubric evaluation for a skill."""
@@ -3185,7 +3186,7 @@ def _workflow_report_options(func):
 @click.option(
     "--llm/--no-llm", default=None, help="Include rubric, LLM security, and verification [default: when configured]."
 )
-@click.option("--min-score", type=click.IntRange(0, 100), default=70, show_default=True)
+@click.option("--min-score", type=click.IntRange(0, 100), default=QUALITY_DEFAULT_MIN_SCORE, show_default=True)
 @click.option(
     "--quality-config",
     type=QUALITY_CONFIG_PATH,
@@ -3685,9 +3686,26 @@ def evaluate(
 @click.option("--no-llm", is_flag=True, help="Use local templates only.")
 @click.option("--dry-run", is_flag=True, help="Preview without writing.")
 @click.option("--force", is_flag=True, help="Overwrite existing evals/evals.json.")
-@click.option("--prompt", type=click.Path(exists=True, path_type=Path), default=None)
-@click.option("--grounding", type=click.Choice(["skill", "intent", "trace"]), default="skill")
-@click.option("--refine", is_flag=True, help="Refine cases using existing or collected trajectories.")
+@click.option(
+    "--prompt",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Author guidance with content beyond headings (default: evals/EVAL.md).",
+)
+@click.option(
+    "--grounding",
+    type=click.Choice(["auto", "skill", "intent", "trace"]),
+    default="auto",
+    show_default=True,
+    help="Auto requires substantive author guidance or usable matching retained traces; "
+    "existing datasets need --force or --refine. Explicit trace opts into refinement; "
+    "use skill for skill-only starters.",
+)
+@click.option(
+    "--refine",
+    is_flag=True,
+    help="Opt into refinement using retained or collected trajectories after grounding selection.",
+)
 @click.option("--from-results", type=click.Path(exists=True, path_type=Path), default=None)
 @click.option("--results-dir", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=None)
 def create_dataset(
@@ -3702,7 +3720,7 @@ def create_dataset(
     from_results: Path | None,
     results_dir: Path | None,
 ) -> None:
-    """Create synthetic eval datasets for agent skill evaluation."""
+    """Create eval datasets from author guidance, retained traces, or explicit skill grounding."""
     from skillevaluator.evaluation import DatasetGenerationError, DatasetOptions, EvaluationService
 
     try:

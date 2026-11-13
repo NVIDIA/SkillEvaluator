@@ -84,7 +84,7 @@ class DatasetOptions:
     dry_run: bool = False
     force: bool = False
     prompt: Path | None = None
-    grounding: str = "skill"
+    grounding: str = "auto"
     refine: bool = False
     from_results: Path | None = None
     results_dir: Path | None = None

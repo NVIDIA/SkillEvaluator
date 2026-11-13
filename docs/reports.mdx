@@ -351,7 +351,7 @@ When one of those names appears below the target root, the digest would certify
 content that no scan read, so the Tier 1 run records the path and publication
 stays `INCOMPLETE` until it is renamed. The root `evals/` directory holds Tier 3
 inputs. The Tier 1 file-walk checks skip it by design, while the Gitleaks
-secret scan and SkillSpector read its authored files and skip only generated
+secret scan and SkillSpector read its authored files. Both still skip generated
 output such as `evals/results`.
 Split-job results must match this identity exactly. Tier 3 runs that stage any
 linked/full repository context or external reference/workspace skills, or task

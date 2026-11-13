@@ -7,6 +7,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable
+from functools import partial
 from importlib.resources import files
 from math import isfinite
 from pathlib import Path
@@ -16,9 +18,7 @@ import yaml
 
 DEFAULT_QUALITY_CONFIG = files("skillevaluator.config").joinpath("quality-default.yaml")
 _ATX_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$")
-_TOP_LEVEL_KEYS = frozenset({"expected_headers", "error_handling"})
 _EXPECTED_HEADER_KEYS = frozenset({"heading", "alternatives", "points", "message", "suggestion"})
-_ERROR_HANDLING_LIST_KEYS = {"mentioned": "terms", "scripts": "markers", "lib": "markers"}
 
 
 class QualityConfigError(ValueError):
@@ -124,17 +124,32 @@ def _validate_entries(value: object, source: str, location: str, *, ignore_case:
     return list(value)
 
 
-def _parse_error_handling(raw: object, source: str, base: ErrorHandlingConfig | None) -> ErrorHandlingConfig:
+# Sections made of named rules. Every rule takes points, message and suggestion, plus the one
+# rule-specific key listed here with the function that validates it.
+_RuleSetting = tuple[str, Callable[[object, str, str], object]]
+_RULE_SECTIONS: dict[str, dict[str, _RuleSetting]] = {
+    "error_handling": {
+        "mentioned": ("terms", partial(_validate_entries, ignore_case=True)),
+        "scripts": ("markers", partial(_validate_entries, ignore_case=False)),
+        "lib": ("markers", partial(_validate_entries, ignore_case=False)),
+    },
+}
+_TOP_LEVEL_KEYS = frozenset({"expected_headers", *_RULE_SECTIONS})
+
+
+def _parse_rule_section(section: str, raw: object, source: str, base: dict | None) -> dict:
+    """Validate one rule section. With a base, keys the section omits keep the base value."""
+    rules = _RULE_SECTIONS[section]
     if not isinstance(raw, dict):
-        raise QualityConfigError(f"{source}: error_handling must be a mapping")
-    _reject_unknown_keys(raw, frozenset(_ERROR_HANDLING_LIST_KEYS), source, "error_handling")
+        raise QualityConfigError(f"{source}: {section} must be a mapping")
+    _reject_unknown_keys(raw, frozenset(rules), source, section)
     parsed = {}
-    for name, list_key in _ERROR_HANDLING_LIST_KEYS.items():
-        location = f"error_handling.{name}"
+    for name, (setting, validate_setting) in rules.items():
+        location = f"{section}.{name}"
         block = raw.get(name) if base is None else raw.get(name, {})
         if not isinstance(block, dict):
             raise QualityConfigError(f"{source}: {location} must be a mapping")
-        allowed = frozenset({"points", "message", "suggestion", list_key})
+        allowed = frozenset({"points", "message", "suggestion", setting})
         _reject_unknown_keys(block, allowed, source, location)
         if base is None:
             missing = sorted(allowed - block.keys())
@@ -145,11 +160,9 @@ def _parse_error_handling(raw: object, source: str, base: ErrorHandlingConfig | 
             "points": _validate_points(merged["points"], source, location),
             "message": _validate_text(merged["message"], source, f"{location}.message"),
             "suggestion": _validate_text(merged["suggestion"], source, f"{location}.suggestion"),
-            list_key: _validate_entries(
-                merged[list_key], source, f"{location}.{list_key}", ignore_case=list_key == "terms"
-            ),
+            setting: validate_setting(merged[setting], source, f"{location}.{setting}"),
         }
-    return parsed  # type: ignore[return-value]
+    return parsed
 
 
 class _UniqueKeySafeLoader(yaml.SafeLoader):
@@ -226,7 +239,6 @@ def _load(path: Path | None) -> tuple[QualityConfig, dict]:
         raise QualityConfigError(f"{source}: expected_headers must be a list")
     _reject_unknown_keys(raw, _TOP_LEVEL_KEYS, source, "top level")
     if not headers_declared:
-        packaged_config = load_quality_config()
         raw = {**raw, "expected_headers": []}
 
     expected_headers: list[ExpectedHeader] = []
@@ -274,23 +286,24 @@ def _load(path: Path | None) -> tuple[QualityConfig, dict]:
         )
 
     if path is None:
-        error_handling = _parse_error_handling(raw.get("error_handling"), source, base=None)
-        config: QualityConfig = {"expected_headers": expected_headers, "error_handling": error_handling}
+        sections = {name: _parse_rule_section(name, raw.get(name), source, base=None) for name in _RULE_SECTIONS}
+        config: QualityConfig = {"expected_headers": expected_headers, **sections}  # type: ignore[typeddict-item]
         return config, dict(config)
-    raw_error_handling = raw.get("error_handling", {})
-    packaged = load_quality_config()["error_handling"]
+    packaged = load_quality_config()
     if not headers_declared:
-        expected_headers = [dict(rule) for rule in packaged_config["expected_headers"]]  # type: ignore[misc]
-    error_handling = _parse_error_handling(raw_error_handling, source, base=packaged)
+        expected_headers = [dict(rule) for rule in packaged["expected_headers"]]  # type: ignore[misc]
     declared: dict = {"expected_headers": expected_headers} if headers_declared else {}
-    declared_error_handling = {
-        name: {key: error_handling[name][key] for key in block}
-        for name, block in raw_error_handling.items()
-        if block
-    }
-    if declared_error_handling:
-        declared["error_handling"] = declared_error_handling
-    return {"expected_headers": expected_headers, "error_handling": error_handling}, declared
+    sections = {}
+    for name in _RULE_SECTIONS:
+        raw_section = raw.get(name, {})
+        sections[name] = _parse_rule_section(name, raw_section, source, base=packaged[name])  # type: ignore[literal-required]
+        # Only the keys the file sets are declared, so the digest ignores inherited packaged values.
+        declared_rules = {
+            rule: {key: sections[name][rule][key] for key in block} for rule, block in raw_section.items() if block
+        }
+        if declared_rules:
+            declared[name] = declared_rules
+    return {"expected_headers": expected_headers, **sections}, declared  # type: ignore[typeddict-item]
 
 
 def quality_config_digest(config: QualityConfig | dict) -> str:

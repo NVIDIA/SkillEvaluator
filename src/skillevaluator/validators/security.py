@@ -516,6 +516,18 @@ def _skillspector_provider_retry_row(row: object) -> bool:
     )
 
 
+def _skillspector_flags_truncation(container: Mapping[str, object]) -> bool:
+    """Return whether a report object has a ``*_truncated`` key that is neither ``false`` nor ``null``.
+
+    SkillSpector flags a list it cut short this way, as in
+    ``ledger_exceptions_truncated``, and what it left out may be a different gap.
+    """
+    return any(
+        isinstance(key, str) and key.endswith("_truncated") and value is not False and value is not None
+        for key, value in container.items()
+    )
+
+
 def _skillspector_provider_retries_exhausted(data: object) -> bool:
     """Return whether a failed LLM-stage report shows only an LLM provider outage.
 
@@ -547,10 +559,7 @@ def _skillspector_provider_retries_exhausted(data: object) -> bool:
         if any(container.get(key) for key in _SKILLSPECTOR_REPORT_FAILURE_MARKERS):
             return False
         # A truncated list may hide a different cause.
-        if any(
-            isinstance(key, str) and key.endswith("_truncated") and value is not False and value is not None
-            for key, value in container.items()
-        ):
+        if _skillspector_flags_truncation(container):
             return False
 
     rows = completeness.get("ledger_exceptions")
@@ -2264,6 +2273,32 @@ def _skillspector_missing_reference_warning(rows: list[Mapping[str, object]]) ->
     )
 
 
+def _skillspector_missing_references_have_rows(references: list, rows: list[Mapping[str, object]]) -> bool:
+    """Whether each ``missing`` entry of *references* is on the line of a ledger row in *rows*, and none is ``ambiguous``.
+
+    Only the line of a row is read for the names it holds
+    (:func:`_skillspector_reference_line_avoids`), so a ``missing`` entry on
+    any other line, which SkillSpector reported without a row, would never be.
+    """
+    lines = {(row.get("path"), row.get("start_line")) for row in rows}
+    for reference in references:
+        if not isinstance(reference, dict):
+            continue
+        status = reference.get("status")
+        if status == "ambiguous":
+            return False
+        if status == "missing":
+            path, line = reference.get("source_path"), reference.get("line")
+            if (
+                not isinstance(path, str)
+                or isinstance(line, bool)
+                or not isinstance(line, int)
+                or (path, line) not in lines
+            ):
+                return False
+    return True
+
+
 def _skillspector_missing_reference_notes(
     ledger_exceptions: list[dict],
     analyzer_statuses: list[dict],
@@ -2273,6 +2308,7 @@ def _skillspector_missing_reference_notes(
     components: object,
     scanned_root: Path | None,
     *,
+    completeness: Mapping[str, object],
     references: object,
     skillspector_version: tuple[int, int, int] | None,
     reference_root: Path | None,
@@ -2291,14 +2327,20 @@ def _skillspector_missing_reference_notes(
     skill that SkillSpector did not inspect (:func:`_skillspector_unscanned_names`,
     :func:`_skillspector_reference_line_avoids`, with one work budget for all
     of the report's lines), such as a link or a file in an artifact directory
-    left out of a staged scan, and there is no fatal scope exclusion. Any
-    other ledger rows must be referenced images that
-    :func:`_skillspector_passive_raster_note` accepts, which then accounts for
-    the counts, analyzers and limitations, and its note follows. Without them,
-    no file is partially or entirely uninspected, no finding was filtered out,
-    there is no limitation, every analyzer is ``completed``, ``not_applicable``
-    or ``disabled``, and each universal analyzer completed one work item per
-    component. Anything else keeps the scan INCOMPLETE.
+    left out of a staged scan, and there is no fatal scope exclusion. Those rows
+    must also account for the report's ``references``: each ``missing`` entry is
+    on the line of one of them
+    (:func:`_skillspector_missing_references_have_rows`), none is ``ambiguous``,
+    and no ``*_truncated`` key of *completeness* (the report's
+    ``analysis_completeness``) is set, because a list that SkillSpector cut
+    short may hide a line that nothing here reads. Any other ledger rows must be
+    referenced images that :func:`_skillspector_passive_raster_note` accepts,
+    which then accounts for the counts, analyzers and limitations, and its note
+    follows. Without them, no file is partially or entirely uninspected, no
+    finding was filtered out, there is no limitation, every analyzer is
+    ``completed``, ``not_applicable`` or ``disabled``, and each universal
+    analyzer completed one work item per component. Anything else keeps the
+    scan INCOMPLETE.
 
     *reference_root* is the root of the artifact that the scan belongs to,
     and the gap is accepted only when it is *scanned_root* itself. Another
@@ -2327,6 +2369,10 @@ def _skillspector_missing_reference_notes(
             row, skillspector_version, references
         ):
             return None
+    if _skillspector_flags_truncation(completeness) or not _skillspector_missing_references_have_rows(
+        references, reference_rows
+    ):
+        return None
 
     notes = [_skillspector_missing_reference_warning(reference_rows)]
     if other_rows:
@@ -2413,6 +2459,7 @@ def _skillspector_reference_caveat_notes(
     components: object,
     scanned_root: Path | None,
     *,
+    completeness: Mapping[str, object],
     references: object,
     skillspector_version: tuple[int, int, int] | None,
     reference_root: Path | None,
@@ -2438,6 +2485,7 @@ def _skillspector_reference_caveat_notes(
         scope_exclusions,
         components,
         scanned_root,
+        completeness=completeness,
         references=references,
         skillspector_version=skillspector_version,
         reference_root=reference_root,
@@ -3650,6 +3698,7 @@ class SecurityValidator(ValidatorBase):
                             analysis_completeness.get("scope_exclusions", []),
                             data.get("components"),
                             scanned_root,
+                            completeness=analysis_completeness,
                             references=analysis_completeness.get("references"),
                             skillspector_version=skillspector_version,
                             reference_root=reference_root,
@@ -3682,6 +3731,7 @@ class SecurityValidator(ValidatorBase):
                         analysis_completeness.get("scope_exclusions", []),
                         data.get("components"),
                         scanned_root,
+                        completeness=analysis_completeness,
                         references=analysis_completeness.get("references"),
                         skillspector_version=skillspector_version,
                         reference_root=reference_root,

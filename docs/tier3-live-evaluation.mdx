@@ -1725,9 +1725,13 @@ A path matches however it names the home directory: `~`, `$HOME`, `${HOME}`,
 `~user`, `/home/<user>`, `/Users/<user>` (not `/Users/Shared`), `/root`, or
 `C:\Users\<user>`. `//`, `/./`, and `dir/..` segments are resolved first, so
 `cat /home/agent//.ssh/id_rsa` and `cat $HOME/.ssh/id_rsa` match `~/.ssh`. The
-spelling must start a path word, and the default word of `${VAR:-word}` or
-`${VAR-word}` is one, so `cat "${SSH_KEY:-$HOME/.ssh/id_rsa}"` matches
-`~/.ssh` too, while `cat backup-$HOME/.netrc` does not match `~/.netrc`. A
+spelling must start a path word. The default word of a `${VAR:-word}` or
+`${VAR-word}` that starts a path word starts one too, so
+`cat "${SSH_KEY:-$HOME/.ssh/id_rsa}"` matches `~/.ssh`, while
+`cat backup-$HOME/.netrc` and `cat backup-${X:-$HOME/.netrc}` do not match
+`~/.netrc`. The expansion is not resolved, so the whole path must lie inside
+the default word: `ls "${XDG_CONFIG_HOME:-$HOME/.config}/gcloud"`, whose path
+goes on after the closing brace, does not match `.config/gcloud`. A
 project file that only shares a name with a home file, such as
 `/home/agent/project/.bashrc` or `./project/.npmrc`, does not match.
 `.aws/credentials` and `.config/gcloud` match in any directory in commands

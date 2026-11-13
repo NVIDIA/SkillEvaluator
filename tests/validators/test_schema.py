@@ -239,7 +239,7 @@ description: {long_desc}
         assert any("1024" in err or "description" in err.lower() for err in result.errors)
 
     def test_metadata_author_validation(self, tmp_path: Path):
-        """Test author format fails for malformed (no email) author under default profile."""
+        """A name without an email is advisory attribution under the default profile."""
         from skillevaluator.models.result import Severity
 
         skill_dir = tmp_path / "no-email-author"
@@ -267,18 +267,16 @@ Example usage.
         validator = SchemaValidator()
         result = validator.validate(skill_dir)
 
-        assert not result.passed
-        author_findings = [f for f in result.findings if f.check_name == "author_format"]
+        assert result.passed, result.errors
+        assert not [f for f in result.findings if f.check_name == "author_format"]
+        author_findings = [f for f in result.findings if f.check_name == "author_without_email"]
         assert len(author_findings) == 1
-        # The default public profile keeps malformed author metadata at HIGH severity.
-        assert author_findings[0].severity == Severity.HIGH
-        # Message changed to be precise about *which* aspect failed (shape vs. domain).
-        # "John Doe" fails the shape check (no Name <email> form).
-        assert "Name <email" in author_findings[0].message
+        assert author_findings[0].severity == Severity.INFO
+        assert author_findings[0].message == "Author has no email address: John Doe"
         assert author_findings[0].metadata.get("shape_ok") is False
 
-    def test_metadata_author_required(self, tmp_path: Path):
-        """Test missing metadata.author is a HIGH severity failure under default profile."""
+    def test_metadata_author_missing_is_advisory(self, tmp_path: Path):
+        """A missing metadata.author is a LOW advisory under the default profile."""
         from skillevaluator.models.result import Severity
 
         skill_dir = tmp_path / "missing-author"
@@ -304,10 +302,10 @@ Example usage.
         validator = SchemaValidator()
         result = validator.validate(skill_dir)
 
-        assert not result.passed
+        assert result.passed, result.errors
         author_findings = [f for f in result.findings if f.check_name == "author_missing"]
         assert len(author_findings) == 1
-        assert author_findings[0].severity == Severity.HIGH
+        assert author_findings[0].severity == Severity.LOW
         assert "Author not specified" in author_findings[0].message
 
     def test_valid_metadata_structure(self, tmp_path: Path):
@@ -995,8 +993,8 @@ Example.
         assert result.passed, f"External profile should accept a well-formed author. Errors: {result.errors}"
         assert not [f for f in result.findings if f.check_name == "author_format"]
 
-    def test_external_profile_requires_author(self, tmp_path: Path):
-        """Missing author remains a blocking schema error under the public profile."""
+    def test_external_profile_reports_missing_author_as_advisory(self, tmp_path: Path):
+        """Missing author is reported but does not block under the public profile."""
         from skillevaluator.models.result import Severity
         from skillevaluator.validators.policy import load_profile
 
@@ -1010,17 +1008,18 @@ Example.
 
         author_findings = [f for f in result.findings if f.check_name == "author_missing"]
         assert len(author_findings) == 1
-        assert author_findings[0].severity == Severity.HIGH
-        assert not result.passed
+        assert author_findings[0].severity == Severity.LOW
+        assert result.passed, result.errors
 
     def test_external_profile_rejects_malformed_author_shape(self, tmp_path: Path):
-        """Bare 'John Doe' fails the shape check under the external profile."""
+        """A bare email fails the shape check under the external profile."""
+        from skillevaluator.models.result import Severity
         from skillevaluator.validators.policy import load_profile
 
         skill_dir = self._write_skill(
             tmp_path,
             name="external-malformed-author",
-            author_line="John Doe",
+            author_line="john@example.com",
         )
         result = SchemaValidator(policy=load_profile("external")).validate(skill_dir)
 
@@ -1028,7 +1027,103 @@ Example.
         assert len(author_findings) == 1, (
             f"Expected exactly one author_format finding for malformed shape, got {len(author_findings)}"
         )
+        assert author_findings[0].severity == Severity.HIGH
         assert author_findings[0].metadata.get("shape_ok") is False
+        assert not result.passed
+
+    @pytest.mark.parametrize(
+        "author",
+        [
+            "NVIDIA cuOpt Team",
+            "Example Corporation and Affiliates",
+            "Jane Doe (@jdoe)",
+            "Équipe Données",
+        ],
+    )
+    def test_default_profile_accepts_name_only_attribution(self, tmp_path: Path, author: str):
+        """Person, team, and organization names without an email are advisory, not blocking."""
+        from skillevaluator.models.result import Severity
+        from skillevaluator.validators.policy import load_profile
+
+        skill_dir = self._write_skill(tmp_path, name="team-author", author_line=f'"{author}"')
+
+        result = SchemaValidator(policy=load_profile("default")).validate(skill_dir)
+
+        assert result.passed, result.errors
+        findings = [f for f in result.findings if f.check_name.startswith("author")]
+        assert [(f.check_name, f.severity) for f in findings] == [("author_without_email", Severity.INFO)]
+
+    @pytest.mark.parametrize(
+        ("author", "reason"),
+        [
+            ("jane@example.com", "contains an email address"),
+            ("Jane Doe jane@example.com", "contains an email address"),
+            ("Jane Doe <jane>", "angle brackets"),
+            ("Jane Doe <jane@example.com> and team", "angle brackets"),
+            ("Jane\u202eDoe", "control or invisible formatting"),
+            ("Jane\tDoe", "control or invisible formatting"),
+            ("---", "no letters or digits"),
+            ("J" * 257, "longer than 256 characters"),
+        ],
+    )
+    def test_malformed_or_unsafe_author_blocks_in_every_profile(self, tmp_path: Path, author: str, reason: str):
+        """Malformed or unsafe values stay HIGH under both bundled profiles."""
+        from skillevaluator.models.result import Severity
+        from skillevaluator.validators.policy import load_profile
+
+        skill_dir = self._write_skill(tmp_path, name="bad-author", author_line=f'"{author}"')
+
+        for profile in ("default", "registry"):
+            result = SchemaValidator(policy=load_profile(profile)).validate(skill_dir)
+            findings = [f for f in result.findings if f.check_name == "author_format"]
+            assert len(findings) == 1, (profile, [f.check_name for f in result.findings])
+            assert findings[0].severity == Severity.HIGH
+            assert reason in findings[0].message
+            assert len(findings[0].line_content) <= len("author: ") + 256
+            assert not result.passed
+
+    def test_registry_profile_requires_contact_author(self, tmp_path: Path):
+        """The registry profile blocks a missing author and a name without an email."""
+        from skillevaluator.models.result import Severity
+        from skillevaluator.validators.policy import load_profile
+
+        policy = load_profile("registry")
+        missing = self._write_skill(tmp_path, name="registry-missing", author_line=None)
+        team = self._write_skill(tmp_path, name="registry-team", author_line="Example Team")
+
+        missing_result = SchemaValidator(policy=policy).validate(missing)
+        team_result = SchemaValidator(policy=policy).validate(team)
+
+        assert not missing_result.passed
+        assert not team_result.passed
+        assert {(f.check_name, f.severity) for f in missing_result.findings if f.check_name.startswith("author")} == {
+            ("author_missing", Severity.HIGH)
+        }
+        assert {(f.check_name, f.severity) for f in team_result.findings if f.check_name.startswith("author")} == {
+            ("author_without_email", Severity.HIGH)
+        }
+
+    def test_domain_restriction_rejects_name_without_email(self, tmp_path: Path):
+        """An author_email_regex needs an email in that domain, so a bare name fails it."""
+        import re
+
+        from skillevaluator.models.result import Severity
+        from skillevaluator.validators.policy import ValidationPolicy, default_policy
+
+        policy = ValidationPolicy(
+            profile="org",
+            author_email_regex=re.compile(r"@example\.org>$"),
+            severity_overrides=dict(default_policy().severity_overrides),
+        )
+        team = self._write_skill(tmp_path, name="org-team", author_line="Example Team")
+        member = self._write_skill(tmp_path, name="org-member", author_line="Jane Doe <jane@example.org>")
+
+        team_result = SchemaValidator(policy=policy).validate(team)
+        findings = [f for f in team_result.findings if f.check_name == "author_format"]
+        assert len(findings) == 1
+        assert findings[0].severity == Severity.HIGH
+        assert "has no email address matching the required domain" in findings[0].message
+        assert SchemaValidator(policy=policy).validate(member).passed
 
     def test_default_validator_uses_public_profile(self, tmp_path: Path):
         """Constructing SchemaValidator() without a policy accepts public domains."""
@@ -1042,3 +1137,136 @@ Example.
         result = SchemaValidator().validate(skill_dir)
 
         assert result.passed
+
+
+class TestMetadataIdContract:
+    """Optional ``metadata.id``: validated when present, required only by policy."""
+
+    @staticmethod
+    def _write_skill(root: Path, name: str, id_line: str | None) -> Path:
+        skill_dir = root / name
+        skill_dir.mkdir(parents=True)
+        id_block = f"  id: {id_line}\n" if id_line is not None else ""
+        (skill_dir / "SKILL.md").write_text(
+            f"""---
+name: {name}
+description: A skill used by the test suite to check the metadata.id contract
+metadata:
+  author: Jane Doe <jane@example.com>
+{id_block}---
+
+# {name}
+
+## Instructions
+
+1. Run.
+
+## Examples
+
+Example.
+""",
+            encoding="utf-8",
+        )
+        return skill_dir
+
+    @staticmethod
+    def _id_findings(result) -> list[tuple[str, str]]:
+        return [(f.check_name, f.severity.value) for f in result.findings if f.check_name.startswith("metadata_id")]
+
+    def test_valid_id_passes_and_does_not_claim_uniqueness(self, tmp_path: Path):
+        from skillevaluator.validators.policy import load_profile
+
+        skill_dir = self._write_skill(tmp_path, "id-ok", "id-ok-2")
+
+        for profile in ("default", "registry"):
+            result = SchemaValidator(policy=load_profile(profile)).validate(skill_dir)
+            assert result.passed, result.errors
+            assert self._id_findings(result) == []
+            detail = next(d for d in result.success_details if d.check_name == "metadata_id_format")
+            assert "Uniqueness is checked only across skills validated together" in detail.message
+            assert result.metadata["metadata_id"] == "id-ok-2"
+
+    def test_missing_id_follows_the_profile_requirement(self, tmp_path: Path):
+        from skillevaluator.validators.policy import ValidationPolicy, load_profile
+
+        skill_dir = self._write_skill(tmp_path, "no-id", None)
+
+        default_result = SchemaValidator(policy=load_profile("default")).validate(skill_dir)
+        recommend_result = SchemaValidator(policy=ValidationPolicy(metadata_id_requirement="recommend")).validate(
+            skill_dir
+        )
+        registry_result = SchemaValidator(policy=load_profile("registry")).validate(skill_dir)
+
+        assert default_result.passed
+        assert self._id_findings(default_result) == []
+        assert recommend_result.passed
+        assert self._id_findings(recommend_result) == [("metadata_id_missing", "low")]
+        assert not registry_result.passed
+        assert self._id_findings(registry_result) == [("metadata_id_missing", "high")]
+        assert "profile 'registry' requires" in registry_result.findings[-1].message
+
+    @pytest.mark.parametrize(
+        ("id_line", "reason"),
+        [
+            ('"My-Skill"', "lowercase ASCII"),
+            ("my_skill", "lowercase ASCII"),
+            ("-my-skill", "lowercase ASCII"),
+            ("my--skill", "lowercase ASCII"),
+            ('" my-skill"', "no surrounding whitespace"),
+            ('"skill-é"', "lowercase ASCII"),
+            ('"' + "a" * 65 + '"', "at most 64 characters (got 65)"),
+            ('""', "must not be empty"),
+            ("123", "must be a string (got int)"),
+            ("true", "must be a string (got bool)"),
+            ("null", "must be a string (got NoneType)"),
+            ("[a, b]", "must be a string (got list)"),
+        ],
+    )
+    def test_invalid_id_is_advisory_by_default_and_blocks_in_registry(self, tmp_path: Path, id_line: str, reason: str):
+        from skillevaluator.validators.policy import load_profile
+
+        skill_dir = self._write_skill(tmp_path, "bad-id", id_line)
+
+        default_result = SchemaValidator(policy=load_profile("default")).validate(skill_dir)
+        registry_result = SchemaValidator(policy=load_profile("registry")).validate(skill_dir)
+
+        assert default_result.passed, default_result.errors
+        assert self._id_findings(default_result) == [("metadata_id_format", "medium")]
+        assert not registry_result.passed
+        assert self._id_findings(registry_result) == [("metadata_id_format", "high")]
+        finding = next(f for f in registry_result.findings if f.check_name == "metadata_id_format")
+        assert reason in finding.message
+        assert len(finding.line_content) <= len("id: ") + 81
+        assert "metadata_id" not in registry_result.metadata
+
+    def test_collection_reports_duplicate_ids(self, tmp_path: Path):
+        from skillevaluator.validators.policy import load_profile
+
+        skills = tmp_path / "skills"
+        self._write_skill(skills, "first-skill", "shared-id")
+        self._write_skill(skills, "second-skill", "shared-id")
+        self._write_skill(skills, "third-skill", "third-skill")
+        self._write_skill(skills, "fourth-skill", None)
+
+        default_result = SchemaValidator(policy=load_profile("default")).validate(tmp_path)
+        registry_result = SchemaValidator(policy=load_profile("registry")).validate(tmp_path)
+
+        duplicates = [f for f in default_result.findings if f.check_name == "metadata_id_duplicate"]
+        assert [(f.severity.value, f.metadata["skills"]) for f in duplicates] == [
+            ("medium", ["skills/first-skill", "skills/second-skill"])
+        ]
+        assert "metadata.id 'shared-id' is declared by 2 skills" in duplicates[0].message
+        assert ("metadata_id_duplicate", "high") in [(f.check_name, f.severity.value) for f in registry_result.findings]
+        assert not registry_result.passed
+
+    def test_collection_with_unique_ids_reports_scope(self, tmp_path: Path):
+        skills = tmp_path / "skills"
+        self._write_skill(skills, "first-skill", "first-skill")
+        self._write_skill(skills, "second-skill", "second-skill")
+
+        result = SchemaValidator().validate(tmp_path)
+
+        assert result.passed, result.errors
+        assert not [f for f in result.findings if f.check_name == "metadata_id_duplicate"]
+        detail = next(d for d in result.success_details if d.check_name == "metadata_id_unique")
+        assert detail.message == "2 declared metadata.id value(s) are unique within this collection"

@@ -577,6 +577,8 @@ def test_gitlab_tier1_and_native_tiers_select_the_same_skills(tmp_path):
         "workflow": ([(".github/workflows/skills.yml", "name: skills\n")], []),
         "root pipeline": ([(".gitlab-ci.yml", "include: []\n")], []),
         "renamed feedback include": ([], [(".gitlab/skill-feedback.yml", "docs/skill-feedback.yml")]),
+        "ignored setup gitlink": ([("skills/alpha/SKILL.md", "# alpha with setup gitlink\n")], []),
+        "visible setup gitlink": ([("skills/alpha/SKILL.md", "# alpha with setup gitlink\n")], []),
     }
     for name, (writes, renames) in cases.items():
         repo = tmp_path / name.replace(" ", "-")
@@ -588,7 +590,15 @@ def test_gitlab_tier1_and_native_tiers_select_the_same_skills(tmp_path):
             (repo / "skills" / skill / "SKILL.md").write_text(f"# {skill}\n")
         (repo / ".gitlab").mkdir()
         (repo / ".gitlab/skill-feedback.yml").write_text("include: []\n" * 20)
+        gitlink = name in {"ignored setup gitlink", "visible setup gitlink"}
+        if gitlink:
+            ignore = "all" if name == "ignored setup gitlink" else "none"
+            (repo / ".gitmodules").write_text(
+                f'[submodule "actions"]\n path = .github/actions\n url = ./actions\n ignore = {ignore}\n'
+            )
         subprocess.run([*git, "add", "-A"], check=True)
+        if gitlink:
+            subprocess.run([*git, "update-index", "--add", "--cacheinfo", f"160000,{'a' * 40},.github/actions"], check=True)
         subprocess.run([*git, "commit", "-qm", "base"], check=True)
         base = subprocess.check_output([*git, "rev-parse", "HEAD"], text=True).strip()
         for relative, text in writes:
@@ -598,6 +608,8 @@ def test_gitlab_tier1_and_native_tiers_select_the_same_skills(tmp_path):
             (repo / target).parent.mkdir(parents=True, exist_ok=True)
             subprocess.run([*git, "mv", source, target], check=True)
         subprocess.run([*git, "add", "-A"], check=True)
+        if gitlink:
+            subprocess.run([*git, "update-index", "--add", "--cacheinfo", f"160000,{'b' * 40},.github/actions"], check=True)
         subprocess.run([*git, "commit", "-qm", "head"], check=True)
         head = subprocess.check_output([*git, "rev-parse", "HEAD"], text=True).strip()
         tier1 = subprocess.run(
@@ -616,3 +628,5 @@ def test_gitlab_tier1_and_native_tiers_select_the_same_skills(tmp_path):
         assert (native == "all") == (name not in {"skill only", "consumer ci script"}), name
         if native == "changed":
             assert [p.name for p in selected] == ["alpha"], name
+        else:
+            assert [p.name for p in selected] == ["alpha", "beta"], name

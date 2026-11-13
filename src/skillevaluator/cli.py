@@ -9,6 +9,7 @@ import copy
 import json
 import logging
 import math
+import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextvars import ContextVar
 from datetime import UTC, datetime
@@ -63,6 +64,7 @@ from skillevaluator.tier1.commands import (
 )
 from skillevaluator.tier3_environments import all_env_modes
 from skillevaluator.tier_group import TierGroup
+from skillevaluator.utils.json_output import json_needs_ascii
 from skillevaluator.utils.path_security import resolve_repo_context_root
 from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
 from skillevaluator.utils.tier2_paths import (
@@ -262,8 +264,17 @@ _TOP_LEVEL_COMMAND_HELP_GROUPS = (
 )
 
 
+class _EncodingSafeGroup(RichGroup):
+    """Configure output before Click parses eager options such as --help."""
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(errors="replace")
+        return super().parse_args(ctx, args)
+
+
 @click.group(
-    cls=RichGroup,
+    cls=_EncodingSafeGroup,
     context_settings=CONTEXT_SETTINGS,
     help_command_groups=_TOP_LEVEL_COMMAND_HELP_GROUPS,
     show_banner=True,
@@ -3185,6 +3196,10 @@ def _workflow_report_options(func):
 @click.option(
     "--profile", default=None, help="Validation policy [default: default; external is a compatibility alias]."
 )
+@click.option(
+    "--policy", "policy_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None,
+    help="Custom policy YAML overlaid on top of --profile.",
+)
 @click.option("--previous-version", default=None, help="Previous version for version checks.")
 @click.option(
     "--skillspector-baseline", type=SKILLSPECTOR_BASELINE_PATH, default=None, help=_SKILLSPECTOR_BASELINE_HELP
@@ -3199,6 +3214,7 @@ def _tier1_workflow(
     quality_config: Path | None,
     pii_waivers: Path | None,
     profile: str | None,
+    policy_path: Path | None,
     previous_version: str | None,
     skillspector_baseline: Path | None,
     report_formats: tuple[str, ...],
@@ -3209,7 +3225,7 @@ def _tier1_workflow(
     from skillevaluator.validators.policy import resolve_policy
 
     try:
-        policy = resolve_policy(profile=profile)
+        policy = resolve_policy(profile=profile, policy_path=policy_path)
     except (FileNotFoundError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     _offer_scanner_install(checks, skip)
@@ -4035,7 +4051,8 @@ def tier3_migrate_dataset(source: Path, skill_name: str | None, destination: Pat
     except (OSError, ValueError, TypeError) as exc:
         raise click.ClickException(str(exc)) from exc
     if destination is None:
-        click.echo(json.dumps(result.dataset, indent=2, ensure_ascii=False))
+        ensure_ascii = json_needs_ascii(result.dataset, getattr(sys.stdout, "encoding", None))
+        click.echo(json.dumps(result.dataset, indent=2, ensure_ascii=ensure_ascii))
     else:
         click.echo(f"Wrote {len(result.dataset['evals'])} cases to {destination}; source preserved.")
 
@@ -4186,6 +4203,10 @@ from skillevaluator.tier3.grader_validation import validate_grader
 
 tier3.add_command(select_decoys_command, "select-decoys")
 tier3.add_command(validate_grader, "validate-grader")
+
+from skillevaluator.tier3.interaction_commands import interact_command
+
+tier3.add_command(interact_command, "interact")
 
 from skillevaluator.tier3.workflow import build_tier3_workflow
 

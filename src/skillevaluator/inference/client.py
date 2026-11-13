@@ -891,6 +891,10 @@ class LLMClient:
         """Parse the raw LLM response text.  Override in subclasses."""
         raise NotImplementedError("Subclasses must implement parse_response for template-method usage")
 
+    def _parse_truncated_response(self, response_text: str, **kwargs: Any) -> Any:
+        """Parse kept partial evidence; subclasses can reject unusable salvage."""
+        return self.parse_response(response_text, **kwargs)
+
     def get_fallback_response(self, **kwargs: Any) -> Any:
         """Return a safe fallback result.  Override in subclasses."""
         raise NotImplementedError("Subclasses must implement get_fallback_response for template-method usage")
@@ -923,9 +927,9 @@ class LLMClient:
         except Exception as exc:
             self.last_failure = llm_failure_diagnostic(exc)
             if isinstance(exc, LLMClientTruncatedError) and exc.content and self.salvage_truncated_response:
-                logger.warning("LLM reply was truncated (%s) - keeping its complete entries", self.last_failure)
+                logger.warning("LLM reply was truncated (%s) - trying to keep its complete entries", self.last_failure)
                 try:
-                    salvaged = self.parse_response(exc.content, **kwargs)
+                    salvaged = self._parse_truncated_response(exc.content, **kwargs)
                 except Exception:
                     pass
                 else:

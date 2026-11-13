@@ -1484,6 +1484,193 @@ class TestQualityScoreDeterministicContracts:
         assert "Instructions lack clear action verbs" not in messages
 
 
+ERROR_HANDLING_TERMS = [
+    "error",
+    "errors",
+    "exception",
+    "exceptions",
+    "invalid",
+    "fail",
+    "fails",
+    "failed",
+    "failure",
+    "failures",
+    "failing",
+    "validate",
+    "validates",
+    "validated",
+    "validating",
+    "validation",
+    "validations",
+]
+MENTION_MESSAGE = "No mention of error handling or validation"
+
+
+def _validate_with(skill_dir: Path, tmp_path: Path, config_body: str | None = None):
+    config_path = None
+    if config_body is not None:
+        config_path = tmp_path / "quality.yaml"
+        config_path.write_text(config_body, encoding="utf-8")
+    return QualityScoreValidator(min_score=0, quality_config=config_path).validate(skill_dir)
+
+
+def _reliability_issues(result) -> list[tuple[str, float]]:
+    issues = result.metadata["quality_scores"]["dimensions"]["reliability"]["issues"]
+    return [(issue["message"], issue["deduction"]) for issue in issues]
+
+
+def _write_script_skill(tmp_path: Path, script: str) -> Path:
+    skill_dir = _write_issue_skill(tmp_path)
+    (skill_dir / "scripts").mkdir()
+    (skill_dir / "scripts" / "run.py").write_text(script, encoding="utf-8")
+    return skill_dir
+
+
+class TestReliabilityErrorHandlingConfig:
+    @pytest.mark.parametrize("term", ERROR_HANDLING_TERMS)
+    def test_each_packaged_term_records_error_handling(self, tmp_path: Path, term: str):
+        skill_dir = _write_issue_skill(tmp_path, troubleshooting=f"Report the {term} to the owner.")
+
+        result = _validate_with(skill_dir, tmp_path)
+
+        assert result.metadata["quality_scores"]["metrics"]["has_error_handling"] is True
+        assert MENTION_MESSAGE not in [message for message, _ in _reliability_issues(result)]
+
+    @pytest.mark.parametrize("text", ["errorless", "failsafe", "validator", "éerror", "处理error时", "error٣"])
+    def test_terms_inside_other_words_do_not_record_error_handling(self, tmp_path: Path, text: str):
+        skill_dir = _write_issue_skill(tmp_path, troubleshooting=f"Report {text} output to the owner.")
+
+        result = _validate_with(skill_dir, tmp_path)
+
+        assert result.metadata["quality_scores"]["metrics"]["has_error_handling"] is False
+        assert (MENTION_MESSAGE, 10) in _reliability_issues(result)
+
+    def test_custom_terms_replace_packaged_terms(self, tmp_path: Path):
+        config = "expected_headers: []\nerror_handling:\n  mentioned:\n    terms: [rollback]\n    message: No rollback plan\n"
+        rollback_skill = _write_issue_skill(tmp_path, name="probe-a", troubleshooting="Use rollback on failure.")
+        error_skill = _write_issue_skill(tmp_path, name="probe-b", troubleshooting="Report the error.")
+
+        rollback_result = _validate_with(rollback_skill, tmp_path, config)
+        error_result = _validate_with(error_skill, tmp_path, config)
+
+        assert rollback_result.metadata["quality_scores"]["metrics"]["has_error_handling"] is True
+        assert ("No rollback plan", 10) not in _reliability_issues(rollback_result)
+        assert error_result.metadata["quality_scores"]["metrics"]["has_error_handling"] is False
+        assert ("No rollback plan", 10) in _reliability_issues(error_result)
+
+    def test_mentioned_points_zero_skips_the_finding(self, tmp_path: Path):
+        silent_skill = _write_issue_skill(tmp_path, name="probe-a", troubleshooting="Check the output directory.")
+        mentioning_skill = _write_issue_skill(tmp_path, name="probe-b", troubleshooting="Report the error.")
+
+        silent = _validate_with(silent_skill, tmp_path, "expected_headers: []\nerror_handling: {mentioned: {points: 0}}\n")
+        mentioning = _validate_with(mentioning_skill, tmp_path, "expected_headers: []\n")
+
+        assert MENTION_MESSAGE not in [message for message, _ in _reliability_issues(silent)]
+        assert silent.metadata["quality_scores"]["metrics"]["has_error_handling"] is False
+        reliability = lambda result: result.metadata["quality_scores"]["dimensions"]["reliability"]["score"]  # noqa: E731
+        assert reliability(silent) == reliability(mentioning)
+
+    def test_scripts_points_zero_skips_the_finding(self, tmp_path: Path):
+        skill_dir = _write_script_skill(tmp_path, "print('hi')\n")
+
+        packaged = _validate_with(skill_dir, tmp_path)
+        disabled = _validate_with(skill_dir, tmp_path, "expected_headers: []\nerror_handling: {scripts: {points: 0}}\n")
+
+        assert ("Scripts may lack error handling: run.py", 5) in _reliability_issues(packaged)
+        assert not [message for message, _ in _reliability_issues(disabled) if message.startswith("Scripts may lack")]
+
+    def test_heading_rule_with_zero_points_still_reports_a_zero_deduction(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(tmp_path)
+        config = 'expected_headers:\n  - heading: "## Rollback"\n    points: 0\n    message: No rollback section\n'
+
+        result = _validate_with(skill_dir, tmp_path, config)
+
+        assert ("No rollback section", 0) in _reliability_issues(result)
+
+    def test_script_markers_come_from_config(self, tmp_path: Path):
+        skill_dir = _write_script_skill(tmp_path, "def main():\n    raise SystemExit(1)\n")
+        config = (
+            "expected_headers: []\nerror_handling:\n  scripts:\n    markers: [sys.exit]\n"
+            "    message: Scripts skip sys.exit\n"
+        )
+
+        packaged = _validate_with(skill_dir, tmp_path)
+        custom = _validate_with(skill_dir, tmp_path, config)
+
+        assert not [message for message, _ in _reliability_issues(packaged) if message.startswith("Scripts may lack")]
+        assert ("Scripts skip sys.exit: run.py", 5) in _reliability_issues(custom)
+
+    def test_try_except_pair_counts_regardless_of_markers(self, tmp_path: Path):
+        skill_dir = _write_script_skill(tmp_path, "try:\n    main()\nexcept OSError:\n    pass\n")
+        config = "expected_headers: []\nerror_handling:\n  scripts:\n    markers: [sys.exit]\n"
+
+        result = _validate_with(skill_dir, tmp_path, config)
+
+        assert not [message for message, _ in _reliability_issues(result) if message.startswith("Scripts may lack")]
+
+    def test_lib_finding_lists_at_most_three_modules(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(tmp_path)
+        module = skill_dir / "probe"
+        module.mkdir()
+        (module / "__init__.py").write_text("")
+        for name in ("a", "b", "c", "d"):
+            (module / f"{name}.py").write_text("VALUE = 1\n")
+
+        result = _validate_with(skill_dir, tmp_path)
+
+        lib_issues = [(m, d) for m, d in _reliability_issues(result) if m.startswith("Lib modules may lack error handling: ")]
+        assert len(lib_issues) == 1 and lib_issues[0][1] == 5
+        names = lib_issues[0][0].removeprefix("Lib modules may lack error handling: ").split(", ")
+        assert len(names) == 3 and set(names) < {"a.py", "b.py", "c.py", "d.py"}
+
+    def test_lib_markers_come_from_config(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(tmp_path)
+        module = skill_dir / "probe"
+        module.mkdir()
+        (module / "__init__.py").write_text("")
+        (module / "core.py").write_text("def run():\n    raise RuntimeError('x')\n")
+        config = "expected_headers: []\nerror_handling:\n  lib:\n    markers: [logger.exception]\n    points: 7\n"
+
+        packaged = _validate_with(skill_dir, tmp_path)
+        custom = _validate_with(skill_dir, tmp_path, config)
+
+        assert not [m for m, _ in _reliability_issues(packaged) if m.startswith("Lib modules may lack")]
+        assert ("Lib modules may lack error handling: core.py", 7) in _reliability_issues(custom)
+
+    @pytest.mark.parametrize(("term", "text"), [("error:", "On error: retry."), ("C++", "Check the C++ build.")])
+    def test_custom_terms_with_punctuation_at_the_edge_match(self, tmp_path: Path, term: str, text: str):
+        skill_dir = _write_issue_skill(tmp_path, troubleshooting=text)
+        config = f'expected_headers: []\nerror_handling:\n  mentioned:\n    terms: ["{term}"]\n'
+
+        result = _validate_with(skill_dir, tmp_path, config)
+
+        assert result.metadata["quality_scores"]["metrics"]["has_error_handling"] is True
+
+    @pytest.mark.parametrize("text", ["Check the exit\ncode first.", "Check the exit  code first.", "Check the exit\r\n  code."])
+    def test_multi_word_custom_terms_match_across_wrapped_or_repeated_whitespace(self, tmp_path: Path, text: str):
+        skill_dir = _write_issue_skill(tmp_path, troubleshooting=text)
+        config = 'expected_headers: []\nerror_handling:\n  mentioned:\n    terms: ["exit code"]\n'
+
+        result = _validate_with(skill_dir, tmp_path, config)
+
+        assert result.metadata["quality_scores"]["metrics"]["has_error_handling"] is True
+
+    def test_multi_word_custom_term_still_needs_whole_words(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(tmp_path, troubleshooting="Check the exit codes first.")
+        config = 'expected_headers: []\nerror_handling:\n  mentioned:\n    terms: ["exit code"]\n'
+
+        result = _validate_with(skill_dir, tmp_path, config)
+
+        assert result.metadata["quality_scores"]["metrics"]["has_error_handling"] is False
+
+    def test_packaged_single_word_terms_behave_as_before(self):
+        from skillevaluator.validators.quality_score import _contains_any_word
+
+        assert _contains_any_word("An Error occurred.", ["error"])
+        assert not _contains_any_word("This is errorless.", ["error"])
+        assert not _contains_any_word("nothing here", ["error", "failure"])
+
+
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])
 @pytest.mark.parametrize(
     "extra_yaml",

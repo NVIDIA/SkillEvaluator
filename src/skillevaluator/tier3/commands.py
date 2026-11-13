@@ -626,7 +626,7 @@ skills_dir = {toml_quote("/workspace/skills")}
             """FROM python:3.12-slim
 
 RUN apt-get -o Acquire::Retries=3 update && \\
-    apt-get -o Acquire::Retries=3 install -y --no-install-recommends bash curl git jq ripgrep && \\
+    apt-get -o Acquire::Retries=3 install -y --no-install-recommends bash curl git jq procps ripgrep && \\
     rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /workspace/skills /logs/agent /logs/verifier
@@ -693,6 +693,7 @@ def evaluate(
     results_dir: Path | None,
     harbor_keep_jobs: bool,
     agent_runtime_preflight: bool | None = None,
+    tolerate_baseline_timeouts: bool | None = None,
     timeout_multiplier: float | None,
     override_cpus: int | None,
     override_memory_mb: int | None,
@@ -791,6 +792,7 @@ def evaluate(
             output_dir=output_dir,
             keep_harbor_jobs=harbor_keep_jobs,
             agent_runtime_preflight=agent_runtime_preflight,
+            tolerate_baseline_timeouts=tolerate_baseline_timeouts,
             env_mode=env_mode,
             env_mode_source="CLI",
             environment_kwargs=merged_environment_kwargs,

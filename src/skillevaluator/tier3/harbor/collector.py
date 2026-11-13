@@ -33,6 +33,7 @@ from skillevaluator.tier3.baseline_store import BASELINE_ANNOTATION_KEYS, load_b
 from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts, get_skill_tool_calls
 from skillevaluator.tier3.eval_core.checks import check_negative_case
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
+from skillevaluator.tier3.harbor import baseline_timeouts
 from skillevaluator.tier3.harbor.activation import summarize_skill_activation
 from skillevaluator.tier3.harbor.lift_basis import pair_metric_scores
 from skillevaluator.tier3.harbor.metrics import (
@@ -142,6 +143,7 @@ GENERATED_AGENT_ARTIFACTS = (
     "pass_at_k_lift.json",
     "security_attribution.json",
     "findings.json",
+    "baseline_timeout_tolerance.json",
 )
 GENERATED_CONDITION_DIRS = ("with-skill", "without-skill")
 GENERATED_ROOT_ARTIFACTS = ("attempt_policy.json", "comparison.json")
@@ -6756,6 +6758,7 @@ def _condition_execution_summary(
     skipped: bool = False,
     stop_on_pass: bool = False,
     pass_threshold: float = 0.50,
+    attempt_slots: dict[str, dict[str, Any]] | None = None,
     expected_attempts_by_case: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """Describe whether a Harbor condition produced complete logical attempts.
@@ -6764,6 +6767,10 @@ def _condition_execution_summary(
     ``_trial_root_name`` is therefore the attempt identity; the case id alone
     is not sufficient and raw reward-row count would over-count those tasks.
     Early-stopped cases require attempts only through their first passing trial.
+    When ``attempt_slots`` is a dict, it receives ``{"required", "missing",
+    "missing_ordinals"}`` for each expected case; ``missing_ordinals`` lists
+    the absent attempt ordinals when the case's attempts carry labels, and is
+    None when only a count is known.
     """
     expected_ids = _validated_expected_case_ids(expected_case_ids)
     expected_count = len(expected_ids) if expected_ids else int(expected_cases or 0)
@@ -6894,7 +6901,22 @@ def _condition_execution_summary(
         if all_explicit:
             expected_ordinals = set(range(1, required + 1))
             actual_ordinals = set(explicit + recovered_ordinals)
-            return required, bool(expected_ordinals - actual_ordinals), bool(actual_ordinals - expected_ordinals)
+            missing_ordinals = sorted(expected_ordinals - actual_ordinals)
+            if attempt_slots is not None:
+                attempt_slots[case_id] = {
+                    "required": required,
+                    "missing": len(missing_ordinals),
+                    "missing_ordinals": missing_ordinals,
+                }
+            return required, bool(missing_ordinals), bool(actual_ordinals - expected_ordinals)
+        if attempt_slots is not None:
+            # Stop-on-pass runs each attempt as its own labelled job, so a case
+            # with nothing scored owes every ordinal through the maximum.
+            attempt_slots[case_id] = {
+                "required": required,
+                "missing": max(0, required - len(attempts)),
+                "missing_ordinals": list(range(1, required + 1)) if stop_on_pass and not attempts else None,
+            }
         return required, len(attempts) < required, len(attempts) > required
 
     missing: list[str] = []
@@ -7037,6 +7059,338 @@ def _aggregate_execution(summaries: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+# -- opt-in baseline-timeout tolerance (evidence half; rules in baseline_timeouts) --
+
+_AGENT_TIMEOUT_SECONDS_RE = re.compile(r"after (\d+(?:\.\d+)?) seconds")
+# Trial logs and trajectories are written by the agent under evaluation, so the
+# tolerance checks read them anchored at the trial directory, bounded and
+# without following links.
+_TOLERANCE_EVIDENCE_MAX_BYTES = 64 * 1024 * 1024
+# Provider overload, rate limiting or auth trouble that an agent can retry
+# through until the execution timeout kills it, so no terminal error is ever
+# written. A best-effort check on known provider error identifiers: Anthropic,
+# OpenAI and Google error types and codes, litellm's RateLimitError, Claude
+# Code's "API Error: <status>" and "Repeated 529 Overloaded", retry events'
+# "error_status", the OpenAI SDK's "Error code: <status>", a JSON or Python
+# "status"/"statusCode" field of 429 or 529 (OpenAI-compatible providers,
+# OpenCode's APIError), and the "429 Too Many Requests" status line (Codex
+# prints "status: 429 Too Many Requests"). Prose such as "rate limit" in
+# fetched pages or answers does not count, nor does another bare HTTP status a
+# page may print. A brief 5xx retry is common in healthy runs and does not
+# count either.
+_PROVIDER_DEGRADATION_RE = re.compile(
+    rb"overloaded_error|server_is_overloaded|Repeated 529 Overloaded"
+    rb"|rate_limit_error|rate_limit_exceeded|\"error\"\s*:\s*\"rate_limit\"|RateLimitError"
+    rb"|insufficient_quota|RESOURCE_EXHAUSTED"
+    rb"|authentication_error|permission_error|invalid[ _-]api[ _-]key"
+    rb"|API Error:?\s*(?:401|403|429|529)\b"
+    rb"|Error code:\s*(?:401|403|429|529)\b"
+    rb"|\"error_status\"\s*:\s*(?:401|403|429|529)\b"
+    rb"|[\"']status(?:_?code)?[\"']?\s*:\s*[\"']?(?:429|529)\b"
+    rb"|\b429\s+Too Many Requests"
+    rb"|\bstatus:?\s+(?:401|403)\s+(?:Unauthorized|Forbidden)",
+    re.IGNORECASE,
+)
+# Where Harbor keeps a trial's text logs: single-step trials under agent/ or
+# the trial root, multi-step native trials under steps/*/agent/. Every *.txt
+# there is scanned, so a supported agent's own log name can never go unread.
+_TRIAL_TEXT_LOG_GLOBS = ("agent/*.txt", "*.txt", "steps/*/agent/*.txt")
+# Harbor's own trial text (exception.txt) is scanned too, but it is not the
+# agent's log, so it never shows the agent was free of provider trouble.
+_HARBOR_TRIAL_TEXT = frozenset(name for name in TRIAL_DIAGNOSTIC_ARTIFACTS if name.endswith(".txt"))
+# The agent can write any number of files next to its log, so the scan reads
+# at most this many; a trial over either bound cannot be cleared.
+_TOLERANCE_LOG_MAX_FILES = 64
+
+
+def _agent_timeout_seconds(reason: str) -> float | None:
+    """Return the agent timeout budget named by a Harbor ``AgentTimeoutError`` message."""
+    match = _AGENT_TIMEOUT_SECONDS_RE.search(reason)
+    if match is None:
+        return None
+    seconds = float(match.group(1))
+    return seconds if math.isfinite(seconds) and seconds > 0 else None
+
+
+def _positive_token_count(value: Any) -> int | None:
+    """Return a positive whole token count, or None for anything else (never bool)."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        if not math.isfinite(value) or value < 1 or value != int(value):
+            return None
+    except OverflowError:
+        # JSON integers can exceed the float range used to check finiteness.
+        return None
+    return int(value)
+
+
+def _read_trial_evidence(
+    trial_dir: Path, relative_path: Path, max_bytes: int = _TOLERANCE_EVIDENCE_MAX_BYTES
+) -> bytes | None:
+    """Read one agent-written trial file safely; None when it does not exist.
+
+    Raises ``SecurePathError`` or ``OSError`` when the file exists but cannot
+    be read safely: a link, not a regular file, over ``max_bytes``, or unreadable.
+    """
+    if not os.path.lexists(trial_dir / relative_path):
+        return None
+    with SecureRoot(trial_dir) as secure_root:
+        raw, _metadata = secure_root.read_bytes(relative_path, max_bytes)
+    return raw
+
+
+def _trial_output_tokens(trial_dir: Path, harbor_result: Mapping[str, Any]) -> int | None:
+    """Return proof that the agent produced output before a trial ended, or None.
+
+    Harbor's ``agent_result.n_output_tokens`` comes first; otherwise any
+    trajectory's ``final_metrics.total_completion_tokens`` (root, ``agent/``
+    or a native step). A missing or zero counter is no proof, and neither is
+    a trajectory that cannot be read bounded and without following links.
+    """
+    agent_result = harbor_result.get("agent_result")
+    tokens = _positive_token_count(agent_result.get("n_output_tokens") if isinstance(agent_result, dict) else None)
+    if tokens is not None:
+        return tokens
+    for path in (
+        Path("trajectory.json"),
+        Path("agent") / "trajectory.json",
+        *(path.relative_to(trial_dir) for path in sorted(trial_dir.glob("steps/*/agent/trajectory.json"))),
+    ):
+        try:
+            raw = _read_trial_evidence(trial_dir, path)
+            trajectory = json.loads(raw) if raw is not None else None
+        except (SecurePathError, ValueError, OSError, RecursionError, UnicodeError):
+            continue
+        final_metrics = trajectory.get("final_metrics") if isinstance(trajectory, dict) else None
+        if isinstance(final_metrics, dict):
+            tokens = _positive_token_count(final_metrics.get("total_completion_tokens"))
+            if tokens is not None:
+                return tokens
+    return None
+
+
+def _provider_log_rejection(trial_dir: Path) -> str | None:
+    """Return why a timed-out trial's logs cannot clear it of provider trouble, or None when they do.
+
+    ``provider_degradation_observed`` when any text log shows provider
+    overload, rate limiting or auth errors. Every line counts: an agent killed
+    by the execution timeout while it retried never writes a terminal error. A
+    log that cannot be read safely in full, or more logs or bytes than the
+    bounds, counts as degradation, since it cannot be cleared. ``no_agent_log``
+    when the trial left no agent log at all (Harbor's exception.txt is not one).
+    """
+    paths = [
+        path.relative_to(trial_dir) for pattern in _TRIAL_TEXT_LOG_GLOBS for path in sorted(trial_dir.glob(pattern))
+    ]
+    if len(paths) > _TOLERANCE_LOG_MAX_FILES:
+        return "provider_degradation_observed"
+    budget = _TOLERANCE_EVIDENCE_MAX_BYTES
+    agent_log_scanned = False
+    for path in paths:
+        try:
+            raw = _read_trial_evidence(trial_dir, path, budget)
+        except (SecurePathError, OSError):
+            return "provider_degradation_observed"
+        if raw is None:
+            continue
+        if _PROVIDER_DEGRADATION_RE.search(raw):
+            return "provider_degradation_observed"
+        budget -= len(raw)
+        agent_log_scanned = agent_log_scanned or path.name not in _HARBOR_TRIAL_TEXT
+    return None if agent_log_scanned else "no_agent_log"
+
+
+def _job_has_unrecovered_agent_timeout(job_dir: Path, recovered: list[dict[str, Any]]) -> bool:
+    """Return whether a trial of the job, other than a recovered attempt, recorded ``AgentTimeoutError``.
+
+    Checks the trial and each native step. A baseline that failed without an
+    agent execution timeout is not a tolerance case, so it gets no rejection
+    or warning and fails exactly as it does without the option.
+    """
+    recovered_labels = {str(item.get("trial") or "") for item in recovered}
+    try:
+        entries = sorted(job_dir.iterdir())
+    except OSError:
+        return False
+    for ordinal, trial_dir in enumerate(entries, start=1):
+        if _inspect_trial_directory(trial_dir)[0] != "directory" or not _looks_like_trial_dir(trial_dir):
+            continue
+        if _published_trial_label(trial_dir.name, alias_ordinal=ordinal) in recovered_labels:
+            continue
+        harbor_result = _read_json(trial_dir / "result.json")
+        root = harbor_result.get("exception_info") if isinstance(harbor_result, dict) else None
+        exception_types = [_exception_details(root)[0], *(kind for kind, _ in _trial_step_exception_details(trial_dir))]
+        if baseline_timeouts.TOLERATED_EXCEPTION_TYPE in exception_types:
+            return True
+    return False
+
+
+def _with_skill_tolerance_rejection(
+    execution: Mapping[str, Any],
+    *,
+    policy: str,
+    job_failure: str,
+    runtime_failures: list[dict[str, str]],
+    trial_failures: list[dict[str, str]],
+) -> str | None:
+    """Check that the with-skill arm is complete and clean (T1); None when it is.
+
+    ``runtime_failures`` and ``trial_failures`` are the active (unrecovered) rows.
+    """
+    if policy == CUSTOM_SCORE_POLICY:
+        return "custom_only_grading"
+    expected = execution.get("expected_attempts")
+    if (
+        execution.get("execution_status") != "succeeded"
+        or not isinstance(expected, int)
+        or expected < 1
+        or execution.get("scored_attempts") != expected
+    ):
+        return "with_skill_incomplete"
+    if execution.get("execution_errors") or job_failure or runtime_failures or trial_failures:
+        return "with_skill_not_clean"
+    return None
+
+
+def _baseline_timeout_failures(
+    *,
+    job_dir: Path,
+    rewards: list[dict[str, Any]],
+    execution: Mapping[str, Any],
+    slots: Mapping[str, Mapping[str, Any]],
+    residual_errors: list[str],
+    job_failure: str,
+    runtime_failures: list[dict[str, str]],
+    trial_failures: list[dict[str, str]],
+    recovered: list[dict[str, Any]],
+    expected_case_ids: list[str],
+    case_id_by_task_selector: dict[str, str] | None,
+    arm_suffix: str,
+    task_entry_id_map: Mapping[str, str] | None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Gather the typed failures of a short baseline arm and check T2 to T7.
+
+    Returns ``(failures, None)`` when every rule holds, otherwise
+    ``([], code)``. ``rewards`` are the arm's scoreable rewards,
+    ``execution`` its summary, ``slots`` the per-case attempt slots from
+    :func:`_condition_execution_summary`, and ``residual_errors`` that
+    summary's errors recomputed without any trial failures or job failure.
+    The runtime and trial failure lists include recovered rows; those are
+    set aside here, as they are for the summary. Harbor's errored count
+    still includes the recovered timeouts, so the job failure may count them.
+    """
+    if not expected_case_ids:
+        return [], "no_case_identity"
+    expected_set = set(expected_case_ids)
+    recovered_labels = {str(item.get("trial") or "") for item in recovered}
+    scored_roots = {str(reward.get("_trial_root_name") or "") for reward in rewards}
+    failures: list[dict[str, Any]] = []
+    exception_reasons: dict[str, str] = {}
+    recovered_timeouts = 0
+    for ordinal, trial_dir in enumerate(sorted(job_dir.iterdir()), start=1):
+        kind, _reason = _inspect_trial_directory(trial_dir)
+        if kind == "link":
+            return [], "unaccounted_trial"
+        if kind != "directory" or not _looks_like_trial_dir(trial_dir):
+            continue
+        label = _published_trial_label(trial_dir.name, alias_ordinal=ordinal)
+        harbor_result = _read_json(trial_dir / "result.json")
+        harbor_result = harbor_result if isinstance(harbor_result, dict) else {}
+        root_type, root_reason = _exception_details(harbor_result.get("exception_info"))
+        if trial_dir.name in scored_roots:
+            if root_type:
+                return [], "timed_out_trial_scored"
+            continue
+        if label in recovered_labels:
+            # A recovered attempt is an agent timeout a later attempt scored;
+            # it is counted only toward Harbor's errored total below.
+            if root_type != baseline_timeouts.TOLERATED_EXCEPTION_TYPE:
+                return [], "unaccounted_trial"
+            recovered_timeouts += 1
+            continue
+        if not harbor_result:
+            return [], "unaccounted_trial"
+        step_details = _trial_step_exception_details(trial_dir)
+        if any(kind == baseline_timeouts.TOLERATED_EXCEPTION_TYPE for kind, _detail in step_details):
+            # Harbor records a native multi-step task's agent timeout on the
+            # step and counts the trial as completed, so the trial carries no
+            # root exception or errored count to bind. The option does not
+            # cover these tasks.
+            return [], "step_timeout_not_supported"
+        selector = _task_selector_from_harbor_result(harbor_result)
+        entry_id = _entry_id_from_harbor_result(
+            harbor_result,
+            case_id_by_task_selector,
+            arm_suffix=arm_suffix,
+            task_entry_id_map=task_entry_id_map,
+        )
+        if case_id_by_task_selector is None and entry_id:
+            entry_id = _canonical_case_id(entry_id, expected_set)
+        exception_reasons[label] = redact_sensitive_text(root_reason)
+        failures.append(
+            {
+                "trial": label,
+                "case_id": entry_id,
+                "task": selector,
+                "attempt": _structural_attempt_ordinal(trial_dir.name, selector) if selector else None,
+                "exception_types": [
+                    exception_type
+                    for exception_type, _detail in ((root_type, root_reason), *step_details)
+                    if exception_type
+                ],
+                "output_tokens": _trial_output_tokens(trial_dir, harbor_result),
+                "timeout_seconds": _agent_timeout_seconds(root_reason),
+                "_trial_dir": trial_dir,
+            }
+        )
+
+    if code := baseline_timeouts.check_failures(
+        expected_attempts=execution.get("expected_attempts"),
+        scored_attempts=execution.get("scored_attempts"),
+        slots=slots,
+        failures=failures,
+    ):
+        return [], code
+
+    # Every failed trial is a typed timeout, once, and each reports exactly its
+    # own timeout: a verifier failure, an invalid reward row or an agent log
+    # runtime error on a timed-out trial is evidence these rules cannot explain.
+    def _matches(rows: list[dict[str, str]]) -> bool:
+        active = [row for row in rows if str(row.get("trial") or "") not in recovered_labels]
+        return len(active) == len(exception_reasons) and all(
+            exception_reasons.get(str(row.get("trial") or "")) == str(row.get("reason") or "") for row in active
+        )
+
+    if not _matches(trial_failures):
+        return [], "untyped_trial_failure"
+    if not _matches(runtime_failures):
+        return [], "agent_runtime_failure"
+
+    # T7: the baseline's errors are only the ones these timeouts produce.
+    allowed = {
+        _safe_diagnostic_text(
+            _sampled_case_id_diagnostic(
+                "Missing scored attempts for cases", sorted({str(failure["case_id"]) for failure in failures})
+            ),
+            max_len=4096,
+        ),
+        f"Scored attempt coverage is {execution.get('scored_attempts')}/{execution.get('expected_attempts')}",
+    }
+    if recovered_timeouts != len(recovered_labels) or job_failure not in {
+        "",
+        baseline_timeouts.JOB_FAILURE.format(count=len(failures) + recovered_timeouts),
+    }:
+        return [], "unbound_error"
+    if any(error not in allowed for error in residual_errors):
+        return [], "unbound_error"
+
+    for failure in failures:
+        if rejection := _provider_log_rejection(failure.pop("_trial_dir")):
+            return [], rejection
+    return failures, None
+
+
 def _observe_private_trials(agent, arm, job_dir, collected, scoreable, selector_map) -> None:
     """Hand existing observations to an active private hook without affecting ordinary collection."""
     runtime = sys.modules.get("skillevaluator.tier3.plugin_execution")
@@ -7070,6 +7424,7 @@ def collect_harbor_results(
     agent_models: dict[str, dict[str, str]] | None = None,
     launch_errors: list[str] | None = None,
     grading_mode: str | None = None,
+    tolerate_baseline_timeouts: bool = False,
     budget_not_run: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Collect results from Harbor jobs into evals/results/<agent>/ structure.
@@ -7080,6 +7435,12 @@ def collect_harbor_results(
     ``grading_mode`` labels a condition with no scoreable reward with the
     requested metric set and score policy; observed rewards still declare
     their own.
+    ``tolerate_baseline_timeouts`` keeps an agent scored on its clean
+    with-skill arm when its baseline fell short only through agent execution
+    timeouts (see :mod:`skillevaluator.tier3.harbor.baseline_timeouts`); it
+    needs both arms run in this collection (no reused baseline) and dimension
+    grading, and ``launch_errors`` must be the runner's launch errors so the
+    run-level rule can account for them.
     """
     if skip_baseline and skip_with_skill:
         raise ValueError("skip_baseline and skip_with_skill are mutually exclusive (no arm would run)")
@@ -7144,6 +7505,17 @@ def collect_harbor_results(
     }
 
     _prepare_generated_outputs(output_dir, agents)
+    # A reused baseline did not run here, so it has no timeouts to judge.
+    tolerance_on = (
+        tolerate_baseline_timeouts
+        and not skip_baseline
+        and not skip_with_skill
+        and reused_baseline_dir is None
+        and grading_mode != "custom_only"
+    )
+    tolerance_candidates: dict[str, list[dict[str, Any]]] = {}
+    tolerance_records: dict[str, dict[str, Any]] = {}
+    tolerance_rejected: dict[str, str] = {}
 
     for agent in agents:
         with_expected_trials, with_expected_case_ids, with_expected_cases, with_expected_attempts = budget_expectations(
@@ -7405,6 +7777,8 @@ def collect_harbor_results(
         without_summary: dict[str, Any] | None = None
         without_not_applicable: list[str] = []
         without_job_dir: Path | None = None
+        without_slots: dict[str, dict[str, Any]] = {}
+        without_identity: dict[str, Any] = {}
         if not skip_baseline:
             without_job_name = f"{skill_name}-{agent}-without"
             without_job_dir = (
@@ -7434,6 +7808,7 @@ def collect_harbor_results(
                         if case_id_by_task_selector is None
                         else None
                     )
+                    without_identity = {"arm_suffix": without_arm_suffix, "task_entry_id_map": without_task_entry_ids}
                     without_collected_rewards = (
                         _extract_rewards(
                             without_job_dir,
@@ -7500,6 +7875,7 @@ def collect_harbor_results(
                     reward_failures=without_trial_failures,
                     stop_on_pass=stop_on_pass,
                     pass_threshold=pass_threshold,
+                    attempt_slots=without_slots if tolerance_on else None,
                     expected_attempts_by_case=without_expected_attempts,
                 )
                 if without_policy == "mixed-score-policies":
@@ -7903,6 +8279,87 @@ def collect_harbor_results(
             },
             "output_dir": str(agent_dir.resolve()),
         }
+        if (
+            tolerance_on
+            and without_job_dir is not None
+            and with_execution.get("execution_status") == "succeeded"
+            and without_execution.get("execution_status") == "failed"
+            and _job_has_unrecovered_agent_timeout(without_job_dir, without_recovered)
+        ):
+            with_recovered_names = {item["trial"] for item in with_recovered}
+            tolerance_failures: list[dict[str, Any]] = []
+            tolerance_code = _with_skill_tolerance_rejection(
+                with_execution,
+                policy=with_policy,
+                job_failure="" if with_job_recovered else with_job_failure,
+                runtime_failures=[row for row in with_runtime_failures if row["trial"] not in with_recovered_names],
+                trial_failures=with_active_trial_failures,
+            )
+            if tolerance_code is None and without_policy == "mixed-score-policies":
+                tolerance_code = "unbound_error"
+            if tolerance_code is None:
+                # Attempts a run budget never admitted are not expected, as in the summary.
+                residual = _condition_execution_summary(
+                    without_rewards,
+                    expected_case_ids=without_expected_case_ids,
+                    expected_cases=without_expected_cases,
+                    n_attempts=n_attempts,
+                    job_failure="",
+                    recovered_attempts=without_recovered,
+                    stop_on_pass=stop_on_pass,
+                    pass_threshold=pass_threshold,
+                    expected_attempts_by_case=without_expected_attempts,
+                )
+                tolerance_failures, tolerance_code = _baseline_timeout_failures(
+                    job_dir=without_job_dir,
+                    rewards=without_rewards,
+                    execution=without_execution,
+                    slots=without_slots,
+                    residual_errors=(
+                        residual["execution_errors"]
+                        if not residual["execution_error_details_truncated"]
+                        else ["truncated residual errors"]
+                    ),
+                    job_failure="" if without_job_recovered else without_job_failure,
+                    runtime_failures=without_runtime_failures,
+                    trial_failures=without_trial_failures,
+                    recovered=without_recovered,
+                    expected_case_ids=without_expected_case_ids,
+                    case_id_by_task_selector=case_id_by_task_selector,
+                    arm_suffix=str(without_identity.get("arm_suffix") or ""),
+                    task_entry_id_map=without_identity.get("task_entry_id_map"),
+                )
+            if tolerance_code is not None:
+                tolerance_rejected[agent] = tolerance_code
+                logger.debug("Baseline timeouts not tolerated for %s: %s", agent, tolerance_code)
+            else:
+                timeouts = {failure["timeout_seconds"] for failure in tolerance_failures}
+                tolerance_candidates[agent] = tolerance_failures
+                tolerance_records[agent] = baseline_timeouts.build_record(
+                    expected_attempts=without_execution["expected_attempts"],
+                    scored_attempts=without_execution["scored_attempts"],
+                    failures=tolerance_failures,
+                    timeout_seconds=next(iter(timeouts)) if len(timeouts) == 1 else None,
+                )
+
+    if tolerance_on:
+        tolerated, rejected, explained = baseline_timeouts.select_tolerated(
+            all_results["agents"], tolerance_candidates, tolerance_rejected, launch_errors
+        )
+        tolerance_warnings: list[str] = []
+        for agent in sorted(tolerated):
+            baseline_timeouts.settle(all_results["agents"][agent], tolerance_records[agent])
+            # Reports reload agents from disk, so the decision travels with the arms.
+            _write_generated_root_json(
+                output_dir / agent / baseline_timeouts.RECORD_ARTIFACT, output_dir, tolerance_records[agent]
+            )
+            tolerance_warnings.append(baseline_timeouts.tolerance_warning(agent, tolerance_records[agent]))
+        for agent, code in sorted(rejected.items()):
+            all_results["agents"][agent][baseline_timeouts.REJECTION_KEY] = code
+            tolerance_warnings.append(baseline_timeouts.rejection_warning(agent, code))
+        all_results[baseline_timeouts.RUN_KEY] = baseline_timeouts.run_record(tolerated, explained)
+        if tolerance_warnings:
+            all_results.setdefault("warnings", []).extend(tolerance_warnings)
 
     # A baseline-only run scores only the without-skill arm.
     scored_arm = "without_skill" if skip_with_skill else "with_skill"

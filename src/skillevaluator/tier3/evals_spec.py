@@ -114,7 +114,7 @@ EVALS_SPEC: list[EntrySpec] = [
         formats=[".yml", ".yaml"],
         validation_notes=[
             "schema_version must be 1.",
-            "Supported harbor keys include task_source (auto|evals_json|native_harbor), custom_dockerfile_mode, base_image_mode, n_attempts, pass_threshold, stop_on_pass, n_concurrent, max_agents, max_cases, timeout_multiplier, agent_runtime_preflight, runtime_env, pre_agent_setup, and agents.<name>.model.",
+            "Supported harbor keys include task_source (auto|evals_json|native_harbor), custom_dockerfile_mode, base_image_mode, n_attempts, pass_threshold, stop_on_pass, n_concurrent, max_agents, max_cases, timeout_multiplier, agent_runtime_preflight, tolerate_baseline_timeouts, runtime_env, pre_agent_setup, and agents.<name>.model.",
             "passthrough_env and setup_commands are accepted as compatibility aliases for runtime_env and pre_agent_setup.",
             "Supported skill_workspace keys: mode (isolated|group), include.",
             "Supported grading keys: mode (default|default_plus_custom|custom_only).",
@@ -682,14 +682,15 @@ _SKILL_SCRIPT_SUFFIXES = frozenset({".py", ".sh", ".bash", ".js", ".mjs", ".cjs"
 # recognized as requiring a read without rescanning every growing prefix.
 _CLAUSE_STATE_RE = re.compile(
     r"(?P<break>[.,;:!?\n]|\b(?:and|but|then)\b)"
-    r"|(?P<cancel>\b(?:before|until|till|unless|prior\s+to|ahead\s+of|skip(?:s|ped|ping)?"
+    r"|(?P<cancel>\b(?:before|until|till|while|after|yet|unless|prior\s+to|ahead\s+of|skip(?:s|ped|ping)?"
     r"|forget(?:s|ting)?|forgot|fail(?:s|ed|ing)?|neglect(?:s|ed|ing)?)\b)"
     r"|(?P<negative>\b(?:no|not|never|without)\b|n['\u2019]t\b)",
     re.IGNORECASE,
 )
 _NEGATED_PREFIX_RE = re.compile(
     rf"(?P<negative>\b(?:not|never|without)\b|n['\u2019]t\b)\s+"
-    rf"(?:(?:\w+ly|first)\s+)?(?:(?:{_READ_VERB_RE}|{_SKILL_USE_VERB_RE}|{_RUN_VERB_RE})\s+(?:the\s+)?)?$",
+    rf"(?:(?:\w+ly|ever|even|first|once|also|really)\s+)?"
+    rf"(?:(?:{_READ_VERB_RE}|{_SKILL_USE_VERB_RE}|{_RUN_VERB_RE})\s+(?:the\s+)?)?$",
     re.IGNORECASE,
 )
 _NEGATIVE_SUBJECT_RE = re.compile(
@@ -706,6 +707,7 @@ _INDIRECT_NEGATED_PREFIX_RE = re.compile(
 _SKILL_NAME_MARKER = "\x00name\x00"
 _MATCH_EXCERPT_CHARS = 80
 _MAX_FIELD_VALUES = 1000
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\[\]\n]+)\]\([^()\n]*\)")
 
 
 def _skill_files_re(skill_name: str | None) -> str:
@@ -753,7 +755,7 @@ def _skill_use_assertion_re(
     name = re.escape(skill_name or "")
     alternatives = [
         _skill_files_re(skill_name),
-        rf"\b(?:{_SKILL_USE_VERB_RE}|{_READ_VERB_RE})\s+(?:the|this|its|that)\s+skill\b"
+        rf"\b(?:{_SKILL_USE_VERB_RE}|{_READ_VERB_RE})\s+(?:(?:the|this|its|that)(?:\s+installed)?|installed)\s+skill\b"
         rf"(?![.\w-]|\s+(?:levels?|sets?)\b)",
     ]
     if skill_name:
@@ -769,11 +771,12 @@ def _skill_use_assertion_re(
     if not prompt and skill_name:
         alternatives.append(rf"\b{_SKILL_USE_VERB_RE}\s+[`'\"]?{name}(?![\w-])[`'\"]?{_SKILL_NAME_END_RE}")
     for script in skill_scripts:
+        script = _normalized_match_text(script)
         script_name = rf"{re.escape(script)}(?![\w-]|\.\w)"
         script_ref = rf"(?:the\s+)?[`'\"]?(?:[\w.~-]*/)*{script_name}"
         alternatives += [
             rf"(?<![\w.-])(?:scripts|tools)/{script_name}",
-            rf"\b{_RUN_VERB_RE}\s+(?:-[\w-]+\s+){{0,4}}{script_ref}",
+            rf"\b{_RUN_VERB_RE}\s+(?:-[\w-]+\s+)*{script_ref}",
             rf"\b{_SCRIPT_USE_VERB_RE}\s+{script_ref}[`'\"]?(?:{_SKILL_NAME_END_RE}|{_SCRIPT_ARGS_RE})",
         ]
     return re.compile("|".join(alternatives), re.IGNORECASE)
@@ -801,8 +804,10 @@ def _first_unnegated_match(pattern: re.Pattern[str], text: str) -> str | None:
 
 
 def _normalized_match_text(text: str) -> str:
-    """Normalize compatibility spellings and invisible format characters, not homoglyphs."""
-    return "".join(char for char in unicodedata.normalize("NFKC", text) if unicodedata.category(char) != "Cf")
+    """Normalize ordinary Unicode and Markdown spellings, without mapping homoglyphs."""
+    text = "".join(char for char in unicodedata.normalize("NFKC", text) if unicodedata.category(char) != "Cf")
+    text = _MARKDOWN_LINK_RE.sub(r"\1", text)
+    return text.replace("**", "").replace("`", "")
 
 
 def _prepared_skill_name(skill_name: str | None) -> tuple[str, str]:

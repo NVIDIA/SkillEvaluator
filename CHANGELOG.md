@@ -696,7 +696,7 @@ All notable changes to SkillEvaluator are documented in this file.
   agent and the run, and the notes say so.
 
 - Tier 3 coverage notices now name the exception type Harbor recorded under a
-  job whose statistics miss a trial. The collector reports that job failure as
+  job whose statistics miss a trial. The collector's job failure then ends with
   `trial <label> recorded VerifierOutputParseError: <message>`, and the notice's
   `failure` now reads `verifier output parse error`, live and from a saved run,
   instead of `null` or the type of a later error. The HTML Tier 3 dimension

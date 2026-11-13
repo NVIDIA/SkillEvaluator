@@ -353,8 +353,8 @@ def test_run_directory_failed_baseline_trial_reaches_the_coverage_notice(tmp_pat
     ]
 
 
-def test_harbor_step_exception_reaches_the_coverage_notice(tmp_path: Path) -> None:
-    """A step exception Harbor recorded under a failed baseline job is the first failure, live and reloaded."""
+def _collect_failed_baseline_step(tmp_path: Path) -> dict[str, Any]:
+    """Collect a run whose baseline job recorded a ``RewardFileNotFoundError`` step exception."""
     jobs_dir = tmp_path / "jobs"
     _write_actual_harbor_022_result(jobs_dir / "demo-opencode-with", reward=1.0)
     _write_actual_harbor_022_result(
@@ -363,7 +363,7 @@ def test_harbor_step_exception_reaches_the_coverage_notice(tmp_path: Path) -> No
         step_rewards=(1.0,),
         step_exception_type="RewardFileNotFoundError",
     )
-    results = collect_harbor_results(
+    return collect_harbor_results(
         skill_name="demo",
         agents=["opencode"],
         output_dir=tmp_path / "results",
@@ -372,6 +372,11 @@ def test_harbor_step_exception_reaches_the_coverage_notice(tmp_path: Path) -> No
         expected_case_ids=["case-001"],
         expected_trials=1,
     )
+
+
+def test_harbor_step_exception_reaches_the_coverage_notice(tmp_path: Path) -> None:
+    """A step exception Harbor recorded under a failed baseline job is the first failure, live and reloaded."""
+    results = _collect_failed_baseline_step(tmp_path)
     skill = tmp_path / "demo"
     skill.mkdir()
     saved = agent_eval_result_from_directory(skill, tmp_path / "results", use_llm_judge=False)
@@ -380,6 +385,18 @@ def test_harbor_step_exception_reaches_the_coverage_notice(tmp_path: Path) -> No
     expected = [("opencode", "baseline_failed", "unavailable", "reward file not found error")]
     for notices in (coverage_notices(results["agents"]), saved.metadata["agent_eval"]["coverage_notices"]):
         assert [(notice["agent"], notice["code"], notice["state"], notice["failure"]) for notice in notices] == expected
+
+
+def test_changelog_quotes_the_recorded_clause_as_the_end_of_the_job_failure(tmp_path: Path) -> None:
+    """The job failure opens with the trial count, so the entry quotes only how it ends."""
+    results = _collect_failed_baseline_step(tmp_path)
+    job_failure = results["agents"]["opencode"]["conditions"]["without_skill"]["execution_errors"][0]
+    assert job_failure.startswith("Harbor evaluation statistics account for 0/1 completed trials; trial ")
+    assert re.search(r"; trial \S+ recorded RewardFileNotFoundError: [^;]+\Z", job_failure)
+
+    entry = _doc_block("CHANGELOG.md", "- Tier 3 coverage notices now name the exception type Harbor recorded")
+    assert "job failure then ends with `trial <label> recorded VerifierOutputParseError: <message>`" in entry
+    assert "reports that job failure as" not in entry
 
 
 # -- BENCHMARK.md ---------------------------------------------------------------

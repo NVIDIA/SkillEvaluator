@@ -372,6 +372,12 @@ All notable changes to SkillEvaluator are documented in this file.
   redrawn; the header and finished tiers print once, and log records print
   through the live view's console. The progress line now prints once, above
   the final verdict.
+- A Tier 3 trial that fails because Docker has no free network address pools
+  now names that cause, and how to clean up, right after the exception type in
+  its failure reason, which used to cut Docker's error off after the long
+  Compose command. The documented cleanup for interrupted or killed runs now
+  also lists and removes the trials' leftover Compose networks, which are what
+  use up the pools.
 
 ## 0.9.0 - 2026-11-13
 

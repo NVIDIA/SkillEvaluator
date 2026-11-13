@@ -493,6 +493,11 @@ All notable changes to SkillEvaluator are documented in this file.
   to Harbor 0.25's `${VAR}` form in generated task TOML, without changing source
   declarations or agent JSON configuration.
 
+- Validate native verifier and step-verifier MCP references against their
+  verifier environment grants, retaining agent grants for agent servers and
+  the legacy default when no separate verifier grants are supplied. Invalid
+  declarations provide field/type and `${VAR}` hints without echoing values.
+
 - Keep local `/logs/artifacts`, `HARBOR_LOGS_DIR/artifacts`, and
   `HARBOR_ARTIFACTS_DIR` on the same private staging tree. Artifact collection
   preserves source files and retained role logs; local whole-log-tree transfers

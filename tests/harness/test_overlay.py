@@ -75,6 +75,30 @@ def test_install_root_only_applies_inside_known_harness_roots(tmp_path: Path):
     assert status["codex"] == "not_loaded"
 
 
+def test_user_root_is_told_apart_from_project_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    skill = tmp_path / ".copilot" / "skills" / "demo-skill"
+    skill.parent.mkdir(parents=True)
+    _skill(tmp_path / "src").rename(skill)
+
+    assert skill_facts(skill)["install_root"] == "~/.copilot/skills"
+    assert _status(skill)["copilot-cli"] == "loads"
+
+
+def test_symlinked_skill_folder_counts_where_the_link_is(tmp_path: Path):
+    link = tmp_path / ".claude" / "skills" / "demo-skill"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(_rooted(tmp_path / "real"), target_is_directory=True)
+
+    assert skill_facts(link)["install_root"] == ".claude/skills"
+
+
+def test_manifest_file_target_checks_its_skill(tmp_path: Path):
+    result = HarnessValidator("claude-code").validate(_rooted(tmp_path) / "SKILL.md")
+
+    assert next(iter(result.metadata["harness_compatibility"].values()))[0]["status"] == "not_loaded"
+
+
 def test_every_status_is_known(tmp_path: Path):
     assert {r.status for r in evaluate_harnesses(_skill(tmp_path, extra="owner: x\n"))} <= set(HARNESS_STATUSES)
 

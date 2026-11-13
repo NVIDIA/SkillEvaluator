@@ -9,6 +9,7 @@ import copy
 import json
 import logging
 import math
+import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextvars import ContextVar
 from datetime import UTC, datetime
@@ -64,6 +65,7 @@ from skillevaluator.tier1.commands import (
 )
 from skillevaluator.tier3_environments import all_env_modes
 from skillevaluator.tier_group import TierGroup
+from skillevaluator.utils.json_output import json_needs_ascii
 from skillevaluator.utils.path_security import resolve_repo_context_root
 from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
 from skillevaluator.utils.tier2_paths import (
@@ -263,8 +265,17 @@ _TOP_LEVEL_COMMAND_HELP_GROUPS = (
 )
 
 
+class _EncodingSafeGroup(RichGroup):
+    """Configure output before Click parses eager options such as --help."""
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(errors="replace")
+        return super().parse_args(ctx, args)
+
+
 @click.group(
-    cls=RichGroup,
+    cls=_EncodingSafeGroup,
     context_settings=CONTEXT_SETTINGS,
     help_command_groups=_TOP_LEVEL_COMMAND_HELP_GROUPS,
     show_banner=True,
@@ -4036,7 +4047,8 @@ def tier3_migrate_dataset(source: Path, skill_name: str | None, destination: Pat
     except (OSError, ValueError, TypeError) as exc:
         raise click.ClickException(str(exc)) from exc
     if destination is None:
-        click.echo(json.dumps(result.dataset, indent=2, ensure_ascii=False))
+        ensure_ascii = json_needs_ascii(result.dataset, getattr(sys.stdout, "encoding", None))
+        click.echo(json.dumps(result.dataset, indent=2, ensure_ascii=ensure_ascii))
     else:
         click.echo(f"Wrote {len(result.dataset['evals'])} cases to {destination}; source preserved.")
 
@@ -4187,6 +4199,10 @@ from skillevaluator.tier3.grader_validation import validate_grader
 
 tier3.add_command(select_decoys_command, "select-decoys")
 tier3.add_command(validate_grader, "validate-grader")
+
+from skillevaluator.tier3.interaction_commands import interact_command
+
+tier3.add_command(interact_command, "interact")
 
 from skillevaluator.tier3.workflow import build_tier3_workflow
 

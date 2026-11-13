@@ -19,7 +19,10 @@ from skillevaluator.tier3.harbor.adapter import (
     generate_harbor_tasks,
 )
 
-_BASE_PACKAGES = ["bash", "curl", "git", "jq", "ripgrep"]
+# Derived from the code's own constant so adding a base package does not break
+# these tests. The assertions below still compare the whole package list, so a
+# blank or stray entry fails them.
+_BASE_PACKAGES = adapter_module._BASE_APT_PACKAGES.split()
 
 
 def _apt_install_packages(dockerfile: str) -> list[str]:

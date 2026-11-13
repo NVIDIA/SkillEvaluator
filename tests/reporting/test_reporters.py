@@ -541,12 +541,26 @@ class TestJSONReporter:
         assert [entry["name"] for entry in data["skills"]] == ["simple"]
         assert data["target_path"] == str(skill)
 
-    @pytest.mark.parametrize("target", [".", "./"])
-    def test_render_all_names_a_clean_skill_at_the_current_directory(self, tmp_path, monkeypatch, target):
+    @pytest.mark.parametrize(
+        ("working_directory", "target"),
+        [
+            ("simple", "."),
+            ("simple", "./"),
+            ("simple/nested", ".."),
+            (".", "simple"),
+            (".", "./simple"),
+            (".", "simple/"),
+            ("simple/nested", "../../simple"),
+        ],
+    )
+    def test_render_all_names_the_skill_for_every_spelling_of_a_local_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, working_directory: str, target: str
+    ) -> None:
+        """``.`` and ``..`` have no folder name of their own; the folder they open does."""
         skill = tmp_path / "simple"
-        skill.mkdir()
+        (skill / "nested").mkdir(parents=True)
         (skill / "SKILL.md").write_text("---\nname: simple\n---\n", encoding="utf-8")
-        monkeypatch.chdir(skill)
+        monkeypatch.chdir(tmp_path / working_directory)
 
         data = json.loads(
             JSONReporter(include_timestamp=False, target_path=target).render_all([self._clean_schema_result()])
@@ -554,6 +568,19 @@ class TestJSONReporter:
 
         assert data["skills"] == [{"name": "simple", "passed": True, "issue_count": 0}]
         assert data["target_path"] == target
+
+    def test_render_all_does_not_name_a_current_directory_that_holds_no_skill(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        folder = tmp_path / "plain"
+        folder.mkdir()
+        monkeypatch.chdir(folder)
+
+        data = json.loads(
+            JSONReporter(include_timestamp=False, target_path=".").render_all([self._clean_schema_result()])
+        )
+
+        assert "plain" not in [entry["name"] for entry in data["skills"]]
 
     def test_render_all_records_the_evaluator_version_and_target(self, success_result: ValidationResult) -> None:
         from skillevaluator import __version__

@@ -445,9 +445,10 @@ _PATH_COMPONENT_END = r"(?=/|$|[\s'\"`;|&<>(),:])"
 # right: a backslash outside single quotes escapes the next character, so
 # neither \" nor \' starts a string and \" does not end one, as in
 # bash -c "echo x >> \"$HOME/.zprofile\""; $'...' ends at an unescaped quote;
-# and in a comment or a here-document body line, quotes pair only within that
-# line, so no quoted string runs past it and the apostrophe of "# it's" does
-# not shift the strings after it.
+# in a comment, quotes pair only within its line, so the apostrophe of
+# "# it's" does not shift the strings after it; and a here-document body is
+# read the same way up to its terminator line, so a quoted string in it may
+# span lines but never runs past the body.
 # Without an option that gives the script (-e, -f, --expression, --file, or a
 # short option cluster in which e or f comes before i, whose attached text is
 # the backup suffix), the first sed operand is the script and is left out; with
@@ -462,12 +463,16 @@ _PATH_COMPONENT_END = r"(?=/|$|[\s'\"`;|&<>(),:])"
 _SHELL_WORD = r"(?:\\.|\"[^\"]*\"|'[^']*'|[^\s;|&<>()'\"`\\])+"
 _QUOTED_STRING_RE = re.compile(r"'[^']*'|\"[^\"\\]*(?:\\.[^\"\\]*)*\"|\$'[^'\\]*(?:\\.[^'\\]*)*'", re.DOTALL)
 # Where _shell_text_regions looks next: an escape, a quote, a "#", a
-# here-document or here-string operator, or a new line. The tokens that open a
-# quoted string are the ones that end with one of _QUOTE_CHARS.
-_SHELL_SCAN_RE = re.compile(r"[\\'\"#\n]|\$'|<<<?")
+# here-document or here-string operator, a new line, or the "((" and "))" of
+# arithmetic, in which "<<" is a shift. The tokens that open a quoted string
+# are the ones that end with one of _QUOTE_CHARS.
+_SHELL_SCAN_RE = re.compile(r"[\\'\"#\n]|\$'|<<<?|\(\(|\)\)")
 _QUOTE_CHARS = frozenset("'\"")
 # A "#" after one of these, or at the start of the text, starts a word and so a comment.
 _COMMENT_WORD_BREAKS = frozenset(" \t\r\n;|&()<>")
+# Here-documents in a here-document body are read up to this depth; a deeper
+# "<<" is read as text of the body around it.
+_MAX_HEREDOC_DEPTH = 8
 # The delimiter word after a "<<" operator, read on its own line, as
 # _HEREDOC_DELIMITER_RE reads it.
 _HEREDOC_OPERAND_RE = re.compile(r"(-?)[ \t]*((?:[^\s;&|<>()'\"`\\]|\\.|'[^'\n]*'|\"[^\"\n]*\")+)")
@@ -908,21 +913,21 @@ def _shell_text_regions(text: str) -> tuple[list[int], list[int]]:
     left to right as the shell reads it: a backslash outside single quotes
     escapes the next character, a "#" that starts a word begins a comment that
     runs to the end of its line, and the lines after the line of a "<<"
-    operator are its body, up to the line that holds only its delimiter. In a
-    comment or a here-document body line, quotes pair only within that line,
-    so no quoted string runs past it.
+    operator are its body, up to the line that holds only its delimiter. A
+    "<<" after an unclosed "((" on its line is a shift. In a comment, quotes
+    pair only within its line. A body is read the same way up to its
+    terminator line, so a quoted string in it may span lines but never runs
+    past the body. Its lines are the lines of that reading: a line break
+    inside a quoted string does not end one, and a comment is part of its line.
     """
     quoted: list[int] = []
     lines: list[int] = []
-    bodies: list[tuple[str, bool]] = []
 
-    def line_end(start: int) -> int:
-        end = text.find("\n", start)
-        return len(text) if end < 0 else end
+    def line_end(start: int, end: int) -> int:
+        found = text.find("\n", start, end)
+        return end if found < 0 else found
 
-    def read_line(start: int, end: int) -> None:
-        if start < end:
-            lines.extend((start, end))
+    def read_comment(start: int, end: int) -> None:
         index = start
         while (token := _SHELL_SCAN_RE.search(text, index, end)) is not None:
             index = token.start()
@@ -934,38 +939,65 @@ def _shell_text_regions(text: str) -> tuple[list[int], list[int]]:
             else:
                 index += len(token.group())
 
-    index = 0
-    while (token := _SHELL_SCAN_RE.search(text, index)) is not None:
-        index, char = token.start(), token.group()
-        if char == "\\":
-            index += 2
-        elif char[-1] in _QUOTE_CHARS:
-            if quote := _QUOTED_STRING_RE.match(text, index):
-                quoted.extend(quote.span())
-                index = quote.end()
+    def read(start: int, end: int, depth: int) -> None:
+        # Reads text[start:end]: the whole text at depth 0, else a body.
+        bodies: list[tuple[str, bool]] = []
+        arithmetic = 0
+        index = line_start = start
+        while (token := _SHELL_SCAN_RE.search(text, index, end)) is not None:
+            index, char = token.start(), token.group()
+            if char == "\\":
+                index += 2
+            elif char[-1] in _QUOTE_CHARS:
+                if quote := _QUOTED_STRING_RE.match(text, index, end):
+                    quoted.extend(quote.span())
+                    index = quote.end()
+                else:
+                    index += len(char)
+            elif char == "#" and (not index or text[index - 1] in _COMMENT_WORD_BREAKS):
+                read_comment(index, comment_end := line_end(index, end))
+                if not depth:
+                    lines.extend((index, comment_end))
+                index = comment_end
+            elif char == "((":
+                arithmetic += 1
+                index += 2
+            elif char == "))":
+                arithmetic = max(arithmetic - 1, 0)
+                index += 2
+            elif char == "<<":
+                if (
+                    not arithmetic
+                    and depth < _MAX_HEREDOC_DEPTH
+                    and (delimiter := _HEREDOC_OPERAND_RE.match(text, index + 2, end))
+                ):
+                    bodies.append((delimiter.group(2).strip("\"'").replace("\\", ""), bool(delimiter.group(1))))
+                index += 2
+            elif char == "\n":
+                if depth and line_start < index:
+                    lines.extend((line_start, index))
+                index += 1
+                arithmetic = 0
+                # The bodies of the line's here-documents follow it, in order.
+                for terminator, strip_tabs in bodies:
+                    body_start = index
+                    while index < end:
+                        body_end, stop = index, line_end(index, end)
+                        index = min(stop + 1, end)
+                        line = text[body_end:stop]
+                        if (line.lstrip("\t") if strip_tabs else line).rstrip("\r") == terminator:
+                            break
+                    else:
+                        body_end = end
+                    read(body_start, body_end, depth + 1)
+                bodies.clear()
+                line_start = index
             else:
                 index += len(char)
-        elif char == "#" and (not index or text[index - 1] in _COMMENT_WORD_BREAKS):
-            read_line(index, end := line_end(index))
-            index = end
-        elif char == "<<":
-            if delimiter := _HEREDOC_OPERAND_RE.match(text, index + 2):
-                bodies.append((delimiter.group(2).strip("\"'").replace("\\", ""), bool(delimiter.group(1))))
-            index += 2
-        elif char == "\n" and bodies:
-            # The bodies of the line's here-documents follow it, in order.
-            index += 1
-            for terminator, strip_tabs in bodies:
-                while index < len(text):
-                    start, end = index, line_end(index)
-                    index = end + 1
-                    line = text[start:end]
-                    if (line.lstrip("\t") if strip_tabs else line).rstrip("\r") == terminator:
-                        break
-                    read_line(start, end)
-            bodies.clear()
-        else:
-            index += len(char)
+        if depth and line_start < end:
+            lines.extend((line_start, end))
+
+    read(0, len(text), 0)
     return quoted, lines
 
 

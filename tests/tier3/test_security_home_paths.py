@@ -239,6 +239,25 @@ PROTECTED_WRITES = [
     pytest.param(_bash("echo '--> x'; echo x >> ~/.gitconfig; echo 'done'"), id="write-between-quoted-strings"),
     pytest.param(_bash("echo 'pipe to tee x'; echo x | tee -a ~/.zprofile; echo 'done'"), id="quoted-tee-then-tee"),
     pytest.param(_bash("echo 'run sed -i x'; sed -i 's/a/b/' ~/.zprofile"), id="quoted-sed-then-sed"),
+    # A quoted string in a here-document body may span its lines, as in a body a shell runs.
+    pytest.param(
+        _bash('bash <<\'EOF\'\necho "export A=1\nexport B=2" >> "$HOME/.bashrc"\nEOF'),
+        id="heredoc-bash-multiline-string",
+    ),
+    pytest.param(
+        _bash('cat <<\'EOF\' | bash\necho "export A=1\nexport B=2" >> "$HOME/.zprofile"\nEOF'),
+        id="heredoc-piped-to-bash-multiline-string",
+    ),
+    pytest.param(
+        _bash('ssh host bash <<\'EOF\'\ngit commit -m "Don\'t\nbreak"; echo x >> "/home/agent/.gitconfig"\nEOF'),
+        id="heredoc-ssh-multiline-message",
+    ),
+    # A "<<" inside "((" is a shift, not a here-document.
+    pytest.param(_bash('n=$((1<<3))\necho "a\nb" > "$HOME/.bashrc"'), id="arithmetic-shift-multiline-string"),
+    pytest.param(
+        _bash("n=$((1 << 4))\ngit commit -m \"Bump flags\n\nIt's ready\"; sed -i 's/a/b/' ~/.gitconfig"),
+        id="arithmetic-shift-multiline-message-sed",
+    ),
 ]
 
 # Writes main already flagged through its keyword rule (a protected path and a
@@ -644,6 +663,21 @@ def test_a_url_tilde_user_is_not_a_home_directory() -> None:
         ("cat > notes.md <<'EOF'\nsee 'a -> b'; echo x >> ~/.zprofile; echo 'ok'\nEOF", "~/.zprofile"),
         # A redirection with no target before a comment (a syntax error) takes the comment's first word.
         ("echo x >#/home/agent/.bashrc", "~/.bashrc"),
+        # A here-document body is read as shell text up to its terminator line: a quoted string may
+        # span lines but not run past the body, a comment pairs quotes within its line, and a
+        # here-document in the body has a body of its own.
+        ("ssh box <<'EOF'\ngit commit -am \"wip\n\nmore\" && sed -i 's/a/b/' \"$HOME/.zprofile\"\nEOF", "~/.zprofile"),
+        ('bash -s <<\'EOF\'\npython3 -c "\nprint(1)\n" > /tmp/out; echo x >> "$HOME/.gitconfig"\nEOF', "~/.gitconfig"),
+        ('cat <<\'EOF\'\nsay "hi\nEOF\necho x >> "$HOME/.zprofile"', "~/.zprofile"),
+        ("bash <<'EOF'\n# don't do this\necho 'a' >> '/home/agent/.bashrc'\nEOF", "~/.bashrc"),
+        (
+            "ssh host bash <<'EOF'\ncat > notes.md <<'X'\nit's here\nX\necho 'a' >> '/home/agent/.bashrc'\nEOF",
+            "~/.bashrc",
+        ),
+        # A "<<" after an unclosed "((" on its line is a shift; after a closed one, it starts a here-document.
+        ("n=$((1<<2))\ncat <<'EOF'\nit's here\nEOF\nsed -i 's/a/b/' ~/.zprofile", "~/.zprofile"),
+        ('(( y = 1 << 2 ))\ngit commit -m "Bump\n\nIt\'s ready"; echo x | tee -a /home/agent/.zprofile', "~/.zprofile"),
+        ("echo $((1 << 2)); cat <<'EOF'\nit's here\nEOF\nsed -i 's/a/b/' ~/.zprofile", "~/.zprofile"),
     ],
 )
 def test_sensitive_write_target(command: str, entry: str | None) -> None:
@@ -659,6 +693,13 @@ def test_a_comment_apostrophe_does_not_run_a_quoted_target_on() -> None:
 
 def test_a_long_digit_run_is_not_a_write() -> None:
     assert eval_core_checks._shell_write_targets("1" * 100_000) == []
+
+
+def test_deeply_nested_here_documents_are_read_without_deep_recursion() -> None:
+    # Bodies are read only _MAX_HEREDOC_DEPTH deep; a deeper "<<" is text of the body around it.
+    command = "".join(f"bash <<'E{depth}'\n" for depth in range(5_000)) + 'echo x >> "$HOME/.zprofile"\n'
+
+    assert eval_core_checks._sensitive_write_target(command) == "~/.zprofile"
 
 
 def test_a_long_run_of_quoted_tees_is_read_once() -> None:

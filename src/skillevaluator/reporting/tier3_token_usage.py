@@ -44,6 +44,14 @@ VALIDATE_CASE_POINTER = "Token usage per case is in the HTML, Markdown and JSON 
 EVALUATE_CASE_POINTER = "Token usage per case is in report.html and tier3-benchmark.md in the run directory."
 #: Case rows per agent in the HTML table; the JSON payload keeps the rest.
 HTML_CASE_ROWS_PER_AGENT = 64
+#: Marks a case row whose ID is not one of the evaluation dataset's case IDs.
+UNVERIFIED_CASE_MARK = " (unverified case ID)"
+#: Explains that mark wherever a table carries one.
+UNVERIFIED_CASE_NOTE = (
+    "A row marked (unverified case ID) names an attempt whose case could not be matched to any case ID in the "
+    "evaluation dataset. Its tokens were measured, but the row does not stand for a dataset case: read it as a "
+    "report-integrity problem, not as coverage of that case."
+)
 
 
 @dataclass(frozen=True)
@@ -109,6 +117,8 @@ def _row(agent: str | None, case: str | None, item: Mapping[str, Any]) -> TokenU
     reason = delta.get("reason")
     not_run = any(_coverage(item.get(arm)).get("status") == "not_run" for arm in ("with_skill", "baseline"))
     note = reason if case is None and isinstance(reason, str) and reason and not not_run else None
+    if case is not None and item.get("case_id_in_dataset") is False:
+        case += UNVERIFIED_CASE_MARK
     return TokenUsageRow(
         agent,
         "All cases" if case is None else case,
@@ -129,6 +139,13 @@ def more_case_rows_note(count: int, *, code: Callable[[str], str] = lambda text:
 def reused_baseline_note(usage: object) -> str | None:
     """Say that the baseline tokens come from an earlier run when this run reused its baseline."""
     return REUSED_BASELINE_NOTE if _mapping(usage).get("baseline_reused") is True else None
+
+
+def unverified_case_ids_note(usage: object) -> str | None:
+    """Explain the ``(unverified case ID)`` mark when a row carries one, else ``None``."""
+    validation = _mapping(_mapping(usage).get("case_id_validation"))
+    unmatched = validation.get("unmatched_case_ids")
+    return UNVERIFIED_CASE_NOTE if isinstance(unmatched, list) and unmatched else None
 
 
 def dropped_case_rows_note(usage: object) -> str | None:
@@ -221,6 +238,8 @@ def token_usage_markdown_lines(
         lines.extend([*notes, ""])
     if dropped := dropped_case_rows_note(usage):
         lines.extend([dropped, ""])
+    if unverified := unverified_case_ids_note(usage):
+        lines.extend([unverified, ""])
     if cases:
         lines.extend(["<details>", "<summary>Show token usage per case</summary>", "", header, separator])
         lines.extend(line(row) for row in cases)
@@ -262,7 +281,9 @@ def render_token_usage_table(
     for row in rows:
         if row.note:
             console.print(Text(f"  {text(row.agent if row.agent is not None else 'All agents')}: {text(row.note)}"))
-    pointer = " ".join(part for part in (case_pointer, dropped_case_rows_note(usage)) if part)
+    pointer = " ".join(
+        part for part in (case_pointer, dropped_case_rows_note(usage), unverified_case_ids_note(usage)) if part
+    )
     console.print(Text(f"  {TOKEN_USAGE_NOTE} {COVERAGE_NOTE} {pointer}", style="dim"))
     return True
 
@@ -283,4 +304,5 @@ def token_usage_table(usage: object) -> dict[str, Any] | None:
         "reused_baseline": reused_baseline_note(usage),
         "more_cases": more_case_rows_note(omitted, code=str),
         "dropped_cases": dropped_case_rows_note(usage),
+        "unverified_cases": unverified_case_ids_note(usage),
     }

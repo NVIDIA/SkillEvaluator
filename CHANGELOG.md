@@ -35,6 +35,24 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 token usage rows are now validated against the evaluation dataset's own
+  case IDs. Every case row uses one of those IDs at most once, and an attempt
+  whose only name is Harbor's 32-character cut of a case name is attributed to
+  that case, so missing telemetry stays with the canonical case instead of
+  splitting into a row of its own. A row that still cannot be matched is marked
+  as an unverified case ID in every report and recorded under
+  `token_usage.case_id_validation`, rather than being shown as coverage of a
+  dataset case.
+- The Tier 3 security scan no longer scores an agent clearing its own output
+  directory as a destructive command. One literal, recursive and forced `rm` of
+  a path inside the agent's output directory is cleanup; the directory itself,
+  anything outside it, a sensitive or protected path, and every compound,
+  quoted, globbed or dynamic command form still score as before.
+- The Tier 3 security scan no longer reads the license URL in a source file's
+  copyright header as data exfiltration. A `http://` or `https://` URL on a
+  comment line of a license or copyright notice is prose, so a long file write
+  that carries such a header is no longer flagged as an upload. A curl, wget or
+  httpie word keeps its meaning wherever it appears, including inside a notice.
 - A failed Tier 3 execution (for example a backend launch failure) now marks the
   report payload, its summary and the affected agents as failed with their
   errors, instead of only the top-level `result.json`. A report re-rendered by

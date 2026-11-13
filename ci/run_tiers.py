@@ -107,7 +107,7 @@ def select_skills(workspace: Path, env: dict) -> tuple[list[Path], dict]:
         raise ConfigurationError("The evaluated commit must match the checkout HEAD.")
     if base and mode == "auto":
         selected, selection = select_changed_skills(workspace, roots, base, head)
-        # Tier 1 applies the same setup predicate, so every tier selects the same skills.
+        # Tier 1 applies the same setup predicate, so every tier that runs selects the same skills.
         changed = _paths(_git(workspace, "diff", "--name-only", "-z", "--no-renames", f"{base}...{head}", "--"))
         if not setup_changed(changed):
             return selected, selection
@@ -739,6 +739,16 @@ def aggregate(reports: Path, tiers: tuple[int, ...], env: dict) -> int:
             _keep_selected(row, selection.get("selected") if isinstance(selection, dict) else None)
             if tier in recorded:
                 row["source_attempt"] = recorded[tier]
+        elif not required and env.get("SKILL_EVAL_SKILLS_CHANGED") == "false":
+            # The trusted workflow decided no skill changed, so this paid
+            # advisory tier did not run. That is a skip, not a failed job.
+            row = {
+                "tier": tier,
+                "required": False,
+                "status": "skipped",
+                "skills": [],
+                "reason": "No file under a configured skill root changed; this paid tier did not run.",
+            }
         else:
             row = {
                 "tier": tier,

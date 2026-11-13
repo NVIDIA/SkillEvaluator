@@ -314,6 +314,49 @@ def test_combined_plugin_report_without_exact_scores_cannot_borrow_latest(tmp_pa
     assert result.metadata["plugin_runtime_report"] == engine["plugin_runtime_report"]
 
 
+def _provenance(complete):
+    reasons = [] if complete else ["rule reference 'github::other/lib::rules::style.md' was not staged (external)"]
+    return {"plugin": "demo", "complete": complete, "incomplete_reasons": reasons}
+
+
+@pytest.mark.parametrize("complete", [True, False], ids=["complete", "incomplete"])
+def test_combined_plugin_result_is_incomplete_when_the_package_is(tmp_path, monkeypatch, complete):
+    source = _live_report_source(tmp_path)
+    results = tmp_path / "results"
+    current = _scored_run(results, "20261110_010001", 0.2)
+    engine = {
+        "execution_status": "succeeded",
+        "agents": {"opencode": {"with_skill": {}}},
+        "run_id": current.name,
+        "run_dir": str(current),
+        "plugin_provenance": _provenance(complete),
+    }
+
+    result = _combined_plugin_result(source, engine, results, monkeypatch)
+
+    # Scores stay visible; an incomplete package never counts as a complete plugin evaluation.
+    assert result.metadata["agent_eval"]["overall_score"] == pytest.approx(0.2)
+    assert ("plugin-components" in result.incomplete_scans) is not complete
+
+
+@pytest.mark.parametrize("complete", [True, False], ids=["complete", "incomplete"])
+def test_live_reports_are_incomplete_when_the_package_is(tmp_path, complete):
+    source = _live_report_source(tmp_path)
+    results = tmp_path / "results"
+    current = _scored_run(results, "20261110_010001", 0.5)
+    engine_result = {
+        "execution_status": "succeeded",
+        "run_id": current.name,
+        "run_dir": str(current),
+        "plugin_provenance": _provenance(complete),
+    }
+
+    payload = _live_json_report(source, engine_result, results, tmp_path / "reports")
+
+    assert payload["tier3"]["overall_score"] == pytest.approx(0.5)
+    assert ("plugin-components" in payload["incomplete_scans"]) is not complete
+
+
 @pytest.mark.parametrize("scored", [True, False], ids=["scored", "no-scores"])
 def test_live_benchmark_card_names_the_plugin(tmp_path, scored):
     source = _live_report_source(tmp_path)

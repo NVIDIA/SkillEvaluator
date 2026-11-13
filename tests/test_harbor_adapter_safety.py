@@ -143,9 +143,11 @@ def test_copy_repo_excludes_tracked_sensitive_files(tmp_path: Path) -> None:
     _assert_sensitive_repo_files_are_excluded(repo, skill, tmp_path / "tracked-task" / "environment")
 
 
-def test_copy_repo_excludes_sensitive_files_without_git(tmp_path: Path) -> None:
+def test_copy_repo_excludes_sensitive_files_without_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = tmp_path / "plain-repo"
     skill = _write_repo_context_fixture(repo)
+    # Keep this no-Git fixture independent of any checkout containing pytest's temp directory.
+    monkeypatch.setattr("skillevaluator.utils.path_security.find_git_repo_root", lambda _path: None)
 
     _assert_sensitive_repo_files_are_excluded(repo, skill, tmp_path / "plain-task" / "environment")
 

@@ -131,6 +131,17 @@ def _skill_name(skill_path: Path, data: dict[str, Any]) -> str:
     return name.strip() if isinstance(name, str) and name.strip() else skill_path.name
 
 
+def _tab_indent_breaks_yaml(fm_yaml: str) -> bool:
+    """A tab in a line's indentation that makes the frontmatter invalid YAML (a tab inside a block scalar is fine)."""
+    if not any("\t" in line[: len(line) - len(line.lstrip())] for line in fm_yaml.splitlines()):
+        return False
+    try:
+        yaml.safe_load(fm_yaml)
+    except yaml.YAMLError:
+        return True
+    return False
+
+
 def skill_facts(skill_path: Path) -> dict[str, Any]:
     """Compute the facts profile rules refer to."""
     manifest, raw, text, fm_yaml, data = _read_manifest(skill_path)
@@ -146,7 +157,7 @@ def skill_facts(skill_path: Path) -> dict[str, Any]:
         "description_type": type(description).__name__ if description is not None else "none",
         "frontmatter_bom": raw.startswith(b"\xef\xbb\xbf"),
         "frontmatter_duplicate_keys": bool(_duplicate_frontmatter_keys(fm_yaml)),
-        "frontmatter_tab_indent": any("\t" in line[: len(line) - len(line.lstrip())] for line in fm_yaml.splitlines()),
+        "frontmatter_tab_indent": _tab_indent_breaks_yaml(fm_yaml),
         "custom_fields": ", ".join(map(str, custom)),
         "custom_field_chars": sum(len(v) if isinstance(v, str) else len(yaml.safe_dump(v)) for v in custom.values()),
     }

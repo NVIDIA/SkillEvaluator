@@ -276,3 +276,19 @@ def test_harness_note_names_the_skill_not_the_harness():
     }
 
     assert harness_note(block) == "2 skills won't load in codex, opencode · skill loads degraded in hermes"
+
+
+def test_tab_inside_a_block_scalar_is_not_tab_indentation(tmp_path: Path):
+    skill = _rooted(tmp_path)
+    (skill / "SKILL.md").write_text(
+        "---\nname: demo-skill\ndescription: |\n  Use when checking.\n  \tindented\n---\nBody\n"
+    )
+
+    assert skill_facts(skill)["frontmatter_tab_indent"] is False
+
+
+def test_tab_after_spaces_that_breaks_yaml_is_flagged(tmp_path: Path):
+    skill = _rooted(tmp_path)
+    (skill / "SKILL.md").write_text("---\nname: demo-skill\nmetadata:\n  \tauthor: x\n---\nBody\n")
+
+    assert skill_facts(skill)["frontmatter_tab_indent"] is True

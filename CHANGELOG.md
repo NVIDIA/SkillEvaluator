@@ -6,6 +6,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- A separate four-case synthetic grader pilot adds forbidden-startup-write and
+  root-search challenges with quoted/read-only and scoped controls, an independent
+  label worksheet, content/source manifest and explicit security/Efficiency
+  availability policy. Task Overall failures remain independent of composite
+  scores. This diagnostic pilot establishes no all-metrics qualification,
+  statistical representativeness, release approval or Jira acceptance;
+  independent automated review is pending.
 - Experimental `tier3 evaluate --backend nemo-gym` targets a native Gym task-folder
   interface. Public `nemo-gym==0.7.0` is incompatible; public source candidate
   `NVIDIA-NeMo/Gym@792fa142f58277aecff05d402061d647e9a92acf` exposes the required
@@ -68,6 +75,16 @@ All notable changes to SkillEvaluator are documented in this file.
   skills. Catalog summaries include duplicate ID severity counts and consistent
   member verdicts, while explicitly labeling linked reports as single-skill
   results and retaining their independent verdicts.
+- The supporting Tier 3 Pass@k table displays an unavailable or skipped
+  baseline rate as `N/A`, preserving an observed baseline rate of `0%`.
+- Tier 3 budget summaries disclose measured usage above configured limits,
+  including after the final admitted attempt, and identify incomplete usage.
+  Additive `budget.observed_overruns` metadata is separate from admission
+  `status`; limits are checked between logical admission units, so a completed
+  run can exceed a cap without becoming partial or failed.
+- Grader qualification reports null behavior-step results with a matching
+  `not_checked` expectation as insufficient evidence instead of errors. Raw
+  scores and unjudgeable rates are unchanged.
 - A failed Tier 3 execution (for example a backend launch failure) now marks the
   report payload, its summary and the affected agents as failed with their
   errors, instead of only the top-level `result.json`. A report re-rendered by

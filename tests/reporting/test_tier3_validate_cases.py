@@ -132,6 +132,39 @@ def test_fix_section_for_tier1_and_tier2():
     assert not any(r.label == "what to fix" for r in summarize_tier2([ValidationResult(validator_name="d")])[2])
 
 
+def test_failed_hook_gate_with_incomplete_scan_is_listed_as_failed_not_as_setup():
+    """A Critical plus failed gate outranks an incomplete scan, as in result_status and the other reporters."""
+    from skillevaluator.models.result import Finding, Severity, ValidationResult
+    from skillevaluator.reporting.console_ui import summarize_tier1
+    from skillevaluator.reporting.run_status import Status, result_status
+
+    gate = "hooks/hooks.json: SkillSpector could not model these hooks; this check cannot pass while they are present"
+    security = ValidationResult(validator_name="Security Scan")
+    security.add_structured_finding(
+        Finding(
+            category="SECURITY",
+            severity=Severity.CRITICAL,
+            check_name="skillspector_hook_payload_unverified",
+            message="SkillSpector could not fully model the hooks in hooks/hooks.json",
+            file_path="hooks/hooks.json",
+            suggestion="Review hooks/hooks.json and every file its hooks run.",
+        )
+    )
+    security.fail_gate(gate)
+    security.mark_scan_incomplete("skillspector")
+    assert security.is_incomplete
+    assert result_status(security) is Status.FAILED
+
+    ok, rows = summarize_tier1([security], lineup=["security"])
+    text = _text(rows)
+    assert not ok
+    assert "0/1 passed  ·  1 failed" in text
+    assert "1 didn't run" not in text
+    assert f"{'security':<12}{gate}" in text
+    assert not any(r.label == "setup" for r in rows)
+    assert "--skip security" not in text
+
+
 def _trial(job: Path, name: str, result: dict | None) -> None:
     trial = job / name
     trial.mkdir(parents=True)

@@ -1701,6 +1701,10 @@
             <button class="view-toggle-btn active" id="view-skill" onclick="switchView('skill')">By {{ content_label | lower }}</button>
             <button class="view-toggle-btn" id="view-validator" onclick="switchView('validator')">By check</button>
         </div>
+        {% for result in results if not result.passed %}
+        {% set reference_summary = result.metadata.get('skillspector_reference_summary') | skillspector_reference_summary %}
+        {% if reference_summary %}<p class="reference-analysis-summary" style="font-size: 0.875rem; color: var(--text-secondary);">{{ reference_summary }}</p>{% endif %}
+        {% endfor %}
 
         {# ==================== SKILL-CENTRIC VIEW ==================== #}
         <div id="results-by-skill" class="results-view active">

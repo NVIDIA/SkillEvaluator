@@ -366,6 +366,24 @@ def test_trajectory_completion_tokens_prove_progress(tmp_path: Path) -> None:
     assert results["agents"]["opencode"][RECORD_KEY]["failures"][0]["output_tokens"] == 42
 
 
+@pytest.mark.parametrize("count", [2**53, 2**70, 1e16], ids=["int-2pow53", "int-2pow70", "float-1e16"])
+def test_out_of_range_harbor_counter_falls_back_to_the_trajectory_and_the_changelog_says_so(
+    tmp_path: Path, count: Any
+) -> None:
+    """Harbor's count past the JSON-safe range is no evidence, so an in-range trajectory count still proves progress."""
+    launch_errors = _two_agent_jobs(tmp_path / "jobs", output_tokens=count)
+    trial = tmp_path / "jobs" / f"{SKILL}-opencode-without" / "case-002__without1"
+    _write_json(trial / "agent" / "trajectory.json", {"steps": [], "final_metrics": {"total_completion_tokens": 42}})
+
+    results = _collect(tmp_path, launch_errors)
+
+    assert results["execution_status"] == "succeeded"
+    assert results["agents"]["opencode"][RECORD_KEY]["failures"][0]["output_tokens"] == 42
+    # The entry refuses the agent only when the attempt has no other count in range.
+    entry = _doc_block("CHANGELOG.md", "- `--tolerate-baseline-timeouts` (see its entry under Added)")
+    assert "with no other in-range count for that attempt the agent is refused as `no_progress_evidence`" in entry
+
+
 @pytest.mark.parametrize(
     ("failed", "code"),
     [

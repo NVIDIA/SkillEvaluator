@@ -703,10 +703,10 @@ All notable changes to SkillEvaluator are documented in this file.
   "Needs attention" note and the `Baseline incomplete` line for each tolerated
   agent also when a cost limit left the best agent's attempts short, where
   both left them out. An output-token count past the JSON-safe integer range
-  (above 2^53 - 1) in a timed-out attempt is no longer progress evidence, so
-  the agent is refused as `no_progress_evidence`; result collection used to
-  stop with `browser-unsafe JSON integer` and write no `result.json` or
-  report.
+  (above 2^53 - 1) in a timed-out attempt is no longer progress evidence;
+  with no other in-range count for that attempt the agent is refused as
+  `no_progress_evidence`, where result collection used to stop with
+  `browser-unsafe JSON integer` and write no `result.json` or report.
 
 - Tier 3 standard judges under `LLM_JUDGE_RETRY_POLICY=strict` with Bedrock
   as the provider no longer label a Bedrock error that the policy treats as an

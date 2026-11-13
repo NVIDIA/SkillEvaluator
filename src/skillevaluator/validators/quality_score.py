@@ -27,7 +27,12 @@ from urllib.parse import unquote, urlsplit
 import yaml
 
 from skillevaluator.constants import (
+    EXECUTABLE_SCRIPT_PATTERNS,
     EXECUTABLE_SKILL_DIRS,
+    NODE_SCRIPT_PATTERNS,
+    PYTHON_SCRIPT_PATTERNS,
+    QUALITY_CHARS_PER_TOKEN,
+    QUALITY_DEFAULT_MIN_SCORE,
     QUALITY_EXCLUDED_DIRS,
     QUALITY_RECOMMENDED_MAX_TOKENS,
     QUALITY_RESERVED_NAMES,
@@ -37,7 +42,7 @@ from skillevaluator.logging_config import get_logger
 from skillevaluator.models.quality import QualityScoreResult
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.models.skill import XML_TAG_RE
-from skillevaluator.quality_config import load_quality_config, quality_config_provenance
+from skillevaluator.quality_config import CodeErrorHandlingRule, load_quality_config_with_provenance
 from skillevaluator.validators.base import ValidatorBase
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 from skillevaluator.validators.markdown import markdown_link_targets
@@ -78,11 +83,6 @@ _ARGUMENT_CHOICE_RE = re.compile(r"\S+|\"[^\"]*\"|'[^']*'")
 # or ``>=`` before a number after a space or bracket (``<n> > 0``, ``<count> (>0)``).
 _ARGUMENT_ARROW_OR_COMPARISON_RE = re.compile(r"(?<!\S)(?:->|=>|>=)(?!\S)|(?<![^\s(\[])>=? ?\d+(?:\.\d+)?(?![^\s)\],])")
 _URL_EDGE_C0_OR_SPACE_RE = re.compile(r"^[\x00-\x20]+|[\x00-\x20]+$")
-_ERROR_HANDLING_RE = re.compile(
-    r"\b(?:errors?|exceptions?|invalid|fail(?:s|ed|ure|ures|ing)?|"
-    r"validat(?:e|es|ed|ing|ion|ions))\b",
-    re.IGNORECASE,
-)
 
 
 def _is_argument_placeholder(body: str) -> bool:
@@ -186,6 +186,12 @@ def _contains_any_term(text: str, terms: Iterable[str]) -> bool:
     return any(_contains_term(text, term) for term in terms)
 
 
+def _contains_any_word(text: str, words: Iterable[str]) -> bool:
+    # Whitespace inside a multi-word term matches any run of whitespace, so wrapped text still matches.
+    pattern = "|".join(r"\s+".join(map(re.escape, word.split())) for word in words)
+    return bool(re.search(rf"(?<!\w)(?:{pattern})(?!\w)", text, re.IGNORECASE))
+
+
 def _has_api_documentation(content: str) -> bool:
     api_patterns = (
         r"\bimport\s+[A-Za-z_][A-Za-z0-9_.]*",
@@ -247,10 +253,9 @@ class QualityScoreValidator(ValidatorBase):
     existing SkillEvaluator SchemaValidator checks.
     """
 
-    def __init__(self, min_score: int = 70, quality_config: Path | None = None) -> None:
+    def __init__(self, min_score: int = QUALITY_DEFAULT_MIN_SCORE, quality_config: Path | None = None) -> None:
         self.min_score = min_score
-        self.quality_config = load_quality_config(quality_config)
-        self.quality_config_provenance = quality_config_provenance(quality_config, self.quality_config)
+        self.quality_config, self.quality_config_provenance = load_quality_config_with_provenance(quality_config)
 
     @property
     def name(self) -> str:
@@ -268,7 +273,7 @@ class QualityScoreValidator(ValidatorBase):
     # -----------------------------------------------------------------
 
     @staticmethod
-    def _executable_files(skill_path: Path, patterns: tuple[str, ...] = ("*.py", "*.sh")) -> list[Path]:
+    def _executable_files(skill_path: Path, patterns: tuple[str, ...] = EXECUTABLE_SCRIPT_PATTERNS) -> list[Path]:
         files: list[Path] = []
         for dirname in EXECUTABLE_SKILL_DIRS:
             directory = skill_path / dirname
@@ -276,6 +281,18 @@ class QualityScoreValidator(ValidatorBase):
                 for pattern in patterns:
                     files.extend(sorted(directory.glob(pattern)))
         return files
+
+    @staticmethod
+    def _runs_only_node_scripts(script_files: list[Path]) -> bool:
+        """Whether every bundled script is a Node script.
+
+        ``run_script`` is the call the script checks look for in the instructions. It names a
+        runner this skill does not use when all its scripts are Node scripts, so such a skill is
+        not asked for it. Skills that also bundle Python or shell scripts keep the check.
+        """
+        return bool(script_files) and all(
+            any(script.match(pattern) for pattern in NODE_SCRIPT_PATTERNS) for script in script_files
+        )
 
     @staticmethod
     def _has_executable_directory(skill_path: Path) -> bool:
@@ -603,7 +620,9 @@ class QualityScoreValidator(ValidatorBase):
                 qs.has_scripts = True
                 qs.script_count = len(script_files)
                 if qs.script_count == 0:
-                    dim.deduct(10, "warning", "scripts/ or tools/ exists but contains no .py or .sh files")
+                    dim.deduct(
+                        10, "warning", "scripts/ or tools/ exists but contains no .py, .sh, .mjs, .cjs or .js files"
+                    )
             else:
                 dim.deduct(
                     25,
@@ -619,7 +638,7 @@ class QualityScoreValidator(ValidatorBase):
                     "No documented scripts in table format",
                     "Add '## Available Scripts' with table: | Script | Purpose | Arguments |",
                 )
-            if "run_script" not in content:
+            if "run_script" not in content and not self._runs_only_node_scripts(script_files):
                 dim.deduct(
                     10,
                     "warning",
@@ -784,81 +803,43 @@ class QualityScoreValidator(ValidatorBase):
         skill_path: Path,
     ) -> None:
         dim = qs.reliability
+        error_handling = self.quality_config["error_handling"]
 
-        if _ERROR_HANDLING_RE.search(content):
-            qs.has_error_handling = True
-        else:
-            dim.deduct(
-                10,
-                "info",
-                "No mention of error handling or validation",
-                "Document expected errors and how to handle them",
-            )
+        mentioned = error_handling["mentioned"]
+        qs.has_error_handling = _contains_any_word(content, mentioned["terms"])
+        if not qs.has_error_handling and mentioned["points"]:
+            dim.deduct(mentioned["points"], "info", mentioned["message"], mentioned["suggestion"])
 
         # Type-aware code quality
         if qs.skill_type in ("script-based", "hybrid"):
-            self._check_script_reliability(dim, skill_path)
+            scripts = self._executable_files(skill_path, patterns=PYTHON_SCRIPT_PATTERNS)
+            self._check_code_error_handling(dim, scripts, error_handling["scripts"])
         elif qs.skill_type == "lib-based":
-            self._check_lib_reliability(dim, skill_path)
+            lib_dir = QualityScoreValidator.find_lib_module(skill_path)
+            if lib_dir:
+                modules = [py for py in lib_dir.rglob("*.py") if py.name != "__init__.py"]
+                self._check_code_error_handling(dim, modules, error_handling["lib"])
 
         for expected in self.quality_config["expected_headers"]:
             accepted_headings = [expected["heading"], *expected["alternatives"]]
             if not any(heading in content for heading in accepted_headings):
                 dim.deduct(expected["points"], "info", expected["message"], expected["suggestion"])
 
-    def _check_script_reliability(self, dim, skill_path: Path) -> None:
-        no_error_handling = []
-        for script in self._executable_files(skill_path, patterns=("*.py",)):
-            try:
-                sc = script.read_text(encoding="utf-8")
-            except Exception:
-                continue
-            has_try = "try:" in sc and "except" in sc
-            has_err = any(
-                p in sc
-                for p in [
-                    "if not ",
-                    "if error",
-                    "raise",
-                    "assert",
-                    "ValueError",
-                    "FileNotFoundError",
-                ]
-            )
-            if not (has_try or has_err):
-                no_error_handling.append(script.name)
-
-        if no_error_handling:
-            dim.deduct(
-                5,
-                "info",
-                f"Scripts may lack error handling: {', '.join(no_error_handling[:3])}",
-                "Scripts should handle errors explicitly",
-            )
-
-    def _check_lib_reliability(self, dim, skill_path: Path) -> None:
-        lib_dir = QualityScoreValidator.find_lib_module(skill_path)
-        if not lib_dir:
+    @staticmethod
+    def _check_code_error_handling(dim, files: list[Path], rule: CodeErrorHandlingRule) -> None:
+        if not rule["points"]:
             return
-        no_err = []
-        for py in lib_dir.rglob("*.py"):
-            if py.name == "__init__.py":
-                continue
+        unhandled = []
+        for path in files:
             try:
-                pc = py.read_text(encoding="utf-8")
+                code = path.read_text(encoding="utf-8")
             except Exception:
                 continue
-            has_try = "try:" in pc and "except" in pc
-            has_err = any(p in pc for p in ["raise", "assert", "ValueError", "TypeError", "RuntimeError"])
-            if not (has_try or has_err):
-                no_err.append(py.name)
-        if no_err:
-            dim.deduct(
-                5,
-                "info",
-                f"Lib modules may lack error handling: {', '.join(no_err[:3])}",
-                "Library code should handle errors explicitly with try/except or raise",
-            )
+            has_try = "try:" in code and "except" in code
+            if not (has_try or any(marker in code for marker in rule["markers"])):
+                unhandled.append(path.name)
+        if unhandled:
+            dim.deduct(rule["points"], "info", f"{rule['message']}: {', '.join(unhandled[:3])}", rule["suggestion"])
 
     # -----------------------------------------------------------------
     # Efficiency dimension (weight: 0.15)
@@ -874,12 +855,12 @@ class QualityScoreValidator(ValidatorBase):
     ) -> None:
         dim = qs.efficiency
 
-        # Token estimates
-        qs.total_tokens = len(content) // 4
+        # Token estimates (characters / QUALITY_CHARS_PER_TOKEN); not a tokenizer count
+        qs.total_tokens = len(content) // QUALITY_CHARS_PER_TOKEN
         fm_match = FRONTMATTER_PATTERN.match(content)
         if fm_match and _frontmatter:
-            qs.frontmatter_tokens = len(fm_match.group(1)) // 4
-            qs.instructions_tokens = len(fm_match.group(2)) // 4
+            qs.frontmatter_tokens = len(fm_match.group(1)) // QUALITY_CHARS_PER_TOKEN
+            qs.instructions_tokens = len(fm_match.group(2)) // QUALITY_CHARS_PER_TOKEN
 
         # The token budget is a recommendation: exceeding it is advisory (MEDIUM),
         # and the deduction still counts toward the --min-score gate.
@@ -888,7 +869,8 @@ class QualityScoreValidator(ValidatorBase):
                 15,
                 "warning",
                 (
-                    f"Large skill ({qs.total_tokens} tokens, recommended max <{QUALITY_RECOMMENDED_MAX_TOKENS}). "
+                    f"Large skill (~{qs.total_tokens} estimated tokens at {QUALITY_CHARS_PER_TOKEN} characters per token, "
+                    f"recommended max <{QUALITY_RECOMMENDED_MAX_TOKENS}; a real tokenizer may count more). "
                     f"Per agentskills.io, SKILL.md should be concise (~500 lines) — "
                     f"large skill bodies increase token cost after invocation; long or unfocused "
                     f"top-level descriptions can degrade agent routing accuracy"

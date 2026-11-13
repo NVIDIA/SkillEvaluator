@@ -129,10 +129,22 @@ def completed_agent_result(payload: dict[str, Any] | None) -> dict[str, Any] | N
         ),
     }
     # Agents kept by --tolerate-baseline-timeouts leave the run succeeded, but
-    # their failed baselines still need attention and are named in the report.
+    # their failed baselines still need attention; reports name them through
+    # tolerated_baseline_agents().
+    result["needs_attention"] = result["needs_attention"] or bool(tolerated_baseline_agents(payload))
+    return result
+
+
+def tolerated_baseline_agents(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Describe each agent kept by --tolerate-baseline-timeouts in ``payload``.
+
+    Reports name these agents whether or not a completed-agent result exists,
+    for example when a cost limit left the best agent's coverage short.
+    """
+    agents = payload.get("agents") if isinstance(payload, dict) else None
+    if not isinstance(agents, dict) or not agents:
+        # Reports without Tier 3 agents never load Tier 3 modules.
+        return []
     from skillevaluator.tier3.harbor.baseline_timeouts import tolerated_baselines
 
-    tolerated = tolerated_baselines(agents)
-    result["baseline_timeouts_tolerated"] = tolerated
-    result["needs_attention"] = result["needs_attention"] or bool(tolerated)
-    return result
+    return tolerated_baselines(agents)

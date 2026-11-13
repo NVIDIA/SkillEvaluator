@@ -72,13 +72,8 @@ jobs:
       - name: Lint
         if: ${{ needs.classify-changes.outputs.docs_only != 'true' }}
         run: uv run ruff check .
-      - name: Run tests with coverage
-        if: ${{ needs.classify-changes.outputs.docs_only != 'true' }}
-        run: >-
-          uv run pytest -q
-          --cov=skillevaluator
-          --cov-report=term-missing
-          --cov-report=xml:coverage.xml
+      # Fern validation takes seconds, so it runs before the test suite: a docs
+      # break is reported early and is not hidden by a failing test.
       - name: Set up Node.js for docs
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -97,6 +92,21 @@ jobs:
             echo
             echo "Validated docs and Fern configuration with Fern CLI $FERN_VERSION."
           } >> "$GITHUB_STEP_SUMMARY"
+      # Pull requests run the suite in parallel without coverage, like the 3.13
+      # and 3.14 jobs. No pull-request check reads the coverage report, and
+      # tracing it on one core made this the slowest required job by far.
+      - name: Run tests
+        if: ${{ github.event_name == 'pull_request' && needs.classify-changes.outputs.docs_only != 'true' }}
+        run: uv run pytest -q -n auto
+      # Pushes to main keep the coverage run. It stays serial: under xdist,
+      # coverage tracing pushed the time-bound tests past their limits (#261).
+      - name: Run tests with coverage
+        if: ${{ github.event_name != 'pull_request' }}
+        run: >-
+          uv run pytest -q
+          --cov=skillevaluator
+          --cov-report=term-missing
+          --cov-report=xml:coverage.xml
 
   test-python-313:
     name: Tests (Python 3.13)
@@ -410,6 +420,7 @@ jobs:
           tests/validators/test_rubric_eval.py
           tests/reporting
           tests/test_cli.py
+          tests/test_cli_stdout_encoding.py
           tests/test_harbor_output_provenance.py
           tests/test_harbor_runner_status.py
           tests/test_harbor_runtime_skill_isolation.py

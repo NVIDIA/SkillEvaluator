@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextvars
 import json
 import shutil
+import subprocess
 import threading
 from collections.abc import Callable
 from datetime import timedelta
@@ -414,7 +415,9 @@ def test_tier1_lint_scripts_fixture() -> None:
 
 
 def test_create_dataset_dry_run_no_llm() -> None:
-    result = CliRunner().invoke(cli, ["create-eval-dataset", str(FIXTURE), "--no-llm", "--dry-run"])
+    result = CliRunner().invoke(
+        cli, ["create-eval-dataset", str(FIXTURE), "--no-llm", "--dry-run", "--grounding", "skill"]
+    )
 
     assert result.exit_code == 0, result.output
     assert "Dry run" in result.output
@@ -486,6 +489,93 @@ def test_validate_quiet_always_writes_html_and_json_reports() -> None:
         reports = list(Path("reports").iterdir())
         assert any(p.suffix == ".html" for p in reports), reports
         assert any(p.suffix == ".json" for p in reports), reports
+
+
+@pytest.mark.parametrize("in_git_checkout", [False, True], ids=("plain-folder", "git-checkout"))
+def test_validate_json_names_a_clean_single_skill_and_records_the_evaluator(
+    tmp_path: Path,
+    in_git_checkout: bool,
+) -> None:
+    """A clean skill run with only the schema check has no finding path or
+    quality score to name the skill by, and inside a Git checkout the report
+    target is the remote URL. The JSON must still list the one skill."""
+    from skillevaluator import __version__
+
+    if in_git_checkout and shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    repo = tmp_path / "repo"
+    skill = repo / "skills" / "simple"
+    shutil.copytree(FIXTURE, skill)
+    if in_git_checkout:
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/example/skills.git"],
+            check=True,
+        )
+    output_dir = tmp_path / "reports"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(skill),
+            "--tiers",
+            "1",
+            "--checks",
+            "schema",
+            "--no-llm",
+            "--report",
+            "json",
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    report = json.loads(next(output_dir.glob("skillevaluator-output-*.json")).read_text(encoding="utf-8"))
+    assert report["skills"] == [{"name": "simple", "passed": True, "issue_count": 0}]
+    assert [item["name"] for contributor in report["contributors"] for item in contributor["items"]] == ["simple"]
+    assert report["version"] == __version__
+    if in_git_checkout:
+        assert report["target_path"].startswith("https://github.com/example/skills/")
+    else:
+        assert report["target_path"] == str(skill.resolve())
+    assert report["top_issues"] == []
+    assert report["gating"]["tiers"]["1"]["validator_policies"] == [
+        {"validator": "Schema & Repository Governance", "blocking": True}
+    ]
+    benchmark = (output_dir / "BENCHMARK.md").read_text(encoding="utf-8")
+    assert "- Skill: `simple`" in benchmark
+    assert f"- Evaluator version: `{__version__}`" in benchmark
+
+
+def test_validate_json_keeps_one_skills_entry_per_rule_of_a_rules_folder(team_rule_dir: Path, tmp_path: Path) -> None:
+    """Only a skill directory names its one skill explicitly. A rules folder
+    groups its results per rule file, so naming the folder would fold both
+    rules into one entry."""
+    output_dir = tmp_path / "reports"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(team_rule_dir),
+            "--tiers",
+            "1",
+            "--checks",
+            "schema",
+            "--no-llm",
+            "--report",
+            "json",
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    report = json.loads(next(output_dir.glob("skillevaluator-output-*.json")).read_text(encoding="utf-8"))
+    assert sorted(entry["name"] for entry in report["skills"]) == ["error-handling", "testing"]
+    assert not (output_dir / "BENCHMARK.md").exists()
 
 
 def test_validate_default_reports_do_not_write_into_authored_sibling_skill(
@@ -1829,6 +1919,7 @@ def test_catalog_child_argv_forwards_every_validate_option() -> None:
     from skillevaluator.cli import _catalog_child_argv_from_ctx, validate
 
     not_forwarded = {
+        "catalog_root": "each child is given the folder it was found in, not the parent's own value",
         "target_path": "the child is given one skill directory, not the catalog root",
         "content_type": "the child re-detects the type of the single skill it is handed",
         "workers": "forwarding it would make each child fan out again",
@@ -2196,8 +2287,8 @@ def test_catalog_summary_same_second_rerun_overwrites_json(monkeypatch) -> None:
         Finding(
             category="SCHEMA",
             severity=Severity.HIGH,
-            check_name="author_missing",
-            message="missing author",
+            check_name="frontmatter_format",
+            message="missing frontmatter",
             file_path="SKILL.md",
         ),
         is_error=True,
@@ -2426,10 +2517,10 @@ def test_validate_quiet_failing_run_renders_verdict_and_fails_cleanly(monkeypatc
         Finding(
             category="SCHEMA",
             severity=Severity.HIGH,
-            check_name="author_missing",
-            message="Author not specified in metadata",
+            check_name="frontmatter_format",
+            message="SKILL.md must have YAML frontmatter between --- markers",
             file_path="SKILL.md",
-            suggestion="Add 'metadata.author' with format 'Name <email@example.com>'",
+            suggestion="Add frontmatter block: start with '---', add YAML content, end with '---'",
         ),
         is_error=True,
     )

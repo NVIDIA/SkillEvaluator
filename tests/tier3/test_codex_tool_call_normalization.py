@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
 import pytest
 
-from skillevaluator.tier3.eval_core import codex_tool_call_normalizer
+from skillevaluator.tier3.eval_core import checks, codex_tool_call_normalizer
 from skillevaluator.tier3.eval_core.atif_helpers import (
     build_behavior_evidence,
     build_metric_evidence_refs,
@@ -1058,3 +1059,1334 @@ def test_host_and_template_summaries_agree_on_list_observations() -> None:
     assert atif_helpers._late_observation_excerpts(trajectory, 200) == _TEMPLATE_MODULE._late_observation_excerpts(
         trajectory, 200
     )
+
+
+# ── Extended static grammar for inline and Promise.allSettled wrappers (#235) ──
+
+_ALL_SETTLED_SOURCE = (
+    "const results=await Promise.allSettled(["
+    'tools.exec_command({cmd:"pwd"}),'
+    'tools.write_stdin({session_id:1,chars:""})'
+    "]);"
+)
+_ALL_SETTLED_SPREAD_RECORDS = [
+    {"i": 0, "status": "fulfilled", "value": {"exit_code": 0, "output": "/workspace\n"}},
+    {"i": 1, "status": "rejected", "reason": {"error": "boom"}},
+]
+_ALL_SETTLED_FIELD_RECORDS = [
+    {"i": index, "result": {key: value for key, value in record.items() if key != "i"}}
+    for index, record in enumerate(_ALL_SETTLED_SPREAD_RECORDS)
+]
+_ALL_SETTLED_RAW_RECORDS = [
+    {"status": "fulfilled", "value": {"exit_code": 0, "output": "/workspace\n"}},
+    {"status": "rejected", "reason": {"error": "boom"}},
+]
+
+
+def _expected_records(records: list[dict]) -> list[str]:
+    """Each record's JSON text, plus the failed-status line a rejected promise gains."""
+    return [
+        json.dumps(record, separators=(",", ":")) + ("\nstatus=failed" if "rejected" in str(record) else "")
+        for record in records
+    ]
+
+
+_RECORD_FRAME = ("Script completed\nWall time 0.1 seconds\nOutput:\n\n", "")
+
+
+def _record_observation(records: list[dict]) -> str:
+    body = "\n".join(json.dumps(record, separators=(",", ":")) for record in records)
+    return "Script completed\nWall time 0.1 seconds\nOutput:\n\n" + body
+
+
+def _security_result(source: str, extractor):
+    trajectory = _trajectory(source)
+    calls = extractor(trajectory)
+    if extractor is _TEMPLATE_MODULE.extract_tool_calls_as_dicts:
+        return _TEMPLATE_MODULE.check_security(trajectory, calls)
+    return check_security(calls)
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "renderer, records",
+    [
+        pytest.param(
+            "results.forEach((r,i)=>text({i,...r}));",
+            _ALL_SETTLED_SPREAD_RECORDS,
+            id="forEach-spread",
+        ),
+        pytest.param(
+            "results.forEach((r, i) => { text({i, ...r}); });",
+            _ALL_SETTLED_SPREAD_RECORDS,
+            id="forEach-spread-braced",
+        ),
+        pytest.param(
+            "for (let i = 0; i < results.length; i++) text({i, ...results[i]});",
+            _ALL_SETTLED_SPREAD_RECORDS,
+            id="for-spread",
+        ),
+        pytest.param(
+            "for (let i = 0; i < results.length; i++) { text({i, ...results[i]}); }",
+            _ALL_SETTLED_SPREAD_RECORDS,
+            id="for-spread-braced",
+        ),
+        pytest.param("results.forEach(text);", _ALL_SETTLED_RAW_RECORDS, id="forEach-text"),
+        pytest.param("results.forEach(r => text(r));", _ALL_SETTLED_RAW_RECORDS, id="forEach-arrow-text"),
+        pytest.param(
+            "results.forEach((r,i)=>text({i,result:r}));",
+            _ALL_SETTLED_FIELD_RECORDS,
+            id="forEach-field",
+        ),
+    ],
+)
+def test_extended_codex_allsettled_maps_each_call_to_its_record(extractor, renderer, records):
+    calls = extractor(_trajectory(_ALL_SETTLED_SOURCE + renderer, _record_observation(records)))
+
+    assert [call["action"] for call in calls] == ["exec_command", "write_stdin"]
+    assert calls[0]["action_input"] == {"cmd": "pwd"}
+    assert calls[1]["action_input"] == {"session_id": 1, "chars": ""}
+    assert [call["observation_status"] for call in calls] == ["mapped_outer_exec_result"] * 2
+    assert [call["observation"] for call in calls] == _expected_records(records)
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param('text(await tools.exec_command({cmd:"pwd"}));', id="inline-await"),
+        pytest.param("const r=await tools.exec_command({cmd:'pwd'});text(r);", id="single-quoted-string"),
+        pytest.param("const r=await tools.exec_command({'cmd':'pwd'});text(r);", id="single-quoted-key"),
+        pytest.param('text((await tools.exec_command({cmd:"pwd"})).output);', id="inline-output"),
+        pytest.param("const r=await tools.exec_command({cmd:'pwd'});text(r.output);", id="bound-output"),
+        pytest.param('text(await tools.exec_command({cmd:"pwd"}))', id="inline-without-final-semicolon"),
+        pytest.param('const r=await tools.exec_command({cmd:"pwd"});text(r)', id="bound-without-final-semicolon"),
+    ],
+)
+def test_extended_codex_inline_and_single_quoted_wrappers_normalize(extractor, source):
+    calls = extractor(_trajectory(source))
+
+    assert [call["action"] for call in calls] == ["exec_command"]
+    assert calls[0]["action_input"] == {"cmd": "pwd"}
+    assert calls[0]["observation_status"] == "mapped_outer_exec_result"
+    assert "normalization_status" not in calls[0]
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        pytest.param(
+            r"const r=await tools.exec_command({cmd:'echo \'hi\''});text(r);",
+            "echo 'hi'",
+            id="escaped-single-quote",
+        ),
+        pytest.param(
+            r"""const r=await tools.exec_command({cmd:'say "hi"'});text(r);""",
+            'say "hi"',
+            id="double-quote-inside-single",
+        ),
+    ],
+)
+def test_extended_codex_single_quoted_string_escapes(source, expected):
+    calls = extract_tool_calls_as_dicts(_trajectory(source))
+
+    assert calls[0]["action_input"] == {"cmd": expected}
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            r"const p=await tools.apply_patch('*** Begin Patch\n*** End Patch');text(p);",
+            id="single-quoted",
+        ),
+        pytest.param(
+            r'const p=await tools.apply_patch("*** Begin Patch\n*** End Patch");text(p);',
+            id="double-quoted",
+        ),
+        pytest.param(
+            r"text(await tools.apply_patch('*** Begin Patch\n*** End Patch'));",
+            id="inline",
+        ),
+    ],
+)
+def test_extended_codex_apply_patch_string_literal_normalizes(extractor, source):
+    calls = extractor(_trajectory(source))
+
+    assert [call["action"] for call in calls] == ["apply_patch"]
+    assert calls[0]["action_input"] == {"input": "*** Begin Patch\n*** End Patch"}
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param('const cmd="pwd";text(await tools.exec_command({cmd}));', id="dynamic-argument"),
+        pytest.param('text(await tools.exec_command({["cmd"]:"pwd"}));', id="computed-key"),
+        pytest.param("text(await tools.exec_command({...args}));", id="spread-arguments"),
+        pytest.param("text(await tools.exec_command({cmd:`pwd`}));", id="template-literal"),
+        pytest.param('text(await tools.exec_command({cmd:"pwd"})); // comment', id="trailing-comment"),
+        pytest.param('const text=1;text(await tools.exec_command({cmd:"pwd"}));', id="shadowed-global"),
+        pytest.param(
+            'const r=await tools.exec_command({cmd:"pwd"});const r=await tools.exec_command({cmd:"ls"});text(r);',
+            id="duplicate-binding",
+        ),
+        pytest.param(
+            'text(await tools.exec_command({cmd:"pwd"}));text(await tools.exec_command({cmd:"ls"}));',
+            id="multi-inline-without-records",
+        ),
+        pytest.param(_ALL_SETTLED_SOURCE + "results.map((r,i)=>text({i,...r}));", id="unsupported-renderer-map"),
+        pytest.param(_ALL_SETTLED_SOURCE + "for (const r of results) text(r);", id="unsupported-renderer-for-of"),
+    ],
+)
+def test_extended_codex_dynamic_and_ambiguous_forms_stay_atomic(extractor, source):
+    calls = extractor(_trajectory(source))
+
+    assert len(calls) == 1
+    assert calls[0]["action"] == "exec"
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "records",
+    [
+        pytest.param(_ALL_SETTLED_SPREAD_RECORDS[:1], id="missing-record"),
+        pytest.param(
+            [*_ALL_SETTLED_SPREAD_RECORDS, {"i": 2, "status": "fulfilled", "value": {}}],
+            id="extra-record",
+        ),
+        pytest.param(list(reversed(_ALL_SETTLED_SPREAD_RECORDS)), id="reordered-records"),
+        pytest.param([_ALL_SETTLED_SPREAD_RECORDS[0], _ALL_SETTLED_SPREAD_RECORDS[0]], id="duplicate-index"),
+        pytest.param([{"i": 0, "status": "fulfilled"}, _ALL_SETTLED_SPREAD_RECORDS[1]], id="malformed-record"),
+        pytest.param(
+            [
+                {**_ALL_SETTLED_SPREAD_RECORDS[0], "extra": True},
+                _ALL_SETTLED_SPREAD_RECORDS[1],
+            ],
+            id="extra-key",
+        ),
+    ],
+)
+def test_extended_codex_untrusted_allsettled_records_fall_back_to_atomic(extractor, records):
+    source = _ALL_SETTLED_SOURCE + "results.forEach((r,i)=>text({i,...r}));"
+    calls = extractor(_trajectory(source, _record_observation(records)))
+
+    assert len(calls) == 1
+    assert calls[0]["action"] == "exec"
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+@pytest.mark.parametrize(
+    "observation",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("partial", id="without-output-header"),
+        pytest.param(_record_observation(_ALL_SETTLED_SPREAD_RECORDS).rsplit("\n", 1)[0], id="truncated"),
+        pytest.param(_record_observation(_ALL_SETTLED_SPREAD_RECORDS) + "\nextra", id="trailing-text"),
+    ],
+)
+def test_extended_codex_incomplete_allsettled_observation_falls_back_to_atomic(observation):
+    source = _ALL_SETTLED_SOURCE + "results.forEach((r,i)=>text({i,...r}));"
+    calls = extract_tool_calls_as_dicts(_trajectory(source, observation))
+
+    assert len(calls) == 1
+    assert calls[0]["action"] == "exec"
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+def test_extended_codex_rejected_allsettled_record_is_an_error():
+    source = _ALL_SETTLED_SOURCE + "results.forEach((r,i)=>text({i,...r}));"
+    trajectory = _trajectory(source, _record_observation(_ALL_SETTLED_SPREAD_RECORDS))
+    yielded = list(codex_tool_call_normalizer.iter_normalized_tool_calls(trajectory))
+
+    assert [codex_tool_call_normalizer.normalized_tool_call_is_error(step, call) for step, call in yielded] == [
+        False,
+        True,
+    ]
+    assert [codex_tool_call_normalizer.normalized_tool_call_error_flag(step, call) for step, call in yielded] == [
+        False,
+        True,
+    ]
+    assert [
+        codex_tool_call_normalizer.normalized_tool_call_observation(step, call) for step, call in yielded
+    ] == _expected_records(_ALL_SETTLED_SPREAD_RECORDS)
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_extended_codex_extracted_records_carry_is_error(extractor):
+    source = _ALL_SETTLED_SOURCE + "results.forEach((r,i)=>text({i,...r}));"
+    calls = extractor(_trajectory(source, _record_observation(_ALL_SETTLED_SPREAD_RECORDS)))
+
+    assert [call.get("is_error") for call in calls] == [False, True]
+
+
+def test_extended_codex_record_status_wins_over_outer_failure():
+    source = _ALL_SETTLED_SOURCE + "results.forEach((r,i)=>text({i,...r}));"
+    trajectory = {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {
+                        "tool_call_id": "outer-call",
+                        "function_name": "exec",
+                        "arguments": {"input": source},
+                    }
+                ],
+                "observation": {
+                    "results": [
+                        {
+                            "source_call_id": "outer-call",
+                            "content": _record_observation(_ALL_SETTLED_SPREAD_RECORDS),
+                            "extra": {"tool_result_is_error": True},
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+    calls = extract_tool_calls_as_dicts(trajectory)
+
+    assert [call.get("is_error") for call in calls] == [False, True]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_extended_codex_inline_multi_call_records_are_split_in_order(extractor):
+    source = 'text(await tools.exec_command({cmd:"pwd"}));text(await tools.exec_command({cmd:"ls"}));'
+    records = [{"stdout": "/workspace\n"}, {"stdout": "file\n"}]
+    calls = extractor(_trajectory(source, _record_observation(records)))
+
+    assert [call["action"] for call in calls] == ["exec_command", "exec_command"]
+    assert [call["action_input"] for call in calls] == [{"cmd": "pwd"}, {"cmd": "ls"}]
+    assert [call["observation"] for call in calls] == [json.dumps(record, separators=(",", ":")) for record in records]
+    assert all("is_error" not in call for call in calls)
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_extended_codex_single_allsettled_record_normalizes(extractor):
+    source = (
+        'const results=await Promise.allSettled([tools.exec_command({cmd:"pwd"})]);'
+        "results.forEach((r,i)=>text({i,...r}));"
+    )
+    records = [{"i": 0, "status": "fulfilled", "value": {"exit_code": 0}}]
+    calls = extractor(_trajectory(source, _record_observation(records)))
+
+    assert len(calls) == 1
+    assert calls[0]["action"] == "exec_command"
+    assert calls[0]["observation"] == json.dumps(records[0], separators=(",", ":"))
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_extended_codex_inline_destructive_command_is_still_flagged(extractor):
+    source = 'text(await tools.exec_command({cmd:"rm -rf /workspace/project"}));'
+    result = _security_result(source, extractor)
+
+    assert result["passed"] is False
+    assert result["score"] == 0.0
+    assert [finding["type"] for finding in result["findings"]] == ["destructive_command"]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_extended_codex_dynamic_inline_is_not_a_clean_security_result(extractor):
+    source = 'const cmd="rm -rf /workspace/project";text(await tools.exec_command({cmd}));'
+    result = _security_result(source, extractor)
+
+    assert result["passed"] is False
+    assert result["score"] == 0.5
+    assert [finding["type"] for finding in result["findings"]] == ["unsupported_tool_wrapper"]
+
+
+def _scorer(extractor, name: str):
+    """The host or bundled-verifier scorer that pairs with ``extractor``."""
+    return getattr(_TEMPLATE_MODULE if extractor is _TEMPLATE_MODULE.extract_tool_calls_as_dicts else checks, name)
+
+
+def _error_recovery(trajectory: dict, extractor) -> dict:
+    return _scorer(extractor, "check_error_recovery")(extractor(trajectory))
+
+
+def _failed_exit_records(shape: str, code: int) -> list[dict]:
+    """The `pwd` record fails with ``code`` in the given record shape; the second record is clean."""
+    records = [
+        {"i": 0, "status": "fulfilled", "value": {"exit_code": code, "output": "boom\n"}},
+        {"i": 1, "status": "fulfilled", "value": {"exit_code": 0}},
+    ]
+    if shape == "field":
+        return [{"i": r["i"], "result": {k: v for k, v in r.items() if k != "i"}} for r in records]
+    return [{k: v for k, v in r.items() if k != "i"} for r in records] if shape == "raw" else records
+
+
+_RENDERERS = [
+    ("results.forEach((r,i)=>text({i,...r}));", "spread"),
+    ("for (let i = 0; i < results.length; i++) text({i, ...results[i]});", "spread"),
+    ("results.forEach(text);", "raw"),
+    ("results.forEach((r,i)=>text({i,result:r}));", "field"),
+]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(("renderer", "shape"), _RENDERERS)
+def test_extended_codex_fulfilled_record_keeps_its_exit_code(extractor, renderer, shape):
+    records = _failed_exit_records(shape, 7)
+    calls = extractor(_trajectory(_ALL_SETTLED_SOURCE + renderer, _record_observation(records)))
+
+    assert [call["is_error"] for call in calls] == [True, False]
+    assert calls[0]["observation"].endswith("\nexit_code=7")
+    assert "exit_code=" not in calls[1]["observation"]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_extended_codex_inline_result_keeps_its_exit_code(extractor):
+    source = 'text(await tools.exec_command({cmd:"false"}));text(await tools.exec_command({cmd:"pwd"}));'
+    records = [{"exit_code": 3, "output": "boom\n"}, {"exit_code": 0, "output": "/workspace\n"}]
+    trajectory = _trajectory(source, _record_observation(records))
+
+    assert [call["is_error"] for call in extractor(trajectory)] == [True, False]
+    assert _error_recovery(trajectory, extractor)["first_attempt_clean"] is False
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_extended_codex_fulfilled_record_without_exit_code_stays_unknown(extractor):
+    records = [
+        {"i": 0, "status": "fulfilled", "value": {"session_id": 4, "output": "running\n"}},
+        {"i": 1, "status": "fulfilled", "value": "done"},
+    ]
+    source = _ALL_SETTLED_SOURCE + "results.forEach((r,i)=>text({i,...r}));"
+    calls = extractor(_trajectory(source, _record_observation(records)))
+
+    assert [call["observation"] for call in calls] == _expected_records(records)
+    assert all("is_error" not in call for call in calls)
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize("reason", [{"error": "boom"}, {}, "boom"])
+def test_extended_codex_rejected_record_scores_as_a_failed_command(extractor, reason):
+    records = [{"status": "rejected", "reason": reason}, {"status": "fulfilled", "value": {"exit_code": 0}}]
+    source = _ALL_SETTLED_SOURCE + "results.forEach(text);"
+    trajectory = _trajectory(source, _record_observation(records))
+    result = _error_recovery(trajectory, extractor)
+
+    assert result["first_attempt_clean"] is False
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_extended_codex_fulfilled_nonzero_exit_scores_as_a_failed_command(extractor):
+    records = _failed_exit_records("raw", 7)
+    trajectory = _trajectory(_ALL_SETTLED_SOURCE + "results.forEach(text);", _record_observation(records))
+    result = _error_recovery(trajectory, extractor)
+
+    assert result["first_attempt_clean"] is False
+    assert result["score"] < 1.0
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_extended_codex_clean_records_still_score_clean(extractor):
+    records = _failed_exit_records("raw", 0)
+    trajectory = _trajectory(_ALL_SETTLED_SOURCE + "results.forEach(text);", _record_observation(records))
+
+    assert _error_recovery(trajectory, extractor)["first_attempt_clean"] is True
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_extended_codex_failed_skill_read_gets_no_activation_credit(extractor):
+    source = (
+        'const results=await Promise.allSettled([tools.exec_command({cmd:"cat /skills/example/SKILL.md"})]);'
+        "results.forEach(text);"
+    )
+    record = {"status": "fulfilled", "value": {"exit_code": 1, "output": "cat: No such file\n"}}
+    calls = extractor(_trajectory(source, _record_observation([record])))
+    result = _scorer(extractor, "check_activation")(calls, "example")
+
+    assert calls[0]["is_error"] is True
+    assert result["score"] == 0.0
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "records",
+    [
+        '{"i":1,"i":0,"status":"fulfilled","value":{}}\n{"i":1,"status":"fulfilled","value":{}}',
+        '{"i":0,"status":"rejected","status":"fulfilled","value":{}}\n{"i":1,"status":"fulfilled","value":{}}',
+        '{"i":0,"status":"fulfilled","value":{},"value":{"exit_code":0}}\n{"i":1,"status":"fulfilled","value":{}}',
+        '{"i":0,"status":"fulfilled","value":{"exit_code":1,"exit_code":0}}\n{"i":1,"status":"fulfilled","value":{}}',
+    ],
+    ids=["index", "status", "value", "nested"],
+)
+def test_extended_codex_duplicate_record_keys_stay_unsupported(extractor, records):
+    source = _ALL_SETTLED_SOURCE + "results.forEach((r,i)=>text({i,...r}));"
+    calls = extractor(_trajectory(source, "Script completed\nWall time 0.1 seconds\nOutput:\n\n" + records))
+
+    assert len(calls) == 1
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    ("command", "output", "clean"),
+    [
+        ("grep foo file.txt", "", True),
+        ("grep foo file.txt", "grep: file.txt: Permission denied\n", False),
+        ("false", "", False),
+    ],
+    ids=["quiet-probe-no-match", "probe-with-diagnostic", "failed-command"],
+)
+@pytest.mark.parametrize("settled", [True, False], ids=["allSettled", "inline"])
+def test_extended_codex_exit_one_record_keeps_the_quiet_probe_exemption(extractor, command, output, clean, settled):
+    # A second call keeps the inline form on the record path; a lone inline call owns the whole output.
+    records = [{"exit_code": 1, "output": output}, {"exit_code": 0, "output": "/workspace\n"}]
+    calls = f'tools.exec_command({{cmd:"{command}"}}),tools.exec_command({{cmd:"pwd"}})'
+    if settled:
+        source = f"const results=await Promise.allSettled([{calls}]);results.forEach(text);"
+        records = [{"status": "fulfilled", "value": record} for record in records]
+    else:
+        source = "".join(f"text(await {call});" for call in calls.split(","))
+    result = _error_recovery(_trajectory(source, _record_observation(records)), extractor)
+
+    assert result["first_attempt_clean"] is clean
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_extended_codex_lone_inline_call_keeps_its_exit_code(extractor):
+    source = 'text(await tools.exec_command({cmd:"exit 7"}));'
+    trajectory = _trajectory(source, _record_observation([{"exit_code": 7, "output": "boom\n"}]))
+    calls = extractor(trajectory)
+
+    assert [call["action"] for call in calls] == ["exec_command"]
+    assert calls[0]["is_error"] is True
+    assert _error_recovery(trajectory, extractor)["first_attempt_clean"] is False
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_extended_codex_lone_inline_call_without_a_record_keeps_the_whole_output(extractor):
+    source = 'text(await tools.exec_command({cmd:"pwd"}));'
+    calls = extractor(_trajectory(source, "run.py completed"))
+
+    assert calls[0]["observation"] == "run.py completed"
+    assert "is_error" not in calls[0]
+
+
+@pytest.mark.parametrize("checker", [check_error_recovery, _TEMPLATE_MODULE.check_error_recovery])
+@pytest.mark.parametrize(
+    ("observation", "clean"),
+    [
+        ('{"exit_code":1,"output":""}\nexit_code=1', True),
+        ('{"exit_code":1,"output":""}\nexit_code=1\ngrep: f: Permission denied', False),
+        ("[" * 100_000 + "\nexit_code=1", False),
+        ('{"a":{"output":""},"b":{"output":"x"}}\nexit_code=1', False),
+    ],
+    ids=["record", "text-after-record", "deeply-nested-is-not-a-record", "two-object-fields-are-ambiguous"],
+)
+def test_quiet_probe_reads_only_a_whole_record(checker, observation, clean):
+    call = {"action": "bash", "action_input": {"command": "grep foo f"}, "observation": observation}
+
+    assert checker([call])["first_attempt_clean"] is clean
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "source",
+    [
+        'const r=await tools.exec_command({cmd:"cat /skills/example/SKILL.md"});text(r);',
+        'const r=await tools.exec_command({cmd:"cat /skills/example/SKILL.md"});text(r)',
+        "const r=await tools.exec_command({cmd:'cat /skills/example/SKILL.md'});text(r);",
+        'text(await tools.exec_command({cmd:"cat /skills/example/SKILL.md"}));',
+    ],
+    ids=["double-quoted", "no-final-semicolon", "single-quoted", "inline"],
+)
+def test_extended_codex_failed_call_grades_the_same_in_every_spelling(extractor, source):
+    record = {"exit_code": 1, "output": "cat: /skills/example/SKILL.md: No such file or directory\n"}
+    trajectory = _trajectory(source, _record_observation([record]))
+    calls = extractor(trajectory)
+
+    assert calls[0]["is_error"] is True
+    assert _scorer(extractor, "check_activation")(calls, "example")["score"] == 0.0
+    assert _error_recovery(trajectory, extractor)["first_attempt_clean"] is False
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_extended_codex_two_bound_calls_each_get_their_own_record(extractor):
+    source = (
+        'const a=await tools.exec_command({cmd:"false"});const b=await tools.exec_command({cmd:"pwd"});'
+        "text(a);text(b);"
+    )
+    records = [{"exit_code": 3, "output": "boom\n"}, {"exit_code": 0, "output": "/workspace\n"}]
+    calls = extractor(_trajectory(source, _record_observation(records)))
+
+    assert [call["observation_status"] for call in calls] == ["mapped_outer_exec_result"] * 2
+    assert [call["is_error"] for call in calls] == [True, False]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "source",
+    [
+        'const a=await tools.exec_command({cmd:"pwd"});const b=await tools.exec_command({cmd:"ls"});text(a);',
+        'const a=await tools.exec_command({cmd:"pwd"});const b=await tools.exec_command({cmd:"ls"});'
+        "text(a.output);text(b.output);",
+    ],
+    ids=["one-rendered", "output-field"],
+)
+def test_extended_codex_bound_forms_it_cannot_split_keep_the_upstream_result(extractor, source):
+    calls = extractor(_trajectory(source, "outer observation"))
+
+    assert [call["action"] for call in calls] == ["exec_command", "exec_command"]
+    assert "is_error" not in calls[0]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize("terminator", ["\u2028", "\u2029"], ids=["U+2028", "U+2029"])
+@pytest.mark.parametrize(
+    "hidden",
+    [
+        "text(await tools.exec_command({cmd:'rm -rf /workspace/project'}));",
+        "const r=await tools.exec_command({cmd:'rm -rf /workspace/project'});text(r);",
+    ],
+    ids=["inline", "const"],
+)
+def test_pragma_line_ended_by_a_javascript_line_terminator_fails_closed(extractor, terminator, hidden):
+    # JavaScript ends a `//` comment at U+2028 and U+2029, so the code after one still runs.
+    source = f"// @exec: {{}}{terminator}{hidden}\ntext(await tools.exec_command({{cmd:'pwd'}}));"
+    result = _security_result(source, extractor)
+
+    assert result["passed"] is False
+    assert result["score"] == 0.5
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize("outer_error", [None, True], ids=["no-outer-flag", "outer-error-flag"])
+def test_extended_codex_lone_successful_call_uses_its_own_record(extractor, outer_error):
+    # The record says exit 0, so its traceback text and the outer flag must not decide the grade.
+    source = "text(await tools.exec_command({cmd:'cat tests/fixture.log'}));"
+    record = {"exit_code": 0, "output": "Traceback (most recent call last):\nValueError: bad\n"}
+    trajectory = _trajectory(source, _record_observation([record]))
+    if outer_error is not None:
+        trajectory["steps"][0]["observation"]["results"][0]["extra"] = {"tool_result_is_error": outer_error}
+    calls = extractor(trajectory)
+
+    assert calls[0]["is_error"] is False
+    assert _error_recovery(trajectory, extractor)["first_attempt_clean"] is True
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param("text(await\x1ctools.exec_command({cmd:'cat /skills/example/SKILL.md'}));", id="fs-whitespace"),
+        pytest.param("text(await\x85tools.exec_command({cmd:'cat /skills/example/SKILL.md'}));", id="nel-whitespace"),
+        pytest.param("const r²=await tools.exec_command({cmd:'cat /skills/example/SKILL.md'});text(r²);", id="name"),
+        pytest.param(_ALL_SETTLED_SOURCE + "results.forEach((r,i)\n=>text({i,...r}));", id="newline-before-arrow"),
+        pytest.param(
+            _ALL_SETTLED_SOURCE + "for (let i = 0; i < results.length; i\n++) text({i, ...results[i]});",
+            id="newline-before-increment",
+        ),
+        pytest.param("text(await tools.exec_command({cmd:'x',n:1e400}));", id="non-finite-number"),
+    ],
+)
+def test_wrapper_that_javascript_rejects_stays_unsupported(extractor, source):
+    # JavaScript throws a SyntaxError before any call runs, so no call may be credited. A batch gets
+    # valid records, so only its lexing can leave it unsupported.
+    observation = _record_observation(_ALL_SETTLED_SPREAD_RECORDS) if "allSettled" in source else "SyntaxError"
+    calls = extractor(_trajectory(source, observation))
+
+    assert len(calls) == 1
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize("field", ["result", "outcome", "settled", "output"])
+def test_quiet_probe_exemption_does_not_depend_on_the_settled_field_name(extractor, field):
+    calls = 'tools.exec_command({cmd:"grep -q foo README.md"}),tools.exec_command({cmd:"pwd"})'
+    source = f"const results=await Promise.allSettled([{calls}]);results.forEach((r,i)=>text({{i,{field}:r}}));"
+    values = [{"exit_code": 1, "output": ""}, {"exit_code": 0, "output": "/workspace\n"}]
+    records = [{"i": i, field: {"status": "fulfilled", "value": value}} for i, value in enumerate(values)]
+    result = _error_recovery(_trajectory(source, _record_observation(records)), extractor)
+
+    assert result["first_attempt_clean"] is True
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_valid_non_ascii_javascript_name_still_decodes(extractor):
+    # U+00E9 is a valid JavaScript identifier character, unlike U+00B2.
+    source = "const résultat=await tools.exec_command({cmd:'pwd'});text(résultat);"
+    calls = extractor(_trajectory(source, "/workspace"))
+
+    assert [call["action"] for call in calls] == ["exec_command"]
+    assert calls[0]["action_input"] == {"cmd": "pwd"}
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "source",
+    [
+        'text(await tools.exec_command({cmd:"false"}));',
+        'const r=await tools.exec_command({cmd:"false"});text(r);',
+    ],
+    ids=["inline", "bound"],
+)
+def test_lone_call_with_a_duplicate_key_record_stays_unsupported(extractor, source):
+    calls = extractor(_trajectory(source, '{"exit_code":1,"exit_code":0,"output":""}'.join(_RECORD_FRAME)))
+
+    assert len(calls) == 1
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+_LONE_SOURCES = [
+    pytest.param('text(await tools.exec_command({cmd:"make"}));', id="inline"),
+    pytest.param('const r=await tools.exec_command({cmd:"make"});text(r);', id="bound"),
+]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize("source", _LONE_SOURCES)
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"exit_code":1,"output":"' + "x" * 300,
+        '{"exit_code":1,"output":"x"}\nextra text',
+        '{"exit_code":1,"outp',
+    ],
+    ids=["truncated-mid-string", "trailing-text", "truncated-mid-key"],
+)
+def test_lone_call_with_an_incomplete_record_stays_unsupported(extractor, source, body):
+    # Incomplete evidence must stop grading: a cut-off failure would otherwise score as a clean run.
+    trajectory = _trajectory(source, "".join(_RECORD_FRAME[:1]) + body)
+    calls = extractor(trajectory)
+
+    assert len(calls) == 1
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+    assert _error_recovery(trajectory, extractor)["first_attempt_clean"] is False
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    ("source", "body"),
+    [
+        ('const r=await tools.exec_command({cmd:"pwd"});text(r);', "/workspace\n"),
+        ('const r=await tools.exec_command({cmd:"pwd"});text(r);', ""),
+        ("text(await tools.apply_patch('*** Begin Patch\\n*** End Patch\\n'));", "Success. Updated the files:\nA a.txt\n"),
+    ],
+    ids=["plain-text", "empty-body", "apply-patch-text"],
+)
+def test_lone_call_with_a_plain_text_result_keeps_the_whole_output(extractor, source, body):
+    observation = _RECORD_FRAME[0] + body
+    calls = extractor(_trajectory(source, observation))
+
+    assert len(calls) == 1
+    assert "normalization_status" not in calls[0]
+    assert calls[0]["observation"] == observation
+
+
+_SKILL_CAT = "cat /skills/example/SKILL.md"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize("space", ["\x1c", "\x1f", "\x85"], ids=["U+001C", "U+001F", "U+0085"])
+@pytest.mark.parametrize(
+    "source",
+    [
+        'const r=await{s}tools.exec_command({{cmd:"{c}"}});text(r);',
+        'const r=await tools.exec_command({{cmd:"{c}"}});{s}text(r);',
+        'const r=await tools.exec_command({{cmd:"{c}"}});text(r);{s}',
+        'const r={s}await tools.exec_command({{cmd:"{c}"}});text(r);',
+    ],
+    ids=["after-await", "before-text", "trailing", "after-equals"],
+)
+def test_upstream_grammar_form_with_a_non_javascript_space_stays_unsupported(extractor, space, source):
+    # Python's isspace() and \s take these characters, JavaScript does not, so the script never runs.
+    calls = extractor(_trajectory(source.format(s=space, c=_SKILL_CAT), "SyntaxError"))
+
+    assert len(calls) == 1
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+    assert _scorer(extractor, "check_activation")(calls, "example")["score"] != 0.75
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "source",
+    [
+        'const r=await tools.exec_command({cmd:"echo a\x85b"});text(r);',
+        '// @exec: {"note":"a\x1cb"}\nconst r=await tools.exec_command({cmd:"pwd"});text(r);',
+        'const r=await\u00a0tools.exec_command({cmd:"pwd"});text(r);',
+    ],
+    ids=["inside-a-string", "on-the-pragma-line", "valid-javascript-space"],
+)
+def test_wrapper_whose_only_odd_characters_are_valid_javascript_still_decodes(extractor, source):
+    calls = extractor(_trajectory(source, "/workspace"))
+
+    assert [call["action"] for call in calls] == ["exec_command"]
+    assert "normalization_status" not in calls[0]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_exec_call_that_is_not_a_codex_wrapper_is_left_alone_by_the_space_check(extractor):
+    source = "echo\x1chello"
+    trajectory = _trajectory(source, "hello")
+    calls = extractor(trajectory)
+
+    assert [call["action"] for call in calls] == ["exec"]
+    assert "normalization_status" not in calls[0]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize("number", ["1e400", "-1e400", "NaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize(
+    "source",
+    [
+        'const r=await tools.exec_command({{cmd:"x",n:{n}}});text(r);',
+        'const r=await tools.exec_command({{cmd:"x",n:[{n}]}});text(r);',
+    ],
+    ids=["bound", "bound-nested"],
+)
+def test_upstream_grammar_form_with_a_non_finite_number_stays_unsupported(extractor, number, source):
+    # JavaScript serializes these as null, so the decoded inf or nan would not be the call's real argument.
+    calls = extractor(_trajectory(source.format(n=number), "outer observation"))
+
+    assert len(calls) == 1
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize("number", ["1e3", "-0", "1.5", "2.5e-3"])
+def test_upstream_grammar_form_with_a_finite_number_still_decodes(extractor, number):
+    source = f'const r=await tools.exec_command({{cmd:"x",n:{number}}});text(r);'
+    calls = extractor(_trajectory(source, "outer observation"))
+
+    assert [call["action"] for call in calls] == ["exec_command"]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize("source", _LONE_SOURCES)
+@pytest.mark.parametrize("prefix", ["\n", "\n\n", " ", "\t", "\n  "], ids=["blank-line", "two-blank-lines", "space", "tab", "blank-and-indent"])
+def test_lone_call_record_after_leading_whitespace_is_graded(extractor, source, prefix):
+    # The header check and the record decoder must agree: whitespace before a complete record is not
+    # an incomplete record.
+    record = '{"exit_code":2,"output":"make: *** Error 2\\n"}'
+    trajectory = _trajectory(source, _RECORD_FRAME[0] + prefix + record)
+    calls = extractor(trajectory)
+
+    assert "normalization_status" not in calls[0]
+    assert calls[0]["is_error"] is True
+    assert _error_recovery(trajectory, extractor)["score"] == 0.0
+
+
+# ── Dynamic literal array/map wrappers (#236) ──
+
+_MAP_ARRAY = 'const cmds=["cat a.md","cat b.md"];'
+_MAP_COLLECTED = _MAP_ARRAY + "const results=await Promise.allSettled(cmds.map(async cmd=>tools.exec_command({cmd})));"
+# The wrapper reported in #236: a literal array mapped by an async arrow that prints each result.
+_MAP_INLINE_ONE = 'const cmds = ["cat guide.md"];\nawait Promise.allSettled(cmds.map(async cmd => text(await tools.exec_command({cmd}))));'
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "callback",
+    [
+        pytest.param("async cmd=>tools.exec_command({cmd})", id="async-arrow"),
+        pytest.param("cmd=>tools.exec_command({cmd})", id="plain-arrow"),
+        pytest.param("async (cmd) => await tools.exec_command({cmd})", id="parenthesized-await"),
+    ],
+)
+@pytest.mark.parametrize(("renderer", "shape"), _RENDERERS)
+def test_dynamic_map_gives_each_command_its_own_record(extractor, callback, renderer, shape):
+    source = f"{_MAP_ARRAY}const results=await Promise.allSettled(cmds.map({callback}));{renderer}"
+    records = _failed_exit_records(shape, 0)
+    calls = extractor(_trajectory(source, _record_observation(records)))
+
+    assert [call["action"] for call in calls] == ["exec_command", "exec_command"]
+    assert [call["action_input"] for call in calls] == [{"cmd": "cat a.md"}, {"cmd": "cat b.md"}]
+    assert [call["observation_status"] for call in calls] == ["mapped_outer_exec_result"] * 2
+    assert [call["observation"] for call in calls] == _expected_records(records)
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_dynamic_map_of_object_literals_passes_each_element_whole(extractor):
+    source = (
+        'const args=[{cmd:"cat a.md"},{session_id:1,chars:""}];'
+        "const results=await Promise.allSettled(args.map(async a=>tools.exec_command(a)));"
+        "results.forEach(text);"
+    )
+    records = [{"status": "fulfilled", "value": {"exit_code": 0}}] * 2
+    calls = extractor(_trajectory(source, _record_observation(records)))
+
+    assert [call["action_input"] for call in calls] == [{"cmd": "cat a.md"}, {"session_id": 1, "chars": ""}]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_dynamic_map_inline_single_command_owns_its_own_record(extractor):
+    record = {"exit_code": 0, "output": "# Guide\n"}
+    trajectory = _trajectory(_MAP_INLINE_ONE, _record_observation([record]))
+    calls = extractor(trajectory)
+
+    assert [call["action"] for call in calls] == ["exec_command"]
+    assert calls[0]["action_input"] == {"cmd": "cat guide.md"}
+    assert calls[0]["observation_status"] == "mapped_outer_exec_result"
+    assert "normalization_status" not in calls[0]
+    assert _error_recovery(trajectory, extractor)["first_attempt_clean"] is True
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_dynamic_map_inline_failed_read_carries_its_exit_status(extractor):
+    record = {"exit_code": 1, "output": "cat: guide.md: No such file\n"}
+    trajectory = _trajectory(_MAP_INLINE_ONE, _record_observation([record]))
+    calls = extractor(trajectory)
+
+    assert calls[0]["is_error"] is True
+    assert calls[0]["observation"].endswith("\nexit_code=1")
+    assert _error_recovery(trajectory, extractor)["first_attempt_clean"] is False
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_dynamic_map_inline_failed_skill_read_gets_no_activation_credit(extractor):
+    source = (
+        'const cmds=["cat /skills/example/SKILL.md"];'
+        "await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({cmd}))));"
+    )
+    record = {"exit_code": 1, "output": "cat: No such file\n"}
+    calls = extractor(_trajectory(source, _record_observation([record])))
+    result = _scorer(extractor, "check_activation")(calls, "example")
+
+    assert calls[0]["is_error"] is True
+    assert result["score"] == 0.0
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_dynamic_map_destructive_command_is_still_flagged(extractor):
+    source = (
+        'const cmds=["rm -rf /workspace/project"];'
+        "await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({cmd}))));"
+    )
+    result = _security_result(source, extractor)
+
+    assert result["passed"] is False
+    assert [finding["type"] for finding in result["findings"]] == ["destructive_command"]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "source",
+    [
+        # Ambiguous ownership: each callback prints when its own promise settles, not in array order.
+        pytest.param(
+            'const cmds=["cat a.md","cat b.md"];'
+            "await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({cmd}))));",
+            id="inline-batch-without-provable-owner",
+        ),
+        # Dynamic arguments that are not literals.
+        pytest.param(
+            'const base="cat a.md";const cmds=[base];'
+            "await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({cmd}))));",
+            id="identifier-element",
+        ),
+        pytest.param(
+            "const cmds=[`cat a.md`];"
+            "await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({cmd}))));",
+            id="template-literal-element",
+        ),
+        pytest.param(
+            'const cmds=["cat a.md",...more];'
+            "await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({cmd}))));",
+            id="spread-element",
+        ),
+        pytest.param(
+            'const cmds=["cat a.md"];await Promise.allSettled(cmds.map(async cmd=>text(await tools[name]({cmd}))));',
+            id="computed-tool-member",
+        ),
+        pytest.param(
+            "await Promise.allSettled(other.map(async cmd=>text(await tools.exec_command({cmd}))));",
+            id="undeclared-array",
+        ),
+        pytest.param(
+            "const cmds=[];await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({cmd}))));",
+            id="empty-array",
+        ),
+        # Changed payloads: the element must reach the tool exactly as the array declared it.
+        pytest.param(
+            'const cmds=["cat a.md"];'
+            'await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({cmd:cmd+" -n"}))));',
+            id="derived-payload",
+        ),
+        pytest.param(
+            'const cmds=["cat a.md"];'
+            "await Promise.allSettled(cmds.map(async c=>text(await tools.exec_command({cmd:c}))));",
+            id="renamed-payload-key",
+        ),
+        pytest.param(
+            'const cmds=["cat a.md"];'
+            'await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({["cmd"]:cmd}))));',
+            id="computed-payload-key",
+        ),
+        pytest.param(
+            'const cmds=["cat a.md"];'
+            "await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({cmd,cmd}))));",
+            id="duplicate-payload-key",
+        ),
+        pytest.param(
+            'const cmds=["cat a.md"];'
+            "await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({...cmd}))));",
+            id="spread-payload",
+        ),
+        pytest.param(
+            _MAP_ARRAY + "const results=await Promise.allSettled(cmds.map(async cmd=>tools.exec_command(cmd)));"
+            "results.forEach(text);",
+            id="whole-element-is-not-an-object",
+        ),
+        # Shadowed bindings.
+        pytest.param(
+            'const cmds=["cat a.md"];'
+            "await Promise.allSettled(cmds.map(async text=>text(await tools.exec_command({cmd:text}))));",
+            id="shadowed-text",
+        ),
+        pytest.param(
+            'const cmds=["cat a.md"];'
+            "await Promise.allSettled(cmds.map(async tools=>text(await tools.exec_command({cmd:tools}))));",
+            id="shadowed-tools",
+        ),
+        pytest.param(
+            'const cmds=["cat a.md"];'
+            "await Promise.allSettled(cmds.map(async cmds=>text(await tools.exec_command({cmds}))));",
+            id="shadowed-array-binding",
+        ),
+        pytest.param(
+            _MAP_COLLECTED + "results.forEach((results,i)=>text({i,...results}));",
+            id="shadowed-results-binding",
+        ),
+        pytest.param(
+            _MAP_ARRAY + "const cmds=await Promise.allSettled(cmds.map(async cmd=>tools.exec_command({cmd})));"
+            "cmds.forEach(text);",
+            id="reused-array-binding",
+        ),
+        # Changed indexes: a renderer must print each record at its own position.
+        pytest.param(
+            _MAP_COLLECTED + "results.forEach((r,i)=>text({i:i+1,...r}));",
+            id="shifted-record-index",
+        ),
+        pytest.param(
+            _MAP_COLLECTED + "for (let i = 0; i < results.length; i++) text({i, ...results[i+1]});",
+            id="shifted-results-index",
+        ),
+        pytest.param(
+            _MAP_COLLECTED + "results.map((r,i)=>text({i,...r}));",
+            id="unsupported-renderer-map",
+        ),
+        # Other wrappers the grammar does not prove.
+        pytest.param(
+            'const cmds=["cat a.md"];await Promise.all(cmds.map(async cmd=>text(await tools.exec_command({cmd}))));',
+            id="promise-all",
+        ),
+        pytest.param(
+            'const cmds=["cat a.md"];'
+            "await Promise.allSettled(cmds.filter(async cmd=>text(await tools.exec_command({cmd}))));",
+            id="filter-not-map",
+        ),
+        pytest.param(
+            _MAP_INLINE_ONE + 'text(await tools.exec_command({cmd:"pwd"}));',
+            id="statement-after-inline-batch",
+        ),
+        pytest.param(
+            'text(await tools.exec_command({cmd:"pwd"}));' + _MAP_INLINE_ONE,
+            id="call-before-array-batch",
+        ),
+    ],
+)
+def test_dynamic_map_forms_it_cannot_prove_stay_unsupported(extractor, source):
+    calls = extractor(_trajectory(source, _record_observation([{"exit_code": 0, "output": "ok\n"}])))
+
+    assert len(calls) == 1
+    assert calls[0]["action"] == "exec"
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "records",
+    [
+        pytest.param(_ALL_SETTLED_SPREAD_RECORDS[:1], id="missing-record"),
+        pytest.param([*_ALL_SETTLED_SPREAD_RECORDS, {"i": 2, "status": "fulfilled", "value": {}}], id="extra-record"),
+        pytest.param(list(reversed(_ALL_SETTLED_SPREAD_RECORDS)), id="reordered-records"),
+        pytest.param([_ALL_SETTLED_SPREAD_RECORDS[0], _ALL_SETTLED_SPREAD_RECORDS[0]], id="duplicate-index"),
+        pytest.param([{"i": 0, "status": "fulfilled"}, _ALL_SETTLED_SPREAD_RECORDS[1]], id="malformed-record"),
+        pytest.param(
+            [{**_ALL_SETTLED_SPREAD_RECORDS[0], "extra": True}, _ALL_SETTLED_SPREAD_RECORDS[1]],
+            id="extra-key",
+        ),
+    ],
+)
+def test_dynamic_map_untrusted_records_stay_unsupported(extractor, records):
+    source = _MAP_COLLECTED + "results.forEach((r,i)=>text({i,...r}));"
+    calls = extractor(_trajectory(source, _record_observation(records)))
+
+    assert len(calls) == 1
+    assert calls[0]["action"] == "exec"
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "records",
+    [
+        '{"i":0,"i":1,"status":"fulfilled","value":{}}\n{"i":1,"status":"fulfilled","value":{}}',
+        '{"i":0,"status":"fulfilled","value":{"exit_code":1,"exit_code":0}}\n{"i":1,"status":"fulfilled","value":{}}',
+    ],
+    ids=["index", "nested"],
+)
+def test_dynamic_map_duplicate_record_keys_stay_unsupported(extractor, records):
+    source = _MAP_COLLECTED + "results.forEach((r,i)=>text({i,...r}));"
+    calls = extractor(_trajectory(source, _RECORD_FRAME[0] + records))
+
+    assert len(calls) == 1
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "observation",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("partial", id="without-output-header"),
+        pytest.param(_record_observation(_ALL_SETTLED_SPREAD_RECORDS).rsplit("\n", 1)[0], id="truncated"),
+        pytest.param(_record_observation(_ALL_SETTLED_SPREAD_RECORDS) + "\nextra", id="trailing-text"),
+    ],
+)
+def test_dynamic_map_incomplete_observation_stays_unsupported(extractor, observation):
+    source = _MAP_COLLECTED + "results.forEach((r,i)=>text({i,...r}));"
+    calls = extractor(_trajectory(source, observation))
+
+    assert len(calls) == 1
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param('{"exit_code":0,"out', id="truncated-record"),
+        pytest.param('{"exit_code":1,"exit_code":0}', id="duplicate-key"),
+    ],
+)
+def test_dynamic_map_inline_incomplete_record_stays_unsupported(extractor, body):
+    calls = extractor(_trajectory(_MAP_INLINE_ONE, _RECORD_FRAME[0] + body))
+
+    assert len(calls) == 1
+    assert calls[0]["action"] == "exec"
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    ("record", "is_error"),
+    [
+        pytest.param({"i": 0, "status": "fulfilled", "value": {"exit_code": 0}}, False, id="exit-zero"),
+        pytest.param({"i": 0, "status": "fulfilled", "value": {"exit_code": 4}}, True, id="nonzero-exit"),
+        pytest.param({"i": 0, "status": "rejected", "reason": {"error": "boom"}}, True, id="rejected"),
+        pytest.param({"i": 0, "status": "fulfilled", "value": {"output": "x"}}, None, id="no-exit-code"),
+    ],
+)
+def test_dynamic_map_record_carries_its_own_outcome(extractor, record, is_error):
+    source = (
+        'const cmds=["cat a.md"];'
+        "const results=await Promise.allSettled(cmds.map(async cmd=>tools.exec_command({cmd})));"
+        "results.forEach((r,i)=>text({i,...r}));"
+    )
+    calls = extractor(_trajectory(source, _record_observation([record])))
+
+    assert len(calls) == 1
+    assert calls[0].get("is_error") is is_error
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_dynamic_map_array_longer_than_the_call_limit_stays_unsupported(extractor):
+    commands = ",".join(f'"cat {index}.md"' for index in range(129))
+    source = (
+        f"const cmds=[{commands}];"
+        "await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({cmd}))));"
+    )
+    calls = extractor(_trajectory(source))
+
+    assert len(calls) == 1
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_dynamic_map_with_incomplete_records_stops_grading(extractor):
+    # A truncated batch is missing evidence, not a partial score: every deterministic check
+    # reports an unsupported wrapper instead of grading what little came back.
+    source = (
+        'const cmds=["cat /skills/example/SKILL.md","python /skills/example/scripts/run.py"];'
+        "const results=await Promise.allSettled(cmds.map(async cmd=>tools.exec_command({cmd})));"
+        "results.forEach((r,i)=>text({i,...r}));"
+    )
+    complete = _record_observation(
+        [
+            {"i": 0, "status": "fulfilled", "value": {"exit_code": 0, "output": "# Example\n"}},
+            {"i": 1, "status": "fulfilled", "value": {"exit_code": 0, "output": "run.py completed\n"}},
+        ]
+    )
+    calls = extractor(_trajectory(source, complete.rsplit("\n", 1)[0]))
+    results = [
+        _scorer(extractor, "check_activation")(calls, "example"),
+        _scorer(extractor, "check_script_execution")(calls, "run.py"),
+        _scorer(extractor, "check_workflow_order")(calls, expected_skill="example"),
+        _scorer(extractor, "check_negative_case")(calls, "example"),
+        _scorer(extractor, "check_routing")(calls, "example"),
+        _scorer(extractor, "check_tool_efficiency")(calls, expected_skill="example", expected_script="run.py"),
+        _scorer(extractor, "check_error_recovery")(calls),
+    ]
+
+    assert {result["passed"] for result in results} == {None}
+    assert {result["score"] for result in results} == {0.5}
+    assert {result["supported"] for result in results} == {False}
+
+
+# ── The inline wrapper's two missing proofs (#502 review) ──
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "callback",
+    [
+        pytest.param("async cmd=>text(tools.exec_command({cmd}))", id="async-arrow"),
+        pytest.param("cmd=>text(tools.exec_command({cmd}))", id="plain-arrow"),
+        pytest.param("async (cmd) => text(tools.exec_command({cmd}))", id="parenthesized"),
+    ],
+)
+def test_inline_map_without_await_prints_a_promise_and_stays_unsupported(extractor, callback):
+    # Without `await` the callback renders the pending Promise, not the tool's result, so the
+    # outer output records nothing about the call. The same program written as a top-level
+    # `text(tools.exec_command(...))` is rejected for exactly this reason.
+    source = f'const cmds=["cat guide.md"];await Promise.allSettled(cmds.map({callback}));'
+    calls = extractor(_trajectory(source, _RECORD_FRAME[0] + "[object Promise]"))
+
+    assert len(calls) == 1
+    assert calls[0]["action"] == "exec"
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_inline_map_with_await_is_still_graded(extractor):
+    # The companion of the test above: requiring `await` must not reject the awaited form.
+    calls = extractor(_trajectory(_MAP_INLINE_ONE, _record_observation([{"exit_code": 0, "output": "# Guide\n"}])))
+
+    assert "normalization_status" not in calls[0]
+    assert calls[0]["action_input"] == {"cmd": "cat guide.md"}
+    assert calls[0]["is_error"] is False
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_collected_map_callback_may_still_omit_await(extractor):
+    # Only the inline form needs `await`: `Promise.allSettled` awaits whatever `.map` returns, so
+    # the collected form's own record still describes the settled call.
+    source = _MAP_COLLECTED + "results.forEach((r,i)=>text({i,...r}));"
+    records = [
+        {"i": 0, "status": "fulfilled", "value": {"exit_code": 0}},
+        {"i": 1, "status": "fulfilled", "value": {"exit_code": 0}},
+    ]
+    calls = extractor(_trajectory(source, _record_observation(records)))
+
+    assert [call["action"] for call in calls] == ["exec_command", "exec_command"]
+    assert [call["is_error"] for call in calls] == [False, False]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param("", id="nothing-printed"),
+        pytest.param("   \n\t", id="whitespace-only"),
+    ],
+)
+def test_inline_map_swallowed_rejection_stays_unsupported(extractor, body):
+    # A rejected call throws inside the callback, so `text()` never runs and `Promise.allSettled`
+    # lets the script exit cleanly with an empty body. Unlike a top-level lone call, whose
+    # unhandled rejection would fail the script, that clean exit proves nothing.
+    calls = extractor(_trajectory(_MAP_INLINE_ONE, _RECORD_FRAME[0] + body))
+
+    assert len(calls) == 1
+    assert calls[0]["action"] == "exec"
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_inline_map_rejected_skill_read_earns_no_activation_credit(extractor):
+    source = (
+        'const cmds=["cat /skills/example/SKILL.md"];'
+        "await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({cmd}))));"
+    )
+    calls = extractor(_trajectory(source, _RECORD_FRAME[0]))
+    result = _scorer(extractor, "check_activation")(calls, "example")
+
+    assert result["passed"] is None
+    assert result["score"] == 0.5
+    assert result["supported"] is False
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    ("body", "is_error"),
+    [
+        pytest.param('{"exit_code":0,"output":"# Example\\n"}', False, id="record-exit-zero"),
+        pytest.param("# Example\nplain guidance\n", None, id="plain-text"),
+    ],
+)
+def test_inline_map_printed_output_proves_the_call_settled(extractor, body, is_error):
+    # The callback renders only after its own `await` resolves, so anything printed proves the
+    # call fulfilled. Refusing the empty body must not become a blanket rejection of the form.
+    source = (
+        'const cmds=["cat /skills/example/SKILL.md"];'
+        "await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({cmd}))));"
+    )
+    calls = extractor(_trajectory(source, _RECORD_FRAME[0] + body))
+    result = _scorer(extractor, "check_activation")(calls, "example")
+
+    assert "normalization_status" not in calls[0]
+    assert calls[0].get("is_error") is is_error
+    assert result["passed"] is True
+    assert result["score"] == 0.75
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_dynamic_map_complete_records_are_graded(extractor):
+    # The headline of #236: a skill read batched through `.map` is graded rather than written off
+    # as an unsupported wrapper. `test_dynamic_map_with_incomplete_records_stops_grading` pins the
+    # other half, from the same source and the same complete observation.
+    source = (
+        'const cmds=["cat /skills/example/SKILL.md","python /skills/example/scripts/run.py"];'
+        "const results=await Promise.allSettled(cmds.map(async cmd=>tools.exec_command({cmd})));"
+        "results.forEach((r,i)=>text({i,...r}));"
+    )
+    complete = _record_observation(
+        [
+            {"i": 0, "status": "fulfilled", "value": {"exit_code": 0, "output": "# Example\n"}},
+            {"i": 1, "status": "fulfilled", "value": {"exit_code": 0, "output": "run.py completed\n"}},
+        ]
+    )
+    calls = extractor(_trajectory(source, complete))
+
+    assert [call["action"] for call in calls] == ["exec_command", "exec_command"]
+    assert [call["is_error"] for call in calls] == [False, False]
+    assert _scorer(extractor, "check_activation")(calls, "example")["score"] == 0.75
+    assert _scorer(extractor, "check_script_execution")(calls, "run.py")["score"] == 1.0
+    assert _scorer(extractor, "check_workflow_order")(calls, expected_skill="example")["score"] == 1.0
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "argument",
+    [
+        pytest.param("{cmd,timeout:5}", id="shorthand-first"),
+        pytest.param("{timeout:5,cmd}", id="literal-first"),
+    ],
+)
+def test_dynamic_map_merges_literal_siblings_with_the_mapped_element(extractor, argument):
+    # A mixed argument object: the element still reaches the tool unchanged under its own key and
+    # the literal sibling is carried through, on either side of the shorthand.
+    source = (
+        'const cmds=["cat a.md"];'
+        f"const results=await Promise.allSettled(cmds.map(async cmd=>tools.exec_command({argument})));"
+        "results.forEach(text);"
+    )
+    calls = extractor(_trajectory(source, _record_observation([{"status": "fulfilled", "value": {"exit_code": 0}}])))
+
+    assert [call["action_input"] for call in calls] == [{"timeout": 5, "cmd": "cat a.md"}]
+    assert "normalization_status" not in calls[0]

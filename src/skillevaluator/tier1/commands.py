@@ -22,6 +22,7 @@ from skillevaluator.constants import (
     PLUGIN_CONTAINED_MANIFEST_DIR,
     PLUGIN_CONTAINED_MANIFEST_FILE,
     PLUGIN_MANIFEST_FILES,
+    QUALITY_DEFAULT_MIN_SCORE,
     SCAN_EXCLUDED_DIRS,
     SCAN_EXCLUDED_FILES,
     SKILL_MANIFEST_FILE,
@@ -46,6 +47,7 @@ from skillevaluator.utils.rich_markup import escape_markup
 from skillevaluator.validators.base import continue_on_failure_scope
 from skillevaluator.validators.code_risk import CodeRiskValidator
 from skillevaluator.validators.dependencies import DependencySecurityValidator
+from skillevaluator.validators.harness import HarnessValidator
 from skillevaluator.validators.hygiene import HygieneValidator
 from skillevaluator.validators.license import LicenseValidator
 from skillevaluator.validators.plugin_schema import PluginSchemaValidator
@@ -84,7 +86,10 @@ DEFAULT_CHECKS = (
     "unicode",
     "quality",
     "lint",
+    "harness",
 )
+# Advisory checks never gate and are not part of the publication lineup.
+ADVISORY_CHECKS = ("harness",)
 # Opt-in checks: recognized by ``--checks`` but excluded from the default run.
 # The dependency CVE audit is also available through the standalone
 # ``dependency-audit`` command; the version check above runs by default.
@@ -118,6 +123,7 @@ _SKIPPED_VALIDATORS = {
     "unicode": ("Unicode Smuggling Detection",),
     "quality": ("Quality Score (4-Dimension Analysis)",),
     "lint": ("Script Lint (Advisory)",),
+    "harness": ("Harness Compatibility",),
 }
 # Checks that read a skill manifest (SKILL.md frontmatter, its version, its
 # quality). A target that ``--type auto`` detects as ``unknown`` and that holds
@@ -247,6 +253,11 @@ def skipped_checks(skip: str | None) -> set[str]:
     return _parse_checks(skip)
 
 
+def runs_schema_check(checks: str | None, skip: str | None) -> bool:
+    """True when a run with these ``--checks``/``--skip`` values runs the schema check."""
+    return "schema" in _enabled_checks(checks) and "schema" not in skipped_checks(skip)
+
+
 def runs_secrets_scan(checks: str | None, skip: str | None) -> bool:
     """True when a run with these ``--checks``/``--skip`` values executes the Gitleaks scan."""
     return "code-integrity" in _enabled_checks(checks) and not {"code-integrity", "secrets"} & skipped_checks(skip)
@@ -292,15 +303,18 @@ def run_validation(
     checks: str | None = None,
     use_llm: bool = False,
     llm_verify: bool = False,
-    min_score: int = 70,
+    min_score: int = QUALITY_DEFAULT_MIN_SCORE,
     quality_config: Path | None = None,
     pii_waivers: Path | None = None,
     previous_version: str | None = None,
     policy: ValidationPolicy | None = None,
     content_type: str | None = None,
+    target_root: Path | None = None,
     fail_fast: bool = False,
     continue_on_failure: bool = False,
     on_check: Callable[[str], None] | None = None,
+    harness: str | None = None,
+    harness_profiles: Path | None = None,
     skillspector_baseline: Path | None = None,
     skip: str | None = None,
 ) -> list[ValidationResult]:
@@ -336,6 +350,11 @@ def run_validation(
     *pii_waivers* is an optional PII waiver file applied by the ``pii`` check.
     *skillspector_baseline* is an audited SkillSpector suppression baseline
     applied to the ``security`` check; it is never discovered from the target.
+    *target_root* is the folder that *target_path* belongs to when a caller
+    validates that folder one skill at a time, as ``validate`` does for a
+    folder of skills. The ``security`` check then accepts no SkillSpector
+    missing reference in the skill, because its instructions may name a file
+    elsewhere in the folder that its scan did not inspect.
     """
     enabled = _enabled_checks(checks)
     skipped = skipped_checks(skip)
@@ -396,6 +415,7 @@ def run_validation(
             content_type=content_type if content_type in _AGENT_ARTIFACT_CONTENT_TYPES else None,
             skillspector_reference_root=target_path if content_type == CONTENT_TYPE_PLUGIN else None,
             skillspector_baseline=skillspector_baseline,
+            target_root=target_root,
         )
         return [_run_result("security", "Security Scan", v.description, v.validate_security_only)]
 
@@ -431,6 +451,10 @@ def run_validation(
         v = LicenseValidator()
         return [_run_result("license", v.name, v.description, v.validate)]
 
+    def _harness_results() -> list[ValidationResult]:
+        v = HarnessValidator(harness, harness_profiles)
+        return [_run_result("harness", v.name, v.description, v.validate)]
+
     def _dependency_results() -> list[ValidationResult]:
         v = DependencySecurityValidator()
         return [_run_result("dependency", v.name, v.description, v.validate)]
@@ -451,6 +475,7 @@ def run_validation(
         ("unicode", _unicode_results, True),
         ("quality", _quality_results, skill_like),
         ("lint", _lint_results, skill_like),
+        ("harness", _harness_results, skill_like),
     )
     active = [
         (check_name, builder) for check_name, builder, applicable in steps if check_name in enabled and applicable
@@ -518,7 +543,7 @@ def run_validation(
 
 
 def run_quality_check(
-    target_path: Path, *, min_score: int = 70, quality_config: Path | None = None
+    target_path: Path, *, min_score: int = QUALITY_DEFAULT_MIN_SCORE, quality_config: Path | None = None
 ) -> list[ValidationResult]:
     validator = QualityScoreValidator(min_score=min_score, quality_config=quality_config)
     return [
@@ -532,7 +557,7 @@ def run_quality_check(
     ]
 
 
-def run_rubric_eval(target_path: Path, *, min_score: int = 70) -> list[ValidationResult]:
+def run_rubric_eval(target_path: Path, *, min_score: int = QUALITY_DEFAULT_MIN_SCORE) -> list[ValidationResult]:
     validator = RubricEvalValidator(min_score=min_score)
     return [
         _as_result(
@@ -615,6 +640,7 @@ def emit_reports(
     policy: ValidationPolicy | None = None,
     target_path: str | None = None,
     expected_skill_name: str | None = None,
+    explicit_skill_name: str | None = None,
     content_label: str = "Skill",
     announce_paths: bool = True,
     sarif_scan_root: Path | None = None,
@@ -633,6 +659,10 @@ def emit_reports(
     forwarded to the HTML reporter so the report shows a Target link and the
     correct content noun. HTML navigation tabs are derived from the tiers
     present in *results*, matching SkillEvaluator's combined report.
+
+    The JSON report records *target_path* too. *explicit_skill_name* names
+    the one skill a single-skill run validated, so the JSON ``skills`` list
+    names it even when no finding path or quality score does.
     """
     if policy is not None:
         apply_policy(results, policy)
@@ -665,6 +695,12 @@ def emit_reports(
             reporter = reporter_cls(
                 workspace_root=sarif_repository_root,
                 scan_root=sarif_scan_root,
+            )
+        elif fmt == "json":
+            reporter = reporter_cls(
+                expected_skill_name=expected_skill_name,
+                target_path=target_path,
+                explicit_skill_name=explicit_skill_name,
             )
         else:
             reporter = reporter_cls(expected_skill_name=expected_skill_name)

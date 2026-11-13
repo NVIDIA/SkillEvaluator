@@ -69,12 +69,12 @@ jobs:
           python-version: "3.13"
 
       - name: Install SkillEvaluator
-        run: uv tool install --python 3.13 "skillevaluator[security] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+        run: uv tool install --python 3.13 "skillevaluator @ git+https://github.com/NVIDIA/SkillEvaluator.git"
 
       - name: Install external Python scanners
         run: |
           uv tool install semgrep
-          uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.3
+          uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.4
 
       - name: Install Gitleaks
         run: |
@@ -152,7 +152,7 @@ jobs:
             });
 ```
 
-The `security` extra installs Bandit and pip-audit. Semgrep and SkillSpector
+SkillEvaluator installs Bandit, and the `security` extra adds pip-audit. Semgrep and SkillSpector
 stay in separate uv tool environments, while Gitleaks is installed from its
 official [releases](https://github.com/gitleaks/gitleaks/releases). Report
 filenames embed a sortable timestamp (`skillevaluator-output-<timestamp>.md`),
@@ -242,6 +242,8 @@ When the exit code is not enough — dashboards, custom thresholds, badge genera
 
 | Field | Type | Contents |
 | --- | --- | --- |
+| `version` | string | SkillEvaluator version that wrote the report |
+| `target_path` | string or null | The validated target. `validate` records its absolute path, or its browsable URL when it is in a Git checkout with an `origin` remote. `tier1` and `tier2` record the path as given on the command line; in a report that CI retains, the path is the skill's path relative to the repository root, never the runner's absolute path. The single-check commands such as `security-scan` give `null` |
 | `overall_passed` | boolean | `true` when every check passed |
 | `overall_status` | string | `passed`, `failed`, or `incomplete` (a required scanner produced no evidence) |
 | `publication_status` | string | `pass`, `neutral`, `fail`, or `incomplete`; use this field for publication eligibility |
@@ -257,7 +259,9 @@ When the exit code is not enough — dashboards, custom thresholds, badge genera
 | `finding_groups` | array | One entry per unique finding: `finding_id`, highest `severity`, `message`, `validators`, and every location in `occurrences[]` with its `occurrence_id`, including each location a finding lists in `metadata.occurrences` when its check folds repeats of one value into it (the PII scan does) |
 | `message_counts` | object | `independent_errors` and `independent_warnings`: error and warning strings with no finding behind them, such as `gate_failures` and scanner or execution errors (strings that mirror a finding, and the `Workflow scope:` note for a stage that configuration skips, are not counted); `informational`: informational messages, not counting the `[OK]` line recorded for each passed check |
 | `results[].findings[].finding_id`, `results[].findings[].occurrence_id` | string | Stable finding and location identities (see below) |
-| `skills` | array | Per-skill `{ name, passed, issue_count }`; `issue_count` counts raw finding records |
+| `skills` | array | Per-skill `{ name, passed, issue_count }`; `issue_count` counts raw finding records. `validate`, `tier1` and `tier2` on one skill folder list that skill once, under its folder name, also when a narrowed run such as `--checks schema` reports no finding |
+| `top_issues` | array | Top issues across every tier in the report, most severe first: `message` (a security finding is grouped under the text before its first `: `), highest `severity`, `total_count` of raw finding records (the unit of `skills[].issue_count`, so a PII finding that folds repeats of one value counts once although `finding_groups` lists each of its locations), `skills_affected`, `category` and `suggestion`. The HTML report data carries the same rows; the HTML summary panel lists the Tier 1 rows only |
+| `gating.tiers` | object | `validate`, `tier1` and `tier2` runs: one entry per tier that ran (`"1"`, `"2"`, `"3"`). `blocking` is `true` when any of the tier's checks gates the exit code, `validators` lists the checks, and `validator_policies` gives each check's own `{ validator, blocking }` |
 | `quality_summary` | array | Quality details with `overall_score` (0–100) and `grade` (A–F); a folder target reports the collection average plus a `skill_count` |
 
 Every finding carries two stable IDs. `finding_id` (`SEF-` plus 20 hex
@@ -323,7 +327,7 @@ jq -e '([.quality_summary[]?.overall_score] | min // 100) >= 80' "$report"
   <Accordion title="overall_status is 'incomplete'">
     A required scanner is missing or returned no evidence. Check the report for
     the named scanner: Semgrep, SkillSpector, and Gitleaks are all separate
-    executables, and the `security` extra alone does not install them. The
+    executables, and installing SkillEvaluator alone does not install them. The
     scanners fail closed: `validate` exits non-zero and the report stays
     non-green until every required scanner is installed and returns valid
     evidence. See the workflow above or

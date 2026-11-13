@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from skillevaluator import __version__
 from skillevaluator.publication_evidence import (
     TIER1_REQUIRED_CHECKS_KEY,
     TIER1_UNSCANNED_PATHS_KEY,
@@ -40,8 +42,10 @@ from skillevaluator.reporting.finding_summary import (
     summarize_messages,
 )
 from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
+from skillevaluator.skillspector_diagnostics import sanitize_completeness
 from skillevaluator.skillspector_provenance import sanitize_skillspector_provenance_metadata
 from skillevaluator.skillspector_reference_caveats import sanitize_reference_caveat_metadata
+from skillevaluator.skillspector_references import reference_summary_record
 from skillevaluator.source_identity import recorded_evaluated_source
 
 if TYPE_CHECKING:
@@ -65,6 +69,9 @@ def _json_safe_benchmark_policy(value: object) -> dict[str, bool] | None:
         if isinstance((candidate := value.get(key)), bool)
     }
     return policy or None
+
+
+_MAX_SEMGREP_UNPARSED_FILES = 1000
 
 
 def _tier1_scope_strings(value: object, field: str) -> list[str]:
@@ -96,16 +103,26 @@ class JSONReporter(ReporterBase):
         indent: int | None = 2,
         include_timestamp: bool = True,
         expected_skill_name: str | None = None,
+        target_path: str | None = None,
+        explicit_skill_name: str | None = None,
     ) -> None:
         """Initialize JSON reporter.
 
         Args:
             indent: JSON indentation level (None for compact)
             include_timestamp: Whether to include generation timestamp
+            expected_skill_name: Publication target name the evidence must bind to
+            target_path: Display path or Git remote URL of the validated target
+            explicit_skill_name: Name of the one skill a single-skill run
+                validated. It names the ``skills`` entry, which is otherwise
+                inferred from finding paths and quality metadata and so falls
+                back to one entry per check ID for a clean run without them.
         """
         self.indent = indent
         self.include_timestamp = include_timestamp
         self.expected_skill_name = expected_skill_name
+        self.target_path = target_path
+        self.explicit_skill_name = explicit_skill_name
 
     @property
     def name(self) -> str:
@@ -137,10 +154,32 @@ class JSONReporter(ReporterBase):
         result_finding_summaries = [summarize_findings([result]) for result in results]
         finding_summary = merge_finding_summaries(result_finding_summaries)
 
-        # Reuse HTML reporter's skill reorganization and contributor extraction
-        html_reporter = HTMLReporter()
+        # Reuse HTML reporter's skill reorganization and contributor extraction.
+        # The explicit name keeps a single-skill run to one ``skills`` entry
+        # when no finding path or quality score names the skill, and the
+        # target path is the same fallback the HTML report uses.
+        identity_target = self.target_path
+        if identity_target and "://" not in identity_target:
+            local_target = Path(identity_target)
+            if (local_target / "SKILL.md").exists() or (local_target / "skill.md").exists():
+                # Preserve the requested target in JSON while resolving aliases
+                # such as "." for the shared single-skill identity fallback.
+                identity_target = str(local_target.resolve())
+        html_reporter = HTMLReporter(
+            target_path=identity_target,
+            explicit_skill_name=self.explicit_skill_name,
+            expected_skill_name=self.expected_skill_name,
+        )
         skills_by_name = html_reporter._reorganize_by_skill(results)
         contributors = HTMLReporter._extract_contributors(skills_by_name, results)
+        # Top issues across every tier, the rows the HTML report data carries
+        # (its summary panel lists the Tier 1 rows only), without ``issue_key``:
+        # that is an HTML anchor hashed from the finding text, and CI redaction
+        # masks the text in this report but cannot refresh a hash it never sees.
+        top_issues = [
+            {key: value for key, value in issue.items() if key != "issue_key"}
+            for issue in html_reporter._compute_top_issues(skills_by_name)
+        ]
 
         # Build per-skill summary
         skills_summary = []
@@ -156,6 +195,8 @@ class JSONReporter(ReporterBase):
             )
 
         data: dict[str, Any] = {
+            "version": __version__,
+            "target_path": self.target_path,
             "overall_passed": all_passed,
             "overall_status": overall_status,
             "incomplete_scans": incomplete_scans,
@@ -177,6 +218,7 @@ class JSONReporter(ReporterBase):
             "message_counts": summarize_messages(results),
             "skills": skills_summary,
             "contributors": contributors,
+            "top_issues": top_issues,
             "results": [
                 self._result_to_dict(result, finding_summary=result_summary)
                 for result, result_summary in zip(results, result_finding_summaries, strict=True)
@@ -254,9 +296,18 @@ class JSONReporter(ReporterBase):
             if not isinstance(gating, dict) or gating.get("tier") is None:
                 continue
             tier = str(gating["tier"])
-            tier_entry = gating_by_tier.setdefault(tier, {"blocking": False, "validators": []})
+            tier_entry = gating_by_tier.setdefault(
+                tier,
+                {"blocking": False, "validators": [], "validator_policies": []},
+            )
             tier_entry["blocking"] = bool(tier_entry["blocking"] or gating.get("blocking"))
             tier_entry["validators"].append(result.validator_name)
+            # ``blocking`` above is true when any validator of the tier blocks;
+            # this records each validator's own policy, so an advisory Tier 2
+            # check is not read as blocking because another one is.
+            tier_entry["validator_policies"].append(
+                {"validator": result.validator_name, "blocking": bool(gating.get("blocking"))}
+            )
         if gating_by_tier:
             data["gating"] = {"tiers": gating_by_tier}
 
@@ -370,6 +421,9 @@ class JSONReporter(ReporterBase):
         # Tier 1 SkillSpector LLM provenance (``--llm``), revalidated here so
         # only the canonical record reaches the report.
         data.update(sanitize_skillspector_provenance_metadata(result.metadata))
+        completeness = sanitize_completeness(result.metadata.get("skillspector_completeness"))
+        if completeness:
+            data["skillspector_completeness"] = completeness
 
         if result.gate_failures:
             data["gate_failures"] = result.gate_failures
@@ -379,11 +433,33 @@ class JSONReporter(ReporterBase):
         if isinstance(coverage, list):
             data["dependency_coverage"] = coverage
 
+        # Files Semgrep could not fully parse. The error message names at most 20;
+        # this keeps up to _MAX_SEMGREP_UNPARSED_FILES and counts the rest, so a
+        # report that was cut short says so instead of looking complete.
+        unparsed_files = result.metadata.get("semgrep_unparsed_files")
+        if isinstance(unparsed_files, list):
+            paths = [item for item in unparsed_files if isinstance(item, str) and 0 < len(item) <= 4096]
+            if paths:
+                data["semgrep_unparsed_files"] = paths[:_MAX_SEMGREP_UNPARSED_FILES]
+                # A report restored from JSON already carries the count of files it left out.
+                carried = result.metadata.get("semgrep_unparsed_files_omitted")
+                omitted = max(0, len(paths) - _MAX_SEMGREP_UNPARSED_FILES)
+                if type(carried) is int and carried > 0:
+                    omitted += carried
+                if omitted:
+                    data["semgrep_unparsed_files_omitted"] = omitted
+
         # Tier 1 SkillSpector file-role scoping: retained and suppressed issue
         # counts, and the raw versus applicable aggregate risk score.
         skillspector_applicability = result.metadata.get("skillspector_applicability")
         if isinstance(skillspector_applicability, dict):
             data["skillspector_applicability"] = skillspector_applicability
+
+        # Tier 1 SkillSpector AE1 counts: referenced artifacts it did not
+        # completely inspect and the reference lines that name them.
+        reference_summary = reference_summary_record(result.metadata.get("skillspector_reference_summary"))
+        if reference_summary is not None:
+            data["skillspector_reference_summary"] = reference_summary
 
         qs = result.metadata.get("quality_scores")
         if qs:

@@ -131,11 +131,12 @@ These variables tune the static and security checks. The check-by-check guide is
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `SKILLEVALUATOR_PROFILE` | `default` | Validation policy when no `--profile` flag is passed. `external` remains a compatibility alias. The CLI flag always wins. |
+| `SKILLEVALUATOR_PROFILE` | `default` | Validation policy when no `--profile` flag is passed: `default` or `registry`. `external` remains a compatibility alias for `default`. The CLI flag always wins. |
 | `SKILLEVALUATOR_BANDIT_PATH` | auto-discovered | Absolute path to the Bandit executable. |
 | `SKILLEVALUATOR_SEMGREP_PATH` | auto-discovered | Absolute path to the Semgrep executable. |
 | `SKILLEVALUATOR_SKILLSPECTOR_PATH` | auto-discovered | Absolute path to the SkillSpector executable. |
 | `SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS` | `1200` | Watchdog for each SkillSpector run, in seconds. The static stage and, with `--llm`, the LLM stage each get the full value. A run that exceeds it is stopped and the security scan is `INCOMPLETE`. Set a positive integer; values above `86400` are capped, and other values fall back to the default with a warning. Keep it above `SKILLSPECTOR_MAX_WORKFLOW_SECONDS` so SkillSpector's own deadline ends a slow scan first. The effective value is recorded as `skillspector_timeout_seconds` in the security result. |
+| `SKILLEVALUATOR_RUBRIC_SUPPLEMENT_BYTES` | `1048576` (1 MiB) | Total bytes of supplementary content `rubric-eval` collects for the judge: first the complete linked Markdown that `SKILL.md` requires, then bounded optional previews of `scripts/` and `references/`. Required linked guidance is never truncated — a document that does not fit the remaining budget fails the evaluation with an `unsafe_skill_input` finding instead of reaching the judge in part. Set a positive integer; values above `8388608` (8 MiB) are capped, and other values fall back to the default with a warning. The budget bounds how many bytes are read, never which paths: every reference is still confined to the skill's own declared root. |
 | `SKILLEVALUATOR_SCHEMA_ALLOWED_DIRS` | — | Extra allowed skill-root directory names (comma- or whitespace-separated), e.g. `data,fixtures`. Additive only — names extend the built-in allowlist and never replace it. |
 | `SKILLEVALUATOR_SUBMITTER` | auto-detected | Explicit submitter identity for the home-path PII check. It is combined with `GITHUB_ACTOR`, `USER`, `LOGNAME`, `USERNAME`, the OS login name, and the skill's declared author — every identity that resolves is protected. If none resolves, the home-path check is disabled with a warning. |
 | `SKILLEVALUATOR_PREVIOUS_VERSION` | — | The previously published skill version that the default version check compares against. Without this value or `--previous-version`, the check validates the current version's format but does not enforce an increase. |
@@ -156,6 +157,12 @@ execution environments are covered in
 | `SKILLEVALUATOR_RESULTS_DIR` | `<skill>/evals/results` | External root for run results. Precedence for writes: the `--results-dir` flag, then this variable, then the canonical in-skill location. Configured roots must remain outside the skill; `evals/results` is the only supported in-skill results root so generated output cannot change the skill's publication identity. Read commands (`view`, `compare`) honor the same order and also fall back to the legacy location so older runs stay visible. |
 | `SKILLEVALUATOR_OUTPUT_PROVENANCE_KEY_FILE` | macOS: `~/Library/Application Support/skillevaluator/output-provenance.key`; Linux: `$XDG_STATE_HOME/skillevaluator/output-provenance.key` (`~/.local/state` when `XDG_STATE_HOME` is unset); Windows: `%LOCALAPPDATA%\skillevaluator\output-provenance.key` | Local key that authenticates the markers SkillEvaluator writes into its generated output directories; a directory is replaced only when its marker verifies for that path. The key is created on first use. It must be outside every evaluated skill and generated output tree. On macOS and Linux, the file and its directory must be owned by the current user and not accessible to group or other users. |
 | `SKILLEVALUATOR_LOCAL_SANDBOX` | `require` | Local-mode sandbox policy. `require` fails closed when no OS sandbox backend (Bubblewrap on Linux, Seatbelt on macOS) is usable; `prefer` degrades to advisory-only guardrails with a loud warning; `off` skips sandbox probing entirely — for skills you fully trust. Any other value is rejected. No value enables native Windows: local mode fails closed there before anything runs — use WSL2 or `--env-mode docker`. |
+| `SKILL_EVAL_NEMO_GYM_BIN` | `gym` on `PATH` | Path to the experimental task-folder adapter's pinned Gym executable. Public `nemo-gym==0.7.0` is incompatible; the public source candidate still needs native runtime qualification. See [Execution backends](/skills/skillevaluator/tier3-live-evaluation#execution-backends). |
+| `SKILL_EVAL_NEMO_GYM_MODEL_URL` | provider base URL | OpenAI-compatible base URL (ending in `/v1`) of the policy model for `--backend nemo-gym`. |
+| `SKILL_EVAL_NEMO_GYM_MODEL_API_KEY` | provider key, only when the URL is also the provider's | API key for that policy model. Required when `SKILL_EVAL_NEMO_GYM_MODEL_URL` is set; use `EMPTY` for a keyless server. Passed to Gym through the environment, never on the command line. |
+| `SKILL_EVAL_NEMO_GYM_HOST` | — | Address of this host that the Gym sandbox can reach (for example the Docker bridge gateway). Needed when the host name resolves to a loopback address. |
+| `SKILL_EVAL_NEMO_GYM_SANDBOX` | `docker` | NeMo Gym sandbox provider for `--backend nemo-gym`. |
+| `SKILL_EVAL_NEMO_GYM_TIMEOUT_S` | `21600` | Wall-clock limit, in seconds, for one `gym eval run` (one agent and arm); must be a finite number greater than 0. With Vertex AI ADC credentials it is also capped to the token's lifetime. On timeout, Ctrl-C, SIGTERM or SIGHUP, Gym's process group gets SIGTERM and 30 seconds to clean up its servers and sandboxes, then SIGKILL; a second Ctrl-C skips the wait. If the group still cannot be confirmed stopped after one last SIGKILL, no further arm starts. After a timeout, the run then finishes as failed with that error and keeps the scores of the arms that finished; after an interruption, the progress output reports it. |
 | `SKILLEVALUATOR_LOCAL_ALLOW_NET` | `true` | Network egress for local-mode trials. Set to `0` to airgap a skill that must not reach the network. Incompatible with the `nv_build` provider — NVIDIA Build local agents require network access, so airgapped runs are rejected up front. |
 | `SKILLEVALUATOR_LOCAL_STRICT_READS` | `false` | Tightens the sandbox's read-only view of the host system to a stricter path set. |
 | `SKILLEVALUATOR_LOCAL_INHERIT_AGENT_KEYS` | `false` | When true, local-mode trials inherit the host's agent credential variables into their ambient environment. Off by default so a hostile skill command cannot read credentials — agents and verifiers receive credentials per-exec instead. |
@@ -226,11 +233,21 @@ Larger budgets give judges more context and cost more prompt tokens.
 | --- | --- | --- |
 | `SKILL_EVAL_ACCURACY_BUDGET` | `8000` characters | Evidence budget for the `accuracy` judge: the agent's final response, files it wrote, and up to 6 recent tool results. |
 | `SKILL_EVAL_GOAL_ACCURACY_BUDGET` | `12000` characters | Evidence budget for the `goal_accuracy` judge, including the RAGAS goal scorer: the final response, end-state file changes, and up to 12 recent tool results. |
-| `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET` | `8000` characters | Evidence budget for the `behavior_check` judge: file changes, the final response, the user request, and a compact tool history. The effective budget is never less than `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT` plus 4000. |
-| `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT` | `800` characters | Maximum length of the agent's final response within the `behavior_check` evidence. Values above 4000 can also raise the effective behavior-check budget. |
+| `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET` | `12000` characters | Evidence budget for the `behavior_check` judge: file changes, the final response, the user request, and a compact tool history. A value you set is used exactly as set, up or down. Only the default is reconciled upwards, to `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT` plus 4000, so raising that limit alone still leaves room for the tool history. |
+| `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT` | `8000` characters | Maximum length of the agent's final response within the `behavior_check` evidence. It also caps the reserved USER REQUEST section, which is otherwise 2000 characters. Raising it above 8000 also raises the *default* behavior-check budget, but never a budget you set yourself. |
+
+Setting `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET` below `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`
+plus 1600 is honoured, but logs a warning: the final response will not fit
+beside any tool history, and `behavior_check` then reports incomplete evidence
+instead of a score (see
+[behavior evidence completeness](tier3-live-evaluation.mdx#evidence-budgets)).
+Lower the final-response limit alongside the budget to cap the judge prompt
+without losing the answer.
 
 Each value must be an integer. Values below `1` are treated as `1`, and
-non-integer values such as `8k` or `1.5` use the default. Set these variables in
+non-integer values such as `8k` or `1.5` use the default; neither is a budget
+you set, so `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET` falls back to its reconciled
+default in both cases. Set these variables in
 the host environment that runs `skillevaluator`. As with the
 [retry settings](#llm-retries-and-judge-time-budget), Tier 3 stages any that
 are set into the generated task's `[verifier.env]`, and never into the agent's

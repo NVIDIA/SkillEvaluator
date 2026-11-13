@@ -1,0 +1,30 @@
+{
+  "schema": "skillevaluator.grader-qualification-policy/v1",
+  "policy_id": "experimental-all-metrics-v1",
+  "description": "Experimental review example only. Availability floors and proposed risk limits are not statistical sufficiency or release approval. The bundled suite lacks required class coverage.",
+  "required_metrics": [
+    "security",
+    "skill_execution",
+    "skill_efficiency",
+    "accuracy",
+    "goal_accuracy",
+    "behavior_check",
+    "behavior_steps",
+    "overall"
+  ],
+  "min_class_cases": {"pass": 1, "fail": 1},
+  "min_category_cases": {
+    "positive": 1,
+    "negative": 1,
+    "edge": 1,
+    "failure_recovery": 1,
+    "unavailable_evidence": 1,
+    "non_use": 1,
+    "baseline": 1
+  },
+  "max_rates": {
+    "false_pass_rate": 0.10,
+    "false_fail_rate": 0.10,
+    "unjudgeable_rate": 0.05
+  }
+}

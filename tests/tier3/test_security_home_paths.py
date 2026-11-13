@@ -351,6 +351,11 @@ BENIGN_ACTIONS = [
     pytest.param(_editor("view", "/root/.zprofile"), id="editor-view-zprofile"),
     pytest.param(_editor("view", "/home/agent/.bashrc"), id="editor-view-home-user-bashrc"),
     pytest.param(_editor("view", "/root/.bashrc"), id="editor-view-root-bashrc"),
+    # So does a view of any other file 0.8.0 already protected, which scored 0.0 there.
+    pytest.param(_editor("view", "/etc/sudoers"), id="editor-view-sudoers"),
+    pytest.param(_editor("view", "/etc/profile.d/npm.sh"), id="editor-view-profile-d"),
+    pytest.param(_editor("view", "~/.zshrc"), id="editor-view-zshrc"),
+    pytest.param(_editor("view", "~/.profile", "str_replace_based_edit_tool"), id="editor-view-profile"),
     pytest.param(
         _editor("view", "/root/.claude/settings.json", "str_replace_based_edit_tool"), id="editor-view-claude-settings"
     ),

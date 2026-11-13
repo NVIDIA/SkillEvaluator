@@ -285,6 +285,12 @@ prerequisites remain visible in the reports. A passing Tier 1 gate is not an
 all-tier evaluation pass. Forks retain keyless Tier 1 checks. On PRs, ordinary software changes
 select no skills, skill changes select the affected skills, and CI configuration
 changes select the collection. Pushes to `main` and manual runs scan the collection.
+With `scan-mode: auto`, the paid jobs (LLM-enriched Tier 1, Tier 2 and Tier 3)
+run on a PR only when it changes a file under a configured skill root. A
+same-repository configuration-only PR runs the keyless Tier 1 scan of every
+skill, and its report lists Tier 2 and Tier 3 as skipped because no skill
+changed. Fork PRs never run the paid tiers, so their reports keep the existing
+Tier 2 and Tier 3 reason.
 
 If a provider returns HTTP 404, verify that the selected model accepts chat
 requests with your account. Presence in the public model catalog alone does not
@@ -363,6 +369,11 @@ with LLM security, SkillSpector semantic findings, verification and rubric
 checks. An unconditional keyless baseline remains available for forks and
 denied admission. For an authorized LLM run, missing or failed enriched evidence
 fails the required Tier 1 gate; it is never replaced with a passing static scan.
+With the default `scan-mode: auto`, a PR runs the enriched job only when it
+changes a file under a configured skill root. CI configuration or unrelated
+changes skip it, and the keyless scan, which covers every skill for a setup
+change, remains the Tier 1 gate. Pushes to the default branch, manual runs and
+`scan-mode: all` keep the enriched job.
 The image supports OpenAI, Anthropic and NVIDIA Build at their native endpoints.
 
 Tier 2 chat/embeddings can use one provider while Tier 3 uses an
@@ -478,7 +489,11 @@ enriched evidence determines the Tier 1 gate for an eligible run; missing
 evidence cannot fall back to a passing static baseline. Default-branch enrichment
 is limited to `push` and `web` pipelines, matching provider admission. Scheduled,
 API, trigger and downstream default-branch pipelines retain the keyless Tier 1
-baseline, as do forks.
+baseline, as do forks. With `SKILL_EVAL_SCAN_MODE: auto`, an MR that changes no
+file under a configured skill root skips the paid jobs (enriched Tier 1, Tier 2
+and Tier 3) before reading a provider key. The aggregate recomputes that decision
+from the checkout with the pinned tools, never from an artifact. It then keeps
+the keyless report as the Tier 1 gate and records Tier 2 and Tier 3 as skipped.
 
 Use `SKILL_EVAL_TIER3_PROVIDER`, `SKILL_EVAL_TIER3_BASE_URL` and
 `SKILL_EVAL_TIER3_MODEL` for a separate live-agent/judge route, and
@@ -678,11 +693,15 @@ configuration-only scope notices are excluded. Incomplete or missing evidence
 shows an unknown count; it cannot imply zero findings or a completed check.
 The Tier 1 gate and each advisory tier's status stay separate, so this example
 can pass the required CI gate while still needing review of Tier 2 and Tier 3.
-Every tier selects the same skills: the changed skills, or every skill when
-the pull request changes CI setup under `.github/`, `.gitlab/`,
+Every tier that runs selects the same skills: the changed skills, or every
+skill when the pull request changes CI setup under `.github/`, `.gitlab/`,
 `.skillevaluator/ci` or `.gitlab-ci.yml` (on GitHub, also when it changes more
 files than the API can list). A cell for a skill that its tier did not select
-reads `Skipped · issues unknown · Not selected for this tier`.
+reads `Skipped · issues unknown · Not selected for this tier`. With
+`scan-mode: auto`, a merge request or same-repository pull request that changes
+no file under a configured skill root skips Tier 2 and Tier 3. Only Tier 1 then
+scans, covering every skill for a setup change, and the Tier 2 and Tier 3 cells read
+`Skipped · issues unknown · No file under a configured skill root changed; this paid tier did not run.`
 
 ```text
 ci-results.json

@@ -433,6 +433,13 @@ files replaced during the read fail task generation before output mutation. On
 Windows, the selected-file handle also denies concurrent writes and deletion
 for the read.
 
+Native Harbor task `environment.mcp_servers` declarations use the same MCP
+approval policy before staging, including declarations in task-level and
+per-step verifier environments. For generated tasks,
+`evals/environment/mcp_servers.toml` accepts approved `$VAR` and `${VAR}` header
+references; generated Harbor task TOML uses the braced form required by Harbor
+0.25. Source files and the agent's MCP JSON keep their original references.
+
 `evals/environment/input/` is reserved and is not copied into generated tasks.
 Directory-level custom Docker `COPY input/` remains buildable for an empty entry
 using an empty context directory. Missing, dynamic, linked, hardlinked, aliased,
@@ -1578,10 +1585,12 @@ reports. A sensitive-path or sensitive-file-write finding records only the
 protected entry it matched, such as `~/.bashrc` or `/root/.ssh`, never the
 command or tool input. When the text holds more than one entry, the longest
 wins, so a write to `/etc/profile.d/npm.sh` records `/etc/profile.d`, not
-`/etc/profile`. The without-skill baseline comparison therefore matches these
-findings by entry: a with-skill write to `~/.bashrc` is attributed to the
-baseline prompt or environment when the baseline run also wrote to
-`~/.bashrc`, whatever each command wrote there.
+`/etc/profile`. A path found through a home spelling, such as
+`/home/agent/.ssh/id_rsa` or `$HOME/.ssh`, records the `~/.ssh` entry, so the
+evidence holds no user name or home directory. The without-skill baseline
+comparison therefore matches these findings by entry: a with-skill write to
+`~/.bashrc` is attributed to the baseline prompt or environment when the
+baseline run also wrote to `~/.bashrc`, whatever each command wrote there.
 
 Destructive-command, network, prompt-injection, and refusal findings keep their
 command, prompt, or response text with credentials masked. The masking is a
@@ -1590,8 +1599,9 @@ saved judge evidence use the same credential masker:
 
 - private key blocks, and the key shapes that log redaction masks, such as
   `sk-`, `nvapi-`, `AKIA`, GitHub tokens, and JWTs;
-- URL user info, as in `https://user:token@host`, including a password
-  containing `@`;
+- URL user info, as in `https://user:token@host`, also when the password holds an
+  `@` (`https://user:p@ss@host`): the user info runs to the last `@` before the
+  host;
 - `Authorization` header values (the `Bearer`, `Basic`, `Token`, or `Digest`
   word stays, and any other scheme, such as `ApiKey` or `SSWS`, is masked with
   its value), API-key and token headers such as `X-API-Key`, and `Cookie`
@@ -1667,7 +1677,8 @@ of the line after a credential name. Quotes are read from the start of each
 line, and unlike in a shell, a line break ends a quoted string here, so a
 quoted value ends at its closing quote or at the end of its line.
 For security findings, only the first 2,000 characters are scanned. Judge
-evidence retains the separate judge evidence budgets described above. A word that this limit cuts in
+evidence retains the separate judge evidence budgets described above.
+A word that the security-finding scan limit cuts in
 half is replaced with `<truncated>`, keeping a URL's scheme and host. The
 evidence is then cut to 500 characters, or 300 for prompt and response text.
 

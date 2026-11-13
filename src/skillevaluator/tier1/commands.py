@@ -298,6 +298,7 @@ def run_validation(
     previous_version: str | None = None,
     policy: ValidationPolicy | None = None,
     content_type: str | None = None,
+    target_root: Path | None = None,
     fail_fast: bool = False,
     continue_on_failure: bool = False,
     on_check: Callable[[str], None] | None = None,
@@ -336,6 +337,11 @@ def run_validation(
     *pii_waivers* is an optional PII waiver file applied by the ``pii`` check.
     *skillspector_baseline* is an audited SkillSpector suppression baseline
     applied to the ``security`` check; it is never discovered from the target.
+    *target_root* is the folder that *target_path* belongs to when a caller
+    validates that folder one skill at a time, as ``validate`` does for a
+    folder of skills. The ``security`` check then accepts no SkillSpector
+    missing reference in the skill, because its instructions may name a file
+    elsewhere in the folder that its scan did not inspect.
     """
     enabled = _enabled_checks(checks)
     skipped = skipped_checks(skip)
@@ -396,6 +402,7 @@ def run_validation(
             content_type=content_type if content_type in _AGENT_ARTIFACT_CONTENT_TYPES else None,
             skillspector_reference_root=target_path if content_type == CONTENT_TYPE_PLUGIN else None,
             skillspector_baseline=skillspector_baseline,
+            target_root=target_root,
         )
         return [_run_result("security", "Security Scan", v.description, v.validate_security_only)]
 
@@ -437,9 +444,9 @@ def run_validation(
 
     # (check name, builder, applies-to-this-content-type). Quality scoring and
     # script linting are skill-oriented and skipped for rules/workflows. Finding
-    # severities (incl. the LICENSE.* / CVE findings added below) are normalized
-    # centrally by the active policy in emit_reports, so they honor the
-    # selected validation profile.
+    # severities (incl. the LICENSE.* and DEPENDENCY.* advisory findings added
+    # below) are normalized centrally by the active policy in emit_reports, so
+    # they honor the selected validation profile.
     steps = (
         ("schema", _schema_results, True),
         ("version", _version_results, skill_like),
@@ -615,6 +622,7 @@ def emit_reports(
     policy: ValidationPolicy | None = None,
     target_path: str | None = None,
     expected_skill_name: str | None = None,
+    explicit_skill_name: str | None = None,
     content_label: str = "Skill",
     announce_paths: bool = True,
     sarif_scan_root: Path | None = None,
@@ -633,6 +641,10 @@ def emit_reports(
     forwarded to the HTML reporter so the report shows a Target link and the
     correct content noun. HTML navigation tabs are derived from the tiers
     present in *results*, matching SkillEvaluator's combined report.
+
+    The JSON report records *target_path* too. *explicit_skill_name* names
+    the one skill a single-skill run validated, so the JSON ``skills`` list
+    names it even when no finding path or quality score does.
     """
     if policy is not None:
         apply_policy(results, policy)
@@ -665,6 +677,12 @@ def emit_reports(
             reporter = reporter_cls(
                 workspace_root=sarif_repository_root,
                 scan_root=sarif_scan_root,
+            )
+        elif fmt == "json":
+            reporter = reporter_cls(
+                expected_skill_name=expected_skill_name,
+                target_path=target_path,
+                explicit_skill_name=explicit_skill_name,
             )
         else:
             reporter = reporter_cls(expected_skill_name=expected_skill_name)

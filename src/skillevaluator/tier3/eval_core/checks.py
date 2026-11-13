@@ -2939,10 +2939,11 @@ _FINDING_EVIDENCE_COOKIE_HEADER_RE = re.compile(
 )
 # A flag value: quoted (to its closing quote or the end of the line, also
 # JSON-escaped inside a shell string) or one word, which may hold escaped
-# spaces ("correct\ horse"). A masked private key is one value, although its
-# marker holds spaces. A word never starts at a shell operator: in
-# "git config --get github.token | curl ..." or "gh auth login --with-token <
-# token.txt" the flag or key has no value on the command line.
+# spaces ("correct\ horse"). A backslash escapes the next character in a
+# double-quoted value, so "pa\"ss" is one value. A masked private key is one
+# value, although its marker holds spaces. A word never starts at a shell
+# operator: in "git config --get github.token | curl ..." or "gh auth login
+# --with-token < token.txt" the flag or key has no value on the command line.
 _FINDING_EVIDENCE_FLAG_VALUE = (
     "(?:"
     + _FINDING_EVIDENCE_PRIVATE_KEY_MARKER
@@ -3205,8 +3206,8 @@ def _redact_finding_evidence(text: Any, limit: int = 500) -> str:
 
 def _mask_finding_evidence_credentials(text: str) -> str:
     """Mask supported credential forms without imposing a caller's evidence budget."""
-    # Shell continuations can join an attached password to its flag.
-    # before matching credential values. Ordinary line breaks stay intact.
+    # Remove shell continuations before matching values: they can join an
+    # attached password to its flag. Ordinary line breaks stay intact.
     text = _LINE_CONTINUATION_RE.sub("", text)
     redacted = _FINDING_EVIDENCE_PRIVATE_KEY_RE.sub(_FINDING_EVIDENCE_PRIVATE_KEY_MARKER, text)
     redacted = _FINDING_EVIDENCE_URL_USERINFO_RE.sub(r"\1<redacted>@", redacted)

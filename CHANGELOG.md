@@ -81,6 +81,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Update the managed SkillSpector scanner and Tier 1 CI image from 2.13.3 to
+  the latest release, 2.13.4, with matching verified wheel and source hashes.
+  This fixes false LP1 findings for scoped `allowed-tools` grants and improves
+  recovery of malformed LLM responses. SkillSpector 2.13.4 can still report
+  JSON files containing a `timeout` key as partial analysis; those scans
+  remain incomplete rather than being treated as successful.
+
 - The `default` policy no longer blocks a skill for its author attribution,
   because the Agent Skills baseline requires only `name` and `description`
   (#43). A missing `metadata.author` is now a LOW advisory, and a person, team,

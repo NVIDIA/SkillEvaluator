@@ -261,23 +261,29 @@ All notable changes to SkillEvaluator are documented in this file.
   as an unverified case ID in every report and recorded under
   `token_usage.case_id_validation`, rather than being shown as coverage of a
   dataset case; a table that shows no such row, because it renders no case rows
-  or its row caps dropped them, names the unmatched case IDs instead.
+  or its row caps dropped them, names the unmatched case IDs instead. Hidden
+  case names receive the same Markdown escaping, publication-label masking and
+  terminal secret redaction as visible rows, before their displayed length is
+  bounded.
 - The Tier 3 security scan no longer scores an agent clearing its own output
   directory as a destructive command. One literal, recursive and forced `rm` of
-  a path inside the agent's output directory is cleanup. That directory is the
-  `output` directory of the directory the trace starts in, so no later `cd` or
-  `workdir` can name another one; the directory itself, anything outside it, a
-  sensitive or protected path, anything below the top level once the trace has
-  created a symbolic link, and every compound, globbed or dynamic command form
-  still score as before.
+  a path inside `/workspace/output` or an output directory established by the
+  trusted staged runtime configuration is cleanup. A tool call's first or
+  later `cwd`/`workdir` and shell directory changes cannot establish another
+  owned root. The directory itself, sensitive or protected paths, compound,
+  globbed, parent-escaping or dynamic forms retain conservative scoring.
+  After observed symlink creation, only an unadorned direct leaf can qualify;
+  unknown command directories cannot qualify. Literal quoting is inert
+  because expansions and escapes are rejected before operands are parsed.
 - The Tier 3 security scan no longer reads the license URL in a source file's
   copyright header as data exfiltration. A `http://` or `https://` URL on a
-  comment line of a license or copyright notice is prose, so the header's own
-  URL no longer makes a long file write look like an upload; a URL the file
-  writes outside such a notice, a docstring link for instance, is still read as
-  before. A curl, wget or httpie word keeps its meaning wherever it appears,
-  including inside a notice, and a comment leader that is also executable shell
-  (`*)`, `--`, `;`, `%`, `//cmd`) never starts a notice.
+  comment line of a license or copyright notice is prose within recognized
+  shell comments and bounded, simple literal file-write actions (`cat`, `tee`
+  or `apply_patch` heredocs). Expanding shell strings and heredocs cannot claim
+  an inert notice context. Other URLs, including docstring links, and mixed or
+  uncertain shell actions retain conservative oversized-action handling. A
+  curl, wget or httpie word keeps its meaning wherever it appears, including
+  inside a notice; executable shell leaders cannot borrow a notice either.
 - A failed Tier 3 execution (for example a backend launch failure) now marks the
   report payload, its summary and the affected agents as failed with their
   errors, instead of only the top-level `result.json`. A report re-rendered by
@@ -711,6 +717,15 @@ All notable changes to SkillEvaluator are documented in this file.
   the Large skill finding, the HTML report and the docs, and adds
   `metrics.estimated_tokens` and `metrics.estimate_method` to the quality JSON.
   `metrics.total_tokens` keeps the same value and scoring is unchanged.
+
+- Tier 1 skill-type detection and the script-based checks recognise Node scripts
+  (`.mjs`, `.cjs`, `.js`) under `scripts/` and `tools/`, so a Node-script skill
+  is no longer typed guide-only. A skill whose scripts are all Node scripts is not
+  asked for a `run_script` call; one that also bundles Python or shell scripts
+  keeps the check. Script lint still parses Python only and reports how many Node
+  scripts it did not lint. The rubric judge also receives Node scripts and files
+  from `tools/`. Scores of Node-script skills can change because they now get the
+  script-based checks.
 
 - Name Skill Lift as the headline comparison and label pass@k differences as
   supporting reliability across reports and terminal output.

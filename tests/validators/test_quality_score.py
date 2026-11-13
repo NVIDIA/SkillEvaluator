@@ -1563,7 +1563,9 @@ class TestReliabilityErrorHandlingConfig:
         silent_skill = _write_issue_skill(tmp_path, name="probe-a", troubleshooting="Check the output directory.")
         mentioning_skill = _write_issue_skill(tmp_path, name="probe-b", troubleshooting="Report the error.")
 
-        silent = _validate_with(silent_skill, tmp_path, "expected_headers: []\nerror_handling: {mentioned: {points: 0}}\n")
+        silent = _validate_with(
+            silent_skill, tmp_path, "expected_headers: []\nerror_handling: {mentioned: {points: 0}}\n"
+        )
         mentioning = _validate_with(mentioning_skill, tmp_path, "expected_headers: []\n")
 
         assert MENTION_MESSAGE not in [message for message, _ in _reliability_issues(silent)]
@@ -1619,7 +1621,9 @@ class TestReliabilityErrorHandlingConfig:
 
         result = _validate_with(skill_dir, tmp_path)
 
-        lib_issues = [(m, d) for m, d in _reliability_issues(result) if m.startswith("Lib modules may lack error handling: ")]
+        lib_issues = [
+            (m, d) for m, d in _reliability_issues(result) if m.startswith("Lib modules may lack error handling: ")
+        ]
         assert len(lib_issues) == 1 and lib_issues[0][1] == 5
         names = lib_issues[0][0].removeprefix("Lib modules may lack error handling: ").split(", ")
         assert len(names) == 3 and set(names) < {"a.py", "b.py", "c.py", "d.py"}
@@ -1647,7 +1651,9 @@ class TestReliabilityErrorHandlingConfig:
 
         assert result.metadata["quality_scores"]["metrics"]["has_error_handling"] is True
 
-    @pytest.mark.parametrize("text", ["Check the exit\ncode first.", "Check the exit  code first.", "Check the exit\r\n  code."])
+    @pytest.mark.parametrize(
+        "text", ["Check the exit\ncode first.", "Check the exit  code first.", "Check the exit\r\n  code."]
+    )
     def test_multi_word_custom_terms_match_across_wrapped_or_repeated_whitespace(self, tmp_path: Path, text: str):
         skill_dir = _write_issue_skill(tmp_path, troubleshooting=text)
         config = 'expected_headers: []\nerror_handling:\n  mentioned:\n    terms: ["exit code"]\n'
@@ -1752,3 +1758,50 @@ def test_html_report_labels_the_token_count_as_an_estimate(tmp_path):
     html = HTMLReporter(include_timestamp=False, explicit_skill_name="estimate-skill").render(result)
 
     assert "Est. tokens (characters/4):" in html
+
+
+def _script_skill(tmp_path, script_name, instructions):
+    skill = tmp_path / "scripted-skill"
+    (skill / "scripts").mkdir(parents=True)
+    (skill / "scripts" / script_name).write_text(
+        "console.log('hi')\n" if script_name.endswith(("js", "mjs")) else "print('hi')\n"
+    )
+    (skill / "SKILL.md").write_text(
+        "---\nname: scripted-skill\ndescription: Runs a bundled script. Use when the user asks for it.\n---\n\n"
+        "# Scripted skill\n\n## Available Scripts\n\n| Script | Purpose | Arguments |\n| --- | --- | --- |\n"
+        f"| {script_name} | Does the work | input |\n\n## Instructions\n\n{instructions}\n"
+    )
+    return skill
+
+
+def _messages(skill):
+    return [finding.message for finding in QualityScoreValidator().validate(skill).findings]
+
+
+def test_node_only_skill_is_not_asked_for_run_script(tmp_path):
+    skill = _script_skill(tmp_path, "run.mjs", "Use the bundled script to process the file.")
+
+    assert not any("run_script" in message for message in _messages(skill))
+
+
+def test_node_only_skill_still_needs_its_scripts_documented_in_a_table(tmp_path):
+    skill = _script_skill(tmp_path, "run.mjs", "Use the bundled script to process the file.")
+    (skill / "SKILL.md").write_text(
+        "---\nname: scripted-skill\ndescription: Runs a bundled script. Use when the user asks for it.\n---\n\n"
+        "# Scripted skill\n\n## Instructions\n\nRun `node scripts/run.mjs input.txt`.\n"
+    )
+
+    assert any("No documented scripts in table format" in message for message in _messages(skill))
+
+
+def test_skill_with_python_and_node_scripts_still_needs_run_script(tmp_path):
+    skill = _script_skill(tmp_path, "run.mjs", "Use the bundled scripts to process the file.")
+    (skill / "scripts" / "helper.py").write_text("print('hi')\n")
+
+    assert any("Instructions don't mention 'run_script'" in message for message in _messages(skill))
+
+
+def test_python_script_skill_still_needs_run_script(tmp_path):
+    skill = _script_skill(tmp_path, "run.py", "Run `node scripts/run.py` and show the output.")
+
+    assert any("Instructions don't mention 'run_script'" in message for message in _messages(skill))

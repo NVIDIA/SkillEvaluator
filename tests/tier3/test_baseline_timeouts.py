@@ -51,6 +51,14 @@ LAUNCH_ERROR = "{agent} without-skill Harbor run failed: Harbor job did not comp
 ADC_LAUNCH_ERROR = (
     "opencode without-skill Harbor run failed: Harbor job exceeded Google ADC token lifetime (3300s) in gke mode"
 )
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _doc_block(name: str, lead: str) -> str:
+    """Return the one blank-line separated block of ``name`` that starts with ``lead``, whitespace-normalized."""
+    blocks = [" ".join(block.split()) for block in (REPO_ROOT / name).read_text(encoding="utf-8").split("\n\n")]
+    [block] = [block for block in blocks if block.startswith(lead)]
+    return block
 
 
 # -- synthetic arm-level Harbor jobs ------------------------------------------
@@ -918,6 +926,22 @@ def test_terminal_findings_panel_never_shows_a_tolerated_agent(
         # Without tolerance the one activated agent keeps its panel, as on main.
         assert f"{SKILL} / {panel_agent} — Findings" in printed
         assert written == [panel_agent]
+
+
+@pytest.mark.parametrize("tolerate", [True, False], ids=["tolerated", "default"])
+def test_failed_baseline_fails_the_run_unless_tolerated_and_the_docs_say_so(tmp_path: Path, tolerate: bool) -> None:
+    """The baseline arm stays failed either way; only the option keeps the agent and the run."""
+    results = _collect(tmp_path, _two_agent_jobs(tmp_path / "jobs"), tolerate_baseline_timeouts=tolerate)
+
+    payload, _benchmark, _html = _render_reports(tmp_path, results)
+
+    (notice,) = payload["coverage_notices"]
+    assert (notice["agent"], notice["code"], notice["state"]) == ("opencode", "baseline_failed", "incomplete")
+    assert payload["execution_status"] == ("succeeded" if tolerate else "failed")
+    assert ("The agent and the Tier 3 run are marked failed." in notice["message"]) is not tolerate
+    block = _doc_block("docs/reports.mdx", "An arm that ran but failed")
+    assert "fails the agent and the run unless `--tolerate-baseline-timeouts` keeps the agent scored" in block
+    assert "[Baseline timeouts](/skills/skillevaluator/tier3-live-evaluation#baseline-timeouts)" in block
 
 
 @pytest.mark.parametrize("kwargs", [{"grading_mode": "custom_only"}, {"skip_baseline": True}])

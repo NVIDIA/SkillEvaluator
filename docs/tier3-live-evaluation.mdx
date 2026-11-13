@@ -58,6 +58,12 @@ human-readable dimensions:
 In `custom_only` mode, your own grader defines the score instead — see
 [Custom Graders & Tasks](/skills/skillevaluator/custom-graders).
 
+For the exact formula behind every one of these numbers — each dimension, the
+Overall Score, Skill Lift and pass@k, with its range, units, the checks or
+judges that produce it, and how to recompute it from the JSON report — see the
+[Metrics Reference](/skills/skillevaluator/metrics-reference). It also states which
+values carry LLM judge variance and what the project has and has not validated.
+
 If every positive with-skill trial has a confirmed activation score of zero,
 the result is **INCONCLUSIVE: skill never activated**. Tier 3 keeps the arm
 scores for inspection but omits lift comparisons and skill-quality advice for
@@ -1640,6 +1646,10 @@ Artifacts record this contract as
 `score_policy: skill-evaluator-dimension-mean-v1`. Legacy metric sets and
 historical partial reports retain their recorded scoring semantics instead of
 being silently reinterpreted.
+
+The [Metrics Reference](/skills/skillevaluator/metrics-reference) works through each
+sub-check behind the six evaluator scores, the arithmetic above them, and a
+worked example you can check against one trial's `reward.json`.
 
 ## Cost limits
 

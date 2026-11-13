@@ -397,6 +397,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     Grades are A for scores of at least 90, B for at least 80, C for at least 70, D for at least 60, and F below 60. The default `--min-score` is 70. Passing requires the score to reach that minimum and no HIGH or CRITICAL quality findings under the active policy.
 
+    Each category starts at 100 and loses a fixed number of points per triggered finding. The [Metrics Reference](/skills/skillevaluator/metrics-reference#tier-1-quality-score) gives the composite formula, the deduction behind every finding, and how this 0–100 score differs from the similarly named Tier 3 dimensions.
+
     The minimum score is an independent gate. Policy severity overrides cannot
     waive it, and a collection average cannot hide an individual skill below
     the minimum. A below-minimum result includes a diagnostic such as

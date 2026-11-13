@@ -2117,6 +2117,10 @@ reviewed source revision.
 
 ### Fixed
 
+- Plugin CLI preflight uses bounded, no-follow configuration loading for both
+  plugin directories and explicit manifests. Combined validation binds plugin
+  scores and runtime evidence to the returned run, retains partial scores when
+  latest changes, and never borrows another run's scores for missing artifacts.
 - Harbor local mode keeps exclusion and filtered download archives inside the
   allowed run directory, so pinned Harbor 0.25 transfers copy selected file
   contents without granting host `/tmp` access. Filters retain exact protected

@@ -4951,7 +4951,7 @@ def check_error_recovery(
             record, end = json.JSONDecoder().raw_decode(observation)
         except (ValueError, RecursionError):
             return None
-        if exit_status_re.sub("", observation[end:]).strip():
+        if _EXIT_STATUS_RE.sub("", observation[end:]).strip():
             return None  # text after the record may be a diagnostic
         while isinstance(record, dict) and not isinstance(record.get("output"), str):
             nested = [item for item in record.values() if isinstance(item, dict)]

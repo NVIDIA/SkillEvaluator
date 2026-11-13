@@ -9,11 +9,13 @@ entropy-based detection and 200+ pre-built patterns.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import ClassVar
 
 from skillevaluator.constants import SCAN_EXCLUDED_DIRS
+from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.utils.tool_runner import (
     GITLEAKS_FINDINGS_EXIT_CODE,
     Severity,
@@ -24,10 +26,44 @@ from skillevaluator.utils.tool_runner import (
 from skillevaluator.validators.base import Finding, ValidationResult, ValidatorBase
 
 # Directory names Gitleaks skips at any depth. Unlike the file-walk scans, it
-# keeps ``evals/`` and ``.evals/`` in scope: evals.json, graders and task input
-# files are authored and published with the skill. Generated output below them,
-# such as ``evals/results/``, still matches the ``results`` entry.
+# keeps ``evals/`` in scope because evals.json, graders and task inputs are
+# authored and published with the skill. ``.evals/`` is treated the same way,
+# as SkillSpector treats it. Generated output below either, such as
+# ``evals/results/``, still matches the ``results`` entry.
 _GITLEAKS_EXCLUDED_DIRS = SCAN_EXCLUDED_DIRS - {"evals", ".evals"}
+
+
+def _eval_results_case_aliases(scan_root: Path) -> list[tuple[str, str]]:
+    """Return differently cased on-disk spellings of the ``evals/results`` directory.
+
+    Tier 3 writes its output to ``evals/results``. On a case-insensitive
+    filesystem that path opens an existing ``evals/Results`` (or
+    ``Evals/Results``), which the publication digest and the file-walk scans
+    also treat as generated output. Gitleaks matches path patterns case
+    sensitively, so each such spelling needs its own allowlist entry. On a
+    case-sensitive filesystem it is a separate, authored directory and stays
+    scanned.
+    """
+    aliases: list[tuple[str, str]] = []
+    try:
+        with os.scandir(scan_root) as entries:
+            evals_names = [
+                entry.name
+                for entry in entries
+                if entry.is_dir(follow_symlinks=False) and matches_filesystem_name(scan_root / entry.name, ("evals",))
+            ]
+        for evals_name in evals_names:
+            with os.scandir(scan_root / evals_name) as entries:
+                aliases.extend(
+                    (evals_name, entry.name)
+                    for entry in entries
+                    if entry.name != "results"
+                    and entry.is_dir(follow_symlinks=False)
+                    and matches_filesystem_name(scan_root / evals_name / entry.name, ("results",))
+                )
+    except OSError:
+        return []
+    return sorted(aliases)
 
 
 class SecretsValidator(ValidatorBase):
@@ -114,7 +150,7 @@ tags = ["nvidia", "api-key"]
             source = "." if scan_is_dir else f"./{scan_root.name}"
             cwd = scan_root if scan_is_dir else scan_root.parent
 
-        config_path = self._create_gitleaks_config()
+        config_path = self._create_gitleaks_config(scan_root if scan_root.is_dir() else None)
         try:
             tool_result = Tools.gitleaks.run(
                 [
@@ -185,7 +221,7 @@ tags = ["nvidia", "api-key"]
 
         return result
 
-    def _create_gitleaks_config(self) -> Path:
+    def _create_gitleaks_config(self, scan_root: Path | None = None) -> Path:
         """Create Gitleaks config with NVIDIA rules and allowlists.
 
         Generated output dirs (results/, versions/ and their dot forms) hold
@@ -193,15 +229,20 @@ tags = ["nvidia", "api-key"]
         credentials, and dependency or cache dirs are not skill content;
         gitleaks has to skip them via config since it takes no exclude flag.
         Authored ``evals/`` files stay in scope; ``evals/results/`` is skipped
-        by the ``results`` entry.
+        by the ``results`` entry, and, for a directory *scan_root*, by its
+        on-disk spelling when the filesystem ignores case.
 
         Test/example/fixture/mock skips are directory path components, not
         substrings. ``(.*)?test(.*)?`` would also skip ``latest`` and
         ``attestation``.
         """
-        artifact_paths = "\n".join(
-            f"    '''(^|/){re.escape(name)}(/|$)'''," for name in sorted(_GITLEAKS_EXCLUDED_DIRS)
-        )
+        patterns = [f"(^|/){re.escape(name)}(/|$)" for name in sorted(_GITLEAKS_EXCLUDED_DIRS)]
+        if scan_root is not None:
+            patterns += [
+                f"(^|/){re.escape(evals_name)}/{re.escape(results_name)}(/|$)"
+                for evals_name, results_name in _eval_results_case_aliases(scan_root)
+            ]
+        artifact_paths = "\n".join(f"    '''{pattern}'''," for pattern in patterns)
         config = f"""
 [extend]
 useDefault = true

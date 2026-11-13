@@ -154,7 +154,9 @@ All notable changes to SkillEvaluator are documented in this file.
   the request model, which made such a model unusable for LLM checks and as a
   Tier 3 judge. A fallback equal to the request model is no longer sent. The
   default is unchanged. The Harbor verifier receives the variable like
-  `LLM_JUDGE_FALLBACK_MODELS`; its Bedrock refusal retry uses it too.
+  `LLM_JUDGE_FALLBACK_MODELS`; its Bedrock refusal retry uses it too, adding
+  the judge model's geography prefix to a bare name and using a full Bedrock
+  ID as given. The reusable CI workflows do not take the variable.
 
 - Folder validation preserves author and metadata ID advisories from passing
   skills. Catalog summaries include duplicate ID severity counts and consistent

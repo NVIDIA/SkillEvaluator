@@ -333,6 +333,17 @@ jq -e '([.quality_summary[]?.overall_score] | min // 100) >= 80' "$report"
     evidence. See the workflow above or
     [Installation: System tools](/skills/skillevaluator/installation#system-tools).
   </Accordion>
+  <Accordion title="Claude answers HTTP 400 'is not a valid fallback target'">
+    The reusable SkillEvaluator workflows pass only their documented inputs
+    (provider, model, base URL, and keys) to the provider-backed tiers, so a
+    `SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL` or `LLM_JUDGE_FALLBACK_MODELS` set
+    in the calling job does not reach them. Choose a Claude model that accepts
+    the default `claude-opus-4-8` fallback there. A pipeline that runs the CLI
+    directly, as in the recipe above, can set
+    `SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL` in the step environment, or `none`
+    to send no fallback. See
+    [Environment variables](/skills/skillevaluator/environment-variables).
+  </Accordion>
   <Accordion title="The report artifact is empty">
     Make sure the artifact `path` matches your `-o` directory and that the upload step carries `if: always()` — otherwise a failed gate skips the upload, and you lose the report exactly when you need it.
   </Accordion>

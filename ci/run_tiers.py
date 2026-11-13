@@ -276,7 +276,7 @@ def native_tier3(skill: Path, output: Path, env: dict) -> int:
     result.metadata["evaluated_source"] = options.evaluated_source
     if service.failure_reason(engine):
         result.mark_scan_incomplete("Tier 3 execution")
-    document = JSONReporter(expected_skill_name=skill.name).render_all([result])
+    document = JSONReporter(expected_skill_name=skill.name, explicit_skill_name=skill.name).render_all([result])
     (output / "skillevaluator-tier3.json").write_text(document, encoding="utf-8")
     return int(resolve_run_status([result]).headline.value != "passed")
 

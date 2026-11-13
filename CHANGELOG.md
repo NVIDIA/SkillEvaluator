@@ -81,6 +81,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Install Bandit with the base package, so `pip install skillevaluator` or
+  `uv tool install skillevaluator` runs every default Tier 1 check without an
+  extra. pip-audit, used only by the opt-in dependency audit
+  (`--check dependency`), stays in the `security` extra. The Bandit install hint
+  now says to reinstall SkillEvaluator.
 - Root help shows the SkillEvaluator wordmark in more terminals: the
   one-line wordmark still needs 115 columns, 76-114 columns now get the same
   letters stacked (SKILL over EVALUATOR), and 60-75 columns get a two-row
@@ -90,6 +95,12 @@ All notable changes to SkillEvaluator are documented in this file.
   columns.
 
 ### Documentation
+
+- The README opens with a three-column **Get started** section: run the CLI
+  directly (`pip install skillevaluator`, then
+  `skillevaluator validate ./my-skill --tiers 1`), add checks to your repository
+  with `skillevaluator ci init` or a CI template, or install the agent skill with
+  `npx skills add NVIDIA/SkillEvaluator`.
 
 - A new Metrics Reference page defines every number the CLI, HTML report, JSON
   report and `BENCHMARK.md` show: the six Tier 3 evaluator signals, the five
@@ -148,6 +159,18 @@ All notable changes to SkillEvaluator are documented in this file.
   `/bin/bash -lc 'cat skills/x/SKILL.md'`, which some agent harnesses record
   instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL
   config.json'`) are still not counted.
+
+- `validate` Tier 1 output: when only the `--llm` / `--llm-verify` stage
+  can't run, `what to fix` gives the exact `export` lines for the missing
+  provider or key instead of a scanner install or `--skip security`, and the
+  scanners row keeps the scanner version (`SkillSpector 2.12.0, LLM didn't
+  run`). A missing SkillSpector or a rejected baseline under `--llm` still
+  gets the scanner fix, and a `SKILLSPECTOR_PROVIDER` adapter set directly
+  gets advice for its own key instead of the public provider's. The summary
+  row now also gives the sub-check count (`9/10 checks passed (22
+  sub-checks)`). It counts validators, as the `Tier 1: 9 of 10 checks passed`
+  verdict line under it does, so the two agree, including with `--skip` and
+  `--fail-fast`.
 
 - A Tier 1 security scan with SkillSpector v2.12.0 or later no longer stops as
   `INCOMPLETE` ("Security Scan didn't run") with

@@ -12,6 +12,11 @@ All notable changes to SkillEvaluator are documented in this file.
   comment helpers, and needs no Pages configuration or history branch. Future
   generated bundles include the template; archived bundles and the released
   onboarding CLI retain their existing hosted publisher setup.
+- `harness` rules for where `SKILL.md` lives: casing, nested manifests, symlinked
+  manifests and resources, OpenClaw symlink escapes, Codex scan depth, and files
+  Hermes leaves out of its file list. Tier 1 `schema` now reports a symlinked or
+  nested `SKILL.md` (MEDIUM), and the `skill.md` naming finding explains the
+  macOS/Linux difference.
 - `harness` rules for descriptions: missing or empty descriptions, Claude Code and
   Codex listing cuts, Copilot CLI's 1,024 UTF-16 unit limit, quotes escaped in the
   Copilot CLI and OpenClaw lists, and Hermes's 60-character listing; `-v` shows

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import ast
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,7 +13,7 @@ from typing import Any
 
 import yaml
 
-from skillevaluator.constants import DESCRIPTION_TRIGGER_PATTERN, SKILL_MANIFEST_VARIANTS
+from skillevaluator.constants import DESCRIPTION_TRIGGER_PATTERN, SKILL_MANIFEST_VARIANTS, SKILL_NOT_SHIPPED_DIRS
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 from skillevaluator.validators.schema import _duplicate_frontmatter_keys
 
@@ -159,12 +160,68 @@ def _tab_indent_breaks_yaml(fm_yaml: str) -> bool:
     return False
 
 
+def _shipped_paths(skill_path: Path) -> list[Path]:
+    """Files and symlinks a skill ships, without descending into VCS or cache folders."""
+    found = []
+    for folder, dirs, files in os.walk(skill_path):
+        dirs[:] = [d for d in dirs if d not in SKILL_NOT_SHIPPED_DIRS]
+        here = Path(folder)
+        found.extend(here / name for name in files)
+        found.extend(here / name for name in dirs if (here / name).is_symlink())
+    return sorted(found)
+
+
+def _bundle_files(skill_path: Path, manifest: Path) -> list[Path]:
+    return [path for path in _shipped_paths(skill_path) if path != manifest]
+
+
+_HERMES_LINKED_DIRS = ("references", "templates", "assets", "scripts")
+
+
+def _paths(items: list[str]) -> str:
+    return ", ".join(items[:3]) + (f" +{len(items) - 3} more" if len(items) > 3 else "")
+
+
+def _bundle_facts(skill_path: Path, manifest: Path) -> dict[str, Any]:
+    base = skill_path.resolve()
+    links, escapes, unlisted = [], [], []
+    for path in _bundle_files(skill_path, manifest):
+        rel = path.relative_to(skill_path).as_posix()
+        if path.is_symlink():
+            links.append(rel)
+            target = path.resolve()
+            if target != base and base not in target.parents:
+                escapes.append(rel)
+            continue
+        if rel.split("/", 1)[0] not in _HERMES_LINKED_DIRS:
+            unlisted.append(rel)
+    return {
+        "resource_symlinks": len(links),
+        "resource_symlink_paths": _paths(links),
+        "resource_symlink_escapes": len(escapes),
+        "resource_symlink_escape_paths": _paths(escapes),
+        "hermes_unlisted_files": len(unlisted),
+        "hermes_unlisted_dirs": _paths(list(dict.fromkeys(rel.split("/", 1)[0] for rel in unlisted))),
+    }
+
+
 def skill_facts(skill_path: Path) -> dict[str, Any]:
     """Compute the facts profile rules refer to."""
     manifest, raw, text, fm_yaml, data = _read_manifest(skill_path)
     description = data.get("description")
     trigger = _TRIGGER_RE.search(description) if isinstance(description, str) else None
     root, depth = _install_root(skill_path)
+    target = "none"
+    if skill_path.is_symlink():
+        resolved = skill_path.resolve()
+        base = (Path(*_link_location_parts(skill_path)).parents[depth] if root else skill_path.parent).resolve()
+        target = "inside_root" if base in resolved.parents else "outside_root"
+    names = {p.name for p in skill_path.iterdir()} if skill_path.is_dir() else set()
+    nested = (
+        [p for p in _shipped_paths(skill_path) if p.name in SKILL_MANIFEST_VARIANTS and p.parent != skill_path]
+        if skill_path.is_dir()
+        else []
+    )
     custom = {k: v for k, v in data.items() if str(k) not in _KNOWN_FIELDS}
     name = _skill_name(skill_path, data)
     return {
@@ -172,6 +229,11 @@ def skill_facts(skill_path: Path) -> dict[str, Any]:
         "description_text": description if isinstance(description, str) else "",
         "install_root": root,
         "grouping_depth": depth,
+        "manifest_name_exact": "SKILL.md" in names,
+        "nested_skill_md": bool(nested),
+        "nested_skill_md_exact": any(p.name == "SKILL.md" and not p.is_symlink() for p in nested),
+        "skill_md_symlink": manifest.is_symlink(),
+        "skill_dir_symlink_target": target,
         "frontmatter_missing": manifest.is_file() and FRONTMATTER_PATTERN.match(text) is None,
         "description_missing": "description" not in data,
         "description_empty": isinstance(description, str) and not description.strip(),
@@ -188,6 +250,7 @@ def skill_facts(skill_path: Path) -> dict[str, Any]:
         "custom_field_chars": sum(len(v) if isinstance(v, str) else len(yaml.safe_dump(v)) for v in custom.values()),
         "description_over": max(0, (len(description) if isinstance(description, str) else 0) - 1024),
         "utf16_over": max(0, (_utf16_units(description)) - 1024),
+        **_bundle_facts(skill_path, manifest),
     }
 
 

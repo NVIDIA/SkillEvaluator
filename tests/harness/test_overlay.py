@@ -16,6 +16,7 @@ from skillevaluator.models.result import Severity
 from skillevaluator.reporting.console_ui import final_check_ticker_row, summarize_tier1
 from skillevaluator.tier1.commands import DEFAULT_CHECKS, run_validation
 from skillevaluator.validators.harness import HarnessValidator
+from skillevaluator.validators.schema import SchemaValidator
 
 HARNESSES = ["claude-code", "codex", "copilot-cli", "hermes", "openclaw", "opencode"]
 BODY = "\n# Demo\n\n## Instructions\n\n1. Step\n\n## Examples\n\nExample.\n"
@@ -96,6 +97,17 @@ def test_copilot_shows_body_for_missing_description_but_drops_non_string(tmp_pat
     assert "CP-DESC-MISSING" in _ids(rows, "copilot-cli") and "CP-STRICT-YAML" not in _ids(rows, "copilot-cli")
     listed = _skill(tmp_path / "list", desc="[a, b]")
     assert "CP-STRICT-YAML" in _ids(_rows(listed), "copilot-cli")
+
+
+def test_symlinked_manifest(tmp_path: Path):
+    skill = _skill(tmp_path)
+    target = tmp_path / "real.md"
+    (skill / "SKILL.md").rename(target)
+    (skill / "SKILL.md").symlink_to(target)
+
+    status = _status(skill)
+
+    assert {h for h, s in status.items() if s == "not_loaded"} == {"codex", "hermes", "openclaw"}
 
 
 def test_install_root_only_applies_inside_known_harness_roots(tmp_path: Path):
@@ -320,6 +332,20 @@ def test_listed_description_projection(tmp_path: Path):
     assert rows["opencode"]["listed"]["mode"] == rows["openclaw"]["listed"]["mode"] == "full"
 
 
+def test_bundle_files_symlinks_and_large_references(tmp_path: Path):
+    skill = _skill(tmp_path)
+    (skill / "references").mkdir()
+    (skill / "references" / "big.md").write_text("line\n" * 20000)
+    outside = tmp_path / "shared.md"
+    outside.write_text("shared")
+    (skill / "references" / "shared.md").symlink_to(outside)
+    facts = skill_facts(skill)
+    rows = _rows(skill)
+
+    assert facts["resource_symlinks"] == facts["resource_symlink_escapes"] == 1
+    assert "HM-RESOURCE-SYMLINK" in _ids(rows, "hermes")
+
+
 def test_fix_reaches_findings_and_panels(tmp_path: Path):
     skill = _skill(tmp_path, desc="Use when testing emoji. " + "\U0001f600" * 600)
     result = HarnessValidator().validate(skill)
@@ -415,3 +441,49 @@ def test_trigger_cut_at_the_listing_window_counts_as_missing(tmp_path: Path):
     facts = skill_facts(_skill(tmp_path, desc="x" * 55 + " Use when checking harness compatibility."))
 
     assert facts["trigger_end"] > 60
+
+
+def test_grouped_skill_linked_to_a_sibling_group_stays_inside_the_root(tmp_path: Path):
+    root = tmp_path / ".agents" / "skills"
+    real = root / "group-b" / "demo-skill"
+    real.parent.mkdir(parents=True)
+    _skill(tmp_path / "src").rename(real)
+    link = root / "group-a" / "demo-skill"
+    link.parent.mkdir()
+    link.symlink_to(real, target_is_directory=True)
+
+    assert skill_facts(link)["skill_dir_symlink_target"] == "inside_root"
+
+
+def test_nested_manifest_under_evals_is_reported(tmp_path: Path):
+    skill = _rooted(tmp_path)
+    (skill / "evals" / "fixture").mkdir(parents=True)
+    (skill / "evals" / "fixture" / "SKILL.md").write_text("---\nname: fixture\n---\n", encoding="utf-8")
+
+    assert skill_facts(skill)["nested_skill_md"] is True
+
+
+@pytest.mark.parametrize(
+    ("folder", "reported"),
+    [("evals", True), ("versions", True), ("references", True), ("node_modules", False), (".git", False)],
+)
+def test_schema_and_harness_agree_on_where_a_nested_manifest_counts(tmp_path: Path, folder: str, reported: bool):
+    skill = _rooted(tmp_path)
+    (skill / folder / "fixture").mkdir(parents=True)
+    (skill / folder / "fixture" / "SKILL.md").write_text("---\nname: fixture\n---\n", encoding="utf-8")
+
+    schema = [f for f in SchemaValidator().validate(skill).findings if f.check_name == "nested_manifest"]
+
+    assert skill_facts(skill)["nested_skill_md"] is reported
+    assert bool(schema) is reported
+
+
+def test_lowercase_nested_manifest_is_not_a_second_skill_in_codex(tmp_path: Path):
+    skill = _rooted(tmp_path)
+    (skill / "sub").mkdir()
+    (skill / "sub" / "skill.md").write_text("---\nname: sub\n---\n", encoding="utf-8")
+
+    facts = skill_facts(skill)
+    assert facts["nested_skill_md"] is True
+    assert facts["nested_skill_md_exact"] is False
+    assert _status(skill)["codex"] == "loads"

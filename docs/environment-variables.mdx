@@ -131,7 +131,7 @@ These variables tune the static and security checks. The check-by-check guide is
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `SKILLEVALUATOR_PROFILE` | `default` | Validation policy when no `--profile` flag is passed. `external` remains a compatibility alias. The CLI flag always wins. |
+| `SKILLEVALUATOR_PROFILE` | `default` | Validation policy when no `--profile` flag is passed: `default` or `registry`. `external` remains a compatibility alias for `default`. The CLI flag always wins. |
 | `SKILLEVALUATOR_BANDIT_PATH` | auto-discovered | Absolute path to the Bandit executable. |
 | `SKILLEVALUATOR_SEMGREP_PATH` | auto-discovered | Absolute path to the Semgrep executable. |
 | `SKILLEVALUATOR_SKILLSPECTOR_PATH` | auto-discovered | Absolute path to the SkillSpector executable. |

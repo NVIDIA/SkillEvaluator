@@ -258,6 +258,12 @@ PROTECTED_WRITES = [
         _bash("n=$((1 << 4))\ngit commit -m \"Bump flags\n\nIt's ready\"; sed -i 's/a/b/' ~/.gitconfig"),
         id="arithmetic-shift-multiline-message-sed",
     ),
+    # A backslash at the end of a comment does not continue it onto the next line.
+    pytest.param(
+        _bash("# Don't keep the old PATH line \\\nsed -i '/old-path/d' $HOME/.zprofile"),
+        id="comment-apostrophe-backslash",
+    ),
+    pytest.param(_bash('# say "hi \\\necho x >> "$HOME/.zprofile"'), id="comment-double-quote-backslash"),
 ]
 
 # Writes main already flagged through its keyword rule (a protected path and a
@@ -678,6 +684,14 @@ def test_a_url_tilde_user_is_not_a_home_directory() -> None:
         ("n=$((1<<2))\ncat <<'EOF'\nit's here\nEOF\nsed -i 's/a/b/' ~/.zprofile", "~/.zprofile"),
         ('(( y = 1 << 2 ))\ngit commit -m "Bump\n\nIt\'s ready"; echo x | tee -a /home/agent/.zprofile', "~/.zprofile"),
         ("echo $((1 << 2)); cat <<'EOF'\nit's here\nEOF\nsed -i 's/a/b/' ~/.zprofile", "~/.zprofile"),
+        # A comment ends at its line break even after a backslash; a continuation elsewhere joins two lines.
+        ("cat <<'EOF' # it's \\\nbody\nEOF\nsed -i 's/a/b/' ~/.zprofile", "~/.zprofile"),
+        ("bash <<'EOF'\n# it's \\\necho 'a' >> '/home/agent/.bashrc'\nEOF", "~/.bashrc"),
+        ("bash <<'EOF'\ndocker run \\\n  img > \"$HOME/.bashrc\"\nEOF", "~/.bashrc"),
+        # The shell removes the continuations of a body whose delimiter is not quoted, comments included.
+        ("bash <<EOF\n# it's \\\necho 'a' >> '/home/agent/.bashrc'\nEOF", None),
+        # A carriage return does not end a word, so the "#" after one does not start a comment.
+        ("echo It\\'s\r#'\nx'; sed -i 's/a/b/' ~/.zprofile", "~/.zprofile"),
     ],
 )
 def test_sensitive_write_target(command: str, entry: str | None) -> None:

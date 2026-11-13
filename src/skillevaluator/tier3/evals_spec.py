@@ -601,9 +601,10 @@ def _check_dataset(skill_path: Path, results: list[CheckResult]) -> bool:
             CheckResult(
                 "evals/",
                 "missing",
-                "No evals/ directory found. Author evals/EVAL.md guidance or retain matching Tier 3 traces, "
-                "then run skillevaluator create-eval-dataset <path>. For an explicitly skill-derived starter, "
-                "run skillevaluator create-eval-dataset <path> --grounding skill.",
+                "No evals/ directory found. Add task guidance in evals/EVAL.md or pass --prompt, or retain "
+                "matching Tier 3 traces, then run skillevaluator create-eval-dataset <path>. "
+                "For an explicitly skill-derived starter, run "
+                "skillevaluator create-eval-dataset <path> --grounding skill.",
             )
         )
         return False
@@ -627,9 +628,9 @@ def _check_dataset(skill_path: Path, results: list[CheckResult]) -> bool:
             "error",
             "REQUIRED dataset file missing. Accepted names: "
             + ", ".join(f"evals{e}" for e in DATASET_EXTENSIONS)
-            + ". Author evals/EVAL.md guidance or retain matching Tier 3 traces before running "
-            "skillevaluator create-eval-dataset <path>, or explicitly request a skill-derived starter with "
-            "skillevaluator create-eval-dataset <path> --grounding skill.",
+            + ". Add task guidance in evals/EVAL.md or pass --prompt, or retain matching Tier 3 traces "
+            "before running skillevaluator create-eval-dataset <path>. For an explicitly skill-derived starter, "
+            "run skillevaluator create-eval-dataset <path> --grounding skill.",
         )
     )
     return False

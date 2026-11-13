@@ -2832,75 +2832,14 @@ def _judge_retry_feedback(problem):
     )
 
 
-# Judge prompts quote the agent's commands and output, so saved judge evidence
-# also masks credentials that have no fixed key shape: URL userinfo
-# ("https://user:token@host"), Authorization, API-key, token and Cookie header
-# values, and the values of credential flags ("--token VALUE",
-# "curl -u user:password"). Each pattern starts at a fixed literal and scans one
-# bounded run, so long text stays linear. The header patterns accept shell
-# ("-H 'Name: value'"), JSON ('"name": "value"') and Python subscript
-# ('headers["Name"] = f"value"') forms, also with the quotes JSON-escaped
-# ('\"Name\": \"value\"'), as tool-call arguments appear in the behavior and
-# goal prompts.
-_JUDGE_EVIDENCE_URL_USERINFO_RE = re.compile(r"(://)[^\s/?#@'\"`<>]{1,256}@")
-_JUDGE_EVIDENCE_HEADER_SEPARATOR = r"\\?[\"']?\]?[ \t]{0,8}[:=][ \t]{0,8}(?:[bfru]{0,2}\\?[\"'])?"
-# Digest values hold quoted fields (username="...", response="..."), so the rest
-# of the value is masked up to a single quote, a backtick or the end of the line.
-_JUDGE_EVIDENCE_DIGEST_AUTH_HEADER_RE = re.compile(
-    r"(\bauthorization" + _JUDGE_EVIDENCE_HEADER_SEPARATOR + r"digest[ \t]{1,8})[^'`\r\n]{1,512}",
-    re.IGNORECASE,
-)
-# Other Authorization schemes vary (Bearer, Basic, ApiKey, Bot, SSWS, ...), so the
-# whole value is masked up to its closing quote or the end of the line. Bearer,
-# Basic, Token and Digest stay visible because they say which kind of credential
-# was sent, and a quoted token after them ('Bearer "token"') is masked too.
-_JUDGE_EVIDENCE_AUTH_HEADER_RE = re.compile(
-    r"(\bauthorization"
-    + _JUDGE_EVIDENCE_HEADER_SEPARATOR
-    + r"(?:(?:bearer|basic|token|digest)[ \t]{1,8}(?:\\?[\"'])?)?)"
-    r"[^\s'\"`,;\\][^'\"`\r\n\\]*",
-    re.IGNORECASE,
-)
-# X-API-Key, Api-Key, X-Auth-Token, X-Access-Token and Private-Token headers.
-_JUDGE_EVIDENCE_KEY_HEADER_RE = re.compile(
-    r"(\b(?:api-key|auth-token|access-token|private-token)" + _JUDGE_EVIDENCE_HEADER_SEPARATOR + r")"
-    r"[^\s'\"`,;\\]+",
-    re.IGNORECASE,
-)
-# A Cookie header holds "name=value" pairs joined by ";", and every pair is masked.
-_JUDGE_EVIDENCE_COOKIE_HEADER_RE = re.compile(
-    r"(\bcookie" + _JUDGE_EVIDENCE_HEADER_SEPARATOR + r")"
-    r"[^\s'\"`,;\\]+(?:;[ \t]{0,8}[^\s'\"`,;\\]+){0,64}",
-    re.IGNORECASE,
-)
-_JUDGE_EVIDENCE_CREDENTIAL_FLAG_RE = re.compile(
-    r"((?<![^\s'\"])--?(?:password|passwd|token|api-key|apikey|secret|access-token|auth-token)(?:[ \t]{1,8}|=))"
-    r"(?:\"[^\"\r\n]+\"|'[^'\r\n]+'|[^\s'\"`\\]+)",
-    re.IGNORECASE,
-)
-# "-u"/"--user" also name ordinary options (python -u, pip --user), so only a
-# user:password value is masked.
-_JUDGE_EVIDENCE_USER_FLAG_RE = re.compile(
-    r"((?<![^\s'\"])(?:-u|--user)(?:[ \t]{1,8}|=))"
-    r"(?:\"[^\"\r\n:]+:[^\"\r\n]+\"|'[^'\r\n:]+:[^'\r\n]+'|[^\s'\"`:\\]{1,256}:[^\s'\"`\\]+)"
-)
-
-
 def _redact_judge_evidence(text):
     """Mask credentials in a judge prompt, reply, or problem before it is saved."""
-    redacted = _redact_configured_credentials(_redact_evidence_text(text))
+    # Share finding credential semantics without imposing the finding scanner's
+    # 2,000-character input budget on the longer judge prompt and reply budgets.
+    redacted = _shared_checks._mask_finding_evidence_credentials(str(text), preserve_header_format=True)
+    redacted = _redact_configured_credentials(_redact_evidence_text(redacted))
     for pattern in _SECRET_PATTERNS:
         redacted = pattern.sub("<redacted>", redacted)
-    redacted = _JUDGE_EVIDENCE_URL_USERINFO_RE.sub(r"\1<redacted>@", redacted)
-    for pattern in (
-        _JUDGE_EVIDENCE_DIGEST_AUTH_HEADER_RE,
-        _JUDGE_EVIDENCE_AUTH_HEADER_RE,
-        _JUDGE_EVIDENCE_KEY_HEADER_RE,
-        _JUDGE_EVIDENCE_COOKIE_HEADER_RE,
-        _JUDGE_EVIDENCE_CREDENTIAL_FLAG_RE,
-        _JUDGE_EVIDENCE_USER_FLAG_RE,
-    ):
-        redacted = pattern.sub(r"\1<redacted>", redacted)
     return redacted
 
 
@@ -3770,6 +3709,10 @@ def _call_required_judge(metric, judge, *args, allow_not_applicable=False, **kwa
                     except OSError:
                         signal.signal(signal.SIGALRM, previous_alarm_handler)
             result = judge(*args, **kwargs)
+            # Dependency and logging handlers can swallow the alarm exception.
+            # Never accept a result returned after this call's wall-time budget.
+            if time.monotonic() >= deadline:
+                raise TimeoutError("LLM judge time budget exhausted")
         finally:
             if alarm_armed:
                 try:

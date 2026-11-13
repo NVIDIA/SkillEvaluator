@@ -506,6 +506,157 @@ class TestJSONReporter:
         assert data["total_validators"] == 2
         assert len(data["results"]) == 2
 
+    @staticmethod
+    def _clean_schema_result() -> ValidationResult:
+        """A single-skill schema result with no finding, as a clean skill gives."""
+        result = ValidationResult(
+            validator_name="Schema & Repository Governance",
+            validator_description="Validate SKILL.md frontmatter and repository structure",
+        )
+        result.add_success("manifest_exists", "Found skill manifest: SKILL.md")
+        result.add_success("frontmatter_valid", "Valid frontmatter for skill 'simple'")
+        result.add_success("naming_convention", "Folder name 'simple' follows kebab-case convention")
+        return result
+
+    def test_render_all_names_the_explicit_skill_of_a_clean_single_skill_run(self) -> None:
+        data = json.loads(
+            JSONReporter(
+                include_timestamp=False,
+                target_path="https://github.com/example/skills/tree/main/skills/simple",
+                explicit_skill_name="simple",
+            ).render_all([self._clean_schema_result()])
+        )
+
+        assert data["skills"] == [{"name": "simple", "passed": True, "issue_count": 0}]
+
+    def test_render_all_names_the_skill_at_a_local_target_path(self, tmp_path: Path) -> None:
+        skill = tmp_path / "simple"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("---\nname: simple\n---\n", encoding="utf-8")
+
+        data = json.loads(
+            JSONReporter(include_timestamp=False, target_path=str(skill)).render_all([self._clean_schema_result()])
+        )
+
+        assert [entry["name"] for entry in data["skills"]] == ["simple"]
+        assert data["target_path"] == str(skill)
+
+    @pytest.mark.parametrize(
+        ("working_directory", "target"),
+        [
+            ("simple", "."),
+            ("simple", "./"),
+            ("simple/nested", ".."),
+            (".", "simple"),
+            (".", "./simple"),
+            (".", "simple/"),
+            ("simple/nested", "../../simple"),
+        ],
+    )
+    def test_render_all_names_the_skill_for_every_spelling_of_a_local_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, working_directory: str, target: str
+    ) -> None:
+        """``.`` and ``..`` have no folder name of their own; the folder they open does."""
+        skill = tmp_path / "simple"
+        (skill / "nested").mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: simple\n---\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path / working_directory)
+
+        data = json.loads(
+            JSONReporter(include_timestamp=False, target_path=target).render_all([self._clean_schema_result()])
+        )
+
+        assert data["skills"] == [{"name": "simple", "passed": True, "issue_count": 0}]
+        assert data["target_path"] == target
+
+    def test_render_all_does_not_name_a_current_directory_that_holds_no_skill(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        folder = tmp_path / "plain"
+        folder.mkdir()
+        monkeypatch.chdir(folder)
+
+        data = json.loads(
+            JSONReporter(include_timestamp=False, target_path=".").render_all([self._clean_schema_result()])
+        )
+
+        assert "plain" not in [entry["name"] for entry in data["skills"]]
+
+    def test_render_all_records_the_evaluator_version_and_target(self, success_result: ValidationResult) -> None:
+        from skillevaluator import __version__
+
+        target = "https://github.com/example/skills/tree/main/skills/test-skill"
+        data = json.loads(JSONReporter(include_timestamp=False, target_path=target).render_all([success_result]))
+        programmatic = json.loads(JSONReporter(include_timestamp=False).render_all([success_result]))
+
+        assert data["version"] == __version__
+        assert data["target_path"] == target
+        assert programmatic["version"] == __version__
+        assert programmatic["target_path"] is None
+
+    def test_render_all_lists_the_html_top_issues_without_the_html_anchor(
+        self, mixed_results: list[ValidationResult]
+    ) -> None:
+        output = JSONReporter(include_timestamp=False).render_all(mixed_results)
+        data = json.loads(output)
+        html_rows = _html_report_data(HTMLReporter(include_timestamp=False).render_all(mixed_results))["top_issues"]
+
+        assert [(row["message"], row["severity"], row["total_count"]) for row in data["top_issues"]] == [
+            ("AWS Access Key ID detected", "critical", 1),
+            ("Generic API key pattern detected", "high", 1),
+        ]
+        assert all(
+            set(row) == {"message", "severity", "total_count", "skills_affected", "category", "suggestion"}
+            for row in data["top_issues"]
+        )
+        assert data["top_issues"] == [
+            {key: value for key, value in row.items() if key != "issue_key"} for row in html_rows
+        ]
+        # The anchor hashes finding text, which CI redaction cannot refresh.
+        assert all(row["issue_key"] not in output for row in html_rows)
+
+    def test_top_issues_cover_every_tier_while_the_html_panel_lists_tier1(
+        self, success_result: ValidationResult
+    ) -> None:
+        results = [success_result, _similarity_result(severity=Severity.HIGH)]
+
+        data = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+        html = HTMLReporter(include_timestamp=False).render_all(results)
+
+        assert [row["message"] for row in data["top_issues"]] == ["same-name similarity match"]
+        assert data["top_issues"] == [
+            {key: value for key, value in row.items() if key != "issue_key"}
+            for row in _html_report_data(html)["top_issues"]
+        ]
+        # The HTML summary panel lists the Tier 1 rows only.
+        assert "same-name similarity match" not in _html_tab(html, "tier1")
+
+    def test_gating_tiers_record_each_validator_policy(self) -> None:
+        schema = ValidationResult(validator_name="Schema & Repository Governance")
+        schema.metadata["gating"] = {"tier": 1, "blocking": True}
+        blocking_dedup = ValidationResult(validator_name="Context Deduplication")
+        blocking_dedup.metadata["gating"] = {"tier": 2, "blocking": True}
+        advisory_dedup = ValidationResult(validator_name="Inter-Skill Deduplication")
+        advisory_dedup.metadata["gating"] = {"tier": 2, "blocking": False}
+
+        data = json.loads(JSONReporter(include_timestamp=False).render_all([schema, blocking_dedup, advisory_dedup]))
+
+        assert data["gating"]["tiers"] == {
+            "1": {
+                "blocking": True,
+                "validators": ["Schema & Repository Governance"],
+                "validator_policies": [{"validator": "Schema & Repository Governance", "blocking": True}],
+            },
+            "2": {
+                "blocking": True,
+                "validators": ["Context Deduplication", "Inter-Skill Deduplication"],
+                "validator_policies": [
+                    {"validator": "Context Deduplication", "blocking": True},
+                    {"validator": "Inter-Skill Deduplication", "blocking": False},
+                ],
+            },
+        }
+
     def test_render_all_persists_typed_rubric_execution_metadata(self) -> None:
         result = ValidationResult(
             validator_name="RUBRIC_EVAL",
@@ -1156,6 +1307,40 @@ def test_folded_pii_finding_in_a_folder_run_counts_each_location_once(tmp_path) 
 
     markdown = MarkdownReporter().render_all([result])
     assert re.search(rf"\| `{finding.finding_id}` \| HIGH \| [^|]+ \| 2 \| PII Scan \|", markdown)
+
+
+def test_top_issues_count_a_folded_pii_finding_as_one_record(tmp_path) -> None:
+    from skillevaluator.validators.security import SecurityValidator
+
+    skill = tmp_path / "simple"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: simple\ndescription: A sample skill.\n---\n# Simple\n\n\n"
+        "See /Users/johndoe/a.\nSee /Users/johndoe/b.\nSee /Users/johndoe/c.\n",
+        encoding="utf-8",
+    )
+    result = SecurityValidator(use_llm=False).validate_pii_only(skill)
+    result.validator_name = "PII Scan"
+    [finding] = [finding for finding in result.findings if "/Users/johndoe/" in finding.message]
+    assert finding.metadata["occurrence_count"] == 3
+
+    data = json.loads(JSONReporter(include_timestamp=False, target_path=str(skill)).render_all([result]))
+
+    # finding_groups lists each folded location; top_issues counts raw finding
+    # records, the unit of skills[].issue_count, so the folded finding counts once.
+    [group] = [group for group in data["finding_groups"] if group["finding_id"] == finding.finding_id]
+    assert len(group["occurrences"]) == 3
+    [issue] = [issue for issue in data["top_issues"] if "/Users/johndoe/" in issue["message"]]
+    assert issue["total_count"] == 1
+    assert data["skills"] == [{"name": "simple", "passed": False, "issue_count": len(result.findings)}]
+    assert sum(issue["total_count"] for issue in data["top_issues"]) == data["skills"][0]["issue_count"]
+
+    # The JSON field table in the CI docs states that unit.
+    docs = (Path(__file__).resolve().parents[2] / "docs" / "ci-integration.mdx").read_text(encoding="utf-8")
+    rows = {line.split(" | ", 1)[0]: line for line in docs.splitlines() if line.startswith("| `")}
+    assert "`total_count` of raw finding records" in rows["| `top_issues`"]
+    assert "raw occurrences" not in rows["| `top_issues`"]
+    assert "`issue_count` counts raw finding records" in rows["| `skills`"]
 
 
 def test_finding_group_occurrences_do_not_copy_the_source_line() -> None:

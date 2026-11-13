@@ -150,6 +150,7 @@ def test_native_tier3_engine_failure_still_emits_incomplete_evidence(consumer, t
         == 0
     )
     report = json.loads((tmp_path / "skillevaluator-tier3.json").read_text())
+    assert [entry["name"] for entry in report["skills"]] == ["alpha"]
     assert report["results"][0]["status"] == "incomplete"
     assert report["gating"]["tiers"]["3"]["blocking"] is False
     assert report["results"][0]["gating"] == {"tier": 3, "blocking": False}
@@ -179,6 +180,23 @@ def test_setup_workflow_only_change_selects_full_collection(consumer):
     git = ["git", "-C", str(consumer), "-c", "user.name=CI tests", "-c", "user.email=ci@example.com"]
     subprocess.run([*git, "add", "."], check=True)
     subprocess.run([*git, "commit", "-m", "setup"], check=True, capture_output=True)
+    selected, selection = run_tiers.select_skills(
+        consumer, env_for(consumer, DIFF_BASE_SHA=base, SKILL_EVAL_SCAN_MODE="auto")
+    )
+    assert [p.name for p in selected] == ["alpha", "beta"]
+    assert selection["reason"] == "ci_configuration_changed"
+
+
+def test_hidden_setup_gitlink_still_selects_full_collection(consumer):
+    """Setup detection reads the same list as the paid-job skip, so .gitmodules cannot hide it."""
+    base = subprocess.check_output(["git", "-C", str(consumer), "rev-parse", "HEAD"], text=True).strip()
+    (consumer / ".gitmodules").write_text(
+        '[submodule "actions"]\n\tpath = .github/actions\n\turl = ./actions\n\tignore = all\n'
+    )
+    git = ["git", "-C", str(consumer), "-c", "user.name=CI tests", "-c", "user.email=ci@example.com"]
+    subprocess.run([*git, "add", ".gitmodules"], check=True)
+    subprocess.run([*git, "update-index", "--add", "--cacheinfo", f"160000,{'b' * 40},.github/actions"], check=True)
+    subprocess.run([*git, "commit", "-m", "setup gitlink"], check=True, capture_output=True)
     selected, selection = run_tiers.select_skills(
         consumer, env_for(consumer, DIFF_BASE_SHA=base, SKILL_EVAL_SCAN_MODE="auto")
     )
@@ -542,6 +560,33 @@ def test_skill_directories_with_url_delimiters_still_aggregate(tmp_path, monkeyp
     assert sorted(s["path"] for s in tier2["skills"]) == sorted(f"skills/{name}" for name in names)
 
 
+def test_retained_reports_record_the_repository_relative_target_not_the_runner_path(consumer, tmp_path, monkeypatch):
+    from skillevaluator.models import ValidationResult
+    from skillevaluator.reporting.json_reporter import JSONReporter
+
+    def execute(args, **_kwargs):
+        if "catalog" in args:
+            return 0
+        result = ValidationResult(
+            validator_name="Context Deduplication", metadata={"gating": {"tier": 2, "blocking": False}}
+        )
+        # The evaluator records the target as the CI passed it, an absolute runner path.
+        document = JSONReporter(target_path=args[args.index("tier2") + 1]).render_all([result])
+        (Path(args[args.index("-o") + 1]) / "skillevaluator-tier2.json").write_text(document)
+        return 0
+
+    monkeypatch.setattr(run_tiers, "run_command", execute)
+    reports = tmp_path / "reports"
+    env = env_for(consumer, NVIDIA_API_KEY="test-provider-value-1234")
+    assert run_tiers.evaluate(2, consumer, reports, env) == 0
+
+    targets = {
+        child.name: json.loads((child / "skillevaluator-tier2.json").read_text())["target_path"]
+        for child in sorted((reports / "tier2").glob("skill-*"))
+    }
+    assert targets == {"skill-001": "skills/alpha", "skill-002": "skills/beta"}
+
+
 def write_attempt(staging, tier, attempt, env, status):
     """Lay out one downloaded tier artifact as actions/download-artifact does for a pattern."""
     artifact = staging / f"skill-evaluator-tier{tier}-attempt-{attempt}"
@@ -736,28 +781,37 @@ def test_retained_tier2_reports_apply_ci_advisory_policy(consumer, tmp_path, fai
     env = env_for(consumer)
     source = {"repository": "example/consumer", "commit": env["REPORT_COMMIT"]}
     result.metadata["evaluated_source"] = source
-    document = JSONReporter().render_all([result])
+    document = JSONReporter(target_path=str(skill)).render_all([result])
     original = json.loads(document)
+    assert original["target_path"] == str(skill)
     assert original["overall_passed"] is False
     assert original["results"][0]["gating"] == {"tier": 2, "blocking": True}
+    assert original["gating"]["tiers"]["2"]["validator_policies"] == [
+        {"validator": "Context Deduplication", "blocking": True}
+    ]
     raw = tmp_path / "raw"
     raw.mkdir()
     (raw / "skillevaluator-tier2.json").write_text(document)
     reports = tmp_path / "reports"
     destination = reports / "tier2/skill-001"
 
-    outcome = run_tiers._retain(raw, destination, 2, set(), skill, 1)
+    outcome = run_tiers._retain(raw, destination, 2, set(), skill, 1, "skills/alpha")
 
     assert outcome == {"status": status, "metrics": {"findings": int(failed)}, "complete": not incomplete}
     retained = json.loads((destination / "skillevaluator-tier2.json").read_text())
     assert retained["gating"]["tiers"]["2"]["blocking"] is False
+    assert retained["gating"]["tiers"]["2"]["validator_policies"] == [
+        {"validator": "Context Deduplication", "blocking": False}
+    ]
     assert retained["overall_passed"] is True
     assert retained["overall_status"] == "passed"
     assert retained["results"][0]["gating"] == {"tier": 2, "blocking": False}
     assert retained["results"][0]["status"] == status
     assert retained["results"][0]["passed"] is False
     assert retained["evaluated_source"] == source
-    for key in set(original) - {"gating", "overall_passed", "overall_status", "results"}:
+    # The evaluator saw the runner's absolute path; the retained report keeps the repository path.
+    assert retained["target_path"] == "skills/alpha"
+    for key in set(original) - {"gating", "overall_passed", "overall_status", "results", "target_path"}:
         assert retained[key] == original[key], key
     for key in set(original["results"][0]) - {"gating"}:
         assert retained["results"][0][key] == original["results"][0][key], key
@@ -901,3 +955,39 @@ def test_tier_diagnostics_budget_is_shared_by_every_skill(consumer, tmp_path, mo
     assert not (second / "command.log").exists()
     index = json.loads((second / "index.json").read_text())
     assert index["omitted"] == [{"path": "command.log", "reason": "tier_limit"}]
+
+
+@pytest.mark.parametrize(
+    ("skills_changed", "advisory"), [("false", "skipped"), ("true", "incomplete"), (None, "incomplete")]
+)
+def test_paid_tiers_skipped_for_no_skill_change_are_reported_as_skipped(consumer, tmp_path, skills_changed, advisory):
+    """Only the trusted "false" turns missing Tier 2/3 evidence into a skip; Tier 1 stays required."""
+    from ci.run_tier1 import _summary
+
+    env = env_for(consumer)
+    if skills_changed is not None:
+        env["SKILL_EVAL_SKILLS_CHANGED"] = skills_changed
+    reports = tmp_path / "reports"
+    (reports / "tier1").mkdir(parents=True)
+    legacy = _summary([], None)
+    legacy.update(overall_status="skipped", execution={"commit": env["REPORT_COMMIT"]})
+    _, legacy["selection"] = run_tiers.select_changed_skills(
+        consumer, "skills", env["REPORT_COMMIT"], env["REPORT_COMMIT"]
+    )
+    (reports / "tier1/summary.json").write_text(json.dumps(legacy))
+    assert run_tiers.aggregate(reports, (1, 2, 3), env) == 0
+    rows = {row["tier"]: row for row in json.loads((reports / "ci-results.json").read_text())["tiers"]}
+    assert rows[2]["status"] == rows[3]["status"] == advisory
+    if advisory == "skipped":
+        assert "No file under a configured skill root changed" in rows[3]["reason"]
+    assert rows[1]["required"] is True
+
+
+def test_no_skill_change_never_excuses_missing_tier1_evidence(consumer, tmp_path):
+    env = env_for(consumer, SKILL_EVAL_SKILLS_CHANGED="false")
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    assert run_tiers.aggregate(reports, (1, 2), env) == 1
+    rows = {row["tier"]: row for row in json.loads((reports / "ci-results.json").read_text())["tiers"]}
+    assert rows[1]["status"] == "incomplete"
+    assert rows[2]["status"] == "skipped"

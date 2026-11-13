@@ -426,9 +426,65 @@ def _attempt(root, case, repeat, output, thresholds, timeout, provider_env=None)
     return {"case": case["id"], "repeat": repeat, "returncode": code, "reward": reward, "observations": rows}
 
 
-def qualify(root, suite, cases, output, repeats, concurrency, timeout, split, provider, provider_env, judge_config):
+def _verifier_git_provenance(paths):
+    """Disclose source identity only when every actual verifier file is tracked."""
+    unknown = {"verifier_git_commit": None, "verifier_git_dirty": None}
+    paths = [path.resolve() for path in paths]
+    if not paths:
+        return unknown
+
+    def git(directory, *args):
+        # Fixed commands and explicit paths only; never read remotes or credentials.
+        result = subprocess.run(
+            ["git", "--no-optional-locks", "-c", "core.fsmonitor=false", "-C", str(directory), *args],
+            env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+            capture_output=True,
+            timeout=2,
+            check=False,
+        )
+        if result.returncode or len(result.stdout) > 256 * 1024:
+            raise ValueError("Git source identity unavailable")
+        return result.stdout.decode("utf-8").strip()
+
+    try:
+        repository = Path(git(paths[0].parent, "rev-parse", "--show-toplevel")).resolve()
+        names = [path.relative_to(repository).as_posix() for path in paths]
+        tracked = [name for name in git(repository, "ls-files", "-z", "--", *names).split("\0") if name]
+        if set(tracked) != set(names):
+            return unknown
+        commit = git(repository, "rev-parse", "--verify", "HEAD")
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit):
+            return unknown
+        dirty = bool(git(repository, "status", "--porcelain", "--untracked-files=no", "--", *names))
+        return {"verifier_git_commit": commit, "verifier_git_dirty": dirty}
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return unknown
+
+
+def qualify(
+    root,
+    suite,
+    cases,
+    output,
+    repeats,
+    concurrency,
+    timeout,
+    split,
+    provider,
+    provider_env,
+    judge_config,
+    qualification_policy=None,
+):
+    from skillevaluator.tier3.grader_policy import evaluate_qualification, preflight_qualification
+
     thresholds = DEFAULT_THRESHOLDS | suite.get("thresholds", {})
-    tasks = [(case, repeat) for case in cases for repeat in range(1, repeats + 1)]
+    if qualification_policy is not None and split != "assessment":
+        raise ValueError("qualification policies require --split assessment")
+    preflight = (
+        preflight_qualification(cases, thresholds, qualification_policy) if qualification_policy is not None else None
+    )
+    not_run = preflight is not None and preflight["status"] != "ready"
+    tasks = [] if not_run else [(case, repeat) for case in cases for repeat in range(1, repeats + 1)]
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         attempts = list(
             executor.map(lambda task: _attempt(root, *task, output, thresholds, timeout, provider_env), tasks)
@@ -469,7 +525,7 @@ def qualify(root, suite, cases, output, repeats, concurrency, timeout, split, pr
     source_root = Path(__file__).resolve().parents[2]
     verifier_file_sha256 = {}
     verifier_digest = hashlib.sha256()
-    verifier_paths = (path.resolve() for path in _VERIFIER_FILES)
+    verifier_paths = [path.resolve() for path in _VERIFIER_FILES]
     for path in sorted(verifier_paths, key=lambda item: item.relative_to(source_root).as_posix()):
         name = path.relative_to(source_root).as_posix()
         content = path.read_bytes()
@@ -497,6 +553,7 @@ def qualify(root, suite, cases, output, repeats, concurrency, timeout, split, pr
             "skillevaluator_version": __version__,
             "verifier_sha256": verifier_digest.hexdigest(),
             "verifier_file_sha256": verifier_file_sha256,
+            **_verifier_git_provenance(verifier_paths),
             "contracts": {
                 key: sorted({r[key] for r in rewards if key in r})
                 for key in ("judge_contract", "metric_set", "score_policy")
@@ -505,8 +562,8 @@ def qualify(root, suite, cases, output, repeats, concurrency, timeout, split, pr
             "goal_methods": sorted(
                 {r.get("details", {}).get("goal_accuracy", {}).get("method") for r in rewards} - {None}
             ),
-            "provider": provider.provider,
-            "model": provider.model,
+            "provider": provider.provider if provider is not None else None,
+            "model": provider.model if provider is not None else None,
             "judge_config": judge_config,
             "judge_environment": safe_env,
             "thresholds": thresholds,
@@ -537,6 +594,9 @@ def qualify(root, suite, cases, output, repeats, concurrency, timeout, split, pr
         }
         # Mixed splits have no aggregate headline or gates.
         result["metrics"] = {}
+    if qualification_policy is not None:
+        result["execution_status"] = "not_run" if not_run else "completed"
+        result["qualification"] = preflight if not_run else evaluate_qualification(result, cases, qualification_policy)
     _write(output / "grader-validation.json", result)
     return result
 
@@ -566,6 +626,11 @@ def gate_failures(result, gates):
 @click.option("--max-false-pass-rate", type=click.FloatRange(0, 1))
 @click.option("--max-false-fail-rate", type=click.FloatRange(0, 1))
 @click.option("--max-unjudgeable-rate", type=click.FloatRange(0, 1))
+@click.option(
+    "--qualification-policy",
+    type=click.Path(path_type=Path),
+    help="Explicit assessment coverage and risk policy JSON file.",
+)
 def validate_grader(
     suite_dir,
     repeats,
@@ -579,6 +644,7 @@ def validate_grader(
     max_false_pass_rate,
     max_false_fail_rate,
     max_unjudgeable_rate,
+    qualification_policy,
 ):
     """Qualify the shipped Tier 3 verifier against independently labelled cases.
 
@@ -586,6 +652,23 @@ def validate_grader(
     """
     suite_dir = REFERENCE_SUITE if suite_dir is None else suite_dir
     try:
+        from skillevaluator.tier3.grader_policy import load_qualification_policy, preflight_qualification
+
+        for name, value in {
+            "timeout": timeout,
+            "max-false-pass-rate": max_false_pass_rate,
+            "max-false-fail-rate": max_false_fail_rate,
+            "max-unjudgeable-rate": max_unjudgeable_rate,
+        }.items():
+            if value is not None and not math.isfinite(value):
+                raise ValueError(f"--{name} must be finite")
+        if qualification_policy is not None and any(
+            value is not None for value in (max_false_pass_rate, max_false_fail_rate, max_unjudgeable_rate)
+        ):
+            raise ValueError("cannot combine --qualification-policy with --max-*-rate gates; put limits in the policy")
+        policy = load_qualification_policy(qualification_policy) if qualification_policy is not None else None
+        if policy is not None and split != "assessment":
+            raise ValueError("qualification policies require --split assessment")
         suite = load_suite(suite_dir)
         unknown = set(case_ids) - {case["id"] for case in suite["cases"]}
         if unknown:
@@ -597,22 +680,36 @@ def validate_grader(
         ]
         if not cases:
             raise ValueError("no cases selected")
+        preflight = (
+            preflight_qualification(cases, DEFAULT_THRESHOLDS | suite.get("thresholds", {}), policy)
+            if policy is not None
+            else None
+        )
         if check_suite:
             payload = {"status": "valid", "cases": len(cases), "split": split}
+            if preflight is not None:
+                payload["qualification"] = preflight
             click.echo(
                 json.dumps(payload)
                 if as_json
                 else f"Suite valid: {len(cases)} {split} cases; executable labels verified (no LLM calls)."
             )
+            if preflight is not None:
+                if not as_json:
+                    _print_qualification(preflight)
+                if preflight["status"] != "ready":
+                    raise click.exceptions.Exit(1)
             return
-        provider = resolve_llm_provider()
-        from skillevaluator.tier3.harbor.runner import _judge_model_config, _provider_environment
-
-        provider_env = _provider_environment(provider)
-        judge_config = _judge_model_config(provider, provider_env, "default")
         output = output.resolve()
         if output.exists() and any(output.iterdir()):
             raise ValueError("output directory must be empty (prevents stale attempt evidence)")
+        provider, provider_env, judge_config = None, {}, {}
+        if preflight is None or preflight["status"] == "ready":
+            provider = resolve_llm_provider()
+            from skillevaluator.tier3.harbor.runner import _judge_model_config, _provider_environment
+
+            provider_env = _provider_environment(provider)
+            judge_config = _judge_model_config(provider, provider_env, "default")
         output.mkdir(parents=True, exist_ok=True)
         result = qualify(
             suite_dir.resolve(),
@@ -626,6 +723,7 @@ def validate_grader(
             provider,
             provider_env,
             judge_config,
+            qualification_policy=policy,
         )
     except (ValueError, OSError) as exc:
         raise click.UsageError(str(exc)) from exc
@@ -653,7 +751,16 @@ def validate_grader(
             Console().print(table)
         click.echo(f"Split: {split}; report: {output / 'grader-validation.json'}")
         click.echo(LIMITATIONS)
-    if failures:
-        if not as_json:
+        if "qualification" in result:
+            _print_qualification(result["qualification"])
+    policy_failed = "qualification" in result and result["qualification"]["status"] != "passed"
+    if failures or policy_failed:
+        if failures and not as_json:
             click.echo(f"Gates exceeded: {', '.join(failures)}", err=True)
         raise click.exceptions.Exit(1)
+
+
+def _print_qualification(decision):
+    click.echo(f"Policy {decision['policy_id']}: {decision['status']} ({decision['phase']})")
+    for reason in decision["reasons"]:
+        click.echo(f"  {reason['message']}")

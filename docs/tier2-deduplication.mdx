@@ -244,6 +244,19 @@ rerun with another chat model (`--llm-model` or `SKILL_EVAL_LLM_MODEL`). To make
 a refusal block `validate`, raise `CONTENT_DEDUP.llm_refused` to `high` in a
 [policy overlay](tier1-validation.mdx#validation-profiles-and-policies).
 
+The JSON report's `llm_analysis` names the configured `provider` and `model`.
+A server-side fallback model can answer a cluster in the configured model's
+place: on the native Claude API, a Claude 5.5 or later model's refusal is
+answered by the fallback model in the same call. So `llm_analysis.models_used`
+lists every model that gave a cluster's verdict (it is absent when none did),
+and each duplicate finding names the model that gave its verdict as
+`llm_model_used`, with `llm_provider`, in its metadata. A model name that is
+not a plain identifier, such as a URL or a key, reads `unresolved`. An
+`llm_refused` finding has no answering model and keeps naming the configured
+one as `llm_model`. A cluster whose analysis fails gives no verdict, so no
+model is listed for it, and the blocking error for failed clusters names the
+configured model.
+
 ## Compare skills across a collection
 
 `similarity-check` recursively discovers skill manifests, embeds each skill's

@@ -81,6 +81,32 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- The `default` policy no longer blocks a skill for its author attribution,
+  because the Agent Skills baseline requires only `name` and `description`
+  (#43). A missing `metadata.author` is now a LOW advisory, and a person, team,
+  or organization name without an email (such as `NVIDIA cuOpt Team` or
+  `Jane Doe (@jdoe)`) passes as an INFO `SCHEMA.author_without_email` finding.
+  A malformed or unsafe value still fails `SCHEMA.author_format` at HIGH: a bare
+  email or an email outside `Name <email@host>`, stray angle brackets, control
+  or invisible formatting characters, no letters or digits, or more than 256
+  characters. A policy with an `author_email_regex` still needs an email in
+  that domain. Overlays on `default` that relied on the old HIGH author
+  severities should set `SCHEMA.author_missing: high` and
+  `SCHEMA.author_without_email: high`, or use `--profile registry`. The policy
+  digest changes for every profile because it now includes
+  `metadata_id_requirement`.
+- Add the bundled `registry` profile (`--profile registry`) for registries with
+  a publication contract. It requires `metadata.author` in
+  `Name <email@host>` form and a valid `metadata.id`.
+- Validate an optional `metadata.id` as an exact 1-64 character lowercase
+  ASCII slug. A policy sets `identity.metadata_id_requirement` to `ignore`
+  (the default), `recommend`, or `require`; an unknown value is an error. A
+  collection run reports an ID declared by more than one skill, and `validate`
+  on a catalog lists these in `catalog-summary.json` under
+  `metadata_id_conflicts` (each sharing skill fails under `require`). Invalid and
+  duplicate IDs are MEDIUM advisories unless the requirement is `require`, and
+  the ID does not change local catalog identity. JSON reports include the
+  active requirement under `policy.metadata_id_requirement`.
 - Install Bandit with the base package, so `pip install skillevaluator` or
   `uv tool install skillevaluator` runs every default Tier 1 check without an
   extra. pip-audit, used only by the opt-in dependency audit
@@ -120,6 +146,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Folder validation preserves author and metadata ID advisories from passing
+  skills. Catalog summaries include duplicate ID severity counts and consistent
+  member verdicts, while explicitly labeling linked reports as single-skill
+  results and retaining their independent verdicts.
 - Behavior checks no longer score a final answer that the evidence limits
   shortened. The final-response allowance rises from 800 to 8,000 characters,
   with the total behavior evidence budget reconciled to 12,000, so an ordinary

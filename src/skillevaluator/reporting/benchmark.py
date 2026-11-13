@@ -56,7 +56,11 @@ from skillevaluator.reporting.base import (
 from skillevaluator.reporting.run_status import resolve_run_status
 from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION, pass_at_k_summary
 from skillevaluator.reporting.tier3_coverage import IncompleteArm, incomplete_arms
-from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
+from skillevaluator.reporting.tier3_scope import (
+    completed_agent_result,
+    tolerated_baseline_agents,
+    validate_report_scope,
+)
 from skillevaluator.reporting.tier3_token_usage import token_usage_markdown_lines
 from skillevaluator.source_identity import evaluated_source_revision, recorded_evaluated_source
 from skillevaluator.tier3.baseline_store import baseline_description
@@ -265,6 +269,14 @@ class BenchmarkReporter(ReporterBase):
                 ]
             )
 
+        tolerated_lines = []
+        for tolerated in tolerated_baseline_agents(ae):
+            scored, expected = tolerated["scored_attempts"], tolerated["expected_attempts"]
+            counts = f" ({scored} of {expected} attempts scored)" if scored is not None and expected is not None else ""
+            tolerated_lines.append(
+                f"Baseline incomplete for **{_publication_safe_inline(tolerated['name'], private_labels)}**"
+                f"{counts}: kept by `--tolerate-baseline-timeouts`, so its baseline and uplift are not reported."
+            )
         if completed and (self.report_scope == "tier3" or completed["needs_attention"]):
             lines.append(
                 f"Completed agent: **{_publication_safe_inline(completed['name'], private_labels)}**; "
@@ -281,20 +293,16 @@ class BenchmarkReporter(ReporterBase):
                 lines.append(
                     "**Needs attention:** other execution failures remain. This completed-agent result does not certify the whole run."
                 )
-            for tolerated in completed.get("baseline_timeouts_tolerated", ()):
-                scored, expected = tolerated["scored_attempts"], tolerated["expected_attempts"]
-                counts = (
-                    f" ({scored} of {expected} attempts scored)" if scored is not None and expected is not None else ""
-                )
-                lines.append(
-                    f"Baseline incomplete for **{_publication_safe_inline(tolerated['name'], private_labels)}**"
-                    f"{counts}: kept by `--tolerate-baseline-timeouts`, so its baseline and uplift are not reported."
-                )
+            lines.extend(tolerated_lines)
             if completed["recovered_attempts"]:
                 lines.append(
                     f"Recovered timeout attempts: {completed['recovered_attempts']}; failed history is retained and excluded from scoring."
                 )
             lines.append("")
+        elif tolerated_lines:
+            # No completed-agent result (for example, a cost limit left the
+            # best agent's coverage short), but the tolerated baselines remain.
+            lines.extend(["**Needs attention:** baseline timeouts were tolerated.", *tolerated_lines, ""])
         self._render_metadata(
             lines,
             results,
@@ -1159,7 +1167,7 @@ def _verdict_callout(status: str) -> str:
         "PASS": "✅ **Overall verdict: PASS — Recommended for publication**",
         "FAIL": "❌ **Overall verdict: FAIL — Publication blocked**",
         "INCOMPLETE": "⚠️ **Overall verdict: INCOMPLETE — Required evidence is missing**",
-        "NEUTRAL": "**Overall verdict: NEUTRAL — One or more dimensions remain below PASS**",
+        "NEUTRAL": "**Overall verdict: NEUTRAL — Publication decision deferred**",
     }
     return f"> {labels.get(status, f'**Overall verdict: {status}**')}"
 
@@ -1169,7 +1177,7 @@ def _verdict_callout(status: str) -> str:
 _VERDICT_RULES = {
     "PASS": "every publication-required tier passed and the Tier 3 dimension gate passed.",
     "NEUTRAL": (
-        "every publication-required tier passed, but no supported agent scored at or above the "
+        "every publication-required tier completed, but no supported agent scored at or above the "
         "dimension PASS boundary on every dimension."
     ),
     "FAIL": "the evidence below blocks publication.",
@@ -1211,15 +1219,15 @@ def _dimension_gate_evidence(
             if DIMENSION_VERDICT_NEUTRAL_THRESHOLD <= item[1] < DIMENSION_VERDICT_PASS_THRESHOLD
         ]
         if failing:
-            listed = "; ".join(f"{name.title()} {score:.1%}" for name, score in failing)
+            listed = "; ".join(f"{name.title()} {_single_score_label(score)}" for name, score in failing)
             return f"{listed} below the {DIMENSION_VERDICT_NEUTRAL_THRESHOLD:.0%} FAIL boundary"
         if below_pass:
-            listed = "; ".join(f"{name.title()} {score:.1%}" for name, score in below_pass)
+            listed = "; ".join(f"{name.title()} {_single_score_label(score)}" for name, score in below_pass)
             return f"{listed} below the {DIMENSION_VERDICT_PASS_THRESHOLD:.0%} PASS boundary"
         lowest = min(entry.scores, key=lambda item: item[1])
         return (
             f"every dimension at or above the {DIMENSION_VERDICT_PASS_THRESHOLD:.0%} PASS boundary "
-            f"(lowest: {lowest[0].title()} {lowest[1]:.1%})"
+            f"(lowest: {lowest[0].title()} {_single_score_label(lowest[1])})"
         )
     text = _DIMENSION_GATE_STATE_TEXT[entry.state]
     # Name why the agent was held out when the run recorded a reason, so an
@@ -1244,17 +1252,36 @@ def _verdict_evidence_lines(
     a decision other than the one in the callout above it.
     """
     tier3 = assessment.tier3
+    breakdown = agent_eval_dimension_breakdown(tier3.payload if isinstance(tier3.payload, dict) else ae)
+    gate_passed = tier3.status in {"pass", "neutral"} and any(entry.verdict == "pass" for entry in breakdown)
+    rule = _VERDICT_RULES.get(status, "recorded below.")
+    if status == "PASS" and not gate_passed:
+        rule = "every publication-required tier passed; " + (
+            "the recorded Tier 3 verdict is pass."
+            if assessment.benchmark_policy.get("tier3_required")
+            else "Tier 3 was optional by policy."
+        )
+    elif status == "NEUTRAL" and gate_passed:
+        rule = (
+            "every publication-required tier completed and the Tier 3 dimension gate passed, "
+            "but the recorded Tier 3 verdict is neutral."
+        )
     lines = [
         "### Why This Verdict",
         "",
-        f"- Decision: **{status}** — {_VERDICT_RULES.get(status, 'recorded below.')}",
+        f"- Decision: **{status}** — {rule}",
     ]
 
     policy_note = (
         "required for publication" if assessment.benchmark_policy.get("tier3_required") else "optional by policy"
     )
     if tier3.status == "skipped":
-        lines.append(f"- Tier 3 live evaluation: skipped ({policy_note}); no dimension evidence was recorded.")
+        evidence_note = (
+            "recorded agent scores do not certify a skipped evaluation."
+            if breakdown
+            else "no dimension evidence was recorded."
+        )
+        lines.append(f"- Tier 3 live evaluation: skipped ({policy_note}); {evidence_note}")
     else:
         completeness = "publication-complete" if tier3.evidence_complete else "not publication-complete"
         lines.append(
@@ -1265,7 +1292,6 @@ def _verdict_evidence_lines(
     for reason in assessment.reasons or (() if status == "PASS" else (tier3.reason,) if tier3.reason else ()):
         lines.append(f"- Blocking: {_publication_safe_inline(reason, private_labels)}")
 
-    breakdown = agent_eval_dimension_breakdown(tier3.payload if isinstance(tier3.payload, dict) else ae)
     agents = _agents(ae)
     if breakdown:
         lines.extend(
@@ -1291,7 +1317,7 @@ def _verdict_evidence_lines(
             )
         # Say why a row that looks worse than the verdict does not contradict
         # it, but only about rows this table actually shows.
-        if status == "PASS" and any(entry.verdict == "fail" for entry in breakdown):
+        if status == "PASS" and gate_passed and any(entry.verdict == "fail" for entry in breakdown):
             lines.extend(
                 [
                     "",
@@ -1301,7 +1327,7 @@ def _verdict_evidence_lines(
                     ),
                 ]
             )
-        elif status == "PASS" and any(entry.verdict is None for entry in breakdown):
+        elif status == "PASS" and gate_passed and any(entry.verdict is None for entry in breakdown):
             lines.extend(
                 [
                     "",

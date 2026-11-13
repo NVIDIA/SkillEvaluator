@@ -224,6 +224,85 @@ def test_skipped_tier3_is_named_with_its_publication_policy() -> None:
     assert "optional by policy" in block or "required for publication" in block
 
 
+@pytest.mark.parametrize("tier3_state", ["absent", "skipped", "skipped-fail", "skipped-neutral", "skipped-unscored"])
+def test_optional_tier3_without_a_passing_gate_does_not_claim_one(tier3_state: str) -> None:
+    results = deepcopy(_deterministic_results())
+    results[0].metadata["benchmark_policy"] = {"tier3_required": False}
+    if tier3_state != "absent":
+        skipped = advisory_skip_result("Live evaluation intentionally omitted", skill_name="demo-skill")
+        if tier3_state != "skipped":
+            agent = deepcopy(_issue_192_results()[-1].metadata["agent_eval"]["agents"]["codex"])
+            if tier3_state == "skipped-neutral":
+                agent["dimensions"] = _dimensions(0.55, 0.45)
+                agent["with_skill"] = 0.45
+                agent["lift"] = -0.1
+            elif tier3_state == "skipped-unscored":
+                agent.pop("dimensions")
+            skipped.metadata["agent_eval"]["agents"] = {"codex": agent}
+        results.append(skipped)
+
+    rendered = _render(results)
+    block = _evidence_block(rendered)
+
+    assert "Overall verdict: PASS" in rendered
+    assert "optional by policy" in block
+    assert "Tier 3 dimension gate passed" not in block
+    assert "and one did" not in block
+
+
+def test_recorded_neutral_verdict_is_explained_when_every_agent_passes_the_dimension_gate() -> None:
+    results = [*deepcopy(_deterministic_results()), deepcopy(_live_tier3_result())]
+    payload = results[-1].metadata["agent_eval"]
+    for container in (payload, payload["summary"]):
+        container["verdict"] = "neutral"
+
+    rendered = _render(results)
+    block = _evidence_block(rendered)
+
+    assert "Overall verdict: NEUTRAL" in rendered
+    assert "| Claude Code | pass |" in block
+    assert "| Codex | pass |" in block
+    assert "recorded Tier 3 verdict is neutral" in block
+    assert "no supported agent scored" not in block
+    assert "One or more dimensions remain below PASS" not in rendered
+
+
+def test_a_recorded_pass_without_passing_dimensions_does_not_invent_an_optional_policy() -> None:
+    results = [*deepcopy(_deterministic_results()), deepcopy(_live_tier3_result())]
+    for agent in results[-1].metadata["agent_eval"]["agents"].values():
+        agent["skill_activation"] = {"status": "never_activated"}
+
+    rendered = _render(results)
+    block = _evidence_block(rendered)
+
+    assert "Overall verdict: PASS" in rendered
+    assert "required for publication" in block
+    assert "optional by policy" not in block
+    assert "Tier 3 dimension gate passed" not in block
+    assert "recorded Tier 3 verdict is pass" in block
+
+
+@pytest.mark.parametrize(
+    ("score", "expected"),
+    [
+        (0.3999, "| Codex | fail | Security 39.99% below the 40% FAIL boundary |"),
+        (0.4999, "| Codex | neutral | Security 49.99% below the 50% PASS boundary |"),
+        (
+            0.5005,
+            "| Codex | pass | every dimension at or above the 50% PASS boundary (lowest: Security 50.1%) |",
+        ),
+    ],
+)
+def test_gate_evidence_preserves_score_bands_and_the_card_rounding_policy(score: float, expected: str) -> None:
+    results = _issue_192_results()
+    codex = results[-1].metadata["agent_eval"]["agents"]["codex"]
+    codex["dimensions"] = _dimensions(0.55, 0.88, {"security": score})
+    codex["with_skill"] = sum(row["with_skill"] for row in codex["dimensions"]) / len(codex["dimensions"])
+    codex["lift"] = codex["with_skill"] - codex["baseline"]
+
+    assert expected in _evidence_block(_render(results))
+
+
 def test_evidence_block_is_absent_from_the_tier3_scoped_report() -> None:
     tier3_only = [_issue_192_results()[-1]]
     rendered = BenchmarkReporter(include_timestamp=True, report_scope="tier3").render_all(tier3_only)
@@ -259,9 +338,7 @@ def test_untrusted_agent_identity_cannot_inject_markdown_structure() -> None:
             id="agent-not-supported",
         ),
         pytest.param(
-            lambda payload: payload["agents"]["gemini-cli"].update(
-                {"skill_activation": {"status": "never_activated"}}
-            ),
+            lambda payload: payload["agents"]["gemini-cli"].update({"skill_activation": {"status": "never_activated"}}),
             id="never-activated",
         ),
     ],
@@ -289,8 +366,11 @@ def test_breakdown_folds_into_the_same_dimension_verdict() -> None:
         "gemini-cli": ("scored", "pass"),
     }
     assert agent_eval_dimension_verdict(payload) == "pass"
-    assert _publication_assessment(
-        _issue_192_results(),
-        payload,
-        expected_skill_name="demo-skill",
-    ).tier3.status == "pass"
+    assert (
+        _publication_assessment(
+            _issue_192_results(),
+            payload,
+            expected_skill_name="demo-skill",
+        ).tier3.status
+        == "pass"
+    )

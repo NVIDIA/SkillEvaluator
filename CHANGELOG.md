@@ -406,7 +406,25 @@ All notable changes to SkillEvaluator are documented in this file.
   another fails a dimension now says so. The block is rendered from the same
   publication assessment the printed verdict is projected from, and from the
   per-agent breakdown the Tier 3 dimension verdict folds, so it cannot describe
-  a different decision. No verdict changes.
+  a different decision. Optional or skipped Tier 3 runs are explained using
+  their recorded policy, and threshold-adjacent scores retain enough precision
+  to stay in their actual verdict band. No verdict changes.
+- `--tolerate-baseline-timeouts` (added in 0.9.0) now follows its own rules
+  in the printed run verdict, in the notes of both reports and during result
+  collection. The `RUN QUALITY VERDICT` line that `tier3 evaluate` prints
+  reads the same agents as the run verdict, so a tolerated agent that passes
+  no longer prints PASS beside a complete agent that fails or never
+  activated the skill; the line now reads FAIL or INCONCLUSIVE, as the
+  reports do. `BENCHMARK.md` and `report.html` now keep the "Needs
+  attention" note and the `Baseline incomplete` line for each tolerated
+  agent also when a cost limit leaves the best agent's attempts short; both
+  reports used to leave them out in that case. `report.html` also keeps the
+  note when its overview reads Inconclusive because the complete agent never
+  activated the skill. An output-token count past the JSON-safe integer
+  range (above 2^53 - 1) in a timed-out attempt is no longer progress
+  evidence; with no other in-range count for that attempt the agent is
+  refused as `no_progress_evidence`, where result collection used to stop
+  with `browser-unsafe JSON integer` and write no `result.json` or report.
 
 ## 0.9.0 - 2026-11-13
 

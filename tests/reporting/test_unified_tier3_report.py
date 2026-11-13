@@ -3834,6 +3834,46 @@ def test_pass_at_k_final_column_has_a_narrow_viewport_scroll_contract() -> None:
     assert ".pass-at-k-table { min-width: 720px; }" in html
 
 
+@pytest.mark.parametrize(
+    "mode,baseline,expected",
+    [
+        ("skipped", {}, "N/A"),
+        ("skipped", {"attempts_used": 0, "max_attempts_possible": 0}, "N/A"),
+        ("skipped", {"rate": 0.0}, "N/A"),
+        ("fresh", {"attempts_used": 0, "max_attempts_possible": 0}, "N/A"),
+        ("fresh", {"rate": None}, "N/A"),
+        ("fresh", {"rate": 0.0, "passed_cases": 0, "total_cases": 1}, "0%"),
+        ("fresh", {"rate": 1.0, "passed_cases": 1, "total_cases": 1}, "100%"),
+    ],
+)
+def test_supporting_baseline_pass_rate_distinguishes_unavailable_from_observed_zero(mode, baseline, expected):
+    # The retained skipped-baseline result has {}, which the canonical loader
+    # normalizes to zero attempt counters without supplying an observed rate.
+    payload = build_agent_eval_payload(
+        "supporting-pass-rate",
+        {
+            "opencode": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 1.0),
+                "pass_with_skill": {"rate": 1.0, "passed_cases": 1, "total_cases": 1},
+                "pass_without_skill": baseline,
+            }
+        },
+        run_config={"baseline": {"mode": mode}},
+        use_llm_judge=False,
+    )
+    assert payload is not None
+    html = _render_agent_payload(payload)
+    table = re.search(r'<table class="summary-table pass-at-k-table".*?</table>', html, re.DOTALL)
+    assert table is not None
+    baseline_row = re.search(r"<td>Without skill</td>\s*<td>(.*?)</td>", table.group(), re.DOTALL)
+    assert baseline_row is not None
+    assert baseline_row.group(1).strip() == expected
+    assert baseline.get("rate") == payload["agents"]["opencode"]["pass_at_k"]["without_skill"].get("rate")
+
+
 def test_shared_metric_pass_lift_is_labelled_separately_from_arm_rates() -> None:
     from skillevaluator.reporting.summary_copy import pass_at_k_summary
     from skillevaluator.tier3.harbor.collector import _shared_metric_pass_lift

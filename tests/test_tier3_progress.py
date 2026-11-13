@@ -410,7 +410,6 @@ def test_rich_progress_running_spinner_moves_on_with_each_redraw(monkeypatch: py
     import re
 
     import rich.live
-    from rich.console import Console
     from rich.spinner import Spinner
 
     progress = _progress_module()
@@ -420,28 +419,29 @@ def test_rich_progress_running_spinner_moves_on_with_each_redraw(monkeypatch: py
     reporter.start(_plan(progress))
     live = _FakeLive.instances[0]
     frames = Spinner("dots").frames
-    interval = Spinner("dots").interval / 1000
 
-    def spinner_frame_at(now: float) -> int:
-        # Draws the latest frame at a fixed time, as Live does on each redraw.
-        rendered = io.StringIO()
-        Console(file=rendered, width=120, color_system=None, get_time=lambda: now).print(live.renderables[-1])
-        glyph = re.search(r"Agent codex\s*│ (\S) running", rendered.getvalue())
-        assert glyph is not None, rendered.getvalue()
+    def latest_frame() -> int:
+        rendered = _render(live.renderables[-1], width=120)
+        glyph = re.search(r"Agent codex\s*│ (\S) running", rendered)
+        assert glyph is not None, rendered
         return frames.index(glyph.group(1))
 
     reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
-    assert spinner_frame_at(100.0) == 0
-    # Rich no longer redraws on its own timer, so the spinner moves only when a
-    # heartbeat or an update redraws the frame. It keeps its place across them.
+    assert latest_frame() == 0
+    # Rich no longer redraws on its own timer, so the spinner moves on one
+    # frame with each heartbeat or update that redraws the view, however far
+    # apart they come.
     reporter.heartbeat()
-    assert spinner_frame_at(100.0 + 3.5 * interval) == 3
+    assert latest_frame() == 1
     reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="attempt 2 of 3"))
-    assert spinner_frame_at(100.0 + 6.5 * interval) == 6
-    # A stage that runs again after it finished starts a new spinner.
+    assert latest_frame() == 2
+    for _ in range(len(frames)):
+        reporter.heartbeat()
+    assert latest_frame() == 2
+    # A stage that runs again after it finished starts from the first frame.
     reporter.emit(progress.ProgressEvent(stage="agent:codex", state="complete", detail="attempt 2 of 3"))
     reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="attempt 3 of 3"))
-    assert spinner_frame_at(100.0 + 7.5 * interval) == 0
+    assert latest_frame() == 0
     reporter.close()
 
 

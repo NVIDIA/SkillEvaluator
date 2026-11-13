@@ -18,15 +18,12 @@ import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from time import monotonic
-from typing import TYPE_CHECKING, Literal, Protocol, TextIO, runtime_checkable
+from typing import Literal, Protocol, TextIO, runtime_checkable
 
 from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, MUTED, RED, TEXT
 from skillevaluator.tier3.harbor.secret_redaction import redact_secrets_in_log_line
 from skillevaluator.utils.redaction import credential_uri_secret_values
 from skillevaluator.utils.rich_markup import strip_terminal_controls
-
-if TYPE_CHECKING:
-    from rich.spinner import Spinner
 
 ProgressMode = Literal["auto", "rich", "plain", "off"]
 logger = logging.getLogger(__name__)
@@ -70,6 +67,11 @@ _DISPLAY_STOPPED_NOTICE = "Tier 3 progress display stopped after a drawing error
 # Printed when the run ends instead, when the terminal refused the line above
 # or Live's stop.
 _DISPLAY_STOPPED_LATE_NOTICE = "Tier 3 progress display stopped after a drawing error; the run went on without it."
+# Frames of a running stage's spinner, as in Rich's "dots". The view redraws
+# only on progress events and heartbeats, so a running stage moves on one frame
+# with each redraw. Rich's own spinner picks its frame from the clock, so it
+# would stand still whenever redraws come a whole number of its cycles apart.
+_RUNNING_FRAMES = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
 
 
 @dataclass(frozen=True, slots=True)
@@ -436,11 +438,9 @@ class RichProgressReporter(PlainProgressReporter):
         self._live = None
         self._live_plan: Tier3RunPlan | None = None
         self._live_events: dict[str, tuple[ProgressEvent, str | None]] = {}
-        # One spinner per running stage, kept across redraws. A Rich spinner
-        # picks its frame from the time since it was first drawn, and Rich no
-        # longer redraws on its own timer, so a new spinner on every redraw
-        # would always show its first frame.
-        self._live_spinners: dict[str, Spinner] = {}
+        # How many times each running stage has been drawn since it started
+        # running, which picks its spinner frame.
+        self._live_spinner_steps: dict[str, int] = {}
         self._live_event_slots = _LIVE_MIN_EVENT_ROWS
         self._printed_plan_lines: dict[str, str] = {}
         # Set, under the same lock hold that stops Live, when a drawing failure
@@ -469,7 +469,7 @@ class RichProgressReporter(PlainProgressReporter):
                 finished_at = None
             else:
                 self._active.pop(event.stage, None)
-                self._live_spinners.pop(event.stage, None)
+                self._live_spinner_steps.pop(event.stage, None)
                 finished_at = self._elapsed()
             # Move the stage to the end so the recent-event window shows it.
             self._live_events.pop(event.stage, None)
@@ -518,7 +518,7 @@ class RichProgressReporter(PlainProgressReporter):
                         self._live = None
                     self._live_plan = None
                     self._live_events.clear()
-                    self._live_spinners.clear()
+                    self._live_spinner_steps.clear()
                     self._live_event_slots = _LIVE_MIN_EVENT_ROWS
                     self._printed_plan_lines.clear()
                     if not after_failure:
@@ -667,7 +667,6 @@ class RichProgressReporter(PlainProgressReporter):
     def _build_live_table(self, *, final: bool = False):
         from rich import box
         from rich.cells import cell_len
-        from rich.spinner import Spinner
         from rich.table import Table
         from rich.text import Text
 
@@ -734,9 +733,9 @@ class RichProgressReporter(PlainProgressReporter):
                 else stage.replace("-", " ").title()
             )
             if event.state == "running":
-                state = self._live_spinners.get(stage)
-                if state is None:
-                    state = self._live_spinners[stage] = Spinner("dots", text=Text("running", style=TEXT))
+                step = self._live_spinner_steps.get(stage, 0)
+                self._live_spinner_steps[stage] = step + 1
+                state = Text.assemble(_RUNNING_FRAMES[step % len(_RUNNING_FRAMES)], " ", ("running", TEXT))
             else:
                 state = Text(event.state, style=state_styles.get(event.state, "white"))
             rows.append(

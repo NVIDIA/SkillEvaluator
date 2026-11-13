@@ -253,6 +253,36 @@ def test_bedrock_refusal_fallback_equal_to_the_request_model_is_not_sent(verifie
 
 
 @pytest.mark.parametrize(
+    ("value", "expected_calls"),
+    [
+        ("claude-opus-4-8", ["us.anthropic.claude-opus-5-5", "us.anthropic.claude-opus-4-8"]),
+        ("us.anthropic.claude-opus-4-8", ["us.anthropic.claude-opus-5-5", "us.anthropic.claude-opus-4-8"]),
+        ("global.anthropic.claude-opus-4-8", ["us.anthropic.claude-opus-5-5", "global.anthropic.claude-opus-4-8"]),
+        ("anthropic.claude-opus-4-8", ["us.anthropic.claude-opus-5-5", "anthropic.claude-opus-4-8"]),
+        ("us.anthropic.claude-opus-5-5", ["us.anthropic.claude-opus-5-5"]),
+    ],
+)
+def test_bedrock_refusal_fallback_uses_a_qualified_bedrock_id_as_given(verifier, monkeypatch, value, expected_calls):
+    import boto3
+
+    monkeypatch.setenv("SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL", value)
+    client = MagicMock()
+    client.converse.side_effect = [
+        {"stopReason": "content_filtered", "output": {"message": {"content": []}}},
+        {"stopReason": "end_turn", "output": {"message": {"content": [{"text": "Done"}]}}},
+    ]
+    monkeypatch.setattr(boto3, "client", lambda *_args, **_kwargs: client)
+
+    if len(expected_calls) == 1:
+        with pytest.raises(verifier._JudgeRefusedError):
+            verifier._call_bedrock("prompt", "us.anthropic.claude-opus-5-5", 4096, 0.0)
+    else:
+        assert verifier._call_bedrock("prompt", "us.anthropic.claude-opus-5-5", 4096, 0.0) == ("Done", None)
+
+    assert [call.kwargs["modelId"] for call in client.converse.call_args_list] == expected_calls
+
+
+@pytest.mark.parametrize(
     ("name", "value"), [("LLM_JUDGE_FALLBACK_POLICY", "replace"), ("LLM_JUDGE_RETRY_POLICY", "strict")]
 )
 def test_policy_turns_off_the_builtin_bedrock_refusal_fallback(verifier, monkeypatch, name, value):

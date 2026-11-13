@@ -2080,16 +2080,24 @@ def _classify_bedrock_retry_error(error):
     return is_network, type_name, None
 
 
+_BEDROCK_ANTHROPIC_PREFIX_RE = re.compile(r"(?:(?:[a-z]{2}|global)\.)?anthropic\.")
+
+
 def _bedrock_refusal_fallback_model(model):
-    """Return Opus 4.8 in the same Bedrock geography as a Claude 5.5 or later model, else None."""
-    prefix = re.match(r"(?:(?:[a-z]{2}|global)\.)?anthropic\.", str(model or ""))
+    """Return the Bedrock refusal fallback ID for a Claude 5.5 or later model, else None.
+
+    A bare name such as ``claude-opus-4-8`` gets the request model's geography
+    prefix. A value that is already a Bedrock ID (``us.anthropic.``,
+    ``global.anthropic.``, ``anthropic.``) is used as given.
+    """
+    prefix = _BEDROCK_ANTHROPIC_PREFIX_RE.match(str(model or ""))
     if prefix is None or not _is_claude_5_5_or_later(model):
         return None
     target = _refusal_fallback_target(model)
     if not target:
         return None
+    bedrock_target = target if _BEDROCK_ANTHROPIC_PREFIX_RE.match(target) else prefix.group(0) + target
     # Compare the resolved Bedrock ID, not the configured leaf name, with the request model.
-    bedrock_target = prefix.group(0) + target
     return None if bedrock_target == str(model).strip() else bedrock_target
 
 

@@ -81,6 +81,27 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- The HTTP 404 message for an unavailable LLM model now says the provider's default
+  may not be callable with the key and points to `SKILL_EVAL_LLM_MODEL` (`llm-model`
+  in the reusable workflow); `ci/README.md` notes the same.
+- Update the managed SkillSpector scanner and Tier 1 CI image from 2.13.3 to
+  the latest release, 2.13.4, with matching verified wheel and source hashes.
+  This fixes false LP1 findings for scoped `allowed-tools` grants and improves
+  recovery of malformed LLM responses. SkillSpector 2.13.4 can still report
+  JSON files containing a `timeout` key as partial analysis; those scans
+  remain incomplete rather than being treated as successful.
+
+- The rubric judge's reference supplement budget is configurable through
+  `SKILLEVALUATOR_RUBRIC_SUPPLEMENT_BYTES` and defaults to one mebibyte instead
+  of 30,000 bytes, which a real linked guide graph outgrows. Required linked
+  Markdown is bounded only by that budget, so a guide larger than an optional
+  preview is collected whole; optional script and reference previews keep their
+  own small per-file bound. The budget decides how many bytes of the skill's own
+  guidance are collected, never which paths may be read: every reference is still
+  confined to the skill's declared root by the same secure reader, and guidance
+  that does not fit still stops the evaluation with an explicit unsafe-input
+  finding rather than being dropped from the judge's prompt.
+
 - The `default` policy no longer blocks a skill for its author attribution,
   because the Agent Skills baseline requires only `name` and `description`
   (#43). A missing `metadata.author` is now a LOW advisory, and a person, team,
@@ -146,23 +167,72 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The behavior evidence gate no longer keeps a score for an expectation that
+  names an observed artifact but also asks for something only the final answer
+  could show. "Writes `report.py` and explains why each column was dropped" was
+  treated as settled by the artifact alone, so a case kept a score whose second
+  half was never checked. Every clause of an expectation must now name a
+  checkable artifact of its own; one that does not keeps the gate, as a wholly
+  prose expectation already did.
+- Accuracy and Behavior judge prompts clarify that explicit final-answer formats
+  apply to the entire final response, independently of correct values in tool
+  output or references. Scoring and thresholds are unchanged; an Accuracy format
+  failure alone can still score 0.8 and pass the default threshold.
+
+- An author value is no longer rejected for containing a Unicode joiner. The
+  character guard matched all of category `C`, so ZWNJ (U+200C) and ZWJ
+  (U+200D), which Persian, Arabic and Devanagari names need to render, plus a
+  soft hyphen and any code point unassigned in the running interpreter's
+  Unicode data, all failed `SCHEMA.author_format` at HIGH under both bundled
+  profiles. The guard now rejects controls, surrogates and private-use code
+  points plus the bidirectional marks, embeddings, overrides, isolates and the
+  byte-order mark, and its message says so. An unassigned code point no longer
+  makes the verdict depend on the interpreter's Unicode version.
+- A bare email address whose domain has no dot, such as `root@buildhost`, is
+  reported as a malformed author rather than as "Author has no email address".
+  The bare-email pattern required a dotted domain, so an intranet address took
+  the plain-attribution path. The discriminator is now a word character on each
+  side of the `@`, which still leaves a social handle such as
+  `Jane Doe (@jdoe)`, a bare `@jdoe` or `Platform Team @ Example` alone, and
+  now also catches a non-ASCII local part.
+- An advisory carried from a passing skill into a collection result now names
+  the skill it came from, in its location and in `metadata.collection_skill`.
+  The findings were preserved but attributed to nothing, so a collection run
+  could not say which member produced one. The per-skill roll-up also stops
+  reporting "All schema and structure checks passed" next to a list of that
+  skill's advisories.
+- A `catalog-summary.json` entry lists the catalog-wide findings behind its
+  verdict under `catalog_findings`. The duplicate `metadata.id` check already
+  failed the member and bumped its `severity_counts`, but a catalog validates
+  each skill on its own, so nothing in that skill's output said what caused
+  either.
 - Folder validation preserves author and metadata ID advisories from passing
   skills. Catalog summaries include duplicate ID severity counts and consistent
   member verdicts, while explicitly labeling linked reports as single-skill
   results and retaining their independent verdicts.
 - Behavior checks no longer score a final answer that the evidence limits
-  shortened. The final-response allowance rises from 800 to 8,000 characters,
-  with the total behavior evidence budget reconciled to 12,000, so an ordinary
+  shortened. The final-response allowance rises from 800 to 8,000 characters
+  and the default behavior evidence budget from 8,000 to 12,000, so an ordinary
   answer reaches the judge whole instead of losing its middle; the user request
-  is reserved alongside it, ahead of the optional exploration output in the
-  compact tool history. The `behavior_check` evidence record now reports
-  whether the required evidence is complete, not only whether something was
-  dropped. When the final answer still cannot fit, the judge returns an
-  explicit evaluation error and no behavior score, rather than grading the
-  evidence loss as a behavior failure, and that missing score stays missing
-  instead of being averaged in as a zero.
+  keeps a reserved section of up to 2,000 characters ahead of the optional
+  exploration output in the compact tool history, which also repeats the
+  request at its head. The `behavior_check` evidence record now reports whether
+  the required evidence is complete, and which sections are incomplete, not
+  only whether something was dropped. When the final answer still cannot fit
+  and the deterministic verified facts do not already settle every expected
+  behavior, the judge returns an explicit evaluation error and no behavior
+  score, rather than grading the evidence loss as a behavior failure.
+  **That case then has no overall score at all**: an unscored metric that is
+  not "not applicable" leaves `overall_score` null, so such cases drop out of
+  any gate or comparison keyed on it until the limits are raised or the case is
+  shortened. A case whose expected behaviors are all confirmed by the verified
+  facts keeps its score, because the missing text cannot change the outcome.
   `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT` and
-  `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET` still override both limits.
+  `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET` are both honoured exactly as set, in
+  either direction. Note that the final-response limit also caps the reserved
+  user-request section when it is set below 2,000, and that a check budget too
+  small to hold the final response beside some tool history is logged as a
+  warning rather than quietly raised — lower the final-response limit with it.
 - Code Risk Analysis reports Semgrep file-level parse errors as one partial-scan
   error that names up to 20 unparsed files, relative to the skill and with the
   line of the first error, instead of the first three truncated messages. The
@@ -180,6 +250,37 @@ All notable changes to SkillEvaluator are documented in this file.
 - Grader qualification reports null behavior-step results with a matching
   `not_checked` expectation as insufficient evidence instead of errors. Raw
   scores and unjudgeable rates are unchanged.
+- Tier 3 token usage rows are now validated against the evaluation dataset's own
+  case IDs. Every case row uses one of those IDs at most once, and an attempt
+  whose only name is Harbor's 32-character cut of a case name is attributed to
+  that case, so missing telemetry stays with the canonical case instead of
+  splitting into a row of its own. A row that still cannot be matched is marked
+  as an unverified case ID in every report and recorded under
+  `token_usage.case_id_validation`, rather than being shown as coverage of a
+  dataset case; a table that shows no such row, because it renders no case rows
+  or its row caps dropped them, names the unmatched case IDs instead. Hidden
+  case names receive the same Markdown escaping, publication-label masking and
+  terminal secret redaction as visible rows, before their displayed length is
+  bounded.
+- The Tier 3 security scan no longer scores an agent clearing its own output
+  directory as a destructive command. One literal, recursive and forced `rm` of
+  a path inside `/workspace/output` or an output directory established by the
+  trusted staged runtime configuration is cleanup. A tool call's first or
+  later `cwd`/`workdir` and shell directory changes cannot establish another
+  owned root. The directory itself, sensitive or protected paths, compound,
+  globbed, parent-escaping or dynamic forms retain conservative scoring.
+  After observed symlink creation, only an unadorned direct leaf can qualify;
+  unknown command directories cannot qualify. Literal quoting is inert
+  because expansions and escapes are rejected before operands are parsed.
+- The Tier 3 security scan no longer reads the license URL in a source file's
+  copyright header as data exfiltration. A `http://` or `https://` URL on a
+  comment line of a license or copyright notice is prose within recognized
+  shell comments and bounded, simple literal file-write actions (`cat`, `tee`
+  or `apply_patch` heredocs). Expanding shell strings and heredocs cannot claim
+  an inert notice context. Other URLs, including docstring links, and mixed or
+  uncertain shell actions retain conservative oversized-action handling. A
+  curl, wget or httpie word keeps its meaning wherever it appears, including
+  inside a notice; executable shell leaders cannot borrow a notice either.
 - A failed Tier 3 execution (for example a backend launch failure) now marks the
   report payload, its summary and the affected agents as failed with their
   errors, instead of only the top-level `result.json`. A report re-rendered by
@@ -189,6 +290,23 @@ All notable changes to SkillEvaluator are documented in this file.
   `/bin/bash -lc 'cat skills/x/SKILL.md'`, which some agent harnesses record
   instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL
   config.json'`) are still not counted.
+- Tier 3 reads the native Codex wrapper that runs a literal command array
+  through `.map`, so a skill read batched that way is graded instead of scoring
+  as an unsupported wrapper. The decoder stays a bounded static one: every array
+  element is still a literal, the callback may only hand that element to one
+  named tool, and a reused or shadowed binding, a changed index or payload, a
+  computed key or tool name, or a duplicate, missing, extra, reordered or
+  truncated result record leaves the whole wrapper unsupported. Each command is
+  matched to the settled result at its own position and carries that result's
+  own exit code or rejection. The form that prints inside the callback settles
+  out of array order, so it is read only for a single command and otherwise
+  stops grading rather than guessing which result belongs to which command.
+  That inline form is graded only on evidence it actually produced: the callback
+  must `await` the call, because an un-awaited one prints a pending promise
+  rather than the tool's result, and it must print something, because
+  `Promise.allSettled` swallows a rejection and would otherwise let a call that
+  never ran exit cleanly and read as a successful command.
+
 - A Tier 1 security scan keeps a SkillSpector `partial` report `INCOMPLETE` when
   its only ledger row is a referenced image but its `references` list records a
   `missing` reference on a line without a ledger row, an `ambiguous` reference,
@@ -254,6 +372,27 @@ All notable changes to SkillEvaluator are documented in this file.
   redrawn; the header and finished tiers print once, and log records print
   through the live view's console. The progress line now prints once, above
   the final verdict.
+- Tier 3 security grading now handles more cases, on top of the 0.9.0
+  home-directory spellings fix. A home path in the default word of a
+  `${VAR:-word}` or `${VAR-word}` that starts a path word now matches, so
+  `cat "${SSH_KEY:-$HOME/.ssh/id_rsa}"` and
+  `echo x >> "${GIT_CONFIG:-$HOME/.gitconfig}"` score Security 0.0 (1.0 in
+  0.9.0), while `cat backup-$HOME/.netrc` and
+  `cat backup-${X:-$HOME/.netrc}` keep 1.0. The quoted strings that
+  bound a redirection, `tee`, or `sed -i` target are found as the shell finds
+  them: an escaped `\'` opens none, a quote in a `#` comment pairs only
+  within its line, and one in a here-document body never pairs past the
+  body. So after `# Show what's in the profile`, the read
+  `echo '--> zprofile'; cat ~/.zprofile; echo '--> done'` now scores 1.0
+  (0.0 in 0.9.0), and `sed -i '/old-path/d' $HOME/.zprofile` scores 0.0
+  (1.0 in 0.9.0). A redirection, `tee`, or `sed` inside a quoted string or a
+  comment no longer hides the writes after it, so
+  `echo "Step 1 -> check"; echo x >> "$HOME/.zprofile"` scores 0.0. The
+  `view` command of `str_replace_editor` or `str_replace_based_edit_tool` is
+  checked as a read, like a `Read`: a view of `/root/.gitconfig`,
+  `/root/.bashrc`, or `/etc/sudoers` scored 0.0 in 0.9.0 and now scores 1.0,
+  and a view of a credential store such as `~/.netrc` still scores 0.0. Both
+  the host checker and the bundled Harbor verifier apply the fix.
 - `--tolerate-baseline-timeouts` (added in 0.9.0) now follows its own rules
   in the printed run verdict, in the notes of both reports and during result
   collection. The `RUN QUALITY VERDICT` line that `tier3 evaluate` prints
@@ -612,6 +751,15 @@ All notable changes to SkillEvaluator are documented in this file.
   the Large skill finding, the HTML report and the docs, and adds
   `metrics.estimated_tokens` and `metrics.estimate_method` to the quality JSON.
   `metrics.total_tokens` keeps the same value and scoring is unchanged.
+
+- Tier 1 skill-type detection and the script-based checks recognise Node scripts
+  (`.mjs`, `.cjs`, `.js`) under `scripts/` and `tools/`, so a Node-script skill
+  is no longer typed guide-only. A skill whose scripts are all Node scripts is not
+  asked for a `run_script` call; one that also bundles Python or shell scripts
+  keeps the check. Script lint still parses Python only and reports how many Node
+  scripts it did not lint. The rubric judge also receives Node scripts and files
+  from `tools/`. Scores of Node-script skills can change because they now get the
+  script-based checks.
 
 - Name Skill Lift as the headline comparison and label pass@k differences as
   supporting reliability across reports and terminal output.

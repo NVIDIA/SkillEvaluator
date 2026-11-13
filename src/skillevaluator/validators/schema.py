@@ -39,8 +39,32 @@ logger = get_logger(__name__)
 #: Upper bound for a ``metadata.author`` value; longer values are malformed.
 AUTHOR_MAX_LENGTH = 256
 
-#: An email address written outside the ``Name <email@host>`` shape.
-_BARE_EMAIL_PATTERN = re.compile(r"[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+")
+#: An email address written outside the ``Name <email@host>`` shape. The
+#: discriminator is ``\w@\w``: an address has a local part, so a word character
+#: sits on each side of the ``@``, while a social handle such as
+#: ``Jane Doe (@jdoe)`` or a bare ``@jdoe`` does not. The domain needs no dot,
+#: so an intranet address such as ``root@buildhost`` is caught as well.
+_BARE_EMAIL_PATTERN = re.compile(r"[^\s<>@]*\w@\w[^\s<>@]*")
+
+#: Unicode general categories never usable in an author value: C0/C1 controls,
+#: surrogates, and private-use code points.
+_UNSAFE_AUTHOR_CATEGORIES = frozenset({"Cc", "Cs", "Co"})
+
+#: Invisible format characters (category ``Cf``) that can make an author value
+#: render as something other than what it says: the bidirectional marks,
+#: embeddings, overrides and isolates, plus the byte-order mark. The rest of
+#: ``Cf`` stays allowed, because ZWNJ (U+200C) and ZWJ (U+200D) are required
+#: for Persian, Arabic and Devanagari names to render correctly.
+_UNSAFE_AUTHOR_FORMAT_CHARS = frozenset(
+    {
+        chr(0x061C),  # ARABIC LETTER MARK
+        chr(0x200E),  # LEFT-TO-RIGHT MARK
+        chr(0x200F),  # RIGHT-TO-LEFT MARK
+        *(chr(code) for code in range(0x202A, 0x202F)),  # embedding, pop, override
+        *(chr(code) for code in range(0x2066, 0x206A)),  # isolate controls
+        chr(0xFEFF),  # ZERO WIDTH NO-BREAK SPACE (byte-order mark)
+    }
+)
 
 #: ``metadata.id`` contract: an exact (unnormalized) lowercase ASCII slug.
 METADATA_ID_MAX_LENGTH = 64
@@ -58,11 +82,21 @@ def author_value_problem(author: str) -> str | None:
     ``NVIDIA cuOpt Team`` or ``Jane Doe (@jdoe)``. Plain attribution may not
     contain angle brackets or an email address, because those mean an attempted
     but broken ``Name <email>`` value.
+
+    The character guard rejects controls, surrogates, private-use code points
+    and the bidirectional/BOM format characters. It deliberately does not
+    reject all of Unicode category ``C``: that also covers the joiners real
+    names need (U+200C/U+200D) and every code point unassigned in the running
+    interpreter's Unicode data, which makes the verdict depend on the
+    interpreter's version rather than on the value.
     """
     if len(author) > AUTHOR_MAX_LENGTH:
         return f"is longer than {AUTHOR_MAX_LENGTH} characters"
-    if any(unicodedata.category(char).startswith("C") for char in author):
-        return "contains control or invisible formatting characters"
+    if any(
+        char in _UNSAFE_AUTHOR_FORMAT_CHARS or unicodedata.category(char) in _UNSAFE_AUTHOR_CATEGORIES
+        for char in author
+    ):
+        return "contains control, private-use, or bidirectional formatting characters"
     if AUTHOR_SHAPE_PATTERN.fullmatch(author):
         return None
     if "<" in author or ">" in author:
@@ -219,16 +253,23 @@ class SchemaValidator(ValidatorBase):
                             }
                         )
 
+                advisories = len(skill_result.findings)
                 result.add_success(
                     check_name=skill_dir.name,
-                    message="All schema and structure checks passed",
+                    message=(
+                        "All schema and structure checks passed"
+                        if not advisories
+                        else f"No blocking schema or structure findings ({advisories} advisory finding(s))"
+                    ),
                     checks=check_details,
                     total_checks=len(check_details),
+                    advisory_findings=advisories,
                 )
-                # A passing child can still carry policy advisories. Keep its
-                # findings without merging its successes a second time.
-                for finding in skill_result.findings:
-                    result.add_finding(finding)
+                # A passing child can still carry policy advisories. Keep them
+                # named after the skill they came from, without merging its
+                # successes a second time; the roll-up above only says that
+                # nothing blocked.
+                result.merge_advisories_with_prefix(skill_result, skill_dir.name)
             else:
                 result.merge_with_prefix(skill_result, skill_dir.name)
                 # merge_with_prefix copies errors/warnings, but not severity

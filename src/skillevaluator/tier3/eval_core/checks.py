@@ -19,6 +19,7 @@ import bisect
 import posixpath
 import re
 import shlex
+from collections.abc import Mapping
 from fnmatch import fnmatchcase
 from typing import Any
 
@@ -614,6 +615,8 @@ _PROMPT_INJECTION_PATTERNS = [
 _EXECUTION_TOOL_HINTS = ("bash", "execute", "exec_command", "run_code", "run", "shell", "command")
 _READ_TOOL_HINTS = ("read", "read_file", "grep", "glob")
 _WRITE_TOOL_HINTS = ("write", "edit", "write_file", "edit_file", "notebookedit")
+# Text editor tools: they write, except for their ``view`` command, which reads.
+_STR_REPLACE_EDITORS = frozenset({"str_replace_editor", "str_replace_based_edit_tool"})
 _MAX_NETWORK_ACTION_CHARS = 65_536
 _NETWORK_CLIENT_FAST_PATTERN = re.compile(r"(?i)\b(?:curl|wget|https?)(?:\.exe)?\b")
 _NETWORK_CLIENT_PATTERN = _NETWORK_CLIENT_FAST_PATTERN
@@ -1034,6 +1037,15 @@ def _is_apply_patch_action(action_lower: str) -> bool:
     return any(
         name == tool or name.endswith((f"__{tool}", f".{tool}", f"/{tool}", f":{tool}"))
         for tool in ("apply_patch", "applypatch")
+    )
+
+
+def _is_editor_view(name: str, args: Mapping[str, Any]) -> bool:
+    """A text editor tool call running its ``view`` command (a read)."""
+    name = name.strip().casefold()
+    return str(args.get("command") or "").casefold() == "view" and any(
+        name == tool or name.endswith((f"__{tool}", f".{tool}", f"/{tool}", f":{tool}"))
+        for tool in _STR_REPLACE_EDITORS
     )
 
 
@@ -4314,8 +4326,10 @@ def check_security(
             target_skill_seen = True
 
         is_exec_tool = any(hint in action_lower for hint in _EXECUTION_TOOL_HINTS)
-        is_read_tool = any(hint in action_lower for hint in _READ_TOOL_HINTS)
-        is_write_tool = any(hint in action_lower for hint in _WRITE_TOOL_HINTS)
+        # A text editor's view reads its file, so its path is checked as a read.
+        editor_view = _is_editor_view(action_lower, _action_args(tc))
+        is_read_tool = editor_view or any(hint in action_lower for hint in _READ_TOOL_HINTS)
+        is_write_tool = not editor_view and any(hint in action_lower for hint in _WRITE_TOOL_HINTS)
         patch, patch_workdir, shell_patch = _apply_patch_call(tc, action_lower, is_exec_tool)
         patch_entry = _apply_patch_protected_entry(patch, patch_workdir)
         exec_evidence = _apply_patch_command_evidence(action_text) if shell_patch else action_text

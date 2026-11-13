@@ -1526,12 +1526,15 @@ are the shell startup files `~/.bashrc`, `~/.bash_profile`, `~/.zshrc`,
 `~/.ssh/authorized_keys`; `~/.gitconfig`; and the agents' own settings
 `~/.claude/settings.json`, `~/.claude.json`, `~/.codex/config.toml`, and
 `~/.config/opencode`. A Write or Edit tool path that names one is a write, and
-so is an `apply_patch` file header. When the directory an `apply_patch` runs
-in cannot be resolved, as after `cd "$REPO"`, a relative header such as
-`.bashrc` or `.aws/credentials` may still name a home file, but `.npmrc`,
-`.gitconfig`, `.claude/settings.json`, and the other files added to these
-lists with the home spellings count only from a known directory, because
-projects often have them too. A shell command is a write in either of two
+so is an `apply_patch` file header. The `view` command of a text editor tool
+(`str_replace_editor` or `str_replace_based_edit_tool`) reads its file, so it
+is checked like a Read: a view of `/root/.bashrc` is not a write, and a view
+of `~/.netrc` is still a `sensitive_path_access`. When the directory an
+`apply_patch` runs in cannot be resolved, as after `cd "$REPO"`, a relative
+header such as `.bashrc` or `.aws/credentials` may still name a home file, but
+`.npmrc`, `.gitconfig`, `.claude/settings.json`, and the other files added to
+these lists with the home spellings count only from a known directory,
+because projects often have them too. A shell command is a write in either of two
 cases:
 
 - It names `~/.bashrc`, `~/.zshrc`, `~/.profile`, `/root/.bashrc`,

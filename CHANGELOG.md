@@ -454,6 +454,16 @@ All notable changes to SkillEvaluator are documented in this file.
   Isolated wheel tests cover SDK 1.28.1 and 2.3.0; the supported Tier 3 dependency
   range remains unchanged.
 
+- Apply the existing MCP declaration policy to native Harbor task environments
+  before staging. Preserve approved `$VAR` header references by converting them
+  to Harbor 0.25's `${VAR}` form in generated task TOML, without changing source
+  declarations or agent JSON configuration.
+
+- Keep local `/logs/artifacts`, `HARBOR_LOGS_DIR/artifacts`, and
+  `HARBOR_ARTIFACTS_DIR` on the same private staging tree. Artifact collection
+  preserves source files and retained role logs; local whole-log-tree transfers
+  fail before modifying their destination.
+
 - Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
   the PR or merge request's target revision. Policy files from the proposed
   changes cannot approve their own exceptions.

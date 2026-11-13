@@ -475,6 +475,24 @@ All notable changes to SkillEvaluator are documented in this file.
   the dataset-size status in `result.json` and the `tier3 evaluate` summary. It
   is taken from the agent with the best baseline score, as in the reports.
 
+- `rubric-eval` now asks the judge once more, naming the problem, when its
+  reply is not valid JSON or its criterion evidence cannot be scored: a
+  criterion is missing, repeated or unknown, or has a score outside 0 to 10 or
+  a pass flag that is not a boolean. In 0.8.0 the first such reply failed
+  Tier 1 with a HIGH `llm_invalid_response` or `llm_unavailable` finding; now
+  only a second one does. The LLM client still retries transient provider
+  errors as set by `SKILL_EVAL_LLM_MAX_RETRIES`; a request that still fails
+  after those retries, a refusal or a truncated reply is not asked again. The
+  JSON report records `judge_attempts`, the number of times the judge was
+  asked (1, or 2 after a rejected reply, not counting the client's retries),
+  in the skill's `rubric_eval` success detail or `llm_*` finding and, for a
+  single skill, also in the `rubric_eval` object. It is left out when the
+  first request fails, for example with no provider configured.
+
+- Rubric retry diagnostics redact judge-supplied credentials before logging or truncating the rejection reason.
+
+- Rubric retry guidance links to the published environment-variable documentation route.
+
 - A default Tier 3 run with a baseline can reach a PASS or NEUTRAL publication
   verdict in BENCHMARK.md again. The baseline arm has no skill under test, so
   it records `skill_execution` and `skill_efficiency` as not applicable and has

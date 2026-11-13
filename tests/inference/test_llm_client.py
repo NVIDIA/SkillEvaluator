@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from skillevaluator.constants import RUBRIC_CRITERIA
 from skillevaluator.inference import (
     EmptyLLMResponseError,
     FindingVerifier,
@@ -1074,13 +1075,23 @@ class TestReasoningModelRequests:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _use_provider(monkeypatch, "anthropic", "claude-opus-5-5")
+        reply = {
+            "overall_pass": True,
+            "score": 90,
+            "summary": "ok",
+            "checks": [
+                {"id": criterion["id"], "criterion": criterion["criterion"], "pass": True, "score": 9, "notes": "ok"}
+                for criterion in RUBRIC_CRITERIA
+            ],
+        }
         mock_anthropic = MagicMock()
-        mock_anthropic.messages.create.return_value = _anthropic_response('{"checks": []}')
+        mock_anthropic.messages.create.return_value = _anthropic_response(json.dumps(reply))
 
         with patch("anthropic.Anthropic", return_value=mock_anthropic):
             report = RubricJudge().process(skill_name="demo", skill_content="# Demo")
 
-        assert report == {"checks": []}
+        assert report == reply
+        assert mock_anthropic.messages.create.call_count == 1
         call_kwargs = mock_anthropic.messages.create.call_args.kwargs
         assert call_kwargs["max_tokens"] == MAX_COMPLETION_TOKENS
         assert call_kwargs["output_config"] == {

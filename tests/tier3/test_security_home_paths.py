@@ -115,6 +115,13 @@ CREDENTIAL_READS = [
     pytest.param(_bash("cat ~/./.ssh/id_rsa"), id="dot-segment"),
     pytest.param(_bash("cat $HOME//.netrc"), id="dollar-home-repeated-slash"),
     pytest.param(_bash("cat /home/agent/project/../.ssh/id_rsa"), id="parent-segment"),
+    # The default word of ${VAR:-word} or ${VAR-word}.
+    pytest.param(_bash('cat "${SSH_KEY:-$HOME/.ssh/id_rsa}"'), id="default-dollar-home"),
+    pytest.param(_bash('kubectl --kubeconfig "${KUBECONFIG:-$HOME/.kube/config}" get pods'), id="default-kubeconfig"),
+    pytest.param(_bash('cat "${NETRC:-${HOME}/.netrc}"'), id="default-braced-home"),
+    pytest.param(_bash('cat "${SSH_KEY:-/home/agent/.ssh/id_rsa}"'), id="default-home-user"),
+    pytest.param(_bash("cat ${NETRC-$HOME/.netrc}"), id="default-without-colon"),
+    pytest.param(_bash("cat ${NETRC:-~agent/.netrc}"), id="default-tilde-user"),
     pytest.param(_bash("tar czf /tmp/a.tgz ~/.azure"), id="azure-dir-tar"),
     pytest.param(_bash("cp -r /home/agent/.azure /tmp/x"), id="azure-dir-copy"),
     pytest.param(_bash("docker run --rm -v $HOME/.azure:/root/.azure:ro img"), id="azure-dir-volume"),
@@ -191,6 +198,8 @@ PROTECTED_WRITES = [
     pytest.param(_bash("sed -i -E 's/a/b/' ~/.zprofile"), id="sed-in-place-extended-regex"),
     pytest.param(_bash("sed -ni -e 's/a/b/p' ~/.gitconfig"), id="sed-in-place-cluster-then-expression"),
     pytest.param(_bash("echo x >> /home/agent/project/../.bashrc"), id="parent-segment"),
+    pytest.param(_bash('echo x >> "${GIT_CONFIG:-$HOME/.gitconfig}"'), id="default-word-target"),
+    pytest.param(_bash("sed -i 's/a/b/' ${PROFILE-/home/agent/.zprofile}"), id="default-word-sed-target"),
     # An apostrophe in a comment, a here-document body or an escape does not open a quoted string.
     pytest.param(
         _bash("# Don't keep the old PATH line\nsed -i '/old-path/d' $HOME/.zprofile"), id="comment-apostrophe"
@@ -315,6 +324,7 @@ BENIGN_ACTIONS = [
     # Home spellings that are not a home directory.
     pytest.param(_bash("ls /mnt/home/agent/.ssh_backup_notes"), id="mnt-home"),
     pytest.param(_bash("cat $HOMEDIR/.ssh/id_rsa.pub.example"), id="homedir-variable"),
+    pytest.param(_bash("cat backup-$HOME/.netrc"), id="dash-joined-home"),
     pytest.param(_bash("ls /rootfs/.ssh"), id="rootfs"),
     pytest.param(_read("/Users/Shared/.npmrc"), id="macos-shared-folder"),
     pytest.param(_bash("ls https://people.example.edu/~alice/.netrc"), id="url-tilde-user"),
@@ -506,6 +516,14 @@ def test_apply_patch_to_lookalike_paths_is_not_flagged(check_security, header: s
         ("cat /Users/Shared/.npmrc", "cat /users/shared/.npmrc"),
         # The upstream fix reads no Windows environment spellings of the home directory.
         ("type %USERPROFILE%\\.netrc", "type %userprofile%/.netrc"),
+        # A ${VAR:-word} or ${VAR-word} default word starts after its "-".
+        ('cat "${SSH_KEY:-$HOME/.ssh/id_rsa}"', 'cat "${ssh_key:-~/.ssh/id_rsa}"'),
+        ("cat ${X-/home/agent/.netrc}", "cat ${x-~/.netrc}"),
+        ("cat ${X:-~alice/.netrc}", "cat ${x:-~/.netrc}"),
+        ('cat "${X:-"$HOME"/.netrc}"', 'cat "${x:-~/.netrc}"'),
+        # Any other "-" joins the word before it.
+        ("cat backup-$HOME/.netrc", "cat backup-$home/.netrc"),
+        ("cat ${X--$HOME/.netrc}", "cat ${x--$home/.netrc}"),
         ("ls /home/agent", "ls /home/agent"),
         ("cd /root && ls", "cd /root && ls"),
     ],

@@ -420,9 +420,12 @@ _SENSITIVE_PATH_DIRECTORIES = frozenset({"~/.azure", "~/.config/opencode"})
 # Home spellings rewritten to "~": /home/<user>, /Users/<user> (not the shared
 # /Users/Shared), /root, $HOME and ${HOME} (quoted or not), and ~user that
 # starts a path word, so the "~alice" of "https://host/~alice/.netrc" stays.
-# Backslashes become "/" first, so C:\Users\<user> is a home spelling too.
+# Backslashes become "/" first, so C:\Users\<user> is a home spelling too. The
+# default word of "${VAR:-word}" or "${VAR-word}" starts a path word too; its
+# operator (group 1) is kept, while any other "-" joins the word before it, so
+# "backup-$HOME/.netrc" stays.
 _HOME_ANCHOR_RE = re.compile(
-    r"(?<![\w.~$-])"
+    r"(?:(\$\{\w+:?-)|(?<![\w.~$-]))"
     r"(?:/home/[^/\s'\"`;|&<>()]+|/users/(?!shared/)[^/\s'\"`;|&<>()]+|/root|\"?\$\{home\}\"?|\"?\$home\"?"
     r"|(?<!/)~[a-z_][a-z0-9_.-]*)"
     r"(?=/)"
@@ -862,7 +865,7 @@ def _normpath_word(match: re.Match[str]) -> str:
 def _normalize_sensitive_path_text(text: Any) -> str:
     """Lowercase *text*, normalize its path words, and rewrite home directories to ``~``."""
     normalized = _PATH_WORD_RE.sub(_normpath_word, str(text).lower().replace("\\", "/"))
-    return _HOME_ANCHOR_RE.sub("~", normalized)
+    return _HOME_ANCHOR_RE.sub(r"\1~", normalized)
 
 
 def _path_entry_in(entry: str, text: str) -> bool:

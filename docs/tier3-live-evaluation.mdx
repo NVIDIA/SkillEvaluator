@@ -1505,7 +1505,10 @@ the finding.
 A path matches however it names the home directory: `~`, `$HOME`, `${HOME}`,
 `~user`, `/home/<user>`, `/Users/<user>` (not `/Users/Shared`), `/root`, or
 `C:\Users\<user>`. `//`, `/./`, and `dir/..` segments are resolved first, so
-`cat /home/agent//.ssh/id_rsa` and `cat $HOME/.ssh/id_rsa` match `~/.ssh`. A
+`cat /home/agent//.ssh/id_rsa` and `cat $HOME/.ssh/id_rsa` match `~/.ssh`. The
+spelling must start a path word, and the default word of `${VAR:-word}` or
+`${VAR-word}` is one, so `cat "${SSH_KEY:-$HOME/.ssh/id_rsa}"` matches
+`~/.ssh` too, while `cat backup-$HOME/.netrc` does not match `~/.netrc`. A
 project file that only shares a name with a home file, such as
 `/home/agent/project/.bashrc` or `./project/.npmrc`, does not match.
 `.aws/credentials` and `.config/gcloud` match in any directory in commands

@@ -410,31 +410,50 @@ class Catalog:
 
 
 def _find_skills(folder: Path) -> list[Path]:
-    found = {
-        p.parent
-        for n in SKILL_MANIFEST_VARIANTS
-        for p in folder.rglob(n)
-        if not any(part in SCAN_EXCLUDED_DIRS for part in p.relative_to(folder).parts)
-    }
+    """Skill folders under ``folder``, symlinked ones included (Claude Code and Codex load those)."""
+    found: set[Path] = set()
+    for here, dirs, files in os.walk(folder, followlinks=True):
+        path = Path(here).absolute()
+        if path.is_symlink() and path.resolve() in {parent.resolve() for parent in path.parents}:
+            dirs.clear()  # a link back to one of its own parent folders
+            continue
+        dirs[:] = [d for d in dirs if d not in SCAN_EXCLUDED_DIRS]
+        if any(n in files for n in SKILL_MANIFEST_VARIANTS):
+            found.add(Path(here))
     return sorted(s for s in found if not any(parent in found for parent in s.parents))
+
+
+def _catalog_base(skill: Path) -> Path | None:
+    """The skills folder a skill is installed in: a harness root, or a workspace ``skills/`` folder (OpenClaw)."""
+    root, depth = _install_root(skill)
+    if root is not None:
+        return skill.absolute().parents[depth]
+    parent = skill.absolute().parent
+    return parent if parent.name == "skills" else None
+
+
+def _catalog_of(group: list[Path]) -> Catalog:
+    base = _catalog_base(group[0])
+    if base is not None:
+        return Catalog.of(_find_skills(base) or group, base)
+    return Catalog.of(group, Path(os.path.commonpath([s.resolve() for s in group])) if len(group) > 1 else None)
 
 
 def facts_for(skills: list[Path]) -> dict[Path, dict[str, Any]]:
     """Facts per skill, with the catalog they are installed in.
 
-    Several skills form their own catalog. A single skill under a known skills folder
-    (e.g. ``.claude/skills``) is measured against everything installed in that folder.
+    A skill installed in a skills folder (e.g. ``.claude/skills``, or an OpenClaw workspace ``skills/``) is
+    measured against everything installed in that folder, and skills in different folders are separate
+    installations. Skills outside any skills folder that are given together form their own catalog.
     """
-    members, base = skills, None
-    if len(skills) == 1:
-        root, depth = _install_root(skills[0])
-        if root is not None:
-            base = skills[0].absolute().parents[depth]
-            members = _find_skills(base) or skills
-    elif skills:
-        base = Path(os.path.commonpath([s.resolve() for s in skills]))
-    catalog = Catalog.of(members, base)
-    return {skill: skill_facts(skill, catalog) for skill in skills}
+    groups: dict[Path | None, list[Path]] = {}
+    for skill in skills:
+        base = _catalog_base(skill)
+        groups.setdefault(base.resolve() if base else None, []).append(skill)
+    catalogs: dict[Path, Catalog] = {}
+    for group in groups.values():
+        catalogs.update(dict.fromkeys(group, _catalog_of(group)))
+    return {skill: skill_facts(skill, catalogs[skill]) for skill in skills}
 
 
 def _utf16_units(value: Any) -> int:
@@ -596,8 +615,6 @@ def evaluate_profile(
         if "catalog_" in expression and not facts["catalog_size"]:
             continue
         if expression != "always" and not _Rule.evaluate(expression, names):
-            continue
-        if expression == "always" and rule["effect"] == "advisory":
             continue
         finding = {"id": rule["id"], "effect": rule["effect"], "message": _fill(rule["message"], facts)}
         for key in ("fix", "outcome"):

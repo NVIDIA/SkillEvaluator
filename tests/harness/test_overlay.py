@@ -388,6 +388,69 @@ def test_duplicate_names_report_each_harness_winner(tmp_path: Path):
     assert "(filler-copy)" in next(f["message"] for f in rows["opencode"]["findings"] if f["id"] == "OC-DUP-NAME")
 
 
+def _install(folder: Path, dirname: str, name: str | None = None) -> Path:
+    skill = folder / dirname
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        f"---\nname: {name or dirname}\ndescription: Use when testing catalogs.\n---\n{BODY}", encoding="utf-8"
+    )
+    return skill
+
+
+def test_separate_skills_folders_are_separate_catalogs(tmp_path: Path):
+    claude = [_install(tmp_path / ".claude" / "skills", n) for n in ("alpha", "beta")]
+    codex = [_install(tmp_path / ".codex" / "skills", n) for n in ("alpha", "gamma", "delta")]
+
+    facts = facts_for([*claude, *codex])
+
+    assert [facts[s]["catalog_size"] for s in claude] == [2, 2]
+    assert [facts[s]["catalog_size"] for s in codex] == [3, 3, 3]
+    assert not any(f["duplicate_name"] for f in facts.values())
+    assert facts[claude[0]]["catalog_base"].endswith(".claude/skills")
+
+
+def test_unrooted_skills_given_together_stay_one_catalog(tmp_path: Path):
+    pack = [_install(tmp_path / "pack", n, name="same") for n in ("one", "two")]
+
+    facts = facts_for(pack)
+
+    assert {f["catalog_size"] for f in facts.values()} == {2}
+    assert all(f["duplicate_name"] for f in facts.values())
+
+
+def test_workspace_skills_folder_counts_its_siblings(tmp_path: Path):
+    first = _install(tmp_path / "skills", "first", name="same")
+    _install(tmp_path / "skills", "second", name="same")
+
+    facts = facts_for([first])[first]
+
+    assert facts["install_root"] is None
+    assert facts["catalog_size"] == 2 and facts["catalog_base"].endswith("skills")
+    assert "OW-DUP-NAME" in _ids(_rows(first), "openclaw")
+
+
+def test_symlinked_skill_folders_count_toward_the_catalog(tmp_path: Path):
+    skills = tmp_path / ".claude" / "skills"
+    real = _install(skills, "real", name="same")
+    store = _install(tmp_path / "store", "linked", name="same")
+    (skills / "linked").symlink_to(store, target_is_directory=True)
+    (skills / "loop").symlink_to(skills, target_is_directory=True)  # a link back to its own folder
+
+    facts = facts_for([real])[real]
+
+    assert facts["catalog_size"] == 2
+    assert facts["duplicate_name"]
+
+
+def test_reload_guidance_reaches_findings(tmp_path: Path):
+    rows = _rows(_skill(tmp_path))
+
+    reload = {f["id"]: f for r in rows.values() for f in r["findings"] if f["id"].endswith("RELOAD")}
+    assert set(reload) == {"CP-RELOAD", "OC-RELOAD"}
+    assert {f["effect"] for f in reload.values()} == {"advisory"}
+    assert {r["status"] for r in rows.values()} == {"loads"}
+
+
 def test_listed_description_projection(tmp_path: Path):
     desc = "Use when " + "a" * 1600
     rows = _rows(_skill(tmp_path, desc=desc))

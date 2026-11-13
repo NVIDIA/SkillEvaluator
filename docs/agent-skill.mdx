@@ -116,7 +116,7 @@ skill tells the agent never to print or store them.
 | "Check my skill before I publish it, no API keys" | `skillevaluator tier1 <skill-dir> --no-llm` | Pass or fail with security, PII, schema, and quality findings |
 | "Score the quality of this SKILL.md" | `skillevaluator quality-check` and `rubric-eval` | Quality score and grade, rubric feedback |
 | "Does it overlap with my other skills?" | `skillevaluator tier2` | Duplicate and similarity findings |
-| "Write eval cases for my skill" | `skillevaluator create-eval-dataset --full`, then `tier3 validate --strict` | A reviewed `evals/evals.json` with positive and negative cases |
+| "Write eval cases for my skill" | Write task requests and outcomes in `<skill-dir>/evals/EVAL.md`, run `skillevaluator create-eval-dataset <skill-dir> --full --prompt <skill-dir>/evals/EVAL.md`, then `tier3 validate <skill-dir> --strict` | A reviewed `evals/evals.json` with positive and negative cases |
 | "Does my skill actually make the agent better?" | `skillevaluator tier3 evaluate` with and without the skill | Verdict, five dimension scores, and Skill Lift |
 | "Explain this benchmark report" | Reads `result.json`, `tier3-benchmark.md`, `what_to_fix.json` | Plain-language verdict and prioritized fixes |
 | "Gate skills in our CI" | `skillevaluator ci init` | A workflow with the right exit-code gates |
@@ -140,6 +140,9 @@ Effectiveness      68.6%       95.3%    +26.7
 
 This is the SkillEvaluator skill evaluated by SkillEvaluator. Its own eval cases
 ship in [`skills/skillevaluator/evals/`](https://github.com/NVIDIA/SkillEvaluator/tree/main/skills/skillevaluator/evals).
+The run above used an earlier version of case 001 that also asserted the agent
+read the skill's `SKILL.md`, which the baseline cannot do; that assertion has
+since been removed.
 
 <Warning>
   Asking one agent to answer with and without a skill and grade itself is not an

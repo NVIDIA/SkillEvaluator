@@ -792,6 +792,10 @@ All notable changes to SkillEvaluator are documented in this file.
   confirm a guess for the masked part. Redaction now removes a digest that no
   longer matches the reported value.
 
+- Truncated `--llm-verify` replies with no complete verdicts no longer claim an
+  answering model. Complete verdicts still retain their model, and other LLM
+  parsers can still accept an empty result as complete evidence.
+
 - Tier 2 context deduplication now checks each chat-LLM verdict before it
   becomes a finding. When present, the confidence must be a JSON number from 0
   to 1, and the rationale and suggestion must be strings of at most 8,192

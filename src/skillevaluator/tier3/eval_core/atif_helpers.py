@@ -1160,6 +1160,14 @@ def _behavior_evidence_completeness(
     return not required_missing, required_missing, incomplete
 
 
+# Clause separators for an expectation. A dot only separates when whitespace
+# follows it, so an artifact path such as ``report.py`` is never split apart.
+_BEHAVIOR_CLAUSE_SPLIT_RE = re.compile(
+    r"(?:\band\b|\bthen\b|\balso\b|\bplus\b|\bas well as\b|\bwhile\b|\bbefore\b|\bafter\b|[;]|\.\s)",
+    re.IGNORECASE,
+)
+
+
 def _expected_behaviors_verified(expected_behavior: Any, facts: list[dict[str, Any]]) -> bool:
     """Return True when deterministic facts already settle every expected behavior.
 
@@ -1169,17 +1177,37 @@ def _expected_behaviors_verified(expected_behavior: Any, facts: list[dict[str, A
     budgeted evidence, and they head the judge's prompt, so for such a case
     the judge's answer does not depend on the final response surviving the
     limits: withholding the score would discard a result the evidence
-    supports. An expectation that names nothing checkable (plain prose such
-    as "explains the trade-offs") is never settled this way, so prose
-    expectations keep the gate.
+    supports.
+
+    Naming an observed artifact is not enough on its own, because an
+    expectation routinely asks for more than the artifact: "writes
+    ``report.py`` **and explains why each column was dropped**" is settled
+    only in its first half, and the half that needs the final response is
+    exactly the half the deterministic facts cannot speak to. Every clause
+    must therefore name a checkable token of its own. A clause that does not
+    — plain prose such as "explains the trade-offs", whether it stands alone
+    or is joined to an artifact clause — keeps the gate.
+
+    The split is deliberately generous: an unrecognized clause shape leaves
+    the expectation looking like prose and keeps the gate, which withholds a
+    score. Lifting the gate wrongly keeps a score the evidence does not
+    support, so the two errors are not symmetric.
     """
     if not isinstance(expected_behavior, list) or not expected_behavior:
         return False
     observed = {str(fact.get("claim")) for fact in facts if fact.get("observed")}
     for behavior in expected_behavior:
-        claims = [claim for claim, _mode in _checkable_tokens(behavior)]
+        text = str(behavior or "")
+        claims = [claim for claim, _mode in _checkable_tokens(text)]
         if not claims or any(claim not in observed for claim in claims):
             return False
+        for clause in _BEHAVIOR_CLAUSE_SPLIT_RE.split(text):
+            # A clause with no letters or digits is punctuation or filler left
+            # behind by the split, not something the agent was asked to do.
+            if not any(char.isalnum() for char in clause):
+                continue
+            if not _checkable_tokens(clause):
+                return False
     return True
 
 

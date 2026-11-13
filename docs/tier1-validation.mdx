@@ -144,35 +144,62 @@ skillevaluator validate ./skills --type skill --continue-on-failure
 
 ## Validation profiles and policies
 
-The bundled `default` policy applies to both public and private repositories.
-It requires a well-formed `metadata.author` value but does not restrict the email
-domain. Missing or malformed author attribution is HIGH severity. Blocked license
-findings are CRITICAL; missing or unknown licenses are reported for review.
-The policy controls validation rules, not repository visibility or report hosting.
-The old `external` name and `--external` flag remain compatibility aliases for
-this same policy; there is no separate bundled `internal` policy.
+Two policies are bundled. Both report malformed or unsafe author values and
+blocked licenses (CRITICAL); they differ in which governance metadata a skill must carry.
+
+| | `default` | `registry` |
+| --- | --- | --- |
+| Use it for | Public and private repositories | Registries with a documented publication contract |
+| `metadata.author` missing | LOW (advisory) | HIGH (blocks) |
+| Author is a name without an email, such as `NVIDIA cuOpt Team` | INFO | HIGH |
+| Author is malformed or unsafe | HIGH | HIGH |
+| `metadata.id` missing | Not reported | HIGH |
+| `metadata.id` invalid, or duplicated in a collection | MEDIUM (advisory) | HIGH |
+
+The Agent Skills baseline requires only `name` and `description`, so the
+`default` policy treats author attribution and a stable ID as recommendations.
+Neither policy restricts the author email domain. A policy controls validation
+rules, not repository visibility or report hosting. The old `external` name and
+`--external` flag remain compatibility aliases for `default`; there is no
+separate bundled `internal` policy.
 
 ```bash title="Profile selection"
 skillevaluator validate ./my-skill                         # default policy
 skillevaluator validate ./my-skill --profile default       # explicit default policy
-skillevaluator validate ./my-skill --external              # compatibility alias
-skillevaluator validate ./my-skill --policy ./policy.yaml  # custom overlay
-SKILLEVALUATOR_PROFILE=default skillevaluator validate ./my-skill
+skillevaluator validate ./my-skill --profile registry      # registry publication contract
+skillevaluator validate ./my-skill --external              # compatibility alias for default
+skillevaluator validate ./my-skill --policy ./policy.yaml  # custom overlay on default
+SKILLEVALUATOR_PROFILE=registry skillevaluator validate ./my-skill
 ```
 
 Precedence, highest to lowest: `--policy` overlay, `--profile` flag, `SKILLEVALUATOR_PROFILE` environment variable, then the bundled `default` policy.
 
 <Accordion title="Write a custom policy overlay">
-  A custom policy overlays the default rules. It can narrow the accepted author domain and change severities by `CATEGORY.check_name` or `CATEGORY.*`:
+  A custom policy overlays the `--profile` rules (`default` unless you choose
+  another). It can narrow the accepted author domain, set the `metadata.id`
+  requirement, and change severities by `CATEGORY.check_name` or `CATEGORY.*`:
 
   ```yaml title="policy.yaml"
   profile: community-strict
   identity:
     author_email_regex: '<[^>]+@example\.org>'
+    metadata_id_requirement: recommend   # ignore | recommend | require
   severity_overrides:
     SCHEMA.author_missing: critical
     LICENSE.*: critical
   ```
+
+  An `author_email_regex` needs an email address in that domain, so under it a
+  name without an email fails `SCHEMA.author_format`. An overlay that omits an
+  `identity` key keeps the base profile's value. An unrecognized
+  `metadata_id_requirement` value is an error, not a silent fallback.
+
+  The author checks are `SCHEMA.author_missing`, `SCHEMA.author_without_email`,
+  and `SCHEMA.author_format`. The ID checks are `SCHEMA.metadata_id_missing`,
+  `SCHEMA.metadata_id_format`, and `SCHEMA.metadata_id_duplicate`. Their default
+  severities follow `metadata_id_requirement`: a missing ID is LOW under
+  `recommend` and HIGH under `require`; an invalid or duplicate ID is MEDIUM
+  unless the requirement is `require`.
 
   Severity overrides change how findings gate a run; they do not change the
   quality score or waive its `--min-score` requirement. Even an override of
@@ -230,7 +257,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     - The standard hierarchy is `skills/<skill-name>/` or `team-skills/<team>/<skill-name>/`. A nonstandard standalone location is reported as an advisory finding.
     - Recognized skill-root subdirectories are `agents/`, `references/`, `scripts/`, `assets/`, `evals/`, `tests/`, `tools/`, and `config/`; anything else gets a LOW advisory finding. Extend the set per repository with `SKILLEVALUATOR_SCHEMA_ALLOWED_DIRS` (comma-separated names are added to the defaults, never replace them).
     - `SKILL.md` should stay at or below 500 lines; larger files receive an advisory finding.
-    - The default profile expects `metadata.author` in `Name <email@host>` form but does not require a particular email domain.
+    - `metadata.author` is optional under the `default` profile. Use `Name <email@host>` to include a contact address, or a person, team, or organization name such as `NVIDIA cuOpt Team` or `Jane Doe (@jdoe)`. A value that is malformed or unsafe is a HIGH `author_format` finding: a bare email or an email outside `Name <email@host>`, stray angle brackets, control or invisible formatting characters, no letters or digits, or more than 256 characters. The `registry` profile requires the `Name <email@host>` form.
+    - `metadata.id` is an optional stable skill ID. When present it must be an exact 1–64 character lowercase ASCII slug (`^[a-z0-9]+(-[a-z0-9]+)*$`, no surrounding whitespace); it may differ from `name`. A collection run reports an ID that more than one discovered skill declares; `validate` on a catalog also lists these in `catalog-summary.json` under `metadata_id_conflicts`, and under `registry` each skill that shares an ID fails. Uniqueness is checked only across the skills validated together, never against a registry, and a single-skill run does not claim it. The ID does not change local catalog identity, which stays keyed by content type and relative path.
     - `metadata.domain` accepts one category string or a list of them, such as `domain: [backend, ai-ml]`. Values are trimmed and deduplicated in order; a blank or null scalar means no domain. A list with more than 16 entries, or a non-string, blank, or over-128-character entry, is a HIGH `Field 'metadata.domain'` finding. The 128-character limit also applies to a single string.
 
     **To fix common findings:** rename the directory to match `name`, remove forbidden fields, and move the skill under `skills/`.
@@ -623,10 +651,11 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
 ## Author attribution and contact emails
 
-Keep the required `metadata.author: Name <email>` attribution in `SKILL.md`.
-The PII check accepts that recognized author line. The same address in another
-field, body text, or a reference document is a separate occurrence and can still
-fail the check.
+When `metadata.author` carries a contact, write it as `Name <email>` in
+`SKILL.md`. The PII check accepts that recognized author line. The same address
+in another field, body text, or a reference document is a separate occurrence
+and can still fail the check. A team or organization name without an email is
+also valid attribution under the `default` profile.
 
 Use a name, team handle, or contact-directory link for additional contact
 information. If a real address must remain, record a reviewed, time-limited

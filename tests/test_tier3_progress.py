@@ -1651,6 +1651,62 @@ def test_writes_refused_until_the_run_closes_are_not_sent_with_the_next_run(
     assert "still evaluating" not in second_run
 
 
+@pytest.mark.parametrize("stage_state", ["complete", "running"], ids=["stage-finished", "stage-still-running"])
+def test_a_final_frame_refused_when_the_run_closes_is_not_sent_with_the_next_run(
+    monkeypatch: pytest.MonkeyPatch,
+    stage_state: str,
+) -> None:
+    from rich.console import Console
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    class NonBlockingTerminal(_TTYBuffer):
+        """Refuses every write while ``refusing`` is set, and keeps nothing it refused."""
+
+        refusing = False
+
+        def write(self, text: str) -> int:
+            if self.refusing and text:
+                raise BlockingIOError(errno.EAGAIN, "write could not complete without blocking", 0)
+            return super().write(text)
+
+    stream = NonBlockingTerminal()
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=60)
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state=stage_state, detail="agent finished"))
+    # Nothing failed while the run went on. The terminal refuses only what the
+    # run's close() writes: the final frame and Live's stop.
+    assert reporter.is_active is True
+    stream.refusing = True
+    reporter.close()
+    stream.refusing = False
+    # The caller prints its results below the frame.
+    stream.write("Result: pass\n")
+    stream.write("Report: report.html\n")
+    first_run = stream.getvalue()
+
+    reporter.start(_plan(progress))
+    reporter.close()
+    second_run = stream.getvalue()[len(first_run) :]
+    # The refused final frame starts by moving the cursor up over the frame on
+    # screen. Sent first in the next run, it would erase the result lines and
+    # draw the old frame over them.
+    assert second_run.startswith("Agents / models:")
+    assert second_run.count("Agents / models:") == 1
+    assert "agent finished" not in second_run
+    assert "interrupted before completion" not in second_run
+
+
 class _WouldBlockTerminal(io.RawIOBase):
     """A terminal file another process made non-blocking: some writes would block and take nothing."""
 

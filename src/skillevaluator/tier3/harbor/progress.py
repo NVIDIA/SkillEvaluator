@@ -530,6 +530,10 @@ class RichProgressReporter(PlainProgressReporter):
                         failed_stop, self._failed_stop = self._failed_stop, None
                         if failed_stop is not None:
                             self._finish_failed_stop(failed_stop)
+                        # Whatever the terminal still refuses as the run ends,
+                        # such as the final frame and Live's stop or the late
+                        # notice, belongs to no later run on this reporter.
+                        self._drop_refused_writes()
 
     def _stop_live_after_failure(self, live) -> None:
         """Stop the live view after a drawing failure and say that the run goes on.
@@ -607,10 +611,8 @@ class RichProgressReporter(PlainProgressReporter):
             if not failed_stop.notice_shown:
                 self._write_line(_DISPLAY_STOPPED_LATE_NOTICE)
         except Exception:
+            # The run's close() then drops what the terminal still refuses.
             logger.debug("Tier 3 progress terminal restore failed", exc_info=True)
-            # Still refused when the run ends, so none of it belongs to a
-            # later run on this reporter.
-            self._drop_refused_writes()
 
     def _render_plan(self, plan: Tier3RunPlan) -> None:
         self._live_plan = plan

@@ -14,10 +14,36 @@ import yaml
 
 from skillevaluator.constants import SKILL_MANIFEST_VARIANTS
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
+from skillevaluator.validators.schema import _duplicate_frontmatter_keys
 
 PROFILES_DIR = Path(__file__).parent / "profiles"
 HARNESS_STATUSES = ("loads", "degraded", "not_loaded")
 _EFFECT_RANK = {"advisory": 0, "degraded": 1, "not_loaded": 2}
+_CLAUDE_ONLY_FIELDS = (
+    "argument-hint",
+    "when_to_use",
+    "context",
+    "agent",
+    "model",
+    "hooks",
+)
+_KNOWN_FIELDS = frozenset(
+    (
+        "name",
+        "description",
+        "license",
+        "compatibility",
+        "metadata",
+        "allowed-tools",
+        "disable-model-invocation",
+        "user-invocable",
+        "platforms",
+        "version",
+        "author",
+        "tags",
+        *_CLAUDE_ONLY_FIELDS,
+    )
+)
 _FACT_RE = re.compile(r"\{([a-z0-9_]+)\}")
 _KNOWN_ROOTS = (
     ".agents/skills",
@@ -99,13 +125,23 @@ def _skill_name(skill_path: Path, data: dict[str, Any]) -> str:
 
 def skill_facts(skill_path: Path) -> dict[str, Any]:
     """Compute the facts profile rules refer to."""
-    *_, data = _read_manifest(skill_path)
+    manifest, raw, text, fm_yaml, data = _read_manifest(skill_path)
+    description = data.get("description")
     root, depth = _install_root(skill_path)
+    custom = {k: v for k, v in data.items() if str(k) not in _KNOWN_FIELDS}
     name = _skill_name(skill_path, data)
     return {
         "skill_name": name,
         "install_root": root,
         "grouping_depth": depth,
+        "frontmatter_missing": manifest.is_file() and FRONTMATTER_PATTERN.match(text) is None,
+        "description_type": type(description).__name__ if description is not None else "none",
+        "frontmatter_bom": raw.startswith(b"\xef\xbb\xbf"),
+        "frontmatter_duplicate_keys": bool(_duplicate_frontmatter_keys(fm_yaml)),
+        "frontmatter_tab_indent": any(line.startswith("\t") for line in fm_yaml.splitlines()),
+        "yaml_lenient_only": False,
+        "custom_fields": ", ".join(map(str, custom)),
+        "custom_field_chars": sum(len(v) if isinstance(v, str) else len(yaml.safe_dump(v)) for v in custom.values()),
     }
 
 

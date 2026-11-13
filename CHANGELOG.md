@@ -6,6 +6,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- `harness` rules for frontmatter parsing: duplicate keys and tab indentation
+  (strict YAML parsers drop the skill), a UTF-8 BOM (Codex), no front matter
+  (Copilot CLI) and long custom frontmatter that never reaches the model. Tier 1
+  `schema` now reports duplicate frontmatter keys (HIGH) and a UTF-8 BOM (MEDIUM).
 - New `skillevaluator harness-check <skill>` command and a "Harness compatibility"
   panel after the Tier 1 results of `validate`: one line per harness with its most
   serious finding and an outcome label (`not found`, `rejected`, `listing

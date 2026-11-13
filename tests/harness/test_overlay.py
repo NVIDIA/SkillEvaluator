@@ -62,6 +62,24 @@ def test_clean_skill_loads_everywhere(tmp_path: Path):
     assert set(_status(_skill(tmp_path)).values()) == {"loads"}
 
 
+def test_duplicate_key_is_not_loaded_by_strict_parsers(tmp_path: Path):
+    status = _status(_skill(tmp_path, extra="description: Use when a second value is given.\n"))
+
+    assert status["codex"] == status["copilot-cli"] == status["openclaw"] == status["opencode"] == "not_loaded"
+    assert status["claude-code"] == "loads"
+
+
+def test_bom_is_not_loaded_by_codex_only(tmp_path: Path):
+    skill = _skill(tmp_path)
+    manifest = skill / "SKILL.md"
+    manifest.write_bytes(b"\xef\xbb\xbf" + manifest.read_bytes())
+
+    status = _status(skill)
+
+    assert status["codex"] == "not_loaded"
+    assert {h for h, s in status.items() if s != "loads"} == {"codex"}
+
+
 def test_install_root_only_applies_inside_known_harness_roots(tmp_path: Path):
     skill = tmp_path / ".claude" / "skills" / "demo-skill"
     skill.parent.mkdir(parents=True)
@@ -186,6 +204,10 @@ def test_tier1_summary_gives_harness_its_own_line(tmp_path: Path):
     assert "harness" not in labels.get("advisories", "")
 
 
+def _rule_ids(skill: Path, harness: str, config: dict | None = None) -> set[str]:
+    return {f["id"] for r in evaluate_harnesses(skill, harness, config=config) for f in r.findings}
+
+
 def test_native_root_skips_root_rules(tmp_path):
     skill = tmp_path / ".claude" / "skills" / "demo"
     skill.mkdir(parents=True)
@@ -196,6 +218,15 @@ def test_native_root_skips_root_rules(tmp_path):
 
     assert "CX-ROOT" in ids({})
     assert not {i for i in ids({"native_root": True}) if i.endswith("-ROOT")}
+
+
+def test_copilot_drops_skill_without_front_matter(tmp_path: Path):
+    skill = tmp_path / ".github" / "skills" / "bare"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("# Bare\n\nNo front matter here.\n")
+
+    assert "CP-NO-FRONTMATTER" in _rule_ids(skill, "copilot-cli")
+    assert "CP-NO-FRONTMATTER" not in _rule_ids(_skill(tmp_path), "copilot-cli")
 
 
 def test_harness_note_names_the_skill_not_the_harness():

@@ -1787,6 +1787,28 @@ def test_a_plan_line_refused_by_a_buffered_terminal_stream_is_printed_once(
     assert "agent finished" not in output
 
 
+def test_changelog_says_a_stream_can_still_send_refused_output_later() -> None:
+    # close() drops only the view's own copy of what the terminal refused. A
+    # stream shaped like standard error keeps its copy and sends it with its
+    # next write, and no public API drops it. The entry is found by its
+    # opening words so that a release heading above it can change.
+    lead = (
+        "- When the terminal refuses one of the plan lines printed before the "
+        "interactive Tier 3 progress view's table first appears"
+    )
+    changelog = (Path(__file__).resolve().parents[1] / "CHANGELOG.md").read_text(encoding="utf-8")
+    blocks = [" ".join(block.split()) for block in changelog.split("\n\n")]
+    entries = [block for block in blocks if block.startswith(lead)]
+
+    assert len(entries) == 1
+    entry = entries[0]
+    assert "no longer keeps its own copy of output the terminal still refuses when the run ends" in entry
+    assert (
+        "A stream that keeps what the terminal refused, as standard error does, can still send it later, "
+        "and a final table sent then can still erase those lines." in entry
+    )
+
+
 class _InterleavingLock:
     """A reentrant lock that runs a hook once, when the arming thread next releases it fully."""
 

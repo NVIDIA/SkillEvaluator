@@ -54,7 +54,11 @@ from skillevaluator.reporting.base import (
 from skillevaluator.reporting.run_status import resolve_run_status
 from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION, pass_at_k_summary
 from skillevaluator.reporting.tier3_coverage import IncompleteArm, incomplete_arms
-from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
+from skillevaluator.reporting.tier3_scope import (
+    completed_agent_result,
+    tolerated_baseline_agents,
+    validate_report_scope,
+)
 from skillevaluator.reporting.tier3_token_usage import token_usage_markdown_lines
 from skillevaluator.source_identity import evaluated_source_revision, recorded_evaluated_source
 from skillevaluator.tier3.baseline_store import baseline_description
@@ -251,6 +255,14 @@ class BenchmarkReporter(ReporterBase):
                 ]
             )
 
+        tolerated_lines = []
+        for tolerated in tolerated_baseline_agents(ae):
+            scored, expected = tolerated["scored_attempts"], tolerated["expected_attempts"]
+            counts = f" ({scored} of {expected} attempts scored)" if scored is not None and expected is not None else ""
+            tolerated_lines.append(
+                f"Baseline incomplete for **{_publication_safe_inline(tolerated['name'], private_labels)}**"
+                f"{counts}: kept by `--tolerate-baseline-timeouts`, so its baseline and uplift are not reported."
+            )
         if completed and (self.report_scope == "tier3" or completed["needs_attention"]):
             lines.append(
                 f"Completed agent: **{_publication_safe_inline(completed['name'], private_labels)}**; "
@@ -267,20 +279,16 @@ class BenchmarkReporter(ReporterBase):
                 lines.append(
                     "**Needs attention:** other execution failures remain. This completed-agent result does not certify the whole run."
                 )
-            for tolerated in completed.get("baseline_timeouts_tolerated", ()):
-                scored, expected = tolerated["scored_attempts"], tolerated["expected_attempts"]
-                counts = (
-                    f" ({scored} of {expected} attempts scored)" if scored is not None and expected is not None else ""
-                )
-                lines.append(
-                    f"Baseline incomplete for **{_publication_safe_inline(tolerated['name'], private_labels)}**"
-                    f"{counts}: kept by `--tolerate-baseline-timeouts`, so its baseline and uplift are not reported."
-                )
+            lines.extend(tolerated_lines)
             if completed["recovered_attempts"]:
                 lines.append(
                     f"Recovered timeout attempts: {completed['recovered_attempts']}; failed history is retained and excluded from scoring."
                 )
             lines.append("")
+        elif tolerated_lines:
+            # No completed-agent result (for example, a cost limit left the
+            # best agent's coverage short), but the tolerated baselines remain.
+            lines.extend(["**Needs attention:** baseline timeouts were tolerated.", *tolerated_lines, ""])
         self._render_metadata(
             lines,
             results,

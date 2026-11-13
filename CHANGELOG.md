@@ -412,6 +412,22 @@ All notable changes to SkillEvaluator are documented in this file.
   `/root/.bashrc`, or `/etc/sudoers` scored 0.0 in 0.9.0 and now scores 1.0,
   and a view of a credential store such as `~/.netrc` still scores 0.0. Both
   the host checker and the bundled Harbor verifier apply the fix.
+- `--tolerate-baseline-timeouts` (added in 0.9.0) now follows its own rules
+  in the printed run verdict, in the notes of both reports and during result
+  collection. The `RUN QUALITY VERDICT` line that `tier3 evaluate` prints
+  reads the same agents as the run verdict, so a tolerated agent that passes
+  no longer prints PASS beside a complete agent that fails or never
+  activated the skill; the line now reads FAIL or INCONCLUSIVE, as the
+  reports do. `BENCHMARK.md` and `report.html` now keep the "Needs
+  attention" note and the `Baseline incomplete` line for each tolerated
+  agent also when a cost limit leaves the best agent's attempts short; both
+  reports used to leave them out in that case. `report.html` also keeps the
+  note when its overview reads Inconclusive because the complete agent never
+  activated the skill. An output-token count past the JSON-safe integer
+  range (above 2^53 - 1) in a timed-out attempt is no longer progress
+  evidence; with no other in-range count for that attempt the agent is
+  refused as `no_progress_evidence`, where result collection used to stop
+  with `browser-unsafe JSON integer` and write no `result.json` or report.
 
 ## 0.9.0 - 2026-11-13
 

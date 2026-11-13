@@ -42,6 +42,7 @@ _PLURAL_SECRET_KEY_PARTS = {
 _TOKEN_COUNT_KEYS = {
     "cached_tokens",
     "completion_tokens",
+    "estimated_tokens",
     "expected_max_tokens",
     "frontmatter_tokens",
     "input_tokens",

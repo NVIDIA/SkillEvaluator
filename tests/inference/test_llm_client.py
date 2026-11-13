@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from skillevaluator.constants import RUBRIC_CRITERIA
@@ -200,17 +201,21 @@ class TestLLMClientGetClient:
         ],
     )
     def test_rejects_noncanonical_aliases_normalized_to_native_openai_before_request(self, base_url: str) -> None:
-        client = LLMClient(
-            model="gpt-5.4-mini",
-            api_key="test-key",
-            base_url=base_url,
-            max_tokens=512,
-        )
+        # This exercises SDK URL normalization without using a host proxy or making requests.
+        transport = httpx.MockTransport(lambda _request: pytest.fail("Endpoint validation must precede requests"))
+        with httpx.Client(transport=transport, trust_env=False) as http_client:
+            client = LLMClient(
+                model="gpt-5.4-mini",
+                api_key="test-key",
+                base_url=base_url,
+                max_tokens=512,
+                http_client=http_client,
+            )
 
-        with pytest.raises(LLMClientError, match="noncanonical alias for the native OpenAI endpoint"):
-            client._get_client()
+            with pytest.raises(LLMClientError, match="noncanonical alias for the native OpenAI endpoint"):
+                client._get_client()
 
-        assert client._client is None
+            assert client._client is None
 
     @pytest.mark.parametrize(
         ("provider", "api_key_env", "base_url_env", "base_url"),
@@ -1750,3 +1755,47 @@ class TestModelProvenance:
 
         assert client.last_failure is not None
         assert client.model_used is None
+
+
+@pytest.mark.parametrize("reply", ['{"index": 0, "verdict": "false_pos', "partial", "{}", "[]"])
+def test_truncated_verifier_reply_without_complete_verdicts_names_no_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reply: str
+) -> None:
+    _use_provider(monkeypatch, "anthropic", "claude-opus-5-5")
+    sdk = MagicMock()
+    sdk.messages.create.return_value = _anthropic_truncated_fallback_response(reply)
+    verifier = FindingVerifier()
+
+    with patch("anthropic.Anthropic", return_value=sdk):
+        assert verifier.verify([], tmp_path) == {}
+
+    assert verifier.last_failure is not None
+    assert "output-token limit" in verifier.last_failure
+    assert verifier.model_used is None
+
+
+def test_generic_truncated_parser_can_keep_a_complete_empty_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Client(LLMClient):
+        salvage_truncated_response = True
+
+        def get_system_prompt(self) -> str:
+            return "system"
+
+        def create_user_prompt(self, **_kwargs) -> str:
+            return "user"
+
+        def parse_response(self, _response_text: str, **_kwargs) -> dict:
+            return {}
+
+        def get_fallback_response(self, **_kwargs) -> str:
+            return "fallback"
+
+    _use_provider(monkeypatch, "anthropic", "claude-opus-5-5")
+    sdk = MagicMock()
+    sdk.messages.create.return_value = _anthropic_truncated_fallback_response("{}")
+    with patch("anthropic.Anthropic", return_value=sdk):
+        client = Client()
+        assert client.process() == {}
+
+    assert client.last_failure is not None
+    assert client.model_used == ANTHROPIC_REFUSAL_FALLBACK_MODEL

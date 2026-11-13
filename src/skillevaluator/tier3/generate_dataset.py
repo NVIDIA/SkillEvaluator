@@ -1953,14 +1953,19 @@ Agent-refined mode (--refine):
                 continue
             if _has_authored_ground_truth(authored_references.get(case["id"])):
                 continue
-            observed = case.get("ground_truth")
-            if isinstance(observed, str) and any(
-                evals_spec._skill_use_match(observed, name, skill_scripts) for name in skill_names
+            observed_strings, truncated = evals_spec._string_leaves(case.get("ground_truth"))
+            if truncated or any(
+                evals_spec._skill_use_match(observed, name, skill_scripts)
+                for observed in observed_strings
+                for name in skill_names
             ):
                 case["ground_truth"] = ""
-                _mark_case_for_review(
-                    case, "observed expected output describes skill use; supply an independent outcome"
+                reason = (
+                    "observed expected output could not be fully checked for skill use"
+                    if truncated
+                    else "observed expected output describes skill use"
                 )
+                _mark_case_for_review(case, f"{reason}; supply an independent outcome")
 
     if auto_authored_dataset is not None:
         cases = _preserve_auto_authored_cases(cases, auto_authored_dataset)
@@ -2014,7 +2019,7 @@ Agent-refined mode (--refine):
         print(f"\nNext: skillevaluator evaluate {skill_path} --agents claude-code --env-mode docker")
     else:
         print(f"\nNext: skillevaluator evaluate {skill_path} --agents claude-code --env-mode docker")
-        print(f"  Or refine with trajectory: skillevaluator create-eval-dataset {skill_path} --refine --force")
+        print(f"  Or refine with trajectory: skillevaluator create-eval-dataset {skill_path} --grounding trace")
     return DatasetGenerationResult(
         status="created",
         path=output_path,

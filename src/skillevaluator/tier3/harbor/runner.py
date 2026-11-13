@@ -5669,7 +5669,12 @@ def _run_harbor_eval_impl(
         task_source = "evals_json" if evals_exists else "native_harbor" if native_exists else ""
     if task_source == "evals_json" and not evals_exists:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="evaluation dataset missing"))
-        return {"error": ["No evals/evals.json found. Run create-eval-dataset or add a dataset."]}
+        return {
+            "error": [
+                "No evals/evals.json found. Add task guidance in evals/EVAL.md or pass --prompt to "
+                "create-eval-dataset; add --grounding skill for an explicit skill-only starter, or author a dataset."
+            ]
+        }
     if task_source == "native_harbor" and not native_exists:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="native Harbor tasks missing"))
         return {"error": ["No native Harbor task source found at evals/harbor."]}

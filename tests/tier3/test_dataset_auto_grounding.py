@@ -150,6 +150,61 @@ def test_auto_trace_keeps_skill_use_out_of_new_expected_outputs(tmp_path, monkey
         assert case["review"]["status"] == "needs_review"
 
 
+@pytest.mark.parametrize(
+    ("proposed", "reason"),
+    [
+        ({"summary": ["The agent read SKILL.md"]}, "skill use"),
+        ({"The agent read SKILL.md": "42 reconciled"}, "skill use"),
+        (["42 reconciled"] * 1001, "fully checked"),
+        ({"summary": ["42 invoices reconciled"]}, None),
+    ],
+)
+@pytest.mark.parametrize("authored", [False, True])
+def test_auto_tool_only_trace_checks_nested_inferred_outcomes(tmp_path, monkeypatch, proposed, reason, authored):
+    from types import SimpleNamespace
+
+    from skillevaluator.inference import client as inference_client
+
+    skill = _skill(tmp_path, "\n")
+    case_id = "sample-skill-001"
+    if authored:
+        (skill / "evals" / "evals.json").write_text(
+            json.dumps(
+                {
+                    "skill_name": "sample-skill",
+                    "evals": [{"id": case_id, "prompt": "Reconcile", "expected_output": proposed}],
+                }
+            )
+        )
+    _trace(
+        skill,
+        tmp_path / "results",
+        steps=[{"source": "agent", "tool_calls": [{"function_name": "bash", "arguments": {"command": "true"}}]}],
+    )
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(tmp_path / "results"))
+
+    class FakeLLMClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def completions(self, *_args):
+            return json.dumps([{"id": case_id, "ground_truth": proposed, "expected_behavior": []}])
+
+    monkeypatch.setattr(
+        "skillevaluator.provider_config.resolve_llm_provider", lambda: SimpleNamespace(provider="test", model="test")
+    )
+    monkeypatch.setattr(inference_client, "LLMClient", FakeLLMClient)
+
+    result = generate_dataset.main([str(skill), *(["--refine"] if authored else [])])
+
+    case = result.dataset["evals"][0]
+    assert result.dataset["generation"]["mode"] == "llm"
+    assert case["expected_output"] == ("" if reason and not authored else proposed)
+    if reason and not authored:
+        assert case["review"]["status"] == "needs_review"
+        assert any(reason in value for value in case["review"]["reasons"])
+
+
 @pytest.mark.parametrize("retained_trace", [False, True])
 def test_auto_does_not_treat_headings_alone_as_author_guidance(tmp_path, monkeypatch, retained_trace):
     skill = _skill(tmp_path, "# Evaluation\n\n## Questions\n\n## Behaviors\n\n## Notes\n")

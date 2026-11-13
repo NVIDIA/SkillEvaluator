@@ -317,8 +317,9 @@ regardless of `--full`. Cases without a matching retained trajectory are marked
 `needs_review`; observed answers are proposals requiring human review, not
 accepted ground truth. An existing dataset without `--force` or `--refine` is
 left unchanged by `auto`, including when matching traces are available. Newly
-observed answers that describe skill use are left empty with a review reason;
-the author must provide an independent expected outcome. Authored expectations,
+observed answers that describe skill use, or are too large to check fully, are
+left empty with a review reason; the author must provide an independent expected
+outcome. Authored expectations,
 including numeric and structured values, stay intact.
 
 Explicit modes remain available: `intent` requires author guidance; `trace`

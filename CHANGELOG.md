@@ -33,6 +33,20 @@ All notable changes to SkillEvaluator are documented in this file.
   beside it and the failure is reported. After a timeout, the failed run still keeps
   the scores of the arms that finished.
 
+### Documentation
+
+- A new Metrics Reference page defines every number the CLI, HTML report, JSON
+  report and `BENCHMARK.md` show: the six Tier 3 evaluator signals, the five
+  dimensions, the Overall Score, Skill Lift, pass@k and the Tier 1 Quality
+  Score. Each entry gives what the number measures, its formula as the source
+  implements it, its range and units, the deterministic checks or LLM judges
+  that produce its input data, and the JSON keys needed to recompute it. It
+  marks which values carry LLM judge variance, describes the pass-rate Wilson
+  intervals, `validate-grader`, the dataset-sufficiency label and the opt-in
+  judge character facts, and states that no inter-rater agreement study against
+  human-labeled trajectories has been published. Tier 1 validation, Tier 3 live
+  evaluation and the reports page link to it.
+
 ### Fixed
 
 - A failed Tier 3 execution (for example a backend launch failure) now marks the

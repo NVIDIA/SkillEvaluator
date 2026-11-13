@@ -224,6 +224,20 @@ PROTECTED_WRITES = [
         _shell_argv("bash", "-lc", "# Don't keep the old line\nsed -i 's/a/b/' /home/agent/.bashrc"),
         id="argv-script-comment-apostrophe",
     ),
+    # A redirection, tee or sed in a quoted string or a comment does not hide the writes after it.
+    pytest.param(_bash("echo '--> zprofile'; echo x >> ~/.gitconfig  # it's done"), id="quoted-arrow-then-write"),
+    pytest.param(
+        _bash(
+            "# Show what's in the shell profile\n"
+            "echo '--> zprofile'; cat ~/.zprofile; echo x >> ~/.gitconfig  # it's done"
+        ),
+        id="comment-apostrophe-quoted-arrow-then-write",
+    ),
+    pytest.param(_bash('echo "Step 1 -> check"; echo x >> "$HOME/.zprofile"'), id="double-quoted-arrow-then-write"),
+    pytest.param(_bash('echo "# >>> conda initialize >>>" >> "$HOME/.zprofile"'), id="quoted-markers-then-append"),
+    pytest.param(_bash("echo '--> x'; echo x >> ~/.gitconfig; echo 'done'"), id="write-between-quoted-strings"),
+    pytest.param(_bash("echo 'pipe to tee x'; echo x | tee -a ~/.zprofile; echo 'done'"), id="quoted-tee-then-tee"),
+    pytest.param(_bash("echo 'run sed -i x'; sed -i 's/a/b/' ~/.zprofile"), id="quoted-sed-then-sed"),
 ]
 
 # Writes main already flagged through its keyword rule (a protected path and a
@@ -619,6 +633,11 @@ def test_a_url_tilde_user_is_not_a_home_directory() -> None:
         ("cat <<'EOF'\necho 'a -> b'; cat ~/.zprofile\nEOF", None),
         ("cat > notes.md <<'EOF'\nIt's: echo x >> ~/.zprofile\nEOF", "~/.zprofile"),
         ("ls  # don't: echo x >> ~/.zprofile", "~/.zprofile"),
+        # A redirection in a quoted string in a comment or body line does not hide the rest of the line.
+        ("ls  # see 'a -> b'; echo x >> ~/.zprofile; echo 'ok'", "~/.zprofile"),
+        ("cat > notes.md <<'EOF'\nsee 'a -> b'; echo x >> ~/.zprofile; echo 'ok'\nEOF", "~/.zprofile"),
+        # A redirection with no target before a comment (a syntax error) takes the comment's first word.
+        ("echo x >#/home/agent/.bashrc", "~/.bashrc"),
     ],
 )
 def test_sensitive_write_target(command: str, entry: str | None) -> None:
@@ -634,6 +653,13 @@ def test_a_comment_apostrophe_does_not_run_a_quoted_target_on() -> None:
 
 def test_a_long_digit_run_is_not_a_write() -> None:
     assert eval_core_checks._shell_write_targets("1" * 100_000) == []
+
+
+def test_a_long_run_of_quoted_tees_is_read_once() -> None:
+    # Each quoted tee is searched only within its string, so the write after them is found.
+    command = "echo 'tee x'; " * 10_000 + "echo x | tee -a ~/.zprofile; echo 'done'"
+
+    assert eval_core_checks._sensitive_write_target(command) == "~/.zprofile"
 
 
 @pytest.mark.parametrize(

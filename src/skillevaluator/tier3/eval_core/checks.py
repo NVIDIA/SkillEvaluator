@@ -19,7 +19,7 @@ import bisect
 import posixpath
 import re
 import shlex
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from fnmatch import fnmatchcase
 from typing import Any
 
@@ -439,7 +439,8 @@ _PATH_COMPONENT_END = r"(?=/|$|[\s'\"`;|&<>(),:])"
 # operands of tee, and the operands of a sed with -i or --in-place. A
 # redirection inside a quoted string (a "bash -c" script, or the arrow of
 # "echo 'a -> b'") has a target that ends with that string, and one in a "#"
-# comment or a here-document body line has a target that ends with that line.
+# comment or a here-document body line has a target that ends with that line;
+# the text after that string or line is still read (_shell_write_scans).
 # _shell_text_regions finds the quoted strings as the shell reads them, left to
 # right: a backslash outside single quotes escapes the next character, so
 # neither \" nor \' starts a string and \" does not end one, as in
@@ -469,6 +470,11 @@ _COMMENT_WORD_BREAKS = frozenset(" \t\r\n;|&()<>")
 # The delimiter word after a "<<" operator, read on its own line, as
 # _HEREDOC_DELIMITER_RE reads it.
 _HEREDOC_OPERAND_RE = re.compile(r"(-?)[ \t]*((?:[^\s;&|<>()'\"`\\]|\\.|'[^'\n]*'|\"[^\"\n]*\")+)")
+# How _shell_write_scans reads a comment or here-document body line when it
+# searches the text around it: every character but a blank or "#" is "x". A
+# target word that reaches the line, as in the syntax error "echo x >#notes",
+# takes the line's first word, and no write starts in the line.
+_SHELL_LINE_FILL_RE = re.compile(r"[^\s#]")
 _REDIRECT_TARGET_RE = re.compile(r"(?:&>>?|(?<![0-9])[0-9]*>>?[|&]?)\s*(" + _SHELL_WORD + ")")
 _FD_REDIRECT_TARGET_RE = re.compile(r"[0-9]*-?")
 _TEE_OPERANDS_RE = re.compile(r"(?<![\w.-])tee((?:[ \t]+(?!#)" + _SHELL_WORD + r")+)", re.IGNORECASE)
@@ -962,30 +968,72 @@ def _shell_text_regions(text: str) -> tuple[list[int], list[int]]:
     return quoted, lines
 
 
+def _shell_write_scans(text: str) -> list[tuple[str, int, int]]:
+    """Return where shell *text* is searched for writes, as (searched text, start, end) triples.
+
+    A write is searched for where it starts: one in the content of a quoted
+    string, in that content; one in a comment or here-document body line, in
+    that line; any other, in the whole text. A line is searched in a copy of
+    *text* that fills the content of its quoted strings with "x", and the
+    whole text in one that fills the content of every quoted string with "x"
+    and reads each comment or body line through _SHELL_LINE_FILL_RE. So a
+    target word that reaches a quoted string takes the whole string and no
+    more, and no write found in the whole text starts inside a quoted string
+    or a line. The copies keep the offsets of *text*.
+    """
+    quoted, lines = _shell_text_regions(text)
+    # A quoted string's content starts after its "'", '"' or "$'".
+    contents = [
+        (start + 1 + (text[start] == "$"), end - 1) for start, end in zip(quoted[::2], quoted[1::2], strict=True)
+    ]
+    line_spans = list(zip(lines[::2], lines[1::2], strict=True))
+
+    def rewritten(source: str, spans: list[tuple[int, int]], rewrite: Callable[[str], str]) -> str:
+        parts: list[str] = []
+        last = 0
+        for start, end in spans:
+            parts += (source[last:start], rewrite(source[start:end]))
+            last = end
+        return "".join((*parts, source[last:]))
+
+    within_lines = rewritten(text, contents, lambda content: "x" * len(content))
+    outside = rewritten(within_lines, line_spans, lambda line: _SHELL_LINE_FILL_RE.sub("x", line))
+    return [
+        (outside, 0, len(text)),
+        *((within_lines, start, end) for start, end in line_spans),
+        *((text, start, end) for start, end in contents),
+    ]
+
+
 def _shell_write_targets(command: str) -> list[str]:
     """Return the files *command* writes through a redirection, tee, or sed -i."""
     text = _LINE_CONTINUATION_RE.sub(" ", str(command))
-    quoted, lines = _shell_text_regions(text)
+    scans = _shell_write_scans(text)
 
-    def argument_text(match: re.Match[str]) -> str:
-        # A redirection, tee or sed inside a quoted string ends with that
-        # string, and one in a comment or here-document body line ends with
-        # that line.
-        end = match.end(1)
-        for regions, closing in ((quoted, 1), (lines, 0)):
-            index = bisect.bisect_right(regions, match.start())
-            if index % 2:
-                end = min(end, regions[index] - closing)
-        return text[match.start(1) : end]
+    def arguments(pattern: re.Pattern[str]) -> list[tuple[str, int, int]]:
+        # The argument text of each match, as (searched text, start, end), in
+        # text order. A match that starts inside an earlier one is part of
+        # that one's target, as in finditer.
+        found = sorted(
+            (match for scan, start, end in scans for match in pattern.finditer(scan, start, end)),
+            key=lambda match: match.start(),
+        )
+        kept: list[tuple[str, int, int]] = []
+        last = 0
+        for match in found:
+            if match.start() >= last:
+                kept.append((match.string, *match.span(1)))
+                last = match.end()
+        return kept
 
     targets = [
         target
-        for match in _REDIRECT_TARGET_RE.finditer(text)
-        if not _FD_REDIRECT_TARGET_RE.fullmatch(target := argument_text(match))
+        for _, start, end in arguments(_REDIRECT_TARGET_RE)
+        if not _FD_REDIRECT_TARGET_RE.fullmatch(target := text[start:end])
     ]
-    targets.extend(argument_text(match) for match in _TEE_OPERANDS_RE.finditer(text))
-    for match in _SED_OPERANDS_RE.finditer(text):
-        words = re.findall(_SHELL_WORD, argument_text(match))
+    targets.extend(text[start:end] for _, start, end in arguments(_TEE_OPERANDS_RE))
+    for scan, start, end in arguments(_SED_OPERANDS_RE):
+        words = [text[start + word.start() : start + word.end()] for word in re.finditer(_SHELL_WORD, scan[start:end])]
         if any(_SED_IN_PLACE_FLAG_RE.fullmatch(word) for word in words):
             operands = [word for word in words if not word.startswith("-") and word not in ("''", '""')]
             scripted = any(_SED_SCRIPT_OPTION_RE.fullmatch(word) for word in words)

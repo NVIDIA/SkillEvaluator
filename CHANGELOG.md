@@ -37,6 +37,8 @@ All notable changes to SkillEvaluator are documented in this file.
   GitHub fork PRs never run the paid tiers and keep their existing Tier 2/3
   reason. Setup guidance explains when provider configuration is exercised and
   how to request an eligible all-skill check before merging.
+  When tiers run, GitLab keyless and native selectors both include changed
+  setup gitlinks despite committed submodule ignore settings.
 
 - HTML, Markdown, and terminal findings show recorded LLM verification verdicts,
   confidence, and reasoning, with an explanation of retained or downgraded severity.

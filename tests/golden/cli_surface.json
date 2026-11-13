@@ -3735,6 +3735,150 @@
             }
           ]
         },
+        "interact": {
+          "params": [
+            {
+              "name": "skills",
+              "opts": [
+                "skills"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "directory"
+            },
+            {
+              "name": "eval_source",
+              "opts": [
+                "--eval-source"
+              ],
+              "param_type": "option",
+              "required": true,
+              "type": "directory"
+            },
+            {
+              "name": "agents",
+              "opts": [
+                "--agents",
+                "-a"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "model",
+              "opts": [
+                "--model"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "choices": [
+                "docker",
+                "kata",
+                "daytona",
+                "e2b",
+                "modal",
+                "runloop",
+                "langsmith",
+                "ec2",
+                "gke",
+                "ack",
+                "openshift",
+                "novita",
+                "apple-container",
+                "singularity",
+                "islo",
+                "tensorlake",
+                "cwsandbox",
+                "wandb",
+                "use-computer",
+                "blaxel",
+                "beam",
+                "skypilot",
+                "hyperbrowser",
+                "vercel",
+                "runta",
+                "mosaic",
+                "local"
+              ],
+              "default": "docker",
+              "name": "env_mode",
+              "opts": [
+                "--env-mode"
+              ],
+              "param_type": "option"
+            },
+            {
+              "multiple": true,
+              "name": "environment_kwarg",
+              "opts": [
+                "--ek",
+                "--environment-kwarg"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "default": "1",
+              "name": "n_attempts",
+              "opts": [
+                "--n-attempts"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "name": "n_concurrent",
+              "opts": [
+                "--n-concurrent"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "choices": [
+                "goal_accuracy",
+                "accuracy",
+                "overall"
+              ],
+              "default": "goal_accuracy",
+              "name": "metric",
+              "opts": [
+                "--metric"
+              ],
+              "param_type": "option"
+            },
+            {
+              "name": "results_dir",
+              "opts": [
+                "--results-dir"
+              ],
+              "param_type": "option",
+              "type": "directory"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "harbor_keep_jobs",
+              "opts": [
+                "--harbor-keep-jobs"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "as_json",
+              "opts": [
+                "--json"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            }
+          ]
+        },
         "migrate-dataset": {
           "params": [
             {

@@ -1195,6 +1195,40 @@ def _anthropic_to_chat_request(
     return translated, tool_names
 
 
+def _chat_completion_usage(payload: dict[str, Any]) -> dict[str, int] | None:
+    """Validate reported token counters without estimating absent usage or cost."""
+    usage = payload.get("usage")
+    if usage is None:
+        return None
+    if not isinstance(usage, dict):
+        raise BridgePayloadError("completion usage must be an object or null")
+
+    def count(value: Any, field: str) -> int:
+        if type(value) is not int or value < 0:
+            raise BridgePayloadError(f"completion usage.{field} must be a non-negative integer")
+        return value
+
+    normalized = {
+        field: count(usage.get(field), field) for field in ("prompt_tokens", "completion_tokens", "total_tokens")
+    }
+    if normalized["total_tokens"] != normalized["prompt_tokens"] + normalized["completion_tokens"]:
+        raise BridgePayloadError("completion usage total_tokens contradicts prompt and completion tokens")
+    for field, detail, maximum in (
+        ("prompt_tokens_details", "cached_tokens", "prompt_tokens"),
+        ("completion_tokens_details", "reasoning_tokens", "completion_tokens"),
+    ):
+        details = usage.get(field)
+        if details is None:
+            continue
+        if not isinstance(details, dict):
+            raise BridgePayloadError(f"completion usage.{field} must be an object or null")
+        if detail in details and details[detail] is not None:
+            normalized[detail] = count(details[detail], f"{field}.{detail}")
+            if normalized[detail] > normalized[maximum]:
+                raise BridgePayloadError(f"completion usage.{field}.{detail} exceeds {maximum}")
+    return normalized
+
+
 def chat_completion_to_responses_events(
     payload: Any,
     custom_tool_names: set[str] | None = None,
@@ -1202,6 +1236,7 @@ def chat_completion_to_responses_events(
 ) -> Iterator[dict[str, Any]]:
     """Yield terminal Responses API events for one non-streaming Chat Completion."""
     response_id, model, content, tool_calls = _chat_completion_parts(payload)
+    usage = _chat_completion_usage(payload)
     output: list[dict[str, Any]] = []
     events: list[dict[str, Any]] = [
         {
@@ -1302,9 +1337,18 @@ def chat_completion_to_responses_events(
             ]
         )
 
-    events.append(
-        {"type": "response.completed", "response": _responses_response(response_id, model, "completed", output)}
-    )
+    response = _responses_response(response_id, model, "completed", output)
+    # Responses requires both detail counters; missing categories cannot be
+    # represented as measured zero merely to populate that schema.
+    if usage is not None and "cached_tokens" in usage and "reasoning_tokens" in usage:
+        response["usage"] = {
+            "input_tokens": usage["prompt_tokens"],
+            "input_tokens_details": {"cached_tokens": usage["cached_tokens"]},
+            "output_tokens": usage["completion_tokens"],
+            "output_tokens_details": {"reasoning_tokens": usage["reasoning_tokens"]},
+            "total_tokens": usage["total_tokens"],
+        }
+    events.append({"type": "response.completed", "response": response})
     for sequence_number, event in enumerate(events, start=1):
         yield {**event, "sequence_number": sequence_number}
 
@@ -1315,6 +1359,17 @@ def chat_completion_to_anthropic_events(
     """Yield terminal Anthropic Messages stream events for one Chat Completion."""
     response_id, model, content, tool_calls = _chat_completion_parts(payload)
     normalized_tool_calls = _anthropic_tool_calls(tool_calls)
+    usage = _chat_completion_usage(payload)
+    # Messages requires integer counters, even when the backend reports none.
+    # These compatibility placeholders are not evidence of measured zero usage.
+    message_usage: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0}
+    if usage is not None:
+        message_usage = {"input_tokens": usage["prompt_tokens"], "output_tokens": usage["completion_tokens"]}
+        if "cached_tokens" in usage:
+            message_usage["input_tokens"] -= usage["cached_tokens"]
+            message_usage["cache_read_input_tokens"] = usage["cached_tokens"]
+        if "reasoning_tokens" in usage:
+            message_usage["output_tokens_details"] = {"thinking_tokens": usage["reasoning_tokens"]}
     yield {
         "type": "message_start",
         "message": {
@@ -1324,7 +1379,7 @@ def chat_completion_to_anthropic_events(
             "model": model,
             "content": [],
             "stop_reason": None,
-            "usage": {"input_tokens": 0, "output_tokens": 0},
+            "usage": message_usage,
         },
     }
 
@@ -1354,7 +1409,7 @@ def chat_completion_to_anthropic_events(
     yield {
         "type": "message_delta",
         "delta": {"stop_reason": "tool_use" if normalized_tool_calls else "end_turn", "stop_sequence": None},
-        "usage": {"input_tokens": 0, "output_tokens": 0},
+        "usage": message_usage,
     }
     yield {"type": "message_stop"}
 

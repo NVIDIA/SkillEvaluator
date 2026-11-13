@@ -133,6 +133,39 @@ def test_tier1_reports_an_explicit_executable_override(scanners, monkeypatch, tm
     assert rows["Bandit"] == ("pass", f"1.9.4 at {executable.resolve()} (from SKILLEVALUATOR_BANDIT_PATH)")
 
 
+@pytest.mark.parametrize(
+    ("name", "label", "check", "source", "version"),
+    [
+        ("skillspector", "SkillSpector", "security", "uv tool run", "2.13.4"),
+        ("gitleaks", "Gitleaks", "code", "managed", "8.30.0"),
+    ],
+)
+def test_tier1_reports_managed_scanner_source(scanners, monkeypatch, name, label, check, source, version) -> None:
+    tool = getattr(Tools, name)
+    monkeypatch.setattr(tool, "resolution_source", source)
+    scanners.output[name] = version
+
+    rows = _rows(tier="1", checks=check)
+
+    assert rows[label] == ("pass", f"{version} at /doctor-tools/{name} (from {source})")
+
+
+def test_tier1_reports_source_selected_during_probe(scanners, monkeypatch) -> None:
+    tool = Tools.skillspector
+
+    def run(*args, **kwargs):
+        tool._path = "/doctor-tools/uv"
+        tool.resolution_source = "uv tool run"
+        return tool_runner.ToolResult(True, "SkillSpector v2.13.4", "", 0)
+
+    monkeypatch.setattr(tool, "run", run)
+
+    assert _rows(tier="1", checks="security")["SkillSpector"] == (
+        "pass",
+        "2.13.4 at /doctor-tools/uv (from uv tool run)",
+    )
+
+
 @pytest.mark.parametrize("failure", ["missing", "malformed override", "timeout", "exit status"])
 def test_tier1_scanner_failure_does_not_hide_other_scanners(scanners, monkeypatch, failure) -> None:
     if failure == "missing":

@@ -51,13 +51,28 @@ _UNSAFE = frozenset(
 )
 
 
-def _skip_context(reason, **metadata):
+def _context_result():
     result = ValidationResult(
         validator_name="Context Deduplication",
         validator_description="Compare content within each effective bundle skill",
     )
-    result.metadata.update(advisory_tier2=True, scan_status="skipped", optional_skip=True, **metadata)
+    result.metadata.update(advisory_tier2=True, optional_skip=False)
+    return result
+
+
+def _skip_context(reason):
+    result = _context_result()
+    result.metadata.update(scan_status="skipped", skipped=True, skip_reason=reason)
     result.add_warning(reason)
+    return result
+
+
+def _context_work_limit(reason, *, check_name, **metadata):
+    result = _context_result()
+    result.metadata.update(scan_status="incomplete", work_limit_exceeded=True, **metadata)
+    result.metadata["work_limit"] = {"check_name": check_name, **metadata}
+    result.mark_scan_incomplete("bundle-context")
+    result.add_error(reason)
     return result
 
 
@@ -84,15 +99,15 @@ def run_plugin_skill_context_dedup(profile, *, threshold=0.8, model=None, llm_mo
     skills = profile.bundled_skills
     if len(skills) > MAX_PLUGIN_DEDUP_SKILLS:
         return [
-            _skip_context(
+            _context_work_limit(
                 "Bundle skill limit exceeded before provider work",
-                work_limit_exceeded=True,
+                check_name="plugin_skill_count_limit",
                 actual_skills=len(skills),
                 skill_limit=MAX_PLUGIN_DEDUP_SKILLS,
             )
         ]
     if not skills:
-        return [_skip_context("No effective skill directories to compare")]
+        return [_skip_context("Not applicable: no effective skill directories to compare")]
     # Capture all skill text before any provider work. The same bounded
     # snapshots feed the existing validator, avoiding a second filesystem read.
     snapshots = []
@@ -101,7 +116,15 @@ def run_plugin_skill_context_dedup(profile, *, threshold=0.8, model=None, llm_mo
         try:
             collected = collect_files(skill.path)
         except SkillCollectionError as exc:
-            result = ValidationResult(validator_name="Context Deduplication")
+            result = _context_result()
+            if exc.check_name not in _UNSAFE:
+                result.mark_scan_incomplete("bundle-context-collection")
+            if exc.check_name.endswith("_limit"):
+                result.metadata["work_limit"] = {
+                    "check_name": exc.check_name,
+                    "file_path": (Path(skill.root_relative) / exc.rel_path).as_posix(),
+                    **exc.metadata,
+                }
             result.add_finding(
                 Finding(
                     "CONTENT_DEDUP",
@@ -123,12 +146,15 @@ def run_plugin_skill_context_dedup(profile, *, threshold=0.8, model=None, llm_mo
             or total_files > MAX_PLUGIN_DEDUP_FILES
         ):
             return [
-                _skip_context(
+                _context_work_limit(
                     "Aggregate bundle content limit exceeded before provider work",
-                    work_limit_exceeded=True,
+                    check_name="plugin_content_limit",
                     actual_chunks=total_chunks,
+                    chunk_limit=MAX_PLUGIN_DEDUP_CHUNKS,
                     actual_text_bytes=total_text_bytes,
+                    text_byte_limit=MAX_PLUGIN_DEDUP_TEXT_BYTES,
                     actual_files=total_files,
+                    file_limit=MAX_PLUGIN_DEDUP_FILES,
                 )
             ]
         snapshots.append(collected)
@@ -179,10 +205,10 @@ def _security_result(error):
     return result
 
 
-def _catalog_skips(reason):
+def _catalog_skips(reason, *, optional=False):
     return [
-        skipped_result(INTER_SKILL_NAME, INTER_SKILL_DESCRIPTION, INTER_SKILL_KEY, reason),
-        skipped_result(INTER_PLUGIN_NAME, INTER_PLUGIN_DESCRIPTION, INTER_PLUGIN_KEY, reason),
+        skipped_result(INTER_SKILL_NAME, INTER_SKILL_DESCRIPTION, INTER_SKILL_KEY, reason, optional=optional),
+        skipped_result(INTER_PLUGIN_NAME, INTER_PLUGIN_DESCRIPTION, INTER_PLUGIN_KEY, reason, optional=optional),
     ]
 
 
@@ -223,7 +249,7 @@ def run_plugin_dedup_scan(
         results.extend(_catalog_skips("Unsafe bundle source; catalog comparisons did not run"))
         return results
     if catalog is None:
-        results.extend(_catalog_skips("No local catalog supplied"))
+        results.extend(_catalog_skips("No local catalog supplied", optional=True))
         return results
     try:
         # C-intra can take minutes. Use the current declarations and contents.

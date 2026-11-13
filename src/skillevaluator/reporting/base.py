@@ -1977,6 +1977,48 @@ def result_has_execution_evidence(result: ValidationResult) -> bool:
     return bool(result.success_details or result.findings or result.summary.checks_performed > 0)
 
 
+def _optional_tier2_catalog_skip(result: ValidationResult, results: list[ValidationResult]) -> bool:
+    """Allow optional catalog absence only alongside the same check's real analysis.
+
+    A plugin dependency-reference success cannot stand in for context analysis.
+    Catalog-only commands likewise need an executed comparison, rather than just
+    an index-build result followed by inapplicable comparisons.
+    """
+    from skillevaluator.reporting.run_status import Status, result_status
+
+    def clean_outcome(candidate: ValidationResult, status: Status) -> bool:
+        metadata = candidate.metadata if isinstance(candidate.metadata, dict) else {}
+        gating = metadata.get("gating")
+        return bool(
+            result_status(candidate) is status
+            and not candidate.errors
+            and not candidate.summary.errors
+            and not candidate.gate_failures
+            and not metadata.get("security_failure")
+            and not (isinstance(gating, dict) and gating.get("tier") != 2)
+        )
+
+    producer = result_publication_evidence(result)
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    catalog_names = {"Inter-Skill Deduplication", "Inter-Plugin Deduplication"}
+    if (
+        producer is None
+        or producer.tier != 2
+        or result.validator_name not in catalog_names
+        or metadata.get("optional_skip") is not True
+        or not clean_outcome(result, Status.SKIPPED)
+    ):
+        return False
+    semantic_names = {"Context Deduplication"} if producer.check_id == "context-optimization" else catalog_names
+    return any(
+        peer.validator_name in semantic_names
+        and result_publication_evidence(peer) == producer
+        and clean_outcome(peer, Status.PASSED)
+        and result_has_execution_evidence(peer)
+        for peer in results
+    )
+
+
 def is_tier3_result(result: ValidationResult) -> bool:
     """Return whether a result belongs to live Tier 3 evaluation."""
     metadata = result.metadata if isinstance(result.metadata, dict) else {}
@@ -2410,6 +2452,7 @@ def assess_publication(
         return bool(
             is_cleanly_skipped(result)
             and not is_advisory_agent_eval_skip(result)
+            and not _optional_tier2_catalog_skip(result, results)
             and not (tier2 and not policy["tier2_required"])
             and not (is_tier3_result(result) and not policy["tier3_required"])
         )

@@ -894,22 +894,41 @@ _CHECK_SCANNERS = {"Security Scan": "skillspector", "Code Risk Analysis": "bandi
 
 
 def _scanners_row(results: list[ValidationResult]) -> list[TierRow]:
-    """The external scanners behind the Tier 1 checks, with their versions or why they did not run."""
-    states: dict[str, tuple[str, str]] = {}
+    """Scanner versions and incomplete evidence, retaining every member's scan state."""
+    versions: dict[str, str] = {}
+    states: dict[str, set[str]] = {}
     for r in results:
         if _is_user_skipped(r):
             if scanner := _CHECK_SCANNERS.get(r.validator_name):
-                states.setdefault(scanner, ("skipped", MUTED))
+                states.setdefault(scanner, set()).add("skipped")
             continue
         for scanner, version in r.scanners.items():
-            states[scanner] = (version, MUTED)
+            if scanner == "skillspector" and version == "unknown":
+                runtime_version = (r.metadata or {}).get("skillspector_version")
+                if isinstance(runtime_version, str) and runtime_version:
+                    version = runtime_version
+            if versions.get(scanner, "unknown") == "unknown":
+                versions[scanner] = version
+            states.setdefault(scanner, set()).add("ran")
         for scan in r.incomplete_scans:
             if (scanner := scan.removesuffix("-llm")) in _SCANNER_NAMES:
-                version = r.scanners.get(scanner) if scan != scanner else None
-                states[scanner] = (f"{version}, LLM didn't run" if version else "didn't run", f"bold {RED}")
+                if scan != scanner and scanner in r.scanners:
+                    state = "llm"
+                else:
+                    state = "missing" if _scanner_setup_issue(r) else "incomplete"
+                states.setdefault(scanner, set()).add(state)
     segments: list[tuple[str, str]] = []
     for scanner in [name for name in _SCANNER_NAMES if name in states]:
-        state, style = states[scanner]
+        version, observed = versions.get(scanner), states[scanner]
+        style = f"bold {RED}"
+        if "incomplete" in observed or ("missing" in observed and version):
+            state = f"{version}, incomplete" if version else "incomplete"
+        elif "llm" in observed:
+            state = f"{version}, LLM didn't run" if version else "LLM incomplete"
+        elif "missing" in observed:
+            state = "didn't run"
+        else:
+            state, style = version or "skipped", MUTED
         segments += [*([(" · ", FAINT)] if segments else []), (_SCANNER_NAMES[scanner], TEXT), (f" {state}", style)]
     return [TierRow("scanners", segments)] if segments else []
 
@@ -1172,7 +1191,7 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
     if count["fail"]:
         checks_segments += [("  ·  ", FAINT), (f"{count['fail']} failed", f"bold {RED}")]
     if count["incomplete"]:
-        checks_segments += [("  ·  ", FAINT), (f"{count['incomplete']} didn't run", f"bold {RED}")]
+        checks_segments += [("  ·  ", FAINT), (f"{count['incomplete']} incomplete", f"bold {RED}")]
     if count["skipped"]:
         checks_segments += [("  ·  ", FAINT), (f"{count['skipped']} skipped", MUTED)]
     if warnings:
@@ -1222,7 +1241,10 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
             TierRow("quality", [(grade, f"bold {grade_style(grade, status=status)}"), (f"  {score:.1f} / 100", TEXT)])
         )
     items = [_tier1_fix(r) for r in broken]
-    if setup := [r for r in incomplete if not _only_llm_stages_missing(r)]:
+    non_llm = [r for r in incomplete if not _only_llm_stages_missing(r)]
+    if partial := [r for r in non_llm if not _scanner_setup_issue(r)]:
+        items.append(_incomplete_fix(partial))
+    if setup := [r for r in non_llm if _scanner_setup_issue(r)]:
         items.append(_setup_fix(setup))
     if llm := [r for r in incomplete if _only_llm_stages_missing(r)]:
         items.append(_llm_fix(llm))
@@ -1243,6 +1265,37 @@ _INSTALL_HINT = re.compile(r"\b[Ii]nstall(?: [\w-]+)*? with: (.+?)\.?$")
 
 
 _DOWNLOAD_FAILED = re.compile(r"couldn't (?:download|set up) .+? \((?:[^()]|\([^()]*\))*\)")
+_MISSING_SCANNER = re.compile(r"\bnot installed\b|\bnot found in PATH\b", re.IGNORECASE)
+
+
+def _scanner_setup_issue(result: ValidationResult) -> bool:
+    """Only explicit installation diagnostics justify a scanner setup explanation."""
+    return any(
+        _DOWNLOAD_FAILED.search(text) or _INSTALL_HINT.search(text) or _MISSING_SCANNER.search(text)
+        for text in map(str, [*result.independent_warnings(), *result.independent_errors()])
+    )
+
+
+def _incomplete_fix(results: list[ValidationResult]) -> FixItem:
+    """Keep partial, malformed and failed analyses separate from installation failures."""
+    checks = ", ".join(dict.fromkeys(_short_name(r.validator_name) for r in results))
+    diagnostics = list(
+        dict.fromkeys(
+            str(message)
+            for result in results
+            for message in (
+                result.gate_failures
+                or result.independent_errors()
+                or result.independent_warnings()
+                or [f"{', '.join(result.incomplete_scans)} did not produce complete evidence"]
+            )
+        )
+    )
+    return FixItem(
+        "scan",
+        f"{checks} incomplete: {'; '.join(diagnostics)}",
+        ["resolve the reported scanner or input issues, then rerun; see detailed reports for full diagnostics"],
+    )
 
 
 def _setup_fix(results: list[ValidationResult]) -> FixItem:
@@ -1251,7 +1304,7 @@ def _setup_fix(results: list[ValidationResult]) -> FixItem:
     hints: list[str] = []
     failed_downloads: list[str] = []
     for r in results:
-        for text in map(str, [*r.warnings, *r.errors]):
+        for text in map(str, [*r.independent_warnings(), *r.independent_errors()]):
             if (download := _DOWNLOAD_FAILED.search(text)) and download.group(0) not in failed_downloads:
                 failed_downloads.append(download.group(0))
             match = _INSTALL_HINT.search(text)

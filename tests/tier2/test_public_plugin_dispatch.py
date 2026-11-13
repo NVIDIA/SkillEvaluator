@@ -266,6 +266,64 @@ def test_explicit_manifest_dedup_uses_selected_members(tmp_path, monkeypatch):
     assert all(result.metadata.get("publication_target") == expected_identity for result in results)
 
 
+def test_dedup_without_catalog_reports_comparisons_as_skipped(tmp_path, monkeypatch):
+    from skillevaluator.reporting.json_reporter import JSONReporter
+    from skillevaluator.reporting.run_status import result_status
+
+    def forbidden(**_kwargs):
+        raise AssertionError("This small plugin must not need a live provider")
+
+    monkeypatch.setattr("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient", forbidden)
+    results = commands.run_dedup_scan(make_plugin(tmp_path / "plugin"))
+
+    assert [result_status(result).value for result in results] == ["passed", "passed", "skipped", "skipped"]
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+    assert payload["total_skipped"] == 2
+    for row in payload["results"][2:]:
+        assert row["status"] == "skipped"
+        assert row["skipped"] is True
+        assert row["optional_skip"] is True
+        assert row["skip_reason"] == "No local catalog supplied"
+        assert row["summary"]["checks_performed"] == 0
+        assert row["success_details"] == []
+
+
+def test_dedup_with_unavailable_catalog_keeps_comparisons_required(tmp_path, monkeypatch):
+    from skillevaluator.reporting.run_status import result_status
+
+    monkeypatch.setattr(
+        "skillevaluator.deduplication.plugin.commands.EmbeddingClient", lambda **_kwargs: FakeEmbedding()
+    )
+    results = commands.run_dedup_scan(make_plugin(tmp_path / "plugin"), catalog=tmp_path / "missing.json")
+
+    assert all(result.metadata.get("optional_skip") is False for result in results[-2:])
+    assert all(result_status(result).value == "skipped" for result in results[-2:])
+    assert all("Local catalog comparison unavailable" in result.warnings[0] for result in results[-2:])
+
+
+def test_dedup_budget_stop_is_incomplete_in_public_json(tmp_path, monkeypatch):
+    from skillevaluator.reporting.json_reporter import JSONReporter
+    from skillevaluator.reporting.retained import retained_results
+    from skillevaluator.reporting.run_status import result_status
+
+    root = make_plugin(tmp_path / "plugin")
+    (root / "skills/demo-member/SKILL.md").write_text(
+        "---\nname: demo-member\ndescription: Project workflow\n---\n" + "Useful content " * 30
+    )
+    monkeypatch.setattr("skillevaluator.deduplication.plugin.commands.MAX_PLUGIN_DEDUP_CHUNKS", 0)
+    results = commands.run_dedup_scan(root)
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+    context = payload["results"][1]
+
+    assert context["status"] == "incomplete"
+    assert context["passed"] is False
+    assert context["skipped"] is False
+    assert context["optional_skip"] is False
+    assert context["summary"]["checks_performed"] == 0
+    assert context["work_limit"]["actual_chunks"] > context["work_limit"]["chunk_limit"] == 0
+    assert result_status(retained_results(payload)[1]).value == "incomplete"
+
+
 def test_combined_validate_keeps_explicit_manifest_for_dedup(tmp_path, monkeypatch):
     from click.testing import CliRunner
 

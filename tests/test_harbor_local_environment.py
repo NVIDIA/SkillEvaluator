@@ -622,6 +622,46 @@ def test_real_contained_filtered_download_preserves_literal_names_and_source(
     asyncio.run(exercise())
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS bsdtar generates AppleDouble metadata entries")
+@pytest.mark.parametrize("method", ["download_dir_with_exclusions", "download_dir_filtered"])
+def test_contained_download_keeps_authored_dot_underscore_files_without_generated_metadata(
+    local_output_environment: SkillEvaluatorLocalEnvironment, tmp_path: Path, method: str
+) -> None:
+    environment = local_output_environment
+    payload = {"keep.txt": b"selected contents\n", "._authored.txt": b"user-authored contents\n"}
+    target = tmp_path / "downloaded"
+    target.mkdir()
+    (target / "retained.txt").write_bytes(b"existing unrelated output\n")
+
+    async def exercise() -> None:
+        await environment.start()
+        try:
+            source = environment._resolve_path("/workspace/export")
+            source.mkdir()
+            for name, data in payload.items():
+                (source / name).write_bytes(data)
+            # Directory metadata creates a synthetic ._. member; selected-file
+            # metadata creates ._keep.txt even though no such source file exists.
+            for path in (source, source / "keep.txt"):
+                subprocess.run(
+                    ["/usr/bin/xattr", "-w", "com.skillevaluator.transfer-test", "metadata", str(path)],
+                    check=True,
+                    capture_output=True,
+                )
+            before = set(environment._root.rglob("*"))
+            options = {"exclude": []} if method == "download_dir_with_exclusions" else {"include": ["*.txt"]}
+
+            await getattr(environment, method)(source_dir="/workspace/export", target_dir=target, **options)
+
+            assert _contained_transfer_files(target) == {**payload, "retained.txt": b"existing unrelated output\n"}
+            assert _contained_transfer_files(source) == payload
+            assert set(environment._root.rglob("*")) == before
+        finally:
+            await environment.stop(delete=False)
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.skipif(os.name == "nt", reason="real local subprocess backend requires POSIX")
 @pytest.mark.parametrize("method", ["download_dir_with_exclusions", "download_dir_filtered"])
 @pytest.mark.parametrize("spelling", ["absolute", "mapped-escape", "linked-source"])

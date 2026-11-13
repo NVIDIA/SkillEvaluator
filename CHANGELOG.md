@@ -174,6 +174,33 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Automatic SkillSpector discovery verifies the pinned release before using an
+  installed executable, selects the verified managed runtime for mismatched or
+  unverifiable versions, and reports the selection. Explicit executable
+  overrides retain the operator's choice. Doctor reports managed and overridden
+  executable sources accurately. Partial scanner results retain their actual
+  diagnostics and recorded versions instead of being described as missing
+  installations; plugin projections preserve incomplete-only status.
+- CI bootstrap rejects unsupported Tier 3 environment modes before importing
+  optional runtime dependencies, preserving the isolated consumer-path check
+  without paying for unnecessary Harbor initialization.
+- NVIDIA Build protocol bridges preserve validated provider-reported token
+  usage instead of discarding it during Anthropic and Responses translation.
+  Responses usage remains unavailable when complete source accounting is
+  absent; no cost estimates are inferred from missing measurements.
+- Local directory downloads disable macOS-generated AppleDouble tar entries
+  so extended attributes do not create nonexistent source-file errors. Real
+  user-authored `._` files and existing containment checks are preserved.
+- Optional plugin catalog comparisons are recorded as skipped when no catalog
+  is supplied, rather than as successful checks. Publication accepts those
+  skips only alongside trustworthy executed semantic analysis; requested
+  catalog failures, contradictory errors and required-tier skips still block.
+  Retained reports preserve the typed optional-skip flag.
+- Plugin context analysis reports work-budget and collection-limit stops as
+  incomplete, rather than advisory passes. Disabled or inapplicable analysis
+  records explicit skips; malformed dependency parsing remains non-green.
+  Aggregate limits are unchanged and reported with their observed counts.
+
 - Plugin CLI preflight uses bounded, no-follow configuration loading for both
   plugin directories and explicit manifests. Combined validation binds plugin
   scores and runtime evidence to the returned run, retains partial scores when

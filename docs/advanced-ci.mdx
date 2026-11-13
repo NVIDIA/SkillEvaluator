@@ -5,7 +5,7 @@ description: "Prerequisites and reference for explicitly enabled all-tier CI."
 
 Standard repository onboarding runs quality and security checks without
 a model key. The all-tier integration is a separate, **explicit opt-in and
-unreleased capability**. Released 0.8.0 bundles and plain `ci init` run only the
+unreleased capability**. Released Tier 1 bundles and plain `ci init` run only the
 quality and security checks; all-tier setup requires a reviewed candidate CLI
 and its bundled schema-version 2 descriptor with the platform's all-tier
 capability and immutable pins.
@@ -35,8 +35,16 @@ It also documents SkillEvaluator's own callers and alternative feedback filename
 
 Only quality and security checks gate this CI integration. Tier 2 and Tier 3
 remain advisory even when failed or incomplete; deprecated Tier 3 required settings are ignored.
-Missing credentials, runtime or datasets must remain visible as incomplete or
-needs-action evidence. A passing scan does not mean all evaluation stages passed.
+When a tier is selected, missing credentials, runtime or datasets remain visible
+as incomplete or needs-action evidence. A passing scan does not mean all
+evaluation stages passed.
+With `scan-mode: auto`, a pull request that changes no skill, such as a setup,
+pin, model or secret change, skips the provider-backed jobs. Their prerequisites
+are first checked by the push to the default branch after it merges, a manual
+run there, or the next skill change. To check them before merging, set
+`scan-mode: all` (GitLab: `SKILL_EVAL_SCAN_MODE: all`) on that pull request and
+restore `auto` before merging. `skillevaluator ci demo` works only after the setup
+has merged.
 
 Reports retain native evidence and an aggregate artifact for 14 days. Feedback
 links to the authenticated artifact for that run; download and extract it,

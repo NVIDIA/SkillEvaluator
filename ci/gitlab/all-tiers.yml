@@ -100,7 +100,7 @@ skill-evaluation:
       base, head = os.environ["DIFF_BASE_SHA"], os.environ["DIFF_HEAD_SHA"]
       if any(not re.fullmatch(r"[0-9a-f]{40}", value) for value in (base, head)):
           raise SystemExit("Changed mode requires exact base and head commits")
-      changed = _git(Path(os.environ["CI_PROJECT_DIR"]).resolve(), "diff", "--name-only", "-z", "--no-renames", base, head, "--").split(b"\0")
+      changed = _git(Path(os.environ["CI_PROJECT_DIR"]).resolve(), "diff", "--name-only", "-z", "--no-renames", "--ignore-submodules=none", base, head, "--").split(b"\0")
       setup = any(path.startswith((b".github/", b".gitlab/", b".skillevaluator/ci")) or path == b".gitlab-ci.yml" for path in changed)
       print("all" if setup else "changed")
       PYTHON
@@ -202,6 +202,12 @@ skill-evaluation-native:
         *",$SKILL_EVAL_TIER,"*) ;;
         *) echo "Tier $SKILL_EVAL_TIER is not selected"; exit 0 ;;
       esac
+      # A merge request that changes no skill skips this paid tier; the
+      # aggregate recomputes the same decision and records it as skipped.
+      if [ "$(python -I "$SKILL_EVAL_TOOLS_DIR/ci/select_changed_skills.py" --skills-changed --workspace "$CI_PROJECT_DIR")" = false ]; then
+        echo "No file under a configured skill root changed; Tier $SKILL_EVAL_TIER did not run."
+        exit 0
+      fi
       python -I "$SKILL_EVAL_TOOLS_DIR/ci/eligible_gitlab.py"
       unset SKILLEVALUATOR_GITLAB_READ_TOKEN
       if [ "$SKILL_EVAL_TIER" = 3 ]; then
@@ -351,6 +357,16 @@ skill-evaluation-aggregate:
       env -i PATH="$PATH" python -I -m uv --no-config --cache-dir "$SKILL_EVAL_TOOLS_DIR/.uv-cache" sync --locked --no-dev --project "$SKILL_EVAL_TOOLS_DIR" --python 3.12 --default-index https://pypi.org/simple
       export PATH="$SKILL_EVAL_TOOLS_DIR/.venv/bin:$PATH"
       mkdir -p skill-evaluator-results/tier1
+      # Recompute the paid jobs' no-skill-change skip with the pinned tools;
+      # never trust an artifact or checkout file for this decision.
+      skills_changed=true
+      if [ "${CI_PIPELINE_SOURCE:-}" = merge_request_event ]; then
+        if ! skills_changed="$(python -I "$SKILL_EVAL_TOOLS_DIR/ci/select_changed_skills.py" --skills-changed --workspace "$CI_PROJECT_DIR")"; then
+          skills_changed=unknown
+        fi
+      fi
+      # Only an exact "false" records missing Tier 2/3 evidence as skipped.
+      export SKILL_EVAL_SKILLS_CHANGED="$skills_changed"
       enriched=false
       if [ "$SKILL_EVAL_TIER1_LLM" = true ]; then
         if [ "${CI_PIPELINE_SOURCE:-}" = merge_request_event ] && [ "${CI_MERGE_REQUEST_SOURCE_PROJECT_ID:-}" = "$CI_PROJECT_ID" ]; then
@@ -361,6 +377,15 @@ skill-evaluation-aggregate:
             push|web) enriched=true ;;
           esac
         fi
+      fi
+      if [ "$enriched" = true ] && [ "$skills_changed" = unknown ]; then
+        echo 'Could not determine whether a skill changed; enriched Tier 1 evidence stays required.' >&2
+        exit 1
+      fi
+      if [ "$enriched" = true ] && [ "$skills_changed" = false ]; then
+        # The enriched job skipped its paid scan; the keyless scan (every
+        # skill for a setup change) is the Tier 1 gate.
+        enriched=false
       fi
       if [ "$enriched" = true ]; then
         # Missing authenticated evidence must fail the required gate instead of

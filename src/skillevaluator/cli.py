@@ -9,6 +9,7 @@ import copy
 import json
 import logging
 import math
+import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextvars import ContextVar
 from datetime import UTC, datetime
@@ -21,11 +22,13 @@ from skillevaluator import __version__
 from skillevaluator.cli_help import GroupedOption, RichGroup
 from skillevaluator.config import load_pii_patterns
 from skillevaluator.constants import (
+    QUALITY_DEFAULT_MIN_SCORE,
     SIMILARITY_DEFAULT_MAX_ENTRIES,
     SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
     SIMILARITY_MAX_ENTRIES,
 )
 from skillevaluator.doctor import DEFAULT_PROBE_TIMEOUT_SEC, MAX_PROBE_TIMEOUT_SEC
+from skillevaluator.harness.report import harness_block, harness_note, harness_panel, write_json_block
 from skillevaluator.logging_config import setup_logging
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.quality_config import QualityConfigError, load_quality_config
@@ -60,9 +63,11 @@ from skillevaluator.tier1.commands import (
     run_rubric_eval,
     run_security_scan,
     run_validation,
+    runs_schema_check,
 )
 from skillevaluator.tier3_environments import all_env_modes
 from skillevaluator.tier_group import TierGroup
+from skillevaluator.utils.json_output import json_needs_ascii
 from skillevaluator.utils.path_security import resolve_repo_context_root
 from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
 from skillevaluator.utils.tier2_paths import (
@@ -81,6 +86,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from skillevaluator.reporting.presentation import FinalRenderContext
+    from skillevaluator.validators.policy import ValidationPolicy
 
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
@@ -249,7 +255,7 @@ _TOP_LEVEL_COMMAND_HELP_GROUPS = (
     ("Repository CI", ("ci",)),
     (
         "Tier 1 · Static and security",
-        ("quality-check", "rubric-eval", "security-scan", "pii-scan", "lint-scripts"),
+        ("quality-check", "rubric-eval", "security-scan", "pii-scan", "lint-scripts", "harness-check"),
     ),
     (
         "Tier 2 · Deduplication",
@@ -262,8 +268,17 @@ _TOP_LEVEL_COMMAND_HELP_GROUPS = (
 )
 
 
+class _EncodingSafeGroup(RichGroup):
+    """Configure output before Click parses eager options such as --help."""
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(errors="replace")
+        return super().parse_args(ctx, args)
+
+
 @click.group(
-    cls=RichGroup,
+    cls=_EncodingSafeGroup,
     context_settings=CONTEXT_SETTINGS,
     help_command_groups=_TOP_LEVEL_COMMAND_HELP_GROUPS,
     show_banner=True,
@@ -1175,12 +1190,21 @@ def _ensure_autopilot_dataset(
             provider = resolve_llm_provider()
         except ProviderConfigurationError:
             no_llm = True
+            if evaluation_params is not None and evaluation_params.get("backend") == "nemo-gym":
+                from skillevaluator.tier3.workflow import _source_snapshot, nemo_gym_preflight_errors
+
+                params = {**evaluation_params, "skill_path": skill_path}
+                with _source_snapshot(skill_path) as source_path:
+                    errors = nemo_gym_preflight_errors(source_path, params)
+                if errors:
+                    raise click.UsageError("; ".join(errors)) from None
             echo("Autopilot: no public provider key is configured; generating one deterministic case.")
         else:
             no_llm = False
             if evaluation_params is not None:
                 from skillevaluator.tier3.workflow import (
                     _preflight_environment,
+                    _preflight_nemo_gym,
                     _preflight_options,
                     _source_snapshot,
                 )
@@ -1190,10 +1214,14 @@ def _ensure_autopilot_dataset(
                 # leave existing authored sources untouched above.
                 params = {**evaluation_params, "skill_path": skill_path}
                 with _source_snapshot(skill_path) as source_path:
-                    environment_kwargs = _preflight_options(source_path, params)
-                if prepare_environment is not None:
-                    prepare_environment()
-                _preflight_environment(params, environment_kwargs=environment_kwargs)
+                    if params.get("backend") == "nemo-gym":
+                        _preflight_nemo_gym(source_path, params)
+                    else:
+                        environment_kwargs = _preflight_options(source_path, params)
+                if params.get("backend") != "nemo-gym":
+                    if prepare_environment is not None:
+                        prepare_environment()
+                    _preflight_environment(params, environment_kwargs=environment_kwargs)
             provider_name, model_name = safe_llm_labels(provider.provider, provider.model)
             echo(f"Autopilot: generating one case with {provider_name} / {model_name}.")
 
@@ -1354,6 +1382,10 @@ def _catalog_child_argv_from_ctx(
         argv.extend(["--skip", str(params["skip"])])
     if params.get("previous_version"):
         argv.extend(["--previous-version", str(params["previous_version"])])
+    if params.get("harness"):
+        argv.extend(["--harness", str(params["harness"])])
+    if params.get("harness_profiles"):
+        argv.extend(["--harness-profiles", str(params["harness_profiles"])])
     if params.get("fail_fast"):
         argv.append("--fail-fast")
     if params.get("continue_on_failure"):
@@ -1373,8 +1405,8 @@ def _catalog_child_argv_from_ctx(
         argv.append("--block-on-dedup")
     elif block_on_dedup is False:
         argv.append("--no-block-on-dedup")
-    min_score = params.get("min_score", 70)
-    if min_score != 70:
+    min_score = params.get("min_score", QUALITY_DEFAULT_MIN_SCORE)
+    if min_score != QUALITY_DEFAULT_MIN_SCORE:
         argv.extend(["--min-score", str(min_score)])
     if params.get("quality_config"):
         argv.extend(["--quality-config", str(Path(params["quality_config"]).resolve())])
@@ -1475,6 +1507,8 @@ def _catalog_child_argv_from_ctx(
     if _report_formats_explicit():
         for fmt in params.get("report_formats") or ():
             argv.extend(["-r", fmt])
+    if catalog_root is not None:
+        argv.extend(["--catalog-root", str(catalog_root)])
     argv.extend(["-o", str(output_dir)])
     return argv
 
@@ -1529,6 +1563,7 @@ def _catalog_skill_entry(
         return entry
 
     entry["json_report"] = json_report.name
+    entry["report_scope"] = "single_skill"
     try:
         payload = json.loads(json_report.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
@@ -1539,13 +1574,63 @@ def _catalog_skill_entry(
     for key in ("overall_passed", "overall_status", "incomplete_scans", "severity_counts"):
         if key in payload:
             entry[key] = payload[key]
+    entry["report_verdict"] = {key: payload[key] for key in ("overall_passed", "overall_status") if key in payload}
     return entry
 
 
-def _write_catalog_summary(output_dir: Path, skills: list[dict[str, object]]) -> Path:
-    """Write a machine-readable fleet rollup for catalog validation."""
+def _catalog_entry_with_metadata_id_conflicts(
+    skill: dict[str, object], conflicts: list[dict[str, object]]
+) -> dict[str, object]:
+    """Project catalog findings onto a member, retaining its independent report verdict.
+
+    The findings themselves are listed under ``catalog_findings`` so the
+    verdict and the severity bump above can be traced back to what caused
+    them: a catalog validates each skill on its own, so these findings exist
+    nowhere else in that skill's output.
+    """
+    entry = dict(skill)
+    recorded: list[dict[str, object]] = []
+    for conflict in conflicts:
+        members = conflict.get("skills")
+        if not isinstance(members, list) or entry.get("name") not in members:
+            continue
+        names = [str(member) for member in members]
+        others = ", ".join(name for name in names if name != entry.get("name"))
+        recorded.append(
+            {
+                "category": "SCHEMA",
+                "check_name": "metadata_id_duplicate",
+                "severity": conflict.get("severity"),
+                "blocking": bool(conflict.get("blocking")),
+                "message": f"metadata.id '{conflict.get('metadata_id')}' is also declared by {others}",
+            }
+        )
+        severity = conflict.get("severity")
+        if severity in ("critical", "high", "medium", "low"):
+            raw_counts = entry.get("severity_counts")
+            counts = dict(raw_counts) if isinstance(raw_counts, dict) else {}
+            previous = counts.get(severity, 0)
+            counts[severity] = (previous if isinstance(previous, int) else 0) + 1
+            entry["severity_counts"] = counts
+        if conflict.get("blocking"):
+            entry["passed"] = False
+            entry["overall_passed"] = False
+            entry["overall_status"] = "failed"
+    if recorded:
+        entry["catalog_findings"] = recorded
+    return entry
+
+
+def _write_catalog_summary(
+    output_dir: Path,
+    skills: list[dict[str, object]],
+    *,
+    metadata_id_conflicts: list[dict[str, object]] | None = None,
+) -> Path:
+    """Write catalog-context verdicts and counts; linked leaf reports retain single-skill scope."""
     from skillevaluator.reporting.base import _write_report_atomically
 
+    skills = [_catalog_entry_with_metadata_id_conflicts(skill, metadata_id_conflicts or []) for skill in skills]
     total = len(skills)
     passed = sum(1 for skill in skills if skill.get("passed"))
     failed = total - passed
@@ -1573,12 +1658,89 @@ def _write_catalog_summary(output_dir: Path, skills: list[dict[str, object]]) ->
         "summary_path": CATALOG_SUMMARY_FILENAME,
         "severity_totals": severity_totals,
         "skills": skills,
+        "metadata_id_conflicts": metadata_id_conflicts or [],
         "generated_at": datetime.now(tz=UTC).isoformat(),
     }
     output_path = output_dir / CATALOG_SUMMARY_FILENAME
     payload = json.dumps(summary, indent=2, default=str, allow_nan=False).encode("utf-8")
     _write_report_atomically(output_path, payload)
     return output_path
+
+
+def _catalog_metadata_id_conflicts(
+    policy: ValidationPolicy | None,
+    skill_dirs: list[Path],
+    catalog_root: Path,
+    discovery_problems: dict[Path, str],
+    *,
+    schema_enabled: bool = True,
+) -> tuple[list[dict[str, object]], list[tuple[str, str]]]:
+    """Find ``metadata.id`` values shared by catalog skills.
+
+    Catalog runs validate each skill on its own, so uniqueness across the
+    catalog is checked here. Returns the conflicts for the catalog summary and,
+    when the policy makes a duplicate blocking, one failure per affected skill.
+
+    This is part of the schema check, so it runs only when that check is
+    selected: ``--checks`` and ``--skip`` run exactly the checks they name.
+    """
+    from skillevaluator.validators.policy import default_policy
+
+    if not schema_enabled:
+        return [], []
+    from skillevaluator.validators.schema import (
+        declared_metadata_id,
+        duplicate_metadata_ids,
+        metadata_id_duplicate_severity,
+    )
+
+    policy = policy or default_policy()
+    declared: dict[str, list[Path]] = {}
+    for skill_dir in skill_dirs:
+        if skill_dir in discovery_problems:
+            continue
+        metadata_id = declared_metadata_id(skill_dir)
+        if metadata_id is not None:
+            declared.setdefault(metadata_id, []).append(skill_dir)
+    duplicates = duplicate_metadata_ids(declared, catalog_root)
+    if not duplicates:
+        return [], []
+    severity = metadata_id_duplicate_severity(policy)
+    blocking = severity.is_error()
+    conflicts: list[dict[str, object]] = [
+        {"metadata_id": value, "skills": skills, "severity": severity.value, "blocking": blocking}
+        for value, skills in duplicates.items()
+    ]
+    failures: list[tuple[str, str]] = []
+    if blocking:
+        for value, skills in duplicates.items():
+            for skill in skills:
+                others = ", ".join(other for other in skills if other != skill)
+                failures.append((skill, f"metadata.id '{value}' is also declared by {others}"))
+    return conflicts, failures
+
+
+def _print_metadata_id_conflicts(conflicts: list[dict[str, object]]) -> None:
+    """Show advisory (non-blocking) catalog ID conflicts under the scoreboard."""
+    from rich.text import Text
+
+    from skillevaluator.reporting.console_ui import MUTED, make_view_console
+
+    console_ = make_view_console()
+    for conflict in conflicts:
+        skills = conflict.get("skills")
+        if conflict.get("blocking") or not isinstance(skills, list):
+            continue
+        line = f"metadata.id '{conflict['metadata_id']}' is declared by {', '.join(map(str, skills))} (advisory)"
+        console_.print(Text.assemble(("      warning     ", MUTED), (strip_terminal_controls(line), MUTED)))
+
+
+def _record_metadata_id_failures(
+    failures: list[tuple[str, str]], id_failures: list[tuple[str, str]]
+) -> list[tuple[str, str]]:
+    """Add blocking ID conflicts to *failures*, keeping a skill's own failure reason first."""
+    failed = {name for name, _reason in failures}
+    return [*failures, *((name, reason) for name, reason in id_failures if name not in failed)]
 
 
 def _validate_catalog(
@@ -1589,6 +1751,7 @@ def _validate_catalog(
     output_dir: Path,
     workers: int = 1,
     discovery_problems: dict[Path, str] | None = None,
+    policy: ValidationPolicy | None = None,
 ) -> None:
     """Run the full validate pipeline once per skill in the catalog.
 
@@ -1612,6 +1775,7 @@ def _validate_catalog(
             output_dir=output_dir,
             workers=workers,
             discovery_problems=discovery_problems,
+            policy=policy,
         )
         return
 
@@ -1633,6 +1797,7 @@ def _validate_catalog(
                 "content_type": "skill",
                 "output_dir": skill_output,
                 "results_dir": _catalog_results_dir(ctx, skill_dir, resolved_target),
+                "catalog_root": resolved_target,
             }
             reason = ""
             try:
@@ -1649,6 +1814,14 @@ def _validate_catalog(
             ctx.meta.pop(meta_key, None)
         else:
             ctx.meta[meta_key] = previous_catalog_root
+    id_conflicts, id_failures = _catalog_metadata_id_conflicts(
+        policy,
+        skill_dirs,
+        resolved_target,
+        discovery_problems,
+        schema_enabled=runs_schema_check(ctx.params.get("checks"), ctx.params.get("skip")),
+    )
+    failures = _record_metadata_id_failures(failures, id_failures)
     failure_map = dict(failures)
     skill_entries = [
         _catalog_skill_entry(
@@ -1660,8 +1833,9 @@ def _validate_catalog(
         )
         for skill_name in (skill_dir.relative_to(resolved_target).as_posix() for skill_dir in skill_dirs)
     ]
-    _write_catalog_summary(output_dir, skill_entries)
+    _write_catalog_summary(output_dir, skill_entries, metadata_id_conflicts=id_conflicts)
     _print_catalog_summary(len(skill_dirs), failures, output_dir)
+    _print_metadata_id_conflicts(id_conflicts)
     if failures:
         raise click.ClickException(
             f"{len(failures)}/{len(skill_dirs)} skills failed validation: "
@@ -1677,6 +1851,7 @@ def _validate_catalog_parallel(
     output_dir: Path,
     workers: int,
     discovery_problems: dict[Path, str] | None = None,
+    policy: ValidationPolicy | None = None,
 ) -> None:
     """Validate catalog skills concurrently in isolated child processes."""
     from skillevaluator.reporting.console_ui import make_view_console
@@ -1714,6 +1889,14 @@ def _validate_catalog_parallel(
             if not passed:
                 failures.append((skill_name, reason))
 
+    id_conflicts, id_failures = _catalog_metadata_id_conflicts(
+        policy,
+        skill_dirs,
+        catalog_root,
+        discovery_problems,
+        schema_enabled=runs_schema_check(ctx.params.get("checks"), ctx.params.get("skip")),
+    )
+    failures = _record_metadata_id_failures(failures, id_failures)
     failures.sort(key=lambda item: item[0])
     failure_map = dict(failures)
     skill_entries = [
@@ -1726,8 +1909,9 @@ def _validate_catalog_parallel(
         )
         for skill_name in (skill_dir.relative_to(catalog_root).as_posix() for skill_dir in skill_dirs)
     ]
-    _write_catalog_summary(output_dir, skill_entries)
+    _write_catalog_summary(output_dir, skill_entries, metadata_id_conflicts=id_conflicts)
     _print_catalog_summary(len(skill_dirs), failures, output_dir)
+    _print_metadata_id_conflicts(id_conflicts)
     if failures:
         raise click.ClickException(
             f"{len(failures)}/{len(skill_dirs)} skills failed validation: "
@@ -1905,9 +2089,26 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     cls=GroupedOption,
     help_group=_TIER1_GROUP,
     help="Comma-separated subset of Tier 1 checks to run (default: all applicable). "
-    "Choices: schema, version, security, pii, license, code-integrity, unicode, quality, lint; "
+    "Choices: schema, version, security, pii, license, code-integrity, unicode, quality, lint, harness; "
     "opt-in (not run by default): dependency. "
     "quality/lint/version are skill-only and skipped for rules/workflows.",
+)
+@click.option(
+    "--harness",
+    "harness",
+    default=None,
+    cls=GroupedOption,
+    help_group=_RUN_GROUP,
+    help="Harnesses for the advisory harness check (default: all), e.g. --harness codex,claude-code.",
+)
+@click.option(
+    "--harness-profiles",
+    "harness_profiles",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    default=None,
+    cls=GroupedOption,
+    help_group=_RUN_GROUP,
+    help="Directory of harness profile YAMLs to use instead of the packaged ones.",
 )
 @click.option(
     "--skip",
@@ -1974,7 +2175,7 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
 @click.option(
     "--min-score",
     type=int,
-    default=70,
+    default=QUALITY_DEFAULT_MIN_SCORE,
     show_default=True,
     cls=GroupedOption,
     help_group=_TIER1_GROUP,
@@ -2001,7 +2202,10 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     default=None,
     cls=GroupedOption,
     help_group=_RUN_GROUP,
-    help="Validation policy: default (external is a compatibility alias). Default: $SKILLEVALUATOR_PROFILE, then default.",
+    help=(
+        "Validation policy: default or registry (external is a compatibility alias for default). "
+        "Default: $SKILLEVALUATOR_PROFILE, then default."
+    ),
 )
 @click.option(
     "--external",
@@ -2029,6 +2233,9 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help="Concurrent catalog skill jobs when validating a folder of skills. "
     "Values above 1 run skills in parallel processes and disable the per-skill pipeline view.",
 )
+# Set by a catalog run on each per-skill job: the folder of skills that the job's
+# skill belongs to, which the security check judges missing references against.
+@click.option("--catalog-root", type=click.Path(file_okay=False, path_type=Path), default=None, hidden=True)
 @click.option(
     "--dedup/--no-dedup",
     "--tier2/--no-tier2",
@@ -2331,11 +2538,14 @@ def validate(
     agent_runtime_preflight: bool | None,
     tolerate_baseline_timeouts: bool | None,
     workers: int,
+    catalog_root: Path | None,
     evaluated_source_repository: str | None,
     evaluated_source_revision: str | None,
     evaluator_container_revision: str | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
+    harness: str | None = None,
+    harness_profiles: Path | None = None,
 ) -> None:
     """Validate a skill through all three tiers, with automatic dataset preparation.
 
@@ -2354,6 +2564,13 @@ def validate(
     skill-only and skipped for plugins.
     """
     _record_validate_json_report(None)
+    if harness:
+        from skillevaluator.harness import load_profiles
+
+        try:
+            load_profiles(harness, harness_profiles)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="--harness") from exc
     if dedup:
         _reject_linked_tier2_root(target_path)
     target_path = target_path.resolve()
@@ -2460,6 +2677,7 @@ def validate(
             output_dir=output_dir,
             workers=workers,
             discovery_problems=discovery_problems,
+            policy=policy,
         )
         return
 
@@ -2541,9 +2759,12 @@ def validate(
         previous_version=previous_version,
         policy=policy,
         content_type=resolved_type,
+        target_root=catalog_root.resolve() if catalog_root is not None else None,
         fail_fast=fail_fast,
         continue_on_failure=continue_on_failure,
         on_check=_on_check if quiet else None,
+        harness=harness,
+        harness_profiles=harness_profiles,
         skip=skip,
     )
     # The raw pass/fail signal drives --fail-fast identically in both modes;
@@ -2554,6 +2775,9 @@ def validate(
     if quiet:
         apply_policy(results, policy)
     tier1_ok, tier1_rows = summarize_tier1(results, lineup=check_lineup)
+    harness_rows = harness_block(results)
+    if harness_rows:
+        view.set_harness(harness_panel(harness_rows, width=view.width, verbose=verbose), harness_note(harness_rows))
     view.tier_done(0, failed=not tier1_ok, rows=tier1_rows)
     tier1_gate_results = list(results)
     tier2_gate_results: list[ValidationResult] = []
@@ -2786,12 +3010,17 @@ def validate(
         policy=policy,
         target_path=target_display,
         expected_skill_name=publication_name,
+        # A Git remote URL in ``target_display`` cannot be probed for SKILL.md,
+        # and a clean run has no finding path to infer the skill from.
+        explicit_skill_name=publication_name if resolved_type == CONTENT_TYPE_SKILL and target_path.is_dir() else None,
         content_label=content_label,
         announce_paths=not quiet,
         sarif_scan_root=target_path,
         sarif_repository_root=sarif_repository_root,
     )
     _record_validate_json_report(f"{report_basename_value}.json" if "json" in effective_formats else None)
+    if harness_rows and "json" in effective_formats:
+        write_json_block(output_dir / f"{report_basename_value}.json", harness_rows)
 
     # BENCHMARK.md is generated compulsorily for skills (matches SkillEvaluator), even on
     # failure, so the publication card always reflects the latest evaluation --
@@ -2807,7 +3036,9 @@ def validate(
         # stays as the last line of defence: the renderer re-validates the
         # carriers it is handed, and a producer can record one after the fact.
         try:
-            BenchmarkReporter(skill_name=publication_name).save(results, output_dir / BENCHMARK_FILENAME)
+            BenchmarkReporter(skill_name=publication_name, evaluator_version=__version__).save(
+                results, output_dir / BENCHMARK_FILENAME
+            )
         except EvaluatedSourceConflict as exc:
             # Publication fails closed on a contradictory identity, so report which
             # values disagreed rather than letting the card write a guess.
@@ -2838,6 +3069,8 @@ def validate(
             agent_eval=agent_eval,
             presentation_context=presentation_context,
         )
+    if harness_rows and not quiet:
+        console.print(harness_panel(harness_rows, verbose=True))
     if gate_failed:
         raise click.ClickException("validation failed")
 
@@ -2851,9 +3084,61 @@ validate.help_group_descriptions = {
 }
 
 
+@cli.command("harness-check")
+@_target_argument
+@click.option(
+    "--harness",
+    default="all",
+    show_default=True,
+    help="Comma-separated harnesses to check, e.g. codex,claude-code.",
+)
+@click.option(
+    "--harness-profiles",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    default=None,
+    help="Directory of harness profile YAMLs to use instead of the packaged ones.",
+)
+@click.option("-v", "--verbose", is_flag=True, help="List every harness with its verified version and date.")
+@click.option(
+    "--json",
+    "json_path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Also write the harness_compatibility block to this JSON file.",
+)
+def harness_check(
+    target_path: Path,
+    harness: str,
+    harness_profiles: Path | None,
+    verbose: bool,
+    json_path: Path | None,
+) -> None:
+    """Show whether each agent harness loads, degrades or drops a skill (advisory; exits 0)."""
+    from skillevaluator.harness.report import run_harness_check
+    from skillevaluator.reporting.console_ui import make_view_console
+
+    try:
+        block = run_harness_check(target_path, harness, harness_profiles, console=make_view_console(), verbose=verbose)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="--harness") from exc
+    if not block:
+        raise click.ClickException(f"No skills found in {target_path}")
+    from skillevaluator.validators.schema import SchemaValidator
+
+    for skill in block:
+        schema = SchemaValidator().validate(Path(skill))
+        if not schema.passed and schema.errors:
+            click.echo(
+                f"Tier 1 schema also fails for {Path(skill).name}: {schema.errors[0].split(' in /', 1)[0]}. "
+                "Run `skillevaluator validate --tiers 1` for details."
+            )
+    if json_path is not None:
+        json_path.write_text(json.dumps({"harness_compatibility": block}, indent=2), encoding="utf-8")
+
+
 @cli.command("quality-check")
 @_target_argument
-@click.option("--min-score", type=int, default=70, show_default=True)
+@click.option("--min-score", type=int, default=QUALITY_DEFAULT_MIN_SCORE, show_default=True)
 @click.option(
     "--quality-config",
     type=QUALITY_CONFIG_PATH,
@@ -2881,7 +3166,7 @@ def quality_check(
 
 @cli.command("rubric-eval")
 @_target_argument
-@click.option("--min-score", type=int, default=70, show_default=True)
+@click.option("--min-score", type=int, default=QUALITY_DEFAULT_MIN_SCORE, show_default=True)
 @_report_options
 def rubric_eval(target_path: Path, min_score: int, report_formats: tuple[str, ...], output_dir: Path) -> None:
     """Run LLM-as-judge rubric evaluation for a skill."""
@@ -3161,7 +3446,7 @@ def _workflow_report_options(func):
 @click.option(
     "--llm/--no-llm", default=None, help="Include rubric, LLM security, and verification [default: when configured]."
 )
-@click.option("--min-score", type=click.IntRange(0, 100), default=70, show_default=True)
+@click.option("--min-score", type=click.IntRange(0, 100), default=QUALITY_DEFAULT_MIN_SCORE, show_default=True)
 @click.option(
     "--quality-config",
     type=QUALITY_CONFIG_PATH,
@@ -3170,7 +3455,16 @@ def _workflow_report_options(func):
 )
 @click.option("--pii-waivers", type=PII_WAIVERS_PATH, default=None, help=_PII_WAIVERS_HELP)
 @click.option(
-    "--profile", default=None, help="Validation policy [default: default; external is a compatibility alias]."
+    "--profile",
+    default=None,
+    help="Validation policy: default or registry [default: default; external is a compatibility alias].",
+)
+@click.option(
+    "--policy",
+    "policy_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Custom policy YAML overlaid on top of --profile.",
 )
 @click.option("--previous-version", default=None, help="Previous version for version checks.")
 @click.option(
@@ -3186,6 +3480,7 @@ def _tier1_workflow(
     quality_config: Path | None,
     pii_waivers: Path | None,
     profile: str | None,
+    policy_path: Path | None,
     previous_version: str | None,
     skillspector_baseline: Path | None,
     report_formats: tuple[str, ...],
@@ -3196,7 +3491,7 @@ def _tier1_workflow(
     from skillevaluator.validators.policy import resolve_policy
 
     try:
-        policy = resolve_policy(profile=profile)
+        policy = resolve_policy(profile=profile, policy_path=policy_path)
     except (FileNotFoundError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     _offer_scanner_install(checks, skip)
@@ -3308,6 +3603,13 @@ def _tier2_workflow(
     ),
 )
 @click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE)
+@click.option(
+    "--backend",
+    default="harbor",
+    show_default=True,
+    type=click.Choice(["harbor", "nemo-gym"]),
+    help="Tier 3 execution backend: Harbor, or NeMo Gym's orchestrator, agent harness and sandbox.",
+)
 @click.option(
     "--environment-kwarg",
     "--ek",
@@ -3449,6 +3751,7 @@ def evaluate(
     skill_path: Path,
     agents: str | None,
     env_mode: str,
+    backend: str,
     environment_kwarg: tuple[str, ...],
     autopilot: bool,
     skip_baseline: bool,
@@ -3530,7 +3833,7 @@ def evaluate(
             skill_path,
             progress=progress,
             evaluation_params=click.get_current_context().params,
-            prepare_environment=prepare_local_runtime if env_mode == "local" else None,
+            prepare_environment=prepare_local_runtime if backend == "harbor" and env_mode == "local" else None,
         )
 
     parsed_environment_kwargs = _parse_environment_kwargs_cli(environment_kwarg, env_mode=env_mode)
@@ -3539,6 +3842,7 @@ def evaluate(
         skill_path=skill_path,
         agents=agents,
         env_mode=env_mode,
+        backend=backend,
         environment_kwarg=environment_kwarg,
         skip_baseline=skip_baseline,
         skip_with_skill=skip_with_skill,
@@ -3574,7 +3878,7 @@ def evaluate(
         environment_kwargs=parsed_environment_kwargs,
     )
     try:
-        if env_mode == "local":
+        if backend == "harbor" and env_mode == "local":
             if not local_runtime_offered:
                 prepare_local_runtime()
             from rich.panel import Panel
@@ -3592,7 +3896,7 @@ def evaluate(
                     padding=(0, 1),
                 )
             )
-        elif env_mode == "gke":
+        elif backend == "harbor" and env_mode == "gke":
             from skillevaluator.tier3.commands import parse_agents
             from skillevaluator.tier3.harbor.runner import (
                 is_gke_vertex_workload_identity_active,
@@ -3656,9 +3960,26 @@ def evaluate(
 @click.option("--no-llm", is_flag=True, help="Use local templates only.")
 @click.option("--dry-run", is_flag=True, help="Preview without writing.")
 @click.option("--force", is_flag=True, help="Overwrite existing evals/evals.json.")
-@click.option("--prompt", type=click.Path(exists=True, path_type=Path), default=None)
-@click.option("--grounding", type=click.Choice(["skill", "intent", "trace"]), default="skill")
-@click.option("--refine", is_flag=True, help="Refine cases using existing or collected trajectories.")
+@click.option(
+    "--prompt",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Author guidance with content beyond headings (default: evals/EVAL.md).",
+)
+@click.option(
+    "--grounding",
+    type=click.Choice(["auto", "skill", "intent", "trace"]),
+    default="auto",
+    show_default=True,
+    help="Auto requires substantive author guidance or usable matching retained traces; "
+    "existing datasets need --force or --refine. Explicit trace opts into refinement; "
+    "use skill for skill-only starters.",
+)
+@click.option(
+    "--refine",
+    is_flag=True,
+    help="Opt into refinement using retained or collected trajectories after grounding selection.",
+)
 @click.option("--from-results", type=click.Path(exists=True, path_type=Path), default=None)
 @click.option("--results-dir", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=None)
 def create_dataset(
@@ -3673,7 +3994,7 @@ def create_dataset(
     from_results: Path | None,
     results_dir: Path | None,
 ) -> None:
-    """Create synthetic eval datasets for agent skill evaluation."""
+    """Create eval datasets from author guidance, retained traces, or explicit skill grounding."""
     from skillevaluator.evaluation import DatasetGenerationError, DatasetOptions, EvaluationService
 
     try:
@@ -3817,6 +4138,7 @@ _DOCTOR_OPTION_TIERS = {
     "env_mode": frozenset({"3"}),
     "environment_kwarg": frozenset({"3"}),
     "agent_model": frozenset({"3"}),
+    "backend": frozenset({"3"}),
 }
 
 
@@ -3849,6 +4171,13 @@ def _doctor_tier_options(*, timeout_help: str):
 
 def _tier3_doctor_options(func):
     """Add the Tier 3 options shared by doctor and tier3 doctor."""
+    func = click.option(
+        "--backend",
+        default="harbor",
+        show_default=True,
+        type=click.Choice(["harbor", "nemo-gym"]),
+        help="Tier 3 execution backend to check: Harbor, or NeMo Gym.",
+    )(func)
     func = click.option("--agent-model", multiple=True, help="Per-agent model override, AGENT=MODEL.")(func)
     func = click.option(
         "--environment-kwarg",
@@ -3879,6 +4208,7 @@ def _run_doctor(
     timeout: float = DEFAULT_PROBE_TIMEOUT_SEC,
     agent_model: tuple[str, ...] = (),
     verify_models: bool = False,
+    backend: str = "harbor",
 ) -> int:
     """Validate every option before any probe, then check each selected tier in order."""
     selected_tiers = ("1", "2", "3") if tier == "all" else (tier,)
@@ -3916,6 +4246,7 @@ def _run_doctor(
                     verify_models=verify_models,
                     agent_model=agent_model,
                     environment_kwargs=parsed_environment_kwargs,
+                    backend=backend,
                 )
             )
         else:
@@ -4022,7 +4353,8 @@ def tier3_migrate_dataset(source: Path, skill_name: str | None, destination: Pat
     except (OSError, ValueError, TypeError) as exc:
         raise click.ClickException(str(exc)) from exc
     if destination is None:
-        click.echo(json.dumps(result.dataset, indent=2, ensure_ascii=False))
+        ensure_ascii = json_needs_ascii(result.dataset, getattr(sys.stdout, "encoding", None))
+        click.echo(json.dumps(result.dataset, indent=2, ensure_ascii=ensure_ascii))
     else:
         click.echo(f"Wrote {len(result.dataset['evals'])} cases to {destination}; source preserved.")
 
@@ -4173,6 +4505,10 @@ from skillevaluator.tier3.grader_validation import validate_grader
 
 tier3.add_command(select_decoys_command, "select-decoys")
 tier3.add_command(validate_grader, "validate-grader")
+
+from skillevaluator.tier3.interaction_commands import interact_command
+
+tier3.add_command(interact_command, "interact")
 
 from skillevaluator.tier3.workflow import build_tier3_workflow
 

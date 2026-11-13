@@ -29,8 +29,11 @@ as a required gate. GitHub calls the hardened legacy scanner workflow at the
 same evaluator commit; GitLab runs the same digest-pinned scanner image.
 Static CI checks receive no model key. Tier 2 and Tier 3 execute independently
 and retain their own native evidence, so one tier's failure does not erase the
-other reports. Changes to onboarding configuration trigger a full Tier 1 scan
-so the setup review exercises actual skills.
+other reports. Changes to onboarding configuration trigger a full keyless
+Tier 1 scan so the setup review exercises actual skills. With `scan-mode: auto`,
+the provider-backed LLM Tier 1 pass, Tier 2 and Tier 3 run on a pull request only
+when it changes a skill. Eligible pushes and manual runs on the default branch
+run them for the whole collection.
 
 Existing released Tier 1-only consumers keep their current workflow and
 bundled image pins. See [GitHub Actions](github-actions.mdx) or
@@ -73,11 +76,11 @@ for skills. Its Tier 1 LLM checks still run only when requested.
 
   ```bash title="Complete offline Tier 1"
   brew install gitleaks semgrep
-  uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.3
+  uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.4
   skillevaluator validate ./my-skill --tiers 1
   ```
 
-  With `skillevaluator[security]`, Semgrep, SkillSpector, and Gitleaks installed, every required scanner produces evidence and the run is deterministic — the same input yields the same exit code, with nothing leaving your machine. Run `skillevaluator doctor --tier 1` first to confirm that each scanner resolves and reports a supported version.
+  With Semgrep, SkillSpector, and Gitleaks installed, every required scanner produces evidence and the run is deterministic — the same input yields the same exit code, with nothing leaving your machine. Run `skillevaluator doctor --tier 1` first to confirm that each scanner resolves and reports a supported version.
 
   ### Narrow to specific checks
 
@@ -97,7 +100,7 @@ for skills. Its Tier 1 LLM checks still run only when requested.
   skillevaluator validate ./my-skill --tiers 1 --llm --llm-verify
   ```
 
-  Confirmed findings keep their original severity. High-confidence false positives stay visible but are downgraded to INFO and carry verification metadata explaining the review. Static scanning always runs first — if a requested LLM stage is unavailable or returns unusable evidence, the run does not silently turn green. `security-scan` and `pii-scan` accept `--llm-verify` too.
+  Confirmed findings keep their original severity. High-confidence false positives stay visible but are downgraded to INFO and carry verification metadata explaining the review. Each finding that gets a verdict names the provider and model that gave it as `llm_provider` and `llm_model_used` in its JSON metadata. For a Claude 5.5 or later model on the native Claude API, the model is the one the reply names; otherwise it is the configured model, unless a server-side `fallback` block in the reply names another model. Verdicts kept from a reply cut off at the output-token limit name the model that wrote that reply. Static scanning always runs first — if a requested LLM stage is unavailable or returns unusable evidence, the run does not silently turn green. `security-scan` and `pii-scan` accept `--llm-verify` too.
 
   HTML, Markdown, and terminal reports show the recorded verification verdict, confidence, and reasoning beside each finding, together with its reported severity.
 </Steps>
@@ -141,39 +144,97 @@ skillevaluator validate ./skills --type skill --continue-on-failure
 
 ## Validation profiles and policies
 
-The bundled `default` policy applies to both public and private repositories.
-It requires a well-formed `metadata.author` value but does not restrict the email
-domain. Missing or malformed author attribution is HIGH severity. Blocked license
-findings are CRITICAL; missing or unknown licenses are reported for review.
-The policy controls validation rules, not repository visibility or report hosting.
-The old `external` name and `--external` flag remain compatibility aliases for
-this same policy; there is no separate bundled `internal` policy.
+Two policies are bundled. Both report malformed or unsafe author values and
+blocked licenses (CRITICAL); they differ in which governance metadata a skill must carry.
+
+| | `default` | `registry` |
+| --- | --- | --- |
+| Use it for | Public and private repositories | Registries with a documented publication contract |
+| `metadata.author` missing | LOW (advisory) | HIGH (blocks) |
+| Author is a name without an email, such as `NVIDIA cuOpt Team` | INFO | HIGH |
+| Author is malformed or unsafe | HIGH | HIGH |
+| `metadata.id` missing | Not reported | HIGH |
+| `metadata.id` invalid, or duplicated in a collection | MEDIUM (advisory) | HIGH |
+
+The Agent Skills baseline requires only `name` and `description`, so the
+`default` policy treats author attribution and a stable ID as recommendations.
+Neither policy restricts the author email domain. A policy controls validation
+rules, not repository visibility or report hosting. The old `external` name and
+`--external` flag remain compatibility aliases for `default`; there is no
+separate bundled `internal` policy.
 
 ```bash title="Profile selection"
 skillevaluator validate ./my-skill                         # default policy
 skillevaluator validate ./my-skill --profile default       # explicit default policy
-skillevaluator validate ./my-skill --external              # compatibility alias
-skillevaluator validate ./my-skill --policy ./policy.yaml  # custom overlay
-SKILLEVALUATOR_PROFILE=default skillevaluator validate ./my-skill
+skillevaluator validate ./my-skill --profile registry      # registry publication contract
+skillevaluator validate ./my-skill --external              # compatibility alias for default
+skillevaluator validate ./my-skill --policy ./policy.yaml  # custom overlay on default
+SKILLEVALUATOR_PROFILE=registry skillevaluator validate ./my-skill
 ```
 
 Precedence, highest to lowest: `--policy` overlay, `--profile` flag, `SKILLEVALUATOR_PROFILE` environment variable, then the bundled `default` policy.
 
 <Accordion title="Write a custom policy overlay">
-  A custom policy overlays the default rules. It can narrow the accepted author domain and change severities by `CATEGORY.check_name` or `CATEGORY.*`:
+  A custom policy overlays the `--profile` rules (`default` unless you choose
+  another). It can narrow the accepted author domain, set the `metadata.id`
+  requirement, and change severities by `CATEGORY.check_name` or `CATEGORY.*`:
 
   ```yaml title="policy.yaml"
   profile: community-strict
   identity:
     author_email_regex: '<[^>]+@example\.org>'
+    metadata_id_requirement: recommend   # ignore | recommend | require
   severity_overrides:
     SCHEMA.author_missing: critical
     LICENSE.*: critical
   ```
 
+  An `author_email_regex` needs an email address in that domain, so under it a
+  name without an email fails `SCHEMA.author_format`. An overlay that omits an
+  `identity` key keeps the base profile's value. An unrecognized
+  `metadata_id_requirement` value is an error, not a silent fallback.
+
+  The author checks are `SCHEMA.author_missing`, `SCHEMA.author_without_email`,
+  and `SCHEMA.author_format`. The ID checks are `SCHEMA.metadata_id_missing`,
+  `SCHEMA.metadata_id_format`, and `SCHEMA.metadata_id_duplicate`. Their default
+  severities follow `metadata_id_requirement`: a missing ID is LOW under
+  `recommend` and HIGH under `require`; an invalid or duplicate ID is MEDIUM
+  unless the requirement is `require`.
+
   Severity overrides change how findings gate a run; they do not change the
   quality score or waive its `--min-score` requirement. Even an override of
   `QUALITY.*: info` leaves a below-minimum quality score failing.
+</Accordion>
+
+<Accordion title="Permit reviewed ownership contacts without allowing other email addresses">
+  Contacts in the single-line `metadata.pic` and `metadata.email` fields of
+  the skill's own `SKILL.md` (the one at the root of the scanned skill) use the
+  separate `PII.ownership_emails` check. Both that check and ordinary
+  `PII.emails` findings remain **HIGH and blocking by default**.
+
+  If your repository policy permits those ownership contacts, pass an explicit
+  policy file. The finding stays visible in the report as informational.
+
+  ```yaml title="ownership-policy.yaml"
+  severity_overrides:
+    PII.ownership_emails: info
+  ```
+
+  ```bash
+  skillevaluator tier1 ./skills/my-skill --no-llm --policy ./ownership-policy.yaml
+  ```
+
+  Supported values are one address or `Name <address>` in valid YAML. The same
+  address in body text, a people directory, another metadata field, or another
+  file (including a `SKILL.md` nested in a subdirectory) still uses the ordinary
+  email policy. Ambiguous YAML, aliases, and block scalars also retain that
+  policy. Credential checks remain blocking.
+
+  Keep this policy under repository-owner review; the scanner does not discover
+  or trust a policy from the skill automatically. Existing `PII.emails` overrides
+  apply to ordinary emails; use `PII.ownership_emails` explicitly for these contacts.
+  This option is available on `tier1`, `tier1 validate`, and `validate`. The
+  released reusable CI templates do not yet expose a custom-policy input.
 </Accordion>
 
 <Note>
@@ -196,10 +257,25 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     - The standard hierarchy is `skills/<skill-name>/` or `team-skills/<team>/<skill-name>/`. A nonstandard standalone location is reported as an advisory finding.
     - Recognized skill-root subdirectories are `agents/`, `references/`, `scripts/`, `assets/`, `evals/`, `tests/`, `tools/`, and `config/`; anything else gets a LOW advisory finding. Extend the set per repository with `SKILLEVALUATOR_SCHEMA_ALLOWED_DIRS` (comma-separated names are added to the defaults, never replace them).
     - `SKILL.md` should stay at or below 500 lines; larger files receive an advisory finding.
-    - The default profile expects `metadata.author` in `Name <email@host>` form but does not require a particular email domain.
+    - Harness portability: patterns the spec allows but common agent harnesses (Claude Code, Codex, OpenCode, OpenClaw, Hermes, Copilot CLI) load differently are reported; override any of them with `SCHEMA.<check_name>` in the validation policy.
+      - A duplicate frontmatter key is HIGH (`duplicate_key`; several harnesses drop the skill), and a UTF-8 BOM is MEDIUM (`manifest_bom`).
+    - `metadata.author` is optional under the `default` profile. Use `Name <email@host>` to include a contact address, or a person, team, or organization name such as `NVIDIA cuOpt Team` or `Jane Doe (@jdoe)`. A value that is malformed or unsafe is a HIGH `author_format` finding: a bare email or an email outside `Name <email@host>`, stray angle brackets, control, private-use, or bidirectional formatting characters (joiners such as ZWNJ and ZWJ, which Persian, Arabic and Devanagari names need, are accepted), no letters or digits, or more than 256 characters. A bare address counts even when its domain has no dot (`root@buildhost`), while a social handle such as `Jane Doe (@jdoe)` does not. The `registry` profile requires the `Name <email@host>` form.
+    - `metadata.id` is an optional stable skill ID. When present it must be an exact 1–64 character lowercase ASCII slug (`^[a-z0-9]+(-[a-z0-9]+)*$`, no surrounding whitespace); it may differ from `name`. A collection run reports an ID that more than one discovered skill declares; `validate` on a catalog also lists these in `catalog-summary.json` under `metadata_id_conflicts`. Under `registry` a shared ID blocks: the run exits nonzero, and each sharing skill's entry is `"passed": false` with the conflict repeated under `catalog_findings` and counted in its `severity_counts`. A catalog validates each skill on its own, so that skill's own report was written before the catalog-wide check ran and keeps its single-skill verdict, which the entry carries alongside as `report_verdict` beside `report_scope: "single_skill"`. Uniqueness is checked only across the skills validated together, never against a registry, and a single-skill run does not claim it. The ID does not change local catalog identity, which stays keyed by content type and relative path.
     - `metadata.domain` accepts one category string or a list of them, such as `domain: [backend, ai-ml]`. Values are trimmed and deduplicated in order; a blank or null scalar means no domain. A list with more than 16 entries, or a non-string, blank, or over-128-character entry, is a HIGH `Field 'metadata.domain'` finding. The 128-character limit also applies to a single string.
 
     **To fix common findings:** rename the directory to match `name`, remove forbidden fields, and move the skill under `skills/`.
+  </Accordion>
+
+  <Accordion title="harness — harness compatibility">
+    The `harness` check reports, for each agent harness, whether the skill `loads`, is `degraded` (loads, but something is cut, hidden or ignored) or is `not_loaded`, with the rule IDs behind each verdict and the harness version and date the profile was verified against. Supported harnesses: `claude-code`, `codex`, `copilot-cli`, `hermes`, `openclaw`, `opencode`. All of this is static: no agent or model is run.
+
+    `validate` runs it by default for all six and lists its findings in the HTML, JSON and SARIF reports; JSON reports also get a `harness_compatibility` block. Use `--checks harness` to run it alone and `--harness codex,claude-code` to narrow the harnesses.
+
+    The profiles ship with the package and come from repeated runs of each harness in which the request sent to the model was captured. The check doesn't change pass/fail: its findings are MEDIUM (`not_loaded`), LOW (`degraded`) or INFO (`advisory`), so it never fails a run unless a policy raises those severities. Install-location rules apply only when the skill sits under a harness root such as `.claude/skills` or `.agents/skills`. Use `--harness-profiles DIR` to try newer profile YAMLs without a release.
+
+    `validate` also shows a "Harness compatibility" panel after Tier 1, `! harness` in the checks line when a harness drops or degrades the skill, a `harness` line in the Tier 1 summary (kept out of the advisories count) and a note in the result box. `skillevaluator harness-check <skill>` runs only this check and shows the same panel, updated as each harness is checked. It accepts a folder of skills, `--harness`, `-v` and `--json PATH`, always exits 0, and points to `validate --tiers 1` when Tier 1 schema also fails. By default the panel is compact: one line per harness with its most serious finding (not loaded, then degraded, then note; ties go to the rule listed first in the profile) labelled with its outcome (`not found`, `rejected`, `listing shortened`, `delivery truncated` and so on), then `+N more` and the number of notes. `-v` (also on `validate`) lists every finding with its fix and each harness's verified version.
+
+    Frontmatter rules: duplicate keys (Codex, Copilot CLI, OpenClaw and OpenCode drop the skill), tab indentation (Codex, Copilot CLI and OpenClaw), a UTF-8 BOM (Codex), no front matter (Copilot CLI), and long custom frontmatter that never reaches the model.
   </Accordion>
 
   <Accordion title="security — vulnerability scanning">
@@ -213,7 +289,35 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     The LLM pass requires a configured provider. It enriches the static result but does not replace static findings or make missing scanner evidence pass.
 
-    SkillSpector's text pattern analyzers cannot read images, so it reports the analysis of a skill that references a PNG or JPEG file as `partial`. SkillEvaluator accepts that gap with a warning instead of `INCOMPLETE` only when the report shows no other gap and no fatal scope exclusion, and each referenced image is a regular, single-link (not hard-linked), non-executable file whose bytes have the chunk structure of a PNG or the marker structure of a JPEG and that is not reached through a symlink. The gap is accepted for at most 256 images and 128 MiB of image data in total. An image is never accepted inside a `hooks`, `scripts`, `tools`, `agents`, `commands`, `prompts`, `rules`, `team-rules` or `workflows` directory at any depth, or under a top-level `config`, `skills`, `.mcp`, `.agents`, `.claude`, `.codex`, `.continue`, `.cursor`, `.gemini` or `.windsurf` directory (names compared without regard to case). The structure check corroborates the file type; it does not decode the image or prove that it renders. PNG IDAT compressed data and ancillary chunks, and JPEG entropy-coded data and APPn or COM segments, are not inspected and can still carry other bytes. The image content itself is not assessed. Any other partial reason still leaves the scan `INCOMPLETE`. SkillSpector also reports a High `AE1` (incomplete referenced artifact analysis) finding for such an image; from v2.12.0 it omits that finding when the skill renders a PNG with Markdown image syntax, such as `![Logo](assets/logo.png)`. An `AE1` finding fails the check like any other High finding.
+    SkillSpector's text pattern analyzers cannot read images, so it reports the analysis of a skill that references a PNG or JPEG file as `partial`. SkillEvaluator accepts that gap with a warning instead of `INCOMPLETE` only when the report shows no other gap apart from the missing references described next, and no fatal scope exclusion, and each referenced image is a regular, single-link (not hard-linked), non-executable file whose bytes have the chunk structure of a PNG or the marker structure of a JPEG and that is not reached through a symlink. The gap is accepted for at most 256 images and 128 MiB of image data in total. An image is never accepted inside a `hooks`, `scripts`, `tools`, `agents`, `commands`, `prompts`, `rules`, `team-rules` or `workflows` directory at any depth, or under a top-level `config`, `skills`, `.mcp`, `.agents`, `.claude`, `.codex`, `.continue`, `.cursor`, `.gemini` or `.windsurf` directory (names compared without regard to case). The structure check corroborates the file type; it does not decode the image or prove that it renders. PNG IDAT compressed data and ancillary chunks, and JPEG entropy-coded data and APPn or COM segments, are not inspected and can still carry other bytes. The image content itself is not assessed. Any other partial reason, except the missing references described next and the hooks described below, still leaves the scan `INCOMPLETE`. SkillSpector also reports a High `AE1` (incomplete referenced artifact analysis) finding for such an image; from v2.12.0 it omits that finding when the skill renders a PNG with Markdown image syntax, such as `![Logo](assets/logo.png)`. An `AE1` finding fails the check like any other High finding.
+
+    SkillSpector also reports the analysis as `partial` when the skill's instructions name a file that it did not scan, such as a file the skill writes at run time (`output/notes.md`) or a source file elsewhere in the repository. SkillEvaluator accepts that gap with a warning instead of `INCOMPLETE` when each such reference meets all of these conditions:
+
+    - It is a nonfatal `reference_resolution` row for one line of a file that the report lists once as a component and that is a regular, single-link file of at most 1,000,000 bytes inside the skill, not reached through a symlink.
+    - The report's complete `references` list records a `missing` reference on that line and quotes part of the line. Every `missing` entry must have an accepted ledger row at the same source path and line; an `ambiguous` entry anywhere, a truncation marker, or an unknown completeness field leaves the scan `INCOMPLETE`.
+    - The line, at most 10,000 characters long, names nothing in the skill that SkillSpector did not inspect: a symlink, a file the report does not list, a directory that holds no listed file, such as `versions/`, `node_modules/` or `evals/results/`, which SkillEvaluator leaves out of the scanned copy, anything inside such a directory, or a directory that holds any of these, even beside listed files. A `.git` directory counts by its own name, by its Git hooks other than `*.sample` templates, and by every other entry in it that is not part of Git's own layout, such as a script placed there, with everything inside that entry. Git's own files, such as `HEAD`, `config`, `index`, `packed-refs` or `ORIG_HEAD`, and what its `objects`, `refs`, `logs` and `info` directories hold, such as branch names, do not count. Names are compared without regard to case or Unicode normalization, in the line as written and as a Markdown renderer or a reader of file paths may read it: with backslash escapes of ASCII punctuation (such as `node\_modules`) removed, HTML character references (such as `&#118;`) resolved and percent-escapes decoded, up to three of these steps in any order. A skill with more than 50,000 files and directories, or nested more than 64 directories deep, is not checked, and its scan stays `INCOMPLETE`. The work of checking a report's lines is also bounded: when it would take longer, such as for many long lines beside thousands of files left out of the scan, the scan stays `INCOMPLETE`.
+    - A word in the line that a shell, cmd.exe, PowerShell or Windows would expand or unquote is read as a pattern, and none of those names may match it. In the pattern, quotes and escapes are removed, a group such as `(v)` stands for what it holds, also right after `]` as in `[v](e)rsions`, each expansion, set of alternatives, extended glob or numeric range may stand for any text, and each bracket expression for any one character. The word is read the way POSIX shells read globs, brace and parameter expansions, `$(...)` and quotes (`v*/*.sh`, `vers?ons`, `v[e]rsions`, `v{e,x}rsions`, `$DIR/run.sh`, `ver""sions`); the way zsh reads groups (`(v)ersions`, `(v|x)ersions`), numeric ranges (`run<1-9>.sh`), the `EXTENDED_GLOB` operators `^`, `#` and `~` (`ver^x`, `verr#sions`, and `v*~x`, read as `v*`), where `x#` as a whole part, such as `C#`, matches only names made of `x`, and globbing flags such as `(#a2)` or `(#c1)`, which make the whole word stand for any text (`(#a2)virsions/x`); the way bash and ksh read extended globs (`@(v)ersions`, `!(x)`); the way cmd.exe reads the `^` escape (`ver^sions`), variables (`%DIR%`, `!DIR!`) and batch parameters (`%1`, `%~dp0`); the way PowerShell reads backtick escapes; with `\` as a directory separator (`v*\i*.sh`); and with a Windows short (8.3) name or a Samba mangled name, a path part with text after a `~` such as `NODE_M~1/BOOTST~1.SH`, standing for any name that holds the part's first character, such as any name with an `n` for `NODE_M~1`. So `3~5` is read as written, as `3`, and as any name with a `3`. A span between backticks is read as Markdown code, as written and with its backticks removed, not as a command, so a plural written as `` `topic`s `` is read as `topics`. Only a leading Markdown `* ` list marker is ignored; a standalone shell wildcard elsewhere, such as `bash *`, still counts. Prose with this syntax is read the same way: a price such as `$5`, a list such as `{a,b}`, `%APPDATA%` or a lone `^` stands for any text, so a line with one stays `INCOMPLETE` whenever anything is left out of the scan, and `approx~10` stays `INCOMPLETE` when a name left out holds an `a`.
+    - The check reads names that are written in the reported line, in the spellings above. It does not read other lines and does not run commands, so it does not detect a name on another line, such as `DIR=node_modules` set on one line and used as `sh $DIR/run.sh` on the next, or a name that a command prints or builds, such as `printf` output in backticks, a list piped into `xargs sh`, `find -exec`, or a PowerShell string joined with `+`. It is meant to keep an instruction that names a left-out file `INCOMPLETE`, not to catch a skill written to hide one. Without this check, such a skill passes whenever SkillSpector reports no missing reference in it; with it, the skill also passes when every line SkillSpector reports is another missing reference, such as `output/notes.md`. SkillSpector's own analyzers, not this check, assess the instructions it scanned.
+    - When the target is a single file, such as `skillevaluator security-scan path/to/SKILL.md`, SkillSpector scans that file alone, so every other file and directory beside it counts as not inspected. A line in it that names a file beside it, such as `scripts/install.sh`, keeps the scan `INCOMPLETE`.
+    - Tier 3 output in its default location, `<skill>/evals/results`, is left out of the scanned copy too, so it counts as not inspected. The rest of `evals/`, such as `evals/evals.json` and input fixtures in `evals/files`, is scanned. After a Tier 3 run, a line that names `results`, a file the run leaves there, such as `report.html` or `summary.json`, or, when the run used `--harbor-keep-jobs`, any bundled file (the kept Harbor tasks hold a copy of the skill) keeps the scan `INCOMPLETE`, although the same line passed before the run. Writing Tier 3 results outside the skill, with `--results-dir` or `SKILLEVALUATOR_RESULTS_DIR`, keeps a run from changing the result.
+    - The scan covers the whole target. When the target is a folder or a plugin that holds skills, such as `skillevaluator security-scan path/to/skills/`, `skillevaluator validate path/to/skills/` (which checks each skill as its own job) or `validate` on a plugin, each skill in it is scanned on its own, and a line may name a file elsewhere in the target that the skill's scan did not inspect, so those skills' missing references keep their scans `INCOMPLETE`.
+
+    Every nonfatal scope exclusion must name an actual uninspected entry under the target. Accepted missing-reference warnings remain visible after the static and LLM stages deduplicate their findings. Any other gap must be a referenced image that SkillEvaluator accepts as described above, and the scan then carries both warnings. Without such images, the report must also show no partially or entirely uninspected file, no limitation and no fatal scope exclusion, and every analyzer must have completed or be not applicable or disabled. In either case the report must count as many findings after filtering as before it, and a `missing` reference without an accepted ledger row, an `ambiguous` reference or a truncation marker leaves the scan `INCOMPLETE` even when a referenced image is its only listed gap. The warning names the file and line of up to three of the references; it does not quote the referenced path. Files not in the scan, including any outside the scanned path, are not inspected.
+
+    SkillSpector v2.12.0 to v2.13.3 report these references as `reference_missing`, and v2.10 and v2.11 as `reference_unresolved`, which SkillEvaluator accepts under the same conditions. A v2.13.3 report whose only gaps are such references is also accepted from the report alone as a missing-reference caveat: an INFO finding that keeps SkillSpector's `partial` status and is recorded as `skillspector_reference_caveats` in the JSON report. It replaces the warning above, and whenever the scan has a known target, as through `validate`, `tier1` or `security-scan`, it is accepted only when the conditions above hold too. A reference that matches several bundled files (`reference_unresolved` from v2.12.0, `ambiguous` in the `references` list before it) still leaves the scan `INCOMPLETE`.
+
+    From v2.13.4, SkillSpector no longer reports such a scan as `partial`. When it inspected every bundled file and the only gaps are references to files the skill does not bundle, it reports the status `complete_with_caveats` and lists each reference as a caveat. SkillEvaluator accepts these caveats under the same conditions and shows the missing-reference warning above, and the findings of an accepted report are checked as in any other complete scan. A caveat on a path that is not a bundled file, or one that fails a condition above, such as a line that names a file left out of the scan, leaves the scan `INCOMPLETE`; as for a `partial` report, the report's findings are still checked and reported. Unlike a v2.13.3 caveat, these caveats are never accepted from the report alone, so they leave a scan without a known target `INCOMPLETE`, and an accepted report carries no `skillspector_reference_caveats` entry. SkillSpector gives this status only when every gap is a nonfatal `reference_missing` row, so a report with no caveat, or with a caveat that is not a nonfatal `reference_missing` row in phase `reference_resolution`, contradicts itself: SkillEvaluator does not trust it, and the scan is `INCOMPLETE` without its findings. The same holds for `complete_with_caveats` from a release before v2.13.4.
+
+    SkillSpector v2.12.0 and later cannot model what an ordinary command or HTTP hook, such as one that runs `echo hi` or a bundled script, does with its hook input. The exception is a hook that SkillSpector recognizes as sending hook content to a remote host, which it reports as **BH2**; a manifest whose command and HTTP hooks are all of that kind counts as modeled. For other hooks it discovers in manifests such as `hooks/hooks.json` and `.claude/settings.json`, SkillSpector reports a **BH1** finding whose evidence says the payload is `unmodeled`, records a nonfatal `partial` `opaque_content` row from `bundled_execution_surface` on the manifest, and reports the analysis as `partial` although the scan finished. This rule applies only to manifests SkillSpector actually reports with that evidence and ledger row; it does not establish coverage for inline plugin-manifest hooks or other hook locations the scanner does not report. The scan's findings cannot show that such hooks are safe: a hook script that sends its input over a socket, `nc` or `/dev/tcp` gets no blocking SkillSpector finding. SkillEvaluator therefore reports the manifest as the Critical `skillspector_hook_payload_unverified`, with a gate failure that neither a `--policy` severity override nor `--llm-verify` clears, instead of `INCOMPLETE` (see [Troubleshooting](#troubleshooting)). This applies when the row is a whole-file row that names only `bundled_execution_surface` and no error class, on a manifest whose BH1 says `unmodeled` (also when a baseline suppresses that BH1), and the report accounts for it exactly: one such row per manifest, `bundled_execution_surface` degraded by exactly those rows with nothing failed or skipped, its `Analyzer bundled_execution_surface status: degraded.` limitation, and one partially inspected file for each manifest that no other row names. The rest of the report is then judged on its own: it is complete when it shows no other gap, and missing references and referenced images can still be accepted with their warnings as described above. The v2.13.3 missing-reference caveat that is accepted from the report alone does not apply, because that check reads the whole report, hook row included. Any other gap still records the SkillSpector scan as incomplete (`incomplete_scans` in the JSON report, and publication eligibility **Incomplete**), with an error that names the other rows, or the other gaps when no other row remains. The check itself is then reported as `FAIL`, not `INCOMPLETE`, because the Critical is a confirmed failure, which takes precedence over missing evidence (see [Reading the final status](/skills/skillevaluator/reports#reading-the-final-status)). A row that does not fit, such as one for a manifest in which SkillSpector parsed no hook (no `unmodeled` BH1), or a report that does not account for it, leaves the whole scan `INCOMPLETE` as before.
+
+    SkillSpector records the same row when it could not parse part of the manifest or read only its first 2,048 hook, permission and settings records. How much of that SkillEvaluator can see depends on the release:
+
+    - v2.13.4 reports `observed_records` and `limit_records` on the row. SkillEvaluator accepts the row only when `observed_records` equals the BH1 `declaration_count` and does not exceed `limit_records`. A manifest with more records than SkillSpector reads, or with a hook handler it counted but could not parse, therefore stays `INCOMPLETE`. So does a settings file with permission rules, `env` or other settings beside its hooks, because SkillSpector counts those records too. A part it does not count, such as a hook group that is not an object, is not visible and gets the Critical.
+    - v2.13.3 does not report them. SkillEvaluator then refuses only a BH1 that counts 2,048 or more declarations, because SkillSpector may have cut that manifest short. A manifest that SkillSpector parsed only in part, such as one with a malformed handler beside a valid one, gets the same Critical as a manifest it read in full, and still fails.
+
+    **Incomplete referenced artifacts.** SkillSpector reports a High **Incomplete referenced artifact analysis (AE1)** finding at each line that names a file it did not completely inspect. Releases before v2.12.0 leave the finding's name empty, so SkillEvaluator names it by its rule instead of `Unknown (AE1)`. A `severity_overrides` entry for these findings uses `SECURITY.Incomplete referenced artifact analysis (AE1)`; one keyed on `SECURITY.Unknown (AE1)` no longer matches. The finding's suggestion names the file, its disposition (`partial`, `failed`, `out_of_scope` or `uninspected`) and each reason SkillSpector gives: the reason code, such as `static_parse_limit` or `read_error`, the analyzers, the line in the file, the message and any limits, such as `limit_characters=8000`. The suggestion is part of the finding's `finding_id`, so it leaves out the run time and the time budget (`observed_seconds`, `limit_seconds`), which differ from run to run; the metadata keeps them. Reasons that differ only in the analyzer, the run time or the time budget are listed once. SkillSpector's own remedy is kept. Releases before v2.12.0 give no reasons in the finding and a generic remedy that says to make the file available: SkillEvaluator then reads the reasons from the report's `analysis_completeness` rows for that file and gives a remedy for a parse limit, a read error, or any other reason. Without such a row the finding keeps SkillSpector's text. The finding's metadata records the file, its disposition and up to 16 reasons under `skillspector_evidence`, with `reasons_truncated` when SkillSpector gave more, and up to 128 reference lines under `skillspector_occurrences`. In a folder of skills each reference line's `file` starts with the skill's `[name]` prefix, like the finding's own path, and `target_path` stays relative to that skill. Text with control characters is left out, credential-shaped text is masked, and a path outside the scanned target is dropped.
+
+    When the check fails, the terminal output, the `references` row of the terminal summary, and the Markdown and HTML reports add one line, such as `skillspector could not completely inspect 1 referenced artifact(s) across 2 reference occurrence(s); each AE1 finding names the artifact and any reasons SkillSpector gave`. The HTML and Markdown reports that the CI workflow renders again from the JSON report show the same line. The JSON report records the counts for every result, passed or failed, in `skillspector_reference_summary`: `affected_artifacts`, `reference_occurrences`, and `reference_occurrences_truncated`, which is `true` when SkillSpector listed more than 128 lines for one finding, so the count is a lower bound. For a folder of skills the counts are totals. None of this changes the finding's severity or whether the scan is complete. A gate changes only where a policy lowered `SECURITY.Unknown (AE1)` and that was what let the check pass.
 
     **Agent control paths.** SkillSpector rules describe attacks on an agent, so a match is an agent threat only in a file the agent reads or runs. When `validate` or `tier1` detects a skill, rules, workflows, or plugin artifact, the `security` check keeps findings on agent control paths and suppresses the rest:
 
@@ -304,7 +408,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     Default Tier 1 does not import or execute target-controlled Python code. The `test_discovery` result is filename evidence only: it counts regular, in-tree, non-symlink `test_*.py` and `*_test.py` candidates without parsing or importing them. It reports `execution_performed=false` and `coverage_measured=false`; test success and code coverage must be established separately in a trusted project environment or an explicit sandbox.
 
-    A missing, timed-out, crashed, or malformed Bandit, Semgrep, Gitleaks, or SkillSpector run is treated as `INCOMPLETE`: terminal and saved reports are non-green and `validate` exits non-zero. See [Scanner setup](#scanner-setup) for installation.
+    A missing, timed-out, crashed, or malformed Bandit, Semgrep, Gitleaks, or SkillSpector run is treated as `INCOMPLETE`: terminal and saved reports are non-green and `validate` exits non-zero. When Semgrep runs but cannot fully parse some files (for example a shell or JavaScript file with syntax Semgrep's parser rejects), the check stays `INCOMPLETE` because Semgrep skips the code it cannot parse, so findings there are missed. The report names up to 20 of those files, relative to the skill and with the line of the first error, keeps Semgrep's findings for the other files, and lists them in the `semgrep_unparsed_files` field of the JSON report, up to 1,000 files; `semgrep_unparsed_files_omitted` counts any beyond that. Fix the syntax error, or check whether it comes from Semgrep's parser or its rule configuration. See [Scanner setup](#scanner-setup) for installation.
   </Accordion>
 
   <Accordion title="unicode — smuggling detection">
@@ -329,11 +433,13 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     | Correctness | 35% | Frontmatter, naming, examples, paths, and skill-type-specific structure |
     | Discoverability | 25% | Description quality, trigger wording, purpose, scope, and naming |
     | Reliability | 25% | Error handling, prerequisites, limitations, troubleshooting, and implementation safeguards |
-    | Efficiency | 15% | Token budget, body length, repetition, instruction clarity, and reference use |
+    | Efficiency | 15% | Estimated token budget, body length, repetition, instruction clarity, and reference use |
 
-    The 5,000-token budget for `SKILL.md` is a recommendation, not a hard limit. A larger `SKILL.md` gets a MEDIUM `quality_efficiency` finding and a 15-point Efficiency deduction. The finding does not fail the check by itself, but the deduction can still take the score below `--min-score`.
+    The 5,000-token budget for `SKILL.md` is a recommendation, not a hard limit. Token counts are estimates (characters divided by 4), not tokenizer output: each model family counts differently, and dense files with tables, identifiers or code spans usually have fewer than 4 characters per token, so the estimate runs low. `metrics.estimated_tokens` holds the estimate and `metrics.estimate_method` names how it was made; `metrics.total_tokens` is kept as the same value for existing consumers. A larger `SKILL.md` gets a MEDIUM `quality_efficiency` finding and a 15-point Efficiency deduction. The finding does not fail the check by itself, but the deduction can still take the score below `--min-score`.
 
     Grades are A for scores of at least 90, B for at least 80, C for at least 70, D for at least 60, and F below 60. The default `--min-score` is 70. Passing requires the score to reach that minimum and no HIGH or CRITICAL quality findings under the active policy.
+
+    Each category starts at 100 and loses a fixed number of points per triggered finding. The [Metrics Reference](/skills/skillevaluator/metrics-reference#tier-1-quality-score) gives the composite formula, the deduction behind every finding, and how this 0–100 score differs from the similarly named Tier 3 dimensions.
 
     The minimum score is an independent gate. Policy severity overrides cannot
     waive it, and a collection average cannot hide an individual skill below
@@ -344,7 +450,9 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     Correctness reports XML-style tags in any frontmatter value as a HIGH finding (potential prompt injection). A string `argument-hint`, or an unquoted hint such as `[<file>]` that YAML reads as a list of strings, may use command-line placeholders such as `<file> [--strict]`, `<plan|apply|verify>`, or `<codec e.g. av1|h264>`. A placeholder has at most four words, and `|` separates choices that are each one word or a quoted literal, after an optional label such as `stage:` or `codec e.g.`. Longer free text, shell command syntax (`;`, `&`, a backtick, `$(`, `${`, or a pipeline such as `<curl x | sh>`), closing tags, attributes, self-closing tags, and role or control tags such as `<system>`, `<tool_call>`, or `<script>` are still reported there. A role word (`system`, `developer`, `assistant`, `user`, `tool`, `context`, `instructions`, `prompt`, `override`, `rules`, or `policy`) followed by `prompt`, `message`, `call`, `use`, `result`, or `instruction` counts as a role tag (`<system_prompt>`, `<toolCall>`, `<user_message>`), while other names such as `<tool_name>`, `<user_id>`, `<prompt_file>`, or `<toolchain>` are ordinary placeholders. A hint with a redirect, that is a `>` that closes no group (`<cmd > file>`, `<cmd>file>`, `<cmd 2>file>`, `<curl x> /tmp/y>`), or a group with anything after a nested placeholder other than its own closing `>` (`<<curl x>/tmp/<y>>`, `<<x><y>>`) or anything other than a plain name before it (`<curl;sh<x>>`, `<$(curl x|sh)<x>>`), is not masked at all, so it is still reported. A placeholder nested directly after a plain name, such as `<R<NNN>>`, is masked. For a list value, each item and the space-joined hint are checked separately. An arrow or comparison between groups, such as `<old> -> <new>`, `<n> >= 1`, or `<count> (>0)`, is not a redirect. Every other field keeps the strict check.
 
-    The checker detects five skill shapes and applies relevant checks: **script-based** (Python or shell files under `scripts/`), **lib-based** (a Python module containing `__init__.py`), **resource-based** (assets, templates, design-system content, or resources), **guide-only** (documentation without executable or resource content), and **hybrid** (scripts plus library or resource content).
+    The checker detects five skill shapes and applies relevant checks: **script-based** (Python, shell or Node `.mjs`, `.cjs` and `.js` files under `scripts/` or `tools/`), **lib-based** (a Python module containing `__init__.py`), **resource-based** (assets, templates, design-system content, or resources), **guide-only** (documentation without executable or resource content), and **hybrid** (scripts plus library or resource content).
+
+    A script-based or hybrid skill is expected to document its scripts in an `## Available Scripts` table and to show how to run them. The check looks for a `run_script` call. A skill whose scripts are all Node scripts is not asked for it, because that call names a runner such a skill does not use; a skill that also bundles Python or shell scripts keeps the check. Node scripts are not read by the error-handling reliability check, which looks at Python scripts only. A Node-script skill that was typed guide-only before can therefore score differently after upgrading.
 
     Quality signals use boundary-aware lexical matching for unambiguous terms and CommonMark parsing for structural link evidence. Links inside code, images, or comments do not count, and external URLs do not satisfy local-reference checks. Deterministic Tier 1 checks do not infer author intent from ambiguous prose such as MCP negation, temporal language, README guidance, or exclusivity claims. Use `rubric-eval` for semantic judgments about the documentation and Tier 3 for observed agent behavior.
 
@@ -352,7 +460,9 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
       If a quality score changes unexpectedly, inspect the finding message rather than adding keywords. The checker rewards usable instructions and evidence in their relevant context, not vocabulary alone.
     </Tip>
 
-    **Expected headings.** Reliability deducts points when `SKILL.md` lacks an expected heading. The packaged `quality-default.yaml` expects `## Prerequisites` (or `## Requirements`), `## Limitations`, and `## Troubleshooting` (or `## Common Issues` or `## FAQ`), each worth 5 points. Pass `--quality-config PATH` to `quality-check`, `tier1`, or `validate` to use your own list instead. The file replaces the packaged defaults rather than merging with them, so copy any default entries you want to keep.
+    **Quality config file.** Pass `--quality-config PATH` to `quality-check`, `tier1`, or `validate` to adjust the Reliability rules below. The file has two optional sections, `expected_headers` and `error_handling`. Anything you leave out keeps its packaged value from `quality-default.yaml`, and any list you set replaces the packaged list rather than merging with it.
+
+    **Expected headings.** Reliability deducts points when `SKILL.md` lacks an expected heading. The packaged `quality-default.yaml` expects `## Prerequisites` (or `## Requirements`), `## Limitations`, and `## Troubleshooting` (or `## Common Issues` or `## FAQ`), each worth 5 points. Omit `expected_headers` to keep that list. A list you set replaces it, so copy any default entries you want to keep. Set `expected_headers: []` to turn heading checks off.
 
     ```yaml title="quality.yaml"
     expected_headers:
@@ -379,7 +489,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     | --- | --- | --- |
     | `heading` | Yes | A single ATX Markdown heading, such as `## Security` |
     | `alternatives` | No | Other headings that satisfy the same entry |
-    | `points` | No (default `5`) | Non-negative number deducted from Reliability when no accepted heading is found |
+    | `points` | No (default `5`) | Non-negative number deducted from Reliability when no accepted heading is found. With `points: 0` the missing heading is still reported as a zero-point (advisory) finding, but the score does not change |
     | `message` | No | Finding message reported when the heading is missing. Defaults to `Missing expected heading: '## Examples'`, listing any alternatives |
     | `suggestion` | No | Fix suggestion attached to the finding. Defaults to `Add a '## Examples' section`, or `Add one of these sections: ...` when there are alternatives |
 
@@ -387,7 +497,25 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     An entry is satisfied when the heading or any alternative appears anywhere in `SKILL.md` as text, so `## Security` also matches `### Security Notes` or a heading inside a code block.
 
-    The file is checked before any validation runs. A file that is missing, unreadable, not UTF-8, invalid YAML, has an unknown key (such as `point` instead of `points`), or lists the same heading twice is a usage error: the command exits with code 2 and names the file and the problem. `validate` checks the file even when `--checks` leaves out `quality`.
+    **Error-handling checks.** Reliability also runs three error-handling rules, set in the `error_handling` section of the same file. An omitted rule, or an omitted key within a rule, keeps its packaged value. Set `points: 0` to turn a rule off; it then adds no finding. This differs from `expected_headers`, where an entry with `points: 0` still reports a zero-point finding that does not change the score.
+
+    ```yaml title="quality.yaml"
+    error_handling:
+      mentioned:
+        terms: [error, failure, rollback, retry]
+      scripts:
+        points: 0
+    ```
+
+    | Rule | Deducts when | Packaged points | List field |
+    | --- | --- | --- | --- |
+    | `mentioned` | `SKILL.md` contains none of the `terms` | `10` | `terms`: whole words, any case. `error` matches `Error` but not `errorless`. A term with spaces, such as `exit code`, also matches when its words are split by a line break or several spaces |
+    | `scripts` | A `.py` file directly in `scripts/` or `tools/` has neither a `try:`/`except` pair nor any of the `markers` | `5` | `markers`: case-sensitive text found anywhere in the file, such as `raise` or `if not ` |
+    | `lib` | A module in the skill's Python package, for skills with no `.py` or `.sh` files directly in `scripts/` or `tools/`, has neither a `try:`/`except` pair nor any of the `markers` | `5` | `markers`: as for `scripts` |
+
+    Each rule also takes `message` and `suggestion`. The `scripts` and `lib` findings append up to three file names to the message, as in `Scripts may lack error handling: run.py`. The `try:`/`except` pair always counts as error handling and is not configurable. See the packaged `quality-default.yaml` for every default term and marker. The `quality_config` digest in the report covers only the rules your file sets, not the packaged values it leaves out, so the digest changes only when your file's rules change.
+
+    The file is checked before any validation runs. A file that is missing, unreadable, not UTF-8, invalid YAML, has an unknown key (such as `point` instead of `points`), lists the same heading twice, has a negative or non-numeric `points`, an empty `terms` or `markers` list, or a repeated entry in one of those lists is a usage error: the command exits with code 2 and names the file and the problem. `validate` checks the file even when `--checks` leaves out `quality`.
 
     ```text title="Example error"
     Error: Invalid value for '--quality-config': quality.yaml: unknown key(s) in expected_headers[0]: point (allowed: alternatives, heading, message, points, suggestion)
@@ -411,6 +539,10 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     Each criterion is scored from 0 to 10. The local evaluator, not the model's boolean, treats 7 or higher as passing. The overall score is an importance-weighted mean, and the rubric passes only when that score reaches `--min-score` and every criterion passes.
 
+    If the judge's reply is not valid JSON, misses, repeats or invents a criterion, or gives a criterion a score outside 0 to 10 or a pass flag that is not a boolean, `rubric-eval` asks the judge once more and names the problem, keeping the first 500 characters of it. A second such reply fails the rubric with a HIGH `llm_invalid_response` finding, or `llm_unavailable` when it is still not JSON. A rate limit, server error or other transient provider error is retried by the LLM client as set by `SKILL_EVAL_LLM_MAX_RETRIES` (see [LLM retries and judge time budget](/skills/skillevaluator/environment-variables#llm-retries-and-judge-time-budget)). A request that still fails after those retries, a refusal or a truncated reply is not asked again.
+
+    The JSON report records `judge_attempts`, the number of times `rubric-eval` asked the judge (1, or 2 after a rejected reply), in the skill's `rubric_eval` success detail or `llm_invalid_response` / `llm_unavailable` finding and, for a single skill, also in the `rubric_eval` object. The client's own retries are not counted. When the first request fails, for example because no provider is configured, no reply came back and `judge_attempts` is left out.
+
     The JSON report names the provider and model that gave each score as `llm_provider` and `llm_model_used` in the skill's `rubric_eval` success detail and, for a single skill, also in the `rubric_eval` object. For a Claude 5.5 or later model on the native Claude API, the model is the one the reply names; otherwise it is the configured model, unless a server-side `fallback` block in the reply names another model. A Claude 5.5 or later model's refusal can be answered by the server-side fallback model, and the API can send a repeat of that request straight to it; the report then names the fallback model, not the configured model.
 
     ```bash title="Rubric evaluation"
@@ -419,7 +551,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
   </Accordion>
 
   <Accordion title="lint — script linting (advisory)">
-    `lint-scripts`, and the `lint` check inside `validate`, parse Python scripts under `scripts/` and report advisory findings. These findings do not make the Tier 1 gate fail.
+    `lint-scripts`, and the `lint` check inside `validate`, parse Python scripts under `scripts/` and report advisory findings. Node scripts count as scripts for skill-type detection and the script-based checks but are not linted; the result says how many Node scripts were not linted. These findings do not make the Tier 1 gate fail.
 
     | Check | Severity | Detects |
     | --- | --- | --- |
@@ -533,10 +665,11 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
 ## Author attribution and contact emails
 
-Keep the required `metadata.author: Name <email>` attribution in `SKILL.md`.
-The PII check accepts that recognized author line. The same address in another
-field, body text, or a reference document is a separate occurrence and can still
-fail the check.
+When `metadata.author` carries a contact, write it as `Name <email>` in
+`SKILL.md`. The PII check accepts that recognized author line. The same address
+in another field, body text, or a reference document is a separate occurrence
+and can still fail the check. A team or organization name without an email is
+also valid attribution under the `default` profile.
 
 Use a name, team handle, or contact-directory link for additional contact
 information. If a real address must remain, record a reviewed, time-limited
@@ -585,7 +718,7 @@ The command line rejects a malformed waiver file before the run starts, with exi
 
 ## Scanner setup
 
-Install `skillevaluator[security]` for the bundled Python scanners (Bandit and pip-audit). Install Semgrep and SkillSpector in separate tool environments, and install Gitleaks separately — it is a Go binary, not a pip package. See [Installation](installation.mdx) for commands and the extras table.
+Bandit installs with SkillEvaluator; install `skillevaluator[security]` for pip-audit, which the opt-in dependency audit uses. Install Semgrep and SkillSpector in separate tool environments, and install Gitleaks separately — it is a Go binary, not a pip package. See [Installation](installation.mdx) for commands and the extras table.
 
 Semgrep uses a policy packaged with the installed distribution, with metrics and version checks disabled; Tier 1 never fetches a registry policy at runtime. The other public Tier 1 configuration also ships inside the package under `skillevaluator/config/`: `pii_patterns.yaml`, `unicode_smuggle_patterns.yaml`, `license_config.yaml`, and `profiles/default.yaml`.
 
@@ -661,14 +794,75 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
 ## Troubleshooting
 
 <AccordionGroup>
+  <Accordion title="Why is SkillSpector analysis incomplete?">
+    Open the security check's execution error in the CLI, HTML, or Markdown
+    report. It now shows up to three file/line locations with their scanner
+    phase and reason, for example:
+
+    ```text
+    SKILL.md:14 [reference_resolution; reference_missing]
+    ```
+
+    This means the scanner could not resolve or inspect a reference; it is not
+    itself proof of a vulnerability. Review the named source line and whether
+    the reference should be bundled. If the scanner mistook a version or API
+    name for a file, report that detection issue to SkillSpector.
+
+    For more detail, each JSON result's `skillspector_completeness.records`
+    retains the scan stage, up to 20 ledger exceptions, analyzer names, and up
+    to eight limitations. Omission counts make truncation explicit. Folder
+    reports retain the skill name with each record. These diagnostics never
+    turn an incomplete scan into a pass.
+  </Accordion>
   <Accordion title="Gitleaks is not installed">
     Install it with `brew install gitleaks` or download a binary from the official [Gitleaks releases](https://github.com/gitleaks/gitleaks/releases).
   </Accordion>
   <Accordion title="A scanner is missing">
-    Install Bandit and pip-audit with `skillevaluator[security]`. Install Semgrep separately with `brew install semgrep` or `uv tool install semgrep`, and SkillSpector with `uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.3`. Required scanner failures remain `INCOMPLETE` until the scanner is installed and returns valid evidence. `skillevaluator doctor --tier 1` lists every scanner the selected checks need, with its resolved path and version.
+    Bandit installs with SkillEvaluator; reinstall it if Bandit is missing. Install pip-audit with `skillevaluator[security]`. Install Semgrep separately with `brew install semgrep` or `uv tool install semgrep`, and SkillSpector with `uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.4`. Required scanner failures remain `INCOMPLETE` until the scanner is installed and returns valid evidence. `skillevaluator doctor --tier 1` lists every scanner the selected checks need, with its resolved path and version.
   </Accordion>
   <Accordion title="SkillSpector reports incomplete analysis for a valid helper script">
-    SkillSpector releases before v2.13.1 can stop inspecting a valid Python or Perl helper early and record a `static_parse_limit`, `obfuscated_instruction_text`, or `runtime_limit` ledger exception. The security check is then `INCOMPLETE`, often with a High **Incomplete referenced artifact analysis (AE1)** finding at each line that names the helper. Check the installed release with `skillspector --version` and upgrade with `uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.3`. If the exception remains after the upgrade, investigate it like any other incomplete scan.
+    SkillSpector releases before v2.13.1 can stop inspecting a valid Python or Perl helper early and record a `static_parse_limit`, `obfuscated_instruction_text`, or `runtime_limit` ledger exception. The security check is then `INCOMPLETE`, often with a High **Incomplete referenced artifact analysis (AE1)** finding at each line that names the helper. The finding's suggestion names the helper and the reason, such as `static_parse_limit (static_patterns_tool_misuse)`. Check the installed release with `skillspector --version` and upgrade with `uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.4`. If the exception remains after the upgrade, investigate it like any other incomplete scan.
+  </Accordion>
+  <Accordion title="SkillSpector could not fully model the hooks">
+    With SkillSpector v2.12.0 and later, a skill, folder or hooks-only plugin
+    with an ordinary command or HTTP hook fails the security check with the
+    Critical `skillspector_hook_payload_unverified`, for example
+    `SkillSpector could not fully model the hooks in hooks/hooks.json (analyzer bundled_execution_surface could not verify what they do with hook input), so this check cannot pass while these hooks are present.`
+    The check also records the gate failure
+    `hooks/hooks.json: SkillSpector could not model these hooks; this check cannot pass while they are present`.
+    Earlier SkillEvaluator releases reported the same scan as `INCOMPLETE`
+    ("Security Scan didn't run") with
+    `hooks/hooks.json [static; opaque_content; analyzers=bundled_execution_surface]`.
+    The scan itself finished, and the other findings and the `--llm` stage are
+    reported as for any complete scan. In a folder, this Critical does not stop
+    the scan at that skill, so the other skills are still scanned without
+    `--continue-on-failure`.
+
+    SkillSpector cannot tell what these hooks do with their input, so review
+    the manifest and every file its hooks run. SkillEvaluator has no way to
+    record that review: removing the hooks is the only way to pass the check.
+    A `--policy` severity override can lower the finding's severity, but the
+    gate failure keeps the check failed. `--llm-verify` does not send the
+    finding to the verifier, so it keeps its severity and gets no verdict. The
+    finding's metadata records the manifest's SHA-256 (`manifest_sha256`) and
+    SkillSpector's row for it.
+
+    SkillSpector records the same row for a manifest it read only in part.
+    With v2.13.4, a manifest with more records than SkillSpector reads or with
+    a handler it could not parse, and a settings file with permission rules or
+    other settings beside its hooks, leave the scan `INCOMPLETE` with the row
+    instead of the Critical. With v2.13.3, only a manifest whose BH1 counts
+    2,048 or more declarations does. See the `security` check under
+    [The checks](#the-checks).
+
+    SkillSpector v2.13.4 also reads a hook's `"timeout"` key as a command
+    wrapper it cannot resolve and records
+    `hooks/hooks.json [static; static_parse_limit; analyzers=static_patterns_tool_misuse]`.
+    That row is an ordinary analysis gap, so with v2.13.4 the SkillSpector
+    scan of such a manifest is also recorded as incomplete (`incomplete_scans`
+    in the JSON report, and publication eligibility **Incomplete**), with an
+    error that names only that row. The check itself is still reported as
+    `FAIL` because of the Critical. v2.13.3 does not record the row.
   </Accordion>
   <Accordion title="SkillSpector times out">
     Each SkillSpector run (the static stage, and the LLM stage with `--llm`)

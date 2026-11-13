@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from skillevaluator.models.result import Severity, ValidationResult
 from skillevaluator.validators.script_lint import ScriptLintValidator
 
 
@@ -30,6 +31,70 @@ class TestScriptLintValidator:
         result = v.validate(skill_dir)
         assert result.passed
         assert not result.findings
+
+    def test_node_scripts_reported_as_not_linted(self, skill_with_scripts):
+        scripts = skill_with_scripts / "scripts"
+        (scripts / "a.mjs").write_text("console.log('a')\n")
+        (scripts / "b.js").write_text("console.log('b')\n")
+        result = ScriptLintValidator().validate(skill_with_scripts)
+        assert result.passed
+        assert not result.findings
+        messages = [d.message for d in result.success_details]
+        assert any("2 Node script(s) not linted" in m for m in messages), messages
+
+    def test_node_scripts_reported_alongside_python_lint_findings(self, skill_with_scripts):
+        scripts = skill_with_scripts / "scripts"
+        (scripts / "flat.py").write_text("#!/usr/bin/env python3\nimport sys\nprint(sys.argv)\n")
+        (scripts / "a.js").write_text("console.log('a')\n")
+        result = ScriptLintValidator().validate(skill_with_scripts)
+        checks = [f.check_name for f in result.findings]
+        assert "flat_script" in checks
+        (note,) = [f for f in result.findings if f.check_name == "node_scripts_not_linted"]
+        assert note.severity == Severity.INFO
+        assert "1 Node script(s) not linted" in note.message
+
+    def test_node_note_survives_folder_aggregation(self, skill_with_scripts):
+        scripts = skill_with_scripts / "scripts"
+        (scripts / "flat.py").write_text("#!/usr/bin/env python3\nimport sys\nprint(sys.argv)\n")
+        (scripts / "a.js").write_text("console.log('a')\n")
+        single = ScriptLintValidator().validate(skill_with_scripts)
+        folder = ValidationResult()
+        folder.merge_with_prefix(single, "skill-a")
+        assert any(
+            f.check_name == "node_scripts_not_linted" and f.file_path.startswith("[skill-a]") for f in folder.findings
+        )
+
+    def test_node_scripts_do_not_add_a_second_completed_check(self, skill_with_scripts):
+        scripts = skill_with_scripts / "scripts"
+        (scripts / "a.mjs").write_text("console.log('a')\n")
+        with_node = ScriptLintValidator().validate(skill_with_scripts)
+        (scripts / "a.mjs").unlink()
+        without_node = ScriptLintValidator().validate(skill_with_scripts)
+        assert with_node.summary.checks_performed == without_node.summary.checks_performed
+        assert len(with_node.success_details) == len(without_node.success_details)
+
+    def test_node_scripts_in_tools_dir_and_clean_python_are_both_reported(self, tmp_path):
+        skill_dir = tmp_path / "tools-skill"
+        tools = skill_dir / "tools"
+        tools.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("---\nname: tools-skill\ndescription: test\n---\n\n# Test\n")
+        (tools / "ok.py").write_text(
+            "#!/usr/bin/env python3\n"
+            "import argparse\n\n"
+            "def main():\n"
+            "    parser = argparse.ArgumentParser()\n"
+            "    parser.add_argument('input')\n"
+            "    args = parser.parse_args()\n"
+            "    print(args.input)\n\n"
+            "if __name__ == '__main__':\n"
+            "    main()\n"
+        )
+        (tools / "a.mjs").write_text("export {}\n")
+        (tools / "b.cjs").write_text("module.exports = {}\n")
+        result = ScriptLintValidator().validate(skill_dir)
+        messages = [d.message for d in result.success_details]
+        assert any("passed lint checks" in m for m in messages), messages
+        assert any("2 Node script(s) not linted" in m for m in messages), messages
 
     def test_flat_script_finding(self, skill_with_scripts):
         scripts = skill_with_scripts / "scripts"

@@ -34,6 +34,7 @@ import textwrap
 import threading
 import time
 import unicodedata
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
@@ -46,11 +47,13 @@ from rich.panel import Panel
 from rich.text import Text
 
 from skillevaluator.constants import CONTENT_DEDUP_LLM_REFUSED_CHECK
+from skillevaluator.logging_config import route_logs_to
 from skillevaluator.reporting.base import (
     get_skip_reason,
     source_validation_errors,
     source_validation_preview,
 )
+from skillevaluator.reporting.presentation import result_execution_status
 from skillevaluator.reporting.terminal_styles import (
     AMBER,
     BRIGHT,
@@ -64,6 +67,7 @@ from skillevaluator.reporting.terminal_styles import (
     grade_style,
     lift_style,
 )
+from skillevaluator.skillspector_references import reference_summary_message
 from skillevaluator.utils.rich_markup import strip_terminal_controls
 
 if TYPE_CHECKING:
@@ -99,6 +103,7 @@ RUNNING = "running"
 PASS = "pass"
 FAIL = "fail"
 SKIP = "skip"
+WARN = "warn"
 
 
 def _fmt_duration(seconds: float | None) -> str:
@@ -550,6 +555,8 @@ class ValidateView:
         self.verdict: Verdict | None = None
         self.links: list[tuple[str, str]] = []
         self._live: Live | None = None
+        self.harness_panel: Panel | None = None
+        self.harness_note: str | None = None
         self.progress_reporter = None
         self._progress_stage: dict[int, set[str]] = {}
         self._static_printed = 0  # blocks already flushed in non-tty mode
@@ -571,13 +578,13 @@ class ValidateView:
         if not self.enabled:
             return
         if self._live_capable():
-            self._live = Live(
-                self,
-                console=self.console,
-                refresh_per_second=8,
-                vertical_overflow="visible",
-            )
+            self.console.print(self._header())
+            self.console.print()
+            # Only unfinished tiers stay live; finished ones print once above. A live
+            # region taller than the window can't be erased, so each redraw would repeat it.
+            self._live = Live(get_renderable=self._live_region, console=self.console, refresh_per_second=8)
             self._live.start()
+            route_logs_to(self.console)
         else:
             from skillevaluator.tier3.harbor.progress import PlainProgressReporter
 
@@ -622,8 +629,8 @@ class ValidateView:
         block.duration = time.time() - block.started_at if block.started_at else None
         block.rows = rows or []
         self._complete_progress(index, "failed" if failed else "complete")
-        self._refresh()
         self._flush_static()
+        self._refresh()
 
     def tier_skip(self, index: int, reason: str) -> None:
         if not self.enabled:
@@ -634,34 +641,26 @@ class ValidateView:
         # Multi-line reasons (setup instructions) continue on unlabeled rows.
         lines = reason.split("\n") or [""]
         block.rows = [TierRow("skipped" if index == 0 else "", [(line, MUTED)]) for index, line in enumerate(lines)]
-        self._refresh()
         self._flush_static()
+        self._refresh()
+
+    def set_harness(self, panel: Panel, note: str | None) -> None:
+        """Show the advisory harness panel after the Tier 1 block and *note* in the verdict."""
+        self.harness_panel = panel
+        self.harness_note = note
+        self._refresh()
 
     def finish(self, verdict: Verdict, links: list[tuple[str, str]]) -> None:
         if not self.enabled:
             return
-        if self.progress_reporter is not None:
-            self.progress_reporter.close()
         self.verdict = verdict
-        # Keep artifacts out of Live's refresh/stop buffers. After its render
-        # hook is removed, normal printing can distinguish TTY from capture.
-        self.links = []
-        if self._live is not None:
-            live = self._live
-            try:
-                live.update(self)
-            finally:
-                try:
-                    live.stop()
-                finally:
-                    self._live = None
-        else:
-            if len(self.blocks) >= 2:
-                self.console.print(self._gate())
-                self.console.print()
-            self.console.print(self._verdict_panel(verdict))
-            self.console.print()
         self.links = links
+        self.stop()
+        if len(self.blocks) >= 2:
+            self.console.print(self._gate())
+            self.console.print()
+        self.console.print(self._verdict_panel(verdict))
+        self.console.print()
         for line in self._footer_lines():
             self.console.print(line)
 
@@ -670,6 +669,7 @@ class ValidateView:
         if self.progress_reporter is not None:
             self.progress_reporter.close()
         if self._live is not None:
+            route_logs_to(None)
             self._live.stop()
             self._live = None
 
@@ -692,10 +692,12 @@ class ValidateView:
         if len(self.blocks) >= 2:
             yield self._gate()
             yield Text()
-        for block in self.blocks:
+        for index, block in enumerate(self.blocks):
             if block.status == PENDING:
                 continue
             yield self._block_panel(block)
+            if index == 0 and self.harness_panel is not None:
+                yield self.harness_panel
         if self.verdict is not None:
             yield self._verdict_panel(self.verdict)
             yield Text()
@@ -816,10 +818,16 @@ class ValidateView:
 
     def _verdict_panel(self, verdict: Verdict) -> Panel:
         headline = strip_terminal_controls(verdict.headline)
+        note = (
+            Text.assemble(("! harness: ", f"bold {AMBER}"), (strip_terminal_controls(self.harness_note), AMBER))
+            if self.harness_note
+            else None
+        )
         if verdict.passed:
             body = Text.assemble(_pill("✓ PASS", GREEN), ("  ", ""), (headline, f"bold {TEXT}"), ("  ·  exit 0", MUTED))
+            details = [Text(strip_terminal_controls(line), style=MUTED) for line in verdict.details]
             return Panel(
-                Group(body, *(Text(strip_terminal_controls(line), style=MUTED) for line in verdict.details)),
+                Group(body, *details, *([Text(), note] if note is not None else [])),
                 box=box.ROUNDED,
                 border_style=GREEN,
                 width=self.width,
@@ -833,6 +841,8 @@ class ValidateView:
             ("  ·  exit 1", MUTED),
         )
         parts: list = [line1, *(Text(strip_terminal_controls(line), style=MUTED) for line in verdict.details)]
+        if note is not None:
+            parts.extend([Text(), note])
         if verdict.fix:
             fix = Text.assemble(("fix     ", f"bold {MUTED}"))
             for chunk, style in verdict.fix:
@@ -849,17 +859,25 @@ class ValidateView:
 
     def _refresh(self) -> None:
         if self._live is not None:
-            self._live.update(self)
+            self._live.refresh()
+
+    def _live_region(self) -> Group:
+        return Group(*(self._block_panel(b) for b in self.blocks[self._static_printed :] if b.status != PENDING))
 
     def _flush_static(self) -> None:
-        """Non-tty mode: print blocks once, as they complete."""
-        if self._live is not None or self._live_capable():
-            return
+        """Print blocks once, in order, as they complete."""
+        done = []
         for block in self.blocks[self._static_printed :]:
             if block.status in (PENDING, RUNNING):
                 break
+            done.append(block)
+        # Advance first so the live region drops these blocks as they print above it.
+        first = self._static_printed
+        self._static_printed += len(done)
+        for index, block in enumerate(done, start=first):
             self.console.print(self._block_panel(block))
-            self._static_printed += 1
+            if index == 0 and self.harness_panel is not None:
+                self.console.print(self.harness_panel)
 
 
 def check_ticker_row(lineup: list[str], done: list[str], current: str | None) -> TierRow:
@@ -909,7 +927,8 @@ def _scanners_row(results: list[ValidationResult]) -> list[TierRow]:
             states[scanner] = (version, MUTED)
         for scan in r.incomplete_scans:
             if (scanner := scan.removesuffix("-llm")) in _SCANNER_NAMES:
-                states[scanner] = ("didn't run", f"bold {RED}")
+                version = r.scanners.get(scanner) if scan != scanner else None
+                states[scanner] = (f"{version}, LLM didn't run" if version else "didn't run", f"bold {RED}")
     segments: list[tuple[str, str]] = []
     for scanner in [name for name in _SCANNER_NAMES if name in states]:
         state, style = states[scanner]
@@ -1057,6 +1076,7 @@ _VALIDATOR_CHECK_KEYS = (
     ("lint", "lint"),
     ("dependency", "dependency"),
     ("version", "version"),
+    ("harness", "harness"),
 )
 
 
@@ -1081,7 +1101,7 @@ def final_check_ticker_row(lineup: list[str], results: list[ValidationResult]) -
         if not result.passed:
             status[key] = FAIL
         elif status.get(key) != FAIL:
-            status[key] = PASS
+            status[key] = WARN if _harness_flagged(result) else PASS
     segments: list[tuple[str, str]] = []
     for i, name in enumerate(lineup):
         if i:
@@ -1089,6 +1109,8 @@ def final_check_ticker_row(lineup: list[str], results: list[ValidationResult]) -
         state = status.get(name)
         if state == FAIL:
             segments.append((f"✗ {name}", f"bold {RED}"))
+        elif state == WARN:
+            segments.append((f"! {name}", f"bold {AMBER}"))
         elif state == PASS:
             segments.append((f"✓ {name}", GREEN))
         elif name in user_skipped:
@@ -1096,6 +1118,12 @@ def final_check_ticker_row(lineup: list[str], results: list[ValidationResult]) -
         else:
             segments.append((name, FAINT))
     return TierRow("checks", segments)
+
+
+def _harness_flagged(result: ValidationResult) -> bool:
+    """True when the advisory harness check found a harness that drops or degrades a skill."""
+    block = (result.metadata or {}).get("harness_compatibility") or {}
+    return any(row.get("status") != "loads" for rows in block.values() for row in rows)
 
 
 def _short_name(validator_name: str) -> str:
@@ -1111,6 +1139,7 @@ def _short_name(validator_name: str) -> str:
         "Unicode Smuggling Detection": "unicode",
         "QUALITY": "quality",
         "SCRIPT_LINT": "lint",
+        "Harness Compatibility": "harness",
         "Context Deduplication": "context",
         "Inter-Skill Deduplication": "catalog",
     }
@@ -1137,22 +1166,24 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
     When *lineup* is given, the per-check ticker stays in the completed
     section with each check's final state (failed checks in red).
     """
+    from skillevaluator.reporting.run_status import Status, result_status
+
     # A check recorded as not applicable did not run: it is neither a pass nor
     # a failure, so it is listed on its own row and left out of the counts.
     not_applicable = [r for r in results if _is_not_applicable(r)]
     results = [r for r in results if not _is_not_applicable(r)]
 
     user_skipped = [r for r in results if _is_user_skipped(r)]
-    total = len(results) - len(user_skipped)
     failed = [r for r in results if not r.passed and not _is_skipped(r)]
-    incomplete = [r for r in failed if r.is_incomplete]
-    broken = [r for r in failed if not r.is_incomplete]
+    # A blocking finding or failed gate outranks an incomplete scan, as on every other surface.
+    incomplete = [r for r in failed if result_status(r) is Status.INCOMPLETE]
+    broken = [r for r in failed if result_status(r) is not Status.INCOMPLETE]
     # Warnings from passing validators surface as advisories below; only the
     # failing validators' warnings belong on the headline checks row.
     warnings = sum(len(r.warnings) for r in failed)
     advisory: dict[str, int] = {}
     for r in results:
-        if r.passed and not _is_skipped(r) and r.findings:
+        if r.passed and not _is_skipped(r) and r.findings and _short_name(r.validator_name) != "harness":
             advisory[_short_name(r.validator_name)] = advisory.get(_short_name(r.validator_name), 0) + len(r.findings)
 
     rows: list[TierRow] = []
@@ -1160,13 +1191,22 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
     if lineup:
         rows.append(final_check_ticker_row(lineup, results))
         rows += scanners
-    checks_segments: list[tuple[str, str]] = [(f"{total - len(failed)}/{total} passed", TEXT)]
-    if broken:
-        checks_segments += [("  ·  ", FAINT), (f"{len(broken)} failed", f"bold {RED}")]
-    if incomplete:
-        checks_segments += [("  ·  ", FAINT), (f"{len(incomplete)} didn't run", f"bold {RED}")]
-    if user_skipped:
-        checks_segments += [("  ·  ", FAINT), (f"{len(user_skipped)} skipped", MUTED)]
+
+    # Count validators with the verdict line's own classification (TierPresentation), so the two agree.
+    outcome = {id(r): result_execution_status(r) for r in results}
+    count = Counter(outcome.values())
+    executed = count["pass"] + count["fail"] + count["incomplete"]
+    checks_segments: list[tuple[str, str]] = [(f"{count['pass']}/{executed} checks passed", TEXT)]
+    if sub_checks := sum(
+        r.summary.checks_performed for r in results if outcome[id(r)] in {"pass", "fail", "incomplete"}
+    ):
+        checks_segments.append((f" ({sub_checks} sub-checks)", MUTED))
+    if count["fail"]:
+        checks_segments += [("  ·  ", FAINT), (f"{count['fail']} failed", f"bold {RED}")]
+    if count["incomplete"]:
+        checks_segments += [("  ·  ", FAINT), (f"{count['incomplete']} didn't run", f"bold {RED}")]
+    if count["skipped"]:
+        checks_segments += [("  ·  ", FAINT), (f"{count['skipped']} skipped", MUTED)]
     if warnings:
         checks_segments += [("  ·  ", FAINT), (f"{warnings} warning{'s' if warnings != 1 else ''}", MUTED)]
     rows.append(TierRow("summary" if lineup else "checks", checks_segments))
@@ -1185,6 +1225,19 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
     if advisory:
         detail = " · ".join(f"{name} {count}" for name, count in sorted(advisory.items(), key=lambda kv: -kv[1]))
         rows.append(TierRow("advisories", [(str(sum(advisory.values())), TEXT), (f"  {detail}", MUTED)]))
+    harness_rows = [
+        row
+        for r in results
+        for rows in ((r.metadata or {}).get("harness_compatibility") or {}).values()
+        for row in rows
+    ]
+    counts = [
+        f"{sum(row.get('status') == status for row in harness_rows)} {label}"
+        for status, label in (("not_loaded", "not loaded"), ("degraded", "degraded"))
+        if any(row.get("status") == status for row in harness_rows)
+    ]
+    if counts:
+        rows.append(TierRow("harness", [(" · ".join(counts), TEXT), ("  (see below)", MUTED)]))
 
     suppressed_security = 0
     for r in results:
@@ -1201,20 +1254,23 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
                 [(f"{suppressed_security} scanner {noun} suppressed outside agent control paths", MUTED)],
             )
         )
+    for r in failed:
+        if reference_summary := reference_summary_message((r.metadata or {}).get("skillspector_reference_summary")):
+            rows.append(TierRow("references", [(reference_summary, MUTED)], fit="wrap"))
 
     quality = _quality_stats(results)
     if quality:
         grade, score = quality
         quality_result = next((r for r in results if _quality_stats([r])), None)
-        from skillevaluator.reporting.run_status import result_status
-
         status = result_status(quality_result).value if quality_result else "unavailable"
         rows.append(
             TierRow("quality", [(grade, f"bold {grade_style(grade, status=status)}"), (f"  {score:.1f} / 100", TEXT)])
         )
     items = [_tier1_fix(r) for r in broken]
-    if incomplete:
-        items.append(_setup_fix(incomplete))
+    if setup := [r for r in incomplete if not _only_llm_stages_missing(r)]:
+        items.append(_setup_fix(setup))
+    if llm := [r for r in incomplete if _only_llm_stages_missing(r)]:
+        items.append(_llm_fix(llm))
     return not failed, rows + fix_section_rows(items)
 
 
@@ -1257,6 +1313,83 @@ def _setup_fix(results: list[ValidationResult]) -> FixItem:
         actions = list(hints)
         problem = f"{checks} didn't run: {', '.join(scanners) or 'a required scanner'} not installed"
     return FixItem("setup", problem, [*actions, f"or skip it: --skip {skip}"])
+
+
+def _only_llm_stages_missing(result: ValidationResult) -> bool:
+    """True when the check itself ran and only its ``--llm`` / ``--llm-verify`` stage did not.
+
+    ``skillspector-llm`` is also recorded when SkillSpector is missing or its baseline is
+    rejected, before any scan runs; only a recorded SkillSpector version shows its static
+    scan completed.
+    """
+    scans = result.incomplete_scans
+    if not scans or not all(s.endswith("-llm") or s.startswith("llm-") for s in scans):
+        return False
+    return "skillspector-llm" not in scans or "skillspector" in result.scanners
+
+
+def _llm_fix(results: list[ValidationResult]) -> FixItem:
+    """One item for checks whose LLM stage could not run: a missing key or a failed provider call."""
+    checks = ", ".join(dict.fromkeys(_short_name(r.validator_name) for r in results))
+    scans = {s for r in results for s in r.incomplete_scans}
+    flags = " / ".join(
+        f for f, on in (("--llm", "skillspector-llm" in scans), ("--llm-verify", "llm-verification" in scans)) if on
+    )
+    # SkillSpector reads its own provider settings when SKILLSPECTOR_PROVIDER names an adapter, so the
+    # public provider matters only for the other stages.
+    direct = _skillspector_adapter_fix() if "skillspector-llm" in scans else None
+    parts = [direct] if direct else []
+    if direct is None or "llm-verification" in scans:
+        reason, fixes = _public_provider_fix()
+        parts.append((f"--llm-verify: {reason}" if direct else reason, fixes))
+    reasons = "; ".join(reason for reason, _ in parts)
+    actions = [action for _, fixes in parts for action in fixes]
+    return FixItem(
+        "setup", f"{checks} LLM review didn't run: {reasons}", [*actions, f"or rerun without {flags or '--llm'}"]
+    )
+
+
+def _public_provider_fix() -> tuple[str, list[str]]:
+    """The problem and actions for the provider behind ``SKILL_EVAL_LLM_*``: a missing key or a failed call."""
+    from skillevaluator.provider_config import resolve_llm_provider
+
+    try:
+        resolve_llm_provider()
+    except ValueError as exc:
+        reason, *setup = str(exc).splitlines() or [""]
+        reason = reason.rstrip(".")
+        exports = [line.strip().removeprefix("export ") for line in setup if line.strip().startswith("export ")]
+        # Some errors name the accepted keys without an export line ("OPENAI_API_KEY or SKILL_EVAL_LLM_API_KEY ...").
+        keys = list(dict.fromkeys(re.findall(r"\b[A-Z][A-Z0-9_]*_KEY\b", reason)))
+        if exports:
+            return reason, [f"export {' '.join(exports)}"]
+        if keys:
+            return reason, [f"{'or ' if i else ''}export {key}='your-api-key'" for i, key in enumerate(keys)]
+        return reason, ["set up an LLM provider and key, then rerun"]
+    return "the LLM provider call failed", [
+        "check the key and model with: skillevaluator doctor --tier 2 --verify-models"
+    ]
+
+
+def _skillspector_adapter_fix() -> tuple[str, list[str]] | None:
+    """The problem and actions for a failed SkillSpector LLM stage when ``SKILLSPECTOR_PROVIDER`` names its adapter.
+
+    ``None`` when it does not: SkillSpector then runs on the provider bridged from ``SKILL_EVAL_LLM_*``.
+    """
+    from skillevaluator.validators.security import _SKILLSPECTOR_EXPLICIT_PROVIDER_ENV
+
+    adapter = os.environ.get("SKILLSPECTOR_PROVIDER", "").strip().lower()
+    if adapter not in _SKILLSPECTOR_EXPLICIT_PROVIDER_ENV:
+        return None
+    key = next(
+        (name for name in sorted(_SKILLSPECTOR_EXPLICIT_PROVIDER_ENV[adapter]) if name.endswith("_API_KEY")), None
+    )
+    if key is not None and not os.environ.get(key, "").strip():
+        return f"{key} is not set for SKILLSPECTOR_PROVIDER={adapter}", [f"export {key}='your-api-key'"]
+    credentials = key or "your AWS credentials"
+    return f"SkillSpector's {adapter} provider call failed", [
+        f"check {credentials} and SKILLSPECTOR_MODEL for SKILLSPECTOR_PROVIDER={adapter}"
+    ]
 
 
 def _skip_name(validator_name: str) -> str:

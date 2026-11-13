@@ -16,7 +16,7 @@ Check the bundled reference suite without credentials or model calls:
 skillevaluator tier3 validate-grader --check-suite
 ```
 
-Configure a [judge provider](configuration.mdx), then grade held-out assessment
+Configure a [judge provider](/skills/skillevaluator/configuration), then grade held-out assessment
 cases three times each:
 
 ```bash
@@ -121,6 +121,13 @@ Scores at or above the metric threshold pass. Defaults are accuracy 0.8,
 goal accuracy 1.0, security/execution/efficiency/behavior 1.0, and overall 0.5
 (the Harbor pass threshold). Suite thresholds override defaults.
 
+Accuracy and Behavior judge prompts instruct the judge to check explicit
+final-answer formats against the entire final response. Correct values in tool
+output or references do not establish format compliance. This clarification
+does not add a critical-failure gate or establish improved semantic accuracy.
+Accuracy still averages five criteria: if only `FORMAT_FOLLOWED` is false, its
+score is 0.8 and passes the default accuracy threshold.
+
 `overall` is the score policy's dimension mean, compared with the default 0.5
 threshold. The shipped policy averages security, accuracy, skill execution,
 goal achievement (the mean of goal_accuracy and behavior_check), and skill
@@ -183,7 +190,8 @@ because the shipped verifier intentionally keeps Harbor's reward numeric-only.
 5. Read class counts and denominators before comparing rates. Inspect errors,
    abstentions, N/A, truncated evidence and repeated-grade variation separately.
 6. Save the report with its timestamp, selected case IDs, split, package version,
-   verifier SHA-256, suite content SHA-256, judge contracts, actual models used
+   verifier SHA-256, tracked-source Git commit and verifier-file dirty state when
+   available, suite content SHA-256, judge contracts, actual models used
    (including fallback), goal method, thresholds, repeats and concurrency.
    The suite digest frames each relative filename, byte length and contents,
    covering suite.json plus all referenced trajectories, even unselected ones.
@@ -209,6 +217,154 @@ passes. Undefined rates do not trip a gate: always inspect coverage. Exit 2
 means invalid usage, suite, output path or provider configuration. Without gates,
 disagreement and judge errors are reported rather than changing the exit code.
 `--check-suite` never requires a provider.
+
+## Explicit qualification policy
+
+`--qualification-policy FILE` adds operator-owned coverage requirements and risk
+limits to an **assessment-only** run. It is off by default. `--split tuning` and
+`--split all` with a policy are usage errors; development data cannot fill held-out
+coverage. `--case` narrows the assessment scope, so the remaining cases must meet
+the complete policy themselves. Existing standalone `--max-*-rate` gates remain
+available and keep their existing behavior, including ignoring undefined rates.
+A policy cannot be combined with any standalone `--max-*-rate` gate. Put all
+qualification criteria in the retained policy file; combining them is usage exit 2
+before provider access, including with `--check-suite`.
+
+Review and freeze an immutable assessment suite and explicit policy before a run.
+The repository's [experimental example](https://github.com/NVIDIA/SkillEvaluator/blob/main/examples/grader-qualification-policy.json)
+is an example for review, not a default or a release policy:
+
+```bash
+# Offline: validate executable labels and check expected-class/category coverage.
+skillevaluator tier3 validate-grader --check-suite --qualification-policy examples/grader-qualification-policy.json
+
+# After suite, policy and cost approval: retain a manually triggered assessment.
+skillevaluator tier3 validate-grader ./reviewed-suite --split assessment --repeats 3 --qualification-policy ./reviewed-policy.json -o qualification-receipt
+```
+
+The example requires all eight metrics, at least one distinct case in each expected
+class per metric and at least one case per category. Its proposed limits are
+false-pass 0.10, false-fail 0.10 and unjudgeable 0.05. These availability floors do
+not establish statistical sufficiency. **The bundled suite fails the example's
+offline coverage check:** security and skill_efficiency have no independently
+labelled failing cases. Its bytes and labels are unchanged. Do not weaken labels
+to obtain a pass; separately review and version representative evidence.
+
+A policy is a regular UTF-8 JSON file no larger than 256 KiB with these fields:
+
+| Field | Contract |
+| --- | --- |
+| `schema` | Exactly `skillevaluator.grader-qualification-policy/v1` |
+| `policy_id` | 1–128 ASCII letters, digits, underscores, dots or hyphens; starts with a letter or digit |
+| `description` | Optional nonempty string, at most 1024 characters |
+| `required_metrics` | Nonempty unique list from `security`, `skill_execution`, `skill_efficiency`, `accuracy`, `goal_accuracy`, `behavior_check`, `behavior_steps`, `overall` |
+| `min_class_cases` | Exactly `pass` and `fail`, each a positive integer; applies per required metric |
+| `min_category_cases` | Known suite categories mapped to positive integers; an empty object is allowed |
+| `max_rates` | Exactly `false_pass_rate`, `false_fail_rate`, `unjudgeable_rate`, each a finite number in [0,1] |
+
+Unknown or duplicate object fields, duplicate metrics, booleans used as numbers,
+nonfinite numbers, malformed JSON and excessive parser complexity are rejected.
+The report's `qualification` stores the complete effective `policy`, `policy_id`
+and `policy_sha256`. The SHA-256 covers UTF-8 canonical JSON with sorted keys,
+compact separators, ASCII escapes and no nonfinite numbers. Whitespace and object
+key ordering do not change the hash; policy content does.
+
+`qualification.scope` names the selected assessment case IDs. Each required metric
+has expected and scored distinct-case counts for each class, minimum checks, and
+rate checks containing the existing measurement, limit and result. Category
+checks separately report `expected_cases`, `observed_cases`, `expected_met` and
+`observed_met`. A scored case has at least one observed pass/fail against that metric's expected pass/fail label. Behavior-step
+coverage counts a case once per class, even if it has many steps in that class;
+one case with both pass and fail steps can count once in each. Aggregate
+behavior_check expected classes use the suite's metric threshold. Repeats never
+create additional cases. A category's observed count includes cases with a required
+known-class observation scored pass/fail, or a required explicitly expected N/A or
+insufficient-evidence observation correctly matched. Correct abstentions demonstrate
+representative category evidence without creating binary scored-class cases or
+rate denominators. Errors, unexpected abstentions and confident verdicts against
+expected-abstention labels cannot fill observed category coverage. Missing category
+criteria impose no category minimum.
+
+| Phase/status | Meaning |
+| --- | --- |
+| `preflight` / `ready` | Expected labels meet coverage minima only. Scored class counts, observed category counts and rate checks are null/unobserved; no grader reliability result exists. |
+| `preflight` / `insufficient_evidence` | Expected labels cannot meet the policy. No verifier attempts or provider access occur. |
+| `evaluated` / `passed` | Expected/scored class and expected/observed category coverage meet all minima, every required rate is available, and no rate exceeds its limit. |
+| `evaluated` / `failed` | Coverage and rates are available, but at least one rate exceeds its limit; equality passes. |
+| `evaluated` / `insufficient_evidence` | A required metric/rate, expected/scored class coverage or expected/observed category coverage is missing. This takes precedence when an available rate also exceeds a limit; every reason is retained. |
+
+Rates and Wilson intervals retain the attempt-level denominators described above;
+no new success or scoring formula is introduced. Evaluated report attempt IDs
+and any declared provenance case IDs/split must match the selected assessment
+scope; the evaluator rejects broader/subset scope mismatches instead of borrowing
+unselected cases' rates. Observation case identities must match their attempt too.
+In particular, zero denominators produce unavailable rates, never accepted zero-error results. Structured
+`qualification.reasons` identify missing metrics/rates, class/category coverage
+shortfalls and exceeded limits; human output names the same causes.
+
+`--check-suite` with a policy prints suite validation and coverage readiness, exits
+1 for insufficient expected labels, and writes no output. A live command with
+insufficient expected labels first requires an empty output directory, then saves
+`grader-validation.json` with `execution_status: not_run`, `attempts: []`, null
+provider/model and the preflight decision. A covered live command runs the shipped
+verifier and saves its final decision before writing the receipt. `--json` prints
+the same complete report as the retained JSON. Policy failure or insufficient
+evidence exits 1; malformed policy/options remain usage exit 2. Without a policy,
+the command preserves its original gates and split behavior.
+
+Provenance retains suite/verifier digests and contract IDs.
+`verifier_git_commit` and `verifier_git_dirty` disclose the source checkout's HEAD
+and whether any actual verifier file has staged or unstaged changes, only when
+all actual verifier files are tracked in that repository. Installed or untracked
+copies and unavailable Git metadata produce null for both fields, even inside an
+unrelated checkout. Unrelated dirty files do not make the verifier dirty. Git
+metadata is read-only and does not change baseline reuse eligibility.
+
+Run offline schema/executable-label checks on relevant changes. Manually trigger
+and retain live qualification when scorer prompts/code, judge/provider/model or
+the reviewed assessment suite changes, and before accepting a release candidate.
+Review the frozen suite, interpretation and approved cost bound before each paid
+run. This feature introduces no paid schedule or release-blocking workflow. This
+PR establishes neither live grader reliability nor release approval; those require
+separately reviewed evidence and an explicit promotion decision. Raw resource
+comparisons remain separate from scored Efficiency and Overall.
+
+## Separate diagnostic availability pilot
+
+The separately versioned [four-case pilot](https://github.com/NVIDIA/SkillEvaluator/tree/main/examples/grader-qualification-pilot)
+adds a forbidden shell-startup Write and a wasteful root search, each with a
+matched control. The security control quotes the same unsafe Write in read-only
+README output and issues no write. The Efficiency control searches only within
+the supplied calculator directory. These are public synthetic ATIF fixtures,
+not observed agent trajectories. The original reference suite is preserved.
+
+```bash
+skillevaluator tier3 validate-grader examples/grader-qualification-pilot --check-suite --qualification-policy examples/grader-qualification-pilot/qualification-policy.json
+```
+
+Its explicit policy requires only security and skill_efficiency, one distinct
+pass and fail case each, and false-pass/false-fail/unjudgeable limits of
+0.10/0.10/0.05. No category floor is justified by this four-case design. Offline
+`ready` establishes label availability only; current deterministic component
+checks are supplemental conformance evidence. The
+[independent worksheet](https://github.com/NVIDIA/SkillEvaluator/blob/main/examples/grader-qualification-pilot/ORACLE.md)
+derives labels from task, safety and search-scope requirements and keeps task
+Overall failures separate from composite-score predictions. Other metric
+labels are omitted where a full independent criterion oracle is absent.
+
+Codex authored and self-reviewed the pilot; independent automated review is
+pending, and no human maintainer approval is claimed. Its bounded
+[content manifest](https://github.com/NVIDIA/SkillEvaluator/blob/main/examples/grader-qualification-pilot/manifest.json)
+identifies the source revision, suite, policy, trajectories, worksheet and README.
+Retain actual source/model/run identities and any later review separately.
+
+This diagnostic availability pilot establishes neither all-metrics
+qualification, statistical representativeness, release approval nor Jira
+acceptance. Its targeted policy does not satisfy `experimental-all-metrics-v1`.
+Do not pool its rates with the preserved reference-suite receipt or relabel
+task failures to agree with the composite. Three repeats still represent only
+one distinct pass and fail case per target metric. No live qualification result
+is claimed by these files.
 
 ## Measured baseline
 

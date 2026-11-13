@@ -5,6 +5,7 @@
 
 import json
 import os
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -15,13 +16,20 @@ from skillevaluator.constants import (
     RUBRIC_MAX_TOKENS,
     RUBRIC_REASONING_MAX_TOKENS,
 )
+from skillevaluator.inference.types import LLMClientError, LLMClientRefusedError, LLMClientTruncatedError
 from skillevaluator.reporting import HTMLReporter
+from skillevaluator.validators import rubric_eval
 from skillevaluator.validators.rubric_eval import (
+    _DEFAULT_SUPPLEMENTARY_TOTAL_BYTES,
+    _MAX_CONFIGURED_SUPPLEMENTARY_TOTAL_BYTES,
+    _SUPPLEMENTARY_TOTAL_BYTES_ENV,
+    RUBRIC_JSON_SCHEMA,
     RubricEvalValidator,
     RubricJudge,
     _collect_supplementary_content,
     _extract_json,
     _UnsafeRubricInputError,
+    supplementary_total_bytes,
 )
 
 
@@ -249,6 +257,17 @@ class TestCollectSupplementaryContent:
         result = _collect_supplementary_content(skill_dir)
         assert "main.py" in result["scripts"]
 
+    def test_collects_node_scripts_for_the_judge(self, tmp_path):
+        skill_dir = tmp_path / "my-skill"
+        skill_dir.mkdir()
+        scripts = skill_dir / "scripts"
+        scripts.mkdir()
+        for name in ("run.mjs", "run.cjs", "run.js"):
+            (scripts / name).write_text("console.log('hello')")
+        (scripts / "notes.txt").write_text("not a script")
+        result = _collect_supplementary_content(skill_dir)
+        assert set(result["scripts"]) == {"run.mjs", "run.cjs", "run.js"}
+
     def test_collects_references(self, tmp_path):
         skill_dir = tmp_path / "my-skill"
         skill_dir.mkdir()
@@ -330,14 +349,51 @@ class TestLinkedRubricGuidance:
 
         assert collected["linked_markdown"] == {"GUIDE.md": "π"}
 
-    @pytest.mark.parametrize(("per_file", "total"), [(1, 10), (10, 1)])
-    def test_required_utf8_content_is_never_truncated(self, tmp_path, per_file, total):
+    @pytest.mark.parametrize(
+        ("earlier_guides", "total", "remaining"),
+        [
+            # The budget itself splits the character: nothing has been collected yet.
+            pytest.param(0, 1, 1, id="budget-splits-the-first-document"),
+            # The running total does: an earlier document leaves too few bytes for this one.
+            pytest.param(1, 8, 0, id="earlier-document-exhausts-the-budget"),
+        ],
+    )
+    def test_required_utf8_content_is_never_truncated(self, tmp_path, earlier_guides, total, remaining):
+        # The supplement budget is the only bound on required guidance, so it must stop the
+        # collection rather than cut a multi-byte character in half -- whether the budget is too
+        # small from the start or an earlier document has already spent it.
         root = _write_skill(tmp_path)
-        (root / "SKILL.md").write_text("[Guide](GUIDE.md)")
+        links = [f"[Earlier](earlier{index}.md)" for index in range(earlier_guides)]
+        (root / "SKILL.md").write_text("\n".join([*links, "[Guide](GUIDE.md)"]))
+        for index in range(earlier_guides):
+            (root / f"earlier{index}.md").write_text("x" * 8)
         (root / "GUIDE.md").write_text("π", encoding="utf-8")
 
-        with pytest.raises(_UnsafeRubricInputError):
-            _collect_supplementary_content(root, max_bytes_per_file=per_file, max_total_bytes=total)
+        with pytest.raises(_UnsafeRubricInputError, match=f"{remaining}-byte limit: GUIDE.md"):
+            _collect_supplementary_content(root, max_bytes_per_file=10, max_total_bytes=total)
+
+    def test_required_guidance_fits_when_the_budget_covers_every_document(self, tmp_path):
+        # The companion of the case above: the same two documents are collected whole as soon as
+        # the budget holds both, so the earlier read is spending the budget, not failing on it.
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("[Earlier](earlier0.md)\n[Guide](GUIDE.md)")
+        (root / "earlier0.md").write_text("x" * 8)
+        (root / "GUIDE.md").write_text("π", encoding="utf-8")
+
+        collected = _collect_supplementary_content(root, max_bytes_per_file=10, max_total_bytes=10)
+
+        assert collected["linked_markdown"] == {"earlier0.md": "x" * 8, "GUIDE.md": "π"}
+
+    def test_required_guidance_is_not_bounded_by_the_preview_size(self, tmp_path):
+        # The per-file bound summarizes optional previews; required guidance answers to the
+        # supplement budget alone, so a guide larger than a preview is still collected whole.
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("[Guide](GUIDE.md)")
+        (root / "GUIDE.md").write_text("g" * 9000)
+
+        collected = _collect_supplementary_content(root, max_bytes_per_file=100, max_total_bytes=10000)
+
+        assert collected["linked_markdown"] == {"GUIDE.md": "g" * 9000}
 
     @pytest.mark.parametrize(
         "case",
@@ -355,7 +411,7 @@ class TestLinkedRubricGuidance:
             "fifo",
         ],
     )
-    def test_incomplete_required_guidance_stops_before_judge(self, tmp_path, case):
+    def test_incomplete_required_guidance_stops_before_judge(self, tmp_path, case, monkeypatch):
         root = _write_skill(tmp_path)
         target = root / "GUIDE.md"
         link = "GUIDE.md"
@@ -368,8 +424,11 @@ class TestLinkedRubricGuidance:
         elif case == "invalid_utf8":
             target.write_bytes(b"\xff")
         elif case == "oversized":
+            # A single document larger than the configured budget cannot be collected whole.
+            monkeypatch.setenv("SKILLEVALUATOR_RUBRIC_SUPPLEMENT_BYTES", "3000")
             target.write_text("x" * 3001)
         elif case == "total_budget":
+            monkeypatch.setenv("SKILLEVALUATOR_RUBRIC_SUPPLEMENT_BYTES", "30000")
             for index in range(11):
                 (root / f"guide{index}.md").write_text("x" * 3000)
             (root / "SKILL.md").write_text("\n".join(f"[Guide](guide{i}.md)" for i in range(11)))
@@ -521,6 +580,88 @@ class TestLinkedRubricGuidance:
         assert "Linked Markdown (paths relative to skill root):" in prompt
         assert "--- GUIDE.md ---\nRequired guidance" in prompt
         assert (root / "SKILL.md").read_bytes() == source.encode("utf-8")
+
+
+class TestSupplementaryBudget:
+    def test_default_budget_holds_a_real_linked_guide_graph(self, tmp_path):
+        # The reporter's graph in #236 is about 65 KB over 13 documents; the stock budget takes it.
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("\n".join(f"[Guide](guide{index}.md)" for index in range(13)))
+        for index in range(13):
+            (root / f"guide{index}.md").write_text("g" * 5000)
+
+        collected = _collect_supplementary_content(root)
+
+        assert len(collected["linked_markdown"]) == 13
+        assert all(len(text) == 5000 for text in collected["linked_markdown"].values())
+
+    def test_budget_default_and_overrides(self, monkeypatch):
+        monkeypatch.delenv(_SUPPLEMENTARY_TOTAL_BYTES_ENV, raising=False)
+        assert supplementary_total_bytes() == _DEFAULT_SUPPLEMENTARY_TOTAL_BYTES
+        assert supplementary_total_bytes({_SUPPLEMENTARY_TOTAL_BYTES_ENV: " 65536 "}) == 65536
+
+    @pytest.mark.parametrize("raw", ["", "   ", "0", "-1", "1.5", "lots", "0x10"])
+    def test_unusable_budget_falls_back_to_the_default(self, raw):
+        assert supplementary_total_bytes({_SUPPLEMENTARY_TOTAL_BYTES_ENV: raw}) == _DEFAULT_SUPPLEMENTARY_TOTAL_BYTES
+
+    def test_budget_is_capped(self):
+        oversized = str(_MAX_CONFIGURED_SUPPLEMENTARY_TOTAL_BYTES * 4)
+        budget = supplementary_total_bytes({_SUPPLEMENTARY_TOTAL_BYTES_ENV: oversized})
+
+        assert budget == _MAX_CONFIGURED_SUPPLEMENTARY_TOTAL_BYTES
+
+    def test_configured_budget_reaches_the_collector(self, tmp_path, monkeypatch):
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("[Guide](GUIDE.md)")
+        (root / "GUIDE.md").write_text("g" * 4096)
+        monkeypatch.setenv(_SUPPLEMENTARY_TOTAL_BYTES_ENV, "4095")
+
+        with pytest.raises(_UnsafeRubricInputError):
+            _collect_supplementary_content(root)
+
+        monkeypatch.setenv(_SUPPLEMENTARY_TOTAL_BYTES_ENV, "4096")
+        assert _collect_supplementary_content(root)["linked_markdown"] == {"GUIDE.md": "g" * 4096}
+
+    @pytest.mark.parametrize("case", ["escape", "encoded_escape", "symlink", "ancestor_symlink", "hardlink"])
+    def test_a_larger_budget_never_widens_the_declared_root(self, tmp_path, monkeypatch, case):
+        # Raising the byte budget buys more of the skill's own guidance, never another path.
+        monkeypatch.setenv(_SUPPLEMENTARY_TOTAL_BYTES_ENV, str(_MAX_CONFIGURED_SUPPLEMENTARY_TOTAL_BYTES))
+        root = _write_skill(tmp_path)
+        (tmp_path / "outside.md").write_text("outside guidance")
+        link = "GUIDE.md"
+        if case == "escape":
+            link = "../outside.md"
+        elif case == "encoded_escape":
+            link = "%2e%2e%5coutside.md"
+        elif case == "symlink":
+            (root / "GUIDE.md").symlink_to(tmp_path / "outside.md")
+        elif case == "ancestor_symlink":
+            (tmp_path / "outside").mkdir()
+            (tmp_path / "outside/guide.md").write_text("outside guidance")
+            (root / "docs").symlink_to(tmp_path / "outside", target_is_directory=True)
+            link = "docs/guide.md"
+        else:
+            os.link(tmp_path / "outside.md", root / "GUIDE.md")
+        (root / "SKILL.md").write_text(f"[Guide]({link})")
+
+        with patch.object(RubricJudge, "process") as judge:
+            result = RubricEvalValidator().validate(root)
+
+        judge.assert_not_called()
+        assert result.metadata["rubric_eval"]["execution_status"] == "failed"
+        assert result.metadata["rubric_eval"]["overall_score"] is None
+        assert any(finding.check_name == "unsafe_skill_input" for finding in result.findings)
+
+    def test_optional_previews_still_stay_small_under_a_large_budget(self, tmp_path, monkeypatch):
+        monkeypatch.setenv(_SUPPLEMENTARY_TOTAL_BYTES_ENV, str(_MAX_CONFIGURED_SUPPLEMENTARY_TOTAL_BYTES))
+        root = _write_skill(tmp_path)
+        (root / "scripts").mkdir()
+        (root / "scripts/main.py").write_text("x" * 20000)
+
+        collected = _collect_supplementary_content(root)
+
+        assert collected["scripts"]["main.py"].endswith("... [truncated]")
+        assert len(collected["scripts"]["main.py"]) < 3100
 
 
 class TestRubricEvalValidator:
@@ -1066,3 +1207,558 @@ class TestRubricEvalValidator:
         assert data["rubric_eval"]["llm_model_used"] == answered_by
         (success,) = data["results"][0]["success_details"]
         assert success["metadata"]["llm_model_used"] == answered_by
+
+
+_RETRY_MARKER = "YOUR PREVIOUS REPLY WAS REJECTED: "
+_RETRY_TAIL = "Reply again with ONLY one JSON object in the shape described above.\n"
+_FIRST_ID = RUBRIC_CRITERIA[0]["id"]
+_LAST_ID = RUBRIC_CRITERIA[-1]["id"]
+
+
+def _reply(checks: list[dict] | None = None) -> str:
+    """Serialize a judge reply whose own totals disagree with its criterion scores."""
+    return json.dumps(
+        {
+            "overall_pass": False,
+            "score": 0,
+            "summary": "judge summary",
+            "checks": _complete_checks() if checks is None else checks,
+        }
+    )
+
+
+def _invalid_checks(case: str) -> list[dict]:
+    checks = _complete_checks()
+    if case == "missing":
+        checks.pop()
+    elif case == "duplicate":
+        checks[-1]["id"] = _FIRST_ID
+    elif case == "unexpected":
+        checks.append({**checks[0], "id": "made_up_criterion"})
+    elif case == "score_above_range":
+        checks[0]["score"] = 11
+    elif case == "nonboolean_pass":
+        checks[0]["pass"] = "yes"
+    else:
+        assert case == "empty"
+        checks = []
+    return checks
+
+
+class _ScriptedCompletions:
+    """Stand in for ``RubricJudge.completions``: return or raise each scripted reply in turn."""
+
+    def __init__(self, *replies: str | Exception) -> None:
+        self._replies = list(replies)
+        self.requests: list[dict] = []
+
+    def __call__(self, system_prompt: str, user_prompt: str, **kwargs) -> str:
+        self.requests.append({"system": system_prompt, "user": user_prompt, **kwargs})
+        reply = self._replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+
+def _validate_with(tmp_path: Path, *replies: str | Exception):
+    scripted = _ScriptedCompletions(*replies)
+    with patch.object(RubricJudge, "completions", new=scripted):
+        result = RubricEvalValidator(min_score=70).validate(_write_skill(tmp_path))
+    return result, scripted.requests
+
+
+def _llm_findings(result) -> list:
+    return [finding for finding in result.findings if finding.check_name.startswith("llm_")]
+
+
+def _use_anthropic(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "claude-opus-5-5")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    for name in ("SKILL_EVAL_LLM_BASE_URL", "ANTHROPIC_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def _anthropic_message(index: int, model: str, text: str) -> dict:
+    return {
+        "id": f"msg_test_{index}",
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": [{"type": "text", "text": text}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
+
+
+class TestInvalidReplyRetry:
+    """One judge reply that cannot be scored gets one more request that names the problem."""
+
+    @pytest.mark.parametrize("padding", ["", "x" * 410 + " "])
+    def test_retry_problem_redacts_credentials_before_logging_and_truncation(
+        self, tmp_path, padding, caplog, monkeypatch
+    ):
+        secret = "sk-syntheticcredential123456789"
+        checks = _complete_checks()
+        checks.append({**checks[0], "id": padding + secret})
+
+        monkeypatch.setattr(rubric_eval.logger, "propagate", True)
+        result, requests = _validate_with(tmp_path, _reply(checks), _reply())
+
+        assert "Rubric judge reply rejected" in caplog.text
+        assert "sk-synthetic" not in caplog.text
+        assert "sk-synthetic" not in requests[1]["user"].removeprefix(requests[0]["user"])
+        assert result.passed
+
+    @pytest.mark.parametrize("padding", ["", "x" * 410 + " "])
+    def test_final_invalid_reply_diagnostics_redact_before_bounding(self, tmp_path, padding):
+        checks = _complete_checks()
+        checks.append({**checks[0], "id": padding + "sk-syntheticcredential123456789 " + "z" * 2000})
+
+        result, requests = _validate_with(tmp_path, _reply(checks), _reply(checks))
+
+        assert len(requests) == 2
+        (finding,) = _llm_findings(result)
+        summary = result.metadata["rubric_eval"]["summary"]
+        assert finding.message == summary
+        assert "sk-synthetic" not in summary
+        assert len(summary) <= 500 + len(" ... [truncated]")
+        assert summary.endswith(" ... [truncated]")
+        assert not result.passed
+
+    @pytest.mark.parametrize("control", ["\n", "\r", "\t", "\x00", "\x1b[31m", "\u2028", "\u202e"])
+    def test_rejection_diagnostics_are_printable_single_lines(self, tmp_path, control, caplog, monkeypatch):
+        checks = _complete_checks()
+        checks.append({**checks[0], "id": f"invented{control}FORGED"})
+        monkeypatch.setattr(rubric_eval.logger, "propagate", True)
+
+        result, requests = _validate_with(tmp_path, _reply(checks), _reply(checks))
+
+        problem = requests[1]["user"].removeprefix(requests[0]["user"]).removeprefix(
+            f"\n{_RETRY_MARKER}"
+        ).removesuffix(f". {_RETRY_TAIL}")
+        assert "invented" in problem and "FORGED" in problem
+        assert problem.isprintable()
+        assert "  " not in problem
+        rejected = [record for record in caplog.records if "reply rejected" in record.getMessage()]
+        assert rejected
+        assert all(record.getMessage().isprintable() for record in rejected)
+        (finding,) = _llm_findings(result)
+        assert finding.message.isprintable()
+        assert result.metadata["rubric_eval"]["summary"] == finding.message
+
+    @pytest.mark.parametrize(
+        ("first_reply", "problem"),
+        [
+            (_reply(_invalid_checks("missing")), f"missing criterion ids: {_LAST_ID}"),
+            (_reply(_invalid_checks("duplicate")), f"duplicate criterion ids: {_FIRST_ID}"),
+            (_reply(_invalid_checks("unexpected")), "unexpected criterion ids: made_up_criterion"),
+            (
+                _reply(_invalid_checks("score_above_range")),
+                f"criterion {_FIRST_ID} score must be a finite number between 0 and 10",
+            ),
+            (_reply(_invalid_checks("nonboolean_pass")), f"criterion {_FIRST_ID} pass must be a boolean"),
+            (_reply(_invalid_checks("empty")), f"expected {len(RUBRIC_CRITERIA)} criteria, received 0"),
+            ("Here is my assessment of the skill.", "Could not extract valid JSON from LLM response (35 chars)"),
+            ('{"summary": "cut", "checks": [', "Could not extract valid JSON from LLM response"),
+        ],
+        ids=["missing", "duplicate", "unexpected", "score", "pass", "empty", "prose", "unclosed-json"],
+    )
+    def test_invalid_reply_is_retried_once_with_the_problem_then_scored(self, tmp_path, first_reply, problem):
+        result, requests = _validate_with(tmp_path, first_reply, _reply())
+
+        assert len(requests) == 2
+        first, retry = requests
+        assert _RETRY_MARKER not in first["user"]
+        assert retry["user"].startswith(first["user"])
+        retry_note = retry["user"][len(first["user"]) :]
+        assert retry_note.startswith(f"\n{_RETRY_MARKER}")
+        assert problem in retry_note
+        assert retry_note.endswith(f". {_RETRY_TAIL}")
+        for request in requests:
+            assert request["system"] == RubricJudge().get_system_prompt()
+            assert request["response_schema"] == RUBRIC_JSON_SCHEMA
+            assert request["schema_name"] == "rubric_evaluation"
+
+        rubric = result.metadata["rubric_eval"]
+        assert result.passed
+        assert _llm_findings(result) == []
+        assert rubric["execution_status"] == "succeeded"
+        assert rubric["overall_score"] == 90.0
+        assert rubric["overall_pass"] is True
+        assert rubric["judge_score"] == 0
+        assert rubric["judge_attempts"] == 2
+        (success,) = result.success_details
+        assert success.metadata["judge_attempts"] == 2
+
+    def test_reply_with_an_integer_past_the_digit_limit_is_retried(self, tmp_path):
+        limit = sys.get_int_max_str_digits()
+        if not limit:
+            pytest.skip("integer string conversion is unlimited in this interpreter")
+        first_reply = f'{{"checks": [{{"id": "{_FIRST_ID}", "score": 1{"0" * limit}}}]}}'
+        with pytest.raises(ValueError) as parse_error:
+            json.loads(first_reply)
+        assert not isinstance(parse_error.value, json.JSONDecodeError)
+
+        result, requests = _validate_with(tmp_path, first_reply, _reply())
+
+        assert len(requests) == 2
+        first, retry = requests
+        assert retry["user"] == f"{first['user']}\n{_RETRY_MARKER}{parse_error.value}. {_RETRY_TAIL}"
+        rubric = result.metadata["rubric_eval"]
+        assert result.passed
+        assert _llm_findings(result) == []
+        assert rubric["overall_score"] == 90.0
+        assert rubric["judge_attempts"] == 2
+
+    @pytest.mark.parametrize(
+        ("message", "problem"),
+        [
+            (
+                "maximum recursion depth exceeded while decoding a JSON array from a unicode string",
+                "maximum recursion depth exceeded while decoding a JSON array from a unicode string",
+            ),
+            ("", "RecursionError"),
+        ],
+        ids=["message", "no-message"],
+    )
+    def test_reply_nested_too_deep_to_parse_is_retried(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch, message, problem
+    ):
+        # json.loads raises RecursionError for nesting deeper than the interpreter
+        # allows. That depth differs by Python version and platform, so a stand-in
+        # parser raises it for this one reply.
+        nested_reply = '{"checks": [[[[]]]]}'
+
+        def extract_json(content: str) -> dict:
+            if content == nested_reply:
+                raise RecursionError(message)
+            return _extract_json(content)
+
+        monkeypatch.setattr(rubric_eval, "_extract_json", extract_json)
+
+        result, requests = _validate_with(tmp_path, nested_reply, _reply())
+
+        assert len(requests) == 2
+        first, retry = requests
+        assert retry["user"] == f"{first['user']}\n{_RETRY_MARKER}{problem}. {_RETRY_TAIL}"
+        rubric = result.metadata["rubric_eval"]
+        assert result.passed
+        assert _llm_findings(result) == []
+        assert rubric["judge_attempts"] == 2
+
+    def test_valid_first_reply_is_not_retried(self, tmp_path):
+        result, requests = _validate_with(tmp_path, _reply())
+
+        assert len(requests) == 1
+        assert result.passed
+        assert result.metadata["rubric_eval"]["judge_attempts"] == 1
+
+    @pytest.mark.parametrize(
+        ("first_reply", "second_case", "problem"),
+        [
+            (_reply(_invalid_checks("missing")), "missing", f"missing criterion ids: {_LAST_ID}"),
+            ("not json", "unexpected", "unexpected criterion ids: made_up_criterion"),
+        ],
+        ids=["missing-twice", "prose-then-unexpected"],
+    )
+    def test_second_invalid_reply_fails_closed(self, tmp_path, first_reply, second_case, problem):
+        result, requests = _validate_with(tmp_path, first_reply, _reply(_invalid_checks(second_case)))
+
+        assert len(requests) == 2
+        rubric = result.metadata["rubric_eval"]
+        assert not result.passed
+        assert rubric["execution_status"] == "failed"
+        assert rubric["overall_score"] is None
+        assert rubric["checks"] == []
+        assert rubric["judge_attempts"] == 2
+        assert problem in rubric["summary"]
+        (finding,) = _llm_findings(result)
+        assert finding.check_name == "llm_invalid_response"
+        assert finding.severity.value == "high"
+        assert finding.metadata == {"judge_attempts": 2}
+        assert problem in finding.message
+
+    @pytest.mark.parametrize("padding", ["", "x" * 410 + " "], ids=["bare", "padded"])
+    def test_second_invalid_reply_redacts_credentials_in_the_finding_and_summary(self, tmp_path, padding):
+        secret = "sk-syntheticcredential123456789"
+        checks = _complete_checks()
+        checks.append({**checks[0], "id": padding + secret})
+
+        result, requests = _validate_with(tmp_path, _reply(checks), _reply(checks))
+
+        assert len(requests) == 2
+        rubric = result.metadata["rubric_eval"]
+        (finding,) = _llm_findings(result)
+        assert finding.check_name == "llm_invalid_response"
+        for reported in (finding.message, rubric["summary"]):
+            assert "sk-synthetic" not in reported
+            assert "sk-<redacted>" in reported
+        assert not result.passed
+
+    def test_second_invalid_reply_bounds_the_finding_and_summary(self, tmp_path):
+        checks = _complete_checks()
+        checks.append({**checks[0], "id": "x" * 20_000})
+
+        result, _requests = _validate_with(tmp_path, _reply(checks), _reply(checks))
+
+        rubric = result.metadata["rubric_eval"]
+        (finding,) = _llm_findings(result)
+        for reported in (finding.message, rubric["summary"]):
+            assert reported.startswith("LLM judge returned invalid rubric evidence: unexpected criterion ids: xxx")
+            assert reported.endswith("x ... [truncated]")
+            assert len(reported) == 500 + len(" ... [truncated]")
+
+    def test_judge_chosen_ids_are_collapsed_to_one_line_in_every_report_of_the_problem(self, tmp_path):
+        first = _complete_checks()
+        first.append({**first[0], "id": "x\n[ERROR] forged line\x1b[31m\x00\u202e end"})
+        second = _complete_checks()
+        second.append({**second[0], "id": "y\r\n\n[ERROR] other\x07\t\tline"})
+
+        with patch("skillevaluator.validators.rubric_eval.logger") as log:
+            result, requests = _validate_with(tmp_path, _reply(first), _reply(second))
+
+        prefix = "LLM judge returned invalid rubric evidence: unexpected criterion ids: "
+        retry_problem = f"{prefix}x [ERROR] forged line end"
+        first_request, retry = requests
+        assert retry["user"] == f"{first_request['user']}\n{_RETRY_MARKER}{retry_problem}. {_RETRY_TAIL}"
+        (rejected,) = [call for call in log.warning.call_args_list if "rejected" in call.args[0]]
+        assert rejected.args[1:] == (retry_problem,)
+
+        reported_problem = f"{prefix}y [ERROR] other line"
+        rubric = result.metadata["rubric_eval"]
+        (finding,) = _llm_findings(result)
+        assert finding.message == reported_problem
+        assert rubric["summary"] == reported_problem
+
+    def test_second_unparseable_reply_reports_unavailable(self, tmp_path):
+        result, requests = _validate_with(tmp_path, _reply(_invalid_checks("missing")), "still not json")
+
+        assert len(requests) == 2
+        rubric = result.metadata["rubric_eval"]
+        assert not result.passed
+        assert rubric["execution_status"] == "failed"
+        assert rubric["judge_attempts"] == 2
+        (finding,) = _llm_findings(result)
+        assert finding.check_name == "llm_unavailable"
+        assert finding.severity.value == "high"
+        assert finding.metadata == {"judge_attempts": 2}
+        assert "LLM configuration or response was invalid" in finding.message
+
+    @pytest.mark.parametrize(
+        ("error", "diagnostic"),
+        [
+            (LLMClientError("no provider configured"), "LLM configuration or response was invalid"),
+            (LLMClientRefusedError("declined"), "safety refusal"),
+            (LLMClientTruncatedError("cut off", _reply()), "output-token limit"),
+        ],
+        ids=["request-error", "refusal", "truncated"],
+    )
+    def test_provider_errors_are_not_retried(self, tmp_path, error, diagnostic):
+        result, requests = _validate_with(tmp_path, error, _reply())
+
+        assert len(requests) == 1
+        rubric = result.metadata["rubric_eval"]
+        assert not result.passed
+        assert rubric["execution_status"] == "failed"
+        assert "judge_attempts" not in rubric
+        (finding,) = _llm_findings(result)
+        assert finding.check_name == "llm_unavailable"
+        assert finding.metadata == {}
+        assert diagnostic in finding.message
+
+    def test_no_provider_sends_no_request_and_records_no_attempts(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
+        from skillevaluator.reporting import JSONReporter
+
+        for name in (
+            "SKILL_EVAL_LLM_PROVIDER",
+            "SKILL_EVAL_LLM_MODEL",
+            "SKILL_EVAL_LLM_API_KEY",
+            "SKILL_EVAL_LLM_BASE_URL",
+            "NVIDIA_API_KEY",
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_BASE_URL",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+        with patch.object(RubricJudge, "_get_client") as get_client:
+            result = RubricEvalValidator().validate(_write_skill(tmp_path))
+
+        get_client.assert_not_called()
+        data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+        assert data["rubric_eval"]["execution_status"] == "failed"
+        assert "judge_attempts" not in data["rubric_eval"]
+        (finding,) = [item for item in data["results"][0]["findings"] if item["check_name"].startswith("llm_")]
+        assert finding["check_name"] == "llm_unavailable"
+        assert "did not run" in finding["message"]
+        assert "judge_attempts" not in (finding.get("metadata") or {})
+
+    def test_provider_error_on_the_retry_reports_unavailable(self, tmp_path):
+        result, requests = _validate_with(
+            tmp_path, _reply(_invalid_checks("missing")), LLMClientRefusedError("declined"), _reply()
+        )
+
+        assert len(requests) == 2
+        assert result.metadata["rubric_eval"]["judge_attempts"] == 2
+        (finding,) = _llm_findings(result)
+        assert finding.check_name == "llm_unavailable"
+        assert finding.metadata == {"judge_attempts": 2}
+        assert "safety refusal" in finding.message
+
+    def test_retry_note_keeps_a_bounded_part_of_a_long_problem(self, tmp_path):
+        long_id = "x" * 20_000
+        checks = _complete_checks()
+        checks.append({**checks[0], "id": long_id})
+        with patch("skillevaluator.validators.rubric_eval.logger") as log:
+            result, requests = _validate_with(tmp_path, _reply(checks), _reply())
+
+        assert len(requests) == 2
+        first, retry = requests
+        retry_note = retry["user"][len(first["user"]) :]
+        problem = retry_note.removeprefix(f"\n{_RETRY_MARKER}").removesuffix(f". {_RETRY_TAIL}")
+        assert problem.startswith("LLM judge returned invalid rubric evidence: unexpected criterion ids: xxx")
+        assert problem.endswith("x ... [truncated]")
+        # The log line and the retry note keep the first 500 characters.
+        assert len(problem) == 500 + len(" ... [truncated]")
+        (rejected,) = [call for call in log.warning.call_args_list if "rejected" in call.args[0]]
+        assert rejected.args[1:] == (problem,)
+        assert result.metadata["rubric_eval"]["judge_attempts"] == 2
+        assert result.passed
+
+    @pytest.mark.parametrize(
+        ("replies", "expected_requests"),
+        [(("valid",), 1), (("missing", "valid"), 2)],
+        ids=["valid", "missing-then-valid"],
+    )
+    def test_custom_criteria_are_checked_against_the_given_list(self, replies, expected_requests):
+        criteria = [
+            {"id": "custom_a", "criterion": "Custom A", "importance": "high"},
+            {"id": "custom_b", "criterion": "Custom B", "importance": "low"},
+        ]
+        checks = [
+            {"id": criterion["id"], "criterion": criterion["criterion"], "pass": True, "score": 9, "notes": "ok"}
+            for criterion in criteria
+        ]
+        scripted_replies = {"valid": _reply(checks), "missing": _reply(checks[:1])}
+        scripted = _ScriptedCompletions(*(scripted_replies[reply] for reply in replies))
+
+        with patch.object(RubricJudge, "completions", new=scripted):
+            report = RubricJudge().process(skill_name="demo", skill_content="# Demo", criteria=criteria)
+
+        assert len(scripted.requests) == expected_requests
+        assert report == json.loads(scripted_replies["valid"])
+        if expected_requests == 2:
+            retry_note = scripted.requests[1]["user"][len(scripted.requests[0]["user"]) :]
+            assert "missing criterion ids: custom_b." in retry_note
+            assert not any(criterion["id"] in retry_note for criterion in RUBRIC_CRITERIA)
+
+    def test_judge_returns_the_second_reply_as_parsed(self):
+        second = {"summary": "still incomplete", "checks": _invalid_checks("missing")}
+        scripted = _ScriptedCompletions(_reply(_invalid_checks("missing")), json.dumps(second))
+        judge = RubricJudge()
+        judge.last_failure = "stale failure"
+
+        with patch.object(RubricJudge, "completions", new=scripted):
+            report = judge.process(skill_name="demo", skill_content="# Demo")
+
+        assert report == second
+        assert judge.last_attempts == 2
+        assert judge.last_failure is None
+
+    def test_each_skill_in_a_folder_records_its_own_attempts(self, tmp_path):
+        for name in ("skill-a", "skill-b", "skill-c"):
+            _write_skill(tmp_path, name)
+        scripted = _ScriptedCompletions(
+            _reply(_invalid_checks("missing")),
+            _reply(),
+            _reply(),
+            _reply(_invalid_checks("missing")),
+            _reply(_invalid_checks("missing")),
+        )
+
+        with patch.object(RubricJudge, "completions", new=scripted):
+            result = RubricEvalValidator(min_score=70).validate(tmp_path)
+
+        assert not result.passed
+        assert len(scripted.requests) == 5
+        successes = {detail.check_name: detail.metadata["judge_attempts"] for detail in result.success_details}
+        assert successes == {"[skill-a] rubric_eval": 2, "[skill-b] rubric_eval": 1}
+        (finding,) = _llm_findings(result)
+        assert finding.file_path.startswith("[skill-c] ")
+        assert finding.metadata == {"judge_attempts": 2}
+
+    def test_report_names_the_model_that_answered_the_retry(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
+        pytest.importorskip("anthropic")
+        httpx = pytest.importorskip("httpx")
+        from skillevaluator.reporting import JSONReporter
+
+        _use_anthropic(monkeypatch)
+        replies = [("claude-opus-5-5", _reply(_invalid_checks("missing"))), ("claude-opus-4-8", _reply())]
+        bodies: list[dict] = []
+
+        def handler(request):
+            bodies.append(json.loads(request.content))
+            model, text = replies[len(bodies) - 1]
+            return httpx.Response(200, json=_anthropic_message(len(bodies), model, text))
+
+        validator = RubricEvalValidator()
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+            validator._judge = RubricJudge(http_client=http_client)
+            result = validator.validate(_write_skill(tmp_path))
+
+        assert len(bodies) == 2
+        assert _RETRY_MARKER not in json.dumps(bodies[0]["messages"])
+        problem = f"LLM judge returned invalid rubric evidence: missing criterion ids: {_LAST_ID}."
+        assert f"{_RETRY_MARKER}{problem}" in bodies[1]["messages"][-1]["content"]
+        assert bodies[1]["output_config"]["format"] == bodies[0]["output_config"]["format"]
+        data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+        assert data["rubric_eval"]["execution_status"] == "succeeded"
+        assert data["rubric_eval"]["judge_attempts"] == 2
+        assert data["rubric_eval"]["llm_model_used"] == "claude-opus-4-8"
+
+    def test_client_retry_of_a_transient_error_is_not_counted(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
+        pytest.importorskip("anthropic")
+        httpx = pytest.importorskip("httpx")
+
+        _use_anthropic(monkeypatch)
+        bodies: list[dict] = []
+
+        def handler(request):
+            bodies.append(json.loads(request.content))
+            if len(bodies) == 1:
+                return httpx.Response(
+                    503, json={"type": "error", "error": {"type": "overloaded_error", "message": "busy"}}
+                )
+            return httpx.Response(200, json=_anthropic_message(len(bodies), "claude-opus-5-5", _reply()))
+
+        validator = RubricEvalValidator()
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+            validator._judge = RubricJudge(
+                http_client=http_client, max_retries=1, retry_base_delay=0, retry_max_delay=0
+            )
+            result = validator.validate(_write_skill(tmp_path))
+
+        assert len(bodies) == 2
+        assert bodies[1] == bodies[0]
+        rubric = result.metadata["rubric_eval"]
+        assert rubric["execution_status"] == "succeeded"
+        assert rubric["judge_attempts"] == 1
+
+
+class TestCollectToolsScripts:
+    def test_tools_directory_scripts_reach_the_judge_without_colliding_with_scripts(self, tmp_path):
+        skill_dir = tmp_path / "my-skill"
+        (skill_dir / "scripts").mkdir(parents=True)
+        (skill_dir / "tools").mkdir()
+        (skill_dir / "scripts" / "run.mjs").write_text("console.log('scripts')")
+        (skill_dir / "tools" / "run.mjs").write_text("console.log('tools')")
+        (skill_dir / "tools" / "helper.py").write_text("print('tools')")
+
+        result = _collect_supplementary_content(skill_dir)
+
+        assert set(result["scripts"]) == {"run.mjs", "tools/run.mjs", "tools/helper.py"}
+        assert "scripts" in result["scripts"]["run.mjs"]
+        assert "tools" in result["scripts"]["tools/run.mjs"]

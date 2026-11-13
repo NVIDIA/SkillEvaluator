@@ -80,7 +80,7 @@ for skills. Its Tier 1 LLM checks still run only when requested.
   skillevaluator validate ./my-skill --tiers 1
   ```
 
-  With `skillevaluator[security]`, Semgrep, SkillSpector, and Gitleaks installed, every required scanner produces evidence and the run is deterministic — the same input yields the same exit code, with nothing leaving your machine. Run `skillevaluator doctor --tier 1` first to confirm that each scanner resolves and reports a supported version.
+  With Semgrep, SkillSpector, and Gitleaks installed, every required scanner produces evidence and the run is deterministic — the same input yields the same exit code, with nothing leaving your machine. Run `skillevaluator doctor --tier 1` first to confirm that each scanner resolves and reports a supported version.
 
   ### Narrow to specific checks
 
@@ -702,7 +702,7 @@ The command line rejects a malformed waiver file before the run starts, with exi
 
 ## Scanner setup
 
-Install `skillevaluator[security]` for the bundled Python scanners (Bandit and pip-audit). Install Semgrep and SkillSpector in separate tool environments, and install Gitleaks separately — it is a Go binary, not a pip package. See [Installation](installation.mdx) for commands and the extras table.
+Bandit installs with SkillEvaluator; install `skillevaluator[security]` for pip-audit, which the opt-in dependency audit uses. Install Semgrep and SkillSpector in separate tool environments, and install Gitleaks separately — it is a Go binary, not a pip package. See [Installation](installation.mdx) for commands and the extras table.
 
 Semgrep uses a policy packaged with the installed distribution, with metrics and version checks disabled; Tier 1 never fetches a registry policy at runtime. The other public Tier 1 configuration also ships inside the package under `skillevaluator/config/`: `pii_patterns.yaml`, `unicode_smuggle_patterns.yaml`, `license_config.yaml`, and `profiles/default.yaml`.
 
@@ -802,7 +802,7 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
     Install it with `brew install gitleaks` or download a binary from the official [Gitleaks releases](https://github.com/gitleaks/gitleaks/releases).
   </Accordion>
   <Accordion title="A scanner is missing">
-    Install Bandit and pip-audit with `skillevaluator[security]`. Install Semgrep separately with `brew install semgrep` or `uv tool install semgrep`, and SkillSpector with `uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.3`. Required scanner failures remain `INCOMPLETE` until the scanner is installed and returns valid evidence. `skillevaluator doctor --tier 1` lists every scanner the selected checks need, with its resolved path and version.
+    Bandit installs with SkillEvaluator; reinstall it if Bandit is missing. Install pip-audit with `skillevaluator[security]`. Install Semgrep separately with `brew install semgrep` or `uv tool install semgrep`, and SkillSpector with `uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.3`. Required scanner failures remain `INCOMPLETE` until the scanner is installed and returns valid evidence. `skillevaluator doctor --tier 1` lists every scanner the selected checks need, with its resolved path and version.
   </Accordion>
   <Accordion title="SkillSpector reports incomplete analysis for a valid helper script">
     SkillSpector releases before v2.13.1 can stop inspecting a valid Python or Perl helper early and record a `static_parse_limit`, `obfuscated_instruction_text`, or `runtime_limit` ledger exception. The security check is then `INCOMPLETE`, often with a High **Incomplete referenced artifact analysis (AE1)** finding at each line that names the helper. The finding's suggestion names the helper and the reason, such as `static_parse_limit (static_patterns_tool_misuse)`. Check the installed release with `skillspector --version` and upgrade with `uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.3`. If the exception remains after the upgrade, investigate it like any other incomplete scan.

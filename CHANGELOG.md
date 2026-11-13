@@ -68,6 +68,11 @@ All notable changes to SkillEvaluator are documented in this file.
   duplicate IDs are MEDIUM advisories unless the requirement is `require`, and
   the ID does not change local catalog identity. JSON reports include the
   active requirement under `policy.metadata_id_requirement`.
+- Install Bandit with the base package, so `pip install skillevaluator` or
+  `uv tool install skillevaluator` runs every default Tier 1 check without an
+  extra. pip-audit, used only by the opt-in dependency audit
+  (`--check dependency`), stays in the `security` extra. The Bandit install hint
+  now says to reinstall SkillEvaluator.
 
 ### Documentation
 

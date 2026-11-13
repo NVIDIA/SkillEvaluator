@@ -110,9 +110,9 @@ ssn:
     description: Social Security Number
     suggestion: "Remove SSN immediately - use placeholder like XXX-XX-XXXX if needed"
 
-# IP addresses (excluding RFC1918 private ranges and localhost)
+# IP addresses (excluding RFC1918 private ranges, localhost, and link-local)
 ip_addresses:
-  - pattern: '\b(?!10\.|172\.1[6-9]\.|172\.2[0-9]\.|172\.3[01]\.|192\.168\.|127\.|0\.)\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'
+  - pattern: '\b(?!10\.|172\.1[6-9]\.|172\.2[0-9]\.|172\.3[01]\.|192\.168\.|127\.|169\.254\.|0\.)\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'
     severity: medium
     description: Non-RFC1918 IP address
     suggestion: "Use private IP (10.x.x.x, 192.168.x.x) or placeholder like 0.0.0.0"

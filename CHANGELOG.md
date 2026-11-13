@@ -372,6 +372,11 @@ All notable changes to SkillEvaluator are documented in this file.
   redrawn; the header and finished tiers print once, and log records print
   through the live view's console. The progress line now prints once, above
   the final verdict.
+- The PII scan no longer reports link-local `169.254.x.x` addresses, such as the
+  cloud instance metadata endpoint `169.254.169.254` and the ECS credentials
+  endpoint `169.254.170.2`, as non-RFC1918 IP addresses; its advice to use a
+  private IP cannot apply to them. Other addresses outside the excluded ranges,
+  including `169.25.x.x` and `169.255.x.x`, are still reported.
 
 ## 0.9.0 - 2026-11-13
 

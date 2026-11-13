@@ -731,6 +731,31 @@ All notable changes to SkillEvaluator are documented in this file.
 - Treat empty and placeholder `expected_script` values as no script expectation,
   and ignore placeholder-only expected behavior entries when grading datasets.
 
+- Tier 3 security findings no longer keep credentials from the agent's
+  commands, the user prompt, or the agent's response in their `evidence`,
+  which is saved in `skill_evaluator_reward.json`, the collected results, and
+  the reports. In 0.8.0 a sensitive-path or sensitive-file-write finding stored
+  the whole command or tool input, such as
+  `echo 'export OPENAI_API_KEY=...' >> ~/.bashrc`; destructive-command,
+  prompt-injection, and refusal findings stored their text unmasked; and
+  network findings masked only known key shapes, so a `curl -u user:password`
+  value was kept. Path findings now record the protected entry they matched,
+  such as `~/.bashrc`, and the longest one when several match, so a write to
+  `/etc/profile.d/npm.sh` records `/etc/profile.d`. The other findings mask, as
+  a best effort, private key blocks, URL user info (also a password that holds
+  an `@`), `Authorization`, API-key, and `Cookie` header values (including
+  quoted and shell-escaped cookie values), credential flags and assignments
+  (also a double-quoted value with an escaped quote, and a value on a
+  backslash-continued line), `.netrc` passwords, and common token prefixes, and
+  keep the rest of the command readable; a backslash-newline is joined, as in a
+  shell, so a continued command shows as one line. A credential in another
+  form, such as a `.pgpass` line, can still appear. Scores are unchanged.
+  Because path findings name the entry, the without-skill baseline comparison
+  now matches them by entry: a with-skill write to `~/.bashrc` is attributed to
+  the baseline prompt or environment when the baseline also wrote to
+  `~/.bashrc`, whatever each command wrote. Both the host checker and the
+  bundled Harbor verifier apply the fix.
+
 - Read JSON, JSONL and YAML evaluation datasets as UTF-8 so Unicode prompts and
   answers load correctly on hosts with a non-UTF-8 default text encoding.
 

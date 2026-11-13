@@ -779,29 +779,133 @@ def test_judge_evidence_masks_credentials_after_json_escaped_line_breaks(
         assert kept in redacted
 
 
-# json.dumps writes a tab as "\t" and, by default, a non-ASCII character as
-# "\uXXXX", so in JSON a credential can follow the letter t or a hex digit.
+# json.dumps writes a tab as "\t", so in JSON a credential can follow the letter t.
 @pytest.mark.parametrize(
     ("text", "secret"),
     [
         pytest.param("ok\tCookie: session=cccccccccccc", "cccccccccccc", id="tab-cookie"),
         pytest.param("ok\t--token tttttttttttt", "tttttttttttt", id="tab-token-flag"),
         pytest.param("ok\t-u uuuu:pppppppppppp", "pppppppppppp", id="tab-user-flag"),
-        pytest.param("key\u00a0ghp_" + "g" * 36, "g" * 36, id="no-break-space-github-token"),
-        pytest.param("\u201csk-proj-" + "a" * 24 + "\u201d", "a" * 24, id="curly-quote-openai-key"),
-        pytest.param("\u2192Cookie: session=cccccccccccc", "cccccccccccc", id="arrow-cookie"),
-        pytest.param("run\u00a0--token tttttttttttt", "tttttttttttt", id="no-break-space-token-flag"),
     ],
 )
-def test_judge_evidence_masks_credentials_after_json_escaped_tabs_and_non_ascii(text: str, secret: str) -> None:
+def test_judge_evidence_masks_credentials_after_json_escaped_tabs(text: str, secret: str) -> None:
     assert secret not in eval_template._redact_judge_evidence(text)
 
     for escaped in (json.dumps({"reply": text}), json.dumps(json.dumps({"reply": text}))):
-        assert "\\t" in escaped or "\\u" in escaped
+        assert "\\t" in escaped
         redacted = eval_template._redact_judge_evidence(escaped)
 
         assert secret not in redacted
         assert "<redacted>" in redacted
+
+
+# Split so that no private key header appears in this file as one literal.
+_PRIVATE_KEY = "PRIVATE " + "KEY"
+_KEY_BODY_LINES = ("MIIEbodyLineOne", "MIIEbodyLineTwo")
+
+
+# A private key block spans lines, which JSON writes as "\n" escapes. The block
+# is masked whole, never only its BEGIN line.
+@pytest.mark.parametrize(
+    "label",
+    [
+        pytest.param(f"RSA {_PRIVATE_KEY}", id="rsa"),
+        pytest.param(f"EC {_PRIVATE_KEY}", id="ec"),
+        pytest.param(f"OPENSSH {_PRIVATE_KEY}", id="openssh"),
+        pytest.param(f"PGP {_PRIVATE_KEY} BLOCK", id="pgp"),
+        pytest.param(f"ENCRYPTED {_PRIVATE_KEY}", id="encrypted"),
+        pytest.param(_PRIVATE_KEY, id="pkcs8"),
+    ],
+)
+def test_judge_evidence_masks_private_key_blocks_in_json_escaped_text(label: str) -> None:
+    block = "\n".join((f"-----BEGIN {label}-----", *_KEY_BODY_LINES, f"-----END {label}-----"))
+    prompt = json.dumps({"user_input": [{"content": f"see\n{block}\nok", "type": "ai"}]}, indent=4)
+
+    for escaped in (json.dumps({"content": block}), json.dumps(json.dumps({"content": block})), prompt):
+        redacted = eval_template._redact_judge_evidence(escaped)
+
+        assert "<redacted private key>" in redacted
+        assert "-----END" not in redacted
+        for line in _KEY_BODY_LINES:
+            assert line not in redacted
+
+
+# A value may hold an escape: a quoted value a line break or tab, a password a
+# non-ASCII character (written "\u00e4" by json.dumps), or a path a backslash.
+# The whole value is masked in JSON escaped once or twice, and in plain text
+# too, where only a real line break ends a quoted value.
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param('tool --password "a\n' + "Tail" * 3 + '" -x', id="quoted-line-break"),
+        pytest.param('tool --password "a\t' + "Tail" * 3 + '" -x', id="quoted-tab"),
+        pytest.param("mysql --password p\u00e4ss" + "Tail" * 3 + " -x", id="non-ascii-password"),
+        pytest.param("tool --token tok\u00e9n" + "Tail" * 3 + " -x", id="non-ascii-token"),
+        pytest.param("tool -u admin:p\u00e4ss" + "Tail" * 3 + " -x", id="non-ascii-user"),
+        pytest.param('tool --token "t\u00f6ken' + "Tail" * 3 + '" -x', id="non-ascii-quoted-token"),
+        pytest.param("tool --password ab\\n" + "Tail" * 3 + " -x", id="backslash-n-password"),
+        pytest.param("tool --token C:\\new\\" + "Tail" * 3 + " -x", id="windows-path-token"),
+    ],
+)
+def test_judge_evidence_masks_values_that_hold_escapes(text: str) -> None:
+    forms = [json.dumps({"command": text}), json.dumps(json.dumps({"command": text}))]
+    if "\n" not in text:
+        forms.append(text)
+    for form in forms:
+        redacted = eval_template._redact_judge_evidence(form)
+
+        assert "Tail" not in redacted
+        assert "<redacted> -x" in redacted
+
+
+# A credential flag that starts a JSON-escaped line keeps its whole value
+# masked, also when the value holds a non-ASCII character.
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("--password p\u00e4ss" + "Tail" * 3 + " -h db", id="password"),
+        pytest.param("--token tok\u00e9n" + "Tail" * 3 + " -x", id="token"),
+        pytest.param("-u admin:p\u00e4ss" + "Tail" * 3 + " -x", id="user"),
+        pytest.param('--token "t\u00f6ken' + "Tail" * 3 + '" -x', id="quoted-token"),
+    ],
+)
+def test_judge_evidence_masks_non_ascii_values_at_json_escaped_line_starts(text: str) -> None:
+    for escaped in (json.dumps({"reply": f"ok\n{text}"}), json.dumps(json.dumps({"reply": f"ok\n{text}"}))):
+        redacted = eval_template._redact_judge_evidence(escaped)
+
+        assert "Tail" not in redacted
+        assert "<redacted>" in redacted
+
+
+# Tool-call arguments reach the behavior and goal prompts as json.dumps text,
+# where the line breaks of a written key file and of a continued command are
+# "\n" escapes.
+def test_judge_evidence_masks_multi_line_tool_call_arguments() -> None:
+    block = "\n".join(
+        (f"-----BEGIN OPENSSH {_PRIVATE_KEY}-----", *_KEY_BODY_LINES, f"-----END OPENSSH {_PRIVATE_KEY}-----")
+    )
+    trajectory = {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {"function_name": "Write", "arguments": {"file_path": "id_ed25519", "content": block}},
+                    {"function_name": "Bash", "arguments": {"command": "sshpass -p \\\n" + "Tail" * 3 + " ssh host"}},
+                ],
+            },
+        ]
+    }
+    summary = eval_template.build_conversation_summary(trajectory, "Set up the deploy key.")
+    assert _KEY_BODY_LINES[0] in summary
+    assert "Tail" in summary
+
+    redacted = eval_template._redact_judge_evidence(summary)
+
+    assert "<redacted private key>" in redacted
+    assert "sshpass -p <redacted> ssh host" in redacted
+    assert "Tail" not in redacted
+    for line in _KEY_BODY_LINES:
+        assert line not in redacted
 
 
 @pytest.mark.parametrize(

@@ -48,10 +48,9 @@ All notable changes to SkillEvaluator are documented in this file.
   (`--token`, `--password`, `-u user:password`, `--cookie`) and keys such as
   `sk-proj-...` that start a line in JSON-escaped text, as in RAGAS prompts and
   replies. A line break there is the two characters `\n`, and these values were
-  saved in clear after it, or after an escaped tab (`\t`) or non-ASCII character
-  (`\u00a0`). A RAGAS `replied` entry for a reply with no text and no tool call,
-  such as a refusal or a content-filter stop, now saves the whole reply body
-  instead of an empty reply.
+  saved in clear after it or after an escaped tab (`\t`). A RAGAS `replied` entry
+  for a reply with no text and no tool call, such as a refusal or a
+  content-filter stop, now saves the whole reply body instead of an empty reply.
 
 ## 0.9.0 - 2026-11-13
 

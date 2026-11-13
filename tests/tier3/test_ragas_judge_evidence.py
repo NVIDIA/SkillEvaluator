@@ -441,6 +441,34 @@ def test_ragas_evidence_masks_credentials_at_json_escaped_line_starts(
         assert secret not in saved
 
 
+def test_ragas_evidence_masks_private_key_blocks_in_json_prompts_and_replies(
+    verifier: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A private key block in the agent's text spans "\\n" escapes in the RAGAS prompt and reply, and is masked whole."""
+    label = "RSA PRIVATE " + "KEY"
+    body = ("MIIEbodyLineOne", "MIIEbodyLineTwo")
+    agent_text = "\n".join(("Wrote the key:", f"-----BEGIN {label}-----", *body, f"-----END {label}-----", "done"))
+    prompt = "Judge whether the agent reached the goal.\ninput: " + json.dumps(
+        {"user_input": [{"content": agent_text, "type": "ai"}]}, indent=4
+    )
+    _install_ragas(monkeypatch, messages=[{"role": "user", "content": prompt}])
+    received = _stub_provider(monkeypatch, [_chat_reply(json.dumps({"end_state": agent_text, "verdict": 1}))])
+
+    with _judge_evidence(verifier):
+        result = verifier.judge_goal_accuracy("question", "expected", "agent answer")
+
+    assert (result["score"], result["method"]) == (1.0, "ragas")
+    assert len(received) == 1
+    exchange, outcome = _attempts(verifier)
+    assert [exchange["status"], outcome["status"]] == ["replied", "accepted"]
+    for field in ("prompt", "reply"):
+        assert "Wrote the key:\\n<redacted private key>\\ndone" in exchange[field]
+    saved = (verifier.VERIFIER_DIR / "judge_attempts.json").read_text(encoding="utf-8")
+    assert "-----END" not in saved
+    for line in body:
+        assert line not in saved
+
+
 @pytest.mark.parametrize(
     ("message", "finish_reason", "kept"),
     [

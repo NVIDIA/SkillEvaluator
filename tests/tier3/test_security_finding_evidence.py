@@ -1294,6 +1294,21 @@ def test_reviewer_credentials_never_reach_saved_judge_evidence(command: str) -> 
     assert evidence.endswith(" && rm -rf /srv/app")
 
 
+# Judge prompts render tool-call arguments with json.dumps, where the line
+# break of a continued command is a "\n" escape after an escaped backslash.
+@pytest.mark.parametrize(
+    "command", [case for case in _REVIEWER_CREDENTIAL_CASES if str(case.id).startswith("continued-")]
+)
+def test_continued_credentials_never_reach_json_escaped_judge_evidence(command: str) -> None:
+    arguments = {"command": command + " && rm -rf /srv/app"}
+    for escaped in (json.dumps(arguments), json.dumps(json.dumps(arguments))):
+        evidence = eval_template._redact_judge_evidence(escaped)
+
+        assert "CANARY_REVIEW_SECRET" not in evidence
+        assert "<redacted>" in evidence
+        assert " && rm -rf /srv/app" in evidence
+
+
 def test_judge_redaction_preserves_long_evidence_and_masks_credentials_past_finding_scan_limit() -> None:
     ordinary = "ordinary evidence " * 200
     evidence = eval_template._redact_judge_evidence(ordinary + 'export DB_PASSWORD="pa\\"CANARY_REVIEW_SECRET"')

@@ -1778,27 +1778,25 @@ def _messages(skill):
     return [finding.message for finding in QualityScoreValidator().validate(skill).findings]
 
 
-@pytest.mark.parametrize(
-    "instruction",
-    [
-        "Run `node scripts/run.mjs input.txt` and show the output.",
-        "Run: node ./scripts/run.mjs input.txt",
-    ],
-)
-def test_documented_node_invocation_satisfies_the_run_script_check(tmp_path, instruction):
-    skill = _script_skill(tmp_path, "run.mjs", instruction)
+def test_node_only_skill_is_not_asked_for_run_script(tmp_path):
+    skill = _script_skill(tmp_path, "run.mjs", "Use the bundled script to process the file.")
 
     assert not any("run_script" in message for message in _messages(skill))
 
 
-def test_node_script_without_a_node_command_still_misses_the_run_script_check(tmp_path):
+def test_node_only_skill_still_needs_its_scripts_documented_in_a_table(tmp_path):
     skill = _script_skill(tmp_path, "run.mjs", "Use the bundled script to process the file.")
+    (skill / "SKILL.md").write_text(
+        "---\nname: scripted-skill\ndescription: Runs a bundled script. Use when the user asks for it.\n---\n\n"
+        "# Scripted skill\n\n## Instructions\n\nRun `node scripts/run.mjs input.txt`.\n"
+    )
 
-    assert any("Instructions don't mention 'run_script'" in message for message in _messages(skill))
+    assert any("No documented scripts in table format" in message for message in _messages(skill))
 
 
-def test_node_command_for_another_file_does_not_satisfy_the_run_script_check(tmp_path):
-    skill = _script_skill(tmp_path, "run.mjs", "Run `node scripts/other.mjs input.txt`.")
+def test_skill_with_python_and_node_scripts_still_needs_run_script(tmp_path):
+    skill = _script_skill(tmp_path, "run.mjs", "Use the bundled scripts to process the file.")
+    (skill / "scripts" / "helper.py").write_text("print('hi')\n")
 
     assert any("Instructions don't mention 'run_script'" in message for message in _messages(skill))
 
@@ -1807,129 +1805,3 @@ def test_python_script_skill_still_needs_run_script(tmp_path):
     skill = _script_skill(tmp_path, "run.py", "Run `node scripts/run.py` and show the output.")
 
     assert any("Instructions don't mention 'run_script'" in message for message in _messages(skill))
-
-
-def test_node_command_for_a_longer_file_name_does_not_satisfy_the_run_script_check(tmp_path):
-    skill = _script_skill(tmp_path, "run.mjs", "Run `node scripts/other-run.mjs input.txt`.")
-
-    assert any("Instructions don't mention 'run_script'" in message for message in _messages(skill))
-
-
-def test_node_command_with_a_trailing_name_part_does_not_satisfy_the_run_script_check(tmp_path):
-    skill = _script_skill(tmp_path, "run.mjs", "Run `node scripts/run.mjs.bak input.txt`.")
-
-    assert any("Instructions don't mention 'run_script'" in message for message in _messages(skill))
-
-
-@pytest.mark.parametrize(
-    "instruction",
-    [
-        "Run `node --version; cat scripts/run.mjs`.",
-        "Run `node --version && cat scripts/run.mjs`.",
-        "Run `node --version | cat scripts/run.mjs`.",
-        "Run `node --version || cat scripts/run.mjs`.",
-        "Run `$(node --version) scripts/run.mjs`.",
-        "Run `node $(cat scripts/run.mjs)`.",
-    ],
-)
-def test_unrelated_node_command_does_not_satisfy_the_run_script_check(tmp_path, instruction):
-    skill = _script_skill(tmp_path, "run.mjs", instruction)
-
-    assert any("Instructions don't mention 'run_script'" in message for message in _messages(skill))
-
-
-def test_node_command_with_flags_still_satisfies_the_run_script_check(tmp_path):
-    skill = _script_skill(tmp_path, "run.mjs", "Run `node --no-warnings scripts/run.mjs input.txt`.")
-
-    assert not any("run_script" in message for message in _messages(skill))
-
-
-@pytest.mark.parametrize(
-    "instruction",
-    [
-        "Run `node --env-file=$(pwd)/.env scripts/run.mjs input.txt`.",
-        "Run `node --require $(npm root -g)/pkg/register.js scripts/run.mjs`.",
-        "Run `node --import $(printf '%s' ./setup.mjs) scripts/run.mjs`.",
-        'Run `node --env-file="$(pwd)/.env" scripts/run.mjs input.txt`.',
-        'Run `node --env-file="config;local.env" scripts/run.mjs input.txt`.',
-        "Run `node --env-file='config) local.env' scripts/run.mjs input.txt`.",
-        'Run `node --env-file=$(dirname "$(pwd)")/.env scripts/run.mjs input.txt`.',
-        'Run `node --env-file=$(printf "%s" "config) local.env") scripts/run.mjs`.',
-    ],
-)
-def test_node_options_with_substitutions_or_quotes_receive_invocation_credit(tmp_path, instruction):
-    skill = _script_skill(tmp_path, "run.mjs", instruction)
-
-    assert not any("run_script" in message for message in _messages(skill))
-
-
-@pytest.mark.parametrize(
-    "instruction",
-    [
-        "Run `node --env-file=$(pwd)/.env; cat scripts/run.mjs`.",
-        'Run `node --env-file="config;local.env" && cat scripts/run.mjs`.',
-        "Run `node --env-file=$(cat scripts/run.mjs) scripts/other.mjs`.",
-        "Run `$(node --env-file=$(pwd)/.env --version) scripts/run.mjs`.",
-    ],
-)
-def test_node_options_do_not_hide_command_boundaries_or_supply_the_script(tmp_path, instruction):
-    skill = _script_skill(tmp_path, "run.mjs", instruction)
-
-    assert any("Instructions don't mention 'run_script'" in message for message in _messages(skill))
-
-
-@pytest.mark.parametrize(
-    "instruction",
-    [
-        "Run node scripts/run.mjs # process the user's file",
-        "Run node scripts/run.mjs to process the user's file.",
-        "Run node scripts/run.mjs # $(this is only a comment",
-    ],
-)
-def test_trailing_prose_or_comments_preserve_node_invocation_credit(tmp_path, instruction):
-    skill = _script_skill(tmp_path, "run.mjs", instruction)
-
-    assert not any("run_script" in message for message in _messages(skill))
-
-
-@pytest.mark.parametrize(
-    "instruction",
-    [
-        "Run `node --version $(pwd) scripts/run.mjs`.",
-        "Run `node -v scripts/run.mjs`.",
-        "Run `node --help scripts/run.mjs`.",
-        "Run `node --eval 'console.log(1)' scripts/run.mjs`.",
-        "Run `node --check scripts/run.mjs`.",
-    ],
-)
-def test_node_modes_without_script_execution_do_not_receive_invocation_credit(tmp_path, instruction):
-    skill = _script_skill(tmp_path, "run.mjs", instruction)
-
-    assert any("Instructions don't mention 'run_script'" in message for message in _messages(skill))
-
-
-@pytest.mark.parametrize(
-    "instruction",
-    [
-        "Run `result=$(node scripts/run.mjs)`.",
-        'Run `result="$(node --env-file=$(pwd)/.env scripts/run.mjs)"`.',
-        "Run `node scripts/run.mjs --version`.",
-    ],
-)
-def test_executed_node_script_receives_invocation_credit_when_capturing_output(tmp_path, instruction):
-    skill = _script_skill(tmp_path, "run.mjs", instruction)
-
-    assert not any("run_script" in message for message in _messages(skill))
-
-
-@pytest.mark.parametrize(
-    "instruction",
-    [
-        r'Run `node --env-file=config\"local.env scripts/run.mjs`.',
-        r'Run `node --env-file="config\"local.env" scripts/run.mjs`.',
-    ],
-)
-def test_escaped_quotes_in_node_options_preserve_invocation_credit(tmp_path, instruction):
-    skill = _script_skill(tmp_path, "run.mjs", instruction)
-
-    assert not any("run_script" in message for message in _messages(skill))

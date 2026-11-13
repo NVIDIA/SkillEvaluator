@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import posixpath
 import re
-import shlex
 from collections.abc import Iterable
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -284,89 +283,16 @@ class QualityScoreValidator(ValidatorBase):
         return files
 
     @staticmethod
-    def _documents_node_invocation(content: str, script_files: list[Path]) -> bool:
-        """Whether *content* shows a ``node`` command running one of the skill's Node scripts.
+    def _runs_only_node_scripts(script_files: list[Path]) -> bool:
+        """Whether every bundled script is a Node script.
 
-        The ``run_script`` check asks for a documented invocation. A Node script is run with
-        ``node``, so ``node scripts/run.mjs input.txt`` counts as that documentation.
+        ``run_script`` is the call the script checks look for in the instructions. It names a
+        runner this skill does not use when all its scripts are Node scripts, so such a skill is
+        not asked for it. Skills that also bundle Python or shell scripts keep the check.
         """
-        names = {
-            script.name for script in script_files if any(script.match(pattern) for pattern in NODE_SCRIPT_PATTERNS)
-        }
-        if not names:
-            return False
-        for match in re.finditer(r"\bnode\b", content):
-            command = QualityScoreValidator._node_command_prefix(content[match.end() :])
-            arguments = shlex.shlex(command, posix=True)
-            arguments.whitespace_split = True
-            arguments.commenters = ""
-            options = True
-            try:
-                for argument in arguments:
-                    if argument == "--":
-                        options = False
-                        continue
-                    # These modes do not execute a positional script. After the script,
-                    # the same switches belong to that script and are harmless.
-                    if options and (
-                        argument.split("=", 1)[0] in {"--version", "--help", "--eval", "--print", "--check"}
-                        or argument in {"-v", "-h", "-c"}
-                        or (argument.startswith(("-e", "-p")) and not argument.startswith("--"))
-                    ):
-                        break
-                    if Path(argument).name in names:
-                        return True
-            except ValueError:
-                # An unfinished quoted example does not establish an invocation.
-                continue
-        return False
-
-    @staticmethod
-    def _node_command_prefix(text: str) -> str:
-        """Read to a shell boundary without mistaking quoted values or ``$(...)`` for one.
-
-        Substitution bodies are opaque: mentioning a script inside an option's
-        substitution does not document running that script with Node. No shell
-        expansion is evaluated.
-        """
-        chars: list[str] = []
-        quotes: list[str] = []  # enclosing quote state for each substitution/parenthesis
-        quote = ""
-        index = 0
-        while index < len(text):
-            char = text[index]
-            if char == "\n":
-                break
-            if char == "\\" and quote != "'" and index + 1 < len(text):
-                if not quotes:
-                    chars.append(text[index : index + 2])
-                index += 2
-                continue
-            if text.startswith("$(", index) and quote != "'":
-                if not quotes:
-                    chars.append("__substitution__")
-                quotes.append(quote)
-                quote = ""
-                index += 2
-                continue
-            if char in "'\"" and (not quote or quote == char):
-                quote = "" if quote else char
-                if not quotes:
-                    chars.append(char)
-            elif quotes:
-                if not quote and char == "(":
-                    quotes.append(quote)
-                elif not quote and char == ")":
-                    quote = quotes.pop()
-            elif not quote and (
-                char in ";&|)`" or (char == "#" and (index == 0 or text[index - 1].isspace()))
-            ):
-                break
-            else:
-                # Preserve quoted data and escapes for the argument tokenizer.
-                chars.append(char)
-            index += 1
-        return "".join(chars)
+        return bool(script_files) and all(
+            any(script.match(pattern) for pattern in NODE_SCRIPT_PATTERNS) for script in script_files
+        )
 
     @staticmethod
     def _has_executable_directory(skill_path: Path) -> bool:
@@ -712,7 +638,7 @@ class QualityScoreValidator(ValidatorBase):
                     "No documented scripts in table format",
                     "Add '## Available Scripts' with table: | Script | Purpose | Arguments |",
                 )
-            if "run_script" not in content and not self._documents_node_invocation(content, script_files):
+            if "run_script" not in content and not self._runs_only_node_scripts(script_files):
                 dim.deduct(
                     10,
                     "warning",

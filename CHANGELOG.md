@@ -844,14 +844,9 @@ All notable changes to SkillEvaluator are documented in this file.
   manifest path, keeping private host-directory names out of logs.
   An empty, zero, or false value such as `0`,
   `false`, or `[]` still gets `missing_name_or_description`. Either way, like
-  any excluded manifest, it makes the scan incomplete. All-tier CI builds its
-  Tier 2 comparison catalog from every discovered skill, so one such skill
-  stops that catalog and leaves Tier 2 incomplete, as invalid YAML already did.
-  The Tier 2 reason now says that a skill's frontmatter is the cause instead of
-  pointing at provider configuration, and the retained catalog diagnostics
-  name the skill by its path in the repository. `similarity-check` stops with
-  an error that names the manifest when a value is longer than 16,384
-  characters, the per-field catalog text limit; description mode still also caps
+  any excluded manifest, it makes the scan incomplete. It stops with an error
+  that names the manifest when a value is longer than 16,384 characters, the
+  per-field catalog text limit; description mode still also caps
   `name: description` at 16,384 characters. An invalid tagged value such as
   `!!int ""`, an impossible date such as `2024-02-30`, or a decimal integer
   longer than 4,300 digits (Python's default limit for converting text to an
@@ -867,6 +862,20 @@ All notable changes to SkillEvaluator are documented in this file.
   an empty value get the same message. Frontmatter over a limit, or a value
   longer than 16,384 characters, fails them with an error that names the
   manifest.
+
+- All-tier CI now says when a skill's frontmatter stops the Tier 2 comparison
+  catalog, and names that skill. CI builds the catalog from every skill under
+  the configured skill roots, including skills that did not change. One
+  `SKILL.md` whose frontmatter is not a valid YAML mapping with a non-empty
+  string `name` and `description` stops it before any embedding request, and
+  Tier 2 then checks no skill and is incomplete. Since the bounded frontmatter
+  parsing in the `similarity-check` structure-limits entry, this includes a
+  value that is not a string, such as `name: 2048`, `name: yes`, or
+  `description: [Draft]`, which was converted to text before. The Tier 2 reason
+  pointed at provider and embedding configuration; it now says that a skill's
+  frontmatter is the cause, and the retained catalog log under
+  `tier2/catalog/diagnostics/` names the skill by its path in the repository.
+  Quote such a value, as in `name: "2048"`.
 
 - The Tier 3 verdict is now FAIL when a scored dimension is below 0.40 and
   another dimension has no score. In 0.8.0 a dimension with no score made the

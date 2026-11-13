@@ -774,6 +774,9 @@ def test_public_docs_show_tier_two_collection_and_catalog_workflows() -> None:
     assert "sends each discovered `SKILL.md` in full" in public_docs
     assert "Only candidate clusters found by the embedding stage are" in public_docs
     assert "sent to the configured chat LLM for classification" in public_docs
+    # One unchanged skill with invalid frontmatter stops the CI comparison catalog.
+    ci_catalog = "`name: 2048`, `name: yes`, or `description: [Draft]`, stops that catalog"
+    assert ci_catalog in " ".join(guide.split())
     assert "NVI" + "DIA" + "_INFERENCE_KEY" not in public_docs  # oss-boundary-anchor: docs-retired-credential
 
 

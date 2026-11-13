@@ -6,6 +6,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Canonical `comment-skill-checks.yml` reusable workflow and source template for
+  the standard scored Tier 1 PR comment without hosted reports. It verifies the
+  existing signed receipts and native evidence, reuses the shared report and
+  comment helpers, and needs no Pages configuration or history branch. Future
+  generated bundles include the template; archived bundles and the released
+  onboarding CLI retain their existing hosted publisher setup.
 - `harness` rules for frontmatter parsing: duplicate keys and tab indentation
   (strict YAML parsers drop the skill), a UTF-8 BOM (Codex), no front matter
   (Copilot CLI) and long custom frontmatter that never reaches the model. Tier 1

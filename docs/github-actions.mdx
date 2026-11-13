@@ -63,8 +63,9 @@ reusable workflow and actions.
 
 <Note>
   The released template provides **checks and downloadable reports**.
-  Hosted reports and PR comments need the [optional publisher setup](#enable-pr-comments).
-  The same release also includes the optional publisher template.
+  The same release includes the [optional hosted publisher](#enable-hosted-reports).
+  [Comments without hosting](#enable-pr-comments) are available in the source
+  workflow for a future release bundle.
 </Note>
 
 <Accordion title="I prefer to inspect the source templates">
@@ -80,7 +81,7 @@ reusable workflow and actions.
 | --- | --- |
 | **PR → Checks** | The `skills / Tier 1 scan` result and its short summary. |
 | **Actions → Skill checks** | The run and downloadable report artifact. |
-| **PR → Conversation**, with publishing enabled | The updated bot comment and **Open full report** link. |
+| **PR → Conversation**, with feedback enabled | The updated scored bot comment and workflow run; hosted publication also adds **Open full report**. |
 
 Download `skill-evaluator-tier1-attempt-N`, extract it, and open `index.html`.
 Failed scans retain their available reports too. The HTML separates the
@@ -134,10 +135,10 @@ required security or schema check.
 
 ### On the pull request
 
-With publishing enabled, one bot comment is updated for new results. Reviewers
+With PR feedback enabled, one bot comment is updated for new results. Reviewers
 see the issue and next step without reading the full Actions log.
 
-<Frame caption="Shortened illustrative PR comment. Real comments link to your report and workflow run.">
+<Frame caption="Shortened illustrative PR comment. Both feedback workflows use this scored format; the hosted publisher also links to the deployed report.">
 <div style={{ padding: "16px", width: "100%", minWidth: 0 }}>
 
 **github-actions[bot]**
@@ -163,6 +164,41 @@ Browse the [public report and log examples](https://github.com/NVIDIA/SkillEvalu
 for more detail. No personal demo-repository access is needed.
 
 ## Enable PR comments
+
+Use the canonical [comment-skill-checks.yml workflow](https://github.com/NVIDIA/SkillEvaluator/blob/main/.github/workflows/comment-skill-checks.yml)
+for the same Tier 1 comment without hosted reports. It shows counts, status,
+quality score and grade, and the first action for each affected skill. Full
+reports remain downloadable from the scan run. Pages settings, a history branch
+and a report URL are not required.
+
+<Note>
+  This is a source capability for a future release bundle. The archived 0.9.0
+  bundle and released `skillevaluator ci init` still configure the hosted
+  publisher. Use a reviewed immutable revision containing the new comment
+  workflow and helpers; an older release pin does not include it.
+</Note>
+
+1. Keep the **Skill checks** scan as one reusable job in
+   `.github/workflows/skill-checks.yml`, with its reviewed evaluator and image
+   pins. Enable `id-token: write` for signed execution receipts.
+2. Add the [comment workflow template](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/comment-skill-checks.yml)
+   as `.github/workflows/comment-skill-checks.yml`. Pin its workflow and tools to
+   the reviewed comment revision, approve the scanner revision, and set
+   `trusted-caller-blobs` to the output of
+   `git hash-object .github/workflows/skill-checks.yml` after all scan-file edits.
+3. Merge both files into the default branch, then open a skill PR. The comment
+   workflow needs `contents: read`, `actions: read` and `pull-requests: write`.
+   Choose this workflow or the hosted publisher for feedback.
+
+Comments run when the scan completes, including failures with valid retained
+evidence. No changed skills keeps the existing **No skills changed** result.
+Only open, current-head PRs from the same repository receive a comment; fork PRs,
+stale results, expired artifacts and failures without verifiable evidence do not.
+Manual retries require both the completed run ID and attempt number. Follow the
+[full comment setup](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/README.md#pr-comments-without-hosted-reports)
+for the exact inputs and shared-wrapper approvals.
+
+## Enable hosted reports
 
 The optional publisher hosts the HTML and posts a comment **after deployment
 succeeds**. It needs a second workflow plus one-time hosting and approval settings.
@@ -256,13 +292,19 @@ or let the [CLI](/skills/skillevaluator/cli-onboarding) handle it.
   </Accordion>
   <Accordion title="The scan finished, but the comment is missing">
     Confirm setup is on the default branch and the PR is eligible for comments.
-    Open **Publish skill reports** to see whether deployment completed. If
-    hosting was skipped, check the scan's `id-token: write` permission and
+    Open **Comment skill checks**, or **Publish skill reports** if using hosting,
+    and inspect the evidence validation result. The hosted publisher also needs
+    successful deployment. Check the scan's `id-token: write` permission and
     `trusted-caller-blobs` value. A new scan must use the updated workflow;
     rerunning an old job keeps its original workflow. The scan's downloadable
     report remains a separate way to inspect available findings.
   </Accordion>
   <Accordion title="Our organization uses a shared workflow wrapper">
+    The comments-only workflow accepts the same caller, wrapper and evaluator
+    approvals as the hosted publisher. Keep the standard rendering in
+    SkillEvaluator and use the [manual comment setup](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/README.md#pr-comments-without-hosted-reports).
+    The released CLI setup below configures hosted publication.
+
     Keep the component reference in your existing caller, for example
     `your-org/ci/.github/workflows/skill-checks.yml@v3`, then run
     `skillevaluator ci init` in each consumer repository. The CLI recognizes
@@ -285,7 +327,7 @@ or let the [CLI](/skills/skillevaluator/cli-onboarding) handle it.
     archived 0.7.1 publisher does not. Direct callers keep an immutable
     evaluator approval. For manual configuration, follow the
     [shared-workflow setup](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/README.md#calling-through-a-shared-workflow)
-    guide. PR comments follow successful report deployment; private reports
+    guide. Hosted PR comments follow successful report deployment; private reports
     require the private Pages setup described above.
   </Accordion>
   <Accordion title="Do the checks need an LLM key or network access?">

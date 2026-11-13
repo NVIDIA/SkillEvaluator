@@ -2208,7 +2208,7 @@
         {% set t3_evidence_links = t3_harbor.get('evidence_links') or [] %}
         {% set t3_agent_anchor_ids = {} %}
         {% set t3_agent_panel_ids = {} %}
-        {% if t3_budget.status == 'exhausted' and tier3.budget_summary %}
+        {% if tier3.budget_summary and (t3_budget.status == 'exhausted' or 'overrun observed' in tier3.budget_summary or 'not fully verified' in tier3.budget_summary) %}
             <p class="warning">{{ tier3.budget_summary }}</p>
         {% endif %}
         {% for name, _agent in t3_agents.items() %}
@@ -3087,7 +3087,7 @@
                         {% set bi = bp.rate_interval or {} %}
                         {% set paired = lf.paired_comparison if lf.paired_comparison is mapping else {} %}
                         {% set wp_rate = wp.get('rate') %}
-                        {% set bp_rate = bp.get('rate') %}
+                        {% set bp_rate = bp.get('rate') if (tier3.baseline or {}).get('mode') != 'skipped' else none %}
                         {% set arm_delta = wp_rate - bp_rate if wp_rate is number and bp_rate is number else none %}
                         {% if wp %}
                         <tr>
@@ -3109,7 +3109,7 @@
                         <tr>
                             <td></td>
                             <td>Without skill</td>
-                            <td>{{ "%.0f%%" | format((bp_rate or 0.0) * 100) }}</td>
+                            <td>{% if bp_rate is number and bp_rate is not boolean %}{{ "%.0f%%" | format(bp_rate * 100) }}{% else %}N/A{% endif %}</td>
                             <td>{% if bi %}{{ bi | adaptive_interval_percent }}{% else %}—{% endif %}</td>
                             <td>{{ bp.passed_cases or 0 }} of {{ bp.total_cases or 0 }}</td>
                             <td>{{ t3_attempts_passed(bp) }}</td>

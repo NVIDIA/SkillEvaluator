@@ -337,7 +337,16 @@ def _retain(raw: Path, destination: Path, tier: int, tokens: set[str], skill: Pa
         for result, row in zip(results, report["results"], strict=True):
             result.metadata["gating"] = {**result.metadata.get("gating", {}), "tier": 2, "blocking": False}
             row["gating"] = result.metadata["gating"]
-        report["gating"] = {"tiers": {"2": {"blocking": False, "validators": [r.validator_name for r in results]}}}
+        report["gating"] = {
+            "tiers": {
+                "2": {
+                    "blocking": False,
+                    "validators": [r.validator_name for r in results],
+                    # Keep the reporter's per-check policy list, now advisory too.
+                    "validator_policies": [{"validator": r.validator_name, "blocking": False} for r in results],
+                }
+            }
+        }
     run_status = resolve_run_status(results)
     if tier == 2:
         report.update(overall_passed=run_status.headline.value == "passed", overall_status=run_status.headline.value)

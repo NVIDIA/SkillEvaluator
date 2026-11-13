@@ -740,6 +740,9 @@ def test_retained_tier2_reports_apply_ci_advisory_policy(consumer, tmp_path, fai
     original = json.loads(document)
     assert original["overall_passed"] is False
     assert original["results"][0]["gating"] == {"tier": 2, "blocking": True}
+    assert original["gating"]["tiers"]["2"]["validator_policies"] == [
+        {"validator": "Context Deduplication", "blocking": True}
+    ]
     raw = tmp_path / "raw"
     raw.mkdir()
     (raw / "skillevaluator-tier2.json").write_text(document)
@@ -751,6 +754,9 @@ def test_retained_tier2_reports_apply_ci_advisory_policy(consumer, tmp_path, fai
     assert outcome == {"status": status, "metrics": {"findings": int(failed)}, "complete": not incomplete}
     retained = json.loads((destination / "skillevaluator-tier2.json").read_text())
     assert retained["gating"]["tiers"]["2"]["blocking"] is False
+    assert retained["gating"]["tiers"]["2"]["validator_policies"] == [
+        {"validator": "Context Deduplication", "blocking": False}
+    ]
     assert retained["overall_passed"] is True
     assert retained["overall_status"] == "passed"
     assert retained["results"][0]["gating"] == {"tier": 2, "blocking": False}

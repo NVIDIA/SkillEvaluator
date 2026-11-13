@@ -2786,6 +2786,9 @@ def validate(
         policy=policy,
         target_path=target_display,
         expected_skill_name=publication_name,
+        # A Git remote URL in ``target_display`` cannot be probed for SKILL.md,
+        # and a clean run has no finding path to infer the skill from.
+        explicit_skill_name=publication_name if resolved_type == CONTENT_TYPE_SKILL and target_path.is_dir() else None,
         content_label=content_label,
         announce_paths=not quiet,
         sarif_scan_root=target_path,
@@ -2807,7 +2810,9 @@ def validate(
         # stays as the last line of defence: the renderer re-validates the
         # carriers it is handed, and a producer can record one after the fact.
         try:
-            BenchmarkReporter(skill_name=publication_name).save(results, output_dir / BENCHMARK_FILENAME)
+            BenchmarkReporter(skill_name=publication_name, evaluator_version=__version__).save(
+                results, output_dir / BENCHMARK_FILENAME
+            )
         except EvaluatedSourceConflict as exc:
             # Publication fails closed on a contradictory identity, so report which
             # values disagreed rather than letting the card write a guess.

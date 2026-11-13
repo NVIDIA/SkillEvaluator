@@ -62,6 +62,15 @@ All notable changes to SkillEvaluator are documented in this file.
   versioned labels, with offline suite checks, repeated-grading statistics,
   provenance, optional rate gates and a bundled public reference suite.
 
+- JSON reports record the SkillEvaluator `version` that wrote them, the
+  `target_path` (the absolute path or Git remote URL from `validate`, the path
+  as given from `tier1` and `tier2`, and `null` from single-check commands such
+  as `security-scan`), and `top_issues`, the grouped issue rows across every
+  tier that the HTML report data carries, without their page anchors. Each
+  `gating.tiers` entry adds `validator_policies`, which says for each check
+  whether it gates the exit code; the tier's `blocking` is `true` when any one
+  of them does. The keys are additive, and existing keys keep their shape.
+
 - Import production trace exports into redacted review candidates with
   `tier3 import-traces`, then promote only explicitly human-reviewed expectations
   and replay fixtures with `tier3 accept-traces`.
@@ -549,6 +558,16 @@ All notable changes to SkillEvaluator are documented in this file.
   use schema 1.1; valid schema 1.0 snapshots retain their original datasets and
   integrity checks, with corrected summaries projected without rewriting files.
 
+- The JSON report of `skillevaluator validate`, `tier1` or `tier2` on one skill
+  folder lists that skill in `skills` and under its author in `contributors`.
+  A clean run with a narrowed check list, such as `--checks schema`, has no
+  finding path or quality score to name the skill by, so the report listed one
+  skill per check ID (`manifest_exists`, `frontmatter_valid` and so on). It
+  now uses the folder's name. The `BENCHMARK.md` of a run without a recorded
+  Tier 3 version, such as `--tiers 1`, now records the evaluator version
+  instead of `Evaluator version: not recorded (legacy or non-live result)`; a
+  version recorded by a Tier 3 run still wins.
+
 - Tier 3 improvement recommendations respect each case's expected skill routing:
   passing negative controls no longer inherit activation-loss advice from positive
   cases, while failed negatives retain task, environment, and run-error diagnostics.
@@ -902,6 +921,7 @@ All notable changes to SkillEvaluator are documented in this file.
   every required check passes. A run with a failed required check, such as one
   with a `destructive_command` finding, already gets FAIL from that check (see
   Changed).
+
 
 ## 0.8.0 - 2026-11-05
 

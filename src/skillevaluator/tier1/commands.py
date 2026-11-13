@@ -615,6 +615,7 @@ def emit_reports(
     policy: ValidationPolicy | None = None,
     target_path: str | None = None,
     expected_skill_name: str | None = None,
+    explicit_skill_name: str | None = None,
     content_label: str = "Skill",
     announce_paths: bool = True,
     sarif_scan_root: Path | None = None,
@@ -633,6 +634,10 @@ def emit_reports(
     forwarded to the HTML reporter so the report shows a Target link and the
     correct content noun. HTML navigation tabs are derived from the tiers
     present in *results*, matching SkillEvaluator's combined report.
+
+    The JSON report records *target_path* too. *explicit_skill_name* names
+    the one skill a single-skill run validated, so the JSON ``skills`` list
+    names it even when no finding path or quality score does.
     """
     if policy is not None:
         apply_policy(results, policy)
@@ -665,6 +670,12 @@ def emit_reports(
             reporter = reporter_cls(
                 workspace_root=sarif_repository_root,
                 scan_root=sarif_scan_root,
+            )
+        elif fmt == "json":
+            reporter = reporter_cls(
+                expected_skill_name=expected_skill_name,
+                target_path=target_path,
+                explicit_skill_name=explicit_skill_name,
             )
         else:
             reporter = reporter_cls(expected_skill_name=expected_skill_name)

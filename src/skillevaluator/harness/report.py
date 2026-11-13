@@ -205,6 +205,7 @@ def run_harness_check(
     config: dict[str, Any] | None = None,
 ) -> Block:
     """Evaluate each skill harness by harness, updating a live panel as each finishes."""
+    target = target.parent if target.is_file() else target
     profiles = load_profiles(harness, profiles_dir)
     finder = HarnessValidator()
     skills = [target] if finder._is_skill_directory(target) else finder._find_all_skills(target)

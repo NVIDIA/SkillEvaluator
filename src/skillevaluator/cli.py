@@ -62,6 +62,7 @@ from skillevaluator.tier1.commands import (
     run_rubric_eval,
     run_security_scan,
     run_validation,
+    runs_schema_check,
 )
 from skillevaluator.tier3_environments import all_env_modes
 from skillevaluator.tier_group import TierGroup
@@ -84,6 +85,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from skillevaluator.reporting.presentation import FinalRenderContext
+    from skillevaluator.validators.policy import ValidationPolicy
 
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
@@ -1556,6 +1558,7 @@ def _catalog_skill_entry(
         return entry
 
     entry["json_report"] = json_report.name
+    entry["report_scope"] = "single_skill"
     try:
         payload = json.loads(json_report.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
@@ -1566,13 +1569,43 @@ def _catalog_skill_entry(
     for key in ("overall_passed", "overall_status", "incomplete_scans", "severity_counts"):
         if key in payload:
             entry[key] = payload[key]
+    entry["report_verdict"] = {key: payload[key] for key in ("overall_passed", "overall_status") if key in payload}
     return entry
 
 
-def _write_catalog_summary(output_dir: Path, skills: list[dict[str, object]]) -> Path:
-    """Write a machine-readable fleet rollup for catalog validation."""
+def _catalog_entry_with_metadata_id_conflicts(
+    skill: dict[str, object], conflicts: list[dict[str, object]]
+) -> dict[str, object]:
+    """Project catalog findings onto a member, retaining its independent report verdict."""
+    entry = dict(skill)
+    for conflict in conflicts:
+        members = conflict.get("skills")
+        if not isinstance(members, list) or entry.get("name") not in members:
+            continue
+        severity = conflict.get("severity")
+        if severity in ("critical", "high", "medium", "low"):
+            raw_counts = entry.get("severity_counts")
+            counts = dict(raw_counts) if isinstance(raw_counts, dict) else {}
+            previous = counts.get(severity, 0)
+            counts[severity] = (previous if isinstance(previous, int) else 0) + 1
+            entry["severity_counts"] = counts
+        if conflict.get("blocking"):
+            entry["passed"] = False
+            entry["overall_passed"] = False
+            entry["overall_status"] = "failed"
+    return entry
+
+
+def _write_catalog_summary(
+    output_dir: Path,
+    skills: list[dict[str, object]],
+    *,
+    metadata_id_conflicts: list[dict[str, object]] | None = None,
+) -> Path:
+    """Write catalog-context verdicts and counts; linked leaf reports retain single-skill scope."""
     from skillevaluator.reporting.base import _write_report_atomically
 
+    skills = [_catalog_entry_with_metadata_id_conflicts(skill, metadata_id_conflicts or []) for skill in skills]
     total = len(skills)
     passed = sum(1 for skill in skills if skill.get("passed"))
     failed = total - passed
@@ -1600,12 +1633,89 @@ def _write_catalog_summary(output_dir: Path, skills: list[dict[str, object]]) ->
         "summary_path": CATALOG_SUMMARY_FILENAME,
         "severity_totals": severity_totals,
         "skills": skills,
+        "metadata_id_conflicts": metadata_id_conflicts or [],
         "generated_at": datetime.now(tz=UTC).isoformat(),
     }
     output_path = output_dir / CATALOG_SUMMARY_FILENAME
     payload = json.dumps(summary, indent=2, default=str, allow_nan=False).encode("utf-8")
     _write_report_atomically(output_path, payload)
     return output_path
+
+
+def _catalog_metadata_id_conflicts(
+    policy: ValidationPolicy | None,
+    skill_dirs: list[Path],
+    catalog_root: Path,
+    discovery_problems: dict[Path, str],
+    *,
+    schema_enabled: bool = True,
+) -> tuple[list[dict[str, object]], list[tuple[str, str]]]:
+    """Find ``metadata.id`` values shared by catalog skills.
+
+    Catalog runs validate each skill on its own, so uniqueness across the
+    catalog is checked here. Returns the conflicts for the catalog summary and,
+    when the policy makes a duplicate blocking, one failure per affected skill.
+
+    This is part of the schema check, so it runs only when that check is
+    selected: ``--checks`` and ``--skip`` run exactly the checks they name.
+    """
+    from skillevaluator.validators.policy import default_policy
+
+    if not schema_enabled:
+        return [], []
+    from skillevaluator.validators.schema import (
+        declared_metadata_id,
+        duplicate_metadata_ids,
+        metadata_id_duplicate_severity,
+    )
+
+    policy = policy or default_policy()
+    declared: dict[str, list[Path]] = {}
+    for skill_dir in skill_dirs:
+        if skill_dir in discovery_problems:
+            continue
+        metadata_id = declared_metadata_id(skill_dir)
+        if metadata_id is not None:
+            declared.setdefault(metadata_id, []).append(skill_dir)
+    duplicates = duplicate_metadata_ids(declared, catalog_root)
+    if not duplicates:
+        return [], []
+    severity = metadata_id_duplicate_severity(policy)
+    blocking = severity.is_error()
+    conflicts: list[dict[str, object]] = [
+        {"metadata_id": value, "skills": skills, "severity": severity.value, "blocking": blocking}
+        for value, skills in duplicates.items()
+    ]
+    failures: list[tuple[str, str]] = []
+    if blocking:
+        for value, skills in duplicates.items():
+            for skill in skills:
+                others = ", ".join(other for other in skills if other != skill)
+                failures.append((skill, f"metadata.id '{value}' is also declared by {others}"))
+    return conflicts, failures
+
+
+def _print_metadata_id_conflicts(conflicts: list[dict[str, object]]) -> None:
+    """Show advisory (non-blocking) catalog ID conflicts under the scoreboard."""
+    from rich.text import Text
+
+    from skillevaluator.reporting.console_ui import MUTED, make_view_console
+
+    console_ = make_view_console()
+    for conflict in conflicts:
+        skills = conflict.get("skills")
+        if conflict.get("blocking") or not isinstance(skills, list):
+            continue
+        line = f"metadata.id '{conflict['metadata_id']}' is declared by {', '.join(map(str, skills))} (advisory)"
+        console_.print(Text.assemble(("      warning     ", MUTED), (strip_terminal_controls(line), MUTED)))
+
+
+def _record_metadata_id_failures(
+    failures: list[tuple[str, str]], id_failures: list[tuple[str, str]]
+) -> list[tuple[str, str]]:
+    """Add blocking ID conflicts to *failures*, keeping a skill's own failure reason first."""
+    failed = {name for name, _reason in failures}
+    return [*failures, *((name, reason) for name, reason in id_failures if name not in failed)]
 
 
 def _validate_catalog(
@@ -1616,6 +1726,7 @@ def _validate_catalog(
     output_dir: Path,
     workers: int = 1,
     discovery_problems: dict[Path, str] | None = None,
+    policy: ValidationPolicy | None = None,
 ) -> None:
     """Run the full validate pipeline once per skill in the catalog.
 
@@ -1639,6 +1750,7 @@ def _validate_catalog(
             output_dir=output_dir,
             workers=workers,
             discovery_problems=discovery_problems,
+            policy=policy,
         )
         return
 
@@ -1677,6 +1789,14 @@ def _validate_catalog(
             ctx.meta.pop(meta_key, None)
         else:
             ctx.meta[meta_key] = previous_catalog_root
+    id_conflicts, id_failures = _catalog_metadata_id_conflicts(
+        policy,
+        skill_dirs,
+        resolved_target,
+        discovery_problems,
+        schema_enabled=runs_schema_check(ctx.params.get("checks"), ctx.params.get("skip")),
+    )
+    failures = _record_metadata_id_failures(failures, id_failures)
     failure_map = dict(failures)
     skill_entries = [
         _catalog_skill_entry(
@@ -1688,8 +1808,9 @@ def _validate_catalog(
         )
         for skill_name in (skill_dir.relative_to(resolved_target).as_posix() for skill_dir in skill_dirs)
     ]
-    _write_catalog_summary(output_dir, skill_entries)
+    _write_catalog_summary(output_dir, skill_entries, metadata_id_conflicts=id_conflicts)
     _print_catalog_summary(len(skill_dirs), failures, output_dir)
+    _print_metadata_id_conflicts(id_conflicts)
     if failures:
         raise click.ClickException(
             f"{len(failures)}/{len(skill_dirs)} skills failed validation: "
@@ -1705,6 +1826,7 @@ def _validate_catalog_parallel(
     output_dir: Path,
     workers: int,
     discovery_problems: dict[Path, str] | None = None,
+    policy: ValidationPolicy | None = None,
 ) -> None:
     """Validate catalog skills concurrently in isolated child processes."""
     from skillevaluator.reporting.console_ui import make_view_console
@@ -1742,6 +1864,14 @@ def _validate_catalog_parallel(
             if not passed:
                 failures.append((skill_name, reason))
 
+    id_conflicts, id_failures = _catalog_metadata_id_conflicts(
+        policy,
+        skill_dirs,
+        catalog_root,
+        discovery_problems,
+        schema_enabled=runs_schema_check(ctx.params.get("checks"), ctx.params.get("skip")),
+    )
+    failures = _record_metadata_id_failures(failures, id_failures)
     failures.sort(key=lambda item: item[0])
     failure_map = dict(failures)
     skill_entries = [
@@ -1754,8 +1884,9 @@ def _validate_catalog_parallel(
         )
         for skill_name in (skill_dir.relative_to(catalog_root).as_posix() for skill_dir in skill_dirs)
     ]
-    _write_catalog_summary(output_dir, skill_entries)
+    _write_catalog_summary(output_dir, skill_entries, metadata_id_conflicts=id_conflicts)
     _print_catalog_summary(len(skill_dirs), failures, output_dir)
+    _print_metadata_id_conflicts(id_conflicts)
     if failures:
         raise click.ClickException(
             f"{len(failures)}/{len(skill_dirs)} skills failed validation: "
@@ -2029,7 +2160,10 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     default=None,
     cls=GroupedOption,
     help_group=_RUN_GROUP,
-    help="Validation policy: default (external is a compatibility alias). Default: $SKILLEVALUATOR_PROFILE, then default.",
+    help=(
+        "Validation policy: default or registry (external is a compatibility alias for default). "
+        "Default: $SKILLEVALUATOR_PROFILE, then default."
+    ),
 )
 @click.option(
     "--external",
@@ -2492,6 +2626,7 @@ def validate(
             output_dir=output_dir,
             workers=workers,
             discovery_problems=discovery_problems,
+            policy=policy,
         )
         return
 
@@ -3208,10 +3343,15 @@ def _workflow_report_options(func):
 )
 @click.option("--pii-waivers", type=PII_WAIVERS_PATH, default=None, help=_PII_WAIVERS_HELP)
 @click.option(
-    "--profile", default=None, help="Validation policy [default: default; external is a compatibility alias]."
+    "--profile",
+    default=None,
+    help="Validation policy: default or registry [default: default; external is a compatibility alias].",
 )
 @click.option(
-    "--policy", "policy_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None,
+    "--policy",
+    "policy_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
     help="Custom policy YAML overlaid on top of --profile.",
 )
 @click.option("--previous-version", default=None, help="Previous version for version checks.")

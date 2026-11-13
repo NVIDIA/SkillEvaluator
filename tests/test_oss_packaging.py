@@ -399,6 +399,7 @@ def test_security_extra_uses_pip_audit_without_bundling_safety() -> None:
 
     assert any(requirement.startswith("pip-audit") for requirement in security)
     assert not any(requirement.startswith("safety") for requirement in security)
+    assert any(requirement.startswith("bandit") for requirement in project["project"]["dependencies"])
     assert "safety" not in lock_names
     assert "safety-schemas" not in lock_names
     assert "nltk" not in lock_names

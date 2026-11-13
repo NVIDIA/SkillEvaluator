@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 from tests.conftest import load_harbor_eval_template
 
-from skillevaluator.tier3.eval_core import llm_judge
+from skillevaluator.tier3.eval_core import atif_helpers, llm_judge
 from skillevaluator.tier3.harbor.metrics import RESERVED_METRIC_NAMES
 
 eval_template = load_harbor_eval_template("harbor_template_eval_judge_contracts")
@@ -244,6 +244,125 @@ def test_behavior_salvage_rejects_repeated_steps(judge_module, monkeypatch) -> N
 
     assert result["score"] is None
     assert result["status"] == "error"
+
+
+# ── Incomplete evidence gate (issue #234) ────────────────────────────────────
+
+
+def _never_called(*args: Any, **kwargs: Any):
+    raise AssertionError("the judge must not call a model on incomplete evidence")
+
+
+def _behavior_bundle(module: ModuleType, traj: dict[str, Any]) -> dict[str, Any]:
+    """Build the behavior_check bundle with the module the judge belongs to."""
+    builder = atif_helpers if module is llm_judge else module
+    return builder.build_metric_evidence_bundles(traj, "Explain the migration.")["behavior_check"]
+
+
+def test_incomplete_required_behavior_evidence_errors_without_a_model_call(judge_module, monkeypatch) -> None:
+    # A behavior score read off a shortened final answer grades the evidence
+    # loss, not the agent, so the judge returns an evaluation error instead.
+    monkeypatch.setattr(judge_module, "call_public_llm", _never_called)
+    omitted = {
+        "count": 1,
+        "truncated": True,
+        "reason": "final response shortened to fit SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT",
+        "required_complete": False,
+        "required_missing": ["final response"],
+        "incomplete_sections": ["final response"],
+    }
+
+    result = judge_module.judge_behavior_check("conversation", ["b1", "b2"], evidence_omitted=omitted)
+
+    assert result["score"] is None
+    assert result["status"] == "error"
+    assert "final response" in result["reason"]
+    assert "SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT" in result["reason"]
+    assert result["results"] == []
+    assert [item["status"] for item in result["expectations"]] == ["not_checked", "not_checked"]
+
+
+def test_complete_required_behavior_evidence_is_judged_normally(judge_module, monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(judge_module, "call_public_llm", _script([(_BEHAVIOR_RESPONSE, None)], calls))
+    omitted = {
+        "count": 1,
+        "truncated": True,
+        "reason": "behavior evidence shortened to fit SKILL_EVAL_BEHAVIOR_CHECK_BUDGET",
+        "required_complete": True,
+        "required_missing": [],
+        "incomplete_sections": ["compact tool history"],
+    }
+
+    result = judge_module.judge_behavior_check("conversation", ["b1", "b2"], evidence_omitted=omitted)
+
+    # Optional exploration output dropped to fit the budget is ordinary; only
+    # missing required evidence withholds the score.
+    assert result["score"] == 0.5
+    assert len(calls) == 1
+
+
+def test_behavior_judge_refuses_to_cut_accounted_evidence_a_second_time(judge_module, monkeypatch) -> None:
+    monkeypatch.setattr(judge_module, "call_public_llm", _never_called)
+    oversized = "A" * (judge_module._behavior_check_budget() + 5000)
+    omitted = {"count": 0, "truncated": False, "reason": "", "required_complete": True, "required_missing": []}
+
+    result = judge_module.judge_behavior_check(oversized, ["b1"], evidence_omitted=omitted)
+
+    assert result["score"] is None
+    assert result["status"] == "error"
+    assert "shortened again inside the judge" in result["reason"]
+
+
+def test_oversized_final_answer_reaches_the_judge_gate_as_an_error(judge_module, monkeypatch) -> None:
+    # End to end over the seam the verifier uses: bundle -> judge. No model is
+    # called and no behavior score is produced.
+    monkeypatch.setattr(judge_module, "call_public_llm", _never_called)
+    marker = "MIGRATE_UNIQUE_COVERAGE_FIRST"
+    answer = "A" * 8000 + marker + "B" * 8000
+    bundle = _behavior_bundle(judge_module, {"steps": [{"source": "agent", "message": answer}]})
+
+    assert marker not in bundle["prompt_evidence"]
+    assert bundle["omitted"]["required_complete"] is False
+
+    result = judge_module.judge_behavior_check(
+        bundle["prompt_evidence"], ["explains the migration"], evidence_omitted=bundle["omitted"]
+    )
+
+    assert result["score"] is None
+    assert result["status"] == "error"
+
+
+def test_gated_behavior_result_never_becomes_a_zero_downstream(judge_module, monkeypatch) -> None:
+    from skillevaluator.tier3.eval_core.declarative_checks import combine_behavior_check
+    from skillevaluator.tier3.harbor.metrics import overall_score_from_metrics
+
+    monkeypatch.setattr(judge_module, "call_public_llm", _never_called)
+    omitted = {"required_complete": False, "required_missing": ["final response"], "reason": "cut"}
+    gated = judge_module.judge_behavior_check("conversation", ["b1"], evidence_omitted=omitted)
+
+    # The verifier's own normalization keeps it scoreless, even where an N/A
+    # result would be accepted.
+    normalized = eval_template._normalize_required_judge_result("behavior_check", gated, allow_not_applicable=True)
+    assert normalized["score"] is None
+    assert normalized["status"] == "error"
+
+    # Direct declarative checks beside the judge must not fill the gap either.
+    combined = combine_behavior_check(gated, [{"step": 1, "passed": True}], 1)
+    assert combined["score"] is None
+    assert combined["status"] == "error"
+
+    # And a missing behavior score leaves the overall score undefined rather
+    # than averaging a zero into the dimension mean (see PR #240).
+    scores = {
+        "security": 1.0,
+        "skill_execution": 1.0,
+        "skill_efficiency": 1.0,
+        "accuracy": 1.0,
+        "goal_accuracy": 1.0,
+        "behavior_check": None,
+    }
+    assert overall_score_from_metrics(scores) is None
 
 
 # ── Specific retries ─────────────────────────────────────────────────────────

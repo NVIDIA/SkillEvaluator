@@ -541,6 +541,20 @@ class TestJSONReporter:
         assert [entry["name"] for entry in data["skills"]] == ["simple"]
         assert data["target_path"] == str(skill)
 
+    @pytest.mark.parametrize("target", [".", "./"])
+    def test_render_all_names_a_clean_skill_at_the_current_directory(self, tmp_path, monkeypatch, target):
+        skill = tmp_path / "simple"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("---\nname: simple\n---\n", encoding="utf-8")
+        monkeypatch.chdir(skill)
+
+        data = json.loads(
+            JSONReporter(include_timestamp=False, target_path=target).render_all([self._clean_schema_result()])
+        )
+
+        assert data["skills"] == [{"name": "simple", "passed": True, "issue_count": 0}]
+        assert data["target_path"] == target
+
     def test_render_all_records_the_evaluator_version_and_target(self, success_result: ValidationResult) -> None:
         from skillevaluator import __version__
 

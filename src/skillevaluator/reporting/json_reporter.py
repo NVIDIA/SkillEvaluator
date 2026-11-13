@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from skillevaluator import __version__
@@ -152,8 +153,15 @@ class JSONReporter(ReporterBase):
         # The explicit name keeps a single-skill run to one ``skills`` entry
         # when no finding path or quality score names the skill, and the
         # target path is the same fallback the HTML report uses.
+        identity_target = self.target_path
+        if identity_target and "://" not in identity_target:
+            local_target = Path(identity_target)
+            if (local_target / "SKILL.md").exists() or (local_target / "skill.md").exists():
+                # Preserve the requested target in JSON while resolving aliases
+                # such as "." for the shared single-skill identity fallback.
+                identity_target = str(local_target.resolve())
         html_reporter = HTMLReporter(
-            target_path=self.target_path,
+            target_path=identity_target,
             explicit_skill_name=self.explicit_skill_name,
             expected_skill_name=self.expected_skill_name,
         )

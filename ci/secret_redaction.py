@@ -10,7 +10,7 @@ import json
 import os
 import re
 from collections.abc import Iterable
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from skillevaluator.reporting import HTMLReporter, MarkdownReporter, SARIFReporter
 from skillevaluator.reporting.finding_summary import refresh_finding_identities
@@ -157,6 +157,12 @@ def sanitized_outputs(raw: Path, tokens: set[str]) -> dict[str, bytes]:
             if name.endswith(".json"):
                 document = redactor.object(json.loads(text))
                 if isinstance(document, dict):
+                    target = document.get("target_path")
+                    if isinstance(target, str) and (
+                        PurePosixPath(target).is_absolute() or PureWindowsPath(target).is_absolute()
+                    ):
+                        # Published CI evidence must not disclose runner paths.
+                        document["target_path"] = None
                     # IDs hashed from the unredacted text could confirm a guessed
                     # value. Refresh even without collected tokens: the redactor
                     # also masks database userinfo that no token names.

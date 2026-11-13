@@ -89,6 +89,9 @@ All notable changes to SkillEvaluator are documented in this file.
   `gating.tiers` entry adds `validator_policies`, which says for each check
   whether it gates the exit code; the tier's `blocking` is `true` when any one
   of them does. The keys are additive, and existing keys keep their shape.
+  Local skill aliases such as `.` retain the folder name in `skills`, and
+  native Tier 3 CI reports retain their single skill identity. Published CI
+  JSON omits absolute host `target_path` values.
 
 - Import production trace exports into redacted review candidates with
   `tier3 import-traces`, then promote only explicitly human-reviewed expectations
@@ -1034,7 +1037,6 @@ All notable changes to SkillEvaluator are documented in this file.
   every required check passes. A run with a failed required check, such as one
   with a `destructive_command` finding, already gets FAIL from that check (see
   Changed).
-
 
 ## 0.8.0 - 2026-11-05
 

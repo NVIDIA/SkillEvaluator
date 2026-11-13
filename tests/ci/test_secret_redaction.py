@@ -868,3 +868,36 @@ def test_invisible_character_in_credential_never_reaches_reports_or_pages(tmp_pa
             if path.is_file():
                 _assert_no_fragment(path.read_bytes(), value)
     assert (site / "runs/123/1/skill-001/skillevaluator-tier1.html").is_file()
+
+
+@pytest.mark.parametrize(
+    ("target", "published"),
+    [
+        ("/home/runner/work/private/skills/demo", None),
+        (r"C:\runner\work\private\skills\demo", None),
+        ("C:/runner/work/private/skills/demo", None),
+        (r"\\server\private\skills\demo", None),
+        ("skills/demo", "skills/demo"),
+        (".", "."),
+        ("https://github.com/example/skills/tree/main/demo", "https://github.com/example/skills/tree/main/demo"),
+        (None, None),
+    ],
+)
+def test_published_json_omits_absolute_host_target_without_changing_evidence(tmp_path, target, published):
+    result = ValidationResult(validator_name="Schema", validator_description="Check skill manifest")
+    result.add_success("manifest_exists", "Found SKILL.md")
+    result.metadata["gating"] = {"tier": 1, "blocking": True}
+    raw_document = json.loads(
+        JSONReporter(include_timestamp=False, target_path=target, explicit_skill_name="demo").render_all([result])
+    )
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "skillevaluator-tier1.json").write_text(json.dumps(raw_document), encoding="utf-8")
+
+    outputs = runner.sanitized_outputs(raw, set())
+    document = json.loads(outputs["skillevaluator-tier1.json"])
+
+    assert raw_document["target_path"] == target
+    assert document["target_path"] == published
+    for field in ("skills", "gating", "version", "results"):
+        assert document[field] == raw_document[field]

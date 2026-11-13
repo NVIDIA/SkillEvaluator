@@ -280,7 +280,7 @@ of the existing repository Actions secret holding the gateway key. The selector
 contains only a secret name, never the key itself. The caller resolves
 `secrets[vars.SKILL_EVAL_GATEWAY_SECRET]` into the reusable workflow's generic
 `LLM_API_KEY`; other repositories can select their own gateway and secret names
-during local onboarding. Missing
+during local onboarding. When the paid jobs run, missing
 prerequisites remain visible in the reports. A passing Tier 1 gate is not an
 all-tier evaluation pass. Forks retain keyless Tier 1 checks. On PRs, ordinary software changes
 select no skills, skill changes select the affected skills, and CI configuration
@@ -292,13 +292,25 @@ skill, and its report lists Tier 2 and Tier 3 as skipped because no skill
 changed. Fork PRs never run the paid tiers, so their reports keep the existing
 Tier 2 and Tier 3 reason.
 
+A PR that edits only the caller workflows, such as onboarding, a pin bump, or a
+change to the model, secret or gateway settings, therefore runs no
+provider-backed tier. A wrong model or a missing secret first shows up in the
+push to the default branch after the merge, or in the next PR that changes a
+skill, not on the setup PR itself. To exercise the paid tiers before merging,
+include a skill change (`ci demo` opens one) or temporarily set
+`scan-mode: all` in the caller (`SKILL_EVAL_SCAN_MODE: all` on GitLab).
+
 If a provider returns HTTP 404, verify that the selected model accepts chat
 requests with your account. Presence in the public model catalog alone does not
 prove serving availability. Change the caller's `model` input to an accessible
 model and refresh `trusted-caller-blobs` before retrying; do not change global
-provider defaults to troubleshoot one repository.
+provider defaults to troubleshoot one repository. A PR that only changes the
+caller's `model` input skips the provider-backed tiers, so it cannot confirm the
+fix. Confirm it on a skill-change PR, with `scan-mode: all` set temporarily, or
+on the first run after the merge.
 
-The setup PR can exercise checks, but its first automatic comment requires
+The setup PR runs the keyless Tier 1 scan but, as it changes no skill, skips
+the provider-backed tiers. Its first automatic comment requires
 the consumer feedback listener on `main` and a subsequent PR run. Repository
 maintainers configure branch protection separately if they want the Tier 1
 aggregate check to block merges.
@@ -354,8 +366,10 @@ automatic comment. Changes to the caller must refresh its approved Git blob in
 caller or producer revision starts automatic feedback only after the updated
 listener reaches the default branch; earlier candidate runs retain their artifacts.
 
-A missing provider key, unavailable runtime, or missing committed native dataset
-must remain visible as an incomplete or needs-action result. Local `ci init`,
+When a paid tier runs, a missing provider key, unavailable runtime, or missing
+committed native dataset must remain visible as an incomplete or needs-action
+result. A PR that changes no skill runs none of them and reports Tier 2 and
+Tier 3 as skipped. Local `ci init`,
 `ci status`, and `ci demo` are setup and inspection commands; a successful setup
 is not evidence that the three tiers passed. Optional Pages hosting remains a
 separate opt-in; artifact feedback works without it.
@@ -370,8 +384,9 @@ checks. An unconditional keyless baseline remains available for forks and
 denied admission. For an authorized LLM run, missing or failed enriched evidence
 fails the required Tier 1 gate; it is never replaced with a passing static scan.
 With the default `scan-mode: auto`, a PR runs the enriched job only when it
-changes a file under a configured skill root. CI configuration or unrelated
-changes skip it, and the keyless scan, which covers every skill for a setup
+changes a file under a configured skill root. A PR that changes only CI
+configuration (including a pin, model or secret change) or unrelated files
+skips it, and the keyless scan, which covers every skill for a setup
 change, remains the Tier 1 gate. Pushes to the default branch, manual runs and
 `scan-mode: all` keep the enriched job.
 The image supports OpenAI, Anthropic and NVIDIA Build at their native endpoints.

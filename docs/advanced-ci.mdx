@@ -35,8 +35,18 @@ It also documents SkillEvaluator's own callers and alternative feedback filename
 
 Only quality and security checks gate this CI integration. Tier 2 and Tier 3
 remain advisory even when failed or incomplete; deprecated Tier 3 required settings are ignored.
-Missing credentials, runtime or datasets must remain visible as incomplete or
-needs-action evidence. A passing scan does not mean all evaluation stages passed.
+When they run, missing credentials, runtime or datasets must remain visible as
+incomplete or needs-action evidence. A passing scan does not mean all evaluation
+stages passed.
+
+With the default `scan-mode: auto`, the provider-backed jobs (LLM-enriched
+Tier 1, Tier 2 and Tier 3) run on a PR or MR only when it changes a file under
+a configured skill folder. A PR that changes only the CI setup, such as
+onboarding, a pin bump, or a model, secret or gateway change, runs the keyless
+Tier 1 scan of every skill and reports Tier 2 and Tier 3 as skipped. Its model
+and credentials are first exercised by the push to the default branch after the
+merge or by the next PR that changes a skill. To exercise them earlier, include
+a skill change or temporarily set `scan-mode: all`.
 
 Reports retain native evidence and an aggregate artifact for 14 days. Feedback
 links to the authenticated artifact for that run; download and extract it,

@@ -5161,11 +5161,12 @@ def _validate_native_task_mcp_policy(
     data: dict[str, Any],
     *,
     runtime_env: dict[str, str] | None,
+    verifier_env: dict[str, str] | None = None,
 ) -> None:
     """Check native MCP declarations before Harbor can resolve their headers."""
     from harbor.models.task.config import MCPServerConfig
 
-    def validate_environment(environment: object, field: str) -> None:
+    def validate_environment(environment: object, field: str, *, allowed_env: dict[str, str] | None) -> None:
         # Harbor's task schema diagnoses malformed surrounding tables.
         if not isinstance(environment, dict) or "mcp_servers" not in environment:
             return
@@ -5173,25 +5174,36 @@ def _validate_native_task_mcp_policy(
         source = f"Native Harbor task [{field}.mcp_servers]: {task_toml}"
         if not isinstance(servers, list) or any(not isinstance(server, dict) for server in servers):
             raise ValueError(f"{source} must be an array of MCP server tables")
+        invalid_declaration = (
+            f"{source} contains an invalid MCP server declaration; check field types and "
+            "use ${VAR} for environment placeholders"
+        )
         for server in servers:
             if server.keys() - MCPServerConfig.model_fields.keys():
-                raise ValueError(f"{source} contains unsupported MCP server fields")
+                supported = ", ".join(sorted(MCPServerConfig.model_fields))
+                raise ValueError(
+                    f"{source} contains unsupported MCP server fields; supported MCP field names: {supported}"
+                )
             try:
                 McpServerDeclaration.model_validate(server)
             except ValidationError:
-                raise ValueError(f"{source} contains an invalid MCP server declaration") from None
-        validate_mcp_server_declarations(servers, allowed_runtime_env=runtime_env, source_label=source)
+                raise ValueError(invalid_declaration) from None
+        validate_mcp_server_declarations(servers, allowed_runtime_env=allowed_env, source_label=source)
         for server in servers:
             try:
                 MCPServerConfig.model_validate(server)
             except ValidationError:
-                raise ValueError(f"{source} contains an invalid MCP server declaration") from None
+                raise ValueError(invalid_declaration) from None
 
-    validate_environment(data.get("environment", {}), "environment")
+    validate_environment(data.get("environment", {}), "environment", allowed_env=runtime_env)
 
     def validate_verifier(verifier: object, field: str) -> None:
         if isinstance(verifier, dict):
-            validate_environment(verifier.get("environment"), f"{field}.environment")
+            validate_environment(
+                verifier.get("environment"),
+                f"{field}.environment",
+                allowed_env=verifier_env if verifier_env is not None else runtime_env,
+            )
 
     validate_verifier(data.get("verifier", {}), "verifier")
     steps = data.get("steps")
@@ -5518,7 +5530,7 @@ def _native_task_workdir(
     environment = data.get("environment", {}) if isinstance(data, dict) else {}
     if not isinstance(environment, dict):
         raise ValueError(f"Native Harbor task [environment] must be a table: {task_dir / 'task.toml'}")
-    _validate_native_task_mcp_policy(task_dir / "task.toml", data, runtime_env=runtime_env)
+    _validate_native_task_mcp_policy(task_dir / "task.toml", data, runtime_env=runtime_env, verifier_env=verifier_env)
     _validate_native_task_execution_compatibility(
         task_dir,
         data,

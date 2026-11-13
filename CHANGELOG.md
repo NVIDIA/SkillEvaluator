@@ -33,29 +33,31 @@ All notable changes to SkillEvaluator are documented in this file.
   beside it and the failure is reported. After a timeout, the failed run still keeps
   the scores of the arms that finished.
 
-### Fixed
-
-- A failed Tier 3 execution (for example a backend launch failure) now marks the
-  report payload, its summary and the affected agents as failed with their
-  errors, instead of only the top-level `result.json`. A report re-rendered by
-  `tier3 view` reads the status from the run's `result.json`. Scores from the
-  completed trials are kept.
-- Skill activation now credits a SKILL.md read wrapped in a shell, such as
-  `/bin/bash -lc 'cat skills/x/SKILL.md'`, which some agent harnesses record
-  instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL
-  config.json'`) are still not counted.
-
-## 0.9.0 - 2026-11-13
-
-### Fixed
-
-- Tier 3 dataset fairness validation checks the skill's own identities and
-  nested judge expectations, recognizes required reads after negated actions,
-  and bounds diagnostics and repeated-negation work. Template prompts avoid
-  requiring bundled scripts; upgrade guidance explains strict CI preflight
-  failures for older datasets that grade skill use.
-
-### Added
+- Tier 1 **Incomplete referenced artifact analysis (AE1)** findings from
+  SkillSpector now say why SkillSpector stopped inspecting the file that a skill
+  names. The suggestion names the file, its disposition and each reason
+  SkillSpector gives, such as
+  `static_parse_limit (static_patterns_tool_misuse)`, with any line and limits,
+  and the finding's metadata records them under `skillspector_evidence` and
+  `skillspector_occurrences`. The suggestion leaves out the run time and the
+  time budget (`observed_seconds`, `limit_seconds`), which differ from run to
+  run, so a finding keeps its `finding_id` from run to run; because the
+  suggestion text is new, each AE1 `finding_id` changes once with this release.
+  Before, the finding said only
+  `Referenced artifact was not completely inspected`, and its reason had to be
+  matched by hand against the incomplete-analysis error, which lists at most
+  three rows. With SkillSpector before v2.12.0 the finding was
+  titled `Unknown (AE1)` and told the user to make the file available although
+  SkillSpector had read part of it. It now carries the rule's name and the
+  reasons from the report's ledger rows for the file. Its check name, and so its
+  SARIF rule ID, changes: a `severity_overrides` entry keyed on
+  `SECURITY.Unknown (AE1)` must now use
+  `SECURITY.Incomplete referenced artifact analysis (AE1)`. The JSON field
+  `skillspector_reference_summary` counts the files and the lines that name them
+  for every result, and a failed check shows the counts in one line of the
+  terminal, Markdown and HTML reports. Severities and scan completeness are
+  unchanged; a gate changes only where an override of `SECURITY.Unknown (AE1)`
+  was what let the check pass.
 
 - Tier 3 `validate-grader --qualification-policy FILE` supports explicit,
   assessment-only metric/class/category coverage and risk limits, provider-free
@@ -69,6 +71,71 @@ All notable changes to SkillEvaluator are documented in this file.
   alone does not establish better Efficiency or quality, pairing does not certify
   equal concurrency/budget or judge-model agreement, and reused telemetry is
   historical. Scoring, raw deltas and reuse eligibility are unchanged.
+
+### Fixed
+
+- A failed Tier 3 execution (for example a backend launch failure) now marks the
+  report payload, its summary and the affected agents as failed with their
+  errors, instead of only the top-level `result.json`. A report re-rendered by
+  `tier3 view` reads the status from the run's `result.json`. Scores from the
+  completed trials are kept.
+- Skill activation now credits a SKILL.md read wrapped in a shell, such as
+  `/bin/bash -lc 'cat skills/x/SKILL.md'`, which some agent harnesses record
+  instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL
+  config.json'`) are still not counted.
+
+- A Tier 1 security scan with SkillSpector v2.12.0 or later no longer stops as
+  `INCOMPLETE` ("Security Scan didn't run") with
+  `hooks/hooks.json [static; opaque_content; analyzers=bundled_execution_surface]`
+  when the scanned skill, folder or hooks-only plugin has an ordinary command
+  or HTTP hook, one SkillSpector does not report as sending hook content to a
+  remote host (BH2). SkillSpector cannot model what such a hook does with its
+  input, so it reports the analysis as `partial` although the scan finished,
+  and its findings cannot show that the hook is safe: a hook script that sends
+  its input over a socket, `nc` or `/dev/tcp` gets no blocking finding. The
+  scan now fails with the Critical `skillspector_hook_payload_unverified`,
+  which names the manifest, such as `hooks/hooks.json` or
+  `.claude/settings.json`, and a gate failure that neither a `--policy`
+  severity override nor `--llm-verify` clears. Only removing the hooks passes
+  the check. The other findings and the `--llm` stage are reported as for any
+  complete scan, and a folder scan goes on to the next skill. This applies
+  only to SkillSpector's nonfatal, whole-file row on a manifest whose BH1
+  finding says its hook payload is `unmodeled`, also under a baseline, and
+  only when the report accounts for the row exactly. This covers only
+  manifests and hook evidence the scanner reports, without claiming coverage
+  for inline plugin-manifest hooks or other unreported hook locations.
+  SkillSpector records the same row for a manifest it read only in part:
+  with v2.13.4, whose row counts
+  the records it read, a manifest with a record that is not a parsed hook
+  declaration, such as a skipped handler or a permission rule, stays
+  `INCOMPLETE`; with v2.13.3, only a BH1 with 2,048 or more declarations does,
+  and a partly parsed manifest gets the Critical. The rest of the report is
+  judged as before: missing references and referenced images are still
+  accepted with their warnings under the rules above; the v2.13.3 missing-path
+  reference caveat that is accepted from the report alone does not apply
+  beside the hooks, because it reads the whole report. Any gap those rules do
+  not accept, such as a missing reference in a scan without a known target or
+  in a skill that `validate` or `security-scan` checks on its own inside a
+  folder or plugin, still records the SkillSpector scan as incomplete
+  (`incomplete_scans` in the JSON report, and publication eligibility
+  `Incomplete`), with an error that names only that gap. The check itself is
+  reported as `FAIL`, not `INCOMPLETE`, because the Critical is a confirmed
+  failure. With SkillSpector v2.13.4, a hook with a `"timeout"` key also gets
+  a `static_parse_limit` row on the manifest, so that scan is recorded as
+  incomplete in the same way.
+
+## 0.9.0 - 2026-11-13
+
+### Fixed
+
+- Tier 3 dataset fairness validation checks the skill's own identities and
+  nested judge expectations, recognizes required reads after negated actions,
+  and bounds diagnostics and repeated-negation work. Template prompts avoid
+  requiring bundled scripts; upgrade guidance explains strict CI preflight
+  failures for older datasets that grade skill use.
+
+### Added
+
 - Dataset fairness validation checks the evaluated skill's own names and nested
   graded text, distinguishes negated reads from required reads, and bounds
   warning excerpts and repeated-match scanning. Common Unicode, Markdown and
@@ -255,32 +322,6 @@ All notable changes to SkillEvaluator are documented in this file.
   template-fallback datasets, marks trace refinement and autopilot generation,
   and displays the source and review state in terminal, HTML, and BENCHMARK
   reports. Run payloads retain the generation record with shortened input hashes.
-
-- Tier 1 **Incomplete referenced artifact analysis (AE1)** findings from
-  SkillSpector now say why SkillSpector stopped inspecting the file that a skill
-  names. The suggestion names the file, its disposition and each reason
-  SkillSpector gives, such as
-  `static_parse_limit (static_patterns_tool_misuse)`, with any line and limits,
-  and the finding's metadata records them under `skillspector_evidence` and
-  `skillspector_occurrences`. The suggestion leaves out the run time and the
-  time budget (`observed_seconds`, `limit_seconds`), which differ from run to
-  run, so a finding keeps its `finding_id` from run to run; because the
-  suggestion text is new, each AE1 `finding_id` changes once with this release.
-  Before, the finding said only
-  `Referenced artifact was not completely inspected`, and its reason had to be
-  matched by hand against the incomplete-analysis error, which lists at most
-  three rows. With SkillSpector before v2.12.0 the finding was
-  titled `Unknown (AE1)` and told the user to make the file available although
-  SkillSpector had read part of it. It now carries the rule's name and the
-  reasons from the report's ledger rows for the file. Its check name, and so its
-  SARIF rule ID, changes: a `severity_overrides` entry keyed on
-  `SECURITY.Unknown (AE1)` must now use
-  `SECURITY.Incomplete referenced artifact analysis (AE1)`. The JSON field
-  `skillspector_reference_summary` counts the files and the lines that name them
-  for every result, and a failed check shows the counts in one line of the
-  terminal, Markdown and HTML reports. Severities and scan completeness are
-  unchanged; a gate changes only where an override of `SECURITY.Unknown (AE1)`
-  was what let the check pass.
 
 - `create-eval-dataset --grounding` selects skill, author-intent, or trace
   grounding. Generated datasets record relative input provenance and review
@@ -1055,46 +1096,6 @@ All notable changes to SkillEvaluator are documented in this file.
   clustering work one skill can need doubles with the budget, and the most
   embedding input it can send doubles with the ceiling, from 512 to 1,024
   texts (724 with either 2,048-dimensional default).
-
-- A Tier 1 security scan with SkillSpector v2.12.0 or later no longer stops as
-  `INCOMPLETE` ("Security Scan didn't run") with
-  `hooks/hooks.json [static; opaque_content; analyzers=bundled_execution_surface]`
-  when the scanned skill, folder or hooks-only plugin has an ordinary command
-  or HTTP hook, one SkillSpector does not report as sending hook content to a
-  remote host (BH2). SkillSpector cannot model what such a hook does with its
-  input, so it reports the analysis as `partial` although the scan finished,
-  and its findings cannot show that the hook is safe: a hook script that sends
-  its input over a socket, `nc` or `/dev/tcp` gets no blocking finding. The
-  scan now fails with the Critical `skillspector_hook_payload_unverified`,
-  which names the manifest, such as `hooks/hooks.json` or
-  `.claude/settings.json`, and a gate failure that neither a `--policy`
-  severity override nor `--llm-verify` clears. Only removing the hooks passes
-  the check. The other findings and the `--llm` stage are reported as for any
-  complete scan, and a folder scan goes on to the next skill. This applies
-  only to SkillSpector's nonfatal, whole-file row on a manifest whose BH1
-  finding says its hook payload is `unmodeled`, also under a baseline, and
-  only when the report accounts for the row exactly. This covers only
-  manifests and hook evidence the scanner reports, without claiming coverage
-  for inline plugin-manifest hooks or other unreported hook locations.
-  SkillSpector records the same row for a manifest it read only in part:
-  with v2.13.4, whose row counts
-  the records it read, a manifest with a record that is not a parsed hook
-  declaration, such as a skipped handler or a permission rule, stays
-  `INCOMPLETE`; with v2.13.3, only a BH1 with 2,048 or more declarations does,
-  and a partly parsed manifest gets the Critical. The rest of the report is
-  judged as before: missing references and referenced images are still
-  accepted with their warnings under the rules above; the v2.13.3 missing-path
-  reference caveat that is accepted from the report alone does not apply
-  beside the hooks, because it reads the whole report. Any gap those rules do
-  not accept, such as a missing reference in a scan without a known target or
-  in a skill that `validate` or `security-scan` checks on its own inside a
-  folder or plugin, still records the SkillSpector scan as incomplete
-  (`incomplete_scans` in the JSON report, and publication eligibility
-  `Incomplete`), with an error that names only that gap. The check itself is
-  reported as `FAIL`, not `INCOMPLETE`, because the Critical is a confirmed
-  failure. With SkillSpector v2.13.4, a hook with a `"timeout"` key also gets
-  a `static_parse_limit` row on the manifest, so that scan is recorded as
-  incomplete in the same way.
 
 - Tier 3 HTML evaluator cards now say when a judge metric's lift left out cases
   whose arms were scored by different judge models, for example after a judge

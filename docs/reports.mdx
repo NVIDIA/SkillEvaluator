@@ -560,7 +560,12 @@ completed run directly:
   fit the [evidence budget](/skills/skillevaluator/tier3-live-evaluation#evidence-budgets) or, for
   `behavior_check`, the final-response section limit
   (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`). For `behavior_check`, the
-  record's `reason` names each setting that applied.
+  record's `reason` names each setting that applied, and
+  `incomplete_sections`, `required_complete` and `required_missing` say which
+  evidence did not reach the judge whole. A `behavior_check` whose required
+  evidence is incomplete is reported as an evaluation error with no score,
+  which also leaves the trial's `overall_score` null; see
+  [evidence budgets](/skills/skillevaluator/tier3-live-evaluation#evidence-budgets).
 - **`<agent>/baseline_timeout_tolerance.json`** — written only for an agent
   kept scored by `--tolerate-baseline-timeouts`: the baseline attempts that hit
   the agent execution timeout. `result.json` carries the same record as

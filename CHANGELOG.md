@@ -445,11 +445,10 @@ All notable changes to SkillEvaluator are documented in this file.
   run`). A missing SkillSpector or a rejected baseline under `--llm` still
   gets the scanner fix, and a `SKILLSPECTOR_PROVIDER` adapter set directly
   gets advice for its own key instead of the public provider's. The summary
-  row now counts the named checks shown above it, plus their sub-checks
-  (`9/9 checks passed (24 sub-checks)`), instead of validators (`11/11
-  passed`). After `--fail-fast` stops the run, the checks it never reached
-  count as `not run`, and `--skip secrets` inside a check that still ran
-  counts as skipped.
+  row now also gives the sub-check count (`9/10 checks passed (22
+  sub-checks)`). It counts validators, as the `Tier 1: 9 of 10 checks passed`
+  verdict line under it does, so the two agree, including with `--skip` and
+  `--fail-fast`.
 
 - `skillevaluator view` no longer asks the LLM again when it regenerates a
   missing `report.html` for a Tier 3 run that saved its report feedback in

@@ -51,7 +51,7 @@ def test_skipped_check_is_visible_in_tier1_summary():
     assert "unicode  with --skip, not checked" in text
 
 
-def test_skip_inside_a_check_that_ran_still_counts_as_skipped():
+def test_skip_secrets_inside_code_integrity_counts_as_skipped():
     from skillevaluator.models.result import ValidationResult
 
     results = [
@@ -64,7 +64,7 @@ def test_skip_inside_a_check_that_ran_still_counts_as_skipped():
     ]
     _ok, rows = summarize_tier1(results, lineup=["code-integrity"])
     text = "\n".join("".join(seg for seg, _style in row.segments) for row in rows)
-    assert "1/1 checks passed  ·  1 skipped" in text
+    assert "2/2 checks passed  ·  1 skipped" in text
     assert "secrets  with --skip, not checked" in text
 
 

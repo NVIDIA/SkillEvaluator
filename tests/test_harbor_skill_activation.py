@@ -72,7 +72,18 @@ def test_unknown_or_malformed_evidence_does_not_assert_never_activated(unknown: 
 
 @pytest.mark.parametrize(
     "detail",
-    [{"should_trigger": False}, {"message": "No expected_skill -- skipped"}],
+    [
+        {"should_trigger": False},
+        # Rewards from earlier releases recorded an unlabelled case with a message and a 1.0 score.
+        {"message": "No expected_skill -- skipped"},
+        {"message": "Negative case, no skill identified"},
+        {
+            "score": None,
+            "status": "not_applicable",
+            "reason": "N/A: no expected_skill or should_trigger defined for this eval case",
+        },
+    ],
+    ids=("negative", "legacy-unlabelled", "legacy-negative-without-skill", "not-applicable"),
 )
 def test_negative_and_unlabelled_cases_do_not_count_as_activation_opportunities(detail: dict) -> None:
     negative = {"details": {"skill_execution": detail}}

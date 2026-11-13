@@ -438,3 +438,196 @@ def test_na_evaluator_reasons_name_the_dataset_field_and_its_legacy_name(tmp_pat
         reward: dict = {}
         mark_not_applicable(reward, metric)
         assert reward["details"][metric]["reason"] == reasons[metric]
+
+
+def test_with_skill_na_skill_metrics_name_the_eval_case_not_a_missing_skill(tmp_path):
+    # Cases that name no expected_skill leave both skill metrics N/A even with the skill installed.
+    skill_metrics = ("skill_execution", "skill_efficiency")
+    root = _uniform_run(tmp_path, with_na=skill_metrics, baseline_na=skill_metrics)
+
+    payload = _report(root)
+
+    reasons = {item["id"]: item["reason"] for item in payload["not_applicable_evaluators"]}
+    assert reasons == {
+        "skill_execution": "No expected_skill defined, so the eval case names no skill to discover or run",
+        "skill_efficiency": "Negative case or no expected_skill defined, so there is no skill use to measure",
+    }
+    dimensions = {row["id"] for row in payload["agents"]["codex"]["dimensions"]}
+    assert {"discoverability", "efficiency"}.isdisjoint(dimensions)
+    assert {item["id"] for item in payload["not_applicable_dimensions"]} == {"discoverability", "efficiency"}
+    # No with-skill Discoverability or Efficiency score, so the agent cannot PASS.
+    assert payload["verdict"] == VERDICT_NEUTRAL
+
+
+SKILL_METRICS = ("skill_execution", "skill_efficiency")
+
+
+def _trial_row(case, *, has_skill, na=(), reason="N/A: no skill under test installed", **scores):
+    """A verifier reward scoring 0.5 on every metric but *scores*, with *na* recorded as N/A."""
+    row = dict.fromkeys(DEFAULT_METRICS, 0.5)
+    row.update(scores)
+    row.update(entry_id=case, metric_set=DEFAULT_METRIC_SET, score_policy=DEFAULT_SCORE_POLICY, has_skill=has_skill)
+    row["details"] = {}
+    for metric in na:
+        row[metric] = None
+        row["details"][metric] = {"score": None, "status": "not_applicable", "reason": reason}
+    return row
+
+
+def _write_job(job, rows):
+    """Write a Harbor job with one trial per row: numeric ``reward.json`` plus the verifier's sidecar."""
+    trial_names = []
+    for row in rows:
+        trial = f"{row['entry_id']}__attempt1"
+        trial_names.append(trial)
+        verifier = job / trial / "verifier"
+        verifier.mkdir(parents=True)
+        numeric = {key: value for key, value in row.items() if isinstance(value, float)}
+        numeric["overall"] = overall_score(row)
+        (verifier / "reward.json").write_text(json.dumps(numeric), encoding="utf-8")
+        (verifier / "skill_evaluator_reward.json").write_text(json.dumps(row), encoding="utf-8")
+    stats = {
+        "n_completed_trials": len(trial_names),
+        "n_errored_trials": 0,
+        "n_running_trials": 0,
+        "n_pending_trials": 0,
+        "n_cancelled_trials": 0,
+        "n_retries": 0,
+        "evals": {
+            "agent__model___harbor-tasks": {
+                "n_trials": len(trial_names),
+                "n_errors": 0,
+                "reward_stats": {"reward": {"0.1": trial_names}},
+            }
+        },
+    }
+    (job / "result.json").write_text(json.dumps({"n_total_trials": len(trial_names), "stats": stats}), encoding="utf-8")
+
+
+def _collect(tmp_path, cases, **options):
+    from skillevaluator.tier3.harbor.collector import collect_harbor_results
+
+    collect_harbor_results(
+        skill_name="demo",
+        agents=["codex"],
+        output_dir=tmp_path / "results",
+        jobs_dir=tmp_path / "jobs",
+        expected_cases=len(cases),
+        expected_case_ids=list(cases),
+        expected_trials=len(cases),
+        **options,
+    )
+    return _report(tmp_path / "results")
+
+
+@pytest.mark.parametrize("baseline_only", [True, False], ids=["baseline-only", "paired-arms"])
+@pytest.mark.parametrize("view", ["saved-report", "html"])
+def test_staged_negative_baseline_na_explains_case_context_in_saved_report_and_html(tmp_path, baseline_only, view):
+    from skillevaluator.models import ValidationResult
+    from skillevaluator.reporting import HTMLReporter
+    from skillevaluator.tier3.eval_core import checks
+    from skillevaluator.tier3.harbor.templates.eval import skill_metrics_applicable
+
+    entry = {"has_skill": False, "workspace_skill_names": ["demo"], "evaluated_skill": "demo", "expected_skill": None}
+    should_trigger = checks.resolve_should_trigger(entry)
+    assert skill_metrics_applicable(
+        entry["has_skill"],
+        should_trigger,
+        entry["expected_skill"],
+        evaluated_skill=entry["evaluated_skill"],
+        workspace_skill_names=entry["workspace_skill_names"],
+    )
+    execution = checks.score_skill_execution(
+        [], entry["expected_skill"], should_trigger=should_trigger, evaluated_skill=entry["evaluated_skill"]
+    )
+    efficiency = checks.score_skill_efficiency([], entry["expected_skill"], should_trigger=should_trigger)
+    assert execution["score"] == 1.0
+    assert efficiency["score"] is None and efficiency["details"]["status"] == "not_applicable"
+    row = _trial_row("negative", has_skill=False, na=("skill_efficiency",), skill_execution=execution["score"])
+    row.update(entry)
+    row["details"]["skill_execution"] = execution["details"]
+    row["details"]["skill_efficiency"] = {"score": None, **efficiency["details"]}
+    _write_job(tmp_path / "jobs" / "demo-codex-without", [row])
+    if not baseline_only:
+        _write_job(tmp_path / "jobs" / "demo-codex-with", [{**row, "has_skill": True}])
+
+    payload = _collect(tmp_path, ("negative",), skip_with_skill=baseline_only)
+
+    agent = payload["agents"]["codex"]
+    assert agent["evaluators"]["skill_execution"]["baseline"] == 1.0
+    assert agent["evaluators"]["skill_execution"]["baseline_status"] == "scored"
+    assert agent["evaluators"]["skill_efficiency"]["baseline"] is None
+    assert agent["evaluators"]["skill_efficiency"]["baseline_status"] == "not_applicable"
+    dimensions = {item["id"]: item for item in agent["dimensions"]}
+    assert dimensions["discoverability"]["baseline"] == 1.0
+    assert {item["id"] for item in payload["not_applicable_dimensions"]} == {"efficiency"}
+    reason = next(item["reason"] for item in payload["not_applicable_evaluators"] if item["id"] == "skill_efficiency")
+    if view == "saved-report":
+        assert "case" in reason.lower()
+        assert "no skill under test installed" not in reason.lower()
+        return
+
+    result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Live evaluation")
+    result.metadata["agent_eval"] = payload
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    assert "skill_efficiency" in html
+    assert reason in html
+    assert "no skill under test installed" not in html.lower()
+
+
+def test_baseline_only_run_explains_both_arm_and_case_skill_na(tmp_path):
+    # --skip-with-skill scores only the baseline, which has no skill under test installed.
+    cases = ("a", "b")
+    _write_job(
+        tmp_path / "jobs" / "demo-codex-without",
+        [_trial_row(case, has_skill=False, na=SKILL_METRICS) for case in cases],
+    )
+
+    payload = _collect(tmp_path, cases, skip_with_skill=True)
+
+    assert payload["mode"] == "baseline_only"
+    reasons = {item["id"]: item["reason"] for item in payload["not_applicable_evaluators"]}
+    assert reasons == {
+        "skill_execution": "No applicable skill is available in this arm, or the eval case names no expected_skill",
+        "skill_efficiency": "No applicable skill is available in this arm, or the case is negative or names no expected_skill",
+    }
+    assert {item["id"] for item in payload["not_applicable_dimensions"]} == {"discoverability", "efficiency"}
+
+
+def test_all_negative_dataset_scores_discoverability_but_cannot_pass_without_efficiency(tmp_path):
+    # Every case is negative, as in a run filtered to the negative cases: the negative check still
+    # scores Discoverability, but no case gives Efficiency a skill use to measure.
+    cases = ("n1", "n2")
+    with_skill = []
+    for case in cases:
+        row = _trial_row(
+            case,
+            has_skill=True,
+            na=("skill_efficiency",),
+            reason="N/A: negative case, so there is no skill use to measure",
+            # Goals met and no security finding, so only the N/A dimension can stop a PASS.
+            security=1.0,
+            accuracy=0.9,
+            skill_execution=1.0,
+            goal_accuracy=1.0,
+            behavior_check=0.9,
+        )
+        row["details"]["skill_execution"] = {"negative_check": {"passed": True, "score": 1.0}, "should_trigger": False}
+        with_skill.append(row)
+    _write_job(tmp_path / "jobs" / "demo-codex-with", with_skill)
+    _write_job(
+        tmp_path / "jobs" / "demo-codex-without",
+        [_trial_row(case, has_skill=False, na=SKILL_METRICS) for case in cases],
+    )
+
+    payload = _collect(tmp_path, cases)
+
+    assert payload["mode"] == "both"
+    dimensions = {row["id"]: row for row in payload["agents"]["codex"]["dimensions"]}
+    assert dimensions["discoverability"]["with_skill"] == pytest.approx(1.0)
+    assert "efficiency" not in dimensions
+    assert {item["id"] for item in payload["not_applicable_dimensions"]} == {"efficiency"}
+    assert {item["id"]: item["reason"] for item in payload["not_applicable_evaluators"]} == {
+        "skill_efficiency": "Negative case or no expected_skill defined, so there is no skill use to measure",
+    }
+    assert payload["verdict"] == VERDICT_NEUTRAL

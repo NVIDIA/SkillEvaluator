@@ -29,8 +29,11 @@ as a required gate. GitHub calls the hardened legacy scanner workflow at the
 same evaluator commit; GitLab runs the same digest-pinned scanner image.
 Static CI checks receive no model key. Tier 2 and Tier 3 execute independently
 and retain their own native evidence, so one tier's failure does not erase the
-other reports. Changes to onboarding configuration trigger a full Tier 1 scan
-so the setup review exercises actual skills.
+other reports. Changes to onboarding configuration trigger a full keyless
+Tier 1 scan so the setup review exercises actual skills. With `scan-mode: auto`,
+the provider-backed LLM Tier 1 pass, Tier 2 and Tier 3 run on a pull request only
+when it changes a skill. Eligible pushes and manual runs on the default branch
+run them for the whole collection.
 
 Existing released Tier 1-only consumers keep their current workflow and
 bundled image pins. See [GitHub Actions](github-actions.mdx) or

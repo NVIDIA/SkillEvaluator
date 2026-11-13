@@ -1970,8 +1970,11 @@ class HTMLReporter(ReporterBase):
         reporters with different options can share it. Jinja environments are
         safe to share between threads once they are configured.
         """
+        from skillevaluator.skillspector_references import reference_summary_message
+
         loader = PackageLoader("skillevaluator.reporting", "templates")
         environment = Environment(loader=loader, autoescape=True)
+        environment.filters["skillspector_reference_summary"] = reference_summary_message
         environment.filters["cleanly_skipped"] = is_cleanly_skipped
         environment.filters["execution_status"] = _result_display_status
         environment.filters["related_paths"] = _related_paths
@@ -2047,7 +2050,9 @@ class HTMLReporter(ReporterBase):
         if self.target_path:
             tp = Path(self.target_path)
             if (tp / "SKILL.md").exists() or (tp / "skill.md").exists():
-                return tp.name
+                # ``.`` and ``..`` (``tier1 .`` from inside the skill folder) have
+                # no folder name of their own; the folder they open does.
+                return (tp.resolve().name if tp.name in {"", ".", ".."} else tp.name) or None
 
         return None
 

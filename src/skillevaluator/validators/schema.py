@@ -31,6 +31,7 @@ from skillevaluator.constants import (
     SKILL_MANIFEST_VARIANTS,
     SKILL_MD_SIZE_THRESHOLDS,
     SKILL_NOT_SHIPPED_DIRS,
+    SPEC_SKILL_FIELDS,
 )
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Finding, Severity
@@ -820,6 +821,20 @@ class SchemaValidator(ValidatorBase):
                     f"~{DESCRIPTION_TRIGGER_WINDOW} characters in their skill list",
                     file_path,
                     f"State when to use the skill within the first {DESCRIPTION_TRIGGER_WINDOW} characters",
+                )
+            )
+
+        unknown = sorted(set(frontmatter.model_extra or {}) - SPEC_SKILL_FIELDS)
+        if unknown:
+            findings.append(
+                self._portability_finding(
+                    "unknown_field",
+                    Severity.LOW,
+                    f"Frontmatter field(s) outside the agentskills.io spec: {', '.join(unknown)}; "
+                    "agent harnesses do not pass them to the model",
+                    file_path,
+                    "Remove them or move them under 'metadata'",
+                    fields=unknown,
                 )
             )
 

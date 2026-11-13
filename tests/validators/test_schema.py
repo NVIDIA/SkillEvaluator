@@ -1705,6 +1705,14 @@ class TestSchemaPortabilityChecks:
         assert bool(findings) is expected
         assert all(f.severity == "low" for f in findings)
 
+    def test_unknown_top_level_fields_are_low(self, tmp_path: Path):
+        fm = _BASE_FM + "owner: team-x\nversion: 1.0.0\nlicense: MIT\nallowed-tools: Read\n"
+        result = SchemaValidator().validate(_write_skill(tmp_path, fm))
+
+        findings = _checks(result, "unknown_field")
+        assert result.passed, result.errors
+        assert [f.metadata["fields"] for f in findings] == [["owner", "version"]]
+
     def test_portability_severity_can_be_overridden_by_policy(self, tmp_path: Path):
         from skillevaluator.validators.policy import ValidationPolicy
 

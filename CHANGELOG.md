@@ -12,6 +12,10 @@ All notable changes to SkillEvaluator are documented in this file.
   comment helpers, and needs no Pages configuration or history branch. Future
   generated bundles include the template; archived bundles and the released
   onboarding CLI retain their existing hosted publisher setup.
+- `harness` rules for invocation fields: `disable-model-invocation`, Codex's
+  `agents/openai.yaml` policy, `allowed-tools`, Claude Code-only fields and Hermes
+  project trust. Tier 1 `schema` now reports fields outside the agentskills.io
+  spec (LOW).
 - `harness` rules for placeholders: price-like `$N` text that Claude Code and
   OpenCode replace with arguments (with line numbers), and `$ARGUMENTS` and
   `${CLAUDE_SKILL_DIR}`, which only Claude Code substitutes.

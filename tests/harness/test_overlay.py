@@ -415,6 +415,23 @@ def test_bundle_files_symlinks_and_large_references(tmp_path: Path):
     assert "OC-REF-CUT" in _ids(rows, "opencode")
 
 
+def test_disable_model_invocation_is_ignored_by_three_harnesses(tmp_path: Path):
+    rows = _rows(_skill(tmp_path, extra="disable-model-invocation: true\n"))
+
+    flagged = {h for h, r in rows.items() if any(f["id"].endswith("DMI-IGNORED") for f in r["findings"])}
+    assert flagged == {"codex", "hermes", "opencode"}
+
+
+def test_codex_implicit_policy_is_codex_only(tmp_path: Path):
+    skill = _skill(tmp_path)
+    (skill / "agents").mkdir()
+    (skill / "agents" / "openai.yaml").write_text("policy:\n  allow_implicit_invocation: false\n")
+    rows = _rows(skill)
+
+    flagged = {h for h, r in rows.items() if any(f["id"].endswith("CODEX-POLICY") for f in r["findings"])}
+    assert flagged == set(HARNESSES) - {"codex"}
+
+
 def test_claude_placeholders_reach_other_harnesses_literally(tmp_path: Path):
     rows = _rows(_skill(tmp_path, body=BODY + "Run ${CLAUDE_SKILL_DIR}/run.sh $ARGUMENTS\n"))
 
@@ -422,6 +439,19 @@ def test_claude_placeholders_reach_other_harnesses_literally(tmp_path: Path):
         assert any(f["id"].endswith("-ARGUMENTS") for f in rows[harness]["findings"]), harness
         assert any(f["id"].endswith("-SKILL-DIR") for f in rows[harness]["findings"]), harness
     assert not rows["claude-code"]["findings"]
+
+
+def test_gating_and_claude_only_fields(tmp_path: Path):
+    extra = 'argument-hint: "<file>"\nplatforms: [macos]\n'
+    skill = _skill(tmp_path, extra=extra)
+    manifest = skill / "SKILL.md"
+    manifest.write_text(
+        manifest.read_text().replace("  author:", '  openclaw: {"requires": {"bins": ["pdftotext"]}}\n  author:')
+    )
+    rows = _rows(skill)
+
+    assert "OC-CLAUDE-ONLY" in _ids(rows, "opencode")
+    assert not any(f["id"].endswith("CLAUDE-ONLY") for f in rows["claude-code"]["findings"])
 
 
 def test_every_rule_has_a_fix_and_placeholders_are_filled(tmp_path: Path):

@@ -6,6 +6,17 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Tier 3 `validate-grader --qualification-policy FILE` supports explicit,
+  assessment-only metric/class/category coverage and risk limits, provider-free
+  preflight checks, retained not-run receipts for insufficient labels, final
+  policy decisions and tracked verifier-source Git provenance. The experimental
+  example is opt-in and fails bundled-suite class coverage; it establishes no
+  live reliability or release approval. Resource comparison metadata and HTML
+  also explain that observed consumption includes task failures, lower usage
+  alone does not establish better Efficiency or quality, pairing does not certify
+  equal concurrency/budget or judge-model agreement, and reused telemetry is
+  historical. Scoring, raw deltas and reuse eligibility are unchanged.
+
 - Add an `error_handling` section to the `--quality-config` file for
   Reliability's three error-handling rules: the `SKILL.md` mention check and
   the `scripts` and `lib` code checks. Each sets `points`, `message`,

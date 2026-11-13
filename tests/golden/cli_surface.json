@@ -4130,6 +4130,14 @@
               ],
               "param_type": "option",
               "type": "float range"
+            },
+            {
+              "name": "qualification_policy",
+              "opts": [
+                "--qualification-policy"
+              ],
+              "param_type": "option",
+              "type": "path"
             }
           ]
         },

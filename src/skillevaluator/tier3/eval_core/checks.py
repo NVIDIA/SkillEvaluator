@@ -1078,10 +1078,13 @@ def _shell_write_scans(text: str) -> tuple[str, list[tuple[str, int, int]]]:
         text,
     )
     # A quoted string's content starts after its "'", '"' or "$'".
+    # No zip(strict=): the verifier also runs on Python 3.9 task images.
+    # _shell_text_regions returns its quoted strings and lines as start, end pairs.
     contents = [
-        (start + 1 + (text[start] == "$"), end - 1) for start, end in zip(quoted[::2], quoted[1::2], strict=True)
+        (start + 1 + (text[start] == "$"), end - 1)
+        for start, end in zip(quoted[::2], quoted[1::2])  # noqa: B905 -- zip(strict=) needs Python 3.10
     ]
-    line_spans = list(zip(lines[::2], lines[1::2], strict=True))
+    line_spans = list(zip(lines[::2], lines[1::2]))  # noqa: B905 -- zip(strict=) needs Python 3.10
 
     def rewritten(source: str, spans: list[tuple[int, int]], rewrite: Callable[[str], str]) -> str:
         parts: list[str] = []
@@ -1392,7 +1395,8 @@ def _protected_write_entry(target: str, workdir: str | None) -> str | None:
     # ".npmrc" or ".claude/settings.json", so they match only the first path.
     candidates = [
         (candidate, is_anchored, index > 0)
-        for index, (path, is_anchored) in enumerate(zip(paths, anchored, strict=True))
+        # anchored has one entry per path; no zip(strict=) on the verifier's Python 3.9.
+        for index, (path, is_anchored) in enumerate(zip(paths, anchored))  # noqa: B905
         for candidate in (path, _HOME_DIR_PREFIX_RE.sub("~", path, count=1))
     ]
     for candidate, known, guessed in candidates:
@@ -2303,7 +2307,8 @@ def _license_notice_comments(text: str, lines: list[str], starts: list[int]) -> 
         i in body_lines or i in headers or not line.strip() or (i in clear and _COMMENT_LINE_RE.match(line))
         for i, line in enumerate(lines)
     )
-    for region, ((line_end, end), (first, last)) in enumerate(zip(spans, bounds, strict=True), start=1):
+    # bounds is built from spans; no zip(strict=) on the verifier's Python 3.9.
+    for region, ((line_end, end), (first, last)) in enumerate(zip(spans, bounds), start=1):  # noqa: B905
         header = headers[first]
         if (
             header is None

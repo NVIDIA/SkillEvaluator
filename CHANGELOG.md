@@ -464,6 +464,12 @@ All notable changes to SkillEvaluator are documented in this file.
   preserves source files and retained role logs; local whole-log-tree transfers
   fail before modifying their destination.
 
+- Local mode applies the run-directory check to every directory download. The
+  excluded and filtered downloads skipped it, so a source such as
+  `/workspace/../../outside` was not refused before Harbor ran `tar` or `find`
+  on it. It now fails with the same error as `download_dir`, and sources inside
+  the run directory are unchanged.
+
 - Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
   the PR or merge request's target revision. Policy files from the proposed
   changes cannot approve their own exceptions.

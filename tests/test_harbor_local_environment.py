@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
+from harbor.environments.base import BaseEnvironment
 from harbor.models.task.config import ArtifactConfig, EnvironmentConfig
 from harbor.models.task.task import Task
 from harbor.models.trial.config import AgentConfig
@@ -246,6 +247,104 @@ def test_local_parent_logs_transfers_fail_before_mutating_files(
     asyncio.run(exercise())
     assert marker.read_text() == "previous download"
     assert role_log.read_text() == "retained role log"
+
+
+def _record_harbor_directory_downloads(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Replace Harbor's tar/find downloads so a test sees whether they were reached."""
+    reached: list[tuple[str, str]] = []
+
+    async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
+        reached.append(("excluded", source_dir))
+
+    async def download_dir_filtered(self, *, source_dir, target_dir, include=None, exclude=None, protect=None):
+        reached.append(("filtered", source_dir))
+
+    monkeypatch.setattr(BaseEnvironment, "download_dir_with_exclusions", download_dir_with_exclusions)
+    monkeypatch.setattr(BaseEnvironment, "download_dir_filtered", download_dir_filtered)
+    return reached
+
+
+async def _download_directory(
+    environment: SkillEvaluatorLocalEnvironment,
+    transfer: str,
+    source: str,
+    target: Path,
+) -> None:
+    if transfer == "download":
+        await environment.download_dir(source, target)
+    elif transfer == "excluded":
+        await environment.download_dir_with_exclusions(source_dir=source, target_dir=target, exclude=["*.log"])
+    else:
+        await environment.download_dir_filtered(source_dir=source, target_dir=target, include=["*.txt"])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Native Windows local mode is unsupported")
+@pytest.mark.parametrize("transfer", ["download", "excluded", "filtered"])
+@pytest.mark.parametrize("spelling", ["workspace", "logs", "home", "relative", "absolute"])
+def test_local_directory_downloads_reject_sources_outside_the_run_directory(
+    local_output_environment: SkillEvaluatorLocalEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    transfer: str,
+    spelling: str,
+) -> None:
+    """Every directory download applies the allowed-roots check, not only download_dir."""
+    environment = local_output_environment
+    reached = _record_harbor_directory_downloads(monkeypatch)
+    outside = tmp_path.resolve() / "outside"
+    outside.mkdir()
+    secret = outside / "secret.txt"
+    secret.write_text("not for the run directory", encoding="utf-8")
+    # A ".." path through a mapped prefix is what resolve() has to collapse; a
+    # plain absolute path is refused while the path is being resolved.
+    mapped = {
+        "workspace": ("/workspace", environment._workspace),
+        "logs": ("/logs", environment._logs_dir),
+        "home": ("~", environment._home),
+        "relative": ("", environment._workspace),
+    }
+    if spelling == "absolute":
+        source = str(outside)
+    else:
+        prefix, host_base = mapped[spelling]
+        relative = os.path.relpath(outside, host_base)
+        assert relative.startswith("..")
+        source = f"{prefix}/{relative}" if prefix else relative
+    target = tmp_path / "downloaded"
+
+    with pytest.raises(ValueError, match=r"outside the (local )?run directory"):
+        asyncio.run(_download_directory(environment, transfer, source, target))
+
+    assert reached == []
+    assert not target.exists()
+    assert secret.read_text(encoding="utf-8") == "not for the run directory"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Native Windows local mode is unsupported")
+@pytest.mark.parametrize("transfer", ["download", "excluded", "filtered"])
+def test_local_directory_downloads_still_accept_sources_inside_the_run_directory(
+    local_output_environment: SkillEvaluatorLocalEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    transfer: str,
+) -> None:
+    environment = local_output_environment
+    reached = _record_harbor_directory_downloads(monkeypatch)
+    kept = environment._workspace / "kept"
+    kept.mkdir(parents=True)
+    (kept / "answer.txt").write_text("inside", encoding="utf-8")
+    (environment._workspace / "skills").mkdir()
+    # ".." that stays inside the run directory is fine; only escaping it is not.
+    source = "/workspace/skills/../kept"
+    target = tmp_path / "downloaded"
+
+    asyncio.run(_download_directory(environment, transfer, source, target))
+
+    if transfer == "download":
+        assert reached == []
+        assert (target / "answer.txt").read_text(encoding="utf-8") == "inside"
+    else:
+        assert reached == [(transfer, source)]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Native Windows local mode is unsupported")

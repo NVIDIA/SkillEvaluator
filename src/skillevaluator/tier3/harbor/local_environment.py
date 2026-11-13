@@ -850,11 +850,18 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
 
-    async def download_dir(self, source_dir: str, target_dir: Path | str) -> None:
+    def _resolve_download_dir_source(self, source_dir: str) -> Path:
+        # Every directory download goes through here, including the Harbor
+        # tar/find based variants, so a ".." path through a mapped prefix
+        # cannot reach outside the run directory.
         source = self._resolve_path(source_dir)
         if not self._path_is_within_allowed_local_roots(source):
             raise ValueError(f"local mode download source is outside the run directory: {source_dir}")
         self._reject_logs_parent_transfer(source)
+        return source
+
+    async def download_dir(self, source_dir: str, target_dir: Path | str) -> None:
+        source = self._resolve_download_dir_source(source_dir)
         target = Path(target_dir)
         if target.exists():
             shutil.rmtree(target)
@@ -867,7 +874,7 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         target_dir: Path | str,
         exclude: list[str],
     ) -> None:
-        self._reject_logs_parent_transfer(self._resolve_path(source_dir))
+        self._resolve_download_dir_source(source_dir)
         await super().download_dir_with_exclusions(source_dir=source_dir, target_dir=target_dir, exclude=exclude)
 
     async def download_dir_filtered(
@@ -879,7 +886,7 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         exclude: Sequence[str] | None = None,
         protect: Sequence[str] | None = None,
     ) -> None:
-        self._reject_logs_parent_transfer(self._resolve_path(source_dir))
+        self._resolve_download_dir_source(source_dir)
         await super().download_dir_filtered(
             source_dir=source_dir, target_dir=target_dir, include=include, exclude=exclude, protect=protect
         )

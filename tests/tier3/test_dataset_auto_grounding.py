@@ -674,7 +674,21 @@ def test_auto_rejects_heading_and_comment_only_guidance(tmp_path, monkeypatch, s
 
 
 @pytest.mark.parametrize("use_llm", [False, True])
-@pytest.mark.parametrize("authored_truth", [None, "The agent used the sample-skill skill; keep this human expectation"])
+@pytest.mark.parametrize(
+    "authored_truth",
+    [
+        None,
+        "The agent used the sample-skill skill; keep this human expectation",
+        {"answer": 42},
+        [42],
+        0,
+        False,
+        [],
+        {},
+        {"answer": {"steps": [42, 0, False, "Read SKILL.md"]}},
+    ],
+    ids=["inferred", "string", "dict", "list", "zero", "false", "empty-list", "empty-dict", "nested"],
+)
 def test_auto_trace_filters_only_inferred_skill_use_ground_truth(tmp_path, monkeypatch, use_llm, authored_truth):
     from skillevaluator.inference.client import LLMClient
 
@@ -750,6 +764,7 @@ def test_auto_trace_filters_only_inferred_skill_use_ground_truth(tmp_path, monke
         assert validation.exit_code == 0, validation.output
     else:
         assert case["expected_output"] == authored_truth
+        assert type(case["expected_output"]) is type(authored_truth)
         assert "The agent read SKILL.md" in case["assertions"]
         assert case["files"] == ["files/invoices.csv"]
         assert result.dataset["owner"] == "human"

@@ -1122,6 +1122,11 @@ def _run_agent_collect_trajectories(
     return discovered[0] if isinstance(discovered, tuple) else discovered
 
 
+def _has_authored_ground_truth(value: Any) -> bool:
+    """Only null and blank strings leave an authored expected outcome unspecified."""
+    return value is not None and (not isinstance(value, str) or bool(value.strip()))
+
+
 async def _refine_with_llm(
     skill: dict[str, Any],
     cases: list[dict[str, Any]],
@@ -1278,7 +1283,7 @@ Return ONLY the refined JSON array. No other text."""
             ground_truth = authored.get("ground_truth") if is_authored else None
             proposed = case.get("ground_truth")
             final_message = _extract_agent_final_message(trajectory) if trajectory is not None else ""
-            if isinstance(ground_truth, str) and ground_truth.strip():
+            if _has_authored_ground_truth(ground_truth):
                 if trajectory is not None and proposed != ground_truth:
                     _mark_case_for_review(case, "agent answer differs from authored ground truth")
                 case["ground_truth"] = ground_truth
@@ -1446,8 +1451,9 @@ def _refine_from_trajectory_template(
         if final_msg:
             truncated = final_msg[:400] if len(final_msg) > 400 else final_msg
             ground_truth = case.get("ground_truth") if is_authored else None
-            if isinstance(ground_truth, str) and ground_truth.strip():
-                if truncated.strip() != ground_truth.strip():
+            if _has_authored_ground_truth(ground_truth):
+                comparable_truth = ground_truth.strip() if isinstance(ground_truth, str) else ground_truth
+                if truncated.strip() != comparable_truth:
                     _mark_case_for_review(case, "agent answer differs from authored ground truth")
                 case["ground_truth"] = ground_truth
             else:
@@ -1934,7 +1940,7 @@ Agent-refined mode (--refine):
                     authored_truth = authored_truths.get(case["id"])
                     inferred_truth = case.get("ground_truth")
                     if (
-                        not (isinstance(authored_truth, str) and authored_truth.strip())
+                        not _has_authored_ground_truth(authored_truth)
                         and isinstance(inferred_truth, str)
                         and evals_spec._skill_use_match(inferred_truth, skill["name"], _script_file_names(skill))
                     ):

@@ -136,11 +136,23 @@ def _run_verdict_agents(agents: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     complete = [raw for raw in raw_agents if not kept_with_failed_baseline(raw)]
     if len(complete) == len(raw_agents):
         return raw_agents
-    from skillevaluator.evaluation.tier3_report import _canonical_agent_rank_from_info
-
-    if any(_canonical_agent_rank_from_info(dict(raw)) is not None for raw in complete):
+    if any(_ranks_like_the_canonical_report(raw) for raw in complete):
         return complete
     return raw_agents
+
+
+def _ranks_like_the_canonical_report(raw: Mapping[str, Any]) -> bool:
+    """Return whether the canonical report ranks the raw agent data ``raw``.
+
+    Data the canonical report cannot read, such as a string in place of a
+    score map, does not rank, so the printed summary stays readable.
+    """
+    from skillevaluator.evaluation.tier3_report import _canonical_agent_rank_from_info
+
+    try:
+        return _canonical_agent_rank_from_info(dict(raw)) is not None
+    except (AttributeError, TypeError, ValueError):
+        return False
 
 
 def _condition_usable(data: Mapping[str, Any], variant: str) -> bool:

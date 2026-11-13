@@ -885,6 +885,33 @@ def test_verdict_comes_from_the_complete_peer_not_a_tolerated_agent(
     )
 
 
+@pytest.mark.parametrize("field", ["with_skill", "without_skill", "dimensions_with_skill"])
+def test_printed_verdict_reads_every_agent_when_the_complete_peer_cannot_rank(tmp_path: Path, field: str) -> None:
+    from skillevaluator.tier3.result_display import render_result
+
+    # opencode passes and is tolerated. codex completes both arms, but its
+    # persisted scores are not a map, so it cannot rank and does not set the
+    # tolerated agent aside: the printed verdict reads every agent, and the
+    # summary still renders.
+    passing = {**SCORES, "goal_accuracy": 1.0}
+    jobs = tmp_path / "jobs"
+    _arm(jobs, "opencode", "with", [(case, "scored") for case in CASES], scores=passing, details=_activation(True))
+    _arm(jobs, "opencode", "without", [("case-001", "scored"), ("case-002", "timeout")])
+    _arm(jobs, "codex", "with", [(case, "scored") for case in CASES], details=_activation(True))
+    _arm(jobs, "codex", "without", [(case, "scored") for case in CASES])
+    results = _collect(tmp_path, [LAUNCH_ERROR.format(agent="opencode", count=1)])
+    assert results[RUN_KEY]["tolerated_agents"] == ["opencode"]
+    results.update({"skill_name": SKILL, "run_dir": str(tmp_path / "results")})
+    results["agents"]["codex"][field] = "not a score map"
+
+    terminal = render_result(results)
+
+    assert "Tier 3 Evaluation: DEGRADED" in terminal
+    assert [line.strip() for line in terminal.splitlines() if line.startswith("RUN QUALITY VERDICT:")] == [
+        "RUN QUALITY VERDICT: PASS"
+    ]
+
+
 def test_verdict_counts_come_from_a_complete_agent_that_set_the_verdict(tmp_path: Path) -> None:
     # claude-code passes everything but its baseline timed out. opencode has the
     # top score but misses a goal (FAIL), so the best agent's own result is not

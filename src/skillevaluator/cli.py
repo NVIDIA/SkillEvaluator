@@ -1197,12 +1197,19 @@ def _run_agent_eval_or_skip(
 
 
 def _attach_plugin_report(result: ValidationResult, engine_result: object) -> ValidationResult:
-    """Keep passive plugin evidence even when canonical score normalization fails."""
+    """Keep passive plugin evidence even when canonical score normalization fails.
+
+    A prepared package that was incomplete makes the result incomplete too.
+    """
     if isinstance(engine_result, dict):
         if "plugin_runtime_report" in engine_result:
             result.metadata["plugin_runtime_report"] = engine_result["plugin_runtime_report"]
         if isinstance(engine_result.get("plugin_inventory"), dict):
             result.metadata.setdefault("plugin", engine_result["plugin_inventory"])
+        provenance = engine_result.get("plugin_provenance")
+        if isinstance(provenance, dict) and provenance.get("complete") is False:
+            # Components the run could not stage or start keep this from being a complete plugin evaluation.
+            result.mark_scan_incomplete("plugin-components")
     return result
 
 

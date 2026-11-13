@@ -184,7 +184,13 @@ def prepare_runtime_package(
     for member in selected:
         if member.problem is not None:
             audit.append(AuditRow(member.type, member.name, member.path, f"unresolved: {member.problem}"))
-        elif member.type == "skill" and member.path:
+        elif member.type in {"skill", "rule"} and not member.path:
+            # A reference outside the plugin root has no content to stage. Keep
+            # it visible and never score the plugin as if it had loaded.
+            state = member.dependency_state or "unclassified"
+            audit.append(AuditRow(member.type, member.name, None, f"not staged: {state} reference"))
+            incomplete.append(f"{member.type} reference '{member.name}' was not staged ({state})")
+        elif member.type == "skill":
             if openclaw and member.path == ".":
                 audit.append(AuditRow("skill", member.name, member.path, OPENCLAW_ROOT_SKILL_REASON))
             else:
@@ -509,7 +515,7 @@ def build_native_source(
         rules=tuple(
             (member.name, member.text or "")
             for member in inventory.selected_components
-            if member.type == "rule" and not member.problem
+            if member.type == "rule" and member.path and not member.problem
         ),
         mcp_servers=tuple(portable_mcp),
         plugin_file_mcp_servers=tuple(plugin_file_mcp),

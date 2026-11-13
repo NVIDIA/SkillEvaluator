@@ -79,7 +79,9 @@ All notable changes to SkillEvaluator are documented in this file.
   catalogs, shared runtime options and loading adapters, MCP/behavior evidence,
   multi-arm comparisons, and static/runtime report hooks. Add `tier3 evaluate-plugin`
   and base-install `tier3 report-plugin` replay of retained snapshots, with setup-only
-  retry controls and published usage documentation.
+  retry controls and published usage documentation. Skill and rule references outside
+  the plugin root are not staged and mark the run incomplete, so a plugin with nothing
+  else to load fails closed.
 
 - A separate four-case synthetic grader pilot adds forbidden-startup-write and
   root-search challenges with quoted/read-only and scoped controls, an independent

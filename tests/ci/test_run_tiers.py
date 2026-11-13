@@ -909,6 +909,8 @@ def test_skill_without_valid_frontmatter_stops_the_catalog_with_a_frontmatter_re
 ):
     import contextlib
 
+    from ci.comment_summary import render_comment_summary
+
     from skillevaluator.embedding.registry import EmbeddingRegistry
 
     game = consumer / "skills" / "game"
@@ -939,11 +941,15 @@ def test_skill_without_valid_frontmatter_stops_the_catalog_with_a_frontmatter_re
     assert commands == ["catalog"]
     tier = json.loads((reports / "tier2/ci-tier.json").read_text(encoding="utf-8"))["tiers"][0]
     assert tier["status"] == "incomplete"
-    assert tier["reason"] == (
-        "The complete comparison catalog could not be built; a discovered skill has no root SKILL.md whose "
-        "frontmatter is a valid YAML mapping with a non-empty string name and description, and the catalog "
-        "diagnostics name it."
-    )
+    reason = "A skill's invalid SKILL.md frontmatter stopped the comparison catalog; its diagnostics name the skill."
+    assert tier["reason"] == reason
     log = (reports / "tier2/catalog/diagnostics/command.log").read_text(encoding="utf-8")
     assert "non-empty string name and description: skills/game" in log
     assert str(consumer) not in log
+    # The feedback comment cuts each cell to a fixed length; the whole reason,
+    # with its pointer to the catalog diagnostics, must survive that cut.
+    assert run_tiers.aggregate(reports, (2,), env) == 0
+    manifest = json.loads((reports / "ci-results.json").read_text(encoding="utf-8"))
+    body = render_comment_summary(manifest, "https://github.com/example/consumer/actions/runs/123/artifacts/9")
+    alpha = next(line for line in body.splitlines() if line.startswith("| skills/alpha |"))
+    assert alpha.split(" | ")[2] == f"INCOMPLETE · issues unknown · {reason}"

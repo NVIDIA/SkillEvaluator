@@ -484,10 +484,11 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
                     args, env=child, cwd=workspace, timeout=deadline - time.monotonic(), log=scratch / "catalog.log"
                 )
                 if catalog_status:
+                    # The PR/MR comment shows about 110 characters of a tier reason; the
+                    # cause and the pointer to the diagnostics must both fit.
                     row["reason"] = (
-                        "The complete comparison catalog could not be built; a discovered skill has no root SKILL.md "
-                        "whose frontmatter is a valid YAML mapping with a non-empty string name and description, "
-                        "and the catalog diagnostics name it."
+                        "A skill's invalid SKILL.md frontmatter stopped the comparison catalog; its diagnostics name "
+                        "the skill."
                         if catalog_status == INVALID_CATALOG_SKILL
                         else "The complete comparison catalog could not be built; inspect provider and embedding "
                         "configuration."

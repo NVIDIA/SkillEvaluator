@@ -112,12 +112,12 @@ uv run --python 3.13 skillevaluator quality-check ./my-skill \
 
 ### Add full static validation
 
-Full static Tier 1 coverage needs the `security` extra and the separate
+Full static Tier 1 coverage needs the separate
 Semgrep, SkillSpector, and Gitleaks executables. Follow
 [scanner setup](installation.mdx#system-tools), then run:
 
 ```bash title="Run the static Tier 1 suite"
-uv run --python 3.13 --extra security skillevaluator tier1 ./my-skill --no-llm
+uv run --python 3.13 skillevaluator tier1 ./my-skill --no-llm
 ```
 
 `--no-llm` disables model-backed stages; it does not remove scanner

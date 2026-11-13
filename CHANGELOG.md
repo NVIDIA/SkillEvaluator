@@ -40,6 +40,14 @@ All notable changes to SkillEvaluator are documented in this file.
   beside it and the failure is reported. After a timeout, the failed run still keeps
   the scores of the arms that finished.
 
+### Changed
+
+- Install Bandit with the base package, so `pip install skillevaluator` or
+  `uv tool install skillevaluator` runs every default Tier 1 check without an
+  extra. pip-audit, used only by the opt-in dependency audit
+  (`--check dependency`), stays in the `security` extra. The Bandit install hint
+  now says to reinstall SkillEvaluator.
+
 ### Documentation
 
 - A new Metrics Reference page defines every number the CLI, HTML report, JSON

@@ -6,6 +6,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from rich.console import Console
 
 from skillevaluator.tier3.case_summary import render_case_summary, verdict, what_to_fix
@@ -69,8 +70,29 @@ def test_grid_shows_one_row_per_case_with_attempt_marks_per_agent() -> None:
     rates = next(line for line in output.splitlines() if line.startswith("success rate"))
     assert "0% → 75%  ?" in rates and rates.rstrip().endswith("?")
     assert output.index("effectiveness") < output.index("security")
-    assert output.count("(without → with skill)") == 2 and "change in pass rate" in output
+    assert output.count("(without → with skill)") == 2 and "change in per-attempt success rate" in output
     assert "inconclusive" in output and "conditions cover different cases" in output
+
+
+def test_multi_agent_diagnostics_are_arm_labeled_after_rate_change() -> None:
+    from skillevaluator.tier3.case_summary import _agent_cell
+
+    with_case = {
+        "attempts": [{"attempt": 1, "trial": "case__attempt1", "score": 0.2, "passed": False, "reason": "goal missed"}]
+    }
+    without_case = {
+        "attempts": [
+            {"attempt": 1, "trial": "case__attempt1", "score": 0.2, "passed": False, "reason": "security issue"}
+        ]
+    }
+    output = _agent_cell(with_case, without_case, safe=str).plain
+
+    assert "FAIL: security issue" in output
+    assert "FAIL: goal missed" in output
+    assert output.index("No skill:") < output.index("FAIL: security issue")
+    assert output.index("FAIL: security issue") < output.index("With skill:")
+    assert output.index("With skill:") < output.index("FAIL: goal missed")
+    assert output.index("·") < output.index("No skill:")
 
 
 def test_verdict_thresholds() -> None:
@@ -82,6 +104,42 @@ def test_verdict_thresholds() -> None:
     assert verdict(hurts)[0] == "skill hurts"
     partial = {"a": _agent({"c": _case(True, missing=1)}, {"c": _case(False, False)})}
     assert verdict(partial) == ("inconclusive", "a: 1 attempt(s) did not run")
+
+
+def test_live_mark_merges_verifier_security_sidecar(tmp_path: Path) -> None:
+    from skillevaluator.tier3.case_summary import _live_mark
+
+    trial = tmp_path / "trial"
+    verifier = trial / "verifier"
+    verifier.mkdir(parents=True)
+    (trial / "result.json").write_text(
+        json.dumps(
+            {
+                "finished_at": "now",
+                "verifier_result": {"rewards": {"overall": 0.9, "security": 0.0, "goal_accuracy": 1.0}},
+            }
+        )
+    )
+    (verifier / "skill_evaluator_reward.json").write_text(
+        json.dumps(
+            {
+                "details": {
+                    "security": {
+                        "supported": False,
+                        "findings": [
+                            {
+                                "type": "unsupported_tool_wrapper",
+                                "score_impact": True,
+                                "message": "unsupported wrapper",
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+    )
+
+    assert _live_mark(trial, tmp_path, 0.5) == "✓"
 
 
 def test_what_to_fix_classifies_and_ranks_by_attempts_lost(tmp_path: Path) -> None:
@@ -346,6 +404,158 @@ def test_never_activated_scores_do_not_claim_a_skill_effect(tmp_path: Path) -> N
     output = render_result({"execution_status": "succeeded", "agents": {"a": agent}})
     assert "skill hurts" not in output
     assert "inconclusive" in output
+
+
+@pytest.mark.parametrize(
+    "negative_routing",
+    [{"expected_skill": None}, {"should_trigger": False, "expected_skill": "release-review"}],
+)
+def test_mixed_activation_miss_does_not_blame_passing_negative(tmp_path: Path, negative_routing: dict) -> None:
+    from skillevaluator.tier3.harbor.activation import summarize_skill_activation
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+
+    negative = {
+        **dict.fromkeys(DEFAULT_METRICS, 1.0),
+        "_trial_name": "n0",
+        "details": {"skill_execution": {"should_trigger": False, "negative_check": {"passed": True}}},
+    }
+    positive = {
+        **dict.fromkeys(DEFAULT_METRICS, 0.2),
+        "_trial_name": "p0",
+        "details": {"skill_execution": {"should_trigger": True, "activation": {"passed": False, "score": 0.0}}},
+    }
+    agent = _agent(
+        {"negative": _case(True, prefix="n"), "positive": _case(False, prefix="p")},
+        {"negative": _case(True), "positive": _case(False)},
+    )
+    agent["skill_activation"] = summarize_skill_activation([negative, positive])
+    (tmp_path / "dataset_snapshot.json").write_text(
+        json.dumps(
+            {
+                "dataset": [
+                    {"id": "negative", **negative_routing},
+                    {"id": "positive", "expected_skill": "release-review"},
+                ]
+            }
+        )
+    )
+    _trial(tmp_path, "a", "n0", negative)
+    _trial(tmp_path, "a", "p0", positive)
+
+    [fix] = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+
+    assert (fix["case"], fix["kind"], fix["attempts_lost"]) == ("positive", "skill not used", 1)
+    assert "frontmatter description" in fix["action"]
+    console = Console(record=True, width=160)
+    render_case_summary({"agents": {"a": agent}}, console=console, fixes=[fix])
+    advice = console.export_text().split("How to improve", 1)[1]
+    assert "positive" in advice and "negative" not in advice
+
+
+@pytest.mark.parametrize("activation_status", ["never_activated", "unknown"])
+@pytest.mark.parametrize("failure_kind", ["skill", "environment", "run error"])
+def test_failed_negative_keeps_task_diagnostics(tmp_path: Path, activation_status: str, failure_kind: str) -> None:
+    case = _case(missing=1) if failure_kind == "run error" else _case(False)
+    agent = _agent({"negative": case}, {})
+    agent["skill_activation"] = {"status": activation_status}
+    (tmp_path / "dataset_snapshot.json").write_text(
+        json.dumps({"dataset": [{"id": "negative", "should_trigger": False, "expected_skill": "release-review"}]})
+    )
+    if failure_kind == "run error":
+        trial = tmp_path / "a" / "with-skill" / "trials" / "negative__attempt1"
+        trial.mkdir(parents=True)
+        (trial / "failure.json").write_text(json.dumps({"error": {"type": "AgentTimeoutError", "message": "900s"}}))
+    else:
+        reward = _reward(False, "the answer omitted the requested total")
+        reward["details"]["skill_execution"]["should_trigger"] = False
+        observation = "ModuleNotFoundError: No module named 'pypdf'" if failure_kind == "environment" else ""
+        _trial(tmp_path, "a", "t0", reward, observation)
+
+    [fix] = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+
+    assert (fix["case"], fix["kind"], fix["attempts_lost"]) == ("negative", failure_kind, 1)
+    assert "frontmatter description" not in fix["action"]
+    if failure_kind == "environment":
+        assert "No module named 'pypdf'" in fix["what"]
+    elif failure_kind == "run error":
+        assert "AgentTimeoutError" in fix["what"]
+    else:
+        assert "omitted the requested total" in fix["what"]
+
+
+@pytest.mark.parametrize("snapshot", [None, "{broken", '{"dataset": [{"id": "c"}]}'])
+@pytest.mark.parametrize("activation_status", ["never_activated", "unknown"])
+def test_unlabeled_snapshot_preserves_legacy_activation_diagnosis(
+    tmp_path: Path, snapshot: str | None, activation_status: str
+) -> None:
+    agent = _agent({"c": _case(True)}, {})
+    agent["skill_activation"] = {"status": activation_status}
+    if snapshot is not None:
+        (tmp_path / "dataset_snapshot.json").write_text(snapshot)
+
+    fixes = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+
+    if activation_status == "never_activated":
+        [fix] = fixes
+        assert (fix["case"], fix["kind"], fix["attempts_lost"]) == ("c", "skill not used", 1)
+    else:
+        assert fixes == []
+
+
+@pytest.mark.parametrize("case_count", [20, 100])
+@pytest.mark.parametrize("agent_count", [1, 2])
+@pytest.mark.parametrize("scenario", ["passing", "mixed negative", "empty snapshot"])
+def test_case_advice_reads_snapshot_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case_count: int, agent_count: int, scenario: str
+) -> None:
+    from skillevaluator.utils.secure_fs import SecureRoot
+
+    case_ids = [f"case-{i:03d}" for i in range(case_count)]
+    entries = [
+        {"id": case_id, "should_trigger": bool(i % 2), "expected_skill": "release-review"}
+        for i, case_id in enumerate(case_ids)
+    ]
+    (tmp_path / "dataset_snapshot.json").write_text(
+        json.dumps({"dataset": [] if scenario == "empty snapshot" else entries})
+    )
+    cases = {case_id: _case(scenario != "mixed negative" or i % 2 == 0) for i, case_id in enumerate(case_ids)}
+    agents = {f"agent-{i}": _agent(cases, {}) for i in range(agent_count)}
+    for agent in agents.values():
+        agent["skill_activation"] = {"status": "unknown" if scenario == "passing" else "never_activated"}
+    snapshot_reads = 0
+    read_bytes = SecureRoot.read_bytes
+
+    def count_reads(self, path, *args, **kwargs):
+        nonlocal snapshot_reads
+        if str(path) == "dataset_snapshot.json":
+            snapshot_reads += 1
+        return read_bytes(self, path, *args, **kwargs)
+
+    monkeypatch.setattr(SecureRoot, "read_bytes", count_reads)
+
+    fixes = what_to_fix({"agents": agents}, run_dir=tmp_path, use_llm=False)
+
+    if scenario == "passing":
+        assert fixes == []
+    else:
+        [fix] = fixes
+        expected_cases = case_ids[1::2] if scenario == "mixed negative" else case_ids
+        assert fix["cases"] == expected_cases
+        assert fix["kind"] == "skill not used"
+        assert fix["attempts_lost"] == len(expected_cases) * agent_count
+    assert snapshot_reads == 1
+
+
+def test_direct_case_diagnosis_still_loads_snapshot(tmp_path: Path) -> None:
+    from skillevaluator.tier3.case_summary import _diagnose_agent_case
+
+    (tmp_path / "dataset_snapshot.json").write_text(
+        json.dumps({"dataset": [{"id": "negative", "should_trigger": False, "expected_skill": "release-review"}]})
+    )
+    agent = _agent({"negative": _case(True)}, {})
+    agent["skill_activation"] = {"status": "never_activated"}
+
+    assert _diagnose_agent_case(tmp_path, "a", agent, "negative") == []
 
 
 def test_truncated_attempts_cannot_produce_a_complete_effect_or_clean_bill(tmp_path: Path) -> None:

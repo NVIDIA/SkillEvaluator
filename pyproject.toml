@@ -65,7 +65,7 @@ tier2 = [
 # Tier 3 live agent evaluation through Harbor's native environments.
 tier3 = [
     "skillevaluator[llm]",
-    "harbor[gke]==0.24.0",
+    "harbor[gke]==0.25.0",
     # CVE-2026-59950, CVE-2026-52870, and CVE-2026-52869 fixed floor.
     "mcp>=1.28.1,<2",
     # CVE-2026-48522 through CVE-2026-48526 fixed floor.
@@ -122,6 +122,7 @@ where = ["src"]
 include = ["skillevaluator*"]
 
 [tool.setuptools.package-data]
+"skillevaluator.tier3" = ["grader_reference/*.json", "grader_reference/trajectories/*.json"]
 "skillevaluator" = ["ci-release.json", "ci-release-all-tiers.json"]
 "skillevaluator.config" = ["*.yaml", "profiles/*.yaml"]
 "skillevaluator.reporting" = ["templates/*.j2", "assets/*.js", "assets/*.md"]

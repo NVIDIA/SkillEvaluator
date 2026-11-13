@@ -88,6 +88,14 @@ def test_all_tiers_save_github_is_minimal_pinned_and_idempotent(repository, all_
     assert job["with"]["tiers"] == "1,2,3"
     assert "tier3-required" not in job["with"]
     assert job["with"]["image"] == ALL_RELEASE["image"]
+    triggers = [
+        "skills/**",
+        ".github/workflows/skill-checks-all-tiers.yml",
+        ".github/workflows/feedback-all-tiers.yml",
+    ]
+    assert scan["on"]["pull_request"] == {"paths": triggers}
+    assert scan["on"]["push"] == {"branches": ["trunk"], "paths": triggers}
+    assert "&" not in scan_path.read_text()  # no YAML aliases in Actions workflows
     feedback = yaml.safe_load((repository / ".github/workflows/feedback-all-tiers.yml").read_text())
     assert feedback["jobs"]["feedback"]["with"]["trusted-caller-blobs"]
     assert feedback["jobs"]["feedback"]["uses"].endswith("@" + ALL_RELEASE["feedback_ref"])
@@ -264,8 +272,9 @@ def test_invalid_tier_selection_fails_before_writes(repository, all_release, tie
 
 
 @pytest.mark.parametrize("has_reusable_feedback", [False, True])
+@pytest.mark.parametrize("benchmark_pr", [False, True])
 def test_github_setup_pr_is_api_only_and_preserves_checkout(
-    repository, all_release, monkeypatch, request, has_reusable_feedback
+    repository, all_release, monkeypatch, request, has_reusable_feedback, benchmark_pr
 ):
     import base64
 
@@ -308,7 +317,13 @@ def test_github_setup_pr_is_api_only_and_preserves_checkout(
     monkeypatch.setattr(wizard, "github_api", api)
     # API commits upload raw bytes; local Git clean filters do not apply.
     monkeypatch.setattr(wizard, "committed_blob", lambda *_args: "0" * 40)
-    result = invoke(repository, all_release, "--mode", "pr", "--paths", "skills")
+    if benchmark_pr:
+        release = json.loads(all_release.read_text())
+        release["capabilities"].append("ci-benchmark-pr-v1")
+        all_release.write_text(json.dumps(release))
+    result = invoke(
+        repository, all_release, "--mode", "pr", "--paths", "skills", *(["--benchmark-pr"] if benchmark_pr else [])
+    )
     assert result.exit_code == 0, result.output
     assert "https://github.com/example-org/consumer/pull/1" in result.output
     tree = next(payload for endpoint, payload in mutations if endpoint.endswith("/git/trees"))
@@ -321,9 +336,11 @@ def test_github_setup_pr_is_api_only_and_preserves_checkout(
     setup = next(payload for endpoint, payload in mutations if endpoint.endswith("/pulls"))
     assert "Tier 1 required" in setup["body"]
     assert "Tier 2 and Tier 3 advisory" in setup["body"]
-    assert feedback["jobs"]["feedback"]["with"]["trusted-caller-blobs"] == wizard.blob_id(
-        texts[".github/workflows/skill-checks-all-tiers.yml"]
-    )
+    assert set(feedback["jobs"]) == ({"feedback", "benchmarks"} if benchmark_pr else {"feedback"})
+    for job in feedback["jobs"].values():
+        assert job["with"]["trusted-caller-blobs"] == wizard.blob_id(
+            texts[".github/workflows/skill-checks-all-tiers.yml"]
+        )
     assert subprocess.check_output(["git", "-C", str(repository), "status", "--porcelain"]) == before
 
 

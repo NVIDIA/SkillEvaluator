@@ -40,6 +40,7 @@ from harbor.agents.installed.codex import Codex
 from harbor.agents.installed.hermes import Hermes
 from harbor.agents.installed.opencode import OpenCode
 
+from skillevaluator.tier3.harbor.hermes_agent import SkillEvaluatorHermes
 from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorCodex
 from skillevaluator.tier3.harbor.local_agents import (
     SetupNetworkErrorAgent,
@@ -53,6 +54,7 @@ from skillevaluator.tier3.harbor.local_agents import (
     SkillEvaluatorLocalOpenCode,
     SkillEvaluatorNvidiaBuildClaudeCode,
     SkillEvaluatorNvidiaBuildCodex,
+    SkillEvaluatorOpenCode,
 )
 from skillevaluator.tier3.plugin_native import SETUP_SCRIPT, ClaudeCodeAdapter, OpenCodeAdapter
 
@@ -282,12 +284,20 @@ class NativeOpenCode(_NativeOpenCodeMixin, OpenCode):
     """OpenCode with ``OPENCODE_CONFIG`` and ``OPENCODE_CONFIG_DIR`` pointing at the staged plugin."""
 
 
+class NativeInstalledOpenCode(_NativeOpenCodeMixin, SkillEvaluatorOpenCode):
+    """Installer-aware OpenCode (the Docker-engine baselines' wrapper) with the staged plugin config."""
+
+
 class NativeGatewayOpenCode(_NativeOpenCodeMixin, SkillEvaluatorGatewayOpenCode):
     """Gateway-routed OpenCode with the staged plugin config."""
 
 
 class NativeHermes(_NativeHermesMixin, Hermes):
     """Hermes with the load census written before launch."""
+
+
+class NativeNvidiaBuildHermes(_NativeHermesMixin, SkillEvaluatorHermes):
+    """Pinned NVIDIA Build Hermes with the load census written before launch."""
 
 
 # Private baseline and wrapper arms need the same setup-phase error boundary
@@ -324,12 +334,20 @@ class PrivateOpenCode(SetupNetworkErrorAgent, OpenCode):
     """Stock OpenCode with setup-only network error classification."""
 
 
+class PrivateInstalledOpenCode(SetupNetworkErrorAgent, SkillEvaluatorOpenCode):
+    """Installer-aware OpenCode with setup-only network error classification."""
+
+
 class PrivateGatewayOpenCode(SetupNetworkErrorAgent, SkillEvaluatorGatewayOpenCode):
     """Gateway OpenCode with setup-only network error classification."""
 
 
 class PrivateHermes(SetupNetworkErrorAgent, Hermes):
     """Stock Hermes with setup-only network error classification."""
+
+
+class PrivateNvidiaBuildHermes(SetupNetworkErrorAgent, SkillEvaluatorHermes):
+    """NVIDIA Build Hermes with setup-only network error classification."""
 
 
 class PrivateLocalClaudeCode(SetupNetworkErrorAgent, SkillEvaluatorLocalClaudeCode):

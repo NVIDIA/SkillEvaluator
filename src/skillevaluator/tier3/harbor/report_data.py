@@ -21,6 +21,8 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
+from skillevaluator.tier3.eval_core.checks import resolve_should_trigger
+from skillevaluator.tier3.harbor import baseline_timeouts
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
@@ -84,7 +86,7 @@ __all__ = (
 )
 
 DATASET_SNAPSHOT_DIGEST_ALGORITHM = "skill-evaluator-dataset-snapshot/1"
-DATASET_SNAPSHOT_SCHEMA_VERSION = "1.0"
+DATASET_SNAPSHOT_SCHEMA_VERSION = "1.1"
 
 
 class DatasetSnapshotContractError(ValueError):
@@ -124,8 +126,9 @@ def deduplicate_dataset_entries(entries: list[dict[str, Any]]) -> list[dict[str,
 def summarize_dataset_entries(entries: list[dict[str, Any]]) -> dict[str, Any]:
     """Summarize unique task identities and their activation intent."""
     unique = deduplicate_dataset_entries(entries)
-    positive = sum(1 for case in unique if case.get("expected_skill") is not None)
-    negative = sum(1 for case in unique if "expected_skill" in case and case.get("expected_skill") is None)
+    routing_intents = [resolve_should_trigger(case) for case in unique]
+    positive = routing_intents.count(True)
+    negative = routing_intents.count(False)
     return {
         "total_tasks": len(unique),
         "positive_tasks": positive,
@@ -197,11 +200,14 @@ def dataset_snapshot_manifest(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_dataset_snapshot(run_dir: Path) -> dict[str, Any] | None:
-    """Load a validated run-owned dataset snapshot, if one was persisted."""
+    """Validate the recorded schema, then normalize in memory without rewriting it."""
     path = run_dir / "dataset_snapshot.json"
     diagnostics: list[dict[str, Any]] = []
     snapshot = _load_bounded_json(path, diagnostics, artifact="dataset_snapshot")
-    if not isinstance(snapshot, dict) or snapshot.get("schema_version") != DATASET_SNAPSHOT_SCHEMA_VERSION:
+    if not isinstance(snapshot, dict):
+        return None
+    schema_version = snapshot.get("schema_version")
+    if not isinstance(schema_version, str) or schema_version not in {"1.0", DATASET_SNAPSHOT_SCHEMA_VERSION}:
         return None
     try:
         encode_dataset_snapshot(snapshot)
@@ -218,13 +224,27 @@ def load_dataset_snapshot(run_dir: Path) -> dict[str, Any] | None:
         [entry for entry in dataset if isinstance(entry, dict)],
         evaluator_version=version,
     )
-    if dataset != expected["dataset"] or summary != expected["dataset_summary"]:
+    expected_summary = expected["dataset_summary"]
+    if snapshot["schema_version"] == "1.0":
+        # Schema 1.0 counted only legacy expected_skill labels. Validate that
+        # exact historical rule before projecting the corrected 1.1 summary.
+        positive = sum(1 for case in expected["dataset"] if case.get("expected_skill") is not None)
+        negative = sum(
+            1 for case in expected["dataset"] if "expected_skill" in case and case.get("expected_skill") is None
+        )
+        expected_summary = {
+            **expected_summary,
+            "positive_tasks": positive,
+            "negative_tasks": negative,
+            "unclassified_tasks": len(expected["dataset"]) - positive - negative,
+        }
+    if dataset != expected["dataset"] or summary != expected_summary:
         return None
     if snapshot.get("dataset_digest_algorithm") != DATASET_SNAPSHOT_DIGEST_ALGORITHM:
         return None
     if snapshot.get("dataset_digest") != expected["dataset_digest"]:
         return None
-    return snapshot
+    return {**snapshot, **expected}
 
 
 class _JSONLimitError(ValueError):
@@ -626,6 +646,12 @@ def aggregate_execution_error_details(
     }
 
 
+_USAGE_COUNTERS = ("prompt_tokens", "completion_tokens", "cached_tokens")
+# Attempts that count for token usage only, per arm: they never reach scores,
+# pass@k or resource totals. See ``skillevaluator.tier3.token_usage``.
+_USAGE_ONLY_KEYS = {"with_skill": "usage_only_attempts", "without_skill": "usage_only_attempts_baseline"}
+
+
 def _trajectory_token_counter(value: Any) -> int | None:
     """Return a browser-safe token counter without inventing zero usage."""
     return (
@@ -635,10 +661,120 @@ def _trajectory_token_counter(value: Any) -> int | None:
     )
 
 
+def _matching_baseline_tolerance(record: Any, conditions: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    """Return an agent's baseline-timeout record when it still matches the on-disk arms.
+
+    The collector writes the record only for an agent it kept scored on its
+    with-skill arm under ``--tolerate-baseline-timeouts``. It is honored only
+    while the with-skill arm succeeded with every attempt scored and no errors,
+    and the baseline failed with exactly the recorded attempt counts; anything
+    else keeps the agent failed.
+    """
+    if not isinstance(record, dict):
+        return None
+    with_skill = conditions.get("with_skill") or {}
+    baseline = conditions.get("without_skill") or {}
+    expected, scored = record.get("expected_attempts"), record.get("scored_attempts")
+    matches = (
+        with_skill.get("execution_status") == "succeeded"
+        and not with_skill.get("execution_errors")
+        and 0 < with_skill.get("expected_attempts", 0) == with_skill.get("scored_attempts")
+        and baseline.get("execution_status") == "failed"
+        and type(expected) is int
+        and type(scored) is int
+        and 0 <= scored < expected
+        and (baseline.get("expected_attempts"), baseline.get("scored_attempts")) == (expected, scored)
+    )
+    return dict(record) if matches else None
+
+
 def _condition_status(agent_info: dict[str, Any], condition: str) -> str:
     conditions = agent_info.get("conditions")
     data = conditions.get(condition) if isinstance(conditions, dict) else None
     return str(data.get("execution_status") or "unknown") if isinstance(data, dict) else "unknown"
+
+
+def _usage_tokens(counters: dict[str, Any]) -> dict[str, int] | None:
+    """Return a report trial's ``tokens`` object, or ``None`` without prompt and completion counts."""
+    prompt = _trajectory_token_counter(counters.get("prompt_tokens"))
+    completion = _trajectory_token_counter(counters.get("completion_tokens"))
+    if prompt is None or completion is None:
+        return None
+    tokens = {"prompt": prompt, "completion": completion}
+    raw_cached = counters.get("cached_tokens")
+    cached = _trajectory_token_counter(raw_cached)
+    if raw_cached is not None and cached is None:
+        # An invalid recorded counter is not Harbor's omitted zero cache.
+        return None
+    if cached is not None:
+        tokens["cached"] = cached
+    return tokens
+
+
+def _harbor_task_directory(trial_dir: Path) -> str | None:
+    """Return the task directory a Harbor trial ran, from its copied ``result.json`` or ``config.json``.
+
+    A generated task's directory is named after its case. The files are
+    optional, so an unreadable or oversized one only gives ``None``.
+    """
+    for artifact, keys in (("result", (("task_id",), ("config", "task"))), ("config", (("task",),))):
+        path = trial_dir / f"{artifact}.json"
+        data = _load_bounded_json(path, [], artifact=artifact) if path.is_file() else None
+        for key_path in keys if isinstance(data, dict) else ():
+            task: Any = data
+            for key in key_path:
+                task = task.get(key) if isinstance(task, dict) else None
+            task_path = task.get("path") if isinstance(task, dict) else None
+            if not isinstance(task_path, str):
+                continue
+            # The run may have used either path separator.
+            directory = task_path.replace("\\", "/").strip().rstrip("/").rsplit("/", 1)[-1]
+            if directory:
+                return directory
+    return None
+
+
+def _unscored_attempt_usage(trial_dir: Path) -> dict[str, Any]:
+    """Read the token counters of an attempt that has no usable reward.
+
+    The attempt is not scored, but it ran and used tokens. Its case is the task
+    directory its Harbor result or config names. Without one, it is the trial
+    name before Harbor's ``__<id>`` suffix, which never contains ``__`` while a
+    case ID may. Its trajectory is optional telemetry, so an unreadable or
+    oversized file only leaves the counters out and does not mark score
+    evidence truncated.
+    """
+    attempt: dict[str, Any] = {
+        "entry_id": _harbor_task_directory(trial_dir) or trial_dir.name.rsplit("__", 1)[0] or "unknown",
+        "trial_id": trial_dir.name,
+        "scored": False,
+    }
+    trajectory_file = trial_dir / "trajectory.json"
+    trajectory = _load_bounded_json(trajectory_file, [], artifact="trajectory") if trajectory_file.exists() else None
+    final_metrics = trajectory.get("final_metrics") if isinstance(trajectory, dict) else None
+    if isinstance(final_metrics, dict):
+        tokens = _usage_tokens({name: final_metrics.get(f"total_{name}") for name in _USAGE_COUNTERS})
+        if tokens is not None:
+            attempt["tokens"] = tokens
+    return attempt
+
+
+def _withheld_attempt_usage(rewards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the token usage of scored attempts whose arm's scores are not reported.
+
+    One row per logical attempt. As in report trials, an attempt scored over
+    several reward rows has no token counts.
+    """
+    rows = []
+    for group in logical_trial_reward_groups(rewards):
+        reward = group[0]
+        row: dict[str, Any] = {"entry_id": reward.get("entry_id"), "trial_id": reward.get("trial_id"), "scored": True}
+        counters = reward.get("_traj")
+        tokens = _usage_tokens(counters) if len(group) == 1 and isinstance(counters, dict) else None
+        if tokens is not None:
+            row["tokens"] = tokens
+        rows.append(row)
+    return rows
 
 
 def load_agent_data(
@@ -737,6 +873,7 @@ def load_agent_data(
                     if job_failure:
                         condition_errors.append(f"{label} aggregate job: {job_failure}")
                     trial_failures = data.get("trial_failures")
+                    judge_failure_trials: set[str] = set()
                     if isinstance(trial_failures, list):
                         for failure in trial_failures:
                             if not isinstance(failure, dict):
@@ -744,12 +881,33 @@ def load_agent_data(
                             trial = failure.get("trial") or "unknown"
                             reason = failure.get("reason") or "Unknown Harbor trial failure"
                             condition_errors.append(f"{label} trial {trial}: {reason}")
+                            trial_id = str(trial)
+                            if str(reason).startswith("Required judge evaluation failed:"):
+                                judge_failure_trials.add(
+                                    str(
+                                        failure.get("_trial_root_name") or failure.get("trial_root_name") or trial_id
+                                    ).split("__step", 1)[0]
+                                )
+                    raw_judge_failures = data.get("judge_failures")
+                    planned_attempts = _nonnegative_counter(data.get("expected_attempts"))
+                    scored_attempts = _nonnegative_counter(data.get("scored_attempts"))
+                    judge_failures = min(
+                        (
+                            _nonnegative_counter(raw_judge_failures)
+                            if isinstance(raw_judge_failures, int) and not isinstance(raw_judge_failures, bool)
+                            else len(judge_failure_trials)
+                        ),
+                        max(0, planned_attempts - scored_attempts),
+                    )
                     condition_execution[key] = {
                         "execution_status": status,
                         "execution_errors": condition_errors,
                         **_execution_error_details(data, len(condition_errors)),
+                        "expected_cases": _nonnegative_counter(data.get("expected_cases")),
+                        "scored_cases": _nonnegative_counter(data.get("scored_cases")),
                         "expected_attempts": _nonnegative_counter(data.get("expected_attempts")),
                         "scored_attempts": _nonnegative_counter(data.get("scored_attempts")),
+                        "judge_failures": judge_failures,
                         "recovered_attempts_total": _nonnegative_counter(data.get("recovered_attempts_total")),
                         "recovered_attempts": data.get("recovered_attempts", []),
                         "recovered_trial_failures": data.get("recovered_trial_failures", []),
@@ -785,8 +943,16 @@ def load_agent_data(
             if custom_lift is not _INVALID_JSON:
                 agent_info["custom_lift"] = custom_lift if isinstance(custom_lift, dict) else {}
 
+        tolerance_record: Any = None
+        tolerance_file = agent_dir / baseline_timeouts.RECORD_ARTIFACT
+        if tolerance_file.exists():
+            tolerance_record = _load_bounded_json(
+                tolerance_file, agent_diagnostics, artifact="baseline_timeout_tolerance"
+            )
+
         for variant_key, variant_dir_name in (("rewards", "with-skill"), ("rewards_baseline", "without-skill")):
             trial_list: list[dict[str, Any]] = []
+            unscored_attempts: list[dict[str, Any]] = []
             count_key = "num_trials" if variant_key == "rewards" else "num_trials_baseline"
             reward_row_count_key = "num_reward_rows" if variant_key == "rewards" else "num_reward_rows_baseline"
             expected_logical_trials = agent_info.get(count_key)
@@ -824,11 +990,17 @@ def load_agent_data(
                     reward_file = trial_dir / "reward.json"
                     if not reward_file.exists():
                         rewards_complete = False
+                        # Not scored, but its token usage still counts.
+                        unscored_attempts.append(_unscored_attempt_usage(trial_dir))
                         continue
                     reward = _load_bounded_json(reward_file, agent_diagnostics, artifact="reward")
                     if not isinstance(reward, dict):
                         rewards_complete = False
+                        unscored_attempts.append(_unscored_attempt_usage(trial_dir))
                         continue
+                    # Derive links from the bounded, admitted on-disk layout rather
+                    # than accepting verifier-authored paths as provenance.
+                    reward["_activation_artifacts"] = {"reward": reward_file.relative_to(results_dir).as_posix()}
                     if not reward.get("entry_id"):
                         reward["entry_id"] = trial_dir.name.split("__", 1)[0] if trial_dir.name else "unknown"
                     result_file = trial_dir / "result.json"
@@ -848,6 +1020,9 @@ def load_agent_data(
                             artifact="trajectory",
                         )
                         if isinstance(trajectory, dict):
+                            reward["_activation_artifacts"]["trajectory"] = trajectory_file.relative_to(
+                                results_dir
+                            ).as_posix()
                             final_metrics = trajectory.get("final_metrics", {})
                             if not isinstance(final_metrics, dict):
                                 final_metrics = {}
@@ -873,6 +1048,9 @@ def load_agent_data(
                 rewards_complete = False
             agent_info[variant_key] = trial_list
             agent_info[f"{variant_key}_complete"] = rewards_complete
+            agent_info[_USAGE_ONLY_KEYS["with_skill" if variant_key == "rewards" else "without_skill"]] = (
+                unscored_attempts
+            )
 
         if "with_skill" not in agent_info:
             continue
@@ -886,24 +1064,30 @@ def load_agent_data(
             agent_info["skill_activation"] = activation
 
         active_conditions = list(condition_execution.values())
+        tolerance = _matching_baseline_tolerance(tolerance_record, condition_execution)
+        # A tolerated agent's status and errors follow its with-skill arm; the
+        # attempt totals below still count both conditions.
+        status_conditions = active_conditions if tolerance is None else [condition_execution["with_skill"]]
         execution_errors = [
-            error for condition in active_conditions for error in condition.get("execution_errors", []) if error
+            error for condition in status_conditions for error in condition.get("execution_errors", []) if error
         ]
-        if not active_conditions or any(
-            condition.get("execution_status") in {"failed", "unknown"} for condition in active_conditions
+        if not status_conditions or any(
+            condition.get("execution_status") in {"failed", "unknown"} for condition in status_conditions
         ):
             execution_status = "failed" if execution_errors else "unknown"
-        elif all(condition.get("execution_status") == "skipped" for condition in active_conditions):
+        elif all(condition.get("execution_status") == "skipped" for condition in status_conditions):
             execution_status = "skipped"
         else:
             execution_status = "succeeded"
         public_execution_errors = list(dict.fromkeys(execution_errors))
+        if tolerance is not None:
+            agent_info[baseline_timeouts.RECORD_KEY] = tolerance
         agent_info.update(
             {
                 "conditions": condition_execution,
                 "execution_status": execution_status,
                 "execution_errors": public_execution_errors,
-                **aggregate_execution_error_details(active_conditions, len(public_execution_errors)),
+                **aggregate_execution_error_details(status_conditions, len(public_execution_errors)),
                 "expected_attempts": sum(
                     _nonnegative_counter(condition.get("expected_attempts")) for condition in active_conditions
                 ),
@@ -935,6 +1119,11 @@ def load_agent_data(
             condition_status = _condition_status(agent_info, condition)
             if condition_status == "succeeded":
                 continue
+            # The arm's scores are withheld below, but its scored attempts used tokens.
+            agent_info[_USAGE_ONLY_KEYS[condition]] = [
+                *_withheld_attempt_usage(agent_info.get(fields[-1]) or []),
+                *agent_info.get(_USAGE_ONLY_KEYS[condition], []),
+            ]
             condition_info = condition_execution.get(condition, {})
             for field in fields:
                 if field.startswith("pass_") and condition_status in {"failed", "unknown"}:

@@ -1,0 +1,854 @@
+{
+  "schema": "skillevaluator.grader-qualification/v1",
+  "suite": {
+    "name": "Calculator reference qualification",
+    "version": "1.0.0",
+    "description": "Small public synthetic reference suite, not a claim of grader reliability."
+  },
+  "cases": [
+    {
+      "id": "arithmetic",
+      "split": "assessment",
+      "category": "positive",
+      "source": {
+        "kind": "synthetic",
+        "origin": "Public calculator reference skill; hand-written ATIF evidence.",
+        "trace_id": "calculator-arithmetic-v1"
+      },
+      "entry": {
+        "question": "Use calculator to compute 2 + 3 * 4. Return only the numeric answer.",
+        "ground_truth": "14",
+        "expected_behavior": [
+          "Read calculator instructions before running calc.py.",
+          "Return only the numeric answer."
+        ],
+        "expected_skill": "calculator",
+        "expected_script": "calc.py",
+        "evaluated_skill": "calculator",
+        "should_trigger": true,
+        "has_skill": true
+      },
+      "trajectory": "trajectories/arithmetic.json",
+      "expected": {
+        "overall": "pass",
+        "metrics": {
+          "security": "pass",
+          "skill_execution": "pass",
+          "skill_efficiency": "pass",
+          "accuracy": "pass",
+          "goal_accuracy": "pass",
+          "behavior_check": [
+            true,
+            true
+          ]
+        }
+      },
+      "label": {
+        "method": "executable",
+        "reviewed_by": "Reference suite maintainers",
+        "reviewed_on": "2026-11-06",
+        "rationale": "Arithmetic independently checked; literal evidence assertions below anchor the label. Expected task outcome and behavior reviewed against the recorded calls.",
+        "checks": [
+          {
+            "type": "final_response_contains",
+            "value": "14"
+          },
+          {
+            "type": "tool_result_contains",
+            "value": "Result: 14"
+          }
+        ]
+      }
+    },
+    {
+      "id": "power",
+      "split": "assessment",
+      "category": "positive",
+      "source": {
+        "kind": "synthetic",
+        "origin": "Public calculator reference skill; hand-written ATIF evidence.",
+        "trace_id": "calculator-power-v1"
+      },
+      "entry": {
+        "question": "Use calculator to compute 2 ** 10. Return only the numeric answer.",
+        "ground_truth": "1024",
+        "expected_behavior": [
+          "Read calculator instructions before running calc.py.",
+          "Return only the numeric answer."
+        ],
+        "expected_skill": "calculator",
+        "expected_script": "calc.py",
+        "evaluated_skill": "calculator",
+        "should_trigger": true,
+        "has_skill": true
+      },
+      "trajectory": "trajectories/power.json",
+      "expected": {
+        "overall": "pass",
+        "metrics": {
+          "security": "pass",
+          "skill_execution": "pass",
+          "skill_efficiency": "pass",
+          "accuracy": "pass",
+          "goal_accuracy": "pass",
+          "behavior_check": [
+            true,
+            true
+          ]
+        }
+      },
+      "label": {
+        "method": "executable",
+        "reviewed_by": "Reference suite maintainers",
+        "reviewed_on": "2026-11-06",
+        "rationale": "Arithmetic independently checked; literal evidence assertions below anchor the label. Expected task outcome and behavior reviewed against the recorded calls.",
+        "checks": [
+          {
+            "type": "final_response_contains",
+            "value": "1024"
+          },
+          {
+            "type": "tool_result_contains",
+            "value": "Result: 1024"
+          }
+        ]
+      }
+    },
+    {
+      "id": "percentage",
+      "split": "assessment",
+      "category": "positive",
+      "source": {
+        "kind": "synthetic",
+        "origin": "Public calculator reference skill; hand-written ATIF evidence.",
+        "trace_id": "calculator-percentage-v1"
+      },
+      "entry": {
+        "question": "Use calculator to compute 15% of 200. Return only the numeric answer.",
+        "ground_truth": "30",
+        "expected_behavior": [
+          "Read calculator instructions before running calc.py.",
+          "Return only the numeric answer."
+        ],
+        "expected_skill": "calculator",
+        "expected_script": "calc.py",
+        "evaluated_skill": "calculator",
+        "should_trigger": true,
+        "has_skill": true
+      },
+      "trajectory": "trajectories/percentage.json",
+      "expected": {
+        "overall": "pass",
+        "metrics": {
+          "security": "pass",
+          "skill_execution": "pass",
+          "skill_efficiency": "pass",
+          "accuracy": "pass",
+          "goal_accuracy": "pass",
+          "behavior_check": [
+            true,
+            true
+          ]
+        }
+      },
+      "label": {
+        "method": "executable",
+        "reviewed_by": "Reference suite maintainers",
+        "reviewed_on": "2026-11-06",
+        "rationale": "Arithmetic independently checked; literal evidence assertions below anchor the label. Expected task outcome and behavior reviewed against the recorded calls.",
+        "checks": [
+          {
+            "type": "final_response_contains",
+            "value": "30"
+          },
+          {
+            "type": "tool_result_contains",
+            "value": "Result: 30"
+          }
+        ]
+      }
+    },
+    {
+      "id": "wrong-answer",
+      "split": "assessment",
+      "category": "negative",
+      "source": {
+        "kind": "synthetic",
+        "origin": "Public calculator reference skill; hand-written ATIF evidence.",
+        "trace_id": "calculator-wrong-answer-v1"
+      },
+      "entry": {
+        "question": "Use calculator to compute 2 + 3 * 4. Return only the numeric answer.",
+        "ground_truth": "14",
+        "expected_behavior": [
+          "Read calculator instructions before running calc.py.",
+          "Return only the numeric answer."
+        ],
+        "expected_skill": "calculator",
+        "expected_script": "calc.py",
+        "evaluated_skill": "calculator",
+        "should_trigger": true,
+        "has_skill": true
+      },
+      "trajectory": "trajectories/wrong-answer.json",
+      "expected": {
+        "overall": "fail",
+        "metrics": {
+          "security": "pass",
+          "skill_execution": "pass",
+          "skill_efficiency": "pass",
+          "accuracy": "fail",
+          "goal_accuracy": "fail",
+          "behavior_check": [
+            true,
+            true
+          ]
+        }
+      },
+      "label": {
+        "method": "executable",
+        "reviewed_by": "Reference suite maintainers",
+        "reviewed_on": "2026-11-06",
+        "rationale": "Arithmetic independently checked; literal evidence assertions below anchor the label. Expected task outcome and behavior reviewed against the recorded calls.",
+        "checks": [
+          {
+            "type": "final_response_contains",
+            "value": "15"
+          },
+          {
+            "type": "tool_result_contains",
+            "value": "Result: 14"
+          }
+        ]
+      }
+    },
+    {
+      "id": "false-success",
+      "split": "assessment",
+      "category": "negative",
+      "source": {
+        "kind": "synthetic",
+        "origin": "Public calculator reference skill; hand-written ATIF evidence.",
+        "trace_id": "calculator-false-success-v1"
+      },
+      "entry": {
+        "question": "Use calculator to compute 2 + 3 * 4. Return only the numeric answer.",
+        "ground_truth": "14",
+        "expected_behavior": [
+          "Read calculator instructions before running calc.py.",
+          "Return only the numeric answer."
+        ],
+        "expected_skill": "calculator",
+        "expected_script": "calc.py",
+        "evaluated_skill": "calculator",
+        "should_trigger": true,
+        "has_skill": true
+      },
+      "trajectory": "trajectories/false-success.json",
+      "expected": {
+        "overall": "fail",
+        "metrics": {
+          "security": "pass",
+          "skill_execution": "fail",
+          "skill_efficiency": "pass",
+          "accuracy": "fail",
+          "goal_accuracy": "fail",
+          "behavior_check": [
+            true,
+            false
+          ]
+        }
+      },
+      "label": {
+        "method": "executable",
+        "reviewed_by": "Reference suite maintainers",
+        "reviewed_on": "2026-11-06",
+        "rationale": "Arithmetic independently checked; literal evidence assertions below anchor the label. Tool failure contradicts the final success claim.",
+        "checks": [
+          {
+            "type": "final_response_contains",
+            "value": "Successfully computed 14"
+          },
+          {
+            "type": "tool_result_contains",
+            "value": "Error: Invalid expression"
+          }
+        ]
+      }
+    },
+    {
+      "id": "wrong-format",
+      "split": "assessment",
+      "category": "edge",
+      "source": {
+        "kind": "synthetic",
+        "origin": "Public calculator reference skill; hand-written ATIF evidence.",
+        "trace_id": "calculator-wrong-format-v1"
+      },
+      "entry": {
+        "question": "Use calculator to compute 2 + 3 * 4. Return only the numeric answer.",
+        "ground_truth": "14",
+        "expected_behavior": [
+          "Read calculator instructions before running calc.py.",
+          "Return only the numeric answer."
+        ],
+        "expected_skill": "calculator",
+        "expected_script": "calc.py",
+        "evaluated_skill": "calculator",
+        "should_trigger": true,
+        "has_skill": true
+      },
+      "trajectory": "trajectories/wrong-format.json",
+      "expected": {
+        "overall": "fail",
+        "metrics": {
+          "security": "pass",
+          "skill_execution": "pass",
+          "skill_efficiency": "pass",
+          "accuracy": "fail",
+          "goal_accuracy": "fail",
+          "behavior_check": [
+            true,
+            false
+          ]
+        }
+      },
+      "label": {
+        "method": "executable",
+        "reviewed_by": "Reference suite maintainers",
+        "reviewed_on": "2026-11-06",
+        "rationale": "Arithmetic independently checked; literal evidence assertions below anchor the label. Numeric value is correct but the required numeric-only format is violated.",
+        "checks": [
+          {
+            "type": "final_response_contains",
+            "value": "The answer is 14."
+          },
+          {
+            "type": "tool_result_contains",
+            "value": "Result: 14"
+          }
+        ]
+      }
+    },
+    {
+      "id": "recover",
+      "split": "assessment",
+      "category": "failure_recovery",
+      "source": {
+        "kind": "synthetic",
+        "origin": "Public calculator reference skill; hand-written ATIF evidence.",
+        "trace_id": "calculator-recover-v1"
+      },
+      "entry": {
+        "question": "Use calculator to compute 2 + 3 * 4. Return only the numeric answer.",
+        "ground_truth": "14",
+        "expected_behavior": [
+          "Read calculator instructions before running calc.py.",
+          "Return only the numeric answer."
+        ],
+        "expected_skill": "calculator",
+        "expected_script": "calc.py",
+        "evaluated_skill": "calculator",
+        "should_trigger": true,
+        "has_skill": true
+      },
+      "trajectory": "trajectories/recover.json",
+      "expected": {
+        "overall": "pass",
+        "metrics": {
+          "security": "pass",
+          "skill_execution": "pass",
+          "skill_efficiency": "pass",
+          "accuracy": "pass",
+          "goal_accuracy": "pass",
+          "behavior_check": [
+            true,
+            true
+          ]
+        }
+      },
+      "label": {
+        "method": "executable",
+        "reviewed_by": "Reference suite maintainers",
+        "reviewed_on": "2026-11-06",
+        "rationale": "Arithmetic independently checked; literal evidence assertions below anchor the label. Expected task outcome and behavior reviewed against the recorded calls.",
+        "checks": [
+          {
+            "type": "final_response_contains",
+            "value": "14"
+          },
+          {
+            "type": "tool_result_contains",
+            "value": "Result: 14"
+          }
+        ]
+      }
+    },
+    {
+      "id": "missing",
+      "split": "assessment",
+      "category": "unavailable_evidence",
+      "source": {
+        "kind": "synthetic",
+        "origin": "Public calculator reference skill; hand-written ATIF evidence.",
+        "trace_id": "calculator-missing-v1"
+      },
+      "entry": {
+        "question": "Use calculator to compute 2 + 3 * 4. Return only the numeric answer.",
+        "ground_truth": "14",
+        "expected_behavior": [
+          "Read calculator instructions before running calc.py.",
+          "Return only the numeric answer."
+        ],
+        "expected_skill": "calculator",
+        "expected_script": "calc.py",
+        "evaluated_skill": "calculator",
+        "should_trigger": true,
+        "has_skill": true
+      },
+      "trajectory": null,
+      "expected": {
+        "overall": "insufficient_evidence",
+        "metrics": {
+          "security": "insufficient_evidence",
+          "skill_execution": "insufficient_evidence",
+          "skill_efficiency": "insufficient_evidence",
+          "accuracy": "insufficient_evidence",
+          "goal_accuracy": "insufficient_evidence",
+          "behavior_check": "insufficient_evidence"
+        }
+      },
+      "label": {
+        "method": "reviewed",
+        "reviewed_by": "Reference suite maintainers",
+        "reviewed_on": "2026-11-06",
+        "rationale": "No evidence exists; abstention is the only supported outcome.",
+        "checks": []
+      }
+    },
+    {
+      "id": "non-use",
+      "split": "assessment",
+      "category": "non_use",
+      "source": {
+        "kind": "synthetic",
+        "origin": "Public calculator reference skill; hand-written ATIF evidence.",
+        "trace_id": "calculator-non-use-v1"
+      },
+      "entry": {
+        "question": "Say hello; do not use calculator.",
+        "ground_truth": "Hello!",
+        "expected_behavior": [
+          "Greet without loading calculator."
+        ],
+        "expected_skill": "calculator",
+        "expected_script": "calc.py",
+        "evaluated_skill": "calculator",
+        "should_trigger": false,
+        "has_skill": true
+      },
+      "trajectory": "trajectories/non-use.json",
+      "expected": {
+        "overall": "pass",
+        "metrics": {
+          "security": "pass",
+          "skill_execution": "pass",
+          "skill_efficiency": "pass",
+          "accuracy": "pass",
+          "goal_accuracy": "pass",
+          "behavior_check": [
+            true
+          ]
+        }
+      },
+      "label": {
+        "method": "executable",
+        "reviewed_by": "Reference suite maintainers",
+        "reviewed_on": "2026-11-06",
+        "rationale": "Arithmetic independently checked; literal evidence assertions below anchor the label. Expected task outcome and behavior reviewed against the recorded calls.",
+        "checks": [
+          {
+            "type": "final_response_contains",
+            "value": "Hello!"
+          }
+        ]
+      }
+    },
+    {
+      "id": "baseline",
+      "split": "assessment",
+      "category": "baseline",
+      "source": {
+        "kind": "synthetic",
+        "origin": "Public calculator reference skill; hand-written ATIF evidence.",
+        "trace_id": "calculator-baseline-v1"
+      },
+      "entry": {
+        "question": "Use calculator to compute 2 + 3 * 4. Return only the numeric answer.",
+        "ground_truth": "14",
+        "expected_behavior": [
+          "Read calculator instructions before running calc.py.",
+          "Return only the numeric answer."
+        ],
+        "expected_skill": "calculator",
+        "expected_script": "calc.py",
+        "evaluated_skill": "calculator",
+        "should_trigger": true,
+        "has_skill": false
+      },
+      "trajectory": "trajectories/baseline.json",
+      "expected": {
+        "overall": "pass",
+        "metrics": {
+          "security": "pass",
+          "accuracy": "pass",
+          "goal_accuracy": "pass",
+          "behavior_check": [
+            false,
+            true
+          ],
+          "skill_execution": "not_applicable",
+          "skill_efficiency": "not_applicable"
+        }
+      },
+      "label": {
+        "method": "executable",
+        "reviewed_by": "Reference suite maintainers",
+        "reviewed_on": "2026-11-06",
+        "rationale": "Arithmetic independently checked; literal evidence assertions below anchor the label. Correct answer without a skill; skill dimensions do not apply.",
+        "checks": [
+          {
+            "type": "final_response_contains",
+            "value": "14"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mixed-behavior",
+      "split": "assessment",
+      "category": "edge",
+      "source": {
+        "kind": "synthetic",
+        "origin": "Public calculator reference skill; hand-written ATIF evidence.",
+        "trace_id": "calculator-mixed-behavior-v1"
+      },
+      "entry": {
+        "question": "Use calculator to compute 2 + 3 * 4. Return only the numeric answer. Also write /workspace/report.txt.",
+        "ground_truth": "14",
+        "expected_behavior": [
+          "Read calculator instructions before running calc.py.",
+          "Return only the numeric answer.",
+          "Write a report to /workspace/report.txt."
+        ],
+        "expected_skill": "calculator",
+        "expected_script": "calc.py",
+        "evaluated_skill": "calculator",
+        "should_trigger": true,
+        "has_skill": true
+      },
+      "trajectory": "trajectories/mixed-behavior.json",
+      "expected": {
+        "overall": "fail",
+        "metrics": {
+          "security": "pass",
+          "skill_execution": "pass",
+          "skill_efficiency": "pass",
+          "accuracy": "pass",
+          "goal_accuracy": "fail",
+          "behavior_check": [
+            true,
+            true,
+            false
+          ]
+        }
+      },
+      "label": {
+        "method": "executable",
+        "reviewed_by": "Reference suite maintainers",
+        "reviewed_on": "2026-11-06",
+        "rationale": "Arithmetic independently checked; literal evidence assertions below anchor the label. The required report was never written.",
+        "checks": [
+          {
+            "type": "final_response_contains",
+            "value": "14"
+          },
+          {
+            "type": "tool_result_contains",
+            "value": "Result: 14"
+          }
+        ]
+      }
+    },
+    {
+      "id": "zero",
+      "split": "assessment",
+      "category": "edge",
+      "source": {
+        "kind": "synthetic",
+        "origin": "Public calculator reference skill; hand-written ATIF evidence.",
+        "trace_id": "calculator-zero-v1"
+      },
+      "entry": {
+        "question": "Use calculator to compute 7 - 7. Return only the numeric answer.",
+        "ground_truth": "0",
+        "expected_behavior": [
+          "Read calculator instructions before running calc.py.",
+          "Return only the numeric answer."
+        ],
+        "expected_skill": "calculator",
+        "expected_script": "calc.py",
+        "evaluated_skill": "calculator",
+        "should_trigger": true,
+        "has_skill": true
+      },
+      "trajectory": "trajectories/zero.json",
+      "expected": {
+        "overall": "pass",
+        "metrics": {
+          "security": "pass",
+          "skill_execution": "pass",
+          "skill_efficiency": "pass",
+          "accuracy": "pass",
+          "goal_accuracy": "pass",
+          "behavior_check": [
+            true,
+            true
+          ]
+        }
+      },
+      "label": {
+        "method": "executable",
+        "reviewed_by": "Reference suite maintainers",
+        "reviewed_on": "2026-11-06",
+        "rationale": "Arithmetic independently checked; literal evidence assertions below anchor the label. Expected task outcome and behavior reviewed against the recorded calls.",
+        "checks": [
+          {
+            "type": "final_response_contains",
+            "value": "0"
+          },
+          {
+            "type": "tool_result_contains",
+            "value": "Result: 0"
+          }
+        ]
+      }
+    },
+    {
+      "id": "negative-value",
+      "split": "assessment",
+      "category": "positive",
+      "source": {
+        "kind": "synthetic",
+        "origin": "Public calculator reference skill; hand-written ATIF evidence.",
+        "trace_id": "calculator-negative-value-v1"
+      },
+      "entry": {
+        "question": "Use calculator to compute 3 - 8. Return only the numeric answer.",
+        "ground_truth": "-5",
+        "expected_behavior": [
+          "Read calculator instructions before running calc.py.",
+          "Return only the numeric answer."
+        ],
+        "expected_skill": "calculator",
+        "expected_script": "calc.py",
+        "evaluated_skill": "calculator",
+        "should_trigger": true,
+        "has_skill": true
+      },
+      "trajectory": "trajectories/negative-value.json",
+      "expected": {
+        "overall": "pass",
+        "metrics": {
+          "security": "pass",
+          "skill_execution": "pass",
+          "skill_efficiency": "pass",
+          "accuracy": "pass",
+          "goal_accuracy": "pass",
+          "behavior_check": [
+            true,
+            true
+          ]
+        }
+      },
+      "label": {
+        "method": "executable",
+        "reviewed_by": "Reference suite maintainers",
+        "reviewed_on": "2026-11-06",
+        "rationale": "Arithmetic independently checked; literal evidence assertions below anchor the label. Expected task outcome and behavior reviewed against the recorded calls.",
+        "checks": [
+          {
+            "type": "final_response_contains",
+            "value": "-5"
+          },
+          {
+            "type": "tool_result_contains",
+            "value": "Result: -5"
+          }
+        ]
+      }
+    },
+    {
+      "id": "no-answer",
+      "split": "assessment",
+      "category": "negative",
+      "source": {
+        "kind": "synthetic",
+        "origin": "Public calculator reference skill; hand-written ATIF evidence.",
+        "trace_id": "calculator-no-answer-v1"
+      },
+      "entry": {
+        "question": "Use calculator to compute 2 + 3 * 4. Return only the numeric answer.",
+        "ground_truth": "14",
+        "expected_behavior": [
+          "Read calculator instructions before running calc.py.",
+          "Return only the numeric answer."
+        ],
+        "expected_skill": "calculator",
+        "expected_script": "calc.py",
+        "evaluated_skill": "calculator",
+        "should_trigger": true,
+        "has_skill": true
+      },
+      "trajectory": "trajectories/no-answer.json",
+      "expected": {
+        "overall": "fail",
+        "metrics": {
+          "security": "pass",
+          "skill_execution": "pass",
+          "skill_efficiency": "pass",
+          "accuracy": "fail",
+          "goal_accuracy": "fail",
+          "behavior_check": [
+            true,
+            false
+          ]
+        }
+      },
+      "label": {
+        "method": "executable",
+        "reviewed_by": "Reference suite maintainers",
+        "reviewed_on": "2026-11-06",
+        "rationale": "Arithmetic independently checked; literal evidence assertions below anchor the label. Expected task outcome and behavior reviewed against the recorded calls.",
+        "checks": [
+          {
+            "type": "final_response_contains",
+            "value": "I cannot solve this."
+          },
+          {
+            "type": "tool_result_contains",
+            "value": "Result: 14"
+          }
+        ]
+      }
+    },
+    {
+      "id": "tuning-add",
+      "split": "tuning",
+      "category": "positive",
+      "source": {
+        "kind": "synthetic",
+        "origin": "Public calculator reference skill; hand-written ATIF evidence.",
+        "trace_id": "calculator-tuning-add-v1"
+      },
+      "entry": {
+        "question": "Use calculator to compute 2 + 2. Return only the numeric answer.",
+        "ground_truth": "4",
+        "expected_behavior": [
+          "Read calculator instructions before running calc.py.",
+          "Return only the numeric answer."
+        ],
+        "expected_skill": "calculator",
+        "expected_script": "calc.py",
+        "evaluated_skill": "calculator",
+        "should_trigger": true,
+        "has_skill": true
+      },
+      "trajectory": "trajectories/tuning-add.json",
+      "expected": {
+        "overall": "pass",
+        "metrics": {
+          "security": "pass",
+          "skill_execution": "pass",
+          "skill_efficiency": "pass",
+          "accuracy": "pass",
+          "goal_accuracy": "pass",
+          "behavior_check": [
+            true,
+            true
+          ]
+        }
+      },
+      "label": {
+        "method": "executable",
+        "reviewed_by": "Reference suite maintainers",
+        "reviewed_on": "2026-11-06",
+        "rationale": "Arithmetic independently checked; literal evidence assertions below anchor the label. Expected task outcome and behavior reviewed against the recorded calls.",
+        "checks": [
+          {
+            "type": "final_response_contains",
+            "value": "4"
+          },
+          {
+            "type": "tool_result_contains",
+            "value": "Result: 4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "tuning-wrong",
+      "split": "tuning",
+      "category": "negative",
+      "source": {
+        "kind": "synthetic",
+        "origin": "Public calculator reference skill; hand-written ATIF evidence.",
+        "trace_id": "calculator-tuning-wrong-v1"
+      },
+      "entry": {
+        "question": "Use calculator to compute 2 + 2. Return only the numeric answer.",
+        "ground_truth": "4",
+        "expected_behavior": [
+          "Read calculator instructions before running calc.py.",
+          "Return only the numeric answer."
+        ],
+        "expected_skill": "calculator",
+        "expected_script": "calc.py",
+        "evaluated_skill": "calculator",
+        "should_trigger": true,
+        "has_skill": true
+      },
+      "trajectory": "trajectories/tuning-wrong.json",
+      "expected": {
+        "overall": "fail",
+        "metrics": {
+          "security": "pass",
+          "skill_execution": "pass",
+          "skill_efficiency": "pass",
+          "accuracy": "fail",
+          "goal_accuracy": "fail",
+          "behavior_check": [
+            true,
+            true
+          ]
+        }
+      },
+      "label": {
+        "method": "executable",
+        "reviewed_by": "Reference suite maintainers",
+        "reviewed_on": "2026-11-06",
+        "rationale": "Arithmetic independently checked; literal evidence assertions below anchor the label. Expected task outcome and behavior reviewed against the recorded calls.",
+        "checks": [
+          {
+            "type": "final_response_contains",
+            "value": "5"
+          },
+          {
+            "type": "tool_result_contains",
+            "value": "Result: 4"
+          }
+        ]
+      }
+    }
+  ]
+}

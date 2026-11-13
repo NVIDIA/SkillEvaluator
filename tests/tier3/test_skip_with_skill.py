@@ -594,7 +594,8 @@ def test_cli_summary_marks_the_with_skill_arm_skipped(tmp_path: Path) -> None:
     assert "contracts differ" not in rendered
     # Per-case rows show no effect rather than "inconclusive" for an arm that never ran.
     assert "inconclusive" not in rendered
-    assert re.search(r"case-001\s+-\s+1/1 .*\s+-\s*$", rendered, re.MULTILINE)
+    assert re.search(r"case-001\s+-\s+0/1 .*\s+-\s*$", rendered, re.MULTILINE)
+    assert "↳ without skill: FAIL: goal not met (goal accuracy 0.62)" in rendered
     security_dimension = next(line for line in rendered.splitlines() if line.strip("│ ").startswith("Security"))
     assert "skipped" in security_dimension
 

@@ -2294,8 +2294,18 @@ NATIVE_AGENT_IMPORT_PATHS: dict[tuple[str, str | None], str] = {
     ("codex", f"{_LOCAL_AGENTS}:SkillEvaluatorGatewayCodex"): f"{_NATIVE_AGENTS}:NativeGatewayCodex",
     ("codex", f"{_LOCAL_AGENTS}:SkillEvaluatorNvidiaBuildCodex"): f"{_NATIVE_AGENTS}:NativeNvidiaBuildCodex",
     ("opencode", None): f"{_NATIVE_AGENTS}:NativeOpenCode",
+    # The installer-aware OpenCode wrapper the Docker-engine baselines run; GKE and
+    # Harbor-native cloud baselines keep the stock agent above.
+    (
+        "opencode",
+        "skillevaluator.tier3.harbor.installed_agents:SkillEvaluatorOpenCode",
+    ): f"{_NATIVE_AGENTS}:NativeInstalledOpenCode",
     ("opencode", f"{_LOCAL_AGENTS}:SkillEvaluatorGatewayOpenCode"): f"{_NATIVE_AGENTS}:NativeGatewayOpenCode",
     ("hermes", None): f"{_NATIVE_AGENTS}:NativeHermes",
+    (
+        "hermes",
+        "skillevaluator.tier3.harbor.hermes_agent:SkillEvaluatorHermes",
+    ): f"{_NATIVE_AGENTS}:NativeNvidiaBuildHermes",
 }
 
 

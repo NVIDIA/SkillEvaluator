@@ -45,7 +45,8 @@ def test_aggregate_retains_every_tier_after_failure():
     workflow = load(".github/workflows/evaluate-all-tiers.yml")
     aggregate = workflow["jobs"]["aggregate"]
     assert aggregate["if"] == "${{ always() }}"
-    assert set(aggregate["needs"]) == {"tier1", "paid-tiers"}
+    # Eligibility tells the aggregate when the paid tiers were skipped for no skill change.
+    assert set(aggregate["needs"]) == {"eligibility", "tier1", "tier1-llm", "paid-tiers"}
     downloads = [s for s in aggregate["steps"] if s.get("uses", "").startswith("actions/download-artifact@")]
     assert [s["with"]["pattern"] for s in downloads] == ["skill-evaluator-tier[123]-attempt-*"]
     assert downloads[0]["with"]["path"] == "${{ runner.temp }}/skill-artifacts"
@@ -68,7 +69,9 @@ def test_aggregate_reuses_tier_evidence_from_jobs_not_rerun():
     pattern = download["with"]["pattern"]
     tier1 = load(".github/workflows/evaluate-skills.yml")["jobs"]["tier1"]["steps"]
     produced = [
-        s["with"]["name"].replace("${{ inputs.artifact-name }}", workflow["jobs"]["tier1"]["with"]["artifact-name"])
+        # The default/fork path retains canonical static evidence. Protected
+        # enrichment emits the same canonical name from its separate job.
+        s["with"]["name"].replace("${{ inputs.artifact-name }}", "skill-evaluator-tier1")
         for s in tier1
         if s.get("uses", "").startswith("actions/upload-artifact@")
     ]
@@ -300,6 +303,7 @@ def test_gitlab_aggregate_downloads_evidence_from_both_advisory_tiers():
         {"job": "skill-evaluation", "artifacts": "true", "optional": "true"},
         {"job": "skill-evaluation-native", "artifacts": "true", "optional": "true"},
         {"job": "skill-evaluation-native-tier2", "artifacts": "true", "optional": "true"},
+        {"job": "skill-evaluation-tier1-llm", "artifacts": "true", "optional": "true"},
     ]
 
 
@@ -458,14 +462,14 @@ def test_gitlab_dind_daemon_requires_tls_client_certificates():
     assert variables["DOCKER_TLS_VERIFY"] == "1"
     assert variables["DOCKER_CERT_PATH"] == "/certs/client"
     assert "2375" not in str(job)
-    docs = " ".join((ROOT / "docs/gitlab-ci.mdx").read_text().split())
+    docs = " ".join((ROOT / "ci/templates/all-tiers/README.md").read_text().split())
     assert 'volumes = ["/certs/client"]' in docs
 
 
 def test_gitlab_native_jobs_use_environment_without_recording_deployments():
     job = load("ci/gitlab/all-tiers.yml")["skill-evaluation-native"]
     assert job["environment"] == {"name": "$SKILL_EVAL_ENVIRONMENT", "action": "prepare"}
-    docs = " ".join((ROOT / "docs/gitlab-ci.mdx").read_text().split())
+    docs = " ".join((ROOT / "ci/templates/all-tiers/README.md").read_text().split())
     assert "`environment: action: prepare`" in docs and "Prevent outdated deployment jobs" in docs
 
 
@@ -476,7 +480,7 @@ def test_gitlab_feedback_job_uses_its_protected_environment_without_recording_de
     assert job["environment"] == {"name": "skillevaluator-feedback", "action": "prepare"}
     # The publisher authenticates its job, pipeline and branch, never a deployment record.
     assert "/deployments" not in (ROOT / "ci/feedback.py").read_text()
-    docs = " ".join((ROOT / "docs/gitlab-ci.mdx").read_text().split())
+    docs = " ".join((ROOT / "ci/templates/all-tiers/README.md").read_text().split())
     assert "The native jobs and the trusted feedback job use `environment: action: prepare`" in docs
     # Some GitLab versions turn prepare jobs on an environment with approval
     # rules into manual jobs, so deploy access is the only safe restriction.
@@ -484,7 +488,7 @@ def test_gitlab_feedback_job_uses_its_protected_environment_without_recording_de
     assert "Do not add deployment approval rules to these environments" in docs
     assert "turn them into manual jobs" in docs and "`prevent_blocking_non_deployment_jobs`" in docs
     assert "Restrict who can run them with the protected environments' deploy access" in docs
-    onboarding = " ".join((ROOT / "docs/cli-onboarding.mdx").read_text().split())
+    onboarding = " ".join((ROOT / "ci/templates/all-tiers/README.md").read_text().split())
     assert "so deployment approvals do not gate them" not in onboarding
     assert "Do not add deployment approval rules to their environments" in onboarding
     assert "turn them into manual jobs" in onboarding
@@ -495,10 +499,10 @@ def test_gitlab_feedback_pipeline_guard_is_offered_and_documented():
     hidden = load("ci/gitlab/all-tiers.yml")[".skill-evaluation-not-feedback"]
     assert hidden["rules"][0] == guard
     assert hidden["rules"][1] == {"when": "on_success"}
-    for path in ("docs/gitlab-ci.mdx", "ci/templates/README.md", "ci/templates/all-tiers/gitlab-all-tiers.yml"):
+    for path in ("ci/templates/all-tiers/README.md", "ci/templates/all-tiers/gitlab-all-tiers.yml"):
         text = (ROOT / path).read_text()
         assert "- if: '$SKILL_EVAL_FEEDBACK == \"true\"'" in text, path
-    docs = " ".join((ROOT / "docs/gitlab-ci.mdx").read_text().split())
+    docs = " ".join((ROOT / "ci/templates/all-tiers/README.md").read_text().split())
     assert "extends: .skill-evaluation-not-feedback" in docs
     assert "no comment is posted or updated" in docs
     assert "Merge these guards to the default branch before the setup MR" in docs
@@ -508,7 +512,7 @@ def test_gitlab_feedback_pipeline_guard_is_offered_and_documented():
     # Guards merge before the setup MR, while only all-tiers.yml defines the
     # hidden job, so they use rules; a job without rules needs a fallback rule.
     assert "gets the guard followed by `- when: on_success`" in docs
-    assert "- when: on_success" in (ROOT / "docs/gitlab-ci.mdx").read_text()
+    assert "- when: on_success" in (ROOT / "ci/templates/all-tiers/README.md").read_text()
     assert "Write these guards as rules" in docs
     assert "until the setup MR merges, `extends: .skill-evaluation-not-feedback` fails validation" in docs
     assert ".skill-evaluation-not-feedback" not in (ROOT / "ci/gitlab/skill-evaluation.yml").read_text()
@@ -518,7 +522,7 @@ def test_gitlab_feedback_pipeline_guard_is_offered_and_documented():
     assert "Write the guards as rules" in template
     assert "added after this file is on the default branch" in template
     # The upgrade path must order the guards before the setup MR as well.
-    onboarding = " ".join((ROOT / "docs/cli-onboarding.mdx").read_text().split())
+    onboarding = " ".join((ROOT / "ci/templates/all-tiers/README.md").read_text().split())
     guards = onboarding.index("merge those guards to the default branch")
     assert guards < onboarding.index("Then, in your setup MR")
     assert "keep `test` in any `stages` list" in onboarding

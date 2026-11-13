@@ -112,14 +112,15 @@ def completed_agent_result(payload: dict[str, Any] | None) -> dict[str, Any] | N
         require_baseline=False,
     ):
         return None
-    from skillevaluator.evaluation.tier3_report import _agent_quality_verdict
+    from skillevaluator.evaluation.tier3_report import _agent_quality_verdict, _agent_quality_verdict_reason
 
-    return {
+    result: dict[str, Any] = {
         "name": name,
         "score": score,
         "baseline": baseline,
         "lift": lift,
         "verdict": _agent_quality_verdict(agent),
+        "reason": _agent_quality_verdict_reason(agent),
         "needs_attention": payload.get("execution_status") != "succeeded",
         "recovered_attempts": sum(
             c.get("recovered_attempts_total", 0)
@@ -127,3 +128,11 @@ def completed_agent_result(payload: dict[str, Any] | None) -> dict[str, Any] | N
             if type(c.get("recovered_attempts_total", 0)) is int and c.get("recovered_attempts_total", 0) >= 0
         ),
     }
+    # Agents kept by --tolerate-baseline-timeouts leave the run succeeded, but
+    # their failed baselines still need attention and are named in the report.
+    from skillevaluator.tier3.harbor.baseline_timeouts import tolerated_baselines
+
+    tolerated = tolerated_baselines(agents)
+    result["baseline_timeouts_tolerated"] = tolerated
+    result["needs_attention"] = result["needs_attention"] or bool(tolerated)
+    return result

@@ -272,6 +272,481 @@ def test_rich_reporter_owns_live_table_and_updates_stage_rows(monkeypatch: pytes
     assert reporter.is_active is False
 
 
+def _render(renderable: Any, *, width: int = 80) -> str:
+    from rich.console import Console
+
+    stream = io.StringIO()
+    Console(file=stream, width=width, color_system=None).print(renderable)
+    return stream.getvalue()
+
+
+def _rendered_live_lines(reporter: Any, *, width: int = 80) -> list[str]:
+    return _render(reporter._build_live_table(), width=width).splitlines()
+
+
+def test_rich_progress_frame_height_stays_fixed_as_plan_and_events_grow() -> None:
+    progress = _progress_module()
+    reporter = progress.RichProgressReporter(stream=io.StringIO(), refresh_interval=60)
+    reporter._live_plan = progress.Tier3RunPlan(
+        skill_name="demo",
+        environment="docker",
+        agents=("codex",),
+        agent_models=(("codex", "example/model"),),
+    )
+
+    initial_lines = _rendered_live_lines(reporter)
+    reporter._live_plan = progress.Tier3RunPlan(
+        skill_name="demo",
+        environment="docker",
+        agents=("codex",),
+        agent_models=(("codex", "example/model"),),
+        provider="example-provider",
+        task_count=2,
+        case_count=1,
+        attempts=1,
+        baseline=True,
+        concurrency=4,
+        timeout_multiplier=2,
+        matrix_trials=2,
+        total_containers=2,
+    )
+    for index in range(10):
+        reporter.emit(
+            progress.ProgressEvent(
+                stage=f"stage-{index}",
+                state="complete",
+                detail=f"completed stage {index} " + "with a detail too long for one line " * 3,
+            )
+        )
+    populated_lines = _rendered_live_lines(reporter)
+
+    assert len(populated_lines) == len(initial_lines)
+    assert "example-provider" in "\n".join(populated_lines)
+    assert "…" in "\n".join(populated_lines)
+
+
+def test_rich_progress_title_does_not_change_frame_height_in_a_narrow_terminal() -> None:
+    progress = _progress_module()
+    reporter = progress.RichProgressReporter(stream=io.StringIO(), refresh_interval=60)
+    reporter._live_plan = progress.Tier3RunPlan(
+        skill_name="a-skill-with-a-very-long-name",
+        environment="docker",
+        agents=tuple(f"agent-{index}" for index in range(8)),
+    )
+
+    initial_height = len(_rendered_live_lines(reporter, width=20))
+    reporter._live_plan = progress.Tier3RunPlan(
+        skill_name="a-skill-with-a-very-long-name",
+        environment="docker",
+        agents=("agent-0",),
+        provider="example-provider",
+        task_count=2,
+        case_count=1,
+        attempts=1,
+        baseline=True,
+        concurrency=4,
+        timeout_multiplier=2,
+        total_containers=2,
+    )
+    for index in range(10):
+        reporter.emit(
+            progress.ProgressEvent(
+                stage=f"stage-{index}",
+                state="complete",
+                detail=f"completed stage {index}",
+            )
+        )
+
+    assert len(_rendered_live_lines(reporter, width=20)) == initial_height
+
+
+def test_rich_progress_frame_does_not_shrink_when_the_agent_set_shrinks() -> None:
+    progress = _progress_module()
+    reporter = progress.RichProgressReporter(stream=io.StringIO(), refresh_interval=60)
+
+    reporter._live_plan = progress.Tier3RunPlan(
+        skill_name="demo",
+        environment="docker",
+        agents=tuple(f"agent-{index}" for index in range(8)),
+    )
+    initial_height = len(_rendered_live_lines(reporter))
+    reporter._live_plan = progress.Tier3RunPlan(skill_name="demo", environment="docker", agents=("agent-0",))
+
+    assert len(_rendered_live_lines(reporter)) == initial_height
+
+
+def test_rich_progress_uses_manual_refresh_and_recent_event_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    import rich.live
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+    reporter = progress.RichProgressReporter(stream=_TTYBuffer(), refresh_interval=60)
+    reporter.start(_plan(progress))
+
+    for index in range(7):
+        reporter.emit(
+            progress.ProgressEvent(
+                stage=f"stage-{index}",
+                state="complete",
+                detail=f"completed stage {index}",
+            )
+        )
+    reporter.emit(progress.ProgressEvent(stage="stage-0", state="running", detail="active again"))
+
+    live = _FakeLive.instances[0]
+    text = _render(live.renderables[-1])
+    # Rich's own refresh thread would redraw outside the reporter lock.
+    assert live.kwargs["auto_refresh"] is False
+    assert "refresh_per_second" not in live.kwargs
+    # The six most recently updated stages stay visible; the oldest drops out.
+    assert "active again" in text
+    assert all(f"completed stage {index}" in text for index in range(2, 7))
+    assert "completed stage 1" not in text
+    reporter.close()
+
+
+def test_rich_progress_resets_state_when_live_initialization_fails() -> None:
+    progress = _progress_module()
+    reporter = progress.RichProgressReporter(stream=io.StringIO(), refresh_interval=60)
+
+    def _fail_live_initialization(*_args, **_kwargs):
+        raise RuntimeError("terminal initialization failed")
+
+    reporter._live_factory = _fail_live_initialization
+    plan = progress.Tier3RunPlan(
+        skill_name="demo",
+        environment="docker",
+        agents=tuple(f"agent-{index}" for index in range(8)),
+    )
+    with pytest.raises(RuntimeError, match="terminal initialization failed"):
+        reporter.start(plan)
+    reporter.close()
+
+    assert reporter._live is None
+    assert reporter._live_plan is None
+    assert reporter._live_events == {}
+    assert reporter._live_event_slots == progress._LIVE_MIN_EVENT_ROWS
+    # A stale record of printed plan lines would hide the next run's plan.
+    assert reporter._printed_plan_lines == {}
+
+
+def test_rich_progress_prints_the_full_plan_above_the_fixed_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+    import rich.live
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+    monkeypatch.setenv("COLUMNS", "80")
+    output = _TTYBuffer()
+    reporter = progress.RichProgressReporter(stream=output, refresh_interval=60)
+    agents = ("claude-code", "codex")
+    options = {"attempts": 3, "baseline": True, "with_skill": True, "concurrency": 4, "max_agents": 2}
+    reporter.start(
+        progress.Tier3RunPlan(
+            skill_name="pdf-processing",
+            environment="docker",
+            agents=agents,
+            timeout_multiplier=1.5,
+            **options,
+        )
+    )
+    resolved = progress.Tier3RunPlan(
+        skill_name="pdf-processing",
+        environment="docker",
+        agents=agents,
+        agent_models=(("claude-code", "anthropic/claude-sonnet-4-5"), ("codex", "openai/gpt-5.1-codex")),
+        provider="nv_build",
+        task_count=3,
+        case_count=12,
+        timeout_multiplier=1.5,
+        matrix_trials=72,
+        preflight_trials=2,
+        total_containers=74,
+        task_timeout_seconds=1350,
+        **options,
+    )
+    reporter.start(resolved)
+    # An unchanged plan update prints nothing again.
+    reporter.start(resolved)
+
+    live = _FakeLive.instances[0]
+    frame_heights = {len(_render(renderable).splitlines()) for renderable in live.renderables}
+    printed = output.getvalue().splitlines()
+    reporter.close()
+
+    assert printed == [
+        "Agents / models: claude-code, codex",
+        "Run plan: Attempts 3 · With skill yes · Baseline yes · Concurrency 4 · Max agents 2 · Timeout 1.5x",
+        "Agents / models: claude-code=anthropic/claude-sonnet-4-5, codex=openai/gpt-5.1-codex",
+        "Provider: nv_build",
+        "Run plan: Tasks 3 · Cases 12 · Attempts 3 · With skill yes · Baseline yes · Concurrency 4 · "
+        "Max agents 2 · Timeout 1.5x · Matrix trials 72 · Preflight trials 2 · Containers 74 · "
+        "Max scaled top-level agent timeout 1350s",
+    ]
+    # The frame below keeps one height at 80 columns while the plan resolves.
+    assert len(frame_heights) == 1
+
+
+def test_rich_progress_prints_colon_delimited_plan_values_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
+    import rich.live
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+    output = _TTYBuffer()
+    reporter = progress.RichProgressReporter(stream=output, refresh_interval=60)
+    # Rich would read ":llama:" and ":rocket:" as emoji codes.
+    reporter.start(
+        progress.Tier3RunPlan(
+            skill_name="demo",
+            environment="docker",
+            agents=("opencode",),
+            agent_models=(("opencode", "ollama:llama:3.1-8b"),),
+            provider="custom:rocket:proxy",
+        )
+    )
+    printed = output.getvalue().splitlines()
+    reporter.close()
+
+    assert printed == [
+        "Agents / models: opencode=ollama:llama:3.1-8b",
+        "Provider: custom:rocket:proxy",
+    ]
+
+
+def test_rich_final_frame_marks_a_plan_that_never_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
+    import rich.live
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+    reporter = progress.RichProgressReporter(stream=_TTYBuffer(), refresh_interval=60)
+    # The CLI's first plan has no provider or counts; then configuration fails.
+    reporter.start(progress.Tier3RunPlan(skill_name="demo", environment="docker", agents=("codex",)))
+    reporter.emit(
+        progress.ProgressEvent(
+            stage="configuration",
+            state="failed",
+            detail="A public LLM provider is required for live evaluation",
+        )
+    )
+    live = _FakeLive.instances[0]
+    running_frame = _render(live.renderables[-1], width=180)
+    reporter.close()
+    final_frame = _render(live.renderables[-1], width=180)
+
+    assert "resolving" in running_frame
+    assert "preparing" in running_frame
+    provider_row = next(line for line in final_frame.splitlines() if "Provider" in line)
+    plan_row = next(line for line in final_frame.splitlines() if "Run plan" in line)
+    assert "not resolved" in provider_row
+    assert "not resolved" in plan_row
+    assert not any(word in final_frame for word in ("pending", "resolving", "preparing"))
+    assert "A public LLM provider is required for live evaluation" in final_frame
+    assert live.stop_calls == 1
+
+
+def test_rich_final_frame_lists_every_stage(monkeypatch: pytest.MonkeyPatch) -> None:
+    import rich.live
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+    reporter = progress.RichProgressReporter(stream=_TTYBuffer(), refresh_interval=60)
+    reporter.start(_plan(progress))
+    reporter.emit(progress.ProgressEvent(stage="docker-images", state="skipped", detail="local environment selected"))
+    for index in range(7):
+        reporter.emit(
+            progress.ProgressEvent(
+                stage=f"agent:agent-{index}",
+                state="complete",
+                detail=f"agent {index} finished",
+            )
+        )
+    reporter.emit(progress.ProgressEvent(stage="run-finished", state="complete", detail="Tier 3 evaluation finished"))
+    live = _FakeLive.instances[0]
+    running_frame = _render(live.renderables[-1], width=180)
+    reporter.close()
+    final_frame = _render(live.renderables[-1], width=180)
+
+    assert "local environment selected" not in running_frame
+    assert "agent 0 finished" not in running_frame
+    # Once the run is over the frame stays in the scrollback, so it keeps every outcome.
+    assert "local environment selected" in final_frame
+    assert all(f"agent {index} finished" in final_frame for index in range(7))
+    assert "Tier 3 evaluation finished" in final_frame
+    assert live.stop_calls == 1
+
+
+def _row_detail(frame: str, stage_label: str) -> str:
+    """Return a row's Detail cell, joining the lines it wraps onto."""
+    detail: list[str] = []
+    for line in frame.splitlines():
+        cells = [cell.strip() for cell in line.split("│")[1:-1]]
+        if len(cells) != 4:
+            continue
+        # A wrapped row continues on lines whose Stage cell is empty.
+        if cells[0] == stage_label or (detail and not cells[0]):
+            detail.append(cells[2])
+        elif detail:
+            break
+    return " ".join(part for part in detail if part)
+
+
+def test_rich_final_frame_wraps_details_the_running_frame_cuts(monkeypatch: pytest.MonkeyPatch) -> None:
+    import rich.live
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+    reporter = progress.RichProgressReporter(stream=_TTYBuffer(), refresh_interval=60)
+    reporter.start(_plan(progress))
+    reason = "one or more Harbor jobs failed; inspect the retained artifacts and the trial logs"
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="failed", detail=reason))
+    live = _FakeLive.instances[0]
+    running_frame = _render(live.renderables[-1])
+    reporter.close()
+    final_frame = _render(live.renderables[-1])
+
+    # At 80 columns the running frame cuts the reason to keep one line per row.
+    assert _row_detail(running_frame, "Agent codex") != reason
+    assert "…" in _row_detail(running_frame, "Agent codex")
+    # The final frame no longer needs a fixed height, so it shows the reason in full.
+    assert _row_detail(final_frame, "Agent codex") == reason
+
+
+def test_rich_final_frame_keeps_rows_on_one_line_where_the_detail_column_is_narrow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import rich.live
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+    reporter = progress.RichProgressReporter(stream=_TTYBuffer(), refresh_interval=60)
+    reporter.start(_plan(progress))
+    reporter.emit(
+        progress.ProgressEvent(
+            stage="agent-runtime-preflight",
+            state="skipped",
+            detail="disabled by default; enable with --agent-runtime-preflight",
+        )
+    )
+    reason = "one or more Harbor jobs failed; inspect the retained artifacts and the trial logs"
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="failed", detail=reason))
+    live = _FakeLive.instances[0]
+    reporter.close()
+    final = live.renderables[-1]
+
+    # Stage (23 characters for Agent Runtime Preflight), State and Elapsed leave
+    # the Detail column 20 characters wide at 76 columns, so the details wrap.
+    wide = _render(final, width=76)
+    assert _row_detail(wide, "Agent codex") == reason
+    assert max(len(line.split("│")[3]) - 2 for line in wide.splitlines() if line.count("│") == 5) == 20
+    # One column narrower, folding every detail into a tall stack of short
+    # pieces would leave the frame unreadable, so each row stays on one line.
+    for width in (75, 60):
+        narrow = _render(final, width=width)
+        rows = [line for line in narrow.splitlines() if line.count("│") == 5]
+        # The header, four plan rows and two stages.
+        assert len(rows) == 7, (width, narrow)
+        assert _row_detail(narrow, "Agent codex").endswith("…")
+        assert all(len(line) == width for line in narrow.splitlines() if line.strip())
+
+
+def _stopping_frame_reporter(progress: Any, output: io.StringIO, agents: tuple[str, ...], stopping_detail: str) -> Any:
+    """Return a Rich reporter whose stage sequence matches a run stopped by Ctrl+C."""
+    reporter = progress.RichProgressReporter(stream=output, refresh_interval=60)
+    plan = progress.Tier3RunPlan(
+        skill_name="pdf-processing",
+        environment="docker",
+        agents=agents,
+        agent_models=tuple((agent, f"provider/{agent}-large-model") for agent in agents),
+        provider="nv_build",
+        task_count=3,
+        case_count=12,
+        attempts=3,
+        baseline=True,
+        with_skill=True,
+        concurrency=4,
+        max_agents=2,
+        timeout_multiplier=1.5,
+        matrix_trials=72,
+        preflight_trials=0,
+        total_containers=72,
+        task_timeout_seconds=1350,
+    )
+    reporter.start(plan)
+    for stage in (
+        "configuration",
+        "model-resolution",
+        "environment-preflight",
+        "credential-validation",
+        "with-skill-tasks",
+        "baseline-tasks",
+        "case-selection",
+        "docker-images",
+    ):
+        reporter.emit(progress.ProgressEvent(stage=stage, state="complete", detail="done"))
+    # The longest built-in stage label stays in the recent-stage window.
+    reporter.emit(
+        progress.ProgressEvent(
+            stage="agent-runtime-preflight",
+            state="skipped",
+            detail="disabled by default; enable with --agent-runtime-preflight",
+        )
+    )
+    for agent in agents:
+        reporter.emit(progress.ProgressEvent(stage=f"agent:{agent}", state="running", detail="with-skill + baseline"))
+    for agent in agents:
+        reporter.emit(progress.ProgressEvent(stage=f"agent:{agent}", state="running", detail=stopping_detail))
+    return reporter
+
+
+@pytest.mark.parametrize("agents", [("claude-code", "codex"), ("mini-swe-agent",)])
+def test_rich_progress_at_80_columns_shows_the_ctrl_c_hint_and_the_full_plan(
+    monkeypatch: pytest.MonkeyPatch,
+    agents: tuple[str, ...],
+) -> None:
+    import rich.live
+
+    from skillevaluator.tier3.harbor import runner
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+    monkeypatch.setenv("COLUMNS", "80")
+    stream = _TTYBuffer()
+    reporter = _stopping_frame_reporter(progress, stream, agents, runner._HARBOR_RUN_STOPPING_DETAIL)
+    output = stream.getvalue()
+    table = _FakeLive.instances[0].renderables[-1]
+    reporter.close()
+
+    # The frame cuts each row to the terminal width; the second Ctrl+C hint
+    # comes first in the detail and is short, so it is still readable. It
+    # still fits two columns narrower: a legacy Windows console uses one
+    # column less, and one is to spare.
+    hint = runner._HARBOR_RUN_STOPPING_DETAIL.split(";")[0]
+    assert "Ctrl+C" in hint
+    for width in (80, 78):
+        frame = _render(table, width=width)
+        agent_rows = [line for line in frame.splitlines() if line.startswith("│ Agent ") and "running" in line]
+        assert len(agent_rows) == len(agents)
+        assert all(hint in row for row in agent_rows), (width, agent_rows)
+    # Every plan value is printed in full above the frame.
+    assert all(f"{agent}=provider/{agent}-large-model" in output for agent in agents)
+    for value in (
+        "Concurrency 4",
+        "Max agents 2",
+        "Timeout 1.5x",
+        "Matrix trials 72",
+        "Containers 72",
+        "Max scaled top-level agent timeout 1350s",
+    ):
+        assert value in output
+
+
 def test_rich_reporter_immediately_starts_one_live_box_and_keeps_stage_updates_inside_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -294,7 +769,13 @@ def test_rich_reporter_immediately_starts_one_live_box_and_keeps_stage_updates_i
     Console(file=initial, force_terminal=False, width=180).print(live.renderables[0])
     assert "Harbor Run Configuration" in initial.getvalue()
     assert "demo-skill" in initial.getvalue()
-    assert output.getvalue() == ""
+    # Only the full plan lines are printed above the box; no stage line is.
+    plan_lines = (
+        "Agents / models: codex=gpt-5, opencode=nvidia/llama\n"
+        "Provider: openai\n"
+        "Run plan: Tasks 2 · Cases 2 · Attempts 3 · Baseline yes · Concurrency 4 · Max agents 2 · Timeout 1.5x\n"
+    )
+    assert output.getvalue() == plan_lines
 
     reporter.emit(progress.ProgressEvent(stage="agent-runtime-preflight", state="running"))
 
@@ -302,7 +783,7 @@ def test_rich_reporter_immediately_starts_one_live_box_and_keeps_stage_updates_i
     Console(file=updated, force_terminal=False, width=180).print(live.renderables[-1])
     assert "Agent Runtime Preflight" in updated.getvalue()
     assert "running" in updated.getvalue()
-    assert output.getvalue() == ""
+    assert output.getvalue() == plan_lines
     reporter.close()
 
 
@@ -555,14 +1036,621 @@ def test_safe_reporter_disables_broken_presentation_without_raising() -> None:
 
     reporter.set_secret_values(["secret"])
     reporter.start(_plan(progress))
+    # A disabled reporter shows nothing, so starting it must not mark it active.
+    assert reporter.is_active is False
     reporter.emit(progress.ProgressEvent(stage="configuration", state="running"))
     reporter.heartbeat()
     reporter.close()
 
     assert broken.close_calls >= 1
     reporter.start(_plan(progress))
+    assert reporter.is_active is False
     reporter.close()
     assert broken.start_calls == 1
+
+
+def test_safe_reporter_becomes_inactive_after_post_start_failure() -> None:
+    progress = _progress_module()
+
+    class FailingReporter:
+        active = False
+
+        @property
+        def is_active(self) -> bool:
+            return self.active
+
+        def start(self, _plan) -> None:
+            self.active = True
+
+        def set_secret_values(self, _values) -> None:
+            pass
+
+        def emit(self, _event) -> None:
+            raise RuntimeError("redraw failed")
+
+        def heartbeat(self) -> None:
+            pass
+
+        def close(self) -> None:
+            self.active = False
+
+    reporter = progress.safe_progress_reporter(FailingReporter())
+    reporter.start(_plan(progress))
+    assert reporter.is_active is True
+
+    reporter.emit(progress.ProgressEvent(stage="configuration", state="ready"))
+
+    assert reporter.is_active is False
+    reporter.close()
+
+
+def test_safe_reporter_disables_after_heartbeat_redraw_failure() -> None:
+    progress = _progress_module()
+    heartbeat_failed = threading.Event()
+    failed_on: list[threading.Thread] = []
+
+    class FailingLive:
+        def __init__(self, table, **_kwargs) -> None:
+            self.renderables = [table]
+            self.update_calls = 0
+            self.stop_calls = 0
+
+        def start(self, *, refresh: bool = False) -> None:
+            assert refresh
+
+        def update(self, table, *, refresh: bool = False) -> None:
+            assert refresh
+            self.renderables.append(table)
+            self.update_calls += 1
+            if self.update_calls == 2:
+                failed_on.append(threading.current_thread())
+                heartbeat_failed.set()
+                raise RuntimeError("heartbeat redraw failed")
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+
+    output = io.StringIO()
+    rich_reporter = progress.RichProgressReporter(stream=output, refresh_interval=0.05)
+    rich_reporter._live_factory = FailingLive
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    heartbeat = rich_reporter._thread
+    live = rich_reporter._live
+    assert heartbeat is not None and live is not None
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+
+    assert heartbeat_failed.wait(timeout=10)
+    # The redraw sets the event before it raises, so the heartbeat thread may still
+    # be turning the reporter off. That thread ends right after, so wait for it.
+    heartbeat.join(timeout=10)
+    assert not heartbeat.is_alive()
+    assert failed_on == [heartbeat]
+    assert reporter.is_active is False
+    assert live.stop_calls == 1
+    assert rich_reporter._live is None
+    # Only the display failed: the agent is never drawn as failed or interrupted,
+    # and a line under the frozen frame says the run goes on.
+    frames = [_render(table, width=180) for table in live.renderables]
+    assert not any("failed" in frame or "interrupted" in frame for frame in frames)
+    assert "running" in frames[-1]
+    assert "Tier 3 progress display stopped after a drawing error; the run continues." in output.getvalue()
+    updates_before = live.update_calls
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="complete"))
+    assert live.update_calls == updates_before
+    reporter.close()
+
+
+_STOP_NOTICE = "Tier 3 progress display stopped after a drawing error; the run continues."
+_LATE_STOP_NOTICE = "Tier 3 progress display stopped after a drawing error; the run went on without it."
+
+
+def _assert_cursor_shown_and_one_stop_notice(output: str, notice: str) -> None:
+    # Live hid the cursor while it drew; it is shown again after the last hide.
+    assert "\x1b[?25l" in output
+    assert output.rfind("\x1b[?25h") > output.rfind("\x1b[?25l")
+    assert output.count("Tier 3 progress display stopped after a drawing error") == 1
+    # The notice is a line of its own below the last frame, even when the
+    # terminal refused the stop that ends the frame's last line.
+    visible = output.replace("\x1b[?25h", "").replace("\x1b[?25l", "")
+    assert f"\n{notice}\n" in visible
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    ["once", "always", "every-thread-for-a-while", "notice-only"],
+    ids=["refused-once", "refused-always", "every-thread-refused-for-a-while", "notice-refused"],
+)
+def test_heartbeat_write_that_would_block_turns_progress_off(
+    monkeypatch: pytest.MonkeyPatch,
+    refusal: str,
+) -> None:
+    from rich.console import Console
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    uncaught: list[BaseException | None] = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: uncaught.append(args.exc_value))
+    refused = threading.Event()
+    heartbeat_writes: list[int] = []
+    # The heartbeat thread's first write is the refused redraw, its second
+    # Live's stop and its third the notice under the last frame.
+    refused_heartbeat_writes = {"once": {1}, "notice-only": {1, 3}}.get(refusal, set())
+
+    class NonBlockingTerminal(_TTYBuffer):
+        """A terminal another process made non-blocking: it refuses some writes."""
+
+        # While set, the terminal's buffer is full and it refuses every
+        # thread's writes.
+        blocked = False
+
+        def write(self, text: str) -> int:
+            if self.blocked:
+                refused.set()
+                raise BlockingIOError(errno.EAGAIN, "write could not complete without blocking", 0)
+            if threading.current_thread().name == "tier3-progress-heartbeat":
+                heartbeat_writes.append(len(text))
+                if refusal == "always" or len(heartbeat_writes) in refused_heartbeat_writes:
+                    refused.set()
+                    raise BlockingIOError(errno.EAGAIN, "write could not complete without blocking", 0)
+            return super().write(text)
+
+    stream = NonBlockingTerminal()
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=0.05)
+    # A real Rich Live, which keeps a refused frame in its buffer and sends it
+    # again with the next one.
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    try:
+        reporter.start(_plan(progress))
+        heartbeat = rich_reporter._thread
+        assert heartbeat is not None
+        reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+        stream.blocked = refusal == "every-thread-for-a-while"
+
+        assert refused.wait(timeout=10)
+        # A refused write turns progress off, so the heartbeat thread ends
+        # instead of resending a growing backlog of frames.
+        heartbeat.join(timeout=10)
+        assert not heartbeat.is_alive()
+        # The terminal takes writes again before the run ends.
+        stream.blocked = False
+        assert reporter.is_active is False
+        assert rich_reporter._live is None
+        reporter.emit(progress.ProgressEvent(stage="agent:codex", state="complete", detail="agent finished"))
+        output = stream.getvalue()
+        assert "agent finished" not in output
+        # Only the display failed, so no stage is reported as failed.
+        assert "failed" not in output
+        assert "interrupted" not in output
+        if refusal == "once":
+            # The terminal took the stop, so the frame left behind and the line
+            # under it say that the agent is still running.
+            assert "running" in output
+            assert _STOP_NOTICE in output
+    finally:
+        reporter.close()
+    assert uncaught == []
+    # A stop or notice the terminal refused on the heartbeat thread is lost
+    # with that thread, so closing the run shows the cursor and the notice.
+    _assert_cursor_shown_and_one_stop_notice(
+        stream.getvalue(),
+        _STOP_NOTICE if refusal == "once" else _LATE_STOP_NOTICE,
+    )
+
+
+@pytest.mark.parametrize(
+    "refused_writes",
+    [{1, 2}, {1, 3}],
+    ids=["update-and-stop-refused", "update-and-notice-refused"],
+)
+def test_callers_write_that_would_block_is_finished_when_progress_closes(
+    monkeypatch: pytest.MonkeyPatch,
+    refused_writes: set[int],
+) -> None:
+    from rich.console import Console
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    caller = threading.current_thread()
+    caller_writes: list[int] = []
+
+    class NonBlockingTerminal(_TTYBuffer):
+        """Refuses the caller's update, then its stop of Live or the notice under the last frame."""
+
+        armed = False
+
+        def write(self, text: str) -> int:
+            if self.armed and threading.current_thread() is caller:
+                caller_writes.append(len(text))
+                if len(caller_writes) in refused_writes:
+                    raise BlockingIOError(errno.EAGAIN, "write could not complete without blocking", 0)
+            return super().write(text)
+
+    stream = NonBlockingTerminal()
+    # No heartbeat during the test, so every write comes from this thread.
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=60)
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    try:
+        reporter.start(_plan(progress))
+        reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+        stream.armed = True
+        reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="still evaluating"))
+        assert reporter.is_active is False
+        assert rich_reporter._live is None
+        stream.armed = False
+        # Once progress is off, other output (a logged warning, say) goes
+        # straight to the terminal below the last frame.
+        for number in range(1, 4):
+            stream.write(f"warning {number} printed after the display stopped\n")
+        printed_before_close = len(stream.getvalue())
+    finally:
+        reporter.close()
+    output = stream.getvalue()
+    assert "failed" not in output
+    assert "interrupted" not in output
+    closing_output = output[printed_before_close:]
+    # Rich keeps this thread's refused writes and would send them with its
+    # next one. They move the cursor up over the frame that was on screen
+    # when drawing failed, so close() drops them instead of erasing the
+    # warnings, and prints the late notice in place of a refused one.
+    assert "\x1b[1A" not in closing_output
+    assert "\x1b[2K" not in closing_output
+    assert closing_output.endswith(f"{_LATE_STOP_NOTICE}\n")
+    if 2 in refused_writes:
+        assert "\x1b[?25h" in closing_output
+    _assert_cursor_shown_and_one_stop_notice(output, _LATE_STOP_NOTICE)
+
+
+def test_run_end_close_during_a_refused_heartbeat_stop_shows_the_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
+    from rich.console import Console
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    uncaught: list[BaseException | None] = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: uncaught.append(args.exc_value))
+    lock = _InterleavingLock()
+    closers: list[threading.Thread] = []
+
+    def close_the_run() -> None:
+        # The run ends while the heartbeat thread is still turning a failed
+        # display off: its stop was refused and it has let go of the lock.
+        closer = threading.Thread(target=reporter.close, name="run-end-close")
+        closers.append(closer)
+        closer.start()
+        closer.join(timeout=10)
+
+    class NonBlockingTerminal(_TTYBuffer):
+        """Refuses every heartbeat-thread write while ``refusing`` is set."""
+
+        refusing = True
+
+        def write(self, text: str) -> int:
+            if self.refusing and threading.current_thread().name == "tier3-progress-heartbeat":
+                if "\x1b[?25h" in text:
+                    # Live's stop, which shows the cursor again.
+                    lock.arm(close_the_run)
+                raise BlockingIOError(errno.EAGAIN, "write could not complete without blocking", 0)
+            return super().write(text)
+
+    stream = NonBlockingTerminal()
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=0.05)
+    rich_reporter._lock = lock
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    heartbeat = rich_reporter._thread
+    assert heartbeat is not None
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+
+    heartbeat.join(timeout=10)
+    assert not heartbeat.is_alive()
+    assert len(closers) == 1
+    assert not closers[0].is_alive()
+    stream.refusing = False
+    first_run = stream.getvalue()
+    _assert_cursor_shown_and_one_stop_notice(first_run, _LATE_STOP_NOTICE)
+    # Nothing of the failed run is left for the next one.
+    reporter.start(_plan(progress))
+    reporter.close()
+    assert "display stopped" not in stream.getvalue()[len(first_run) :]
+    assert uncaught == []
+
+
+def test_a_new_run_without_close_carries_nothing_from_a_refused_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    from rich.console import Console
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    class NonBlockingTerminal(_TTYBuffer):
+        """Refuses every write while ``refusing`` is set."""
+
+        refusing = False
+
+        def write(self, text: str) -> int:
+            if self.refusing:
+                raise BlockingIOError(errno.EAGAIN, "write could not complete without blocking", 0)
+            return super().write(text)
+
+    stream = NonBlockingTerminal()
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=60)
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+    stream.refusing = True
+    # The update and Live's stop are both refused.
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="still evaluating"))
+    assert reporter.is_active is False
+    stream.refusing = False
+    first_run = stream.getvalue()
+
+    # The reporter is used again without the close() that ends the failed run.
+    rich_reporter.start(_plan(progress))
+    rich_reporter.emit(progress.ProgressEvent(stage="agent:codex", state="complete", detail="agent finished"))
+    rich_reporter.close()
+
+    second_run = stream.getvalue()[len(first_run) :]
+    assert "agent finished" in second_run
+    assert "still evaluating" not in second_run
+    assert "display stopped" not in second_run
+    assert second_run.rfind("\x1b[?25h") > second_run.rfind("\x1b[?25l")
+
+
+@pytest.mark.parametrize("notice_refused", [True, False], ids=["notice-refused", "notice-accepted"])
+def test_refused_first_frame_and_stop_leave_the_cursor_shown(
+    monkeypatch: pytest.MonkeyPatch,
+    notice_refused: bool,
+) -> None:
+    from rich.console import Console
+    from rich.live import Live
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    class NonBlockingTerminal(_TTYBuffer):
+        """Takes Live's hide-cursor write, then refuses the first frame and Live's own stop."""
+
+        armed = False
+
+        def write(self, text: str) -> int:
+            refused = self.armed and "\x1b[?25l" not in text
+            if refused and (notice_refused or _STOP_NOTICE not in text):
+                raise BlockingIOError(errno.EAGAIN, "write could not complete without blocking", 0)
+            return super().write(text)
+
+    stream = NonBlockingTerminal()
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=60)
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+
+    def live_on_a_refusing_terminal(*args: Any, **kwargs: Any) -> Any:
+        # The plan lines above the frame are already printed.
+        stream.armed = True
+        return Live(*args, **kwargs)
+
+    rich_reporter._live_factory = live_on_a_refusing_terminal
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    try:
+        # Live.start() stops Live itself when its first frame fails, then
+        # raises. The terminal refuses that stop as well, so the cursor Live
+        # hid stays hidden, and Live is already stopped when progress turns off.
+        reporter.start(_plan(progress))
+        assert reporter.is_active is False
+        assert rich_reporter._live is None
+        stream.armed = False
+        printed_before_close = len(stream.getvalue())
+    finally:
+        reporter.close()
+    output = stream.getvalue()
+    _assert_cursor_shown_and_one_stop_notice(output, _LATE_STOP_NOTICE if notice_refused else _STOP_NOTICE)
+    # Nothing the terminal refused is sent when the run ends.
+    assert "\x1b[1A" not in output[printed_before_close:]
+    if notice_refused:
+        # No frame reached the terminal, so the late notice follows the plan
+        # lines without a blank line.
+        assert "Harbor Run Configuration" not in output
+        assert "\n\n" not in output.replace("\x1b[?25h", "").replace("\x1b[?25l", "")
+    else:
+        # The notice went out with the frame and the stop the terminal had
+        # refused just before, so the frame is on screen above it.
+        assert "Harbor Run Configuration" in output
+
+
+class _InterleavingLock:
+    """A reentrant lock that runs a hook once, when the arming thread next releases it fully."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._depth = 0
+        self._hook: tuple[threading.Thread, Any] | None = None
+
+    def arm(self, hook: Any) -> None:
+        self._hook = (threading.current_thread(), hook)
+
+    def __enter__(self) -> _InterleavingLock:
+        self._lock.acquire()
+        self._depth += 1
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._depth -= 1
+        released = self._depth == 0
+        self._lock.release()
+        armed = self._hook
+        if released and armed is not None and armed[0] is threading.current_thread():
+            self._hook = None
+            armed[1]()
+
+
+def test_an_update_that_races_a_drawing_failure_is_not_drawn_as_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    import rich.live
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+    rich_reporter = progress.RichProgressReporter(stream=_TTYBuffer(), refresh_interval=60)
+    lock = _InterleavingLock()
+    rich_reporter._lock = lock
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="attempt 1 of 3"))
+
+    def late_agent_update() -> None:
+        # The caller's next agent update passed the wrapper's check before the
+        # failure turned progress off, and reaches the reporter while it stops.
+        update = threading.Thread(
+            target=rich_reporter.emit,
+            args=(progress.ProgressEvent(stage="agent:codex", state="running", detail="attempt 2 of 3"),),
+        )
+        update.start()
+        update.join(timeout=10)
+
+    lock.arm(late_agent_update)
+    # What the heartbeat thread's failure callback runs.
+    reporter._disable()
+    live = _FakeLive.instances[0]
+    frames = [_render(renderable, width=180) for renderable in live.renderables]
+    reporter.close()
+
+    # Only the display failed: the agent is never drawn as failed, and the
+    # frame left on screen shows the update as still running.
+    assert not any("failed" in frame or "interrupted" in frame for frame in frames)
+    assert "attempt 2 of 3" in frames[-1]
+    assert live.stop_calls == 1
+
+
+def test_heartbeat_failure_during_a_plan_update_stops_what_the_update_drew(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import rich.live
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+
+    class RacingReporter(progress.RichProgressReporter):
+        report_failure: Any = None
+        failure_thread: threading.Thread | None = None
+        race = False
+
+        def set_failure_callback(self, callback) -> None:
+            super().set_failure_callback(callback)
+            self.report_failure = callback
+
+        def start(self, plan) -> None:
+            if self.race:
+                # The heartbeat thread reports a redraw failure while this plan
+                # update is in flight.
+                self.failure_thread = threading.Thread(target=self.report_failure)
+                self.failure_thread.start()
+                self.failure_thread.join(timeout=0.2)
+            super().start(plan)
+
+    rich_reporter = RacingReporter(stream=_TTYBuffer(), refresh_interval=60)
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    rich_reporter.race = True
+    reporter.start(_plan(progress))
+    failure_thread = rich_reporter.failure_thread
+    assert failure_thread is not None
+    failure_thread.join(timeout=10)
+
+    assert not failure_thread.is_alive()
+    # The failure waited for the update, then stopped the frame it drew.
+    assert reporter.is_active is False
+    assert rich_reporter.is_active is False
+    assert [live.stop_calls for live in _FakeLive.instances] == [1]
+    reporter.close()
+
+
+def test_safe_reporter_wraps_a_reporter_whose_callback_registration_fails() -> None:
+    progress = _progress_module()
+
+    class RefusingReporter(progress.NullProgressReporter):
+        def __init__(self) -> None:
+            self.events: list[Any] = []
+
+        def set_failure_callback(self, _callback) -> None:
+            raise RuntimeError("failure callbacks are not supported")
+
+        def emit(self, event) -> None:
+            self.events.append(event)
+
+    class StrictProxy:
+        """Forwards the reporter protocol and refuses any other attribute."""
+
+        def __init__(self) -> None:
+            self.target = RefusingReporter()
+
+        def __getattr__(self, name: str) -> Any:
+            if name in {"is_active", "start", "set_secret_values", "emit", "heartbeat", "close"}:
+                return getattr(self.target, name)
+            raise RuntimeError(f"unsupported attribute: {name}")
+
+    refusing = RefusingReporter()
+    proxy = StrictProxy()
+
+    for target, events in ((refusing, refusing.events), (proxy, proxy.target.events)):
+        reporter = progress.safe_progress_reporter(target)
+        reporter.start(_plan(progress))
+        reporter.emit(progress.ProgressEvent(stage="configuration", state="running"))
+        reporter.close()
+        assert [event.stage for event in events] == ["configuration"]
+
+
+def test_heartbeat_failure_without_a_safety_wrapper_stops_the_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    progress = _progress_module()
+    uncaught: list[BaseException | None] = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: uncaught.append(args.exc_value))
+
+    class FailingHeartbeatReporter(progress.PlainProgressReporter):
+        def heartbeat(self) -> None:
+            raise RuntimeError("heartbeat failed")
+
+    reporter = FailingHeartbeatReporter(stream=io.StringIO(), refresh_interval=0.05)
+    reporter.start(_plan(progress))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running"))
+    heartbeat = reporter._thread
+    assert heartbeat is not None
+
+    heartbeat.join(timeout=10)
+
+    assert not heartbeat.is_alive()
+    assert reporter.is_active is False
+    assert uncaught == []
+    reporter.close()
 
 
 def test_safe_reporter_tracks_lifecycle_when_delegate_has_no_active_state() -> None:
@@ -931,6 +2019,38 @@ def _stub_runner(
     return runner, skill
 
 
+def _dataset_sufficiency_agent_result(
+    *,
+    score: float = 0.8,
+    paired_cases: int = 13,
+    skill_activation: dict[str, Any] | None = None,
+    skip_with_skill: bool = False,
+) -> dict[str, Any]:
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+
+    scores = dict.fromkeys(DEFAULT_METRICS, score)
+    result = {
+        "execution_status": "succeeded",
+        "execution_errors": [],
+        "metrics_with_skill": list(DEFAULT_METRICS),
+        "metrics_without_skill": list(DEFAULT_METRICS),
+        "with_skill": {} if skip_with_skill else scores,
+        "without_skill": scores,
+        "conditions": {
+            "with_skill": {"execution_status": "skipped" if skip_with_skill else "succeeded"},
+            "without_skill": {"execution_status": "succeeded"},
+        },
+        "pass_at_k": {
+            "with_skill": {"rate_interval": {"lower": 0.45, "upper": 0.55}},
+            "without_skill": {"rate": 0.8},
+            "lift": {"paired_comparison": {"paired_cases": paired_cases}},
+        },
+    }
+    if skill_activation is not None:
+        result["skill_activation"] = skill_activation
+    return result
+
+
 def test_runner_rejects_custom_in_skill_results_root_before_creating_output(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -944,6 +2064,175 @@ def test_runner_rejects_custom_in_skill_results_root_before_creating_output(
     assert "canonical" in json.dumps(result)
     assert "evals/results" in json.dumps(result)
     assert not results_root.exists()
+
+
+def test_root_dataset_sufficiency_uses_best_agent_selected_by_report(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def collect(**_kwargs):
+        return {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "metrics": [],
+            "agents": {
+                "codex": _dataset_sufficiency_agent_result(score=0.7, paired_cases=1),
+                "opencode": _dataset_sufficiency_agent_result(score=0.9, paired_cases=7),
+            },
+        }
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, collect=collect)
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex", "opencode"],
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    assert "error" not in result
+    assert result["dataset_sufficiency"] == result["agents"]["opencode"]["dataset_sufficiency"]
+    assert result["dataset_sufficiency"]["checks"][2]["observed"]["paired_cases"] == 7
+
+
+def test_single_never_activated_agent_gets_root_dataset_sufficiency(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        collect=lambda **_kwargs: {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "metrics": [],
+            "agents": {
+                "codex": _dataset_sufficiency_agent_result(
+                    skill_activation={"status": "never_activated"},
+                )
+            },
+        },
+    )
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    from skillevaluator.tier3.result_display import render_result
+
+    assert "dataset_sufficiency" in result
+    assert "Dataset size:" in render_result(result)
+
+
+def test_skipped_with_skill_agent_gets_root_dataset_sufficiency(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        collect=lambda **_kwargs: {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "metrics": [],
+            "agents": {"codex": _dataset_sufficiency_agent_result(skip_with_skill=True)},
+        },
+    )
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        skip_with_skill=True,
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    from skillevaluator.tier3.result_display import render_result
+
+    assert result["agents"]["codex"]["conditions"]["with_skill"]["execution_status"] == "skipped"
+    assert "dataset_sufficiency" in result
+    assert "Dataset size:" in render_result(result)
+
+
+def test_skipped_with_skill_agents_rank_root_dataset_sufficiency_by_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        collect=lambda **_kwargs: {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "metrics": [],
+            "agents": {
+                "codex": _dataset_sufficiency_agent_result(score=0.6, paired_cases=1, skip_with_skill=True),
+                "opencode": _dataset_sufficiency_agent_result(score=0.9, paired_cases=7, skip_with_skill=True),
+            },
+        },
+    )
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex", "opencode"],
+        skip_with_skill=True,
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    from skillevaluator.tier3.result_display import render_result
+
+    agents = result["agents"]
+    assert agents["codex"]["dataset_sufficiency"] != agents["opencode"]["dataset_sufficiency"]
+    assert result["dataset_sufficiency"] == agents["opencode"]["dataset_sufficiency"]
+    assert "Dataset size:" in render_result(result)
+
+
+def test_runner_keeps_recorded_negative_count_when_unclassified_cases_remain(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    entries = [{"id": f"positive-{index}", "prompt": "Question", "expected_skill": "demo"} for index in range(10)]
+    entries.extend({"id": f"negative-{index}", "prompt": "Question", "expected_skill": None} for index in range(2))
+    entries.append({"id": "unclassified", "prompt": "Question"})
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        collect=lambda **_kwargs: {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "metrics": [],
+            "agents": {"codex": _dataset_sufficiency_agent_result()},
+        },
+    )
+    from skillevaluator.tier3.harbor.report_data import build_dataset_snapshot
+
+    dataset_truth = build_dataset_snapshot(entries, evaluator_version=runner.__version__)
+    monkeypatch.setattr(runner, "_persist_dataset_truth", lambda *_args, **_kwargs: dataset_truth)
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    from skillevaluator.tier3.result_display import render_result
+
+    summary = result["dataset_sufficiency"]["coverage_summary"]
+    assert result["dataset_summary"] == {
+        "total_tasks": 13,
+        "positive_tasks": 10,
+        "negative_tasks": 2,
+        "unclassified_tasks": 1,
+        "source": "dataset",
+    }
+    assert summary.startswith("Dataset size: sufficient")
+    assert "2 negative cases (needs 1)" in summary
+    assert summary in render_result(result)
 
 
 def test_run_result_bounds_multibyte_launch_errors_for_report_loader(
@@ -1359,6 +2648,35 @@ def test_credential_validation_includes_distinct_standard_grading_route(
         ("anthropic", "claude-test"),
         ("openai", "judge-gpt"),
     }
+
+
+def test_native_task_source_omits_evals_dataset_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner, skill = _stub_runner(monkeypatch, tmp_path)
+    (skill / "evals" / "evals.json").write_text(
+        json.dumps(
+            {
+                "skill_name": "demo-skill",
+                "generation": {"mode": "template_requested", "review_state": "needs_review"},
+                "evals": [{"id": "case-1", "prompt": "Q", "expected_output": "A"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _configure_native_task_source(monkeypatch, runner, skill)
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        output_dir=tmp_path / "results",
+        agent_runtime_preflight=False,
+    )
+
+    assert "error" not in result
+    assert result["run_config"]["task_source"] == "native_harbor"
+    assert result["dataset_provenance"] is None
 
 
 def test_missing_native_task_source_stops_before_credential_probes(
@@ -2872,7 +4190,9 @@ def test_second_interrupt_forces_running_agents_to_stop(
     assert reporter.interrupts == 2
     events = [(event.stage, event.state, event.detail) for event in reporter.events]
     stopping = [detail for stage, state, detail in events if stage == "agent:codex" and state == "running"]
-    assert stopping[-1].startswith("stopping Harbor jobs; press Ctrl+C again")
+    assert stopping[-1] == runner._HARBOR_RUN_STOPPING_DETAIL
+    assert stopping[-1].startswith("2nd Ctrl+C skips wait; stopping Harbor jobs")
+    assert stopping[-1].endswith("up to 30s of environment cleanup")
     assert ("agent:codex", "failed", "interrupted before completion") in events
     assert events[-1] == ("run-finished", "failed", "Tier 3 evaluation interrupted")
 
@@ -3108,6 +4428,7 @@ def test_runner_emits_truthful_stages_plan_and_per_agent_state(
         ("with-skill-tasks", "ready"),
         ("baseline-tasks", "running"),
         ("baseline-tasks", "ready"),
+        ("configuration", "complete"),
         ("docker-images", "delegated"),
         ("agent-runtime-preflight", "running"),
         ("agent-runtime-preflight", "complete"),

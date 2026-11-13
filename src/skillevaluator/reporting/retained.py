@@ -14,10 +14,13 @@ from functools import partial
 from typing import Any
 
 from skillevaluator.models import Finding, SuccessDetail, ValidationResult, ValidationSummary
+from skillevaluator.publication_evidence import TIER1_REQUIRED_CHECKS_KEY, TIER1_UNSCANNED_PATHS_KEY
 from skillevaluator.reporting.base import is_cleanly_skipped, is_tier2_result, is_tier3_result, passes_required_gate
 from skillevaluator.reporting.html import HTMLReporter
+from skillevaluator.reporting.json_reporter import _tier1_scope_strings
 from skillevaluator.reporting.run_status import resolve_run_status, result_status
 from skillevaluator.skillspector_provenance import sanitize_skillspector_provenance_metadata
+from skillevaluator.skillspector_reference_caveats import sanitize_reference_caveat_metadata
 
 
 class RetainedReportError(ValueError):
@@ -249,6 +252,10 @@ def retained_results(
             metadata["skillspector_version"] = _text(row["skillspector_version"], "skillspector_version")
         # Revalidated like every report boundary; a non-canonical record is left out.
         metadata.update(sanitize_skillspector_provenance_metadata(row))
+        if "skillspector_reference_caveats" in row:
+            reference_caveats = sanitize_reference_caveat_metadata(row["skillspector_reference_caveats"])
+            _require(reference_caveats is not None, "Invalid skillspector_reference_caveats")
+            metadata["skillspector_reference_caveats"] = reference_caveats
         if "publication_target_conflict" in row:
             metadata["publication_target_conflict"] = _text(
                 row["publication_target_conflict"], "publication_target_conflict"
@@ -262,6 +269,12 @@ def retained_results(
         for key in ("incomplete_scans", "gate_failures"):
             if key in row:
                 metadata[key] = _strings(row[key], key)
+        for key in (TIER1_REQUIRED_CHECKS_KEY, TIER1_UNSCANNED_PATHS_KEY):
+            if key in row:
+                try:
+                    metadata[key] = _tier1_scope_strings(row[key], key)
+                except ValueError as exc:
+                    raise RetainedReportError(str(exc)) from exc
         if "scanners" in row:
             _require(
                 isinstance(row["scanners"], dict)

@@ -85,7 +85,8 @@
               "choices": [
                 "openai",
                 "anthropic",
-                "nv_build"
+                "nv_build",
+                "openai-compatible"
               ],
               "default": "openai",
               "name": "provider",
@@ -97,7 +98,8 @@
             {
               "choices": [
                 "openai",
-                "nv_build"
+                "nv_build",
+                "openai-compatible"
               ],
               "name": "embedding_provider",
               "opts": [
@@ -120,6 +122,114 @@
               ],
               "param_type": "option",
               "type": "text"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "tier1_llm",
+              "opts": [
+                "--tier1-llm"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "choices": [
+                "openai",
+                "anthropic",
+                "nv_build"
+              ],
+              "name": "tier1_provider",
+              "opts": [
+                "--tier1-provider"
+              ],
+              "param_type": "option"
+            },
+            {
+              "default": "",
+              "name": "tier1_model",
+              "opts": [
+                "--tier1-model"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "default": "",
+              "name": "base_url",
+              "opts": [
+                "--base-url"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "default": "",
+              "name": "embedding_base_url",
+              "opts": [
+                "--embedding-base-url"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "choices": [
+                "openai",
+                "anthropic",
+                "nv_build",
+                "openai-compatible"
+              ],
+              "name": "tier3_provider",
+              "opts": [
+                "--tier3-provider"
+              ],
+              "param_type": "option"
+            },
+            {
+              "default": "",
+              "name": "tier3_model",
+              "opts": [
+                "--tier3-model"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "default": "",
+              "name": "tier3_base_url",
+              "opts": [
+                "--tier3-base-url"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "multiple": true,
+              "name": "agent_model",
+              "opts": [
+                "--agent-model"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "default": "SKILL_EVAL_LLM_API_KEY",
+              "name": "gateway_secret",
+              "opts": [
+                "--gateway-secret"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "benchmark_pr",
+              "opts": [
+                "--benchmark-pr"
+              ],
+              "param_type": "option",
+              "type": "boolean"
             },
             {
               "name": "agents",
@@ -481,6 +591,19 @@
           "type": "path"
         },
         {
+          "choices": [
+            "skill",
+            "intent",
+            "trace"
+          ],
+          "default": "skill",
+          "name": "grounding",
+          "opts": [
+            "--grounding"
+          ],
+          "param_type": "option"
+        },
+        {
           "default": "False",
           "is_flag": true,
           "name": "refine",
@@ -801,6 +924,22 @@
           "type": "boolean"
         },
         {
+          "name": "reuse_baseline",
+          "opts": [
+            "--reuse-baseline"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "name": "compare_to",
+          "opts": [
+            "--compare-to"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
           "default": "False",
           "is_flag": true,
           "name": "skip_with_skill",
@@ -817,6 +956,46 @@
           ],
           "param_type": "option",
           "type": "integer"
+        },
+        {
+          "name": "max_agent_tokens",
+          "opts": [
+            "--max-agent-tokens"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "name": "max_judge_calls",
+          "opts": [
+            "--max-judge-calls"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "name": "max_attempts_total",
+          "opts": [
+            "--max-attempts-total"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "name": "max_cost_usd",
+          "opts": [
+            "--max-cost-usd"
+          ],
+          "param_type": "option",
+          "type": "float range"
+        },
+        {
+          "name": "price_file",
+          "opts": [
+            "--price-file"
+          ],
+          "param_type": "option",
+          "type": "file"
         },
         {
           "name": "pass_threshold",
@@ -959,6 +1138,18 @@
           "param_type": "option",
           "secondary_opts": [
             "--no-agent-runtime-preflight"
+          ],
+          "type": "boolean"
+        },
+        {
+          "is_flag": true,
+          "name": "tolerate_baseline_timeouts",
+          "opts": [
+            "--tolerate-baseline-timeouts"
+          ],
+          "param_type": "option",
+          "secondary_opts": [
+            "--no-tolerate-baseline-timeouts"
           ],
           "type": "boolean"
         },
@@ -2567,6 +2758,48 @@
     },
     "tier3": {
       "commands": {
+        "accept-traces": {
+          "params": [
+            {
+              "name": "skill_path",
+              "opts": [
+                "skill_path"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "directory"
+            },
+            {
+              "name": "review_dir",
+              "opts": [
+                "review_dir"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "directory"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "dry_run",
+              "opts": [
+                "--dry-run"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "allow_native_harbor",
+              "opts": [
+                "--allow-native-harbor"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            }
+          ]
+        },
         "compare": {
           "params": [
             {
@@ -2585,6 +2818,55 @@
               ],
               "param_type": "option",
               "type": "directory"
+            }
+          ]
+        },
+        "compare-versions": {
+          "params": [
+            {
+              "name": "skill_path",
+              "opts": [
+                "skill_path"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "path"
+            },
+            {
+              "name": "current",
+              "opts": [
+                "--current"
+              ],
+              "param_type": "option",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "name": "prior",
+              "opts": [
+                "--prior"
+              ],
+              "param_type": "option",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "name": "results_dir",
+              "opts": [
+                "--results-dir"
+              ],
+              "param_type": "option",
+              "type": "directory"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "as_json",
+              "opts": [
+                "--json"
+              ],
+              "param_type": "option",
+              "type": "boolean"
             }
           ]
         },
@@ -2646,6 +2928,19 @@
               ],
               "param_type": "option",
               "type": "path"
+            },
+            {
+              "choices": [
+                "skill",
+                "intent",
+                "trace"
+              ],
+              "default": "skill",
+              "name": "grounding",
+              "opts": [
+                "--grounding"
+              ],
+              "param_type": "option"
             },
             {
               "default": "False",
@@ -2842,6 +3137,22 @@
               "type": "boolean"
             },
             {
+              "name": "reuse_baseline",
+              "opts": [
+                "--reuse-baseline"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "compare_to",
+              "opts": [
+                "--compare-to"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
               "default": "False",
               "is_flag": true,
               "name": "skip_with_skill",
@@ -2858,6 +3169,46 @@
               ],
               "param_type": "option",
               "type": "integer"
+            },
+            {
+              "name": "max_agent_tokens",
+              "opts": [
+                "--max-agent-tokens"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "name": "max_judge_calls",
+              "opts": [
+                "--max-judge-calls"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "name": "max_attempts_total",
+              "opts": [
+                "--max-attempts-total"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "name": "max_cost_usd",
+              "opts": [
+                "--max-cost-usd"
+              ],
+              "param_type": "option",
+              "type": "float range"
+            },
+            {
+              "name": "price_file",
+              "opts": [
+                "--price-file"
+              ],
+              "param_type": "option",
+              "type": "file"
             },
             {
               "name": "pass_threshold",
@@ -3004,6 +3355,18 @@
               "type": "boolean"
             },
             {
+              "is_flag": true,
+              "name": "tolerate_baseline_timeouts",
+              "opts": [
+                "--tolerate-baseline-timeouts"
+              ],
+              "param_type": "option",
+              "secondary_opts": [
+                "--no-tolerate-baseline-timeouts"
+              ],
+              "type": "boolean"
+            },
+            {
               "name": "timeout_multiplier",
               "opts": [
                 "--timeout-multiplier"
@@ -3124,6 +3487,127 @@
               "param_type": "argument",
               "required": true,
               "type": "directory"
+            }
+          ]
+        },
+        "history": {
+          "params": [
+            {
+              "name": "skill_path",
+              "opts": [
+                "skill_path"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "path"
+            },
+            {
+              "name": "results_dir",
+              "opts": [
+                "--results-dir"
+              ],
+              "param_type": "option",
+              "type": "directory"
+            },
+            {
+              "name": "agent",
+              "opts": [
+                "--agent"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "as_json",
+              "opts": [
+                "--json"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "name": "output",
+              "opts": [
+                "--output"
+              ],
+              "param_type": "option",
+              "type": "file"
+            }
+          ]
+        },
+        "import-metrics": {
+          "params": [
+            {
+              "name": "source",
+              "opts": [
+                "source"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "file"
+            },
+            {
+              "name": "output_dir",
+              "opts": [
+                "--output-dir",
+                "-o"
+              ],
+              "param_type": "option",
+              "required": true,
+              "type": "directory"
+            }
+          ]
+        },
+        "import-traces": {
+          "params": [
+            {
+              "name": "skill_path",
+              "opts": [
+                "skill_path"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "directory"
+            },
+            {
+              "name": "export",
+              "opts": [
+                "export"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "file"
+            },
+            {
+              "name": "output",
+              "opts": [
+                "--output",
+                "-o"
+              ],
+              "param_type": "option",
+              "type": "directory"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "force",
+              "opts": [
+                "--force"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "dry_run",
+              "opts": [
+                "--dry-run"
+              ],
+              "param_type": "option",
+              "type": "boolean"
             }
           ]
         },
@@ -3251,6 +3735,35 @@
             }
           ]
         },
+        "migrate-dataset": {
+          "params": [
+            {
+              "name": "source",
+              "opts": [
+                "source"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "file"
+            },
+            {
+              "name": "skill_name",
+              "opts": [
+                "--skill-name"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "destination",
+              "opts": [
+                "--output"
+              ],
+              "param_type": "option",
+              "type": "file"
+            }
+          ]
+        },
         "select-decoys": {
           "params": [
             {
@@ -3358,6 +3871,121 @@
               ],
               "param_type": "option",
               "type": "boolean"
+            }
+          ]
+        },
+        "validate-grader": {
+          "params": [
+            {
+              "name": "suite_dir",
+              "opts": [
+                "suite_dir"
+              ],
+              "param_type": "argument",
+              "type": "directory"
+            },
+            {
+              "default": "3",
+              "name": "repeats",
+              "opts": [
+                "--repeats"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "choices": [
+                "assessment",
+                "tuning",
+                "all"
+              ],
+              "default": "assessment",
+              "name": "split",
+              "opts": [
+                "--split"
+              ],
+              "param_type": "option"
+            },
+            {
+              "multiple": true,
+              "name": "case_ids",
+              "opts": [
+                "--case"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "default": "grader-validation-output",
+              "name": "output",
+              "opts": [
+                "--output",
+                "-o"
+              ],
+              "param_type": "option",
+              "type": "directory"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "as_json",
+              "opts": [
+                "--json"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "check_suite",
+              "opts": [
+                "--check-suite"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "1",
+              "name": "concurrency",
+              "opts": [
+                "--concurrency"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "default": "300.0",
+              "name": "timeout",
+              "opts": [
+                "--timeout"
+              ],
+              "param_type": "option",
+              "type": "float range"
+            },
+            {
+              "name": "max_false_pass_rate",
+              "opts": [
+                "--max-false-pass-rate"
+              ],
+              "param_type": "option",
+              "type": "float range"
+            },
+            {
+              "name": "max_false_fail_rate",
+              "opts": [
+                "--max-false-fail-rate"
+              ],
+              "param_type": "option",
+              "type": "float range"
+            },
+            {
+              "name": "max_unjudgeable_rate",
+              "opts": [
+                "--max-unjudgeable-rate"
+              ],
+              "param_type": "option",
+              "type": "float range"
             }
           ]
         },
@@ -3472,6 +4100,22 @@
             "type": "boolean"
           },
           {
+            "name": "reuse_baseline",
+            "opts": [
+              "--reuse-baseline"
+            ],
+            "param_type": "option",
+            "type": "text"
+          },
+          {
+            "name": "compare_to",
+            "opts": [
+              "--compare-to"
+            ],
+            "param_type": "option",
+            "type": "text"
+          },
+          {
             "default": "False",
             "is_flag": true,
             "name": "skip_with_skill",
@@ -3488,6 +4132,46 @@
             ],
             "param_type": "option",
             "type": "integer"
+          },
+          {
+            "name": "max_agent_tokens",
+            "opts": [
+              "--max-agent-tokens"
+            ],
+            "param_type": "option",
+            "type": "integer range"
+          },
+          {
+            "name": "max_judge_calls",
+            "opts": [
+              "--max-judge-calls"
+            ],
+            "param_type": "option",
+            "type": "integer range"
+          },
+          {
+            "name": "max_attempts_total",
+            "opts": [
+              "--max-attempts-total"
+            ],
+            "param_type": "option",
+            "type": "integer range"
+          },
+          {
+            "name": "max_cost_usd",
+            "opts": [
+              "--max-cost-usd"
+            ],
+            "param_type": "option",
+            "type": "float range"
+          },
+          {
+            "name": "price_file",
+            "opts": [
+              "--price-file"
+            ],
+            "param_type": "option",
+            "type": "file"
           },
           {
             "name": "pass_threshold",
@@ -3630,6 +4314,18 @@
             "param_type": "option",
             "secondary_opts": [
               "--no-agent-runtime-preflight"
+            ],
+            "type": "boolean"
+          },
+          {
+            "is_flag": true,
+            "name": "tolerate_baseline_timeouts",
+            "opts": [
+              "--tolerate-baseline-timeouts"
+            ],
+            "param_type": "option",
+            "secondary_opts": [
+              "--no-tolerate-baseline-timeouts"
             ],
             "type": "boolean"
           },
@@ -3918,6 +4614,14 @@
           "type": "integer range"
         },
         {
+          "name": "catalog_root",
+          "opts": [
+            "--catalog-root"
+          ],
+          "param_type": "option",
+          "type": "directory"
+        },
+        {
           "default": "True",
           "is_flag": true,
           "name": "dedup",
@@ -4081,6 +4785,46 @@
           "type": "integer"
         },
         {
+          "name": "max_agent_tokens",
+          "opts": [
+            "--max-agent-tokens"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "name": "max_judge_calls",
+          "opts": [
+            "--max-judge-calls"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "name": "max_attempts_total",
+          "opts": [
+            "--max-attempts-total"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "name": "max_cost_usd",
+          "opts": [
+            "--max-cost-usd"
+          ],
+          "param_type": "option",
+          "type": "float range"
+        },
+        {
+          "name": "price_file",
+          "opts": [
+            "--price-file"
+          ],
+          "param_type": "option",
+          "type": "file"
+        },
+        {
           "name": "pass_threshold",
           "opts": [
             "--pass-threshold"
@@ -4183,6 +4927,18 @@
           "param_type": "option",
           "secondary_opts": [
             "--no-agent-runtime-preflight"
+          ],
+          "type": "boolean"
+        },
+        {
+          "is_flag": true,
+          "name": "tolerate_baseline_timeouts",
+          "opts": [
+            "--tolerate-baseline-timeouts"
+          ],
+          "param_type": "option",
+          "secondary_opts": [
+            "--no-tolerate-baseline-timeouts"
           ],
           "type": "boolean"
         },

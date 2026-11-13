@@ -584,23 +584,10 @@ All notable changes to SkillEvaluator are documented in this file.
   asked (1, or 2 after a rejected reply, not counting the client's retries),
   in the skill's `rubric_eval` success detail or `llm_*` finding and, for a
   single skill, also in the `rubric_eval` object. It is left out when the
-  first request fails, for example with no provider configured.
-
-- Rubric retry diagnostics redact judge-supplied credentials before logging or truncating the rejection reason.
-
-- A Tier 1 security scan keeps a SkillSpector `partial` or
-  `complete_with_caveats` report `INCOMPLETE`, instead of passing with the
-  missing-reference warning above, when the report lists a `missing` reference
-  on a line that has no ledger row, lists an `ambiguous` reference on any
-  line, or flags one of its lists as truncated with a key that ends in
-  `_truncated`, such as `ledger_exceptions_truncated`. A `partial` report whose
-  only listed gap is a referenced image no longer passes with the image
-  warning alone in those cases either. Only the line of a ledger row is checked
-  for a file left out of the scanned copy, so the line of a reference without a
-  row, or one that a truncated list left out, could name a file such as
-  `versions/install.sh` and pass unnoticed.
-
-- Rubric retry guidance links to the published environment-variable documentation route.
+  first request fails, for example with no provider configured. Rejection
+  diagnostics redact judge-supplied credentials before shortening the reason,
+  and collapse whitespace and controls to printable single-line text in logs,
+  retry notes and final invalid-response findings and summaries.
 
 - A default Tier 3 run with a baseline can reach a PASS or NEUTRAL publication
   verdict in BENCHMARK.md again. The baseline arm has no skill under test, so
@@ -613,6 +600,18 @@ All notable changes to SkillEvaluator are documented in this file.
   both arms scored. On the card those two rows say `baseline N/A` instead of
   `baseline not run`. Any other missing or inconsistent baseline still makes
   the card INCOMPLETE.
+
+- A Tier 1 security scan keeps a SkillSpector `partial` or
+  `complete_with_caveats` report `INCOMPLETE`, instead of passing with the
+  missing-reference warning above, when the report lists a `missing` reference
+  on a line that has no ledger row, lists an `ambiguous` reference on any
+  line, or flags one of its lists as truncated with a key that ends in
+  `_truncated`, such as `ledger_exceptions_truncated`. A `partial` report whose
+  only listed gap is a referenced image no longer passes with the image
+  warning alone in those cases either. Only the line of a ledger row is checked
+  for a file left out of the scanned copy, so the line of a reference without a
+  row, or one that a truncated list left out, could name a file such as
+  `versions/install.sh` and pass unnoticed.
 
 - `BENCHMARK.md` no longer publishes an Overall uplift that disagrees with
   `lift.json` and the JSON, HTML, Markdown and terminal reports when a metric is

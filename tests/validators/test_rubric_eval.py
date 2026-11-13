@@ -1174,6 +1174,43 @@ class TestInvalidReplyRetry:
         assert "sk-synthetic" not in requests[1]["user"].removeprefix(requests[0]["user"])
         assert result.passed
 
+    @pytest.mark.parametrize("padding", ["", "x" * 410 + " "])
+    def test_final_invalid_reply_diagnostics_redact_before_bounding(self, tmp_path, padding):
+        checks = _complete_checks()
+        checks.append({**checks[0], "id": padding + "sk-syntheticcredential123456789 " + "z" * 2000})
+
+        result, requests = _validate_with(tmp_path, _reply(checks), _reply(checks))
+
+        assert len(requests) == 2
+        (finding,) = _llm_findings(result)
+        summary = result.metadata["rubric_eval"]["summary"]
+        assert finding.message == summary
+        assert "sk-synthetic" not in summary
+        assert len(summary) <= 500 + len(" ... [truncated]")
+        assert summary.endswith(" ... [truncated]")
+        assert not result.passed
+
+    @pytest.mark.parametrize("control", ["\n", "\r", "\t", "\x00", "\x1b[31m", "\u2028", "\u202e"])
+    def test_rejection_diagnostics_are_printable_single_lines(self, tmp_path, control, caplog, monkeypatch):
+        checks = _complete_checks()
+        checks.append({**checks[0], "id": f"invented{control}FORGED"})
+        monkeypatch.setattr(rubric_eval.logger, "propagate", True)
+
+        result, requests = _validate_with(tmp_path, _reply(checks), _reply(checks))
+
+        problem = requests[1]["user"].removeprefix(requests[0]["user"]).removeprefix(
+            f"\n{_RETRY_MARKER}"
+        ).removesuffix(f". {_RETRY_TAIL}")
+        assert "invented" in problem and "FORGED" in problem
+        assert problem.isprintable()
+        assert "  " not in problem
+        rejected = [record for record in caplog.records if "reply rejected" in record.getMessage()]
+        assert rejected
+        assert all(record.getMessage().isprintable() for record in rejected)
+        (finding,) = _llm_findings(result)
+        assert finding.message.isprintable()
+        assert result.metadata["rubric_eval"]["summary"] == finding.message
+
     @pytest.mark.parametrize(
         ("first_reply", "problem"),
         [

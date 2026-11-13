@@ -429,6 +429,22 @@ All notable changes to SkillEvaluator are documented in this file.
   `/root/.bashrc`, or `/etc/sudoers` scored 0.0 in 0.9.0 and now scores 1.0,
   and a view of a credential store such as `~/.netrc` still scores 0.0. Both
   the host checker and the bundled Harbor verifier apply the fix.
+- `BENCHMARK.md` now shows the evidence and the policy that decided its overall
+  verdict. The card used to print `Overall verdict: PASS — Recommended for
+  publication` with nothing behind it, so a reader who saw an agent with no
+  dimension scores and another agent below the documented 40% FAIL boundary had
+  no way to tell why the gate still passed. A "Why This Verdict" block under the
+  callout now names the rule that fired, the Tier 3 evidence state with its
+  publication policy, each blocking reason, and, per agent, what the dimension
+  gate read: which agent passed every dimension, which dimension fell below the
+  FAIL or PASS boundary, and which agent the gate did not count, naming the
+  excluded arm when the run recorded one. A PASS that rests on one agent while
+  another fails a dimension now says so. The block is rendered from the same
+  publication assessment the printed verdict is projected from, and from the
+  per-agent breakdown the Tier 3 dimension verdict folds, so it cannot describe
+  a different decision. Optional or skipped Tier 3 runs are explained using
+  their recorded policy, and threshold-adjacent scores retain enough precision
+  to stay in their actual verdict band. No verdict changes.
 - `--tolerate-baseline-timeouts` (added in 0.9.0) now follows its own rules
   in the printed run verdict, in the notes of both reports and during result
   collection. The `RUN QUALITY VERDICT` line that `tier3 evaluate` prints

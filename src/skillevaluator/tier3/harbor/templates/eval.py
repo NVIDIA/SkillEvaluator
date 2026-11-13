@@ -754,6 +754,12 @@ _SECTION_USER_REQUEST = _shared_atif._SECTION_USER_REQUEST
 _env_positive_int = _shared_atif._env_positive_int
 _behavior_final_response_limit = _shared_atif._behavior_final_response_limit
 _behavior_check_budget = _shared_atif._behavior_check_budget
+_behavior_user_request_limit = _shared_atif._behavior_user_request_limit
+_BEHAVIOR_SECTION_LABELS = _shared_atif._BEHAVIOR_SECTION_LABELS
+_BEHAVIOR_REQUIRED_EVIDENCE = _shared_atif._BEHAVIOR_REQUIRED_EVIDENCE
+_BEHAVIOR_EVIDENCE_GAP_HINT = _shared_atif._BEHAVIOR_EVIDENCE_GAP_HINT
+_behavior_evidence_completeness = _shared_atif._behavior_evidence_completeness
+behavior_evidence_gap = _shared_atif.behavior_evidence_gap
 _BEHAVIOR_WRITE_TOOLS = _shared_atif._BEHAVIOR_WRITE_TOOLS
 _BEHAVIOR_EXEC_TOOLS = _shared_atif._BEHAVIOR_EXEC_TOOLS
 _BEHAVIOR_WRITE_COMMAND_MARKERS = _shared_atif._BEHAVIOR_WRITE_COMMAND_MARKERS
@@ -2846,75 +2852,14 @@ def _judge_retry_feedback(problem):
     )
 
 
-# Judge prompts quote the agent's commands and output, so saved judge evidence
-# also masks credentials that have no fixed key shape: URL userinfo
-# ("https://user:token@host"), Authorization, API-key, token and Cookie header
-# values, and the values of credential flags ("--token VALUE",
-# "curl -u user:password"). Each pattern starts at a fixed literal and scans one
-# bounded run, so long text stays linear. The header patterns accept shell
-# ("-H 'Name: value'"), JSON ('"name": "value"') and Python subscript
-# ('headers["Name"] = f"value"') forms, also with the quotes JSON-escaped
-# ('\"Name\": \"value\"'), as tool-call arguments appear in the behavior and
-# goal prompts.
-_JUDGE_EVIDENCE_URL_USERINFO_RE = re.compile(r"(://)[^\s/?#@'\"`<>]{1,256}@")
-_JUDGE_EVIDENCE_HEADER_SEPARATOR = r"\\?[\"']?\]?[ \t]{0,8}[:=][ \t]{0,8}(?:[bfru]{0,2}\\?[\"'])?"
-# Digest values hold quoted fields (username="...", response="..."), so the rest
-# of the value is masked up to a single quote, a backtick or the end of the line.
-_JUDGE_EVIDENCE_DIGEST_AUTH_HEADER_RE = re.compile(
-    r"(\bauthorization" + _JUDGE_EVIDENCE_HEADER_SEPARATOR + r"digest[ \t]{1,8})[^'`\r\n]{1,512}",
-    re.IGNORECASE,
-)
-# Other Authorization schemes vary (Bearer, Basic, ApiKey, Bot, SSWS, ...), so the
-# whole value is masked up to its closing quote or the end of the line. Bearer,
-# Basic, Token and Digest stay visible because they say which kind of credential
-# was sent, and a quoted token after them ('Bearer "token"') is masked too.
-_JUDGE_EVIDENCE_AUTH_HEADER_RE = re.compile(
-    r"(\bauthorization"
-    + _JUDGE_EVIDENCE_HEADER_SEPARATOR
-    + r"(?:(?:bearer|basic|token|digest)[ \t]{1,8}(?:\\?[\"'])?)?)"
-    r"[^\s'\"`,;\\][^'\"`\r\n\\]*",
-    re.IGNORECASE,
-)
-# X-API-Key, Api-Key, X-Auth-Token, X-Access-Token and Private-Token headers.
-_JUDGE_EVIDENCE_KEY_HEADER_RE = re.compile(
-    r"(\b(?:api-key|auth-token|access-token|private-token)" + _JUDGE_EVIDENCE_HEADER_SEPARATOR + r")"
-    r"[^\s'\"`,;\\]+",
-    re.IGNORECASE,
-)
-# A Cookie header holds "name=value" pairs joined by ";", and every pair is masked.
-_JUDGE_EVIDENCE_COOKIE_HEADER_RE = re.compile(
-    r"(\bcookie" + _JUDGE_EVIDENCE_HEADER_SEPARATOR + r")"
-    r"[^\s'\"`,;\\]+(?:;[ \t]{0,8}[^\s'\"`,;\\]+){0,64}",
-    re.IGNORECASE,
-)
-_JUDGE_EVIDENCE_CREDENTIAL_FLAG_RE = re.compile(
-    r"((?<![^\s'\"])--?(?:password|passwd|token|api-key|apikey|secret|access-token|auth-token)(?:[ \t]{1,8}|=))"
-    r"(?:\"[^\"\r\n]+\"|'[^'\r\n]+'|[^\s'\"`\\]+)",
-    re.IGNORECASE,
-)
-# "-u"/"--user" also name ordinary options (python -u, pip --user), so only a
-# user:password value is masked.
-_JUDGE_EVIDENCE_USER_FLAG_RE = re.compile(
-    r"((?<![^\s'\"])(?:-u|--user)(?:[ \t]{1,8}|=))"
-    r"(?:\"[^\"\r\n:]+:[^\"\r\n]+\"|'[^'\r\n:]+:[^'\r\n]+'|[^\s'\"`:\\]{1,256}:[^\s'\"`\\]+)"
-)
-
-
 def _redact_judge_evidence(text):
     """Mask credentials in a judge prompt, reply, or problem before it is saved."""
-    redacted = _redact_configured_credentials(_redact_evidence_text(text))
+    # Share finding credential semantics without imposing the finding scanner's
+    # 2,000-character input budget on the longer judge prompt and reply budgets.
+    redacted = _shared_checks._mask_finding_evidence_credentials(str(text), preserve_header_format=True)
+    redacted = _redact_configured_credentials(_redact_evidence_text(redacted))
     for pattern in _SECRET_PATTERNS:
         redacted = pattern.sub("<redacted>", redacted)
-    redacted = _JUDGE_EVIDENCE_URL_USERINFO_RE.sub(r"\1<redacted>@", redacted)
-    for pattern in (
-        _JUDGE_EVIDENCE_DIGEST_AUTH_HEADER_RE,
-        _JUDGE_EVIDENCE_AUTH_HEADER_RE,
-        _JUDGE_EVIDENCE_KEY_HEADER_RE,
-        _JUDGE_EVIDENCE_COOKIE_HEADER_RE,
-        _JUDGE_EVIDENCE_CREDENTIAL_FLAG_RE,
-        _JUDGE_EVIDENCE_USER_FLAG_RE,
-    ):
-        redacted = pattern.sub(r"\1<redacted>", redacted)
     return redacted
 
 
@@ -3564,14 +3509,36 @@ def _behavior_prompt_example(expected_count):
     )
 
 
-def judge_behavior_check(conversation_text, expected_behaviors):
+def judge_behavior_check(conversation_text, expected_behaviors, *, evidence_omitted=None):
+    """Judge expected behaviors, or refuse when required evidence did not reach the judge.
+
+    *evidence_omitted* is the behavior_check bundle's omission accounting. When
+    it reports that required evidence is incomplete, no model is called and an
+    explicit evaluation error is returned with no score: grading a shortened
+    final answer scores the evidence loss, not the agent.
+    """
     expected_behaviors = normalize_expected_behaviors(expected_behaviors)
     if not _has_judge_reference(expected_behaviors):
         return _judge_not_applicable(_NO_EXPECTED_BEHAVIOR_REASON, results=[])
 
     expected_count = len(expected_behaviors)
     behaviors_text = "\n".join(f"{i + 1}. {b}" for i, b in enumerate(expected_behaviors))
+
+    gap = behavior_evidence_gap(evidence_omitted)
+    if gap:
+        return _judge_error(gap, results=[], expectations=_behavior_expectations(expected_behaviors, [], gap))
+
     conversation = _compact_behavior_conversation(conversation_text)
+    if evidence_omitted is not None and conversation != conversation_text:
+        # The bundle is built to fit this budget, so a second cut here would
+        # drop evidence nothing has accounted for. Refuse rather than score it.
+        second_cut = (
+            "behavior_check evidence was shortened again inside the judge, past the omission accounting. "
+            f"{_BEHAVIOR_EVIDENCE_GAP_HINT}"
+        )
+        return _judge_error(
+            second_cut, results=[], expectations=_behavior_expectations(expected_behaviors, [], second_cut)
+        )
 
     prompt = f"""You are evaluating whether an AI agent showed each expected behavior during a task. \
 Read the conversation and decide, for each numbered behavior, whether it was observed.
@@ -3784,6 +3751,10 @@ def _call_required_judge(metric, judge, *args, allow_not_applicable=False, **kwa
                     except OSError:
                         signal.signal(signal.SIGALRM, previous_alarm_handler)
             result = judge(*args, **kwargs)
+            # Dependency and logging handlers can swallow the alarm exception.
+            # Never accept a result returned after this call's wall-time budget.
+            if time.monotonic() >= deadline:
+                raise TimeoutError("LLM judge time budget exhausted")
         finally:
             if alarm_armed:
                 try:
@@ -4248,6 +4219,7 @@ def main():
                     judge_behavior_check,
                     bundles["behavior_check"]["prompt_evidence"],
                     expected_behavior,
+                    evidence_omitted=bundles["behavior_check"]["omitted"],
                 )
             else:
                 bc_result = _judge_not_applicable(_NO_EXPECTED_BEHAVIOR_REASON, results=[])
@@ -4257,6 +4229,7 @@ def main():
                 judge_behavior_check,
                 bundles["behavior_check"]["prompt_evidence"],
                 expected_behavior,
+                evidence_omitted=bundles["behavior_check"]["omitted"],
                 allow_not_applicable=not _has_judge_reference(expected_behavior),
             )
         if declarative_checks:

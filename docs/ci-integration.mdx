@@ -69,7 +69,7 @@ jobs:
           python-version: "3.13"
 
       - name: Install SkillEvaluator
-        run: uv tool install --python 3.13 "skillevaluator[security] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+        run: uv tool install --python 3.13 "skillevaluator @ git+https://github.com/NVIDIA/SkillEvaluator.git"
 
       - name: Install external Python scanners
         run: |
@@ -152,7 +152,7 @@ jobs:
             });
 ```
 
-The `security` extra installs Bandit and pip-audit. Semgrep and SkillSpector
+SkillEvaluator installs Bandit, and the `security` extra adds pip-audit. Semgrep and SkillSpector
 stay in separate uv tool environments, while Gitleaks is installed from its
 official [releases](https://github.com/gitleaks/gitleaks/releases). Report
 filenames embed a sortable timestamp (`skillevaluator-output-<timestamp>.md`),
@@ -243,7 +243,7 @@ When the exit code is not enough — dashboards, custom thresholds, badge genera
 | Field | Type | Contents |
 | --- | --- | --- |
 | `version` | string | SkillEvaluator version that wrote the report |
-| `target_path` | string or null | The validated target. `validate` records its absolute path, or its browsable URL when it is in a Git checkout with an `origin` remote. `tier1` and `tier2` record the path as given on the command line. The single-check commands such as `security-scan` give `null` |
+| `target_path` | string or null | The validated target. `validate` records its absolute path, or its browsable URL when it is in a Git checkout with an `origin` remote. `tier1` and `tier2` record the path as given on the command line; in a report that CI retains, the path is the skill's path relative to the repository root, never the runner's absolute path. The single-check commands such as `security-scan` give `null` |
 | `overall_passed` | boolean | `true` when every check passed |
 | `overall_status` | string | `passed`, `failed`, or `incomplete` (a required scanner produced no evidence) |
 | `publication_status` | string | `pass`, `neutral`, `fail`, or `incomplete`; use this field for publication eligibility |
@@ -327,7 +327,7 @@ jq -e '([.quality_summary[]?.overall_score] | min // 100) >= 80' "$report"
   <Accordion title="overall_status is 'incomplete'">
     A required scanner is missing or returned no evidence. Check the report for
     the named scanner: Semgrep, SkillSpector, and Gitleaks are all separate
-    executables, and the `security` extra alone does not install them. The
+    executables, and installing SkillEvaluator alone does not install them. The
     scanners fail closed: `validate` exits non-zero and the report stays
     non-green until every required scanner is installed and returns valid
     evidence. See the workflow above or

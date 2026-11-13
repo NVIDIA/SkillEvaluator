@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: Apache-2.0
+# Optional: requires Pages, a retained gh-pages branch and your own trust settings.
+# Pages reports are public unless the site is explicitly private (GitHub Enterprise Cloud).
+# Reports include source evidence; private repositories should otherwise use scan artifacts.
+# Use the release-generated file; set your own URL and refresh the caller blob after scan-file edits.
+# Also grant id-token: write in skill-checks.yml so scans retain signed execution receipts.
+name: Publish skill reports
+on:
+  workflow_run:
+    workflows: [Skill checks]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run-id:
+        description: Completed Skill checks run to publish
+        type: string
+        required: true
+      run-attempt:
+        description: Completed attempt number for that run
+        type: string
+        required: true
+permissions:
+  contents: write
+  actions: read
+  pages: write
+  id-token: write
+  pull-requests: write
+jobs:
+  reports:
+    uses: NVIDIA/SkillEvaluator/.github/workflows/publish-skill-reports.yml@ba7779ad617c6444c98b6241a75bce92067e9d56
+    with:
+      run-id: ${{ format('{0}', github.event.workflow_run.id || inputs.run-id) }}
+      run-attempt: ${{ format('{0}', github.event.workflow_run.run_attempt || inputs.run-attempt) }}
+      report-base-url: YOUR_REPORT_BASE_URL
+      trusted-evaluator-shas: ba7779ad617c6444c98b6241a75bce92067e9d56
+      trusted-caller-blobs: 7222c6c781ad6b4d832f39da5ea5c5a83b55fedc
+      # Approve each wrapper by its exact workflow path and full SHA or tag name.
+      # Tags use GitHub's recorded historical commit, never the tag's current target.
+      # trusted-wrapper-workflows: your-org/shared-ci/.github/workflows/skill-checks.yml@FULL_COMMIT_SHA
+      # To let one shared wrapper select new pinned evaluator revisions, explicitly delegate:
+      # trusted-wrapper-workflows: your-org/shared-ci/.github/workflows/skill-checks.yml@v3
+      # delegated-evaluator-wrapper: your-org/shared-ci/.github/workflows/skill-checks.yml@v3
+      # Delegation requires the approved caller's only job to call that wrapper, without a matrix.
+      # Only this wrapper and one pinned evaluator leaf may appear in the historical run.
+      # With delegation, trusted-evaluator-shas may be omitted; caller blob approval stays required.
+      tools-ref: ba7779ad617c6444c98b6241a75bce92067e9d56
+      tools-repository: NVIDIA/SkillEvaluator

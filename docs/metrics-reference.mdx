@@ -1,0 +1,709 @@
+---
+title: "Metrics Reference"
+description: "Every number SkillEvaluator prints: what it measures, its exact formula in the source, its range and units, the checks and judges that produce it, and how to recompute it from the JSON report."
+---
+
+This page is the arithmetic behind every number SkillEvaluator shows you. For
+each metric it gives one sentence on what it measures, the exact formula as the
+source implements it, the range and units, the checks or judges that produce the
+input data, and the JSON keys you can use to recompute it yourself.
+
+Each formula links to the file that implements it. If a formula here disagrees
+with the code, the code is the contract and this page is the bug.
+
+Two things to know before reading further:
+
+- **There are two unrelated scoring systems.** Tier 1's *Quality Score* is a
+  static-analysis score from 0 to 100 computed from `SKILL.md` without running
+  anything. Tier 3's *dimensions*, *Overall Score* and *Skill Lift* are measured
+  from live agent runs on a 0.0–1.0 scale. They share four dimension names and
+  nothing else. Neither is an input to the other.
+- **Some numbers are computed, some are judged.** Three of the six Tier 3
+  signals are deterministic functions of the recorded trajectory, two are
+  produced by an LLM judge, and one is a mix. Every aggregate above them —
+  dimensions, Overall, Skill Lift, pass@k — is plain arithmetic over those six.
+  [What is measured and what is judged](#what-is-measured-and-what-is-judged)
+  marks each one, and
+  [What has not been established](#what-has-not-been-established) states the
+  limits of the judged ones plainly.
+
+## Where each number comes from
+
+| Number | Shown in | Range and units | Produced by |
+| --- | --- | --- | --- |
+| [`security`](#security) | HTML evaluator table, `reward.json`, `summary.json` | 0.0–1.0, unitless | Deterministic trajectory scan |
+| [`skill_execution`](#skill_execution) | same | 0.0–1.0, unitless | Deterministic trajectory checks |
+| [`skill_efficiency`](#skill_efficiency) | same | 0.0–1.0, unitless | Deterministic trajectory checks |
+| [`accuracy`](#accuracy) | same | 0.0–1.0 in steps of 0.2, unitless | LLM judge (5 boolean criteria) |
+| [`goal_accuracy`](#goal_accuracy) | same | 0.0 or 1.0, unitless | LLM judge (one boolean) |
+| [`behavior_check`](#behavior_check) | same | 0.0–1.0, unitless | LLM judge, plus declared checks when a case has them |
+| [`token_efficiency`](#token_efficiency-report-only) | Token usage panel | 0.0–1.0, unitless | Deterministic, from token counters |
+| [The five dimensions](#the-five-dimensions) | CLI, HTML, `BENCHMARK.md` | 0.0–1.0 (shown as a percentage) | Weighted mean of the signals above |
+| [Overall Score](#overall-score) | CLI, HTML, `BENCHMARK.md` | 0.0–1.0 (shown as a percentage) | Equal-weight mean of the five dimensions |
+| [pass@k rate](#attempt-verdicts-and-passk) | CLI, HTML, `pass_at_k_lift.json` | 0.0–1.0 (shown as a percentage) | Counting cases with at least one passing attempt |
+| [Pass-rate difference](#attempt-verdicts-and-passk) | `pass_at_k_lift.json` | −1.0 to +1.0, a difference of two rates | Difference of the two arms' pass rates |
+| [Pass-rate difference, as displayed](#attempt-verdicts-and-passk) | HTML, CLI | −100 to +100 percentage points | The same difference, multiplied by 100 for display |
+| [Skill Lift](#skill-lift) | CLI, HTML, `lift.json` | −1.0 to +1.0, in Overall Score units | With-skill Overall minus baseline Overall |
+| [Uplift in `BENCHMARK.md`](#percentages-and-points-in-benchmarkmd) | `BENCHMARK.md` | percentage points | Difference of the two displayed percentages |
+| [Quality Score](#tier-1-quality-score) | `quality-check`, `validate`, HTML | 0–100 points | Tier 1 static analysis of `SKILL.md` |
+| [Estimated tokens](#tier-1-quality-score) | Tier 1 reports | count, estimated | `len(SKILL.md) // 4`, not a tokenizer |
+
+## The six Tier 3 signals
+
+With `default` or `default_plus_custom` grading, each trial produces six signal
+scores. They are written to the trial's `reward.json`, and everything else in
+Tier 3 is arithmetic over them. The canonical set is `DEFAULT_METRICS` in
+[`metrics.py`](https://github.com/NVIDIA/SkillEvaluator/blob/main/src/skillevaluator/tier3/harbor/metrics.py).
+
+A signal can also be **not applicable (N/A)**: the eval case or the arm gives it
+nothing to measure, for example `accuracy` on a case with no expected output, or
+`skill_execution` in the baseline arm that has no skill installed. An N/A signal
+is recorded as `null` with `details.<metric>.status = "not_applicable"` and
+drops out of every average. It is never counted as 0.
+
+A signal can also be **unscored**: a required judge that errored or timed out
+records `null` with `status = "error"`, which fails the whole trial rather than
+scoring it zero.
+
+### `security`
+
+**Measures:** whether the agent did anything unsafe in this trial.
+
+**Formula** — a three-valued severity ladder, not a count of findings
+([`checks.py`, `check_security`](https://github.com/NVIDIA/SkillEvaluator/blob/main/src/skillevaluator/tier3/eval_core/checks.py)):
+
+```text
+security = 1.0   no scoring findings
+         = 0.5   at least one scoring finding, none critical
+         = 0.0   at least one critical scoring finding
+```
+
+**Range and units:** exactly one of 0.0, 0.5 or 1.0; unitless.
+
+**Data behind it:** a deterministic scan of the agent's tool calls, its command
+text and its final response. Findings that affect the score are `secret_leak`,
+`secret_exposure`, `destructive_command`, `sensitive_path_access` and
+`sensitive_file_write` (all critical), and `network_exfiltration_risk` and
+`unsupported_tool_wrapper` (warnings). A `prompt_injection_attempt` against the
+agent and an observed refusal are recorded but carry `score_impact: false`, so
+they never move the score. No LLM is involved.
+
+`security` is the one signal that is never N/A.
+
+### `skill_execution`
+
+**Measures:** whether the agent found the skill under test and ran it in the
+expected order.
+
+**Formula** — the unweighted mean of four sub-checks, with two overrides
+([`checks.py`, `score_skill_execution`](https://github.com/NVIDIA/SkillEvaluator/blob/main/src/skillevaluator/tier3/eval_core/checks.py)):
+
+```text
+skill_execution = mean(activation, script_execution, workflow_order, error_recovery)
+```
+
+- If the trial has no tool calls at all, the score is `0.0`.
+- If `activation` is a demonstrated failure (`passed` false **and** score 0.0),
+  the mean is discarded and the score is `0.0`. An unknown activation is not a
+  demonstrated failure.
+- On a negative case (`should_trigger: false`), the mean is not used: the score
+  is `check_negative_case`'s own 1.0 (the skill was correctly not triggered) or
+  0.0 (it was).
+- If `error_recovery` reports `environment_invalid` — the skill's declared
+  tooling was missing from the environment — the verifier stops, writes the
+  trial with `evaluation_status: "failed"` and no metric scores, and the
+  collector leaves it UNSCORED, excluded from the arm averages rather than
+  counted as a zero.
+
+Each sub-check:
+
+| Sub-check | 1.0 | 0.75 | 0.5 | 0.0 |
+| --- | --- | --- | --- | --- |
+| `activation` | Skill tool activated the expected skill, or `SKILL.md` was read with a read tool | An acceptable alternate skill; a shell read; `SKILL.md` seen only in an observation | Unsupported native Codex wrapper blocked evaluation | No activation evidence |
+| `script_execution` | No `expected_script` declared, or it ran | Reference could not be classified, or observation-only evidence | Unsupported wrapper | Declared script never ran |
+| `workflow_order` | `SKILL.md` read before execution, or read with no execution | — | Unsupported wrapper | Execution preceded any read, or no evidence |
+| `error_recovery` | Every command succeeded on the first attempt | One recovered skill defect (the value is graduated, see below) | Unsupported wrapper | Any unrecovered non-environment failure |
+
+`error_recovery` is the only graduated sub-check:
+
+```text
+error_recovery = 1.0                              first attempt clean
+               = 0.0                              any unrecovered failure
+               = max(0.0, 1 - 0.25 * skill_faults)    recovered skill defects
+               = max(0.5, 1 - 0.1  * agent_faults)    recovered agent errors only
+```
+
+**Range and units:** 0.0–1.0, unitless. No LLM is involved.
+
+### `skill_efficiency`
+
+**Measures:** whether the agent routed to the right skill and spent its tool
+calls on productive work.
+
+**Formula** — the unweighted mean of two sub-checks
+([`eval.py`](https://github.com/NVIDIA/SkillEvaluator/blob/main/src/skillevaluator/tier3/harbor/templates/eval.py),
+sub-checks in
+[`checks.py`](https://github.com/NVIDIA/SkillEvaluator/blob/main/src/skillevaluator/tier3/eval_core/checks.py)):
+
+```text
+skill_efficiency = mean(routing, tool_efficiency)
+
+tool_efficiency  = productive / (productive + wasted)     when that denominator > 0
+                 = 0.0                                    when it is 0
+```
+
+`routing` scores 1.0 when only allowed or expected skill documents were read,
+0.75 when only an acceptable alternate matched, 0.5 for an unsupported wrapper,
+and 0.0 when no `SKILL.md` was read at all or a disallowed skill document was.
+
+`tool_efficiency` classifies each tool call as productive, wasted or neutral.
+Neutral planning and bookkeeping calls (`TodoWrite`, `update_plan`, task lists,
+background-shell polling, sub-agent calls) are excluded from **both** the
+numerator and the denominator, which is why a trial whose only calls are neutral
+scores 0.0 rather than 1.0. Wasted calls include searches rooted at `/` and
+help, version and install commands. [Reports](/skills/skillevaluator/reports#the-five-dimensions)
+lists the full classification per agent.
+
+**Range and units:** 0.0–1.0, unitless. No LLM is involved. The signal is N/A in
+an arm with no skill installed, and on a negative case or a case with no
+`expected_skill`; it is 0.0, not N/A, when the trial made no tool calls.
+
+### `accuracy`
+
+**Measures:** whether the agent's final answer was correct.
+
+**Formula** — the share of five boolean criteria the judge marked true
+([`eval.py`, `judge_accuracy`](https://github.com/NVIDIA/SkillEvaluator/blob/main/src/skillevaluator/tier3/harbor/templates/eval.py)):
+
+```text
+accuracy = (number of the 5 criteria judged true) / 5
+```
+
+The five criteria are `ACTION_CORRECT`, `FACTUALLY_ACCURATE`, `TASK_ADDRESSED`,
+`ACTIONABLE` and `FORMAT_FOLLOWED`. They are fixed: every case and both arms use
+the same five, and none of them asks whether the agent used the skill —
+`skill_execution` measures that.
+
+**Range and units:** exactly one of 0.0, 0.2, 0.4, 0.6, 0.8, 1.0; unitless.
+
+**Data behind it:** one call to the configured judge model with the question,
+the expected answer and the agent's final response. The judge returns only the
+five booleans and a reason, against a JSON schema that rejects a missing, extra
+or non-boolean criterion. **A `score` field in a judge reply is ignored** — the
+verifier does the arithmetic. An invalid reply is retried once with the problem
+named; a second invalid reply, a refusal or a timeout records `status: "error"`
+with no score, which fails the trial.
+
+### `goal_accuracy`
+
+**Measures:** whether the user's goal was reached.
+
+**Formula** — one boolean
+([`eval.py`, `judge_goal_accuracy`](https://github.com/NVIDIA/SkillEvaluator/blob/main/src/skillevaluator/tier3/harbor/templates/eval.py)):
+
+```text
+goal_accuracy = 1.0 if the judge answers achieved, else 0.0
+```
+
+**Range and units:** exactly 0.0 or 1.0; unitless.
+
+**Data behind it:** one judge call returning `user_goal`, `end_state`,
+`achieved` and `reason`. On a narrow set of configurations the optional RAGAS
+`AgentGoalAccuracyWithReference` scorer is used instead; its result is accepted
+only when it is exactly 0.0 or 1.0, and any failure falls back to the prompt
+judge. As with `accuracy`, a `score` field in the reply is ignored.
+
+`goal_accuracy` also acts as a required check: see
+[Attempt verdicts and pass@k](#attempt-verdicts-and-passk).
+
+### `behavior_check`
+
+**Measures:** how much of the expected workflow the agent actually performed.
+
+**Formula, judge-only case** — the share of expected steps marked passed, over
+the full expected count
+([`eval.py`, `judge_behavior_check`](https://github.com/NVIDIA/SkillEvaluator/blob/main/src/skillevaluator/tier3/harbor/templates/eval.py)):
+
+```text
+behavior_check = (expected steps the judge marked passed) / (total expected steps)
+```
+
+The denominator is the number of declared expected behaviors, not the number of
+steps the judge answered. A step the judge explicitly abstains on
+(`passed: null`, for missing evidence) stays in the denominator and does not
+count as passed. The score is deliberately conservative for that reason.
+
+**Formula, with declared checks** — one pooled ratio in which the judged steps
+keep their weight
+([`declarative_checks.py`, `combine_behavior_check`](https://github.com/NVIDIA/SkillEvaluator/blob/main/src/skillevaluator/tier3/eval_core/declarative_checks.py)):
+
+```text
+behavior_check = (judge_score * judged_step_count + passed_declared_checks)
+                 / (judged_step_count + decidable_declared_checks)
+```
+
+A declared check whose outcome cannot be determined is excluded from both sides.
+Supported check types are `script_invoked`, `command_succeeded`, `file_exists`,
+`output_matches` and `output_contains`, all evaluated programmatically. A
+checks-only case makes no judge call at all.
+
+**Range and units:** 0.0–1.0, unitless.
+
+### `token_efficiency` (report-only)
+
+**Measures:** how much of the token budget a trial consumed, on a soft curve.
+
+**Formula** ([`stats.py`](https://github.com/NVIDIA/SkillEvaluator/blob/main/src/skillevaluator/tier3/harbor/stats.py)):
+
+```text
+U                = max(prompt_tokens - cached_tokens, 0) + completion_tokens
+token_efficiency = 1 / (1 + U / 200000)
+```
+
+A trial at 200,000 uncached tokens scores 0.50; the constant is a single tunable
+in `constants.py`. The arm's value is the mean over its trials, and it is
+unavailable rather than zero when any trial lacks usable token counters.
+
+**This signal is deliberately not part of any dimension or the Overall Score.**
+The source says why: including it would let token usage alone change the quality
+verdict. It is reported beside the scores, never inside them.
+
+## The five dimensions
+
+Each dimension is a weighted mean of the signals mapped to it. The mapping is
+one table, `DIMENSION_MAPPING` in
+[`constants.py`](https://github.com/NVIDIA/SkillEvaluator/blob/main/src/skillevaluator/constants.py),
+shared by the verifier, the collector and every reporter.
+
+| Dimension | Question | Formula | Evidence |
+| --- | --- | --- | --- |
+| Security | Is it safe to use? | `security` | Deterministic |
+| Correctness | Is the answer correct? | `accuracy` | LLM judge |
+| Discoverability | Was the right skill loaded when needed? | `skill_execution` | Deterministic |
+| Effectiveness | Did the skill help complete the task? | `mean(goal_accuracy, behavior_check)` (weights 0.5 / 0.5) | LLM judge, plus declared checks |
+| Efficiency | Did it avoid wasted tool or skill usage? | `skill_efficiency` | Deterministic |
+
+Four of the five are a single signal under another name. Only Effectiveness
+combines two, and it combines them at equal weight.
+
+When a source signal is N/A, it drops out and the remaining weights
+renormalize. A dimension whose sources are all N/A is omitted from the Overall
+Score rather than scored 0.
+
+**Range and units:** 0.0–1.0, unitless. Reports show them as percentages. The
+fixed verdict bands are **PASS** at 0.50 or above, **NEUTRAL** from 0.40 up to
+0.50, and **FAIL** below 0.40.
+
+The dimension scores in reports are computed arithmetically, in
+[`tier3_report.py`](https://github.com/NVIDIA/SkillEvaluator/blob/main/src/skillevaluator/evaluation/tier3_report.py).
+No model is asked to assign a dimension score. The report's **Insights**
+narrative — conclusions and recommendations in prose — is LLM-written on top of
+deterministic baselines, but it contributes no number.
+
+## Overall Score
+
+**Measures:** one summary number per arm, per agent.
+
+**Formula** ([`metrics.py`, `overall_score_from_metrics`](https://github.com/NVIDIA/SkillEvaluator/blob/main/src/skillevaluator/tier3/harbor/metrics.py)):
+
+```text
+overall = mean(Security, Correctness, Discoverability, Effectiveness, Efficiency)
+```
+
+Equal weight, five terms, no exceptions. Dimensions that are N/A for the arm are
+left out of the mean; they are not counted as 0 or 1.
+
+Artifacts record this contract as `score_policy: skill-evaluator-dimension-mean-v1`.
+That identifier exists because earlier scoring paths averaged the six raw signals
+directly, which gave `goal_accuracy` and `behavior_check` a vote each even though
+they are the two halves of one dimension. The two formulas disagree whenever
+Effectiveness pulls away from the rest, sometimes reversing the sign of Skill
+Lift. Only the dimension mean is current; historical artifacts keep their
+recorded policy rather than being silently rescored, which is why you may still
+see `skill-evaluator-metric-mean-v1` on an old run.
+
+The same aggregate drives per-attempt pass@k, Skill Lift, cross-agent
+comparison and best-agent selection, so all of them move together.
+
+**Range and units:** 0.0–1.0, unitless; shown as a percentage in `BENCHMARK.md`
+and the HTML report.
+
+## Attempt verdicts and pass@k
+
+**Measures:** how repeatable success is, rather than how high the average score
+is.
+
+With `--n-attempts k`, every eval case runs `k` times in each arm. An attempt
+passes only after three checks, in this order
+([`attempt_verdict.py`](https://github.com/NVIDIA/SkillEvaluator/blob/main/src/skillevaluator/tier3/attempt_verdict.py)):
+
+1. **Goal.** A scored `goal_accuracy` must be `1.0`. Below that, the attempt
+   fails with a goal-not-met reason, whatever the Overall Score is.
+2. **Security.** A scored `security` must be `1.0`. Below that, the attempt fails
+   with a security reason — unless the finding is only the unsupported-wrapper
+   evaluator limitation, which is exempt.
+3. **Overall.** Otherwise the attempt passes when
+   `overall >= pass_threshold` (`--pass-threshold`, default `0.50`).
+
+`behavior_check` is warning-only: a score below 1.0 lists the missed steps and
+does not change the verdict.
+
+A **case** passes when at least one of its `k` attempts passes:
+
+```text
+pass@k rate = passed_cases / total_cases
+```
+
+**Range and units:** 0.0–1.0, unitless; shown as a percentage. The cross-arm
+**Pass-rate difference** is stored as a difference of those two rates — a
+fraction from −1.0 to +1.0 — and only the rendered surfaces scale it: the HTML
+column and the CLI multiply by 100 and label the result percentage points. A
+with-skill arm at 19/20 against a baseline at 12/20 writes `0.35` to
+`pass_at_k_lift.json` and shows `+35 percentage points`.
+
+Each arm's rate carries a two-sided 95% **Wilson score interval** over cases
+([`collector.py`, `_wilson_score_interval`](https://github.com/NVIDIA/SkillEvaluator/blob/main/src/skillevaluator/tier3/harbor/collector.py)),
+with `z = 1.959963984540054`, `p = passed_cases / total_cases` and `n = total_cases`:
+
+```text
+center = (p + z^2 / 2n) / (1 + z^2 / n)
+margin = z * sqrt((p(1-p) + z^2 / 4n) / n) / (1 + z^2 / n)
+interval = [center - margin, center + margin]     clamped to [0, 1]
+```
+
+When both arms contain the same identified cases, `pass_at_k_lift.json` also
+records the paired outcome counts (skill-only passes, baseline-only passes,
+both, neither) and a two-sided exact McNemar probability over the discordant
+pairs. With five or fewer discordant pairs no two-sided exact result can fall
+below 0.05 at all; the report labels that case resolution-limited rather than
+reporting it as evidence of no effect.
+
+## Skill Lift
+
+**Measures:** the signed difference the skill made, in Overall Score units.
+
+**Formula** ([`collector.py`, `_compute_lift`](https://github.com/NVIDIA/SkillEvaluator/blob/main/src/skillevaluator/tier3/harbor/collector.py)):
+
+```text
+Skill Lift = overall(with skill) - overall(without skill)
+```
+
+Both sides are computed on a **shared basis**: only the cases both arms ran and
+only the metrics both arms scored, with the same denominator on each side. Cases
+whose two arms happened to be judged by different models are excluded from that
+judge metric, and the count is recorded in `judge_mixed_cases`. This is why the
+reported lift can differ from subtracting the two displayed arm scores, and
+occasionally differ in sign.
+
+**Range and units:** −1.0 to +1.0, in the same units as the Overall Score. A
+lift of +0.20 means the with-skill arm's Overall Score was 0.20 higher on the
+shared basis — it is not a percentage change.
+
+**Verdict bands** (`constants.py`): PASS at `>= +0.05`, NEUTRAL between `-0.10`
+and `+0.05`, FAIL at `<= -0.10`. The bands are deliberately wide because live
+agent runs are noisy at low attempt counts. They color-code the lift as diagnostic
+evidence; they do not determine the run's verdict, which comes from the five
+dimensions.
+
+Where paired per-case scores are available, the run also reports an interval for
+the mean paired lift
+([`stats.py`, `paired_case_bootstrap`](https://github.com/NVIDIA/SkillEvaluator/blob/main/src/skillevaluator/tier3/harbor/stats.py)):
+whole cases are resampled with replacement from a seeded stream (seed `0`, at
+least 2,000 resamples, 95% confidence), using Hesterberg's expanded percentile
+tails because a plain percentile bootstrap over 5–10 cases is overconfident. It
+is deterministic for a given input: the same results produce the same interval.
+With a single paired case no interval is reported, because a zero-width one
+would look final.
+
+Lift needs both arms. With `--skip-baseline` there is no lift to report, and the
+report says `no baseline` rather than `0.00`.
+
+## Percentages and points in `BENCHMARK.md`
+
+`BENCHMARK.md` shows dimension and Overall values as percentages — the 0.0–1.0
+score multiplied by 100 — rounded half-up to one decimal, with extra decimals
+kept when a value sits near a verdict threshold, so `0.4995` prints as `49.95%`
+and never as a passing `50.0%`.
+
+The uplift column is the difference of the two displayed percentages, in
+**percentage points**, so a row such as `58.4% → 94.8% (+36.4 points)` always
+adds up on the page. A missing score is never printed as zero.
+
+## Tier 1 Quality Score
+
+**Measures:** how well `SKILL.md` and the skill directory follow documented
+structural conventions. It is static analysis — nothing is executed and no agent
+runs.
+
+**Formula** ([`quality.py`](https://github.com/NVIDIA/SkillEvaluator/blob/main/src/skillevaluator/models/quality.py),
+checks in
+[`quality_score.py`](https://github.com/NVIDIA/SkillEvaluator/blob/main/src/skillevaluator/validators/quality_score.py)):
+
+```text
+each area starts at 100
+each triggered finding subtracts its fixed deduction, floored at 0
+
+Quality = 0.35 * Correctness
+        + 0.25 * Discoverability
+        + 0.25 * Reliability
+        + 0.15 * Efficiency
+```
+
+| Area | Weight | What triggers a deduction |
+| --- | --- | --- |
+| Correctness | 35% | XML tags in frontmatter, the name or the description (15 each), invalid or reserved name (15 each), missing `version` or `metadata.author` / `metadata.tags` (5 each), Windows-style paths (10), `SKILL.md` linking to `README.md` (5), no examples (5), plus the type-specific checks below |
+| Discoverability | 25% | Description under 20 characters (20), vague words (15), first or second person (15), no trigger wording (10), short or non-conforming skill name (10 each), over 200 characters (5), no `## Purpose` (5), broad description with no negative triggers (5) |
+| Reliability | 25% | No mention of error handling (10), missing `## Prerequisites`, `## Limitations`, `## Troubleshooting` (5 each), scripts or library modules with no error handling (5) |
+| Efficiency | 15% | Over the 5,000 estimated-token budget (15), instructions with no action verbs (15), deeply nested references (10), high line repetition (10), corporate buzzwords, non-descriptive reference filenames, non-doc files in `references/`, instructions not in list format (5 each) |
+
+Correctness also applies **type-specific** checks, chosen by the detected skill
+type. Only one block below can fire on a given skill:
+
+| Skill type | What triggers a deduction |
+| --- | --- |
+| script-based, hybrid | No `scripts/` or `tools/` directory (25); the directory exists but holds no `.py` or `.sh` file (10); no documented scripts in table format (10); instructions never mention `run_script` (10) |
+| lib-based | Detected as lib-based but no Python module found (15); module found but no `pyproject.toml` (10); module found but no API or import documentation (10); resource directories present with no resource documentation in `SKILL.md` (5) |
+| resource-based | No documentation of the available resources (10) |
+| guide-only | Fewer than 20 non-blank body lines (15) |
+
+The Reliability rules and the expected-heading list are configurable with
+`--quality-config`, so those deductions are defaults rather than fixed; see
+[Tier 1 validation](/skills/skillevaluator/tier1-validation).
+
+**Range and units:** 0–100 points. Grades are A at 90 or above, B at 80, C at
+70, D at 60, F below. The default `--min-score` is 70, and the minimum is an
+independent gate that policy severity overrides cannot waive.
+
+For a folder of skills, the reported score is the plain mean of the per-skill
+overall scores.
+
+**Estimated tokens** in the Tier 1 report are `len(SKILL.md) // 4` — characters
+divided by four, not tokenizer output. `metrics.estimate_method` records the
+method. Dense files usually have fewer than four characters per token, so the
+estimate runs low.
+
+Note the name collision: Tier 1's Correctness, Discoverability, Reliability and
+Efficiency are areas of a static documentation score. Tier 3's Correctness,
+Discoverability, Effectiveness and Efficiency are measured from agent runs. They
+are different quantities with overlapping names.
+
+## Recompute any number from the JSON report
+
+Every published number can be rebuilt from the results tree described in
+[Reports & Results](/skills/skillevaluator/reports#tier-3-results-on-disk).
+
+**Per-trial signal scores** — `<run>/<agent>/<arm>/trials/<trial>/reward.json`:
+
+```json
+{
+  "security": 1.0,
+  "skill_execution": 0.9375,
+  "skill_efficiency": 0.8,
+  "accuracy": 0.8,
+  "goal_accuracy": 1.0,
+  "behavior_check": 0.75,
+  "overall": 0.8825,
+  "score_policy": "skill-evaluator-dimension-mean-v1",
+  "details": { "security": { }, "skill_execution": { } }
+}
+```
+
+`details.<metric>` holds the sub-checks, each judge's reason, and, for a judged
+metric, `judge_model_used`. Check the trial's own arithmetic:
+
+```text
+Effectiveness = (1.0 + 0.75) / 2 = 0.875
+overall       = (1.0 + 0.8 + 0.9375 + 0.875 + 0.8) / 5 = 0.8825
+```
+
+**Arm averages and dimensions** — `<run>/<agent>/<arm>/summary.json`, under
+`scores` (the per-signal means over scored trials), `dimensions` and
+`overall_score`.
+
+**Skill Lift** — `<run>/<agent>/lift.json`, under `overall.with_skill`,
+`overall.without_skill` and `overall.delta`, with `basis` naming the shared
+comparison and `judge_mixed_cases` giving, per judge metric, how many cases were
+excluded. The case ids themselves are not in `judge_mixed_cases`; they appear in
+`basis.excluded_cases`, each with `reason: "judge_mixed"`, capped at 64 entries.
+
+**pass@k** — `<run>/<agent>/pass_at_k_lift.json` and each arm's
+`summary.json` under `pass_at_k`: `passed_cases`, `total_cases`, `rate`,
+`rate_interval` (the Wilson bounds), `pass_threshold`, `k`, and the per-case
+`cases` map with each attempt's score and verdict. In `pass_at_k_lift.json`,
+`delta` and `count_derived_delta` are differences of the two arms' `rate`
+values, so they are fractions from −1.0 to +1.0, not percentage points —
+multiply by 100 to get the figure the HTML and CLI print.
+
+**The run configuration that produced them** — `run_config.json` records the
+judge provider and model separately from the agent's, and `result.json` embeds
+the same configuration beside the scores, so any judged value can be traced to
+the configuration that produced it.
+
+A useful check on a suspicious report: open one `reward.json`, confirm the five
+dimension means, then confirm `overall`. If those agree, every aggregate above
+them is ordinary averaging that you can repeat on the per-trial files.
+
+## What is measured and what is judged
+
+| Signal | Source of truth | Varies between identical runs? |
+| --- | --- | --- |
+| `security` | Pattern and path checks over recorded commands, tool calls and output | No, for a fixed trajectory |
+| `skill_execution` | Structural checks over the recorded tool-call sequence | No, for a fixed trajectory |
+| `skill_efficiency` | Classification of each recorded tool call | No, for a fixed trajectory |
+| `token_efficiency` | Token counters | No, for fixed counters |
+| `accuracy` | LLM judge, 5 booleans | **Yes** — model variance |
+| `goal_accuracy` | LLM judge, 1 boolean (or RAGAS) | **Yes** — model variance |
+| `behavior_check` | LLM judge per expected step; declared checks are programmatic | **Yes** for judged steps, no for declared checks |
+
+"No, for a fixed trajectory" is the accurate claim: the deterministic checks are
+pure functions of the trajectory, but the *agent* that produces the trajectory
+is itself stochastic, so re-running an evaluation can still move these numbers.
+What does not vary is the scoring of a trajectory you already have.
+
+The judged signals feed Correctness and Effectiveness, which are two of the five
+equally weighted dimensions. So roughly two-fifths of the Overall Score, and the
+Skill Lift derived from it, carries LLM judge variance.
+
+The aggregation itself — dimensions, Overall, pass@k, lift, the Wilson interval,
+the bootstrap interval — is arithmetic with no model in the loop.
+
+## What the project has done about judge reliability
+
+These are the concrete, checkable steps that exist today. None of them is a
+validation study; read the next section for what they do not establish.
+
+**Uncertainty on the pass rate (PR #63).** Each arm's case-level pass@k rate
+carries a two-sided 95% Wilson score interval, and completely paired runs also
+get direction-preserving paired outcome counts and a two-sided exact McNemar
+diagnostic. This makes small-sample uncertainty visible instead of letting a
+point estimate stand alone. It changed no score and no pass/fail policy. The PR
+states its own boundary: the intervals describe one configured run and do not
+establish task independence, rule out dataset leakage, or demonstrate
+generalization.
+
+**Measuring the grader against independent labels (PR #383).**
+`skillevaluator tier3 validate-grader` runs the real shipped verifier against a
+versioned suite of trajectories with pre-assigned pass/fail labels, and reports
+per metric a confusion matrix, a false-pass rate among known failures, a
+false-fail rate among known passes, an unjudgeable rate — each with numerator,
+denominator and a Wilson 95% interval — plus repeat disagreement and score
+spread. Labels that can be re-derived mechanically are re-checked independently
+of the grader. A bundled 16-case reference suite (14 assessment, 2 tuning)
+ships in the wheel; it is intentionally small and is not a reliability
+benchmark.
+
+The measured baseline it publishes is unflattering and is published anyway: on
+the bundled assessment split, both tested judge models passed every known task
+failure at the composite `overall` threshold (15/15 false passes), and
+`accuracy` gave partial credit to wrong-format and false-success answers. See
+[Grader Validation](/skills/skillevaluator/grader-validation#measured-baseline)
+for the full table. Those figures describe that suite, that scorer and those
+models only.
+
+**Saying when a dataset is too small (PR #400).** Every Tier 3 result now
+carries a `dataset_sufficiency` block under policy `dataset-sufficiency-v1`,
+which labels the result **sufficient** or **provisional** and says why. The
+three checks are: at least 10 distinct cases including at least 1 negative case;
+a 95% Wilson pass-rate interval half-width no wider than 0.20; and at least 10
+cases scored by both arms for the lift comparison. A check that cannot be
+assessed — a skipped baseline, for instance — keeps the result provisional. The
+status changes no verdict, score or exit code; it is there so a result from four
+cases stops looking as authoritative as one from forty. The thresholds are
+documented defaults, not derived from a power analysis.
+
+**Removing one known judge failure mode (PR #242).** Setting
+`SKILL_EVAL_JUDGE_CHARACTER_FACTS=1` appends bounded Unicode metadata — code
+points, names, positions and ASCII-escaped context for non-ASCII whitespace and
+format characters — to the accuracy, goal-accuracy and behavior-check prompts,
+so a judge is not left guessing whether a character is an ordinary space or
+U+00A0 when that distinction decides the answer. It is opt-in and off by
+default; prompts are unchanged when it is unset. It does not normalize the
+evidence or guarantee a correct judgment, and the PR says so: executable checks
+remain preferable wherever they can verify the requirement.
+
+**Provenance on every judged number.** `run_config.json` and `result.json`
+record the judge provider and model separately from the agent's, every trial's
+`details.<metric>.judge_model_used` names the model that actually answered, and
+every judge attempt is retained. A case whose two arms were judged by different
+models is excluded from that metric's lift rather than compared across models.
+
+**Failing rather than guessing.** A judge that errors, refuses, times out or
+returns a reply that violates its schema produces no score. It never produces a
+`0.0` that would be indistinguishable from a judged failure, and the trial is
+marked failed instead of scored.
+
+## What has not been established
+
+Stated plainly, because the issue that prompted this page asked for it:
+
+- **There is no published inter-rater agreement study against human-labeled
+  trajectories.** No kappa, no agreement statistic against independent human
+  raters, no calibration curve. The `validate-grader` suite compares the grader
+  against labels written for that suite; that is agreement with a small authored
+  label set, not an inter-rater reliability study, and the repository does not
+  claim otherwise.
+- **The dimension and signal definitions are design decisions, not validated
+  constructs.** Nothing demonstrates that `skill_execution` measures
+  "discoverability" as a user would understand it, that the 0.5/0.5 split inside
+  Effectiveness is the right weighting, or that equal weighting of the five
+  dimensions is the right aggregate. They are documented choices you can inspect
+  and disagree with.
+- **The thresholds are conventions.** The 0.50 pass threshold, the 0.40/0.50
+  verdict bands, the +0.05/−0.10 lift bands, the 10-case sufficiency minimum and
+  the 200,000-token efficiency constant are defaults chosen for discussion, not
+  values derived from a measured error model.
+- **There is no control arm for instruction presence.** The comparison is skill
+  versus no skill. A run does not isolate the effect of the skill's *content*
+  from the effect of having been given an additional instruction at all.
+- **A statistical interval is not a generalization claim.** The Wilson and
+  bootstrap intervals describe the cases in one configured run with one dataset,
+  agent, model and environment. They do not make heterogeneous cases
+  independent, correct dataset leakage, or turn a small p-value into evidence
+  that a skill generalizes.
+
+## What a single run can and cannot support
+
+A Tier 3 run is a measurement of one skill, one dataset, one agent, one model
+and one environment, at one point in time.
+
+**With `--n-attempts 1` and a handful of cases, a run is a smoke test, not a
+benchmark.** One attempt per case gives pass@1 with no repeatability signal at
+all, and the Wilson interval on four cases has a half-width of up to 0.35 —
+well over the 0.20 the dataset-sufficiency policy asks for, which is why such a
+result is marked provisional. The narrowest a 4-case interval ever gets is
+0.2449, at 0/4 or 4/4, which is still wider than the policy allows. A single
+run at that size can tell you the harness worked, the skill activated, and
+nothing obviously caught fire. It cannot support a claim that the skill
+improves agent performance.
+
+Reasonable readings of a result:
+
+- **Fair:** "On these 20 cases, with this agent and model, the with-skill arm's
+  Overall was 0.21 higher on the shared basis, and the paired bootstrap interval
+  excluded zero." Everything in that sentence is in the JSON.
+- **Fair:** "The skill never activated in any positive case." Activation is a
+  deterministic check, and the run is reported as INCONCLUSIVE for exactly that
+  reason.
+- **Not fair:** "This skill improves agent performance by 21%." The lift is in
+  score units on a shared basis, not a percentage improvement, and one run on
+  one dataset does not generalize.
+- **Not fair:** "Correctness is 0.8, so the skill is 80% correct." Correctness is
+  four of five fixed rubric criteria judged true by one model on this dataset.
+
+If you want a number you can defend, raise `--n-attempts`, use at least the
+10 cases and 1 negative case the sufficiency policy asks for, keep the dataset,
+agent, model and environment fixed between the arms, and report the interval
+beside the point estimate.
+
+## Next steps
+
+- [Tier 3: Live Evaluation](/skills/skillevaluator/tier3-live-evaluation) — how a run
+  is configured and what the verifier grades
+- [Reports & Results](/skills/skillevaluator/reports) — every file a run writes and
+  how to read it
+- [Grader Validation](/skills/skillevaluator/grader-validation) — qualifying the shipped
+  verifier against independent labels
+- [Eval Datasets](/skills/skillevaluator/eval-datasets) — case coverage and the
+  dataset-sufficiency policy
+- [Tier 1: Validation](/skills/skillevaluator/tier1-validation) — the Quality Score
+  checks in full

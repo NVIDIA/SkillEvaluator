@@ -58,6 +58,12 @@ human-readable dimensions:
 In `custom_only` mode, your own grader defines the score instead — see
 [Custom Graders & Tasks](/skills/skillevaluator/custom-graders).
 
+For the exact formula behind every one of these numbers — each dimension, the
+Overall Score, Skill Lift and pass@k, with its range, units, the checks or
+judges that produce it, and how to recompute it from the JSON report — see the
+[Metrics Reference](/skills/skillevaluator/metrics-reference). It also states which
+values carry LLM judge variance and what the project has and has not validated.
+
 If every positive with-skill trial has a confirmed activation score of zero,
 the result is **INCONCLUSIVE: skill never activated**. Tier 3 keeps the arm
 scores for inspection but omits lift comparisons and skill-quality advice for
@@ -978,6 +984,22 @@ and each uses the full `--n-concurrent` budget. For example, two agents with
 `--n-concurrent 4` run up to eight trials at once, fewer when fewer cases
 remain.
 
+Run budgets (`--max-agent-tokens`, `--max-judge-calls`,
+`--max-attempts-total`, and priced `--max-cost-usd`) control admission between
+logical units of work. Already admitted work can take measured usage above a
+cap, including on the final unit. These are admission boundaries, so a priced
+cost budget does not guarantee a hard dollar cap.
+
+`budget.status` and `exhausted_limit` describe admission decisions;
+`budget.partial` records attempts left not run. Separately,
+`budget.observed_overruns` maps each exceeded limit to its measured `used`,
+configured `limit`, and `excess` (with attempts measured by started attempts).
+Only usage strictly above a cap is an overrun; completion exactly at a cap
+remains within it. Summaries derive these facts from usage and limits,
+including for older saved runs. Missing or partially measured bounded usage
+is reported as unverified, and unconfigured limits are not checked. An observed
+overrun alone does not change scores, execution success, or partial-run status.
+
 In a terminal, `--progress auto` uses the `rich` view: one table of the run
 plan and its stages that keeps the same height for the whole run. Each row is
 one line, and a long value ends in an ellipsis instead of wrapping. The agent
@@ -1624,6 +1646,10 @@ Artifacts record this contract as
 `score_policy: skill-evaluator-dimension-mean-v1`. Legacy metric sets and
 historical partial reports retain their recorded scoring semantics instead of
 being silently reinterpreted.
+
+The [Metrics Reference](/skills/skillevaluator/metrics-reference) works through each
+sub-check behind the six evaluator scores, the arithmetic above them, and a
+worked example you can check against one trial's `reward.json`.
 
 ## Cost limits
 

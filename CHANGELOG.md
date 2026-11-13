@@ -6,6 +6,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- A separate four-case synthetic grader pilot adds forbidden-startup-write and
+  root-search challenges with quoted/read-only and scoped controls, an independent
+  label worksheet, content/source manifest and explicit security/Efficiency
+  availability policy. Task Overall failures remain independent of composite
+  scores. This diagnostic pilot establishes no all-metrics qualification,
+  statistical representativeness, release approval or Jira acceptance;
+  independent automated review is pending.
 - Experimental `tier3 evaluate --backend nemo-gym` targets a native Gym task-folder
   interface. Public `nemo-gym==0.7.0` is incompatible; public source candidate
   `NVIDIA-NeMo/Gym@792fa142f58277aecff05d402061d647e9a92acf` exposes the required
@@ -33,8 +40,33 @@ All notable changes to SkillEvaluator are documented in this file.
   beside it and the failure is reported. After a timeout, the failed run still keeps
   the scores of the arms that finished.
 
+### Documentation
+
+- A new Metrics Reference page defines every number the CLI, HTML report, JSON
+  report and `BENCHMARK.md` show: the six Tier 3 evaluator signals, the five
+  dimensions, the Overall Score, Skill Lift, pass@k and the Tier 1 Quality
+  Score. Each entry gives what the number measures, its formula as the source
+  implements it, its range and units, the deterministic checks or LLM judges
+  that produce its input data, and the JSON keys needed to recompute it. It
+  marks which values carry LLM judge variance, describes the pass-rate Wilson
+  intervals, `validate-grader`, the dataset-sufficiency label and the opt-in
+  judge character facts, and states that no inter-rater agreement study against
+  human-labeled trajectories has been published. Tier 1 validation, Tier 3 live
+  evaluation and the reports page link to it. A regression test parses the
+  constants, thresholds, weights and deduction sizes out of the page and
+  asserts them against the live values in `constants.py`,
+  `tier3/dataset_sufficiency.py`, the default quality config and the bundled
+  grader suite, so retuning any of them fails CI instead of rotting the page.
+
 ### Fixed
 
+- The supporting Tier 3 Pass@k table displays an unavailable or skipped
+  baseline rate as `N/A`, preserving an observed baseline rate of `0%`.
+- Tier 3 budget summaries disclose measured usage above configured limits,
+  including after the final admitted attempt, and identify incomplete usage.
+  Additive `budget.observed_overruns` metadata is separate from admission
+  `status`; limits are checked between logical admission units, so a completed
+  run can exceed a cap without becoming partial or failed.
 - Grader qualification reports null behavior-step results with a matching
   `not_checked` expectation as insufficient evidence instead of errors. Raw
   scores and unjudgeable rates are unchanged.
@@ -508,6 +540,14 @@ All notable changes to SkillEvaluator are documented in this file.
   include accessible descriptions, links to data tables and visible fallbacks
   when canvas initialization is unavailable; Tier 1 reports omit chart assets.
 
+- Root help shows the SkillEvaluator wordmark in more terminals: the
+  one-line wordmark still needs 115 columns, 76-114 columns now get the same
+  letters stacked (SKILL over EVALUATOR), and 60-75 columns get a two-row
+  wordmark. Narrower terminals keep the plain title. A wordmark that the
+  terminal's output encoding cannot print is skipped: gbk and big5hkscs lack
+  the half blocks of the two-row one, so they get the plain title at 60-75
+  columns.
+
 - Separate HTML Tier 2 evidence into within-skill and across-skill comparisons,
   with recorded completion, duplicate, affected-path, and catalog counts. Keep
   skipped or unavailable comparisons distinct from completed zero-match scans.
@@ -743,6 +783,14 @@ All notable changes to SkillEvaluator are documented in this file.
   and `--type skill` still validates the target as a skill.
 
 - The unknown-artifact CLI guidance links to the published content-types documentation route.
+
+- Code Risk Analysis reports Semgrep file-level parse errors as one partial-scan
+  error that names up to 20 unparsed files, relative to the skill and with the
+  line of the first error, instead of the first three truncated messages. The
+  check stays `incomplete` because Semgrep skips the code it cannot parse. The
+  JSON report lists the files in `semgrep_unparsed_files` (up to 1,000, with
+  `semgrep_unparsed_files_omitted` counting the rest); other Semgrep errors are
+  reported as before.
 
 - Security checks preserve authored evaluation files and their findings while
   excluding generated outputs. Fully inspected skills with only missing-path

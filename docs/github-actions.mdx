@@ -49,26 +49,9 @@ with:
 Use your own skill folders. Keep `auto` to scan changed skills in PRs;
 `all` checks the configured collection. If your default branch is not `main`,
 update the template's push branch.
+
 The 0.8.0 template pins a workflow that does not accept `enforcement-mode`;
 leave that input out when using the released template.
-
-To opt into advisory enforcement, first update both the reusable workflow's
-commit pin and the image digest to versions that include
-`enforcement-mode` support. This feature is unreleased and is not available
-in the 0.8.0 bundle. Use the reviewed commit SHA of a supporting workflow and
-the published immutable digest of its matching scanner image; changing only
-the input on the 0.8.0 template causes workflow validation to fail.
-
-With compatible pins, omit `enforcement-mode` or set it to `strict` for merge
-gating. Set `enforcement-mode: advisory` for visibility runs: complete policy
-or score failures retain their failed verdict and full artifacts, emit a workflow
-warning, and leave the job successful. Configuration errors, incomplete scanners,
-missing or malformed evidence, and runtime failures still fail the job.
-Hosted publication and PR comments run for advisory downgrades recorded as
-`enforcement: {mode: advisory, downgraded: true}`; strict failures still require
-a failing workflow conclusion.
-An older image without advisory support rejects the explicit advisory flag;
-strict mode continues to work with existing images.
 
 ### Commit the workflow and open a skill PR
 
@@ -105,6 +88,27 @@ Failed scans retain their available reports too. The HTML separates the
 required security or schema check.
 
 <AccordionGroup>
+  <Accordion title="Use advisory enforcement">
+    This unreleased feature requires both a reusable workflow commit and a
+    scanner image digest that include `enforcement-mode` support. The 0.8.0
+    bundle does not accept this input. Use the reviewed commit SHA of a
+    supporting workflow and the published immutable digest of its matching
+    image; changing only the input on the 0.8.0 template causes workflow
+    validation to fail.
+
+    With compatible pins, omit `enforcement-mode` or set it to `strict` for
+    merge gating. Set `enforcement-mode: advisory` for visibility runs:
+    complete policy or score failures retain their failed verdict and full
+    artifacts, emit a workflow warning, and leave the job successful.
+    Configuration errors, incomplete scanners, missing or malformed evidence,
+    and runtime failures still fail the job.
+
+    Hosted publication and PR comments run for advisory downgrades recorded as
+    `enforcement: {mode: advisory, downgraded: true}`; strict failures still
+    require a failing workflow conclusion. An older image without advisory
+    support rejects the explicit advisory flag; strict mode continues to work
+    with existing images.
+  </Accordion>
   <Accordion title="Why is an author email reported as PII?">
     The required `metadata.author` attribution is accepted. Extra copies in
     contact fields, body text, or reference documents are checked separately.
@@ -247,6 +251,10 @@ or let the [CLI](/skills/skillevaluator/cli-onboarding) handle it.
     shown in your repository. `min-score` sets the quality threshold; required
     security, schema and other checks remain independent. The reusable scanner
     runs quality and security checks only.
+
+    Keep `enforcement-mode: strict` for a required check. Advisory checks stay
+    green on failed policy or score verdicts, so do not use them as required
+    merge gates.
   </Accordion>
   <Accordion title="The scan finished, but the comment is missing">
     Confirm setup is on the default branch and the PR is eligible for comments.

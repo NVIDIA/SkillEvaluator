@@ -198,9 +198,10 @@ All notable changes to SkillEvaluator are documented in this file.
   optional, including the legacy alternate field, without changing numeric grades.
   Unrendered activation diagnostics remain in canonical exports without consuming
   HTML overview or failure-reason preview budgets.
-- Unreleased Tier 1 reusable-workflow `enforcement-mode` input, defaulting to
-  `strict`. Opt-in `advisory` keeps complete policy/score failures non-blocking
-  while retaining failed verdicts and reports and emitting a workflow warning.
+- The Tier 1 reusable workflow accepts `enforcement-mode: strict|advisory`
+  (default `strict`). Opt-in `advisory` keeps complete policy/score failures
+  non-blocking while retaining failed verdicts and reports and emitting a
+  workflow warning.
   Configuration, scanner completeness, evidence, and runtime failures still
   block. Advisory mode requires supporting workflow and scanner image pins;
   the released 0.8.0 bundle does not accept this input.

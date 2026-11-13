@@ -1859,10 +1859,20 @@ def test_unconfirmed_gym_stop_launches_nothing_more_and_keeps_finished_arms(
         # The with-skill arm finished before the baseline hung: its trial is still scored.
         assert agent["num_trials_with"] == 1
     assert agent["num_trials_without"] == 0
+    assert any(error.startswith("codex ") and "gym eval run timed out after" in error for error in errors)
     assert any(
         event.stage == "agent:codex" and event.state == "failed" and "could not be confirmed stopped" in event.detail
         for event in reporter.events
     )
+    # The summary without --verbose still says Gym may be running, also when an arm finished.
+    from rich.console import Console
+
+    from skillevaluator.tier3.result_display import render_evaluation_result
+
+    assert any("may still be running" in warning for warning in result["warnings"])
+    console = Console(record=True, width=1000)
+    render_evaluation_result(result, console=console, verbose=False, skill_path=skill)
+    assert "may still be running" in console.export_text()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups and signals")

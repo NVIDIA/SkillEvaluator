@@ -1114,8 +1114,9 @@ def run_nemo_gym_eval(
                             except GymLaunchError as exc:
                                 arm_errors.append(f"gym eval run could not start: {exc}")
                             except GymCleanupError as exc:
+                                # Only the timeout path raises it; an interrupt re-raises KeyboardInterrupt.
                                 cleanup_error = exc
-                                arm_errors.append(str(exc))
+                                arm_errors += [f"gym eval run timed out after {arm_timeout:.0f}s", str(exc)]
                             else:
                                 if returncode is None:
                                     arm_errors.append(f"gym eval run timed out after {arm_timeout:.0f}s")
@@ -1173,6 +1174,9 @@ def run_nemo_gym_eval(
         )
         if launch_errors:
             _merge_launch_execution_errors(results, launch_errors)
+        if cleanup_error is not None:
+            # Also a warning: the summary shows warnings even when it folds failure details behind --verbose.
+            results.setdefault("warnings", []).append(str(cleanup_error))
         reporter.emit(ProgressEvent(stage="collection", state="complete", detail="NeMo Gym results collected"))
 
         # The same completion contract as a Harbor run, so result discovery (`view`, compare) finds Gym runs.

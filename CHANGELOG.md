@@ -732,12 +732,13 @@ All notable changes to SkillEvaluator are documented in this file.
   that the run went on is printed instead, when the run ends, so only one of
   the two appears. Before, progress turned off with no notice, and the refused
   line was printed again with the next run's plan. The view also no longer
-  keeps output the terminal still refuses when the run ends and sends it with
-  the next run on the same reporter. A running stage's spinner in that view
-  now moves on one frame with each redraw, at least once a second by default,
-  instead of staying on its first frame. These follow the Fixed entry that
-  starts "The interactive Tier 3 progress view (`--progress rich`, or `auto`
-  in a terminal) now keeps one height".
+  keeps output the terminal still refuses when the run ends, such as the final
+  table, and sends it with the next run on the same reporter, where it could
+  erase the lines printed between the runs. A running stage's spinner in that
+  view now moves on one frame with each redraw, at least once a second by
+  default, instead of staying on its first frame. These follow the Fixed entry
+  that starts "The interactive Tier 3 progress view (`--progress rich`, or
+  `auto` in a terminal) now keeps one height".
 
 - The Tier 3 terminal summary now shows `N/A`, not `NO SCORE`, as the Skill
   Lift of an evaluator or dimension that is N/A in either arm, as the Markdown

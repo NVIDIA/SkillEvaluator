@@ -694,8 +694,9 @@ All notable changes to SkillEvaluator are documented in this file.
   agent and the run, and the notes say so.
 
 - `--tolerate-baseline-timeouts` (see its entry under Added) now follows its
-  own rules in every place a run is reported. The `RUN QUALITY VERDICT` line
-  that `tier3 evaluate` prints reads the same agents as the run verdict, so a
+  own rules in the printed run verdict, in the notes of both reports and
+  during result collection. The `RUN QUALITY VERDICT` line that
+  `tier3 evaluate` prints reads the same agents as the run verdict, so a
   tolerated agent that passes no longer prints PASS beside a complete agent
   that fails or never activated the skill; the line now reads FAIL or
   INCONCLUSIVE, as the reports do. `BENCHMARK.md` and `report.html` keep the

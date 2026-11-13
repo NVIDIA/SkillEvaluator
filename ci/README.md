@@ -322,7 +322,10 @@ workflow and GitHub artifact metadata also remain required.
 The generated `skill-checks-llm.yml` is a separate trusted manual run. Set
 `paths`, choose `llm-provider` (`openai`, `anthropic` or `nv_build`), optionally
 set `llm-model`, and explicitly map the repository secret `LLM_API_KEY`. Missing
-credentials fail explicitly. Avoid passing secrets to untrusted PR content;
+credentials fail explicitly. When `llm-model` is empty the provider's default model
+is used, and that model may not be callable with every key (for example, an NVIDIA
+Build key can list a model that still answers HTTP 404). If the LLM checks report
+"Model or endpoint unavailable", set `llm-model` to a model your key can call. Avoid passing secrets to untrusted PR content;
 the basic PR workflow remains keyless. Provider billing and content transmission
 apply. A configured LLM run is not proof of Tier 2 or Tier 3 evaluation.
 

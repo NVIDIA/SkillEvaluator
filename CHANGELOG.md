@@ -81,6 +81,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- The HTTP 404 message for an unavailable LLM model now says the provider's default
+  may not be callable with the key and points to `SKILL_EVAL_LLM_MODEL` (`llm-model`
+  in the reusable workflow); `ci/README.md` notes the same.
 - Update the managed SkillSpector scanner and Tier 1 CI image from 2.13.3 to
   the latest release, 2.13.4, with matching verified wheel and source hashes.
   This fixes false LP1 findings for scoped `allowed-tools` grants and improves

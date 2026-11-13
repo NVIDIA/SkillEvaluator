@@ -2834,9 +2834,15 @@ def _judge_retry_feedback(problem):
 # goal prompts. The flag patterns accept a JSON-escaped quoted value too
 # ('--token \"value\"'). Text escaped again, such as tool-call JSON quoted in a
 # RAGAS prompt, puts a run of backslashes before each quote, and an escaped tab
-# ("\t") can stand between a name and its value, so both are accepted.
+# ("\t") can stand between a name and its value, so both are accepted. In
+# JSON-escaped text a header or flag that starts a line, or follows a tab or a
+# non-ASCII character, comes right after the escape ("\n", "\t", "\u00a0"),
+# so the header and flag patterns also start there.
 _JUDGE_EVIDENCE_URL_USERINFO_RE = re.compile(r"(://)[^\s/?#@'\"`<>]{1,256}@")
 _JUDGE_EVIDENCE_BLANK = r"(?:[ \t]|\\{1,8}t)"
+_JUDGE_EVIDENCE_AFTER_ESCAPE = r"(?<=\\[nrt])|(?<=\\u[0-9a-fA-F]{4})"
+_JUDGE_EVIDENCE_LINE_START = r"(?:\b|" + _JUDGE_EVIDENCE_AFTER_ESCAPE + r")"
+_JUDGE_EVIDENCE_FLAG_START = r"(?:(?<![^\s'\"])|" + _JUDGE_EVIDENCE_AFTER_ESCAPE + r")"
 _JUDGE_EVIDENCE_HEADER_SEPARATOR = (
     r"\\{0,8}[\"']?\]?"
     + _JUDGE_EVIDENCE_BLANK
@@ -2847,7 +2853,9 @@ _JUDGE_EVIDENCE_HEADER_SEPARATOR = (
 # Digest values hold quoted fields (username="...", response="..."), so the rest
 # of the value is masked up to a single quote, a backtick or the end of the line.
 _JUDGE_EVIDENCE_DIGEST_AUTH_HEADER_RE = re.compile(
-    r"(\bauthorization"
+    r"("
+    + _JUDGE_EVIDENCE_LINE_START
+    + r"authorization"
     + _JUDGE_EVIDENCE_HEADER_SEPARATOR
     + r"digest"
     + _JUDGE_EVIDENCE_BLANK
@@ -2859,7 +2867,9 @@ _JUDGE_EVIDENCE_DIGEST_AUTH_HEADER_RE = re.compile(
 # Basic, Token and Digest stay visible because they say which kind of credential
 # was sent, and a quoted token after them ('Bearer "token"') is masked too.
 _JUDGE_EVIDENCE_AUTH_HEADER_RE = re.compile(
-    r"(\bauthorization"
+    r"("
+    + _JUDGE_EVIDENCE_LINE_START
+    + r"authorization"
     + _JUDGE_EVIDENCE_HEADER_SEPARATOR
     + r"(?:(?:bearer|basic|token|digest)"
     + _JUDGE_EVIDENCE_BLANK
@@ -2869,7 +2879,11 @@ _JUDGE_EVIDENCE_AUTH_HEADER_RE = re.compile(
 )
 # X-API-Key, Api-Key, X-Auth-Token, X-Access-Token and Private-Token headers.
 _JUDGE_EVIDENCE_KEY_HEADER_RE = re.compile(
-    r"(\b(?:api-key|auth-token|access-token|private-token)" + _JUDGE_EVIDENCE_HEADER_SEPARATOR + r")"
+    r"("
+    + _JUDGE_EVIDENCE_LINE_START
+    + r"(?:api-key|auth-token|access-token|private-token)"
+    + _JUDGE_EVIDENCE_HEADER_SEPARATOR
+    + r")"
     r"[^\s'\"`,;\\]+",
     re.IGNORECASE,
 )
@@ -2880,7 +2894,7 @@ _JUDGE_EVIDENCE_COOKIE_HEADER_RE = re.compile(
     re.IGNORECASE,
 )
 _JUDGE_EVIDENCE_CREDENTIAL_FLAG_RE = re.compile(
-    r"((?<![^\s'\"])--?(?:password|passwd|token|api-key|apikey|secret|access-token|auth-token)"
+    r"(" + _JUDGE_EVIDENCE_FLAG_START + r"--?(?:password|passwd|token|api-key|apikey|secret|access-token|auth-token)"
     r"(?:" + _JUDGE_EVIDENCE_BLANK + r"{1,8}|=))"
     r"(?:\\{0,8}\"[^\"\r\n]+\"|'[^'\r\n]+'|[^\s'\"`\\]+)",
     re.IGNORECASE,
@@ -2888,15 +2902,16 @@ _JUDGE_EVIDENCE_CREDENTIAL_FLAG_RE = re.compile(
 # "-u"/"--user" also name ordinary options (python -u, pip --user), so only a
 # user:password value is masked.
 _JUDGE_EVIDENCE_USER_FLAG_RE = re.compile(
-    r"((?<![^\s'\"])(?:-u|--user)(?:" + _JUDGE_EVIDENCE_BLANK + r"{1,8}|=))"
+    r"(" + _JUDGE_EVIDENCE_FLAG_START + r"(?:-u|--user)(?:" + _JUDGE_EVIDENCE_BLANK + r"{1,8}|=))"
     r"(?:\\{0,8}\"[^\"\r\n:]+:[^\"\r\n]+\"|'[^'\r\n:]+:[^'\r\n]+'|[^\s'\"`:\\]{1,256}:[^\s'\"`\\]+)"
 )
 # RAGAS writes its input into the prompt as JSON, and tool-call arguments are
 # JSON, so a line break or tab in the quoted text arrives as the two characters
 # "\n", "\r" or "\t", and a non-ASCII character such as a no-break space or a
-# curly quote as "\u00a0" or "\u201c". The patterns check the character before
-# a credential, which is then the last letter or digit of that escape, so the
-# text after each such escape is redacted again as the start of a line.
+# curly quote as "\u00a0" or "\u201c". The key-shape and Cookie patterns check
+# the character before a credential, which is then the last letter or digit of
+# that escape, so the text after each such escape is redacted again as the
+# start of a line.
 _JUDGE_EVIDENCE_ESCAPED_BREAK_RE = re.compile(r"(\\(?:[nrt]|u[0-9a-fA-F]{4}))")
 
 

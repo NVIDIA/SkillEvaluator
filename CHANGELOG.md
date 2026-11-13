@@ -707,8 +707,9 @@ All notable changes to SkillEvaluator are documented in this file.
   line break there is the two characters `\n`, so an `Authorization`, API-key
   or `Cookie` header value, a `--token` or `-u user:password` flag value, or a
   key such as `sk-proj-...` that started the next line was saved in clear. The
-  same held after an escaped non-ASCII character such as `\u00a0`, for a
-  header or flag value after an escaped tab (`\t`), for a flag value in
+  same held after an escaped non-ASCII character such as `\u00a0`, for an
+  `Authorization` or API-key header value or a flag value after an escaped
+  tab (`\t`), also when the header or flag starts a line, for a flag value in
   escaped quotes (`--token \"value\"`), and for a quoted header or flag value
   escaped twice, as when a RAGAS prompt repeats an earlier tool call. RAGAS
   `replied` entries now keep the tool-call arguments when the reply also has

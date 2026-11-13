@@ -835,6 +835,53 @@ def test_judge_evidence_masks_credentials_after_json_escaped_tabs_and_non_ascii(
         assert "<redacted>" in redacted
 
 
+# The same headers and flags at the start of a line, or right after a non-ASCII
+# character, follow the escape itself ("\n" or "\u00a0"), and the escaped tab
+# then separates the name from its value.
+@pytest.mark.parametrize(
+    ("line", "secret", "kept"),
+    [
+        pytest.param(
+            "Authorization:\tBearer bbbbbbbbbbbb", "bbbbbbbbbbbb", "Bearer <redacted>", id="tab-authorization"
+        ),
+        pytest.param("Authorization: Bearer\tbbbbbbbbbbbb", "bbbbbbbbbbbb", "Authorization:", id="tab-after-scheme"),
+        pytest.param(
+            'Authorization:\tDigest response="dddddddddddd"', "dddddddddddd", "Digest <redacted>", id="tab-digest"
+        ),
+        pytest.param("Api-Key:\tkkkkkkkkkkkk", "kkkkkkkkkkkk", "Api-Key:", id="tab-api-key"),
+        pytest.param("--token\tvvvvvvvvvvvv", "vvvvvvvvvvvv", "--token", id="tab-token-flag"),
+        pytest.param("-u\tuuuu:pppppppppppp", "pppppppppppp", "-u", id="tab-user-flag"),
+    ],
+)
+@pytest.mark.parametrize("before", ["HTTP/1.1 200 OK\n", "\u00a0"], ids=["line-start", "after-non-ascii"])
+def test_judge_evidence_masks_credentials_after_json_escaped_tabs_at_line_starts(
+    line: str, secret: str, kept: str, before: str
+) -> None:
+    text = before + line
+    assert secret not in eval_template._redact_judge_evidence(text)
+
+    for escaped in (json.dumps({"reply": text}), json.dumps(json.dumps({"reply": text}))):
+        redacted = eval_template._redact_judge_evidence(escaped)
+
+        assert secret not in redacted
+        assert kept in redacted
+        assert "<redacted>" in redacted
+
+
+def test_judge_evidence_masks_tab_separated_credentials_in_ragas_prompts_and_heredocs() -> None:
+    agent_text = "HTTP/1.1 200 OK\nAuthorization:\tBearer bbbbbbbbbbbb\nApi-Key:\tkkkkkkkkkkkk"
+    prompt = json.dumps({"user_input": [{"content": agent_text, "type": "ai"}]}, indent=4)
+    arguments = json.dumps({"command": "cat <<EOF\nApi-Key:\tkkkkkkkkkkkk\n--token\tvvvvvvvvvvvv\nEOF"})
+
+    redacted_prompt = eval_template._redact_judge_evidence(prompt)
+    redacted_arguments = eval_template._redact_judge_evidence(arguments)
+
+    assert "\\nAuthorization:\\tBearer <redacted>\\nApi-Key:\\t<redacted>" in redacted_prompt
+    assert "\\nApi-Key:\\t<redacted>\\n--token\\t<redacted>\\nEOF" in redacted_arguments
+    for secret in ("bbbbbbbbbbbb", "kkkkkkkkkkkk", "vvvvvvvvvvvv"):
+        assert secret not in redacted_prompt + redacted_arguments
+
+
 @pytest.mark.parametrize(
     "text",
     [

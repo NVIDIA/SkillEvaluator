@@ -216,6 +216,133 @@ def test_behavior_pool():
     assert all(r["observed"] == "error" for r in gv.observations(case, reward, gv.DEFAULT_THRESHOLDS)[1:])
 
 
+@pytest.fixture
+def unchecked_behavior():
+    case = {"id": "baseline", "expected": {"overall": "fail", "metrics": {"behavior_check": [False, True]}}}
+    reward = {
+        "overall": 0.4,
+        "behavior_check": 0.5,
+        "details": {
+            "behavior_check": {
+                "score": 0.5,
+                "reason": "The numeric answer was returned, but instruction reading cannot be verified.",
+                "results": [
+                    {"step": 1, "passed": None, "reason": "Tool execution details are not provided."},
+                    {"step": 2, "passed": True, "reason": "The final response was only the number 14."},
+                ],
+                "expectations": [
+                    {
+                        "step": 1,
+                        "requirement": "Read calculator instructions before running calc.py.",
+                        "status": "not_checked",
+                        "reason": "Tool execution details are not provided.",
+                    },
+                    {
+                        "step": 2,
+                        "requirement": "Return only the numeric answer.",
+                        "status": "met",
+                        "reason": "The final response was only the number 14.",
+                    },
+                ],
+            }
+        },
+    }
+    return case, reward
+
+
+@pytest.mark.parametrize("reverse_expectations", [False, True])
+def test_unchecked_behavior_step_projects_insufficient_evidence(unchecked_behavior, reverse_expectations):
+    case, reward = unchecked_behavior
+    if reverse_expectations:
+        reward["details"]["behavior_check"]["expectations"].reverse()
+    original = copy.deepcopy(reward)
+    rows = gv.observations(case, reward, gv.DEFAULT_THRESHOLDS)
+    assert [(r["metric"], r["expected"], r["observed"], r["score"]) for r in rows] == [
+        ("overall", "fail", "fail", 0.4),
+        ("behavior_check", "fail", "fail", 0.5),
+        ("behavior_steps", "fail", "insufficient_evidence", None),
+        ("behavior_steps", "pass", "pass", 1),
+    ]
+    assert reward == original
+    summary = gv.summarize([r for r in rows if r["metric"] == "behavior_steps"])
+    assert summary["errors"] == 0
+    assert summary["insufficient_evidence"] == 1
+    assert summary["confusion_matrix"]["fail"]["insufficient_evidence"] == 1
+    assert summary["unjudgeable_rate"]["numerator"] == 1
+    assert summary["unjudgeable_rate"]["denominator"] == 2
+    without_status = copy.deepcopy(reward)
+    without_status["details"]["behavior_check"].pop("expectations")
+    error_summary = gv.summarize(
+        [r for r in gv.observations(case, without_status, gv.DEFAULT_THRESHOLDS) if r["metric"] == "behavior_steps"]
+    )
+    assert error_summary["errors"] == 1
+    assert error_summary["insufficient_evidence"] == 0
+    assert summary["unjudgeable_rate"] == error_summary["unjudgeable_rate"]
+
+
+@pytest.mark.parametrize(
+    "expectations",
+    [
+        None,
+        {},
+        [],
+        [None],
+        [{"status": "not_checked"}],
+        [{"step": 2, "status": "not_checked"}],
+        [{"step": "1", "status": "not_checked"}],
+        [{"step": True, "status": "not_checked"}],
+        [{"step": 1.0, "status": "not_checked"}],
+        [{"step": 1}],
+        *[{"step": 1, "status": status} for status in (None, "met", "unmet", "error", "unknown", [], {})],
+    ],
+)
+def test_null_behavior_step_without_valid_matching_status_is_error(unchecked_behavior, expectations):
+    case, reward = unchecked_behavior
+    reward["details"]["behavior_check"]["expectations"] = expectations
+    steps = [r for r in gv.observations(case, reward, gv.DEFAULT_THRESHOLDS) if r["metric"] == "behavior_steps"]
+    assert [(r["observed"], r["score"]) for r in steps] == [("error", None), ("pass", 1)]
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {},
+        {"step": 1},
+        {"step": 2, "passed": None},
+        {"step": "1", "passed": None},
+        {"step": True, "passed": None},
+        {"step": 1.0, "passed": None},
+        *[{"step": 1, "passed": passed} for passed in ("true", 1, 0, {}, [])],
+    ],
+)
+def test_malformed_behavior_result_cannot_abstain(unchecked_behavior, result):
+    case, reward = unchecked_behavior
+    reward["details"]["behavior_check"]["results"][0] = result
+    first = gv.observations(case, reward, gv.DEFAULT_THRESHOLDS)[2]
+    assert (first["observed"], first["score"]) == ("error", None)
+
+
+@pytest.mark.parametrize("passed", [False, True])
+def test_boolean_behavior_result_keeps_verdict_with_not_checked_status(unchecked_behavior, passed):
+    case, reward = unchecked_behavior
+    reward["details"]["behavior_check"]["results"][0]["passed"] = passed
+    first = gv.observations(case, reward, gv.DEFAULT_THRESHOLDS)[2]
+    assert (first["observed"], first["score"]) == ("pass" if passed else "fail", int(passed))
+
+
+@pytest.mark.parametrize("failure", ["status", "process", "score"])
+def test_aggregate_behavior_error_overrides_not_checked_step(unchecked_behavior, failure):
+    case, reward = unchecked_behavior
+    if failure == "status":
+        reward["details"]["behavior_check"]["status"] = "error"
+    elif failure == "process":
+        reward["_process_error"] = True
+    else:
+        reward.pop("behavior_check")
+    rows = gv.observations(case, reward, gv.DEFAULT_THRESHOLDS)
+    assert [r["observed"] for r in rows[1:]] == ["error", "error", "error"]
+
+
 def test_behavior_expected_class_uses_suite_threshold():
     case = {"id": "mixed", "expected": {"overall": "fail", "metrics": {"behavior_check": [True, False]}}}
     reward = {

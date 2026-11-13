@@ -925,3 +925,35 @@ def test_published_json_redacts_known_credentials_in_repository_relative_target_
     assert document["target_path"] == "skills/[REDACTED]/demo"
     assert token.encode() not in outputs["skillevaluator-tier1.json"]
     assert (raw / "skillevaluator-tier1.json").read_text(encoding="utf-8") == raw_document
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="only POSIX file names carry undecodable bytes as surrogate escapes"
+)
+def test_reports_rendered_from_redacted_json_accept_an_undecodable_file_name(tmp_path):
+    # On Linux, os.listdir returns the name b"caf\xe9.md" as "caf\udce9.md".
+    name = "references/caf\udce9.md"
+    result = ValidationResult(validator_name="Schema", validator_description="Check skill manifest")
+    result.add_finding(
+        Finding(
+            category="SCHEMA",
+            severity=Severity.LOW,
+            check_name="unexpected_file",
+            message=f"Unexpected '{name}' in skill root",
+            file_path=name,
+        )
+    )
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    JSONReporter(include_timestamp=False, explicit_skill_name="demo").save([result], raw / "skillevaluator-tier1.json")
+    for view in ("skillevaluator-tier1.html", "skillevaluator-tier1.md", "skillevaluator-tier1.sarif.json"):
+        (raw / view).write_text("placeholder\n", encoding="utf-8")
+
+    outputs = runner.sanitized_outputs(raw, set())
+
+    for view in ("skillevaluator-tier1.html", "skillevaluator-tier1.md"):
+        assert "Unexpected" in outputs[view].decode("utf-8")
+    sarif = json.loads(outputs["skillevaluator-tier1.sarif.json"])
+    assert sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == (
+        "references/caf%E9.md"
+    )

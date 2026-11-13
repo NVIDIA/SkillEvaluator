@@ -90,9 +90,9 @@ def _constrain_native_html(document: str, trusted_code: frozenset[str]) -> str:
     code = {*parser.scripts, *parser.handlers}
     if parser.external_script or not code <= trusted_code:
         raise ValueError("Unexpected executable markup in the native report")
-    hashes = sorted(
-        {"'sha256-" + base64.b64encode(hashlib.sha256(code.encode()).digest()).decode() + "'" for code in code}
-    )
+    # Hash the bytes the report is written with (report_views._write escapes lone surrogates).
+    digests = (hashlib.sha256(item.encode("utf-8", "backslashreplace")).digest() for item in code)
+    hashes = sorted({"'sha256-" + base64.b64encode(digest).decode() + "'" for digest in digests})
     policy = (
         "default-src 'none'; script-src 'unsafe-hashes' "
         + " ".join(hashes)

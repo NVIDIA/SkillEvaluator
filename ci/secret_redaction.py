@@ -156,7 +156,8 @@ def sanitized_outputs(raw: Path, tokens: set[str], *, target_path: str | None = 
                     if name.endswith(".md")
                     else SARIFReporter()
                 )
-                sanitized[name] = reporter.render_all(results).encode("utf-8")
+                # Undecodable file names come back as lone surrogates; escape them.
+                sanitized[name] = reporter.render_all(results).encode("utf-8", "backslashreplace")
                 continue
             text = content.decode("utf-8")
             if name.endswith(".json"):

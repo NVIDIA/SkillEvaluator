@@ -379,10 +379,13 @@ def _retain(
             context={"report_index_url": "../../index.html", "canonical_json_url": f"{name}.json"},
         ),
         encoding="utf-8",
+        errors="backslashreplace",
     )
     from skillevaluator.reporting.markdown import MarkdownReporter
 
-    (destination / f"{name}.md").write_text(MarkdownReporter().render_all(results), encoding="utf-8")
+    (destination / f"{name}.md").write_text(
+        MarkdownReporter().render_all(results), encoding="utf-8", errors="backslashreplace"
+    )
     metrics = {"findings": sum(len(result.findings) for result in results)}
     if tier == 3:
         payload = report.get("tier3") or {}

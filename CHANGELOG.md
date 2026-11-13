@@ -4,6 +4,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Tier 3 dataset fairness validation checks the skill's own identities and
+  nested judge expectations, recognizes required reads after negated actions,
+  and bounds diagnostics and repeated-negation work. Template prompts avoid
+  requiring bundled scripts; upgrade guidance explains strict CI preflight
+  failures for older datasets that grade skill use.
+
 ### Added
 
 - Dataset fairness validation checks the evaluated skill's own names and nested

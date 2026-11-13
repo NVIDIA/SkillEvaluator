@@ -20,7 +20,13 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from skillevaluator.constants import EXECUTABLE_SKILL_DIRS, SCRIPT_LINT_MAX_NESTING, SCRIPT_LINT_SAFE_CONSTANTS
+from skillevaluator.constants import (
+    EXECUTABLE_SKILL_DIRS,
+    NODE_SCRIPT_PATTERNS,
+    PYTHON_SCRIPT_PATTERNS,
+    SCRIPT_LINT_MAX_NESTING,
+    SCRIPT_LINT_SAFE_CONSTANTS,
+)
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.validators.base import ValidatorBase
@@ -129,25 +135,31 @@ class ScriptLintValidator(ValidatorBase):
             validator_description=self.description,
         )
         py_files: list[Path] = []
+        node_files: list[Path] = []
         for dirname in EXECUTABLE_SKILL_DIRS:
             directory = skill_path / dirname
             if directory.is_dir():
-                py_files.extend(sorted(directory.glob("*.py")))
+                for pattern in PYTHON_SCRIPT_PATTERNS:
+                    py_files.extend(sorted(directory.glob(pattern)))
+                for pattern in NODE_SCRIPT_PATTERNS:
+                    node_files.extend(sorted(directory.glob(pattern)))
+        not_linted = f"{len(node_files)} Node script(s) not linted (script lint parses Python only)"
+        suffix = f"; {not_linted}" if node_files else ""
         if not py_files:
             if not any((skill_path / dirname).is_dir() for dirname in EXECUTABLE_SKILL_DIRS):
                 result.add_success(check_name="lint", message="No scripts/ or tools/ directory found")
             else:
-                result.add_success(check_name="lint", message="No Python scripts found in scripts/ or tools/")
+                result.add_success(check_name="lint", message=f"No Python scripts found in scripts/ or tools/{suffix}")
             return result
 
         for script in py_files:
             self._lint_script(script, result)
 
         if not result.findings:
-            result.add_success(
-                check_name="lint",
-                message=f"All {len(py_files)} script(s) passed lint checks",
-            )
+            result.add_success(check_name="lint", message=f"All {len(py_files)} script(s) passed lint checks{suffix}")
+        elif node_files:
+            # The findings carry the verdict; keep the Node note without counting another check.
+            result.add_message(not_linted)
         return result
 
     def _lint_script(self, script: Path, result: ValidationResult) -> None:

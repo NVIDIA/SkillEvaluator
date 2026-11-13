@@ -27,7 +27,10 @@ from urllib.parse import unquote, urlsplit
 import yaml
 
 from skillevaluator.constants import (
+    EXECUTABLE_SCRIPT_PATTERNS,
     EXECUTABLE_SKILL_DIRS,
+    NODE_SCRIPT_PATTERNS,
+    PYTHON_SCRIPT_PATTERNS,
     QUALITY_CHARS_PER_TOKEN,
     QUALITY_EXCLUDED_DIRS,
     QUALITY_RECOMMENDED_MAX_TOKENS,
@@ -269,7 +272,7 @@ class QualityScoreValidator(ValidatorBase):
     # -----------------------------------------------------------------
 
     @staticmethod
-    def _executable_files(skill_path: Path, patterns: tuple[str, ...] = ("*.py", "*.sh")) -> list[Path]:
+    def _executable_files(skill_path: Path, patterns: tuple[str, ...] = EXECUTABLE_SCRIPT_PATTERNS) -> list[Path]:
         files: list[Path] = []
         for dirname in EXECUTABLE_SKILL_DIRS:
             directory = skill_path / dirname
@@ -277,6 +280,23 @@ class QualityScoreValidator(ValidatorBase):
                 for pattern in patterns:
                     files.extend(sorted(directory.glob(pattern)))
         return files
+
+    @staticmethod
+    def _documents_node_invocation(content: str, script_files: list[Path]) -> bool:
+        """Whether *content* shows a ``node`` command running one of the skill's Node scripts.
+
+        The ``run_script`` check asks for a documented invocation. A Node script is run with
+        ``node``, so ``node scripts/run.mjs input.txt`` counts as that documentation.
+        """
+        names = {
+            script.name for script in script_files if any(script.match(pattern) for pattern in NODE_SCRIPT_PATTERNS)
+        }
+        if not names:
+            return False
+        # The name must not continue a longer file name: ``other-run.mjs`` is not ``run.mjs``.
+        script_name = "|".join(re.escape(name) for name in sorted(names))
+        invocation = re.compile(rf"\bnode\b[^\n]*?(?<![\w.-])(?:{script_name})(?![\w.-])")
+        return invocation.search(content) is not None
 
     @staticmethod
     def _has_executable_directory(skill_path: Path) -> bool:
@@ -604,7 +624,9 @@ class QualityScoreValidator(ValidatorBase):
                 qs.has_scripts = True
                 qs.script_count = len(script_files)
                 if qs.script_count == 0:
-                    dim.deduct(10, "warning", "scripts/ or tools/ exists but contains no .py or .sh files")
+                    dim.deduct(
+                        10, "warning", "scripts/ or tools/ exists but contains no .py, .sh, .mjs, .cjs or .js files"
+                    )
             else:
                 dim.deduct(
                     25,
@@ -620,7 +642,7 @@ class QualityScoreValidator(ValidatorBase):
                     "No documented scripts in table format",
                     "Add '## Available Scripts' with table: | Script | Purpose | Arguments |",
                 )
-            if "run_script" not in content:
+            if "run_script" not in content and not self._documents_node_invocation(content, script_files):
                 dim.deduct(
                     10,
                     "warning",
@@ -794,7 +816,7 @@ class QualityScoreValidator(ValidatorBase):
 
         # Type-aware code quality
         if qs.skill_type in ("script-based", "hybrid"):
-            scripts = self._executable_files(skill_path, patterns=("*.py",))
+            scripts = self._executable_files(skill_path, patterns=PYTHON_SCRIPT_PATTERNS)
             self._check_code_error_handling(dim, scripts, error_handling["scripts"])
         elif qs.skill_type == "lib-based":
             lib_dir = QualityScoreValidator.find_lib_module(skill_path)

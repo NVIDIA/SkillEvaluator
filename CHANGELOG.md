@@ -281,6 +281,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Tier 1 skill-type detection and the script-based checks recognise Node scripts
+  (`.mjs`, `.cjs`, `.js`) under `scripts/` and `tools/`, so a Node-script skill
+  is no longer typed guide-only. A `node scripts/<file>` command counts as the
+  documented invocation. Script lint still parses Python only and reports how
+  many Node scripts it did not lint. The rubric judge also receives Node scripts
+  and files from `tools/`. Scores of Node-script skills can change because they
+  now get the script-based checks.
+
 - Remove `skillevaluator.quality_config.quality_config_provenance(path, config)`.
   Use `load_quality_config_with_provenance(path)` instead: it loads the config
   and returns `(config, provenance)`, and its digest covers only the rules a

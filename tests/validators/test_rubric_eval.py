@@ -253,6 +253,17 @@ class TestCollectSupplementaryContent:
         result = _collect_supplementary_content(skill_dir)
         assert "main.py" in result["scripts"]
 
+    def test_collects_node_scripts_for_the_judge(self, tmp_path):
+        skill_dir = tmp_path / "my-skill"
+        skill_dir.mkdir()
+        scripts = skill_dir / "scripts"
+        scripts.mkdir()
+        for name in ("run.mjs", "run.cjs", "run.js"):
+            (scripts / name).write_text("console.log('hello')")
+        (scripts / "notes.txt").write_text("not a script")
+        result = _collect_supplementary_content(skill_dir)
+        assert set(result["scripts"]) == {"run.mjs", "run.cjs", "run.js"}
+
     def test_collects_references(self, tmp_path):
         skill_dir = tmp_path / "my-skill"
         skill_dir.mkdir()
@@ -1520,3 +1531,19 @@ class TestInvalidReplyRetry:
         rubric = result.metadata["rubric_eval"]
         assert rubric["execution_status"] == "succeeded"
         assert rubric["judge_attempts"] == 1
+
+
+class TestCollectToolsScripts:
+    def test_tools_directory_scripts_reach_the_judge_without_colliding_with_scripts(self, tmp_path):
+        skill_dir = tmp_path / "my-skill"
+        (skill_dir / "scripts").mkdir(parents=True)
+        (skill_dir / "tools").mkdir()
+        (skill_dir / "scripts" / "run.mjs").write_text("console.log('scripts')")
+        (skill_dir / "tools" / "run.mjs").write_text("console.log('tools')")
+        (skill_dir / "tools" / "helper.py").write_text("print('tools')")
+
+        result = _collect_supplementary_content(skill_dir)
+
+        assert set(result["scripts"]) == {"run.mjs", "tools/run.mjs", "tools/helper.py"}
+        assert "scripts" in result["scripts"]["run.mjs"]
+        assert "tools" in result["scripts"]["tools/run.mjs"]

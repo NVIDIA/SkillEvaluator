@@ -26,6 +26,7 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from skillevaluator.constants import (
+    EXECUTABLE_SCRIPT_PATTERNS,
     RUBRIC_CRITERIA,
     RUBRIC_MAX_TOKENS,
     RUBRIC_MIN_SCORE,
@@ -317,7 +318,7 @@ class RubricJudge(LLMClient):
                     for name, content in linked_markdown.items():
                         extra += f"--- {name} ---\n{content}\n\n"
                 if scripts:
-                    extra += "\nScripts (from scripts/ directory):\n"
+                    extra += "\nScripts (from scripts/ and tools/ directories):\n"
                     for name, content in scripts.items():
                         extra += f"--- {name} ---\n{content}\n\n"
                 if references:
@@ -519,7 +520,13 @@ def _collect_supplementary_content(
         if linked:
             result["linked_markdown"] = linked
 
-    for subdir, exts in [("scripts", ("*.py", "*.sh")), ("references", ("*.md",))]:
+    # ``tools/`` is the agentskills.io name for ``scripts/``; its files are listed
+    # under their directory so they cannot collide with a script of the same name.
+    for subdir, bucket, exts in [
+        ("scripts", "scripts", EXECUTABLE_SCRIPT_PATTERNS),
+        ("tools", "scripts", EXECUTABLE_SCRIPT_PATTERNS),
+        ("references", "references", ("*.md",)),
+    ]:
         d = skill_path / subdir
         if not os.path.lexists(d):
             continue
@@ -547,7 +554,7 @@ def _collect_supplementary_content(
                     max_bytes=read_limit,
                     truncate=True,
                 )
-                result[subdir][f.name] = text
+                result[bucket][f.name if subdir != "tools" else f"tools/{f.name}"] = text
                 total += bytes_read
 
     return result

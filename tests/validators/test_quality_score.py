@@ -1752,3 +1752,64 @@ def test_html_report_labels_the_token_count_as_an_estimate(tmp_path):
     html = HTMLReporter(include_timestamp=False, explicit_skill_name="estimate-skill").render(result)
 
     assert "Est. tokens (characters/4):" in html
+
+
+def _script_skill(tmp_path, script_name, instructions):
+    skill = tmp_path / "scripted-skill"
+    (skill / "scripts").mkdir(parents=True)
+    (skill / "scripts" / script_name).write_text(
+        "console.log('hi')\n" if script_name.endswith(("js", "mjs")) else "print('hi')\n"
+    )
+    (skill / "SKILL.md").write_text(
+        "---\nname: scripted-skill\ndescription: Runs a bundled script. Use when the user asks for it.\n---\n\n"
+        "# Scripted skill\n\n## Available Scripts\n\n| Script | Purpose | Arguments |\n| --- | --- | --- |\n"
+        f"| {script_name} | Does the work | input |\n\n## Instructions\n\n{instructions}\n"
+    )
+    return skill
+
+
+def _messages(skill):
+    return [finding.message for finding in QualityScoreValidator().validate(skill).findings]
+
+
+@pytest.mark.parametrize(
+    "instruction",
+    [
+        "Run `node scripts/run.mjs input.txt` and show the output.",
+        "Run: node ./scripts/run.mjs input.txt",
+    ],
+)
+def test_documented_node_invocation_satisfies_the_run_script_check(tmp_path, instruction):
+    skill = _script_skill(tmp_path, "run.mjs", instruction)
+
+    assert not any("run_script" in message for message in _messages(skill))
+
+
+def test_node_script_without_a_node_command_still_misses_the_run_script_check(tmp_path):
+    skill = _script_skill(tmp_path, "run.mjs", "Use the bundled script to process the file.")
+
+    assert any("Instructions don't mention 'run_script'" in message for message in _messages(skill))
+
+
+def test_node_command_for_another_file_does_not_satisfy_the_run_script_check(tmp_path):
+    skill = _script_skill(tmp_path, "run.mjs", "Run `node scripts/other.mjs input.txt`.")
+
+    assert any("Instructions don't mention 'run_script'" in message for message in _messages(skill))
+
+
+def test_python_script_skill_still_needs_run_script(tmp_path):
+    skill = _script_skill(tmp_path, "run.py", "Run `node scripts/run.py` and show the output.")
+
+    assert any("Instructions don't mention 'run_script'" in message for message in _messages(skill))
+
+
+def test_node_command_for_a_longer_file_name_does_not_satisfy_the_run_script_check(tmp_path):
+    skill = _script_skill(tmp_path, "run.mjs", "Run `node scripts/other-run.mjs input.txt`.")
+
+    assert any("Instructions don't mention 'run_script'" in message for message in _messages(skill))
+
+
+def test_node_command_with_a_trailing_name_part_does_not_satisfy_the_run_script_check(tmp_path):
+    skill = _script_skill(tmp_path, "run.mjs", "Run `node scripts/run.mjs.bak input.txt`.")
+
+    assert any("Instructions don't mention 'run_script'" in message for message in _messages(skill))

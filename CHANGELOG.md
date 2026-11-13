@@ -6,6 +6,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- New `skillevaluator harness-check <skill>` command and a "Harness compatibility"
+  panel after the Tier 1 results of `validate`: one line per harness with its most
+  serious finding and an outcome label (`not found`, `rejected`, `listing
+  shortened`, ...), then `+N more` and the note count; `-v` shows every finding
+  with its fix. The checks line shows `! harness`, Tier 1 gets a `harness` summary
+  line, and the result box names the harnesses that won't load the skill.
+  `harness-check` always exits 0; `--json PATH` writes the block.
 - New advisory Tier 1 `harness` check: for each agent harness (`claude-code`,
   `codex`, `copilot-cli`, `hermes`, `openclaw`, `opencode`) it reports whether the
   skill `loads`, is `degraded` or is `not_loaded`, from versioned profiles shipped

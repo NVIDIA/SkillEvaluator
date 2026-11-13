@@ -35,19 +35,16 @@ It also documents SkillEvaluator's own callers and alternative feedback filename
 
 Only quality and security checks gate this CI integration. Tier 2 and Tier 3
 remain advisory even when failed or incomplete; deprecated Tier 3 required settings are ignored.
-When they run, missing credentials, runtime or datasets must remain visible as
-incomplete or needs-action evidence. A passing scan does not mean all evaluation
-stages passed.
-
-With the default `scan-mode: auto`, the provider-backed jobs (LLM-enriched
-Tier 1, Tier 2 and Tier 3) run on a PR or MR only when it changes a file under
-a configured skill folder. A PR that changes only the CI setup, such as
-onboarding, a pin bump, or a model, secret or gateway change, runs the keyless
-Tier 1 scan of every skill and reports Tier 2 and Tier 3 as skipped. Its model
-and credentials are first exercised by the push to the default branch after the
-merge or by the next PR that changes a skill. To exercise them before the merge,
-include a skill change in the same PR or temporarily set `scan-mode: all` in the
-caller. `skillevaluator ci demo` works only after the setup has merged.
+When a tier is selected, missing credentials, runtime or datasets remain visible
+as incomplete or needs-action evidence. A passing scan does not mean all
+evaluation stages passed.
+With `scan-mode: auto`, a pull request that changes no skill, such as a setup,
+pin, model or secret change, skips the provider-backed jobs. Their prerequisites
+are first checked by the push to the default branch after it merges, a manual
+run there, or the next skill change. To check them before merging, set
+`scan-mode: all` (GitLab: `SKILL_EVAL_SCAN_MODE: all`) on that pull request and
+restore `auto` before merging. `skillevaluator ci demo` works only after the setup
+has merged.
 
 Reports retain native evidence and an aggregate artifact for 14 days. Feedback
 links to the authenticated artifact for that run; download and extract it,

@@ -280,8 +280,9 @@ of the existing repository Actions secret holding the gateway key. The selector
 contains only a secret name, never the key itself. The caller resolves
 `secrets[vars.SKILL_EVAL_GATEWAY_SECRET]` into the reusable workflow's generic
 `LLM_API_KEY`; other repositories can select their own gateway and secret names
-during local onboarding. When the paid jobs run, missing
-prerequisites remain visible in the reports. A passing Tier 1 gate is not an
+during local onboarding. Missing
+prerequisites remain visible in the reports of runs that start the provider-backed
+jobs (see below for which PRs skip them). A passing Tier 1 gate is not an
 all-tier evaluation pass. Forks retain keyless Tier 1 checks. On PRs, ordinary software changes
 select no skills, skill changes select the affected skills, and CI configuration
 changes select the collection. Pushes to `main` and manual runs scan the collection.
@@ -292,29 +293,29 @@ skill, and its report lists Tier 2 and Tier 3 as skipped because no skill
 changed. Fork PRs never run the paid tiers, so their reports keep the existing
 Tier 2 and Tier 3 reason.
 
-A PR that edits only the caller workflows, such as onboarding, a pin bump, or a
-change to the model, secret or gateway settings, therefore runs no
-provider-backed tier. A wrong model or a missing secret first shows up in the
-push to the default branch after the merge, or in the next PR that changes a
-skill, not on the setup PR itself. To exercise the paid tiers before merging,
-change a file under a configured skill root in the same PR, or temporarily set
-`scan-mode: all` in the caller (`SKILL_EVAL_SCAN_MODE: all` on GitLab) and
-revert it before merging. `ci demo` cannot do this: it requires the all-tier
-scan caller on the default branch and rejects a setup that has not merged, and
-its skill-change PR branches from the default branch, so it never carries an
-unmerged caller change. Use `ci demo` after the setup merges.
+Because the generated caller only starts on skill or caller changes, the
+same-repository PRs that now skip the paid jobs are the setup PRs: onboarding,
+pin bumps, and model, secret or gateway changes to the caller. Such a PR no
+longer shows a wrong model or a missing key. The first provider-backed run is the push to the
+default branch after it merges, a manual run there, or the next PR that changes
+a skill. To exercise a caller change with providers before merging, set
+`scan-mode: all` in the caller on that PR and read the results in the run's
+artifact; that PR gets no automatic comment, because the listener approves only
+the default branch's caller. Before merging, restore `auto` and then refresh
+`trusted-caller-blobs` for the final caller. `ci demo` cannot exercise an unmerged
+setup: it requires the all-tier scan caller on the default branch and rejects a
+setup that has not merged, and its skill-change PR branches from the default
+branch. Use `ci demo` after the setup merges.
 
 If a provider returns HTTP 404, verify that the selected model accepts chat
 requests with your account. Presence in the public model catalog alone does not
 prove serving availability. Change the caller's `model` input to an accessible
 model and refresh `trusted-caller-blobs` before retrying; do not change global
 provider defaults to troubleshoot one repository. A PR that only changes the
-caller's `model` input skips the provider-backed tiers, so it cannot confirm the
-fix. Confirm it by adding a skill change to the same PR, by setting
-`scan-mode: all` temporarily, or on the first run after the merge.
+caller skips the provider-backed jobs, so the new model is first exercised by the
+push after it merges, unless that PR temporarily uses `scan-mode: all` as described above.
 
-The setup PR runs the keyless Tier 1 scan but, as it changes no skill, skips
-the provider-backed tiers. Its first automatic comment requires
+The setup PR runs the keyless Tier 1 scan of every skill, but its first automatic comment requires
 the consumer feedback listener on `main` and a subsequent PR run. Repository
 maintainers configure branch protection separately if they want the Tier 1
 aggregate check to block merges.
@@ -370,10 +371,8 @@ automatic comment. Changes to the caller must refresh its approved Git blob in
 caller or producer revision starts automatic feedback only after the updated
 listener reaches the default branch; earlier candidate runs retain their artifacts.
 
-When a paid tier runs, a missing provider key, unavailable runtime, or missing
-committed native dataset must remain visible as an incomplete or needs-action
-result. A PR that changes no skill runs none of them and reports Tier 2 and
-Tier 3 as skipped. Local `ci init`,
+A missing provider key, unavailable runtime, or missing committed native dataset
+must remain visible as an incomplete or needs-action result. Local `ci init`,
 `ci status`, and `ci demo` are setup and inspection commands; a successful setup
 is not evidence that the three tiers passed. Optional Pages hosting remains a
 separate opt-in; artifact feedback works without it.
@@ -388,9 +387,8 @@ checks. An unconditional keyless baseline remains available for forks and
 denied admission. For an authorized LLM run, missing or failed enriched evidence
 fails the required Tier 1 gate; it is never replaced with a passing static scan.
 With the default `scan-mode: auto`, a PR runs the enriched job only when it
-changes a file under a configured skill root. A PR that changes only CI
-configuration (including a pin, model or secret change) or unrelated files
-skips it, and the keyless scan, which covers every skill for a setup
+changes a file under a configured skill root. CI configuration or unrelated
+changes skip it, and the keyless scan, which covers every skill for a setup
 change, remains the Tier 1 gate. Pushes to the default branch, manual runs and
 `scan-mode: all` keep the enriched job.
 The image supports OpenAI, Anthropic and NVIDIA Build at their native endpoints.

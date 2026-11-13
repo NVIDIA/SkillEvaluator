@@ -9,7 +9,9 @@ and naming conventions per SkillEvaluator specification.
 
 import os
 import re
+import unicodedata
 from pathlib import Path
+from typing import Any
 
 import yaml
 from pydantic import ValidationError
@@ -30,9 +32,185 @@ from skillevaluator.models.skill import SkillFrontmatter, SkillManifest
 from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.validators.base import ValidationResult, ValidatorBase
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN, format_validation_location
-from skillevaluator.validators.policy import ValidationPolicy, default_policy
+from skillevaluator.validators.policy import AUTHOR_SHAPE_PATTERN, ValidationPolicy, default_policy
 
 logger = get_logger(__name__)
+
+#: Upper bound for a ``metadata.author`` value; longer values are malformed.
+AUTHOR_MAX_LENGTH = 256
+
+#: An email address written outside the ``Name <email@host>`` shape. The
+#: discriminator is ``\w@\w``: an address has a local part, so a word character
+#: sits on each side of the ``@``, while a social handle such as
+#: ``Jane Doe (@jdoe)`` or a bare ``@jdoe`` does not. The domain needs no dot,
+#: so an intranet address such as ``root@buildhost`` is caught as well.
+_BARE_EMAIL_PATTERN = re.compile(r"[^\s<>@]*\w@\w[^\s<>@]*")
+
+#: Unicode general categories never usable in an author value: C0/C1 controls,
+#: surrogates, and private-use code points.
+_UNSAFE_AUTHOR_CATEGORIES = frozenset({"Cc", "Cs", "Co"})
+
+#: Invisible format characters (category ``Cf``) that can make an author value
+#: render as something other than what it says: the bidirectional marks,
+#: embeddings, overrides and isolates, plus the byte-order mark. The rest of
+#: ``Cf`` stays allowed, because ZWNJ (U+200C) and ZWJ (U+200D) are required
+#: for Persian, Arabic and Devanagari names to render correctly.
+_UNSAFE_AUTHOR_FORMAT_CHARS = frozenset(
+    {
+        chr(0x061C),  # ARABIC LETTER MARK
+        chr(0x200E),  # LEFT-TO-RIGHT MARK
+        chr(0x200F),  # RIGHT-TO-LEFT MARK
+        *(chr(code) for code in range(0x202A, 0x202F)),  # embedding, pop, override
+        *(chr(code) for code in range(0x2066, 0x206A)),  # isolate controls
+        chr(0xFEFF),  # ZERO WIDTH NO-BREAK SPACE (byte-order mark)
+    }
+)
+
+#: ``metadata.id`` contract: an exact (unnormalized) lowercase ASCII slug.
+METADATA_ID_MAX_LENGTH = 64
+METADATA_ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*", re.ASCII)
+
+#: Longest raw ``metadata.id`` text repeated in a finding.
+_METADATA_ID_DISPLAY_LIMIT = 80
+
+
+def author_value_problem(author: str) -> str | None:
+    """Return why *author* is malformed or unsafe, or ``None`` when it is usable.
+
+    A usable value is either the ``Name <email@host>`` shape or plain
+    attribution: a person, team, or organization name such as
+    ``NVIDIA cuOpt Team`` or ``Jane Doe (@jdoe)``. Plain attribution may not
+    contain angle brackets or an email address, because those mean an attempted
+    but broken ``Name <email>`` value.
+
+    The character guard rejects controls, surrogates, private-use code points
+    and the bidirectional/BOM format characters. It deliberately does not
+    reject all of Unicode category ``C``: that also covers the joiners real
+    names need (U+200C/U+200D) and every code point unassigned in the running
+    interpreter's Unicode data, which makes the verdict depend on the
+    interpreter's version rather than on the value.
+    """
+    if len(author) > AUTHOR_MAX_LENGTH:
+        return f"is longer than {AUTHOR_MAX_LENGTH} characters"
+    if any(
+        char in _UNSAFE_AUTHOR_FORMAT_CHARS or unicodedata.category(char) in _UNSAFE_AUTHOR_CATEGORIES
+        for char in author
+    ):
+        return "contains control, private-use, or bidirectional formatting characters"
+    if AUTHOR_SHAPE_PATTERN.fullmatch(author):
+        return None
+    if "<" in author or ">" in author:
+        return "uses angle brackets but is not of the form 'Name <email@host>'"
+    if _BARE_EMAIL_PATTERN.search(author):
+        return "contains an email address that is not in the form 'Name <email@host>'"
+    if not any(char.isalnum() for char in author):
+        return "has no letters or digits"
+    return None
+
+
+def metadata_id_problem(value: Any) -> str | None:
+    """Return why *value* breaks the ``metadata.id`` contract, or ``None``."""
+    if not isinstance(value, str):
+        return f"must be a string (got {type(value).__name__})"
+    if not value:
+        return "must not be empty"
+    if len(value) > METADATA_ID_MAX_LENGTH:
+        return f"must be at most {METADATA_ID_MAX_LENGTH} characters (got {len(value)})"
+    if not METADATA_ID_PATTERN.fullmatch(value):
+        return (
+            "must be lowercase ASCII letters and digits, with single hyphens between them "
+            "(for example 'my-skill'), and no surrounding whitespace"
+        )
+    return None
+
+
+def _relative_label(skill_dir: Path, root: Path) -> str:
+    try:
+        return skill_dir.relative_to(root).as_posix()
+    except ValueError:
+        return skill_dir.as_posix()
+
+
+def duplicate_metadata_ids(declared_ids: dict[str, list[Path]], root: Path) -> dict[str, list[str]]:
+    """Map each ``metadata.id`` declared by more than one skill to sorted skill labels under *root*."""
+    return {
+        value: sorted(_relative_label(skill_dir, root) for skill_dir in dirs)
+        for value, dirs in sorted(declared_ids.items())
+        if len(dirs) > 1
+    }
+
+
+def declared_metadata_id(skill_dir: Path) -> str | None:
+    """Return the valid ``metadata.id`` declared in *skill_dir*'s manifest, if any.
+
+    Used by catalog runs that validate each skill separately, so they can
+    still check uniqueness across the catalog. Unparseable manifests and
+    invalid IDs return ``None``; the per-skill schema check reports those.
+    """
+    validator = SchemaValidator()
+    manifest = validator._find_skill_manifest(skill_dir)
+    if manifest is None:
+        return None
+    frontmatter = validator._validate_frontmatter(manifest).metadata.get("frontmatter")
+    if frontmatter is None or frontmatter.metadata is None:
+        return None
+    value = (frontmatter.metadata.model_extra or {}).get("id")
+    return value if metadata_id_problem(value) is None else None
+
+
+def metadata_id_duplicate_severity(policy: ValidationPolicy) -> Severity:
+    """Severity of a duplicate ``metadata.id`` under *policy* (HIGH only when IDs are required)."""
+    default = Severity.HIGH if policy.metadata_id_requirement == "require" else Severity.MEDIUM
+    return policy.severity_for("SCHEMA", "metadata_id_duplicate", default=default)
+
+
+def _display_metadata_id(value: Any) -> str:
+    """Render a bounded preview of a ``metadata.id`` value for a finding.
+
+    A non-string value is described by its type alone and never rendered.
+    ``metadata.id`` accepts arbitrary YAML before this check rejects a
+    non-string, and ``repr`` expands a YAML alias graph eagerly: a 445-byte
+    manifest with 20 doubling aliases builds a 14,680,060-character string,
+    and a slightly deeper graph exhausts memory. Truncating afterwards is too
+    late, because the whole string is built first.
+    """
+    if not isinstance(value, str):
+        return f"<{type(value).__name__}>"
+    if len(value) > _METADATA_ID_DISPLAY_LIMIT:
+        return value[:_METADATA_ID_DISPLAY_LIMIT] + "…"
+    return value
+
+
+_UTF8_BOM = b"\xef\xbb\xbf"
+
+
+def _duplicate_frontmatter_keys(frontmatter_yaml: str) -> list[tuple[str, int]]:
+    """Return ``(dotted_key, line)`` for every repeated mapping key (PyYAML keeps the last silently)."""
+    try:
+        root = yaml.compose(frontmatter_yaml, Loader=yaml.SafeLoader)
+    except yaml.YAMLError:
+        return []
+    duplicates: list[tuple[str, int]] = []
+    stack: list[tuple[yaml.Node, str]] = [(root, "")] if root is not None else []
+    visited: set[int] = set()
+    while stack:
+        node, prefix = stack.pop()
+        if id(node) in visited:
+            continue
+        visited.add(id(node))
+        if isinstance(node, yaml.MappingNode):
+            seen: set[str] = set()
+            for key_node, value_node in node.value:
+                if not isinstance(key_node, yaml.ScalarNode) or key_node.value == "<<":
+                    continue
+                key = f"{prefix}{key_node.value}"
+                if key_node.value in seen:
+                    duplicates.append((key, key_node.start_mark.line + 2))
+                seen.add(key_node.value)
+                stack.append((value_node, f"{key}."))
+        elif isinstance(node, yaml.SequenceNode):
+            stack.extend((item, prefix) for item in node.value)
+    return sorted(duplicates, key=lambda item: item[1])
 
 
 class SchemaValidator(ValidatorBase):
@@ -41,9 +219,10 @@ class SchemaValidator(ValidatorBase):
     Checks: frontmatter schema, folder hierarchy, naming conventions,
     directory-name consistency, required/forbidden fields.
 
-    Author attribution is policy-driven: the ``Name <email>`` *shape* is always
-    enforced, while an optional email-domain restriction can come from the
-    active :class:`ValidationPolicy`.
+    Author attribution and ``metadata.id`` are policy-driven: the active
+    :class:`ValidationPolicy` decides whether a missing author, a name without
+    an email, or a missing ID blocks, and may restrict the author email domain.
+    Malformed or unsafe author values and invalid IDs are always reported.
     """
 
     def __init__(self, policy: ValidationPolicy | None = None) -> None:
@@ -87,8 +266,12 @@ class SchemaValidator(ValidatorBase):
         )
         result.merge(self._validate_folder_compliance(skill_path))
 
+        declared_ids: dict[str, list[Path]] = {}
         for skill_dir in skill_dirs:
             skill_result = self._validate_single_skill(skill_dir)
+            metadata_id = skill_result.metadata.get("metadata_id")
+            if isinstance(metadata_id, str):
+                declared_ids.setdefault(metadata_id, []).append(skill_dir)
             if skill_result.passed:
                 # Collect detailed check information
                 check_details = []
@@ -102,15 +285,72 @@ class SchemaValidator(ValidatorBase):
                             }
                         )
 
+                advisories = len(skill_result.findings)
                 result.add_success(
                     check_name=skill_dir.name,
-                    message="All schema and structure checks passed",
+                    message=(
+                        "All schema and structure checks passed"
+                        if not advisories
+                        else f"No blocking schema or structure findings ({advisories} advisory finding(s))"
+                    ),
                     checks=check_details,
                     total_checks=len(check_details),
+                    advisory_findings=advisories,
                 )
+                # A passing child can still carry policy advisories. Keep them
+                # named after the skill they came from, without merging its
+                # successes a second time; the roll-up above only says that
+                # nothing blocked.
+                result.merge_advisories_with_prefix(skill_result, skill_dir.name)
             else:
                 result.merge_with_prefix(skill_result, skill_dir.name)
+                # merge_with_prefix copies errors/warnings, but not severity
+                # counters. Count findings once in this collection's summary.
+                for finding in skill_result.findings:
+                    result.summary.tally_severity(finding.severity)
 
+        result.merge(self._validate_metadata_id_uniqueness(declared_ids, skill_path))
+        return result
+
+    def _validate_metadata_id_uniqueness(self, declared_ids: dict[str, list[Path]], root: Path) -> ValidationResult:
+        """Report ``metadata.id`` values declared by more than one skill in this collection.
+
+        Uniqueness is evaluated only across the skills discovered together in
+        one run. It does not consult a registry or a saved catalog, whose
+        identity stays keyed by content type and relative path.
+        """
+        result = ValidationResult()
+        if not declared_ids:
+            return result
+        policy = self.policy
+        duplicates = duplicate_metadata_ids(declared_ids, root)
+        for value, relative in duplicates.items():
+            result.add_finding(
+                Finding(
+                    category="SCHEMA",
+                    severity=metadata_id_duplicate_severity(policy),
+                    check_name="metadata_id_duplicate",
+                    message=(
+                        f"metadata.id '{value}' is declared by {len(relative)} skills in this collection: "
+                        f"{', '.join(relative)}"
+                    ),
+                    file_path=str(root),
+                    suggestion="Give each skill its own metadata.id.",
+                    metadata={
+                        "metadata_id": value,
+                        "skills": relative,
+                        "profile": policy.profile,
+                        "metadata_id_requirement": policy.metadata_id_requirement,
+                    },
+                )
+            )
+        if not duplicates:
+            count = sum(len(dirs) for dirs in declared_ids.values())
+            result.add_success(
+                check_name="metadata_id_unique",
+                message=f"{count} declared metadata.id value(s) are unique within this collection",
+                metadata_id_count=count,
+            )
         return result
 
     def _validate_single_skill(self, skill_path: Path) -> ValidationResult:
@@ -171,6 +411,8 @@ class SchemaValidator(ValidatorBase):
         if frontmatter := result.metadata.get("frontmatter"):
             result.merge(self._validate_name_matches_directory(skill_path, frontmatter))
             result.merge(self._validate_author(frontmatter, str(skill_md)))
+            result.merge(self._validate_metadata_id(frontmatter, str(skill_md)))
+            result.merge(self._validate_portability(skill_md))
 
         return result
 
@@ -243,6 +485,23 @@ class SchemaValidator(ValidatorBase):
                 )
             )
             return result
+
+        for key, line_number in _duplicate_frontmatter_keys(frontmatter_yaml):
+            result.add_finding(
+                Finding(
+                    category="SCHEMA",
+                    severity=self.policy.severity_for("SCHEMA", "duplicate_key", default=Severity.HIGH),
+                    check_name="duplicate_key",
+                    message=(
+                        f"Duplicate frontmatter key '{key}': YAML parsers disagree on it "
+                        "(Codex, OpenCode, Copilot CLI and OpenClaw drop the skill; others keep the last value)"
+                    ),
+                    file_path=file_path,
+                    line_number=line_number,
+                    suggestion=f"Keep a single '{key}' entry",
+                    metadata={"key": key},
+                )
+            )
 
         try:
             frontmatter = SkillFrontmatter.model_validate(data)
@@ -434,6 +693,49 @@ class SchemaValidator(ValidatorBase):
 
         return result
 
+    def _portability_finding(
+        self,
+        check_name: str,
+        default: Severity,
+        message: str,
+        file_path: str,
+        suggestion: str,
+        **metadata: object,
+    ) -> Finding:
+        return Finding(
+            category="SCHEMA",
+            severity=self.policy.severity_for("SCHEMA", check_name, default=default),
+            check_name=check_name,
+            message=message,
+            file_path=file_path,
+            suggestion=suggestion,
+            metadata=dict(metadata),
+        )
+
+    def _validate_portability(self, skill_md: Path) -> ValidationResult:
+        """Flag spec-valid patterns that common agent harnesses load differently or not at all."""
+        result = ValidationResult()
+        file_path = str(skill_md)
+        findings: list[Finding] = []
+
+        try:
+            raw = skill_md.read_bytes()
+        except OSError:
+            raw = b""
+        if raw.startswith(_UTF8_BOM):
+            findings.append(
+                self._portability_finding(
+                    "manifest_bom",
+                    Severity.MEDIUM,
+                    "SKILL.md starts with a UTF-8 byte-order mark; Codex drops the skill",
+                    file_path,
+                    "Save SKILL.md as UTF-8 without BOM",
+                )
+            )
+        for finding in findings:
+            result.add_finding(finding)
+        return result
+
     def _validate_line_count(self, skill_md: Path) -> ValidationResult:
         """Warn if SKILL.md exceeds recommended line count."""
         result = ValidationResult()
@@ -583,77 +885,160 @@ class SchemaValidator(ValidatorBase):
         return result
 
     def _validate_author(self, frontmatter: SkillFrontmatter, file_path: str = "") -> ValidationResult:
-        """Require author field with name + email; domain restriction is policy-driven.
+        """Classify ``metadata.author`` and apply the active policy.
 
-        Splits the historical single-regex check into two orthogonal pieces:
+        Four outcomes, each with its own check name so a policy can set its
+        severity independently:
 
-        1. *Shape* — every author value must match ``Name <email@host>``,
-           regardless of profile.
-        2. *Domain* — only enforced when the active policy supplies an
-           ``author_email_regex``. A custom policy can require an organization
-           domain; the bundled default policy accepts any email domain.
+        - ``author_missing``: no author (default policy: LOW, advisory).
+        - ``author_without_email``: a person, team, or organization name with
+          no email address (default policy: INFO).
+        - ``author_format``: a malformed or unsafe value, such as a bare email,
+          stray angle brackets, or control characters, or an email outside the
+          policy's ``author_email_regex`` domain (HIGH, blocking).
+        - success: ``Name <email@host>`` that satisfies any domain restriction.
 
-        Severity for both ``author_missing`` and ``author_format`` comes from
-        the active policy with HIGH defaults.
+        A policy with an ``author_email_regex`` needs an email in that domain,
+        so a name without an email fails its domain check.
         """
         result = ValidationResult()
         policy = self.policy
+        author = (frontmatter.metadata.author or "").strip() if frontmatter.metadata else ""
 
-        if frontmatter.metadata and frontmatter.metadata.author:
-            author = frontmatter.metadata.author.strip()
-            shape_ok = policy.author_shape_regex.fullmatch(author) is not None
-            domain_ok = policy.is_author_email_acceptable(author)
-
-            if shape_ok and domain_ok:
-                result.add_success(
-                    check_name="author_format",
-                    message=f"Valid author format: {author}",
+        if not author:
+            result.add_finding(
+                Finding(
+                    category="SCHEMA",
+                    severity=policy.severity_for("SCHEMA", "author_missing", default=Severity.LOW),
+                    check_name="author_missing",
+                    message="Author not specified in metadata",
+                    file_path=file_path,
+                    suggestion=(
+                        "Add 'metadata.author' with a person, team, or organization name, "
+                        "or 'Name <email@example.com>' to include a contact address"
+                    ),
+                    metadata={"profile": policy.profile},
                 )
-            else:
-                if not shape_ok:
-                    message = "Author must be of the form 'Name <email@host>'"
-                    suggestion = "Use format: 'Full Name <email@example.com>'"
-                else:
-                    domain_pattern = policy.author_email_regex.pattern if policy.author_email_regex is not None else ""
-                    message = (
-                        f"Author email does not match required domain "
-                        f"(profile '{policy.profile}', pattern: {domain_pattern})"
-                    )
-                    suggestion = (
-                        "Use an email matching the active profile's author_email_regex, "
-                        "or review whether that domain restriction is appropriate for your repository."
-                    )
+            )
+            return result
 
-                result.add_finding(
-                    Finding(
-                        category="SCHEMA",
-                        severity=policy.severity_for("SCHEMA", "author_format", default=Severity.HIGH),
-                        check_name="author_format",
-                        message=message,
-                        file_path=file_path,
-                        line_content=f"author: {author}",
-                        suggestion=suggestion,
-                        metadata={
-                            "current_author": author,
-                            "profile": policy.profile,
-                            "shape_ok": shape_ok,
-                            "domain_ok": domain_ok,
-                        },
-                    )
-                )
+        problem = author_value_problem(author)
+        shape_ok = problem is None and policy.author_shape_regex.fullmatch(author) is not None
+        domain_ok = shape_ok and policy.is_author_email_acceptable(author)
+        finding_metadata = {
+            "current_author": author[:AUTHOR_MAX_LENGTH],
+            "profile": policy.profile,
+            "shape_ok": shape_ok,
+            "domain_ok": domain_ok,
+        }
+
+        if problem is not None:
+            message = f"Author {problem}"
+            suggestion = "Use a plain name such as 'Example Team', or 'Full Name <email@example.com>'"
+        elif shape_ok and domain_ok:
+            result.add_success(check_name="author_format", message=f"Valid author format: {author}")
+            return result
+        elif policy.author_email_regex is not None:
+            domain_pattern = policy.author_email_regex.pattern
+            subject = "Author email does not match" if shape_ok else "Author has no email address matching"
+            message = f"{subject} the required domain (profile '{policy.profile}', pattern: {domain_pattern})"
+            suggestion = (
+                "Use 'Name <email>' with an email matching the active profile's author_email_regex, "
+                "or review whether that domain restriction is appropriate for your repository."
+            )
         else:
             result.add_finding(
                 Finding(
                     category="SCHEMA",
-                    severity=policy.severity_for("SCHEMA", "author_missing", default=Severity.HIGH),
-                    check_name="author_missing",
-                    message="Author not specified in metadata",
+                    severity=policy.severity_for("SCHEMA", "author_without_email", default=Severity.INFO),
+                    check_name="author_without_email",
+                    message=f"Author has no email address: {author}",
                     file_path=file_path,
-                    suggestion="Add 'metadata.author' field with format 'Name <email@example.com>'",
-                    metadata={"profile": policy.profile},
+                    line_content=f"author: {author}",
+                    suggestion=(
+                        "A name is accepted as attribution unless the profile requires a contact address "
+                        "(such as 'registry'); then use 'Name <email@example.com>'"
+                    ),
+                    metadata=finding_metadata,
                 )
             )
+            return result
 
+        result.add_finding(
+            Finding(
+                category="SCHEMA",
+                severity=policy.severity_for("SCHEMA", "author_format", default=Severity.HIGH),
+                check_name="author_format",
+                message=message,
+                file_path=file_path,
+                line_content=f"author: {author[:AUTHOR_MAX_LENGTH]}",
+                suggestion=suggestion,
+                metadata=finding_metadata,
+            )
+        )
+        return result
+
+    def _validate_metadata_id(self, frontmatter: SkillFrontmatter, file_path: str = "") -> ValidationResult:
+        """Validate an optional ``metadata.id`` against the stable-ID contract.
+
+        A present ID must be an exact 1-64 character lowercase ASCII slug in
+        every policy mode. The policy's ``metadata_id_requirement`` decides
+        whether absence is ignored, recommended (LOW), or required (HIGH), and
+        whether an invalid ID blocks (``require``) or is advisory (MEDIUM).
+        A valid ID is stored in ``result.metadata['metadata_id']`` for the
+        collection-level uniqueness check.
+        """
+        result = ValidationResult()
+        policy = self.policy
+        requirement = policy.metadata_id_requirement
+        extra = frontmatter.metadata.model_extra if frontmatter.metadata is not None else None
+        details = {"profile": policy.profile, "metadata_id_requirement": requirement}
+
+        if not extra or "id" not in extra:
+            if requirement == "ignore":
+                return result
+            default = Severity.HIGH if requirement == "require" else Severity.LOW
+            verb = "requires" if requirement == "require" else "recommends"
+            result.add_finding(
+                Finding(
+                    category="SCHEMA",
+                    severity=policy.severity_for("SCHEMA", "metadata_id_missing", default=default),
+                    check_name="metadata_id_missing",
+                    message=f"metadata.id not specified; profile '{policy.profile}' {verb} a stable skill ID",
+                    file_path=file_path,
+                    suggestion="Add 'metadata.id' with a lowercase slug such as 'my-skill' that stays fixed across versions",
+                    metadata=details,
+                )
+            )
+            return result
+
+        value = extra["id"]
+        problem = metadata_id_problem(value)
+        if problem is not None:
+            default = Severity.HIGH if requirement == "require" else Severity.MEDIUM
+            result.add_finding(
+                Finding(
+                    category="SCHEMA",
+                    severity=policy.severity_for("SCHEMA", "metadata_id_format", default=default),
+                    check_name="metadata_id_format",
+                    message=f"metadata.id {problem}",
+                    file_path=file_path,
+                    line_content=f"id: {_display_metadata_id(value)}",
+                    suggestion="Use a lowercase slug such as 'my-skill' (1-64 characters: a-z, 0-9, single hyphens)",
+                    metadata=details,
+                )
+            )
+            return result
+
+        result.add_success(
+            check_name="metadata_id_format",
+            message=(
+                f"Valid metadata.id '{value}'. Uniqueness is checked only across skills validated together "
+                "in one collection run"
+            ),
+            metadata_id=value,
+        )
+        result.metadata["metadata_id"] = value
         return result
 
     def _validate_folder_compliance(self, folder_path: Path) -> ValidationResult:

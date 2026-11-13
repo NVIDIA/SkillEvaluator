@@ -152,7 +152,7 @@ errors, such as an option the workflow does not accept, exit `2`.
 | `--min-score INTEGER` | `70` | Minimum passing quality and rubric score, from 0 to 100; quality severity overrides cannot waive the minimum |
 | `--quality-config PATH` | packaged `quality-default.yaml` | YAML file that adjusts the quality check's expected headings and error-handling rules; settings it omits keep their packaged values. See [Tier 1: Validation](/skills/skillevaluator/tier1-validation#the-checks). |
 | `--pii-waivers PATH` | none | Reviewed, expiring PII waivers applied by the `pii` check. See [PII waivers](/skills/skillevaluator/tier1-validation#pii-waivers). |
-| `--profile TEXT` | `SKILLEVALUATOR_PROFILE`, then `default` | Validation policy; `external` is a compatibility alias |
+| `--profile TEXT` | `SKILLEVALUATOR_PROFILE`, then `default` | Validation policy: `default` or `registry`. `external` is a compatibility alias for `default`. |
 | `--policy FILE` | none | Explicit policy overlay, including reviewed ownership-contact severity. See [Tier 1 policies](tier1-validation.mdx#validation-profiles-and-policies). |
 | `--previous-version TEXT` | `SKILLEVALUATOR_PREVIOUS_VERSION`, else unset | Previous version for version checks |
 | `--skillspector-baseline FILE` | unset | Audited SkillSpector suppression baseline; never discovered from the skill. See [Audited SkillSpector baselines](/skills/skillevaluator/tier1-validation#audited-skillspector-baselines). |
@@ -277,7 +277,7 @@ Applies to the whole run: target typing, policy profile, reports, tier selection
 | `--tiers TEXT` | all three for skills | Explicit tier selection, e.g. `--tiers 1,2` skips live evaluation and `--tiers 1,3` skips dedup. Tier 1 always runs. |
 | `--full` | unnecessary for skills | Compatibility flag for all three tiers with autopilot. Explicit tier selection and disable flags still apply. |
 | `--verbose` | off | Print the full per-check detail stream instead of the compact pipeline view. |
-| `--profile TEXT` | `$SKILLEVALUATOR_PROFILE`, then `default` | Bundled validation policy. `external` is a compatibility alias for `default`. |
+| `--profile TEXT` | `$SKILLEVALUATOR_PROFILE`, then `default` | Bundled validation policy: `default` or `registry`. `external` is a compatibility alias for `default`. |
 | `--external` | — | Compatibility alias for `--profile default`; does not change repository visibility. |
 | `--policy FILE` | none | Custom policy YAML overlaid on top of `--profile`. |
 | `--workers INTEGER RANGE` | `1` | Concurrent skill jobs when validating a folder of skills (`x>=1`). Values above 1 run skills in parallel processes and disable the per-skill pipeline view. |

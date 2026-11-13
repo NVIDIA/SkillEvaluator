@@ -20,12 +20,16 @@ from skillevaluator.inference.types import LLMClientError, LLMClientRefusedError
 from skillevaluator.reporting import HTMLReporter
 from skillevaluator.validators import rubric_eval
 from skillevaluator.validators.rubric_eval import (
+    _DEFAULT_SUPPLEMENTARY_TOTAL_BYTES,
+    _MAX_CONFIGURED_SUPPLEMENTARY_TOTAL_BYTES,
+    _SUPPLEMENTARY_TOTAL_BYTES_ENV,
     RUBRIC_JSON_SCHEMA,
     RubricEvalValidator,
     RubricJudge,
     _collect_supplementary_content,
     _extract_json,
     _UnsafeRubricInputError,
+    supplementary_total_bytes,
 )
 
 
@@ -253,6 +257,17 @@ class TestCollectSupplementaryContent:
         result = _collect_supplementary_content(skill_dir)
         assert "main.py" in result["scripts"]
 
+    def test_collects_node_scripts_for_the_judge(self, tmp_path):
+        skill_dir = tmp_path / "my-skill"
+        skill_dir.mkdir()
+        scripts = skill_dir / "scripts"
+        scripts.mkdir()
+        for name in ("run.mjs", "run.cjs", "run.js"):
+            (scripts / name).write_text("console.log('hello')")
+        (scripts / "notes.txt").write_text("not a script")
+        result = _collect_supplementary_content(skill_dir)
+        assert set(result["scripts"]) == {"run.mjs", "run.cjs", "run.js"}
+
     def test_collects_references(self, tmp_path):
         skill_dir = tmp_path / "my-skill"
         skill_dir.mkdir()
@@ -334,14 +349,51 @@ class TestLinkedRubricGuidance:
 
         assert collected["linked_markdown"] == {"GUIDE.md": "π"}
 
-    @pytest.mark.parametrize(("per_file", "total"), [(1, 10), (10, 1)])
-    def test_required_utf8_content_is_never_truncated(self, tmp_path, per_file, total):
+    @pytest.mark.parametrize(
+        ("earlier_guides", "total", "remaining"),
+        [
+            # The budget itself splits the character: nothing has been collected yet.
+            pytest.param(0, 1, 1, id="budget-splits-the-first-document"),
+            # The running total does: an earlier document leaves too few bytes for this one.
+            pytest.param(1, 8, 0, id="earlier-document-exhausts-the-budget"),
+        ],
+    )
+    def test_required_utf8_content_is_never_truncated(self, tmp_path, earlier_guides, total, remaining):
+        # The supplement budget is the only bound on required guidance, so it must stop the
+        # collection rather than cut a multi-byte character in half -- whether the budget is too
+        # small from the start or an earlier document has already spent it.
         root = _write_skill(tmp_path)
-        (root / "SKILL.md").write_text("[Guide](GUIDE.md)")
+        links = [f"[Earlier](earlier{index}.md)" for index in range(earlier_guides)]
+        (root / "SKILL.md").write_text("\n".join([*links, "[Guide](GUIDE.md)"]))
+        for index in range(earlier_guides):
+            (root / f"earlier{index}.md").write_text("x" * 8)
         (root / "GUIDE.md").write_text("π", encoding="utf-8")
 
-        with pytest.raises(_UnsafeRubricInputError):
-            _collect_supplementary_content(root, max_bytes_per_file=per_file, max_total_bytes=total)
+        with pytest.raises(_UnsafeRubricInputError, match=f"{remaining}-byte limit: GUIDE.md"):
+            _collect_supplementary_content(root, max_bytes_per_file=10, max_total_bytes=total)
+
+    def test_required_guidance_fits_when_the_budget_covers_every_document(self, tmp_path):
+        # The companion of the case above: the same two documents are collected whole as soon as
+        # the budget holds both, so the earlier read is spending the budget, not failing on it.
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("[Earlier](earlier0.md)\n[Guide](GUIDE.md)")
+        (root / "earlier0.md").write_text("x" * 8)
+        (root / "GUIDE.md").write_text("π", encoding="utf-8")
+
+        collected = _collect_supplementary_content(root, max_bytes_per_file=10, max_total_bytes=10)
+
+        assert collected["linked_markdown"] == {"earlier0.md": "x" * 8, "GUIDE.md": "π"}
+
+    def test_required_guidance_is_not_bounded_by_the_preview_size(self, tmp_path):
+        # The per-file bound summarizes optional previews; required guidance answers to the
+        # supplement budget alone, so a guide larger than a preview is still collected whole.
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("[Guide](GUIDE.md)")
+        (root / "GUIDE.md").write_text("g" * 9000)
+
+        collected = _collect_supplementary_content(root, max_bytes_per_file=100, max_total_bytes=10000)
+
+        assert collected["linked_markdown"] == {"GUIDE.md": "g" * 9000}
 
     @pytest.mark.parametrize(
         "case",
@@ -359,7 +411,7 @@ class TestLinkedRubricGuidance:
             "fifo",
         ],
     )
-    def test_incomplete_required_guidance_stops_before_judge(self, tmp_path, case):
+    def test_incomplete_required_guidance_stops_before_judge(self, tmp_path, case, monkeypatch):
         root = _write_skill(tmp_path)
         target = root / "GUIDE.md"
         link = "GUIDE.md"
@@ -372,8 +424,11 @@ class TestLinkedRubricGuidance:
         elif case == "invalid_utf8":
             target.write_bytes(b"\xff")
         elif case == "oversized":
+            # A single document larger than the configured budget cannot be collected whole.
+            monkeypatch.setenv("SKILLEVALUATOR_RUBRIC_SUPPLEMENT_BYTES", "3000")
             target.write_text("x" * 3001)
         elif case == "total_budget":
+            monkeypatch.setenv("SKILLEVALUATOR_RUBRIC_SUPPLEMENT_BYTES", "30000")
             for index in range(11):
                 (root / f"guide{index}.md").write_text("x" * 3000)
             (root / "SKILL.md").write_text("\n".join(f"[Guide](guide{i}.md)" for i in range(11)))
@@ -525,6 +580,88 @@ class TestLinkedRubricGuidance:
         assert "Linked Markdown (paths relative to skill root):" in prompt
         assert "--- GUIDE.md ---\nRequired guidance" in prompt
         assert (root / "SKILL.md").read_bytes() == source.encode("utf-8")
+
+
+class TestSupplementaryBudget:
+    def test_default_budget_holds_a_real_linked_guide_graph(self, tmp_path):
+        # The reporter's graph in #236 is about 65 KB over 13 documents; the stock budget takes it.
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("\n".join(f"[Guide](guide{index}.md)" for index in range(13)))
+        for index in range(13):
+            (root / f"guide{index}.md").write_text("g" * 5000)
+
+        collected = _collect_supplementary_content(root)
+
+        assert len(collected["linked_markdown"]) == 13
+        assert all(len(text) == 5000 for text in collected["linked_markdown"].values())
+
+    def test_budget_default_and_overrides(self, monkeypatch):
+        monkeypatch.delenv(_SUPPLEMENTARY_TOTAL_BYTES_ENV, raising=False)
+        assert supplementary_total_bytes() == _DEFAULT_SUPPLEMENTARY_TOTAL_BYTES
+        assert supplementary_total_bytes({_SUPPLEMENTARY_TOTAL_BYTES_ENV: " 65536 "}) == 65536
+
+    @pytest.mark.parametrize("raw", ["", "   ", "0", "-1", "1.5", "lots", "0x10"])
+    def test_unusable_budget_falls_back_to_the_default(self, raw):
+        assert supplementary_total_bytes({_SUPPLEMENTARY_TOTAL_BYTES_ENV: raw}) == _DEFAULT_SUPPLEMENTARY_TOTAL_BYTES
+
+    def test_budget_is_capped(self):
+        oversized = str(_MAX_CONFIGURED_SUPPLEMENTARY_TOTAL_BYTES * 4)
+        budget = supplementary_total_bytes({_SUPPLEMENTARY_TOTAL_BYTES_ENV: oversized})
+
+        assert budget == _MAX_CONFIGURED_SUPPLEMENTARY_TOTAL_BYTES
+
+    def test_configured_budget_reaches_the_collector(self, tmp_path, monkeypatch):
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("[Guide](GUIDE.md)")
+        (root / "GUIDE.md").write_text("g" * 4096)
+        monkeypatch.setenv(_SUPPLEMENTARY_TOTAL_BYTES_ENV, "4095")
+
+        with pytest.raises(_UnsafeRubricInputError):
+            _collect_supplementary_content(root)
+
+        monkeypatch.setenv(_SUPPLEMENTARY_TOTAL_BYTES_ENV, "4096")
+        assert _collect_supplementary_content(root)["linked_markdown"] == {"GUIDE.md": "g" * 4096}
+
+    @pytest.mark.parametrize("case", ["escape", "encoded_escape", "symlink", "ancestor_symlink", "hardlink"])
+    def test_a_larger_budget_never_widens_the_declared_root(self, tmp_path, monkeypatch, case):
+        # Raising the byte budget buys more of the skill's own guidance, never another path.
+        monkeypatch.setenv(_SUPPLEMENTARY_TOTAL_BYTES_ENV, str(_MAX_CONFIGURED_SUPPLEMENTARY_TOTAL_BYTES))
+        root = _write_skill(tmp_path)
+        (tmp_path / "outside.md").write_text("outside guidance")
+        link = "GUIDE.md"
+        if case == "escape":
+            link = "../outside.md"
+        elif case == "encoded_escape":
+            link = "%2e%2e%5coutside.md"
+        elif case == "symlink":
+            (root / "GUIDE.md").symlink_to(tmp_path / "outside.md")
+        elif case == "ancestor_symlink":
+            (tmp_path / "outside").mkdir()
+            (tmp_path / "outside/guide.md").write_text("outside guidance")
+            (root / "docs").symlink_to(tmp_path / "outside", target_is_directory=True)
+            link = "docs/guide.md"
+        else:
+            os.link(tmp_path / "outside.md", root / "GUIDE.md")
+        (root / "SKILL.md").write_text(f"[Guide]({link})")
+
+        with patch.object(RubricJudge, "process") as judge:
+            result = RubricEvalValidator().validate(root)
+
+        judge.assert_not_called()
+        assert result.metadata["rubric_eval"]["execution_status"] == "failed"
+        assert result.metadata["rubric_eval"]["overall_score"] is None
+        assert any(finding.check_name == "unsafe_skill_input" for finding in result.findings)
+
+    def test_optional_previews_still_stay_small_under_a_large_budget(self, tmp_path, monkeypatch):
+        monkeypatch.setenv(_SUPPLEMENTARY_TOTAL_BYTES_ENV, str(_MAX_CONFIGURED_SUPPLEMENTARY_TOTAL_BYTES))
+        root = _write_skill(tmp_path)
+        (root / "scripts").mkdir()
+        (root / "scripts/main.py").write_text("x" * 20000)
+
+        collected = _collect_supplementary_content(root)
+
+        assert collected["scripts"]["main.py"].endswith("... [truncated]")
+        assert len(collected["scripts"]["main.py"]) < 3100
 
 
 class TestRubricEvalValidator:
@@ -1343,6 +1480,58 @@ class TestInvalidReplyRetry:
         assert finding.metadata == {"judge_attempts": 2}
         assert problem in finding.message
 
+    @pytest.mark.parametrize("padding", ["", "x" * 410 + " "], ids=["bare", "padded"])
+    def test_second_invalid_reply_redacts_credentials_in_the_finding_and_summary(self, tmp_path, padding):
+        secret = "sk-syntheticcredential123456789"
+        checks = _complete_checks()
+        checks.append({**checks[0], "id": padding + secret})
+
+        result, requests = _validate_with(tmp_path, _reply(checks), _reply(checks))
+
+        assert len(requests) == 2
+        rubric = result.metadata["rubric_eval"]
+        (finding,) = _llm_findings(result)
+        assert finding.check_name == "llm_invalid_response"
+        for reported in (finding.message, rubric["summary"]):
+            assert "sk-synthetic" not in reported
+            assert "sk-<redacted>" in reported
+        assert not result.passed
+
+    def test_second_invalid_reply_bounds_the_finding_and_summary(self, tmp_path):
+        checks = _complete_checks()
+        checks.append({**checks[0], "id": "x" * 20_000})
+
+        result, _requests = _validate_with(tmp_path, _reply(checks), _reply(checks))
+
+        rubric = result.metadata["rubric_eval"]
+        (finding,) = _llm_findings(result)
+        for reported in (finding.message, rubric["summary"]):
+            assert reported.startswith("LLM judge returned invalid rubric evidence: unexpected criterion ids: xxx")
+            assert reported.endswith("x ... [truncated]")
+            assert len(reported) == 500 + len(" ... [truncated]")
+
+    def test_judge_chosen_ids_are_collapsed_to_one_line_in_every_report_of_the_problem(self, tmp_path):
+        first = _complete_checks()
+        first.append({**first[0], "id": "x\n[ERROR] forged line\x1b[31m\x00\u202e end"})
+        second = _complete_checks()
+        second.append({**second[0], "id": "y\r\n\n[ERROR] other\x07\t\tline"})
+
+        with patch("skillevaluator.validators.rubric_eval.logger") as log:
+            result, requests = _validate_with(tmp_path, _reply(first), _reply(second))
+
+        prefix = "LLM judge returned invalid rubric evidence: unexpected criterion ids: "
+        retry_problem = f"{prefix}x [ERROR] forged line end"
+        first_request, retry = requests
+        assert retry["user"] == f"{first_request['user']}\n{_RETRY_MARKER}{retry_problem}. {_RETRY_TAIL}"
+        (rejected,) = [call for call in log.warning.call_args_list if "rejected" in call.args[0]]
+        assert rejected.args[1:] == (retry_problem,)
+
+        reported_problem = f"{prefix}y [ERROR] other line"
+        rubric = result.metadata["rubric_eval"]
+        (finding,) = _llm_findings(result)
+        assert finding.message == reported_problem
+        assert rubric["summary"] == reported_problem
+
     def test_second_unparseable_reply_reports_unavailable(self, tmp_path):
         result, requests = _validate_with(tmp_path, _reply(_invalid_checks("missing")), "still not json")
 
@@ -1557,3 +1746,19 @@ class TestInvalidReplyRetry:
         rubric = result.metadata["rubric_eval"]
         assert rubric["execution_status"] == "succeeded"
         assert rubric["judge_attempts"] == 1
+
+
+class TestCollectToolsScripts:
+    def test_tools_directory_scripts_reach_the_judge_without_colliding_with_scripts(self, tmp_path):
+        skill_dir = tmp_path / "my-skill"
+        (skill_dir / "scripts").mkdir(parents=True)
+        (skill_dir / "tools").mkdir()
+        (skill_dir / "scripts" / "run.mjs").write_text("console.log('scripts')")
+        (skill_dir / "tools" / "run.mjs").write_text("console.log('tools')")
+        (skill_dir / "tools" / "helper.py").write_text("print('tools')")
+
+        result = _collect_supplementary_content(skill_dir)
+
+        assert set(result["scripts"]) == {"run.mjs", "tools/run.mjs", "tools/helper.py"}
+        assert "scripts" in result["scripts"]["run.mjs"]
+        assert "tools" in result["scripts"]["tools/run.mjs"]

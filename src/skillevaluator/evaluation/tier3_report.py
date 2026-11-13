@@ -1217,6 +1217,9 @@ def build_agent_eval_payload(
         mode=mode,
         # A reused baseline's copied trajectories hold the tokens of the run it came from.
         baseline_reused=isinstance(baseline_record, dict) and baseline_record.get("mode") == "reused",
+        # The dataset's own case IDs are the only canonical ones, so every case
+        # row is checked against them and none is invented from a trial name.
+        dataset_case_ids=[entry["id"] for entry in public_dataset if isinstance(entry.get("id"), str) and entry["id"]],
     )
 
     _layer_llm_insights(

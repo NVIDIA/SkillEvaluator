@@ -2715,7 +2715,16 @@ def validate(
             manifest_type = CONTENT_TYPE_SKILL
         elif requested_path.name == WORKFLOWS_MANIFEST_FILE:
             manifest_type = CONTENT_TYPE_WORKFLOWS
-    resolved_type = content_type if content_type != "auto" else manifest_type or detect_content_type(target_path)
+    resolved_type = content_type
+    if content_type == "auto":
+        if manifest_type is not None:
+            resolved_type = manifest_type
+        else:
+            # Folder-name detection needs a resolved path, while the authored
+            # plugin path must still expose links to the plugin safety checks.
+            resolved_type = detect_content_type(target_path.resolve())
+            if resolved_type != CONTENT_TYPE_PLUGIN and detect_content_type(target_path) == CONTENT_TYPE_PLUGIN:
+                resolved_type = CONTENT_TYPE_PLUGIN
     target_path = target_path.absolute() if resolved_type == CONTENT_TYPE_PLUGIN else target_path.resolve()
     from skillevaluator.publication_identity import publication_target_name
 

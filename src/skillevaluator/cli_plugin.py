@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,11 +16,19 @@ if TYPE_CHECKING:
     from rich.console import Console
 
 
-def _emit_reports(results: list[ValidationResult], formats: tuple[str, ...], output: Path, console: Console) -> None:
+def _emit_reports(
+    results: list[ValidationResult],
+    formats: tuple[str, ...],
+    output: Path,
+    console: Console,
+    *,
+    plugin_name: str | None = None,
+) -> None:
     from skillevaluator.reporting import BenchmarkReporter, CLIReporter
     from skillevaluator.tier1.commands import REPORTERS
 
-    reporters = {**REPORTERS, "benchmark": BenchmarkReporter}
+    # Without the plugin's name the card is titled with the placeholder "skill".
+    reporters = {**REPORTERS, "benchmark": partial(BenchmarkReporter, skill_name=plugin_name)}
     # Parse and validate everything before the first output file is created.
     selected = [(name, reporters[name]()) for name in dict.fromkeys(formats) if name != "cli"]
     if "cli" in formats:
@@ -51,21 +60,28 @@ def emit_plugin_run_reports(
     """Normalize existing score artifacts and attach retained plugin observations."""
     from skillevaluator.cli import _attach_plugin_report
     from skillevaluator.cli_core import resolve_plugin_path
-    from skillevaluator.evaluation.tier3_report import agent_eval_result_from_run
-    from skillevaluator.tier3.results_location import plugin_results_directory
+    from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory
+    from skillevaluator.publication_identity import publication_target_name
 
     source = resolve_plugin_path(source)
-    results_dir = plugin_results_directory(source, results_dir)
-    result = agent_eval_result_from_run(
-        source, results_dir=results_dir, env_mode=env_mode, engine_result=engine_result, use_llm_judge=False
-    )
+    # Another execution may publish latest before these requested formats are
+    # written. Only the returned run owns this command's canonical score data.
+    run_dir_value = engine_result.get("run_dir") if isinstance(engine_result, dict) else None
+    run_dir = Path(run_dir_value) if isinstance(run_dir_value, (str, Path)) and run_dir_value else None
+    result = None
+    if run_dir is not None and run_dir.is_dir():
+        result = agent_eval_result_from_directory(
+            source, run_dir, env_mode=env_mode, engine_result=engine_result, use_llm_judge=False
+        )
     if result is None:
         result = ValidationResult(validator_name="AGENT_EVAL")
         result.mark_scan_incomplete("canonical-score-summary")
         result.add_warning("Canonical score summary unavailable; retained runtime observations follow.")
     _attach_plugin_report(result, engine_result)
     output_dir = _report_output_location(source, output_dir, report_formats)
-    _emit_reports([result], report_formats, output_dir, console)
+    _emit_reports(
+        [result], report_formats, output_dir, console, plugin_name=publication_target_name(source) or source.name
+    )
 
 
 def build_plugin_commands(evaluate, *, run_options, report_options, console):
@@ -130,7 +146,8 @@ def build_plugin_commands(evaluate, *, run_options, report_options, console):
         result = ValidationResult(validator_name="Retained runtime evidence")
         result.mark_scan_incomplete("saved-score-summary-unavailable")
         result.add_message("Passive replay: scoring and publication eligibility are not recomputed.")
-        result.metadata["plugin_runtime_report"] = report.payload()
-        _emit_reports([result], report_formats, output_dir, console)
+        payload = report.payload()
+        result.metadata["plugin_runtime_report"] = payload
+        _emit_reports([result], report_formats, output_dir, console, plugin_name=payload["name"] or None)
 
     return evaluate_plugin, report_plugin

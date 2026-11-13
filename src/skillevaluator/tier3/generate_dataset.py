@@ -759,7 +759,9 @@ def _without_skill_use(case: dict[str, Any], skill: dict[str, Any], skill_script
     return case
 
 
-def _print_baseline_fairness_warnings(dataset: dict[str, Any], skill_scripts: Sequence[str]) -> None:
+def _print_baseline_fairness_warnings(
+    dataset: dict[str, Any], skill_scripts: Sequence[str], skill_names: Sequence[str] = ()
+) -> None:
     """Name generated cases that still grade skill use; `tier3 validate` reports the same warnings.
 
     The check does not read expected_script, and normalizing an invalid one (an
@@ -772,7 +774,9 @@ def _print_baseline_fairness_warnings(dataset: dict[str, Any], skill_scripts: Se
         if isinstance(case, dict)
     ]
     for entry in normalize_dataset_entries({**dataset, "evals": cases}):
-        for warning in evals_spec._baseline_fairness_warnings(entry, skill_scripts=skill_scripts):
+        for warning in evals_spec._baseline_fairness_warnings(
+            entry, skill_scripts=skill_scripts, skill_names=skill_names
+        ):
             print(f"Warning: case {entry.get('id')}: {warning}")
 
 
@@ -1707,7 +1711,7 @@ Agent-refined mode (--refine):
     needs_review = sum(1 for case in cases if _case_needs_review(case))
     print(f"  {needs_review} case(s) flagged needs_review")
 
-    _print_baseline_fairness_warnings(dataset, _script_file_names(skill))
+    _print_baseline_fairness_warnings(dataset, _script_file_names(skill), (skill["name"],))
     if args.dry_run:
         print("\nDry run — not saved.")
         print(json.dumps(dataset, indent=2))

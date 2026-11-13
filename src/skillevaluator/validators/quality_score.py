@@ -296,10 +296,16 @@ class QualityScoreValidator(ValidatorBase):
             return False
         # The name must not continue a longer file name: ``other-run.mjs`` is not ``run.mjs``.
         script_name = "|".join(re.escape(name) for name in sorted(names))
+        # A command substitution is one argument: ``node --env-file=$(pwd)/.env scripts/run.mjs``
+        # runs ``run.mjs``, while ``$(node --version) scripts/run.mjs`` and ``node $(cat run.mjs)``
+        # do not, so mask each substitution (innermost first) before looking for the command.
+        masked = content
+        while (unmasked := re.sub(r"\$\([^()\n]*\)", "$SUBSTITUTION", masked)) != masked:
+            masked = unmasked
         # Shell separators end the command, so ``node --version; cat scripts/run.mjs`` is not
         # an invocation of ``run.mjs``.
         invocation = re.compile(rf"\bnode\b[^\n;&|)`]*?(?<![\w.-])(?:{script_name})(?![\w.-])")
-        return invocation.search(content) is not None
+        return invocation.search(masked) is not None
 
     @staticmethod
     def _has_executable_directory(skill_path: Path) -> bool:

@@ -1829,6 +1829,7 @@ def test_node_command_with_a_trailing_name_part_does_not_satisfy_the_run_script_
         "Run `node --version | cat scripts/run.mjs`.",
         "Run `node --version || cat scripts/run.mjs`.",
         "Run `$(node --version) scripts/run.mjs`.",
+        "Run `node $(cat scripts/run.mjs)`.",
     ],
 )
 def test_unrelated_node_command_does_not_satisfy_the_run_script_check(tmp_path, instruction):
@@ -1839,5 +1840,19 @@ def test_unrelated_node_command_does_not_satisfy_the_run_script_check(tmp_path, 
 
 def test_node_command_with_flags_still_satisfies_the_run_script_check(tmp_path):
     skill = _script_skill(tmp_path, "run.mjs", "Run `node --no-warnings scripts/run.mjs input.txt`.")
+
+    assert not any("run_script" in message for message in _messages(skill))
+
+
+@pytest.mark.parametrize(
+    "instruction",
+    [
+        "Run `node --env-file=$(pwd)/.env scripts/run.mjs input.txt`.",
+        "Run `node --require $(npm root -g)/pkg/register.js scripts/run.mjs`.",
+        "Run `node --import $(printf '%s' ./setup.mjs) scripts/run.mjs`.",
+    ],
+)
+def test_node_command_with_a_substitution_in_an_option_satisfies_the_run_script_check(tmp_path, instruction):
+    skill = _script_skill(tmp_path, "run.mjs", instruction)
 
     assert not any("run_script" in message for message in _messages(skill))

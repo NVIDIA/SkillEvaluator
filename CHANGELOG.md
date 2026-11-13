@@ -56,8 +56,10 @@ All notable changes to SkillEvaluator are documented in this file.
   root skips the paid jobs (LLM-enriched Tier 1, Tier 2 and Tier 3): the keyless
   scan remains the Tier 1 gate and reports list Tier 2 and Tier 3 as skipped.
   GitHub fork PRs never run the paid tiers and keep their existing Tier 2/3
-  reason. The enriched scan applies reviewed security baselines like the keyless
-  scan.
+  reason. Setup guidance explains when provider configuration is exercised and
+  how to request an eligible all-skill check before merging.
+  When tiers run, GitLab keyless and native selectors both include changed
+  setup gitlinks despite committed submodule ignore settings.
 
 - HTML, Markdown, and terminal findings show recorded LLM verification verdicts,
   confidence, and reasoning, with an explanation of retained or downgraded severity.
@@ -530,6 +532,13 @@ All notable changes to SkillEvaluator are documented in this file.
   rebuilt, with the LLM when a provider is configured, and its
   `what_to_fix.json` rewritten.
 
+- Generated Tier 3 images now build when any staged skill declares packages
+  in `apt-packages.txt`. The generated `apt-get install` line ended the base
+  package list with `\ \`, so the shell passed apt-get a package named " "
+  and the build failed with `Unable to locate package`. This affected the
+  shared eval base image, generated task Dockerfiles and the default
+  Dockerfile for native Harbor tasks.
+
 - Public MCP URL probes handle modern SDK client and stream APIs while retaining
   checked-address connections, header grants, response limits, and bounded
   cleanup. Redirect responses are refused before SDK-level redirect handling.
@@ -541,10 +550,26 @@ All notable changes to SkillEvaluator are documented in this file.
   to Harbor 0.25's `${VAR}` form in generated task TOML, without changing source
   declarations or agent JSON configuration.
 
+- Validate native verifier and step-verifier MCP references against their
+  verifier environment grants, retaining agent grants for agent servers and
+  the legacy default when no separate verifier grants are supplied. Invalid
+  declarations provide field/type and `${VAR}` hints without echoing values.
+
 - Keep local `/logs/artifacts`, `HARBOR_LOGS_DIR/artifacts`, and
   `HARBOR_ARTIFACTS_DIR` on the same private staging tree. Artifact collection
   preserves source files and retained role logs; local whole-log-tree transfers
   fail before modifying their destination.
+
+- With default or default-plus-custom grading, a Tier 3 task image now fails
+  to build when `python3 -I` cannot import the verifier's packages: idna,
+  openai, ragas or boto3. This happens, for example, when a custom Dockerfile
+  sets `ENV PIP_USER=1`, or when the packages are reachable only through
+  `PYTHONPATH`. The build-time import check ran plain `python`, which sees
+  those locations. `test.sh` runs the verifier as `python3 -I`, which does not.
+  Such images built, and then every trial's verifier failed on `import idna`,
+  or the goal-accuracy judge fell back from RAGAS to the custom judge when only
+  ragas was hidden. The check now runs as `python3 -I`. `custom_only` grading
+  never runs that verifier, so its images no longer run the check.
 
 - Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
   the PR or merge request's target revision. Policy files from the proposed
@@ -610,11 +635,10 @@ All notable changes to SkillEvaluator are documented in this file.
   asked (1, or 2 after a rejected reply, not counting the client's retries),
   in the skill's `rubric_eval` success detail or `llm_*` finding and, for a
   single skill, also in the `rubric_eval` object. It is left out when the
-  first request fails, for example with no provider configured.
-
-- Rubric retry diagnostics redact judge-supplied credentials before logging or truncating the rejection reason.
-
-- Rubric retry guidance links to the published environment-variable documentation route.
+  first request fails, for example with no provider configured. Rejection
+  diagnostics redact judge-supplied credentials before shortening the reason,
+  and collapse whitespace and controls to printable single-line text in logs,
+  retry notes and final invalid-response findings and summaries.
 
 - A default Tier 3 run with a baseline can reach a PASS or NEUTRAL publication
   verdict in BENCHMARK.md again. The baseline arm has no skill under test, so
@@ -751,6 +775,31 @@ All notable changes to SkillEvaluator are documented in this file.
 - Treat empty and placeholder `expected_script` values as no script expectation,
   and ignore placeholder-only expected behavior entries when grading datasets.
 
+- Tier 3 security findings no longer keep credentials from the agent's
+  commands, the user prompt, or the agent's response in their `evidence`,
+  which is saved in `skill_evaluator_reward.json`, the collected results, and
+  the reports. In 0.8.0 a sensitive-path or sensitive-file-write finding stored
+  the whole command or tool input, such as
+  `echo 'export OPENAI_API_KEY=...' >> ~/.bashrc`; destructive-command,
+  prompt-injection, and refusal findings stored their text unmasked; and
+  network findings masked only known key shapes, so a `curl -u user:password`
+  value was kept. Path findings now record the protected entry they matched,
+  such as `~/.bashrc`, and the longest one when several match, so a write to
+  `/etc/profile.d/npm.sh` records `/etc/profile.d`. The other findings mask, as
+  a best effort, private key blocks, URL user info (also a password that holds
+  an `@`), `Authorization`, API-key, and `Cookie` header values (including
+  quoted and shell-escaped cookie values), credential flags and assignments
+  (also a double-quoted value with an escaped quote, and a value on a
+  backslash-continued line), `.netrc` passwords, and common token prefixes, and
+  keep the rest of the command readable; a backslash-newline is joined, as in a
+  shell, so a continued command shows as one line. A credential in another
+  form, such as a `.pgpass` line, can still appear. Scores are unchanged.
+  Because path findings name the entry, the without-skill baseline comparison
+  now matches them by entry: a with-skill write to `~/.bashrc` is attributed to
+  the baseline prompt or environment when the baseline also wrote to
+  `~/.bashrc`, whatever each command wrote. Both the host checker and the
+  bundled Harbor verifier apply the fix.
+
 - Read JSON, JSONL and YAML evaluation datasets as UTF-8 so Unicode prompts and
   answers load correctly on hosts with a non-UTF-8 default text encoding.
 
@@ -803,8 +852,12 @@ All notable changes to SkillEvaluator are documented in this file.
   (`reference_unresolved` from v2.12.0), a fatal or other ledger row, an
   uninspected file, a degraded analyzer, a limitation, or fewer findings
   counted after filtering than before still leaves the scan `INCOMPLETE`.
-
-- Missing-reference coverage checks retain standalone shell wildcards while ignoring leading Markdown bullets, so commands cannot hide uninspected files.
+  Every missing reference must match an accepted ledger location; ambiguous
+  references, unknown completeness fields and truncated evidence remain
+  `INCOMPLETE`. Nonfatal exclusions must name real uninspected paths. Line
+  checks retain standalone shell wildcards and recognize escaped spaces, and
+  accepted-reference warnings survive static/LLM finding deduplication. A
+  refused reference includes a short acceptance hint and documentation link.
 
 - Estimate Tier 1 instruction tokens from the parsed Markdown body, so `---`
   inside YAML values or comments does not count frontmatter as instructions.

@@ -58,7 +58,7 @@ from skillevaluator.provider_config import (
 )
 from skillevaluator.skillspector_diagnostics import completeness_record, merge_completeness
 from skillevaluator.skillspector_provenance import SKILLSPECTOR_LLM_ANALYZERS, sanitize_skillspector_llm_provenance
-from skillevaluator.skillspector_reference_caveats import reference_caveat_metadata
+from skillevaluator.skillspector_reference_caveats import REFERENCE_COMPLETENESS_FIELDS, reference_caveat_metadata
 from skillevaluator.skillspector_references import (
     AE1_PATTERN,
     AE1_RULE_ID,
@@ -1223,6 +1223,12 @@ def _skillspector_runtime_limit_hint(ledger_exceptions: Iterable[Mapping[str, ob
     return " ".join(hints) or None
 
 
+_SKILLSPECTOR_REFERENCE_REJECTION_HINT = (
+    "Missing references require a standalone target with complete, matching reference and scan evidence. "
+    "See https://docs.nvidia.com/skills/skillevaluator/tier1-validation."
+)
+
+
 def _skillspector_incomplete_analysis_error(status: str, ledger_exceptions: list[dict]) -> str:
     """Describe a partial SkillSpector analysis with example gaps and, for runtime limits, a remedy."""
     message = f"skillspector JSON field 'analysis_completeness' reports incomplete analysis (status '{status}')"
@@ -1238,6 +1244,8 @@ def _skillspector_incomplete_analysis_error(status: str, ledger_exceptions: list
             )
     message = f"{message}; security scan did not complete"
     hint = _skillspector_runtime_limit_hint(ledger_exceptions)
+    if not hint and ledger_exceptions and all(row.get("phase") == "reference_resolution" for row in ledger_exceptions):
+        hint = _SKILLSPECTOR_REFERENCE_REJECTION_HINT
     return f"{message}. {hint}" if hint else message
 
 
@@ -1602,10 +1610,10 @@ _SKILLSPECTOR_REFERENCE_SOURCE_MAX_BYTES = 1_000_000
 # which a missing reference is no longer accepted.
 _SKILLSPECTOR_REFERENCE_TREE_MAX_ENTRIES = 50_000
 _SKILLSPECTOR_REFERENCE_LINE_MAX_CHARS = 10_000
-# A Markdown backslash escape of an ASCII punctuation character, which a
-# renderer resolves in text and in a link destination alike. SkillSpector
-# itself removes only ``\\``, ``\(``, ``\)``, ``\<`` and ``\>``.
-_SKILLSPECTOR_MARKDOWN_ESCAPE_RE = re.compile(r"\\([!-/:-@\[-`{-~])")
+# Markdown escapes of ASCII punctuation, and shell-escaped spaces, can hide
+# a path's spelling. SkillSpector itself removes only ``\\``, ``\(``, ``\)``,
+# ``\<`` and ``\>``.
+_SKILLSPECTOR_MARKDOWN_ESCAPE_RE = re.compile(r"\\([ !-/:-@\[-`{-~])")
 # Removing Markdown escapes, resolving HTML character references and decoding
 # percent-escapes can each reveal another; a reference's line is also read
 # after up to this many of them, in any order.
@@ -1806,15 +1814,13 @@ def _skillspector_references_on_line(references: list, path: object, line: int) 
     ]
 
 
-def _skillspector_unscanned_names(scanned_root: Path, components: object) -> set[str] | None:
-    """Names on the paths of the entries that SkillSpector did not inspect, else ``None``.
+def _skillspector_unscanned_paths(scanned_root: Path, components: object) -> set[str] | None:
+    """Relative paths of entries that SkillSpector did not inspect, else ``None``.
 
     An entry is uninspected when it is a link, a junction or another
     non-regular file, a regular file that no ``components`` entry lists, or a
     directory that holds no listed file, such as an artifact directory left out
-    of a staged scan, with everything inside it. Every part of an uninspected
-    entry's path is a name, so a directory that holds one is named even when it
-    also holds listed files. Links are not followed.
+    of a staged scan, with everything inside it. Links are not followed.
 
     A ``.git`` directory that holds no listed file counts by its own name, by
     every entry outside Git's own layout (:data:`_SKILLSPECTOR_GIT_FILE_RE`,
@@ -1888,7 +1894,17 @@ def _skillspector_unscanned_names(scanned_root: Path, components: object) -> set
                         uninspected.add(relative)
         except OSError:
             return None
-    return {part for relative in uninspected for part in relative.split("/")}
+    return uninspected
+
+
+def _skillspector_unscanned_names(scanned_root: Path, components: object) -> set[str] | None:
+    """Every path part of an uninspected entry, or ``None`` when the bounded walk fails.
+
+    A directory that holds an uninspected entry is named even when it also
+    holds listed files. The paths come from :func:`_skillspector_unscanned_paths`.
+    """
+    paths = _skillspector_unscanned_paths(scanned_root, components)
+    return None if paths is None else {part for relative in paths for part in relative.split("/")}
 
 
 def _skillspector_name_keys(names: Iterable[str]) -> frozenset[str]:
@@ -2321,6 +2337,7 @@ def _skillspector_missing_reference_notes(
     references: object,
     skillspector_version: tuple[int, int, int] | None,
     reference_root: Path | None,
+    analysis_completeness: Mapping[str, object],
 ) -> list[str] | None:
     """Warnings for a ``partial`` analysis whose gaps are references to files not bundled, else ``None``.
 
@@ -2336,9 +2353,12 @@ def _skillspector_missing_reference_notes(
     skill that SkillSpector did not inspect (:func:`_skillspector_unscanned_names`,
     :func:`_skillspector_reference_line_avoids`, with one work budget for all
     of the report's lines), such as a link or a file in an artifact directory
-    left out of a staged scan, and there is no fatal scope exclusion. Any
-    other ledger rows must be referenced images that
-    :func:`_skillspector_passive_raster_note` accepts, which then accounts for
+    left out of a staged scan, and there is no fatal scope exclusion.
+    Every missing reference must have an accepted ledger row at its source
+    location, and no reference may be ambiguous. Unknown completeness fields,
+    including truncation markers, are not accepted. Nonfatal scope exclusions
+    must name actual uninspected paths. Any other ledger rows must be referenced
+    images that :func:`_skillspector_passive_raster_note` accepts, which then accounts for
     the counts, analyzers and limitations, and its note follows. Without them,
     no file is partially or entirely uninspected, no finding was filtered out,
     there is no limitation, every analyzer is ``completed``, ``not_applicable``
@@ -2356,6 +2376,11 @@ def _skillspector_missing_reference_notes(
     ``complete_with_caveats`` instead; :func:`_skillspector_reference_caveat_notes`
     applies the same rules to it.
     """
+    # A bounded subset cannot establish that every reference was checked.
+    # Keep unknown evidence fields (including truncation markers) outside the
+    # same report contract used by the report-only reference-caveat gate.
+    if set(analysis_completeness) != REFERENCE_COMPLETENESS_FIELDS:
+        return None
     reference_rows = [row for row in ledger_exceptions if row.get("phase") == "reference_resolution"]
     other_rows = [row for row in ledger_exceptions if row.get("phase") != "reference_resolution"]
     if (
@@ -2373,6 +2398,15 @@ def _skillspector_missing_reference_notes(
         ):
             return None
 
+    locations = {(row["path"], row.get("start_line")) for row in reference_rows}
+    for reference in references:
+        if not isinstance(reference, dict) or reference.get("status") == "ambiguous":
+            return None
+        if reference.get("status") == "missing":
+            path, line = reference.get("source_path"), reference.get("line")
+            if not isinstance(path, str) or type(line) is not int or (path, line) not in locations:
+                return None
+
     notes = [_skillspector_missing_reference_warning(reference_rows)]
     if other_rows:
         image_note = _skillspector_passive_raster_note(
@@ -2389,10 +2423,12 @@ def _skillspector_missing_reference_notes(
         or not _skillspector_universal_analyzers_completed(analyzer_statuses, counts["total_components"])
     ):
         return None
-    unscanned = _skillspector_unscanned_names(scanned_root, components)
-    if unscanned is None:
+    unscanned_paths = _skillspector_unscanned_paths(scanned_root, components)
+    if unscanned_paths is None or any(
+        not isinstance(row.get("path"), str) or row["path"] not in unscanned_paths for row in scope_exclusions
+    ):
         return None
-    keys = _skillspector_name_keys(unscanned)
+    keys = _skillspector_name_keys(part for path in unscanned_paths for part in path.split("/"))
     budget = _SkillspectorMatchBudget()
     sources: dict[str, bytes] = {}
     checked: set[tuple[str, object]] = set()
@@ -2461,6 +2497,7 @@ def _skillspector_reference_caveat_notes(
     references: object,
     skillspector_version: tuple[int, int, int] | None,
     reference_root: Path | None,
+    analysis_completeness: Mapping[str, object],
 ) -> list[str] | None:
     """Warnings for a ``complete_with_caveats`` analysis, else ``None``.
 
@@ -2486,6 +2523,7 @@ def _skillspector_reference_caveat_notes(
         references=references,
         skillspector_version=skillspector_version,
         reference_root=reference_root,
+        analysis_completeness=analysis_completeness,
     )
 
 
@@ -2501,6 +2539,7 @@ def _skillspector_reference_caveat_error(ledger_exceptions: list[dict]) -> str:
             "without a caveat; security scan did not complete"
         )
     rows = [row for row in ledger_exceptions if not _skillspector_row_is_reference_caveat(row)]
+    only_missing_references = not rows
     description = "caveats other than missing references"
     if not rows:
         rows = ledger_exceptions
@@ -2512,7 +2551,8 @@ def _skillspector_reference_caveat_error(ledger_exceptions: list[dict]) -> str:
     )
     if len(rows) > len(shown):
         message = f"{message}; and {len(rows) - len(shown)} more"
-    return f"{message}; security scan did not complete"
+    message = f"{message}; security scan did not complete"
+    return f"{message}. {_SKILLSPECTOR_REFERENCE_REJECTION_HINT}" if only_missing_references else message
 
 
 # SkillSpector 2.12.0 and later record a nonfatal ``partial`` ``opaque_content``
@@ -3361,8 +3401,16 @@ class SecurityValidator(ValidatorBase):
                 seen.add(key)
                 unique.append(finding)
         if len(unique) != len(result.findings):
+            errors = result.independent_errors()
+            warnings = result.independent_warnings()
             result.findings = unique
             result.recalculate_from_findings()
+            for error in errors:
+                if error not in result.errors:
+                    result.add_error(error)
+            for warning in warnings:
+                if warning not in result.warnings:
+                    result.add_warning(warning)
 
     @staticmethod
     def _drop_repeated_hook_reports(result: ValidationResult, enrichment: ValidationResult) -> None:
@@ -4011,6 +4059,7 @@ class SecurityValidator(ValidatorBase):
                             references=analysis_completeness.get("references"),
                             skillspector_version=skillspector_version,
                             reference_root=reference_root,
+                            analysis_completeness=analysis_completeness,
                         )
                         if caveat_notes is None:
                             # As for a partial report's gaps, the findings are
@@ -4052,6 +4101,7 @@ class SecurityValidator(ValidatorBase):
                         references=analysis_completeness.get("references"),
                         skillspector_version=skillspector_version,
                         reference_root=reference_root,
+                        analysis_completeness=analysis_completeness,
                     )
                     if accepted_reference_caveats is not None and reference_root is not None and gap_notes is None:
                         # reference_caveat_metadata reads only the report. When

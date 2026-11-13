@@ -686,7 +686,9 @@ class TestFolderScans:
         _assert_failed_with_incomplete_scan(result)
         assert [error for error in result.errors if "did not complete" in error] == [
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
-            "SKILL.md:7 [reference_resolution; reference_missing]; security scan did not complete"
+            "SKILL.md:7 [reference_resolution; reference_missing]; security scan did not complete. "
+            "Missing references require a standalone target with complete, matching reference and scan evidence. "
+            "See https://docs.nvidia.com/skills/skillevaluator/tier1-validation."
         ]
         assert _MISSING_REFERENCE_WARNING not in result.warnings
         _assert_hook_critical(result, root, ".claude/settings.json")
@@ -717,7 +719,9 @@ class TestFolderScans:
         _assert_failed_with_incomplete_scan(result)
         expected_incomplete_errors = [
             f"[{name}] skillspector JSON field 'analysis_completeness' reports incomplete analysis (status "
-            "'partial'): SKILL.md:7 [reference_resolution; reference_missing]; security scan did not complete"
+            "'partial'): SKILL.md:7 [reference_resolution; reference_missing]; security scan did not complete. "
+            "Missing references require a standalone target with complete, matching reference and scan evidence. "
+            "See https://docs.nvidia.com/skills/skillevaluator/tier1-validation."
             for name in ("a", "b")
         ]
         assert [error for error in result.errors if "did not complete" in error] == expected_incomplete_errors

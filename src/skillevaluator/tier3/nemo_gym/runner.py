@@ -405,6 +405,10 @@ class GymLaunchError(OSError):
     """``gym eval run`` could not be started."""
 
 
+class GymCleanupError(RuntimeError):
+    """``gym eval run`` could not be confirmed stopped, so its servers or sandboxes may still be running."""
+
+
 @contextlib.contextmanager
 def _signals_raise_keyboard_interrupt() -> Any:
     """While Gym runs, turn SIGTERM/SIGHUP into one KeyboardInterrupt so Gym's cleanup still runs."""
@@ -445,12 +449,15 @@ def _run_gym(
     Gym's output reaches ``log`` through the secret redactor. On timeout, Ctrl-C, SIGTERM or
     SIGHUP the group gets SIGTERM and a grace period, so Gym's own shutdown stops its servers
     and removes its sandboxes, then always SIGKILL. A second Ctrl-C skips the rest of the grace.
+    If that stop fails, one last bounded SIGKILL and reap follows; a group still not confirmed
+    stopped raises ``GymCleanupError``, so the caller never starts another launch beside it.
     """
     import codecs
     import threading
 
     from skillevaluator.tier3.harbor.runner import (
         _HARBOR_RUN_CANCEL_POLL_SECONDS,
+        _HARBOR_RUN_REAP_SECONDS,
         _terminate_harbor_process_tree,
     )
     from skillevaluator.tier3.harbor.stream_redaction import StreamingLogRedactor
@@ -488,6 +495,31 @@ def _run_gym(
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(process.pid, signal.SIGKILL)
 
+    def _group_is_gone() -> bool:
+        # Signal 0 finds no member once the group is empty; killed members get a moment to be reaped.
+        deadline = time.monotonic() + _HARBOR_RUN_REAP_SECONDS
+        while True:
+            try:
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                return True
+            except PermissionError:
+                pass
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(_HARBOR_RUN_CANCEL_POLL_SECONDS)
+
+    def _confirm_stopped(cause: Exception) -> None:
+        # The normal stop failed: one last bounded SIGKILL and reap before giving up on the group.
+        _kill_group()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=_HARBOR_RUN_REAP_SECONDS)
+        if process.poll() is None or not _group_is_gone():
+            raise GymCleanupError(
+                f"NeMo Gym (process group {process.pid}) could not be confirmed stopped: {cause}. "
+                "Its servers or sandboxes may still be running; stop them before another run."
+            ) from cause
+
     def _stop() -> None:
         # A second interrupt anywhere in here still SIGKILLs the group before it propagates.
         try:
@@ -503,14 +535,17 @@ def _run_gym(
             with contextlib.suppress(subprocess.TimeoutExpired):
                 process.wait(timeout=_HARBOR_RUN_CANCEL_POLL_SECONDS)
             try:
-                _terminate_harbor_process_tree(process, grace_seconds=_GYM_SHUTDOWN_GRACE_SECONDS)
-            except PermissionError:
-                # macOS EPERM race: the leader was exiting while its group was signalled.
-                with contextlib.suppress(subprocess.TimeoutExpired):
-                    process.wait(timeout=_HARBOR_RUN_CANCEL_POLL_SECONDS)
-                if process.poll() is None:
-                    raise
-                _kill_group()
+                try:
+                    _terminate_harbor_process_tree(process, grace_seconds=_GYM_SHUTDOWN_GRACE_SECONDS)
+                except PermissionError:
+                    # macOS EPERM race: the leader was exiting while its group was signalled.
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        process.wait(timeout=_HARBOR_RUN_CANCEL_POLL_SECONDS)
+                    if process.poll() is None:
+                        raise
+                    _kill_group()
+            except (OSError, RuntimeError) as exc:
+                _confirm_stopped(exc)
         except KeyboardInterrupt:
             _kill_group()
             process.wait()
@@ -1059,8 +1094,10 @@ def run_nemo_gym_eval(
                             )
                         except GymLaunchError as exc:
                             arm_errors.append(f"gym eval run could not start: {exc}")
-                        except (OSError, RuntimeError) as exc:
-                            arm_errors.append(f"gym eval run could not be stopped cleanly: {exc}")
+                        except GymCleanupError as exc:
+                            # Gym may still be running: end the evaluation instead of starting another arm beside it.
+                            reporter.emit(ProgressEvent(stage=f"agent:{agent}", state="failed", detail=str(exc)))
+                            raise
                         else:
                             if returncode is None:
                                 arm_errors.append(f"gym eval run timed out after {arm_timeout:.0f}s")

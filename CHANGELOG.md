@@ -28,7 +28,9 @@ All notable changes to SkillEvaluator are documented in this file.
   `harbor.pre_agent_setup`, `skill_workspace.decoy_manifest` and
   `--custom-dockerfile-mode preserve`, `harbor.base_image_mode` and native
   `evals/harbor/` tasks work as on Harbor, and
-  `tier3 doctor --backend nemo-gym` checks Gym readiness.
+  `tier3 doctor --backend nemo-gym` checks Gym readiness. A Gym process group that
+  cannot be confirmed stopped after a timeout or interruption ends the run instead of
+  starting the next arm.
 
 - Tier 3 reports show token usage per case, per agent and over all agents, as
   a measurement that is not scored. The JSON payload gains `token_usage`;

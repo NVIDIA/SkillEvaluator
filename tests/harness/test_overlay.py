@@ -422,6 +422,18 @@ def test_disable_model_invocation_is_ignored_by_three_harnesses(tmp_path: Path):
     assert flagged == {"codex", "hermes", "opencode"}
 
 
+def test_codex_policy_makes_disable_model_invocation_effective_in_codex(tmp_path: Path):
+    skill = _skill(tmp_path, extra="disable-model-invocation: true\n")
+    (skill / "agents").mkdir()
+    (skill / "agents" / "openai.yaml").write_text("policy:\n  allow_implicit_invocation: false\n")
+    rows = _rows(skill)
+
+    flagged = {h for h, r in rows.items() if any(f["id"].endswith("DMI-IGNORED") for f in r["findings"])}
+    assert flagged == {"hermes", "opencode"}
+    assert not any(f["id"].endswith("CODEX-POLICY") for r in rows.values() for f in r["findings"])
+    assert rows["codex"]["status"] == "loads"
+
+
 def test_codex_implicit_policy_is_codex_only(tmp_path: Path):
     skill = _skill(tmp_path)
     (skill / "agents").mkdir()

@@ -17,12 +17,13 @@ on:
         description: Completed attempt number for that run
         type: string
         required: true
-permissions:
-  contents: read
-  actions: read
-  pull-requests: write
+permissions: {}
 jobs:
   comment:
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
     uses: NVIDIA/SkillEvaluator/.github/workflows/comment-skill-checks.yml@RELEASE_WORKFLOW_SHA
     with:
       run-id: ${{ format('{0}', github.event.workflow_run.id || inputs.run-id) }}

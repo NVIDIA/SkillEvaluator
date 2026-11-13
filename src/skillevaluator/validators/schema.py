@@ -18,6 +18,9 @@ from pydantic import ValidationError
 
 from skillevaluator.constants import (
     DEFAULT_ALLOWED_SKILL_DIRS,
+    DESCRIPTION_MAX_LENGTH,
+    DESCRIPTION_TRIGGER_PATTERN,
+    DESCRIPTION_TRIGGER_WINDOW,
     KEBAB_CASE_PATTERN,
     MAX_SKILL_MD_LINES,
     RECOMMENDED_BODY_SECTIONS,
@@ -182,6 +185,7 @@ def _display_metadata_id(value: Any) -> str:
 
 
 _UTF8_BOM = b"\xef\xbb\xbf"
+_TRIGGER_RE = re.compile(DESCRIPTION_TRIGGER_PATTERN, re.IGNORECASE)
 
 
 def _duplicate_frontmatter_keys(frontmatter_yaml: str) -> list[tuple[str, int]]:
@@ -412,7 +416,7 @@ class SchemaValidator(ValidatorBase):
             result.merge(self._validate_name_matches_directory(skill_path, frontmatter))
             result.merge(self._validate_author(frontmatter, str(skill_md)))
             result.merge(self._validate_metadata_id(frontmatter, str(skill_md)))
-            result.merge(self._validate_portability(skill_md))
+            result.merge(self._validate_portability(skill_md, frontmatter))
 
         return result
 
@@ -712,7 +716,7 @@ class SchemaValidator(ValidatorBase):
             metadata=dict(metadata),
         )
 
-    def _validate_portability(self, skill_md: Path) -> ValidationResult:
+    def _validate_portability(self, skill_md: Path, frontmatter: SkillFrontmatter) -> ValidationResult:
         """Flag spec-valid patterns that common agent harnesses load differently or not at all."""
         result = ValidationResult()
         file_path = str(skill_md)
@@ -732,6 +736,35 @@ class SchemaValidator(ValidatorBase):
                     "Save SKILL.md as UTF-8 without BOM",
                 )
             )
+        description = frontmatter.description
+        utf16_units = len(description.encode("utf-16-le", "surrogatepass")) // 2
+        if len(description) <= DESCRIPTION_MAX_LENGTH < utf16_units:
+            findings.append(
+                self._portability_finding(
+                    "description_utf16_length",
+                    Severity.MEDIUM,
+                    f"Description is {len(description)} characters but {utf16_units} UTF-16 units; "
+                    f"Copilot CLI counts UTF-16 units and drops descriptions over {DESCRIPTION_MAX_LENGTH}",
+                    file_path,
+                    "Shorten the description or replace emoji and other non-BMP characters",
+                    utf16_units=utf16_units,
+                )
+            )
+
+        trigger = _TRIGGER_RE.search(description)
+        if trigger is None or trigger.end() > DESCRIPTION_TRIGGER_WINDOW:
+            where = "no 'Use when ...' trigger" if trigger is None else f"its trigger at characters {trigger.start()}-{trigger.end()}"
+            findings.append(
+                self._portability_finding(
+                    "description_trigger",
+                    Severity.LOW,
+                    f"Description has {where}; some harnesses show only the first "
+                    f"~{DESCRIPTION_TRIGGER_WINDOW} characters in their skill list",
+                    file_path,
+                    f"State when to use the skill within the first {DESCRIPTION_TRIGGER_WINDOW} characters",
+                )
+            )
+
         for finding in findings:
             result.add_finding(finding)
         return result

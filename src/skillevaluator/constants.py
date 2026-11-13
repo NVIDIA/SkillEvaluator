@@ -156,6 +156,14 @@ PLUGIN_CONTAINED_MODE = "contained"
 # Skill manifest file name variants (case-insensitive search)
 SKILL_MANIFEST_VARIANTS = ("SKILL.md", "skill.md")
 
+# Some harnesses show only the first ~60 characters of each description in
+# their skill list, so the "when to use" trigger should appear within it.
+DESCRIPTION_TRIGGER_WINDOW = 60
+DESCRIPTION_TRIGGER_PATTERN = (
+    r"\buse (?:this (?:skill )?|it )?(?:when|for|to|if|whenever)\b"
+    r"|\bwhen (?:the user|a user|you|asked)\b|\btriggers?\b"
+)
+
 # Banned/deprecated packages
 BANNED_PACKAGES = [
     "subprocess32",  # Use subprocess from stdlib

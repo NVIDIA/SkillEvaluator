@@ -12,6 +12,12 @@ All notable changes to SkillEvaluator are documented in this file.
   comment helpers, and needs no Pages configuration or history branch. Future
   generated bundles include the template; archived bundles and the released
   onboarding CLI retain their existing hosted publisher setup.
+- `harness` rules for descriptions: missing or empty descriptions, Claude Code and
+  Codex listing cuts, Copilot CLI's 1,024 UTF-16 unit limit, quotes escaped in the
+  Copilot CLI and OpenClaw lists, and Hermes's 60-character listing; `-v` shows
+  the description each harness lists. Tier 1 `schema` now reports a description
+  over 1,024 UTF-16 units (MEDIUM) and no "Use when ..." trigger in its first 60
+  characters (LOW).
 - `harness` rules for frontmatter parsing: duplicate keys and tab indentation
   (strict YAML parsers drop the skill), a UTF-8 BOM (Codex), no front matter
   (Copilot CLI) and long custom frontmatter that never reaches the model. Tier 1

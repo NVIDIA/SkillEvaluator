@@ -2453,7 +2453,14 @@ def validate(
         _reject_linked_tier2_root(target_path)
     from skillevaluator.cli_core import detect_content_type
 
-    resolved_type = content_type if content_type != "auto" else detect_content_type(target_path)
+    resolved_type = content_type
+    if content_type == "auto":
+        # Folder-name detection (``skills/``, ``team-rules/``...) needs an absolute path, so detect
+        # on the resolved target as before. The raw argument only upgrades the result to a plugin:
+        # resolving a symlinked plugin root or manifest would hide the link the plugin checks refuse.
+        resolved_type = detect_content_type(target_path.resolve())
+        if resolved_type != "plugin" and detect_content_type(target_path) == "plugin":
+            resolved_type = "plugin"
     target_path = target_path.absolute() if resolved_type == "plugin" else target_path.resolve()
     from skillevaluator.publication_identity import publication_target_name
 

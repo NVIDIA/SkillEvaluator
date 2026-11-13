@@ -116,11 +116,19 @@ def evaluate_plugin(
         env_grants=plugin_options.probe_mcp_env,
         allowed_private_hosts=plugin_options.allowed_private_hosts,
     )
-    # Match the engine's source-parent resolution before moving to the wrapper.
-    if include := config.get("skill_workspace", {}).get("include"):
-        config["skill_workspace"]["include"] = [
+    # The engine resolves relative paths against the skill it runs, which is the temporary wrapper.
+    # Resolve them against the authored source first: ``include`` and ``decoy_manifest`` from the
+    # source's parent directory, ``price_file`` from the source directory, as for a skill.
+    workspace_config = config.get("skill_workspace", {})
+    if include := workspace_config.get("include"):
+        workspace_config["include"] = [
             str((inventory.root.parent / Path(path).expanduser()).absolute()) for path in include
         ]
+    if manifest := workspace_config.get("decoy_manifest"):
+        workspace_config["decoy_manifest"] = str((inventory.root.parent / Path(manifest).expanduser()).absolute())
+    harbor_config = config.get("harbor", {})
+    if price_file := harbor_config.get("price_file"):
+        harbor_config["price_file"] = str((inventory.root / Path(price_file).expanduser()).absolute())
     staged_config = yaml.safe_dump(config).encode("utf-8") if config else None
 
     def run_prepared(prepared: EvaluationOptions) -> dict[str, Any]:

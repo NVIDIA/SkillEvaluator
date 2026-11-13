@@ -135,6 +135,58 @@ def test_non_skill_default_does_not_generate_or_run_skill_evals(monkeypatch, tmp
     assert result.exit_code == 0, result.output
 
 
+def _record_tier1(monkeypatch):
+    seen = {}
+
+    def run(path, **kwargs):
+        seen.update(path=path, content_type=kwargs["content_type"])
+        return []
+
+    monkeypatch.setattr(cli_module, "run_validation", run)
+    monkeypatch.setattr(cli_module, "_run_dedup_or_skip", lambda *_a, **_kw: [])
+    monkeypatch.setattr(cli_module, "_ensure_autopilot_dataset", lambda *_a, **_kw: None)
+    return seen
+
+
+def test_validate_dot_detects_the_folder_not_the_relative_argument(monkeypatch, tmp_path):
+    # A new skill folder has no SKILL.md yet. Only its place under skills/ identifies it,
+    # and the relative argument "." does not show that place.
+    folder = tmp_path / "skills" / "new-skill"
+    folder.mkdir(parents=True)
+    seen = _record_tier1(monkeypatch)
+    monkeypatch.chdir(folder)
+    result = CliRunner().invoke(cli_module.cli, ["validate", ".", "--tiers", "1", "-o", str(tmp_path / "reports")])
+    assert result.exit_code == 0, result.output
+    assert seen["content_type"] == "skill"
+    assert "skill: new-skill" in result.output
+
+
+@pytest.mark.parametrize("linked", ["root", "manifest"])
+def test_validate_keeps_a_symlinked_plugin_input_unresolved(monkeypatch, tmp_path, linked):
+    # Resolving the link would hide it from the plugin checks that refuse it.
+    manifest = tmp_path / "real" / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"name": "demo"}', encoding="utf-8")
+    try:
+        if linked == "root":
+            target = tmp_path / "linked-plugin"
+            target.symlink_to(manifest.parents[1], target_is_directory=True)
+        else:
+            target = tmp_path / "plugin" / ".claude-plugin" / "plugin.json"
+            target.parent.mkdir(parents=True)
+            target.symlink_to(tmp_path / "outside.json")
+            (tmp_path / "outside.json").write_text('{"name": "demo"}', encoding="utf-8")
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    seen = _record_tier1(monkeypatch)
+    result = CliRunner().invoke(
+        cli_module.cli, ["validate", str(target), "--tiers", "1", "--no-tier2", "-o", str(tmp_path / "reports")]
+    )
+    assert result.exit_code == 0, result.output
+    assert seen["content_type"] == "plugin"
+    assert seen["path"] == target
+
+
 def test_default_tier3_runs_after_tier1_failure(monkeypatch, tmp_path):
     skill = tmp_path / "failing-skill"
     skill.mkdir()

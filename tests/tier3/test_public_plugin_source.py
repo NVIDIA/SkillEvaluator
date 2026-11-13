@@ -42,6 +42,53 @@ def test_workspace_includes_keep_authored_source_context(tmp_path, monkeypatch, 
     assert seen == [helper]
 
 
+@pytest.mark.parametrize("absolute", [False, True], ids=["relative", "absolute"])
+def test_price_file_and_decoy_manifest_keep_authored_source_context(tmp_path, monkeypatch, absolute):
+    import yaml
+
+    from skillevaluator.tier3 import decoys
+    from skillevaluator.tier3.evals_config import load_evals_config
+    from skillevaluator.tier3.harbor.runner import _decoy_workspace_skills, _resolve_harbor_price_file
+
+    root = _plugin(tmp_path / "plugin")
+    (root / "evals").mkdir()
+    price_book = root / "evals/prices.json"
+    price_book.write_text("{}", encoding="utf-8")
+    manifest = tmp_path / "decoys.json"
+    manifest.write_text("{}", encoding="utf-8")
+    (root / "evals/config.yml").write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "harbor": {
+                    "max_cost_usd": 1.0,
+                    "price_file": str(price_book) if absolute else "evals/prices.json",
+                },
+                "skill_workspace": {"mode": "group", "decoy_manifest": str(manifest) if absolute else "decoys.json"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    seen = {}
+
+    def load_manifest(target, manifest_path):
+        seen["manifest"] = manifest_path
+        return [], {"selected": []}
+
+    def engine(self, options, *, progress_reporter=None):
+        config, _ = load_evals_config(options.skill_path)
+        seen["price_file"] = _resolve_harbor_price_file(None, config["harbor"], options.skill_path)
+        _decoy_workspace_skills(options.skill_path, config["skill_workspace"], "group")
+        return {"execution_status": "succeeded"}
+
+    monkeypatch.setattr(decoys, "load_decoy_manifest", load_manifest)
+    monkeypatch.setattr(EvaluationService, "evaluate", engine)
+    EvaluationService().evaluate_plugin(EvaluationOptions(root, agents="claude-code"))
+    # The price book is read from the plugin, and the manifest from the plugin's parent, as for a skill.
+    assert seen["price_file"] == price_book.resolve() and seen["price_file"].is_file()
+    assert seen["manifest"].resolve() == manifest.resolve()
+
+
 def test_missing_workspace_include_remains_an_error(tmp_path, monkeypatch):
     from skillevaluator.tier3.evals_config import load_evals_config
     from skillevaluator.tier3.harbor.runner import _workspace_skills

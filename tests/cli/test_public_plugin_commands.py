@@ -56,6 +56,9 @@ def test_saved_run_replays_six_formats_without_the_source(tmp_path, monkeypatch)
     }
     payload = json.loads((output / "plugin-report.json").read_text(encoding="utf-8"))
     assert payload["plugin_runtime"] == report.payload()
+    card = (output / "BENCHMARK.md").read_text(encoding="utf-8")
+    assert card.startswith("# Plugin Benchmark: replayed-public\n")
+    assert "- Skill: `replayed-public`" in card
 
 
 def test_replay_missing_or_invalid_snapshot_fails_before_writing(tmp_path):
@@ -147,6 +150,32 @@ def _live_json_report(source, engine_result, results, output):
         console=Console(file=io.StringIO()),
     )
     return json.loads((output / "plugin-report.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("scored", [True, False], ids=["scored", "no-scores"])
+def test_live_benchmark_card_names_the_plugin(tmp_path, scored):
+    source = _live_report_source(tmp_path)
+    results = tmp_path / "results"
+    engine_result = {"execution_status": "failed", "error": "Fixture setup failed"}
+    if scored:
+        run_dir = _scored_run(results, "20261110_010001", 0.5)
+        engine_result = {"execution_status": "succeeded", "run_id": run_dir.name, "run_dir": str(run_dir)}
+    report = project_plugin_runtime(engine_result, provenance={"plugin": "demo", "runtime_evidence": {}})
+    engine_result["plugin_runtime_report"] = report.payload()
+    output = tmp_path / "reports"
+    emit_plugin_run_reports(
+        source,
+        engine_result,
+        report_formats=("benchmark",),
+        output_dir=output,
+        results_dir=results,
+        env_mode="docker",
+        console=Console(file=io.StringIO()),
+    )
+    # Without a score summary the card has no other source for the name and falls back to "skill".
+    card = (output / "BENCHMARK.md").read_text(encoding="utf-8")
+    assert card.startswith("# Plugin Benchmark: demo\n")
+    assert "- Skill: `demo`" in card
 
 
 def test_live_reports_use_returned_run_when_latest_moves(tmp_path):

@@ -58,6 +58,12 @@ PACKAGED_NVIDIA_BUILD_RUNTIME_FILES = {
     "skillevaluator/tier3/harbor/secure_docker_environment.py",
     "skillevaluator/tier3/harbor/sensitive_stdin.py",
 }
+PACKAGED_CHART_FILES = {
+    "skillevaluator/reporting/assets/chart.umd.min.js",
+    "skillevaluator/reporting/assets/Chart.js-LICENSE.md",
+    "skillevaluator/reporting/assets/kurkle-color-LICENSE.md",
+    "skillevaluator/reporting/assets/README.md",
+}
 SOURCE_SCAN_EXCLUDED_DIRS = {
     ".git",
     ".nox",
@@ -149,7 +155,7 @@ def test_harbor_dependency_contract_keeps_base_install_isolated() -> None:
     assert base_names.isdisjoint({"harbor", "litellm"})
     assert len(harbor_requirements) == 1
     assert harbor_requirements[0].extras == {"gke"}
-    assert HARBOR_VERSION == "0.24.0"
+    assert HARBOR_VERSION == "0.25.0"
     assert str(harbor_requirements[0].specifier) == f"=={HARBOR_VERSION}"
     assert len(litellm_requirements) == 1
     litellm_specifier = litellm_requirements[0].specifier
@@ -575,6 +581,7 @@ def test_public_distributions_include_nvidia_build_runtime_bridges(tmp_path: Pat
         wheel_metadata = archive.read(metadata_member).decode("utf-8")
     missing_from_wheel = PACKAGED_NVIDIA_BUILD_RUNTIME_FILES - wheel_members
     assert not missing_from_wheel, f"wheel is missing runtime bridge files: {sorted(missing_from_wheel)}"
+    assert wheel_members >= PACKAGED_CHART_FILES
     assert not any(member.startswith("skillevaluator/telemetry/") for member in wheel_members)
     assert "Provides-Extra: telemetry" not in wheel_metadata
     assert "Requires-Dist: protobuf" not in wheel_metadata
@@ -585,6 +592,7 @@ def test_public_distributions_include_nvidia_build_runtime_bridges(tmp_path: Pat
     expected_sdist_members = {f"src/{path}" for path in PACKAGED_NVIDIA_BUILD_RUNTIME_FILES}
     missing_from_sdist = expected_sdist_members - sdist_members
     assert not missing_from_sdist, f"sdist is missing runtime bridge files: {sorted(missing_from_sdist)}"
+    assert {f"src/{path}" for path in PACKAGED_CHART_FILES} <= sdist_members
     assert not any(member.startswith("src/skillevaluator/telemetry/") for member in sdist_members)
 
 

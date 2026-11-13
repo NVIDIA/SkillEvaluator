@@ -56,22 +56,6 @@ def completeness_record(completeness: dict, stage: str) -> dict:
     }
 
 
-def completeness_details(record: dict) -> str:
-    """A short explanation for the existing execution-error display in reports."""
-    details = []
-    for row in record["ledger_exceptions"][:3]:
-        location = row["path"]
-        if row.get("start_line"):
-            location += f":{row['start_line']}"
-        details.append(f"{location} [{row['phase']}; {row['reason_code']}]")
-    remaining = len(record["ledger_exceptions"]) - len(details) + record["omitted_exceptions"]
-    if remaining:
-        details.append(f"{remaining} more ledger exception(s); see JSON completeness details")
-    if record["limitations"]:
-        details.append(f"Limitation: {record['limitations'][0]}")
-    return "; ".join(details)
-
-
 def sanitize_completeness(value: object) -> dict:
     """Re-project saved metadata at report boundaries and preserve omission counts."""
     if not isinstance(value, dict) or not isinstance(value.get("records"), list):

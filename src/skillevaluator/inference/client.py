@@ -7,7 +7,7 @@ Provides a single ``LLMClient`` class for public provider-backed checks. The
 class supports two usage patterns:
 
 1. **Direct** -- call ``completions()`` or ``extract_json_from_response()``
-   with explicit system/user prompts.
+   with explicit system/user prompts, or ``chat()`` with a multi-turn history.
 2. **Template-method** -- subclass and override ``get_system_prompt``,
    ``create_user_prompt``, ``parse_response``, and
    ``get_fallback_response``, then call ``process(**kwargs)``.
@@ -22,14 +22,21 @@ import io
 import json
 import os
 import re
+import threading
 import urllib.error
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 
 from skillevaluator.constants import LLM_VERIFY_TEMPERATURE
 from skillevaluator.inference.diagnostics import llm_failure_diagnostic
+from skillevaluator.inference.json_span import (
+    MAX_JSON_NESTING,
+    STRICT_JSON_DECODE_HOOKS,
+    balanced_json_container_end,
+    json_nesting_within_limit,
+)
 from skillevaluator.inference.retry import RetryConfig, resolve_retry_config, retry_call_with_backoff
 from skillevaluator.inference.types import (
     EmptyLLMResponseError,
@@ -328,6 +335,63 @@ def _checked_content(content: str, stop_reason: object, refusal: object = None) 
     return content
 
 
+_CHAT_TURN_ROLES = frozenset({"user", "assistant"})
+
+
+def _split_chat_history(messages: Sequence[Mapping[str, str]]) -> tuple[str | None, list[dict[str, str]]]:
+    """Split an OpenAI-style history into its leading system text and its conversation turns."""
+    if not messages:
+        raise LLMClientError("chat requires at least one message")
+    system_parts: list[str] = []
+    turns: list[dict[str, str]] = []
+    for message in messages:
+        role = message.get("role") if isinstance(message, Mapping) else None
+        content = message.get("content") if isinstance(message, Mapping) else None
+        if not isinstance(content, str):
+            raise LLMClientError("chat message content must be a string")
+        if role == "system":
+            if turns:
+                raise LLMClientError("chat system messages must come before the user and assistant turns")
+            system_parts.append(content)
+        elif role in _CHAT_TURN_ROLES:
+            turns.append({"role": str(role), "content": content})
+        else:
+            raise LLMClientError("chat message role must be system, user or assistant")
+    if not turns:
+        raise LLMClientError("chat requires at least one user or assistant message")
+    return ("\n\n".join(system_parts) if system_parts else None), turns
+
+
+def _chat_messages(system_prompt: str | None, turns: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Return an OpenAI-style message list: the optional system message, then the turns."""
+    system = [{"role": "system", "content": system_prompt}] if system_prompt is not None else []
+    return [*system, *(dict(turn) for turn in turns)]
+
+
+def _anthropic_served_model(response: Any, *, requested_fallback: bool) -> str | None:
+    """Return the model that wrote an Anthropic reply when it can differ from the requested one.
+
+    A server-side ``fallback`` block names the model that took over. A turn
+    served by sticky routing, which sends repeats of a fallen-back request
+    straight to the fallback model, carries no block. For a request that asked
+    for server-side fallback, the top-level ``model`` then names the model
+    that wrote the reply. ``None`` means the requested model answered.
+    """
+    served_model = None
+    for block in getattr(response, "content", None) or []:
+        if getattr(block, "type", None) != "fallback":
+            continue
+        served = getattr(block, "to", None)
+        model = served.get("model") if isinstance(served, dict) else getattr(served, "model", None)
+        if isinstance(model, str) and model:
+            served_model = model
+    if served_model is None and requested_fallback:
+        model = getattr(response, "model", None)
+        if isinstance(model, str) and model:
+            served_model = model
+    return served_model
+
+
 def _extract_choice_content(response: Any) -> str:
     choices = getattr(response, "choices", None) or []
     first_choice = choices[0] if choices else None
@@ -340,13 +404,46 @@ def _extract_choice_content(response: Any) -> str:
     )
 
 
+_JSON_CONTAINER_START = re.compile(r"[{\[]")
+
+
+def _embedded_json_objects(text: str) -> list[dict[str, Any]]:
+    """Return the complete top-level JSON objects embedded in prose.
+
+    Each ``{`` or ``[`` starts a string-aware balanced span that is decoded as a
+    whole and then skipped, so nothing nested inside a span is ever promoted:
+    not the members of a valid object or array, and not an object inside a
+    span that fails to decode. Decoded arrays are not counted, so chunk
+    citations such as ``[1]`` stay harmless. A span that never closes, closes
+    with a mismatched bracket or nests too deeply ends the scan, because its
+    extent is unknown. Spans never overlap, so the work stays linear in the
+    reply length.
+    """
+    objects: list[dict[str, Any]] = []
+    cursor = 0
+    while (match := _JSON_CONTAINER_START.search(text, cursor)) is not None:
+        start = match.start()
+        end = balanced_json_container_end(text, start)
+        if end is None:
+            break
+        try:
+            value = json.loads(text[start:end], **STRICT_JSON_DECODE_HOOKS)
+        except (RecursionError, ValueError):
+            value = None
+        if isinstance(value, dict):
+            objects.append(value)
+        cursor = end
+    return objects
+
+
 class LLMClient:
     """Public-provider client for chat completions.
 
     Supports two usage modes:
 
     1. **Direct** -- call :meth:`completions` or
-       :meth:`extract_json_from_response` with explicit prompts.
+       :meth:`extract_json_from_response` with explicit prompts, or
+       :meth:`chat` with a multi-turn history.
     2. **Template-method** -- subclass and override
        :meth:`get_system_prompt`, :meth:`create_user_prompt`,
        :meth:`parse_response`, and :meth:`get_fallback_response`, then
@@ -410,12 +507,33 @@ class LLMClient:
         self._client: Any = None
         self._provider_config: ProviderConfig | None = None
         self.last_failure: str | None = None
+        # Per thread, because one client can serve concurrent calls.
+        self._call_state = threading.local()
 
     # -- public read-only properties for introspection --------------------
 
     @property
     def model(self) -> str:
         return self._model or self._resolved_config().model
+
+    @property
+    def provider(self) -> str:
+        return self._resolved_config().provider
+
+    @property
+    def model_used(self) -> str | None:
+        """Return the model that answered this thread's last :meth:`completions` or :meth:`chat` call.
+
+        For an Anthropic reply, a server-side ``fallback`` content block names
+        the model that answered, on any endpoint. Only a native Claude API
+        request for a Claude 5.5 or later model, which asks for server-side
+        fallback, also reads the reply's top-level ``model`` when there is no
+        block. Otherwise it is the configured model. ``None`` before a call
+        succeeds and after a call fails, except that :meth:`process` names the
+        model that wrote a reply cut off at the output-token limit when it
+        keeps that reply's complete entries.
+        """
+        return getattr(self._call_state, "model_used", None)
 
     @property
     def base_url(self) -> str | None:
@@ -570,24 +688,61 @@ class LLMClient:
     ) -> str:
         """Send a chat completion request and return the response text.
 
-        Raises :class:`LLMClientError` when the response is empty.
+        Raises :class:`LLMClientError` when the response is empty. On success
+        :attr:`model_used` names the model that answered.
         """
+        return self._complete_messages(
+            system_prompt,
+            [{"role": "user", "content": user_prompt}],
+            response_schema=response_schema,
+            schema_name=schema_name,
+        )
+
+    def chat(self, messages: Sequence[Mapping[str, str]]) -> str:
+        """Send a multi-turn conversation and return the reply text.
+
+        ``messages`` is an OpenAI-style history: optional leading ``system``
+        messages, then ``user`` and ``assistant`` turns. Anthropic receives the
+        system text in its separate ``system`` field. Retries, the typed
+        refusal, truncation and empty-reply errors, Anthropic server-side
+        fallback and the ADC token refresh work as in :meth:`completions`, and
+        provider SDK errors are raised unchanged after the retries. An invalid
+        history raises :class:`LLMClientError` before any client is created.
+        On success :attr:`model_used` names the model that answered.
+        """
+        self._call_state.model_used = None
+        system_prompt, turns = _split_chat_history(messages)
+        return self._complete_messages(system_prompt, turns)
+
+    def _complete_messages(
+        self,
+        system_prompt: str | None,
+        turns: list[dict[str, str]],
+        *,
+        response_schema: dict[str, Any] | None = None,
+        schema_name: str = "judge_response",
+    ) -> str:
+        """Send ``turns`` after an optional system prompt and return the response text."""
+        self._call_state.model_used = None
         config = self._resolved_config()
         client = self._get_client()
         target_key = SchemaTargetKey(config.provider, config.base_url or "", config.model)
         max_tokens = self._request_max_tokens(config)
         reasoning_effort = self.reasoning_effort
+        answered_by = config.model
 
         def _invoke_provider() -> str:
+            nonlocal answered_by
             use_schema = response_schema is not None and target_key not in _SCHEMA_UNSUPPORTED_TARGETS
             if config.provider == "anthropic":
+                requests_fallback = is_claude_5_5_or_later(config.model) and _is_native_anthropic_endpoint(config)
 
                 def _anthropic_kwargs(include_schema: bool) -> dict[str, Any]:
                     call_kwargs: dict[str, Any] = {
                         "model": config.model,
                         "max_tokens": _anthropic_max_tokens(config.model, max_tokens or MAX_COMPLETION_TOKENS),
-                        "system": system_prompt,
-                        "messages": [{"role": "user", "content": user_prompt}],
+                        **({"system": system_prompt} if system_prompt is not None else {}),
+                        "messages": [dict(turn) for turn in turns],
                         **_temperature_kwargs(config.model, self._temperature),
                     }
                     output_config: dict[str, Any] = {}
@@ -597,7 +752,7 @@ class LLMClient:
                         output_config["effort"] = reasoning_effort
                     if output_config:
                         call_kwargs["output_config"] = output_config
-                    if is_claude_5_5_or_later(config.model) and _is_native_anthropic_endpoint(config):
+                    if requests_fallback:
                         # Server-side fallback (beta): a safety-classifier refusal is retried on
                         # the fallback model within the same call. Older SDKs lack typed fields.
                         call_kwargs["extra_headers"] = {"anthropic-beta": ANTHROPIC_SERVER_SIDE_FALLBACK_BETA}
@@ -610,6 +765,7 @@ class LLMClient:
                     target_key=target_key,
                     use_schema=use_schema,
                 )
+                answered_by = _anthropic_served_model(response, requested_fallback=requests_fallback) or config.model
                 content = "".join(
                     str(block.text) for block in response.content if getattr(block, "type", None) == "text"
                 )
@@ -623,10 +779,7 @@ class LLMClient:
                     ) from exc
                 response = completion(
                     model=config.litellm_model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
+                    messages=_chat_messages(system_prompt, turns),
                     aws_region_name=config.region,
                     **_temperature_kwargs(config.model, self._temperature),
                     **({"max_tokens": max_tokens} if max_tokens is not None else {}),
@@ -638,10 +791,7 @@ class LLMClient:
                 call_kwargs: dict[str, Any] = {
                     "model": config.model,
                     "stream": False,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
+                    "messages": _chat_messages(system_prompt, turns),
                     **_temperature_kwargs(config.model, self._temperature),
                     **_token_limit_kwargs(config, max_tokens),
                     **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
@@ -684,7 +834,15 @@ class LLMClient:
                     raise
             return _extract_choice_content(response)
 
-        return retry_call_with_backoff(_invoke_provider, config=self._retry_config)
+        try:
+            content = retry_call_with_backoff(_invoke_provider, config=self._retry_config)
+        except LLMClientTruncatedError as exc:
+            # The partial reply still came from a known model; a caller that
+            # keeps its complete entries can name that model.
+            exc.model_used = answered_by
+            raise
+        self._call_state.model_used = answered_by
+        return content
 
     def extract_json_from_response(
         self,
@@ -694,18 +852,30 @@ class LLMClient:
         response_schema: dict[str, Any] | None = None,
         schema_name: str = "judge_response",
     ) -> dict:
-        """Send a completion and parse JSON from the response."""
+        """Send a completion and parse one unambiguous JSON object from the response.
+
+        The whole reply, optionally in a Markdown fence, is parsed first. Models
+        without structured output (Bedrock, or after a schema downgrade) may
+        still wrap the object in prose; exactly one embedded object is then
+        accepted, while several objects remain an error rather than a guess.
+        """
         raw = self.completions(system_prompt, user_prompt, response_schema=response_schema, schema_name=schema_name)
 
         cleaned = raw.strip()
         if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[1]
+            cleaned = cleaned.partition("\n")[2]
             cleaned = cleaned.rsplit("```", 1)[0].strip()
 
         try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError as e:
-            raise LLMClientError(f"LLM returned invalid JSON: {e}\nRaw: {raw[:500]}") from e
+            if not json_nesting_within_limit(cleaned):
+                raise ValueError(f"JSON nests deeper than {MAX_JSON_NESTING} levels")
+            return json.loads(cleaned, **STRICT_JSON_DECODE_HOOKS)
+        except (RecursionError, ValueError) as e:
+            objects = _embedded_json_objects(raw)
+            if len(objects) == 1:
+                return objects[0]
+            detail = f"found {len(objects)} JSON objects; expected exactly one" if objects else str(e)
+            raise LLMClientError(f"LLM returned invalid JSON: {detail}\nRaw: {raw[:500]}") from e
 
     # -- template-method hooks (override in subclasses) -------------------
 
@@ -734,7 +904,8 @@ class LLMClient:
         receive a usable result, and ``last_failure`` records a bounded
         diagnostic of the cause. When ``salvage_truncated_response`` is set,
         a reply cut off at the token limit is parsed for its complete entries
-        instead, and ``last_failure`` still records the truncation.
+        instead, ``last_failure`` still records the truncation, and
+        :attr:`model_used` names the model that wrote the reply.
         """
         self.last_failure = None
         try:
@@ -754,9 +925,14 @@ class LLMClient:
             if isinstance(exc, LLMClientTruncatedError) and exc.content and self.salvage_truncated_response:
                 logger.warning("LLM reply was truncated (%s) - keeping its complete entries", self.last_failure)
                 try:
-                    return self.parse_response(exc.content, **kwargs)
+                    salvaged = self.parse_response(exc.content, **kwargs)
                 except Exception:
                     pass
+                else:
+                    # The kept entries came from this model, which can be a
+                    # server-side fallback rather than the configured model.
+                    self._call_state.model_used = exc.model_used
+                    return salvaged
             logger.warning("LLM call failed (%s) - using fallback response", self.last_failure)
             return self.get_fallback_response(**kwargs)
 

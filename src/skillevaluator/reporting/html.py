@@ -37,16 +37,26 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import urlparse
 
-from jinja2 import BaseLoader, Environment
+from jinja2 import BaseLoader, Environment, pass_context
 
 from skillevaluator import __version__
-from skillevaluator.constants import QUALITY_GRADE_THRESHOLDS, TIER3_LIFT_FAIL_THRESHOLD, TIER3_LIFT_PASS_THRESHOLD
+from skillevaluator.constants import (
+    DIMENSION_HINTS,
+    DIMENSION_MAPPING,
+    DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
+    DIMENSION_VERDICT_PASS_THRESHOLD,
+    QUALITY_GRADE_THRESHOLDS,
+    SIGNAL_EVIDENCE_SOURCES,
+    TIER3_LIFT_FAIL_THRESHOLD,
+    TIER3_LIFT_PASS_THRESHOLD,
+)
 from skillevaluator.publication_evidence import result_publication_evidence_dict
 from skillevaluator.reporting.base import (
     AGENT_EVAL_EXACT_TEXT_KEYS,
     ReporterBase,
     additional_errors,
     additional_warnings,
+    agent_eval_publication_dataset_provenance,
     agent_eval_publication_evidence_complete,
     agent_eval_report_serialization_issue,
     agent_eval_report_serialization_limits,
@@ -56,8 +66,6 @@ from skillevaluator.reporting.base import (
     get_skip_reason,
     is_advisory_agent_eval_skip,
     is_cleanly_skipped,
-    is_tier2_result,
-    is_tier3_result,
     passes_required_gate,
     publication_free_text,
     publication_identity_present,
@@ -72,11 +80,33 @@ from skillevaluator.reporting.base import (
 from skillevaluator.reporting.base import (
     is_tier2_validator_name as _is_tier2_validator_name,
 )
-from skillevaluator.reporting.harbor_viewer import normalize_agent_eval_harbor_links
-from skillevaluator.reporting.presentation import success_is_not_applicable
-from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
+from skillevaluator.reporting.finding_summary import (
+    describe_issue_counts,
+    finding_counts,
+    summarize_findings,
+    summarize_messages,
+    total_issue_count,
+)
+from skillevaluator.reporting.finding_verification import finding_verification
+from skillevaluator.reporting.harbor_viewer import harbor_job_links, normalize_agent_eval_harbor_links
+from skillevaluator.reporting.presentation import (
+    FinalRenderContext,
+    TierPresentation,
+    build_final_render_context,
+    result_execution_status,
+    success_is_not_applicable,
+)
+from skillevaluator.reporting.run_status import Status, result_status, result_tier
+from skillevaluator.reporting.tier2_views import tier2_scope_views
 from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
+from skillevaluator.reporting.tier3_token_usage import token_usage_table
+from skillevaluator.reporting.trial_charts import steps_by_case_chart
 from skillevaluator.skillspector_provenance import skillspector_provenance_records
+from skillevaluator.source_identity import recorded_evaluated_source
+from skillevaluator.tier3.baseline_store import baseline_description
+from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
+from skillevaluator.tier3.evidence_volume import format_evidence_volume
+from skillevaluator.tier3.version_comparison import version_comparison_lines
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
@@ -96,12 +126,17 @@ _TIER3_HTML_PREVIEW_TRIGGER_BYTES = 256 * 1024
 _TIER3_HTML_PREVIEW_CHARS = 128 * 1024
 _TIER3_HTML_PREVIEW_STRING_CHARS = 4 * 1024
 _TIER3_HTML_PREVIEW_COLLECTION_ITEMS = 64
+_TIER3_HTML_PREVIEW_PRIORITY_KEYS = ("best_agent",)
 _TIER3_PREVIEW_MARKER = "... [HTML preview truncated; download the full Tier 3 payload]"
 _TIER3_JSON_SAFE_PRIORITY_KEYS = (
     "schema_version",
     "verdict",
     "execution_status",
+    # A few hundred bytes that explain a failed agent arm. Walked before the
+    # bulky keys, so the bounded HTML preview keeps every message whole.
+    "coverage_notices",
     "summary",
+    "correct_answers",
     "skill_name",
     "publication_target",
     "run_id",
@@ -451,6 +486,33 @@ def _score_mapping(
     return scores
 
 
+def _tier3_score_reasons(value: object) -> dict[str, str]:
+    """Keep per-metric reasons keyed like ``_score_mapping`` so each matches its score cell."""
+    if not isinstance(value, dict):
+        return {}
+    reasons: dict[str, str] = {}
+    seen: set[str] = set()
+    for key, reason in value.items():
+        identifier = _tier3_display_identifier(key)
+        identity_key = identifier.casefold()
+        if not identifier:
+            continue
+        if identity_key in seen:
+            return {}
+        seen.add(identity_key)
+        if isinstance(reason, str) and reason:
+            reasons[identifier] = reason
+    return reasons
+
+
+@pass_context
+def _tier3_not_applicable_reason(_context: Any, metric: object, with_skill: bool = False) -> str:
+    """Describe N/A metrics at render time, keeping Tier 3 imports out of base template compilation."""
+    from skillevaluator.tier3.harbor.metrics import not_applicable_reason
+
+    return not_applicable_reason(str(metric), with_skill=with_skill is True)
+
+
 def _tier3_text_mapping(value: object) -> dict[str, str]:
     """Normalize public label maps without silently overwriting aliases."""
     if not isinstance(value, dict):
@@ -528,6 +590,8 @@ def _sanitize_tier3_pass_condition(value: object) -> dict[str, Any]:
             case = dict(raw_case)
             for key in ("attempts_used", "attempts_missing", "attempts_skipped"):
                 case[key] = _nonnegative_count(case.get(key))
+            if "attempts_recovered" in case:
+                case["attempts_recovered"] = _nonnegative_count(case.get("attempts_recovered"))
             case["best_score"] = _finite_number(case.get("best_score"), minimum=0.0, maximum=1.0)
             first_pass = case.get("first_pass_attempt")
             case["first_pass_attempt"] = (
@@ -765,7 +829,27 @@ def _sanitize_tier3_pass_at_k(value: object) -> dict[str, Any]:
     return pass_at_k
 
 
-def _sanitize_tier3_evaluator_card(value: dict[str, Any]) -> dict[str, Any] | None:
+def _sanitize_tier3_comparison_basis(value: object) -> dict[str, Any] | None:
+    """Keep an evaluator card's judge-model lift exclusions only when they name a case count."""
+    if not isinstance(value, dict) or not (excluded_cases := _nonnegative_count(value.get("excluded_cases"))):
+        return None
+    return {
+        "excluded_cases": excluded_cases,
+        "case_ids": _tier3_identifier_list(value.get("case_ids")),
+        "excluded_attempts": _strict_nonnegative_count(value.get("excluded_attempts")),
+        "contributing_attempts": _strict_nonnegative_count(value.get("contributing_attempts")),
+        "reason": _json_safe_tier3_text(value["reason"]) if isinstance(value.get("reason"), str) else "",
+    }
+
+
+def _sanitize_tier3_evaluator_card(
+    value: dict[str, Any],
+    *,
+    include_evidence_unavailable_default: bool = False,
+) -> dict[str, Any] | None:
+    from skillevaluator.evaluation.tier3_findings import FAILURE_REASON_EVIDENCE_KEYS
+    from skillevaluator.tier3.eval_core.atif_helpers import _METRIC_EVIDENCE_REF_METRICS
+
     card = dict(value)
     card["with_skill"] = _finite_number(card.get("with_skill"), minimum=0.0, maximum=1.0)
     if card["with_skill"] is None:
@@ -784,8 +868,30 @@ def _sanitize_tier3_evaluator_card(value: dict[str, Any]) -> dict[str, Any] | No
         entry["score"] = _finite_number(entry.get("score"), minimum=0.0, maximum=1.0)
         for key in ("notes", "failures", "checks", "evidence_refs"):
             entry[key] = _string_list(entry.get(key))
+        for key in FAILURE_REASON_EVIDENCE_KEYS:
+            if not (isinstance(entry.get(key), str) and entry[key]):
+                entry.pop(key, None)
+        if entry.pop("comparison_excluded", None) is True:
+            entry["comparison_excluded"] = True
+        if (
+            include_evidence_unavailable_default
+            and card.get("id") in _METRIC_EVIDENCE_REF_METRICS
+            and entry["score"] is not None
+            and entry["score"] < 0.8
+            and not entry["evidence_refs"]
+        ):
+            unavailable_reason = entry.get("evidence_unavailable_reason")
+            if isinstance(unavailable_reason, str) and unavailable_reason:
+                entry["evidence_unavailable_reason"] = unavailable_reason[:512]
+            else:
+                entry["evidence_unavailable_reason"] = "No trajectory evidence was recorded for this metric"
+        else:
+            entry.pop("evidence_unavailable_reason", None)
         evidence.append(entry)
     card["evidence"] = evidence
+    comparison_basis = _sanitize_tier3_comparison_basis(card.pop("comparison_basis", None))
+    if comparison_basis:
+        card["comparison_basis"] = comparison_basis
     sampling = card.get("evidence_sampling") if isinstance(card.get("evidence_sampling"), dict) else {}
     for key in ("represented_cases", "represented_trials", "total_trials", "scanned_trials"):
         if key in sampling:
@@ -822,11 +928,56 @@ def _sanitize_tier3_agent(value: dict[str, Any]) -> dict[str, Any]:
     agent["evaluator_cards"] = [
         card
         for item in _dict_list(agent.get("evaluator_cards"))
-        if (card := _sanitize_tier3_evaluator_card(item)) is not None
+        if (card := _sanitize_tier3_evaluator_card(item, include_evidence_unavailable_default=True)) is not None
     ]
     agent["findings"] = [_sanitize_tier3_dimension(item) for item in _dict_list(agent.get("findings"))]
     agent["pass_at_k"] = _sanitize_tier3_pass_at_k(agent.get("pass_at_k"))
+    # The drill-down and steps chart render baseline rows from
+    # ``trials_baseline`` (with-skill rows come from the top-level trials), so
+    # those rows get the same render-time bounds as with-skill rows.
+    if "trials_baseline" in agent:
+        agent["trials_baseline"] = [
+            _sanitize_tier3_trial(item, fill_defaults=False) for item in _dict_list(agent.get("trials_baseline"))
+        ]
     return agent
+
+
+def _tier3_html_dimensions(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Add display-only missing-signal rows for a successful best agent."""
+    if not isinstance(payload, dict):
+        return []
+    dimensions = [dict(item) for item in _dict_list(payload.get("dimensions"))]
+    dimension_ids = {item.get("id") for item in dimensions}
+    dimension_ids.update(item.get("id") for item in _dict_list(payload.get("not_applicable_dimensions")))
+    agents = payload.get("agents")
+    summary = payload.get("summary")
+    summary = summary if isinstance(summary, dict) else {}
+    best_name = payload.get("best_agent") or summary.get("best_agent")
+    best = agents.get(best_name) if isinstance(agents, dict) and isinstance(best_name, str) else None
+    if not isinstance(best, dict) or best.get("execution_status") != "succeeded":
+        return dimensions
+    active_metrics = set(_tier3_identifier_list(best.get("metrics_with_skill")))
+    for dimension_id, config in DIMENSION_MAPPING.items():
+        if dimension_id in dimension_ids:
+            continue
+        signals = list(dict.fromkeys([*config.get("evaluators", []), *config.get("fallback_evaluators", [])]))
+        active_signals = [signal for signal in signals if signal in active_metrics]
+        if not active_signals:
+            continue
+        dimensions.append(
+            {
+                "id": dimension_id,
+                "score": None,
+                "with_skill": None,
+                "baseline": None,
+                "lift": None,
+                "verdict": None,
+                "evaluators": active_signals,
+                "reasoning_bullets": ["A signal this dimension needs produced no score."],
+            }
+        )
+        dimension_ids.add(dimension_id)
+    return dimensions
 
 
 def _scrub_untrusted_tier3_agents(value: object) -> dict[str, dict[str, Any]]:
@@ -870,14 +1021,30 @@ def _scrub_untrusted_tier3_agents(value: object) -> dict[str, dict[str, Any]]:
     return agents
 
 
-def _sanitize_tier3_trial(value: dict[str, Any]) -> dict[str, Any]:
+def _sanitize_tier3_trial(value: dict[str, Any], *, fill_defaults: bool = True) -> dict[str, Any]:
+    """Bound the trial fields the template renders.
+
+    With ``fill_defaults=False`` (baseline rows), optional fields are normalized
+    only when present, so the embedded payload does not grow by empty defaults
+    on every row.
+    """
     trial = dict(value)
     for key in ("agent", "entry_id", "trial_id"):
-        trial[key] = _tier3_display_identifier(trial.get(key))
+        if fill_defaults or key in trial:
+            trial[key] = _tier3_display_identifier(trial.get(key))
     trial["overall"] = _finite_number(trial.get("overall"), minimum=0.0, maximum=1.0)
     trial["scores"] = _score_mapping(trial.get("scores"))
-    trial["baseline_scores"] = _score_mapping(trial.get("baseline_scores"))
-    trial["lift_scores"] = _score_mapping(trial.get("lift_scores"), minimum=-1.0, maximum=1.0)
+    for key, minimum in (("baseline_scores", 0.0), ("lift_scores", -1.0)):
+        if fill_defaults or key in trial:
+            trial[key] = _score_mapping(trial.get(key), minimum=minimum, maximum=1.0)
+    score_reasons = _tier3_score_reasons(trial.pop("score_reasons", None))
+    if score_reasons:
+        trial["score_reasons"] = score_reasons
+    if "not_applicable_metrics" in trial:
+        from skillevaluator.tier3.harbor.metrics import not_applicable_list
+
+        # Only metrics that can be N/A count, so a malformed payload cannot mark security N/A.
+        trial["not_applicable_metrics"] = not_applicable_list(trial["not_applicable_metrics"])
     # Unavailable telemetry stays absent rather than becoming zero, so the
     # template can omit charts and show "—" instead of reporting no usage.
     raw_tokens = trial.pop("tokens", None)
@@ -892,10 +1059,12 @@ def _sanitize_tier3_trial(value: dict[str, Any]) -> dict[str, Any]:
     steps = _strict_nonnegative_count(trial.pop("steps", None))
     if steps is not None:
         trial["steps"] = steps
-    trial["warnings"] = _string_list(trial.get("warnings"))
-    recovery = trial.get("error_recovery") if isinstance(trial.get("error_recovery"), dict) else {}
-    recovery["details"] = _string_list(recovery.get("details"))
-    trial["error_recovery"] = recovery
+    if fill_defaults or "warnings" in trial:
+        trial["warnings"] = _string_list(trial.get("warnings"))
+    if fill_defaults or "error_recovery" in trial:
+        recovery = trial.get("error_recovery") if isinstance(trial.get("error_recovery"), dict) else {}
+        recovery["details"] = _string_list(recovery.get("details"))
+        trial["error_recovery"] = recovery
     return trial
 
 
@@ -926,9 +1095,82 @@ def _sanitize_tier3_dataset_case(value: dict[str, Any]) -> dict[str, Any]:
     return case
 
 
+def _sanitize_tier3_case_diagnostics(value: object) -> list[dict[str, Any]]:
+    cases = _dict_list(value)
+    for case in cases:
+        case["entry_id"] = _tier3_display_identifier(case.get("entry_id"))
+        case["requirements"] = _dict_list(case.get("requirements"))
+        case["attempts"] = _dict_list(case.get("attempts"))
+        for attempt in case["attempts"]:
+            attempt["errors"] = _string_list(attempt.get("errors"))
+            attempt["judgments"] = _dict_list(attempt.get("judgments"))
+            for judgment in attempt["judgments"]:
+                judgment["evidence"] = _string_list(judgment.get("evidence"))
+                judgment["unmet_checks"] = _string_list(judgment.get("unmet_checks"))
+                judgment["inapplicable_checks"] = _string_list(judgment.get("inapplicable_checks"))
+    return cases
+
+
 def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
     """Normalize template-facing types after merging canonical and fallback data."""
     payload = _json_safe_tier3_payload(value)
+    sufficiency = payload.get("dataset_sufficiency")
+    if isinstance(sufficiency, dict) and sufficiency.get("status") in {"sufficient", "provisional"}:
+        coverage_summary = sufficiency.get("coverage_summary")
+        reason = sufficiency.get("reason")
+        payload["dataset_sufficiency"] = {
+            "status": sufficiency["status"],
+            "coverage_summary": coverage_summary[:512] if isinstance(coverage_summary, str) else "",
+            "reason": reason[:512] if isinstance(reason, str) else "",
+        }
+    else:
+        payload.pop("dataset_sufficiency", None)
+    evidence = payload.get("evidence_volume")
+    if isinstance(evidence, dict):
+
+        def counter(value: object) -> int:
+            return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 2**53 - 1 else 0
+
+        def case_counter(value: object) -> int | None:
+            result = counter(value)
+            return result or None
+
+        safe_evidence: dict[str, Any] = {
+            key: counter(evidence.get(key))
+            for key in (
+                "cases",
+                "attempts_planned",
+                "attempts_scored",
+                "execution_failures",
+                "judge_failures",
+            )
+        }
+        safe_evidence["cases"] = case_counter(evidence.get("cases"))
+        safe_evidence["attempts_per_case"] = case_counter(evidence.get("attempts_per_case"))
+        safe_evidence["uniform_attempts"] = evidence.get("uniform_attempts") is not False
+        safe_evidence["limited"] = evidence.get("limited") is True
+        safe_evidence["by_arm"] = (
+            {
+                arm: {
+                    key: counter(arm_value.get(key))
+                    for key in (
+                        "attempts_planned",
+                        "attempts_scored",
+                        "execution_failures",
+                        "judge_failures",
+                    )
+                }
+                | {"cases": case_counter(arm_value.get("cases"))}
+                for arm, arm_value in evidence.get("by_arm", {}).items()
+                if arm in {"with_skill", "without_skill"} and isinstance(arm_value, dict)
+            }
+            if isinstance(evidence.get("by_arm"), dict)
+            else {}
+        )
+        safe_evidence["display"] = format_evidence_volume(safe_evidence) or ""
+        payload["evidence_volume"] = safe_evidence
+    else:
+        payload.pop("evidence_volume", None)
     payload["summary"] = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
     payload["agents"] = {
         identifier: _sanitize_tier3_agent(agent) for identifier, agent in _tier3_agent_entries(payload.get("agents"))
@@ -982,7 +1224,8 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload.get(key), dict):
             payload[key] = {}
     payload["metric_labels"] = _tier3_text_mapping(payload.get("metric_labels"))
-    payload["dimension_hints"] = _tier3_text_mapping(payload.get("dimension_hints"))
+    payload["dimension_hints"] = _tier3_text_mapping(payload.get("dimension_hints")) or dict(DIMENSION_HINTS)
+    payload["signal_evidence"] = dict(SIGNAL_EVIDENCE_SOURCES)
     evaluator_paths = payload["provenance"].get("evaluator_paths")
     payload["provenance"]["evaluator_paths"] = evaluator_paths if isinstance(evaluator_paths, dict) else {}
     if "source_validation" in payload["provenance"]:
@@ -1022,17 +1265,32 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
         if (card := _sanitize_tier3_evaluator_card(item)) is not None
     ]
     payload["cases"] = _dict_list(payload.get("cases"))
+    # Unscored dimensions stay listed so the report can explain them.
     payload["dimensions"] = [
         dimension
         for item in _dict_list(payload.get("dimensions"))
-        if (
-            (dimension := _sanitize_tier3_dimension(item)).get("score") is not None
-            or dimension.get("with_skill") is not None
+        if any(
+            (dimension := _sanitize_tier3_dimension(item)).get(key) is not None
+            for key in ("score", "with_skill", "baseline")
         )
+    ]
+    scored_dimension_ids = {dimension.get("id") for dimension in payload["dimensions"]}
+    payload["not_applicable_dimensions"] = [
+        {"id": dimension_id, "reason": reason if isinstance(reason := item.get("reason"), str) else ""}
+        for item in _dict_list(payload.get("not_applicable_dimensions"))
+        if (dimension_id := _tier3_display_identifier(item.get("id"))) and dimension_id not in scored_dimension_ids
     ]
     for key in ("conclusions", "recommendations", "suggestions_v2"):
         payload[key] = _sanitize_tier3_insight_items(payload.get(key))
+    payload["next_steps"] = [
+        {
+            key: str(step.get(key) or "")
+            for key in ("kind", "target", "problem", "evidence", "action", "check", "strength")
+        }
+        for step in _dict_list(payload.get("next_steps"))
+    ]
     payload["dataset"] = [_sanitize_tier3_dataset_case(item) for item in _dict_list(payload.get("dataset"))]
+    payload["case_diagnostics"] = _sanitize_tier3_case_diagnostics(payload.get("case_diagnostics"))
     payload["trials"] = [_sanitize_tier3_trial(item) for item in _dict_list(payload.get("trials"))]
     timing: list[dict[str, Any]] = []
     for item in _dict_list(payload.get("timing")):
@@ -1045,6 +1303,16 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
         payload[key] = _tier3_identifier_list(payload.get(key))
     for key in ("execution_errors", "suggestions"):
         payload[key] = _string_list(payload.get(key))
+    # The template lists each notice's message; drop entries without one.
+    coverage_notices = [
+        notice
+        for notice in _dict_list(payload.get("coverage_notices"))
+        if isinstance(notice.get("message"), str) and notice["message"]
+    ]
+    if coverage_notices:
+        payload["coverage_notices"] = coverage_notices
+    else:
+        payload.pop("coverage_notices", None)
     # ``skill_name`` was already validated above as an exact NFC filesystem
     # identity. Do not pass it through compatibility-normalizing display text.
     for key in ("best_agent", "verdict", "execution_status"):
@@ -1068,6 +1336,11 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
                 maximum=1.0,
             )
     payload["runtime_seconds"] = _finite_number(payload.get("runtime_seconds"), minimum=0.0) or 0.0
+    baseline = payload.get("baseline")
+    if isinstance(baseline, dict) and baseline:
+        payload["baseline_description"] = baseline_description(baseline)
+    if comparison := payload.get("prior_version_comparison"):
+        payload["prior_version_lines"] = version_comparison_lines(comparison)
     payload["summary"]["runtime_seconds"] = (
         _finite_number(payload["summary"].get("runtime_seconds"), minimum=0.0) or 0.0
     )
@@ -1147,6 +1420,8 @@ def _bounded_tier3_preview_value(value: Any, budget: _Tier3PreviewBudget) -> Any
 
     if isinstance(value, dict):
         items = list(value.items())
+        priority_keys = _TIER3_HTML_PREVIEW_PRIORITY_KEYS
+        items.sort(key=lambda item: item[0] not in priority_keys)
         kept = min(len(items), _TIER3_HTML_PREVIEW_COLLECTION_ITEMS)
         budget.omitted_items += len(items) - kept
         bounded_dict: dict[Any, Any] = {}
@@ -1158,18 +1433,103 @@ def _bounded_tier3_preview_value(value: Any, budget: _Tier3PreviewBudget) -> Any
     return value
 
 
+def _restore_failure_reason_text(deferred: list[tuple[dict[str, Any], str, Any]], room: int) -> int:
+    """Put deferred failure reasons back while ``room`` bytes remain; return how many stay out."""
+    omitted = 0
+    for container, key, value in deferred:
+        # Key, colon, value and separating comma in compact JSON.
+        cost = len(_compact_json(key).encode("utf-8")) + len(_compact_json(value).encode("utf-8")) + 2
+        if cost <= room:
+            container[key] = value
+            room -= cost
+        else:
+            omitted += 1
+    return omitted
+
+
+def _capped_tier3_trial_rows(payload: dict[str, Any]) -> int:
+    """Count the drill-down rows the bounded preview walk leaves out.
+
+    The walk keeps the first ``_TIER3_HTML_PREVIEW_COLLECTION_ITEMS`` entries of
+    every list and mapping: with-skill rows across all agents in the top-level
+    ``trials``, baseline rows per agent, and the first agents.
+    """
+    limit = _TIER3_HTML_PREVIEW_COLLECTION_ITEMS
+    trials = payload.get("trials")
+    omitted = max(0, len(trials) - limit) if isinstance(trials, list) else 0
+    agents = payload.get("agents")
+    for index, agent in enumerate(agents.values() if isinstance(agents, dict) else []):
+        baseline = agent.get("trials_baseline") if isinstance(agent, dict) else None
+        if isinstance(baseline, list):
+            omitted += len(baseline) if index >= limit else max(0, len(baseline) - limit)
+    return omitted
+
+
 def _bounded_tier3_preview(payload: dict[str, Any] | None) -> tuple[dict[str, Any] | None, dict[str, int]]:
-    """Return a presentation-only projection plus visible omission counts."""
-    if not payload or len(_compact_json(payload).encode("utf-8")) <= _TIER3_HTML_PREVIEW_TRIGGER_BYTES:
+    """Return a presentation-only projection plus visible omission counts.
+
+    Built failure reasons and excerpts are optional for the overview, so they
+    are taken out first and put back only into room left under the preview
+    trigger. They can never spend the bounded preview budget ahead of the
+    overview keys. ``trial_rows`` counts only drill-down rows the walk capped,
+    so the drill-down note does not fire when only another list was trimmed.
+    """
+    if not payload:
         return payload, {}
+    # A private copy: the caller embeds ``payload`` itself as the canonical data.
+    # The token usage table reads the full payload, so ``token_usage`` neither
+    # triggers the preview nor spends its budget.
+    slim = json.loads(_compact_json({key: value for key, value in payload.items() if key != "token_usage"}))
+    # Activation diagnostics belong to the canonical export. The template does
+    # not render them, so duplicate per-trial copies must not spend overview or
+    # failure-reason space before the preview budget is applied.
+    agents = slim.get("agents")
+    containers = [slim, *(agents.values() if isinstance(agents, dict) else [])]
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        for arm in ("trials", "trials_baseline"):
+            trials = container.get(arm)
+            for trial in trials if isinstance(trials, list) else []:
+                if isinstance(trial, dict):
+                    trial.pop("activation_validation", None)
+    serialized = _compact_json(slim)
+    if len(serialized.encode("utf-8")) <= _TIER3_HTML_PREVIEW_TRIGGER_BYTES:
+        return slim, {}
+
+    from skillevaluator.evaluation.tier3_findings import failure_reason_text_slots, strip_failure_reason_text
+
+    rendered_slots = list(failure_reason_text_slots(slim, include_top_level_cards=False))
+    deferred = [(container, key, container.pop(key)) for container, key in rendered_slots]
+    # The page renders each agent's cards, never the top-level card copy, so its
+    # reasons are dropped without being restored or counted as left out.
+    strip_failure_reason_text(slim)
+    slim_size = len(_compact_json(slim).encode("utf-8"))
+    omitted_diagnostics = 0
+    if slim_size > _TIER3_HTML_PREVIEW_TRIGGER_BYTES:
+        omitted_diagnostics = len(slim.pop("case_diagnostics", []))
+        slim_size = len(_compact_json(slim).encode("utf-8"))
+    if slim_size <= _TIER3_HTML_PREVIEW_TRIGGER_BYTES:
+        omitted_reasons = _restore_failure_reason_text(deferred, _TIER3_HTML_PREVIEW_TRIGGER_BYTES - slim_size)
+        return slim, {
+            key: count
+            for key, count in {
+                "failure_reasons": omitted_reasons,
+                "case_diagnostics": omitted_diagnostics,
+            }.items()
+            if count
+        }
 
     budget = _Tier3PreviewBudget()
-    preview = _bounded_tier3_preview_value(payload, budget)
+    preview = _bounded_tier3_preview_value(slim, budget)
     notice = {
         key: value
         for key, value in {
             "characters": budget.omitted_characters,
             "items": budget.omitted_items,
+            "trial_rows": _capped_tier3_trial_rows(slim),
+            "failure_reasons": len(deferred),
+            "case_diagnostics": omitted_diagnostics,
         }.items()
         if value > 0
     }
@@ -1468,6 +1828,22 @@ def _fix_first(
     return items[:limit]
 
 
+@cache
+def _load_chart_assets() -> tuple[str, str]:
+    """Read fixed, trusted chart resources once, only for reports containing charts."""
+    assets = resources.files("skillevaluator.reporting").joinpath("assets")
+    try:
+        runtime = assets.joinpath("chart.umd.min.js").read_text(encoding="utf-8")
+        notices = "\n\n".join(
+            assets.joinpath(name).read_text(encoding="utf-8")
+            for name in ("Chart.js-LICENSE.md", "kurkle-color-LICENSE.md")
+        )
+    except OSError:
+        # A broken install keeps the report; each chart shows its data-link fallback.
+        return "", ""
+    return runtime, notices
+
+
 class PackageLoader(BaseLoader):
     """Custom Jinja2 loader that loads templates from package resources."""
 
@@ -1495,21 +1871,7 @@ def _detail_display_status(detail: Any) -> str:
 
 def _result_display_status(result: ValidationResult) -> str:
     """Describe execution separately from the preserved gate boolean."""
-    not_applicable = (
-        bool(result.success_details)
-        and not result.findings
-        and all(_detail_display_status(detail) == "not_applicable" for detail in result.success_details)
-    )
-    outcome = result_status(result)
-    if outcome == Status.FAILED:
-        return "fail"
-    if outcome == Status.INCOMPLETE:
-        return "incomplete"
-    if is_cleanly_skipped(result):
-        return "not_applicable" if "not applicable" in get_skip_reason(result).casefold() else "skipped"
-    if result.passed and not_applicable:
-        return "not_applicable"
-    return "pass" if result.passed else "fail"
+    return result_execution_status(result)
 
 
 def _validated_ci_context(context: dict[str, str] | None) -> dict[str, str]:
@@ -1567,6 +1929,9 @@ class HTMLReporter(ReporterBase):
         ci_context: dict[str, str] | None = None,
         report_scope: str = "publication",
         scan_root: str | None = None,
+        requested_tiers: tuple[int, ...] | None = None,
+        displayed_tiers: tuple[int, ...] | None = None,
+        presentation_context: FinalRenderContext | None = None,
     ) -> None:
         self.include_timestamp = include_timestamp
         self.title = title or "SkillEvaluator Validation Report"
@@ -1574,7 +1939,7 @@ class HTMLReporter(ReporterBase):
         self._tabs_explicit = tabs is not None
         self.target_path = target_path
         self.content_label = content_label
-        # Active validation profile (e.g. "internal", "external"). Surfaced
+        # Active validation policy (e.g. "default" or a custom policy name). Surfaced
         # in the report header so reviewers can tell which audience the
         # validation gate was applied for.
         self.profile = profile
@@ -1586,6 +1951,9 @@ class HTMLReporter(ReporterBase):
         # The folder the scanners ran on, used to show finding locations
         # relative to the skill in "Fix first".
         self.scan_root = scan_root
+        self.requested_tiers = requested_tiers
+        self.displayed_tiers = displayed_tiers
+        self.presentation_context = presentation_context
         self._env = self._create_environment()
 
     @staticmethod
@@ -1603,10 +1971,12 @@ class HTMLReporter(ReporterBase):
         environment.filters["cleanly_skipped"] = is_cleanly_skipped
         environment.filters["execution_status"] = _result_display_status
         environment.filters["related_paths"] = _related_paths
+        environment.filters["finding_verification"] = finding_verification
         environment.filters["additional_errors"] = additional_errors
         environment.filters["adaptive_percent"] = _adaptive_percent
         environment.filters["adaptive_interval_percent"] = _adaptive_interval_percent
         environment.filters["skip_reason"] = get_skip_reason
+        environment.filters["not_applicable_reason"] = _tier3_not_applicable_reason
         return environment
 
     @staticmethod
@@ -1723,6 +2093,8 @@ class HTMLReporter(ReporterBase):
 
                 vdata["findings"].append(
                     {
+                        "finding_id": finding.finding_id,
+                        "occurrence_id": finding.occurrence_id,
                         "category": finding.category,
                         "severity": finding.severity.value
                         if hasattr(finding.severity, "value")
@@ -1749,6 +2121,7 @@ class HTMLReporter(ReporterBase):
                 skill_data["status"] = "incomplete"
             skill_data["validators"][vn] = vdata
 
+        skill_data["finding_count"] = self._unique_finding_count(skill_data)
         # Deduplicate findings per validator
         for vdata in skill_data["validators"].values():
             if vdata["findings"]:
@@ -1859,6 +2232,8 @@ class HTMLReporter(ReporterBase):
                         confidence = finding.metadata.get("confidence", "high")
                     skills[skill_name]["validators"][validator_name]["findings"].append(
                         {
+                            "finding_id": finding.finding_id,
+                            "occurrence_id": finding.occurrence_id,
                             "category": finding.category,
                             "severity": finding.severity.value
                             if hasattr(finding.severity, "value")
@@ -1878,6 +2253,7 @@ class HTMLReporter(ReporterBase):
 
         # Deduplicate findings within each skill/validator
         for skill_data in skills.values():
+            skill_data["finding_count"] = self._unique_finding_count(skill_data)
             # Recompute issue_count after deduplication (use occurrences)
             deduped_count = 0
             for validator_data in skill_data["validators"].values():
@@ -1906,6 +2282,23 @@ class HTMLReporter(ReporterBase):
         return " ".join((msg or "").split())
 
     @staticmethod
+    def _unique_finding_count(skill_data: dict[str, Any]) -> int:
+        """Count a skill's findings once per ``finding_id``, before display merging.
+
+        ``issue_count`` keeps counting raw records for the JSON ``skills``
+        list and contributor totals; the skill badge shows this count so it
+        agrees with the summary's Findings number.
+        """
+        return len(
+            {
+                finding["finding_id"]
+                for validator in skill_data["validators"].values()
+                for finding in validator["findings"]
+                if finding.get("finding_id")
+            }
+        )
+
+    @staticmethod
     def _deduplicate_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Aggregate duplicate findings that share the same message, file, and suggestion.
 
@@ -1913,16 +2306,29 @@ class HTMLReporter(ReporterBase):
         into a single entry with an 'occurrences' count and a 'lines' list.
         This dramatically reduces visual noise when the same PII pattern
         (e.g., "Personal macOS user path") fires on many lines in the same file.
+        A finding's ``occurrence_id`` becomes an ``occurrence_ids`` list on the
+        merged entry, so every merged location keeps its identity. The key
+        also holds ``finding_id`` and the verification decision when present,
+        so different checks or decisions never merge. The first occurrence's
+        rationale represents the group; individual rationales remain in the
+        validator view and JSON export.
         """
         groups: dict[tuple, dict[str, Any]] = {}
+        seen_occurrences: dict[tuple, set[str]] = {}
 
         for finding in findings:
             # Normalize message for deduplication (strip trailing whitespace/newlines)
             norm_msg = HTMLReporter._normalize_message(finding.get("message", ""))
+            verification = finding_verification(finding)
+            decision = (
+                (verification.verdict, verification.confidence, verification.severity_effect) if verification else None
+            )
             key = (
                 norm_msg,
                 finding.get("file_path", ""),
                 finding.get("suggestion", ""),
+                finding.get("finding_id"),
+                decision,
             )
 
             if key in groups:
@@ -1945,10 +2351,18 @@ class HTMLReporter(ReporterBase):
                 new_conf = finding.get("confidence", "high")
                 if conf_order.get(new_conf, 2) < conf_order.get(existing_conf, 2):
                     groups[key]["confidence"] = new_conf
+                occurrence_id = finding.get("occurrence_id")
+                if occurrence_id and "occurrence_ids" in groups[key] and occurrence_id not in seen_occurrences[key]:
+                    seen_occurrences[key].add(occurrence_id)
+                    groups[key]["occurrence_ids"].append(occurrence_id)
             else:
                 entry = dict(finding)
                 entry["message"] = norm_msg  # Store normalized message
                 entry["occurrences"] = 1
+                if "occurrence_id" in entry:
+                    occurrence_id = entry.pop("occurrence_id")
+                    entry["occurrence_ids"] = [occurrence_id] if occurrence_id else []
+                    seen_occurrences[key] = set(entry["occurrence_ids"])
                 line_num = finding.get("line_number")
                 entry["lines"] = [line_num] if line_num else []
                 # Extract confidence from metadata if present
@@ -2256,62 +2670,67 @@ class HTMLReporter(ReporterBase):
         name rather than relying on list slicing (which would silently break
         if a tier ever produced zero results).
         """
-        tier1: list[ValidationResult] = []
-        tier2: list[ValidationResult] = []
-        tier3: list[ValidationResult] = []
-        for r in results:
-            if is_tier3_result(r):
-                tier3.append(r)
-            elif is_tier2_result(r):
-                tier2.append(r)
-            else:
-                tier1.append(r)
-        return tier1, tier2, tier3
+        buckets: dict[int, list[ValidationResult]] = {1: [], 2: [], 3: []}
+        for result in results:
+            buckets[result_tier(result)].append(result)
+        return buckets[1], buckets[2], buckets[3]
 
     @staticmethod
-    def _compute_tier_summary(results: list[ValidationResult]) -> dict[str, Any]:
+    def _compute_tier_summary(
+        results: list[ValidationResult], *, presentation: TierPresentation | None = None
+    ) -> dict[str, Any]:
         """Compact stats for a single tier — what the hero chip displays.
 
         Returns ``passed`` (boolean), executed/pass/skip counts,
-        ``issue_count`` (sum of findings), and per-severity totals.
+        ``issue_count`` (unique findings, as the Markdown summary counts
+        them), and per-severity totals of those unique findings at their
+        highest severity. ``occurrence_count``, ``raw_finding_count`` and
+        ``duplicates_removed`` sit beside them, and ``issue_detail`` describes
+        them in the shared report wording when they differ from the unique
+        count or when errors or warnings have no finding behind them.
         ``total == 0`` lets the template hide the chip entirely without an
         extra "did this tier run?" predicate.
         """
         total = len(results)
-        skipped_count = sum(1 for r in results if is_cleanly_skipped(r))
-        executed_count = total - skipped_count
-        passed_count = sum(1 for r in results if r.passed and not r.is_incomplete and not is_cleanly_skipped(r))
+        statuses = [result_execution_status(r) for r in results] if presentation is None else []
+        skipped_count = presentation.skipped if presentation else statuses.count("skipped")
+        not_applicable_count = presentation.not_applicable if presentation else statuses.count("not_applicable")
+        passed_count = presentation.passed if presentation else statuses.count("pass")
+        failed_count = presentation.failed if presentation else statuses.count("fail")
+        incomplete_count = presentation.incomplete if presentation else statuses.count("incomplete")
+        executed_count = passed_count + failed_count + incomplete_count
         advisory_skipped_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
-        failed_count = sum(1 for r in results if result_status(r) == Status.FAILED)
-        incomplete_count = sum(1 for r in results if result_status(r) == Status.INCOMPLETE)
-        issue_count = 0
-        critical = high = medium = low = 0
-        for r in results:
-            issue_count += len(r.findings or [])
-            for f in r.findings or []:
-                sev = f.severity.value if hasattr(f.severity, "value") else str(f.severity).lower()
-                if sev == "critical":
-                    critical += 1
-                elif sev == "high":
-                    high += 1
-                elif sev == "medium":
-                    medium += 1
-                elif sev == "low":
-                    low += 1
+        findings = summarize_findings(results)
+        messages = summarize_messages(results)
+        unique_by_severity = findings["unique_by_severity"]
+        has_detail = (
+            findings["raw_occurrences"] != findings["unique_findings"]
+            or findings["distinct_occurrences"] != findings["unique_findings"]
+            or messages["independent_errors"]
+            or messages["independent_warnings"]
+        )
         return {
             "total": total,
             "executed_count": executed_count,
             "passed_count": passed_count,
             "skipped_count": skipped_count,
+            "not_applicable_count": not_applicable_count,
             "advisory_skipped_count": advisory_skipped_count,
             "failed_count": failed_count,
-            "issue_count": issue_count,
+            "issue_count": findings["unique_findings"],
+            "occurrence_count": findings["distinct_occurrences"],
+            "raw_finding_count": findings["raw_occurrences"],
+            "duplicates_removed": findings["duplicates_removed"],
+            "total_issues": total_issue_count(findings, messages),
+            "issue_detail": (
+                describe_issue_counts(findings, messages, raw_records=True, duplicates=True) if has_detail else ""
+            ),
             "all_passed": executed_count > 0 and failed_count == 0 and incomplete_count == 0,
             "incomplete_count": incomplete_count,
-            "critical": critical,
-            "high": high,
-            "medium": medium,
-            "low": low,
+            "critical": unique_by_severity["critical"],
+            "high": unique_by_severity["high"],
+            "medium": unique_by_severity["medium"],
+            "low": unique_by_severity["low"],
         }
 
     def _results_to_dict(self, results: list[ValidationResult]) -> list[dict[str, Any]]:
@@ -2354,6 +2773,8 @@ class HTMLReporter(ReporterBase):
             for finding in result.findings:
                 result_dict["findings"].append(
                     {
+                        "finding_id": finding.finding_id,
+                        "occurrence_id": finding.occurrence_id,
                         "category": finding.category,
                         "severity": finding.severity.value,
                         "check_name": finding.check_name,
@@ -2381,7 +2802,9 @@ class HTMLReporter(ReporterBase):
         return output
 
     @staticmethod
-    def _tier3_report_data(results: list[ValidationResult]) -> dict[str, Any] | None:
+    def _tier3_report_data(
+        results: list[ValidationResult], *, selected: tuple[ValidationResult, dict] | None = None
+    ) -> dict[str, Any] | None:
         """Return safe Tier 3 display data without certifying partial evidence."""
         if not results:
             return None
@@ -2516,7 +2939,7 @@ class HTMLReporter(ReporterBase):
                 return payload_has_agent_evidence(candidate)
             return not execution_status and result_has_execution_evidence(result)
 
-        selected = select_agent_eval_candidate(results)
+        selected = selected if selected is not None else select_agent_eval_candidate(results)
         payload_result, payload = selected if selected is not None else (None, None)
         serialization_issue = agent_eval_report_serialization_issue(payload) if payload is not None else None
         rejected_assessment = (
@@ -2719,12 +3142,14 @@ class HTMLReporter(ReporterBase):
     def render_all(self, results: list[ValidationResult]) -> str:
         validate_report_scope(self.report_scope, results)
         tier1_results, tier2_results, tier3_results = self._split_results_by_tier(results)
-        tier3_data = self._tier3_report_data(tier3_results)
+        selected = select_agent_eval_candidate(tier3_results)
+        raw_payload = selected[1] if selected is not None else None
+        tier3_data = self._tier3_report_data(tier3_results, selected=selected)
         completed_agent = completed_agent_result(tier3_data)
         # Preserve the raw policy/provenance assessment, then let the emitted
         # payload make the decision only more conservative. Display shaping
         # must never invent a successful run or erase a persisted waiver.
-        raw_publication = assess_publication(results, expected_skill_name=self.expected_skill_name)
+        raw_publication = assess_publication(results, raw_payload, expected_skill_name=self.expected_skill_name)
         # Without a persisted payload, tier3_data is a synthesized display
         # fallback rather than evidence, so only the raw assessment applies.
         emitted_publication = (
@@ -2733,7 +3158,7 @@ class HTMLReporter(ReporterBase):
                 tier3_data,
                 expected_skill_name=self.expected_skill_name,
             )
-            if select_agent_eval_candidate(tier3_results) is not None
+            if selected is not None
             else raw_publication
         )
         publication = max(
@@ -2744,19 +3169,30 @@ class HTMLReporter(ReporterBase):
             ),
         )
 
-        run_status = resolve_run_status(results)
-        all_passed = run_status.headline == Status.PASSED
-        has_incomplete = run_status.headline == Status.INCOMPLETE
-        overall_status = run_status.headline.value
-        total_errors = sum(r.summary.errors for r in results)
-        total_warnings = sum(r.summary.warnings for r in results)
+        context = self.presentation_context or build_final_render_context(
+            results,
+            requested_tiers=self.requested_tiers,
+            displayed_tiers=self.displayed_tiers,
+            report_scope=self.report_scope,
+            expected_skill_name=self.expected_skill_name,
+            agent_eval=raw_payload,
+            publication_assessment=publication,
+        )
+        all_passed = context.command_status == Status.PASSED
+        has_incomplete = context.command_status == Status.INCOMPLETE
+        overall_status = context.command_status.value
+        finding_summary = summarize_findings(results)
+        message_summary = summarize_messages(results)
         skipped_count = sum(1 for r in results if is_cleanly_skipped(r))
-        passed_count = sum(1 for r in results if r.passed and not r.is_incomplete and not is_cleanly_skipped(r))
+        passed_count = sum(tier.passed for tier in context.tiers.values())
         advisory_skipped_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
         failed_count = sum(1 for r in results if not passes_required_gate(r))
-        total_issues = total_errors + total_warnings
+        # Count unique findings rather than raw validator records that repeat
+        # one finding, plus errors and warnings with no finding behind them
+        # (failed gates, scanner and execution errors), as Markdown does.
+        total_issues = total_issue_count(finding_summary, message_summary)
         total_validators = len(results)
-        executed_count = total_validators - skipped_count
+        executed_count = sum(tier.executed for tier in context.tiers.values())
         pass_percentage = round((passed_count / executed_count * 100) if executed_count > 0 else 0, 1)
 
         timestamp = ""
@@ -2805,12 +3241,28 @@ class HTMLReporter(ReporterBase):
         # Per-tier summaries so the hero card chips can show "Tier 1: 6/7
         # passed (0 critical)" etc. without leaking Tier 2 / Tier 3 stats
         # from the global aggregate counters.
-        tier1_summary = self._compute_tier_summary(tier1_results)
+        tier1_summary = self._compute_tier_summary(tier1_results, presentation=context.tiers[1])
         tier1_skillspector_versions = _skillspector_versions(tier1_results)
         tier1_skillspector_provenance = _skillspector_provenance(tier1_results)
-        tier2_summary = self._compute_tier_summary(tier2_results)
-        tier3_summary = self._compute_tier_summary(tier3_results)
+        tier2_summary = self._compute_tier_summary(tier2_results, presentation=context.tiers[2])
+        tier3_summary = self._compute_tier_summary(tier3_results, presentation=context.tiers[3])
+        tier3_dataset_sufficiency = tier3_data.get("dataset_sufficiency") if isinstance(tier3_data, dict) else None
+        dataset_summary = tier3_data.get("dataset_summary") if isinstance(tier3_data, dict) else None
+        task_count = dataset_summary.get("total_tasks") if isinstance(dataset_summary, dict) else None
+        dataset_source = dataset_summary.get("source") if isinstance(dataset_summary, dict) else None
+        if (
+            not isinstance(task_count, int)
+            or isinstance(task_count, bool)
+            or task_count <= 0
+            or dataset_source == "unavailable"
+        ):
+            tier3_dataset_sufficiency = None
         tier3_preview, tier3_preview_notice = _bounded_tier3_preview(tier3_data)
+        if isinstance(tier3_preview, dict) and isinstance(tier3_preview.get("evidence_volume"), dict):
+            tier3_preview["evidence_volume"]["display"] = format_evidence_volume(tier3_preview["evidence_volume"]) or ""
+        tier3_dataset_provenance_line, tier3_dataset_provenance_warning = dataset_provenance_display(
+            tier3_data.get("dataset_provenance") if isinstance(tier3_data, dict) else None
+        )
         tier3_canonical_data, tier3_canonical_encoding = _canonical_tier3_embed(tier3_data)
         tier3_truncation = tier3_data.get("report_truncation", {}) if isinstance(tier3_data, dict) else {}
 
@@ -2822,15 +3274,9 @@ class HTMLReporter(ReporterBase):
         tier1_top_issues = self._compute_top_issues(tier1_skills)
         tier1_contributors = self._extract_contributors(tier1_skills, tier1_display_results)
         tier1_display_skipped = sum(1 for result in tier1_display_results if is_cleanly_skipped(result))
-        tier1_display_total = len(tier1_display_results) - tier1_display_skipped
-        tier1_display_passed = sum(
-            1
-            for result in tier1_display_results
-            if result.passed and not result.is_incomplete and not is_cleanly_skipped(result)
-        )
-        tier1_display_failed = sum(
-            1 for result in tier1_display_results if not result.passed and not is_cleanly_skipped(result)
-        )
+        tier1_display_total = context.tiers[1].executed
+        tier1_display_passed = context.tiers[1].passed
+        tier1_display_failed = context.tiers[1].failed
         tier1_display_total_skills = len(tier1_skills)
         tier1_display_passed_skills = sum(1 for skill in tier1_skills.values() if skill["passed"])
         tier1_display_summary = {
@@ -2838,7 +3284,9 @@ class HTMLReporter(ReporterBase):
             "passed_count": tier1_display_passed,
             "skipped_count": tier1_display_skipped,
             "failed_count": tier1_display_failed,
-            "total_issues": sum(result.summary.errors + result.summary.warnings for result in tier1_display_results),
+            # Unique Tier 1 findings plus errors and warnings with no finding
+            # behind them, counted as the Markdown summary counts them.
+            "total_issues": tier1_summary["total_issues"],
             "pass_percentage": round(
                 (tier1_display_passed / tier1_display_total * 100) if tier1_display_total else 0,
                 1,
@@ -2852,7 +3300,9 @@ class HTMLReporter(ReporterBase):
         # exit code. Results produced outside ``validate`` retain the public
         # defaults: Tier 1/Tier 2 block and Tier 3 is advisory.
         blocking_results: list[ValidationResult] = []
-        advisory_results: list[ValidationResult] = []
+        # Per tier, so the gate policy counts findings the way each tier card does.
+        blocking_by_tier: dict[str, list[ValidationResult]] = {}
+        advisory_by_tier: dict[str, list[ValidationResult]] = {}
         blocking_tiers: list[str] = []
         advisory_tiers: list[str] = []
         for tier_name, tier_results, default_blocking in (
@@ -2874,28 +3324,28 @@ class HTMLReporter(ReporterBase):
                 )
                 if is_blocking:
                     blocking_results.append(result)
+                    blocking_by_tier.setdefault(tier_name, []).append(result)
                     tier_blocks = True
                 else:
-                    advisory_results.append(result)
+                    advisory_by_tier.setdefault(tier_name, []).append(result)
                     tier_advises = True
             if tier_blocks:
                 blocking_tiers.append(tier_name)
             if tier_advises:
                 advisory_tiers.append(tier_name)
 
-        def _severity_totals(tier_results: list[ValidationResult]) -> dict[str, int]:
+        def _severity_totals(results_by_tier: dict[str, list[ValidationResult]]) -> dict[str, int]:
+            # Each tier's unique findings at their highest severity, as its tier
+            # card counts them; the same finding in two tiers counts in both.
             totals = {"critical": 0, "high": 0, "medium": 0, "low": 0}
-            for result in tier_results:
-                for finding in result.findings:
-                    severity = (
-                        finding.severity.value if hasattr(finding.severity, "value") else str(finding.severity).lower()
-                    )
-                    if severity in totals:
-                        totals[severity] += 1
+            for tier_results in results_by_tier.values():
+                unique_by_severity = summarize_findings(tier_results)["unique_by_severity"]
+                for severity in totals:
+                    totals[severity] += unique_by_severity[severity]
             return totals
 
-        blocking_totals = _severity_totals(blocking_results)
-        advisory_totals = _severity_totals(advisory_results)
+        blocking_totals = _severity_totals(blocking_by_tier)
+        advisory_totals = _severity_totals(advisory_by_tier)
         blocking_critical = blocking_totals["critical"]
         blocking_high = blocking_totals["high"]
         blocking_medium = blocking_totals["medium"]
@@ -2983,13 +3433,11 @@ class HTMLReporter(ReporterBase):
         tier1_failed_checks = [
             plain_check_name(r.validator_name) for r in tier1_results if _result_display_status(r) == "fail"
         ]
-        tier1_blocking_findings = sum(
-            1
-            for r in tier1_results
-            if not passes_required_gate(r)
-            for f in r.findings
-            if (f.severity.value if hasattr(f.severity, "value") else str(f.severity).lower()) in {"critical", "high"}
-        )
+        # Unique critical and high findings in failed checks, counted like the Findings number.
+        tier1_blocking_by_severity = summarize_findings([r for r in tier1_results if not passes_required_gate(r)])[
+            "unique_by_severity"
+        ]
+        tier1_blocking_findings = tier1_blocking_by_severity["critical"] + tier1_blocking_by_severity["high"]
         # Why each incomplete Tier 1 check stopped, in the scanner's words. The
         # summary asks for an install only when every scanner is just missing.
         tier1_stop_reasons = [
@@ -3026,6 +3474,9 @@ class HTMLReporter(ReporterBase):
                 "advisory_skipped_count": advisory_skipped_count,
                 "failed_count": failed_count,
                 "total_issues": total_issues,
+                "raw_finding_occurrences": finding_summary["raw_occurrences"],
+                "distinct_finding_occurrences": finding_summary["distinct_occurrences"],
+                "duplicates_removed": finding_summary["duplicates_removed"],
                 "pass_percentage": pass_percentage,
                 "total_skills": total_skills,
                 "passed_skills": passed_skills,
@@ -3033,6 +3484,9 @@ class HTMLReporter(ReporterBase):
                 "publication_status": publication.status,
             },
             "results": self._results_to_dict(results),
+            "finding_counts": finding_counts(finding_summary),
+            "finding_groups": finding_summary["groups"],
+            "message_counts": message_summary,
             "skills": skills_by_name,
             "top_issues": top_issues,
             "contributors": contributors,
@@ -3088,12 +3542,13 @@ class HTMLReporter(ReporterBase):
         cl = self.content_label
         return template.render(
             report_scope=self.report_scope,
+            presentation=context,
             completed_agent=completed_agent,
             title=self.title,
             ci_context=self.ci_context,
             explicit_skill_name=self.explicit_skill_name,
             tier1_execution_summary={
-                status: sum(_result_display_status(r) == status for r in tier1_results)
+                status: sum(context.result_statuses[id(r)] == status for r in tier1_results)
                 for status in ("pass", "fail", "incomplete", "skipped", "not_applicable")
             },
             timestamp=timestamp,
@@ -3108,8 +3563,8 @@ class HTMLReporter(ReporterBase):
             publication_status=publication.status,
             publication_reasons=publication.reasons,
             tier3_effective_status=(
-                completed_agent["verdict"]
-                if self.report_scope == "tier3" and completed_agent
+                tier3_data.get("verdict")
+                if self.report_scope == "tier3" and isinstance(tier3_data, dict) and tier3_data.get("verdict")
                 else publication.tier3.status
             ),
             total_validators=total_validators,
@@ -3147,10 +3602,26 @@ class HTMLReporter(ReporterBase):
             content_label_plural=cl + "s",
             quality_scores=quality_scores_by_skill,
             tier3=tier3_preview,
+            tier3_display_dimensions=_tier3_html_dimensions(tier3_data),
+            tier3_dataset_provenance_line=tier3_dataset_provenance_line,
+            tier3_dataset_provenance_warning=tier3_dataset_provenance_warning,
+            chart_assets=_load_chart_assets,
             tier3_canonical_data=tier3_canonical_data,
             tier3_canonical_encoding=tier3_canonical_encoding,
             tier3_truncation=tier3_truncation,
+            tier3_dataset_sufficiency=tier3_dataset_sufficiency,
             tier3_preview_notice=tier3_preview_notice,
+            # Measured, not scored. From the full display payload, with its own
+            # per-agent cap: the preview walk can blank strings of late keys.
+            tier3_token_usage=token_usage_table(
+                tier3_data.get("token_usage") if isinstance(tier3_data, dict) else None
+            ),
+            # From the full display payload: the bounded preview can cap rows
+            # unevenly per condition and blank identity fields of late rows.
+            steps_by_case_chart=steps_by_case_chart(
+                tier3_data.get("agents") if isinstance(tier3_data, dict) else {},
+                tier3_data.get("trials") if isinstance(tier3_data, dict) else [],
+            ),
             tier1_summary=tier1_summary,
             skillspector_versions=tier1_skillspector_versions,
             skillspector_provenance=tier1_skillspector_provenance,
@@ -3162,8 +3633,14 @@ class HTMLReporter(ReporterBase):
             tier1_contributors=tier1_contributors,
             tier1_display_summary=tier1_display_summary,
             tier2_results=tier2_results,
+            tier2_scopes=tier2_scope_views(tier2_results),
+            harbor_jobs=harbor_job_links(tier3_data or {}),
+            dataset_provenance=agent_eval_publication_dataset_provenance(tier3_data),
+            evaluated_source=recorded_evaluated_source(result.metadata for result in results),
             tier3_lift_pass_threshold=TIER3_LIFT_PASS_THRESHOLD,
             tier3_lift_fail_threshold=TIER3_LIFT_FAIL_THRESHOLD,
+            tier3_dimension_pass_threshold=DIMENSION_VERDICT_PASS_THRESHOLD,
+            tier3_dimension_neutral_threshold=DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
             quality_min_score=quality_min_score,
             quality_grade_legend=QUALITY_GRADE_LEGEND,
             verdict_words=VERDICT_WORDS,

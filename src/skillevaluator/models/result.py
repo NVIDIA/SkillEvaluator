@@ -16,6 +16,7 @@ render validation results in various formats.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -131,6 +132,104 @@ class Finding:
             return f"[{self.category}-{self.severity.value.upper()}]"
         return f"[{self.category}-{str(self.severity).upper()}]"
 
+    @staticmethod
+    def _normalize_identity_text(value: object) -> str:
+        """Normalize human text without coupling identity to formatting."""
+        return " ".join(("" if value is None else str(value)).casefold().split())
+
+    @staticmethod
+    def _location_paths(file_path: object) -> list[str]:
+        """Return ``file_path`` and the shorter paths a message may name it by.
+
+        A folder run prefixes each skill's ``file_path`` with ``[skill] ``
+        and a plugin scan prepends the member's directory, but neither
+        rewrites the message, which still names the path the scanner saw.
+        Longest first, so the most specific match is removed.
+        """
+        path = str(file_path)
+        paths = [path]
+        while path.startswith("[") and "] " in path:
+            path = path.split("] ", 1)[1]
+            paths.append(path)
+        paths.extend(path[index + 1 :] for index, char in enumerate(path[:-1]) if char in "/\\")
+        return paths
+
+    def _identity_message(self) -> str:
+        """Return the message without location text the finding records elsewhere.
+
+        Secret detection writes the finding's own ``in <file>:<line>`` into
+        its message (with the path as the scanner saw it, which may be a
+        suffix of ``file_path``), and the PII scan appends
+        ``— N occurrences (...)`` when it folds repeats of one value into a
+        finding whose ``metadata`` lists them. Leaving that text out keeps ``finding_id`` stable when
+        lines move. Other text, such as a file name a check puts in its
+        message, stays part of the identity.
+        """
+        message = "" if self.message is None else str(self.message)
+        if self.file_path is not None and self.line_number is not None:
+            # Compare with "/" separators: a plugin scan writes file_path with
+            # "/" while the message keeps the scanner's backslashes on Windows.
+            # Each backslash maps to one "/", so a match spans the same text.
+            slashed = message.replace("\\", "/")
+            for location in self._location_paths(self.file_path):
+                text = f" in {location}:{self.line_number}".replace("\\", "/")
+                index = slashed.find(text)
+                if index >= 0:
+                    message = message[:index] + message[index + len(text) :]
+                    break
+        occurrences = self.metadata.get("occurrences") if isinstance(self.metadata, dict) else None
+        if isinstance(occurrences, list) and len(occurrences) > 1:
+            marker = f" \u2014 {len(occurrences)} occurrences ("
+            index = message.rfind(marker)
+            if index >= 0 and message.endswith(")"):
+                message = message[:index]
+        return message
+
+    @property
+    def finding_id(self) -> str:
+        """Return a deterministic semantic identity independent of location.
+
+        File and line belong to an occurrence. Excluding them, and any copy
+        of them in the message (see ``_identity_message``), lets reporters
+        group the same check across paths and validators while retaining every
+        concrete occurrence in the reconciliation contract. Severity is also
+        excluded, so a policy override or verifier downgrade keeps the ID.
+        """
+        identity = "\x1f".join(
+            (
+                self._normalize_identity_text(self.category),
+                self._normalize_identity_text(self.check_name),
+                self._normalize_identity_text(self._identity_message()),
+                self._normalize_identity_text(self.suggestion),
+            )
+        )
+        digest = hashlib.sha256(identity.encode("utf-8"), usedforsecurity=False).hexdigest()[:20]
+        return f"SEF-{digest}"
+
+    def location_occurrence_id(self, file_path: object, line_number: object, line_content: object = None) -> str:
+        """Return the occurrence ID this finding has at another location.
+
+        A check that folds repeats into one finding, such as the PII scan,
+        lists the other locations in ``metadata["occurrences"]``; reporters
+        give each of them an ID this way. At the finding's own location and
+        line content it equals ``occurrence_id``.
+        """
+        identity = "\x1f".join(
+            (
+                self.finding_id,
+                ("" if file_path is None else str(file_path)).replace("\\", "/"),
+                str(line_number) if line_number is not None else "",
+                self._normalize_identity_text(line_content),
+            )
+        )
+        digest = hashlib.sha256(identity.encode("utf-8"), usedforsecurity=False).hexdigest()[:20]
+        return f"SEO-{digest}"
+
+    @property
+    def occurrence_id(self) -> str:
+        """Return a deterministic identity for this concrete location."""
+        return self.location_occurrence_id(self.file_path, self.line_number, self.line_content)
+
     @property
     def location(self) -> str:
         """Return formatted location like 'file.py:42'."""
@@ -147,6 +246,8 @@ class Finding:
         """Convert to dictionary for JSON serialization."""
         severity_value = self.severity.value if isinstance(self.severity, Severity) else str(self.severity).lower()
         return {
+            "finding_id": self.finding_id,
+            "occurrence_id": self.occurrence_id,
             "category": self.category,
             "severity": severity_value,
             "check_name": self.check_name,
@@ -426,6 +527,8 @@ class ValidationResult:
         Call after mutating finding severities (e.g. LLM verification downgrade)
         so that result state is consistent with the actual finding objects.
         Independent gate failures remain errors regardless of those severities.
+        HIGH and CRITICAL findings are errors, and so is a MEDIUM finding whose
+        metadata sets ``fail_on_medium`` (a dependency audit with that option).
         """
         self.errors.clear()
         self.warnings.clear()
@@ -441,7 +544,8 @@ class ValidationResult:
             )
             self.summary.tally_severity(sev)
 
-            is_error = sev in (Severity.CRITICAL, Severity.HIGH)
+            fail_on_medium = isinstance(finding.metadata, dict) and finding.metadata.get("fail_on_medium") is True
+            is_error = sev.is_error(fail_on_medium=fail_on_medium)
             legacy_msg = finding.to_legacy_string()
             if is_error:
                 self.errors.append(legacy_msg)
@@ -450,6 +554,30 @@ class ValidationResult:
             else:
                 self.warnings.append(legacy_msg)
                 self.summary.warnings += 1
+
+    def _finding_legacy_lines(self) -> set[str]:
+        """Return the legacy error and warning lines that only repeat a structured finding."""
+        represented = {finding.to_legacy_string() for finding in self.findings}
+        for finding in self.findings:
+            # merge_with_prefix puts skill labels before legacy messages but inside
+            # structured finding paths. Recognize both forms, including nested merges.
+            location = finding.location
+            prefix = ""
+            while location.startswith("[") and "] " in location:
+                label, _, location = location.partition("] ")
+                prefix += label + "] "
+                represented.add(f"{prefix}{finding.tag} {finding.message} in {location}")
+        return represented
+
+    def independent_errors(self) -> list[str]:
+        """Return errors no structured finding repeats, such as execution diagnostics."""
+        represented = self._finding_legacy_lines()
+        return [error for error in self.errors if error not in represented]
+
+    def independent_warnings(self) -> list[str]:
+        """Return warnings no structured finding repeats, such as why a scanner did not complete."""
+        represented = self._finding_legacy_lines()
+        return [warning for warning in self.warnings if warning not in represented]
 
     def add_error(self, message: str) -> None:
         """Add a legacy error string and mark validation as failed.
@@ -563,6 +691,21 @@ class ValidationResult:
 
         # Prefix findings with skill name in file_path
         for finding in other.findings:
+            metadata = finding.metadata
+            listed = metadata.get("occurrences") if isinstance(metadata, dict) else None
+            if isinstance(listed, list):
+                # A check that folds repeats (the PII scan) lists each location
+                # in metadata; prefix those like file_path so the finding's own
+                # location still matches its first listed one.
+                metadata = {
+                    **metadata,
+                    "occurrences": [
+                        {**item, "file": f"[{prefix}] {item['file']}"}
+                        if isinstance(item, dict) and isinstance(item.get("file"), str)
+                        else item
+                        for item in listed
+                    ],
+                }
             prefixed_finding = Finding(
                 category=finding.category,
                 severity=finding.severity,
@@ -572,7 +715,7 @@ class ValidationResult:
                 line_number=finding.line_number,
                 line_content=finding.line_content,
                 suggestion=finding.suggestion,
-                metadata=finding.metadata,
+                metadata=metadata,
             )
             self.findings.append(prefixed_finding)
 

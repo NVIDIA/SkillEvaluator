@@ -18,6 +18,7 @@ from itertools import islice
 from pathlib import Path
 
 import yaml
+from yaml.events import MappingStartEvent, NodeEvent
 
 from skillevaluator.constants import (
     CONTENT_DEDUP_EXCLUDED_DIRS,
@@ -29,12 +30,23 @@ from skillevaluator.constants import (
     CONTENT_DEDUP_SCANNABLE_EXTENSIONS,
 )
 from skillevaluator.utils.path_security import matches_filesystem_name
-from skillevaluator.utils.tier2_paths import is_contained_compatibility_alias
+from skillevaluator.utils.structured_data import (
+    StructuredDataLimitError,
+    StructuredDataSyntaxError,
+    load_bounded_yaml,
+)
+from skillevaluator.utils.tier2_paths import (
+    contained_directory_alias_target,
+    is_contained_compatibility_alias,
+    is_link_or_reparse,
+)
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
 logger = logging.getLogger(__name__)
 
 _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
+# Root tags that load as a dict: none, the non-specific "!", or an explicit !!map.
+_PLAIN_MAPPING_TAGS = frozenset({None, "!", "tag:yaml.org,2002:map"})
 
 
 class SkillCollectionError(ValueError):
@@ -336,16 +348,48 @@ def _is_link_or_reparse(path: Path, rel_path: str | None = None) -> bool:
     return stat.S_ISLNK(info.st_mode) or bool(reparse_flag and file_attributes & reparse_flag)
 
 
+def _frontmatter_root_kind(frontmatter_yaml: str) -> str:
+    """Classify the root node of the text between the ``---`` lines.
+
+    Returns ``"mapping"`` for a plain YAML mapping, ``"invalid"`` when the YAML
+    is malformed before its root node, and ``"other"`` for anything else. Only
+    the parser events up to the root node are read. Text that is not a
+    mapping, such as a thematic break followed by a long list or prose, or a
+    ``!!set`` that loads as a set, is never frontmatter, so it is not built or
+    checked against the structure limits.
+    """
+    try:
+        for event in yaml.parse(frontmatter_yaml, Loader=yaml.SafeLoader):
+            if isinstance(event, NodeEvent):
+                is_mapping = isinstance(event, MappingStartEvent) and event.tag in _PLAIN_MAPPING_TAGS
+                return "mapping" if is_mapping else "other"
+    except yaml.YAMLError:
+        return "invalid"
+    return "other"
+
+
+def _frontmatter_root_is_mapping(frontmatter_yaml: str) -> bool:
+    """Return whether the text between the ``---`` lines opens a plain YAML mapping."""
+    return _frontmatter_root_kind(frontmatter_yaml) == "mapping"
+
+
 def _strip_valid_frontmatter(raw_text: str) -> tuple[str, int]:
-    """Strip valid mapping frontmatter and return its original line offset."""
+    """Strip valid mapping frontmatter and return its original line offset.
+
+    Raises :class:`StructuredDataLimitError` when mapping frontmatter exceeds a
+    nesting, node, alias, merge, scalar, or integer-size limit.
+    """
     match = FRONTMATTER_PATTERN.match(raw_text)
     if not match:
         return raw_text, 0
 
     frontmatter_yaml, markdown_content = match.groups()
+    if not _frontmatter_root_is_mapping(frontmatter_yaml):
+        return raw_text, 0
     try:
-        data = yaml.safe_load(frontmatter_yaml)
-    except yaml.YAMLError:
+        # Agent clients keep the last value of a repeated frontmatter key.
+        data = load_bounded_yaml(frontmatter_yaml, last_key_wins=True)
+    except StructuredDataSyntaxError:
         return raw_text, 0
     if not data or not isinstance(data, dict):
         return raw_text, 0
@@ -440,6 +484,8 @@ def _collect_files_anchored(
 
     candidates: list[_CandidateFile] = []
     declared_total_bytes = 0
+    regular_directories: set[str] = set()
+    directory_aliases: dict[Path, tuple[str, str]] = {}
 
     def _raise_traversal_error(error: OSError) -> None:
         raise error
@@ -457,18 +503,34 @@ def _collect_files_anchored(
                 rel_path = directory.relative_to(root).as_posix()
                 if matches_filesystem_name(directory, excluded):
                     logger.debug("Skipping excluded path: %s", rel_path)
+                    # A pruned regular directory is still a valid alias
+                    # target; its contents stay excluded either way.
+                    if not is_link_or_reparse(directory):
+                        regular_directories.add(rel_path)
                     continue
                 # ``os.walk(..., followlinks=False)`` does not follow normal
                 # symlinks, but Windows directory junctions are separate
-                # reparse points and may still be traversed. Reject every
-                # retained redirect before allowing the walk to recurse.
+                # reparse points and may still be traversed. Never descend
+                # into a retained redirect: an unselected, contained alias
+                # such as ``.agents -> .claude`` is recorded for validation
+                # after the walk; every other redirect is rejected here.
                 if _is_link_or_reparse(directory, rel_path):
-                    raise SkillCollectionError(
-                        "unsafe_path",
-                        f"Refusing symbolic link or reparse point: {rel_path}",
-                        rel_path=rel_path,
-                        suggestion="Replace the link with a regular directory stored inside the skill directory.",
+                    target = (
+                        None
+                        if directory.suffix.lower() in CONTENT_DEDUP_SCANNABLE_EXTENSIONS
+                        else contained_directory_alias_target(directory, directory.relative_to(root))
                     )
+                    if target is None:
+                        raise SkillCollectionError(
+                            "unsafe_path",
+                            f"Refusing symbolic link or reparse point: {rel_path}",
+                            rel_path=rel_path,
+                            suggestion="Replace the link with a regular directory stored inside the skill directory.",
+                        )
+                    directory_aliases[directory] = (rel_path, target)
+                    yield directory
+                    continue
+                regular_directories.add(rel_path)
                 kept.append(name)
             dirnames[:] = kept
             for name in kept:
@@ -496,6 +558,17 @@ def _collect_files_anchored(
                 "limit": CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
             },
         )
+    for alias_rel_path, target in directory_aliases.values():
+        if target not in regular_directories:
+            raise SkillCollectionError(
+                "unsafe_path",
+                (
+                    "Refusing symbolic link or reparse point whose target is not a regular directory "
+                    f"in the skill: {alias_rel_path} -> {target}"
+                ),
+                rel_path=alias_rel_path,
+                suggestion="Point the link at a regular directory stored inside the skill directory.",
+            )
     discovered_paths.sort()
     discovered_names_by_parent: dict[Path, set[str]] = {}
     for discovered_path in discovered_paths:
@@ -516,6 +589,10 @@ def _collect_files_anchored(
         rel_path = relative.as_posix()
         if _is_excluded(rel_parts, excluded):
             logger.debug("Skipping excluded path: %s", rel_path)
+            continue
+
+        if file_path in directory_aliases:
+            logger.debug("Skipping directory alias in favor of regular target: %s", rel_path)
             continue
 
         if _is_link_or_reparse(file_path, rel_path):
@@ -627,7 +704,17 @@ def _collect_files_anchored(
         content = raw_text
         line_offset = 0
         if candidate.extension in {".md", ".mdc"}:
-            content, line_offset = _strip_valid_frontmatter(raw_text)
+            try:
+                content, line_offset = _strip_valid_frontmatter(raw_text)
+            except StructuredDataLimitError as e:
+                raise SkillCollectionError(
+                    "manifest_complexity_limit",
+                    f"Frontmatter structured-data complexity limit exceeded: {candidate.rel_path}",
+                    rel_path=candidate.rel_path,
+                    suggestion=(
+                        "Reduce frontmatter nesting, collection sizes, scalar lengths, integer sizes, or YAML aliases."
+                    ),
+                ) from e
 
         collected.append(
             CollectedFile(

@@ -19,7 +19,7 @@ a separate demo repository.
 ## Get a version you can run
 
 **These source templates contain placeholders.** Copy the
-[ready-to-use configurations](../bundles/0.7.1/README.md) instead; their reviewed
+[ready-to-use configurations](../bundles/0.8.0/README.md) instead; their reviewed
 workflow commits and container image digest are already filled in.
 
 Open a file in that folder and use GitHub's **Raw** view to copy its complete
@@ -60,3 +60,9 @@ Open a pull request or merge request that changes a skill to see the checks.
 Enable the platform's CI service, allow the referenced workflows or includes,
 and provide a compatible runner. The [platform guides](../../docs/repository-integration.mdx)
 cover results and merge-gating settings.
+
+## Advanced CI
+
+The unreleased, explicitly enabled all-tier integration has separate
+[setup and maintainer instructions](all-tiers/README.md). Released templates
+above provide quality and security checks without a model key.

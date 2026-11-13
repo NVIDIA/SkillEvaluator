@@ -522,6 +522,41 @@ def test_collapsed_equal_score_steps_remain_policy_ambiguous() -> None:
     assert _score_policy_for_rewards(logical, DEFAULT_METRICS) == (LEGACY_SCORE_POLICY, False)
 
 
+def test_logical_multistep_security_exemption_requires_every_step_to_be_exempt() -> None:
+    from skillevaluator.tier3.attempt_verdict import attempt_verdict
+
+    def rows(second_type: str) -> list[dict]:
+        result = []
+        for index, finding_type in enumerate(("unsupported_tool_wrapper", second_type), start=1):
+            reward = {
+                "entry_id": "case-001",
+                "_trial_root_name": "case-001__attempt1",
+                "_step_name": f"step-{index}",
+                "metric_set": DEFAULT_METRIC_SET,
+                **dict.fromkeys(DEFAULT_METRICS, 0.9),
+                "security": 0.0,
+                "goal_accuracy": 1.0,
+                "behavior_check": 1.0,
+                "details": {
+                    "security": {
+                        "findings": [{"type": finding_type, "score_impact": True, "message": f"step {index} finding"}]
+                    }
+                },
+            }
+            result.append(reward)
+        return result
+
+    [all_exempt] = _logical_attempt_rewards(rows("unsupported_tool_wrapper"))
+    [mixed] = _logical_attempt_rewards(rows("destructive_command"))
+    exempt_verdict = attempt_verdict(overall_score(all_exempt), 0.5, reward=all_exempt)
+    mixed_verdict = attempt_verdict(overall_score(mixed), 0.5, reward=mixed)
+
+    assert exempt_verdict.passed is True
+    assert exempt_verdict.security_exempt is True
+    assert mixed_verdict.passed is False
+    assert mixed_verdict.security_exempt is False
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -604,6 +639,14 @@ def test_lift_and_pass_at_k_share_the_canonical_default_score() -> None:
             "trial": "case-001__attempt1",
             "score": 0.49,
             "passed": False,
+            "goal_accuracy": 0.9,
+            "reason": "goal not met (goal accuracy 0.90)",
+            "warnings": ["missed expected behavior (behavior 0.90)"],
+            "security_clean": False,
+            "security_score": 0.3875,
+            "security_message": None,
+            "security_exempt": False,
+            "required_failure": "wrong_answer",
         }
     ]
 
@@ -696,6 +739,63 @@ def test_lift_leaves_out_multistep_cases_whose_steps_used_a_fallback_judge() -> 
 
     assert lift["accuracy"] == {"with_skill": 0.8, "without_skill": 0.4, "delta": 0.4, "direction": "up"}
     assert lift["judge_mixed_cases"] == {"accuracy": 1}
+
+
+def test_lift_leaves_out_goal_cases_scored_by_ragas_in_one_arm_only() -> None:
+    def goal_reward(case_id: str, score: float, method: str, step: int | None = None) -> dict:
+        reward = {
+            "entry_id": case_id,
+            "_trial_name": f"{case_id}__attempt1",
+            "metric_set": DEFAULT_METRIC_SET,
+            **dict.fromkeys(DEFAULT_METRICS, 0.5),
+            "goal_accuracy": score,
+            "details": {"goal_accuracy": {"score": score, "method": method, "judge_model_used": "gpt-4.1"}},
+        }
+        if step is not None:
+            reward |= {"_trial_root_name": f"{case_id}__attempt1", "_step_name": f"step-{step}"}
+        return reward
+
+    with_scores = dict.fromkeys(DEFAULT_METRICS, 0.5) | {"goal_accuracy": 0.9}
+    without_scores = dict.fromkeys(DEFAULT_METRICS, 0.5) | {"goal_accuracy": 0.2}
+    expected = {"with_skill": 0.8, "without_skill": 0.4, "delta": 0.4, "direction": "up"}
+
+    # The same model scored both arms, but RAGAS fell back to the prompt judge in one of them.
+    with_rewards = [goal_reward("case-1", 1.0, "ragas"), goal_reward("case-2", 0.8, "ragas")]
+    without_rewards = [goal_reward("case-1", 0.0, "custom"), goal_reward("case-2", 0.4, "ragas")]
+    lift = _compute_lift(with_scores, without_scores, with_rewards, without_rewards, ["case-1", "case-2"])
+    assert lift["goal_accuracy"] == expected
+    assert lift["judge_mixed_cases"] == {"goal_accuracy": 1}
+
+    # Two prompt-judged arms with the same model still pair.
+    same = _compute_lift(
+        with_scores,
+        without_scores,
+        [goal_reward("case-1", 0.8, "custom")],
+        [goal_reward("case-1", 0.4, "custom")],
+        ["case-1"],
+    )
+    assert "judge_mixed_cases" not in same
+
+    # A multi-step attempt whose steps used different scorers is left out too.
+    multistep_with = _logical_attempt_rewards(
+        [
+            goal_reward("case-1", 1.0, "ragas", step=1),
+            goal_reward("case-1", 1.0, "custom", step=2),
+            goal_reward("case-2", 0.8, "ragas", step=1),
+            goal_reward("case-2", 0.8, "ragas", step=2),
+        ]
+    )
+    multistep_without = _logical_attempt_rewards(
+        [
+            goal_reward("case-1", 0.0, "ragas", step=1),
+            goal_reward("case-1", 0.0, "ragas", step=2),
+            goal_reward("case-2", 0.4, "ragas", step=1),
+            goal_reward("case-2", 0.4, "ragas", step=2),
+        ]
+    )
+    lift = _compute_lift(with_scores, without_scores, multistep_with, multistep_without, ["case-1", "case-2"])
+    assert lift["goal_accuracy"] == expected
+    assert lift["judge_mixed_cases"] == {"goal_accuracy": 1}
 
 
 def test_pass_summary_marks_incomplete_reward_unscored() -> None:
@@ -818,6 +918,62 @@ def test_large_failure_sets_publish_bounded_samples_with_exact_counts(failure_ki
         for error in summary["execution_errors"]
     )
     assert len(encoded) < collector_module.GENERATED_JSON_MAX_BYTES
+
+
+def test_condition_summary_counts_judge_failures_beyond_bounded_detail_sample() -> None:
+    sample_limit = collector_module.PUBLISHED_FAILURE_DETAILS_MAX
+    failures = [{"trial": f"trial-{index:05d}", "reason": "execution failure"} for index in range(sample_limit + 4)]
+    for failure in failures[sample_limit:]:
+        failure["reason"] = "Required judge evaluation failed: accuracy"
+
+    summary = _condition_execution_summary(
+        [],
+        expected_case_ids=[],
+        expected_cases=sample_limit + 4,
+        n_attempts=1,
+        job_failure="",
+        reward_failures=failures,
+    )
+
+    assert summary["judge_failures"] == 4
+    assert summary["reward_failure_details_total"] == sample_limit + 4
+    assert summary["reward_failure_details_truncated"] is True
+
+
+def test_condition_summary_counts_step_judge_failures_once_per_logical_attempt() -> None:
+    step_names = ("first", "second", "third")
+    rewards = [
+        {
+            "_trial_root_name": f"case-002__attempt{attempt}",
+            "_trial_name": f"case-002__attempt{attempt}",
+            "entry_id": "case-002",
+            "overall": 0.5,
+        }
+        for attempt in (1, 2)
+    ]
+    failures = [
+        {
+            "_trial_root_name": "case-001__attempt1",
+            "trial": f"case-001__attempt1__step{step_name}",
+            "reason": "Required judge evaluation failed: accuracy",
+        }
+        for step_name in step_names
+    ]
+    failures.append({"trial": "case-001__attempt2", "reason": "HarborTrialError: attempt errored"})
+
+    summary = _condition_execution_summary(
+        rewards,
+        expected_case_ids=["case-001", "case-002"],
+        expected_cases=2,
+        n_attempts=2,
+        job_failure="",
+        reward_failures=failures,
+    )
+
+    assert summary["expected_attempts"] == 4
+    assert summary["scored_attempts"] == 2
+    assert summary["judge_failures"] == 1
+    assert all(set(failure) == {"trial", "reason"} for failure in collector_module._public_failure_list(failures))
 
 
 @pytest.mark.parametrize(

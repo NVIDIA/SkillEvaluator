@@ -3,7 +3,7 @@
 
 """Validation policy / profile system.
 
-Implements audience-aware policy for SkillEvaluator validators. A
+Implements configurable policy for SkillEvaluator validators. A
 :class:`ValidationPolicy` carries the severity overrides and identity
 constraints (e.g. acceptable author email domains) that a validator should
 apply for a given repository or organization.
@@ -39,7 +39,7 @@ logger = get_logger(__name__)
 
 PROFILES_DIR = Path(__file__).parent.parent / "config" / "profiles"
 
-DEFAULT_PROFILE_NAME = "external"
+DEFAULT_PROFILE_NAME = "default"
 
 #: Environment variable that selects the default profile when no CLI flag is set.
 PROFILE_ENV_VAR = "SKILLEVALUATOR_PROFILE"
@@ -50,7 +50,7 @@ _AUTHOR_SHAPE_PATTERN = re.compile(r"\S[^<>\n]* <[^<>@\s]+@[^<>\s]+>")
 
 @dataclass(frozen=True)
 class ValidationPolicy:
-    """Audience-aware policy bundle consumed by validators.
+    """Validation policy bundle consumed by validators.
 
     Attributes:
         profile: Human-readable profile name or a custom name supplied by a
@@ -66,7 +66,7 @@ class ValidationPolicy:
     """
 
     profile: str = DEFAULT_PROFILE_NAME
-    audience: str = "external"
+    audience: str = "all"
     author_email_regex: re.Pattern[str] | None = None
     severity_overrides: dict[str, Severity] = field(default_factory=dict)
     source: Path | None = None
@@ -222,7 +222,7 @@ def _policy_from_data(
 
     return ValidationPolicy(
         profile=profile_name,
-        audience="external",
+        audience="all",
         author_email_regex=author_email_regex,
         severity_overrides=severity_overrides,
         source=source,
@@ -230,12 +230,14 @@ def _policy_from_data(
 
 
 def load_profile(name: str = DEFAULT_PROFILE_NAME) -> ValidationPolicy:
-    """Load a bundled profile by name.
+    """Load a bundled policy; ``external`` is a compatibility alias for ``default``.
 
     Raises:
         FileNotFoundError: when no YAML exists for the requested profile.
         ValueError: when the YAML is malformed.
     """
+    if name == "external":
+        name = DEFAULT_PROFILE_NAME
     path = PROFILES_DIR / f"{name}.yaml"
     if not path.exists():
         available = sorted(p.stem for p in PROFILES_DIR.glob("*.yaml")) if PROFILES_DIR.exists() else []
@@ -284,11 +286,11 @@ def load_policy_file(
 
 
 def default_policy() -> ValidationPolicy:
-    """Return the default public policy."""
+    """Return the default policy for both public and private repositories."""
     try:
         return load_profile(DEFAULT_PROFILE_NAME)
     except FileNotFoundError:
-        logger.warning("Default profile YAML not found; falling back to an in-memory public policy.")
+        logger.warning("Default profile YAML not found; falling back to an in-memory default policy.")
         return ValidationPolicy(
             profile=DEFAULT_PROFILE_NAME,
             author_email_regex=None,
@@ -312,7 +314,7 @@ def resolve_policy(
     1. ``policy_path`` overlaid on top of ``profile`` (or the default profile)
     2. ``profile`` named profile
     3. ``SKILLEVALUATOR_PROFILE`` env var
-    4. Default public profile
+    4. Default policy for all repositories
     """
     base = profile or os.environ.get(PROFILE_ENV_VAR) or DEFAULT_PROFILE_NAME
     if policy_path is not None:
@@ -342,17 +344,23 @@ def apply_policy(
     if policy is None:
         return results
     for result in results:
-        changed = False
+        independent_warnings: list[str] | None = None
         for finding in result.findings:
             current = (
                 finding.severity if isinstance(finding.severity, Severity) else Severity(str(finding.severity).lower())
             )
             new_severity = policy.severity_for(finding.category, finding.check_name, current)
             if new_severity != current:
+                if independent_warnings is None:
+                    # Read before any change: a mirrored line names the old severity.
+                    independent_warnings = result.independent_warnings()
                 finding.severity = new_severity
-                changed = True
-        if changed:
+        if independent_warnings is not None:
             result.recalculate_from_findings()
+            # Rebuilding from findings drops every warning. Keep those no
+            # finding mirrors, such as why a scanner did not complete.
+            for warning in independent_warnings:
+                result.add_warning(warning)
         if isinstance(result.metadata, dict):
             result.metadata["policy"] = policy.to_dict()
     return results

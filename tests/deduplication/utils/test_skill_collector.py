@@ -9,6 +9,7 @@ import logging
 import os
 import stat
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -22,6 +23,15 @@ from skillevaluator.deduplication.utils.skill_collector import (
     SkillCollectionError,
     collect_files,
 )
+
+
+@pytest.fixture
+def default_int_digit_limit():
+    """Pin Python's default 4,300-digit limit for converting text to an int."""
+    previous = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4_300)
+    yield
+    sys.set_int_max_str_digits(previous)
 
 
 class TestCollectedFile:
@@ -133,6 +143,104 @@ class TestCollectFiles:
         assert len(result) == 1
         assert result[0].extension == ".mdc"
 
+    @pytest.mark.usefixtures("default_int_digit_limit")
+    @pytest.mark.parametrize(
+        "frontmatter",
+        [
+            pytest.param(
+                "\n".join(
+                    ["m0: &m0 {" + ", ".join(f"k{index}: {index}" for index in range(10)) + "}"]
+                    + [f"m{level}: &m{level} {{<<: [{', '.join([f'*m{level - 1}'] * 10)}]}}" for level in range(1, 5)]
+                ),
+                id="merge-key-chain",
+            ),
+            pytest.param(
+                "\n".join(
+                    ["a0: &a0 safe"]
+                    + [f"a{level}: &a{level} [*a{level - 1}, *a{level - 1}]" for level in range(1, 19)]
+                    + ["description: *a18"]
+                ),
+                id="alias-dag",
+            ),
+            pytest.param("extra: " + "[" * 1_500 + "safe" + "]" * 1_500, id="deep-nesting"),
+            pytest.param("description: " + "x" * 65_537, id="long-scalar"),
+            pytest.param("tags:\n" + "\n".join(f"  - tag{index}" for index in range(1_100)), id="long-list"),
+            # 3,600 hex digits are 14,400 bits, over the 14,000-bit integer limit.
+            pytest.param("version: 0x" + "f" * 3_600, id="big-integer"),
+            # 4,250 decimal digits are about 14,118 bits, within Python's 4,300-digit limit.
+            pytest.param("version: " + "9" * 4_250, id="big-decimal-integer"),
+        ],
+    )
+    def test_frontmatter_complexity_limit_fails_closed(self, skill_root: Path, frontmatter: str) -> None:
+        references = skill_root / "references"
+        references.mkdir()
+        (references / "guide.md").write_text(f"---\nname: guide\n{frontmatter}\n---\n# Guide\n", encoding="utf-8")
+
+        with pytest.raises(SkillCollectionError, match=r"complexity limit exceeded: references/guide\.md") as exc:
+            collect_files(skill_root)
+
+        assert exc.value.check_name == "manifest_complexity_limit"
+        assert exc.value.rel_path == "references/guide.md"
+        assert "YAML aliases" in exc.value.suggestion
+
+    @pytest.mark.usefixtures("default_int_digit_limit")
+    @pytest.mark.parametrize(
+        "line",
+        [
+            pytest.param('version: !!int ""', id="tagged-int"),
+            pytest.param("version: !!bool nope", id="tagged-bool"),
+            pytest.param("version: !!float x", id="tagged-float"),
+            pytest.param("last_updated: 2024-02-30", id="impossible-date"),
+            # int() rejects more than 4,300 decimal digits before the bit limit applies.
+            pytest.param("version: " + "9" * 5_000, id="decimal-over-digit-limit"),
+        ],
+    )
+    def test_unconstructible_value_keeps_frontmatter_in_the_analyzed_text(self, skill_root: Path, line: str) -> None:
+        text = f"---\nname: tagged\n{line}\n---\n# Body\nContent."
+        # Bytes keep the LF line endings on every platform, so the exact text compares.
+        (skill_root / "SKILL.md").write_bytes(text.encode("utf-8"))
+
+        result = collect_files(skill_root)
+
+        assert result[0].content == text
+        assert result[0].line_offset == 0
+
+    @pytest.mark.parametrize(
+        "block",
+        [
+            pytest.param("\n".join(f"- item {index}" for index in range(1_100)), id="thematic-break-list"),
+            pytest.param("A line of prose that holds no key or colon.\n" * 1_600, id="thematic-break-prose"),
+            pytest.param(
+                "\n".join(
+                    ["- &m0 {" + ", ".join(f"k{index}: {index}" for index in range(10)) + "}"]
+                    + [f"- &m{level} {{<<: [{', '.join([f'*m{level - 1}'] * 10)}]}}" for level in range(1, 5)]
+                ),
+                id="sequence-merge-chain",
+            ),
+            pytest.param("!!set\n" + "\n".join(f"? item{index}" for index in range(1_100)), id="set-root"),
+        ],
+    )
+    def test_block_that_is_not_a_mapping_stays_in_the_analyzed_text(self, skill_root: Path, block: str) -> None:
+        # Each block is over a structure limit if parsed as YAML, but text that
+        # is not a mapping is not frontmatter, so it is never built.
+        references = skill_root / "references"
+        references.mkdir()
+        text = f"---\n{block}\n---\n# Guide\nContent."
+        (references / "guide.md").write_bytes(text.encode("utf-8"))
+
+        result = {item.rel_path: item for item in collect_files(skill_root)}
+
+        assert result["references/guide.md"].content == text
+        assert result["references/guide.md"].line_offset == 0
+
+    def test_repeated_frontmatter_key_is_still_stripped(self, skill_root: Path) -> None:
+        (skill_root / "SKILL.md").write_bytes(b"---\nname: first\nname: second\n---\n# Body\nContent.")
+
+        result = collect_files(skill_root)
+
+        assert result[0].content == "# Body\nContent."
+        assert result[0].line_offset == 4
+
     def test_openclaw_compatibility_alias_is_skipped_and_regular_target_is_collected_once(
         self,
         skill_root: Path,
@@ -226,6 +334,97 @@ class TestCollectFiles:
 
         assert exc_info.value.check_name == "unsafe_path"
         assert exc_info.value.rel_path == "CLAUDE.md"
+
+    def test_contained_agent_directory_alias_is_skipped_and_target_is_collected_once(
+        self,
+        skill_root: Path,
+    ) -> None:
+        canonical = skill_root / ".claude"
+        canonical.mkdir()
+        (canonical / "shared.md").write_text("# Shared agent instructions\n")
+        try:
+            (skill_root / ".agents").symlink_to(canonical.name, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        result = collect_files(skill_root)
+
+        assert [item.rel_path for item in result] == [".claude/shared.md"]
+
+    def test_directory_alias_counts_toward_path_budget(self, skill_root: Path, monkeypatch) -> None:
+        canonical = skill_root / ".claude"
+        canonical.mkdir()
+        (canonical / "shared.md").write_text("# Shared agent instructions\n")
+        try:
+            (skill_root / ".agents").symlink_to(canonical.name, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+        monkeypatch.setattr(skill_collector, "CONTENT_DEDUP_MAX_DISCOVERED_PATHS", 2)
+
+        with pytest.raises(SkillCollectionError) as exc_info:
+            collect_files(skill_root)
+
+        assert exc_info.value.check_name == "path_count_limit"
+        assert exc_info.value.metadata == {"actual": 3, "limit": 2}
+
+    def test_directory_alias_to_pruned_regular_directory_is_skipped(self, skill_root: Path) -> None:
+        (skill_root / "SKILL.md").write_text("# Skill\n")
+        (skill_root / "evals").mkdir()
+        (skill_root / "evals" / "snapshot.md").write_text("# Generated snapshot\n")
+        try:
+            (skill_root / "latest-evals").symlink_to("evals", target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        result = collect_files(skill_root)
+
+        assert [item.rel_path for item in result] == ["SKILL.md"]
+
+    def test_rejects_directory_alias_chain(self, skill_root: Path) -> None:
+        canonical = skill_root / ".canonical"
+        canonical.mkdir()
+        (canonical / "shared.md").write_text("# Shared agent instructions\n")
+        try:
+            (skill_root / ".claude").symlink_to(canonical.name, target_is_directory=True)
+            (skill_root / ".agents").symlink_to(".claude", target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        with pytest.raises(SkillCollectionError) as exc_info:
+            collect_files(skill_root)
+
+        assert exc_info.value.check_name == "unsafe_path"
+        assert exc_info.value.rel_path == ".agents"
+        assert ".agents -> .claude" in str(exc_info.value)
+
+    @pytest.mark.parametrize("alias_name", ["guide.md", "helper.PY"])
+    def test_rejects_directory_alias_with_scannable_name(self, skill_root: Path, alias_name: str) -> None:
+        canonical = skill_root / "canonical"
+        canonical.mkdir()
+        try:
+            (skill_root / alias_name).symlink_to(canonical.name, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        with pytest.raises(SkillCollectionError) as exc_info:
+            collect_files(skill_root)
+
+        assert exc_info.value.check_name == "unsafe_path"
+        assert exc_info.value.rel_path == alias_name
+
+    @pytest.mark.parametrize("target", ["missing", ".", "..", "../outside"])
+    def test_rejects_directory_alias_without_contained_regular_target(self, skill_root: Path, target: str) -> None:
+        (skill_root.parent / "outside").mkdir()
+        try:
+            (skill_root / ".agents").symlink_to(target, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        with pytest.raises(SkillCollectionError) as exc_info:
+            collect_files(skill_root)
+
+        assert exc_info.value.check_name == "unsafe_path"
+        assert exc_info.value.rel_path == ".agents"
 
 
 class TestCollectFilesSafety:

@@ -17,12 +17,15 @@ Writes:
   /logs/verifier/reward.txt        -- overall score (0.0-1.0)
 
 LLM judges use the configured public provider environment variables.
-RAGAS is used for goal_accuracy and accuracy when available.
+RAGAS is used for goal_accuracy when available. Judges return verdicts only and
+the scores are computed here; every judge attempt is saved, redacted, to
+/logs/verifier/judge_attempts.json.
 """
 
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import ipaddress
@@ -109,6 +112,26 @@ if _CHECKS_PATH.is_file():
 else:  # Source-tree template: the canonical module lives in the package.
     from skillevaluator.tier3.eval_core import checks as _shared_checks
 
+_DECLARATIVE_CHECKS_PATH = _SCRIPT_TESTS_DIR / "declarative_checks.py"
+if _DECLARATIVE_CHECKS_PATH.is_file():
+    _declarative_spec = importlib.util.spec_from_file_location(
+        "_skillevaluator_shared_declarative_checks", _DECLARATIVE_CHECKS_PATH
+    )
+    assert _declarative_spec and _declarative_spec.loader
+    _shared_declarative_checks = importlib.util.module_from_spec(_declarative_spec)
+    _had_checks_module = "checks" in sys.modules
+    _previous_checks_module = sys.modules.get("checks")
+    sys.modules["checks"] = _shared_checks
+    try:
+        _declarative_spec.loader.exec_module(_shared_declarative_checks)
+    finally:
+        if _had_checks_module:
+            sys.modules["checks"] = _previous_checks_module
+        else:
+            sys.modules.pop("checks", None)
+else:
+    from skillevaluator.tier3.eval_core import declarative_checks as _shared_declarative_checks
+
 AMBIGUOUS_OUTER_EXEC_OBSERVATION = _shared_checks.AMBIGUOUS_OUTER_EXEC_OBSERVATION
 UNOBSERVED_INNER_CALL = _shared_checks.UNOBSERVED_INNER_CALL
 UNSUPPORTED_NATIVE_CODEX_EXEC = _shared_checks.UNSUPPORTED_NATIVE_CODEX_EXEC
@@ -121,7 +144,12 @@ _apply_arithmetic_assignments = _shared_checks._apply_arithmetic_assignments
 _apply_binding_builtin = _shared_checks._apply_binding_builtin
 _apply_eval_bindings = _shared_checks._apply_eval_bindings
 _apply_patch_call = _shared_checks._apply_patch_call
+_apply_patch_bodies_are_data = _shared_checks._apply_patch_bodies_are_data
 _apply_patch_command_evidence = _shared_checks._apply_patch_command_evidence
+_apply_patch_heredoc_pieces = _shared_checks._apply_patch_heredoc_pieces
+_apply_patch_heredoc_text = _shared_checks._apply_patch_heredoc_text
+_apply_patch_path_text = _shared_checks._apply_patch_path_text
+_apply_patch_prefix_is_unsettled = _shared_checks._apply_patch_prefix_is_unsettled
 _apply_patch_protected_entry = _shared_checks._apply_patch_protected_entry
 _apply_set_options = _shared_checks._apply_set_options
 _arithmetic_close = _shared_checks._arithmetic_close
@@ -168,6 +196,7 @@ _is_httpie_body_item = _shared_checks._is_httpie_body_item
 _is_network_exfiltration_command = _shared_checks._is_network_exfiltration_command
 _is_output_redirect = _shared_checks._is_output_redirect
 _is_redirection_operator = _shared_checks._is_redirection_operator
+_keeps_patch_header = _shared_checks._keeps_patch_header
 _keep_attached_descriptors = _shared_checks._keep_attached_descriptors
 _lexical_path_components = _shared_checks._lexical_path_components
 _looks_like_refusal = _shared_checks._looks_like_refusal
@@ -185,11 +214,14 @@ _network_lookup_readings = _shared_checks._network_lookup_readings
 _network_redirection = _shared_checks._network_redirection
 _network_shell_tokens = _shared_checks._network_shell_tokens
 _network_tokens_exfiltrate = _shared_checks._network_tokens_exfiltrate
+_normalize_sensitive_path_text = _shared_checks._normalize_sensitive_path_text
 _normalize_skill_names = _shared_checks._normalize_skill_names
 _normalized_write_path = _shared_checks._normalized_write_path
+_normpath_word = _shared_checks._normpath_word
 _number_may_fail = _shared_checks._number_may_fail
 _parse_unit_starts = _shared_checks._parse_unit_starts
 _pass_to_reference = _shared_checks._pass_to_reference
+_path_entry_in = _shared_checks._path_entry_in
 _path_with_shell_cwd = _shared_checks._path_with_shell_cwd
 _pipeline_last_stage_keeps_bindings = _shared_checks._pipeline_last_stage_keeps_bindings
 _pipeline_upstream_names_script = _shared_checks._pipeline_upstream_names_script
@@ -204,9 +236,11 @@ _redact_network_evidence = _shared_checks._redact_network_evidence
 _redirects_script_to_stdin = _shared_checks._redirects_script_to_stdin
 _references_exact_target_artifact = _shared_checks._references_exact_target_artifact
 _refuse_assignment = _shared_checks._refuse_assignment
+_relative_dotfile_entry = _shared_checks._relative_dotfile_entry
 _resolve_lookups = _shared_checks._resolve_lookups
 _resolve_network_client_lookups = _shared_checks._resolve_network_client_lookups
 _resolved_shell_arg = _shared_checks._resolved_shell_arg
+_resolved_workdir = _shared_checks._resolved_workdir
 _rm_brace_sequence = _shared_checks._rm_brace_sequence
 _rm_brace_words = _shared_checks._rm_brace_words
 _rm_call_workdirs = _shared_checks._rm_call_workdirs
@@ -241,11 +275,15 @@ _script_path_matches = _shared_checks._script_path_matches
 _search_path_is_root = _shared_checks._search_path_is_root
 _secret_exposure_finding = _shared_checks._secret_exposure_finding
 _security_finding = _shared_checks._security_finding
+_sensitive_path_match = _shared_checks._sensitive_path_match
+_sensitive_write_target = _shared_checks._sensitive_write_target
 _shell_c_payload = _shared_checks._shell_c_payload
 _shell_c_positional = _shared_checks._shell_c_positional
 _shell_executable = _shared_checks._shell_executable
 _shell_substitution_payloads = _shared_checks._shell_substitution_payloads
 _shell_tokens = _shared_checks._shell_tokens
+_shell_write_targets = _shared_checks._shell_write_targets
+_shell_write_texts = _shared_checks._shell_write_texts
 _skill_match_details = _shared_checks._skill_match_details
 _skill_md_arg = _shared_checks._skill_md_arg
 _skill_name_from_ref = _shared_checks._skill_name_from_ref
@@ -264,25 +302,41 @@ _unit_is_complete = _shared_checks._unit_is_complete
 _unquoted_separator_index = _shared_checks._unquoted_separator_index
 _unresolved_value = _shared_checks._unresolved_value
 _unsettle_every_binding = _shared_checks._unsettle_every_binding
+_unsettled_cd_operand = _shared_checks._unsettled_cd_operand
 _unsupported_native_codex_result = _shared_checks._unsupported_native_codex_result
 _unwrap_shell_command = _shared_checks._unwrap_shell_command
 _value_now = _shared_checks._value_now
 _walk_for_invocation = _shared_checks._walk_for_invocation
+_without_plain_patch_headers = _shared_checks._without_plain_patch_headers
 _without_redirections = _shared_checks._without_redirections
 check_error_recovery = _shared_checks.check_error_recovery
 check_script_execution = _shared_checks.check_script_execution
+normalize_optional_reference = _shared_checks.normalize_optional_reference
+normalize_expected_behaviors = _shared_checks.normalize_expected_behaviors
 resolve_should_trigger = _shared_checks.resolve_should_trigger
 score_skill_execution = _shared_checks.score_skill_execution
+skill_efficiency_not_applicable_reason = _shared_checks.skill_efficiency_not_applicable_reason
+skill_execution_not_applicable_reason = _shared_checks.skill_execution_not_applicable_reason
 
-# All 148 constant initializers are AST-identical at the fixed base.
+# All 148 constant initializers are AST-identical at the fixed base; shared
+# constants added since are aliased here too.
 ACCEPTABLE_ALTERNATE_SCORE = _shared_checks.ACCEPTABLE_ALTERNATE_SCORE
 WASTE_INDICATORS = _shared_checks.WASTE_INDICATORS
 _ALLEXPORT_MARK = _shared_checks._ALLEXPORT_MARK
 _APPLY_PATCH_BODY_RE = _shared_checks._APPLY_PATCH_BODY_RE
 _APPLY_PATCH_CD_RE = _shared_checks._APPLY_PATCH_CD_RE
+_APPLY_PATCH_CDPATH_RE = _shared_checks._APPLY_PATCH_CDPATH_RE
 _APPLY_PATCH_COMMAND_RE = _shared_checks._APPLY_PATCH_COMMAND_RE
 _APPLY_PATCH_DEFAULT_WORKDIR = _shared_checks._APPLY_PATCH_DEFAULT_WORKDIR
 _APPLY_PATCH_HEADER_RE = _shared_checks._APPLY_PATCH_HEADER_RE
+_APPLY_PATCH_HEREDOC_COMMAND_RE = _shared_checks._APPLY_PATCH_HEREDOC_COMMAND_RE
+_APPLY_PATCH_HEREDOC_WORD_RE = _shared_checks._APPLY_PATCH_HEREDOC_WORD_RE
+_APPLY_PATCH_OUTPUT_USE_RE = _shared_checks._APPLY_PATCH_OUTPUT_USE_RE
+_APPLY_PATCH_QUOTED_RE = _shared_checks._APPLY_PATCH_QUOTED_RE
+_APPLY_PATCH_SHELL_PATH_RE = _shared_checks._APPLY_PATCH_SHELL_PATH_RE
+_APPLY_PATCH_UNMODELLED_SHELL_RE = _shared_checks._APPLY_PATCH_UNMODELLED_SHELL_RE
+_APPLY_PATCH_UNSETTLED_DIR_RE = _shared_checks._APPLY_PATCH_UNSETTLED_DIR_RE
+_APPLY_PATCH_UNSETTLED_PREFIX_RE = _shared_checks._APPLY_PATCH_UNSETTLED_PREFIX_RE
 _ARITHMETIC_ASSIGNMENT_RE = _shared_checks._ARITHMETIC_ASSIGNMENT_RE
 _ARITHMETIC_EXPANSION_RE = _shared_checks._ARITHMETIC_EXPANSION_RE
 _ASSIGNMENT_MASK = _shared_checks._ASSIGNMENT_MASK
@@ -318,6 +372,7 @@ _DYNAMIC_ARGUMENT_RE = _shared_checks._DYNAMIC_ARGUMENT_RE
 _EMPTY_REFERENCE_SHELLS = _shared_checks._EMPTY_REFERENCE_SHELLS
 _EXECUTION_TOOL_HINTS = _shared_checks._EXECUTION_TOOL_HINTS
 _EXPORTED_MARK = _shared_checks._EXPORTED_MARK
+_FD_REDIRECT_TARGET_RE = _shared_checks._FD_REDIRECT_TARGET_RE
 _FILE_READ_VERBS = _shared_checks._FILE_READ_VERBS
 _FUNCTION_HEADER_NAME_RE = _shared_checks._FUNCTION_HEADER_NAME_RE
 _GLUED_AKIA_BODY = _shared_checks._GLUED_AKIA_BODY
@@ -327,7 +382,10 @@ _GLUED_KEYWORD_RE = _shared_checks._GLUED_KEYWORD_RE
 _GROUPING_TOKENS = _shared_checks._GROUPING_TOKENS
 _HEREDOC_DELIMITER_RE = _shared_checks._HEREDOC_DELIMITER_RE
 _HEREDOC_REDIRECTS = _shared_checks._HEREDOC_REDIRECTS
+_HOME_ANCHOR_RE = _shared_checks._HOME_ANCHOR_RE
+_HOME_CREDENTIAL_PATHS = _shared_checks._HOME_CREDENTIAL_PATHS
 _HOME_DIR_PREFIX_RE = _shared_checks._HOME_DIR_PREFIX_RE
+_HOME_SENSITIVE_WRITE_PATHS = _shared_checks._HOME_SENSITIVE_WRITE_PATHS
 _HOME_SHORTHAND_RE = _shared_checks._HOME_SHORTHAND_RE
 _HTTPIE_BODY_FLAGS = _shared_checks._HTTPIE_BODY_FLAGS
 _INERT_PRINT_COMMANDS = _shared_checks._INERT_PRINT_COMMANDS
@@ -341,6 +399,7 @@ _INTERPRETER_GRAMMARS = _shared_checks._INTERPRETER_GRAMMARS
 _JUSTIFYING_SHELLS = _shared_checks._JUSTIFYING_SHELLS
 _LAST_STAGE_IN_CURRENT_SHELL = _shared_checks._LAST_STAGE_IN_CURRENT_SHELL
 _LAST_STAGE_IN_SUBSHELL = _shared_checks._LAST_STAGE_IN_SUBSHELL
+_LINE_CONTINUATION_RE = _shared_checks._LINE_CONTINUATION_RE
 _LISTING_ACTS_ON_NAMES = _shared_checks._LISTING_ACTS_ON_NAMES
 _LITERAL_DOLLAR = _shared_checks._LITERAL_DOLLAR
 _LOOP_HEADER_WORDS = _shared_checks._LOOP_HEADER_WORDS
@@ -376,14 +435,20 @@ _OUTPUT_REDIRECTS = _shared_checks._OUTPUT_REDIRECTS
 _PARSES_WHOLE_TEXT_FIRST = _shared_checks._PARSES_WHOLE_TEXT_FIRST
 _PASS_THROUGH_WRAPPERS = _shared_checks._PASS_THROUGH_WRAPPERS
 _PATH_ARG_KEYS = _shared_checks._PATH_ARG_KEYS
+_PATH_COMPONENT_END = _shared_checks._PATH_COMPONENT_END
+_PATH_WORD_RE = _shared_checks._PATH_WORD_RE
 _PIPELINE_OPTION_RE = _shared_checks._PIPELINE_OPTION_RE
 _POSITIONAL_SET_RE = _shared_checks._POSITIONAL_SET_RE
 _PREFIX_EXPANDS_FIRST = _shared_checks._PREFIX_EXPANDS_FIRST
 _PREFIX_OUTLIVES_SPECIAL_BUILTIN = _shared_checks._PREFIX_OUTLIVES_SPECIAL_BUILTIN
+_PROC_CWD_ALIAS_RE = _shared_checks._PROC_CWD_ALIAS_RE
+_PROC_ROOT_ALIAS_RE = _shared_checks._PROC_ROOT_ALIAS_RE
 _PROMPT_INJECTION_PATTERNS = _shared_checks._PROMPT_INJECTION_PATTERNS
+_PROTECTED_WRITE_PATHS = _shared_checks._PROTECTED_WRITE_PATHS
 _PUNCTUATION_PIECE_RE = _shared_checks._PUNCTUATION_PIECE_RE
 _PUNCTUATION_RUN_RE = _shared_checks._PUNCTUATION_RUN_RE
 _QUOTED_NEWLINE = _shared_checks._QUOTED_NEWLINE
+_QUOTED_STRING_RE = _shared_checks._QUOTED_STRING_RE
 _QUOTED_SYNTAX_MARK = _shared_checks._QUOTED_SYNTAX_MARK
 _READONLY_ATTRIBUTES = _shared_checks._READONLY_ATTRIBUTES
 _READONLY_MARK = _shared_checks._READONLY_MARK
@@ -393,9 +458,11 @@ _READ_OPTIONS_WITH_ARG = _shared_checks._READ_OPTIONS_WITH_ARG
 _READ_TOOL_HINTS = _shared_checks._READ_TOOL_HINTS
 _REDIRECTION_OPERATOR_RE = _shared_checks._REDIRECTION_OPERATOR_RE
 _REDIRECTION_WORD_RE = _shared_checks._REDIRECTION_WORD_RE
+_REDIRECT_TARGET_RE = _shared_checks._REDIRECT_TARGET_RE
 _REFERENCE_MARK = _shared_checks._REFERENCE_MARK
 _REFERENCE_SHELLS = _shared_checks._REFERENCE_SHELLS
 _REFUSED_ASSIGNMENT_GOES_ON = _shared_checks._REFUSED_ASSIGNMENT_GOES_ON
+_RELATIVE_HEADER_ROOT = _shared_checks._RELATIVE_HEADER_ROOT
 _RM_CD_RE = _shared_checks._RM_CD_RE
 _RM_FIND_EXEC_ACTIONS = _shared_checks._RM_FIND_EXEC_ACTIONS
 _RM_FORCE_PROTECTED_ROOTS = _shared_checks._RM_FORCE_PROTECTED_ROOTS
@@ -409,6 +476,10 @@ _SCRIPT = _shared_checks._SCRIPT
 _SCRIPT_INTERPRETERS = _shared_checks._SCRIPT_INTERPRETERS
 _SECRET_PATTERNS = _shared_checks._SECRET_PATTERNS
 _SECRET_VAR_NAME_RE = _shared_checks._SECRET_VAR_NAME_RE
+_SED_IN_PLACE_FLAG_RE = _shared_checks._SED_IN_PLACE_FLAG_RE
+_SED_OPERANDS_RE = _shared_checks._SED_OPERANDS_RE
+_SED_SCRIPT_OPTION_RE = _shared_checks._SED_SCRIPT_OPTION_RE
+_SENSITIVE_PATH_DIRECTORIES = _shared_checks._SENSITIVE_PATH_DIRECTORIES
 _SENSITIVE_WRITE_PATHS = _shared_checks._SENSITIVE_WRITE_PATHS
 _SHELL_ASSIGNMENT_RE = _shared_checks._SHELL_ASSIGNMENT_RE
 _SHELL_COMMAND_INTERPRETERS = _shared_checks._SHELL_COMMAND_INTERPRETERS
@@ -417,6 +488,7 @@ _SHELL_METACHARS = _shared_checks._SHELL_METACHARS
 _SHELL_NAME_RE = _shared_checks._SHELL_NAME_RE
 _SHELL_SEPARATORS = _shared_checks._SHELL_SEPARATORS
 _SHELL_VARIABLE_RE = _shared_checks._SHELL_VARIABLE_RE
+_SHELL_WORD = _shared_checks._SHELL_WORD
 _SOURCING_COMMANDS = _shared_checks._SOURCING_COMMANDS
 _SPECIAL_BUILTINS = _shared_checks._SPECIAL_BUILTINS
 _SPECIAL_BUILTIN_ERROR_STOPS = _shared_checks._SPECIAL_BUILTIN_ERROR_STOPS
@@ -425,11 +497,13 @@ _STDIN_DEPENDENT_WRAPPERS = _shared_checks._STDIN_DEPENDENT_WRAPPERS
 _STDIN_TEXT_CONSUMERS = _shared_checks._STDIN_TEXT_CONSUMERS
 _SYNTAX_SHAPE_RE = _shared_checks._SYNTAX_SHAPE_RE
 _SYNTAX_WORDS = _shared_checks._SYNTAX_WORDS
+_TEE_OPERANDS_RE = _shared_checks._TEE_OPERANDS_RE
 _TRANSPARENT_COMMAND_PREFIXES = _shared_checks._TRANSPARENT_COMMAND_PREFIXES
 _UNAUTHORIZED_PATHS = _shared_checks._UNAUTHORIZED_PATHS
 _UNDECIDABLE = _shared_checks._UNDECIDABLE
 _UNIT_CLOSERS = _shared_checks._UNIT_CLOSERS
 _UNIT_NEWLINE = _shared_checks._UNIT_NEWLINE
+_UNKNOWN_CWD_ROOT = _shared_checks._UNKNOWN_CWD_ROOT
 _UNMODELLED_CONTROL_WORDS = _shared_checks._UNMODELLED_CONTROL_WORDS
 _UNRESOLVED_ARG_RE = _shared_checks._UNRESOLVED_ARG_RE
 _UNSAFE_HTTP_METHODS = _shared_checks._UNSAFE_HTTP_METHODS
@@ -439,6 +513,7 @@ _UNSET_REFERENCE_SHELLS = _shared_checks._UNSET_REFERENCE_SHELLS
 _VARIABLE_READING_BUILTINS = _shared_checks._VARIABLE_READING_BUILTINS
 _VERSION_SUFFIX_RE = _shared_checks._VERSION_SUFFIX_RE
 _WGET_DATA_FLAGS = _shared_checks._WGET_DATA_FLAGS
+_WINDOWS_DRIVE_PREFIX_RE = _shared_checks._WINDOWS_DRIVE_PREFIX_RE
 _WRAPPER_GRAMMARS = _shared_checks._WRAPPER_GRAMMARS
 _WRAPPER_NONE = _shared_checks._WRAPPER_NONE
 _WRAPPER_OK = _shared_checks._WRAPPER_OK
@@ -555,6 +630,13 @@ def _env_path(name, default):
     return Path(os.environ.get(name, str(default)))
 
 
+def _declarative_workspace_roots():
+    roots = [Path.cwd(), Path("/workspace"), Path("/workspace/output")]
+    if artifact_root := os.environ.get("HARBOR_ARTIFACTS_DIR"):
+        roots.append(Path(artifact_root))
+    return list(dict.fromkeys(roots))
+
+
 LOGS_DIR = _env_path("HARBOR_LOGS_DIR", "/logs")
 AGENT_LOGS_DIR = _env_path("HARBOR_AGENT_LOGS_DIR", LOGS_DIR / "agent")
 VERIFIER_DIR = _env_path("HARBOR_VERIFIER_DIR", LOGS_DIR / "verifier")
@@ -612,6 +694,9 @@ _CREDENTIAL_ENV_VARS = (
 
 
 DEFAULT_METRIC_SET = "skill-evaluator-default-v2"
+# Judges return verdicts and the verifier computes their scores. Rewards carry
+# this marker so scores from older judge prompts are not mistaken for these.
+JUDGE_CONTRACT = "skill-evaluator-judges-v2"
 DEFAULT_SCORE_POLICY = "skill-evaluator-dimension-mean-v1"
 DISPLAY_METRICS = [
     "security",
@@ -817,6 +902,192 @@ def _fallback_models(primary_model):
     return _dedupe_models([primary_model, *env_fallbacks])
 
 
+def _judge_policy(name, choices):
+    """Read one judge policy variable: unset or empty selects ``choices[0]``; another value raises."""
+    value = os.environ.get(name, "").strip().lower()
+    if not value:
+        return choices[0]
+    if value not in choices:
+        raise ValueError(f"{name} must be {' or '.join(choices)}")
+    return value
+
+
+def _judge_fallback_policy():
+    """Return LLM_JUDGE_FALLBACK_POLICY: ``append`` (default) or ``replace``.
+
+    The only fallback model this verifier adds on its own is the Claude Opus
+    4.8 refusal fallback for Claude 5.5 or later judges (server-side on the
+    native Claude API, a second request on Bedrock). ``replace`` turns it off,
+    so only the primary judge and the LLM_JUDGE_FALLBACK_MODELS entries answer.
+    """
+    return _judge_policy("LLM_JUDGE_FALLBACK_POLICY", ("append", "replace"))
+
+
+def _judge_retry_policy():
+    """Return LLM_JUDGE_RETRY_POLICY: ``legacy`` (default) or ``strict`` (see _call_strict_judge)."""
+    return _judge_policy("LLM_JUDGE_RETRY_POLICY", ("legacy", "strict"))
+
+
+def _judge_policies_valid():
+    """Return whether LLM_JUDGE_FALLBACK_POLICY and LLM_JUDGE_RETRY_POLICY both hold a known value."""
+    try:
+        _judge_fallback_policy()
+        _judge_retry_policy()
+    except ValueError:
+        return False
+    return True
+
+
+def _strict_judge_replies():
+    """Return whether a completed judge reply must be one whole JSON object and is final.
+
+    True under LLM_JUDGE_RETRY_POLICY=strict. An invalid policy value also
+    counts as strict here; the provider call rejects it before sending anything.
+    """
+    try:
+        return _judge_retry_policy() == "strict"
+    except ValueError:
+        return True
+
+
+def _builtin_refusal_fallback_allowed():
+    """Return whether the built-in Claude Opus 4.8 refusal fallback may answer a refused judge.
+
+    It is off under LLM_JUDGE_FALLBACK_POLICY=replace, and under
+    LLM_JUDGE_RETRY_POLICY=strict, where a refusal ends the judge.
+    """
+    try:
+        return _judge_fallback_policy() == "append" and _judge_retry_policy() == "legacy"
+    except ValueError:
+        return False
+
+
+# LLM_JUDGE_RETRY_POLICY=strict tries at most this many models, the primary
+# first, and sends each at most this many requests. All of them share the
+# judge's wall-time budget (_ACTIVE_JUDGE_DEADLINE).
+_STRICT_JUDGE_MAX_MODELS = 3
+_STRICT_JUDGE_REQUESTS_PER_MODEL = 2
+# Requests left for the model the strict policy is trying; None outside it.
+_STRICT_JUDGE_REQUESTS_LEFT: ContextVar[list[int] | None] = ContextVar("strict_judge_requests_left", default=None)
+# Under the strict policy, a provider error that says one of these is not
+# retried or handed to another model, even when it is an HTTP 429: another
+# model cannot lift a quota, budget, billing or credit limit, and must not be
+# asked to overturn a content-filter, safety or security rejection. Whole
+# phrases only, joined by a space or underscore, so a model id or host name
+# such as ``content-safety-judge`` or ``security-proxy`` is not a reason.
+_STRICT_JUDGE_STOP_PATTERN = re.compile(
+    r"\b(?:"
+    r"insufficient[ _]quota|quota[ _]exceeded|exceeded (?:your|the) (?:current )?quota"
+    r"|budget(?: has been)?[ _](?:exceeded|exhausted)|exceeded (?:your|the) (?:\w+ )?budget"
+    r"|billing[ _](?:hard[ _]limit|not[ _]active)"
+    r"|credit balance|insufficient[ _]credits?|out of credits"
+    r"|content[ _](?:filter|policy|management policy)"
+    r"|safety (?:system|filter|policy|block)"
+    r"|security (?:policy|filter|block|violation)"
+    r"|(?:blocked|flagged|rejected) by (?:the |a |an )?(?:\w+ )?(?:safety|security|content)"
+    r"|policy[ _](?:rejection|violation)"
+    r")\b",
+    re.IGNORECASE,
+)
+_STRICT_JUDGE_ERROR_BODY_CHARS = 500
+
+
+class _StrictJudgeRequestLimitError(RuntimeError):
+    """The strict policy's per-model request limit is used up."""
+
+
+def _spend_strict_judge_request():
+    """Count one request against the strict per-model limit; a no-op outside the strict policy."""
+    left = _STRICT_JUDGE_REQUESTS_LEFT.get()
+    if left is None:
+        return
+    if left[0] <= 0:
+        raise _StrictJudgeRequestLimitError(
+            f"strict judge policy allows {_STRICT_JUDGE_REQUESTS_PER_MODEL} requests per model"
+        )
+    left[0] -= 1
+
+
+def _provider_error_fields(body):
+    """Return the code, type and message of a JSON error body, or None when the body has none."""
+    if len(body) > _STRICT_JUDGE_ERROR_BODY_CHARS * 20:
+        return None
+    try:
+        parsed = json.loads(body)
+    except (RecursionError, ValueError):
+        return None
+    detail = parsed.get("error", parsed) if isinstance(parsed, dict) else None
+    if isinstance(detail, str):
+        return detail or None
+    if not isinstance(detail, dict):
+        return None
+    fields = [detail[key] for key in ("code", "type", "message", "detail") if isinstance(detail.get(key), str)]
+    return " ".join(fields) or None
+
+
+def _strict_judge_error_stops(error):
+    """Return whether a provider error is a quota, budget, billing, safety or security rejection.
+
+    Only what the provider said is read: the code, type and message of a JSON
+    error body, else the start of the body (the excerpt the error detail
+    shows, so a long proxy error page's footer cannot end the judge), or a
+    Bedrock error's code and message. A connection error has no provider
+    verdict, so the words in its reason, such as a proxy host name, never count.
+    """
+    if isinstance(error, urllib.error.HTTPError):
+        body = _http_error_body(error)
+        text = _provider_error_fields(body)
+        if text is None:
+            text = body[:_STRICT_JUDGE_ERROR_BODY_CHARS]
+    elif isinstance(error, (urllib.error.URLError, OSError)):
+        return False
+    else:
+        response = getattr(error, "response", None)
+        info = response.get("Error") if isinstance(response, dict) else None
+        if isinstance(info, dict):
+            text = f"{info.get('Code') or ''} {info.get('Message') or ''}"
+        else:
+            text = str(error)
+    return _STRICT_JUDGE_STOP_PATTERN.search(text) is not None
+
+
+# Besides the model errors every policy hands to LLM_JUDGE_FALLBACK_MODELS
+# (_should_try_fallback), the strict policy reads these as a model the
+# provider does not have or the key cannot use: OpenAI's model_not_found
+# ("The model `x` does not exist ..."), a Claude not_found_error about the
+# model, and Bedrock's access-denied, not-found and invalid-model errors.
+_STRICT_MODEL_UNAVAILABLE_PATTERN = re.compile(
+    r"\bmodel_not_found\b|\bnot_found_error model:|\bthe model\b.{0,200}?\bdoes not exist\b", re.IGNORECASE
+)
+_STRICT_BEDROCK_MODEL_UNAVAILABLE_CODES = frozenset({"AccessDeniedException", "ResourceNotFoundException"})
+
+
+def _strict_model_unavailable(error):
+    """Return whether a failed strict judge request says the model is missing or not open to the key."""
+    if isinstance(error, urllib.error.HTTPError):
+        body = _http_error_body(error)
+        text = _provider_error_fields(body)
+        if text is None:
+            text = body[:_STRICT_JUDGE_ERROR_BODY_CHARS]
+        return _STRICT_MODEL_UNAVAILABLE_PATTERN.search(text) is not None
+    response = getattr(error, "response", None)
+    info = response.get("Error") if isinstance(response, dict) else None
+    if not isinstance(info, dict):
+        return False
+    code = str(info.get("Code") or "")
+    return code in _STRICT_BEDROCK_MODEL_UNAVAILABLE_CODES or (
+        code == "ValidationException" and "model identifier" in str(info.get("Message") or "").lower()
+    )
+
+
+def _strict_judge_retry_allowed(error):
+    """Return whether the strict policy lets the transport retry *error* on the same model."""
+    left = _STRICT_JUDGE_REQUESTS_LEFT.get()
+    if left is None:
+        return True
+    return left[0] > 0 and not _strict_judge_error_stops(error)
+
+
 def _resolve_url(provider):
     if provider == "nv_build":
         url = os.environ.get("SKILL_EVAL_LLM_BASE_URL") or NVIDIA_BUILD_CHAT_URL
@@ -903,11 +1174,22 @@ def _sanitize_error_value(value, extra_secret_values=()):
     return sanitize(value)
 
 
-def _format_http_error_with_fallback(error):
+def _http_error_body(error):
+    """Return a failed response's body text, reading it only once."""
+    body = getattr(error, "_skill_evaluator_body", None)
+    if isinstance(body, str):
+        return body
     try:
         body = error.read().decode("utf-8", "replace").strip()
     except Exception:
         body = ""
+    with contextlib.suppress(Exception):
+        error._skill_evaluator_body = body
+    return body
+
+
+def _format_http_error_with_fallback(error):
+    body = _http_error_body(error)
     raw_detail = f"HTTP {error.code}: {error.reason}"
     safe_detail = raw_detail
     if body:
@@ -1365,6 +1647,7 @@ _DEFAULT_MAX_DELAY = 30.0
 _JUDGE_WALL_TIME_BUDGET_SEC = 180.0
 _ACTIVE_JUDGE_DEADLINE: ContextVar[float | None] = ContextVar("active_judge_deadline", default=None)
 _ACTIVE_JUDGE_CALLS: ContextVar[list[dict[str, Any]] | None] = ContextVar("active_judge_calls", default=None)
+_ACTIVE_JUDGE_EVIDENCE: ContextVar[list[dict[str, Any]] | None] = ContextVar("active_judge_evidence", default=None)
 
 
 class EvalRetryConfig(NamedTuple):
@@ -1489,6 +1772,7 @@ def _urlopen_with_retry(request, timeout=90):
     attempt = 0
     while True:
         request_timeout = _remaining_judge_timeout(timeout)
+        _spend_strict_judge_request()
         try:
             with urllib.request.urlopen(request, timeout=request_timeout) as response:  # nosec B310
                 return response.read()
@@ -1500,6 +1784,7 @@ def _urlopen_with_retry(request, timeout=90):
                 or (not is_http and not is_network)
                 or (is_http and not _is_retriable_http_status(error.code))
                 or _is_certificate_failure(error)
+                or not _strict_judge_retry_allowed(error)
             ):
                 raise
 
@@ -1646,7 +1931,11 @@ def _call_anthropic(prompt, model, max_tokens, temperature, response_schema=None
     effort = _effective_reasoning_effort("anthropic", model, JUDGE_REASONING_EFFORT)
     # Server-side fallback (beta, native Claude API only): a safety-classifier
     # refusal is retried on the fallback model within the same call.
-    server_side_fallback = _is_claude_5_5_or_later(model) and urlparse(target_url).hostname == "api.anthropic.com"
+    server_side_fallback = (
+        _is_claude_5_5_or_later(model)
+        and urlparse(target_url).hostname == "api.anthropic.com"
+        and _builtin_refusal_fallback_allowed()
+    )
 
     def _build_request(include_schema):
         payload = {
@@ -1683,10 +1972,18 @@ def _call_anthropic(prompt, model, max_tokens, temperature, response_schema=None
     if body.get("stop_reason") == "refusal":
         raise _JudgeRefusedError("judge model declined the request (stop_reason=refusal)")
     blocks = [block for block in body.get("content", []) if isinstance(block, dict)]
+    served_model = None
     for block in blocks:
         served = block.get("to") if block.get("type") == "fallback" else None
-        if provenance is not None and isinstance(served, dict) and isinstance(served.get("model"), str):
-            provenance["model"] = served["model"]
+        if isinstance(served, dict) and isinstance(served.get("model"), str) and served["model"]:
+            served_model = served["model"]
+    # A turn served by sticky routing, which sends repeats of a fallen-back
+    # request straight to the fallback model, carries no fallback block; the
+    # top-level model then names the model that wrote the reply.
+    if served_model is None and server_side_fallback and isinstance(body.get("model"), str) and body["model"]:
+        served_model = body["model"]
+    if provenance is not None and served_model is not None:
+        provenance["model"] = served_model
     content = "".join(str(block.get("text", "")) for block in blocks if block.get("type") == "text")
     return content.strip(), None
 
@@ -1802,6 +2099,7 @@ def _call_bedrock(prompt, model, max_tokens, temperature, timeout=90, provenance
                 endpoint = getattr(client, "_endpoint", None)
                 if endpoint is not None and hasattr(endpoint, "timeout"):
                     endpoint.timeout = request_timeout
+                _spend_strict_judge_request()
                 try:
                     return client.converse(
                         modelId=model_id,
@@ -1810,7 +2108,11 @@ def _call_bedrock(prompt, model, max_tokens, temperature, timeout=90, provenance
                     )
                 except Exception as error:
                     is_retriable, status_label, retry_after_str = _classify_bedrock_retry_error(error)
-                    if attempt >= retry_config.max_retries or not is_retriable:
+                    if (
+                        attempt >= retry_config.max_retries
+                        or not is_retriable
+                        or not _strict_judge_retry_allowed(error)
+                    ):
                         raise
 
                     sleep_duration = _compute_bounded_retry_delay(
@@ -1831,7 +2133,7 @@ def _call_bedrock(prompt, model, max_tokens, temperature, timeout=90, provenance
                     attempt += 1
 
         response = _converse(model)
-        fallback_model = _bedrock_refusal_fallback_model(model)
+        fallback_model = _bedrock_refusal_fallback_model(model) if _builtin_refusal_fallback_allowed() else None
         if response.get("stopReason") == "content_filtered" and fallback_model:
             # Bedrock has no server-side fallback, so retry a classifier refusal here.
             response = _converse(fallback_model)
@@ -1848,6 +2150,9 @@ def _call_bedrock(prompt, model, max_tokens, temperature, timeout=90, provenance
     except _JudgeRefusedError:
         raise
     except Exception as exc:
+        if _STRICT_JUDGE_REQUESTS_LEFT.get() is not None and _strict_judge_failure(exc, "bedrock")[1]:
+            # The strict policy lets the next candidate answer for an unavailable model.
+            raise
         return None, f"Bedrock request failed: {exc}"
 
 
@@ -1953,6 +2258,108 @@ def _record_judge_call(provenance, requested_model, sent_model):
         )
 
 
+def _call_judge_model(prompt, provider, model, max_tokens, temperature, response_schema, schema_name, provenance):
+    """Send one judge prompt to *model*; ``provenance["model"]`` becomes the model that answered."""
+    if provider == "anthropic":
+        return _call_anthropic(
+            prompt,
+            model,
+            max_tokens,
+            temperature,
+            response_schema=response_schema,
+            provenance=provenance,
+        )
+    if provider == "bedrock":
+        return _call_bedrock(prompt, model, max_tokens, temperature, provenance=provenance)
+    return _call_openai_compatible(
+        prompt,
+        provider,
+        model,
+        max_tokens,
+        temperature,
+        response_schema=response_schema,
+        schema_name=schema_name,
+    )
+
+
+def _strict_judge_failure(error, provider=None):
+    """Describe a failed strict judge request and whether the next candidate may answer instead.
+
+    Only unavailability moves on: a transient HTTP status, connection failure
+    or Bedrock throttling that outlasted its one retry, a model the provider
+    does not have or the key cannot use (_should_try_fallback and
+    _strict_model_unavailable), or a used-up per-model request limit.
+    Everything else ends the judge. A Bedrock error keeps the
+    "Bedrock request failed" label that _call_bedrock gives the errors it
+    returns, so a model that moved on reads the same as one that ended the judge.
+    """
+    if isinstance(error, _JudgeRefusedError):
+        return str(error), False
+    if isinstance(error, _StrictJudgeRequestLimitError):
+        return str(error), True
+    if isinstance(error, urllib.error.HTTPError):
+        detail, model_unavailable = _format_http_error_with_fallback(error)
+        if _strict_judge_error_stops(error):
+            return detail, False
+        return detail, model_unavailable or _strict_model_unavailable(error) or _is_retriable_http_status(error.code)
+    label = "Bedrock request failed" if provider == "bedrock" else "Public provider call failed"
+    detail = f"{label}: {error}"
+    if isinstance(error, TimeoutError) and "LLM judge time budget exhausted" in str(error):
+        return detail, False
+    if _is_certificate_failure(error) or _strict_judge_error_stops(error):
+        return detail, False
+    if isinstance(error, (urllib.error.URLError, OSError)):
+        return detail, True
+    # Bedrock throttling and service errors (see _call_bedrock), or a model it cannot serve.
+    return detail, _classify_bedrock_retry_error(error)[0] or _strict_model_unavailable(error)
+
+
+def _call_strict_judge(provider, requested_model, models, call_model):
+    """Ask the judge under LLM_JUDGE_RETRY_POLICY=strict.
+
+    At most _STRICT_JUDGE_MAX_MODELS candidates are tried, the primary first,
+    with at most _STRICT_JUDGE_REQUESTS_PER_MODEL requests to each, all inside
+    the judge's wall-time budget. See _strict_judge_failure for which failures
+    move on to the next candidate. The first completed reply is final, even an
+    empty or invalid one: a second request from the same required judge, such
+    as behavior_check's format retry, is not sent, so no other model can
+    overturn the reply.
+    """
+    calls = _ACTIVE_JUDGE_CALLS.get()
+    if calls:
+        return (
+            None,
+            "LLM_JUDGE_RETRY_POLICY=strict accepts one completed reply per judge, so the judge's retry was not sent",
+            {"provider": provider, "model": calls[-1]["model"]},
+        )
+    errors = []
+    provenance = {"provider": provider, "model": requested_model}
+    for candidate_model in models[:_STRICT_JUDGE_MAX_MODELS]:
+        provenance = {"provider": provider, "model": candidate_model}
+        requests_left = _STRICT_JUDGE_REQUESTS_LEFT.set([_STRICT_JUDGE_REQUESTS_PER_MODEL])
+        try:
+            content, error = call_model(candidate_model, provenance)
+        except Exception as exc:
+            detail, move_on = _strict_judge_failure(exc, provider)
+            errors.append(f"{candidate_model}: {detail}")
+            if not move_on:
+                # Keep the earlier models' errors, so the reason shows why they were passed over.
+                return None, _redact_configured_credentials(" | ".join(errors)), provenance
+            continue
+        finally:
+            _STRICT_JUDGE_REQUESTS_LEFT.reset(requests_left)
+        if error:
+            if errors:
+                error = " | ".join([*errors, f"{candidate_model}: {error}"])
+            return None, _redact_configured_credentials(error), provenance
+        if candidate_model != requested_model:
+            logger.warning("LLM judge model %s failed; using fallback model %s", requested_model, candidate_model)
+        _record_judge_call(provenance, requested_model, candidate_model)
+        return content, None, provenance
+    detail = "LLM judge model fallback exhausted: " + " | ".join(errors)
+    return None, _redact_configured_credentials(detail), provenance
+
+
 def _call_public_llm_with_provenance(
     prompt,
     model=None,
@@ -1965,35 +2372,29 @@ def _call_public_llm_with_provenance(
     provider = _public_provider()
     if not provider:
         return None, _public_provider_error(), {}
+    try:
+        # An invalid policy value fails closed before any request is sent.
+        _judge_fallback_policy()
+        strict = _judge_retry_policy() == "strict"
+    except ValueError as error:
+        return None, str(error), {}
     requested_model = _selected_judge_model(model)
     models = _fallback_models(requested_model) if allow_model_fallback else [requested_model]
+
+    def call_model(candidate_model, provenance):
+        return _call_judge_model(
+            prompt, provider, candidate_model, max_tokens, temperature, response_schema, schema_name, provenance
+        )
+
+    if strict:
+        return _call_strict_judge(provider, requested_model, models, call_model)
     errors = []
     last_provenance = {"provider": provider, "model": requested_model}
     for candidate_model in models:
         provenance = {"provider": provider, "model": candidate_model}
         last_provenance = provenance
         try:
-            if provider == "anthropic":
-                content, error = _call_anthropic(
-                    prompt,
-                    candidate_model,
-                    max_tokens,
-                    temperature,
-                    response_schema=response_schema,
-                    provenance=provenance,
-                )
-            elif provider == "bedrock":
-                content, error = _call_bedrock(prompt, candidate_model, max_tokens, temperature, provenance=provenance)
-            else:
-                content, error = _call_openai_compatible(
-                    prompt,
-                    provider,
-                    candidate_model,
-                    max_tokens,
-                    temperature,
-                    response_schema=response_schema,
-                    schema_name=schema_name,
-                )
+            content, error = call_model(candidate_model, provenance)
         except _JudgeRefusedError as refusal:
             # A classifier refusal is fallback-eligible like a missing model.
             errors.append(f"{candidate_model}: {refusal}")
@@ -2127,6 +2528,22 @@ def _json_nesting_within_limit(text):
     return True
 
 
+def _parse_whole_json_object(text):
+    """Return *text* parsed as one JSON object, or None when it holds anything else."""
+    if not text.startswith("{") or not _json_nesting_within_limit(text):
+        return None
+    try:
+        parsed = json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_object_pairs,
+            parse_constant=_reject_nonstandard_json_constant,
+            parse_float=_parse_finite_json_float,
+        )
+    except (json.JSONDecodeError, RecursionError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def extract_json(text):
     """Extract a JSON payload from LLM response text.
 
@@ -2134,11 +2551,14 @@ def extract_json(text):
     container. Multiple complete documents are ambiguous, and an unfinished
     earlier structural segment blocks promotion of a nested object. Top-level
     arrays parse through unchanged; judge callers must dict-check the result
-    themselves.
+    themselves. Under LLM_JUDGE_RETRY_POLICY=strict the whole reply, apart
+    from surrounding whitespace, must be one JSON object.
     """
     text = (text or "").strip()
     if not text or len(text) > _MAX_JSON_TEXT_CHARS:
         return None
+    if _strict_judge_replies():
+        return _parse_whole_json_object(text)
 
     documents = []
     index = 0
@@ -2280,8 +2700,11 @@ def _salvage_behavior_results(text):
 
     Reasoning judges that hit the output-token cap emit ``{"results": [...`` and
     stop mid-entry (``finish_reason="length"``); every fully-formed ``{...}``
-    entry before the cut is still valid JSON and can be scored.
+    entry before the cut is still valid JSON and can be scored. The strict
+    judge policy scores only complete replies, so nothing is salvaged under it.
     """
+    if _strict_judge_replies():
+        return []
     text = text or ""
     if len(text) > _MAX_JSON_TEXT_CHARS or not _json_nesting_within_limit(text):
         return []
@@ -2383,87 +2806,301 @@ def _resolve_acceptable_skills(entry, expected_skill=None):
 
 # Keep in sync with skillevaluator.provider_config.MAX_COMPLETION_TOKENS (drift test).
 STRUCTURED_JUDGE_MAX_TOKENS = 16384
+# Saved judge evidence is bounded so one long prompt cannot bloat the verifier output.
+JUDGE_EVIDENCE_PROMPT_CHARS = 16000
+JUDGE_EVIDENCE_REPLY_CHARS = 8000
+JUDGE_ATTEMPTS_FILE_NAME = "judge_attempts.json"
+_JUDGE_PROBLEM_CHARS = 300
 
-_JUDGE_RETRY_REMINDER = (
-    "\n\nIMPORTANT: Your previous reply could not be parsed or validated. Respond with ONLY the "
-    "minified JSON object on a single line -- no markdown fences, no prose, and keep explanations brief."
+
+def _judge_retry_feedback(problem):
+    """Retry instruction that names what was wrong with the previous reply."""
+    return (
+        f"\n\nIMPORTANT: Your previous reply could not be parsed or validated: {problem[:_JUDGE_PROBLEM_CHARS]}. "
+        "Respond with ONLY the minified JSON object on a single line in the shape described above -- "
+        "no markdown fences, no prose, no score field, and keep explanations brief."
+    )
+
+
+# Judge prompts quote the agent's commands and output, so saved judge evidence
+# also masks credentials that have no fixed key shape: URL userinfo
+# ("https://user:token@host"), Authorization, API-key, token and Cookie header
+# values, and the values of credential flags ("--token VALUE",
+# "curl -u user:password"). Each pattern starts at a fixed literal and scans one
+# bounded run, so long text stays linear. The header patterns accept shell
+# ("-H 'Name: value'"), JSON ('"name": "value"') and Python subscript
+# ('headers["Name"] = f"value"') forms, also with the quotes JSON-escaped
+# ('\"Name\": \"value\"'), as tool-call arguments appear in the behavior and
+# goal prompts.
+_JUDGE_EVIDENCE_URL_USERINFO_RE = re.compile(r"(://)[^\s/?#@'\"`<>]{1,256}@")
+_JUDGE_EVIDENCE_HEADER_SEPARATOR = r"\\?[\"']?\]?[ \t]{0,8}[:=][ \t]{0,8}(?:[bfru]{0,2}\\?[\"'])?"
+# Digest values hold quoted fields (username="...", response="..."), so the rest
+# of the value is masked up to a single quote, a backtick or the end of the line.
+_JUDGE_EVIDENCE_DIGEST_AUTH_HEADER_RE = re.compile(
+    r"(\bauthorization" + _JUDGE_EVIDENCE_HEADER_SEPARATOR + r"digest[ \t]{1,8})[^'`\r\n]{1,512}",
+    re.IGNORECASE,
+)
+# Other Authorization schemes vary (Bearer, Basic, ApiKey, Bot, SSWS, ...), so the
+# whole value is masked up to its closing quote or the end of the line. Bearer,
+# Basic, Token and Digest stay visible because they say which kind of credential
+# was sent, and a quoted token after them ('Bearer "token"') is masked too.
+_JUDGE_EVIDENCE_AUTH_HEADER_RE = re.compile(
+    r"(\bauthorization"
+    + _JUDGE_EVIDENCE_HEADER_SEPARATOR
+    + r"(?:(?:bearer|basic|token|digest)[ \t]{1,8}(?:\\?[\"'])?)?)"
+    r"[^\s'\"`,;\\][^'\"`\r\n\\]*",
+    re.IGNORECASE,
+)
+# X-API-Key, Api-Key, X-Auth-Token, X-Access-Token and Private-Token headers.
+_JUDGE_EVIDENCE_KEY_HEADER_RE = re.compile(
+    r"(\b(?:api-key|auth-token|access-token|private-token)" + _JUDGE_EVIDENCE_HEADER_SEPARATOR + r")"
+    r"[^\s'\"`,;\\]+",
+    re.IGNORECASE,
+)
+# A Cookie header holds "name=value" pairs joined by ";", and every pair is masked.
+_JUDGE_EVIDENCE_COOKIE_HEADER_RE = re.compile(
+    r"(\bcookie" + _JUDGE_EVIDENCE_HEADER_SEPARATOR + r")"
+    r"[^\s'\"`,;\\]+(?:;[ \t]{0,8}[^\s'\"`,;\\]+){0,64}",
+    re.IGNORECASE,
+)
+_JUDGE_EVIDENCE_CREDENTIAL_FLAG_RE = re.compile(
+    r"((?<![^\s'\"])--?(?:password|passwd|token|api-key|apikey|secret|access-token|auth-token)(?:[ \t]{1,8}|=))"
+    r"(?:\"[^\"\r\n]+\"|'[^'\r\n]+'|[^\s'\"`\\]+)",
+    re.IGNORECASE,
+)
+# "-u"/"--user" also name ordinary options (python -u, pip --user), so only a
+# user:password value is masked.
+_JUDGE_EVIDENCE_USER_FLAG_RE = re.compile(
+    r"((?<![^\s'\"])(?:-u|--user)(?:[ \t]{1,8}|=))"
+    r"(?:\"[^\"\r\n:]+:[^\"\r\n]+\"|'[^'\r\n:]+:[^'\r\n]+'|[^\s'\"`:\\]{1,256}:[^\s'\"`\\]+)"
 )
 
 
-def _call_validated_json_judge(prompt, validate, call, extract, **call_kwargs):
-    """Invoke a JSON judge with one format-correction retry when payload validation fails."""
-    call_kwargs.setdefault("max_tokens", STRUCTURED_JUDGE_MAX_TOKENS)
+def _redact_judge_evidence(text):
+    """Mask credentials in a judge prompt, reply, or problem before it is saved."""
+    redacted = _redact_configured_credentials(_redact_evidence_text(text))
+    for pattern in _SECRET_PATTERNS:
+        redacted = pattern.sub("<redacted>", redacted)
+    redacted = _JUDGE_EVIDENCE_URL_USERINFO_RE.sub(r"\1<redacted>@", redacted)
+    for pattern in (
+        _JUDGE_EVIDENCE_DIGEST_AUTH_HEADER_RE,
+        _JUDGE_EVIDENCE_AUTH_HEADER_RE,
+        _JUDGE_EVIDENCE_KEY_HEADER_RE,
+        _JUDGE_EVIDENCE_COOKIE_HEADER_RE,
+        _JUDGE_EVIDENCE_CREDENTIAL_FLAG_RE,
+        _JUDGE_EVIDENCE_USER_FLAG_RE,
+    ):
+        redacted = pattern.sub(r"\1<redacted>", redacted)
+    return redacted
 
-    def invoke(call_prompt):
+
+def _verifier_output_dir():
+    """Directory that receives skill_evaluator_reward.json (see write_reward_outputs)."""
+    if (
+        SKILL_EVALUATOR_REWARD_JSON == VERIFIER_DIR / "skill_evaluator_reward.json"
+        and REWARD_JSON.parent != VERIFIER_DIR
+    ):
+        return REWARD_JSON.parent
+    return SKILL_EVALUATOR_REWARD_JSON.parent
+
+
+def _record_judge_attempt(
+    metric, attempt, *, prompt, reply, problem, method="llm", model=None, status=None, score=None
+):
+    """Save one judge attempt to judge_attempts.json while main() runs the judges.
+
+    The file is rewritten after every attempt, so it also explains a judge that
+    failed or a verifier that stopped mid-run. Saving evidence must never change
+    a score, so write failures are only logged. A ``salvage`` entry records the
+    usable part rebuilt from attempt *attempt*'s truncated reply.
+    """
+    attempts = _ACTIVE_JUDGE_EVIDENCE.get()
+    if attempts is None:
+        return
+    if status is None:
+        status = "error" if reply is None else "accepted" if problem is None else "rejected"
+    entry = {
+        "metric": metric,
+        "attempt": attempt,
+        "method": method,
+        "model": model,
+        "status": status,
+        "problem": _truncate_for_behavior(_redact_judge_evidence(problem), 1000) if problem else None,
+    }
+    if prompt is not None:
+        redacted_prompt = _redact_judge_evidence(prompt)
+        entry["prompt_sha256"] = hashlib.sha256(redacted_prompt.encode("utf-8", "replace")).hexdigest()
+        entry["prompt_chars"] = len(prompt)
+        entry["prompt"] = _truncate_for_behavior(redacted_prompt, JUDGE_EVIDENCE_PROMPT_CHARS)
+    if reply is not None:
+        entry["reply_chars"] = len(reply)
+        entry["reply"] = _truncate_for_behavior(_redact_judge_evidence(reply), JUDGE_EVIDENCE_REPLY_CHARS)
+    if score is not None:
+        entry["score"] = score
+    attempts.append(entry)
+    _write_judge_attempts(attempts)
+
+
+def _write_judge_attempts(attempts):
+    try:
+        path = _verifier_output_dir() / JUDGE_ATTEMPTS_FILE_NAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_name(path.name + ".tmp")
+        payload = {"judge_contract": JUDGE_CONTRACT, "attempts": attempts}
+        tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp_path.replace(path)
+    except TimeoutError:
+        # The required-judge deadline alarm, not a write failure.
+        raise
+    except (OSError, TypeError, ValueError) as error:
+        logger.warning("Could not save judge evidence: %s", type(error).__name__)
+
+
+def _judge_attempt_model(provenance=None, calls_before=None):
+    """Return the model that answered an attempt, or the requested model when none did."""
+    calls = _ACTIVE_JUDGE_CALLS.get()
+    if calls is not None and calls_before is not None and len(calls) > calls_before:
+        return calls[-1]["model"]
+    if provenance and provenance.get("model"):
+        return provenance["model"]
+    return _selected_judge_model()
+
+
+def _call_validated_json_judge(prompt, validate, call, extract, *, metric="judge", salvage=None, **call_kwargs):
+    """Invoke a JSON judge; on an invalid reply, retry once and name the problem.
+
+    *validate* returns ``None`` for a usable reply or a short description of the
+    problem, which the retry sends back to the judge. Provider errors are not
+    retried here: the transport already retried them within its own budget.
+    *salvage* may rebuild a usable reply from text that never parsed, such as a
+    reply cut off by the output-token cap; it is tried only after both attempts.
+    Under LLM_JUDGE_RETRY_POLICY=strict the first completed reply is final, so
+    an invalid one fails the judge without a retry or a salvage.
+    """
+    call_kwargs.setdefault("max_tokens", STRUCTURED_JUDGE_MAX_TOKENS)
+    unparsed_replies = []
+
+    def invoke(attempt, call_prompt):
+        calls = _ACTIVE_JUDGE_CALLS.get()
+        calls_before = len(calls) if calls is not None else 0
         content, error, *metadata = call(call_prompt, **call_kwargs)
         provenance = metadata[0] if metadata and isinstance(metadata[0], dict) else {}
         parsed = extract(content) if content else None
-        validation_error = validate(parsed) if not error else None
-        return parsed, error, provenance, validation_error
+        model = _judge_attempt_model(provenance, calls_before)
+        problem = None
+        if not error:
+            problem = "the reply was empty" if not content else validate(parsed)
+            if content and parsed is None:
+                unparsed_replies.append((attempt, content, model))
+        _record_judge_attempt(
+            metric,
+            attempt,
+            prompt=call_prompt,
+            reply=None if error else content or "",
+            problem=error or problem,
+            model=model,
+        )
+        return parsed, error, provenance, problem
 
-    parsed, error, provenance, validation_error = invoke(prompt)
+    parsed, error, provenance, problem = invoke(1, prompt)
     if error:
         return None, f"LLM judge error: {error}", provenance
-    if validation_error is None:
+    if problem is None:
         return parsed, None, provenance
+    if _strict_judge_replies():
+        return (
+            None,
+            f"Judge response was unparseable or invalid: {problem}; LLM_JUDGE_RETRY_POLICY=strict sends no retry",
+            provenance,
+        )
 
-    parsed, error, provenance, validation_error = invoke(prompt + _JUDGE_RETRY_REMINDER)
+    parsed, error, provenance, problem = invoke(2, prompt + _judge_retry_feedback(problem))
+    if not error and problem is None:
+        return parsed, None, provenance
+    if salvage is not None:
+        # Newest first: only text that never parsed can be a reply cut off mid-object.
+        for attempt, text, model in reversed(unparsed_replies):
+            candidate = salvage(text)
+            if candidate is not None:
+                # The LLM attempts were saved with their own status (rejected,
+                # or error if the retry failed in transport); this entry shows
+                # that the score comes from the part of *attempt*'s reply that
+                # was rebuilt.
+                _record_judge_attempt(
+                    metric,
+                    attempt,
+                    prompt=None,
+                    reply=json.dumps(candidate),
+                    problem=None,
+                    method="salvage",
+                    model=model,
+                    status="accepted",
+                )
+                return candidate, None, provenance
     if error:
         return None, f"LLM judge retry error: {error}", provenance
-    if validation_error is not None:
-        return None, f"{validation_error} after retry", provenance
-    return parsed, None, provenance
+    return None, f"Judge response was unparseable or invalid after retry: {problem}", provenance
 
 
 # ── LLM Judge: Accuracy (5-criterion) ────────────────────────────────────────
 
-
-_ACCURACY_CRITERIA_KEYS = frozenset(
-    {
-        "SKILL_IDENTIFIED",
-        "ACTION_CORRECT",
-        "FACTUALLY_ACCURATE",
-        "TASK_ADDRESSED",
-        "ACTIONABLE",
-    }
+# Accuracy grades the outcome only. Whether the agent found and used the skill is
+# scored by skill_execution, so a correct answer from the no-skill baseline can
+# reach 1.0 here.
+_ACCURACY_CRITERIA = (
+    ("ACTION_CORRECT", "Does the response describe or carry out the correct actions or commands for the task?"),
+    ("FACTUALLY_ACCURATE", "Are the factual claims consistent with the expected answer?"),
+    ("TASK_ADDRESSED", "Does the response directly address the user's request?"),
+    ("ACTIONABLE", "Does the response give usable results or next steps, not just an acknowledgment?"),
+    (
+        "FORMAT_FOLLOWED",
+        "If the USER QUESTION explicitly requires an output format (a template, prefix, fields, ordering, "
+        "or units), does the response follow it? When the question requires no specific format, answer true "
+        "if the response gives an answer and false if it gives none.",
+    ),
 )
-
-
-def _valid_accuracy_criteria(value):
-    """Return True when value is a complete 5-criterion boolean mapping."""
-    return (
-        isinstance(value, dict)
-        and value.keys() == _ACCURACY_CRITERIA_KEYS
-        and all(isinstance(item, bool) for item in value.values())
-    )
+_ACCURACY_CRITERIA_KEYS = frozenset(key for key, _question in _ACCURACY_CRITERIA)
 
 
 def _accuracy_payload_error(parsed):
-    """Validate a parsed accuracy judge payload and return an error message if malformed."""
+    """Describe what is wrong with an accuracy reply, or return ``None`` when it is usable.
+
+    The score is computed from the five verdicts, so a ``score`` field in the
+    reply is ignored rather than trusted.
+    """
     if not isinstance(parsed, dict):
-        return "Judge response was not a valid JSON object"
-    if "reason" in parsed and not isinstance(parsed["reason"], str):
-        return "Judge response contained an invalid accuracy reason"
+        return "the reply did not contain one JSON object"
     criteria = parsed.get("criteria")
-    criteria_valid = _valid_accuracy_criteria(criteria)
-    if "criteria" in parsed and not criteria_valid:
-        return "Judge response contained invalid accuracy criteria"
-    if _finite_score(parsed.get("score")) is None and not criteria_valid:
-        return "Judge response contained no valid accuracy score or complete criteria"
+    if not isinstance(criteria, dict):
+        return 'the reply has no "criteria" object'
+    missing = sorted(_ACCURACY_CRITERIA_KEYS - criteria.keys())
+    if missing:
+        return f"criteria is missing {', '.join(missing)}"
+    unexpected = sorted(str(key)[:40] for key in criteria.keys() - _ACCURACY_CRITERIA_KEYS)
+    if unexpected:
+        return f"criteria has unexpected keys {', '.join(unexpected[:5])}"
+    not_boolean = sorted(key for key, value in criteria.items() if not isinstance(value, bool))
+    if not_boolean:
+        return f"criteria values must be true or false, not {', '.join(not_boolean)}"
+    if "reason" in parsed and not isinstance(parsed["reason"], str):
+        return '"reason" must be a string'
     return None
 
 
 def _goal_payload_error(parsed):
-    """Validate a parsed goal-accuracy judge payload and return an error message if malformed."""
+    """Describe what is wrong with a goal reply, or return ``None`` when it is usable.
+
+    Goal accuracy is binary, like RAGAS AgentGoalAccuracyWithReference: the
+    score is 1.0 when ``achieved`` is true and 0.0 otherwise, so a ``score``
+    field in the reply is ignored.
+    """
     if not isinstance(parsed, dict):
-        return "Judge response was not a valid JSON object"
+        return "the reply did not contain one JSON object"
+    if not isinstance(parsed.get("achieved"), bool):
+        return '"achieved" must be true or false'
     for field in ("reason", "user_goal", "end_state"):
         if field in parsed and not isinstance(parsed[field], str):
-            return f"Judge response contained an invalid {field} value"
-    if not isinstance(parsed.get("achieved"), bool):
-        return "Judge response contained an invalid achieved value"
-    if "score" in parsed and _finite_score(parsed["score"]) is None:
-        return "Judge response contained an invalid goal score"
+            return f'"{field}" must be a string'
     return None
 
 
@@ -2472,26 +3109,13 @@ ACCURACY_JSON_SCHEMA = {
     "properties": {
         "criteria": {
             "type": "object",
-            "properties": {
-                "SKILL_IDENTIFIED": {"type": "boolean"},
-                "ACTION_CORRECT": {"type": "boolean"},
-                "FACTUALLY_ACCURATE": {"type": "boolean"},
-                "TASK_ADDRESSED": {"type": "boolean"},
-                "ACTIONABLE": {"type": "boolean"},
-            },
-            "required": [
-                "SKILL_IDENTIFIED",
-                "ACTION_CORRECT",
-                "FACTUALLY_ACCURATE",
-                "TASK_ADDRESSED",
-                "ACTIONABLE",
-            ],
+            "properties": {key: {"type": "boolean"} for key, _question in _ACCURACY_CRITERIA},
+            "required": [key for key, _question in _ACCURACY_CRITERIA],
             "additionalProperties": False,
         },
-        "score": {"type": "number"},
         "reason": {"type": "string"},
     },
-    "required": ["criteria", "score", "reason"],
+    "required": ["criteria", "reason"],
     "additionalProperties": False,
 }
 
@@ -2501,10 +3125,9 @@ GOAL_ACCURACY_JSON_SCHEMA = {
         "user_goal": {"type": "string"},
         "end_state": {"type": "string"},
         "achieved": {"type": "boolean"},
-        "score": {"type": "number"},
         "reason": {"type": "string"},
     },
-    "required": ["user_goal", "end_state", "achieved", "score", "reason"],
+    "required": ["user_goal", "end_state", "achieved", "reason"],
     "additionalProperties": False,
 }
 
@@ -2517,38 +3140,50 @@ BEHAVIOR_CHECK_JSON_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "step": {"type": "integer"},
-                    "passed": {"type": "boolean"},
+                    "passed": {"type": ["boolean", "null"]},
                     "reason": {"type": "string"},
                 },
                 "required": ["step", "passed", "reason"],
                 "additionalProperties": False,
             },
         },
-        "score": {"type": "number"},
         "summary": {"type": "string"},
     },
-    "required": ["results", "score", "summary"],
+    "required": ["results", "summary"],
     "additionalProperties": False,
 }
 
 
-def judge_accuracy(question, ground_truth, agent_text, *, skill_identification_applicable=True):
+def judge_accuracy(question, ground_truth, agent_text, *, skill_identification_applicable=None):
+    """Judge accuracy from five outcome verdicts; the score is computed here.
+
+    *skill_identification_applicable* is deprecated and ignored. Accuracy no
+    longer has a skill criterion, so every case and both arms use the same five
+    criteria. The keyword is still accepted so existing callers keep working.
+    """
+    del skill_identification_applicable
     if not _has_judge_reference(ground_truth):
         return _judge_not_applicable(_NO_GROUND_TRUTH_REASON)
-    prompt = """You are an expert evaluator for AI agent responses. Evaluate by checking \
-each criterion below against the expected answer. For each criterion, determine true (satisfied) or false (not satisfied).
+    criteria_text = "\n".join(
+        f"{index}. {key}: {criterion}" for index, (key, criterion) in enumerate(_ACCURACY_CRITERIA, 1)
+    )
+    prompt = f"""You are an expert evaluator for AI agent responses. Check the response against \
+the expected answer on each criterion below and decide true (satisfied) or false (not satisfied) for each.
 
-1. SKILL_IDENTIFIED: Does the response reference or use the correct skill for the task?
-2. ACTION_CORRECT: Does the response describe or execute the correct actions/scripts?
-3. FACTUALLY_ACCURATE: Are the factual claims consistent with the expected answer?
-4. TASK_ADDRESSED: Does the response directly address the user's request?
-5. ACTIONABLE: Does the response provide actionable information (not just acknowledgment)?
+{criteria_text}
 
-Compute score = count(true) / 5.
-Be lenient on exact wording but strict on factual correctness.
+Judge the outcome only. Do not reward or penalize the response for naming, or not naming, \
+a tool or skill: that is scored separately.
+If the evidence holds no answer to the question (for example, the agent stopped, timed out or \
+refused), every criterion is false, unless the expected answer is itself a refusal.
+Be lenient on wording, but strict on factual correctness and on any output format the user \
+question explicitly requires.
 
-Respond with ONLY a JSON object:
-{{"criteria": {{"SKILL_IDENTIFIED": true, "ACTION_CORRECT": true, "FACTUALLY_ACCURATE": true, "TASK_ADDRESSED": true, "ACTIONABLE": true}}, "score": 1.0, "reason": "brief summary"}}
+Respond with ONLY one JSON object with a "criteria" object holding exactly these five keys, each \
+true or false, and a one-sentence "reason". Do not include a score: it is computed from the criteria.
+Example of the shape (the values are only an illustration):
+{{"criteria": {{"ACTION_CORRECT": true, "FACTUALLY_ACCURATE": false, "TASK_ADDRESSED": true, "ACTIONABLE": true, \
+"FORMAT_FOLLOWED": true}}, "reason": "Ran the right command but reported the wrong version number."}}
 
 USER QUESTION:
 {question}
@@ -2559,56 +3194,26 @@ EXPECTED ANSWER:
 SELECTED EVIDENCE (final response + produced artifacts; low-relevance steps may be omitted):
 {agent_text}"""
 
-    if not skill_identification_applicable:
-        prompt = prompt.replace(
-            "1. SKILL_IDENTIFIED: Does the response reference or use the correct skill for the task?",
-            "1. SKILL_IDENTIFIED: Inapplicable: no skill is expected. Set false; exclude it from the score.",
-        ).replace("Compute score = count(true) / 5.", "Compute score = count(true among the other four criteria) / 4.")
-        prompt = prompt.replace('"SKILL_IDENTIFIED": true', '"SKILL_IDENTIFIED": false')
-    # Adjust the rubric before interpolation so task/evidence text stays intact.
-    prompt = prompt.format(question=question, ground_truth=ground_truth, agent_text=agent_text)
     prompt = append_character_facts(prompt, question=question, ground_truth=ground_truth, agent_text=agent_text)
-
-    def validate_payload(parsed):
-        error = _accuracy_payload_error(parsed)
-        if not error and not skill_identification_applicable and not _valid_accuracy_criteria(parsed.get("criteria")):
-            return "Accuracy requires complete criterion verdicts when skill identification is inapplicable"
-        return error
 
     parsed, error, _provenance = _call_validated_json_judge(
         prompt,
-        validate_payload,
+        _accuracy_payload_error,
         call_public_llm,
         extract_json,
+        metric="accuracy",
         response_schema=ACCURACY_JSON_SCHEMA,
         schema_name="accuracy_judgment",
     )
     if error:
         return _judge_error(error)
 
-    assert isinstance(parsed, dict)
-    criteria = parsed.get("criteria")
-    criteria_valid = _valid_accuracy_criteria(criteria)
-
-    if criteria_valid:
-        # Score only applicable verdicts; excluded criteria leave both numerator and denominator.
-        excluded = set() if skill_identification_applicable else {"SKILL_IDENTIFIED"}
-        applicable = [verdict for name, verdict in criteria.items() if name not in excluded]
-        score = sum(verdict is True for verdict in applicable) / len(applicable)
-    else:
-        # Legacy score-only payloads; validate_payload rejects them when a criterion is excluded.
-        assert skill_identification_applicable
-        score = _finite_score(parsed.get("score"))
-        assert score is not None
-    result = {
-        "score": round(score, 4),
+    criteria = {key: parsed["criteria"][key] for key, _question in _ACCURACY_CRITERIA}
+    return {
+        "score": round(sum(criteria.values()) / len(criteria), 4),
         "reason": _bounded_judge_text(parsed.get("reason", "")),
-        "criteria": criteria if criteria_valid else {},
+        "criteria": criteria,
     }
-    if not skill_identification_applicable:
-        result["excluded_criteria"] = ["SKILL_IDENTIFIED"]
-        result["scoring_policy"] = "applicable-accuracy-criteria/v1"
-    return result
 
 
 # ── LLM Judge: Goal Accuracy ─────────────────────────────────────────────────
@@ -2621,11 +3226,36 @@ def judge_goal_accuracy(question, ground_truth, agent_text, tool_summary=""):
     if _ragas_goal_accuracy_enabled():
         try:
             result = _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary)
-            if not isinstance(result, dict) or _finite_score(result.get("score")) is None:
-                raise ValueError("RAGAS returned a non-finite goal accuracy score")
-            return result
+            score = result.get("score") if isinstance(result, dict) else None
+            if isinstance(score, bool) or score not in (0.0, 1.0):
+                raise ValueError("RAGAS returned a non-binary goal accuracy score")
         except Exception as e:
-            logger.info("RAGAS not available (%s), using custom prompt", e)
+            # The documented scorer changed for this trial, so say why where users will see it.
+            detail = _redact_configured_credentials(f"{type(e).__name__}: {e}")[:_JUDGE_ERROR_REASON_LIMIT]
+            logger.warning("RAGAS goal scorer failed (%s); using the custom goal judge", detail)
+            problem = f"RAGAS failed ({type(e).__name__}: {e}); used the custom judge"
+            _record_judge_attempt(
+                "goal_accuracy",
+                1,
+                prompt=None,
+                reply=None,
+                problem=problem,
+                method="ragas",
+                model=_judge_attempt_model(),
+            )
+        else:
+            _record_judge_attempt(
+                "goal_accuracy",
+                1,
+                prompt=None,
+                reply=None,
+                problem=None,
+                method="ragas",
+                model=result.get("model") or _judge_attempt_model(),
+                status="accepted",
+                score=score,
+            )
+            return result
     return _judge_goal_accuracy_custom(question, ground_truth, agent_text, tool_summary)
 
 
@@ -2637,6 +3267,10 @@ def _ragas_goal_accuracy_enabled():
     # The prompt judge can append metadata outside the original evidence.
     if character_facts_enabled():
         return False
+    # RAGAS sends its own requests, outside the strict policy's request limits,
+    # and an unknown policy value must fail the judge before any request.
+    if _strict_judge_replies() or not _judge_policies_valid():
+        return False
     if _public_provider() != "openai" or _is_openai_reasoning_model(_selected_judge_model()):
         return False
     try:
@@ -2646,12 +3280,91 @@ def _ragas_goal_accuracy_enabled():
     return _is_native_openai_chat_url("openai", request_url)
 
 
+def _ragas_message_text(message):
+    content = message.get("content")
+    if not isinstance(content, str):
+        content = json.dumps(message.get("tool_calls") if content is None else content, default=str)
+    return f"[{message.get('role', 'unknown')}]\n{content}"
+
+
+def _ragas_request_text(body):
+    """Return the judge model and the messages of one RAGAS chat-completions request as text."""
+    try:
+        request = json.loads(body)
+        return request.get("model"), "\n\n".join(_ragas_message_text(message) for message in request["messages"])
+    except (ValueError, LookupError, TypeError, AttributeError):
+        return None, body.decode("utf-8", "replace")
+
+
+def _ragas_reply_text(body):
+    """Return the judge's answer in one chat-completions reply: its text, or the tool-call arguments RAGAS parses."""
+    try:
+        message = json.loads(body)["choices"][0]["message"]
+        if message.get("content") or not message.get("tool_calls"):
+            return str(message.get("content") or "")
+        return "\n".join(str(call["function"]["arguments"]) for call in message["tool_calls"])
+    except (ValueError, LookupError, TypeError, AttributeError):
+        return body.decode("utf-8", "replace")
+
+
+def _record_ragas_exchange(response, problem=None):
+    """Save one RAGAS judge request and its reply, or the HTTP error, as a goal_accuracy attempt.
+
+    _record_judge_attempt redacts the full texts before it shortens them, so the
+    error body is not cut here.
+    """
+    try:
+        model, prompt = _ragas_request_text(response.request.content)
+        reply = None
+        if problem is None and response.is_success:
+            reply = _ragas_reply_text(response.content)
+        elif problem is None:
+            problem = f"HTTP {response.status_code}: {response.text}"
+        _record_judge_attempt(
+            "goal_accuracy",
+            1,
+            prompt=prompt,
+            reply=reply,
+            problem=problem,
+            method="ragas",
+            model=model or _judge_attempt_model(),
+            status="replied" if reply is not None else None,
+        )
+    except TimeoutError:
+        # The required-judge deadline alarm, not an evidence failure.
+        raise
+    except Exception as error:
+        # Saving evidence must never change a score or hide a provider error.
+        logger.warning("Could not save RAGAS judge evidence: %s", type(error).__name__)
+
+
+async def _save_ragas_exchange(response):
+    """httpx response hook: RAGAS builds its own prompts and parses its own replies, so save both here."""
+    try:
+        await response.aread()
+    except Exception as error:
+        _record_ragas_exchange(response, f"the reply was not received ({type(error).__name__})")
+        raise
+    _record_ragas_exchange(response)
+
+
+def _ragas_evidence_http_client(openai_module):
+    """Return the SDK's default async HTTP client with the evidence hook, or None to score without evidence."""
+    try:
+        return openai_module.DefaultAsyncHttpxClient(event_hooks={"response": [_save_ragas_exchange]})
+    except TimeoutError:
+        raise
+    except Exception as error:
+        logger.warning("Could not save RAGAS judge evidence: %s", type(error).__name__)
+        return None
+
+
 def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary):
     """Use RAGAS AgentGoalAccuracyWithReference for high-quality two-step evaluation."""
     import asyncio
 
+    import openai
     from openai import AsyncOpenAI
-    from ragas import SingleTurnSample
     from ragas.llms.base import llm_factory
     from ragas.messages import AIMessage as RagasAI
     from ragas.messages import HumanMessage as RagasHuman
@@ -2667,63 +3380,106 @@ def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary)
     suffix = "/chat/completions"
     if not request_url.endswith(suffix) or not _is_native_openai_chat_url("openai", request_url):
         raise RuntimeError("RAGAS goal accuracy requires the selected canonical OpenAI provider")
-    client = AsyncOpenAI(api_key=api_key, base_url=request_url[: -len(suffix)])
-    llm = llm_factory(_selected_judge_model(), client=client)
-
-    metric = AgentGoalAccuracyWithReference(llm=llm)
-    user_input = [
-        RagasHuman(content=question),
-        RagasAI(content=agent_text),
-    ]
-
-    sample = SingleTurnSample(user_input=user_input, reference=ground_truth)
-
+    # The response hook saves each RAGAS request and reply to judge_attempts.json.
+    # It runs in the loop below, whose tasks copy this context, so it sees the
+    # verifier's judge evidence list. Closing the client also closes this one.
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url=request_url[: -len(suffix)],
+        http_client=_ragas_evidence_http_client(openai),
+    )
     loop = asyncio.new_event_loop()
     try:
+        # Build the scorer inside the try so a setup failure still closes the client.
+        judge_model = _selected_judge_model()
+        llm = llm_factory(judge_model, client=client)
+        metric = AgentGoalAccuracyWithReference(llm=llm)
+        user_input = [
+            RagasHuman(content=question),
+            RagasAI(content=agent_text),
+        ]
+        # Collections metrics take the messages and reference as keywords, not a SingleTurnSample.
+        scorer_timeout = _remaining_judge_timeout(_resolve_judge_wall_time_budget())
         result = loop.run_until_complete(
             asyncio.wait_for(
-                metric.ascore(sample),
-                timeout=_remaining_judge_timeout(_resolve_judge_wall_time_budget()),
+                metric.ascore(user_input=user_input, reference=ground_truth),
+                timeout=scorer_timeout,
             )
         )
     finally:
-        loop.close()
+
+        def consume_cleanup_task_exception(task):
+            # Tasks can fail after a cleanup timeout; never let asyncio log their exception text.
+            if not task.cancelled():
+                task.exception()
+
+        try:
+            # The judge deadline alarm can stop the loop mid-score; cancel that work before closing the client.
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.add_done_callback(consume_cleanup_task_exception)
+                task.cancel()
+            if pending:
+                _finished, unfinished = loop.run_until_complete(asyncio.wait(pending, timeout=5.0))
+                if unfinished:
+                    logger.warning("RAGAS judge task cancellation timed out: %d unfinished tasks", len(unfinished))
+        except Exception as error:
+            logger.warning("RAGAS judge task cancellation failed: %s", type(error).__name__)
+        finally:
+            try:
+                # Closing the client must still be attempted if scoring tasks could not be drained.
+                close_task = loop.create_task(client.close())
+                close_task.add_done_callback(consume_cleanup_task_exception)
+                _finished, unfinished = loop.run_until_complete(asyncio.wait({close_task}, timeout=5.0))
+                if unfinished:
+                    close_task.cancel()
+                    logger.warning("RAGAS judge client close timed out")
+                else:
+                    close_task.result()
+            except (Exception, asyncio.CancelledError) as error:
+                # Cleanup must never hide the score or the scorer's own failure.
+                logger.warning("RAGAS judge client close failed: %s", type(error).__name__)
+            finally:
+                loop.close()
 
     score = float(result.value) if hasattr(result, "value") else float(result)
-    if not math.isfinite(score):
-        raise ValueError("RAGAS returned a non-finite goal accuracy score")
+    if score not in (0.0, 1.0):
+        # Also rejects NaN; the caller then runs the prompt judge.
+        raise ValueError("RAGAS returned a non-binary goal accuracy score")
+    provenance = {"provider": "openai", "model": judge_model}
+    _record_judge_call(provenance, judge_model, judge_model)
     return {
-        "score": max(0.0, min(1.0, score)),
+        "score": score,
         "reason": "RAGAS AgentGoalAccuracyWithReference",
+        "achieved": score == 1.0,
         "method": "ragas",
-        "provider": "openai",
-        "model": _selected_judge_model(),
+        **provenance,
     }
 
 
 def _judge_goal_accuracy_custom(question, ground_truth, agent_text, tool_summary):
-    """Fallback: two-step custom prompt mirroring RAGAS logic."""
-    prompt = f"""You are an evaluation judge. Determine whether an AI agent achieved the expected goal.
+    """Fallback: two-step custom prompt mirroring RAGAS logic, with the same binary score."""
+    tool_section = f"\nAGENT'S TOOL CALLS:\n{tool_summary}\n" if str(tool_summary or "").strip() else ""
+    prompt = f"""You are an evaluation judge. Decide whether an AI agent achieved the expected goal.
 
-Step 1: What was the user's goal?
-Step 2: What end state did the agent reach?
-Step 3: Compare the end state to the expected outcome.
+Step 1: State the user's goal.
+Step 2: State the end state the agent reached.
+Step 3: Decide whether that end state achieves the expected outcome.
 
 USER REQUEST:
 {question}
 
 EXPECTED OUTCOME:
 {ground_truth}
-
-AGENT'S TOOL CALLS:
-{tool_summary}
-
+{tool_section}
 END-STATE EVIDENCE:
 {agent_text}
 
-Did the agent achieve the expected goal?
-Respond with ONLY a JSON object:
-{{"user_goal": "...", "end_state": "...", "achieved": true/false, "score": 1.0, "reason": "..."}}"""
+Respond with ONLY one JSON object with the keys "user_goal", "end_state", "achieved" (true or \
+false) and a one-sentence "reason". Do not include a score: it is 1.0 when achieved and 0.0 otherwise.
+Example of the shape (the values are only an illustration):
+{{"user_goal": "List the open release blockers", "end_state": "Listed two of the three blockers", \
+"achieved": false, "reason": "One blocker from the expected outcome is missing."}}"""
     prompt = append_character_facts(
         prompt, question=question, ground_truth=ground_truth, tool_summary=tool_summary, agent_text=agent_text
     )
@@ -2733,23 +3489,18 @@ Respond with ONLY a JSON object:
         _goal_payload_error,
         _call_public_llm_with_provenance,
         extract_json,
+        metric="goal_accuracy",
         response_schema=GOAL_ACCURACY_JSON_SCHEMA,
         schema_name="goal_accuracy_judgment",
     )
     if error:
         return _judge_error(error, **provenance)
 
-    assert isinstance(parsed, dict)
-    achieved = parsed.get("achieved")
-    assert isinstance(achieved, bool)
-
-    score = 1.0 if achieved else 0.0
-    if "score" in parsed:
-        score = _finite_score(parsed["score"])
-        assert score is not None
+    achieved = parsed["achieved"]
     return {
-        "score": score,
+        "score": 1.0 if achieved else 0.0,
         "reason": _bounded_judge_text(parsed.get("reason", "")),
+        "achieved": achieved,
         "user_goal": _bounded_judge_text(parsed.get("user_goal", "")),
         "end_state": _bounded_judge_text(parsed.get("end_state", "")),
         "method": "custom",
@@ -2765,22 +3516,41 @@ Respond with ONLY a JSON object:
 # (finish_reason="length", reasoning_tokens=1024).
 BEHAVIOR_JUDGE_MAX_TOKENS = STRUCTURED_JUDGE_MAX_TOKENS
 
-_BEHAVIOR_RETRY_REMINDER = (
-    "\n\nIMPORTANT: Your previous reply could not be parsed. Respond with ONLY the "
-    "minified JSON object on a single line -- no markdown fences, no prose, and "
-    'keep every "reason" under 15 words.'
-)
+
+def _behavior_prompt_example(expected_count):
+    """One entry per expected behavior, so the example is a valid reply if a judge copies it."""
+    return json.dumps(
+        {
+            "results": [
+                {
+                    "step": step,
+                    "passed": None if step % 3 == 0 else step % 3 == 1,
+                    "reason": (
+                        "Required tool output was not captured."
+                        if step % 3 == 0
+                        else "Seen in the transcript."
+                        if step % 3 == 1
+                        else "Observed output violates the requirement."
+                    ),
+                }
+                for step in range(1, expected_count + 1)
+            ],
+            "summary": "A short summary of what was and was not observed.",
+        }
+    )
 
 
 def judge_behavior_check(conversation_text, expected_behaviors):
+    expected_behaviors = normalize_expected_behaviors(expected_behaviors)
     if not _has_judge_reference(expected_behaviors):
         return _judge_not_applicable(_NO_EXPECTED_BEHAVIOR_REASON, results=[])
 
+    expected_count = len(expected_behaviors)
     behaviors_text = "\n".join(f"{i + 1}. {b}" for i, b in enumerate(expected_behaviors))
     conversation = _compact_behavior_conversation(conversation_text)
 
-    prompt = f"""You are evaluating whether an AI agent followed expected behaviors during a task. \
-Analyze the full conversation and determine if each expected behavior was observed.
+    prompt = f"""You are evaluating whether an AI agent showed each expected behavior during a task. \
+Read the conversation and decide, for each numbered behavior, whether it was observed.
 
 CONVERSATION:
 {conversation}
@@ -2788,97 +3558,125 @@ CONVERSATION:
 EXPECTED BEHAVIORS:
 {behaviors_text}
 
-For each behavior, set "passed" to true (observed) or false (not observed) with a brief reason.
+Respond with ONLY one JSON object. "results" must hold exactly {expected_count} entries, one per \
+expected behavior: "step" is the behavior's number (each number from 1 to {expected_count} exactly \
+once), "passed" is true (observed), false (evidence supports a violation or absence), or null \
+when missing or incomplete evidence prevents checking the behavior. Missing artifact contents, \
+unavailable tool output, or a truncated trace require null, NOT false, for checks that depend on \
+that evidence. A missing observation alone is not proof the behavior failed. Explain that evidence gap \
+in "reason" (under 15 words). An unrelated task \
+can be a valid negative control: evaluate its stated behavior without requiring skill use. Add a \
+one-sentence "summary". Do not include a score: it is computed from the results.
+Example of the shape for this task's {expected_count} behaviors (the values are only an illustration):
+{_behavior_prompt_example(expected_count)}"""
 
-Respond with ONLY a JSON object:
-{{"results": [{{"step": 1, "passed": true, "reason": "..."}}, ...], "score": 0.67, "summary": "brief summary"}}"""
     prompt = append_character_facts(prompt, conversation=conversation, expected_behaviors=behaviors_text)
 
-    content, error = call_public_llm(
-        prompt,
-        max_tokens=BEHAVIOR_JUDGE_MAX_TOKENS,
-        response_schema=BEHAVIOR_CHECK_JSON_SCHEMA,
-        schema_name="behavior_check_judgment",
-    )
-    if error:
-        return _judge_error(f"LLM judge error: {error}", results=[])
+    def salvage(text):
+        # Complete entries from a reply cut off before its results array closed.
+        salvaged = _salvage_behavior_results(text)
+        candidate = {
+            "results": salvaged,
+            "summary": f"Salvaged {len(salvaged)}/{expected_count} behavior results from truncated judge response",
+        }
+        if not salvaged or _behavior_payload_error(candidate, expected_count, allow_partial=True):
+            return None
+        return candidate
 
-    def _parse_judge_object(text):
-        return extract_json(text) if text else None
-
-    parsed = _parse_judge_object(content)
-    score = _behavior_payload_score(parsed, len(expected_behaviors))
-    attempts = [(content or "", parsed)]
-    retry_error = None
-    if score is None:
-        # One retry max, with an explicit machine-readable-output reminder.
-        retry_content, retry_error = call_public_llm(
-            prompt + _BEHAVIOR_RETRY_REMINDER,
+    try:
+        parsed, error, _provenance = _call_validated_json_judge(
+            prompt,
+            lambda payload: _behavior_payload_error(payload, expected_count),
+            call_public_llm,
+            extract_json,
+            metric="behavior_check",
+            salvage=salvage,
             max_tokens=BEHAVIOR_JUDGE_MAX_TOKENS,
             response_schema=BEHAVIOR_CHECK_JSON_SCHEMA,
             schema_name="behavior_check_judgment",
         )
-        if not retry_error:
-            parsed = _parse_judge_object(retry_content)
-            attempts.append((retry_content or "", parsed))
-            score = _behavior_payload_score(parsed, len(expected_behaviors))
+    except Exception as exc:
+        error = f"Required behavior_check judge raised {type(exc).__name__}: {exc}"
+    if error:
+        return _judge_error(error, results=[], expectations=_behavior_expectations(expected_behaviors, [], error))
 
-    if score is None:
-        # Salvage complete entries from a truncated results array (newest first).
-        for text, extracted in reversed(attempts):
-            if extracted is not None:
-                continue
-            salvaged = _salvage_behavior_results(text)
-            if salvaged:
-                candidate = {
-                    "results": salvaged,
-                    "summary": (
-                        f"Salvaged {len(salvaged)}/{len(expected_behaviors)} behavior "
-                        "results from truncated judge response"
-                    ),
-                }
-                candidate_score = _behavior_payload_score(
-                    candidate,
-                    len(expected_behaviors),
-                    allow_partial=True,
-                )
-                if candidate_score is not None:
-                    parsed = candidate
-                    score = candidate_score
-                    break
-
-    if score is None:
-        if retry_error:
-            return _judge_error(f"LLM judge retry error: {retry_error}", results=[])
-        return _judge_error("Judge response was unparseable or invalid after retry", results=[])
-
-    results = parsed["results"]
+    # Keep the conservative score denominator without calling missing verdicts failures.
+    results = sorted(parsed["results"], key=lambda result: result["step"])
+    score = sum(1 for result in results if result["passed"]) / expected_count
     return {
         "score": round(score, 4),
         "reason": parsed.get("summary", ""),
         "results": results,
+        "expectations": _behavior_expectations(expected_behaviors, results),
     }
 
 
-def _behavior_payload_score(parsed, expected_count, *, allow_partial=False):
+def _behavior_expectations(expected_behaviors, results, error=""):
+    by_step = {result["step"]: result for result in results}
+    return [
+        {
+            "step": step,
+            "requirement": requirement,
+            "status": ("met" if by_step[step]["passed"] else "unmet")
+            if step in by_step and type(by_step[step]["passed"]) is bool
+            else "not_checked",
+            "reason": by_step[step].get("reason", "")
+            if step in by_step
+            else _redact_configured_credentials(error) or "No judgment returned for this expectation",
+        }
+        for step, requirement in enumerate(expected_behaviors, 1)
+    ]
+
+
+def _behavior_payload_error(parsed, expected_count, *, allow_partial=False):
+    """Describe what is wrong with a behavior reply, or return ``None`` when it is usable.
+
+    Each expected behavior is judged exactly once, identified by its 1-based
+    ``step`` number, with a boolean ``passed`` or an explicit null abstention. *allow_partial* accepts a
+    salvaged prefix that judges each of its steps once. The score is computed
+    from the verdicts, so a ``score`` field in the reply is ignored.
+    """
     if not isinstance(parsed, dict):
-        return None
+        return "the reply did not contain one JSON object"
     results = parsed.get("results")
     if not isinstance(results, list):
-        return None
-    if any(not isinstance(result, dict) or not isinstance(result.get("passed"), bool) for result in results):
-        return None
+        return 'the reply has no "results" list'
     if allow_partial:
         if not results or len(results) > expected_count:
-            return None
+            return f'"results" has {len(results)} entries; it needs 1 to {expected_count}'
     elif len(results) != expected_count:
-        return None
-    if "score" in parsed and _finite_score(parsed["score"]) is None:
-        return None
-    denominator = expected_count if allow_partial else len(results)
-    if denominator <= 0:
-        return None
-    return sum(1 for result in results if result["passed"]) / denominator
+        return f'"results" has {len(results)} entries; it needs exactly {expected_count}, one per behavior'
+    if any(not isinstance(result, dict) for result in results):
+        return 'every "results" entry must be an object'
+    if any(
+        "passed" not in result or (result["passed"] is not None and type(result["passed"]) is not bool)
+        for result in results
+    ):
+        return 'every "results" entry needs "passed" set to true, false, or null'
+    if any(
+        result["passed"] is None and (not isinstance(result.get("reason"), str) or not result["reason"].strip())
+        for result in results
+    ):
+        return 'unchecked entries need a nonempty "reason" explaining the missing evidence'
+    steps = [result.get("step") for result in results]
+    if any(isinstance(step, bool) or not isinstance(step, int) for step in steps):
+        return 'every "results" entry needs an integer "step" number'
+    expected_steps = set(range(1, expected_count + 1))
+    duplicated = sorted({step for step in steps if steps.count(step) > 1})
+    unexpected = sorted(set(steps) - expected_steps)[:10]
+    missing = [] if allow_partial else sorted(expected_steps - set(steps))[:10]
+    if duplicated or missing or unexpected:
+        parts = []
+        if duplicated:
+            parts.append(f"steps judged more than once: {duplicated[:10]}")
+        if missing:
+            parts.append(f"steps not judged: {missing}")
+        if unexpected:
+            parts.append(f"steps outside 1..{expected_count}: {unexpected}")
+        return "; ".join(parts)
+    if "summary" in parsed and not isinstance(parsed["summary"], str):
+        return '"summary" must be a string'
+    return None
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -2969,7 +3767,15 @@ def _call_required_judge(metric, judge, *args, allow_not_applicable=False, **kwa
                 finally:
                     signal.signal(signal.SIGALRM, previous_alarm_handler)
     except Exception as exc:
-        result = _judge_error(f"Required {metric} judge raised {type(exc).__name__}: {exc}")
+        error = f"Required {metric} judge raised {type(exc).__name__}: {exc}"
+        metadata = {}
+        if metric == "behavior_check":
+            expected_behaviors = kwargs.get("expected_behaviors", args[1] if len(args) > 1 else [])
+            metadata = {
+                "results": [],
+                "expectations": _behavior_expectations(expected_behaviors or [], [], error),
+            }
+        result = _judge_error(error, **metadata)
     finally:
         _ACTIVE_JUDGE_DEADLINE.reset(token)
         _ACTIVE_JUDGE_CALLS.reset(calls_token)
@@ -3058,9 +3864,22 @@ def skill_metrics_applicable(
     return any(str(name).strip().lower() in staged for name in candidates if name and str(name).strip())
 
 
-def _skill_metric_not_applicable():
-    """Scoreless ``skill_execution`` / ``skill_efficiency`` result for an arm without the skill."""
-    return {"score": None, "status": NOT_APPLICABLE_STATUS, "reason": SKILL_METRICS_NOT_APPLICABLE_REASON}
+def _skill_metric_not_applicable(reason=SKILL_METRICS_NOT_APPLICABLE_REASON):
+    """Scoreless ``skill_execution`` / ``skill_efficiency`` result.
+
+    The default reason covers an arm without the skill. An eval case that gives
+    the metric nothing to score passes its own reason.
+    """
+    return {"score": None, "status": NOT_APPLICABLE_STATUS, "reason": reason}
+
+
+def _case_skill_metric_reasons(should_trigger, expected_skill):
+    """Return the skill metrics this eval case leaves N/A, each with its reason."""
+    reasons = {
+        "skill_execution": skill_execution_not_applicable_reason(should_trigger, expected_skill),
+        "skill_efficiency": skill_efficiency_not_applicable_reason(should_trigger, expected_skill),
+    }
+    return {metric: reason for metric, reason in reasons.items() if reason}
 
 
 def _reward_overall(result, details):
@@ -3109,16 +3928,72 @@ def write_reward_outputs(result, overall):
     sanitized_result = {key: _sanitize_error_value(value) for key, value in result.items()}
     sanitized_overall = _sanitize_error_value(overall)
     REWARD_JSON.parent.mkdir(parents=True, exist_ok=True)
-    skill_evaluator_reward_json = SKILL_EVALUATOR_REWARD_JSON
-    if (
-        skill_evaluator_reward_json == VERIFIER_DIR / "skill_evaluator_reward.json"
-        and REWARD_JSON.parent != VERIFIER_DIR
-    ):
-        skill_evaluator_reward_json = REWARD_JSON.parent / skill_evaluator_reward_json.name
+    skill_evaluator_reward_json = _verifier_output_dir() / SKILL_EVALUATOR_REWARD_JSON.name
     skill_evaluator_reward_json.parent.mkdir(parents=True, exist_ok=True)
     skill_evaluator_reward_json.write_text(json.dumps(sanitized_result, indent=2))
     REWARD_JSON.write_text(json.dumps(_numeric_reward_payload(sanitized_result, sanitized_overall), indent=2))
     REWARD_TXT.write_text(str(sanitized_overall))
+
+
+def _dependency_context(skill: str, *, skills_root: Path = Path("/workspace/skills")) -> dict[str, Any]:
+    """Read bounded dependency evidence from the evaluator-staged skill."""
+    context: dict[str, Any] = {
+        "apt": [],
+        "pip": [],
+        "skill_text": "",
+        "skill_dirs": [],
+        "skill_modules": set(),
+        "script_imports": set(),
+    }
+    if not skill or skill in {".", ".."} or Path(skill).name != skill:
+        return context
+    root = skills_root / skill
+    if not root.is_dir():
+        return context
+    context["skill_dirs"] = [
+        str(root),
+        f"/root/.claude/skills/{skill}",
+        f"/root/.agents/skills/{skill}",
+        f"/root/.config/opencode/skills/{skill}",
+        f"/etc/codex/skills/{skill}",
+    ]
+    remaining = 1024 * 1024
+    for index, path in enumerate(root.rglob("*")):
+        if index >= 4096 or remaining <= 0:
+            break
+        if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
+            continue
+        relative = path.relative_to(root)
+        if path.suffix == ".py":
+            context["skill_modules"].add(path.stem)
+            context["skill_modules"].update(relative.parts[:-1])
+        if path.name == "__init__.py":
+            context["skill_modules"].add(path.parent.name)
+        dependency = path.parent.name == "scripts" and path.name in {"requirements.txt", "apt-packages.txt"}
+        if not dependency and path.name.lower() != "skill.md" and "scripts" not in relative.parts:
+            continue
+        try:
+            with path.open("rb") as stream:
+                data = stream.read(min(remaining, 128 * 1024))
+        except OSError:
+            continue
+        remaining -= len(data)
+        content = data.decode("utf-8", errors="replace")
+        if dependency:
+            key = "pip" if path.name == "requirements.txt" else "apt"
+            context[key].extend(
+                line.split("#", 1)[0].strip()
+                for line in content.splitlines()
+                if line.strip() and not line.lstrip().startswith(("#", "-"))
+            )
+        else:
+            context["skill_text"] += "\n" + content
+            if "scripts" in relative.parts and path.suffix == ".py":
+                imports = re.finditer(r"(?m)^\s*(?:from\s+([\w.]+)\s+import\b|import\s+([\w.]+))", content)
+                context["script_imports"].update((match.group(1) or match.group(2)).split(".")[0] for match in imports)
+    context["skill_modules"] = sorted(context["skill_modules"])
+    context["script_imports"] = sorted(context["script_imports"])
+    return context
 
 
 def main():
@@ -3126,11 +4001,12 @@ def main():
     traj, traj_meta = load_trajectory_with_fallback(ATIF_PATH, ATIF_PATH.parent)
 
     expected_skill = entry.get("expected_skill") or ""
-    expected_script = entry.get("expected_script") or ""
+    expected_script = normalize_optional_reference(entry.get("expected_script"))
     should_trigger = resolve_should_trigger(entry)
     evaluated_skill = entry.get("evaluated_skill") or ""
     acceptable_skills = _resolve_acceptable_skills(entry, expected_skill)
-    expected_behavior = entry.get("expected_behavior", [])
+    expected_behavior = normalize_expected_behaviors(entry.get("expected_behavior", []))
+    declarative_checks = entry.get("checks", [])
     question = entry.get("question", "")
     ground_truth = entry.get("ground_truth", "")
     workspace_mode = entry.get("skill_workspace_mode", "isolated")
@@ -3166,6 +4042,11 @@ def main():
                 skill_execution=_skill_metric_not_applicable(),
                 skill_efficiency=_skill_metric_not_applicable(),
             )
+        else:
+            # A skill metric the case gives nothing to score stays N/A, as on the judged path.
+            for metric, na_reason in _case_skill_metric_reasons(should_trigger, expected_skill).items():
+                skill_scores[metric] = None
+                judge_details[metric] = _skill_metric_not_applicable(na_reason)
         result = {
             "security": 0,
             **skill_scores,
@@ -3176,6 +4057,38 @@ def main():
             "trajectory_source": traj_meta.get("source"),
             "trajectory_detail": traj_meta.get("warning") or traj_meta.get("note"),
         }
+        if declarative_checks:
+            direct_results = _shared_declarative_checks.evaluate_declarative_checks(
+                declarative_checks,
+                tool_calls=[],
+                final_response="",
+                workspace_roots=_declarative_workspace_roots(),
+            )
+            direct_results = _shared_declarative_checks.mark_no_skill_script_checks(
+                declarative_checks,
+                direct_results,
+                has_skill=entry.get("has_skill", True),
+                skill_metrics_on=skill_metrics_on,
+                evaluated_skill=evaluated_skill,
+            )
+            judged_count = len(expected_behavior) if _has_judge_reference(expected_behavior) else 0
+            base_behavior = {
+                "score": judge_scores["behavior_check"],
+                "status": "accepted" if judged_count else "not_applicable",
+                "reason": "No trajectory or reconstructible agent log"
+                if judged_count
+                else _NO_EXPECTED_BEHAVIOR_REASON,
+                "results": [
+                    {"step": index + 1, "passed": False, "reason": "No trajectory or reconstructible agent log"}
+                    for index in range(judged_count)
+                ],
+            }
+            behavior_result = _shared_declarative_checks.combine_behavior_check(
+                base_behavior, direct_results, judged_count
+            )
+            judge_scores["behavior_check"] = behavior_result["score"]
+            judge_details["behavior_check"] = behavior_result
+            result["behavior_check"] = behavior_result["score"]
         if judge_details:
             result["details"] = judge_details
         write_reward_outputs(result, 0.0)
@@ -3215,9 +4128,26 @@ def main():
             require_evaluated_skill=True,
             skill_tool_names=skill_tools,
             acceptable_skills=acceptable_skills,
+            dependency_context=_dependency_context(evaluated_skill or expected_skill),
         )
         se_score = skill_execution_result["score"]
         details["skill_execution"] = skill_execution_result["details"]
+        if skill_execution_result.get("status") == "environment_invalid":
+            recovery = skill_execution_result["details"]["error_recovery"]
+            write_reward_outputs(
+                {
+                    "evaluation_status": "failed",
+                    "evaluation_errors": {"environment": recovery["reason"]},
+                    "environment_issues": recovery["environment_issues"],
+                    "entry_id": entry.get("id"),
+                    "metric_set": DEFAULT_METRIC_SET,
+                    "score_policy": DEFAULT_SCORE_POLICY,
+                    "details": details,
+                },
+                0.0,
+            )
+            logger.error("[environment] %s", recovery["reason"])
+            raise SystemExit(1)
     else:
         se_score = None
         details["skill_execution"] = _skill_metric_not_applicable()
@@ -3227,8 +4157,10 @@ def main():
         sef_score = None
         details["skill_efficiency"] = _skill_metric_not_applicable()
     elif not should_trigger or not expected_skill:
-        sef_score = 1.0
-        details["skill_efficiency"] = {"message": "Skipped (negative or no expected_skill)"}
+        sef_score = None
+        details["skill_efficiency"] = _skill_metric_not_applicable(
+            skill_efficiency_not_applicable_reason(should_trigger, expected_skill)
+        )
     elif not tool_calls:
         sef_score = 0.0
         details["skill_efficiency"] = {"message": "No tool calls in trajectory"}
@@ -3255,42 +4187,75 @@ def main():
         traj, question, ground_truth=ground_truth, expected_behavior=expected_behavior
     )
 
-    # ── Eval 4: accuracy (LLM judge) ─────────────────────────────────────
-    acc_result = _call_required_judge(
-        "accuracy",
-        judge_accuracy,
-        question,
-        ground_truth,
-        bundles["accuracy"]["prompt_evidence"],
-        skill_identification_applicable=should_trigger and bool(expected_skill),
-        allow_not_applicable=not _has_judge_reference(ground_truth),
-    )
-    acc_score = acc_result["score"]
-    details["accuracy"] = acc_result
+    # Every judge attempt below is saved to judge_attempts.json as it happens.
+    judge_attempts = []
+    judge_evidence_token = _ACTIVE_JUDGE_EVIDENCE.set(judge_attempts)
+    try:
+        # ── Eval 4: accuracy (LLM judge) ─────────────────────────────────
+        acc_result = _call_required_judge(
+            "accuracy",
+            judge_accuracy,
+            question,
+            ground_truth,
+            bundles["accuracy"]["prompt_evidence"],
+            allow_not_applicable=not _has_judge_reference(ground_truth),
+        )
+        acc_score = acc_result["score"]
+        details["accuracy"] = acc_result
 
-    # ── Eval 5: goal_accuracy (RAGAS or custom LLM judge) ────────────────
-    ga_result = _call_required_judge(
-        "goal_accuracy",
-        judge_goal_accuracy,
-        question,
-        ground_truth,
-        bundles["goal_accuracy"]["prompt_evidence"],
-        tool_summary="",
-        allow_not_applicable=not _has_judge_reference(ground_truth),
-    )
-    ga_score = ga_result["score"]
-    details["goal_accuracy"] = ga_result
+        # ── Eval 5: goal_accuracy (RAGAS or custom LLM judge) ────────────
+        ga_result = _call_required_judge(
+            "goal_accuracy",
+            judge_goal_accuracy,
+            question,
+            ground_truth,
+            bundles["goal_accuracy"]["prompt_evidence"],
+            tool_summary="",
+            allow_not_applicable=not _has_judge_reference(ground_truth),
+        )
+        ga_score = ga_result["score"]
+        details["goal_accuracy"] = ga_result
 
-    # ── Eval 6: behavior_check (LLM judge) ───────────────────────────────
-    bc_result = _call_required_judge(
-        "behavior_check",
-        judge_behavior_check,
-        bundles["behavior_check"]["prompt_evidence"],
-        expected_behavior,
-        allow_not_applicable=not _has_judge_reference(expected_behavior),
-    )
-    bc_score = bc_result["score"]
-    details["behavior_check"] = bc_result
+        # ── Eval 6: behavior_check (LLM judge) ───────────────────────────
+        if declarative_checks:
+            if _has_judge_reference(expected_behavior):
+                bc_result = _call_required_judge(
+                    "behavior_check",
+                    judge_behavior_check,
+                    bundles["behavior_check"]["prompt_evidence"],
+                    expected_behavior,
+                )
+            else:
+                bc_result = _judge_not_applicable(_NO_EXPECTED_BEHAVIOR_REASON, results=[])
+        else:
+            bc_result = _call_required_judge(
+                "behavior_check",
+                judge_behavior_check,
+                bundles["behavior_check"]["prompt_evidence"],
+                expected_behavior,
+                allow_not_applicable=not _has_judge_reference(expected_behavior),
+            )
+        if declarative_checks:
+            direct_results = _shared_declarative_checks.evaluate_declarative_checks(
+                declarative_checks,
+                tool_calls=tool_calls,
+                final_response=_get_final_response(traj),
+                workspace_roots=_declarative_workspace_roots(),
+            )
+            direct_results = _shared_declarative_checks.mark_no_skill_script_checks(
+                declarative_checks,
+                direct_results,
+                has_skill=entry.get("has_skill", True),
+                skill_metrics_on=skill_metrics_on,
+                evaluated_skill=evaluated_skill,
+            )
+            judged_count = len(expected_behavior) if _has_judge_reference(expected_behavior) else 0
+            bc_result = _shared_declarative_checks.combine_behavior_check(bc_result, direct_results, judged_count)
+        bc_score = bc_result["score"]
+        details["behavior_check"] = bc_result
+    finally:
+        _ACTIVE_JUDGE_EVIDENCE.reset(judge_evidence_token)
+        _write_judge_attempts(judge_attempts)
 
     # persist refs + omission metadata onto the metric details
     attach_metric_evidence_refs(details, {m: bundles[m]["evidence_refs"] for m in bundles})
@@ -3308,6 +4273,7 @@ def main():
         "behavior_check": bc_score,
         "metric_set": DEFAULT_METRIC_SET,
         "score_policy": DEFAULT_SCORE_POLICY,
+        "judge_contract": JUDGE_CONTRACT,
         "entry_id": entry.get("id"),
         "has_skill": entry.get("has_skill", True),
         "trajectory_source": traj_meta.get("source"),

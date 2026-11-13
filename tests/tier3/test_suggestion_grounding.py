@@ -426,25 +426,82 @@ def test_suggestions_evidence_refs_resolved_to_full_dict(monkeypatch):
     assert "excerpt" in refs[0]
 
 
-def test_suggestions_evidence_refs_unresolvable_string_fallback(monkeypatch):
-    """Unresolvable string ref is parsed into a minimal dict with kind='evidence'."""
+def test_suggestions_drop_evidence_refs_the_run_did_not_record(monkeypatch):
+    """A cited ref that the run did not record is dropped instead of rendered as evidence."""
     monkeypatch.setattr(
         "skillevaluator.tier3.eval_core.llm_judge.call_public_llm",
         lambda _prompt, **_kw: (
             '[{"suggestion": "Fix something", "dimension": "goal_accuracy",'
-            ' "evidence_refs": ["trajectory.json#/steps/999"]}]',
+            ' "evidence_refs": ["trajectory.json#/steps/999", "trajectory.json#/steps/14",'
+            ' "trajectory.json#/steps/14", {"source": "made-up.json", "json_pointer": "/x"}]}]',
             None,
         ),
     )
     reward = _reward_multi_metric(0.1)
     findings = report._extract_findings([reward])
-    objs = report._generate_suggestions_structured("demo", findings, [reward])
-    assert objs
-    refs = objs[0]["evidence_refs"]
-    assert refs and isinstance(refs[0], dict), f"expected dict fallback, got {refs!r}"
-    assert refs[0]["source"] == "trajectory.json"
-    assert refs[0]["json_pointer"] == "/steps/999"
-    assert refs[0]["kind"] == "evidence"
+    [obj] = report._generate_suggestions_structured("demo", findings, [reward])
+    assert [ref["json_pointer"] for ref in obj["evidence_refs"]] == ["/steps/14"]
+    assert obj["evidence_refs"][0]["kind"] == "tool_call"
+
+
+@pytest.mark.parametrize(
+    "raw_refs",
+    [
+        ["trajectory.json#/steps/14"],
+        {"source": "trajectory.json", "json_pointer": "/steps/14", "kind": "tool_call", "excerpt": "submit ..."},
+        "trajectory.json#/steps/14",
+    ],
+)
+def test_suggestions_resolve_legacy_evidence_ref_shapes(monkeypatch, raw_refs):
+    monkeypatch.setattr(
+        "skillevaluator.tier3.eval_core.llm_judge.call_public_llm",
+        lambda _prompt, **_kw: (
+            '[{"suggestion": "Fix evaluator job", "dimension": "goal_accuracy",'
+            ' "evidence_refs": ["trajectory.json#/steps/14"]}]',
+            None,
+        ),
+    )
+    reward = _reward_multi_metric(0.1)
+    reward["details"]["goal_accuracy"]["evidence_refs"] = raw_refs
+    findings = report._extract_findings([reward])
+    [suggestion] = report._generate_suggestions_structured("demo", findings, [reward])
+    assert suggestion["evidence_refs"][0]["source"] == "trajectory.json"
+    assert suggestion["evidence_refs"][0]["json_pointer"] == "/steps/14"
+    if isinstance(raw_refs, dict):
+        assert suggestion["evidence_refs"][0]["kind"] == "tool_call"
+        assert suggestion["evidence_refs"][0]["excerpt"] == "submit ..."
+
+
+def test_suggestions_keep_one_copy_of_a_repeated_suggestion(monkeypatch):
+    monkeypatch.setattr(
+        "skillevaluator.tier3.eval_core.llm_judge.call_public_llm",
+        lambda _prompt, **_kw: (
+            '[{"suggestion": "Install jq in evals/environment/Dockerfile.", "dimension": "goal_accuracy"},'
+            ' {"suggestion": "install jq in  evals/environment/Dockerfile.", "dimension": "security"},'
+            ' "Document the output format in SKILL.md."]',
+            None,
+        ),
+    )
+    reward = _reward_multi_metric(0.1)
+    objs = report._generate_suggestions_structured("demo", report._extract_findings([reward]), [reward])
+    assert [obj["suggestion"] for obj in objs] == [
+        "Install jq in evals/environment/Dockerfile.",
+        "Document the output format in SKILL.md.",
+    ]
+
+
+def test_suggestion_prompt_guards_requirements_and_labels_hypotheses(monkeypatch):
+    prompts = []
+    monkeypatch.setattr(
+        "skillevaluator.tier3.eval_core.llm_judge.call_public_llm",
+        lambda prompt, **_kw: (prompts.append(prompt), ("[]", None))[1],
+    )
+    reward = _reward_multi_metric(0.1)
+    report._generate_suggestions_structured("demo", report._extract_findings([reward]), [reward])
+    [prompt] = prompts
+    assert "Do not suggest loosening, removing, or rewriting an eval expectation just so the agent passes" in prompt
+    assert 'start the suggestion with "Hypothesis:"' in prompt
+    assert "Give distinct suggestions" in prompt
 
 
 def test_suggestions_evidence_refs_lookup_uses_all_metrics(monkeypatch):

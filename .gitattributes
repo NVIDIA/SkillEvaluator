@@ -1,3 +1,6 @@
 # Shell scripts run through their shebang inside Linux containers. Keep them
 # LF so a Windows checkout cannot turn "#!/bin/bash" into "#!/bin/bash\r".
 *.sh text eol=lf
+
+# Vendored report assets are verified by digest; never convert their newlines.
+src/skillevaluator/reporting/assets/** -text

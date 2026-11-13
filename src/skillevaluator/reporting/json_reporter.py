@@ -18,7 +18,12 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from skillevaluator.publication_evidence import result_publication_evidence_dict
+from skillevaluator import __version__
+from skillevaluator.publication_evidence import (
+    TIER1_REQUIRED_CHECKS_KEY,
+    TIER1_UNSCANNED_PATHS_KEY,
+    result_publication_evidence_dict,
+)
 from skillevaluator.reporting.base import (
     ReporterBase,
     assess_publication,
@@ -29,13 +34,20 @@ from skillevaluator.reporting.base import (
     result_publication_target_dict,
     select_agent_eval_payload,
 )
+from skillevaluator.reporting.finding_summary import (
+    finding_counts,
+    merge_finding_summaries,
+    summarize_findings,
+    summarize_messages,
+)
 from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
 from skillevaluator.skillspector_diagnostics import sanitize_completeness
 from skillevaluator.skillspector_provenance import sanitize_skillspector_provenance_metadata
+from skillevaluator.skillspector_reference_caveats import sanitize_reference_caveat_metadata
 from skillevaluator.source_identity import recorded_evaluated_source
 
 if TYPE_CHECKING:
-    from skillevaluator.models import ValidationResult
+    from skillevaluator.models import Finding, ValidationResult
 
 
 def _json_safe_agent_eval(value: object) -> dict[str, Any]:
@@ -57,6 +69,22 @@ def _json_safe_benchmark_policy(value: object) -> dict[str, bool] | None:
     return policy or None
 
 
+def _tier1_scope_strings(value: object, field: str) -> list[str]:
+    """Copy bounded scope evidence without narrowing its publication meaning.
+
+    Reject malformed declarations rather than dropping them: absence has legacy
+    semantics and could otherwise turn incomplete evidence into a passing run.
+    Semantic lineup validation remains the publication assessor's responsibility.
+    """
+    if (
+        not isinstance(value, list)
+        or len(value) > 20_000
+        or any(not isinstance(item, str) or not 1 <= len(item) <= 4096 for item in value)
+    ):
+        raise ValueError(f"Invalid {field}: expected a bounded list of nonempty strings")
+    return list(value)
+
+
 class JSONReporter(ReporterBase):
     """JSON export for machine-readable output.
 
@@ -70,16 +98,26 @@ class JSONReporter(ReporterBase):
         indent: int | None = 2,
         include_timestamp: bool = True,
         expected_skill_name: str | None = None,
+        target_path: str | None = None,
+        explicit_skill_name: str | None = None,
     ) -> None:
         """Initialize JSON reporter.
 
         Args:
             indent: JSON indentation level (None for compact)
             include_timestamp: Whether to include generation timestamp
+            expected_skill_name: Publication target name the evidence must bind to
+            target_path: Display path or Git remote URL of the validated target
+            explicit_skill_name: Name of the one skill a single-skill run
+                validated. It names the ``skills`` entry, which is otherwise
+                inferred from finding paths and quality metadata and so falls
+                back to one entry per check ID for a clean run without them.
         """
         self.indent = indent
         self.include_timestamp = include_timestamp
         self.expected_skill_name = expected_skill_name
+        self.target_path = target_path
+        self.explicit_skill_name = explicit_skill_name
 
     @property
     def name(self) -> str:
@@ -108,11 +146,28 @@ class JSONReporter(ReporterBase):
         overall_status = run_status.headline.value
         total_errors = sum(r.summary.errors for r in results)
         total_warnings = sum(r.summary.warnings for r in results)
+        result_finding_summaries = [summarize_findings([result]) for result in results]
+        finding_summary = merge_finding_summaries(result_finding_summaries)
 
-        # Reuse HTML reporter's skill reorganization and contributor extraction
-        html_reporter = HTMLReporter()
+        # Reuse HTML reporter's skill reorganization and contributor extraction.
+        # The explicit name keeps a single-skill run to one ``skills`` entry
+        # when no finding path or quality score names the skill, and the
+        # target path is the same fallback the HTML report uses.
+        html_reporter = HTMLReporter(
+            target_path=self.target_path,
+            explicit_skill_name=self.explicit_skill_name,
+            expected_skill_name=self.expected_skill_name,
+        )
         skills_by_name = html_reporter._reorganize_by_skill(results)
         contributors = HTMLReporter._extract_contributors(skills_by_name, results)
+        # Top issues across every tier, the rows the HTML report data carries
+        # (its summary panel lists the Tier 1 rows only), without ``issue_key``:
+        # that is an HTML anchor hashed from the finding text, and CI redaction
+        # masks the text in this report but cannot refresh a hash it never sees.
+        top_issues = [
+            {key: value for key, value in issue.items() if key != "issue_key"}
+            for issue in html_reporter._compute_top_issues(skills_by_name)
+        ]
 
         # Build per-skill summary
         skills_summary = []
@@ -128,6 +183,8 @@ class JSONReporter(ReporterBase):
             )
 
         data: dict[str, Any] = {
+            "version": __version__,
+            "target_path": self.target_path,
             "overall_passed": all_passed,
             "overall_status": overall_status,
             "incomplete_scans": incomplete_scans,
@@ -142,9 +199,18 @@ class JSONReporter(ReporterBase):
                 "medium": sum(r.summary.medium_count for r in results),
                 "low": sum(r.summary.low_count for r in results),
             },
+            # Raw totals above count every validator record. These reconcile
+            # them into unique findings and distinct locations by stable ID.
+            "finding_counts": finding_counts(finding_summary),
+            "finding_groups": finding_summary["groups"],
+            "message_counts": summarize_messages(results),
             "skills": skills_summary,
             "contributors": contributors,
-            "results": [self._result_to_dict(r) for r in results],
+            "top_issues": top_issues,
+            "results": [
+                self._result_to_dict(result, finding_summary=result_summary)
+                for result, result_summary in zip(results, result_finding_summaries, strict=True)
+            ],
         }
 
         agent_eval = select_agent_eval_payload(results)
@@ -218,9 +284,18 @@ class JSONReporter(ReporterBase):
             if not isinstance(gating, dict) or gating.get("tier") is None:
                 continue
             tier = str(gating["tier"])
-            tier_entry = gating_by_tier.setdefault(tier, {"blocking": False, "validators": []})
+            tier_entry = gating_by_tier.setdefault(
+                tier,
+                {"blocking": False, "validators": [], "validator_policies": []},
+            )
             tier_entry["blocking"] = bool(tier_entry["blocking"] or gating.get("blocking"))
             tier_entry["validators"].append(result.validator_name)
+            # ``blocking`` above is true when any validator of the tier blocks;
+            # this records each validator's own policy, so an advisory Tier 2
+            # check is not read as blocking because another one is.
+            tier_entry["validator_policies"].append(
+                {"validator": result.validator_name, "blocking": bool(gating.get("blocking"))}
+            )
         if gating_by_tier:
             data["gating"] = {"tiers": gating_by_tier}
 
@@ -239,6 +314,21 @@ class JSONReporter(ReporterBase):
         rubric_results = [r.metadata["rubric_eval"] for r in results if r.metadata.get("rubric_eval")]
         if rubric_results:
             data["rubric_eval"] = rubric_results[0]
+
+        # Tier 1 applicability: ``--type auto`` found no supported artifact, so
+        # the manifest checks were recorded as not applicable. Every result of
+        # such a run carries the record, whatever --checks selected, so CI can
+        # read this instead of parsing skip reasons.
+        tier1_applicability = next(
+            (
+                result.metadata.get("tier1_applicability")
+                for result in results
+                if isinstance(result.metadata.get("tier1_applicability"), dict)
+            ),
+            None,
+        )
+        if tier1_applicability is not None:
+            data["tier1_applicability"] = tier1_applicability
 
         # Tier 3: Agent evaluation summary
         if emitted_agent_eval:
@@ -259,8 +349,15 @@ class JSONReporter(ReporterBase):
 
         return json.dumps(data, indent=self.indent, default=str, allow_nan=False)
 
-    def _result_to_dict(self, result: ValidationResult) -> dict[str, Any]:
+    def _result_to_dict(
+        self,
+        result: ValidationResult,
+        *,
+        finding_summary: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Convert ValidationResult to serializable dictionary."""
+        if finding_summary is None:
+            finding_summary = summarize_findings([result])
         skipped = is_cleanly_skipped(result)
         data: dict[str, Any] = {
             "validator": result.validator_name,
@@ -281,20 +378,8 @@ class JSONReporter(ReporterBase):
                 "medium_count": result.summary.medium_count,
                 "low_count": result.summary.low_count,
             },
-            "findings": [
-                {
-                    "category": f.category,
-                    "severity": f.severity.value,
-                    "check_name": f.check_name,
-                    "message": f.message,
-                    "file_path": f.file_path,
-                    "line_number": f.line_number,
-                    "line_content": f.line_content,
-                    "suggestion": f.suggestion,
-                    "metadata": f.metadata or None,
-                }
-                for f in result.findings
-            ],
+            "finding_counts": finding_counts(finding_summary),
+            "findings": [self._finding_to_dict(finding) for finding in result.findings],
             "success_details": [
                 {
                     "check": s.check_name,
@@ -314,6 +399,10 @@ class JSONReporter(ReporterBase):
         if result.metadata.get("confirmed_failure") is True:
             data["confirmed_failure"] = True
 
+        for key in (TIER1_REQUIRED_CHECKS_KEY, TIER1_UNSCANNED_PATHS_KEY):
+            if key in result.metadata:
+                data[key] = _tier1_scope_strings(result.metadata[key], key)
+
         skillspector_version = result.metadata.get("skillspector_version")
         if isinstance(skillspector_version, str):
             data["skillspector_version"] = skillspector_version
@@ -332,9 +421,25 @@ class JSONReporter(ReporterBase):
         if isinstance(coverage, list):
             data["dependency_coverage"] = coverage
 
+        # Tier 1 SkillSpector file-role scoping: retained and suppressed issue
+        # counts, and the raw versus applicable aggregate risk score.
+        skillspector_applicability = result.metadata.get("skillspector_applicability")
+        if isinstance(skillspector_applicability, dict):
+            data["skillspector_applicability"] = skillspector_applicability
+
         qs = result.metadata.get("quality_scores")
         if qs:
             data["quality"] = qs
+
+        # Whether an explicitly requested SkillSpector baseline was applied, so
+        # CI can tell an inert baseline from one that matched nothing.
+        skillspector_baseline = result.metadata.get("skillspector_baseline")
+        if isinstance(skillspector_baseline, dict):
+            data["skillspector_baseline"] = dict(skillspector_baseline)
+
+        reference_caveats = sanitize_reference_caveat_metadata(result.metadata.get("skillspector_reference_caveats"))
+        if reference_caveats is not None:
+            data["skillspector_reference_caveats"] = reference_caveats
 
         # Tier 3: Agent evaluation data
         ae = result.metadata.get("agent_eval")
@@ -377,6 +482,13 @@ class JSONReporter(ReporterBase):
         if isinstance(work_limit, dict):
             data["work_limit"] = work_limit
 
+        return data
+
+    @staticmethod
+    def _finding_to_dict(finding: Finding) -> dict[str, Any]:
+        """Preserve the legacy JSON null for findings without metadata."""
+        data = finding.to_dict()
+        data["metadata"] = data["metadata"] or None
         return data
 
     def get_file_extension(self) -> str:

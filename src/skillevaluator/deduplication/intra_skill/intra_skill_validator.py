@@ -25,6 +25,7 @@ from skillevaluator.constants import (
     CONTENT_DEDUP_SIMILARITY_THRESHOLD,
     CONTENT_DEDUP_TRIVIAL_DUP_MAX_CHARS,
 )
+from skillevaluator.deduplication.intra_skill import llm_analyzer
 from skillevaluator.deduplication.intra_skill.llm_analyzer import (
     SYSTEM_PROMPT,
     analyze_cluster,
@@ -36,7 +37,7 @@ from skillevaluator.deduplication.utils.chunker import ContentChunk, chunk_file
 from skillevaluator.deduplication.utils.skill_collector import CollectedFile, SkillCollectionError, collect_files
 from skillevaluator.embedding.client import EmbeddingClient, SimilarityConfigError, validate_embedding_vector
 from skillevaluator.inference import LLMClient, LLMClientError, LLMClientRefusedError
-from skillevaluator.inference.diagnostics import llm_failure_diagnostic, safe_llm_labels
+from skillevaluator.inference.diagnostics import llm_failure_diagnostic, safe_llm_labels, safe_llm_model
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.utils.tier2_paths import safe_path_label
 from skillevaluator.validators.base import ValidatorBase
@@ -48,9 +49,14 @@ logger = logging.getLogger(__name__)
 # config assignment. Used to recognize repeated config/comment snippets.
 _COMMENT_PREFIXES = ("#", ";", "//", "--", "!")
 _CONFIG_KV_RE = re.compile(r"^[\w.\-/]+\s*[=:]\s*\S")
-CONTENT_DEDUP_MAX_CLUSTER_MEMBERS = 64
-CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS = 64_000
+# One cluster may hold every chunk of the scan. The per-call and aggregate
+# prompt budgets bound paid review; a fixed member cap below the chunk ceiling
+# would refuse large repeated-content clusters whose prompt fits.
+CONTENT_DEDUP_MAX_CLUSTER_MEMBERS = CONTENT_DEDUP_MAX_CHUNKS
 CONTENT_DEDUP_MAX_TOTAL_LLM_PROMPT_CHARS = 1_000_000
+# Most member locations and source files named in one finding message. The
+# rest are counted, so a finding for a 1,024-member cluster stays a few kilobytes.
+_MAX_REPORTED_LOCATIONS = 64
 
 # Scan label recorded when a work limit stops duplicate analysis early.
 _WORK_LIMIT_SCAN = "context-deduplication"
@@ -110,6 +116,27 @@ def _is_trivial_intra_file_duplicate(cluster: ContentCluster) -> bool:
     if cluster.cross_file:
         return False
     return all(_chunk_is_short_config(member) for member in cluster.members)
+
+
+def _cluster_location_text(cluster: ContentCluster) -> tuple[str, str]:
+    """Return the finding scope and member location list, bounded in length."""
+    distinct_files = sorted({c.source_file for c in cluster.members})
+    if len(distinct_files) == 1:
+        scope = f"within {distinct_files[0]}"
+    else:
+        scope = f"across {' and '.join(distinct_files[:_MAX_REPORTED_LOCATIONS])}"
+        if (omitted_files := len(distinct_files) - _MAX_REPORTED_LOCATIONS) > 0:
+            scope += f" and {omitted_files} more file{'s' if omitted_files != 1 else ''}"
+
+    locations = [
+        f'"{c.heading}" in {c.source_file} (lines {c.start_line}-{c.end_line})'
+        for c in cluster.members[:_MAX_REPORTED_LOCATIONS]
+    ]
+    location_text = "\n  vs ".join(locations)
+    if (omitted := len(cluster.members) - _MAX_REPORTED_LOCATIONS) > 0:
+        noun = "locations" if omitted != 1 else "location"
+        location_text += f"\n  and {omitted} more {noun} ({len(cluster.members)} in total)"
+    return scope, location_text
 
 
 def _mark_work_limit_incomplete(
@@ -319,7 +346,9 @@ class IntraSkillValidator(ValidatorBase):
                 ),
                 (
                     prompt_chars,
-                    CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS,
+                    # Read at call time: build_user_prompt shares repeated text
+                    # against this same attribute, so one value sets both.
+                    llm_analyzer.MAX_PROMPT_CHARS,
                     "llm_prompt_size_limit",
                     "an LLM review prompt of {actual} characters exceeds the limit of {limit}.",
                 ),
@@ -393,6 +422,17 @@ class IntraSkillValidator(ValidatorBase):
             "clusters_failed": failed_count,
             "failures": [{"count": count, "diagnostic": diagnostic} for diagnostic, count in sorted(failures.items())],
         }
+        # "model" above stays the configured model. A server-side fallback can
+        # answer some clusters in its place, so name every model that answered.
+        models_used = sorted(
+            {
+                safe_llm_model(verdict.model)
+                for _, verdict, _ in cluster_results
+                if verdict is not None and verdict.model is not None
+            }
+        )
+        if models_used:
+            result.metadata["llm_analysis"]["models_used"] = models_used
         if refused_count:
             logger.warning(
                 "LLM declined to classify %d of %d content clusters (provider: %s; model: %s); "
@@ -418,15 +458,7 @@ class IntraSkillValidator(ValidatorBase):
                 continue
 
             distinct_files = sorted({c.source_file for c in cluster.members})
-
-            locations = []
-            for c in cluster.members:
-                locations.append(f'"{c.heading}" in {c.source_file} (lines {c.start_line}-{c.end_line})')
-            location_text = "\n  vs ".join(locations)
-            if len(distinct_files) == 1:
-                scope = f"within {distinct_files[0]}"
-            else:
-                scope = f"across {' and '.join(distinct_files)}"
+            scope, location_text = _cluster_location_text(cluster)
 
             if verdict is None:
                 # Report the refused overlap so the author can review it, but
@@ -475,6 +507,13 @@ class IntraSkillValidator(ValidatorBase):
                         "reasoning": verdict.reasoning,
                         "confidence": verdict.confidence,
                         "source_files": distinct_files,
+                        # The model that gave this verdict, which can be a
+                        # server-side fallback rather than the configured model.
+                        **(
+                            {"llm_provider": provider, "llm_model_used": safe_llm_model(verdict.model)}
+                            if verdict.model is not None
+                            else {}
+                        ),
                     },
                 )
             )

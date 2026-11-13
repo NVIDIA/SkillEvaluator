@@ -29,6 +29,7 @@ from skillevaluator.evaluation.results import DatasetGenerationError, DatasetGen
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
 from skillevaluator.tier3.case_ids import safe_child, validate_case_id, validate_case_ids
+from skillevaluator.tier3.dataset_coverage import dataset_coverage_result
 from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS, load_dataset_entries_with_format
 from skillevaluator.tier3.evals_config import CONFIG_FILENAMES, _validate_config, load_evals_config
 from skillevaluator.tier3.evals_spec import validate_harbor_contract, validate_skillevaluators
@@ -48,6 +49,7 @@ from skillevaluator.tier3.harbor.metrics import (
     LEGACY_METRICS,
     LEGACY_SCORE_POLICY,
     PARTIAL_SCORE_POLICY,
+    not_applicable_list,
     overall_score_from_metrics,
 )
 from skillevaluator.tier3.harbor.progress import (
@@ -429,6 +431,7 @@ def create_dataset(
     dry_run: bool = False,
     force: bool = False,
     prompt: Path | None = None,
+    grounding: str = "skill",
     refine: bool = False,
     from_results: Path | None = None,
     results_dir: Path | None = None,
@@ -447,6 +450,8 @@ def create_dataset(
         argv.append("--force")
     if prompt:
         argv.extend(["--prompt", str(prompt.resolve())])
+    if grounding != "skill":
+        argv.extend(["--grounding", grounding])
     if refine:
         argv.append("--refine")
     if from_results:
@@ -619,7 +624,7 @@ skills_dir = {toml_quote("/workspace/skills")}
             """FROM python:3.12-slim
 
 RUN apt-get -o Acquire::Retries=3 update && \\
-    apt-get -o Acquire::Retries=3 install -y --no-install-recommends bash curl git jq ripgrep && \\
+    apt-get -o Acquire::Retries=3 install -y --no-install-recommends bash curl git jq procps ripgrep && \\
     rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /workspace/skills /logs/agent /logs/verifier
@@ -663,7 +668,14 @@ def evaluate(
     environment_kwarg: tuple[str, ...] = (),
     skip_baseline: bool,
     skip_with_skill: bool = False,
+    reuse_baseline: str | None = None,
+    compare_to: str | None = None,
     n_attempts: int | None,
+    max_agent_tokens: int | None = None,
+    max_judge_calls: int | None = None,
+    max_attempts_total: int | None = None,
+    max_cost_usd: float | None = None,
+    price_file: Path | None = None,
     pass_threshold: float | None,
     stop_on_pass: bool | None = None,
     n_concurrent: int | None,
@@ -679,6 +691,7 @@ def evaluate(
     results_dir: Path | None,
     harbor_keep_jobs: bool,
     agent_runtime_preflight: bool | None = None,
+    tolerate_baseline_timeouts: bool | None = None,
     timeout_multiplier: float | None,
     override_cpus: int | None,
     override_memory_mb: int | None,
@@ -721,6 +734,10 @@ def evaluate(
         reporter.emit(ProgressEvent(stage="configuration", state="running"))
         if skip_baseline and skip_with_skill:
             raise ValueError("--skip-baseline and --skip-with-skill are mutually exclusive (no arm would run)")
+        if reuse_baseline and (skip_baseline or skip_with_skill):
+            raise ValueError("--reuse-baseline is mutually exclusive with --skip-baseline and --skip-with-skill")
+        if compare_to and skip_with_skill:
+            raise ValueError("--compare-to is mutually exclusive with --skip-with-skill")
         unknown = validate_agents(agent_list)
         if unknown:
             supported = ", ".join(sorted(HARBOR_AGENTS_SUPPORTED))
@@ -750,7 +767,14 @@ def evaluate(
             agents=agent_list,
             skip_baseline=skip_baseline,
             skip_with_skill=skip_with_skill,
+            reuse_baseline=reuse_baseline,
+            compare_to=compare_to,
             n_attempts=n_attempts,
+            max_agent_tokens=max_agent_tokens,
+            max_judge_calls=max_judge_calls,
+            max_attempts_total=max_attempts_total,
+            max_cost_usd=max_cost_usd,
+            price_file=price_file,
             pass_threshold=pass_threshold,
             stop_on_pass=stop_on_pass,
             n_concurrent=n_concurrent,
@@ -766,6 +790,7 @@ def evaluate(
             output_dir=output_dir,
             keep_harbor_jobs=harbor_keep_jobs,
             agent_runtime_preflight=agent_runtime_preflight,
+            tolerate_baseline_timeouts=tolerate_baseline_timeouts,
             env_mode=env_mode,
             env_mode_source="CLI",
             environment_kwargs=merged_environment_kwargs,
@@ -966,15 +991,19 @@ def validate_evals(skill_path: Path, *, as_json: bool, strict: bool, harbor_cont
                 )
             ]
 
+    coverage = dataset_coverage_result(skill_path)
     if as_json:
         console.print_json(
             json.dumps(
-                [{"path": r.path, "status": r.status, "message": r.message} for r in results],
+                [{"path": r.path, "status": r.status, "message": r.message} for r in results]
+                + ([coverage] if coverage is not None else []),
                 indent=2,
             )
         )
     else:
         _print_validate_results(skill_path, results)
+        if coverage is not None:
+            console.print(Text(coverage["message"]))
 
     has_errors = any(r.status == "error" for r in results)
     has_warnings = any(r.status == "warning" for r in results)
@@ -1056,7 +1085,25 @@ def view_results(skill_path: Path, *, results_dir: Path | None = None) -> Path:
     target = latest.resolve() if latest.is_symlink() else latest
     report_path = target / "report.html"
     if not report_path.exists():
-        report_path = render_agent_eval_html_report(skill_path, target)
+        from skillevaluator.evaluation.tier3_feedback_chat import _read_result_json, saved_feedback_for_run
+        from skillevaluator.evaluation.tier3_report import _TIER3_FEEDBACK_FIELDS
+
+        saved_result = _read_result_json(target)
+        saved_feedback = saved_feedback_for_run(saved_result, target)
+        # A run saves every feedback field; anything less is rebuilt as before.
+        if saved_feedback and saved_feedback.keys() == set(_TIER3_FEEDBACK_FIELDS):
+            # Rebuild with the feedback this run saved. Asking the judge again
+            # costs tokens and can change the advice; with no provider it
+            # silently drops the advice the run saved.
+            report_path = render_agent_eval_html_report(
+                skill_path,
+                target,
+                engine_result=saved_result,
+                use_llm_judge=False,
+                saved_feedback=saved_feedback,
+            )
+        else:
+            report_path = render_agent_eval_html_report(skill_path, target)
     console.print(f"Opening: [cyan]{escape_markup(str(report_path))}[/cyan]")
     webbrowser.open(report_path.as_uri())
     return report_path
@@ -1074,6 +1121,83 @@ def harbor_view(jobs_dir: Path) -> int:
     except PermissionError:
         console.print("[red]Error: harbor binary is not executable.[/red]")
         return 1
+
+
+_FEEDBACK_EXIT_WORDS = frozenset({"exit", "quit", "q", ":q"})
+
+
+def run_feedback_chat(run_dir: Path, *, skill_path: Path | None = None) -> int:
+    """Chat about one completed Tier 3 run directory; nothing is written to disk.
+
+    Returns 0 when the chat ends normally and 1 when the run or provider cannot
+    be used, or when questions were asked but every one of them failed.
+    """
+    from skillevaluator.evaluation.tier3_feedback_chat import (
+        FEEDBACK_CHAT_ASSISTANT_LABEL,
+        assert_completed_run_dir,
+        open_feedback_session,
+        resolve_skill_path_for_run,
+        skill_changed_since_run,
+    )
+
+    try:
+        resolved_run = assert_completed_run_dir(run_dir)
+        resolved_skill = resolve_skill_path_for_run(resolved_run, skill_path)
+        session = open_feedback_session(resolved_skill, resolved_run)
+    except (OSError, ValueError) as exc:
+        # ProviderConfigurationError is a ValueError. No highlighting, so
+        # messages such as "Tier 3" stay plain text.
+        error_line = Text("Error: ", style="red")
+        error_line.append(strip_terminal_controls(str(exc)))
+        console.print(error_line, highlight=False)
+        return 1
+
+    panel_body = Text()
+    panel_body.append(strip_terminal_controls(resolved_skill.name), style="bold")
+    panel_body.append(f" · {strip_terminal_controls(resolved_run.name)}\n")
+    panel_body.append(strip_terminal_controls(str(resolved_run)), style="dim")
+    console.print()
+    console.print(Panel(panel_body, title=Text("Post-run feedback"), border_style="cyan"))
+    if skill_path is not None and skill_changed_since_run(resolved_run, resolved_skill):
+        console.print(
+            Text("The skill has changed since this run; answers describe the evaluated version.", style="yellow")
+        )
+    console.print(
+        Text(
+            "Each question sends this run's evidence to the configured LLM provider. "
+            "Type exit or press Ctrl-D to quit.",
+            style="dim",
+        )
+    )
+    console.print()
+
+    while True:
+        try:
+            line = console.input("[bold cyan]You:[/bold cyan] ")
+        except (EOFError, KeyboardInterrupt):
+            console.print()
+            break
+        question = line.strip()
+        if not question:
+            continue
+        if question.lower() in _FEEDBACK_EXIT_WORDS:
+            break
+        try:
+            answer = session.reply(question)
+        except KeyboardInterrupt:
+            # The session keeps no unanswered turn; Ctrl-C at the prompt still exits.
+            console.print()
+            console.print(Text("Interrupted; that question was discarded.", style="dim"))
+            console.print()
+            continue
+        console.print()
+        # Model text is printed literally: never parsed as markup, escapes removed.
+        reply_line = Text(f"{FEEDBACK_CHAT_ASSISTANT_LABEL}: ", style="bold green")
+        reply_line.append(strip_terminal_controls(answer))
+        console.print(reply_line)
+        console.print()
+
+    return 1 if session.failed_turns and not session.answered_turns else 0
 
 
 def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int:
@@ -1129,6 +1253,7 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
                         "score_policy_with_skill": _summary_score_policy(data),
                         "standard_metrics": _summary_standard_metrics(data),
                         "custom_only": _summaries_are_custom_only([data]),
+                        "not_applicable_with_skill": not_applicable_list(data.get("not_applicable_metrics")),
                     }
                     wo_summary = agent_dir / "without-skill" / "summary.json"
                     if wo_summary.exists():
@@ -1156,6 +1281,9 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
                                     {
                                         "overall_without_skill": wo_overall,
                                         "score_policy_without_skill": _summary_score_policy(wo_data),
+                                        "not_applicable_without_skill": not_applicable_list(
+                                            wo_data.get("not_applicable_metrics")
+                                        ),
                                     }
                                 )
                         except (ValueError, OSError):
@@ -1222,6 +1350,7 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
 
     table.add_row(*[""] * (1 + sum(2 if agent in agent_without else 1 for agent in agents)))
     overall_row: list[str | Text] = [Text("Overall", style="bold")]
+    lift_json_agents: list[str] = []
     for agent in agents:
         meta = agent_meta[agent]
         with_avg = _overall_score_for_display(
@@ -1242,7 +1371,13 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
                 persisted_overall=meta.get("overall_without_skill"),
                 score_policy=meta.get("score_policy_without_skill"),
             )
-            if with_avg is None or without_avg is None:
+            uses_lift_json, shared_lift = _shared_dimension_overall_lift(
+                agent_with[agent], agent_without[agent], overall_metrics, meta
+            )
+            if uses_lift_json and shared_lift is not None:
+                lift_json_agents.append(agent)
+                overall_row.append(_lift_text(shared_lift))
+            elif uses_lift_json or with_avg is None or without_avg is None:
                 overall_row.append(Text("-", style="dim"))
             else:
                 delta = with_avg - without_avg
@@ -1266,8 +1401,48 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
         # Pad before escaping so escape backslashes do not count toward the column width.
         run_line = f"{agent:<16s} {meta['timestamp']} (Harbor, {meta.get('num_trials', '?')} trials)"
         console.print(f"  [dim]{escape_markup(run_line)}[/dim]")
+    if lift_json_agents:
+        console.print(
+            f"  [dim]Overall lift for {escape_markup(', '.join(lift_json_agents))} compares only the "
+            "dimensions both arms scored, as in lift.json and the reports.[/dim]"
+        )
     console.print()
     return 0
+
+
+def _shared_dimension_overall_lift(
+    with_scores: dict[str, float],
+    without_scores: dict[str, float],
+    metrics: tuple[str, ...],
+    meta: dict[str, Any],
+) -> tuple[bool, float | None]:
+    """Return the canonical standard-policy Overall lift when shared metrics differ."""
+    shared_not_applicable = sorted(
+        {*meta.get("not_applicable_with_skill", ()), *meta.get("not_applicable_without_skill", ())}
+    )
+    if (
+        not shared_not_applicable
+        or metrics != DEFAULT_METRICS
+        or meta.get("score_policy_with_skill") != DEFAULT_SCORE_POLICY
+        or meta.get("score_policy_without_skill") != DEFAULT_SCORE_POLICY
+    ):
+        return False, None
+    agent_path = meta.get("path")
+    if not isinstance(agent_path, str) or not agent_path:
+        return True, None
+    try:
+        lift_data = json.loads((Path(agent_path) / "lift.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True, None
+    if not isinstance(lift_data, dict) or not isinstance(lift_data.get("overall"), dict):
+        return True, None
+    return True, _finite_numeric(lift_data["overall"].get("delta"))
+
+
+def _lift_text(delta: float) -> Text:
+    delta_text = f"+{delta:.2f}" if delta > 0 else f"{delta:.2f}"
+    delta_style = "bold green" if delta > 0 else ("bold red" if delta < 0 else "bold dim")
+    return Text(delta_text, style=delta_style)
 
 
 def _summary_scores(data: dict[str, Any], *, allow_missing_status: bool = False) -> dict[str, float]:
@@ -1425,6 +1600,7 @@ __all__ = [
     "init_harbor_task",
     "parse_agents",
     "parse_environment_kwargs",
+    "run_feedback_chat",
     "validate_evals",
     "view_results",
 ]

@@ -8,6 +8,29 @@ redesign, and publication gate is available. Existing `BENCHMARK.md` files are
 generated artifacts; merging the renderer does not rewrite cards already
 published in skill repositories.
 
+## Generate cards in repository CI
+
+The candidate three-tier CI aggregate composes each skill's actual retained
+Tier 1/2/3 results into `benchmarks/skill-NNN/skillevaluator.json` and
+`benchmarks/skill-NNN/BENCHMARK.md`. Find both through the combined report's
+index. Generation requires no model calls and never reads mutable skill files.
+It preserves exact source, dataset, run and coverage identities; contradictory
+or missing evidence produces an honest incomplete card.
+
+Tier 2/3 advisory CI policy does not waive benchmark publication requirements.
+Automation must use `publication.status` and `publication.eligible` in the
+combined JSON. A passing required CI gate alone cannot approve publication.
+In particular, older Tier 1 images that do not retain required-check scope
+produce incomplete cards until a compatible image is selected.
+
+On GitHub, local onboarding can opt into `--benchmark-pr` with a reviewed
+`ci-benchmark-pr-v1` descriptor. A trusted default-branch publisher verifies the
+producer, exact source head, current attempt and native JSON, regenerates
+eligible cards, and opens a dedicated PR containing only `BENCHMARK.md`
+updates. Source PRs and the default branch are never edited directly. Artifact
+Markdown is never trusted as write-ready content. GitLab currently retains
+cards in the aggregate artifact. See the [GitHub benchmark-card reference](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/all-tiers/README.md#llm-security-gateway-agents-and-benchmark-cards).
+
 ## Before and after
 
 The legacy card led with dense tier output and mixed verdict evidence into the
@@ -164,6 +187,39 @@ skillevaluator validate ./my-skill \
   --evaluated-source-revision 2263a2ebdab903e87f7e7c0a001d22c3a926a9cf \
   --evaluator-container-revision ghcr.io/nvidia/skillevaluator@sha256:0117bc2e...
 ```
+
+A pipeline that publishes cards for a requested source can also check that each
+card names that source, so a stale card or one generated for another commit
+fails before it is signed or copied:
+
+```bash
+uv run python scripts/ci/check_public_benchmarks.py \
+  --require-source-provenance \
+  --expected-source-repository NVIDIA/NVFlare \
+  --expected-source-revision 2263a2ebdab903e87f7e7c0a001d22c3a926a9cf \
+  --expected-evaluator-container-revision ghcr.io/nvidia/skillevaluator@sha256:0117bc2e... \
+  ./benchmark-backfill/example-skill
+```
+
+Each `--expected-*` option is optional and checks one metadata line of every
+scanned card, whatever its verdict: `Evaluated source`,
+`Evaluated source revision` or `Evaluator container revision`. The line must
+appear once in `Evaluation Metadata` and hold the same value; a missing line, a
+`not recorded` placeholder, a malformed value, a duplicate or a different value
+fails the scan. Only a plain one-line list item counts as that line, which is
+how SkillEvaluator renders it. An item that holds a link or inline HTML, or
+continues onto a second line, is treated as missing and reported as not
+recorded. Only top-level items are read: a nested list item is ignored, not
+counted as a duplicate. A value padded with spaces inside its code span is not
+canonical. The expected values use the same forms as the `validate`
+options above, and a malformed expected value stops the scan with a usage
+error. Hex digits in the source revision are compared without regard to case.
+Repository names and evaluator container revisions must match the card
+exactly, so give a container digest or implementation commit in lower case and
+the registry host as the card records it. The card's revision line is the
+commit when one was supplied and the content digest otherwise, so pass the
+same kind of revision the run received. Any `--expected-*` option also implies
+`--require-files`.
 
 A `PASS` card must also record its `Source digest` and `Tier 3 run ID`, so a
 `PASS` card rendered by an earlier release fails the scan until it is

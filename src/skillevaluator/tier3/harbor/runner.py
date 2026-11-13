@@ -26,7 +26,7 @@ import time
 import tomllib
 import unicodedata
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -68,6 +68,13 @@ from skillevaluator.publication_identity import (
     publication_target_from_path,
 )
 from skillevaluator.source_identity import normalized_evaluated_source
+from skillevaluator.tier3.baseline_store import (
+    baseline_description,
+    baseline_task_tree_digest,
+    comparison_identity,
+    identity_dataset_digest,
+    select_baseline,
+)
 from skillevaluator.tier3.case_ids import validate_case_ids
 from skillevaluator.tier3.eval_core.llm_judge import JUDGE_REASONING_EFFORT
 from skillevaluator.tier3.evals_config import (
@@ -82,8 +89,10 @@ from skillevaluator.tier3.evals_config import (
 from skillevaluator.tier3.harbor import (
     CONTAINER_AGENT_IMPORT_PATHS,
     DOCKER_AGENT_IMPORT_PATHS,
+    HERMES_VERSION,
     LOCAL_CODEX_HOME_DIRNAME,
     LOCAL_CODEX_SECRETS_DIRNAME,
+    baseline_timeouts,
 )
 from skillevaluator.tier3.harbor.adapter import (
     _RUNTIME_PROCESS_CONTROL_ENV_NAMES,
@@ -164,6 +173,7 @@ from skillevaluator.tier3.output_provenance import (
     write_output_file_atomically,
 )
 from skillevaluator.tier3.results_location import publish_latest_results
+from skillevaluator.tier3.version_comparison import compare_versions, select_prior_version
 from skillevaluator.tier3_environments import (
     DEFAULT_ENV_MODE,
     ENV_MODE_LOCAL,
@@ -774,6 +784,43 @@ def _persist_dataset_truth(run_dir: Path, *, fallback_task_ids: list[str]) -> di
     return snapshot
 
 
+def _dataset_generation_provenance(skill_path: Path) -> dict[str, Any] | None:
+    source = find_evals_file(skill_path)
+    if source is None or source.suffix.lower() not in {".json", ".yaml", ".yml"}:
+        return None
+    import yaml
+
+    try:
+        if source.suffix.lower() == ".json":
+            document = json.loads(source.read_text(encoding="utf-8"))
+        else:
+            document = yaml.safe_load(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, yaml.YAMLError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    from skillevaluator.tier3.dataset_provenance import sanitize_generation_record
+
+    generation = document.get("generation")
+    if isinstance(generation, dict):
+        generation = dict(generation)
+        eval_entries = document.get("evals")
+        if isinstance(eval_entries, list):
+            needs_review_count = sum(
+                1
+                for entry in eval_entries
+                if isinstance(entry, dict)
+                and isinstance(entry.get("review"), dict)
+                and entry["review"].get("status") == "needs_review"
+            )
+            generation["needs_review_count"] = needs_review_count
+            if needs_review_count > 0:
+                generation["review_state"] = "needs_review"
+            elif generation.get("review_state") == "needs_review":
+                generation["review_state"] = "unreviewed"
+    return sanitize_generation_record(generation)
+
+
 _NVIDIA_BUILD_FILE_SENTINEL = "skillevaluator-file-backed-nvidia-key"
 _NVIDIA_BUILD_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
 _NVIDIA_BUILD_AGENT_DEFAULT_MODEL = CHAT_DEFAULT_NVIDIA
@@ -791,6 +838,18 @@ _HARBOR_RUN_DIAGNOSTIC_TAIL_CHARS = 16 * 1024
 _HARBOR_RUN_OUTPUT_READ_BYTES = 64 * 1024
 _HARBOR_RUN_POLL_SECONDS = 0.01
 _HARBOR_RUN_TERMINATE_SECONDS = 0.1
+# Harbor turns SIGTERM into KeyboardInterrupt and then stops its trial
+# environments (for example removing Docker containers). An interrupted run
+# waits this long for that cleanup before it kills the process group.
+_HARBOR_RUN_CANCEL_GRACE_SECONDS = 30.0
+_HARBOR_RUN_CANCEL_POLL_SECONDS = 0.1
+# Progress detail for an agent whose Harbor jobs are stopping. The hint comes
+# first and is short, so the Rich progress row, which is cut to the terminal
+# width, still shows it at 80 columns next to the longest built-in stage label,
+# with columns to spare.
+_HARBOR_RUN_STOPPING_DETAIL = (
+    f"2nd Ctrl+C skips wait; stopping Harbor jobs, up to {_HARBOR_RUN_CANCEL_GRACE_SECONDS:g}s of environment cleanup"
+)
 _HARBOR_RUN_REAP_SECONDS = 5.0
 
 
@@ -803,6 +862,32 @@ class _BoundedHarborProcessResult:
 
 class _HarborRunTimeoutError(RuntimeError):
     """Raised after timed-out Harbor orchestration cleanup completes."""
+
+
+class _HarborRunCancelledError(BaseException):
+    """Raised on a worker thread once an interrupted run's Harbor job is contained.
+
+    Like ``KeyboardInterrupt``, it bypasses ``except Exception`` handlers that
+    record ordinary job failures, so a cancelled run stops instead of moving on
+    to its next attempt or condition.
+    """
+
+
+@dataclass(frozen=True, eq=False)
+class _HarborRunCancellation:
+    """Cross-thread stop request for the Harbor jobs of an interrupted run.
+
+    Ctrl+C reaches only the coordinating thread. Setting ``requested`` stops new
+    Harbor launches and sends running jobs SIGTERM with a cleanup grace period;
+    setting ``forced`` (a second Ctrl+C) ends that grace period early.
+    """
+
+    requested: threading.Event = field(default_factory=threading.Event)
+    forced: threading.Event = field(default_factory=threading.Event)
+
+    def raise_if_requested(self) -> None:
+        if self.requested.is_set():
+            raise _HarborRunCancelledError("Tier 3 evaluation was interrupted before this Harbor job started")
 
 
 def _redact_harbor_diagnostic(detail: object, *, secret_values: set[str]) -> str:
@@ -1331,6 +1416,9 @@ _HARBOR_LAUNCH_ENV = MappingProxyType({"HARBOR_TELEMETRY": "0", "PYTHON_DOTENV_D
 # wrappers check a minimum version for the selected model.
 _CODEX_VERSION = PINNED_RUNTIME_VERSIONS["codex"]
 _CLAUDE_CODE_VERSION = PINNED_RUNTIME_VERSIONS["claude-code"]
+# Harbor would otherwise install ``opencode-ai@latest``. CI's managed local
+# bootstrap installs this same release, so every CI mode shares one pin.
+OPENCODE_VERSION = "1.19.5"
 # Harbor 0.22's Codex agent ran with ``model_reasoning_effort=high``; later
 # releases defer to Codex's own default. Pin the effort SkillEvaluator was
 # validated with so scores and cost stay comparable across Harbor upgrades.
@@ -1338,6 +1426,8 @@ _HARBOR_AGENT_KWARGS: Mapping[str, Mapping[str, str]] = MappingProxyType(
     {
         "codex": MappingProxyType({"reasoning_effort": "high", "version": _CODEX_VERSION}),
         "claude-code": MappingProxyType({"version": _CLAUDE_CODE_VERSION}),
+        "opencode": MappingProxyType({"version": OPENCODE_VERSION}),
+        "hermes": MappingProxyType({"version": HERMES_VERSION}),
     }
 )
 # Claude Code's default effort depends on the model, and Claude Opus 5 ran at
@@ -1518,6 +1608,8 @@ def _resolve_environment_kwargs(
 
 _HARBOR_RUNTIME_POLICY_KWARGS = frozenset(
     {
+        "auto_mounting",
+        "auto_mounts",
         "context_id",
         "cpu_enforcement_policy",
         "delete",
@@ -1573,8 +1665,9 @@ _HARBOR_ENVIRONMENT_RUNTIME_POLICY_KWARGS: dict[str, frozenset[str]] = {
         }
     ),
     "blaxel": frozenset({"dind_extra_args"}),
-    # Credential strategy selection; SkillEvaluator sets it only for the wandb alias.
-    "cwsandbox": frozenset({"auth"}),
+    # SkillEvaluator owns credential strategy selection and prevents arbitrary
+    # host environment values from reaching remote task Compose interpolation.
+    "cwsandbox": frozenset({"auth", "forward_compose_env"}),
     "daytona": frozenset({"network_block_all"}),
     "ec2": frozenset({"iam_instance_profile", "strict_host_key_checking"}),
     "gke": frozenset({"memory_limit_multiplier"}),
@@ -1590,7 +1683,7 @@ _HARBOR_ENVIRONMENT_RUNTIME_POLICY_KWARGS: dict[str, frozenset[str]] = {
     "singularity": frozenset({"singularity_no_mount"}),
     "use-computer": frozenset({"resources"}),
     "vercel": frozenset({"ports"}),
-    "wandb": frozenset({"auth"}),
+    "wandb": frozenset({"auth", "forward_compose_env"}),
 }
 
 
@@ -1958,6 +2051,15 @@ def _validate_agent_provider_credentials(
     model_sources = agent_model_sources or {}
     models = agent_models or {}
 
+    if "hermes" in agents:
+        if provider.provider != "nv_build" or env_mode != "docker":
+            return ["Experimental hermes supports only NVIDIA Build with --env-mode docker."]
+        if not agent_runtime_env.get("NVIDIA_API_KEY", "").strip():
+            return ["hermes with NVIDIA Build requires NVIDIA_API_KEY."]
+        model = models.get("hermes", "")
+        if model and (model.count("/") != 1 or any(not part.strip() for part in model.split("/"))):
+            return ["hermes requires a full NVIDIA Build catalog model ID in publisher/model form."]
+
     opencode_model = models.get("opencode")
     expected_opencode_provider = {
         "anthropic": "anthropic",
@@ -2064,7 +2166,7 @@ def _validate_agent_provider_credentials(
                     ]
         return []
 
-    unsupported = [agent for agent in agents if agent not in {"claude-code", "codex", "opencode"}]
+    unsupported = [agent for agent in agents if agent not in {"claude-code", "codex", "opencode", "hermes"}]
     if unsupported:
         return [
             "nv_build does not support live agent(s): "
@@ -2896,6 +2998,32 @@ def _gateway_anthropic_agent_credentials(
     }
 
 
+# Opt-in standard judge policies, read again by the verifier template:
+# host variable -> (run_config.json judge key, accepted values, default first).
+_JUDGE_POLICY_ENV_VARS = {
+    "LLM_JUDGE_FALLBACK_POLICY": ("fallback_policy", ("append", "replace")),
+    "LLM_JUDGE_RETRY_POLICY": ("retry_policy", ("legacy", "strict")),
+}
+
+
+def _judge_policies(environ: Mapping[str, str]) -> tuple[dict[str, str], list[str]]:
+    """Return the set judge policies keyed for ``run_config.json``, and an error for each unknown value.
+
+    Values are case-insensitive and an empty value means unset, as in the verifier.
+    """
+    policies: dict[str, str] = {}
+    errors: list[str] = []
+    for name, (key, choices) in _JUDGE_POLICY_ENV_VARS.items():
+        value = environ.get(name, "").strip().lower()
+        if not value:
+            continue
+        if value in choices:
+            policies[key] = value
+        else:
+            errors.append(f"{name} must be {' or '.join(choices)}")
+    return policies, errors
+
+
 def _judge_model_config(
     provider: ProviderConfig,
     provider_env: Mapping[str, str],
@@ -2923,6 +3051,8 @@ def _judge_model_config(
     }
     if character_facts := provider_env.get("SKILL_EVAL_JUDGE_CHARACTER_FACTS"):
         configuration["character_facts"] = character_facts
+    # Only a known value is recorded; the run stops before trials on any other.
+    configuration.update(_judge_policies(provider_env)[0])
     return configuration
 
 
@@ -2980,7 +3110,7 @@ def _agent_credentials(
 ) -> dict[str, str]:
     """Resolve operator-owned credentials for exactly one agent runtime."""
     if provider.provider == "nv_build":
-        if agent == "opencode":
+        if agent in {"opencode", "hermes"}:
             if env_mode == ENV_MODE_LOCAL:
                 return _local_agent_credentials(provider)
             return {"NVIDIA_API_KEY": provider.api_key or ""}
@@ -3472,6 +3602,8 @@ def _model_for_agent(
         # Provider-model, --model, --agent-model, and evals/config.yml overrides
         # stay exact for native OpenCode; bridge defaults remain compatibility-pinned.
         selected = _NVIDIA_BUILD_AGENT_DEFAULT_MODEL
+    if agent == "hermes" and source == "public provider default" and provider.provider == "nv_build":
+        selected = "nvidia/nemotron-3.5-super-vl-120b-a12b"
     if agent == "opencode":
         namespace = {
             "anthropic": "anthropic",
@@ -3512,6 +3644,8 @@ def _agent_import_path(provider: ProviderConfig, agent: str, env_mode: str) -> s
 
 def _provider_agent_import_path(provider: ProviderConfig, agent: str, env_mode: str) -> str | None:
     """Select only the provider-specific wrappers required for this environment."""
+    if agent == "hermes" and provider.provider == "nv_build" and env_mode == "docker":
+        return DOCKER_AGENT_IMPORT_PATHS["hermes"]
     if provider.provider == "openai-compatible" and agent == "codex" and env_mode != ENV_MODE_LOCAL:
         return _GATEWAY_CODEX_IMPORT_PATH
     if provider.provider == "openai-compatible" and agent == "opencode" and env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES:
@@ -3608,16 +3742,44 @@ def _verified_windows_taskkill_path() -> Path:
     return resolved_candidate
 
 
-def _terminate_harbor_process_tree(process: subprocess.Popen[bytes]) -> None:
-    """Terminate the POSIX process group or Windows task tree and reap Harbor."""
+def _wait_for_harbor_leader(
+    process: subprocess.Popen[bytes],
+    timeout_seconds: float,
+    *,
+    end_grace: threading.Event | None,
+) -> None:
+    """Wait up to ``timeout_seconds`` for Harbor to exit, or until ``end_grace`` is set."""
+    deadline = time.monotonic() + timeout_seconds
+    while (remaining := deadline - time.monotonic()) > 0:
+        if end_grace is not None and end_grace.is_set():
+            return
+        try:
+            process.wait(timeout=min(remaining, _HARBOR_RUN_CANCEL_POLL_SECONDS))
+        except subprocess.TimeoutExpired:
+            continue
+        return
+
+
+def _terminate_harbor_process_tree(
+    process: subprocess.Popen[bytes],
+    *,
+    grace_seconds: float = _HARBOR_RUN_TERMINATE_SECONDS,
+    end_grace: threading.Event | None = None,
+) -> None:
+    """Terminate the POSIX process group or Windows task tree and reap Harbor.
+
+    On POSIX the group receives SIGTERM, then SIGKILL once the leader exits or
+    ``grace_seconds`` pass, whichever is first; a set ``end_grace`` skips the
+    rest of the grace period. Windows has no SIGTERM that Harbor handles, so
+    its task tree is always stopped with ``taskkill /T /F``.
+    """
     if os.name == "posix":
         # POSIX process groups do not own a descendant that deliberately calls
         # setsid(2). The host-side Harbor CLI/configuration is therefore a
         # trusted boundary; untrusted task execution belongs in an isolated
         # backend rather than SkillEvaluator's experimental local mode.
         _signal_harbor_process_group(process, signal.SIGTERM)
-        with suppress(subprocess.TimeoutExpired):
-            process.wait(timeout=_HARBOR_RUN_TERMINATE_SECONDS)
+        _wait_for_harbor_leader(process, grace_seconds, end_grace=end_grace)
         # Always signal the original group after the grace period. The leader
         # may already have exited while a descendant retained the output pipe.
         _signal_harbor_process_group(process, signal.SIGKILL)
@@ -3669,14 +3831,23 @@ def _run_bounded_harbor_process(
     max_output_bytes: int,
     diagnostic_tail_chars: int,
     secret_values: set[str],
+    cancellation: _HarborRunCancellation | None = None,
 ) -> _BoundedHarborProcessResult:
-    """Run Harbor with bounded merged output and optional cleanup deadline."""
+    """Run Harbor with bounded merged output and optional cleanup deadline.
+
+    A requested ``cancellation`` prevents the launch, or stops a running
+    process tree, and then raises :class:`_HarborRunCancelledError`. A running
+    job gets SIGTERM and up to ``_HARBOR_RUN_CANCEL_GRACE_SECONDS`` to stop its
+    environments before the group is killed, unless the cancellation is forced.
+    """
     if timeout_seconds is not None and timeout_seconds <= 0:
         raise ValueError("Harbor run timeout must be positive")
     if max_output_bytes <= 0:
         raise ValueError("Harbor output byte limit must be positive")
     if diagnostic_tail_chars <= 0:
         raise ValueError("Harbor diagnostic tail limit must be positive")
+    if cancellation is not None:
+        cancellation.raise_if_requested()
 
     creation_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
     process = subprocess.Popen(
@@ -3777,6 +3948,9 @@ def _run_bounded_harbor_process(
                 break
             if reader_done.is_set() and process.poll() is not None:
                 break
+            if cancellation is not None and cancellation.requested.is_set():
+                # The BaseException handler below stops the process tree.
+                raise _HarborRunCancelledError("Tier 3 evaluation was interrupted; Harbor job stopped")
             if deadline is None:
                 reader_done.wait(_HARBOR_RUN_POLL_SECONDS)
                 continue
@@ -3816,7 +3990,16 @@ def _run_bounded_harbor_process(
         cleanup_error: BaseException | None = None
         if process.poll() is None or not reader_done.is_set():
             try:
-                _terminate_harbor_process_tree(process)
+                if cancellation is not None and isinstance(primary_error, _HarborRunCancelledError):
+                    # Let Harbor's SIGTERM handling stop its trial environments
+                    # instead of leaving containers or agent processes behind.
+                    _terminate_harbor_process_tree(
+                        process,
+                        grace_seconds=_HARBOR_RUN_CANCEL_GRACE_SECONDS,
+                        end_grace=cancellation.forced,
+                    )
+                else:
+                    _terminate_harbor_process_tree(process)
             except BaseException as exc:
                 cleanup_error = exc
         if not reader_started:
@@ -3856,7 +4039,12 @@ def _run_harbor(
     expected_trials: int | None = None,
     expected_total_trials: int | None = None,
     include_task_names: list[str] | None = None,
+    cancellation: _HarborRunCancellation | None = None,
 ) -> tuple[bool, str]:
+    if cancellation is not None:
+        # Check before the credential refresh as well as at launch, so a queued
+        # condition or attempt makes no token request after an interrupt.
+        cancellation.raise_if_requested()
     base_url = (
         (verifier_env or {}).get("OPENAI_BASE_URL")
         or run_env.get("OPENAI_BASE_URL")
@@ -3932,6 +4120,7 @@ def _run_harbor(
                 max_output_bytes=_HARBOR_RUN_OUTPUT_MAX_BYTES,
                 diagnostic_tail_chars=_HARBOR_RUN_DIAGNOSTIC_TAIL_CHARS,
                 secret_values=secret_values,
+                cancellation=cancellation,
             )
     except _HarborRunTimeoutError as exc:
         if adc_timeout is not None:
@@ -4477,6 +4666,228 @@ def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
         )
 
 
+def _counts_as_judge_call(attempt: object) -> bool:
+    """Return whether a ``judge_attempts.json`` entry counts toward ``--max-judge-calls``.
+
+    A ``salvage`` entry rebuilds an earlier reply, so it is not a call. A
+    ``ragas`` entry with a prompt saves one HTTP request RAGAS made internally,
+    including transport retries; the ``ragas`` entry without a prompt, which
+    holds RAGAS's score or failure, is the one counted call.
+    """
+    if not isinstance(attempt, dict):
+        return False
+    method = attempt.get("method")
+    if method == "salvage":
+        return False
+    return not (method == "ragas" and "prompt_sha256" in attempt)
+
+
+def _budget_usage(job_dir: Path) -> dict[str, Any]:
+    """Read attempt usage from Harbor's retained trajectory and judge artifacts."""
+    usage: dict[str, Any] = {}
+    for trajectory_path in job_dir.glob("**/trajectory.json"):
+        try:
+            payload = json.loads(trajectory_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        final_metrics = payload.get("final_metrics", {}) if isinstance(payload, dict) else {}
+        if isinstance(final_metrics, dict):
+            prompt = final_metrics.get("total_prompt_tokens")
+            completion = final_metrics.get("total_completion_tokens")
+            cached = final_metrics.get("total_cached_tokens")
+            cost = final_metrics.get("total_cost_usd")
+            if isinstance(prompt, int) and isinstance(completion, int):
+                usage["input_tokens"] = usage.get("input_tokens", 0) + prompt
+                usage["output_tokens"] = usage.get("output_tokens", 0) + completion
+                if isinstance(cached, int) and not isinstance(cached, bool):
+                    usage["cached_input_tokens"] = usage.get("cached_input_tokens", 0) + cached
+            if isinstance(cost, int | float) and not isinstance(cost, bool):
+                usage["cost_usd"] = usage.get("cost_usd", 0.0) + float(cost)
+    judge_calls = 0
+    saw_judge_artifact = False
+    for artifact_path in job_dir.glob("**/judge_attempts.json"):
+        saw_judge_artifact = True
+        try:
+            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        attempts = payload.get("attempts") if isinstance(payload, dict) else payload
+        if isinstance(attempts, list):
+            judge_calls += sum(1 for attempt in attempts if _counts_as_judge_call(attempt))
+    if saw_judge_artifact:
+        usage["judge_calls"] = judge_calls
+    return usage
+
+
+def _resolve_harbor_price_file(
+    price_file: Path | None, harbor_config: Mapping[str, Any], source_skill_dir: Path
+) -> Path | None:
+    if price_file is not None:
+        return Path(price_file).expanduser().resolve()
+    configured = harbor_config.get("price_file")
+    if not configured:
+        return None
+    path = Path(str(configured)).expanduser()
+    return (path if path.is_absolute() else source_skill_dir / path).resolve()
+
+
+def _run_budgeted_variants(
+    *,
+    skill_name: str,
+    agent: str,
+    jobs: list[tuple[str, Path, str | None]],
+    task_names: list[str],
+    env_mode: str,
+    model: str,
+    jobs_dir: Path,
+    run_env: dict[str, str],
+    n_attempts: int,
+    pass_threshold: float,
+    stop_on_pass: bool,
+    timeout_multiplier: float,
+    override_cpus: int | None,
+    override_memory_mb: int | None,
+    override_storage_mb: int | None,
+    budget: Any,
+    n_concurrent: int,
+    verifier_env: Mapping[str, str] | None = None,
+    environment_kwargs: Mapping[str, Any] | None = None,
+    cancellation: _HarborRunCancellation | None = None,
+) -> dict[str, list[str]]:
+    errors: dict[str, dict[tuple[int, int], str]] = {variant: {} for variant, _, _ in jobs}
+    attempt_job_dirs: dict[str, dict[tuple[int, int], Path]] = {variant: {} for variant, _, _ in jobs}
+    result_lock = threading.Lock()
+
+    def run_unit(task_index: int, task_name: str, attempt: int) -> bool:
+        if cancellation is not None:
+            cancellation.raise_if_requested()
+        admissions = [
+            {"agent": agent, "arm": variant, "case_id": task_name, "attempt": attempt} for variant, _, _ in jobs
+        ]
+        if not budget.admit_many(admissions):
+            return False
+        passed = True
+        for variant, dataset, job_import_path in jobs:
+            if cancellation is not None:
+                cancellation.raise_if_requested()
+            job_name = f"{skill_name}-{agent}-{variant}-{task_name}-attempt{attempt:03d}"
+            ok, detail = _run_harbor(
+                dataset=dataset,
+                agent=agent,
+                job_name=job_name,
+                env_mode=env_mode,
+                model=model,
+                jobs_dir=jobs_dir,
+                run_env=run_env,
+                n_attempts=1,
+                n_concurrent=1,
+                timeout_multiplier=timeout_multiplier,
+                override_cpus=override_cpus,
+                override_memory_mb=override_memory_mb,
+                override_storage_mb=override_storage_mb,
+                agent_import_path=job_import_path,
+                verifier_env=verifier_env,
+                environment_kwargs=environment_kwargs,
+                expected_trials=1,
+                include_task_names=[task_name],
+                cancellation=cancellation,
+            )
+            job_dir = jobs_dir / job_name
+            budget.record_usage(_budget_usage(job_dir), model=model)
+            with result_lock:
+                attempt_job_dirs[variant][(task_index, attempt)] = job_dir
+                if ok:
+                    for key, error in list(errors[variant].items()):
+                        failed_dir = attempt_job_dirs[variant].get(key)
+                        if (
+                            key[0] == task_index
+                            and error.endswith(": Harbor job did not complete successfully: 1 errored")
+                            and failed_dir is not None
+                            and harbor_timeout_job_recovered(failed_dir, job_dir)
+                        ):
+                            errors[variant].pop(key)
+                else:
+                    errors[variant][(task_index, attempt)] = (
+                        f"{agent} {variant}-skill Harbor run failed: {task_name} attempt {attempt}: {detail}"
+                    )
+            passed = passed and ok and _job_passed(job_dir, pass_threshold)
+        return passed
+
+    def run_case(task_index: int, task_name: str) -> None:
+        for attempt in range(1, n_attempts + 1):
+            if run_unit(task_index, task_name, attempt) and stop_on_pass:
+                break
+
+    worker_count = max(1, min(n_concurrent, len(task_names) or 1))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        if stop_on_pass:
+            futures = [executor.submit(run_case, index, task_name) for index, task_name in enumerate(task_names)]
+        else:
+            futures = [
+                executor.submit(run_unit, index, task_name, attempt)
+                for index, task_name in enumerate(task_names)
+                for attempt in range(1, n_attempts + 1)
+            ]
+        for future in as_completed(futures):
+            future.result()
+    for variant, _, _ in jobs:
+        _merge_attempt_jobs(
+            [attempt_job_dirs[variant][key] for key in sorted(attempt_job_dirs[variant])],
+            jobs_dir / f"{skill_name}-{agent}-{variant}",
+        )
+    return {variant: [errors[variant][key] for key in sorted(errors[variant])] for variant, _, _ in jobs}
+
+
+def _run_budgeted_variant(
+    *,
+    skill_name: str,
+    agent: str,
+    variant: str,
+    dataset: Path,
+    task_names: list[str],
+    env_mode: str,
+    model: str,
+    jobs_dir: Path,
+    run_env: dict[str, str],
+    n_attempts: int,
+    pass_threshold: float,
+    stop_on_pass: bool,
+    timeout_multiplier: float,
+    override_cpus: int | None,
+    override_memory_mb: int | None,
+    override_storage_mb: int | None,
+    budget: Any,
+    n_concurrent: int = 1,
+    agent_import_path: str | None = None,
+    verifier_env: Mapping[str, str] | None = None,
+    environment_kwargs: Mapping[str, Any] | None = None,
+    cancellation: _HarborRunCancellation | None = None,
+) -> list[str]:
+    errors = _run_budgeted_variants(
+        skill_name=skill_name,
+        agent=agent,
+        jobs=[(variant, dataset, agent_import_path)],
+        task_names=task_names,
+        env_mode=env_mode,
+        model=model,
+        jobs_dir=jobs_dir,
+        run_env=run_env,
+        n_attempts=n_attempts,
+        pass_threshold=pass_threshold,
+        stop_on_pass=stop_on_pass,
+        timeout_multiplier=timeout_multiplier,
+        override_cpus=override_cpus,
+        override_memory_mb=override_memory_mb,
+        override_storage_mb=override_storage_mb,
+        budget=budget,
+        n_concurrent=n_concurrent,
+        verifier_env=verifier_env,
+        environment_kwargs=environment_kwargs,
+        cancellation=cancellation,
+    )
+    return errors[variant]
+
+
 def _run_stop_on_pass_variant(
     *,
     skill_name: str,
@@ -4497,12 +4908,23 @@ def _run_stop_on_pass_variant(
     agent_import_path: str | None = None,
     verifier_env: Mapping[str, str] | None = None,
     environment_kwargs: Mapping[str, Any] | None = None,
+    n_concurrent: int = 1,
+    cancellation: _HarborRunCancellation | None = None,
 ) -> list[str]:
-    """Run each case one attempt at a time, stopping its attempts on first pass."""
-    errors: list[tuple[Path, str]] = []
-    attempt_job_dirs: list[Path] = []
-    for task_name in task_names:
+    """Run up to ``n_concurrent`` cases at once, stopping each case's attempts on first pass.
+
+    A case launches its next attempt only after the previous one scored, so
+    attempts of one case stay sequential. Attempt jobs are merged in dataset
+    order rather than completion order, keeping the aggregate deterministic.
+    """
+    stop_launching = threading.Event()
+
+    def _run_case(task_name: str) -> tuple[list[str], list[Path]]:
+        case_errors: list[tuple[Path, str]] = []
+        case_job_dirs: list[Path] = []
         for attempt in range(1, n_attempts + 1):
+            if stop_launching.is_set():
+                break
             job_name = f"{skill_name}-{agent}-{variant}-{task_name}-attempt{attempt:03d}"
             ok, detail = _run_harbor(
                 dataset=dataset,
@@ -4523,25 +4945,57 @@ def _run_stop_on_pass_variant(
                 environment_kwargs=environment_kwargs,
                 expected_trials=1,
                 include_task_names=[task_name],
+                cancellation=cancellation,
             )
             job_dir = jobs_dir / job_name
-            attempt_job_dirs.append(job_dir)
+            case_job_dirs.append(job_dir)
             if not ok:
-                errors.append(
+                case_errors.append(
                     (job_dir, f"{agent} {variant}-skill Harbor run failed: {task_name} attempt {attempt}: {detail}")
                 )
                 continue
-            errors = [
+            # A recovered timeout matches only an earlier attempt of the same
+            # task, so filtering this case's own errors is enough.
+            case_errors = [
                 (failed_dir, detail)
-                for failed_dir, detail in errors
+                for failed_dir, detail in case_errors
                 if not detail.endswith(": Harbor job did not complete successfully: 1 errored")
                 or not failed_dir.is_dir()
                 or not harbor_timeout_job_recovered(failed_dir, job_dir)
             ]
             if _job_passed(job_dir, pass_threshold):
                 break
+        return [detail for _, detail in case_errors], case_job_dirs
+
+    def _run_case_or_stop(task_name: str) -> tuple[list[str], list[Path]]:
+        try:
+            return _run_case(task_name)
+        except BaseException:
+            # As in a serial loop, an unexpected failure stops later launches.
+            stop_launching.set()
+            raise
+
+    errors: list[str] = []
+    attempt_job_dirs: list[Path] = []
+    if task_names:
+        with ThreadPoolExecutor(max_workers=min(n_concurrent, len(task_names))) as executor:
+            futures = [executor.submit(_run_case_or_stop, task_name) for task_name in task_names]
+            try:
+                # Surface an unexpected case failure without waiting on earlier cases.
+                for future in as_completed(futures):
+                    future.result()
+            except BaseException:
+                # Queued cases never start; running cases finish only their current attempt.
+                stop_launching.set()
+                for future in futures:
+                    future.cancel()
+                raise
+        for future in futures:
+            case_errors, case_job_dirs = future.result()
+            errors.extend(case_errors)
+            attempt_job_dirs.extend(case_job_dirs)
     _merge_attempt_jobs(attempt_job_dirs, jobs_dir / f"{skill_name}-{agent}-{variant}")
-    return [detail for _, detail in errors]
+    return errors
 
 
 def _private_runtime_hooks() -> Any:
@@ -4618,8 +5072,10 @@ def _run_agent_pair(
     verifier_env: Mapping[str, str] | None = None,
     environment_kwargs: Mapping[str, Any] | None = None,
     with_agent_import_path: str | None = None,
+    cancellation: _HarborRunCancellation | None = None,
     additional_arms: Sequence[tuple[str, Path, str | None]] = (),
     additional_arm_errors: dict[str, str] | None = None,
+    budget_controller: Any = None,
 ) -> list[str]:
     """Run ordinary and privately requested arms under one per-agent trial budget."""
     jobs = [] if with_skill is None else [("with", with_skill, with_agent_import_path or agent_import_path)]
@@ -4639,9 +5095,38 @@ def _run_agent_pair(
             additional_arm_errors[variant] = _bounded_execution_error("; ".join(failures))
         return []
 
+    if budget_controller is not None:
+        budget_errors: list[str] = []
+        failures_by_variant = _run_budgeted_variants(
+            skill_name=skill_name,
+            agent=agent,
+            jobs=jobs,
+            task_names=list(task_names or []),
+            env_mode=env_mode,
+            model=model,
+            jobs_dir=jobs_dir,
+            run_env=run_env,
+            n_attempts=n_attempts,
+            pass_threshold=pass_threshold,
+            stop_on_pass=stop_on_pass,
+            timeout_multiplier=timeout_multiplier,
+            override_cpus=override_cpus,
+            override_memory_mb=override_memory_mb,
+            override_storage_mb=override_storage_mb,
+            budget=budget_controller,
+            n_concurrent=n_concurrent,
+            verifier_env=verifier_env,
+            environment_kwargs=environment_kwargs,
+            cancellation=cancellation,
+        )
+        for variant, failures in failures_by_variant.items():
+            budget_errors.extend(record_failure(variant, failures))
+        return budget_errors
+
     if stop_on_pass:
-        # A later attempt is launched only after the previous one scored, so
-        # stop-on-pass runs each condition sequentially, one attempt at a time.
+        # A case's later attempt is launched only after its previous one
+        # scored. Up to n_concurrent cases run at once, and the conditions run
+        # one after another, so each gets the full per-agent budget.
         sequential_errors: list[str] = []
         for variant, dataset, job_import_path in jobs:
             try:
@@ -4664,6 +5149,8 @@ def _run_agent_pair(
                     agent_import_path=job_import_path,
                     verifier_env=verifier_env,
                     environment_kwargs=environment_kwargs,
+                    n_concurrent=n_concurrent,
+                    cancellation=cancellation,
                 )
             except Exception as exc:
                 if variant not in extra_variants:
@@ -4701,6 +5188,7 @@ def _run_agent_pair(
                 verifier_env=verifier_env,
                 environment_kwargs=environment_kwargs,
                 expected_trials=expected_trials,
+                cancellation=cancellation,
             ): variant
             for (variant, dataset, job_import_path), condition_concurrency in zip(jobs, job_concurrency, strict=True)
         }
@@ -4783,21 +5271,25 @@ class _RunProgressLifecycle:
     def close(self) -> None:
         self._reporter.close()
 
-    def fail_unfinished(self) -> None:
-        """Fail every open stage and finish the run without masking its error."""
+    def fail_unfinished(self, *, interrupted: bool = False) -> None:
+        """Fail every open stage and finish the run without masking its error.
+
+        ``interrupted`` reports Ctrl+C or cancellation rather than an unexpected failure.
+        """
+        stage_detail = "interrupted before completion" if interrupted else "unexpected failure interrupted this stage"
         for stage in tuple(self._active_stages):
             self.emit(
                 ProgressEvent(
                     stage=stage,
                     state="failed",
-                    detail="unexpected failure interrupted this stage",
+                    detail=stage_detail,
                 )
             )
         self.emit(
             ProgressEvent(
                 stage="run-finished",
                 state="failed",
-                detail="Tier 3 evaluation failed unexpectedly",
+                detail="Tier 3 evaluation interrupted" if interrupted else "Tier 3 evaluation failed unexpectedly",
                 output_dir=self._output_dir,
                 result_path=self._existing_file(self._result_path),
                 report_path=self._existing_file(self._report_path),
@@ -4854,7 +5346,14 @@ def _run_harbor_eval_impl(
     *,
     skip_baseline: bool = False,
     skip_with_skill: bool = False,
+    reuse_baseline: str | None = None,
+    compare_to: str | None = None,
     n_attempts: int | None = None,
+    max_agent_tokens: int | None = None,
+    max_judge_calls: int | None = None,
+    max_attempts_total: int | None = None,
+    max_cost_usd: float | None = None,
+    price_file: Path | None = None,
     pass_threshold: float | None = None,
     stop_on_pass: bool | None = None,
     n_concurrent: int | None = None,
@@ -4871,6 +5370,7 @@ def _run_harbor_eval_impl(
     output_dir: Path | None = None,
     keep_harbor_jobs: bool = False,
     agent_runtime_preflight: bool | None = None,
+    tolerate_baseline_timeouts: bool | None = None,
     env_mode: str = DEFAULT_ENV_MODE,
     env_mode_source: str = "CLI",
     environment_kwargs: Mapping[str, Any] | None = None,
@@ -4900,6 +5400,14 @@ def _run_harbor_eval_impl(
         return {"error": ["At least one Harbor agent is required."]}
     if skip_baseline and skip_with_skill:
         detail = "skip_baseline and skip_with_skill are mutually exclusive (no arm would run)"
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=detail))
+        return {"error": [detail]}
+    if reuse_baseline and (skip_baseline or skip_with_skill):
+        detail = "--reuse-baseline is mutually exclusive with --skip-baseline and --skip-with-skill"
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=detail))
+        return {"error": [detail]}
+    if compare_to and skip_with_skill:
+        detail = "--compare-to is mutually exclusive with --skip-with-skill"
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=detail))
         return {"error": [detail]}
     if env_mode == ENV_MODE_LOCAL:
@@ -4976,6 +5484,13 @@ def _run_harbor_eval_impl(
     n_concurrent = n_concurrent if n_concurrent is not None else harbor_config.get("n_concurrent", 4)
     max_agents = max_agents if max_agents is not None else harbor_config.get("max_agents", len(agents))
     max_cases = max_cases if max_cases is not None else harbor_config.get("max_cases")
+    max_agent_tokens = max_agent_tokens if max_agent_tokens is not None else harbor_config.get("max_agent_tokens")
+    max_judge_calls = max_judge_calls if max_judge_calls is not None else harbor_config.get("max_judge_calls")
+    max_attempts_total = (
+        max_attempts_total if max_attempts_total is not None else harbor_config.get("max_attempts_total")
+    )
+    max_cost_usd = max_cost_usd if max_cost_usd is not None else harbor_config.get("max_cost_usd")
+    price_file = _resolve_harbor_price_file(price_file, harbor_config, evaluator_skill_path)
     timeout_multiplier = (
         timeout_multiplier if timeout_multiplier is not None else harbor_config.get("timeout_multiplier", 1.0)
     )
@@ -4983,6 +5498,11 @@ def _run_harbor_eval_impl(
         agent_runtime_preflight
         if agent_runtime_preflight is not None
         else harbor_config.get("agent_runtime_preflight", False)
+    )
+    tolerate_baseline_timeouts = bool(
+        tolerate_baseline_timeouts
+        if tolerate_baseline_timeouts is not None
+        else harbor_config.get("tolerate_baseline_timeouts", False)
     )
     grading_mode = grading_mode or grading_config.get("mode", "default")
     workspace_mode = skill_workspace_mode or workspace_config.get("mode", "isolated")
@@ -5035,6 +5555,12 @@ def _run_harbor_eval_impl(
     if grading_mode not in {"default", "default_plus_custom", "custom_only"}:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid grading mode"))
         return {"error": ["grading.mode must be default, default_plus_custom, or custom_only"]}
+    # The standard judges would all fail on an unknown policy, after the agent
+    # trials had spent their budget; custom_only runs never forward the policies.
+    judge_policy_errors = _judge_policies(os.environ)[1] if grading_mode != "custom_only" else []
+    if judge_policy_errors:
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid judge policy"))
+        return {"error": judge_policy_errors}
     if workspace_mode not in {"isolated", "group"}:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid workspace mode"))
         return {"error": ["skill_workspace.mode must be isolated or group"]}
@@ -5150,6 +5676,7 @@ def _run_harbor_eval_impl(
     if task_source not in {"evals_json", "native_harbor"}:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="invalid task source"))
         return {"error": ["harbor.task_source must be auto, evals_json, or native_harbor"]}
+    dataset_provenance = _dataset_generation_provenance(evaluator_skill_path) if task_source == "evals_json" else None
 
     reporter.emit(ProgressEvent(stage="credential-validation", state="running"))
     if runtime_errors:
@@ -5337,6 +5864,23 @@ def _run_harbor_eval_impl(
                 detail="credentials and selected models verified",
             )
         )
+    effective_resources = harbor_config.get("resources", {})
+    effective_resources = dict(effective_resources) if isinstance(effective_resources, Mapping) else {}
+    for resource, override in (
+        ("cpus", override_cpus),
+        ("memory_mb", override_memory_mb),
+        ("storage_mb", override_storage_mb),
+    ):
+        if override is not None:
+            effective_resources[resource] = override
+    environment_kwargs_digest = hashlib.sha256(
+        json.dumps(effective_environment_kwargs, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    runtime_env_digest = hashlib.sha256(
+        json.dumps(configured_runtime_env, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
     run_config = {
         "config_file": str(config_path.relative_to(evaluator_skill_path)) if config_path else "none",
         "harbor": {
@@ -5344,12 +5888,21 @@ def _run_harbor_eval_impl(
             "environment_kwargs": {
                 "keys": sorted(effective_environment_kwargs),
                 "sources": environment_kwarg_sources,
+                "values_sha256": environment_kwargs_digest,
             },
             "n_attempts": n_attempts,
             "stop_on_pass": bool(stop_on_pass),
             "n_concurrent": n_concurrent,
             "timeout_multiplier": timeout_multiplier,
             "base_image_mode": base_image_mode,
+            "resources": {
+                "cpus": effective_resources.get("cpus"),
+                "memory_mb": effective_resources.get("memory_mb"),
+                "storage_mb": effective_resources.get("storage_mb"),
+            },
+            "agent_workdir": harbor_config.get("agent_workdir"),
+            "custom_dockerfile_mode": dockerfile_mode,
+            "runtime_env": {"keys": sorted(configured_runtime_env), "values_sha256": runtime_env_digest},
             "jobs_retained": keep_harbor_jobs,
         },
         "provider": {"name": provider.provider, "model": provider.model},
@@ -5360,11 +5913,16 @@ def _run_harbor_eval_impl(
         },
         "task_source": task_source,
         "grading": {"mode": grading_mode},
+        "skill_workspace": {"mode": workspace_mode},
+        "copy_repo": copy_repo,
+        "repo_context_exclude_paths": [str(path) for path in repo_context_exclude_paths],
         "agents": model_resolution,
         # Persisted so a card rendered later from this run directory records the
         # source tree that was evaluated, not the evaluator build that ran it.
         "evaluated_source": normalized_evaluated_source(evaluated_source),
     }
+    if tolerate_baseline_timeouts:
+        run_config["harbor"]["tolerate_baseline_timeouts"] = True
     if max_cases is not None:
         run_config["harbor"]["max_cases"] = max_cases
     verifier_env = {**configured_runtime_env, **provider_env}
@@ -5772,11 +6330,104 @@ def _run_harbor_eval_impl(
     task_selectors = expected_task_selectors or []
     case_id_by_task_selector = expected_case_id_by_task_selector or {}
     case_ids = [case_id_by_task_selector[selector] for selector in task_selectors]
+    baseline_task_dirs = {agent: tuple(emitted_tasks[agent].get("without_skill", ())) for agent in agents}
+    try:
+        identity_digest = identity_dataset_digest(next(iter(baseline_task_dirs.values()), ()))
+        task_tree_digest = baseline_task_tree_digest(baseline_task_dirs)
+    except (OSError, UnicodeError, ValueError) as exc:
+        return _persist_pre_execution_failure([f"could not record baseline task identity: {exc}"])
+    run_config["baseline_task_tree_digest"] = task_tree_digest
     try:
         dataset_truth = _persist_dataset_truth(run_dir, fallback_task_ids=case_ids)
     except DatasetSnapshotContractError as exc:
         return _persist_pre_execution_failure([str(exc)])
     expected_trials = len(task_selectors) * n_attempts
+    identity = comparison_identity(
+        run_config,
+        {
+            "dataset_digest": dataset_truth["dataset_digest"],
+            "identity_dataset_digest": identity_digest,
+            "baseline_task_tree_digest": task_tree_digest,
+            "expected_case_ids": case_ids,
+            "evaluator_version": dataset_truth["evaluator_version"],
+            "publication_target": publication_target,
+            "attempt_policy": {
+                "max_attempts": n_attempts,
+                "pass_threshold": float(pass_threshold),
+                "stop_on_pass": bool(stop_on_pass),
+            },
+            "score_policy": None,
+        },
+    )
+    baseline = {"mode": "skipped" if skip_baseline else "fresh"}
+    prior_version = None
+    if compare_to:
+        try:
+            prior_version = select_prior_version(run_dir.parent, compare_to, identity, current_run_dir=run_dir)
+        except ValueError as exc:
+            return _persist_pre_execution_failure([str(exc)])
+    reused_baseline_dir = None
+    if reuse_baseline:
+        try:
+            baseline = select_baseline(run_dir.parent, reuse_baseline, agents, identity)
+        except ValueError as exc:
+            return _persist_pre_execution_failure([str(exc)])
+        if baseline["mode"] == "reused":
+            reused_baseline_dir = Path(baseline["source_run_dir"])
+            skip_baseline = True
+    run_config["baseline"] = baseline
+    if reuse_baseline:
+        reporter.emit(ProgressEvent(stage="baseline", state="complete", detail=baseline_description(baseline)))
+    from skillevaluator.tier3.harbor.run_budget import (
+        BudgetConfigurationError,
+        BudgetController,
+        PriceBook,
+        planned_attempts,
+    )
+
+    if max_cost_usd is not None and price_file is None:
+        return _persist_pre_execution_failure(["--max-cost-usd requires --price-file"])
+    try:
+        price_book = PriceBook.load(price_file) if price_file is not None else None
+        if price_book is not None:
+            for agent in agents:
+                price_book.price_for(model_resolution[agent]["model"])
+        base_arms = 2 - int(skip_baseline) - int(skip_with_skill)
+        planned_arm_count = sum(base_arms + len(additional_arms.get(agent, ())) for agent in agents)
+        budget = BudgetController(
+            max_agent_tokens=max_agent_tokens,
+            max_judge_calls=max_judge_calls,
+            max_attempts_total=max_attempts_total,
+            max_cost_usd=max_cost_usd,
+            price_book=price_book,
+            planned=planned_attempts(
+                len(case_ids),
+                n_attempts,
+                1,
+                arms=planned_arm_count,
+                stop_on_pass=bool(stop_on_pass),
+            ),
+        )
+    except BudgetConfigurationError as exc:
+        return _persist_pre_execution_failure([str(exc)])
+    active_budget = (
+        budget
+        if any(limit is not None for limit in (max_agent_tokens, max_judge_calls, max_attempts_total, max_cost_usd))
+        else None
+    )
+    multiply_sign = "\u00d7"
+    reporter.emit(
+        ProgressEvent(
+            stage="configuration",
+            state="complete",
+            detail=(
+                f"Planned: {budget.planned} attempts "
+                f"({len(case_ids)} cases {multiply_sign} {n_attempts} attempts {multiply_sign} "
+                f"{planned_arm_count} agent arms total)"
+            ),
+        )
+    )
+    run_config["budget"] = budget.metadata()
     variants = 2 - int(skip_baseline) - int(skip_with_skill)
     matrix_trials = expected_trials * sum(variants + len(additional_arms.get(agent, ())) for agent in agents)
     try:
@@ -5888,6 +6539,8 @@ def _run_harbor_eval_impl(
         )
     errors: list[str] = []
     started_agents: SimpleQueue[str] = SimpleQueue()
+    # Ctrl+C reaches only this thread; workers observe it through this object.
+    cancellation = _HarborRunCancellation()
 
     def _execute_agent(agent: str) -> list[str]:
         started_agents.put(agent)
@@ -5897,7 +6550,7 @@ def _run_harbor_eval_impl(
             model=model_resolution[agent]["model"],
             env_mode=env_mode,
             with_skill=agent_task_dirs[agent][0],
-            baseline=agent_task_dirs[agent][1],
+            baseline=None if reused_baseline_dir is not None else agent_task_dirs[agent][1],
             jobs_dir=jobs_dir,
             run_env={**runtime_plans[agent].subprocess_env, **job_judge_subprocess_env},
             n_attempts=n_attempts,
@@ -5912,8 +6565,10 @@ def _run_harbor_eval_impl(
             stop_on_pass=bool(stop_on_pass),
             pass_threshold=float(pass_threshold),
             task_names=task_selectors,
+            budget_controller=active_budget,
             verifier_env=job_judge_verifier_env,
             environment_kwargs=effective_environment_kwargs,
+            cancellation=cancellation,
             **(
                 {
                     "additional_arms": additional_arms[agent],
@@ -5940,39 +6595,77 @@ def _run_harbor_eval_impl(
                 variants = "with-skill" if skip_baseline else "with-skill + baseline"
             reporter.emit(ProgressEvent(stage=f"agent:{agent}", state="running", detail=variants))
 
+    futures: dict[Future[list[str]], str] = {}
+
+    def _join_interrupted_agents() -> None:
+        """Wait while running agents stop their Harbor jobs after an interrupt.
+
+        A second Ctrl+C ends the cleanup grace period; a third one propagates.
+        """
+        stopping_reported = False
+        while True:
+            try:
+                running = [future for future in futures if not future.done()]
+                if not running:
+                    return
+                if not stopping_reported:
+                    stopping_reported = True
+                    for agent in sorted(futures[future] for future in running):
+                        reporter.emit(
+                            ProgressEvent(
+                                stage=f"agent:{agent}",
+                                state="running",
+                                detail=_HARBOR_RUN_STOPPING_DETAIL,
+                            )
+                        )
+                wait(running, timeout=_HARBOR_RUN_CANCEL_POLL_SECONDS)
+            except KeyboardInterrupt:
+                if cancellation.forced.is_set():
+                    raise
+                cancellation.forced.set()
+
     with ThreadPoolExecutor(max_workers=min(max_agents, len(agents))) as executor:
-        futures = {executor.submit(_execute_agent, agent): agent for agent in agents}
-        pending = set(futures)
-        while pending:
-            _emit_started_agents()
-            done, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
-            _emit_started_agents()
-            for future in done:
-                agent = futures[future]
-                active_agents.discard(agent)
-                try:
-                    agent_errors = future.result()
-                except Exception as exc:
-                    reporter.emit(
-                        ProgressEvent(
-                            stage=f"agent:{agent}",
-                            state="failed",
-                            detail="agent worker failed unexpectedly",
+        try:
+            futures = {executor.submit(_execute_agent, agent): agent for agent in agents}
+            pending = set(futures)
+            while pending:
+                _emit_started_agents()
+                done, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+                _emit_started_agents()
+                for future in done:
+                    agent = futures[future]
+                    active_agents.discard(agent)
+                    try:
+                        agent_errors = future.result()
+                    except Exception as exc:
+                        reporter.emit(
+                            ProgressEvent(
+                                stage=f"agent:{agent}",
+                                state="failed",
+                                detail="agent worker failed unexpectedly",
+                            )
                         )
-                    )
-                    unexpected_worker_error = unexpected_worker_error or exc
-                    continue
-                errors.extend(agent_errors)
-                if agent_errors:
-                    reporter.emit(
-                        ProgressEvent(
-                            stage=f"agent:{agent}",
-                            state="failed",
-                            detail="one or more Harbor jobs failed; inspect retained artifacts",
+                        unexpected_worker_error = unexpected_worker_error or exc
+                        continue
+                    errors.extend(agent_errors)
+                    if agent_errors:
+                        reporter.emit(
+                            ProgressEvent(
+                                stage=f"agent:{agent}",
+                                state="failed",
+                                detail="one or more Harbor jobs failed; inspect retained artifacts",
+                            )
                         )
-                    )
-                else:
-                    reporter.emit(ProgressEvent(stage=f"agent:{agent}", state="complete"))
+                    else:
+                        reporter.emit(ProgressEvent(stage=f"agent:{agent}", state="complete"))
+        except BaseException:
+            # Without this, the executor exit would wait for every running
+            # Harbor job to finish and would still start queued agents. Cancel
+            # the queue first so a worker that stops never picks up another agent.
+            executor.shutdown(wait=False, cancel_futures=True)
+            cancellation.requested.set()
+            _join_interrupted_agents()
+            raise
 
     if unexpected_worker_error is not None:
         for agent in sorted(active_agents):
@@ -5987,8 +6680,9 @@ def _run_harbor_eval_impl(
             agents=agents,
             output_dir=run_dir,
             jobs_dir=jobs_dir,
-            skip_baseline=skip_baseline,
+            skip_baseline=skip_baseline and reused_baseline_dir is None,
             skip_with_skill=skip_with_skill,
+            reused_baseline_dir=reused_baseline_dir,
             n_attempts=n_attempts,
             pass_threshold=float(pass_threshold),
             stop_on_pass=bool(stop_on_pass),
@@ -6002,14 +6696,20 @@ def _run_harbor_eval_impl(
             agent_models=model_resolution,
             launch_errors=errors,
             grading_mode=grading_mode,
+            tolerate_baseline_timeouts=tolerate_baseline_timeouts,
+            budget_not_run=active_budget.not_run if active_budget is not None else [],
         )
     except Exception:
         reporter.emit(ProgressEvent(stage="collection", state="failed", detail="result collection failed"))
         _emit_run_finished("failed", "result collection failed")
         raise
     reporter.emit(ProgressEvent(stage="collection", state="complete", detail="Harbor results collected"))
+    identity["score_policy"] = results.get("score_policy", identity["score_policy"])
     results.update(
         {
+            "baseline": baseline,
+            "comparison_identity": identity,
+            "expected_case_ids": case_ids,
             "skill_name": skill_path.name,
             "run_id": run_id,
             **_run_owned_publication_fields(),
@@ -6024,9 +6724,78 @@ def _run_harbor_eval_impl(
             "dataset_summary": dataset_truth["dataset_summary"],
             "dataset_digest": dataset_truth["dataset_digest"],
             "dataset_digest_algorithm": dataset_truth["dataset_digest_algorithm"],
+            "identity_dataset_digest": identity_digest,
+            "baseline_task_tree_digest": task_tree_digest,
+            "budget": budget.metadata(),
+            "dataset_provenance": dataset_provenance,
             "run_config": run_config,
+            "partial": bool(budget.not_run),
         }
     )
+    from skillevaluator.evaluation.tier3_report import (
+        _agent_score_policy,
+        _build_agent,
+    )
+    from skillevaluator.evaluation.tier3_report import (
+        _pick_best_agent as _pick_canonical_best_agent,
+    )
+    from skillevaluator.tier3.dataset_sufficiency import MIN_NEGATIVE_CASES, assess_dataset_sufficiency
+    from skillevaluator.tier3.harbor.report import _pick_best_agent
+    from skillevaluator.tier3.harbor.report_data import metrics_for_condition
+
+    summary = dataset_truth["dataset_summary"]
+    agent_results = results.get("agents")
+    if isinstance(agent_results, dict):
+        negative_cases = int(summary.get("negative_tasks") or 0)
+        if int(summary.get("unclassified_tasks") or 0) > 0 and negative_cases < MIN_NEGATIVE_CASES:
+            negative_cases = None
+        for agent_result in agent_results.values():
+            pass_at_k = agent_result.get("pass_at_k") if isinstance(agent_result.get("pass_at_k"), dict) else {}
+            with_pass = pass_at_k.get("with_skill") if isinstance(pass_at_k.get("with_skill"), dict) else {}
+            lift = pass_at_k.get("lift") if isinstance(pass_at_k.get("lift"), dict) else {}
+            paired = lift.get("paired_comparison") if isinstance(lift.get("paired_comparison"), dict) else {}
+            agent_result["dataset_sufficiency"] = assess_dataset_sufficiency(
+                distinct_cases=int(summary.get("total_tasks") or 0),
+                negative_cases=negative_cases,
+                pass_rate_interval=with_pass.get("rate_interval"),
+                paired_cases=paired.get("paired_cases"),
+                baseline_skipped=skip_baseline,
+            )
+        if agent_results:
+            best_agent = _pick_best_agent(agent_results)
+            if best_agent not in agent_results:
+                conditions = [
+                    agent.get("conditions", {}).get("with_skill", {}).get("execution_status")
+                    if isinstance(agent, dict)
+                    and isinstance(agent.get("conditions"), dict)
+                    and isinstance(agent["conditions"].get("with_skill"), dict)
+                    else None
+                    for agent in agent_results.values()
+                ]
+                baseline_only = bool(agent_results) and (
+                    skip_with_skill
+                    or (len(conditions) == len(agent_results) and all(status == "skipped" for status in conditions))
+                )
+                # Canonical agent payloads carry the baseline-only score as "baseline".
+                score_field = "baseline" if baseline_only else "with_skill"
+                canonical_agents = {
+                    name: _build_agent(
+                        name,
+                        agent,
+                        metrics_for_condition(agent, "with_skill"),
+                        metrics_for_condition(agent, "without_skill"),
+                        agent.get("model") if isinstance(agent.get("model"), str) else None,
+                        _agent_score_policy(agent),
+                        baseline_only=baseline_only,
+                    )
+                    for name, agent in agent_results.items()
+                    if isinstance(agent, dict)
+                }
+                best_agent = _pick_canonical_best_agent(canonical_agents, score_field=score_field)
+                if not best_agent and len(agent_results) == 1:
+                    best_agent = next(iter(agent_results))
+            if best_agent in agent_results:
+                results["dataset_sufficiency"] = agent_results[best_agent]["dataset_sufficiency"]
     selected_metrics = tuple(results.get("metrics", DEFAULT_METRICS))
     collected_attempt_policy = results.get("attempt_policy")
     attempt_policy = dict(collected_attempt_policy) if isinstance(collected_attempt_policy, dict) else {}
@@ -6049,8 +6818,20 @@ def _run_harbor_eval_impl(
         keep_requested=keep_harbor_jobs,
         result=results,
     )
+    # A tolerated baseline's own launch errors are its timeouts, already on its
+    # baseline condition; every other launch error still fails the run.
+    errors = baseline_timeouts.unexplained_launch_errors(results, errors)
     if errors:
         _merge_launch_execution_errors(results, errors)
+    if prior_version is not None:
+        comparison = (
+            compare_versions(run_dir, Path(prior_version["source_run_dir"]), collected_result=results)
+            if prior_version["status"] == "available"
+            else prior_version
+        )
+        comparison["rejected_candidates"] = prior_version.get("rejected_candidates", [])
+        results["prior_version_comparison"] = comparison
+        run_config["prior_version_comparison"] = comparison
     reporter.emit(ProgressEvent(stage="report", state="running"))
     try:
         (run_dir / "run_config.json").write_text(json.dumps(run_config, indent=2), encoding="utf-8")
@@ -6220,14 +7001,14 @@ def run_harbor_eval(*args: Any, **kwargs: Any) -> dict[str, Any]:
             )
         lifecycle.finish_result(result)
         return result
-    except BaseException:
+    except BaseException as exc:
         _finalize_harbor_artifacts(
             run_dir_value=lifecycle.output_dir,
             keep_requested=bool(kwargs.get("keep_harbor_jobs", False)),
             result=None,
         )
         try:
-            lifecycle.fail_unfinished()
+            lifecycle.fail_unfinished(interrupted=isinstance(exc, (KeyboardInterrupt, _HarborRunCancelledError)))
         except BaseException:
             logger.debug("Tier 3 progress terminalization failed", exc_info=True)
         raise

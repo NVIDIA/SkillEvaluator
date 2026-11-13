@@ -16,6 +16,12 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from skillevaluator.inference.json_span import (
+    MAX_JSON_NESTING,
+    STRICT_JSON_DECODE_HOOKS,
+    balanced_json_container_end,
+    json_nesting_within_limit,
+)
 from skillevaluator.inference.types import EmptyLLMResponseError, LLMClientTruncatedError
 from skillevaluator.provider_config import (
     MAX_COMPLETION_TOKENS,
@@ -31,6 +37,7 @@ from skillevaluator.tier3.eval_core.atif_helpers import (
     _truncate_for_behavior,
 )
 from skillevaluator.tier3.eval_core.character_facts import append_character_facts
+from skillevaluator.tier3.eval_core.optional_reference import normalize_expected_behaviors
 
 logger = logging.getLogger(__name__)
 
@@ -294,85 +301,9 @@ def call_public_llm(
 
 _JSON_WHITESPACE = " \t\r\n"
 _MAX_JSON_TEXT_CHARS = 100_000
-_MAX_JSON_NESTING = 128
+_MAX_JSON_NESTING = MAX_JSON_NESTING
 _JSON_NUMBER_PREFIX_RE = re.compile(r"-?(?:(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]*)?|(?:0|[1-9][0-9]*)\.)?")
-
-
-def _balanced_json_container_end(text: str, start: int) -> int | None:
-    """Return the exclusive end of one bounded structural container."""
-    if start >= len(text) or text[start] not in "{[":
-        return None
-    stack: list[str] = []
-    in_string = False
-    escaped = False
-    for i in range(start, len(text)):
-        ch = text[i]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_string = False
-        elif ch == '"':
-            in_string = True
-        elif ch in "{[":
-            stack.append(ch)
-            if len(stack) > _MAX_JSON_NESTING:
-                return None
-        elif ch in "}]":
-            expected = "{" if ch == "}" else "["
-            if not stack or stack[-1] != expected:
-                return None
-            stack.pop()
-            if not stack:
-                return i + 1
-    return None
-
-
-def _reject_duplicate_object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    """Build an object while rejecting ambiguous duplicate members."""
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("Duplicate JSON object member")
-        result[key] = value
-    return result
-
-
-def _reject_nonstandard_json_constant(_value: str) -> None:
-    raise ValueError("Non-standard JSON constant")
-
-
-def _parse_finite_json_float(value: str) -> float:
-    parsed = float(value)
-    if not math.isfinite(parsed):
-        raise ValueError("JSON number overflowed to a non-finite value")
-    return parsed
-
-
-def _json_nesting_within_limit(text: str) -> bool:
-    """Bound structural nesting without recursively parsing partial JSON."""
-    depth = 0
-    in_string = False
-    escaped = False
-    for character in text:
-        if in_string:
-            if escaped:
-                escaped = False
-            elif character == "\\":
-                escaped = True
-            elif character == '"':
-                in_string = False
-        elif character == '"':
-            in_string = True
-        elif character in "{[":
-            depth += 1
-            if depth > _MAX_JSON_NESTING:
-                return False
-        elif character in "}]" and depth:
-            depth -= 1
-    return True
+_json_nesting_within_limit = json_nesting_within_limit
 
 
 def _extract_json(text: str) -> dict[str, Any] | list[Any] | None:
@@ -394,16 +325,14 @@ def _extract_json(text: str) -> dict[str, Any] | list[Any] | None:
         if text[index] not in "{[":
             index += 1
             continue
-        end = _balanced_json_container_end(text, index)
+        end = balanced_json_container_end(text, index)
         if end is None:
             return documents[0] if documents else None
         candidate = text[index:end]
         try:
             parsed = json.loads(
                 candidate,
-                object_pairs_hook=_reject_duplicate_object_pairs,
-                parse_constant=_reject_nonstandard_json_constant,
-                parse_float=_parse_finite_json_float,
+                **STRICT_JSON_DECODE_HOOKS,
             )
         except (json.JSONDecodeError, RecursionError, ValueError):
             index = end
@@ -465,9 +394,7 @@ def _is_append_only_json_object_prefix(fragment: str) -> bool:
         return False
 
     decoder = json.JSONDecoder(
-        object_pairs_hook=_reject_duplicate_object_pairs,
-        parse_constant=_reject_nonstandard_json_constant,
-        parse_float=_parse_finite_json_float,
+        **STRICT_JSON_DECODE_HOOKS,
     )
 
     def _skip_whitespace(index: int) -> int:
@@ -540,9 +467,7 @@ def _salvage_behavior_results(text: str) -> list[dict[str, Any]]:
         return []
 
     decoder = json.JSONDecoder(
-        object_pairs_hook=_reject_duplicate_object_pairs,
-        parse_constant=_reject_nonstandard_json_constant,
-        parse_float=_parse_finite_json_float,
+        **STRICT_JSON_DECODE_HOOKS,
     )
 
     def _skip_whitespace(index: int) -> int:
@@ -623,11 +548,16 @@ def _salvage_behavior_results(text: str) -> list[dict[str, Any]]:
 
 
 STRUCTURED_JUDGE_MAX_TOKENS = MAX_COMPLETION_TOKENS
+_JUDGE_PROBLEM_CHARS = 300
 
-_JUDGE_RETRY_REMINDER = (
-    "\n\nIMPORTANT: Your previous reply could not be parsed or validated. Respond with ONLY the "
-    "minified JSON object on a single line -- no markdown fences, no prose, and keep explanations brief."
-)
+
+def _judge_retry_feedback(problem: str) -> str:
+    """Retry instruction that names what was wrong with the previous reply."""
+    return (
+        f"\n\nIMPORTANT: Your previous reply could not be parsed or validated: {problem[:_JUDGE_PROBLEM_CHARS]}. "
+        "Respond with ONLY the minified JSON object on a single line in the shape described above -- "
+        "no markdown fences, no prose, no score field, and keep explanations brief."
+    )
 
 
 def _call_validated_json_judge(
@@ -635,61 +565,92 @@ def _call_validated_json_judge(
     validate: Any,
     call: Any,
     extract: Any,
+    *,
+    salvage: Any = None,
     **call_kwargs: Any,
 ) -> tuple[Any, str | None, dict[str, Any]]:
-    """Invoke a JSON judge with one format-correction retry when payload validation fails."""
+    """Invoke a JSON judge; on an invalid reply, retry once and name the problem.
+
+    *validate* returns ``None`` for a usable reply or a short description of the
+    problem, which the retry sends back to the judge. Provider errors are not
+    retried here: the transport already retried them within its own budget.
+    *salvage* may rebuild a usable reply from text that never parsed, such as a
+    reply cut off by the output-token cap; it is tried only after both attempts.
+    """
     call_kwargs.setdefault("max_tokens", STRUCTURED_JUDGE_MAX_TOKENS)
+    unparsed_replies: list[str] = []
 
     def invoke(call_prompt: str) -> tuple[Any, str | None, dict[str, Any], str | None]:
         content, error, *metadata = call(call_prompt, **call_kwargs)
         provenance = metadata[0] if metadata and isinstance(metadata[0], dict) else {}
         parsed = extract(content) if content else None
-        validation_error = validate(parsed) if not error else None
-        return parsed, error, provenance, validation_error
+        problem = None
+        if not error:
+            problem = "the reply was empty" if not content else validate(parsed)
+            if content and parsed is None:
+                unparsed_replies.append(content)
+        return parsed, error, provenance, problem
 
-    parsed, error, provenance, validation_error = invoke(prompt)
+    parsed, error, provenance, problem = invoke(prompt)
     if error:
         return None, f"LLM judge error: {error}", provenance
-    if validation_error is None:
+    if problem is None:
         return parsed, None, provenance
 
-    parsed, error, provenance, validation_error = invoke(prompt + _JUDGE_RETRY_REMINDER)
+    parsed, error, provenance, problem = invoke(prompt + _judge_retry_feedback(problem))
+    if not error and problem is None:
+        return parsed, None, provenance
+    if salvage is not None:
+        # Newest first: only text that never parsed can be a reply cut off mid-object.
+        for text in reversed(unparsed_replies):
+            candidate = salvage(text)
+            if candidate is not None:
+                return candidate, None, provenance
     if error:
         return None, f"LLM judge retry error: {error}", provenance
-    if validation_error is not None:
-        return None, f"{validation_error} after retry", provenance
-    return parsed, None, provenance
+    return None, f"Judge response was unparseable or invalid after retry: {problem}", provenance
 
 
 # ---------------------------------------------------------------------------
 # Accuracy judge (5-criterion)
 # ---------------------------------------------------------------------------
 
+# Accuracy grades the outcome only. Whether the agent found and used the skill is
+# scored by skill_execution, so a correct answer from the no-skill baseline can
+# reach 1.0 here.
+_ACCURACY_CRITERIA = (
+    ("ACTION_CORRECT", "Does the response describe or carry out the correct actions or commands for the task?"),
+    ("FACTUALLY_ACCURATE", "Are the factual claims consistent with the expected answer?"),
+    ("TASK_ADDRESSED", "Does the response directly address the user's request?"),
+    ("ACTIONABLE", "Does the response give usable results or next steps, not just an acknowledgment?"),
+    (
+        "FORMAT_FOLLOWED",
+        "If the USER QUESTION explicitly requires an output format (a template, prefix, fields, ordering, "
+        "or units), does the response follow it? When the question requires no specific format, answer true "
+        "if the response gives an answer and false if it gives none.",
+    ),
+)
+_ACCURACY_DEDUCTION_SENTENCES = {
+    "ACTION_CORRECT": "The agent did not take the action the expected answer calls for",
+    "FACTUALLY_ACCURATE": "The answer's facts do not match the expected answer",
+    "TASK_ADDRESSED": "The answer does not address what the user asked",
+    "ACTIONABLE": "The answer does not give the user a result they can act on",
+    "FORMAT_FOLLOWED": "The answer does not follow the output format the question requires",
+}
+_ACCURACY_CRITERIA_KEYS = frozenset(key for key, _question in _ACCURACY_CRITERIA)
+
 ACCURACY_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "criteria": {
             "type": "object",
-            "properties": {
-                "SKILL_IDENTIFIED": {"type": "boolean"},
-                "ACTION_CORRECT": {"type": "boolean"},
-                "FACTUALLY_ACCURATE": {"type": "boolean"},
-                "TASK_ADDRESSED": {"type": "boolean"},
-                "ACTIONABLE": {"type": "boolean"},
-            },
-            "required": [
-                "SKILL_IDENTIFIED",
-                "ACTION_CORRECT",
-                "FACTUALLY_ACCURATE",
-                "TASK_ADDRESSED",
-                "ACTIONABLE",
-            ],
+            "properties": {key: {"type": "boolean"} for key, _question in _ACCURACY_CRITERIA},
+            "required": [key for key, _question in _ACCURACY_CRITERIA],
             "additionalProperties": False,
         },
-        "score": {"type": "number"},
         "reason": {"type": "string"},
     },
-    "required": ["criteria", "score", "reason"],
+    "required": ["criteria", "reason"],
     "additionalProperties": False,
 }
 
@@ -699,10 +660,9 @@ GOAL_ACCURACY_JSON_SCHEMA: dict[str, Any] = {
         "user_goal": {"type": "string"},
         "end_state": {"type": "string"},
         "achieved": {"type": "boolean"},
-        "score": {"type": "number"},
         "reason": {"type": "string"},
     },
-    "required": ["user_goal", "end_state", "achieved", "score", "reason"],
+    "required": ["user_goal", "end_state", "achieved", "reason"],
     "additionalProperties": False,
 }
 
@@ -715,36 +675,39 @@ BEHAVIOR_CHECK_JSON_SCHEMA: dict[str, Any] = {
                 "type": "object",
                 "properties": {
                     "step": {"type": "integer"},
-                    "passed": {"type": "boolean"},
+                    "passed": {"type": ["boolean", "null"]},
                     "reason": {"type": "string"},
                 },
                 "required": ["step", "passed", "reason"],
                 "additionalProperties": False,
             },
         },
-        "score": {"type": "number"},
         "summary": {"type": "string"},
     },
-    "required": ["results", "score", "summary"],
+    "required": ["results", "summary"],
     "additionalProperties": False,
 }
 
-ACCURACY_PROMPT = """You are an expert evaluator for AI agent responses. Evaluate by checking \
-each criterion below against the expected answer. For each criterion, determine true (satisfied) or false (not satisfied).
+ACCURACY_PROMPT = (
+    """You are an expert evaluator for AI agent responses. Check the response against \
+the expected answer on each criterion below and decide true (satisfied) or false (not satisfied) for each.
 
-1. SKILL_IDENTIFIED: Does the response reference or use the correct skill for the task?
-2. ACTION_CORRECT: Does the response describe or execute the correct actions/scripts?
-3. FACTUALLY_ACCURATE: Are the factual claims consistent with the expected answer?
-4. TASK_ADDRESSED: Does the response directly address the user's request?
-5. ACTIONABLE: Does the response provide actionable information (not just acknowledgment)?
+"""
+    + "\n".join(f"{index}. {key}: {criterion}" for index, (key, criterion) in enumerate(_ACCURACY_CRITERIA, 1))
+    + """
 
-Compute score = count(true) / 5.
-Be lenient on exact wording but strict on factual correctness.
+Judge the outcome only. Do not reward or penalize the response for naming, or not naming, \
+a tool or skill: that is scored separately.
+If the evidence holds no answer to the question (for example, the agent stopped, timed out or \
+refused), every criterion is false, unless the expected answer is itself a refusal.
+Be lenient on wording, but strict on factual correctness and on any output format the user \
+question explicitly requires.
 
-Respond with ONLY a JSON object:
-{{"criteria": {{"SKILL_IDENTIFIED": true/false, "ACTION_CORRECT": true/false, \
-"FACTUALLY_ACCURATE": true/false, "TASK_ADDRESSED": true/false, "ACTIONABLE": true/false}}, \
-"score": <float>, "reason": "<brief summary>"}}
+Respond with ONLY one JSON object with a "criteria" object holding exactly these five keys, each \
+true or false, and a one-sentence "reason". Do not include a score: it is computed from the criteria.
+Example of the shape (the values are only an illustration):
+{{"criteria": {{"ACTION_CORRECT": true, "FACTUALLY_ACCURATE": false, "TASK_ADDRESSED": true, "ACTIONABLE": true, \
+"FORMAT_FOLLOWED": true}}, "reason": "Ran the right command but reported the wrong version number."}}
 
 USER QUESTION:
 {question}
@@ -754,39 +717,31 @@ EXPECTED ANSWER:
 
 SELECTED EVIDENCE (final response + produced artifacts; low-relevance steps may be omitted):
 {agent_text}"""
-
-_ACCURACY_CRITERIA_KEYS = frozenset(
-    {
-        "SKILL_IDENTIFIED",
-        "ACTION_CORRECT",
-        "FACTUALLY_ACCURATE",
-        "TASK_ADDRESSED",
-        "ACTIONABLE",
-    }
 )
 
 
-def _valid_accuracy_criteria(value: Any) -> bool:
-    """Return True when value is a complete 5-criterion boolean mapping."""
-    return (
-        isinstance(value, dict)
-        and value.keys() == _ACCURACY_CRITERIA_KEYS
-        and all(isinstance(item, bool) for item in value.values())
-    )
-
-
 def _accuracy_payload_error(parsed: Any) -> str | None:
-    """Validate a parsed accuracy judge payload and return an error message if malformed."""
+    """Describe what is wrong with an accuracy reply, or return ``None`` when it is usable.
+
+    The score is computed from the five verdicts, so a ``score`` field in the
+    reply is ignored rather than trusted.
+    """
     if not isinstance(parsed, dict):
-        return "Judge response was not a valid JSON object"
-    if "reason" in parsed and not isinstance(parsed["reason"], str):
-        return "Judge response contained an invalid accuracy reason"
+        return "the reply did not contain one JSON object"
     criteria = parsed.get("criteria")
-    criteria_valid = _valid_accuracy_criteria(criteria)
-    if "criteria" in parsed and not criteria_valid:
-        return "Judge response contained invalid accuracy criteria"
-    if _finite_score(parsed.get("score")) is None and not criteria_valid:
-        return "Judge response contained no valid accuracy score or complete criteria"
+    if not isinstance(criteria, dict):
+        return 'the reply has no "criteria" object'
+    missing = sorted(_ACCURACY_CRITERIA_KEYS - criteria.keys())
+    if missing:
+        return f"criteria is missing {', '.join(missing)}"
+    unexpected = sorted(str(key)[:40] for key in criteria.keys() - _ACCURACY_CRITERIA_KEYS)
+    if unexpected:
+        return f"criteria has unexpected keys {', '.join(unexpected[:5])}"
+    not_boolean = sorted(key for key, value in criteria.items() if not isinstance(value, bool))
+    if not_boolean:
+        return f"criteria values must be true or false, not {', '.join(not_boolean)}"
+    if "reason" in parsed and not isinstance(parsed["reason"], str):
+        return '"reason" must be a string'
     return None
 
 
@@ -795,35 +750,27 @@ def judge_accuracy(
     ground_truth: str,
     agent_text: str,
     *,
-    skill_identification_applicable: bool = True,
+    skill_identification_applicable: bool | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Judge accuracy; exclude skill identification when no skill is expected."""
+    """Judge accuracy from five outcome verdicts; the score is computed here.
+
+    *skill_identification_applicable* is deprecated and ignored. Accuracy no
+    longer has a skill criterion, so every case and both arms use the same five
+    criteria. The keyword is still accepted so existing callers keep working.
+    """
+    del skill_identification_applicable
     if not _has_judge_reference(ground_truth):
         return _judge_not_applicable(_NO_GROUND_TRUTH_REASON)
 
-    prompt = ACCURACY_PROMPT
-    if not skill_identification_applicable:
-        prompt = prompt.replace(
-            "1. SKILL_IDENTIFIED: Does the response reference or use the correct skill for the task?",
-            "1. SKILL_IDENTIFIED: Inapplicable: no skill is expected. Set false; exclude it from the score.",
-        ).replace("Compute score = count(true) / 5.", "Compute score = count(true among the other four criteria) / 4.")
-    # Adjust the rubric before interpolation so task/evidence text stays intact.
-    prompt = prompt.format(question=question, ground_truth=ground_truth, agent_text=agent_text)
+    prompt = ACCURACY_PROMPT.format(question=question, ground_truth=ground_truth, agent_text=agent_text)
     prompt = append_character_facts(prompt, question=question, ground_truth=ground_truth, agent_text=agent_text)
-
-    def validate_payload(parsed: Any) -> str | None:
-        error = _accuracy_payload_error(parsed)
-        if not error and not skill_identification_applicable and not _valid_accuracy_criteria(parsed.get("criteria")):
-            return "Accuracy requires complete criterion verdicts when skill identification is inapplicable"
-        return error
-
     kwargs.setdefault("response_schema", ACCURACY_JSON_SCHEMA)
     kwargs.setdefault("schema_name", "accuracy_judgment")
 
     parsed, error, _provenance = _call_validated_json_judge(
         prompt,
-        validate_payload,
+        _accuracy_payload_error,
         call_public_llm,
         _extract_json,
         **kwargs,
@@ -831,73 +778,54 @@ def judge_accuracy(
     if error:
         return _judge_error(error)
 
-    assert isinstance(parsed, dict)
-    criteria = parsed.get("criteria")
-    criteria_valid = _valid_accuracy_criteria(criteria)
-
-    if criteria_valid:
-        # Score only applicable verdicts; excluded criteria leave both numerator and denominator.
-        excluded = set() if skill_identification_applicable else {"SKILL_IDENTIFIED"}
-        applicable = [verdict for name, verdict in criteria.items() if name not in excluded]
-        score = sum(verdict is True for verdict in applicable) / len(applicable)
-    else:
-        # Legacy score-only payloads; validate_payload rejects them when a criterion is excluded.
-        assert skill_identification_applicable
-        score = _finite_score(parsed.get("score"))
-        assert score is not None
-
-    result = {
-        "score": round(score, 4),
+    criteria = {key: parsed["criteria"][key] for key, _question in _ACCURACY_CRITERIA}
+    return {
+        "score": round(sum(criteria.values()) / len(criteria), 4),
         "reason": _bounded_judge_text(parsed.get("reason", "")),
-        "criteria": criteria if criteria_valid else {},
+        "criteria": criteria,
     }
-    if not skill_identification_applicable:
-        result["excluded_criteria"] = ["SKILL_IDENTIFIED"]
-        result["scoring_policy"] = "applicable-accuracy-criteria/v1"
-    return result
 
 
 # ---------------------------------------------------------------------------
 # Goal accuracy judge
 # ---------------------------------------------------------------------------
 
-GOAL_ACCURACY_PROMPT = """You are an evaluation judge. Determine whether an AI agent achieved \
-the expected goal by analyzing the full conversation.
+GOAL_ACCURACY_PROMPT = """You are an evaluation judge. Decide whether an AI agent achieved the expected goal.
 
-Step 1: What was the user's goal?
-Step 2: What end state did the agent reach?
-Step 3: Compare the end state to the expected outcome.
+Step 1: State the user's goal.
+Step 2: State the end state the agent reached.
+Step 3: Decide whether that end state achieves the expected outcome.
 
 USER REQUEST:
 {question}
 
-EXPECTED OUTCOME (ground truth):
+EXPECTED OUTCOME:
 {ground_truth}
-
-AGENT'S TOOL CALLS:
-{tool_summary}
-
+{tool_section}
 END-STATE EVIDENCE:
 {agent_text}
 
-Did the agent achieve the expected goal?
-
-Respond with ONLY a JSON object:
-{{"user_goal": "<inferred goal>", "end_state": "<what agent achieved>", \
-"achieved": true/false, "score": 1.0 or 0.0, "reason": "<brief explanation>"}}"""
+Respond with ONLY one JSON object with the keys "user_goal", "end_state", "achieved" (true or \
+false) and a one-sentence "reason". Do not include a score: it is 1.0 when achieved and 0.0 otherwise.
+Example of the shape (the values are only an illustration):
+{{"user_goal": "List the open release blockers", "end_state": "Listed two of the three blockers", \
+"achieved": false, "reason": "One blocker from the expected outcome is missing."}}"""
 
 
 def _goal_payload_error(parsed: Any) -> str | None:
-    """Validate a parsed goal-accuracy judge payload and return an error message if malformed."""
+    """Describe what is wrong with a goal reply, or return ``None`` when it is usable.
+
+    Goal accuracy is binary, like RAGAS AgentGoalAccuracyWithReference: the
+    score is 1.0 when ``achieved`` is true and 0.0 otherwise, so a ``score``
+    field in the reply is ignored.
+    """
     if not isinstance(parsed, dict):
-        return "Judge response was not a valid JSON object"
+        return "the reply did not contain one JSON object"
+    if not isinstance(parsed.get("achieved"), bool):
+        return '"achieved" must be true or false'
     for field in ("reason", "user_goal", "end_state"):
         if field in parsed and not isinstance(parsed[field], str):
-            return f"Judge response contained an invalid {field} value"
-    if not isinstance(parsed.get("achieved"), bool):
-        return "Judge response contained an invalid achieved value"
-    if "score" in parsed and _finite_score(parsed["score"]) is None:
-        return "Judge response contained an invalid goal score"
+            return f'"{field}" must be a string'
     return None
 
 
@@ -908,14 +836,15 @@ def judge_goal_accuracy(
     tool_summary: str = "",
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Run the goal accuracy judge (two-step: infer goal, compare outcome)."""
+    """Run the goal accuracy judge (two-step: infer goal, compare outcome); the score is binary."""
     if not _has_judge_reference(ground_truth):
         return _judge_not_applicable(_NO_GROUND_TRUTH_REASON)
 
+    tool_section = f"\nAGENT'S TOOL CALLS:\n{tool_summary}\n" if str(tool_summary or "").strip() else ""
     prompt = GOAL_ACCURACY_PROMPT.format(
         question=question,
         ground_truth=ground_truth,
-        tool_summary=tool_summary,
+        tool_section=tool_section,
         agent_text=agent_text,
     )
     prompt = append_character_facts(
@@ -934,18 +863,11 @@ def judge_goal_accuracy(
     if error:
         return _judge_error(error)
 
-    assert isinstance(parsed, dict)
-    achieved = parsed.get("achieved")
-    assert isinstance(achieved, bool)
-
-    score = 1.0 if achieved else 0.0
-    if "score" in parsed:
-        score = _finite_score(parsed["score"])
-        assert score is not None
-
+    achieved = parsed["achieved"]
     return {
-        "score": score,
+        "score": 1.0 if achieved else 0.0,
         "reason": _bounded_judge_text(parsed.get("reason", "")),
+        "achieved": achieved,
         "user_goal": _bounded_judge_text(parsed.get("user_goal", "")),
         "end_state": _bounded_judge_text(parsed.get("end_state", "")),
     }
@@ -955,9 +877,8 @@ def judge_goal_accuracy(
 # Behavior check judge
 # ---------------------------------------------------------------------------
 
-BEHAVIOR_CHECK_PROMPT = """You are evaluating whether an AI agent followed expected behaviors \
-during a task. Analyze the full conversation and determine if each expected behavior was \
-observed.
+BEHAVIOR_CHECK_PROMPT = """You are evaluating whether an AI agent showed each expected behavior during a task. \
+Read the conversation and decide, for each numbered behavior, whether it was observed.
 
 CONVERSATION:
 {conversation}
@@ -965,11 +886,17 @@ CONVERSATION:
 EXPECTED BEHAVIORS:
 {behaviors}
 
-For each behavior, set "passed" to true (observed) or false (not observed) with a brief reason.
-
-Respond with ONLY a JSON object:
-{{"results": [{{"step": 1, "passed": true/false, "reason": "..."}}, ...], \
-"score": <float between 0.0 and 1.0>, "summary": "<brief summary>"}}"""
+Respond with ONLY one JSON object. "results" must hold exactly {expected_count} entries, one per \
+expected behavior: "step" is the behavior's number (each number from 1 to {expected_count} exactly \
+once), "passed" is true (observed), false (evidence supports a violation or absence), or null \
+when missing or incomplete evidence prevents checking the behavior. Missing artifact contents, \
+unavailable tool output, or a truncated trace require null, NOT false, for checks that depend on \
+that evidence. A missing observation alone is not proof the behavior failed. Explain that evidence gap \
+in "reason" (under 15 words). An unrelated task \
+can be a valid negative control: evaluate its stated behavior without requiring skill use. Add a \
+one-sentence "summary". Do not include a score: it is computed from the results.
+Example of the shape for this task's {expected_count} behaviors (the values are only an illustration):
+{example}"""
 
 
 def _slice_with_middle_marker(
@@ -1061,11 +988,28 @@ def _compact_behavior_conversation(conversation_text: str, limit: int | None = N
 # (finish_reason="length", reasoning_tokens=1024).
 BEHAVIOR_JUDGE_MAX_TOKENS = STRUCTURED_JUDGE_MAX_TOKENS
 
-_BEHAVIOR_RETRY_REMINDER = (
-    "\n\nIMPORTANT: Your previous reply could not be parsed. Respond with ONLY the "
-    "minified JSON object on a single line -- no markdown fences, no prose, and "
-    'keep every "reason" under 15 words.'
-)
+
+def _behavior_prompt_example(expected_count: int) -> str:
+    """One entry per expected behavior, so the example is a valid reply if a judge copies it."""
+    return json.dumps(
+        {
+            "results": [
+                {
+                    "step": step,
+                    "passed": None if step % 3 == 0 else step % 3 == 1,
+                    "reason": (
+                        "Required tool output was not captured."
+                        if step % 3 == 0
+                        else "Seen in the transcript."
+                        if step % 3 == 1
+                        else "Observed output violates the requirement."
+                    ),
+                }
+                for step in range(1, expected_count + 1)
+            ],
+            "summary": "A short summary of what was and was not observed.",
+        }
+    )
 
 
 def judge_behavior_check(
@@ -1073,102 +1017,127 @@ def judge_behavior_check(
     expected_behaviors: list[str],
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Run the behavior check LLM judge."""
+    """Run the behavior check LLM judge; the score is the share of behaviors observed."""
+    expected_behaviors = normalize_expected_behaviors(expected_behaviors)
     if not _has_judge_reference(expected_behaviors):
         return _judge_not_applicable(_NO_EXPECTED_BEHAVIOR_REASON, results=[])
 
+    expected_count = len(expected_behaviors)
     behaviors_text = "\n".join(f"{i + 1}. {b}" for i, b in enumerate(expected_behaviors))
 
     conversation = _compact_behavior_conversation(conversation_text)
     prompt = BEHAVIOR_CHECK_PROMPT.format(
         conversation=conversation,
         behaviors=behaviors_text,
+        expected_count=expected_count,
+        example=_behavior_prompt_example(expected_count),
     )
     prompt = append_character_facts(prompt, conversation=conversation, expected_behaviors=behaviors_text)
     kwargs.setdefault("max_tokens", BEHAVIOR_JUDGE_MAX_TOKENS)
     kwargs.setdefault("response_schema", BEHAVIOR_CHECK_JSON_SCHEMA)
     kwargs.setdefault("schema_name", "behavior_check_judgment")
 
-    content, error = call_public_llm(prompt, **kwargs)
+    def salvage(text: str) -> dict[str, Any] | None:
+        # Complete entries from a reply cut off before its results array closed.
+        salvaged = _salvage_behavior_results(text)
+        candidate = {
+            "results": salvaged,
+            "summary": f"Salvaged {len(salvaged)}/{expected_count} behavior results from truncated judge response",
+        }
+        if not salvaged or _behavior_payload_error(candidate, expected_count, allow_partial=True):
+            return None
+        return candidate
+
+    try:
+        parsed, error, _provenance = _call_validated_json_judge(
+            prompt,
+            lambda payload: _behavior_payload_error(payload, expected_count),
+            call_public_llm,
+            _extract_json,
+            salvage=salvage,
+            **kwargs,
+        )
+    except Exception as exc:
+        error = f"Required behavior_check judge raised {type(exc).__name__}: {exc}"
     if error:
-        return _judge_error(f"LLM judge error: {error}", results=[])
+        return _judge_error(error, results=[], expectations=_behavior_expectations(expected_behaviors, [], error))
 
-    def _parse_judge_object(text: str | None) -> dict[str, Any] | list[Any] | None:
-        """Parse a JSON object or list from judge response text."""
-        return _extract_json(text) if text else None
-
-    parsed = _parse_judge_object(content)
-    score = _behavior_payload_score(parsed, len(expected_behaviors))
-    attempts = [(content or "", parsed)]
-    retry_error = None
-    if score is None:
-        # One retry max, with an explicit machine-readable-output reminder.
-        retry_content, retry_error = call_public_llm(prompt + _BEHAVIOR_RETRY_REMINDER, **kwargs)
-        if not retry_error:
-            parsed = _parse_judge_object(retry_content)
-            attempts.append((retry_content or "", parsed))
-            score = _behavior_payload_score(parsed, len(expected_behaviors))
-
-    if score is None:
-        # Salvage complete entries from a truncated results array (newest first).
-        for text, extracted in reversed(attempts):
-            if extracted is not None:
-                continue
-            salvaged = _salvage_behavior_results(text)
-            if salvaged:
-                candidate = {
-                    "results": salvaged,
-                    "summary": (
-                        f"Salvaged {len(salvaged)}/{len(expected_behaviors)} behavior "
-                        "results from truncated judge response"
-                    ),
-                }
-                candidate_score = _behavior_payload_score(
-                    candidate,
-                    len(expected_behaviors),
-                    allow_partial=True,
-                )
-                if candidate_score is not None:
-                    parsed = candidate
-                    score = candidate_score
-                    break
-
-    if score is None:
-        if retry_error:
-            return _judge_error(f"LLM judge retry error: {retry_error}", results=[])
-        return _judge_error("Judge response was unparseable or invalid after retry", results=[])
-
-    assert isinstance(parsed, dict)
-    results = parsed["results"]
-
+    # Keep the conservative score denominator without calling missing verdicts failures.
+    results = sorted(parsed["results"], key=lambda result: result["step"])
+    score = sum(1 for result in results if result["passed"]) / expected_count
     return {
         "score": round(score, 4),
         "reason": parsed.get("summary", ""),
         "results": results,
+        "expectations": _behavior_expectations(expected_behaviors, results),
     }
 
 
-def _behavior_payload_score(
-    parsed: dict[str, Any] | list[Any] | None,
-    expected_count: int,
-    *,
-    allow_partial: bool = False,
-) -> float | None:
+def _behavior_expectations(
+    expected_behaviors: list[str], results: list[dict[str, Any]], error: str = ""
+) -> list[dict[str, Any]]:
+    by_step = {result["step"]: result for result in results}
+    return [
+        {
+            "step": step,
+            "requirement": requirement,
+            "status": ("met" if by_step[step]["passed"] else "unmet")
+            if step in by_step and type(by_step[step]["passed"]) is bool
+            else "not_checked",
+            "reason": by_step[step].get("reason", "")
+            if step in by_step
+            else _redact_configured_credentials(error) or "No judgment returned for this expectation",
+        }
+        for step, requirement in enumerate(expected_behaviors, 1)
+    ]
+
+
+def _behavior_payload_error(parsed: Any, expected_count: int, *, allow_partial: bool = False) -> str | None:
+    """Describe what is wrong with a behavior reply, or return ``None`` when it is usable.
+
+    Each expected behavior is judged exactly once, identified by its 1-based
+    ``step`` number, with a boolean ``passed`` or an explicit null abstention. *allow_partial* accepts a
+    salvaged prefix that judges each of its steps once. The score is computed
+    from the verdicts, so a ``score`` field in the reply is ignored.
+    """
     if not isinstance(parsed, dict):
-        return None
+        return "the reply did not contain one JSON object"
     results = parsed.get("results")
     if not isinstance(results, list):
-        return None
-    if any(not isinstance(result, dict) or not isinstance(result.get("passed"), bool) for result in results):
-        return None
+        return 'the reply has no "results" list'
     if allow_partial:
         if not results or len(results) > expected_count:
-            return None
+            return f'"results" has {len(results)} entries; it needs 1 to {expected_count}'
     elif len(results) != expected_count:
-        return None
-    if "score" in parsed and _finite_score(parsed["score"]) is None:
-        return None
-    denominator = expected_count if allow_partial else len(results)
-    if denominator <= 0:
-        return None
-    return sum(1 for result in results if result["passed"]) / denominator
+        return f'"results" has {len(results)} entries; it needs exactly {expected_count}, one per behavior'
+    if any(not isinstance(result, dict) for result in results):
+        return 'every "results" entry must be an object'
+    if any(
+        "passed" not in result or (result["passed"] is not None and type(result["passed"]) is not bool)
+        for result in results
+    ):
+        return 'every "results" entry needs "passed" set to true, false, or null'
+    if any(
+        result["passed"] is None and (not isinstance(result.get("reason"), str) or not result["reason"].strip())
+        for result in results
+    ):
+        return 'unchecked entries need a nonempty "reason" explaining the missing evidence'
+    steps = [result.get("step") for result in results]
+    if any(isinstance(step, bool) or not isinstance(step, int) for step in steps):
+        return 'every "results" entry needs an integer "step" number'
+    expected_steps = set(range(1, expected_count + 1))
+    duplicated = sorted({step for step in steps if steps.count(step) > 1})
+    unexpected = sorted(set(steps) - expected_steps)[:10]
+    missing = [] if allow_partial else sorted(expected_steps - set(steps))[:10]
+    if duplicated or missing or unexpected:
+        parts = []
+        if duplicated:
+            parts.append(f"steps judged more than once: {duplicated[:10]}")
+        if missing:
+            parts.append(f"steps not judged: {missing}")
+        if unexpected:
+            parts.append(f"steps outside 1..{expected_count}: {unexpected}")
+        return "; ".join(parts)
+    if "summary" in parsed and not isinstance(parsed["summary"], str):
+        return '"summary" must be a string'
+    return None

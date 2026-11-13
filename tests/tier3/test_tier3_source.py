@@ -39,6 +39,35 @@ def test_source_preflight_accepts_yaml_dataset(tmp_path: Path) -> None:
 
     assert source == "evals_json"
     assert not [check for check in checks if check.status in {"missing", "error"}]
+    note = next(check for check in checks if check.path == "Dataset size")
+    assert note.status == "ok"
+    assert note.message == (
+        "Dataset size: provisional — 1 case (policy needs 10), "
+        "0 negative cases (needs 1) (policy dataset-sufficiency-v1)"
+    )
+
+
+def test_dataset_size_note_does_not_change_validation_result(tmp_path: Path) -> None:
+    skill = _skill(tmp_path)
+    evals = skill / "evals"
+    evals.mkdir()
+    (evals / "evals.json").write_text(
+        json.dumps(
+            {
+                "skill_name": "source-skill",
+                "evals": [
+                    {"id": "positive", "prompt": "do the thing", "expected_output": "done"},
+                ],
+            }
+        )
+    )
+
+    source, checks = validate_tier3_source(skill)
+    status_checks = [check for check in checks if check.path != "Dataset size"]
+
+    assert source == "evals_json"
+    assert not [check for check in status_checks if check.status in {"missing", "error"}]
+    assert next(check for check in checks if check.path == "Dataset size").status == "ok"
 
 
 def test_source_preflight_rejects_empty_dataset(tmp_path: Path) -> None:

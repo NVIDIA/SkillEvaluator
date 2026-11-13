@@ -1,0 +1,16 @@
+{
+  "skill_name": "text-analyzer",
+  "evals": [
+    {
+      "id": "text-analyzer-starter-001",
+      "prompt": "Analyze /workspace/input/input.txt with text-analyzer. Return the word count, line count, character count, sentence count and most frequent word.",
+      "expected_output": "4 words, 2 lines, 27 characters, 2 sentences; hello is the most frequent word with 2 occurrences.",
+      "expected_skill": "text-analyzer",
+      "expected_script": "analyze_text.py",
+      "assertions": [
+        "The agent reads text-analyzer/SKILL.md and runs scripts/analyze_text.py with --file and --json.",
+        "The returned statistics match the input fixture, including its final newline."
+      ]
+    }
+  ]
+}

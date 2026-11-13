@@ -82,9 +82,11 @@ def arm_observations(
     recovered_attempts: Sequence[dict[str, Any]] = (),
 ) -> ArmObservations:
     """Use the collector's existing score and attempt rules on cached logical records."""
+    from skillevaluator.tier3.attempt_verdict import attempt_verdict
+
     expected = set(expected_case_ids)
     rewards, scored, unscored = [], [], []
-    attempts: dict[str, list[tuple[int | None, float | None]]] = {case: [] for case in expected_case_ids}
+    attempts: dict[str, list[tuple[int | None, float | None, bool]]] = {case: [] for case in expected_case_ids}
     identities: set[str] = set()
     complete = bool(expected)
     for record in records:
@@ -105,7 +107,8 @@ def arm_observations(
             ordinal = collector._attempt_ordinal(reward) or collector._positive_attempt_ordinal(
                 getattr(record, "attempt_ordinal", None)
             )
-            attempts[case].append((ordinal, score))
+            passed = attempt_verdict(score, pass_threshold, reward=reward).passed
+            attempts[case].append((ordinal, score, passed))
         else:
             complete = False
         observation = TrialObservation(
@@ -134,7 +137,7 @@ def arm_observations(
         **common,
     )
     for case_attempts in attempts.values():
-        ordinals = [ordinal for ordinal, _score in case_attempts]
+        ordinals = [ordinal for ordinal, _score, _passed in case_attempts]
         explicit = [ordinal for ordinal in ordinals if ordinal is not None]
         if explicit and len(explicit) != len(ordinals):
             complete = False
@@ -144,8 +147,8 @@ def arm_observations(
             first_pass = next(
                 (
                     (index, ordinal)
-                    for index, (ordinal, score) in enumerate(ordered, 1)
-                    if score is not None and score >= pass_threshold
+                    for index, (ordinal, score, passed) in enumerate(ordered, 1)
+                    if score is not None and passed
                 ),
                 None,
             )
@@ -419,9 +422,9 @@ class ComparisonRuntime:
                         )
                         by_case.setdefault(record.case_id, []).append(row)
             failures = load_failures_by_case(evidence)
-            cross_cases = {
-                case for case in self.expected_case_ids if observer.context.case_spec(case).get("cross_component")
-            }
+            # Signal specs deliberately omit dataset classification fields.
+            # Reuse the context's canonical two-member classification instead.
+            cross_cases = getattr(observer.context, "cross_component_cases", None)
             stats = build_agent_statistics(
                 arms,
                 expected_case_ids=self.expected_case_ids,

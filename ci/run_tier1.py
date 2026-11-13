@@ -12,6 +12,7 @@ many skills are scanned at once; rows, logs and annotations keep skill order.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import functools
 import json
 import os
@@ -27,6 +28,11 @@ from pathlib import Path
 
 from skillevaluator.reporting.html import _validated_ci_context
 from skillevaluator.utils.secret_redaction import Redactor
+
+try:
+    from security_baselines import BaselineConfigurationError, load_security_baselines
+except ModuleNotFoundError:
+    from ci.security_baselines import BaselineConfigurationError, load_security_baselines
 
 try:
     from secret_redaction import collect_sensitive_values, sanitized_outputs
@@ -400,6 +406,7 @@ def evaluate_skill(
     timeout: float,
     execute,
     tokens: set[str],
+    baseline: dict | None = None,
 ) -> tuple[dict, dict | None, bool]:
     """Run one evaluator process; return row fields, its report and whether time ran out.
 
@@ -415,9 +422,14 @@ def evaluate_skill(
         # directory, never in the upload directory. Docker mounts /audit-tmp
         # as tmpfs, so cancellation cannot upload half-written secrets. The
         # name carries the report directory so concurrent scans are traceable.
-        with tempfile.TemporaryDirectory(
-            prefix=f"skillevaluator-private-{output.name}-", dir=env.get("TMPDIR")
-        ) as temporary:
+        with (
+            tempfile.TemporaryDirectory(
+                prefix=f"skillevaluator-private-{output.name}-", dir=env.get("TMPDIR")
+            ) as temporary,
+            tempfile.TemporaryDirectory(prefix="skillevaluator-policy-", dir=env.get("TMPDIR"))
+            if baseline is not None
+            else contextlib.nullcontext() as policy_directory,
+        ):
             raw = Path(temporary).resolve(strict=True)
             if raw.is_relative_to(workspace) or raw.is_relative_to(output.parent):
                 raise ValueError("A private scanner directory must be outside the workspace and reports.")
@@ -427,7 +439,7 @@ def evaluate_skill(
                 str(target),
                 "--llm" if llm else "--no-llm",
                 "--profile",
-                "external",
+                "default",
                 "--min-score",
                 min_score,
                 # native_reports renders each skill's HTML from the retained JSON
@@ -437,6 +449,11 @@ def evaluate_skill(
                 "-o",
                 str(raw),
             ]
+            if baseline is not None:
+                policy_path = Path(policy_directory) / Path(baseline["file"]).name
+                policy_path.write_bytes(baseline["content"])
+                policy_path.chmod(0o400)
+                argv.extend(["--skillspector-baseline", str(policy_path)])
             with (raw / "stdout.log").open("xb") as stdout, (raw / "stderr.log").open("xb") as stderr:
                 process = execute(
                     argv, cwd=workspace, env=env, stdout=stdout, stderr=stderr, check=False, timeout=timeout
@@ -521,6 +538,10 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
         if reports.is_relative_to(workspace):
             raise ConfigurationError("The report directory must be outside the read-only workspace.")
         env, llm = child_environment(environ)
+        baselines, baseline_context, policy_tokens = load_security_baselines(workspace, environ)
+        tokens.update(policy_tokens)
+        if baseline_context is not None:
+            context["security_baselines"] = baseline_context
         score = environ.get("MIN_SCORE", "70")
         if not score.isascii() or not score.isdigit() or len(score) > 3 or int(score) > 100:
             raise ConfigurationError("MIN_SCORE must be an integer between 0 and 100.")
@@ -561,7 +582,14 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
                 if clock() >= deadline:
                     raise ValueError("Credential preflight exceeded the scan time limit.")
             redactor = Redactor(tokens)
-            metadata = json.dumps({"selection": selection, "execution": context}, ensure_ascii=True)
+            metadata = json.dumps(
+                {
+                    "selection": selection,
+                    "execution": context,
+                    "baseline_files": [baseline["file"] for baseline in baselines.values()],
+                },
+                ensure_ascii=True,
+            )
             if redactor.text(metadata) != metadata:
                 raise ValueError("A credential is present in report context.")
         except (OSError, ValueError, UnicodeError, RecursionError) as exc:
@@ -572,10 +600,10 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
                 "Credential preflight could not safely prepare the scan; no results were published."
             ) from exc
         environments = [worker_environment(env, slot) for slot in range(1, min(workers, len(selected)) + 1)]
-    except (ConfigurationError, SelectionError, OSError) as exc:
+    except (ConfigurationError, SelectionError, BaselineConfigurationError, OSError) as exc:
         message = (
             str(exc)
-            if isinstance(exc, (ConfigurationError, SelectionError))
+            if isinstance(exc, (ConfigurationError, SelectionError, BaselineConfigurationError))
             else "The workspace or runtime configuration could not be read."
         )
         summary = _summary([], error=message)
@@ -607,6 +635,9 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
         }
         for index, target in enumerate(selected, 1)
     ]
+    for row in rows:
+        if baseline := baselines.get(row["path"]):
+            row["security_baseline"] = {key: baseline[key] for key in ("file", "digest")}
 
     def checkpoint() -> None:
         summary = _summary(rows)
@@ -653,6 +684,7 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
                         timeout=remaining,
                         execute=execute,
                         tokens=tokens,
+                        baseline=baselines.get(rows[index]["path"]),
                     )
                 except Exception:
                     outcome = ({"error": "Evaluator execution failed unexpectedly; no result is claimed."}, None, False)

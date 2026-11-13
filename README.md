@@ -19,7 +19,7 @@ the [NVIDIA Verified Skills pipeline](https://github.com/NVIDIA/skills).
 
 ## Bring skill evaluation to your repository
 
-Check changed skills in GitHub or GitLab with Tier 1 quality checks, SkillSpector
+Check changed skills in GitHub or GitLab with quality checks, SkillSpector
 security scanning and reports. Choose folders and thresholds; no evaluator code
 to import.
 
@@ -34,13 +34,13 @@ Choose checks and optional hosted feedback, then review the setup PR.
 [CLI setup guide](docs/cli-onboarding.mdx).
 
 **Manual setup:** copy a filled-in template from
-[CI templates](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/bundles/0.7.1). No local CLI needed.
+[CI templates](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/bundles/0.8.0). No local CLI needed.
 
 | Your repository | Ready-to-use template | Copy destination |
 | --- | --- | --- |
-| GitHub | [Skill checks](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.7.1/skill-checks.yml) | `.github/workflows/skill-checks.yml` |
-| GitLab | [Skill checks](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.7.1/gitlab-skill-checks.yml) | `.gitlab-ci.yml`, or merge into your existing pipeline |
-| GitHub reports and PR comments | [Optional publisher](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.7.1/publish-skill-reports.yml) | Second workflow; complete publisher setup |
+| GitHub | [Skill checks](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.8.0/skill-checks.yml) | `.github/workflows/skill-checks.yml` |
+| GitLab | [Skill checks](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.8.0/gitlab-skill-checks.yml) | `.gitlab-ci.yml`, or merge into your existing pipeline |
+| GitHub reports and PR comments | [Optional publisher](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.8.0/publish-skill-reports.yml) | Second workflow; complete publisher setup |
 
 See [GitHub](docs/github-actions.mdx) and [GitLab](docs/gitlab-ci.mdx) setup,
 [template reference](ci/templates/README.md) and [report examples](ci/examples/README.md).
@@ -173,7 +173,8 @@ Cite the paper and record the SkillEvaluator release or commit; see [CITATION.cf
 
 See [the documentation](https://docs.nvidia.com/skills/skillevaluator/) for
 setup, tier guides, reports, CI integration, CLI reference, and
-[performance dashboard](docs/reports.mdx#performance-dashboard).
+[performance dashboard](docs/reports.mdx#performance-dashboard). To let an agent run
+SkillEvaluator, install [`skills/skillevaluator/`](skills/skillevaluator/).
 
 ## Installation and third-party software
 

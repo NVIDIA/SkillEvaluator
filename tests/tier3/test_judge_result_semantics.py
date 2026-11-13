@@ -21,19 +21,20 @@ _TEMPLATE = (
     Path(__file__).resolve().parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
 )
 _CRITERIA = {
-    "SKILL_IDENTIFIED": True,
     "ACTION_CORRECT": False,
     "FACTUALLY_ACCURATE": True,
     "TASK_ADDRESSED": True,
     "ACTIONABLE": False,
+    "FORMAT_FOLLOWED": True,
 }
-VALID_ACCURACY_RESPONSE = json.dumps({"criteria": _CRITERIA, "score": 0.6, "reason": "valid retry"})
+VALID_ACCURACY_RESPONSE = json.dumps({"criteria": _CRITERIA, "reason": "valid retry"})
+# Five valid criteria, so a reply built on it can fail only on what follows.
+_VALID_CRITERIA_PREFIX = '{"criteria": ' + json.dumps(_CRITERIA) + ", "
 VALID_GOAL_RESPONSE = json.dumps(
     {
         "user_goal": "complete the task",
         "end_state": "task completed",
         "achieved": True,
-        "score": 1.0,
         "reason": "valid retry",
     }
 )
@@ -51,53 +52,148 @@ eval_template = _load_template_module()
 
 
 @pytest.mark.parametrize("module", [llm_judge, eval_template])
-@pytest.mark.parametrize("skill_verdict", [True, False])
-def test_negative_accuracy_excludes_skill_identification(module, skill_verdict, monkeypatch):
-    criteria = dict.fromkeys(_CRITERIA, True)
-    criteria["SKILL_IDENTIFIED"] = skill_verdict
-    criteria["ACTION_CORRECT"] = False
-    calls = []
-    monkeypatch.setattr(
-        module,
-        "call_public_llm",
-        _pair_script([(json.dumps({"criteria": criteria, "score": 0.1, "reason": "case"}), None)], calls),
-    )
-    result = module.judge_accuracy("question", "answer", "evidence", skill_identification_applicable=False)
-    assert result["score"] == 0.75
-    assert result["excluded_criteria"] == ["SKILL_IDENTIFIED"]
-    assert "other four criteria" in calls[0]
+def test_behavior_inventory_preserves_original_requirements_and_missing_verdicts(module, monkeypatch):
+    truncated = '{"results":[{"step":2,"passed":false,"reason":"file absent"},{"step":3'
+    monkeypatch.setattr(module, "call_public_llm", _pair_script([(truncated, None)], []))
+    result = module.judge_behavior_check("conversation", ["read the input", "write the file", "check the file"])
+
+    assert result["score"] == 0.0
+    assert result["results"] == [{"step": 2, "passed": False, "reason": "file absent"}]
+    assert [item["requirement"] for item in result["expectations"]] == [
+        "read the input",
+        "write the file",
+        "check the file",
+    ]
+    assert [item["status"] for item in result["expectations"]] == ["not_checked", "unmet", "not_checked"]
+    assert all(item["reason"] for item in result["expectations"])
 
 
 @pytest.mark.parametrize("module", [llm_judge, eval_template])
-def test_negative_accuracy_requires_criterion_evidence(module, monkeypatch):
+def test_behavior_inventory_keeps_all_expectations_after_judge_error(module, monkeypatch):
+    monkeypatch.setattr(module, "call_public_llm", _pair_script([("", "judge unavailable")], []))
+    result = module.judge_behavior_check("conversation", ["first", "second"])
+
+    assert result["score"] is None
+    assert result["status"] == "error"
+    assert [item["requirement"] for item in result["expectations"]] == ["first", "second"]
+    assert all(item["status"] == "not_checked" for item in result["expectations"])
+    assert all(item["reason"] for item in result["expectations"])
+
+
+@pytest.mark.parametrize("module", [llm_judge, eval_template])
+@pytest.mark.parametrize("exception", [TimeoutError, RuntimeError])
+def test_behavior_inventory_survives_unexpected_provider_exceptions(module, exception, monkeypatch):
+    def raise_error(*_args, **_kwargs):
+        raise exception("provider failed")
+
+    monkeypatch.setattr(module, "call_public_llm", raise_error)
+    result = module.judge_behavior_check("conversation", ["first", "second"])
+    assert result["score"] is None and result["status"] == "error"
+    assert result["results"] == []
+    assert [item["requirement"] for item in result["expectations"]] == ["first", "second"]
+    assert all(item["status"] == "not_checked" for item in result["expectations"])
+    assert all(exception.__name__ in item["reason"] for item in result["expectations"])
+
+
+@pytest.mark.parametrize("keyword_arguments", [False, True])
+def test_required_behavior_judge_wrapper_keeps_inventory_on_unexpected_exception(keyword_arguments):
+    def raise_timeout(*_args, **_kwargs):
+        raise TimeoutError("judge deadline")
+
+    args = () if keyword_arguments else ("conversation", ["first", "second"])
+    kwargs = (
+        {"conversation_text": "conversation", "expected_behaviors": ["first", "second"]} if keyword_arguments else {}
+    )
+    result = eval_template._call_required_judge("behavior_check", raise_timeout, *args, **kwargs)
+    assert result["score"] is None and result["status"] == "error"
+    assert result["results"] == []
+    assert [item["requirement"] for item in result["expectations"]] == ["first", "second"]
+    assert all(item["status"] == "not_checked" for item in result["expectations"])
+    assert all("TimeoutError" in item["reason"] for item in result["expectations"])
+
+
+@pytest.mark.parametrize("module", [llm_judge, eval_template])
+def test_behavior_judge_can_abstain_without_calling_missing_evidence_a_violation(module, monkeypatch):
+    response = json.dumps(
+        {
+            "results": [
+                {"step": 1, "passed": True, "reason": "input read"},
+                {"step": 2, "passed": None, "reason": "artifact contents not captured"},
+            ]
+        }
+    )
+    monkeypatch.setattr(module, "call_public_llm", _pair_script([(response, None)], []))
+    result = module.judge_behavior_check("partial trace", ["read input", "verify contents"])
+    assert result["score"] == 0.5
+    assert [item["status"] for item in result["expectations"]] == ["met", "not_checked"]
+    assert result["expectations"][1]["reason"] == "artifact contents not captured"
+
+
+@pytest.mark.parametrize("module", [llm_judge, eval_template])
+@pytest.mark.parametrize("reason", [None, "", " ", []])
+def test_behavior_abstention_requires_a_reason(module, reason):
+    payload = {"results": [{"step": 1, "passed": None, "reason": reason}]}
+    assert module._behavior_payload_error(payload, 1) is not None
+
+
+@pytest.mark.parametrize("module", [llm_judge, eval_template])
+def test_accuracy_grades_the_outcome_not_skill_use(module, monkeypatch):
+    # A correct no-skill or negative-case answer can reach 1.0: skill use is
+    # scored by skill_execution, not by an accuracy criterion.
+    calls = []
+    response = json.dumps({"criteria": dict.fromkeys(_CRITERIA, True), "reason": "correct"})
+    monkeypatch.setattr(module, "call_public_llm", _pair_script([(response, None)], calls))
+
+    result = module.judge_accuracy("question", "answer", "evidence")
+
+    assert result["score"] == 1.0
+    assert "SKILL_IDENTIFIED" not in calls[0]
+    assert "FORMAT_FOLLOWED" in calls[0]
+    assert "Do not reward or penalize the response for naming, or not naming" in calls[0]
+    assert "excluded_criteria" not in result
+
+
+@pytest.mark.parametrize("module", [llm_judge, eval_template])
+def test_accuracy_requires_criterion_verdicts(module, monkeypatch):
     calls = []
     monkeypatch.setattr(
         module, "call_public_llm", _pair_script([('{"score":1,"reason":"missing verdicts"}', None)], calls)
     )
-    result = module.judge_accuracy("question", "answer", "evidence", skill_identification_applicable=False)
+    result = module.judge_accuracy("question", "answer", "evidence")
     assert result["score"] is None
     assert result["status"] == "error"
+    assert len(calls) == 2
+    assert 'the reply has no "criteria" object' in calls[1]
 
 
 @pytest.mark.parametrize("module", [llm_judge, eval_template])
-def test_negative_rubric_does_not_rewrite_supplied_evidence(module, monkeypatch):
+def test_accuracy_prompt_does_not_rewrite_supplied_evidence(module, monkeypatch):
     calls = []
     criteria = dict.fromkeys(_CRITERIA, True)
-    response = json.dumps({"criteria": criteria, "score": 1.0, "reason": "valid"})
+    response = json.dumps({"criteria": criteria, "reason": "valid"})
     monkeypatch.setattr(module, "call_public_llm", _pair_script([(response, None)], calls))
-    evidence = 'Evidence literal: Compute score = count(true) / 5. "SKILL_IDENTIFIED": true, "score": 0.8'
-    module.judge_accuracy("question", "answer", evidence, skill_identification_applicable=False)
+    evidence = 'Evidence literal: {question} Compute score = count(true) / 5. "SKILL_IDENTIFIED": true, "score": 0.8'
+    module.judge_accuracy("question", "answer", evidence)
     assert evidence in calls[0]
 
 
-@pytest.mark.parametrize("module", [llm_judge, eval_template])
-def test_report_reasons_omit_excluded_accuracy_criteria(module, monkeypatch):
-    criteria = dict.fromkeys(_CRITERIA, True)
-    criteria["SKILL_IDENTIFIED"] = False
-    criteria["ACTION_CORRECT"] = False
-    response = json.dumps({"criteria": criteria, "score": 0.6, "reason": "declined correctly"})
-    monkeypatch.setattr(module, "call_public_llm", _pair_script([(response, None)], []))
-    detail = module.judge_accuracy("question", "answer", "evidence", skill_identification_applicable=False)
+def test_report_reasons_still_omit_criteria_excluded_by_older_rewards():
+    # Rewards written before accuracy dropped SKILL_IDENTIFIED may still list it
+    # as excluded; reports keep honoring that.
+    criteria = {
+        "SKILL_IDENTIFIED": False,
+        "ACTION_CORRECT": False,
+        "FACTUALLY_ACCURATE": True,
+        "TASK_ADDRESSED": True,
+        "ACTIONABLE": True,
+    }
+    detail = {
+        "score": 0.75,
+        "reason": "declined correctly",
+        "criteria": criteria,
+        "excluded_criteria": ["SKILL_IDENTIFIED"],
+        "scoring_policy": "applicable-accuracy-criteria/v1",
+    }
     reward = {
         "entry_id": "negative-001",
         **dict.fromkeys(("security", "skill_execution", "skill_efficiency", "goal_accuracy", "behavior_check"), 1.0),
@@ -107,7 +203,7 @@ def test_report_reasons_omit_excluded_accuracy_criteria(module, monkeypatch):
     findings = {finding["metric"]: finding for finding in report._extract_findings([reward])}
     reasons = findings["accuracy"]["reasons"]
     assert findings["accuracy"]["score"] == 0.75
-    assert "ACTION_CORRECT failed" in reasons
+    assert "The agent did not take the action the expected answer calls for (criterion ACTION_CORRECT)" in reasons
     assert not any("SKILL_IDENTIFIED" in reason for reason in reasons)
 
 
@@ -493,10 +589,9 @@ def _judge_goal_with_response(
         pytest.param("[]", id="list"),
         pytest.param("{}", id="empty-object"),
         pytest.param('prefix [{"score": 1.0}] suffix', id="prose-wrapped-list"),
-        pytest.param('{"score": true}', id="boolean-score"),
-        pytest.param('{"score": true, "score": 0.5}', id="duplicate-score"),
-        pytest.param('{"score": NaN}', id="nan-score"),
-        pytest.param('{"score": Infinity}', id="infinite-score"),
+        pytest.param(_VALID_CRITERIA_PREFIX + '"score": true, "score": 0.5}', id="duplicate-score"),
+        pytest.param(_VALID_CRITERIA_PREFIX + '"score": NaN}', id="nan-score"),
+        pytest.param(_VALID_CRITERIA_PREFIX + '"score": Infinity}', id="infinite-score"),
         pytest.param('{"criteria": {"SKILL_IDENTIFIED": true}}', id="incomplete-criteria"),
         pytest.param(
             json.dumps({"criteria": {**_CRITERIA, "ACTIONABLE": "true"}}),
@@ -518,28 +613,51 @@ def test_accuracy_rejects_unscorable_response_shapes(judge_module, monkeypatch, 
 
 
 @pytest.mark.parametrize(
-    ("score", "expected"),
+    "score",
     [
-        pytest.param(0.0, 0.0, id="genuine-zero"),
-        pytest.param(-2, 0.0, id="clamp-low"),
-        pytest.param(4.2, 1.0, id="clamp-high"),
-        pytest.param(-(10**400), 0.0, id="clamp-huge-integer-low"),
-        pytest.param(10**400, 1.0, id="clamp-huge-integer-high"),
+        pytest.param(0.0, id="zero"),
+        pytest.param(0.5, id="fraction"),
+        pytest.param(99, id="out-of-range"),
+        pytest.param(10**400, id="huge-integer"),
     ],
 )
-def test_accuracy_accepts_finite_numeric_scores(judge_module, monkeypatch, score: float, expected: float) -> None:
+def test_accuracy_rejects_score_only_replies(judge_module, monkeypatch, score: float) -> None:
+    calls: list[str] = []
     content = json.dumps({"score": score, "reason": "model judgment"})
-    monkeypatch.setattr(judge_module, "call_public_llm", lambda *_args, **_kwargs: (content, None))
+    monkeypatch.setattr(judge_module, "call_public_llm", _pair_script([(content, None)], calls))
 
     result = judge_module.judge_accuracy("question", "ground truth", "agent response")
 
-    assert result["score"] == expected
-    assert result.get("status") != "error"
+    assert len(calls) == 2
+    _assert_error_result(result)
+
+
+@pytest.mark.parametrize(
+    "reported_score",
+    [
+        pytest.param(0.0, id="contradicting-zero"),
+        pytest.param(-2, id="below-range"),
+        pytest.param(4.2, id="above-range"),
+        pytest.param(10**400, id="huge-integer"),
+        pytest.param("0.8", id="string"),
+        pytest.param(True, id="boolean"),
+    ],
+)
+def test_accuracy_ignores_any_reported_score(judge_module, monkeypatch, reported_score) -> None:
+    calls: list[str] = []
+    content = json.dumps({"criteria": _CRITERIA, "score": reported_score, "reason": "model judgment"})
+    monkeypatch.setattr(judge_module, "call_public_llm", _pair_script([(content, None)], calls))
+
+    result = judge_module.judge_accuracy("question", "ground truth", "agent response")
+
+    assert len(calls) == 1
+    assert result["score"] == 0.6
+    assert result["criteria"] == _CRITERIA
 
 
 def test_accuracy_normalizes_and_bounds_reason(judge_module, monkeypatch) -> None:
     calls: list[str] = []
-    content = json.dumps({"score": 1.0, "reason": "  " + ("x" * 600) + "  "})
+    content = json.dumps({"criteria": _CRITERIA, "reason": "  " + ("x" * 600) + "  "})
     monkeypatch.setattr(judge_module, "call_public_llm", _pair_script([(content, None)], calls))
 
     result = judge_module.judge_accuracy("question", "ground truth", "agent response")
@@ -553,7 +671,7 @@ def test_accuracy_redacts_configured_secret_before_bounding_reason(judge_module,
     credential = "SECRET-ABCDEFGHIJKLMNOPQRSTUVWXYZ-0123456789"
     prefix = "x" * 490
     monkeypatch.setenv("OPENAI_API_KEY", credential)
-    content = json.dumps({"score": 1.0, "reason": prefix + credential})
+    content = json.dumps({"criteria": _CRITERIA, "reason": prefix + credential})
     monkeypatch.setattr(judge_module, "call_public_llm", lambda *_args, **_kwargs: (content, None))
 
     result = judge_module.judge_accuracy("question", "ground truth", "agent response")
@@ -598,12 +716,12 @@ def test_accuracy_accepts_unique_object_after_non_json_bracket_label(judge_modul
     monkeypatch.setattr(
         judge_module,
         "call_public_llm",
-        lambda *_args, **_kwargs: ('Judge [draft]: {"score": 0.5}', None),
+        lambda *_args, **_kwargs: ("Judge [draft]: " + json.dumps({"criteria": _CRITERIA}), None),
     )
 
     result = judge_module.judge_accuracy("question", "ground truth", "agent response")
 
-    assert result["score"] == 0.5
+    assert result["score"] == 0.6
     assert result.get("status") != "error"
 
 
@@ -615,13 +733,13 @@ def test_accuracy_accepts_unique_object_before_unmatched_trailing_prose_without_
     monkeypatch.setattr(
         judge_module,
         "call_public_llm",
-        _pair_script([('{"score": 0.5}\nNote [draft', None)], calls),
+        _pair_script([(json.dumps({"criteria": _CRITERIA}) + "\nNote [draft", None)], calls),
     )
 
     result = judge_module.judge_accuracy("question", "ground truth", "agent response")
 
     assert len(calls) == 1
-    assert result["score"] == 0.5
+    assert result["score"] == 0.6
     assert result.get("status") != "error"
 
 
@@ -675,8 +793,6 @@ def test_accuracy_deep_nesting_is_scoreless_instead_of_raising(judge_module, mon
         pytest.param('{"achieved": 1}', id="integer-achieved"),
         pytest.param('{"achieved": 1, "achieved": true}', id="duplicate-achieved"),
         pytest.param('{"achieved": "true"}', id="string-achieved"),
-        pytest.param('{"achieved": true, "score": true}', id="boolean-score"),
-        pytest.param('{"achieved": true, "score": "0.8"}', id="string-score"),
         pytest.param('{"achieved": false, "score": NaN}', id="nan-score"),
         pytest.param('{"achieved": true, "score": Infinity}', id="infinite-score"),
     ],
@@ -693,12 +809,15 @@ def test_goal_rejects_unscorable_response_shapes(judge_module, monkeypatch, cont
         pytest.param({"achieved": False, "score": 0.0}, 0.0, id="genuine-zero"),
         pytest.param({"achieved": True}, 1.0, id="derive-true"),
         pytest.param({"achieved": False}, 0.0, id="derive-false"),
-        pytest.param({"achieved": False, "score": 0.25}, 0.25, id="finite-override"),
-        pytest.param({"achieved": True, "score": -(10**400)}, 0.0, id="huge-integer-low"),
-        pytest.param({"achieved": False, "score": 10**400}, 1.0, id="huge-integer-high"),
+        pytest.param({"achieved": False, "score": 1.0}, 0.0, id="contradicting-score"),
+        pytest.param({"achieved": False, "score": 0.25}, 0.0, id="fractional-score"),
+        pytest.param({"achieved": True, "score": -(10**400)}, 1.0, id="huge-integer-low"),
+        pytest.param({"achieved": False, "score": 10**400}, 0.0, id="huge-integer-high"),
+        pytest.param({"achieved": True, "score": True}, 1.0, id="boolean-score"),
+        pytest.param({"achieved": True, "score": "0.8"}, 1.0, id="string-score"),
     ],
 )
-def test_goal_requires_boolean_achieved_and_uses_only_finite_numeric_optional_score(
+def test_goal_score_is_binary_from_achieved_and_ignores_reported_score(
     judge_module,
     monkeypatch,
     payload: dict,
@@ -822,7 +941,7 @@ def test_behavior_first_provider_error_is_scoreless_without_retry(judge_module, 
 def test_behavior_retries_overflowed_numeric_metadata_once_and_recovers(judge_module, monkeypatch) -> None:
     calls: list[str] = []
     overflowed = '{"results":[{"passed":true,"reason":"ok","metadata":1e999}],"score":1.0}'
-    recovered = json.dumps({"results": [{"passed": True, "reason": "ok"}], "score": 1.0, "summary": "recovered"})
+    recovered = json.dumps({"results": [{"step": 1, "passed": True, "reason": "ok"}], "summary": "recovered"})
     monkeypatch.setattr(
         judge_module,
         "call_public_llm",
@@ -845,26 +964,26 @@ def test_behavior_retries_overflowed_numeric_metadata_once_and_recovers(judge_mo
         pytest.param("[]", id="list"),
         pytest.param("{}", id="empty-object"),
         pytest.param(
-            'prefix [{"results": [{"passed": true}], "score": 1.0}] suffix',
+            'prefix [{"results": [{"step": 1, "passed": true}], "score": 1.0}] suffix',
             id="prose-wrapped-list",
         ),
         pytest.param('{"results": "wrong", "score": 0}', id="non-list-results"),
         pytest.param('{"results": [1], "score": 0}', id="non-object-result"),
-        pytest.param('{"results": [{"passed": 1}], "score": 1}', id="non-boolean-passed"),
+        pytest.param('{"results": [{"step": 1, "passed": 1}], "score": 1}', id="non-boolean-passed"),
         pytest.param(
-            '{"results": [{"passed": 1, "passed": true}], "score": 1}',
+            '{"results": [{"step": 1, "passed": 1, "passed": true}], "score": 1}',
             id="duplicate-passed",
         ),
         pytest.param('{"results": [], "score": 0}', id="incomplete-results"),
         pytest.param(
-            '{"results": [{"passed": false}, {"passed": false}], "score": 0}',
+            '{"results": [{"step": 1, "passed": false}, {"step": 2, "passed": false}], "score": 0}',
             id="extra-results",
         ),
         pytest.param('{"results": [], "score": true}', id="boolean-score"),
         pytest.param('{"results": [], "score": NaN}', id="nan-score"),
         pytest.param('{"results": [], "score": Infinity}', id="infinite-score"),
         pytest.param(
-            '{"results": [{"passed": true}], "score": NaN}',
+            '{"results": [{"step": 1, "passed": true}], "score": NaN}',
             id="valid-results-with-nan-score",
         ),
     ],
@@ -888,22 +1007,28 @@ def test_behavior_retries_malformed_or_invalid_shapes_once_then_errors(
     ("payload", "expected_behaviors", "expected"),
     [
         pytest.param(
-            {"results": [{"passed": False}], "score": 0.0, "summary": "failed"},
+            {"results": [{"step": 1, "passed": False}], "summary": "failed"},
             ["b1"],
             0.0,
             id="explicit-zero",
         ),
         pytest.param(
-            {"results": [{"passed": True}, {"passed": False}], "summary": "half"},
+            {"results": [{"step": 2, "passed": False}, {"step": 1, "passed": True}], "summary": "half"},
             ["b1", "b2"],
             0.5,
-            id="derived",
+            id="derived-out-of-order",
         ),
         pytest.param(
-            {"results": [{"passed": False}], "score": 10**400, "summary": "valid integer"},
+            {"results": [{"step": 1, "passed": False}], "score": 10**400, "summary": "ignored score"},
             ["b1"],
             0.0,
-            id="huge-integer-score",
+            id="huge-integer-score-ignored",
+        ),
+        pytest.param(
+            {"results": [{"step": 1, "passed": False}], "score": 1.0, "summary": "contradicting score"},
+            ["b1"],
+            0.0,
+            id="contradicting-score-ignored",
         ),
     ],
 )
@@ -930,7 +1055,7 @@ def test_behavior_accepts_unique_object_before_unmatched_trailing_prose_without_
     monkeypatch,
 ) -> None:
     calls: list[str] = []
-    content = '{"results":[{"passed":true}]}\nNote [draft'
+    content = '{"results":[{"step":1,"passed":true}]}\nNote [draft'
     monkeypatch.setattr(judge_module, "call_public_llm", _pair_script([(content, None)], calls))
 
     result = judge_module.judge_behavior_check("conversation", ["behavior"])
@@ -945,7 +1070,7 @@ def test_behavior_retries_nonstandard_constant_in_metadata_then_errors(
     monkeypatch,
 ) -> None:
     calls: list[str] = []
-    content = '{"results":[{"passed":true,"metadata":-Infinity}]}'
+    content = '{"results":[{"step":1,"passed":true,"metadata":-Infinity}]}'
     monkeypatch.setattr(
         judge_module,
         "call_public_llm",
@@ -1017,7 +1142,7 @@ def test_behavior_salvage_rejects_noncompletable_current_entry(
     monkeypatch,
     unfinished_entry: str,
 ) -> None:
-    malformed = '{"results":[{"passed":true},' + unfinished_entry
+    malformed = '{"results":[{"step":1,"passed":true},' + unfinished_entry
     calls: list[str] = []
     monkeypatch.setattr(
         judge_module,
@@ -1035,9 +1160,9 @@ def test_behavior_salvage_rejects_noncompletable_current_entry(
 @pytest.mark.parametrize(
     "unfinished_entry",
     [
-        pytest.param('{"passed":false,"reason":"cut', id="unfinished-string"),
-        pytest.param('{"passed":false,"reason":', id="missing-value-at-end"),
-        pytest.param('{"passed":fal', id="partial-false-literal"),
+        pytest.param('{"step":2,"passed":false,"reason":"cut', id="unfinished-string"),
+        pytest.param('{"step":2,"passed":false,"reason":', id="missing-value-at-end"),
+        pytest.param('{"step":2,"passed":fal', id="partial-false-literal"),
     ],
 )
 def test_behavior_salvage_accepts_append_only_completable_current_entry(
@@ -1045,7 +1170,7 @@ def test_behavior_salvage_accepts_append_only_completable_current_entry(
     monkeypatch,
     unfinished_entry: str,
 ) -> None:
-    truncated = '{"results":[{"passed":true},' + unfinished_entry
+    truncated = '{"results":[{"step":1,"passed":true},' + unfinished_entry
     calls: list[str] = []
     monkeypatch.setattr(
         judge_module,
@@ -1057,11 +1182,11 @@ def test_behavior_salvage_accepts_append_only_completable_current_entry(
 
     assert len(calls) == 2
     assert result["score"] == 0.5
-    assert result["results"] == [{"passed": True}]
+    assert result["results"] == [{"step": 1, "passed": True}]
 
 
 def test_behavior_retries_ambiguous_multiple_documents_then_errors(judge_module, monkeypatch) -> None:
-    content = '{"results":[{"passed":false}]} {"results":[{"passed":true}]}'
+    content = '{"results":[{"step":1,"passed":false}]} {"results":[{"step":1,"passed":true}]}'
     calls: list[str] = []
     monkeypatch.setattr(
         judge_module,
@@ -1077,7 +1202,7 @@ def test_behavior_retries_ambiguous_multiple_documents_then_errors(judge_module,
 
 
 def test_behavior_deep_nesting_is_scoreless_instead_of_raising(judge_module, monkeypatch) -> None:
-    content = '{"results":[{"passed":true,"metadata":' + "[" * 10_000 + "0" + "]" * 10_000 + "}]}"
+    content = '{"results":[{"step":1,"passed":true,"metadata":' + "[" * 10_000 + "0" + "]" * 10_000 + "}]}"
     calls: list[str] = []
     monkeypatch.setattr(
         judge_module,
@@ -1096,15 +1221,27 @@ def test_behavior_deep_nesting_is_scoreless_instead_of_raising(judge_module, mon
     "malformed",
     [
         pytest.param(
-            '{"metadata":' + "[" * 900 + "0" + "]" * 900 + ',"results":[{"passed":true},{"passed":false',
+            '{"metadata":'
+            + "[" * 900
+            + "0"
+            + "]" * 900
+            + ',"results":[{"step":1,"passed":true},{"step":2,"passed":false',
             id="top-level-field",
         ),
         pytest.param(
-            '{"results":[{"passed":true,"metadata":' + "[" * 900 + "0" + "]" * 900 + '},{"passed":false',
+            '{"results":[{"step":1,"passed":true,"metadata":'
+            + "[" * 900
+            + "0"
+            + "]" * 900
+            + '},{"step":2,"passed":false',
             id="complete-entry",
         ),
         pytest.param(
-            '{"results":[{"passed":true},{"passed":false,"metadata":' + "[" * 900 + "0" + "]" * 900 + ',"reason":"cut',
+            '{"results":[{"step":1,"passed":true},{"step":2,"passed":false,"metadata":'
+            + "[" * 900
+            + "0"
+            + "]" * 900
+            + ',"reason":"cut',
             id="current-partial-entry",
         ),
     ],
@@ -1132,15 +1269,15 @@ def test_behavior_salvage_rejects_excessive_nesting(
     "malformed",
     [
         pytest.param(
-            '{"metadata":NaN,"results":[{"passed":true},{"passed":false',
+            '{"metadata":NaN,"results":[{"step":1,"passed":true},{"step":2,"passed":false',
             id="top-level-field",
         ),
         pytest.param(
-            '{"results":[{"passed":true,"metadata":Infinity},{"passed":false',
+            '{"results":[{"step":1,"passed":true,"metadata":Infinity},{"step":2,"passed":false',
             id="complete-entry",
         ),
         pytest.param(
-            '{"results":[{"passed":true},{"passed":false,"metadata":-Infinity,"reason":"cut',
+            '{"results":[{"step":1,"passed":true},{"step":2,"passed":false,"metadata":-Infinity,"reason":"cut',
             id="current-partial-entry",
         ),
     ],
@@ -1167,51 +1304,53 @@ def test_behavior_salvage_rejects_nonstandard_constants(
 @pytest.mark.parametrize(
     "malformed",
     [
-        pytest.param('{"results":null,"metadata":[{"passed":true}]', id="unrelated-array"),
-        pytest.param('{"metadata":{"results":[{"passed":true}]', id="nested-results"),
-        pytest.param('{"results":[{"passed":true} {"passed":false', id="missing-comma"),
+        pytest.param('{"results":null,"metadata":[{"step":1,"passed":true}]', id="unrelated-array"),
+        pytest.param('{"metadata":{"results":[{"step":1,"passed":true}]', id="nested-results"),
+        pytest.param('{"results":[{"step":1,"passed":true} {"step":2,"passed":false', id="missing-comma"),
         pytest.param(
-            '{"results":[{"passed":true},{"passed":truX}]}',
+            '{"results":[{"step":1,"passed":true},{"step":2,"passed":truX}]}',
             id="closed-invalid-token",
         ),
         pytest.param(
-            '{"results":[{"passed":true},{"passed":false,}]}',
+            '{"results":[{"step":1,"passed":true},{"step":2,"passed":false,}]}',
             id="closed-trailing-comma",
         ),
-        pytest.param('{"score":true,"results":[{"passed":true},{"passed":false', id="boolean-score"),
-        pytest.param('{"score":"0.5","results":[{"passed":true},{"passed":false', id="string-score"),
-        pytest.param('{"score":NaN,"results":[{"passed":true},{"passed":false', id="nan-score"),
-        pytest.param('{"score":Infinity,"results":[{"passed":true},{"passed":false', id="infinite-score"),
+        pytest.param('{"score":true,"results":[{"step":1,"passed":true},{"step":2,"passed":false', id="boolean-score"),
+        pytest.param('{"score":"0.5","results":[{"step":1,"passed":true},{"step":2,"passed":false', id="string-score"),
+        pytest.param('{"score":NaN,"results":[{"step":1,"passed":true},{"step":2,"passed":false', id="nan-score"),
         pytest.param(
-            '[{"results":[{"passed":true},{"passed":false',
+            '{"score":Infinity,"results":[{"step":1,"passed":true},{"step":2,"passed":false', id="infinite-score"
+        ),
+        pytest.param(
+            '[{"results":[{"step":1,"passed":true},{"step":2,"passed":false',
             id="array-wrapper",
         ),
         pytest.param(
-            '[] {"results":[{"passed":true},{"passed":false',
+            '[] {"results":[{"step":1,"passed":true},{"step":2,"passed":false',
             id="complete-array-prefix",
         ),
         pytest.param(
-            '}] {"results":[{"passed":true},{"passed":false',
+            '}] {"results":[{"step":1,"passed":true},{"step":2,"passed":false',
             id="structural-prefix",
         ),
         pytest.param(
-            '{"score":true,"score":0.5,"results":[{"passed":true},{"passed":false',
+            '{"score":true,"score":0.5,"results":[{"step":1,"passed":true},{"step":2,"passed":false',
             id="duplicate-score",
         ),
         pytest.param(
-            '{"results":[{"passed":1,"passed":true},{"passed":false',
+            '{"results":[{"step":1,"passed":1,"passed":true},{"step":2,"passed":false',
             id="duplicate-passed",
         ),
         pytest.param(
-            '{"results":\N{NO-BREAK SPACE}[{"passed":true},{"passed":false',
+            '{"results":\N{NO-BREAK SPACE}[{"step":1,"passed":true},{"step":2,"passed":false',
             id="non-json-nbsp",
         ),
         pytest.param(
-            '{"results":\f[{"passed":true},{"passed":false',
+            '{"results":\f[{"step":1,"passed":true},{"step":2,"passed":false',
             id="non-json-form-feed",
         ),
         pytest.param(
-            '{"results":\v[{"passed":true},{"passed":false',
+            '{"results":\v[{"step":1,"passed":true},{"step":2,"passed":false',
             id="non-json-vertical-tab",
         ),
     ],
@@ -1236,7 +1375,7 @@ def test_behavior_salvage_rejects_invalid_top_level_prefixes(
 
 
 def test_behavior_salvage_keeps_finite_top_level_score_prefix(judge_module, monkeypatch) -> None:
-    truncated = '{"score":0.5,"results":[{"passed":true},{"passed":false'
+    truncated = '{"score":0.5,"results":[{"step":1,"passed":true},{"step":2,"passed":false'
     calls: list[str] = []
     monkeypatch.setattr(
         judge_module,
@@ -1247,14 +1386,14 @@ def test_behavior_salvage_keeps_finite_top_level_score_prefix(judge_module, monk
     result = judge_module.judge_behavior_check("conversation", ["b1", "b2"])
 
     assert result["score"] == 0.5
-    assert result["results"] == [{"passed": True}]
+    assert result["results"] == [{"step": 1, "passed": True}]
 
 
 @pytest.mark.parametrize(
     "prefix", [pytest.param("Here is the JSON:\n", id="prose"), pytest.param("```json\n", id="fence")]
 )
 def test_behavior_salvage_tolerates_non_structural_wrappers(judge_module, monkeypatch, prefix: str) -> None:
-    truncated = f'{prefix}{{"results":[{{"passed":true}},{{"passed":false'
+    truncated = f'{prefix}{{"results":[{{"step":1,"passed":true}},{{"step":2,"passed":false'
     calls: list[str] = []
     monkeypatch.setattr(
         judge_module,
@@ -1265,7 +1404,7 @@ def test_behavior_salvage_tolerates_non_structural_wrappers(judge_module, monkey
     result = judge_module.judge_behavior_check("conversation", ["b1", "b2"])
 
     assert result["score"] == 0.5
-    assert result["results"] == [{"passed": True}]
+    assert result["results"] == [{"step": 1, "passed": True}]
 
 
 def test_absent_reference_judges_are_explicitly_not_applicable(judge_module) -> None:

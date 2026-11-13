@@ -28,9 +28,12 @@ from itertools import islice
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
+from skillevaluator.tier3.attempt_verdict import attempt_verdict, scored_goal_accuracy
+from skillevaluator.tier3.baseline_store import BASELINE_ANNOTATION_KEYS, load_baseline_rows, measured_condition_usage
 from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts, get_skill_tool_calls
 from skillevaluator.tier3.eval_core.checks import check_negative_case
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
+from skillevaluator.tier3.harbor import baseline_timeouts
 from skillevaluator.tier3.harbor.activation import summarize_skill_activation
 from skillevaluator.tier3.harbor.lift_basis import pair_metric_scores
 from skillevaluator.tier3.harbor.metrics import (
@@ -59,10 +62,12 @@ from skillevaluator.tier3.harbor.metrics import (
     not_applicable_metrics,
     overall_score,
     overall_score_from_metrics,
+    recorded_not_applicable_reason,
     rewards_have_mixed_metric_contracts,
     score_definition,
     score_policy_for_metrics,
     score_value,
+    shared_not_applicable_reason,
 )
 from skillevaluator.tier3.output_provenance import write_output_file_atomically
 from skillevaluator.tier3.toml_utils import extract_toml_metadata_entry_id
@@ -130,6 +135,7 @@ AGENT_LOG_ARTIFACTS = (
     "gemini-cli.txt",
     "cline.txt",
     "opencode.txt",
+    "hermes.txt",
 )
 GENERATED_AGENT_ARTIFACTS = (
     "lift.json",
@@ -137,6 +143,7 @@ GENERATED_AGENT_ARTIFACTS = (
     "pass_at_k_lift.json",
     "security_attribution.json",
     "findings.json",
+    "baseline_timeout_tolerance.json",
 )
 GENERATED_CONDITION_DIRS = ("with-skill", "without-skill")
 GENERATED_ROOT_ARTIFACTS = ("attempt_policy.json", "comparison.json")
@@ -857,6 +864,8 @@ def _agent_log_runtime_failure_reason(
         trial_dir / "codex.txt",
         trial_dir / "agent" / "opencode.txt",
         trial_dir / "opencode.txt",
+        trial_dir / "agent" / "hermes.txt",
+        trial_dir / "hermes.txt",
     ):
         text = _read_bounded_text(path)
         if text is None:
@@ -3404,7 +3413,7 @@ def _restore_constituent_not_applicable(
         return result
     root_rewards = dict(original)
     steps = []
-    for _name, step in zip(names, result["step_results"], strict=True):
+    for name, step in zip(names, result["step_results"], strict=True):
         verifier = step.get("verifier_result")
         rewards = verifier.get("rewards") if isinstance(verifier, dict) else None
         if not isinstance(rewards, dict):
@@ -3414,12 +3423,14 @@ def _restore_constituent_not_applicable(
             # A conflicting numeric value remains authoritative and prevents restoration.
             if metric in rewards and not metric_is_not_applicable(rewards, metric):
                 return result
-            mark_not_applicable(rewards, metric)
+            # Keep the reason the step's verifier recorded, such as a negative eval case.
+            mark_not_applicable(rewards, metric, recorded_not_applicable_reason(by_name[name], metric))
         steps.append({**step, "verifier_result": {**verifier, "rewards": rewards}})
     for metric in restored:
-        mark_not_applicable(root_rewards, metric)
+        reason = shared_not_applicable_reason([by_name[name] for name in names], metric)
+        mark_not_applicable(root_rewards, metric, reason)
         if metric not in data:
-            mark_not_applicable(data, metric)
+            mark_not_applicable(data, metric, reason)
     return {**result, "verifier_result": {**root_verifier, "rewards": root_rewards}, "step_results": steps}
 
 
@@ -4387,12 +4398,13 @@ def _partition_scoreable_rewards(
         if raw_trial in failed_trials:
             continue
         failed_trials.add(raw_trial)
-        failures.append(
-            {
-                "trial": _published_trial_label(raw_trial, alias_ordinal=len(failures) + 1),
-                "reason": _unscoreable_reward_reason(reward),
-            }
-        )
+        failure = {
+            "trial": _published_trial_label(raw_trial, alias_ordinal=len(failures) + 1),
+            "reason": _unscoreable_reward_reason(reward),
+        }
+        if reward.get("_trial_root_name"):
+            failure["_trial_root_name"] = str(reward["_trial_root_name"])
+        failures.append(failure)
 
     custom_names = {name for reward in scoreable for name in extract_custom_metrics(reward)}
     if len(custom_names) > MAX_CUSTOM_METRICS:
@@ -4402,12 +4414,13 @@ def _partition_scoreable_rewards(
             if raw_trial in failed_trials:
                 continue
             failed_trials.add(raw_trial)
-            failures.append(
-                {
-                    "trial": _published_trial_label(raw_trial, alias_ordinal=len(failures) + 1),
-                    "reason": UNSAFE_CUSTOM_METRIC_UNION_REASON,
-                }
-            )
+            failure = {
+                "trial": _published_trial_label(raw_trial, alias_ordinal=len(failures) + 1),
+                "reason": UNSAFE_CUSTOM_METRIC_UNION_REASON,
+            }
+            if reward.get("_trial_root_name"):
+                failure["_trial_root_name"] = str(reward["_trial_root_name"])
+            failures.append(failure)
         scoreable = []
     return scoreable, failures
 
@@ -4425,7 +4438,11 @@ def _unscoreable_reward_reason(reward: dict[str, Any]) -> str:
             safe_metric = _safe_diagnostic_text(metric, max_len=64)
             safe_reason = _safe_diagnostic_text(reason, max_len=512)
             if safe_reason:
-                parts.append(f"{safe_metric or 'judge'}: {safe_reason}")
+                parts.append(
+                    f"[environment] {safe_reason}"
+                    if metric == "environment"
+                    else f"{safe_metric or 'judge'}: {safe_reason}"
+                )
     elif isinstance(errors, list):
         parts.extend(_safe_diagnostic_text(reason, max_len=512) for reason in errors[: len(DEFAULT_METRICS)])
         parts = [part for part in parts if part]
@@ -4436,7 +4453,12 @@ def _unscoreable_reward_reason(reward: dict[str, Any]) -> str:
 
     if not parts:
         return fallback
-    return _safe_diagnostic_text("Required judge evaluation failed: " + "; ".join(parts), max_len=2048)
+    prefix = (
+        "Evaluation environment invalid: "
+        if isinstance(errors, dict) and "environment" in errors
+        else "Required judge evaluation failed: "
+    )
+    return _safe_diagnostic_text(prefix + "; ".join(parts), max_len=2048)
 
 
 def _strip_attempt_suffix(value: str) -> str:
@@ -4635,7 +4657,7 @@ def _logical_attempt_rewards(rewards: list[dict[str, Any]]) -> list[dict[str, An
             if metric in standard_scores:
                 logical_reward[metric] = standard_scores[metric]
         for metric in not_applicable_metrics(rows, metrics):
-            mark_not_applicable(logical_reward, metric)
+            mark_not_applicable(logical_reward, metric, shared_not_applicable_reason(rows, metric))
         logical_reward.update(custom_scores)
         if custom_scores:
             logical_reward["custom_metrics"] = custom_scores
@@ -4658,12 +4680,35 @@ def _logical_attempt_rewards(rewards: list[dict[str, Any]]) -> list[dict[str, An
         }
         if judge_models:
             logical_reward["_judge_models"] = judge_models
+        security_shortfalls = [
+            verdict
+            for row in rows
+            if (verdict := attempt_verdict(_overall_score(row), 0.5, reward=row)).security_clean is False
+        ]
+        if security_shortfalls and all(verdict.security_exempt for verdict in security_shortfalls):
+            message = next(
+                (verdict.security_message for verdict in security_shortfalls if verdict.security_message), None
+            )
+            logical_reward["details"] = {
+                "security": {
+                    "supported": False,
+                    "findings": [
+                        {
+                            "type": "unsupported_tool_wrapper",
+                            "score_impact": True,
+                            "message": message,
+                        }
+                    ]
+                    if message
+                    else [],
+                }
+            }
         logical.append(logical_reward)
     return logical
 
 
 def harbor_job_passed(job_dir: Path, pass_threshold: float) -> bool:
-    """Return whether a complete logical attempt meets the pass threshold.
+    """Return whether a complete logical attempt meets the required checks.
 
     This deliberately shares collection's failure filtering and multi-step
     reward precedence. A root Harbor ``result.json`` reward is authoritative;
@@ -4675,7 +4720,11 @@ def harbor_job_passed(job_dir: Path, pass_threshold: float) -> bool:
         return False
     rewards, _ = _partition_scoreable_rewards(_extract_rewards(job_dir))
     return any(
-        (score := _overall_score(reward)) is not None and score >= pass_threshold
+        attempt_verdict(
+            _overall_score(reward),
+            pass_threshold,
+            reward=reward,
+        ).passed
         for reward in _logical_attempt_rewards(rewards)
     )
 
@@ -4952,8 +5001,10 @@ def _pass_summary(
     stop_on_pass: bool = False,
     expected_cases: int | None,
     expected_case_ids: list[str] | None = None,
+    expected_attempts_by_case: Mapping[str, int] | None = None,
     recovered_attempts: list[dict[str, Any]] | None = None,
     scorer: Callable[[dict[str, Any]], float | None] | None = None,
+    shared_metrics_by_case: Mapping[str, set[str]] | None = None,
 ) -> dict[str, Any]:
     """Summarize pass@k using SkillEvaluator continuous reward scores.
 
@@ -4964,15 +5015,33 @@ def _pass_summary(
     expected_ids = _validated_expected_case_ids(expected_case_ids)
     expected_id_set = set(expected_ids) if expected_ids else None
     grouped: dict[str, list[tuple[dict[str, Any], float]]] = {}
+    correct_answers = 0
+    scored_answers = 0
+    security_clean_count = 0
+    scored_security = 0
     for reward in _logical_attempt_rewards(rewards):
+        entry_id = _entry_id(reward, expected_id_set)
+        applicable_metrics = shared_metrics_by_case.get(entry_id) if shared_metrics_by_case is not None else None
+        verdict = attempt_verdict(None, pass_threshold, reward=reward, applicable_metrics=applicable_metrics)
+        if expected_id_set is None or entry_id in expected_id_set:
+            if verdict.correct_answer is not None:
+                scored_answers += 1
+                correct_answers += int(verdict.correct_answer)
+            if verdict.security_clean is not None:
+                scored_security += 1
+                security_clean_count += int(verdict.security_clean or verdict.security_exempt)
         overall = score_of(reward)
         if overall is None:
             continue
-        grouped.setdefault(_entry_id(reward, expected_id_set), []).append((reward, overall))
+        grouped.setdefault(entry_id, []).append((reward, overall))
 
     cases: dict[str, Any] = {}
     pairing_cases: dict[str, dict[str, Any]] = {}
     passed_cases = 0
+    scored_cases = 0
+    required_checks_passed = 0
+    wrong_answer_cases = 0
+    security_failed_cases = 0
     attempts_used = 0
     extra_case_ids: list[str] = []
 
@@ -4988,13 +5057,22 @@ def _pass_summary(
         attempts = grouped.get(entry_id, [])
         attempt_rows: list[dict[str, Any]] = []
         attempt_passes: list[dict[str, bool]] = []
+        attempt_verdicts = []
         best_score: float | None = None
         first_pass_attempt: int | None = None
         for idx, (reward, overall) in enumerate(sorted(attempts, key=lambda item: _attempt_sort_key(item[0])), start=1):
             idx = _attempt_ordinal(reward) or idx
             score = round(overall, 4)
-            passed = score >= pass_threshold
-            attempt_passes.append({"passed": passed})
+            applicable_metrics = shared_metrics_by_case.get(entry_id) if shared_metrics_by_case is not None else None
+            verdict = attempt_verdict(
+                score,
+                pass_threshold,
+                reward=reward,
+                applicable_metrics=applicable_metrics,
+            )
+            attempt_verdicts.append(verdict)
+            passed = verdict.passed
+            attempt_passes.append({"passed": passed, "required_failure": verdict.required_failure})
             if passed and first_pass_attempt is None:
                 first_pass_attempt = idx
             best_score = score if best_score is None else max(best_score, score)
@@ -5009,6 +5087,14 @@ def _pass_summary(
                         "trial": _published_trial_label(reward.get("_trial_name", "")),
                         "score": score,
                         "passed": passed,
+                        "goal_accuracy": scored_goal_accuracy(reward),
+                        "reason": verdict.reason,
+                        "warnings": list(verdict.warnings),
+                        "security_clean": verdict.security_clean,
+                        "security_score": verdict.security_score,
+                        "security_message": verdict.security_message,
+                        "security_exempt": verdict.security_exempt,
+                        "required_failure": verdict.required_failure,
                     }
                 )
                 published_attempt_details += 1
@@ -5017,10 +5103,22 @@ def _pass_summary(
         is_expected_case = expected_id_set is None or entry_id in expected_id_set
         if case_passed and is_expected_case:
             passed_cases += 1
+        if attempts and is_expected_case:
+            scored_cases += 1
+            wrong_answer_failed = any(verdict.correct_answer is False for verdict in attempt_verdicts)
+            security_failed = any(
+                verdict.security_clean is False and not verdict.security_exempt for verdict in attempt_verdicts
+            )
+            required_checks_passed += int(not wrong_answer_failed and not security_failed)
+            wrong_answer_cases += int(wrong_answer_failed)
+            security_failed_cases += int(security_failed)
         if is_expected_case:
             attempts_used += len(attempts)
         recovered_count = sum(item["case_id"] == entry_id for item in (recovered_attempts or []))
-        unscored = max(0, n_attempts - len(attempts) - recovered_count)
+        expected_attempt_count = (
+            expected_attempts_by_case.get(entry_id, n_attempts) if expected_attempts_by_case is not None else n_attempts
+        )
+        unscored = max(0, expected_attempt_count - len(attempts) - recovered_count)
         skipped = unscored if stop_on_pass and case_passed else 0
         missing = 0 if skipped else unscored
 
@@ -5040,6 +5138,10 @@ def _pass_summary(
                 "attempts_missing": missing,
                 "best_score": round(best_score, 4) if best_score is not None else None,
                 "attempts": attempt_rows,
+                "reason": next((verdict.reason for verdict in attempt_verdicts if not verdict.passed), None),
+                "warnings": list(
+                    dict.fromkeys(warning for verdict in attempt_verdicts for warning in verdict.warnings)
+                ),
                 "attempt_details_total": len(attempts),
                 "attempt_details_shown": len(attempt_rows),
                 "attempt_details_truncated": len(attempt_rows) < len(attempts),
@@ -5057,9 +5159,20 @@ def _pass_summary(
     rate = round(passed_cases / total_cases, 4) if total_cases else 0.0
     rate_interval = _wilson_score_interval(passed_cases, total_cases)
 
+    max_attempts_possible = (
+        sum(expected_attempts_by_case.values()) if expected_attempts_by_case is not None else total_cases * n_attempts
+    )
     return {
         "k": n_attempts,
         "pass_threshold": pass_threshold,
+        "correct_answers": {"correct": correct_answers, "scored": scored_answers},
+        "required_checks": {
+            "passed": required_checks_passed,
+            "scored": scored_cases,
+            "wrong_answer": wrong_answer_cases,
+            "security": security_failed_cases,
+        },
+        "security_clean": {"clean": security_clean_count, "scored": scored_security},
         "stop_on_pass": stop_on_pass,
         "passed_cases": passed_cases,
         "failed_cases": failed_cases,
@@ -5067,7 +5180,7 @@ def _pass_summary(
         "rate": rate,
         "rate_interval": rate_interval,
         "attempts_used": attempts_used,
-        "max_attempts_possible": total_cases * n_attempts,
+        "max_attempts_possible": max_attempts_possible,
         "avg_attempts_used": round(attempts_used / total_cases, 4) if total_cases else 0.0,
         "extra_case_count": len(extra_case_ids),
         "extra_cases": extra_case_ids[:PUBLISHED_CASE_ID_DIAGNOSTIC_SAMPLE_MAX],
@@ -5171,6 +5284,9 @@ def _shared_metric_pass_lift(
         for case in cases & paired_cases:
             shared_by_case[case].discard(metric)
     fallback = set().union(*treatment_scored.values()) & set().union(*control_scored.values())
+    shared_metrics_by_case = {
+        case: shared_by_case.get(case, fallback) for case in set(treatment_scored) | set(control_scored)
+    }
     excluded_metrics = set(judge_mixed).union(*(treatment_scored[case] ^ control_scored[case] for case in paired_cases))
     scorer = _shared_metric_scorer(shared_by_case, fallback, expected_id_set)
     summaries = [
@@ -5182,6 +5298,7 @@ def _shared_metric_pass_lift(
             expected_cases=expected_cases,
             expected_case_ids=expected_case_ids,
             scorer=scorer,
+            shared_metrics_by_case=shared_metrics_by_case,
         )
         for rewards in (treatment_rewards, control_rewards)
     ]
@@ -5273,7 +5390,9 @@ def _merge_constituent_judge_models(data: dict[str, Any], result: dict[str, Any]
 def _reward_judge_models(reward: dict[str, Any], metric: str) -> set[str]:
     """Return the judge models that scored ``metric`` in one reward row.
 
-    A multi-step logical reward carries its steps' models in ``_judge_models``.
+    A RAGAS score is tagged ``"<model> (ragas)"`` so it never pairs with a
+    prompt-judge score from the same model. A multi-step logical reward carries
+    its steps' models in ``_judge_models``.
     """
     carried = reward.get("_judge_models")
     if isinstance(carried, dict):
@@ -5284,7 +5403,10 @@ def _reward_judge_models(reward: dict[str, Any], metric: str) -> set[str]:
     if isinstance(detail, dict) and isinstance(detail.get("judge_models"), list):
         return {model for model in detail["judge_models"] if isinstance(model, str) and model}
     model = detail.get("judge_model_used") if isinstance(detail, dict) else None
-    return {model} if isinstance(model, str) and model else set()
+    if not isinstance(model, str) or not model:
+        return set()
+    # RAGAS and the prompt judge score differently with the same model, so a mix of the two must not pair.
+    return {f"{model} (ragas)" if detail.get("method") == "ragas" else model}
 
 
 def _judge_models_by_case(
@@ -5908,7 +6030,11 @@ def _annotate_security_attribution(
 
 
 def _is_standard_skill_execution_reward(reward: dict[str, Any]) -> bool:
-    """Return whether the reward carries a usable canonical standard score."""
+    """Admit standard invocation evidence independently of numeric skill grading.
+
+    A baseline's explicitly N/A skill score still has an observable trajectory.
+    Missing scores without the applicability marker do not establish support.
+    """
     standard_metric_sets = {DEFAULT_METRIC_SET, LEGACY_METRIC_SET}
     declared_metric_set = reward.get("metric_set") or reward.get("metric_set_version")
     if declared_metric_set and str(declared_metric_set) not in standard_metric_sets:
@@ -5917,7 +6043,7 @@ def _is_standard_skill_execution_reward(reward: dict[str, Any]) -> bool:
     return (
         metric_set in standard_metric_sets
         and "skill_execution" in metrics
-        and metric_value(reward, "skill_execution") is not None
+        and (metric_value(reward, "skill_execution") is not None or metric_is_not_applicable(reward, "skill_execution"))
     )
 
 
@@ -6132,7 +6258,7 @@ def _add_trusted_invocation_evidence(
     """Replace verifier-authored routing evidence on standard rewards only."""
     if not _is_standard_skill_execution_reward(source_reward):
         return
-    for key in ("skill_invoked", "routing_passed", "invocation_evidence_source"):
+    for key in ("skill_invoked", "routing_passed", "invocation_evidence_source", "invocation_evidence_scope"):
         clean_reward.pop(key, None)
     if trial_root is None:
         return
@@ -6150,6 +6276,7 @@ def _add_trusted_invocation_evidence(
     else:
         return
     clean_reward["invocation_evidence_source"] = "trajectory"
+    clean_reward["invocation_evidence_scope"] = "step" if source_reward.get("_step_name") else "logical_trial"
 
 
 def _can_restore_custom_metric_name(value: str) -> bool:
@@ -6283,6 +6410,10 @@ def _save_trials(
             reward["_trajectory_summary"] = _summarize_trajectory(materialized_traj)
 
         clean_reward = {k: v for k, v in reward.items() if not k.startswith("_")}
+        clean_reward["baseline_evidence"] = {
+            "version": 1,
+            "annotations": {key: reward[key] for key in BASELINE_ANNOTATION_KEYS if key in reward},
+        }
         if safe_materialized_traj is None and trajectory_reason not in {
             None,
             "missing_single_step_trajectory",
@@ -6627,6 +6758,8 @@ def _condition_execution_summary(
     skipped: bool = False,
     stop_on_pass: bool = False,
     pass_threshold: float = 0.50,
+    attempt_slots: dict[str, dict[str, Any]] | None = None,
+    expected_attempts_by_case: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """Describe whether a Harbor condition produced complete logical attempts.
 
@@ -6634,6 +6767,10 @@ def _condition_execution_summary(
     ``_trial_root_name`` is therefore the attempt identity; the case id alone
     is not sufficient and raw reward-row count would over-count those tasks.
     Early-stopped cases require attempts only through their first passing trial.
+    When ``attempt_slots`` is a dict, it receives ``{"required", "missing",
+    "missing_ordinals"}`` for each expected case; ``missing_ordinals`` lists
+    the absent attempt ordinals when the case's attempts carry labels, and is
+    None when only a count is known.
     """
     expected_ids = _validated_expected_case_ids(expected_case_ids)
     expected_count = len(expected_ids) if expected_ids else int(expected_cases or 0)
@@ -6644,8 +6781,11 @@ def _condition_execution_summary(
             "execution_error_details_total": 0,
             "execution_error_details_shown": 0,
             "execution_error_details_truncated": False,
+            "expected_cases": 0,
+            "scored_cases": 0,
             "expected_attempts": 0,
             "scored_attempts": 0,
+            "judge_failures": 0,
             **_failure_list_metadata("runtime_failure_details", runtime_failures),
             **_failure_list_metadata("reward_failure_details", reward_failures),
         }
@@ -6658,6 +6798,11 @@ def _condition_execution_summary(
         if item["trial"] not in recovered_names or not item.get("reason", "").startswith("AgentTimeoutError:")
     ]
     reward_failures = [item for item in (reward_failures or []) if item["trial"] not in recovered_names]
+    judge_failure_trials = {
+        str(failure.get("_trial_root_name") or failure.get("trial_root_name") or failure.get("trial") or "")
+        for failure in [*runtime_failures, *reward_failures]
+        if str(failure.get("reason") or "").startswith("Required judge evaluation failed:")
+    }
     errors: list[str] = [job_failure] if job_failure else []
     public_runtime_failures = _public_failure_list(runtime_failures)
     public_reward_failures = _public_failure_list(reward_failures)
@@ -6688,9 +6833,9 @@ def _condition_execution_summary(
     for reward in _logical_attempt_rewards(rewards):
         score = _overall_score(reward)
         if score is not None:
-            logical_passed[str(reward.get("_trial_root_name") or reward.get("_trial_name") or "")] = (
-                score >= pass_threshold
-            )
+            logical_passed[str(reward.get("_trial_root_name") or reward.get("_trial_name") or "")] = attempt_verdict(
+                score, pass_threshold, reward=reward
+            ).passed
     roots: dict[str, dict[str, Any]] = {}
     for reward in rewards:
         root = str(reward.get("_trial_root_name") or "").strip()
@@ -6713,7 +6858,7 @@ def _condition_execution_summary(
                 "case_id": case_id,
                 "steps": {step_name} if step_name else set(),
                 "reward": reward,
-                "passed": logical_passed.get(root, score >= pass_threshold),
+                "passed": logical_passed.get(root, attempt_verdict(score, pass_threshold, reward=reward).passed),
                 "attempt_ordinal": _attempt_ordinal(reward),
             }
             continue
@@ -6739,7 +6884,9 @@ def _condition_execution_summary(
         if len(explicit + recovered_ordinals) != len(set(explicit + recovered_ordinals)):
             errors.append(f"Scored case {case_id!r} has duplicate attempt ordinals")
 
-        required = n_attempts
+        required = (
+            expected_attempts_by_case.get(case_id, n_attempts) if expected_attempts_by_case is not None else n_attempts
+        )
         if stop_on_pass:
             first_pass = next(
                 ((index, item) for index, item in enumerate(attempts, start=1) if item["passed"]),
@@ -6754,12 +6901,35 @@ def _condition_execution_summary(
         if all_explicit:
             expected_ordinals = set(range(1, required + 1))
             actual_ordinals = set(explicit + recovered_ordinals)
-            return required, bool(expected_ordinals - actual_ordinals), bool(actual_ordinals - expected_ordinals)
+            missing_ordinals = sorted(expected_ordinals - actual_ordinals)
+            if attempt_slots is not None:
+                attempt_slots[case_id] = {
+                    "required": required,
+                    "missing": len(missing_ordinals),
+                    "missing_ordinals": missing_ordinals,
+                }
+            return required, bool(missing_ordinals), bool(actual_ordinals - expected_ordinals)
+        if attempt_slots is not None:
+            # Stop-on-pass runs each attempt as its own labelled job, so a case
+            # with nothing scored owes every ordinal through the maximum.
+            attempt_slots[case_id] = {
+                "required": required,
+                "missing": max(0, required - len(attempts)),
+                "missing_ordinals": list(range(1, required + 1)) if stop_on_pass and not attempts else None,
+            }
         return required, len(attempts) < required, len(attempts) > required
 
     missing: list[str] = []
     excess: list[str] = []
-    expected_attempts = 0 if stop_on_pass else expected_count * n_attempts
+    expected_attempts = (
+        0
+        if stop_on_pass
+        else (
+            sum(expected_attempts_by_case.values())
+            if expected_attempts_by_case is not None
+            else expected_count * n_attempts
+        )
+    )
     case_ids = expected_ids or sorted(by_case)
     for case_id in case_ids:
         required, case_missing, case_excess = _case_attempt_coverage(case_id, by_case.get(case_id, []))
@@ -6802,8 +6972,11 @@ def _condition_execution_summary(
         "execution_error_details_total": len(all_errors),
         "execution_error_details_shown": len(errors),
         "execution_error_details_truncated": len(errors) < len(all_errors),
+        "expected_cases": expected_count,
+        "scored_cases": len(expected_set.intersection(by_case)) if expected_ids else len(by_case),
         "expected_attempts": expected_attempts,
         "scored_attempts": scored_attempts,
+        "judge_failures": min(len(judge_failure_trials), max(0, expected_attempts - scored_attempts)),
         **(
             {
                 "physical_expected_attempts": physical_expected_attempts,
@@ -6886,6 +7059,338 @@ def _aggregate_execution(summaries: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+# -- opt-in baseline-timeout tolerance (evidence half; rules in baseline_timeouts) --
+
+_AGENT_TIMEOUT_SECONDS_RE = re.compile(r"after (\d+(?:\.\d+)?) seconds")
+# Trial logs and trajectories are written by the agent under evaluation, so the
+# tolerance checks read them anchored at the trial directory, bounded and
+# without following links.
+_TOLERANCE_EVIDENCE_MAX_BYTES = 64 * 1024 * 1024
+# Provider overload, rate limiting or auth trouble that an agent can retry
+# through until the execution timeout kills it, so no terminal error is ever
+# written. A best-effort check on known provider error identifiers: Anthropic,
+# OpenAI and Google error types and codes, litellm's RateLimitError, Claude
+# Code's "API Error: <status>" and "Repeated 529 Overloaded", retry events'
+# "error_status", the OpenAI SDK's "Error code: <status>", a JSON or Python
+# "status"/"statusCode" field of 429 or 529 (OpenAI-compatible providers,
+# OpenCode's APIError), and the "429 Too Many Requests" status line (Codex
+# prints "status: 429 Too Many Requests"). Prose such as "rate limit" in
+# fetched pages or answers does not count, nor does another bare HTTP status a
+# page may print. A brief 5xx retry is common in healthy runs and does not
+# count either.
+_PROVIDER_DEGRADATION_RE = re.compile(
+    rb"overloaded_error|server_is_overloaded|Repeated 529 Overloaded"
+    rb"|rate_limit_error|rate_limit_exceeded|\"error\"\s*:\s*\"rate_limit\"|RateLimitError"
+    rb"|insufficient_quota|RESOURCE_EXHAUSTED"
+    rb"|authentication_error|permission_error|invalid[ _-]api[ _-]key"
+    rb"|API Error:?\s*(?:401|403|429|529)\b"
+    rb"|Error code:\s*(?:401|403|429|529)\b"
+    rb"|\"error_status\"\s*:\s*(?:401|403|429|529)\b"
+    rb"|[\"']status(?:_?code)?[\"']?\s*:\s*[\"']?(?:429|529)\b"
+    rb"|\b429\s+Too Many Requests"
+    rb"|\bstatus:?\s+(?:401|403)\s+(?:Unauthorized|Forbidden)",
+    re.IGNORECASE,
+)
+# Where Harbor keeps a trial's text logs: single-step trials under agent/ or
+# the trial root, multi-step native trials under steps/*/agent/. Every *.txt
+# there is scanned, so a supported agent's own log name can never go unread.
+_TRIAL_TEXT_LOG_GLOBS = ("agent/*.txt", "*.txt", "steps/*/agent/*.txt")
+# Harbor's own trial text (exception.txt) is scanned too, but it is not the
+# agent's log, so it never shows the agent was free of provider trouble.
+_HARBOR_TRIAL_TEXT = frozenset(name for name in TRIAL_DIAGNOSTIC_ARTIFACTS if name.endswith(".txt"))
+# The agent can write any number of files next to its log, so the scan reads
+# at most this many; a trial over either bound cannot be cleared.
+_TOLERANCE_LOG_MAX_FILES = 64
+
+
+def _agent_timeout_seconds(reason: str) -> float | None:
+    """Return the agent timeout budget named by a Harbor ``AgentTimeoutError`` message."""
+    match = _AGENT_TIMEOUT_SECONDS_RE.search(reason)
+    if match is None:
+        return None
+    seconds = float(match.group(1))
+    return seconds if math.isfinite(seconds) and seconds > 0 else None
+
+
+def _positive_token_count(value: Any) -> int | None:
+    """Return a positive whole token count, or None for anything else (never bool)."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        if not math.isfinite(value) or value < 1 or value != int(value):
+            return None
+    except OverflowError:
+        # JSON integers can exceed the float range used to check finiteness.
+        return None
+    return int(value)
+
+
+def _read_trial_evidence(
+    trial_dir: Path, relative_path: Path, max_bytes: int = _TOLERANCE_EVIDENCE_MAX_BYTES
+) -> bytes | None:
+    """Read one agent-written trial file safely; None when it does not exist.
+
+    Raises ``SecurePathError`` or ``OSError`` when the file exists but cannot
+    be read safely: a link, not a regular file, over ``max_bytes``, or unreadable.
+    """
+    if not os.path.lexists(trial_dir / relative_path):
+        return None
+    with SecureRoot(trial_dir) as secure_root:
+        raw, _metadata = secure_root.read_bytes(relative_path, max_bytes)
+    return raw
+
+
+def _trial_output_tokens(trial_dir: Path, harbor_result: Mapping[str, Any]) -> int | None:
+    """Return proof that the agent produced output before a trial ended, or None.
+
+    Harbor's ``agent_result.n_output_tokens`` comes first; otherwise any
+    trajectory's ``final_metrics.total_completion_tokens`` (root, ``agent/``
+    or a native step). A missing or zero counter is no proof, and neither is
+    a trajectory that cannot be read bounded and without following links.
+    """
+    agent_result = harbor_result.get("agent_result")
+    tokens = _positive_token_count(agent_result.get("n_output_tokens") if isinstance(agent_result, dict) else None)
+    if tokens is not None:
+        return tokens
+    for path in (
+        Path("trajectory.json"),
+        Path("agent") / "trajectory.json",
+        *(path.relative_to(trial_dir) for path in sorted(trial_dir.glob("steps/*/agent/trajectory.json"))),
+    ):
+        try:
+            raw = _read_trial_evidence(trial_dir, path)
+            trajectory = json.loads(raw) if raw is not None else None
+        except (SecurePathError, ValueError, OSError, RecursionError, UnicodeError):
+            continue
+        final_metrics = trajectory.get("final_metrics") if isinstance(trajectory, dict) else None
+        if isinstance(final_metrics, dict):
+            tokens = _positive_token_count(final_metrics.get("total_completion_tokens"))
+            if tokens is not None:
+                return tokens
+    return None
+
+
+def _provider_log_rejection(trial_dir: Path) -> str | None:
+    """Return why a timed-out trial's logs cannot clear it of provider trouble, or None when they do.
+
+    ``provider_degradation_observed`` when any text log shows provider
+    overload, rate limiting or auth errors. Every line counts: an agent killed
+    by the execution timeout while it retried never writes a terminal error. A
+    log that cannot be read safely in full, or more logs or bytes than the
+    bounds, counts as degradation, since it cannot be cleared. ``no_agent_log``
+    when the trial left no agent log at all (Harbor's exception.txt is not one).
+    """
+    paths = [
+        path.relative_to(trial_dir) for pattern in _TRIAL_TEXT_LOG_GLOBS for path in sorted(trial_dir.glob(pattern))
+    ]
+    if len(paths) > _TOLERANCE_LOG_MAX_FILES:
+        return "provider_degradation_observed"
+    budget = _TOLERANCE_EVIDENCE_MAX_BYTES
+    agent_log_scanned = False
+    for path in paths:
+        try:
+            raw = _read_trial_evidence(trial_dir, path, budget)
+        except (SecurePathError, OSError):
+            return "provider_degradation_observed"
+        if raw is None:
+            continue
+        if _PROVIDER_DEGRADATION_RE.search(raw):
+            return "provider_degradation_observed"
+        budget -= len(raw)
+        agent_log_scanned = agent_log_scanned or path.name not in _HARBOR_TRIAL_TEXT
+    return None if agent_log_scanned else "no_agent_log"
+
+
+def _job_has_unrecovered_agent_timeout(job_dir: Path, recovered: list[dict[str, Any]]) -> bool:
+    """Return whether a trial of the job, other than a recovered attempt, recorded ``AgentTimeoutError``.
+
+    Checks the trial and each native step. A baseline that failed without an
+    agent execution timeout is not a tolerance case, so it gets no rejection
+    or warning and fails exactly as it does without the option.
+    """
+    recovered_labels = {str(item.get("trial") or "") for item in recovered}
+    try:
+        entries = sorted(job_dir.iterdir())
+    except OSError:
+        return False
+    for ordinal, trial_dir in enumerate(entries, start=1):
+        if _inspect_trial_directory(trial_dir)[0] != "directory" or not _looks_like_trial_dir(trial_dir):
+            continue
+        if _published_trial_label(trial_dir.name, alias_ordinal=ordinal) in recovered_labels:
+            continue
+        harbor_result = _read_json(trial_dir / "result.json")
+        root = harbor_result.get("exception_info") if isinstance(harbor_result, dict) else None
+        exception_types = [_exception_details(root)[0], *(kind for kind, _ in _trial_step_exception_details(trial_dir))]
+        if baseline_timeouts.TOLERATED_EXCEPTION_TYPE in exception_types:
+            return True
+    return False
+
+
+def _with_skill_tolerance_rejection(
+    execution: Mapping[str, Any],
+    *,
+    policy: str,
+    job_failure: str,
+    runtime_failures: list[dict[str, str]],
+    trial_failures: list[dict[str, str]],
+) -> str | None:
+    """Check that the with-skill arm is complete and clean (T1); None when it is.
+
+    ``runtime_failures`` and ``trial_failures`` are the active (unrecovered) rows.
+    """
+    if policy == CUSTOM_SCORE_POLICY:
+        return "custom_only_grading"
+    expected = execution.get("expected_attempts")
+    if (
+        execution.get("execution_status") != "succeeded"
+        or not isinstance(expected, int)
+        or expected < 1
+        or execution.get("scored_attempts") != expected
+    ):
+        return "with_skill_incomplete"
+    if execution.get("execution_errors") or job_failure or runtime_failures or trial_failures:
+        return "with_skill_not_clean"
+    return None
+
+
+def _baseline_timeout_failures(
+    *,
+    job_dir: Path,
+    rewards: list[dict[str, Any]],
+    execution: Mapping[str, Any],
+    slots: Mapping[str, Mapping[str, Any]],
+    residual_errors: list[str],
+    job_failure: str,
+    runtime_failures: list[dict[str, str]],
+    trial_failures: list[dict[str, str]],
+    recovered: list[dict[str, Any]],
+    expected_case_ids: list[str],
+    case_id_by_task_selector: dict[str, str] | None,
+    arm_suffix: str,
+    task_entry_id_map: Mapping[str, str] | None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Gather the typed failures of a short baseline arm and check T2 to T7.
+
+    Returns ``(failures, None)`` when every rule holds, otherwise
+    ``([], code)``. ``rewards`` are the arm's scoreable rewards,
+    ``execution`` its summary, ``slots`` the per-case attempt slots from
+    :func:`_condition_execution_summary`, and ``residual_errors`` that
+    summary's errors recomputed without any trial failures or job failure.
+    The runtime and trial failure lists include recovered rows; those are
+    set aside here, as they are for the summary. Harbor's errored count
+    still includes the recovered timeouts, so the job failure may count them.
+    """
+    if not expected_case_ids:
+        return [], "no_case_identity"
+    expected_set = set(expected_case_ids)
+    recovered_labels = {str(item.get("trial") or "") for item in recovered}
+    scored_roots = {str(reward.get("_trial_root_name") or "") for reward in rewards}
+    failures: list[dict[str, Any]] = []
+    exception_reasons: dict[str, str] = {}
+    recovered_timeouts = 0
+    for ordinal, trial_dir in enumerate(sorted(job_dir.iterdir()), start=1):
+        kind, _reason = _inspect_trial_directory(trial_dir)
+        if kind == "link":
+            return [], "unaccounted_trial"
+        if kind != "directory" or not _looks_like_trial_dir(trial_dir):
+            continue
+        label = _published_trial_label(trial_dir.name, alias_ordinal=ordinal)
+        harbor_result = _read_json(trial_dir / "result.json")
+        harbor_result = harbor_result if isinstance(harbor_result, dict) else {}
+        root_type, root_reason = _exception_details(harbor_result.get("exception_info"))
+        if trial_dir.name in scored_roots:
+            if root_type:
+                return [], "timed_out_trial_scored"
+            continue
+        if label in recovered_labels:
+            # A recovered attempt is an agent timeout a later attempt scored;
+            # it is counted only toward Harbor's errored total below.
+            if root_type != baseline_timeouts.TOLERATED_EXCEPTION_TYPE:
+                return [], "unaccounted_trial"
+            recovered_timeouts += 1
+            continue
+        if not harbor_result:
+            return [], "unaccounted_trial"
+        step_details = _trial_step_exception_details(trial_dir)
+        if any(kind == baseline_timeouts.TOLERATED_EXCEPTION_TYPE for kind, _detail in step_details):
+            # Harbor records a native multi-step task's agent timeout on the
+            # step and counts the trial as completed, so the trial carries no
+            # root exception or errored count to bind. The option does not
+            # cover these tasks.
+            return [], "step_timeout_not_supported"
+        selector = _task_selector_from_harbor_result(harbor_result)
+        entry_id = _entry_id_from_harbor_result(
+            harbor_result,
+            case_id_by_task_selector,
+            arm_suffix=arm_suffix,
+            task_entry_id_map=task_entry_id_map,
+        )
+        if case_id_by_task_selector is None and entry_id:
+            entry_id = _canonical_case_id(entry_id, expected_set)
+        exception_reasons[label] = redact_sensitive_text(root_reason)
+        failures.append(
+            {
+                "trial": label,
+                "case_id": entry_id,
+                "task": selector,
+                "attempt": _structural_attempt_ordinal(trial_dir.name, selector) if selector else None,
+                "exception_types": [
+                    exception_type
+                    for exception_type, _detail in ((root_type, root_reason), *step_details)
+                    if exception_type
+                ],
+                "output_tokens": _trial_output_tokens(trial_dir, harbor_result),
+                "timeout_seconds": _agent_timeout_seconds(root_reason),
+                "_trial_dir": trial_dir,
+            }
+        )
+
+    if code := baseline_timeouts.check_failures(
+        expected_attempts=execution.get("expected_attempts"),
+        scored_attempts=execution.get("scored_attempts"),
+        slots=slots,
+        failures=failures,
+    ):
+        return [], code
+
+    # Every failed trial is a typed timeout, once, and each reports exactly its
+    # own timeout: a verifier failure, an invalid reward row or an agent log
+    # runtime error on a timed-out trial is evidence these rules cannot explain.
+    def _matches(rows: list[dict[str, str]]) -> bool:
+        active = [row for row in rows if str(row.get("trial") or "") not in recovered_labels]
+        return len(active) == len(exception_reasons) and all(
+            exception_reasons.get(str(row.get("trial") or "")) == str(row.get("reason") or "") for row in active
+        )
+
+    if not _matches(trial_failures):
+        return [], "untyped_trial_failure"
+    if not _matches(runtime_failures):
+        return [], "agent_runtime_failure"
+
+    # T7: the baseline's errors are only the ones these timeouts produce.
+    allowed = {
+        _safe_diagnostic_text(
+            _sampled_case_id_diagnostic(
+                "Missing scored attempts for cases", sorted({str(failure["case_id"]) for failure in failures})
+            ),
+            max_len=4096,
+        ),
+        f"Scored attempt coverage is {execution.get('scored_attempts')}/{execution.get('expected_attempts')}",
+    }
+    if recovered_timeouts != len(recovered_labels) or job_failure not in {
+        "",
+        baseline_timeouts.JOB_FAILURE.format(count=len(failures) + recovered_timeouts),
+    }:
+        return [], "unbound_error"
+    if any(error not in allowed for error in residual_errors):
+        return [], "unbound_error"
+
+    for failure in failures:
+        if rejection := _provider_log_rejection(failure.pop("_trial_dir")):
+            return [], rejection
+    return failures, None
+
+
 def _observe_private_trials(agent, arm, job_dir, collected, scoreable, selector_map) -> None:
     """Hand existing observations to an active private hook without affecting ordinary collection."""
     runtime = sys.modules.get("skillevaluator.tier3.plugin_execution")
@@ -6906,6 +7411,7 @@ def collect_harbor_results(
     *,
     skip_baseline: bool = False,
     skip_with_skill: bool = False,
+    reused_baseline_dir: Path | None = None,
     n_attempts: int = 1,
     pass_threshold: float = 0.50,
     stop_on_pass: bool = False,
@@ -6918,6 +7424,8 @@ def collect_harbor_results(
     agent_models: dict[str, dict[str, str]] | None = None,
     launch_errors: list[str] | None = None,
     grading_mode: str | None = None,
+    tolerate_baseline_timeouts: bool = False,
+    budget_not_run: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Collect results from Harbor jobs into evals/results/<agent>/ structure.
 
@@ -6927,6 +7435,12 @@ def collect_harbor_results(
     ``grading_mode`` labels a condition with no scoreable reward with the
     requested metric set and score policy; observed rewards still declare
     their own.
+    ``tolerate_baseline_timeouts`` keeps an agent scored on its clean
+    with-skill arm when its baseline fell short only through agent execution
+    timeouts (see :mod:`skillevaluator.tier3.harbor.baseline_timeouts`); it
+    needs both arms run in this collection (no reused baseline) and dimension
+    grading, and ``launch_errors`` must be the runner's launch errors so the
+    run-level rule can account for them.
     """
     if skip_baseline and skip_with_skill:
         raise ValueError("skip_baseline and skip_with_skill are mutually exclusive (no arm would run)")
@@ -6939,6 +7453,36 @@ def collect_harbor_results(
         case_id_by_task_selector,
         expected_case_ids,
     )
+    budget_not_run = budget_not_run or []
+
+    def budget_expectations(
+        agent: str,
+        arm: str,
+    ) -> tuple[int | None, list[str] | None, int | None, dict[str, int] | None]:
+        matching = [
+            item for item in budget_not_run if item.get("agent") == agent and item.get("arm") in {arm, f"{arm}_skill"}
+        ]
+        if not matching:
+            return expected_trials, expected_case_ids, expected_cases, None
+        attempts_by_case: dict[str, int] = {}
+        for item in matching:
+            selector = str(item.get("case_id") or "")
+            case_id = (case_id_by_task_selector or {}).get(selector, selector)
+            attempts_by_case[case_id] = attempts_by_case.get(case_id, 0) + 1
+        active_ids = [case_id for case_id in (expected_case_ids or []) if attempts_by_case.get(case_id, 0) < n_attempts]
+        if expected_case_ids:
+            active_case_ids: list[str] | None = active_ids
+            active_cases = len(active_ids)
+            attempt_counts = {case_id: max(0, n_attempts - attempts_by_case.get(case_id, 0)) for case_id in active_ids}
+        else:
+            fully_not_run = sum(count >= n_attempts for count in attempts_by_case.values())
+            active_case_ids = None
+            active_cases = max(0, (expected_cases or 0) - fully_not_run)
+            attempt_counts = {
+                case_id: max(0, n_attempts - count) for case_id, count in attempts_by_case.items() if count < n_attempts
+            }
+        actual_trials = None if expected_trials is None else max(0, expected_trials - len(matching))
+        return actual_trials, active_case_ids, active_cases, attempt_counts
 
     # Unscored conditions keep the requested grading policy instead of
     # falling back to the default metric set, which custom_only never grades.
@@ -6961,8 +7505,33 @@ def collect_harbor_results(
     }
 
     _prepare_generated_outputs(output_dir, agents)
+    # A reused baseline did not run here, so it has no timeouts to judge.
+    tolerance_on = (
+        tolerate_baseline_timeouts
+        and not skip_baseline
+        and not skip_with_skill
+        and reused_baseline_dir is None
+        and grading_mode != "custom_only"
+    )
+    tolerance_candidates: dict[str, list[dict[str, Any]]] = {}
+    tolerance_records: dict[str, dict[str, Any]] = {}
+    tolerance_rejected: dict[str, str] = {}
 
     for agent in agents:
+        with_expected_trials, with_expected_case_ids, with_expected_cases, with_expected_attempts = budget_expectations(
+            agent, "with"
+        )
+        without_expected_trials, without_expected_case_ids, without_expected_cases, without_expected_attempts = (
+            budget_expectations(agent, "without")
+        )
+        if skip_baseline:
+            agent_expected_case_ids = with_expected_case_ids
+        elif with_expected_case_ids is not None and without_expected_case_ids is not None:
+            agent_expected_case_ids = [
+                case_id for case_id in with_expected_case_ids if case_id in set(without_expected_case_ids)
+            ]
+        else:
+            agent_expected_case_ids = expected_case_ids
         model_info = agent_models.get(agent, {}) if agent_models else {}
         agent_model = _bounded_reward_metadata_text(model_info.get("model"))
         agent_model_source = _bounded_reward_metadata_text(model_info.get("source"))
@@ -6996,7 +7565,7 @@ def collect_harbor_results(
         if with_job_dir:
             with_job_ok, with_job_failure = validate_harbor_job_result(
                 with_job_dir / "result.json",
-                expected_trials=expected_trials,
+                expected_trials=with_expected_trials,
             )
             with_job_failure = _published_job_failure(with_job_failure)
             with_runtime_failures = _extract_agent_runtime_failures(with_job_dir)
@@ -7046,14 +7615,15 @@ def collect_harbor_results(
                 n_attempts=n_attempts,
                 pass_threshold=pass_threshold,
                 stop_on_pass=stop_on_pass,
-                expected_cases=expected_cases,
-                expected_case_ids=expected_case_ids,
+                expected_cases=with_expected_cases,
+                expected_case_ids=with_expected_case_ids,
+                expected_attempts_by_case=with_expected_attempts,
                 recovered_attempts=with_recovered,
             )
             with_execution = _condition_execution_summary(
                 with_rewards,
-                expected_case_ids=expected_case_ids,
-                expected_cases=expected_cases,
+                expected_case_ids=with_expected_case_ids,
+                expected_cases=with_expected_cases,
                 n_attempts=n_attempts,
                 job_failure="" if with_job_recovered else with_job_failure,
                 recovered_attempts=with_recovered,
@@ -7061,6 +7631,7 @@ def collect_harbor_results(
                 reward_failures=with_trial_failures,
                 stop_on_pass=stop_on_pass,
                 pass_threshold=pass_threshold,
+                expected_attempts_by_case=with_expected_attempts,
             )
             if with_policy == "mixed-score-policies":
                 _fail_execution_with_error(with_execution, "Conflicting score policies within the with-skill condition")
@@ -7142,8 +7713,8 @@ def collect_harbor_results(
         if not with_execution:
             with_execution = _condition_execution_summary(
                 with_rewards,
-                expected_case_ids=expected_case_ids,
-                expected_cases=expected_cases,
+                expected_case_ids=with_expected_case_ids,
+                expected_cases=with_expected_cases,
                 n_attempts=n_attempts,
                 job_failure=with_job_failure,
                 runtime_failures=with_runtime_failures,
@@ -7192,6 +7763,7 @@ def collect_harbor_results(
         without_scores: dict[str, float] = {}
         without_custom_scores: dict[str, float] = {}
         without_pass: dict[str, Any] = {}
+        without_collected_rewards: list[dict[str, Any]] = []
         without_runtime_failures: list[dict[str, str]] = []
         without_trial_failures: list[dict[str, str]] = []
         without_job_failure = ""
@@ -7205,53 +7777,65 @@ def collect_harbor_results(
         without_summary: dict[str, Any] | None = None
         without_not_applicable: list[str] = []
         without_job_dir: Path | None = None
+        without_slots: dict[str, dict[str, Any]] = {}
+        without_identity: dict[str, Any] = {}
         if not skip_baseline:
             without_job_name = f"{skill_name}-{agent}-without"
-            without_job_dir = _find_job_dir(jobs_dir, without_job_name)
+            without_job_dir = (
+                reused_baseline_dir / agent / "without-skill"
+                if reused_baseline_dir is not None
+                else _find_job_dir(jobs_dir, without_job_name)
+            )
 
             if without_job_dir:
-                without_job_ok, without_job_failure = validate_harbor_job_result(
-                    without_job_dir / "result.json",
-                    expected_trials=expected_trials,
-                )
-                without_job_failure = _published_job_failure(without_job_failure)
-                without_runtime_failures = _extract_agent_runtime_failures(without_job_dir)
-                without_trial_failures = _extract_trial_failures(without_job_dir)
-                preserve_partial = _can_preserve_partial_rewards(without_job_dir, without_trial_failures)
-                # The runner stages unsuffixed task names when only one arm runs.
-                without_arm_suffix = "-without-skill" if not skip_with_skill else ""
-                without_task_entry_ids = (
-                    _staged_task_entry_id_map(output_dir, agent, "without", arm_suffix=without_arm_suffix)
-                    if case_id_by_task_selector is None
-                    else None
-                )
-                without_collected_rewards = (
-                    _extract_rewards(
-                        without_job_dir,
-                        case_id_by_task_selector,
-                        arm_suffix=without_arm_suffix,
-                        task_entry_id_map=without_task_entry_ids,
+                if reused_baseline_dir is not None:
+                    without_job_ok, without_job_failure = True, ""
+                    without_collected_rewards = load_baseline_rows(reused_baseline_dir, agent)
+                    without_rewards, invalid_score_failures = _partition_scoreable_rewards(without_collected_rewards)
+                else:
+                    without_job_ok, without_job_failure = validate_harbor_job_result(
+                        without_job_dir / "result.json",
+                        expected_trials=without_expected_trials,
                     )
-                    if without_job_ok or preserve_partial
-                    else []
-                )
-                without_rewards, invalid_score_failures = _partition_scoreable_rewards(without_collected_rewards)
-                _observe_private_trials(
-                    agent,
-                    "without_skill",
-                    without_job_dir,
-                    without_collected_rewards,
-                    without_rewards,
-                    case_id_by_task_selector,
-                )
-                without_recovered = (
-                    _recovered_timeout_attempts(without_job_dir, without_rewards, n_attempts=n_attempts)
-                    if stop_on_pass
-                    else []
-                )
-                without_job_recovered = _recovered_job_failure(
-                    without_job_dir, without_trial_failures, without_recovered
-                )
+                    without_job_failure = _published_job_failure(without_job_failure)
+                    without_runtime_failures = _extract_agent_runtime_failures(without_job_dir)
+                    without_trial_failures = _extract_trial_failures(without_job_dir)
+                    preserve_partial = _can_preserve_partial_rewards(without_job_dir, without_trial_failures)
+                    # The runner stages unsuffixed task names when only one arm runs.
+                    without_arm_suffix = "-without-skill" if not skip_with_skill else ""
+                    without_task_entry_ids = (
+                        _staged_task_entry_id_map(output_dir, agent, "without", arm_suffix=without_arm_suffix)
+                        if case_id_by_task_selector is None
+                        else None
+                    )
+                    without_identity = {"arm_suffix": without_arm_suffix, "task_entry_id_map": without_task_entry_ids}
+                    without_collected_rewards = (
+                        _extract_rewards(
+                            without_job_dir,
+                            case_id_by_task_selector,
+                            arm_suffix=without_arm_suffix,
+                            task_entry_id_map=without_task_entry_ids,
+                        )
+                        if without_job_ok or preserve_partial
+                        else []
+                    )
+                    without_rewards, invalid_score_failures = _partition_scoreable_rewards(without_collected_rewards)
+                    _observe_private_trials(
+                        agent,
+                        "without_skill",
+                        without_job_dir,
+                        without_collected_rewards,
+                        without_rewards,
+                        case_id_by_task_selector,
+                    )
+                    without_recovered = (
+                        _recovered_timeout_attempts(without_job_dir, without_rewards, n_attempts=n_attempts)
+                        if stop_on_pass
+                        else []
+                    )
+                    without_job_recovered = _recovered_job_failure(
+                        without_job_dir, without_trial_failures, without_recovered
+                    )
                 without_logical_rewards = _logical_attempt_rewards(without_rewards)
                 without_mixed_metric_contracts = rewards_have_mixed_metric_contracts(without_rewards)
                 without_trial_failures.extend(invalid_score_failures)
@@ -7275,14 +7859,15 @@ def collect_harbor_results(
                     n_attempts=n_attempts,
                     pass_threshold=pass_threshold,
                     stop_on_pass=stop_on_pass,
-                    expected_cases=expected_cases,
-                    expected_case_ids=expected_case_ids,
+                    expected_cases=without_expected_cases,
+                    expected_case_ids=without_expected_case_ids,
+                    expected_attempts_by_case=without_expected_attempts,
                     recovered_attempts=without_recovered,
                 )
                 without_execution = _condition_execution_summary(
                     without_rewards,
-                    expected_case_ids=expected_case_ids,
-                    expected_cases=expected_cases,
+                    expected_case_ids=without_expected_case_ids,
+                    expected_cases=without_expected_cases,
                     n_attempts=n_attempts,
                     job_failure="" if without_job_recovered else without_job_failure,
                     recovered_attempts=without_recovered,
@@ -7290,6 +7875,8 @@ def collect_harbor_results(
                     reward_failures=without_trial_failures,
                     stop_on_pass=stop_on_pass,
                     pass_threshold=pass_threshold,
+                    attempt_slots=without_slots if tolerance_on else None,
+                    expected_attempts_by_case=without_expected_attempts,
                 )
                 if without_policy == "mixed-score-policies":
                     _fail_execution_with_error(
@@ -7312,18 +7899,29 @@ def collect_harbor_results(
                     if without_execution["execution_status"] == "succeeded"
                     else None
                 )
-                _save_trials(
-                    without_collected_rewards,
-                    agent_dir / "without-skill" / "trials",
-                    without_job_dir,
-                    skill_name=skill_name,
-                    agent=agent,
-                    variant="without_skill",
-                    agent_model=agent_model,
-                    agent_model_source=agent_model_source,
-                    expected_case_ids=expected_case_ids,
-                )
+                if reused_baseline_dir is not None:
+                    for source_reward in (without_job_dir / "trials").glob("*/reward.json"):
+                        target = agent_dir / "without-skill" / "trials" / source_reward.parent.name
+                        target.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(source_reward, target / "reward.json")
+                        for artifact in ("trajectory.json", "result.json"):
+                            source = source_reward.with_name(artifact)
+                            if source.is_file() and not source.is_symlink():
+                                shutil.copyfile(source, target / artifact)
+                else:
+                    _save_trials(
+                        without_collected_rewards,
+                        agent_dir / "without-skill" / "trials",
+                        without_job_dir,
+                        skill_name=skill_name,
+                        agent=agent,
+                        variant="without_skill",
+                        agent_model=agent_model,
+                        agent_model_source=agent_model_source,
+                        expected_case_ids=expected_case_ids,
+                    )
                 without_summary = {
+                    "reused": reused_baseline_dir is not None,
                     "agent": agent,
                     "model": agent_model,
                     "model_source": agent_model_source,
@@ -7374,14 +7972,15 @@ def collect_harbor_results(
         if not without_execution:
             without_execution = _condition_execution_summary(
                 without_rewards,
-                expected_case_ids=expected_case_ids,
-                expected_cases=expected_cases,
+                expected_case_ids=without_expected_case_ids,
+                expected_cases=without_expected_cases,
                 n_attempts=n_attempts,
                 job_failure=without_job_failure,
                 runtime_failures=without_runtime_failures,
                 skipped=skip_baseline,
                 stop_on_pass=stop_on_pass,
                 pass_threshold=pass_threshold,
+                expected_attempts_by_case=without_expected_attempts,
             )
         if not skip_baseline and without_job_dir is None:
             summary_dir = agent_dir / "without-skill"
@@ -7477,7 +8076,7 @@ def collect_harbor_results(
                 without_scores,
                 with_logical_rewards,
                 without_logical_rewards,
-                expected_case_ids,
+                agent_expected_case_ids,
                 score_policy=with_policy,
                 with_not_applicable=with_not_applicable,
                 without_not_applicable=without_not_applicable,
@@ -7532,8 +8131,8 @@ def collect_harbor_results(
                 n_attempts=n_attempts,
                 pass_threshold=pass_threshold,
                 stop_on_pass=stop_on_pass,
-                expected_cases=expected_cases,
-                expected_case_ids=expected_case_ids,
+                expected_cases=with_expected_cases,
+                expected_case_ids=agent_expected_case_ids,
             )
             _write_generated_root_json(agent_dir / "pass_at_k_lift.json", output_dir, pass_lift)
 
@@ -7546,7 +8145,7 @@ def collect_harbor_results(
                 with_rewards,
                 without_rewards,
                 baseline_run=not skip_baseline,
-                expected_case_ids=expected_case_ids,
+                expected_case_ids=agent_expected_case_ids,
             )
             _write_generated_root_json(
                 agent_dir / "security_attribution.json",
@@ -7572,6 +8171,27 @@ def collect_harbor_results(
         )
         without_active_trial_failures, without_recovered_trial_failures = _split_recovered_failures(
             without_trial_failures, without_recovered
+        )
+        with_reward_trials = {
+            str(reward.get("_trial_root_name") or reward.get("_trial_name") or "") for reward in with_collected_rewards
+        }
+        without_reward_trials = {
+            str(reward.get("_trial_root_name") or reward.get("_trial_name") or "")
+            for reward in without_collected_rewards
+        }
+        with_unrepresented_failures = {
+            str(failure.get("trial") or "")
+            for failure in with_active_trial_failures
+            if failure.get("trial") and str(failure["trial"]) not in with_reward_trials
+        }
+        without_unrepresented_failures = {
+            str(failure.get("trial") or "")
+            for failure in without_active_trial_failures
+            if failure.get("trial") and str(failure["trial"]) not in without_reward_trials
+        }
+        with_execution_count = len(_logical_attempt_rewards(with_collected_rewards)) + len(with_unrepresented_failures)
+        without_execution_count = len(_logical_attempt_rewards(without_collected_rewards)) + len(
+            without_unrepresented_failures
         )
         all_results["agents"][agent] = {
             "model": agent_model,
@@ -7635,8 +8255,111 @@ def collect_harbor_results(
             **agent_execution,
             "num_trials_with": len(with_logical_rewards),
             "num_trials_without": len(without_logical_rewards) if not skip_baseline else 0,
+            "execution_counts": {
+                "fresh": {
+                    "with_skill": with_execution_count,
+                    "without_skill": 0 if reused_baseline_dir else without_execution_count,
+                },
+                "reused": {"without_skill": len(without_logical_rewards) if reused_baseline_dir else 0},
+            },
+            "measured_usage": {
+                "fresh": {
+                    "with_skill": None
+                    if with_active_trial_failures
+                    else measured_condition_usage(agent_dir / "with-skill"),
+                    "without_skill": None
+                    if reused_baseline_dir or without_active_trial_failures
+                    else measured_condition_usage(agent_dir / "without-skill"),
+                },
+                "reused": {
+                    "without_skill": measured_condition_usage(agent_dir / "without-skill")
+                    if reused_baseline_dir
+                    else None,
+                },
+            },
             "output_dir": str(agent_dir.resolve()),
         }
+        if (
+            tolerance_on
+            and without_job_dir is not None
+            and with_execution.get("execution_status") == "succeeded"
+            and without_execution.get("execution_status") == "failed"
+            and _job_has_unrecovered_agent_timeout(without_job_dir, without_recovered)
+        ):
+            with_recovered_names = {item["trial"] for item in with_recovered}
+            tolerance_failures: list[dict[str, Any]] = []
+            tolerance_code = _with_skill_tolerance_rejection(
+                with_execution,
+                policy=with_policy,
+                job_failure="" if with_job_recovered else with_job_failure,
+                runtime_failures=[row for row in with_runtime_failures if row["trial"] not in with_recovered_names],
+                trial_failures=with_active_trial_failures,
+            )
+            if tolerance_code is None and without_policy == "mixed-score-policies":
+                tolerance_code = "unbound_error"
+            if tolerance_code is None:
+                # Attempts a run budget never admitted are not expected, as in the summary.
+                residual = _condition_execution_summary(
+                    without_rewards,
+                    expected_case_ids=without_expected_case_ids,
+                    expected_cases=without_expected_cases,
+                    n_attempts=n_attempts,
+                    job_failure="",
+                    recovered_attempts=without_recovered,
+                    stop_on_pass=stop_on_pass,
+                    pass_threshold=pass_threshold,
+                    expected_attempts_by_case=without_expected_attempts,
+                )
+                tolerance_failures, tolerance_code = _baseline_timeout_failures(
+                    job_dir=without_job_dir,
+                    rewards=without_rewards,
+                    execution=without_execution,
+                    slots=without_slots,
+                    residual_errors=(
+                        residual["execution_errors"]
+                        if not residual["execution_error_details_truncated"]
+                        else ["truncated residual errors"]
+                    ),
+                    job_failure="" if without_job_recovered else without_job_failure,
+                    runtime_failures=without_runtime_failures,
+                    trial_failures=without_trial_failures,
+                    recovered=without_recovered,
+                    expected_case_ids=without_expected_case_ids,
+                    case_id_by_task_selector=case_id_by_task_selector,
+                    arm_suffix=str(without_identity.get("arm_suffix") or ""),
+                    task_entry_id_map=without_identity.get("task_entry_id_map"),
+                )
+            if tolerance_code is not None:
+                tolerance_rejected[agent] = tolerance_code
+                logger.debug("Baseline timeouts not tolerated for %s: %s", agent, tolerance_code)
+            else:
+                timeouts = {failure["timeout_seconds"] for failure in tolerance_failures}
+                tolerance_candidates[agent] = tolerance_failures
+                tolerance_records[agent] = baseline_timeouts.build_record(
+                    expected_attempts=without_execution["expected_attempts"],
+                    scored_attempts=without_execution["scored_attempts"],
+                    failures=tolerance_failures,
+                    timeout_seconds=next(iter(timeouts)) if len(timeouts) == 1 else None,
+                )
+
+    if tolerance_on:
+        tolerated, rejected, explained = baseline_timeouts.select_tolerated(
+            all_results["agents"], tolerance_candidates, tolerance_rejected, launch_errors
+        )
+        tolerance_warnings: list[str] = []
+        for agent in sorted(tolerated):
+            baseline_timeouts.settle(all_results["agents"][agent], tolerance_records[agent])
+            # Reports reload agents from disk, so the decision travels with the arms.
+            _write_generated_root_json(
+                output_dir / agent / baseline_timeouts.RECORD_ARTIFACT, output_dir, tolerance_records[agent]
+            )
+            tolerance_warnings.append(baseline_timeouts.tolerance_warning(agent, tolerance_records[agent]))
+        for agent, code in sorted(rejected.items()):
+            all_results["agents"][agent][baseline_timeouts.REJECTION_KEY] = code
+            tolerance_warnings.append(baseline_timeouts.rejection_warning(agent, code))
+        all_results[baseline_timeouts.RUN_KEY] = baseline_timeouts.run_record(tolerated, explained)
+        if tolerance_warnings:
+            all_results.setdefault("warnings", []).extend(tolerance_warnings)
 
     # A baseline-only run scores only the without-skill arm.
     scored_arm = "without_skill" if skip_with_skill else "with_skill"
@@ -7694,6 +8417,8 @@ def collect_harbor_results(
     if top_execution["execution_errors"]:
         all_results["error"] = list(top_execution["execution_errors"])
 
+    if budget_not_run:
+        all_results["partial"] = True
     return all_results
 
 

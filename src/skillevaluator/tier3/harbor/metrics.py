@@ -93,9 +93,11 @@ DIMENSION_QUESTIONS = {
 }
 
 # A judged metric is "not applicable" when its dataset case has nothing to
-# judge against (no ground_truth / expected_behavior). The skill metrics are
-# not applicable in an arm that has no skill under test to discover or route to
-# (the no-skill or no-plugin baseline). The verifier records the metric as
+# judge against (no expected_output / assertions, which the legacy format calls
+# ground_truth / expected_behavior). The skill metrics are not applicable in an
+# arm that has no skill under test to discover or route to (the no-skill or
+# no-plugin baseline), and for an eval case that names no expected_skill;
+# skill_efficiency also for a negative case. The verifier records the metric as
 # ``null`` with ``details[metric].status == "not_applicable"``; N/A metrics are
 # excluded from the trial overall, the arm averages, and lift. Security never
 # becomes N/A, and an absent or non-finite metric without the explicit marker
@@ -105,10 +107,41 @@ NOT_APPLICABLE_ELIGIBLE_METRICS = ("skill_execution", "skill_efficiency", "accur
 NOT_APPLICABLE_REASONS = {
     "skill_execution": "This arm has no skill under test installed, so there is no skill to discover or run",
     "skill_efficiency": "This arm has no skill under test installed, so there is no skill to route to",
-    "accuracy": "No ground_truth defined, so there is no reference answer to judge against",
-    "goal_accuracy": "No ground_truth defined, so there is no expected outcome to judge against",
-    "behavior_check": "No expected_behavior defined, so there is no workflow to check",
+    "accuracy": "No expected_output (legacy ground_truth) defined, so there is no reference answer to judge against",
+    "goal_accuracy": (
+        "No expected_output (legacy ground_truth) defined, so there is no expected outcome to judge against"
+    ),
+    "behavior_check": "No assertions (legacy expected_behavior) defined, so there is no workflow to check",
 }
+# A reason carried over from a verifier sidecar is cut to this length.
+NOT_APPLICABLE_REASON_MAX_CHARS = 512
+# With the skill under test installed, a skill metric is N/A only because of the eval case.
+WITH_SKILL_NOT_APPLICABLE_REASONS = {
+    "skill_execution": "No expected_skill defined, so the eval case names no skill to discover or run",
+    "skill_efficiency": "Negative case or no expected_skill defined, so there is no skill use to measure",
+}
+
+
+# Reporting may have only an arm-level N/A marker, without the verifier's reason.
+# A baseline that stages a matching candidate still follows the eval-case rules.
+BASELINE_NOT_APPLICABLE_REASONS = {
+    "skill_execution": ("No applicable skill is available in this arm, or the eval case names no expected_skill"),
+    "skill_efficiency": (
+        "No applicable skill is available in this arm, or the case is negative or names no expected_skill"
+    ),
+}
+
+
+def not_applicable_reason(
+    metric: str, *, with_skill: bool = False, default: str = "Not applicable to this eval case"
+) -> str:
+    """Return why *metric* can be N/A in an arm with or without the skill under test."""
+    if with_skill and metric in WITH_SKILL_NOT_APPLICABLE_REASONS:
+        return WITH_SKILL_NOT_APPLICABLE_REASONS[metric]
+    if not with_skill and metric in BASELINE_NOT_APPLICABLE_REASONS:
+        return BASELINE_NOT_APPLICABLE_REASONS[metric]
+    return NOT_APPLICABLE_REASONS.get(metric, default)
+
 
 _RESERVED_METADATA_KEYS = {
     "custom_details",
@@ -119,6 +152,7 @@ _RESERVED_METADATA_KEYS = {
     "evaluation_errors",
     "evaluation_status",
     "has_skill",
+    "judge_contract",
     "metric_set",
     "metric_set_version",
     "metrics",
@@ -353,8 +387,36 @@ def not_applicable_counts(
     return counts
 
 
-def mark_not_applicable(reward: dict[str, Any], metric: str) -> None:
-    """Record *metric* as N/A on *reward* using the verifier's marker shape."""
+def _bounded_reason(value: object) -> str | None:
+    """Return a non-empty reason string cut to ``NOT_APPLICABLE_REASON_MAX_CHARS``, or ``None``."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()[:NOT_APPLICABLE_REASON_MAX_CHARS]
+
+
+def recorded_not_applicable_reason(reward: dict[str, Any], metric: str) -> str | None:
+    """Return the reason *reward* records for its N/A *metric*, or ``None`` when it records none."""
+    details = reward.get("details")
+    detail = details.get(metric) if isinstance(details, dict) else None
+    if not isinstance(detail, dict) or detail.get("status") != NOT_APPLICABLE_STATUS:
+        return None
+    return _bounded_reason(detail.get("reason"))
+
+
+def shared_not_applicable_reason(rewards: list[dict[str, Any]], metric: str) -> str | None:
+    """Return the distinct reasons *rewards* record for their N/A *metric*, joined, or ``None``."""
+    reasons = [reason for reward in rewards if (reason := recorded_not_applicable_reason(reward, metric))]
+    return _bounded_reason("; ".join(dict.fromkeys(reasons)))
+
+
+def mark_not_applicable(reward: dict[str, Any], metric: str, reason: str | None = None) -> None:
+    """Record *metric* as N/A on *reward* using the verifier's marker shape.
+
+    A reason the reward already records for its N/A metric is kept. Otherwise
+    *reason*, such as the one the verifier recorded for the eval case, is used,
+    and without one the generic reason for the metric.
+    """
+    kept = recorded_not_applicable_reason(reward, metric) or _bounded_reason(reason)
     reward[metric] = None
     details = reward.get("details")
     if not isinstance(details, dict):
@@ -366,7 +428,7 @@ def mark_not_applicable(reward: dict[str, Any], metric: str) -> None:
         {
             "score": None,
             "status": NOT_APPLICABLE_STATUS,
-            "reason": NOT_APPLICABLE_REASONS.get(metric, "Not applicable to this eval case"),
+            "reason": kept or NOT_APPLICABLE_REASONS.get(metric, "Not applicable to this eval case"),
         }
     )
     details[metric] = detail

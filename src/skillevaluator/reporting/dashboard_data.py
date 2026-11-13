@@ -129,6 +129,9 @@ def _trial_coverage_truncated(marker: dict[str, Any]) -> bool:
     # Non-best detail pruning is checked per agent against its declared counts.
     diagnostics = {
         "raw_trial_rewards",
+        # Token usage is measured, not scored, and the trials stay.
+        "token_usage_case_rows",
+        "token_usage",
         "raw_detail_fields",
         "raw_reward_fields",
         "raw_metric_values",
@@ -139,6 +142,11 @@ def _trial_coverage_truncated(marker: dict[str, Any]) -> bool:
         "insight_items",
         "custom_metric_discovery_trials",
         "non_best_agent_details",
+        "failure_reasons",
+        "case_diagnostics",
+        "expectation_cases",
+        "expectations",
+        "expectation_attempts",
     }
     if not omitted:
         return not loading  # an unexplained truncation still fails closed

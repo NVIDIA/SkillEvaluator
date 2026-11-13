@@ -21,6 +21,7 @@ import contextlib
 import json
 import logging
 import math
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from itertools import islice
 from pathlib import Path
@@ -39,9 +40,18 @@ from skillevaluator.constants import (
     TIER3_LIFT_FAIL_THRESHOLD,
     TIER3_LIFT_PASS_THRESHOLD,
 )
+from skillevaluator.evaluation.tier3_findings import (
+    TRIAL_PASS_THRESHOLD,
+    failure_excerpt,
+    failure_reason,
+    failure_reason_text_slots,
+    sanitize_grader_text,
+    strip_failure_reason_text,
+)
 from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.source_identity import resolve_evaluated_source
+from skillevaluator.tier3.evidence_volume import evidence_volume_for_conditions
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +109,12 @@ _MAX_RAW_METRICS_PER_REWARD = 64
 _MAX_RAW_REWARD_FIELDS = 96
 _MAX_CUSTOM_METRIC_NAME_VISITS_PER_REWARD = 128
 _MAX_UNPAIRED_CASE_IDS_IN_REPORT = 64
+# An evaluator card lists at most this many of the cases its lift left out; the
+# card's ``excluded_cases`` count stays exact.
+_MAX_LIFT_EXCLUDED_CASE_IDS_PER_CARD = 64
+_MAX_LIFT_EXCLUDED_CASE_ID_CHARS = 256
+# Lift pairing cannot compare a trial without a resolved case.
+_UNRESOLVED_CASE_IDS = frozenset({"", "unknown"})
 _MAX_EMBEDDED_REPORT_BYTES = 2 * 1024 * 1024
 _MAX_JSON_SAFE_INTEGER = (1 << 53) - 1
 
@@ -537,6 +553,7 @@ def agent_eval_result_from_directory(
         persisted_dataset_summary=run_truth.get("dataset_summary"),
         dataset_digest=run_truth.get("dataset_digest"),
         dataset_digest_algorithm=run_truth.get("dataset_digest_algorithm"),
+        dataset_provenance=run_truth.get("dataset_provenance"),
         run_id=run_truth.get("run_id"),
         publication_target=publication_target,
         publication_target_conflict=run_truth.get("publication_target_conflict"),
@@ -544,6 +561,13 @@ def agent_eval_result_from_directory(
         use_llm_judge=use_llm_judge,
         enforce_embedded_size=enforce_embedded_size,
     )
+    with contextlib.suppress(Exception):
+        source = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+        if isinstance(source, dict) and isinstance(source.get("agents"), dict):
+            from skillevaluator.tier3.case_summary import load_case_findings
+            from skillevaluator.tier3.next_steps import next_steps
+
+            payload["next_steps"] = next_steps(source, run_dir=run_dir, fixes=load_case_findings(run_dir))
     return _validation_result_from_payload(payload)
 
 
@@ -597,8 +621,14 @@ def render_agent_eval_html_report(
     engine_result: dict[str, Any] | None = None,
     use_llm_judge: bool = True,
     include_benchmark: bool = False,
+    saved_feedback: dict[str, list[Any]] | None = None,
 ) -> Path:
-    """Render a standalone Tier 3 HTML report and optional standard benchmark."""
+    """Render a standalone Tier 3 HTML report and optional standard benchmark.
+
+    ``saved_feedback`` is the report feedback a completed run saved in
+    ``result.json``. It replaces the rebuilt feedback fields and nothing calls
+    an LLM; see ``_apply_saved_feedback``.
+    """
     from skillevaluator.reporting import BenchmarkReporter, HTMLReporter
 
     skill_path = skill_path.expanduser().resolve()
@@ -608,14 +638,19 @@ def render_agent_eval_html_report(
         run_dir,
         env_mode=env_mode,
         engine_result=engine_result,
-        use_llm_judge=use_llm_judge,
+        use_llm_judge=use_llm_judge and not saved_feedback,
     )
     if result is None:
         raise ValueError(f"No agent results found in {run_dir}")
 
     canonical_payload = result.metadata.get("agent_eval")
     if isinstance(canonical_payload, dict):
-        _apply_case_findings(canonical_payload, engine_result, run_dir, skill_path, use_llm=use_llm_judge)
+        if saved_feedback:
+            _apply_saved_feedback(canonical_payload, saved_feedback, engine_result, run_dir, skill_path)
+        else:
+            _apply_case_findings(canonical_payload, engine_result, run_dir, skill_path, use_llm=use_llm_judge)
+        # Restored feedback and fresh findings both join after the initial size budget.
+        fit_token_usage(canonical_payload)
     if engine_result is not None and isinstance(canonical_payload, dict):
         # Persist only the compact feedback contract needed by the CLI. The
         # complete canonical payload remains in the HTML report and can be much
@@ -624,6 +659,13 @@ def render_agent_eval_html_report(
             "schema_version": _TIER3_FEEDBACK_SCHEMA_VERSION,
             **{field: list(canonical_payload.get(field) or []) for field in _TIER3_FEEDBACK_FIELDS},
         }
+        from skillevaluator.tier3.token_usage import per_agent_token_usage
+
+        # The terminal summary prints token usage per agent; per-case rows stay in the report files.
+        if token_usage := per_agent_token_usage(canonical_payload.get("token_usage")):
+            engine_result["token_usage"] = token_usage
+        else:
+            engine_result.pop("token_usage", None)
 
     target = output_path.expanduser().resolve() if output_path is not None else run_dir / "report.html"
     from skillevaluator.publication_identity import publication_target_name
@@ -672,6 +714,7 @@ def build_agent_eval_payload(
     persisted_dataset_summary: dict[str, Any] | None = None,
     dataset_digest: str | None = None,
     dataset_digest_algorithm: str | None = None,
+    dataset_provenance: dict[str, Any] | None = None,
     historical_missing_score_policy: bool = False,
     run_id: str | None = None,
     publication_target: dict[str, str] | None = None,
@@ -787,6 +830,7 @@ def build_agent_eval_payload(
             report_budget,
             baseline_only=baseline_only,
         )
+    _attach_activation_expectations(agent_payloads, dataset or [], skill_name)
     best = agent_payloads.get(best_agent, {})
     if suggestions_v2 is None and run_dir is not None:
         # Findings are per-agent evidence. Resolve the canonical best agent
@@ -829,8 +873,10 @@ def build_agent_eval_payload(
     overall_score = _finite_float(raw_overall_score) if execution_status == "succeeded" else None
     overall_lift = _finite_float(best.get("lift"))
     # Baseline calibration scores measure no skill, so they never set a skill verdict.
+    # The verdict reads the agents the best agent is picked from.
+    verdict_agents = _headline_agents(agent_payloads, score_field=score_field)
     verdict = (
-        _overall_verdict_from_agents(agent_payloads)
+        _overall_verdict_from_agents(verdict_agents)
         if overall_score is not None and not baseline_only
         else VERDICT_NEUTRAL
     )
@@ -838,7 +884,17 @@ def build_agent_eval_payload(
     metric_ids = list(best.get("evaluators", {}).keys())
     metric_labels = _metric_labels(metric_ids)
     canonical_trials = _flatten_trials(agent_payloads)
+    # The drill-down reads with-skill reasons from the flattened trials and
+    # baseline reasons from ``trials_baseline``, so keep one copy of each.
+    for agent in agent_payloads.values():
+        for trial in agent.get("trials", []):
+            trial.pop("score_reasons", None)
     public_dataset = deduplicate_dataset_entries([entry for entry in (dataset or []) if isinstance(entry, dict)])
+    from skillevaluator.evaluation.tier3_expectations import build_case_diagnostics
+
+    case_diagnostics, expectation_omissions = build_case_diagnostics(public_dataset, agents, evaluation_mode=mode)
+    for section, count in expectation_omissions.items():
+        report_budget.omit(section, count)
     computed_dataset_truth = (
         build_dataset_snapshot(public_dataset, evaluator_version=evaluator_version or "") if public_dataset else None
     )
@@ -847,6 +903,44 @@ def build_agent_eval_payload(
         if isinstance(persisted_dataset_summary, dict)
         else _dataset_summary(public_dataset, canonical_trials)
     )
+    from skillevaluator.tier3.dataset_sufficiency import MIN_NEGATIVE_CASES, assess_dataset_sufficiency
+
+    for agent_name, agent_payload in agent_payloads.items():
+        agent_info = agents.get(agent_name, {})
+        agent_payload["evidence_volume"] = evidence_volume_for_conditions(
+            agent_info.get("conditions"),
+            trial_failures=agent_info.get("trial_failures"),
+            baseline_only=baseline_only,
+            dataset_summary=dataset_summary,
+            rewards_by_arm={
+                "with_skill": agent_info.get("rewards"),
+                "without_skill": agent_info.get("rewards_baseline"),
+            },
+            uniform_attempts=not bool(policy.get("stop_on_pass")),
+            attempts_per_case=_as_nonnegative_int(policy.get("max_attempts")) or None,
+        )
+        pass_summary = agent_payload.get("pass_at_k") if isinstance(agent_payload.get("pass_at_k"), dict) else {}
+        with_pass = pass_summary.get("with_skill") if isinstance(pass_summary.get("with_skill"), dict) else {}
+        without_pass = pass_summary.get("without_skill")
+        lift = pass_summary.get("lift") if isinstance(pass_summary.get("lift"), dict) else {}
+        paired = lift.get("paired_comparison") if isinstance(lift.get("paired_comparison"), dict) else {}
+        raw_paired_cases = paired.get("paired_cases")
+        paired_cases = (
+            _as_nonnegative_int(raw_paired_cases)
+            if isinstance(raw_paired_cases, int) and not isinstance(raw_paired_cases, bool) and raw_paired_cases >= 0
+            else None
+        )
+        unclassified_cases = _as_nonnegative_int(dataset_summary.get("unclassified_tasks"))
+        negative_cases = _as_nonnegative_int(dataset_summary.get("negative_tasks"))
+        if unclassified_cases > 0 and negative_cases < MIN_NEGATIVE_CASES:
+            negative_cases = None
+        agent_payload["dataset_sufficiency"] = assess_dataset_sufficiency(
+            distinct_cases=_as_nonnegative_int(dataset_summary.get("total_tasks")),
+            negative_cases=negative_cases,
+            pass_rate_interval=with_pass.get("rate_interval"),
+            paired_cases=paired_cases,
+            baseline_skipped=not bool(without_pass),
+        )
     effective_dataset_digest = dataset_digest or (
         str(computed_dataset_truth["dataset_digest"]) if computed_dataset_truth else None
     )
@@ -866,10 +960,23 @@ def build_agent_eval_payload(
     advice_agents = {name for name, agent in agent_payloads.items() if not _never_activated(agent)}
     evidence_links = [link for link in harbor_summary.get("evidence_links") or [] if link.get("agent") in advice_agents]
     best_evidence_links = [link for link in evidence_links if link.get("agent") == best_agent]
+    verdict_source: dict[str, Any] | None = None
+    if best_agent and _agent_quality_verdict(agent_payloads.get(best_agent, {})) == verdict:
+        verdict_source = agent_payloads[best_agent]
+    else:
+        # The reason and counts come from an agent the verdict was read from.
+        verdict_source = next(
+            (agent for agent in verdict_agents.values() if _agent_quality_verdict(agent) == verdict),
+            None,
+        )
 
+    from skillevaluator.tier3.dataset_provenance import sanitize_generation_record
+
+    safe_dataset_provenance = sanitize_generation_record(dataset_provenance)
     summary = {
         "schema_version": _SCHEMA_VERSION,
         "verdict": verdict,
+        "verdict_reason": None if verdict == VERDICT_PASS else _agent_quality_verdict_reason(verdict_source or {}),
         "skill_activation": best.get("skill_activation", {}),
         "skill_name": skill_name,
         "mode": mode,
@@ -877,11 +984,16 @@ def build_agent_eval_payload(
         "agents_run": list(agent_payloads.keys()),
         "overall_score": round(overall_score, 4) if overall_score is not None else None,
         "overall_lift": round(overall_lift, 4) if overall_lift is not None else None,
+        "correct_answers": verdict_source.get("correct_answers") if verdict_source else None,
+        "required_checks": verdict_source.get("required_checks") if verdict_source else None,
+        "security_clean": verdict_source.get("security_clean") if verdict_source else None,
         "environment": env_mode,
         "runtime_seconds": _finite_float(runtime_seconds) or 0.0,
         "evaluated_at": evaluated_at,
         "evaluator_version": evaluator_version,
         "dataset_summary": dataset_summary,
+        "dataset_sufficiency": best.get("dataset_sufficiency"),
+        "evidence_volume": best.get("evidence_volume"),
         "dataset_digest": effective_dataset_digest,
         "dataset_digest_algorithm": effective_dataset_digest_algorithm,
         "score_policy": policy["score_policy"],
@@ -897,6 +1009,8 @@ def build_agent_eval_payload(
         ),
         "scored_attempts": sum(_as_nonnegative_int(agent.get("scored_attempts")) for agent in agent_payloads.values()),
     }
+    if safe_dataset_provenance is not None:
+        summary["dataset_provenance"] = safe_dataset_provenance
     if publication_target_conflict in _PUBLICATION_TARGET_CONFLICT_MARKERS:
         summary["publication_target_conflict"] = publication_target_conflict
     case_selection = _case_selection(run_config)
@@ -925,7 +1039,12 @@ def build_agent_eval_payload(
             {
                 "severity": "warn",
                 "title": "Inconclusive: skill never activated",
-                "message": "The skill was never activated in any positive with-skill trial. Scores are diagnostic only; no lift verdict was computed.",
+                "message": (
+                    "The skill was never activated in any positive with-skill trial"
+                    # An agent kept with a failed baseline did not decide this verdict.
+                    + ("" if len(verdict_agents) == len(agent_payloads) else " of an agent with a complete baseline")
+                    + ". Scores are diagnostic only; no lift verdict was computed."
+                ),
             }
         ]
         deterministic_suggestions = ["Check skill loading and agent support, then rerun the evaluation."]
@@ -950,12 +1069,18 @@ def build_agent_eval_payload(
         best_evidence_links,
     )
 
+    budget_metadata = (run_config or {}).get("budget")
+    from skillevaluator.tier3.harbor.run_budget import budget_line
+
     payload = {
         "schema_version": _SCHEMA_VERSION,
+        "baseline": (run_config or {}).get("baseline", {}),
+        "prior_version_comparison": (run_config or {}).get("prior_version_comparison", {}),
         "summary": summary,
         "skill_name": skill_name,
         "mode": mode,
         "verdict": verdict,
+        "verdict_reason": summary["verdict_reason"],
         "skill_activation": summary["skill_activation"],
         "best_agent": best_agent,
         "agents_run": list(agent_payloads.keys()),
@@ -972,8 +1097,11 @@ def build_agent_eval_payload(
         "evaluated_at": evaluated_at,
         "evaluator_version": evaluator_version,
         "dataset_summary": dataset_summary,
+        "dataset_sufficiency": best.get("dataset_sufficiency"),
+        "evidence_volume": best.get("evidence_volume"),
         "dataset_digest": effective_dataset_digest,
         "dataset_digest_algorithm": effective_dataset_digest_algorithm,
+        "dataset_provenance": safe_dataset_provenance,
         "score_policy": policy["score_policy"],
         "run_id": run_id,
         "publication_target": dict(publication_target) if isinstance(publication_target, dict) else None,
@@ -989,6 +1117,9 @@ def build_agent_eval_payload(
         "cases": best.get("cases", []),
         "trials": canonical_trials,
         "pass_at_k": best.get("pass_at_k", {}),
+        "correct_answers": best.get("correct_answers"),
+        "required_checks": best.get("required_checks"),
+        "security_clean": best.get("security_clean"),
         "insights": _insights_from_dimensions(best_dimensions),
         "conclusions": list(deterministic_conclusions),
         "recommendations": recommendations,
@@ -1001,7 +1132,10 @@ def build_agent_eval_payload(
         "supported_metric_ids": list(AGENT_EVAL_EVALUATORS),
         "metric_labels": metric_labels,
         "attempt_policy": policy,
+        "budget": budget_metadata,
+        "budget_summary": budget_line(budget_metadata) if isinstance(budget_metadata, dict) else None,
         "dataset": public_dataset,
+        "case_diagnostics": case_diagnostics,
         "provenance": _build_provenance(
             agent_payloads,
             agents,
@@ -1017,6 +1151,27 @@ def build_agent_eval_payload(
         payload["case_selection"] = dict(case_selection)
     if harbor_summary:
         payload["harbor_viewer"] = harbor_summary
+    from skillevaluator.reporting.tier3_coverage import coverage_notices
+
+    # Name each arm that ran but failed, so no report reads its missing scores
+    # as an arm that never ran.
+    if notices := coverage_notices(agent_payloads):
+        payload["coverage_notices"] = notices
+    from skillevaluator.tier3.token_usage import USAGE_ONLY_ATTEMPT_KEYS, build_token_usage
+
+    # Measured, never scored: token usage per case and agent, counting attempts
+    # that failed before scoring. Scores and ``resources`` do not read it. It
+    # joins the payload after the budget, so it never displaces score evidence.
+    baseline_record = (run_config or {}).get("baseline")
+    token_usage = build_token_usage(
+        {
+            name: {**agent, **{key: agents.get(name, {}).get(key) for key in USAGE_ONLY_ATTEMPT_KEYS}}
+            for name, agent in agent_payloads.items()
+        },
+        mode=mode,
+        # A reused baseline's copied trajectories hold the tokens of the run it came from.
+        baseline_reused=isinstance(baseline_record, dict) and baseline_record.get("mode") == "reused",
+    )
 
     _layer_llm_insights(
         payload,
@@ -1048,6 +1203,10 @@ def build_agent_eval_payload(
         )
     payload = _sanitize_json_numbers(payload)
     _enforce_report_payload_budget(payload, report_budget, enforce_size=enforce_embedded_size)
+    if token_usage:
+        payload["token_usage"] = _sanitize_json_numbers(token_usage)
+        if enforce_embedded_size:
+            fit_token_usage(payload)
     return payload
 
 
@@ -1352,6 +1511,23 @@ def _enforce_report_payload_budget(
     if not enforce_size or _serialized_payload_size(payload) <= _MAX_EMBEDDED_REPORT_BYTES:
         return
 
+    # Built failure reasons and excerpts only explain scores the payload already
+    # carries, so they go before any recorded evidence.
+    deferred_reasons = [(container, key, container[key]) for container, key in failure_reason_text_slots(payload)]
+    omitted_reasons = strip_failure_reason_text(payload)
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        report_budget.omit("case_diagnostics", len(payload.pop("case_diagnostics", [])))
+        for container, key, value in deferred_reasons:
+            container[key] = value
+        refresh_signal()
+        omitted_reasons = (
+            strip_failure_reason_text(payload) if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES else 0
+        )
+    report_budget.omit("failure_reasons", omitted_reasons)
+    refresh_signal()
+    if _serialized_payload_size(payload) <= _MAX_EMBEDDED_REPORT_BYTES:
+        return
+
     provenance = payload.get("provenance")
     if isinstance(provenance, dict):
         comparison = provenance.get("comparison")
@@ -1363,6 +1539,55 @@ def _enforce_report_payload_budget(
     if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
         _prune_non_best_agent_details(payload, report_budget)
         refresh_signal()
+
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        compacted_attempt_verdicts = 0
+        trial_lists = []
+        trial_lists.extend(
+            agent.get(key)
+            for agent in (payload.get("agents") or {}).values()
+            if isinstance(agent, dict)
+            for key in ("trials", "trials_baseline")
+        )
+        for trials in trial_lists:
+            if not isinstance(trials, list):
+                continue
+            for trial in trials:
+                attempt = trial.get("attempt_verdict") if isinstance(trial, dict) else None
+                if not isinstance(attempt, dict):
+                    continue
+                if "reason" in attempt or "warnings" in attempt:
+                    attempt.pop("reason", None)
+                    attempt.pop("warnings", None)
+                    compacted_attempt_verdicts += 1
+        flattened_trials = payload.get("trials")
+        if isinstance(flattened_trials, list):
+            payload["trials"] = [
+                {key: value for key, value in trial.items() if key != "attempt_verdict"}
+                if isinstance(trial, dict) and "attempt_verdict" in trial
+                else trial
+                for trial in flattened_trials
+            ]
+            compacted_attempt_verdicts += sum(
+                isinstance(trial, dict) and "attempt_verdict" in trial for trial in flattened_trials
+            )
+        report_budget.omit("attempt_verdict_details", compacted_attempt_verdicts)
+        refresh_signal()
+
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        raw_rewards = provenance.get("raw_trial_rewards") if isinstance(provenance, dict) else None
+        if isinstance(raw_rewards, dict):
+            omitted = sum(len(items) for items in raw_rewards.values() if isinstance(items, list))
+            provenance["raw_trial_rewards"] = {name: [] for name in raw_rewards}
+            report_budget.omit("raw_trial_rewards", omitted)
+        refresh_signal()
+
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        dataset = payload.get("dataset")
+        if isinstance(dataset, list) and dataset:
+            payload["dataset"] = []
+            report_budget.omit("dataset_items", len(dataset))
+            refresh_signal()
 
     if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
         omitted_items = 0
@@ -1382,14 +1607,6 @@ def _enforce_report_payload_budget(
             if _compact_agent_conditions(agent):
                 omitted_items += 1
         report_budget.omit("dataset_and_trial_items", omitted_items)
-        refresh_signal()
-
-    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
-        raw_rewards = provenance.get("raw_trial_rewards") if isinstance(provenance, dict) else None
-        if isinstance(raw_rewards, dict):
-            omitted = sum(len(items) for items in raw_rewards.values() if isinstance(items, list))
-            provenance["raw_trial_rewards"] = {name: [] for name in raw_rewards}
-            report_budget.omit("raw_trial_rewards", omitted)
         refresh_signal()
 
     if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
@@ -1428,6 +1645,89 @@ def _enforce_report_payload_budget(
     refresh_signal()
 
 
+# ``report_truncation.omitted`` keys that only token usage adds.
+_TOKEN_USAGE_OMISSIONS = ("token_usage", "token_usage_case_rows")
+
+
+def fit_token_usage(payload: dict[str, Any]) -> None:
+    """Keep measured token usage from costing a bounded payload its report limits.
+
+    Token usage is unscored, so it may never push a payload past the embedded
+    size budget or make it fail the report serialization limits (nodes, depth
+    and text) that every reporter checks. It joins the payload last, after the
+    size budget, so it gives way first: its per-case rows, then its sums, each
+    drop recorded in ``report_truncation``. If not even that record fits, the
+    token usage and its records go, which leaves the payload as it is without
+    token usage. Code that adds fields to a built payload, such as case findings
+    or ``validate``'s applicability keys, calls this again.
+    """
+    omitted = _report_omissions(payload)
+    if "token_usage" not in payload and not (omitted and any(key in omitted for key in _TOKEN_USAGE_OMISSIONS)):
+        return
+    if _token_usage_fits(payload):
+        return
+    if "token_usage" in payload:
+        from skillevaluator.tier3.token_usage import drop_token_usage_cases
+
+        dropped = drop_token_usage_cases(payload["token_usage"])
+        if (
+            dropped
+            and _record_token_usage_omission(payload, "token_usage_case_rows", dropped)
+            and _token_usage_fits(payload)
+        ):
+            return
+        del payload["token_usage"]
+        if _record_token_usage_omission(payload, "token_usage", 1) and _token_usage_fits(payload):
+            return
+    _remove_token_usage_omissions(payload)
+
+
+def _report_omissions(payload: dict[str, Any]) -> dict[str, Any] | None:
+    truncation = payload.get("report_truncation")
+    omitted = truncation.get("omitted") if isinstance(truncation, dict) else None
+    return omitted if isinstance(omitted, dict) else None
+
+
+def _token_usage_fits(payload: dict[str, Any]) -> bool:
+    from skillevaluator.reporting.base import agent_eval_report_serialization_issue
+
+    # The minimal last-resort payload carries no details.
+    if "payload_sections" in (_report_omissions(payload) or {}):
+        return False
+    try:
+        size = _serialized_payload_size(payload)
+    except (TypeError, ValueError):
+        return False
+    return size <= _MAX_EMBEDDED_REPORT_BYTES and agent_eval_report_serialization_issue(payload) is None
+
+
+def _record_token_usage_omission(payload: dict[str, Any], section: str, count: int) -> bool:
+    """Count a token usage drop in ``report_truncation``; ``False`` when its record cannot take it."""
+    if "report_truncation" not in payload:
+        payload["report_truncation"] = _ReportBudget(omitted={section: count}).signal()
+        return True
+    omitted = _report_omissions(payload)
+    if omitted is None:
+        return False
+    previous = omitted.get(section)
+    total = count + (previous if isinstance(previous, int) and not isinstance(previous, bool) else 0)
+    payload["report_truncation"]["omitted"] = dict(sorted({**omitted, section: total}.items()))
+    return True
+
+
+def _remove_token_usage_omissions(payload: dict[str, Any]) -> None:
+    """Take token usage's keys out of ``report_truncation``, and the record when only they made it."""
+    omitted = _report_omissions(payload)
+    if omitted is None or not any(key in omitted for key in _TOKEN_USAGE_OMISSIONS):
+        return
+    remaining = {key: value for key, value in omitted.items() if key not in _TOKEN_USAGE_OMISSIONS}
+    truncation = payload["report_truncation"]
+    if remaining or truncation.get("artifact_loading"):
+        truncation["omitted"] = remaining
+    else:
+        del payload["report_truncation"]
+
+
 def _serialized_payload_size(payload: dict[str, Any]) -> int:
     return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8"))
 
@@ -1452,6 +1752,10 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
             "verdict",
             "overall_score",
             "overall_lift",
+            "correct_answers",
+            "required_checks",
+            "security_clean",
+            "verdict_reason",
             "environment",
             "runtime_seconds",
             "score_policy",
@@ -1461,6 +1765,7 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
             "execution_error_details_truncated",
             "expected_attempts",
             "scored_attempts",
+            "evidence_volume",
         }
     }
     compact_summary["skill_name"] = str(summary.get("skill_name") or payload.get("skill_name") or "")[:256]
@@ -1487,7 +1792,12 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
         "environment": payload.get("environment"),
         "overall_score": payload.get("overall_score"),
         "overall_lift": payload.get("overall_lift"),
+        "correct_answers": summary.get("correct_answers"),
+        "required_checks": summary.get("required_checks"),
+        "security_clean": summary.get("security_clean"),
+        "verdict_reason": summary.get("verdict_reason"),
         "composite_lift": payload.get("composite_lift"),
+        "evidence_volume": payload.get("evidence_volume"),
         "execution_status": payload.get("execution_status"),
         "execution_errors": compact_summary["execution_errors"],
         "execution_error_details_total": compact_summary.get("execution_error_details_total", 0),
@@ -1650,15 +1960,19 @@ def _not_applicable_evaluators(
     metrics: list[str],
     with_scores: dict[str, Any],
     not_applicable: list[str],
+    *,
+    with_skill: bool = True,
 ) -> list[dict[str, str]]:
-    """Evaluators with no with-skill score because no eval case gave them a reference."""
-    from skillevaluator.tier3.harbor.metrics import METRIC_DISPLAY, NOT_APPLICABLE_REASONS
+    """Evaluators with no score in the reported arm because every trial recorded them as N/A."""
+    from skillevaluator.tier3.harbor.metrics import METRIC_DISPLAY, not_applicable_reason
 
     return [
         {
             "id": metric,
             "label": METRIC_DISPLAY.get(metric, metric.replace("_", " ").title()),
-            "reason": NOT_APPLICABLE_REASONS.get(metric, "Not applicable to these eval cases"),
+            "reason": not_applicable_reason(
+                metric, with_skill=with_skill, default="Not applicable to these eval cases"
+            ),
         }
         for metric in metrics
         if metric in not_applicable and _finite_float(with_scores.get(metric)) is None
@@ -1687,6 +2001,77 @@ def _not_applicable_dimensions(
     return out
 
 
+def _logical_condition_rewards(info: dict[str, Any]) -> tuple[list[list[dict[str, Any]]], bool]:
+    """Return each arm's logical attempts as the lift rebuild compares them, and whether both loads are complete.
+
+    The first list holds the with-skill attempts, the second the baseline's. A
+    logical trial whose rows disagree on the case is left out and makes the
+    result incomplete.
+    """
+    from skillevaluator.tier3.harbor.collector import _logical_attempt_rewards
+    from skillevaluator.tier3.harbor.report_data import logical_trial_reward_groups
+
+    conditions: list[list[dict[str, Any]]] = []
+    complete = True
+    for key in ("rewards", "rewards_baseline"):
+        rows = info.get(key)
+        complete = complete and info.get(f"{key}_complete") is True
+        groups = logical_trial_reward_groups(
+            [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+        )
+        logical_rows: list[dict[str, Any]] = []
+        for index, group in enumerate(groups):
+            if not _logical_group_entry_identity_is_consistent(group):
+                complete = False
+                continue
+            logical_rows.extend(
+                {
+                    **row,
+                    "_trial_root_name": str(index),
+                    **({"_step_name": str(step)} if len(group) > 1 else {}),
+                }
+                for step, row in enumerate(group)
+            )
+        conditions.append(_logical_attempt_rewards(logical_rows))
+    return conditions, complete
+
+
+def _judge_mixed_lift_exclusions(info: dict[str, Any], metrics: Collection[str]) -> dict[str, dict[str, Any]]:
+    """Name the cases each judge metric's lift left out because the arms' judge models differed.
+
+    Reads the logical attempts the lift rebuild compares, so a case listed here
+    is one that ``_compute_lift`` left out of that metric. Per metric it returns
+    ``case_ids``, ``excluded_attempts``, the with-skill attempts that scored the
+    metric on those cases, and ``complete``, whether both arms' rewards loaded
+    completely with every logical trial naming one case. A saved run without
+    loaded rewards yields no entry; its recorded per-metric counts still
+    describe the exclusion.
+    """
+    from skillevaluator.tier3.harbor.collector import _entry_id, _judge_mixed_cases
+    from skillevaluator.tier3.harbor.metrics import metric_set_for_reward, metric_value
+
+    (with_rows, without_rows), complete = _logical_condition_rewards(info)
+    if not with_rows or not without_rows:
+        return {}
+    exclusions: dict[str, dict[str, Any]] = {}
+    for metric, cases in _judge_mixed_cases(with_rows, without_rows, None).items():
+        case_ids = {case for case in cases if case not in _UNRESOLVED_CASE_IDS}
+        if metric not in metrics or not case_ids:
+            continue
+        exclusions[metric] = {
+            "case_ids": case_ids,
+            "excluded_attempts": sum(
+                1
+                for row in with_rows
+                if _entry_id(row) in case_ids
+                and metric in metric_set_for_reward(row)[1]
+                and metric_value(row, metric) is not None
+            ),
+            "complete": complete,
+        }
+    return exclusions
+
+
 def _judge_aware_lift(
     info: dict[str, Any],
     with_scores: dict[str, Any],
@@ -1697,10 +2082,8 @@ def _judge_aware_lift(
     from skillevaluator.tier3.harbor.collector import (
         _LLM_JUDGE_METRICS,
         _compute_lift,
-        _logical_attempt_rewards,
         _reward_judge_models,
     )
-    from skillevaluator.tier3.harbor.report_data import logical_trial_reward_groups
 
     recorded = info.get("lift")
     recorded = recorded if isinstance(recorded, dict) else {}
@@ -1750,28 +2133,7 @@ def _judge_aware_lift(
         )
     ):
         return None
-    conditions: list[list[dict[str, Any]]] = []
-    complete = True
-    for key in ("rewards", "rewards_baseline"):
-        rows = info.get(key)
-        complete = complete and info.get(f"{key}_complete") is True
-        groups = logical_trial_reward_groups(
-            [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
-        )
-        logical_rows: list[dict[str, Any]] = []
-        for index, group in enumerate(groups):
-            if not _logical_group_entry_identity_is_consistent(group):
-                complete = False
-                continue
-            logical_rows.extend(
-                {
-                    **row,
-                    "_trial_root_name": str(index),
-                    **({"_step_name": str(step)} if len(group) > 1 else {}),
-                }
-                for step, row in enumerate(group)
-            )
-        conditions.append(_logical_attempt_rewards(logical_rows))
+    conditions, complete = _logical_condition_rewards(info)
     clean_scores = [
         {metric: value for metric, raw in scores.items() if (value := _unit_interval_score(raw)) is not None}
         for scores in (with_scores, without_scores)
@@ -1936,7 +2298,7 @@ def _build_agent(
     # N/A notes describe the scored arm: the baseline in a baseline-only run.
     if baseline_only:
         not_applicable_evaluators = _not_applicable_evaluators(
-            baseline_metrics, without_scores, baseline_not_applicable
+            baseline_metrics, without_scores, baseline_not_applicable, with_skill=False
         )
         not_applicable_dimensions = _not_applicable_dimensions(dimensions, baseline_not_applicable)
     else:
@@ -1945,6 +2307,7 @@ def _build_agent(
     if never_activated:
         for evaluator in evaluators.values():
             evaluator["lift"] = None
+            evaluator.pop("lift_excluded_cases", None)
         for dimension in dimensions:
             dimension.update(
                 lift=None,
@@ -2047,9 +2410,17 @@ def _build_agent(
         overall_lift = _lift_value("overall", judge_lift) if comparable_scores else None
     if comparison_unavailable:
         overall_lift = None
+    lift_overall = _lift_overall_scores(overall_lift, judge_lift, overall_ws, overall_bl)
 
-    trials = _normalize_trials(info.get("rewards") or [], with_metrics)
-    baseline_trials = _normalize_trials(info.get("rewards_baseline") or [], baseline_metrics)
+    pass_with_skill = info.get("pass_with_skill")
+    pass_threshold = _finite_float(pass_with_skill.get("pass_threshold")) if isinstance(pass_with_skill, dict) else None
+    pass_threshold = pass_threshold if pass_threshold is not None else 0.5
+    trials = _normalize_trials(info.get("rewards") or [], with_metrics, pass_threshold=pass_threshold)
+    baseline_trials = _normalize_trials(
+        info.get("rewards_baseline") or [],
+        baseline_metrics,
+        pass_threshold=pass_threshold,
+    )
     if not never_activated:
         _attach_baseline_pairs(trials, baseline_trials, with_metrics, comparable_overall=comparable_scores)
     from skillevaluator.tier3.harbor.resource_usage import resource_comparison
@@ -2098,6 +2469,7 @@ def _build_agent(
         "with_skill": overall_ws,
         "baseline": overall_bl,
         "lift": overall_lift,
+        "lift_overall": lift_overall,
         "metrics_with_skill": with_metrics,
         "metrics_without_skill": baseline_metrics,
         "num_trials": int(info.get("num_trials", 0) or 0),
@@ -2105,11 +2477,19 @@ def _build_agent(
         "trials": trials,
         "trials_baseline": baseline_trials,
         "resources": resources,
+        "correct_answers": _correct_answer_comparison(info),
+        "required_checks": _required_check_comparison(info),
+        "security_clean": _security_clean_comparison(info),
         "pass_at_k": {
             "with_skill": info.get("pass_with_skill") or {},
             "without_skill": info.get("pass_without_skill") or {},
             "lift": (info.get("pass_lift") or {}) if comparable_scores else {},
         },
+        "evidence_volume": evidence_volume_for_conditions(
+            info.get("conditions"),
+            trial_failures=info.get("trial_failures"),
+            baseline_only=baseline_only,
+        ),
         "cases": _cases(info),
     }
 
@@ -2131,8 +2511,10 @@ def _attach_agent_report_details(
     custom_with_skill = info.get("custom_with_skill")
     custom_without_skill = info.get("custom_without_skill")
     custom_lift = info.get("custom_lift")
+    evaluators = agent_payload.get("evaluators", {})
+    lift_excluded_metrics = [metric for metric, values in evaluators.items() if values.get("lift_excluded_cases")]
     agent_payload["evaluator_cards"] = _evaluator_cards(
-        agent_payload.get("evaluators", {}),
+        evaluators,
         # Baseline-only cards draw their evidence from the only arm that ran.
         rewards=(info.get("rewards_baseline") if baseline_only else info.get("rewards")) or [],
         custom_with_skill=custom_with_skill if isinstance(custom_with_skill, dict) else {},
@@ -2140,6 +2522,8 @@ def _attach_agent_report_details(
         custom_lift=custom_lift if isinstance(custom_lift, dict) else {},
         report_budget=report_budget,
         baseline_only=baseline_only,
+        lift_exclusions=_judge_mixed_lift_exclusions(info, lift_excluded_metrics) if lift_excluded_metrics else {},
+        lift_basis=agent_payload.get("lift_basis"),
     )
     if _never_activated(agent_payload):
         for card in agent_payload["evaluator_cards"]:
@@ -2187,7 +2571,19 @@ def _build_evaluators(
             else ("not_applicable" if metric in with_not_applicable else "missing"),
             "baseline_status": baseline_status,
         }
+        if excluded_cases := _lift_excluded_case_count(mixed, metric):
+            # The arm scores keep these cases; only this metric's lift left them out.
+            evaluators[metric]["lift_excluded_cases"] = excluded_cases
     return evaluators
+
+
+def _lift_excluded_case_count(mixed: object, metric: str) -> int:
+    """Return how many cases a judge metric's lift left out because the arms' judge models differed."""
+    from skillevaluator.tier3.harbor.collector import _LLM_JUDGE_METRICS
+
+    count = mixed.get(metric) if isinstance(mixed, dict) and metric in _LLM_JUDGE_METRICS else None
+    # A count JSON cannot carry exactly is left out rather than published as ``null``.
+    return count if type(count) is int and 0 < count <= _MAX_JSON_SAFE_INTEGER else 0
 
 
 def _build_dimensions(
@@ -2483,12 +2879,34 @@ def _bounded_custom_metric_names(
     return names, False
 
 
+def _metric_detail(reward: dict[str, Any], metric: str) -> dict[str, Any] | None:
+    """Return the grader detail that explains one metric score in ``reward``."""
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+
+    custom_details = reward.get("custom_details")
+    custom_detail_is_authoritative = (
+        metric not in DEFAULT_METRICS and isinstance(custom_details, dict) and metric in custom_details
+    )
+    if custom_detail_is_authoritative:
+        detail = custom_details[metric]
+    else:
+        details = reward.get("details")
+        detail = details.get(metric) if isinstance(details, dict) else None
+        if not isinstance(detail, dict):
+            detail = custom_details.get(metric) if isinstance(custom_details, dict) else None
+    return detail if isinstance(detail, dict) else None
+
+
 def _metric_evidence(
     metric: str,
     rewards: list[dict[str, Any]],
     report_budget: _ReportBudget,
     sampling: dict[str, Any] | None = None,
+    *,
+    lift_excluded_case_ids: Collection[str] = (),
 ) -> list[dict[str, Any]]:
+    from skillevaluator.tier3.eval_core.atif_helpers import _METRIC_EVIDENCE_REF_METRICS
+    from skillevaluator.tier3.harbor.collector import _entry_id
     from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, metric_set_for_reward
 
     if report_budget.evidence_remaining <= 0:
@@ -2510,28 +2928,20 @@ def _metric_evidence(
             continue
         if metric in DEFAULT_METRICS and metric not in metric_set_for_reward(reward)[1]:
             continue
-        custom_details = reward.get("custom_details")
-        custom_detail_is_authoritative = (
-            metric not in DEFAULT_METRICS and isinstance(custom_details, dict) and metric in custom_details
-        )
-        if custom_detail_is_authoritative:
-            detail = custom_details[metric]
-        else:
-            details = reward.get("details")
-            detail = details.get(metric) if isinstance(details, dict) else None
-            if not isinstance(detail, dict):
-                detail = custom_details.get(metric) if isinstance(custom_details, dict) else None
-        if not isinstance(detail, dict):
+        detail = _metric_detail(reward, metric)
+        if detail is None:
             continue
 
         raw_score = _finite_float(reward.get(metric))
         if raw_score is None:
             raw_score = _custom_metric_value(reward, metric)
+        score_failed = raw_score is not None and raw_score < TRIAL_PASS_THRESHOLD
 
         notes: list[str] = []
-        reason = detail.get("reason")
-        if isinstance(reason, str) and reason.strip():
-            notes.append(reason.strip()[:512])
+        raw_grader_reason = detail.get("reason")
+        reason = sanitize_grader_text(raw_grader_reason)
+        if reason:
+            notes.append(reason[:512])
 
         failures: list[str] = []
         results = detail.get("results")
@@ -2539,9 +2949,9 @@ def _metric_evidence(
             for result in results:
                 if not isinstance(result, dict) or result.get("passed") is not False:
                     continue
-                failure = result.get("reason")
-                if isinstance(failure, str) and failure.strip():
-                    failures.append(failure.strip()[:512])
+                failure = sanitize_grader_text(result.get("reason"))
+                if failure:
+                    failures.append(failure[:512])
                 if len(failures) == 3:
                     break
 
@@ -2558,6 +2968,17 @@ def _metric_evidence(
             "checks": checks,
             "evidence_refs": _compact_evidence_refs(detail.get("evidence_refs")),
         }
+        if lift_excluded_case_ids and _entry_id(reward) in lift_excluded_case_ids:
+            # The case's arms were scored by different judge models: its score
+            # counts in the arm score but not in this metric's lift.
+            entry["comparison_excluded"] = True
+        if score_failed and metric in _METRIC_EVIDENCE_REF_METRICS and not entry["evidence_refs"]:
+            from skillevaluator.evaluation.tier3_findings import evidence_unavailable_reason
+
+            entry["evidence_unavailable_reason"] = evidence_unavailable_reason(reward)
+        # The built reason and excerpt are not part of the fingerprint: attempts
+        # of one case often quote different commands under the same grader
+        # reason, and they still collapse into one entry with ``occurrences``.
         fingerprint = json.dumps(
             entry,
             sort_keys=True,
@@ -2575,6 +2996,22 @@ def _metric_evidence(
             report_budget.omit("evidence_entries")
             output_truncated = True
             continue
+        if score_failed:
+            # Graders that record only findings or failed criteria still explain
+            # a failing score. Notes already show the grader's own reason, so the
+            # separate built reason omits that text and leaves out failing
+            # results, which the card already lists as ``failures``.
+            omitted_reasons = (raw_grader_reason, *notes) if isinstance(raw_grader_reason, str) else tuple(notes)
+            if fallback_reason := failure_reason(
+                detail,
+                include_results=False,
+                metric=metric,
+                reward=reward,
+                omit=omitted_reasons,
+            ):
+                entry["reason"] = fallback_reason
+            if excerpt := failure_excerpt(detail):
+                entry["excerpt"] = excerpt
         evidence.append(entry)
         by_fingerprint[fingerprint] = entry
         report_budget.evidence_remaining -= 1
@@ -2702,6 +3139,8 @@ def _evaluator_card(
     rewards: list[dict[str, Any]],
     report_budget: _ReportBudget,
     baseline_only: bool = False,
+    lift_exclusion: dict[str, Any] | None = None,
+    lift_basis: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if baseline_only:
         # No with-skill arm ran: the baseline score sets the card's status band.
@@ -2709,6 +3148,10 @@ def _evaluator_card(
         headline = _as_float(scores.get("baseline"))
     else:
         ws = headline = _as_float(scores.get("with_skill"))
+    excluded_cases = scores.get("lift_excluded_cases")
+    if baseline_only or type(excluded_cases) is not int or excluded_cases <= 0:
+        excluded_cases = 0
+    excluded_case_ids: set[str] = set((lift_exclusion or {}).get("case_ids") or ()) if excluded_cases else set()
     evidence_sampling: dict[str, Any] = {}
     card = {
         "id": metric,
@@ -2717,11 +3160,66 @@ def _evaluator_card(
         "baseline": scores.get("baseline"),
         "lift": scores.get("lift"),
         "status": "pass" if headline >= 0.8 else ("warn" if headline >= 0.6 else "fail"),
-        "evidence": _metric_evidence(metric, rewards, report_budget, evidence_sampling),
+        "evidence": _metric_evidence(
+            metric, rewards, report_budget, evidence_sampling, lift_excluded_case_ids=excluded_case_ids
+        ),
     }
     if evidence_sampling:
         card["evidence_sampling"] = evidence_sampling
+    if excluded_cases:
+        card["comparison_basis"] = _card_comparison_basis(
+            metric,
+            excluded_cases,
+            excluded_case_ids,
+            lift_exclusion,
+            lift_basis,
+            arm_scores=scores.get("with_skill") is not None and scores.get("baseline") is not None,
+        )
     return card
+
+
+def _card_comparison_basis(
+    metric: str,
+    excluded_cases: int,
+    case_ids: set[str],
+    lift_exclusion: dict[str, Any] | None,
+    lift_basis: dict[str, Any] | None,
+    *,
+    arm_scores: bool,
+) -> dict[str, Any]:
+    """Explain which cases an evaluator card's lift left out while its arm scores keep them.
+
+    ``excluded_cases`` is the comparison's own count. ``case_ids`` lists the
+    lift's keys for the cases the loaded rewards identify (case IDs without an
+    attempt suffix), which can be fewer, for example for a saved run whose
+    rewards were not loaded. The with-skill attempt counts are both ``None``
+    unless both arms' rewards loaded completely and identify every left-out
+    case: ``excluded_attempts`` scored the metric on those cases, and
+    ``contributing_attempts`` fed the metric's lift. ``arm_scores`` says whether
+    both arm scores exist for the reason to point at.
+    """
+    exclusion = lift_exclusion or {}
+    # The lift basis is published whenever both arms' reward loads report complete,
+    # even when a logical trial named two cases and left the comparison short.
+    complete = exclusion.get("complete") is True and isinstance(lift_basis, dict) and len(case_ids) == excluded_cases
+    metrics_basis = lift_basis.get("metrics") if complete else None
+    metric_basis = metrics_basis.get(metric) if isinstance(metrics_basis, dict) else None
+    trials = metric_basis.get("trials") if isinstance(metric_basis, dict) else None
+    contributing = trials.get("with_skill") if isinstance(trials, dict) else None
+    excluded_attempts = exclusion.get("excluded_attempts") if complete else None
+    if type(contributing) is not int or type(excluded_attempts) is not int:
+        contributing = excluded_attempts = None
+    reason = "Cases whose arms were scored by different judge models are left out of this metric's lift"
+    return {
+        "excluded_cases": excluded_cases,
+        # Cutting can make two long keys equal; each is listed once.
+        "case_ids": sorted({case_id[:_MAX_LIFT_EXCLUDED_CASE_ID_CHARS] for case_id in case_ids})[
+            :_MAX_LIFT_EXCLUDED_CASE_IDS_PER_CARD
+        ],
+        "excluded_attempts": excluded_attempts,
+        "contributing_attempts": contributing,
+        "reason": f"{reason}; the arm scores include them." if arm_scores else f"{reason}.",
+    }
 
 
 def _evaluator_cards(
@@ -2733,6 +3231,8 @@ def _evaluator_cards(
     custom_lift: dict[str, Any],
     report_budget: _ReportBudget,
     baseline_only: bool = False,
+    lift_exclusions: dict[str, dict[str, Any]] | None = None,
+    lift_basis: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     from skillevaluator.tier3.harbor.metrics import METRIC_DISPLAY
 
@@ -2757,6 +3257,8 @@ def _evaluator_cards(
                 rewards=rewards,
                 report_budget=report_budget,
                 baseline_only=baseline_only,
+                lift_exclusion=(lift_exclusions or {}).get(metric),
+                lift_basis=lift_basis,
             )
         )
 
@@ -2818,12 +3320,90 @@ def _cases(info: dict[str, Any]) -> list[dict[str, Any]]:
     return cases
 
 
+def _correct_answer_arm(value: object) -> dict[str, int | None]:
+    summary = value.get("correct_answers") if isinstance(value, dict) else None
+    summary = summary if isinstance(summary, dict) else {}
+
+    def count(name: str) -> int | None:
+        number = summary.get(name)
+        return number if isinstance(number, int) and not isinstance(number, bool) and number >= 0 else None
+
+    return {"correct": count("correct"), "scored": count("scored")}
+
+
+def _correct_answer_comparison(info: dict[str, Any]) -> dict[str, Any]:
+    return _count_comparison(info, "correct_answers", numerator="correct")
+
+
+def _count_arm(value: object, key: str, *, numerator: str) -> dict[str, int | None]:
+    summary = value.get(key) if isinstance(value, dict) else None
+    summary = summary if isinstance(summary, dict) else {}
+
+    def count(name: str) -> int | None:
+        number = summary.get(name)
+        return number if isinstance(number, int) and not isinstance(number, bool) and number >= 0 else None
+
+    return {numerator: count(numerator), "scored": count("scored")}
+
+
+def _count_comparison(info: dict[str, Any], key: str, *, numerator: str) -> dict[str, Any]:
+    with_skill = _count_arm(info.get("pass_with_skill"), key, numerator=numerator)
+    without_skill = _count_arm(info.get("pass_without_skill"), key, numerator=numerator)
+    difference = None
+    if (
+        with_skill[numerator] is not None
+        and with_skill["scored"]
+        and without_skill[numerator] is not None
+        and without_skill["scored"]
+    ):
+        if with_skill["scored"] == without_skill["scored"]:
+            difference = with_skill[numerator] - without_skill[numerator]
+        else:
+            difference = round(
+                100.0
+                * (with_skill[numerator] / with_skill["scored"] - without_skill[numerator] / without_skill["scored"]),
+                1,
+            )
+    return {
+        "with_skill": with_skill,
+        "without_skill": without_skill,
+        "difference": difference,
+        "difference_unit": (
+            "percentage_points"
+            if difference is not None and with_skill["scored"] != without_skill["scored"]
+            else "count"
+        ),
+    }
+
+
+def _required_check_comparison(info: dict[str, Any]) -> dict[str, Any]:
+    comparison = _count_comparison(info, "required_checks", numerator="passed")
+    for arm_name, source_name in (("with_skill", "pass_with_skill"), ("without_skill", "pass_without_skill")):
+        arm = info.get(source_name)
+        checks = arm.get("required_checks") if isinstance(arm, dict) else None
+        checks = checks if isinstance(checks, dict) else {}
+        comparison[arm_name].update(
+            wrong_answer=checks.get("wrong_answer", 0),
+            security=checks.get("security", 0),
+        )
+    return comparison
+
+
+def _security_clean_comparison(info: dict[str, Any]) -> dict[str, Any]:
+    return _count_comparison(info, "security_clean", numerator="clean")
+
+
 # ---------------------------------------------------------------------------
 # Trials (Trials tab)
 # ---------------------------------------------------------------------------
 
 
-def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list[dict[str, Any]]:
+def _normalize_trials(
+    rewards: list[dict[str, Any]],
+    metrics: list[str],
+    *,
+    pass_threshold: float = 0.5,
+) -> list[dict[str, Any]]:
     """Project raw Harbor reward dicts into canonical per-trial entries.
 
     Each reward (loaded by ``_load_agent_data``) carries the per-evaluator
@@ -2835,15 +3415,18 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
     # Import lazily: ``skillevaluator.tier3`` imports report construction through
     # its command module, so importing Harbor metrics at module load time creates
     # a collector-first circular import.
+    from skillevaluator.tier3.attempt_verdict import attempt_verdict
     from skillevaluator.tier3.harbor.metrics import (
         DEFAULT_METRIC_SET,
         LEGACY_METRIC_SET,
+        metric_is_not_applicable,
         metric_set_for_reward,
         metric_set_for_rewards,
         metric_value,
         overall_score,
     )
     from skillevaluator.tier3.harbor.report_data import logical_trial_reward_groups
+    from skillevaluator.tier3.harbor.resource_usage import normalized_trial_timing
 
     out: list[dict[str, Any]] = []
     reward_groups = logical_trial_reward_groups([reward for reward in rewards if isinstance(reward, dict)])
@@ -2878,9 +3461,19 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
             "scores": scores,
             "overall": _complete_mean([overall_score(item) for item in group]) if group_is_consistent else None,
         }
+        verdict = attempt_verdict(trial["overall"], pass_threshold, reward=reward)
+        trial["attempt_verdict"] = {
+            "passed": verdict.passed,
+            "reason": verdict.reason,
+            "warnings": list(verdict.warnings),
+        }
         from skillevaluator.tier3.harbor.metrics import not_applicable_metrics
 
         trial["not_applicable_metrics"] = not_applicable_metrics(group, metrics)
+        # One extraction point for the drill-down tooltips of both arms.
+        score_reasons = _trial_score_reasons(standard_rows, scores)
+        if score_reasons:
+            trial["score_reasons"] = score_reasons
         seconds = _finite_float(reward.get("_agent_seconds"))
         if not is_multi_row and seconds is not None and seconds >= 0:
             trial["agent_seconds"] = seconds
@@ -2899,6 +3492,9 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
                 }
                 if cached_tokens is not None:
                     trial["tokens"]["cached"] = cached_tokens
+            timing = normalized_trial_timing(traj.get("timing"))
+            if timing is not None:
+                trial["timing"] = timing
         warnings = list(
             dict.fromkeys(
                 str(warning) for item in group if isinstance(item.get("warnings"), list) for warning in item["warnings"]
@@ -2912,9 +3508,17 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
             (not declared_metric_set or str(declared_metric_set) in standard_metric_sets)
             and metric_set in standard_metric_sets
             and "skill_execution" in standard_metrics
-            and metric_value(reward, "skill_execution") is not None
+            and (
+                metric_value(reward, "skill_execution") is not None
+                or metric_is_not_applicable(reward, "skill_execution")
+            )
         )
-        if not is_multi_row and is_standard_reward and reward.get("invocation_evidence_source") == "trajectory":
+        if (
+            not is_multi_row
+            and reward.get("invocation_evidence_scope") != "step"
+            and is_standard_reward
+            and reward.get("invocation_evidence_source") == "trajectory"
+        ):
             for key in ("skill_invoked", "routing_passed"):
                 if type(reward.get(key)) is bool:
                     trial[key] = reward[key]
@@ -2923,8 +3527,152 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
         harbor_viewer = _normalize_harbor_viewer_metadata(reward.get("harbor_viewer"))
         if harbor_viewer:
             trial["harbor_viewer"] = harbor_viewer
+        trial["activation_validation"] = _trial_activation_validation(group, trial)
         out.append(trial)
     return out
+
+
+def _trusted_observed_activation(reward: dict[str, Any]) -> str:
+    """Project collector-issued invocation evidence; never inspect trajectory or scores as proof."""
+    from skillevaluator.tier3.harbor.metrics import (
+        DEFAULT_METRIC_SET,
+        LEGACY_METRIC_SET,
+        metric_is_not_applicable,
+        metric_set_for_reward,
+        metric_value,
+    )
+
+    standard_sets = {DEFAULT_METRIC_SET, LEGACY_METRIC_SET}
+    declared = reward.get("metric_set") or reward.get("metric_set_version")
+    metric_set, metrics = metric_set_for_reward(reward)
+    if (
+        (declared and str(declared) not in standard_sets)
+        or metric_set not in standard_sets
+        or "skill_execution" not in metrics
+        or (metric_value(reward, "skill_execution") is None and not metric_is_not_applicable(reward, "skill_execution"))
+        or reward.get("invocation_evidence_source") != "trajectory"
+    ):
+        return "unknown"
+    invoked = reward.get("skill_invoked")
+    return ("invoked" if invoked else "not_invoked") if type(invoked) is bool else "unknown"
+
+
+def _trial_activation_validation(group: list[dict[str, Any]], trial: dict[str, Any]) -> dict[str, Any]:
+    """Keep routing, task quality, workflow and resources at their observed scopes.
+
+    Fallback reward rows do not prove a complete logical trajectory. Even when
+    every retained row says non-use, omitted steps may have used the skill.
+    Only a collector-produced single/merged root can certify logical non-use.
+    """
+    scopes: list[dict[str, Any]] = []
+    for index, reward in enumerate(group[:_MAX_EVIDENCE_PER_CARD]):
+        scope: dict[str, Any] = {"reward_row": index, "observed_activation": _trusted_observed_activation(reward)}
+        artifacts = reward.get("_activation_artifacts")
+        if isinstance(artifacts, dict):
+            scope["artifacts"] = {
+                key: value
+                for key, value in artifacts.items()
+                if key in {"reward", "trajectory"}
+                and isinstance(value, str)
+                and len(value) <= 4096
+                and not Path(value).is_absolute()
+                and ".." not in Path(value).parts
+            }
+        details = reward.get("details")
+        execution = details.get("skill_execution") if isinstance(details, dict) else None
+        workflow: dict[str, Any] = {}
+        if isinstance(execution, dict):
+            for key in ("workflow_order", "script_execution", "error_recovery"):
+                check = execution.get(key)
+                if isinstance(check, dict):
+                    workflow[key] = {
+                        "passed": check.get("passed") if type(check.get("passed")) is bool else None,
+                        "score": _unit_interval_score(check.get("score")),
+                    }
+        scope["workflow"] = workflow
+        scopes.append(scope)
+    logical_scope = len(group) == 1 and group[0].get("invocation_evidence_scope") == "logical_trial"
+    return {
+        "expected_activation": None,
+        "observed_activation": _trusted_observed_activation(group[0]) if logical_scope else "unknown",
+        "expectation_status": "unknown",
+        "observation_scope": "logical_trial" if logical_scope else "reward_rows_only",
+        "evidence_scopes": scopes,
+        "evidence_scopes_complete": len(group) <= _MAX_EVIDENCE_PER_CARD,
+        "task_outcome": {key: trial["scores"].get(key) for key in ("accuracy", "goal_accuracy")},
+        "resources": {key: trial[key] for key in ("steps", "tokens", "agent_seconds", "timing") if key in trial},
+    }
+
+
+def _attach_activation_expectations(
+    agents: dict[str, dict[str, Any]],
+    dataset: list[dict[str, Any]],
+    skill_name: str,
+) -> None:
+    """Compare authored expectations with observed use, independently of correctness."""
+    from skillevaluator.tier3.eval_core.checks import resolve_acceptable_skills, resolve_should_trigger
+
+    entries: dict[str, list[dict[str, Any]]] = {}
+    for entry in dataset:
+        if isinstance(entry, dict) and entry.get("id") is not None:
+            entries.setdefault(str(entry["id"]), []).append(entry)
+    for agent in agents.values():
+        for arm, baseline in (("trials", False), ("trials_baseline", True)):
+            for trial in agent.get(arm, []):
+                expected: bool | None = False if baseline else None
+                matches = entries.get(str(trial.get("entry_id")), [])
+                if not baseline and len(matches) == 1:
+                    entry = matches[0]
+                    should_trigger = resolve_should_trigger(entry)
+                    if should_trigger is False:
+                        expected = False
+                    elif should_trigger is True:
+                        expected_skill = entry.get("expected_skill")
+                        if isinstance(expected_skill, str) and expected_skill.strip():
+                            target = skill_name.strip().lower()
+                            if expected_skill.strip().lower() == target:
+                                expected = True
+                            elif target not in {name.lower() for name in resolve_acceptable_skills(entry)}:
+                                expected = False
+                            # Allowed alternate use is optional, so neither use nor non-use is required.
+                validation = trial["activation_validation"]
+                validation["expected_activation"] = expected
+                observed = validation["observed_activation"]
+                if expected is not None and observed != "unknown":
+                    validation["expectation_status"] = (
+                        "matched" if (observed == "invoked") == expected else "mismatched"
+                    )
+
+
+def _trial_score_reasons(
+    rows: list[tuple[dict[str, Any], tuple[str, ...]]],
+    scores: dict[str, float],
+) -> dict[str, str]:
+    """Return one bounded grader reason per failing metric of a logical trial.
+
+    A logical trial can span several reward rows. The reason comes from the
+    lowest-scoring row that explains the metric, so a passing row cannot hide a
+    failure behind the averaged score.
+    """
+    from skillevaluator.tier3.harbor.metrics import metric_value
+
+    reasons: dict[str, str] = {}
+    for metric in scores:
+        lowest: tuple[float, str] | None = None
+        for row, row_metrics in rows:
+            if metric not in row_metrics:
+                continue
+            row_score = metric_value(row, metric)
+            if row_score is None or row_score >= TRIAL_PASS_THRESHOLD:
+                continue
+            if lowest is not None and row_score >= lowest[0]:
+                continue
+            reason = failure_reason(_metric_detail(row, metric), metric=metric, reward=row)
+            if reason:
+                lowest = (row_score, reason)
+        if lowest is not None:
+            reasons[metric] = lowest[1]
+    return reasons
 
 
 def _attach_baseline_pairs(
@@ -3423,6 +4171,52 @@ def _recommendation_category_from(text: str) -> str:
     return _RECO_CATEGORY_HINTS.get(first, "Action")
 
 
+def _is_case_verdict(conclusion: object) -> bool:
+    """Whether a conclusion is the per-case verdict that ``_apply_case_findings`` adds (the report headline)."""
+    return isinstance(conclusion, dict) and conclusion.get("title") == "Skill effect"
+
+
+def _saved_case_fixes(run_dir: Path) -> list[dict[str, Any]] | None:
+    """The run's ``what_to_fix.json`` when the report can show it as is, else ``None``."""
+    from skillevaluator.tier3.case_summary import load_case_findings
+
+    fixes = load_case_findings(run_dir)
+    if fixes is None or any(
+        not all(isinstance(fix.get(key), str) for key in ("case", "scope", "kind", "what"))
+        or not all(isinstance(fix.get(key) or "", str) for key in ("action", "evidence"))
+        for fix in fixes
+    ):
+        return None
+    return fixes
+
+
+def _apply_saved_feedback(
+    payload: dict[str, Any],
+    saved_feedback: dict[str, list[Any]],
+    engine_result: dict[str, Any] | None,
+    run_dir: Path,
+    skill_path: Path,
+) -> None:
+    """Show the report feedback a completed run saved, with no LLM call.
+
+    The case-findings pass still runs without the LLM, on the run's own
+    ``what_to_fix.json`` when it is usable (otherwise it writes the rule-based
+    fixes), so what it adds beyond the saved fields stays. Saved conclusions
+    that carry the per-case verdict replace the pass's verdict and fixes, so
+    rule-based fixes written then can differ from the saved recommendations;
+    feedback saved before the verdict existed gets both added, as a fresh
+    render shows them.
+    """
+    saved = {field: list(saved_feedback[field]) for field in _TIER3_FEEDBACK_FIELDS if field in saved_feedback}
+    fixes = _saved_case_fixes(run_dir)
+    if any(_is_case_verdict(item) for item in saved.get("conclusions", [])):
+        _apply_case_findings(payload, engine_result, run_dir, skill_path, use_llm=False, fixes=fixes)
+        payload.update(saved)
+    else:
+        payload.update(saved)
+        _apply_case_findings(payload, engine_result, run_dir, skill_path, use_llm=False, fixes=fixes)
+
+
 def _apply_case_findings(
     payload: dict[str, Any],
     engine_result: dict[str, Any] | None,
@@ -3430,8 +4224,12 @@ def _apply_case_findings(
     skill_path: Path,
     *,
     use_llm: bool,
+    fixes: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Lead the report with the case-based verdict and fixes; also saves them as what_to_fix.json for the CLI."""
+    """Lead the report with the case-based verdict and fixes; also saves them as what_to_fix.json for the CLI.
+
+    ``fixes`` already saved for the run are reused as they are and not written again.
+    """
     from skillevaluator.tier3.case_summary import goal_not_met_count, save_case_findings, what_to_fix
     from skillevaluator.tier3.case_summary import verdict as case_verdict
 
@@ -3442,8 +4240,9 @@ def _apply_case_findings(
     if not isinstance(source, dict) or not isinstance(source.get("agents"), dict):
         return
     try:
-        fixes = what_to_fix(source, run_dir=run_dir, skill_path=skill_path, use_llm=use_llm)
-        save_case_findings(run_dir, fixes)
+        if fixes is None:
+            fixes = what_to_fix(source, run_dir=run_dir, skill_path=skill_path, use_llm=use_llm)
+            save_case_findings(run_dir, fixes)
     except Exception:  # advisory: the report keeps its metric-based insights
         logger.debug("Case findings skipped", exc_info=True)
         return
@@ -3487,6 +4286,10 @@ def _apply_case_findings(
         for fix in fixes
     ]
     payload["suggestions"] = [fix["action"] for fix in fixes if fix.get("action")]
+    from skillevaluator.tier3.next_steps import next_steps
+
+    with contextlib.suppress(Exception):  # advisory, like the fixes above
+        payload["next_steps"] = next_steps(source, run_dir=run_dir, fixes=fixes)
 
 
 def _recommendation_title_from(text: str) -> str:
@@ -3541,11 +4344,23 @@ def _build_conclusions(
         )
 
     failing_trials: list[str] = []
+    unscored_trials: list[str] = []
     for agent_name, agent in agents.items():
         for trial in agent.get("trials") or []:
             overall = _finite_float(trial.get("overall"))
-            if overall is None or overall < pass_threshold:
-                failing_trials.append(f"{agent_name}/{trial.get('entry_id') or trial.get('trial_id')}")
+            trial_label = f"{agent_name}/{trial.get('entry_id') or trial.get('trial_id')}"
+            attempt = trial.get("attempt_verdict")
+            attempt_passed = attempt.get("passed") if isinstance(attempt, dict) else None
+            attempt_reason = attempt.get("reason") if isinstance(attempt, dict) else None
+            if attempt_passed is False:
+                if overall is None and attempt_reason == "overall score was not available":
+                    unscored_trials.append(trial_label)
+                else:
+                    failing_trials.append(trial_label)
+            elif overall is None:
+                unscored_trials.append(trial_label)
+            elif overall < pass_threshold:
+                failing_trials.append(trial_label)
     if failing_trials:
         conclusions.append(
             {
@@ -3554,6 +4369,17 @@ def _build_conclusions(
                 "message": (
                     f"{len(failing_trials)} trial(s) missed the pass threshold; examples: "
                     + ", ".join(failing_trials[:5])
+                ),
+            }
+        )
+    if unscored_trials:
+        conclusions.append(
+            {
+                "severity": "warn",
+                "title": "Unscored trials",
+                "message": (
+                    f"{len(unscored_trials)} trial(s) have unavailable overall scores; examples: "
+                    + ", ".join(unscored_trials[:5])
                 ),
             }
         )
@@ -3643,6 +4469,36 @@ def _precomputed_score(precomputed: dict[str, Any], dim_id: str) -> float | None
     return None
 
 
+def _lift_overall_scores(
+    overall_lift: float | None,
+    judge_lift: dict[str, Any] | None,
+    overall_ws: float | None,
+    overall_bl: float | None,
+) -> dict[str, float] | None:
+    """Return the two overall scores that the published overall lift subtracts.
+
+    When a metric is N/A in one arm it drops out of both arms for lift, so these
+    scores can differ from the arm overall scores.
+    """
+    if overall_lift is None:
+        return None
+    entry = judge_lift.get("overall") if isinstance(judge_lift, dict) else None
+    candidates = []
+    if isinstance(entry, dict):
+        candidates.append(
+            (_unit_interval_score(entry.get("with_skill")), _unit_interval_score(entry.get("without_skill")))
+        )
+    candidates.append((overall_ws, overall_bl))
+    for with_score, baseline_score in candidates:
+        if (
+            with_score is not None
+            and baseline_score is not None
+            and abs((with_score - baseline_score) - overall_lift) <= 1e-4 + 1e-9
+        ):
+            return {"with_skill": round(with_score, 4), "baseline": round(baseline_score, 4)}
+    return None
+
+
 def _lift_value(metric: str, lift_data: dict[str, Any]) -> float | None:
     entry = lift_data.get(metric)
     if isinstance(entry, dict):
@@ -3663,35 +4519,57 @@ def _verdict_from_lift(lift: float | None) -> str:
 
 
 def _agent_quality_verdict(agent: dict[str, Any]) -> str:
-    """Classify one supported agent by the canonical dimension gate."""
+    """Classify one supported agent by required checks, then dimensions.
+
+    A dimension below the neutral threshold fails the agent even when another
+    dimension has no score (for example Correctness without ``ground_truth``).
+    A missing or non-finite dimension still blocks PASS.
+    """
     if agent.get("execution_status") != "succeeded":
         return VERDICT_NEUTRAL
     if _never_activated(agent):
         return VERDICT_INCONCLUSIVE
+    from skillevaluator.tier3.attempt_verdict import required_check_failure_reason
 
+    required_checks = agent.get("required_checks")
+    required_check_arm = required_checks.get("with_skill") if isinstance(required_checks, dict) else None
+    if required_check_failure_reason(required_check_arm):
+        return VERDICT_FAIL
     dimensions = {
         str(dimension.get("id")): dimension
         for dimension in agent.get("dimensions") or []
         if isinstance(dimension, dict)
     }
     scores: list[float] = []
+    incomplete = False
     for dimension_id in _DIMENSION_IDS:
         dimension = dimensions.get(dimension_id)
         value = (dimension or {}).get("with_skill", (dimension or {}).get("score"))
         numeric = _finite_float(value)
         if numeric is None:
-            return VERDICT_NEUTRAL
-        scores.append(numeric)
+            incomplete = True
+        else:
+            scores.append(numeric)
 
     if any(score < DIMENSION_VERDICT_NEUTRAL_THRESHOLD for score in scores):
         return VERDICT_FAIL
-    if any(score < DIMENSION_VERDICT_PASS_THRESHOLD for score in scores):
+    if incomplete or any(score < DIMENSION_VERDICT_PASS_THRESHOLD for score in scores):
         return VERDICT_NEUTRAL
     return VERDICT_PASS
 
 
+def _agent_quality_verdict_reason(agent: dict[str, Any]) -> str | None:
+    if _never_activated(agent):
+        return None
+    from skillevaluator.tier3.attempt_verdict import required_check_failure_reason
+
+    required_checks = agent.get("required_checks")
+    arm = required_checks.get("with_skill") if isinstance(required_checks, dict) else None
+    return required_check_failure_reason(arm)
+
+
 def _overall_verdict_from_agents(agents: dict[str, dict[str, Any]]) -> str:
-    """PASS only when one supported agent passes every required dimension."""
+    """PASS only when one supported agent passes its quality requirements."""
     verdicts = [
         _agent_quality_verdict(agent) for agent in agents.values() if agent.get("execution_status") == "succeeded"
     ]
@@ -3804,10 +4682,27 @@ def _build_baseline_only_conclusions(
     return conclusions
 
 
+def _headline_agents(
+    agents: dict[str, dict[str, Any]], *, score_field: str = "with_skill"
+) -> dict[str, dict[str, Any]]:
+    """Return the agents that set the run's best agent and verdict.
+
+    An agent kept by --tolerate-baseline-timeouts is set aside whenever an
+    agent with a complete baseline ranks, so the headline score and verdict
+    both come from complete evidence.
+    """
+    from skillevaluator.tier3.harbor.baseline_timeouts import kept_with_failed_baseline
+
+    complete = {name: agent for name, agent in agents.items() if not kept_with_failed_baseline(agent)}
+    if any(_canonical_agent_rank(agent, score_field=score_field) is not None for agent in complete.values()):
+        return complete
+    return agents
+
+
 def _pick_best_agent(agents: dict[str, dict[str, Any]], *, score_field: str = "with_skill") -> str:
     eligible = {
         name: rank
-        for name, agent in agents.items()
+        for name, agent in _headline_agents(agents, score_field=score_field).items()
         if (rank := _canonical_agent_rank(agent, score_field=score_field)) is not None
     }
     activated = {name: rank for name, rank in eligible.items() if not _never_activated(agents[name])}
@@ -3933,6 +4828,12 @@ def _run_truth_metadata(
             truth["dataset"] = [entry for entry in candidate["dataset"] if isinstance(entry, dict)]
         if "dataset_summary" not in truth and isinstance(candidate.get("dataset_summary"), dict):
             truth["dataset_summary"] = dict(candidate["dataset_summary"])
+        if "dataset_provenance" not in truth:
+            from skillevaluator.tier3.dataset_provenance import sanitize_generation_record
+
+            provenance = sanitize_generation_record(candidate.get("dataset_provenance"))
+            if provenance is not None:
+                truth["dataset_provenance"] = provenance
         for field_name in ("evaluator_version", "dataset_digest", "dataset_digest_algorithm"):
             value = candidate.get(field_name)
             if field_name not in truth and isinstance(value, str) and value.strip():
@@ -4054,9 +4955,21 @@ def _dataset_summary(dataset: list[dict[str, Any]], trials: list[dict[str, Any]]
 
 def _verdict_policy(attempt_policy: dict[str, Any]) -> dict[str, Any]:
     """Expose the distinct task-attempt, dimension, and overall-lift gates."""
+    from skillevaluator.tier3.attempt_verdict import (
+        DEFAULT_GOAL_ACCURACY_PASS_THRESHOLD,
+        DEFAULT_SECURITY_PASS_THRESHOLD,
+        RUN_FAILS_ON_ANY_FAILED_CASE,
+    )
+
     attempt_threshold = attempt_policy.get("pass_threshold")
     return {
         "attempt_pass_threshold": _finite_float(attempt_threshold),
+        "goal_accuracy_pass_threshold": DEFAULT_GOAL_ACCURACY_PASS_THRESHOLD,
+        "security_pass_threshold": DEFAULT_SECURITY_PASS_THRESHOLD,
+        "attempt_pass_rule": "overall_threshold_and_goal_accuracy_and_security_threshold_when_scored",
+        "run_fail_policy": "any_with_skill_required_check_failure"
+        if RUN_FAILS_ON_ANY_FAILED_CASE
+        else "dimension_gate",
         "dimension_pass_threshold": DIMENSION_VERDICT_PASS_THRESHOLD,
         "dimension_neutral_threshold": DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
         "lift_pass_threshold": TIER3_LIFT_PASS_THRESHOLD,

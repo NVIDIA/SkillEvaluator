@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Merge this into an existing .gitlab-ci.yml or use it as the complete file.
 # The release-generated copy pins both the reusable job and its container image.
+# The image uses the default OSS policy for public and private repositories.
+# No internal/external variable is needed; artifacts follow repository access.
 include:
   - remote: https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/RELEASE_WORKFLOW_SHA/ci/gitlab/skill-evaluation.yml
 
@@ -8,6 +10,7 @@ variables:
   SKILL_EVAL_IMAGE: ghcr.io/nvidia/skillevaluator-tier1@sha256:RELEASE_IMAGE_DIGEST
   SKILL_EVAL_PATHS: "skills"
   SKILL_EVAL_MIN_SCORE: "70"
+  SKILL_EVAL_SECURITY_BASELINES: "false"
 
 # GitLab requires merge-request rules directly in the root file, even when a
 # job is included. Preserve your existing workflow rules if you have them.

@@ -45,12 +45,129 @@ from skillevaluator.validators.markdown import markdown_link_targets
 logger = get_logger(__name__)
 
 _WORD_CHAR = r"A-Za-z0-9_"
+# Role and control tags that stay reportable in ``argument-hint`` even when they
+# look like a CLI placeholder, including nested forms (``<system<payload>>``) and a
+# role word with a message-part suffix (``<system_prompt>``, ``<toolCall>``,
+# ``<user_message>``, ``<tool_results>``). Other suffixes name an ordinary value
+# (``<tool_name>``, ``<user_id>``, ``<prompt_file>``, ``<toolchain>``,
+# ``<systemd-unit>``) and may be masked. ``<script>`` takes no suffix.
+_ARGUMENT_CONTROL_TAG_RE = re.compile(
+    r"<(?:(?:system|developer|assistant|user|tool|context|instructions?|prompt|override|rules|policy)"
+    r"(?:[_-]?(?:prompt|message|call|use|result|instruction)s?)?|script)(?=[\s<>:])",
+    re.IGNORECASE,
+)
+# The text before a nested placeholder in its outer group: a plain name such as the
+# ``R`` in ``<R<NNN>>``. Anything else (``<curl;sh<x>>``, ``<$(curl x|sh)<x>>``) is not
+# a placeholder.
+_ARGUMENT_NESTED_PREFIX_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
+# A complete group that may be a CLI placeholder such as ``<file>``, ``<plan|apply>`` or
+# ``<codec e.g. av1|h264>``: no attribute, line break, nested tag or self-closing slash.
+# ``_is_argument_placeholder`` then bounds the body before the group is masked.
+_ARGUMENT_PLACEHOLDER_RE = re.compile(r"<(?![^<>]*/\s*>)([A-Za-z][^<>=\r\n]*)>")
+# Placeholders name one value; a longer group reads as free text and stays visible.
+_ARGUMENT_PLACEHOLDER_MAX_WORDS = 4
+# Shell command syntax that never appears in a placeholder: ``;``, ``&``, backticks,
+# ``$(...)`` and ``${...}``.
+_ARGUMENT_COMMAND_SYNTAX_RE = re.compile(r"[;&`]|\$[({]")
+# Optional label before the first choice of a ``|`` list: ``stage: a | b``, ``codec e.g. av1|h264``.
+_ARGUMENT_CHOICE_LABEL_RE = re.compile(r"^(?:[^|:]+:|\S+\s+(?:e\.g\.|i\.e\.),?)\s+", re.IGNORECASE)
+# One choice in a ``|`` list: a single word or a quoted literal.
+_ARGUMENT_CHOICE_RE = re.compile(r"\S+|\"[^\"]*\"|'[^']*'")
+# A ``>`` between groups that is an arrow or a comparison, not a redirect: a
+# space-delimited ``->``, ``=>`` or ``>=`` (``<old> -> <new>``, ``<n> >= <m>``), or ``>``
+# or ``>=`` before a number after a space or bracket (``<n> > 0``, ``<count> (>0)``).
+_ARGUMENT_ARROW_OR_COMPARISON_RE = re.compile(r"(?<!\S)(?:->|=>|>=)(?!\S)|(?<![^\s(\[])>=? ?\d+(?:\.\d+)?(?![^\s)\],])")
 _URL_EDGE_C0_OR_SPACE_RE = re.compile(r"^[\x00-\x20]+|[\x00-\x20]+$")
 _ERROR_HANDLING_RE = re.compile(
     r"\b(?:errors?|exceptions?|invalid|fail(?:s|ed|ure|ures|ing)?|"
     r"validat(?:e|es|ed|ing|ion|ions))\b",
     re.IGNORECASE,
 )
+
+
+def _is_argument_placeholder(body: str) -> bool:
+    """Return whether an ``argument-hint`` group body is a short CLI placeholder.
+
+    A placeholder has at most four words (tokens with a letter or digit, so ``|``
+    and ``...`` do not count), no shell command syntax, and no space before the
+    closing ``>`` (``<cmd > file>`` is a redirect). ``|`` separates choices, and
+    each choice is one word or a quoted literal, so ``<plan|apply>`` and
+    ``<issue_id | symptom>`` pass while a pipeline such as ``<curl x | sh>`` does not.
+    """
+    if body[-1].isspace() or _ARGUMENT_COMMAND_SYNTAX_RE.search(body):
+        return False
+    words = [token for token in body.split() if any(char.isalnum() for char in token)]
+    if len(words) > _ARGUMENT_PLACEHOLDER_MAX_WORDS:
+        return False
+    if "|" not in body:
+        return True
+    choices = body.split("|")
+    choices[0] = _ARGUMENT_CHOICE_LABEL_RE.sub("", choices[0].strip(), count=1)
+    return all(_ARGUMENT_CHOICE_RE.fullmatch(choice.strip()) for choice in choices)
+
+
+def _mask_argument_placeholder(match: re.Match[str]) -> str:
+    """Mask a short CLI placeholder; leave free text and command syntax for the tag check."""
+    # "[]" cannot form a new tag when masking nested syntax such as ``<R<NNN>>``.
+    return "[]" if _is_argument_placeholder(match.group(1)) else match.group(0)
+
+
+def _masking_hides_text(masked: str) -> bool:
+    """Return whether masking left a ``>`` that could hide text inside a group.
+
+    A ``>`` that closes no group (``<cmd>file>``) reads as a redirect. Inside a group,
+    a masked placeholder must be followed directly by the group's own closing ``>``
+    (``<R<NNN>>`` masks to ``<R[]>``), and the group must open with a plain name
+    before it. Any other text after it (``<<cmd>file>``, ``<<x><y>>``,
+    ``<<x>[y] free text>``) or before it (``<curl;sh<x>>``, ``<$(curl x|sh)<x>>``)
+    means the outer group is not a placeholder. An arrow or comparison between
+    groups (``<old> -> <new>``, ``<n> >= 1``) is not a redirect.
+    """
+    operators = {
+        match.start() + match.group().index(">") for match in _ARGUMENT_ARROW_OR_COMPARISON_RE.finditer(masked)
+    }
+    opened: list[int] = []
+    after_mask = False
+    index = 0
+    while index < len(masked):
+        char = masked[index]
+        if after_mask and char != ">":
+            return True
+        after_mask = False
+        if char == "<":
+            opened.append(index)
+        elif char == ">":
+            if not opened:
+                if index not in operators:
+                    return True
+            else:
+                opened.pop()
+        elif opened and masked.startswith("[]", index):
+            if not _ARGUMENT_NESTED_PREFIX_RE.fullmatch(masked, opened[-1] + 1, index):
+                return True
+            after_mask = True
+            index += 1
+        index += 1
+    return after_mask
+
+
+def _mask_argument_hint(hint: str) -> str:
+    """Mask the short CLI placeholders in a string ``argument-hint`` for the XML tag check.
+
+    Control tags are checked on the raw value first: masking an inner placeholder
+    could otherwise erase an enclosing tag such as ``<system<payload>>``. A ``>``
+    left after masking reads as a redirect when it closes no group (``<cmd>file>``,
+    ``<cmd 2>file>``, ``<curl x> /tmp/y>``), and a group that holds anything after a
+    masked placeholder other than its own closing ``>`` (``<<cmd>file>``,
+    ``<<x><y>>``) is not a placeholder. The raw hint is then returned, so every
+    group in it stays visible to the tag check.
+    """
+    if _ARGUMENT_CONTROL_TAG_RE.search(hint):
+        return hint
+    masked = _ARGUMENT_PLACEHOLDER_RE.sub(_mask_argument_placeholder, hint)
+    if _masking_hides_text(masked):
+        return hint
+    return masked
 
 
 def _contains_term(text: str, term: str) -> bool:
@@ -428,7 +545,16 @@ class QualityScoreValidator(ValidatorBase):
         for key, val in fm.items():
             if key in ("name", "description"):
                 continue
-            if XML_TAG_RE.search(str(val)):
+            values = [str(val)]
+            # A string argument-hint documents CLI placeholders (``<file> [--strict]``).
+            if key == "argument-hint" and isinstance(val, str):
+                values = [_mask_argument_hint(val)]
+            elif key == "argument-hint" and isinstance(val, list) and val and all(isinstance(i, str) for i in val):
+                # YAML reads an unquoted ``[<file>]`` hint as a list. Check every item and
+                # the joined hint on its own, so a group split across items stays visible
+                # and no tag forms across the boundary between two checked values.
+                values = [*map(_mask_argument_hint, val), _mask_argument_hint(" ".join(val))]
+            if any(XML_TAG_RE.search(checked) for checked in values):
                 dim.deduct(
                     15,
                     "error",
@@ -751,11 +877,9 @@ class QualityScoreValidator(ValidatorBase):
         # Token estimates
         qs.total_tokens = len(content) // 4
         fm_match = FRONTMATTER_PATTERN.match(content)
-        if fm_match:
+        if fm_match and _frontmatter:
             qs.frontmatter_tokens = len(fm_match.group(1)) // 4
-        inst_start = content.find("---", 3) + 3
-        if inst_start > 3:
-            qs.instructions_tokens = len(content[inst_start:]) // 4
+            qs.instructions_tokens = len(fm_match.group(2)) // 4
 
         # The token budget is a recommendation: exceeding it is advisory (MEDIUM),
         # and the deduction still counts toward the --min-score gate.

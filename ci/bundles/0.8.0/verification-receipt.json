@@ -1,0 +1,86 @@
+{
+  "all_verified": true,
+  "image": "ghcr.io/nvidia/skillevaluator-tier1@sha256:9d5483243918937be4f2178f74cf7c622a531dee41e3176906994d52fa14950a",
+  "source_revision": "55d2d046595e61cce6ba9f5fd9cc84b972cd3915",
+  "platform": {
+    "os": "linux",
+    "architecture": "amd64"
+  },
+  "public_manifest_matches_smoke_tested_image": true,
+  "anonymous_pull_verified": true,
+  "official_build_run": "https://github.com/NVIDIA/SkillEvaluator/actions/runs/42158955180",
+  "image_config_digest": "sha256:d17d6f5105ec5f1bf0cbe4dff0d693aae4ecf01e9c1c6a6ddb7830518acace33",
+  "image_smoke_cases": [
+    {
+      "case": "all-pass",
+      "verified": true,
+      "exit_code": 0,
+      "overall_status": "passed",
+      "total": 2,
+      "passed": 2,
+      "failed": 0,
+      "incomplete": 0,
+      "summary_bytes": 405,
+      "summary_json_sha256": "ced60f27d397b38bd9d72d5d0e7638c034ac0541ceb4e44c9d79f768688fddba",
+      "base_sha": "3859e32fa2bb079c63f99a4939ff44fc7f2609ed",
+      "head_sha": "3859e32fa2bb079c63f99a4939ff44fc7f2609ed"
+    },
+    {
+      "case": "invalid-name",
+      "verified": true,
+      "exit_code": 1,
+      "overall_status": "failed",
+      "total": 2,
+      "passed": 1,
+      "failed": 1,
+      "incomplete": 0,
+      "summary_bytes": 718,
+      "summary_json_sha256": "b1333840f5805183fd35c09aaecfc7c9b73287fa671e4b60dc883057e6342a66",
+      "base_sha": "3859e32fa2bb079c63f99a4939ff44fc7f2609ed",
+      "head_sha": "95f519d38e0419c9329aa7da26d27dfa04677cf0"
+    },
+    {
+      "case": "changed-one",
+      "verified": true,
+      "exit_code": 0,
+      "overall_status": "passed",
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "incomplete": 0,
+      "summary_bytes": 405,
+      "summary_json_sha256": "3f81e1faeef126af7f79e9380b45960c8a6f8c1ba0100328d937dd7de6a56c4d",
+      "base_sha": "3859e32fa2bb079c63f99a4939ff44fc7f2609ed",
+      "head_sha": "3151da988714649e15d466b825d70bb1405fd1ca"
+    },
+    {
+      "case": "no-change",
+      "verified": true,
+      "exit_code": 0,
+      "overall_status": "skipped",
+      "total": 0,
+      "passed": 0,
+      "failed": 0,
+      "incomplete": 0,
+      "summary_bytes": 365,
+      "summary_json_sha256": "a448b47e57b70ce0db138a267d4ef1d1e147d573ff7ee4e6d1413b78f26d8fb5",
+      "base_sha": "3859e32fa2bb079c63f99a4939ff44fc7f2609ed",
+      "head_sha": "7b803868314e445ff74c20827b1f8b1585a9e50c"
+    },
+    {
+      "case": "missing-llm-key",
+      "verified": true,
+      "exit_code": 1,
+      "overall_status": "error",
+      "total": 0,
+      "passed": 0,
+      "failed": 0,
+      "incomplete": 0,
+      "summary_bytes": 464,
+      "summary_json_sha256": "612e3ed656defe276012e1b0e6f787e64cd07633431b8b761d1d01632b5c48ab",
+      "base_sha": "3859e32fa2bb079c63f99a4939ff44fc7f2609ed",
+      "head_sha": "3859e32fa2bb079c63f99a4939ff44fc7f2609ed"
+    }
+  ],
+  "scope": "Fresh official image build, five real container smoke cases, anonymous pull, and public registry identity. Consumer GitHub/GitLab runs are recorded separately."
+}

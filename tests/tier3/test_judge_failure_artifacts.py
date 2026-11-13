@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import importlib.util
 import json
+import logging
 import math
 import os
 import shutil
@@ -16,8 +18,10 @@ import subprocess
 import sys
 import time
 import urllib.error
+from contextlib import suppress
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
@@ -118,9 +122,8 @@ def test_character_facts_keep_numeric_dataset_answers_scoreable(tmp_path, monkey
     payload = json.dumps(
         {
             "criteria": dict.fromkeys(
-                ["SKILL_IDENTIFIED", "ACTION_CORRECT", "FACTUALLY_ACCURATE", "TASK_ADDRESSED", "ACTIONABLE"], False
+                ["ACTION_CORRECT", "FACTUALLY_ACCURATE", "TASK_ADDRESSED", "ACTIONABLE", "FORMAT_FOLLOWED"], False
             ),
-            "score": 0.0,
             "reason": "test verdict",
             "achieved": False,
             "user_goal": "test",
@@ -165,6 +168,64 @@ def test_character_facts_keep_numeric_dataset_answers_scoreable(tmp_path, monkey
     collected = dict(numeric)
     collector._merge_reward_sidecars(collected, verifier.VERIFIER_DIR)
     assert overall_score(collected) == numeric["overall"]
+
+
+def test_staged_dependency_context_is_bounded(tmp_path):
+    verifier = _load_verifier(tmp_path)
+    root = tmp_path / "skills" / "demo"
+    scripts = root / "nested" / "scripts"
+    scripts.mkdir(parents=True)
+    (root / "SKILL.md").write_text("Use jq")
+    (scripts / "apt-packages.txt").write_text("# tools\njq=1.7 # JSON\n")
+    (scripts / "requirements.txt").write_text("Some-Package[extra]>=1\n")
+    (scripts / "run.py").write_text("x" * (128 * 1024) + "excluded_tail")
+    (scripts / "outside.py").symlink_to(verifier.ENTRY_PATH)
+    context = verifier._dependency_context("demo", skills_root=root.parent)
+    assert context["apt"] == ["jq=1.7"]
+    assert context["pip"] == ["Some-Package[extra]>=1"]
+    assert "Use jq" in context["skill_text"]
+    assert "excluded_tail" not in context["skill_text"]
+    assert "judge-artifact-case" not in context["skill_text"]
+    assert verifier._dependency_context("../demo", skills_root=root.parent)["skill_text"] == ""
+    assert verifier._dependency_context("absent", skills_root=root.parent)["apt"] == []
+
+
+@pytest.mark.parametrize("declared", [True, False])
+def test_missing_dependency_is_unscored_before_judging(tmp_path, monkeypatch, declared):
+    verifier = _load_verifier(tmp_path)
+    entry = json.loads(verifier.ENTRY_PATH.read_text())
+    entry.update(expected_skill="demo", evaluated_skill="demo", should_trigger=True, expected_script="scripts/run.py")
+    verifier.ENTRY_PATH.write_text(json.dumps(entry))
+    if declared:
+        monkeypatch.setattr(verifier, "_dependency_context", lambda _skill: {"apt": ["jq"]})
+    monkeypatch.setattr(
+        verifier,
+        "extract_tool_calls_as_dicts",
+        lambda _traj: [
+            {
+                "action": "bash",
+                "action_input": {"command": "python scripts/run.py"},
+                "observation": "bash: line 1: jq: command not found\nexit code 127",
+            }
+        ],
+    )
+    monkeypatch.setattr(verifier, "_call_required_judge", lambda *_a, **_kw: pytest.fail("Judge must not run"))
+    with pytest.raises(SystemExit, match="1"):
+        verifier.main()
+    sidecar = json.loads(verifier.SKILL_EVALUATOR_REWARD_JSON.read_text())
+    assert sidecar["evaluation_status"] == "failed"
+    assert "jq" in sidecar["evaluation_errors"]["environment"]
+    assert sidecar["environment_issues"][0]["fault_kind"] == (
+        "declared_dependency_unavailable" if declared else "undeclared_dependency"
+    )
+    collected = json.loads(verifier.REWARD_JSON.read_text())
+    collector._merge_reward_sidecars(collected, verifier.VERIFIER_DIR)
+    assert overall_score(collected) is None
+    reason = collector._unscoreable_reward_reason(collected)
+    assert "[environment]" in reason
+    assert "jq" in reason
+    assert "evals/environment/Dockerfile" in reason
+    assert "judge evaluation failed" not in reason
 
 
 def test_verifier_main_fails_closed_after_collecting_every_required_judge(
@@ -212,10 +273,10 @@ def test_verifier_main_fails_closed_after_collecting_every_required_judge(
     assert set(rich["evaluation_errors"]) == {"accuracy", "goal_accuracy", "behavior_check"}
     assert all(0 < len(reason) <= 512 for reason in rich["evaluation_errors"].values())
 
+    # The case is a negative case, so skill_efficiency is N/A and Harbor's numeric reward leaves it out.
     assert numeric == {
         "security": 1.0,
         "skill_execution": 1.0,
-        "skill_efficiency": 1.0,
         "overall": 0.0,
     }
     assert verifier.REWARD_TXT.read_text(encoding="utf-8") == "0.0"
@@ -343,45 +404,72 @@ def test_required_judge_restores_alarm_handler_after_teardown_interrupt(
     assert signal.getitimer(signal.ITIMER_REAL)[0] == 0
 
 
-def test_ragas_goal_judge_obeys_the_required_judge_time_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure Ragas goal scorer returns before its Harbor budget expires."""
-    verifier = _load_verifier(tmp_path)
+_RAGAS_TEST_KEY = "test-key-fake"
+
+
+def _use_ragas_eligible_judge(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Select a canonical OpenAI non-reasoning judge, which routes goal_accuracy to Ragas."""
     monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key-fake")
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.delenv("SKILL_EVAL_LLM_BASE_URL", raising=False)
-    monkeypatch.setattr(verifier, "_ragas_goal_accuracy_enabled", lambda: True)
-    monkeypatch.setattr(verifier, "_JUDGE_WALL_TIME_BUDGET_SEC", 0.01)
+    monkeypatch.setenv("OPENAI_API_KEY", _RAGAS_TEST_KEY)
+    monkeypatch.setenv("LLM_JUDGE_MODEL", "gpt-4.1")
+    for name in (
+        "SKILL_EVAL_JUDGE_MODEL",
+        "SKILL_EVAL_LLM_MODEL",
+        "LLM_JUDGE_FALLBACK_MODELS",
+        "OPENAI_BASE_URL",
+        "SKILL_EVAL_LLM_BASE_URL",
+        # Character facts select the prompt goal judge instead of Ragas.
+        "SKILL_EVAL_JUDGE_CHARACTER_FACTS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+class _FakeAsyncOpenAI:
+    """Record how the Ragas scorer builds and closes its OpenAI client."""
+
+    instances: ClassVar[list[_FakeAsyncOpenAI]] = []
+    close_error: ClassVar[BaseException | None] = None
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.closed = 0
+        type(self).instances.append(self)
+
+    async def close(self) -> None:
+        self.closed += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
+def _install_fake_ragas(monkeypatch: pytest.MonkeyPatch, metric: type) -> type[_FakeAsyncOpenAI]:
+    """Install the Ragas 0.4 modules and OpenAI client the verifier imports, with ``metric`` as the scorer."""
 
     class FakeMessage:
-        """Mock message object for Ragas sample input."""
+        """Mock message object for Ragas input."""
 
         def __init__(self, content: str):
             self.content = content
 
-    class FakeMetric:
-        """Mock metric object for Ragas async evaluation."""
+    class RejectedSample:
+        """Collections metrics do not take a sample object."""
 
-        def __init__(self, llm):
-            self.llm = llm
+        def __init__(self, **_kwargs):
+            raise AssertionError("Ragas collections metrics take keywords, not a SingleTurnSample")
 
-        async def ascore(self, _sample):
-            await asyncio.sleep(0.05)
-            return SimpleNamespace(value=1.0)
-
+    client = type("FakeAsyncOpenAI", (_FakeAsyncOpenAI,), {"instances": []})
     fake_ragas = ModuleType("ragas")
-    fake_ragas.SingleTurnSample = lambda **_kwargs: object()
+    fake_ragas.SingleTurnSample = RejectedSample
     fake_ragas_llms = ModuleType("ragas.llms")
     fake_ragas_llms_base = ModuleType("ragas.llms.base")
-    fake_ragas_llms_base.llm_factory = lambda *_args, **_kwargs: object()
+    fake_ragas_llms_base.llm_factory = lambda model, *, client: SimpleNamespace(model=model, client=client)
     fake_ragas_messages = ModuleType("ragas.messages")
     fake_ragas_messages.AIMessage = FakeMessage
     fake_ragas_messages.HumanMessage = FakeMessage
     fake_ragas_metrics = ModuleType("ragas.metrics")
     fake_ragas_collections = ModuleType("ragas.metrics.collections")
-    fake_ragas_collections.AgentGoalAccuracyWithReference = FakeMetric
+    fake_ragas_collections.AgentGoalAccuracyWithReference = metric
     fake_openai = ModuleType("openai")
-    fake_openai.AsyncOpenAI = lambda **_kwargs: object()
+    fake_openai.AsyncOpenAI = client
     for name, module in {
         "ragas": fake_ragas,
         "ragas.llms": fake_ragas_llms,
@@ -392,6 +480,389 @@ def test_ragas_goal_judge_obeys_the_required_judge_time_budget(tmp_path: Path, m
         "openai": fake_openai,
     }.items():
         monkeypatch.setitem(sys.modules, name, module)
+    return client
+
+
+def test_ragas_goal_scorer_uses_the_collections_keyword_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An eligible OpenAI judge scores goal_accuracy with Ragas instead of silently using the custom judge."""
+    verifier = _load_verifier(tmp_path)
+    _use_ragas_eligible_judge(monkeypatch)
+    calls: list[tuple[str, list[str], str]] = []
+
+    class CollectionsMetric:
+        """Mirror Ragas 0.4 AgentGoalAccuracyWithReference.ascore(user_input, reference)."""
+
+        def __init__(self, llm):
+            self.llm = llm
+
+        async def ascore(self, user_input, reference):
+            calls.append((self.llm.model, [message.content for message in user_input], reference))
+            return SimpleNamespace(value=1.0)
+
+    client = _install_fake_ragas(monkeypatch, CollectionsMetric)
+    monkeypatch.setattr(
+        verifier,
+        "_judge_goal_accuracy_custom",
+        lambda *_args, **_kwargs: pytest.fail("Ragas must score without falling back to the custom judge"),
+    )
+
+    assert verifier._ragas_goal_accuracy_enabled()
+    result = verifier._call_required_judge(
+        "goal_accuracy", verifier.judge_goal_accuracy, "question", "ground truth", "agent response"
+    )
+
+    assert calls == [("gpt-4.1", ["question", "agent response"], "ground truth")]
+    assert result["score"] == 1.0
+    assert result["method"] == "ragas"
+    assert (result["provider"], result["model"]) == ("openai", "gpt-4.1")
+    assert result["judge_model_used"] == "gpt-4.1"
+    assert result["judge_fallback_used"] is False
+    assert [instance.kwargs["base_url"] for instance in client.instances] == ["https://api.openai.com/v1"]
+    assert [instance.closed for instance in client.instances] == [1]
+
+
+@pytest.mark.parametrize("close_fails", [False, True], ids=["close-ok", "close-fails"])
+def test_ragas_goal_scorer_failure_warns_and_closes_its_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, close_fails: bool
+) -> None:
+    """A Ragas failure is logged as a redacted warning, and the client is closed before the custom judge runs."""
+    verifier = _load_verifier(tmp_path)
+    _use_ragas_eligible_judge(monkeypatch)
+
+    class FailingMetric:
+        """Fail the way a provider error surfaces through Ragas."""
+
+        def __init__(self, llm):
+            self.llm = llm
+
+        async def ascore(self, **_kwargs):
+            raise RuntimeError(f"Error code: 401 - Incorrect API key provided: {_RAGAS_TEST_KEY}")
+
+    client = _install_fake_ragas(monkeypatch, FailingMetric)
+    if close_fails:
+        client.close_error = OSError("socket close failed")
+    custom_result = {"score": 0.0, "reason": "custom judgment", "method": "custom"}
+
+    def custom_judge(*_args, **_kwargs):
+        assert [instance.closed for instance in client.instances] == [1]
+        return custom_result
+
+    monkeypatch.setattr(verifier, "_judge_goal_accuracy_custom", custom_judge)
+
+    with caplog.at_level(logging.WARNING, logger=verifier.logger.name):
+        result = verifier.judge_goal_accuracy("question", "ground truth", "agent response")
+
+    assert result == custom_result
+    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    fallback_warning = "RAGAS goal scorer failed (RuntimeError: Error code: 401"
+    assert any(message.startswith(fallback_warning) for message in warnings), warnings
+    assert ("RAGAS judge client close failed: OSError" in warnings) is close_fails
+    assert all(_RAGAS_TEST_KEY not in message for message in warnings)
+
+
+def test_ragas_goal_scorer_setup_failure_closes_its_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failure while building the scorer, before any score request, must not leak the client."""
+    verifier = _load_verifier(tmp_path)
+    _use_ragas_eligible_judge(monkeypatch)
+
+    class BrokenMetric:
+        """Fail at construction, as an incompatible Ragas release would."""
+
+        def __init__(self, **_kwargs):
+            raise TypeError("incompatible Ragas release")
+
+    client = _install_fake_ragas(monkeypatch, BrokenMetric)
+    custom_result = {"score": 0.0, "reason": "custom judgment", "method": "custom"}
+    monkeypatch.setattr(verifier, "_judge_goal_accuracy_custom", lambda *_args, **_kwargs: custom_result)
+
+    assert verifier.judge_goal_accuracy("question", "ground truth", "agent response") == custom_result
+    assert [instance.closed for instance in client.instances] == [1]
+
+
+@pytest.mark.parametrize("scorer_fails", [False, True], ids=["score", "scorer-error"])
+def test_ragas_client_close_cancellation_preserves_the_scorer_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, scorer_fails: bool
+) -> None:
+    """A cancelled close operation must not replace a completed score or the scorer's original exception."""
+    verifier = _load_verifier(tmp_path)
+    _use_ragas_eligible_judge(monkeypatch)
+    scorer_error = RuntimeError("original scorer failure")
+
+    class Metric:
+        def __init__(self, llm):
+            self.llm = llm
+
+        async def ascore(self, **_kwargs):
+            if scorer_fails:
+                raise scorer_error
+            return SimpleNamespace(value=1.0)
+
+    client = _install_fake_ragas(monkeypatch, Metric)
+    client.close_error = asyncio.CancelledError(_RAGAS_TEST_KEY)
+
+    with caplog.at_level(logging.WARNING, logger=verifier.logger.name):
+        if scorer_fails:
+            with pytest.raises(RuntimeError) as exc_info:
+                verifier._judge_goal_accuracy_ragas("question", "ground truth", "response", "")
+            assert exc_info.value is scorer_error
+        else:
+            result = verifier._judge_goal_accuracy_ragas("question", "ground truth", "response", "")
+            assert result["score"] == 1.0
+
+    assert [instance.closed for instance in client.instances] == [1]
+    warnings = [record.getMessage() for record in caplog.records]
+    assert "RAGAS judge client close failed: CancelledError" in warnings
+    assert all(_RAGAS_TEST_KEY not in message for message in warnings)
+
+
+@pytest.mark.parametrize("stubborn", ["scoring_task", "client_close"])
+@pytest.mark.parametrize("scorer_fails", [False, True], ids=["score", "scorer-error"])
+def test_ragas_cleanup_does_not_wait_for_cancellation_acknowledgment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    stubborn: str,
+    scorer_fails: bool,
+) -> None:
+    """Cleanup returns before resistant work finishes, closes the client, and preserves the scorer's outcome."""
+    verifier = _load_verifier(tmp_path)
+    _use_ragas_eligible_judge(monkeypatch)
+    loop = asyncio.new_event_loop()
+    real_close = loop.close
+    release = asyncio.Event()
+    rescued: list[bool] = []
+    scoring_tasks: list[asyncio.Task[None]] = []
+    scorer_error = RuntimeError("original scorer failure")
+
+    async def refuse_cancellation():
+        while not release.is_set():
+            with suppress(asyncio.CancelledError):
+                await release.wait()
+
+    class Metric:
+        def __init__(self, llm):
+            self.llm = llm
+
+        async def ascore(self, **_kwargs):
+            if stubborn == "scoring_task":
+                scoring_tasks.append(loop.create_task(refuse_cancellation()))
+                await asyncio.sleep(0)
+            if scorer_fails:
+                raise scorer_error
+            return SimpleNamespace(value=1.0)
+
+    client = _install_fake_ragas(monkeypatch, Metric)
+    if stubborn == "client_close":
+
+        async def resistant_close(self):
+            self.closed += 1
+            await refuse_cancellation()
+
+        monkeypatch.setattr(client, "close", resistant_close)
+
+    # Shorten cleanup waits without replacing asyncio's cancellation behavior.
+    real_wait_for, real_wait = asyncio.wait_for, asyncio.wait
+
+    async def short_wait_for(awaitable, timeout):
+        return await real_wait_for(awaitable, 0.01 if timeout == 5.0 else timeout)
+
+    async def short_wait(tasks, *, timeout=None, **kwargs):
+        return await real_wait(tasks, timeout=0.01 if timeout == 5.0 else timeout, **kwargs)
+
+    monkeypatch.setattr(asyncio, "wait_for", short_wait_for)
+    monkeypatch.setattr(asyncio, "wait", short_wait)
+    monkeypatch.setattr(asyncio, "new_event_loop", lambda: loop)
+    # Keep this independent loop open so the test can finish every task after the assertion.
+    monkeypatch.setattr(loop, "close", lambda: None)
+
+    def rescue_blocked_cleanup():
+        rescued.append(True)
+        release.set()
+
+    rescue = loop.call_later(0.5, rescue_blocked_cleanup)
+    try:
+        with caplog.at_level(logging.WARNING, logger=verifier.logger.name):
+            if scorer_fails:
+                with pytest.raises(RuntimeError) as exc_info:
+                    verifier._judge_goal_accuracy_ragas("question", "ground truth", "response", "")
+                assert exc_info.value is scorer_error
+            else:
+                result = verifier._judge_goal_accuracy_ragas("question", "ground truth", "response", "")
+                assert result["score"] == 1.0
+                assert result["method"] == "ragas"
+
+        assert not rescued, "cleanup waited for cancellation-resistant work to finish"
+        assert [instance.closed for instance in client.instances] == [1]
+        assert any("timed out" in record.getMessage() for record in caplog.records)
+    finally:
+        rescue.cancel()
+        release.set()
+
+        async def drain_test_tasks():
+            pending = asyncio.all_tasks(loop) - {asyncio.current_task()}
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+        loop.run_until_complete(drain_test_tasks())
+        assert not asyncio.all_tasks(loop)
+        real_close()
+
+
+def test_ragas_cleanup_consumes_late_task_exceptions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A task failing after the drain timeout must not leak credentials through asyncio's exception handler."""
+    verifier = _load_verifier(tmp_path)
+    _use_ragas_eligible_judge(monkeypatch)
+    loop = asyncio.new_event_loop()
+    release = asyncio.Event()
+    late_failures: list[bool] = []
+    scoring_tasks: list[asyncio.Task[None]] = []
+    loop_errors: list[dict] = []
+    loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+
+    async def fail_after_client_close_starts():
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            await release.wait()
+            late_failures.append(True)
+            raise RuntimeError(_RAGAS_TEST_KEY) from None
+
+    class Metric:
+        def __init__(self, llm):
+            self.llm = llm
+
+        async def ascore(self, **_kwargs):
+            scoring_tasks.append(loop.create_task(fail_after_client_close_starts()))
+            await asyncio.sleep(0)
+            return SimpleNamespace(value=1.0)
+
+    client = _install_fake_ragas(monkeypatch, Metric)
+
+    async def close(self):
+        self.closed += 1
+        release.set()
+        # Let the abandoned scoring task fail while client cleanup is still running.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    real_wait = asyncio.wait
+
+    async def short_wait(tasks, *, timeout=None, **kwargs):
+        return await real_wait(tasks, timeout=0.01 if timeout == 5.0 else timeout, **kwargs)
+
+    monkeypatch.setattr(client, "close", close)
+    monkeypatch.setattr(asyncio, "wait", short_wait)
+    monkeypatch.setattr(asyncio, "new_event_loop", lambda: loop)
+
+    with caplog.at_level(logging.WARNING, logger=verifier.logger.name):
+        result = verifier._judge_goal_accuracy_ragas("question", "ground truth", "response", "")
+
+    assert result["score"] == 1.0
+    assert [instance.closed for instance in client.instances] == [1]
+    assert late_failures == [True]
+    assert any("task cancellation timed out" in record.getMessage() for record in caplog.records)
+    # Finalize the abandoned task's exception cycle before checking asyncio's handler.
+    scoring_tasks.clear()
+    gc.collect()
+    assert not loop_errors
+    assert all(_RAGAS_TEST_KEY not in record.getMessage() for record in caplog.records)
+
+
+def test_ragas_expired_setup_budget_does_not_create_a_scoring_coroutine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recwarn: pytest.WarningsRecorder
+) -> None:
+    """An exhausted setup deadline must not leave an unawaited scorer behind."""
+    verifier = _load_verifier(tmp_path)
+    _use_ragas_eligible_judge(monkeypatch)
+    elapsed = [0.0]
+    monkeypatch.setattr(verifier, "signal", SimpleNamespace())
+    monkeypatch.setattr(verifier, "time", SimpleNamespace(monotonic=lambda: elapsed[0]))
+    monkeypatch.setattr(verifier, "_JUDGE_WALL_TIME_BUDGET_SEC", 1.0)
+    created: list[bool] = []
+
+    class Metric:
+        def __init__(self, llm):
+            self.llm = llm
+            elapsed[0] = 2.0
+
+        def ascore(self, **_kwargs):
+            created.append(True)
+            return asyncio.sleep(0)
+
+    client = _install_fake_ragas(monkeypatch, Metric)
+    monkeypatch.setattr(
+        verifier.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: pytest.fail("an exhausted budget must prevent fallback HTTP requests"),
+    )
+
+    result = verifier._call_required_judge(
+        "goal_accuracy", verifier.judge_goal_accuracy, "question", "ground truth", "agent response"
+    )
+
+    assert result["status"] == "error"
+    assert result["score"] is None
+    assert "time budget exhausted" in result["reason"]
+    assert [instance.closed for instance in client.instances] == [1]
+    assert created == []
+    gc.collect()
+    assert not any("was never awaited" in str(warning.message) for warning in recwarn)
+
+
+@pytest.mark.parametrize("cutoff", ["scorer_timeout", "deadline_alarm"])
+def test_ragas_goal_judge_obeys_the_required_judge_time_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cutoff: str
+) -> None:
+    """Ensure Ragas goal scorer returns before its Harbor budget expires and still closes its client."""
+    verifier = _load_verifier(tmp_path)
+    _use_ragas_eligible_judge(monkeypatch)
+    cancelled: list[bool] = []
+    elapsed = [0.0]
+    if cutoff == "scorer_timeout":
+        # Without an interval timer only the scorer's own wait_for bounds it.
+        monkeypatch.setattr(verifier, "signal", SimpleNamespace())
+        monkeypatch.setattr(verifier, "_JUDGE_WALL_TIME_BUDGET_SEC", 0.01)
+        # Setup expiry is covered separately; keep this case in the active-scorer phase.
+        monkeypatch.setattr(verifier, "time", SimpleNamespace(monotonic=lambda: elapsed[0]))
+        scorer_sleep = 0.05
+    else:
+        if not hasattr(signal, "setitimer") or signal.getitimer(signal.ITIMER_REAL)[0] > 0:
+            pytest.skip("free POSIX interval timer required")
+        monkeypatch.setattr(verifier, "_JUDGE_WALL_TIME_BUDGET_SEC", 0.05)
+        scorer_sleep = 30.0
+        real_remaining = verifier._remaining_judge_timeout
+        scorer_bounds: list[float] = []
+
+        def remaining_after_scorer(timeout):
+            # Leave the scorer's first bound open so the deadline alarm stops the loop mid-score.
+            if not scorer_bounds:
+                scorer_bounds.append(timeout)
+                return 60.0
+            return real_remaining(timeout)
+
+        monkeypatch.setattr(verifier, "_remaining_judge_timeout", remaining_after_scorer)
+
+    class FakeMetric:
+        """Mock metric object for Ragas async evaluation."""
+
+        def __init__(self, llm):
+            self.llm = llm
+
+        async def ascore(self, **_kwargs):
+            if cutoff == "scorer_timeout":
+                elapsed[0] = 1.0
+            try:
+                await asyncio.sleep(scorer_sleep)
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+            return SimpleNamespace(value=1.0)
+
+    client = _install_fake_ragas(monkeypatch, FakeMetric)
     monkeypatch.setattr(
         verifier.urllib.request,
         "urlopen",
@@ -404,6 +875,9 @@ def test_ragas_goal_judge_obeys_the_required_judge_time_budget(tmp_path: Path, m
 
     assert result["status"] == "error"
     assert result["score"] is None
+    # The cut-off scoring work is cancelled and the client is closed once, not left to the loop's teardown.
+    assert cancelled == [True]
+    assert [instance.closed for instance in client.instances] == [1]
 
 
 def test_verifier_main_keeps_genuine_zero_judge_verdicts_scoreable(
@@ -433,16 +907,20 @@ def test_verifier_main_keeps_genuine_zero_judge_verdicts_scoreable(
     assert "evaluation_status" not in rich
     assert "evaluation_errors" not in rich
     assert rich["score_policy"] == DEFAULT_SCORE_POLICY
-    assert {metric: numeric[metric] for metric in verifier.DISPLAY_METRICS} == {
+    # The case is a negative case, so skill_efficiency is N/A: Harbor's numeric reward leaves it out,
+    # and the overall averages the other four dimensions.
+    assert {metric: numeric.get(metric) for metric in verifier.DISPLAY_METRICS} == {
         "security": 1.0,
         "skill_execution": 1.0,
-        "skill_efficiency": 1.0,
+        "skill_efficiency": None,
         "accuracy": 0.0,
         "goal_accuracy": 0.0,
         "behavior_check": 0.0,
     }
-    assert numeric["overall"] == 0.6
-    assert overall_score(numeric) == 0.6
+    assert numeric["overall"] == 0.5
+    collected = dict(numeric)
+    collector._merge_reward_sidecars(collected, verifier.VERIFIER_DIR)
+    assert overall_score(collected) == 0.5
 
 
 def test_verifier_main_recovers_malformed_accuracy_and_goal_judges(
@@ -460,13 +938,12 @@ def test_verifier_main_recovers_malformed_accuracy_and_goal_judges(
             json.dumps(
                 {
                     "criteria": {
-                        "SKILL_IDENTIFIED": True,
                         "ACTION_CORRECT": True,
                         "FACTUALLY_ACCURATE": True,
                         "TASK_ADDRESSED": True,
                         "ACTIONABLE": True,
+                        "FORMAT_FOLLOWED": True,
                     },
-                    "score": 1.0,
                     "reason": "accuracy recovered",
                 }
             ),
@@ -521,24 +998,19 @@ def test_verifier_retries_non_string_judge_text_before_collector_and_report(
     goal_calls: list[str] = []
 
     def pair_call(prompt: str, **_kwargs):
-        if "SKILL_IDENTIFIED" not in prompt:
+        if "FORMAT_FOLLOWED" not in prompt:
             return json.dumps({"results": [{"step": 1, "passed": True}], "score": 1.0}), None
         accuracy_calls.append(prompt)
+        criteria = {
+            "ACTION_CORRECT": True,
+            "FACTUALLY_ACCURATE": True,
+            "TASK_ADDRESSED": True,
+            "ACTIONABLE": True,
+            "FORMAT_FOLLOWED": False,
+        }
         if len(accuracy_calls) == 1:
-            return json.dumps({"score": 1.0, "reason": {"nested": "accuracy"}}), None
-        return json.dumps(
-            {
-                "score": 1.0,
-                "reason": "accuracy recovered",
-                "criteria": {
-                    "SKILL_IDENTIFIED": False,
-                    "ACTION_CORRECT": True,
-                    "FACTUALLY_ACCURATE": True,
-                    "TASK_ADDRESSED": True,
-                    "ACTIONABLE": True,
-                },
-            }
-        ), None
+            return json.dumps({"criteria": criteria, "reason": {"nested": "accuracy"}}), None
+        return json.dumps({"reason": "accuracy recovered", "criteria": criteria}), None
 
     def goal_call(prompt: str, **_kwargs):
         goal_calls.append(prompt)
@@ -582,7 +1054,8 @@ def test_verifier_retries_non_string_judge_text_before_collector_and_report(
     assert len(accuracy_calls) == 2
     assert len(goal_calls) == 2
     assert collected["details"]["accuracy"]["reason"] == "accuracy recovered"
-    assert collected["details"]["accuracy"]["excluded_criteria"] == ["SKILL_IDENTIFIED"]
+    assert collected["details"]["accuracy"]["score"] == 0.8
+    assert "excluded_criteria" not in collected["details"]["accuracy"]
     assert collected["details"]["goal_accuracy"]["reason"] == "goal recovered"
     assert all(isinstance(reason, str) for finding in findings for reason in finding["reasons"])
 
@@ -689,7 +1162,7 @@ def test_verifier_main_keeps_accuracy_fail_closed_after_retry_exhaustion(
 
     assert exc_info.value.code == 1
     assert len(pair_calls) == 3
-    accuracy_attempts = [call for call in pair_calls if "SKILL_IDENTIFIED" in call[0]]
+    accuracy_attempts = [call for call in pair_calls if "FORMAT_FOLLOWED" in call[0]]
     assert len(accuracy_attempts) == 2
     assert [kwargs["max_tokens"] for _, kwargs in accuracy_attempts] == [verifier.STRUCTURED_JUDGE_MAX_TOKENS] * 2
     assert len(goal_calls) == 1

@@ -6,8 +6,10 @@ from __future__ import annotations
 import contextvars
 import json
 import shutil
+import subprocess
 import threading
 from collections.abc import Callable
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -59,6 +61,112 @@ def test_validate_passes_explicit_previous_version(monkeypatch, tmp_path: Path) 
 
     assert result.exit_code == 0, result.output
     assert captured == ["1.2.0"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["validate", "--no-tier3", "--no-dedup", "--no-llm", "--checks", "security"],
+        ["security-scan"],
+        ["tier1", "security-scan"],
+        ["tier1", "--checks", "security", "--no-llm"],
+        ["tier1", "validate", "--checks", "security", "--no-llm"],
+    ],
+    ids=["validate", "security-scan", "tier1-security-scan", "tier1", "tier1-validate"],
+)
+def test_explicit_skillspector_baseline_reaches_the_security_scan(
+    command: list[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.validators.security import SecurityValidator
+
+    baseline = tmp_path / "approved-baseline.yaml"
+    baseline.write_text('version: 2\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n', encoding="utf-8")
+    seen: list[Path | None] = []
+
+    def _run_skillspector(self: SecurityValidator, _path: Path) -> ValidationResult:
+        seen.append(self.skillspector_baseline)
+        return ValidationResult()
+
+    monkeypatch.setattr(SecurityValidator, "_run_skillspector", _run_skillspector)
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            *command,
+            str(FIXTURE),
+            "--skillspector-baseline",
+            baseline.name,
+            "-r",
+            "json",
+            "-o",
+            str(tmp_path / "reports"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen == [baseline.resolve()]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["validate", "--no-tier3", "--no-dedup", "--no-llm"],
+        ["tier1", "--no-llm"],
+    ],
+    ids=["validate", "tier1"],
+)
+def test_skillspector_baseline_and_skip_both_reach_the_run(
+    command: list[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``--skip`` on another check must not drop the baseline, and vice versa."""
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.validators.security import SecurityValidator
+
+    baseline = tmp_path / "approved-baseline.yaml"
+    baseline.write_text('version: 2\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n', encoding="utf-8")
+    seen: list[Path | None] = []
+
+    def _run_skillspector(self: SecurityValidator, _path: Path) -> ValidationResult:
+        seen.append(self.skillspector_baseline)
+        return ValidationResult()
+
+    monkeypatch.setattr(SecurityValidator, "_run_skillspector", _run_skillspector)
+    reports = tmp_path / "reports"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            *command,
+            str(FIXTURE),
+            "--checks",
+            "security,unicode",
+            "--skip",
+            "unicode",
+            "--skillspector-baseline",
+            str(baseline),
+            "-r",
+            "json",
+            "-o",
+            str(reports),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen == [baseline.resolve()]
+    (report,) = reports.rglob("*.json")
+    by_name = {entry["validator"]: entry for entry in json.loads(report.read_text(encoding="utf-8"))["results"]}
+    assert by_name["Unicode Smuggling Detection"]["skip_reason"] == "skipped with --skip"
+
+
+def test_skillspector_baseline_must_name_an_existing_file(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        cli, ["security-scan", str(FIXTURE), "--skillspector-baseline", str(tmp_path / "missing.yaml")]
+    )
+
+    assert result.exit_code == 2
+    assert "--skillspector-baseline" in result.output
 
 
 def test_claude_alias_is_canonicalized_and_deduplicated() -> None:
@@ -127,7 +235,7 @@ def test_validate_fixture_no_llm(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0, result.output
-    assert "All validations passed" in result.output
+    assert "Passed required checks" in result.output
 
 
 def test_validate_reports_malformed_policy_without_traceback(tmp_path: Path) -> None:
@@ -381,6 +489,93 @@ def test_validate_quiet_always_writes_html_and_json_reports() -> None:
         assert any(p.suffix == ".json" for p in reports), reports
 
 
+@pytest.mark.parametrize("in_git_checkout", [False, True], ids=("plain-folder", "git-checkout"))
+def test_validate_json_names_a_clean_single_skill_and_records_the_evaluator(
+    tmp_path: Path,
+    in_git_checkout: bool,
+) -> None:
+    """A clean skill run with only the schema check has no finding path or
+    quality score to name the skill by, and inside a Git checkout the report
+    target is the remote URL. The JSON must still list the one skill."""
+    from skillevaluator import __version__
+
+    if in_git_checkout and shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    repo = tmp_path / "repo"
+    skill = repo / "skills" / "simple"
+    shutil.copytree(FIXTURE, skill)
+    if in_git_checkout:
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/example/skills.git"],
+            check=True,
+        )
+    output_dir = tmp_path / "reports"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(skill),
+            "--tiers",
+            "1",
+            "--checks",
+            "schema",
+            "--no-llm",
+            "--report",
+            "json",
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    report = json.loads(next(output_dir.glob("skillevaluator-output-*.json")).read_text(encoding="utf-8"))
+    assert report["skills"] == [{"name": "simple", "passed": True, "issue_count": 0}]
+    assert [item["name"] for contributor in report["contributors"] for item in contributor["items"]] == ["simple"]
+    assert report["version"] == __version__
+    if in_git_checkout:
+        assert report["target_path"].startswith("https://github.com/example/skills/")
+    else:
+        assert report["target_path"] == str(skill.resolve())
+    assert report["top_issues"] == []
+    assert report["gating"]["tiers"]["1"]["validator_policies"] == [
+        {"validator": "Schema & Repository Governance", "blocking": True}
+    ]
+    benchmark = (output_dir / "BENCHMARK.md").read_text(encoding="utf-8")
+    assert "- Skill: `simple`" in benchmark
+    assert f"- Evaluator version: `{__version__}`" in benchmark
+
+
+def test_validate_json_keeps_one_skills_entry_per_rule_of_a_rules_folder(team_rule_dir: Path, tmp_path: Path) -> None:
+    """Only a skill directory names its one skill explicitly. A rules folder
+    groups its results per rule file, so naming the folder would fold both
+    rules into one entry."""
+    output_dir = tmp_path / "reports"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(team_rule_dir),
+            "--tiers",
+            "1",
+            "--checks",
+            "schema",
+            "--no-llm",
+            "--report",
+            "json",
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    report = json.loads(next(output_dir.glob("skillevaluator-output-*.json")).read_text(encoding="utf-8"))
+    assert sorted(entry["name"] for entry in report["skills"]) == ["error-handling", "testing"]
+    assert not (output_dir / "BENCHMARK.md").exists()
+
+
 def test_validate_default_reports_do_not_write_into_authored_sibling_skill(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -397,9 +592,7 @@ def test_validate_default_reports_do_not_write_into_authored_sibling_skill(
         encoding="utf-8",
     )
     initial_files = {
-        path.relative_to(authored_sibling): path.read_bytes()
-        for path in authored_sibling.rglob("*")
-        if path.is_file()
+        path.relative_to(authored_sibling): path.read_bytes() for path in authored_sibling.rglob("*") if path.is_file()
     }
     private_state = tmp_path / "private-state"
     private_state.mkdir(mode=0o700)
@@ -416,9 +609,7 @@ def test_validate_default_reports_do_not_write_into_authored_sibling_skill(
     assert (output_root / "BENCHMARK.md").is_file()
     assert is_generated_output_root(output_root)
     assert {
-        path.relative_to(authored_sibling): path.read_bytes()
-        for path in authored_sibling.rglob("*")
-        if path.is_file()
+        path.relative_to(authored_sibling): path.read_bytes() for path in authored_sibling.rglob("*") if path.is_file()
     } == initial_files
 
 
@@ -724,9 +915,7 @@ def test_quality_check_applies_custom_quality_config(
 
 @pytest.mark.parametrize("command", [["quality-check"], ["tier1", "quality-check"]])
 def test_quality_check_rejects_missing_quality_config(command: list[str], tmp_path: Path) -> None:
-    result = CliRunner().invoke(
-        cli, [*command, str(FIXTURE), "--quality-config", str(tmp_path / "missing.yaml")]
-    )
+    result = CliRunner().invoke(cli, [*command, str(FIXTURE), "--quality-config", str(tmp_path / "missing.yaml")])
 
     assert result.exit_code == 2
     assert "does not exist" in result.output
@@ -891,6 +1080,157 @@ def test_cli_rejects_invalid_quality_config_as_usage_error(
     assert "Invalid value for '--quality-config'" in output
     assert expected in output
     assert "Traceback" not in output
+
+
+_PII_WAIVER_COMMANDS = {
+    "pii-scan": (["pii-scan"], "skillevaluator-pii.json"),
+    "tier1-pii-scan": (["tier1", "pii-scan"], "skillevaluator-pii.json"),
+    "tier1": (["tier1", "--checks", "pii", "--no-llm"], "skillevaluator-tier1.json"),
+    "validate": (
+        ["validate", "--no-tier3", "--no-llm", "--no-tier2", "--checks", "pii"],
+        "skillevaluator-output-*.json",
+    ),
+}
+
+
+def _pii_waiver_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, *extra_args: str):
+    """Run a PII-scanning command on a copy of the fixture with one non-placeholder address in it."""
+    from skillevaluator.validators.pii_waivers import pii_evidence_sha256, today_utc
+
+    skill = tmp_path / "simple"
+    shutil.copytree(FIXTURE, skill)
+    (skill / "contact.md").write_text("# Contact\nWrite to boss@company.com for access.\n", encoding="utf-8")
+    waiver = {
+        "id": "PII-001",
+        "category": "emails",
+        "file": "simple/contact.md",
+        "line": 2,
+        "evidence_sha256": pii_evidence_sha256("emails", "boss@company.com"),
+        "reason": "Public support address of the documented service",
+        "owner": "docs-team",
+        "created": (today_utc() - timedelta(days=1)).isoformat(),
+        "expires": (today_utc() + timedelta(days=300)).isoformat(),
+    }
+    (tmp_path / "pii-waivers.yaml").write_text(json.dumps({"version": 1, "waivers": [waiver]}), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    args, report_glob = _PII_WAIVER_COMMANDS[command]
+
+    result = CliRunner().invoke(cli, [*args, "simple", "--report", "json", "--output-dir", "out", *extra_args])
+
+    (report_path,) = (tmp_path / "out").glob(report_glob)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    checks = [finding["check_name"] for entry in report["results"] for finding in entry["findings"]]
+    return result, checks
+
+
+@pytest.mark.parametrize("command", list(_PII_WAIVER_COMMANDS))
+def test_pii_waivers_option_applies_reviewed_waivers(
+    command: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    result, checks = _pii_waiver_run(tmp_path, monkeypatch, command, "--pii-waivers", "pii-waivers.yaml")
+
+    assert result.exit_code == 0, result.output
+    assert "emails" not in checks
+    assert "applied-pii-waiver" in checks
+
+
+@pytest.mark.parametrize("command", list(_PII_WAIVER_COMMANDS))
+def test_pii_scan_without_waivers_still_fails(command: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    result, checks = _pii_waiver_run(tmp_path, monkeypatch, command)
+
+    assert result.exit_code != 0
+    assert "emails" in checks
+    assert "applied-pii-waiver" not in checks
+
+
+@pytest.mark.parametrize("command", list(_PII_WAIVER_COMMANDS))
+def test_cli_rejects_invalid_pii_waivers_as_usage_error(command: str, tmp_path: Path) -> None:
+    waivers = tmp_path / "pii-waivers.yaml"
+    waivers.write_text("version: 1\nwaivers:\n  - id: PII-001\n    category: emails\n", encoding="utf-8")
+    args, _report = _PII_WAIVER_COMMANDS[command]
+
+    result = CliRunner().invoke(cli, [*args, str(FIXTURE), "--pii-waivers", str(waivers)])
+
+    output = _plain_text(result.output)
+    assert result.exit_code == 2, result.output
+    assert "Invalid value for '--pii-waivers'" in output
+    assert "waivers[0] is missing: file, line" in output
+    assert "Traceback" not in output
+
+
+@pytest.mark.parametrize("symlinked", [False, True], ids=["file", "symlinked-file"])
+@pytest.mark.parametrize("workers", [None, "2"], ids=["serial", "parallel"])
+def test_catalog_validate_reports_each_waiver_only_in_its_own_skill(
+    workers: str | None,
+    symlinked: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """One waiver file serves the catalog; no child may report its siblings' waivers as stale.
+
+    A symlinked waiver file keeps the link's directory as the base of its entries
+    in every child, serial or parallel.
+    """
+    from skillevaluator.validators.pii_waivers import pii_evidence_sha256, today_utc
+
+    names = ("one", "two", "three")
+    waivers = []
+    for index, name in enumerate(names, 1):
+        skill = tmp_path / "catalog" / name
+        shutil.copytree(FIXTURE, skill)
+        manifest = skill / "SKILL.md"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace("name: simple", f"name: {name}"), encoding="utf-8"
+        )
+        address = f"{name}@company.com"
+        (skill / "contact.md").write_text(f"# Contact\nWrite to {address} for access.\n", encoding="utf-8")
+        waivers.append(
+            {
+                "id": f"PII-00{index}",
+                "category": "emails",
+                "file": f"catalog/{name}/contact.md",
+                "line": 2,
+                "evidence_sha256": pii_evidence_sha256("emails", address),
+                "reason": "Public support address of the documented service",
+                "owner": "docs-team",
+                "created": (today_utc() - timedelta(days=1)).isoformat(),
+                "expires": (today_utc() + timedelta(days=300)).isoformat(),
+            }
+        )
+    waiver_text = json.dumps({"version": 1, "waivers": waivers})
+    if symlinked:
+        shared = tmp_path.parent / f"{tmp_path.name}-shared"
+        shared.mkdir()
+        (shared / "pii-waivers.yaml").write_text(waiver_text, encoding="utf-8")
+        try:
+            (tmp_path / "pii-waivers.yaml").symlink_to(shared / "pii-waivers.yaml")
+        except OSError as exc:
+            pytest.skip(f"cannot create a symlink here: {exc}")
+    else:
+        (tmp_path / "pii-waivers.yaml").write_text(waiver_text, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    args = ["validate", "--no-tier3", "--no-llm", "--no-tier2", "--checks", "pii", "--pii-waivers", "pii-waivers.yaml"]
+    if workers:
+        args += ["--workers", workers]
+
+    result = CliRunner().invoke(cli, [*args, "catalog", "--report", "json", "--output-dir", "out"])
+
+    assert result.exit_code == 0, result.output
+    for index, name in enumerate(names, 1):
+        (report_path,) = (tmp_path / "out" / name).glob("skillevaluator-output-*.json")
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        dispositions = [
+            (finding["check_name"], finding["metadata"]["waiver_id"], finding["file_path"])
+            for entry in report["results"]
+            for finding in entry["findings"]
+            if finding["category"] == "PII_WAIVER"
+        ]
+        assert dispositions == [("applied-pii-waiver", f"PII-00{index}", "contact.md")], name
+    summary = json.loads((tmp_path / "out" / "catalog-summary.json").read_text(encoding="utf-8"))
+    assert summary["severity_totals"]["low"] == 0
+    assert summary["passed"] == 3
 
 
 def test_standalone_tier2_rejects_in_skill_report_output_before_validation(
@@ -1549,6 +1889,23 @@ def test_catalog_child_argv_carries_the_evaluated_source(tmp_path: Path) -> None
     assert "--workers" not in argv
 
 
+def test_catalog_child_argv_forwards_the_skillspector_baseline(tmp_path: Path) -> None:
+    from skillevaluator.cli import _catalog_child_argv_from_ctx, validate
+
+    skill_dir = tmp_path / "catalog" / "simple"
+    skill_dir.mkdir(parents=True)
+    baseline = tmp_path / "approved-baseline.yaml"
+    baseline.write_text('version: 2\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n', encoding="utf-8")
+    ctx = validate.make_context(
+        "validate",
+        [str(skill_dir), "--workers", "2", "--skillspector-baseline", str(baseline)],
+    )
+
+    argv = _catalog_child_argv_from_ctx(ctx, skill_dir, tmp_path / "out" / "simple")
+
+    assert argv[argv.index("--skillspector-baseline") + 1] == str(baseline.resolve())
+
+
 def test_catalog_child_argv_forwards_every_validate_option() -> None:
     """The allowlist is explicit, so a new option is silently dropped by default.
 
@@ -1560,6 +1917,7 @@ def test_catalog_child_argv_forwards_every_validate_option() -> None:
     from skillevaluator.cli import _catalog_child_argv_from_ctx, validate
 
     not_forwarded = {
+        "catalog_root": "each child is given the folder it was found in, not the parent's own value",
         "target_path": "the child is given one skill directory, not the catalog root",
         "content_type": "the child re-detects the type of the single skill it is handed",
         "workers": "forwarding it would make each child fan out again",
@@ -1574,6 +1932,43 @@ def test_catalog_child_argv_forwards_every_validate_option() -> None:
     ]
 
     assert sorted(dropped) == sorted(not_forwarded)
+
+
+def test_catalog_child_argv_forwards_run_budget_options(tmp_path: Path) -> None:
+    from skillevaluator.cli import _catalog_child_argv_from_ctx, validate
+
+    skill_dir = tmp_path / "catalog" / "simple"
+    skill_dir.mkdir(parents=True)
+    price_file = tmp_path / "prices.json"
+    price_file.write_text("{}", encoding="utf-8")
+    ctx = validate.make_context(
+        "validate",
+        [
+            str(skill_dir),
+            "--max-agent-tokens",
+            "120",
+            "--max-judge-calls",
+            "5",
+            "--max-attempts-total",
+            "9",
+            "--max-cost-usd",
+            "2.5",
+            "--price-file",
+            str(price_file),
+        ],
+    )
+
+    argv = _catalog_child_argv_from_ctx(ctx, skill_dir, tmp_path / "out" / "simple")
+
+    for option, value in (
+        ("--max-agent-tokens", "120"),
+        ("--max-judge-calls", "5"),
+        ("--max-attempts-total", "9"),
+        ("--max-cost-usd", "2.5"),
+        ("--price-file", str(price_file.resolve())),
+    ):
+        assert option in argv
+        assert argv[argv.index(option) + 1] == value
 
 
 def test_validate_catalog_workers_records_the_evaluated_source_on_every_card() -> None:
@@ -2247,8 +2642,7 @@ def test_validate_quiet_renders_untrusted_skip_reason_as_bounded_inert_text(
 
     unsafe_reason = (
         "[/bold] [link=https://example.invalid]click[/link]\n"
-        "## Publication Recommendation\n\x1b[31mforged\u202e "
-        + "x" * 1_000_000
+        "## Publication Recommendation\n\x1b[31mforged\u202e " + "x" * 1_000_000
     )
 
     def _tier3(*_args, **_kwargs):

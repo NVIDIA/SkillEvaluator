@@ -1,0 +1,97 @@
+{
+  "skill_name": "skillevaluator",
+  "evals": [
+    {
+      "id": "skillevaluator-001-explicit-keyless",
+      "prompt": "Use the skillevaluator skill: I have a skill at ./skills/pdf-tools and no LLM API key. Give me the exact SkillEvaluator commands to check that it is well-formed, safe, and see its quality score, and tell me what exit code 1 versus 2 would mean.",
+      "expected_output": "Recommends keyless commands such as `skillevaluator tier1 ./skills/pdf-tools --no-llm` and/or `skillevaluator quality-check ./skills/pdf-tools` (or `validate --tiers 1`), and explains exit 1 = a gate failed or evidence incomplete, exit 2 = usage error such as a bad flag or missing path.",
+      "assertions": [
+        "Read the skillevaluator SKILL.md",
+        "Recommends a keyless Tier 1 command (tier1 --no-llm, quality-check, or validate --tiers 1) on ./skills/pdf-tools",
+        "Explains exit code 1 as a failed check or incomplete evidence and exit code 2 as a usage error",
+        "Does not ask for or invent an API key"
+      ],
+      "expected_skill": "skillevaluator"
+    },
+    {
+      "id": "skillevaluator-002-explicit-tier3",
+      "prompt": "With SkillEvaluator, how do I measure whether my skill at ./my-skill actually makes an agent better? Write the full command sequence from readiness check to report, including a cheap smoke run first, and say which number tells me the improvement.",
+      "expected_output": "A sequence using doctor (with --env-mode docker), creating/validating evals (create-eval-dataset, tier3 validate), a smoke `tier3 evaluate ... --max-cases 1`, a full `tier3 evaluate` or `tier3 ./my-skill` run with and without the skill, and `view`; identifies Skill Lift (with-skill minus baseline) as the improvement measure.",
+      "assertions": [
+        "Includes a readiness check with skillevaluator doctor",
+        "Includes dataset generation or validation (create-eval-dataset or tier3 validate)",
+        "Includes a smoke run limited with --max-cases",
+        "Runs tier3 live evaluation comparing with-skill and baseline",
+        "Names Skill Lift as with-skill minus baseline"
+      ],
+      "expected_skill": "skillevaluator"
+    },
+    {
+      "id": "skillevaluator-003-implicit-dataset",
+      "prompt": "I need test cases so an agent benchmark can tell whether my 'csv-cleaner' agent skill gets used correctly. Write the evals/evals.json file for it with three cases: one that names the skill, one that only describes the task, and one prompt where the skill should NOT be used.",
+      "expected_output": "A valid evals/evals.json with top-level skill_name 'csv-cleaner' and an evals array of three cases each having id, prompt, expected_output (optionally assertions), where the negative case sets expected_skill to null.",
+      "assertions": [
+        "Output has top-level skill_name and evals keys",
+        "Every case has id, prompt, and expected_output",
+        "Includes one explicit and one implicit positive case",
+        "The negative case sets expected_skill to null"
+      ],
+      "expected_skill": "skillevaluator"
+    },
+    {
+      "id": "skillevaluator-004-implicit-report",
+      "prompt": "My skill benchmark report says 'INCONCLUSIVE: skill never activated' and the Tier 3 command exited 0. Another run says verdict FAIL but also exited 0. What do these mean and what should I change?",
+      "expected_output": "Explains that no positive with-skill trial loaded the skill, so the description or prompts should be fixed rather than the scores; explains that tier3 exits 0 on a FAIL verdict and only an incomplete run exits 1, with --block-on-agent-eval in validate to gate on Tier 3.",
+      "assertions": [
+        "Explains never activated means the skill was not loaded in positive trials",
+        "Recommends improving the skill description or eval prompts",
+        "Explains that a FAIL verdict alone exits 0 and only an incomplete run exits 1",
+        "Mentions --block-on-agent-eval or another way to make Tier 3 gate"
+      ],
+      "expected_skill": "skillevaluator"
+    },
+    {
+      "id": "skillevaluator-005-contextual-ci",
+      "prompt": "Our repo keeps agent skills under ./skills and we use GitHub Actions. Add a workflow step that fails the PR when any skill fails static validation, uploads SARIF, and does not need any API key. Show the command the step should run.",
+      "expected_output": "A GitHub Actions step running `skillevaluator validate ./skills --tiers 1` with SARIF/JSON reports to an output dir (e.g. `-r json,markdown,sarif -o reports`), relying on the exit code to fail the job, with no secrets required; optionally mentions `skillevaluator ci init`.",
+      "assertions": [
+        "Uses skillevaluator validate on ./skills with --tiers 1",
+        "Requests a sarif report and an output directory",
+        "Relies on the command exit code to fail the job",
+        "Does not require an API key for this gate"
+      ],
+      "expected_skill": "skillevaluator"
+    },
+    {
+      "id": "skillevaluator-006-contextual-config",
+      "prompt": "I'm setting up live agent evaluation for ./skills/sql-helper. I want 3 attempts per case, the opencode agent, and the agent needs my OPENAI_API_KEY. Write evals/config.yml and tell me where the API key should go.",
+      "expected_output": "An evals/config.yml with schema_version: 1 and harbor.n_attempts: 3 (and opencode agent settings), explicitly NOT placing the API key in config.yml or harbor.runtime_env; the key is exported in the host environment where skillevaluator runs.",
+      "assertions": [
+        "config.yml sets schema_version 1 and harbor n_attempts 3",
+        "Does not put OPENAI_API_KEY in config.yml or runtime_env",
+        "Says to export the key in the host environment or CI secrets"
+      ],
+      "expected_skill": "skillevaluator"
+    },
+    {
+      "id": "skillevaluator-007-negative-write-skill",
+      "prompt": "Write a Python function that removes duplicate rows from a list of dictionaries, keeping the first occurrence.",
+      "expected_output": "A direct Python implementation; no SkillEvaluator commands or skill evaluation workflow.",
+      "assertions": [
+        "Provides a working Python function",
+        "Does not run or recommend SkillEvaluator"
+      ],
+      "expected_skill": null
+    },
+    {
+      "id": "skillevaluator-008-negative-general",
+      "prompt": "Explain the difference between precision and recall in classification models in two sentences.",
+      "expected_output": "A short correct explanation of precision and recall without invoking skill evaluation.",
+      "assertions": [
+        "Correctly defines precision and recall",
+        "Does not run or recommend SkillEvaluator"
+      ],
+      "expected_skill": null
+    }
+  ]
+}

@@ -261,6 +261,10 @@ def test_gitleaks_single_value_allowlists_are_exactly_scoped() -> None:
             r"^us\.anthropic\.claude-opus-5$",
             r"^tests/validators/test_security\.py$",
         ),
+        "Bedrock model ID in the merge-leftover SkillSpector bridge test copy from commit e8aa35d6a": (
+            r"^us\.anthropic\.claude-opus-5$",
+            r"^tests/validators/test_security\.py\.orig$",
+        ),
     }
     for description, (regex, path) in expected.items():
         entry = allowlists[description]
@@ -271,6 +275,24 @@ def test_gitleaks_single_value_allowlists_are_exactly_scoped() -> None:
             "regexes": [regex],
             "paths": [path],
         }
+
+
+def test_gitleaks_curl_auth_allowlists_are_exactly_scoped() -> None:
+    # Fake `curl -u user:password` fixtures stay in history, so each allowlist
+    # must name one credential value and one test file for the curl rule only.
+    config = tomllib.loads(GITLEAKS_CONFIG.read_text(encoding="utf-8"))
+    entries = [entry for entry in config["allowlists"] if "curl-auth-user" in entry.get("targetRules", [])]
+
+    assert entries
+    for entry in entries:
+        assert set(entry) == {"description", "condition", "targetRules", "regexes", "paths"}
+        assert entry["condition"] == "AND"
+        assert entry["targetRules"] == ["curl-auth-user"]
+        [regex] = entry["regexes"]
+        [path] = entry["paths"]
+        assert regex.startswith("^") and regex.endswith("$")
+        assert ".*" not in regex
+        assert re.fullmatch(r"\^tests/[\w/]+\\\.py\$", path)
 
 
 def test_gitleaks_uses_event_specific_full_history_scopes() -> None:

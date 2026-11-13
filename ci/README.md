@@ -1,8 +1,9 @@
 # Reusable repository CI
 
-This directory supplies the shared Tier 1 CI runtime and consumer onboarding
-templates. Start with [repository integration](../docs/repository-integration.mdx)
-for GitHub Actions or GitLab CI/CD. The GitLab adapter is in `ci/gitlab/`;
+This directory supplies the shared CI runtime for quality and security checks,
+plus consumer onboarding templates. Start with
+[repository integration](../docs/repository-integration.mdx) for GitHub Actions
+or GitLab CI/CD. The GitLab adapter is in `ci/gitlab/`;
 the image and report generation are shared by both platforms.
 The upstream workflow release and public package must be reviewed and published
 before consumers can use this path. Source templates are not runnable while
@@ -22,14 +23,21 @@ immutable `image`, such as
 also pins the workflow with `uses: ...@RELEASE_WORKFLOW_SHA`. Do not substitute a
 mutable image tag or an unreviewed branch reference.
 
+The image selects one bundled `default` validation policy for public and private
+repositories. Its rules live in `src/skillevaluator/config/profiles/default.yaml`;
+there is no `internal`/`external` CI input. Older released images label this same
+policy `external`. Upgrading the workflow alone does not change a pinned image's
+policy label. Profile names do not control network access or report visibility.
+
 | Input | Basic configuration |
 | --- | --- |
 | `paths` | `skills`; up to 100 newline-separated repository-relative skill directories or roots |
 | `scan-mode` | `auto`: affected skills on PRs, all configured skills on pushes/manual runs; `all` overrides selection |
-| `llm` | `false`; static Tier 1 requires no model key |
+| `llm` | `false`; static checks require no model key |
 | `artifact-name` | Keep `skill-evaluator-tier1` for the optional publisher |
 | `report-base-url` | Optional own Pages URL, only after hosted publication is configured |
 | `scan-workers` | `4`; skills scanned at once, from 1 to 16. `1` scans one skill at a time |
+| `security-baselines` | `false`; explicitly apply reviewed per-skill SkillSpector baselines as described below |
 
 The runtime discovers exact-case `SKILL.md` files, rejects unsafe paths and
 symlinks, deduplicates overlapping roots and bounds each invocation to 100
@@ -50,6 +58,8 @@ shared files outside the configured roots are not inferred as dependencies.
 Use `scan-mode: all` when changes to those shared resources require evaluation.
 Changed-skill selection checks out full history without old file contents (a
 blobless clone); full scans fetch only the scanned commit.
+Enabling reviewed security baselines fetches full, unfiltered history so target
+policy files are available without network access inside the scanner image.
 Static scanning is network connected: vulnerability databases may receive
 package metadata. Dependency auditing never installs packages or runs build
 scripts: requirements must provide exact package/version pins. Unpinned, URL,
@@ -82,6 +92,60 @@ inspect or redact the input, the run reports an error without publishing
 detailed scan output. This is not a guarantee that every credential or
 transformed value is detected. Remove and rotate exposed credentials; reports
 and Git history from previous runs are not rewritten automatically.
+
+## Reviewed security baselines
+
+This source capability requires a supporting workflow and image release; it is
+not added retroactively to already published onboarding bundles. Enable
+`security-baselines: true` on the GitHub reusable workflow, or set GitLab's
+`SKILL_EVAL_SECURITY_BASELINES: "true"`. Both default to false. This option
+applies SkillSpector exceptions only; it does not disable PII or security checks,
+change the quality gate, or forward the separate CLI `--pii-waivers` option.
+
+If a central component wraps the GitHub workflow, update its approved workflow
+and image pins together and forward the `security-baselines` boolean to the
+scan job. Each consumer keeps its own reviewed mapping and baseline files.
+
+Commit the fixed manifest `.skillevaluator/skillspector-baselines.yaml`:
+
+```yaml
+version: 1
+baselines:
+  legacy/sample-expert: config/security-baselines/sample-expert.json
+```
+
+Keys are exact repository-relative skill directories, and values are
+repository-relative native SkillSpector YAML or JSON baseline files. There are
+no globs. Unmapped skills receive no baseline. Paths must be canonical, without
+absolute paths, parent traversal, control characters, or links; the manifest
+rejects duplicate keys, YAML anchors and aliases, and unknown top-level keys.
+The manifest is limited to 64 KiB and 1,000 mappings, each baseline to 2 MiB,
+and the combined policy files to 16 MiB. The credential preflight also applies
+its existing line and redaction limits to the policy files.
+
+Both the mapping and baseline bytes come from the same approved Git commit:
+the pull request's target commit on GitHub, or GitLab's target-branch commit.
+For detached same-project GitLab merge requests without a target SHA, the job
+fetches the actual target branch before scanning; it never substitutes the
+merge base or candidate head. Fork GitLab merge requests require an exact
+platform-provided target SHA already available in the checkout and fail closed
+otherwise. Push/manual runs use their current commit. A pull request proposing
+the first manifest must merge through review before this option can use it;
+the candidate's new or edited approvals never apply to that same pull request.
+
+Missing policy commits, manifests, files, or invalid mappings fail configuration.
+Selected baseline bytes are materialized read-only in private temporary storage
+outside the skill tree and passed with `--skillspector-baseline` only to the
+mapped skill. The scanner retains its normal validation of the baseline format.
+Exact fingerprints still bind the source content and scanner version; regenerate
+and review them after either changes, or use deliberate narrow reviewed rules.
+Baselines cannot clear incomplete analysis.
+
+The retained `summary.json` records the policy commit, manifest path, digest, and
+`mapped_skill_count` in `execution.security_baselines`, and each mapped skill's baseline file and
+digest in `skills[].security_baseline`. The skill's native report records whether
+the baseline applied and what it suppressed. Policy files receive the same
+credential preflight and report redaction as skill content.
 
 ## Optional hosted reports and PR feedback
 
@@ -187,10 +251,39 @@ with:
 
 Replace `FULL_COMMIT_SHA` with the reviewed 40-character commit. Multiple wrappers
 can be separated by newlines or commas. Each referenced wrapper must be approved;
-branch and tag references are rejected. Continue approving the actual evaluator
+branch references are rejected. Continue approving the actual evaluator
 in `trusted-evaluator-shas` and the consumer scan file in `trusted-caller-blobs`.
 Review any wrapper update and refresh its pin in both the calling workflow and
 publisher approval list; refresh the consumer blob after editing its scan file.
+
+For a central component maintained at a version tag such as `@v3`, the consumer
+can explicitly delegate evaluator version selection to that component:
+
+```yaml
+with:
+  trusted-wrapper-workflows: your-org/shared-ci/.github/workflows/skill-checks.yml@v3
+  delegated-evaluator-wrapper: your-org/shared-ci/.github/workflows/skill-checks.yml@v3
+  trusted-caller-blobs: YOUR_REVIEWED_SCAN_FILE_BLOB
+```
+
+This mode supports one consumer scan job calling one shared component, which
+calls one SHA-pinned evaluator in the configured evaluator repository. Omit
+`trusted-evaluator-shas` when delegating. The publisher verifies GitHub's
+historical tag resolution and the signed evaluator receipt; it never resolves
+today's tag to validate an earlier run. Each report records the resolved wrapper
+commit. Component maintainers can update evaluator pins behind the approved tag
+without changing each consumer; edits to the consumer scan file still need a
+new approved blob. Tag delegation grants that component control over evaluator
+versions and common policy, so enable it only for a component your team trusts.
+Multiple wrapper levels and matrix callers require the explicit SHA allowlists.
+
+`skillevaluator ci init` detects this existing caller, keeps its configuration,
+and prepares the publisher and caller approval automatically. The CLI checks
+the shared component's identity permission before changing GitHub settings.
+For private reports, an administrator first selects **Private** and **GitHub
+Actions** in Pages settings. The CLI verifies the assigned private URL and
+configures report history and the setup PR. It never creates a public site for
+a private repository. Private Pages requires an Enterprise Cloud organization.
 
 The consumer scan job **and every wrapper job calling the next workflow** need:
 
@@ -253,7 +346,7 @@ placeholders until then.
    runs read that cache but never write it. Release builds do not reuse cached
    layers, so `git` and `ca-certificates` come from the Debian packages current
    at release time.
-   Build the complete Tier 1 runtime with required external scanners. The base
+   Build the shared CI runtime with its required external scanners. The base
    image digest, uv bootstrap, scanner runtime dependencies and SkillSpector
    build dependencies are pinned; scanner installs require package hashes.
    Confirm the resulting digest's source revision and the installed scanner

@@ -184,7 +184,7 @@ def test_auto_trace_preserves_authored_cases_and_flags_unmatched_coverage(tmp_pa
     source = _trace(skill, tmp_path / "results", case_id="authored")
     monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(tmp_path / "results"))
 
-    result = generate_dataset.main([str(skill), "--no-llm"])
+    result = generate_dataset.main([str(skill), "--no-llm", "--refine"])
 
     assert [case["id"] for case in result.dataset["evals"]] == ["authored", "unmatched"]
     first, second = result.dataset["evals"]
@@ -391,7 +391,7 @@ def test_auto_trace_preserves_authored_prompt_metadata_and_review_history(tmp_pa
     )
     monkeypatch.setattr(inference_client, "LLMClient", FakeLLMClient)
 
-    result = generate_dataset.main([str(skill), *([] if use_llm else ["--no-llm"])])
+    result = generate_dataset.main([str(skill), "--refine", *([] if use_llm else ["--no-llm"])])
 
     case = result.dataset["evals"][0]
     assert case["prompt"] == "Check this exact authored invoice"
@@ -528,7 +528,16 @@ def test_cli_auto_trace_fallback_records_template_mode_and_preserves_sources(
 
     monkeypatch.setattr("skillevaluator.provider_config.resolve_llm_provider", resolve_provider)
     monkeypatch.setattr(inference_client, "LLMClient", FailingClient)
-    result = CliRunner().invoke(cli, ["create-eval-dataset", str(skill), "--results-dir", str(tmp_path / "results")])
+    result = CliRunner().invoke(
+        cli,
+        [
+            "create-eval-dataset",
+            str(skill),
+            "--results-dir",
+            str(tmp_path / "results"),
+            *(["--refine"] if existing_authored else []),
+        ],
+    )
 
     assert result.exit_code == 0, result.output
     dataset = json.loads(output.read_text())
@@ -558,3 +567,192 @@ def test_cli_auto_trace_fallback_records_template_mode_and_preserves_sources(
     assert "generated from templates (fallback:" in display
     assert expected_reason in display
     assert warning is True
+
+
+@pytest.mark.parametrize("options", [[], ["--no-llm"]])
+def test_auto_existing_matching_trace_requires_explicit_write_authorization(tmp_path, monkeypatch, options):
+    from skillevaluator.inference.client import LLMClient
+
+    skill = _skill(tmp_path, "\n")
+    output = skill / "evals" / "evals.json"
+    original = b'{"skill_name":"sample-skill","evals":[{"id":"authored","prompt":"Check","expected_output":"Keep","assertions":["Keep this assertion"]}]}\n'
+    output.write_bytes(original)
+    output.chmod(0o640)
+    before = output.stat()
+    _trace(skill, tmp_path / "results", case_id="authored")
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(tmp_path / "results"))
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    provider_calls = []
+
+    def complete(*_args, **_kwargs):
+        provider_calls.append(True)
+        raise RuntimeError("unchanged datasets must not need inference")
+
+    monkeypatch.setattr(LLMClient, "completions", complete)
+    result = CliRunner().invoke(cli, ["create-eval-dataset", str(skill), *options])
+
+    assert result.exit_code == 0, result.output
+    assert "Dataset already exists" in result.output
+    assert "matching" in result.output.lower() and "trace" in result.output.lower()
+    assert "--refine" in result.output
+    assert output.read_bytes() == original
+    assert output.stat().st_mode & 0o777 == 0o640
+    assert output.stat().st_mtime_ns == before.st_mtime_ns
+    assert output.stat().st_ino == before.st_ino
+    assert provider_calls == []
+
+
+@pytest.mark.parametrize("grounding", ["auto", "skill", "intent"])
+def test_existing_dataset_noop_precedes_skill_and_guidance_reads(tmp_path, grounding):
+    skill = _skill(tmp_path, "ignored")
+    output = skill / "evals" / "evals.json"
+    output.write_bytes(b"{}\n")
+    output.chmod(0o600)
+    (skill / "SKILL.md").write_bytes(b"\xff")
+    (skill / "evals" / "EVAL.md").write_bytes(b"\xff")
+    prompt = tmp_path / "unreadable-guidance.md"
+    prompt.write_bytes(b"\xff")
+
+    result = generate_dataset.main([str(skill), "--grounding", grounding, "--prompt", str(prompt)])
+
+    assert result.status == "unchanged"
+    assert output.read_bytes() == b"{}\n"
+    assert output.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("original", [b"{}", b"not json"])
+def test_auto_force_invalid_existing_dataset_gives_auto_recovery(tmp_path, original):
+    skill = _skill(tmp_path, "\n")
+    output = skill / "evals" / "evals.json"
+    output.write_bytes(original)
+    output.chmod(0o640)
+
+    with pytest.raises(DatasetGenerationError) as error:
+        generate_dataset.main([str(skill), "--no-llm", "--force"])
+
+    assert "--grounding auto requires" in str(error.value)
+    assert "--grounding skill --force" in str(error.value)
+    assert "--prompt" in str(error.value)
+    assert "--grounding trace" not in str(error.value)
+    assert output.read_bytes() == original
+    assert output.stat().st_mode & 0o777 == 0o640
+
+
+@pytest.mark.parametrize("source", ["eval_md", "prompt"])
+@pytest.mark.parametrize(
+    "guidance",
+    [
+        "# Evaluation\n## Questions\n## Behaviors\n",
+        "<!-- Add intent here -->\n",
+        "# Evaluation\n<!-- multi\nline -->\n## Notes\n",
+    ],
+)
+def test_auto_rejects_heading_and_comment_only_guidance(tmp_path, monkeypatch, source, guidance):
+    from skillevaluator.inference.client import LLMClient
+
+    skill = _skill(tmp_path, guidance if source == "eval_md" else None)
+    options = []
+    if source == "prompt":
+        prompt = tmp_path / "intent.md"
+        prompt.write_text(guidance)
+        options = ["--prompt", str(prompt)]
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(tmp_path / "absent"))
+    provider_calls = []
+
+    def complete(*_args, **_kwargs):
+        provider_calls.append(True)
+        raise RuntimeError("missing intent must be rejected before inference")
+
+    monkeypatch.setattr(LLMClient, "completions", complete)
+    before = {p.relative_to(skill): p.read_bytes() for p in skill.rglob("*") if p.is_file()}
+    with pytest.raises(DatasetGenerationError, match="--grounding auto requires"):
+        generate_dataset.main([str(skill), *options])
+
+    assert {p.relative_to(skill): p.read_bytes() for p in skill.rglob("*") if p.is_file()} == before
+    assert provider_calls == []
+
+
+@pytest.mark.parametrize("use_llm", [False, True])
+@pytest.mark.parametrize("authored_truth", [None, "The agent used the sample-skill skill; keep this human expectation"])
+def test_auto_trace_filters_only_inferred_skill_use_ground_truth(tmp_path, monkeypatch, use_llm, authored_truth):
+    from skillevaluator.inference.client import LLMClient
+
+    skill = _skill(tmp_path, "\n")
+    (skill / "scripts").mkdir()
+    (skill / "scripts" / "reconcile.py").write_text("print('42 invoices reconciled')\n")
+    output = skill / "evals" / "evals.json"
+    original_hash = None
+    if authored_truth is not None:
+        output.write_text(
+            json.dumps(
+                {
+                    "skill_name": skill.name,
+                    "owner": "human",
+                    "evals": [
+                        {
+                            "id": "sample-skill-001",
+                            "prompt": "Reconcile these invoices",
+                            "expected_output": authored_truth,
+                            "assertions": ["The agent read SKILL.md"],
+                            "files": ["files/invoices.csv"],
+                        }
+                    ],
+                }
+            )
+        )
+        original_hash = hashlib.sha256(output.read_bytes()).hexdigest()
+    source = _trace(
+        skill,
+        tmp_path / "results",
+        steps=[
+            {
+                "source": "agent",
+                "message": "Using the sample-skill skill I read SKILL.md and ran reconcile.py: 42 invoices reconciled",
+            }
+        ],
+    )
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(tmp_path / "results"))
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    def complete(*_args, **_kwargs):
+        return json.dumps(
+            [
+                {
+                    "id": "sample-skill-001",
+                    "question": "Reconcile these invoices",
+                    "expected_skill": skill.name,
+                    "expected_script": "reconcile.py",
+                    "ground_truth": "The agent used the sample-skill skill and reconciled 42 invoices",
+                    "expected_behavior": ["Reports the invoice total"],
+                }
+            ]
+        )
+
+    monkeypatch.setattr(LLMClient, "completions", complete)
+    result = generate_dataset.main(
+        [str(skill), *([] if use_llm else ["--no-llm"]), *(["--refine"] if authored_truth is not None else [])]
+    )
+
+    case = json.loads(output.read_text())["evals"][0]
+    assert result.dataset["generation"]["mode"] == ("llm" if use_llm else "template_requested")
+    assert result.dataset["generation"]["review_state"] == "needs_review"
+    assert {
+        "kind": "trajectory",
+        "path": "trajectory.json",
+        "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+    } in result.dataset["generation"]["inputs"]
+    if authored_truth is None:
+        assert case["expected_output"] == ""
+        assert any("skill use" in reason for reason in case["review"]["reasons"])
+        validation = CliRunner().invoke(cli, ["tier3", "validate", str(skill), "--strict", "--json"])
+        assert validation.exit_code == 0, validation.output
+    else:
+        assert case["expected_output"] == authored_truth
+        assert "The agent read SKILL.md" in case["assertions"]
+        assert case["files"] == ["files/invoices.csv"]
+        assert result.dataset["owner"] == "human"
+        assert {"kind": "dataset", "path": "evals/evals.json", "sha256": original_hash} in result.dataset["generation"][
+            "inputs"
+        ]

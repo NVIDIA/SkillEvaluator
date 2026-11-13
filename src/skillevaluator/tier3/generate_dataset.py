@@ -16,7 +16,7 @@ Workflows (from simplest to highest quality):
   4. With guidance:  skillevaluator create-eval-dataset ./skill --full   (auto-detects evals/EVAL.md)
   5. Agent-refined:  skillevaluator create-eval-dataset ./skill --full --refine
 
-Standalone auto grounding prefers nonblank author intent, then meaningful
+Standalone auto grounding prefers substantive author intent, then meaningful
 matching retained traces; otherwise it fails before provider access or writes.
 Explicit --grounding skill opts into skill-only starters. Unattended
 generate_one_case/autopilot generation retains its skill-grounded contract.
@@ -127,6 +127,14 @@ def _to_agentskills_dataset(
     return dataset
 
 
+def _has_substantive_guidance(text: str) -> bool:
+    """Require authored content beyond Markdown headings and HTML comments."""
+    content = re.sub(r"<!--.*?(?:-->|\Z)", "", text, flags=re.DOTALL)
+    content = re.sub(r"(?m)^.*\n[ \t]*(?:={3,}|-{3,})[ \t]*$", "", content)
+    content = re.sub(r"(?m)^[ \t]*#{1,6}(?:[ \t]+.*)?$", "", content)
+    return bool(content.strip())
+
+
 def _parse_skill(skill_path: Path, prompt_file: str | None = None) -> dict[str, Any]:
     """Parse SKILL.md for name, description, scripts, interactive hints, and developer eval guidance.
 
@@ -191,11 +199,16 @@ def _parse_skill(skill_path: Path, prompt_file: str | None = None) -> dict[str, 
             eval_prompt_source = str(pf)
         else:
             print(f"Warning: --prompt file not found: {prompt_file}")
-    if not eval_prompt:
+    if not _has_substantive_guidance(eval_prompt):
+        eval_prompt = ""
+        eval_prompt_source = None
         eval_md = skill_path / "evals" / "EVAL.md"
         if eval_md.exists():
             eval_prompt = eval_md.read_text(encoding="utf-8").strip()
             eval_prompt_source = str(eval_md)
+    if not _has_substantive_guidance(eval_prompt):
+        eval_prompt = ""
+        eval_prompt_source = None
 
     return {
         "name": name,
@@ -1656,10 +1669,11 @@ Examples:
   skillevaluator create-eval-dataset ./my-skill --full --refine --prompt guidance.md
 
 Default grounding (--grounding auto):
-  Prefer nonblank --prompt or evals/EVAL.md, then meaningful matching retained
+  Prefer substantive --prompt or evals/EVAL.md, then meaningful matching retained
   traces from a completed run scoped to this skill. Otherwise supply guidance,
   retained results, or explicitly choose --grounding skill. --refine and
   --no-llm do not bypass this preflight. Auto never collects its own input.
+  Existing datasets require --refine or --force before auto can modify them.
 
 Developer eval guidance (auto-detected from evals/EVAL.md if present):
   Place an EVAL.md in your skill's evals/ directory to provide the LLM
@@ -1734,9 +1748,22 @@ Agent-refined mode (--refine):
 
     evals_dir = skill_path / "evals"
     output_path = evals_dir / "evals.json"
+    # Explicit trace grounding opts into refinement; automatic trace discovery
+    # must not authorize an in-place change or read skill/guidance first.
+    if output_path.exists() and not args.force and not refine_requested:
+        print(f"Dataset already exists: {output_path}")
+        print("Use --refine to apply matching retained traces, or --force to overwrite.")
+        return DatasetGenerationResult(status="unchanged", path=output_path)
+
     skill = _parse_skill(skill_path, prompt_file=args.prompt)
     auto_cases: list[dict[str, Any]] | None = None
     auto_evidence: tuple[dict[str, dict[str, Any]], dict[str, Path]] | None = None
+    auto_input_required = (
+        "--grounding auto requires substantive author guidance in evals/EVAL.md or --prompt, "
+        "or a matching retained agent trace from this skill's completed results "
+        "(--from-results / --results-dir). To generate skill-only starters explicitly, "
+        "use --grounding skill --force to overwrite an existing dataset, or --grounding skill for a new dataset."
+    )
     if grounding == "auto":
         if skill.get("eval_prompt"):
             grounding = "intent"
@@ -1745,13 +1772,9 @@ Agent-refined mode (--refine):
                 try:
                     auto_cases = _load_existing_cases(output_path)
                 except DatasetGenerationError:
-                    if args.force or args.refine:
-                        raise
-                    # Keep the existing no-overwrite contract even for an empty
-                    # or invalid source. Explicit refinement still validates it.
-                    print(f"Dataset already exists: {output_path}")
-                    print("Use --force to overwrite.")
-                    return DatasetGenerationResult(status="unchanged", path=output_path)
+                    _abort(
+                        f"{auto_input_required} The existing dataset cannot supply valid case ids for matching traces."
+                    )
             else:
                 auto_cases = _generate_full(skill) if args.full else _generate_simple(skill)
             auto_evidence = _discover_auto_trace_evidence(
@@ -1760,22 +1783,11 @@ Agent-refined mode (--refine):
             if auto_evidence[0]:
                 grounding = "trace"
                 refine_requested = True
-            elif not (output_path.exists() and not args.force and not args.refine):
-                _abort(
-                    "--grounding auto requires nonblank author guidance in evals/EVAL.md or --prompt, "
-                    "or a matching retained agent trace from this skill's completed results "
-                    "(--from-results / --results-dir). To generate skill-only starters explicitly, "
-                    "use --grounding skill."
-                )
+            else:
+                _abort(auto_input_required)
 
     if grounding == "intent" and not skill.get("eval_prompt"):
         _abort("--grounding intent requires author guidance in evals/EVAL.md or --prompt")
-
-    # Refinement bypasses the unchanged-dataset guard.
-    if output_path.exists() and not args.force and not refine_requested:
-        print(f"Dataset already exists: {output_path}")
-        print("Use --force to overwrite.")
-        return DatasetGenerationResult(status="unchanged", path=output_path)
 
     trace_requested = grounding == "trace"
     trace_existing = trace_requested and output_path.is_file()
@@ -1908,9 +1920,28 @@ Agent-refined mode (--refine):
                 )
                 print(f"  Refined {len(cases)} case(s) with LLM + trajectory")
             if auto_evidence is not None:
+                # Skill-use narration from a with-skill run is evidence for
+                # review, not an outcome to grade the no-skill baseline on.
+                # Keep independently authored expectations intact.
+                authored_truths = (
+                    {case["id"]: case.get("ground_truth") for case in normalize_dataset_entries(auto_authored_dataset)}
+                    if auto_authored_dataset is not None
+                    else {}
+                )
                 for case in cases:
                     if case["id"] not in matched_case_ids:
                         _mark_case_for_review(case, "no matching retained trajectory for this case")
+                    authored_truth = authored_truths.get(case["id"])
+                    inferred_truth = case.get("ground_truth")
+                    if (
+                        not (isinstance(authored_truth, str) and authored_truth.strip())
+                        and isinstance(inferred_truth, str)
+                        and evals_spec._skill_use_match(inferred_truth, skill["name"], _script_file_names(skill))
+                    ):
+                        case["ground_truth"] = ""
+                        _mark_case_for_review(
+                            case, "observed answer describes skill use; supply an independent expected outcome"
+                        )
             skill["_generation_refined"] = True
         elif trace_requested:
             restore_original_dataset()

@@ -449,6 +449,43 @@ def test_ragas_evidence_masks_credentials_at_json_escaped_line_starts(
         assert secret not in saved
 
 
+def test_ragas_evidence_masks_quoted_credentials_in_a_repeated_tool_call(verifier: ModuleType) -> None:
+    """A request that repeats an earlier tool call writes its JSON arguments as JSON again.
+
+    The quotes in the arguments then reach the prompt escaped twice, as a run of
+    backslashes before each quote.
+    """
+    end_state = 'Ran deploy --token "tttt qqqq" with headers={"Authorization": "Bearer jjjjjjjjjjjj"}'
+    arguments = json.dumps({"end_state": end_state, "verdict": 1})
+    messages = [
+        {"role": "user", "content": "Judge the agent.\ninput: " + json.dumps({"end_state": end_state})},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "call-1", "type": "function", "function": {"name": "Verdict", "arguments": arguments}}
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "error: the verdict could not be parsed"},
+    ]
+    request = httpx.Request("POST", _CHAT_URL, json={"model": "gpt-4.1", "messages": messages})
+    reply = json.dumps(_tool_call_reply(arguments)).encode()
+
+    with _judge_evidence(verifier):
+        verifier._record_ragas_exchange(httpx.Response(200, content=reply, request=request))
+
+    (exchange,) = _attempts(verifier)
+    assert exchange["status"] == "replied"
+    # Once escaped in the user message and the reply, twice in the repeated tool call.
+    assert exchange["prompt"].count("--token <redacted>") == 2
+    assert exchange["prompt"].count("Bearer <redacted>") == 2
+    assert "--token <redacted>" in exchange["reply"]
+    assert "Bearer <redacted>" in exchange["reply"]
+    saved = (verifier.VERIFIER_DIR / "judge_attempts.json").read_text(encoding="utf-8")
+    for secret in ("tttt qqqq", "jjjjjjjjjjjj"):
+        assert secret not in saved
+
+
 @pytest.mark.parametrize(
     ("message", "finish_reason", "kept"),
     [

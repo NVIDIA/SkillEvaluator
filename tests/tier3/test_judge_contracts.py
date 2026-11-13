@@ -732,11 +732,15 @@ def test_judge_evidence_masks_json_escaped_tool_call_headers(command: str, secre
     summary = eval_template.build_conversation_summary(trajectory, "Fetch the index.")
     assert secret in summary
     assert '\\"' in summary
+    # Escaped again, as when a RAGAS prompt repeats an earlier tool call.
+    twice = json.dumps(summary)
+    assert '\\\\\\"' in twice
 
-    redacted = eval_template._redact_judge_evidence(summary)
+    for text in (summary, twice):
+        redacted = eval_template._redact_judge_evidence(text)
 
-    assert secret not in redacted
-    assert "<redacted>" in redacted
+        assert secret not in redacted
+        assert "<redacted>" in redacted
 
 
 @pytest.mark.parametrize(
@@ -754,11 +758,15 @@ def test_judge_evidence_masks_json_escaped_quoted_flag_values(command: str, secr
     }
     summary = eval_template.build_conversation_summary(trajectory, "Deploy the service.")
     assert secret + '\\"' in summary
+    # Escaped again, as when a RAGAS prompt repeats an earlier tool call.
+    twice = json.dumps(summary)
+    assert secret + '\\\\\\"' in twice
 
-    redacted = eval_template._redact_judge_evidence(summary)
+    for text in (summary, twice):
+        redacted = eval_template._redact_judge_evidence(text)
 
-    assert secret not in redacted
-    assert "<redacted>" in redacted
+        assert secret not in redacted
+        assert "<redacted>" in redacted
 
 
 # RAGAS writes the agent's messages into its prompt as JSON, and tool-call

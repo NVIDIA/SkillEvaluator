@@ -2832,9 +2832,11 @@ def _judge_retry_feedback(problem):
 # ('headers["Name"] = f"value"') forms, also with the quotes JSON-escaped
 # ('\"Name\": \"value\"'), as tool-call arguments appear in the behavior and
 # goal prompts. The flag patterns accept a JSON-escaped quoted value too
-# ('--token \"value\"').
+# ('--token \"value\"'). Text escaped again, such as tool-call JSON quoted in a
+# RAGAS prompt, puts a run of backslashes before each quote, so a short run is
+# accepted.
 _JUDGE_EVIDENCE_URL_USERINFO_RE = re.compile(r"(://)[^\s/?#@'\"`<>]{1,256}@")
-_JUDGE_EVIDENCE_HEADER_SEPARATOR = r"\\?[\"']?\]?[ \t]{0,8}[:=][ \t]{0,8}(?:[bfru]{0,2}\\?[\"'])?"
+_JUDGE_EVIDENCE_HEADER_SEPARATOR = r"\\{0,8}[\"']?\]?[ \t]{0,8}[:=][ \t]{0,8}(?:[bfru]{0,2}\\{0,8}[\"'])?"
 # Digest values hold quoted fields (username="...", response="..."), so the rest
 # of the value is masked up to a single quote, a backtick or the end of the line.
 _JUDGE_EVIDENCE_DIGEST_AUTH_HEADER_RE = re.compile(
@@ -2848,7 +2850,7 @@ _JUDGE_EVIDENCE_DIGEST_AUTH_HEADER_RE = re.compile(
 _JUDGE_EVIDENCE_AUTH_HEADER_RE = re.compile(
     r"(\bauthorization"
     + _JUDGE_EVIDENCE_HEADER_SEPARATOR
-    + r"(?:(?:bearer|basic|token|digest)[ \t]{1,8}(?:\\?[\"'])?)?)"
+    + r"(?:(?:bearer|basic|token|digest)[ \t]{1,8}(?:\\{0,8}[\"'])?)?)"
     r"[^\s'\"`,;\\][^'\"`\r\n\\]*",
     re.IGNORECASE,
 )
@@ -2866,14 +2868,14 @@ _JUDGE_EVIDENCE_COOKIE_HEADER_RE = re.compile(
 )
 _JUDGE_EVIDENCE_CREDENTIAL_FLAG_RE = re.compile(
     r"((?<![^\s'\"])--?(?:password|passwd|token|api-key|apikey|secret|access-token|auth-token)(?:[ \t]{1,8}|=))"
-    r"(?:\\?\"[^\"\r\n]+\"|'[^'\r\n]+'|[^\s'\"`\\]+)",
+    r"(?:\\{0,8}\"[^\"\r\n]+\"|'[^'\r\n]+'|[^\s'\"`\\]+)",
     re.IGNORECASE,
 )
 # "-u"/"--user" also name ordinary options (python -u, pip --user), so only a
 # user:password value is masked.
 _JUDGE_EVIDENCE_USER_FLAG_RE = re.compile(
     r"((?<![^\s'\"])(?:-u|--user)(?:[ \t]{1,8}|=))"
-    r"(?:\\?\"[^\"\r\n:]+:[^\"\r\n]+\"|'[^'\r\n:]+:[^'\r\n]+'|[^\s'\"`:\\]{1,256}:[^\s'\"`\\]+)"
+    r"(?:\\{0,8}\"[^\"\r\n:]+:[^\"\r\n]+\"|'[^'\r\n:]+:[^'\r\n]+'|[^\s'\"`:\\]{1,256}:[^\s'\"`\\]+)"
 )
 # RAGAS writes its input into the prompt as JSON, and tool-call arguments are
 # JSON, so a line break or tab in the quoted text arrives as the two characters

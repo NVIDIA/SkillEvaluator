@@ -441,6 +441,15 @@ def test_symlinked_skill_folders_count_toward_the_catalog(tmp_path: Path):
     assert facts["duplicate_name"]
 
 
+def test_reload_guidance_reaches_findings(tmp_path: Path):
+    rows = _rows(_skill(tmp_path))
+
+    reload = {f["id"]: f for r in rows.values() for f in r["findings"] if f["id"].endswith("RELOAD")}
+    assert set(reload) == {"CP-RELOAD", "OC-RELOAD"}
+    assert {f["effect"] for f in reload.values()} == {"advisory"}
+    assert {r["status"] for r in rows.values()} == {"loads"}
+
+
 def test_listed_description_projection(tmp_path: Path):
     desc = "Use when " + "a" * 1600
     rows = _rows(_skill(tmp_path, desc=desc))

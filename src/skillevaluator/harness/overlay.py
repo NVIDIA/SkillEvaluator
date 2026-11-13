@@ -506,8 +506,6 @@ def evaluate_profile(
             continue
         if expression != "always" and not _Rule.evaluate(expression, names):
             continue
-        if expression == "always" and rule["effect"] == "advisory":
-            continue
         finding = {"id": rule["id"], "effect": rule["effect"], "message": _fill(rule["message"], facts)}
         for key in ("fix", "outcome"):
             if rule.get(key):

@@ -16,7 +16,7 @@ All notable changes to SkillEvaluator are documented in this file.
   it: list budgets (scaled by the context window), duplicate names and which copy
   each harness uses, and OpenClaw's prompt cap and compact list. A `catalog` line
   in the panel names the folder measured. Skills in separate folders are measured
-  separately.
+  separately, and Copilot CLI and OpenCode get an advisory reload note.
 - `harness` rules for where `SKILL.md` lives: casing, nested manifests, symlinked
   manifests and resources, OpenClaw symlink escapes, Codex scan depth, and files
   Hermes leaves out of its file list. Tier 1 `schema` now reports a symlinked or

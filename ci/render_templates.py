@@ -43,6 +43,7 @@ def render_templates(
         rendered[source.name] = (
             source.read_text(encoding="utf-8")
             .replace("publish-skill-reports.yml@RELEASE_WORKFLOW_SHA", f"publish-skill-reports.yml@{publisher_ref}")
+            .replace("comment-skill-checks.yml@RELEASE_WORKFLOW_SHA", f"comment-skill-checks.yml@{publisher_ref}")
             .replace("tools-ref: RELEASE_WORKFLOW_SHA", f"tools-ref: {publisher_ref}")
             .replace("RELEASE_WORKFLOW_SHA", workflow_ref)
             .replace(IMAGE_PLACEHOLDER, image)
@@ -71,11 +72,27 @@ def render_templates(
         "## GitHub: choose your templates\n\n"
         "- Checks and downloadable reports: copy `skill-checks.yml` to `.github/workflows/skill-checks.yml`. "
         "Set `paths` to your skill roots and choose `min-score` (default 70).\n"
+        "- Standard PR comments: also copy `comment-skill-checks.yml` to `.github/workflows/` "
+        "and complete the comment setup below. No hosted reports are required.\n"
         "- Hosted reports and PR comments: also copy `publish-skill-reports.yml` to `.github/workflows/` "
         "and complete the one-time setup below.\n\n"
-        "The workflow and image pins are already filled in. Both templates use GitHub's automatic token; "
+        "Choose one feedback workflow. The workflow and image pins are already filled in. "
+        "The templates use GitHub's automatic token; "
         "no personal token or model key is needed for the default checks. "
         "Your organization must allow the referenced actions and the provided permissions.\n\n"
+        "### PR comment setup\n\n"
+        "1. Uncomment `id-token: write` under `permissions` in `skill-checks.yml` for signed execution receipts. "
+        "Keep its single reusable scan job and customize your skill paths.\n"
+        "2. Run `git hash-object .github/workflows/skill-checks.yml` after all scan-file edits and put the "
+        "result in `trusted-caller-blobs` in `comment-skill-checks.yml`. Refresh it after every scan-file edit.\n"
+        "3. Merge both files into the default branch, preserving the supplied scan name, filename and artifact name. "
+        "Open a skill PR to trigger a new scan. The comment workflow needs only `contents: read`, "
+        "`actions: read` and `pull-requests: write`; no Pages or history branch is needed.\n\n"
+        "The standard scored Tier 1 comment is updated for eligible current-head, same-repository PRs, "
+        "including failed scans with valid evidence. Full reports remain downloadable from the scan run. "
+        "Manual retries require both the completed run ID and attempt number.\n\n"
+        f"[Full comment setup](https://github.com/{repository}/blob/{publisher_ref}/ci/README.md"
+        "#pr-comments-without-hosted-reports).\n\n"
         "### One-time publisher setup\n\n"
         "1. Enable Settings → Pages → Source: GitHub Actions. Reports can include source excerpts; "
         "a private repository does not automatically make its Pages site private. "
@@ -108,7 +125,7 @@ def main() -> None:
     parser.add_argument("--workflow-ref", required=True)
     parser.add_argument(
         "--publisher-ref",
-        help="Reviewed publisher workflow and tools SHA; defaults to --workflow-ref. Does not change the scanner pin.",
+        help="Reviewed comment/publisher workflows and tools SHA; defaults to --workflow-ref. Keeps the scanner pin.",
     )
     parser.add_argument("--image", required=True)
     parser.add_argument("--repository", default="NVIDIA/SkillEvaluator")

@@ -6,6 +6,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Canonical `comment-skill-checks.yml` reusable workflow and source template for
+  the standard scored Tier 1 PR comment without hosted reports. It verifies the
+  existing signed receipts and native evidence, reuses the shared report and
+  comment helpers, and needs no Pages configuration or history branch. Future
+  generated bundles include the template; archived bundles and the released
+  onboarding CLI retain their existing hosted publisher setup.
 - `harness` rules for descriptions: missing or empty descriptions, Claude Code and
   Codex listing cuts, Copilot CLI's 1,024 UTF-16 unit limit, quotes escaped in the
   Copilot CLI and OpenClaw lists, and Hermes's 60-character listing; `-v` shows

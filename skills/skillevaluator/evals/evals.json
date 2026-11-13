@@ -3,7 +3,7 @@
   "evals": [
     {
       "id": "skillevaluator-001-explicit-keyless",
-      "prompt": "Use the skillevaluator skill: I have a skill at ./skills/pdf-tools and no LLM API key. Give me the exact SkillEvaluator commands to check that it is well-formed, safe, and see its quality score, and tell me what exit code 1 versus 2 would mean.",
+      "prompt": "With SkillEvaluator, I have a skill at ./skills/pdf-tools and no LLM API key. Give me the exact SkillEvaluator commands to check that it is well-formed, safe, and see its quality score, and tell me what exit code 1 versus 2 would mean.",
       "expected_output": "Recommends keyless commands such as `skillevaluator tier1 ./skills/pdf-tools --no-llm` and/or `skillevaluator quality-check ./skills/pdf-tools` (or `validate --tiers 1`), and explains exit 1 = a gate failed or evidence incomplete, exit 2 = usage error such as a bad flag or missing path.",
       "assertions": [
         "Recommends a keyless Tier 1 command (tier1 --no-llm, quality-check, or validate --tiers 1) on ./skills/pdf-tools",

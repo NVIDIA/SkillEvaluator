@@ -17,7 +17,8 @@ from __future__ import annotations
 import functools
 import logging
 import re
-from collections.abc import Sequence
+import unicodedata
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -428,7 +429,7 @@ def validate_tier3_source(skill_path: Path) -> tuple[str, list[CheckResult]]:
                 )
             ]
         results = [CheckResult(str(evals_file.relative_to(skill_path)), "ok", "Tier 3 eval dataset found.")]
-        _validate_dataset_contents(evals_file, results)
+        _validate_dataset_contents(evals_file, results, skill_path=skill_path)
         return source, results
 
     if source == "native_harbor":
@@ -598,7 +599,9 @@ def _check_dataset(skill_path: Path, results: list[CheckResult]) -> bool:
             CheckResult(
                 "evals/",
                 "missing",
-                "No evals/ directory found. Create one with: skillevaluator create-eval-dataset <path>",
+                "No evals/ directory found. Author evals/EVAL.md guidance or retain matching Tier 3 traces, "
+                "then run skillevaluator create-eval-dataset <path>. For an explicitly skill-derived starter, "
+                "run skillevaluator create-eval-dataset <path> --grounding skill.",
             )
         )
         return False
@@ -613,7 +616,7 @@ def _check_dataset(skill_path: Path, results: list[CheckResult]) -> bool:
                     f"Dataset found ({candidate.stat().st_size} bytes).",
                 )
             )
-            _validate_dataset_contents(candidate, results)
+            _validate_dataset_contents(candidate, results, skill_path=skill_path)
             return True
 
     results.append(
@@ -622,7 +625,9 @@ def _check_dataset(skill_path: Path, results: list[CheckResult]) -> bool:
             "error",
             "REQUIRED dataset file missing. Accepted names: "
             + ", ".join(f"evals{e}" for e in DATASET_EXTENSIONS)
-            + ". Generate with: skillevaluator create-eval-dataset <path>",
+            + ". Author evals/EVAL.md guidance or retain matching Tier 3 traces before running "
+            "skillevaluator create-eval-dataset <path>, or explicitly request a skill-derived starter with "
+            "skillevaluator create-eval-dataset <path> --grounding skill.",
         )
     )
     return False
@@ -635,7 +640,7 @@ def _check_dataset(skill_path: Path, results: list[CheckResult]) -> bool:
 # the file format (see below), and "the following SKILL.md" is the task's file.
 _READ_VERB_RE = (
     r"(?:read|reads|reading|load|loads|loaded|loading|open|opens|opened|consult(?:s|ed)?"
-    r"|(?<!the\s)follow(?:s|ed|ing)?)"
+    r"|cat|(?<!the\s)follow(?:s|ed|ing)?)"
 )
 _SKILL_MD_QUALIFIER_RE = r"(?:the|its|this|that|own|skill['\u2019]s)"
 # Nouns after SKILL.md that make it the file format or other skills' files
@@ -670,10 +675,26 @@ _SCRIPT_USE_VERB_RE = r"us(?:e|ed|es|ing)"
 _SCRIPT_ARGS_RE = r"(?=\s+(?:-{1,2}\w|[\w.~-]*/|[\w~-]+\.[a-z]\w*\b))"
 # Script file types listed from the skill's scripts/ and tools/ directories.
 _SKILL_SCRIPT_SUFFIXES = frozenset({".py", ".sh", ".bash", ".js", ".mjs", ".cjs", ".ts", ".rb", ".pl", ".ps1"})
-# A match is skipped when its clause is negated ("did not read SKILL.md",
-# "without running review.py"): the baseline meets such a check.
-_NEGATION_RE = re.compile(r"\b(?:not|never|without)\b|n['\u2019]t\b", re.IGNORECASE)
-_CLAUSE_BREAK_RE = re.compile(r"[.,;:!?\n]|\b(?:and|but|then)\b", re.IGNORECASE)
+# Negation must immediately precede the verb, with at most one adverb.
+# Clause events are consumed once, so "not ... without first reading" can be
+# recognized as requiring a read without rescanning every growing prefix.
+_CLAUSE_STATE_RE = re.compile(
+    r"(?P<break>[.,;:!?\n]|\b(?:and|but|then)\b)|(?P<negative>\b(?:not|never|without)\b|n['\u2019]t\b)",
+    re.IGNORECASE,
+)
+_NEGATED_PREFIX_RE = re.compile(
+    rf"(?P<negative>\b(?:not|never|without)\b|n['\u2019]t\b)\s+"
+    rf"(?:(?:\w+ly|first)\s+)?(?:(?:{_READ_VERB_RE}|{_SKILL_USE_VERB_RE}|{_RUN_VERB_RE})\s+(?:the\s+)?)?$",
+    re.IGNORECASE,
+)
+_NEGATIVE_SUBJECT_RE = re.compile(
+    r"\bno\s+(?:(?!(?:before|until|without|and|or|but|then)\b)[\w-]+\s+){0,3}(?:agents?|trials?)\s+$",
+    re.IGNORECASE,
+)
+# Dataset aliases are literal data, never regex source. One fixed marker keeps
+# compiled patterns independent of the number and size of expected_skill values.
+_SKILL_NAME_MARKER = "\x00name\x00"
+_MATCH_EXCERPT_CHARS = 80
 
 
 def _skill_files_re(skill_name: str | None) -> str:
@@ -690,20 +711,22 @@ def _skill_files_re(skill_name: str | None) -> str:
     # directory" or "from the installed skill" is still this skill's own.
     elsewhere = rf"\s+(?:in|of|from|under|inside)\s+(?!(?:the\s+|its\s+|this\s+)?(?:installed\s+|own\s+)?{skill_place}(?![\w-]))"
     alternatives.append(
-        rf"\b{_READ_VERB_RE}(?:\s+{qualifier})*\s+[`'\"]?SKILL\.md\b"
-        rf"(?![`'\"]?(?:{elsewhere}|\s+{_SKILL_MD_GENERIC_NOUN_RE}))"
+        rf"\b{_READ_VERB_RE}(?:\s+{qualifier})*\s+(?:(?:the\s+)?contents\s+of\s+)?[`'\"*_\[]*SKILL\.md\b"
+        rf"(?![`'\"*_\]]*(?:{elsewhere}|\s+{_SKILL_MD_GENERIC_NOUN_RE}))"
     )
     return "|".join(alternatives)
 
 
 @functools.lru_cache(maxsize=64)
-def _prompt_skill_files_re(skill_name: str | None) -> re.Pattern[str]:
+def _prompt_skill_files_re(skill_name: str | None, skill_scripts: tuple[str, ...] = ()) -> re.Pattern[str]:
     """A prompt that points the agent at the skill's own files, which the no-skill baseline is never given."""
-    return re.compile(_skill_files_re(skill_name), re.IGNORECASE)
+    return _skill_use_assertion_re(skill_name or "", skill_scripts, prompt=True)
 
 
 @functools.lru_cache(maxsize=64)
-def _skill_use_assertion_re(skill_name: str, skill_scripts: tuple[str, ...] = ()) -> re.Pattern[str]:
+def _skill_use_assertion_re(
+    skill_name: str, skill_scripts: tuple[str, ...] = (), *, prompt: bool = False
+) -> re.Pattern[str]:
     """Graded text about using the skill: its files, its name called a skill, "used <name>", or running its scripts.
 
     A skill named after the CLI or file format it wraps (glab, kubectl, pdf)
@@ -719,38 +742,134 @@ def _skill_use_assertion_re(skill_name: str, skill_scripts: tuple[str, ...] = ()
     name = re.escape(skill_name)
     alternatives = [
         _skill_files_re(skill_name),
-        rf"(?<![\w-]){name}(?![\w-])[^.;\n]{{0,20}}\bskill\b(?!\s+(?:levels?|sets?)\b)",
-        rf"\bskill\s+(?:named\s+|called\s+)?[`'\"]?{name}(?![\w-])",
-        rf"\b{_SKILL_USE_VERB_RE}\s+[`'\"]?{name}(?![\w-])[`'\"]?{_SKILL_NAME_END_RE}",
+        rf"\b(?:{_SKILL_USE_VERB_RE}|{_READ_VERB_RE})\s+(?:the|this|its|that)\s+skill\b"
+        rf"(?![.\w-]|\s+(?:levels?|sets?)\b)",
     ]
+    if skill_name:
+        alternatives.extend(
+            [
+                rf"(?<![\w-]){name}(?![\w-])(?:\s+(?:as|is)(?:\s+(?:the|a))?(?:\s+right)?)?"
+                rf"\s+skill\b(?![.\w-]|\s+(?:levels?|sets?)\b)",
+                rf"\bskill\s+(?:named\s+|called\s+)?[`'\"]?{name}(?![\w-])",
+            ]
+        )
+    # A template may explicitly route with "Use <name> to ...". Naming it as a
+    # skill or pointing at its files/scripts requires the unavailable install.
+    if not prompt and skill_name:
+        alternatives.append(rf"\b{_SKILL_USE_VERB_RE}\s+[`'\"]?{name}(?![\w-])[`'\"]?{_SKILL_NAME_END_RE}")
     for script in skill_scripts:
         script_name = rf"{re.escape(script)}(?![\w-]|\.\w)"
         script_ref = rf"(?:the\s+)?[`'\"]?(?:[\w.~-]*/)*{script_name}"
         alternatives += [
             rf"(?<![\w.-])(?:scripts|tools)/{script_name}",
-            rf"\b{_RUN_VERB_RE}\s+{script_ref}",
+            rf"\b{_RUN_VERB_RE}\s+(?:-[\w-]+\s+){{0,4}}{script_ref}",
             rf"\b{_SCRIPT_USE_VERB_RE}\s+{script_ref}[`'\"]?(?:{_SKILL_NAME_END_RE}|{_SCRIPT_ARGS_RE})",
         ]
     return re.compile("|".join(alternatives), re.IGNORECASE)
 
 
 def _first_unnegated_match(pattern: re.Pattern[str], text: str) -> str | None:
-    """The first match whose clause is not negated, or None."""
+    """A bounded excerpt of the first positive requirement, in linear scan order."""
+    events = iter(_CLAUSE_STATE_RE.finditer(text))
+    event = next(events, None)
+    negatives = 0
     for match in pattern.finditer(text):
-        clause = _CLAUSE_BREAK_RE.split(text[: match.start()])[-1]
-        if not _NEGATION_RE.search(clause):
-            return match.group(0)
+        while event is not None and event.start() < match.start():
+            negatives = 0 if event.lastgroup == "break" else negatives + 1
+            event = next(events, None)
+        prefix_start = max(0, match.start() - 256)
+        # Report interpretation can describe absent activation: "no positive
+        # with-skill trial loaded the skill". Keep this direct subject bounded;
+        # "no agent proceeds before reading" still requires a read.
+        if _NEGATIVE_SUBJECT_RE.search(text, prefix_start, match.start()):
+            continue
+        negated = _NEGATED_PREFIX_RE.search(text, prefix_start, match.start())
+        if negated is None or (negated["negative"].lower() == "without" and negatives > 1):
+            return text[match.start() : min(match.end(), match.start() + _MATCH_EXCERPT_CHARS)]
     return None
 
 
-def _prompt_skill_files_match(prompt: str, skill_name: str | None) -> str | None:
+def _normalized_match_text(text: str) -> str:
+    """Normalize compatibility spellings and invisible format characters, not homoglyphs."""
+    return "".join(char for char in unicodedata.normalize("NFKC", text) if unicodedata.category(char) != "Cf")
+
+
+def _prepared_skill_name(skill_name: str | None) -> tuple[str, str]:
+    """Prepare an identity once per case, without retaining contributor aliases globally."""
+    name = _normalized_match_text(skill_name or "")
+    return name, name.casefold()
+
+
+def _mask_skill_name(text: str, name: str, folded_name: str | None = None) -> str:
+    """Replace whole literal identities without compiling contributor-controlled regexes."""
+    folded_text = text.casefold()
+    folded_name = name.casefold() if folded_name is None else folded_name
+    offsets = None
+    if len(folded_text) != len(text):
+        # Casefold can expand a character (ß -> ss); retain original offsets so
+        # these aliases work without changing the diagnostic's other spelling.
+        offsets = [index for index, char in enumerate(text) for _ in char.casefold()]
+    parts = []
+    consumed = search_at = 0
+    while (found := folded_text.find(folded_name, search_at)) >= 0:
+        search_at = found + len(folded_name)
+        start = offsets[found] if offsets is not None else found
+        end = offsets[search_at - 1] + 1 if offsets is not None else search_at
+        before = text[start - 1] if start else ""
+        after = text[end : end + 1]
+        if (
+            (before and (before.isalnum() or before in "_-"))
+            or (after and (after.isalnum() or after in "_-"))
+            or text[start:end].casefold() != folded_name
+        ):
+            continue
+        parts.extend((text[consumed:start], _SKILL_NAME_MARKER))
+        consumed = end
+    if not consumed:
+        return text
+    parts.append(text[consumed:])
+    return "".join(parts)
+
+
+def _match_skill_text(
+    text: str,
+    skill_name: str | None,
+    skill_scripts: Sequence[str],
+    *,
+    prompt: bool,
+    prepared_name: tuple[str, str] | None = None,
+) -> str | None:
+    text = _normalized_match_text(text)
+    name, folded_name = prepared_name if prepared_name is not None else _prepared_skill_name(skill_name)
+    scripts = tuple(skill_scripts)
+    generic_pattern = _prompt_skill_files_re(None, scripts) if prompt else _skill_use_assertion_re("", scripts)
+    # Check generic wording first: an identity like "skill" or "read" must
+    # not mask the noun or verb in "read SKILL.md" and bypass validation.
+    matched = _first_unnegated_match(generic_pattern, text)
+    if matched is None and name:
+        masked = _mask_skill_name(text, name, folded_name)
+        if masked is not text:
+            pattern = (
+                _prompt_skill_files_re(_SKILL_NAME_MARKER, scripts)
+                if prompt
+                else _skill_use_assertion_re(_SKILL_NAME_MARKER, scripts)
+            )
+            matched = _first_unnegated_match(pattern, masked)
+    if matched is None:
+        return None
+    # Restore only a bounded name fragment; neither huge aliases nor the
+    # internal marker may reach terminal, JSON or CI diagnostics.
+    return matched.replace(_SKILL_NAME_MARKER, name[:_MATCH_EXCERPT_CHARS]).split("\x00", 1)[0][:_MATCH_EXCERPT_CHARS]
+
+
+def _prompt_skill_files_match(prompt: str, skill_name: str | None, skill_scripts: Sequence[str] = ()) -> str | None:
     """The prompt text that points the agent at the skill's own files, or None."""
-    return _first_unnegated_match(_prompt_skill_files_re(skill_name), prompt)
+    return _match_skill_text(prompt, skill_name, skill_scripts, prompt=True)
 
 
 def _skill_use_match(text: str, skill_name: str, skill_scripts: Sequence[str] = ()) -> str | None:
     """The expected-output or assertion text that grades skill use, or None."""
-    return _first_unnegated_match(_skill_use_assertion_re(skill_name, tuple(skill_scripts)), text)
+    return _match_skill_text(text, skill_name, skill_scripts, prompt=False)
 
 
 def _skill_script_names(skill_path: Path) -> tuple[str, ...]:
@@ -776,7 +895,26 @@ def _authored_field(entry: dict[str, Any], runtime_key: str, agentskills_key: st
     return runtime_key
 
 
-def _baseline_fairness_warnings(entry: dict[str, Any], *, skill_scripts: Sequence[str] = ()) -> list[str]:
+def _string_leaves(value: Any) -> Iterator[str]:
+    """Strings the judge renders, including mapping keys; visit shared/cyclic containers once."""
+    pending = [value]
+    seen = set()
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str):
+            yield item
+        elif isinstance(item, (dict, list, tuple)) and id(item) not in seen:
+            seen.add(id(item))
+            if isinstance(item, dict):
+                pending.extend(reversed(list(item.values())))
+                pending.extend(reversed(list(item)))
+            else:
+                pending.extend(reversed(item))
+
+
+def _baseline_fairness_warnings(
+    entry: dict[str, Any], *, skill_scripts: Sequence[str] = (), skill_names: Sequence[str] = ()
+) -> list[str]:
     """Explain dataset text the no-skill baseline is graded on but cannot satisfy.
 
     ``entry`` is a normalized dataset entry; ``skill_scripts`` are the file
@@ -786,31 +924,67 @@ def _baseline_fairness_warnings(entry: dict[str, Any], *, skill_scripts: Sequenc
     """
     warnings = []
     prompt = entry.get("question")
-    skill_name = entry.get("expected_skill")
-    skill_name = skill_name.strip() if isinstance(skill_name, str) and skill_name.strip() else None
-    if isinstance(prompt, str) and (matched := _prompt_skill_files_match(prompt, skill_name)):
+    declared_name = entry.get("expected_skill")
+    names = tuple(
+        dict.fromkeys(name.strip() for name in (*skill_names, declared_name) if isinstance(name, str) and name.strip())
+    ) or (None,)
+    prepared_names = tuple(_prepared_skill_name(name) for name in names)
+    scripts = tuple(skill_scripts)
+    matched = None
+    if isinstance(prompt, str):
+        matched = next(
+            (
+                match
+                for name in prepared_names
+                if (match := _match_skill_text(prompt, None, scripts, prompt=True, prepared_name=name))
+            ),
+            None,
+        )
+    if matched:
         warnings.append(
-            f"{_authored_field(entry, 'question', 'prompt')} points at the skill's files ({matched!r}). The no-skill "
+            f"{_authored_field(entry, 'question', 'prompt')} points at the skill's files ({matched[:80]!r}). The no-skill "
             "baseline gets the same prompt without the skill, so it cannot follow it. Describe the task instead; "
             "skill_execution measures whether the skill was used."
         )
-    if skill_name:
-        texts = [(_authored_field(entry, "ground_truth", "expected_output"), entry.get("ground_truth"))]
-        behaviors = entry.get("expected_behavior")
-        if isinstance(behaviors, list):
-            behavior_field = _authored_field(entry, "expected_behavior", "assertions")
-            texts.extend((behavior_field, item) for item in behaviors)
-        for field_name, text in texts:
-            if isinstance(text, str) and (matched := _skill_use_match(text, skill_name, skill_scripts)):
+    texts = [
+        (_authored_field(entry, "ground_truth", "expected_output"), entry.get("ground_truth")),
+        (_authored_field(entry, "expected_behavior", "assertions"), entry.get("expected_behavior")),
+    ]
+    for field_name, value in texts:
+        for text in _string_leaves(value):
+            matched = next(
+                (
+                    match
+                    for name in prepared_names
+                    if (match := _match_skill_text(text, None, scripts, prompt=False, prepared_name=name))
+                ),
+                None,
+            )
+            if matched:
                 warnings.append(
-                    f"{field_name} grades skill use ({matched!r}), which the no-skill baseline is also graded "
+                    f"{field_name} grades skill use ({matched[:80]!r}), which the no-skill baseline is also graded "
                     "on. Keep it about the task outcome; skill_execution scores skill use separately."
                 )
-                break
+                return warnings
     return warnings
 
 
-def _validate_dataset_contents(path: Path, results: list[CheckResult]) -> None:
+def _skill_identity_names(skill_path: Path) -> tuple[str, ...]:
+    """Directory and declared identities, with bounded frontmatter input/parsing."""
+    from skillevaluator.plugin_markdown import parse_markdown
+
+    names = [skill_path.name]
+    try:
+        with (skill_path / "SKILL.md").open(encoding="utf-8") as source:
+            name = parse_markdown(source.read(128 * 1024)).name
+        if name and name not in names:
+            names.append(name)
+    except (OSError, UnicodeError):
+        pass
+    return tuple(names)
+
+
+def _validate_dataset_contents(path: Path, results: list[CheckResult], *, skill_path: Path | None = None) -> None:
     """Validate the contents of a dataset file."""
     from .dataset_utils import load_dataset_entries_with_format
     from .eval_core.declarative_checks import validate_declarative_checks
@@ -853,9 +1027,10 @@ def _validate_dataset_contents(path: Path, results: list[CheckResult]) -> None:
         results.append(CheckResult(str(path.name), "error", str(exc)))
         case_ids_valid = False
 
-    skill_path = path.parent.parent
+    skill_path = skill_path or path.parent.parent
     skill_has_scripts = any((skill_path / "scripts").glob("*.py"))
     skill_scripts = _skill_script_names(skill_path)
+    skill_names = _skill_identity_names(skill_path)
     required_fields_valid = True
 
     for i, entry in enumerate(entries):
@@ -883,7 +1058,7 @@ def _validate_dataset_contents(path: Path, results: list[CheckResult]) -> None:
                     f"Missing recommended fields: {', '.join(sorted(missing_recommended))}",
                 )
             )
-        for warning in _baseline_fairness_warnings(entry, skill_scripts=skill_scripts):
+        for warning in _baseline_fairness_warnings(entry, skill_scripts=skill_scripts, skill_names=skill_names):
             results.append(CheckResult(f"entry {entry_id}", "warning", warning))
         if dataset_format == "legacy" and "expected_script" not in entry and skill_has_scripts:
             results.append(

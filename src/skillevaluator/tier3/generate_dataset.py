@@ -355,9 +355,10 @@ def _template_task(skill: dict[str, Any]) -> tuple[str, str | None]:
     """
     name = skill["name"]
     task = _description_lower(skill)
-    if evals_spec._prompt_skill_files_match(task, name):
+    script_names = _script_file_names(skill)
+    if evals_spec._prompt_skill_files_match(task, name, script_names):
         task = _BARE_SKILL_MD_RE.sub("my SKILL.md", task)
-        if evals_spec._prompt_skill_files_match(task, name):
+        if evals_spec._prompt_skill_files_match(task, name, script_names):
             return _GENERIC_TASK, None
     if evals_spec._skill_use_match(task, name, _script_file_names(skill)):
         return task, None

@@ -9,6 +9,7 @@ import asyncio
 import json
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -1121,3 +1122,172 @@ def test_agent_skill_dataset_passes_the_strict_validate_its_docs_recommend():
     result = CliRunner().invoke(cli, ["tier3", "validate", str(_REPO / "skills" / "skillevaluator"), "--strict"])
 
     assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The agent never edits files before reading SKILL.md",
+        "The agent does not run any command without first reading SKILL.md",
+        "The agent should not proceed until it has read SKILL.md",
+        "The agent doesn't act before it reads SKILL.md",
+    ],
+)
+def test_negated_action_that_requires_reading_the_skill_still_warns(text):
+    assert _baseline_fairness_warnings(_case(prompt="Check manifest.yaml", assertions=[text]))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The agent did not read SKILL.md",
+        "The agent never reads SKILL.md",
+        "The agent did not actually read SKILL.md",
+        "The agent answered without first reading SKILL.md",
+        "The agent didn't run review.py",
+    ],
+)
+def test_immediately_negated_skill_use_does_not_warn(text):
+    assert (
+        _baseline_fairness_warnings(_case(prompt="Check manifest.yaml", assertions=[text]), skill_scripts=["review.py"])
+        == []
+    )
+
+
+@pytest.mark.parametrize("field", ["prompt", "expected_output", "assertions"])
+@pytest.mark.parametrize("large_input", ["whitespace", "alias"])
+def test_fairness_diagnostics_bound_untrusted_matched_text(field, large_input):
+    name = "r" * 200_000 if large_input == "alias" else "release-review"
+    text = f"Use the {name} skill" if large_input == "alias" else "Read" + " " * 200_000 + "SKILL.md"
+    entry = (
+        _case(name, prompt="Check manifest.yaml", **{field: [text] if field == "assertions" else text})
+        if field != "prompt"
+        else _case(name, prompt=text)
+    )
+
+    (warning,) = _baseline_fairness_warnings(entry)
+
+    assert len(warning) < 1_000
+    assert "skill_execution" in warning
+
+
+@pytest.mark.parametrize("declared_name", ["missing", None, "rr"])
+@pytest.mark.parametrize("identity", ["release-review", "release-audit"])
+def test_strict_validation_uses_the_directory_and_frontmatter_identity(tmp_path, declared_name, identity):
+    skill = _write_release_review_skill(tmp_path, [f"The agent used {identity}."])
+    (skill / "SKILL.md").write_text("---\nname: release-audit\ndescription: Review releases\n---\n", encoding="utf-8")
+    path = skill / "evals" / "evals.json"
+    case = json.loads(path.read_text())["evals"][0]
+    case["prompt"] = f"Use the skill at skills/{identity}"
+    if declared_name != "missing":
+        case["expected_skill"] = declared_name
+    path.write_text(json.dumps([{"id": "case-1", "question": case.pop("prompt"), **case}]))
+
+    result = CliRunner().invoke(cli, ["tier3", "validate", str(skill), "--strict", "--json"])
+
+    assert result.exit_code == 1, result.output
+    warnings = [item["message"] for item in json.loads(result.output) if "skill_execution" in item["message"]]
+    assert len(warnings) == 2
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"assertions": [{"text": "The agent read SKILL.md"}]},
+        {"assertions": [["The agent read SKILL.md"]]},
+        {"expected_output": {"result": ["The agent read SKILL.md"]}},
+        {"expected_output": ["The agent read SKILL.md"]},
+        {"expected_behavior": "The agent read SKILL.md"},
+        {"assertions": {"The agent read SKILL.md": "required"}},
+    ],
+)
+def test_every_judge_graded_string_leaf_is_checked_after_loading(tmp_path, fields):
+    skill = _write_release_review_skill(tmp_path, ["Lists both blockers"])
+    path = skill / "evals" / "evals.json"
+    data = json.loads(path.read_text())
+    data["evals"][0].update(fields)
+    path.write_text(json.dumps(data))
+
+    result = CliRunner().invoke(cli, ["tier3", "validate", str(skill), "--strict", "--json"])
+
+    assert result.exit_code == 1, result.output
+    assert any("grades skill use" in item["message"] for item in json.loads(result.output))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The agent read SKILL\u200b.md",
+        "The agent read ＳＫＩＬＬ．ｍｄ",  # noqa: RUF001 -- compatibility spelling under test
+        "The agent read **SKILL.md**",
+        "The agent read [SKILL.md](SKILL.md)",
+        "The agent used the skill",
+        "The agent followed the skill's instructions",
+        "The agent read the contents of SKILL.md",
+        "The agent ran cat SKILL.md",
+        "The agent ran python3 -I review.py",
+    ],
+)
+def test_common_skill_use_spellings_warn(text):
+    assert _baseline_fairness_warnings(
+        _case(prompt="Check manifest.yaml", assertions=[text]), skill_scripts=["review.py"]
+    )
+
+
+@pytest.mark.parametrize("prompt", ["Run ./scripts/review.py on manifest.yaml", "Use the release-review skill"])
+def test_prompt_that_requires_the_skill_or_its_script_warns(prompt):
+    assert _baseline_fairness_warnings(_case(prompt=prompt), skill_scripts=["review.py"])
+
+
+@pytest.mark.parametrize("generate", [generate_dataset._generate_simple, generate_dataset._generate_full])
+def test_template_prompt_is_generic_when_description_requires_own_script(generate):
+    cases = generate(_skill(description="Runs ./scripts/review.py against a manifest"))
+    assert cases
+    assert all("review.py" not in case["question"] for case in cases)
+
+
+def test_repeated_negated_skill_use_finishes_with_a_generous_resource_bound():
+    # 360KB used to take over two minutes due to repeated growing-prefix scans.
+    # A subprocess deadline guards runaway work; it is deliberately not a small
+    # microbenchmark threshold and does not depend on relative wall-clock speed.
+    code = (
+        "from skillevaluator.tier3.evals_spec import _skill_use_match; "
+        "assert _skill_use_match('not read SKILL.md ' * 22000, 'release-review') is None"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=30)
+
+
+@pytest.mark.parametrize("alias", ["release.review", "release review", "Straße"])
+def test_declared_alias_is_literal_even_when_it_is_not_a_kebab_case_name(alias):
+    (warning,) = _baseline_fairness_warnings(
+        _case(alias, prompt="Check manifest.yaml", assertions=[f"Used {alias.upper()}."])
+    )
+    assert "grades skill use" in warning
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Explains that no positive with-skill trial loaded the skill, so the description or prompts should be fixed",
+        "Explains that no agent read SKILL.md during the previous benchmark",
+    ],
+)
+def test_report_interpretation_with_a_direct_negative_subject_does_not_warn(text):
+    assert _baseline_fairness_warnings(_case(prompt="Explain the benchmark report", expected_output=text)) == []
+
+
+@pytest.mark.parametrize("identity", ["skill", "read"])
+def test_identity_colliding_with_generic_wording_cannot_hide_skill_use(identity):
+    assert _baseline_fairness_warnings(
+        _case(identity, prompt="Check manifest.yaml", assertions=["The agent read SKILL.md"])
+    )
+
+
+def test_huge_alias_with_many_unmatched_leaves_finishes_with_a_generous_resource_bound():
+    # The alias is one scalar in the input, not work to repeat for every leaf.
+    code = (
+        "from skillevaluator.tier3.evals_spec import _baseline_fairness_warnings; "
+        "assert _baseline_fairness_warnings({'expected_skill': 'r' * 200000, "
+        "'expected_behavior': ['No issues'] * 4000}) == []"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=30)

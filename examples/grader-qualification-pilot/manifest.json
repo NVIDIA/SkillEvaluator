@@ -1,0 +1,133 @@
+{
+  "schema": "skillevaluator.synthetic-pilot-freeze/v1",
+  "suite_version": "1.0.0",
+  "authored_on": "2026-11-13",
+  "author": "Codex",
+  "independent_review": {
+    "kind": "independent automated review",
+    "reviewer": "Codex subagent /root/review_pilot_pr501",
+    "posted_via_github_account": "rng1995",
+    "url": "https://github.com/NVIDIA/SkillEvaluator/pull/501#pullrequestreview-5891138481",
+    "submitted_at": "2026-11-13T12:38:52Z",
+    "github_state": "COMMENTED",
+    "reviewed_commit": "16f1cef237515aea3279869a190a5b8902b5bab5",
+    "reviewed_suite_sha256": "03aa08ec8ff5df39ebccd7b582010d655425615f36c9fad3600da2b2da79e4da",
+    "reviewed_policy_sha256": "925267b444976e4befc4f34e3776902ec0f0b920872a1150c40e6fe7cf797b33",
+    "reviewed_manifest_payload_sha256": "d777c60df10e0399072ca49a7c706978c6c73409e536e9a64507c4e50a296528",
+    "spec_result": "PASS",
+    "quality_result": "PASS",
+    "confirmed_case_labels": 4,
+    "actionable_findings": 0,
+    "human_maintainer_approval_claimed": false
+  },
+  "source_identity": {
+    "git_commit": "a2da2440a65fc3e25879fddce68f5243708e099a",
+    "description": "Exact authoring source; later runs must retain their actual source identity.",
+    "files": {
+      "src/skillevaluator/constants.py": {
+        "bytes": 27249,
+        "sha256": "c20cfc19fab01dded55dde9359b95057396483f340c7f31fd5f44687278eac27"
+      },
+      "src/skillevaluator/evidence.py": {
+        "bytes": 613,
+        "sha256": "378cd063debbfefdd82d877d1fa2204a3fd948acc960c07f3d51c996488ad360"
+      },
+      "src/skillevaluator/tier3/eval_core/atif_helpers.py": {
+        "bytes": 42423,
+        "sha256": "fa8efda8952bf65979cc3c5e1e8c8a228f699604fb1354b818a1d42f5ab0a2e9"
+      },
+      "src/skillevaluator/tier3/eval_core/character_facts.py": {
+        "bytes": 3070,
+        "sha256": "c5ebbbe9b10b3b5340713a8d02b569cae75ff01e8db0b553529075d67172865b"
+      },
+      "src/skillevaluator/tier3/eval_core/checks.py": {
+        "bytes": 295907,
+        "sha256": "45886ffc15a8664126bda88f5b03325812c158ed1d57c60b3f19445ecf7db95b"
+      },
+      "src/skillevaluator/tier3/eval_core/codex_tool_call_normalizer.py": {
+        "bytes": 53786,
+        "sha256": "140f8bdb8d8f43330cdf3d21c5e9acbc802c0d5b3462116b42d210149f7312d7"
+      },
+      "src/skillevaluator/tier3/eval_core/declarative_checks.py": {
+        "bytes": 12585,
+        "sha256": "b258b3948960c8dec0014d47457496d13519fdbf0ae3193a6d48af681bde1b13"
+      },
+      "src/skillevaluator/tier3/eval_core/log_converters.py": {
+        "bytes": 38628,
+        "sha256": "77a7ecbf4d81dd38fb5f1fbb969700f77fed921755e6f07838e98e2ba9d78e41"
+      },
+      "src/skillevaluator/tier3/eval_core/optional_reference.py": {
+        "bytes": 1157,
+        "sha256": "922cc1dfcfcd53b92f65837ec1257abe03e08c27f632000d23ee5532112d0f09"
+      },
+      "src/skillevaluator/tier3/eval_core/script_invocation.py": {
+        "bytes": 149332,
+        "sha256": "3a0e0692ff91a1f13bcff15bdde68264a1963c84fa189786425a4fc93b267910"
+      },
+      "src/skillevaluator/tier3/eval_core/secret_redaction.py": {
+        "bytes": 3687,
+        "sha256": "218f07a94dcbe10eab1527f03f407ce8b64d3728de35425e41bccb0210cf8e65"
+      },
+      "src/skillevaluator/tier3/eval_core/shell_lexing.py": {
+        "bytes": 6683,
+        "sha256": "5b4efc7bb45f03eb17306294fb227c8dedeb47f8faaf93698f03b5dc395b42f5"
+      },
+      "src/skillevaluator/tier3/grader_policy.py": {
+        "bytes": 13083,
+        "sha256": "215159a39f26dba1706b334767934ed85f9a79d1d028f9beb21921a607db5dc1"
+      },
+      "src/skillevaluator/tier3/grader_validation.py": {
+        "bytes": 34252,
+        "sha256": "b7c95c55158974441aed0aa5d22ddfd81d9f0c350e0a8a21d001502c0026215a"
+      },
+      "src/skillevaluator/tier3/harbor/metrics.py": {
+        "bytes": 32441,
+        "sha256": "365e106004e34b95a45ea0d93ce93a6a2e62ecb86600dcbe715e9b52324167b2"
+      },
+      "src/skillevaluator/tier3/harbor/templates/eval.py": {
+        "bytes": 181716,
+        "sha256": "66de59c5310cf6b828e6e3a3d351c98a39c26ffb7d16f0c026d84465a2257440"
+      }
+    }
+  },
+  "max_artifact_file_bytes": 262144,
+  "max_manifest_bytes": 65536,
+  "suite_sha256": "8ad66f1d525856c229efcd9c6bb5207b7ac24f1cfd98f372fbb5f99d400c09aa",
+  "policy_sha256": "925267b444976e4befc4f34e3776902ec0f0b920872a1150c40e6fe7cf797b33",
+  "preserved_reference_suite_sha256": "5e85ceac8624639cb15e8758f172dada4d21ac2a5460a82936c31f01b519a023",
+  "files": {
+    "ORACLE.md": {
+      "bytes": 9433,
+      "sha256": "e52e47a952ee2cd3293f2721f73bf0eb8898fc8dc9d2d1df19695b9ddad2510a"
+    },
+    "README.md": {
+      "bytes": 6088,
+      "sha256": "f28f695298097bcac7550217958a0938b3499734e007bbe4f63902d5b1793f59"
+    },
+    "qualification-policy.json": {
+      "bytes": 702,
+      "sha256": "a77b9ce8ba522c3d159e5ecc5e5852310729d499dcb240744a8b0e25f0b9c46e"
+    },
+    "suite.json": {
+      "bytes": 10458,
+      "sha256": "40416e64609b4d497cc916759f31ce0806f2b2b0af4f57a446dbd133c2e9ac00"
+    },
+    "trajectories/efficiency-root-search.json": {
+      "bytes": 2110,
+      "sha256": "a3066e18dfe0ef0a803d39e364fa73fb46488c8fc967e8ef548ab637464a76a1"
+    },
+    "trajectories/efficiency-scoped-search.json": {
+      "bytes": 2139,
+      "sha256": "6bad177f0517c7f1e99983483c5b2634037fe4670de547e6aeee8698be7163a9"
+    },
+    "trajectories/security-quoted-startup.json": {
+      "bytes": 2183,
+      "sha256": "0e922d6e1408d5112d3a34d40f4da3ef719d7bdc115025d2f7ceb7f96b398140"
+    },
+    "trajectories/security-startup-write.json": {
+      "bytes": 2690,
+      "sha256": "68c6ff6d941c80c4b0d6ea907cc774cded52ecfd3be76c2064ab71500a310d71"
+    }
+  },
+  "manifest_payload_sha256": "7a4a902172f4d5a10aa0eac95a9c1c3c8c4ca16507e6456f8abde810dc79aeb0"
+}

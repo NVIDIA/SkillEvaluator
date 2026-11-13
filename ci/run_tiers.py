@@ -41,7 +41,7 @@ try:
     from select_changed_skills import (
         SelectionError,
         _git,
-        _paths,
+        changed_paths,
         select_changed_skills,
         setup_changed,
         skill_roots,
@@ -55,7 +55,7 @@ except ModuleNotFoundError:
     from ci.select_changed_skills import (
         SelectionError,
         _git,
-        _paths,
+        changed_paths,
         select_changed_skills,
         setup_changed,
         skill_roots,
@@ -108,7 +108,8 @@ def select_skills(workspace: Path, env: dict) -> tuple[list[Path], dict]:
     if base and mode == "auto":
         selected, selection = select_changed_skills(workspace, roots, base, head)
         # Tier 1 applies the same setup predicate, so every tier that runs selects the same skills.
-        changed = _paths(_git(workspace, "diff", "--name-only", "-z", "--no-renames", f"{base}...{head}", "--"))
+        # The shared list is the one the paid-job skip reads (gitlinks included).
+        changed = changed_paths(workspace, env, head)
         if not setup_changed(changed):
             return selected, selection
         reason = "ci_configuration_changed"
@@ -275,7 +276,7 @@ def native_tier3(skill: Path, output: Path, env: dict) -> int:
     result.metadata["evaluated_source"] = options.evaluated_source
     if service.failure_reason(engine):
         result.mark_scan_incomplete("Tier 3 execution")
-    document = JSONReporter(expected_skill_name=skill.name).render_all([result])
+    document = JSONReporter(expected_skill_name=skill.name, explicit_skill_name=skill.name).render_all([result])
     (output / "skillevaluator-tier3.json").write_text(document, encoding="utf-8")
     return int(resolve_run_status([result]).headline.value != "passed")
 
@@ -317,7 +318,9 @@ def _combined(statuses: list[str]) -> str:
     )
 
 
-def _retain(raw: Path, destination: Path, tier: int, tokens: set[str], skill: Path, code: int) -> dict:
+def _retain(
+    raw: Path, destination: Path, tier: int, tokens: set[str], skill: Path, code: int, target_path: str | None = None
+) -> dict:
     from skillevaluator.reporting.retained import retained_results
 
     try:
@@ -330,6 +333,10 @@ def _retain(raw: Path, destination: Path, tier: int, tokens: set[str], skill: Pa
     if len(documents) != 1:
         raise ConfigurationError("The evaluator did not produce one canonical JSON report.")
     report = Redactor(tokens).object(read_json(documents[0]))
+    if target_path is not None and isinstance(report.get("target_path"), str):
+        # The evaluator records the target as the CI passed it, an absolute path
+        # in the runner's workspace; the retained report keeps the repository path.
+        report["target_path"] = target_path
     results = retained_results(report, allowed_tiers={tier})
     if tier == 2:
         # Standalone Tier 2 gates its CLI exit; CI keeps the same evidence and
@@ -562,7 +569,7 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
                 )
                 if code == 124:
                     skill_row["error"] = "Evaluation exceeded the configured time budget."
-                retained = _retain(raw, leaf, tier, tokens, skill, code)
+                retained = _retain(raw, leaf, tier, tokens, skill, code, skill_row["path"])
                 complete = retained.pop("complete")
                 skill_row.update(retained)
                 if tier == 3 and dataset_preflight(skill) != digests:

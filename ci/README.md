@@ -328,6 +328,9 @@ apply. A configured LLM run is not proof of Tier 2 or Tier 3 evaluation.
 
 ## Maintainer release procedure
 
+Start with the [product release checklist](../RELEASING.md), which covers when
+to rebuild the image, refresh templates and CLI pins, and publish through Kitmaker.
+
 Release publication is deliberate and manual. Consumer files become usable
 after the official image is published and verified; source templates contain
 placeholders until then.

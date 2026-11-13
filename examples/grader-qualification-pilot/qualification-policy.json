@@ -1,0 +1,19 @@
+{
+  "schema": "skillevaluator.grader-qualification-policy/v1",
+  "policy_id": "synthetic-security-efficiency-availability-v1",
+  "description": "Diagnostic availability pilot for security and skill_efficiency only. One distinct pass/fail case per metric is an availability floor, not statistical representativeness, all-metrics qualification, release approval or Jira acceptance. No category minimum is justified by this four-case design.",
+  "required_metrics": [
+    "security",
+    "skill_efficiency"
+  ],
+  "min_class_cases": {
+    "pass": 1,
+    "fail": 1
+  },
+  "min_category_cases": {},
+  "max_rates": {
+    "false_pass_rate": 0.1,
+    "false_fail_rate": 0.1,
+    "unjudgeable_rate": 0.05
+  }
+}

@@ -10,8 +10,8 @@
 
 > 📺 **Livestream:** [Ask the Experts: Evaluating Agent Skills](https://www.youtube.com/watch?v=4rI0zATFxYI)
 
-SkillEvaluator is an open-source tool that checks AI agent skills and measures their effect on task results:
-start with quality checks, then compare live runs with and without a skill.
+SkillEvaluator checks AI agent skills and measures their effect on task results:
+start with quality checks, then compare runs with and without a skill.
 
 Agent skills are folders of instructions and supporting files defined by the
 [Agent Skills specification](https://agentskills.io/). SkillEvaluator is part of
@@ -39,7 +39,8 @@ pip install skillevaluator
 Run all Tier 1 checks, no API key:
 
 ```bash
-skillevaluator validate ./my-skill
+skillevaluator validate \
+  ./my-skill --tiers 1
 ```
 
 Or run from a clone: [Quickstart](#quickstart).
@@ -47,13 +48,13 @@ Or run from a clone: [Quickstart](#quickstart).
 </td>
 <td>
 
-Check changed skills on every pull request. On GitHub, run in your repository:
+Check changed skills on every pull request. On GitHub, run:
 
 ```bash
 skillevaluator ci init
 ```
 
-It opens a setup PR. On GitLab, copy the [CI template](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/bundles/0.8.0).
+It opens a setup PR. On GitLab, copy the [CI template](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/bundles/0.9.0).
 
 </td>
 <td>
@@ -65,7 +66,7 @@ npx skills add \
   NVIDIA/SkillEvaluator
 ```
 
-Then ask: *"Is my skill any good?"* It runs the column 1 CLI. No Node.js? [Copy the folder](docs/agent-skill.mdx#install).
+Then ask: *"Is my skill any good?"* No Node.js? [Copy the folder](docs/agent-skill.mdx#install).
 
 </td>
 </tr>
@@ -78,7 +79,7 @@ Guides: [installation](https://docs.nvidia.com/skills/skillevaluator/installatio
 
 ## Quickstart
 
-Both paths use the bundled `text-analyzer` skill.
+Both paths use bundled `text-analyzer`.
 
 | Start here | Requires | First result |
 | --- | --- | --- |
@@ -93,7 +94,7 @@ git clone --depth 1 https://github.com/NVIDIA/SkillEvaluator.git
 cd SkillEvaluator
 ```
 
-uv provisions Python 3.13 and dependencies. Run from this checkout; for a standalone CLI, see
+uv provisions Python 3.13 and dependencies. For standalone installation, see
 [Installation](https://docs.nvidia.com/skills/skillevaluator/installation).
 
 ### Run without an LLM
@@ -141,7 +142,7 @@ The same key supports Tier 2 embeddings and supported Tier 3 agents. See the
 
 ![SkillEvaluator three-tier pipeline: Skill → Tier 1 Validation → Tier 2 Deduplication → Tier 3 Live Evaluation → Reports](https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/ad2815fe78c045db91d230681d32863698da08cf/docs/assets/three-tier-overview.svg)
 
-Each tier is independent. Add the relevant extra to your checkout command:
+Each tier is independent. Add its extra to your command:
 
 | Tier | Question | Example after setup | Additional setup |
 | --- | --- | --- | --- |
@@ -157,9 +158,9 @@ are missing; Semgrep is optional. See [scanners](docs/installation.mdx#system-to
 security scanning; [Harbor](https://github.com/harbor-framework/harbor), the
 open-source agent evaluation framework, powers sandboxed agent runs.
 
-Tier 2 reports when inter-skill comparison did not run. Tier 3 reuses evaluation
-sources or creates one starter case with limited coverage. See the
-[tier guides](https://docs.nvidia.com/skills/skillevaluator/) for details.
+Tier 2 reports when inter-skill comparison did not run. Tier 3 autopilot reuses
+sources or creates one skill-grounded case with limited coverage. See
+[tier guides](https://docs.nvidia.com/skills/skillevaluator/).
 
 ## Run the combined pipeline
 
@@ -175,15 +176,18 @@ autopilot for skills. Use `--tiers 1,2` to skip live evaluation or `--tiers 1` f
 static checks. `--no-autopilot` requires an existing source. Other artifact types
 retain their applicable stages.
 
-Tier 1 always gates `validate`. Tier 2 gates unless `--no-block-on-dedup` is set;
+Tier 1 gates `validate`. Tier 2 gates unless `--no-block-on-dedup` is set;
 Tier 3 gates only with `--block-on-agent-eval`. Model and managed-sandbox usage
 can incur charges; see [runtime and cost](docs/tier3-live-evaluation.mdx#plan-for-cost).
 
-For broader coverage, generate and review additional cases. Templates omit
-negatives unless authored in `EVAL.md`:
+Standalone generation needs substantive `evals/EVAL.md` guidance, a `--prompt`
+file with task requests and outcomes, or matching retained traces. `--force`
+below replaces the autopilot starter; `--refine` refines it. Explicit
+`--grounding skill` permits skill-only starters. Review cases; templates omit
+unauthored negatives.
 
 ```bash
-uv run --python 3.13 --extra tier3 skillevaluator tier3 create-eval-dataset ./my-skill --full
+uv run --python 3.13 --extra tier3 skillevaluator tier3 create-eval-dataset ./my-skill --full --prompt eval-guidance.md --force
 ```
 
 ## Run from a source checkout

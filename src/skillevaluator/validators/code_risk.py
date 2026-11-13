@@ -18,6 +18,51 @@ from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.utils.tool_runner import Severity, Tools, parse_json_output
 from skillevaluator.validators.base import Finding, ValidationResult, ValidatorBase, iter_scannable_files
 
+_SEMGREP_PARSE_ERROR_TYPES = frozenset(
+    {"SyntaxError", "PartialParsing", "LexicalError", "ParseError", "OtherParseError", "AstBuilderError"}
+)
+_SEMGREP_PARSE_ERROR_PATH_LIMIT = 20
+
+
+def _semgrep_error_type(error: dict) -> str:
+    """Return the Semgrep error type name; JSON reports use a string or ``["Name", ...]``."""
+    error_type = error.get("type")
+    if isinstance(error_type, list) and error_type:
+        error_type = error_type[0]
+    return error_type if isinstance(error_type, str) else ""
+
+
+def _is_semgrep_parse_error(error: dict) -> bool:
+    """True for a file-level parse error: Semgrep ran but could not parse one input file."""
+    return bool(error.get("path")) and _semgrep_error_type(error) in _SEMGREP_PARSE_ERROR_TYPES
+
+
+def _semgrep_display_path(path: str, skill_root: Path | None) -> str:
+    """Return *path* relative to the scanned skill.
+
+    Semgrep reports absolute paths for the absolute target ``_run_semgrep`` passes, so a
+    raw path would put the user's home directory into every report. A path outside the
+    skill keeps only its file name.
+    """
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        return candidate.as_posix()
+    if skill_root is not None:
+        try:
+            return candidate.relative_to(skill_root).as_posix()
+        except ValueError:
+            pass
+    return candidate.name
+
+
+def _semgrep_error_line(error: dict) -> int | None:
+    spans = error.get("spans")
+    if isinstance(spans, list) and spans and isinstance(spans[0], dict):
+        start = spans[0].get("start")
+        if isinstance(start, dict) and isinstance(start.get("line"), int):
+            return start["line"]
+    return None
+
 
 def _semgrep_file_excludes(skill_path: Path) -> list[str]:
     """Return generated file patterns using the target filesystem's case semantics."""
@@ -305,7 +350,9 @@ class CodeRiskValidator(ValidatorBase):
         elif tool_result.exit_code in (0, 1):
             # Exit code 0 = clean, 1 = findings; both emit JSON on stdout
             result.record_scanner("semgrep", Tools.semgrep.version)
-            self._process_semgrep_output(tool_result.stdout, result, exit_code=tool_result.exit_code)
+            self._process_semgrep_output(
+                tool_result.stdout, result, exit_code=tool_result.exit_code, skill_path=skill_path.resolve()
+            )
         else:
             error_msg = tool_result.stderr or tool_result.stdout or "no diagnostic output"
             result.add_error(f"Semgrep error (exit code {tool_result.exit_code}): {error_msg[:200]}")
@@ -319,8 +366,12 @@ class CodeRiskValidator(ValidatorBase):
         result: ValidationResult,
         *,
         exit_code: int | None = None,
+        skill_path: Path | None = None,
     ) -> None:
-        """Parse Semgrep JSON output and report findings."""
+        """Parse Semgrep JSON output and report findings.
+
+        *skill_path* is the resolved skill root; it lets parse-error paths be shown relative to it.
+        """
         data = parse_json_output(output)
         if data is None:
             result.add_error("Semgrep did not return valid JSON; scan did not complete")
@@ -359,8 +410,15 @@ class CodeRiskValidator(ValidatorBase):
             result.mark_scan_incomplete("semgrep")
             return
 
-        # Report scan errors (limit to avoid noise)
-        for error in scan_errors[:3]:
+        # File-level parse errors mean Semgrep ran but skipped part of the input; every
+        # other error is reported one by one (limited to avoid noise).
+        parse_errors: list[dict] = []
+        other_errors: list[dict] = []
+        for error in scan_errors:
+            (parse_errors if _is_semgrep_parse_error(error) else other_errors).append(error)
+        if parse_errors:
+            self._report_semgrep_parse_errors(result, parse_errors, skill_path)
+        for error in other_errors[:3]:
             message = str(error.get("message") or error.get("type") or "Unknown scan error")
             result.add_error(f"Semgrep scan error: {message[:100]}")
         if scan_errors:
@@ -385,6 +443,33 @@ class CodeRiskValidator(ValidatorBase):
 
         for finding in findings:
             self._report_semgrep_finding(result, finding)
+
+    def _report_semgrep_parse_errors(
+        self, result: ValidationResult, parse_errors: list[dict], skill_path: Path | None = None
+    ) -> None:
+        """Report files Semgrep could not fully parse as a partial scan.
+
+        The message names up to ``_SEMGREP_PARSE_ERROR_PATH_LIMIT`` files with the line of
+        their first error; ``semgrep_unparsed_files`` keeps every file path, relative to the skill.
+        """
+        first_line: dict[str, int | None] = {}
+        for error in parse_errors:
+            path = _semgrep_display_path(str(error.get("path") or "unknown"), skill_path)
+            line = _semgrep_error_line(error)
+            if first_line.get(path) is None:
+                first_line[path] = line
+        files = list(first_line)
+        locations = [f"{path}:{line}" if line else path for path, line in first_line.items()]
+        shown = locations[:_SEMGREP_PARSE_ERROR_PATH_LIMIT]
+        extra = len(locations) - len(shown)
+        listing = ", ".join(shown) + (f", and {extra} more" if extra > 0 else "")
+        result.metadata["semgrep_unparsed_files"] = files
+        result.add_error(
+            f"Semgrep partial scan: {len(files)} file(s) could not be fully parsed ({listing}). "
+            f"Semgrep skips the code it cannot parse, so findings there are missed. Findings for the "
+            f"other files are kept. Fix the syntax error, or check whether it comes from Semgrep's parser "
+            f"or the rule configuration for that language."
+        )
 
     def _report_semgrep_finding(self, result: ValidationResult, finding: dict) -> None:
         """Report a single Semgrep finding."""

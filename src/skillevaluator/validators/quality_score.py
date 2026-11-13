@@ -34,7 +34,6 @@ from skillevaluator.constants import (
     QUALITY_CHARS_PER_TOKEN,
     QUALITY_DEFAULT_MIN_SCORE,
     QUALITY_EXCLUDED_DIRS,
-    QUALITY_RESERVED_NAMES,
     QUALITY_RESOURCE_DIRS,
 )
 from skillevaluator.logging_config import get_logger
@@ -593,12 +592,14 @@ class QualityScoreValidator(ValidatorBase):
                     f"Invalid name format: '{name}' (lowercase/numbers/hyphens only)",
                     "Use only lowercase letters, numbers, and hyphens",
                 )
-            if _contains_any_term(name, QUALITY_RESERVED_NAMES):
+            reserved = self.quality_config["correctness"]["reserved_name"]
+            matched = [term for term in reserved["terms"] if _contains_term(name, term)]
+            if matched and reserved["points"]:
                 dim.deduct(
-                    15,
+                    reserved["points"],
                     "error",
-                    "Name contains reserved word (anthropic, claude)",
-                    "Remove reserved words from skill name",
+                    f"{reserved['message']}: {', '.join(matched)}",
+                    reserved["suggestion"],
                 )
             if XML_TAG_RE.search(name):
                 dim.deduct(15, "error", "Name contains XML tags", "Remove XML tags from skill name")

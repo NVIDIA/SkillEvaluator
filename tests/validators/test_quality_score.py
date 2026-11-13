@@ -957,12 +957,12 @@ class TestQualityScoreDeterministicContracts:
     def test_reserved_names_match_complete_name_segments(self, tmp_path: Path):
         messages = _finding_messages(_write_issue_skill(tmp_path, name="philanthropic-grant-matcher"))
 
-        assert "Name contains reserved word (anthropic, claude)" not in messages
+        assert not any("reserved word" in message for message in messages)
 
     def test_reserved_name_segment_is_still_reported(self, tmp_path: Path):
         messages = _finding_messages(_write_issue_skill(tmp_path, name="anthropic-grant-matcher"))
 
-        assert "Name contains reserved word (anthropic, claude)" in messages
+        assert "Name contains reserved word: anthropic" in messages
 
     def test_person_phrases_do_not_match_inside_words(self, tmp_path: Path):
         messages = _finding_messages(
@@ -1855,6 +1855,71 @@ class TestDiscoverabilityDescriptionTooShortConfig:
         (skill_dir / "SKILL.md").write_text("---\nname: undescribed-skill\n---\n\n# Undescribed\n", encoding="utf-8")
 
         assert _short_description_issues(_validate_with(skill_dir, tmp_path)) == []
+
+
+def _reserved_name_issues(result) -> list[dict]:
+    issues = result.metadata["quality_scores"]["dimensions"]["correctness"]["issues"]
+    return [issue for issue in issues if "reserved" in issue["message"].lower()]
+
+
+class TestCorrectnessReservedNameConfig:
+    def test_packaged_rule_reports_the_matched_term_as_a_gate_failure(self, tmp_path: Path):
+        from skillevaluator.models.result import Severity
+
+        result = _validate_with(_write_issue_skill(tmp_path, name="claude-grant-matcher"), tmp_path)
+
+        (issue,) = _reserved_name_issues(result)
+        assert issue["message"] == "Name contains reserved word: claude"
+        assert issue["suggestion"] == "Remove reserved words from skill name"
+        assert issue["deduction"] == 15
+        assert issue["severity"] == "error"
+        assert any(f.severity == Severity.HIGH and "reserved word" in f.message for f in result.findings)
+        assert not result.passed
+
+    def test_every_matched_term_is_listed_once_and_deducted_once(self, tmp_path: Path):
+        result = _validate_with(_write_issue_skill(tmp_path, name="claude-anthropic-helper"), tmp_path)
+
+        (issue,) = _reserved_name_issues(result)
+        assert issue["message"] == "Name contains reserved word: anthropic, claude"
+        assert issue["deduction"] == 15
+
+    def test_custom_terms_replace_the_packaged_list(self, tmp_path: Path):
+        config = "correctness:\n  reserved_name:\n    terms: [acme, Internal]\n"
+
+        packaged_word = _validate_with(_write_issue_skill(tmp_path, name="claude-helper"), tmp_path, config)
+        custom_word = _validate_with(_write_issue_skill(tmp_path, name="internal-helper"), tmp_path, config)
+        inside_word = _validate_with(_write_issue_skill(tmp_path, name="acmestore-helper"), tmp_path, config)
+
+        assert _reserved_name_issues(packaged_word) == []
+        assert [issue["message"] for issue in _reserved_name_issues(custom_word)] == [
+            "Name contains reserved word: Internal"
+        ]
+        assert _reserved_name_issues(inside_word) == []
+
+    def test_custom_points_message_and_suggestion_are_used(self, tmp_path: Path):
+        config = (
+            "correctness:\n  reserved_name:\n    points: 30\n"
+            "    message: Name uses a vendor name\n    suggestion: Pick a neutral name\n"
+        )
+
+        result = _validate_with(_write_issue_skill(tmp_path, name="claude-helper"), tmp_path, config)
+
+        issues = result.metadata["quality_scores"]["dimensions"]["correctness"]["issues"]
+        (issue,) = [issue for issue in issues if issue["message"].startswith("Name uses a vendor name")]
+        assert issue["message"] == "Name uses a vendor name: claude"
+        assert issue["suggestion"] == "Pick a neutral name"
+        assert issue["deduction"] == 30
+
+    def test_zero_points_turns_the_rule_and_its_gate_failure_off(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(tmp_path, name="claude-helper")
+        default = _validate_with(skill_dir, tmp_path)
+
+        disabled = _validate_with(skill_dir, tmp_path, "correctness:\n  reserved_name:\n    points: 0\n")
+
+        assert _reserved_name_issues(disabled) == []
+        assert not any("reserved word" in finding.message for finding in disabled.findings)
+        scores = [r.metadata["quality_scores"]["dimensions"]["correctness"]["score"] for r in (default, disabled)]
+        assert scores[1] == scores[0] + 15
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])

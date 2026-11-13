@@ -107,6 +107,19 @@ All notable changes to SkillEvaluator are documented in this file.
   cannot be confirmed stopped after a timeout or interruption, no further arm starts
   beside it and the failure is reported. After a timeout, the failed run still keeps
   the scores of the arms that finished.
+- Add a `correctness` section to the `--quality-config` file with a
+  `reserved_name` rule, so the reserved words checked in the skill name are no
+  longer fixed in code. The rule sets `terms`, `points`, `message`, and
+  `suggestion`; `points: 0` turns it off, which also removes its HIGH finding.
+  The section is optional and overlays the packaged values the same way the
+  other rule sections do. Scores are unchanged without a custom file. The
+  finding message now names the words it matched (`Name contains reserved
+  word: claude`) instead of listing every reserved word. The schema check keeps
+  its own fixed list and is not affected. The packaged `quality_config` digest
+  changes once, because `quality-default.yaml` gained the section. The
+  `QUALITY_RESERVED_NAMES` constant is removed; read
+  `load_quality_config()["correctness"]["reserved_name"]["terms"]` instead. The
+  other Correctness rules stay in code for now.
 - Add a `discoverability` section to the `--quality-config` file with a
   `description_too_short` rule, so the 20-character minimum for the
   frontmatter description is no longer fixed in code. The rule sets

@@ -91,6 +91,21 @@ class DiscoverabilityConfig(TypedDict):
     description_too_short: DescriptionTooShortRule
 
 
+class ReservedNameRule(TypedDict):
+    """Deduction when the frontmatter name contains one of the terms (whole word, any case)."""
+
+    points: int | float
+    message: str
+    suggestion: str
+    terms: list[str]
+
+
+class CorrectnessConfig(TypedDict):
+    """Correctness rules; a rule with points 0 is skipped."""
+
+    reserved_name: ReservedNameRule
+
+
 class QualityConfig(TypedDict):
     """Validated deterministic quality configuration."""
 
@@ -98,6 +113,7 @@ class QualityConfig(TypedDict):
     error_handling: ErrorHandlingConfig
     efficiency: EfficiencyConfig
     discoverability: DiscoverabilityConfig
+    correctness: CorrectnessConfig
 
 
 class QualityConfigProvenance(TypedDict):
@@ -176,6 +192,9 @@ _RULE_SECTIONS: dict[str, dict[str, _RuleSetting]] = {
     },
     "discoverability": {
         "description_too_short": ("min_chars", _validate_positive_int),
+    },
+    "correctness": {
+        "reserved_name": ("terms", partial(_validate_entries, ignore_case=True)),
     },
 }
 _TOP_LEVEL_KEYS = frozenset({"expected_headers", *_RULE_SECTIONS})

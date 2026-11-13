@@ -486,7 +486,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
       If a quality score changes unexpectedly, inspect the finding message rather than adding keywords. The checker rewards usable instructions and evidence in their relevant context, not vocabulary alone.
     </Tip>
 
-    **Quality config file.** Pass `--quality-config PATH` to `quality-check`, `tier1`, or `validate` to adjust the rules below. The file has four optional sections: `expected_headers` and `error_handling` for Reliability, `efficiency` for the token budget, and `discoverability` for the minimum description length. Anything you leave out keeps its packaged value from `quality-default.yaml`, and any list you set replaces the packaged list rather than merging with it.
+    **Quality config file.** Pass `--quality-config PATH` to `quality-check`, `tier1`, or `validate` to adjust the rules below. The file has five optional sections: `expected_headers` and `error_handling` for Reliability, `efficiency` for the token budget, `discoverability` for the minimum description length, and `correctness` for reserved words in the skill name. Anything you leave out keeps its packaged value from `quality-default.yaml`, and any list you set replaces the packaged list rather than merging with it.
 
     **Expected headings.** Reliability deducts points when `SKILL.md` lacks an expected heading. The packaged `quality-default.yaml` expects `## Prerequisites` (or `## Requirements`), `## Limitations`, and `## Troubleshooting` (or `## Common Issues` or `## FAQ`), each worth 5 points. Omit `expected_headers` to keep that list. A list you set replaces it, so copy any default entries you want to keep. Set `expected_headers: []` to turn heading checks off.
 
@@ -574,6 +574,23 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     | `suggestion` | `Add more context: what tasks does this skill handle?` | Fix suggestion attached to the finding |
 
     The length is counted in characters after leading and trailing whitespace is removed. A skill with no description is not reported by this rule. The finding appends the length and the minimum to `message`, as in `Description too short (recommend 50-150 chars): 12 chars, minimum 20`. The other Discoverability rules, including the 200-character upper limit, are not configurable yet.
+
+    **Reserved words in the name.** Correctness deducts points when the frontmatter `name` contains a reserved word, set in the `correctness` section under `reserved_name`. An omitted key keeps its packaged value. A `terms` list you set replaces the packaged list, so copy `anthropic` and `claude` if you want to keep them:
+
+    ```yaml title="quality.yaml"
+    correctness:
+      reserved_name:
+        terms: [anthropic, claude, acme]
+    ```
+
+    | Field | Packaged value | Meaning |
+    | --- | --- | --- |
+    | `terms` | `[anthropic, claude]` | Whole words, any case. `claude` matches `claude-helper` but not `claudette-helper` |
+    | `points` | `15` | Non-negative number deducted from Correctness. `0` turns the rule off |
+    | `message` | `Name contains reserved word` | Start of the finding message |
+    | `suggestion` | `Remove reserved words from skill name` | Fix suggestion attached to the finding |
+
+    The finding appends the matched terms to `message`, as in `Name contains reserved word: claude`. Several matches still deduct `points` once. This is an error-level rule: its finding is HIGH and fails the quality check whatever the score, so `points: 0` removes that failure as well as the deduction. The schema check has its own fixed list (`anthropic`, `claude`) that this file does not change, so with the default checks a name containing either word is still rejected there. The other Correctness rules are not configurable yet.
 
     The file is checked before any validation runs. A file that is missing, unreadable, not UTF-8, invalid YAML, has an unknown key (such as `point` instead of `points`), lists the same heading twice, has a negative or non-numeric `points`, a `max_tokens` or `min_chars` that is not a positive whole number, an empty `terms` or `markers` list, or a repeated entry in one of those lists is a usage error: the command exits with code 2 and names the file and the problem. `validate` checks the file even when `--checks` leaves out `quality`.
 

@@ -628,3 +628,65 @@ def test_custom_digest_declares_only_the_discoverability_keys_the_file_sets(tmp_
     assert _digest(config_path) == quality_config_digest(
         {"discoverability": {"description_too_short": {"min_chars": 40}}}
     )
+
+
+PACKAGED_RESERVED_NAME = {
+    "points": 15,
+    "message": "Name contains reserved word",
+    "suggestion": "Remove reserved words from skill name",
+    "terms": ["anthropic", "claude"],
+}
+
+
+def test_packaged_reserved_name_matches_former_hard_coded_values() -> None:
+    rule = load_quality_config()["correctness"]["reserved_name"]
+
+    assert rule == PACKAGED_RESERVED_NAME
+    assert type(rule["points"]) is int
+
+
+def test_custom_file_with_only_reserved_terms_keeps_every_other_packaged_value(tmp_path: Path) -> None:
+    config_path = tmp_path / "quality.yaml"
+    config_path.write_text("correctness:\n  reserved_name:\n    terms: [acme]\n", encoding="utf-8")
+    packaged = load_quality_config()
+
+    config = load_quality_config(config_path)
+
+    assert config["correctness"]["reserved_name"] == {**PACKAGED_RESERVED_NAME, "terms": ["acme"]}
+    assert {key: value for key, value in config.items() if key != "correctness"} == {
+        key: value for key, value in packaged.items() if key != "correctness"
+    }
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        ("correctness: []\n", r"correctness must be a mapping"),
+        ("correctness:\n  name_format: {}\n", r"unknown key\(s\) in correctness: name_format"),
+        ("correctness:\n  reserved_name: [acme]\n", r"correctness\.reserved_name must be a mapping"),
+        (
+            "correctness:\n  reserved_name:\n    words: [acme]\n",
+            r"unknown key\(s\) in correctness\.reserved_name: words \(allowed: message, points, suggestion, terms\)",
+        ),
+        ("correctness:\n  reserved_name:\n    terms: []\n", r"correctness\.reserved_name\.terms must be a non-empty list"),
+        ("correctness:\n  reserved_name:\n    terms: acme\n", r"correctness\.reserved_name\.terms must be a non-empty list"),
+        ('correctness:\n  reserved_name:\n    terms: [" "]\n', r"correctness\.reserved_name\.terms\[0\] must be a non-blank"),
+        (
+            "correctness:\n  reserved_name:\n    terms: [Acme, acme]\n",
+            r"duplicate entry 'acme' in correctness\.reserved_name\.terms",
+        ),
+        ("correctness:\n  reserved_name:\n    points: -1\n", r"correctness\.reserved_name\.points must be a non-negative"),
+    ],
+)
+def test_quality_config_rejects_invalid_correctness(tmp_path: Path, body: str, match: str) -> None:
+    config_path = _write_config(tmp_path, body)
+
+    with pytest.raises(QualityConfigError, match=rf"^{tmp_path}.*{match}"):
+        load_quality_config(config_path)
+
+
+def test_custom_digest_declares_only_the_correctness_keys_the_file_sets(tmp_path: Path) -> None:
+    config_path = tmp_path / "quality.yaml"
+    config_path.write_text("correctness: {reserved_name: {terms: [acme]}}\n", encoding="utf-8")
+
+    assert _digest(config_path) == quality_config_digest({"correctness": {"reserved_name": {"terms": ["acme"]}}})

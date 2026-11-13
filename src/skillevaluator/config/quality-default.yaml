@@ -65,3 +65,15 @@ discoverability:
     message: "Description too short (recommend 50-150 chars)"
     suggestion: "Add more context: what tasks does this skill handle?"
     min_chars: 20
+
+# Correctness rules. They overlay the same way as the sections above.
+correctness:
+  # The frontmatter name contains one of the terms as a whole word (any case). This is an
+  # error-level rule: its finding is HIGH and fails the quality check whatever the score.
+  # The finding appends the matched terms to the message. The schema check keeps its own
+  # reserved-word list, which this file does not change.
+  reserved_name:
+    points: 15
+    message: "Name contains reserved word"
+    suggestion: "Remove reserved words from skill name"
+    terms: [anthropic, claude]

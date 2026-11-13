@@ -54,8 +54,16 @@ _KNOWN_FIELDS = frozenset(
 )
 _FACT_RE = re.compile(r"\{([a-z0-9_]+)\}")
 _DOLLAR_N_RE = re.compile(r"(?<!\\)\$(\d+)(?!\w)")
-_PRICE_TAIL_RE = re.compile(r"[.,]\d|\s*(?:/|per\b)")
-_PRICE_HEAD_RE = re.compile(r"/\s*$")
+# Always a price: cents or thousands ($4.00), "per"/"each"/USD ($5 per month), a billing unit ($5/month),
+# or a spaced slash before another amount ($4 / $20).
+_PRICE_TAIL_RE = re.compile(
+    r"[.,]\d|\s+(?:per|each|usd)\b|\s*/\s*(?:mo(?:nth)?|y(?:ea)?r|day|week|h(?:ou)?r|user|seat|m?tok)\b(?!/)|\s+/\s+[$\d]",
+    re.IGNORECASE,
+)
+_PRICE_HEAD_RE = re.compile(r"\$\d[\d.,]*\s+/\s+$")
+# A bare $N past this index ($5, $20) is an amount, not an argument, unless a path or a closing quote/brace follows.
+_MAX_ARG_INDEX = 3
+_ARG_TAIL_RE = re.compile(r"\s*(?:/[^\s$\d]|~)|[\"'`}\]]")
 _KNOWN_ROOTS = (
     ".agents/skills",
     ".claude/skills",
@@ -255,6 +263,25 @@ def _paths(items: list[str]) -> str:
     return ", ".join(items[:3]) + (f" +{len(items) - 3} more" if len(items) > 3 else "")
 
 
+def _read_text(path: Path) -> tuple[int, list[str]] | None:
+    """Size and lines of a text file a harness could read; None for binary data and files that can't be read.
+
+    The check is advisory, so anything odd is skipped instead of raised: binary data (a NUL byte in the
+    first 8 KiB), a pipe or device that would block, a broken or looping link, a file without permission.
+    """
+    try:
+        if not path.is_file():
+            return None
+        with path.open("rb") as handle:
+            head = handle.read(8192)
+            if b"\0" in head:
+                return None
+            data = head + handle.read()
+    except OSError:
+        return None
+    return len(data), data.decode("utf-8", "replace").splitlines()
+
+
 def _bundle_facts(skill_path: Path, manifest: Path) -> dict[str, Any]:
     base = skill_path.resolve()
     links, escapes, sizes, long_lines, unlisted = [], [], [], [], []
@@ -262,18 +289,21 @@ def _bundle_facts(skill_path: Path, manifest: Path) -> dict[str, Any]:
         rel = path.relative_to(skill_path).as_posix()
         if path.is_symlink():
             links.append(rel)
-            target = path.resolve()
-            if target != base and base not in target.parents:
-                escapes.append(rel)
-            continue
-        lines = path.read_bytes().decode("utf-8", "replace").splitlines()
-        sizes.append((rel, path.stat().st_size, len(lines)))
-        long_lines += [rel] * sum(len(line) > 2000 for line in lines)
-        if rel.split("/", 1)[0] not in _HERMES_LINKED_DIRS:
+            target = Path(os.path.realpath(path))  # unlike Path.resolve(), no error on a symlink loop
+            if target == base or base in target.parents:
+                continue  # counted under its own path
+            escapes.append(rel)  # OpenCode follows it, so what it points to is read (and cut) like any file
+        elif rel.split("/", 1)[0] not in _HERMES_LINKED_DIRS:
             unlisted.append(rel)
+        text = _read_text(path)
+        if text is not None:
+            size, lines = text
+            sizes.append((rel, size, len(lines)))
+            long_lines += [rel] * sum(len(line) > 2000 for line in lines)
     largest = max(sizes, key=lambda item: item[1], default=("", 0, 0))
     paged = [rel for rel, size, count in sizes if size > 51200 or count > 2000]
-    multi_read = [rel for rel, size, _ in sizes if size > 64000]
+    # Only OpenCode is known to follow symlinks to files outside the skill; OpenClaw's reads are not tested there.
+    multi_read = [rel for rel, size, _ in sizes if size > 64000 and rel not in escapes]
     return {
         "resource_symlinks": len(links),
         "resource_symlink_paths": _paths(links),
@@ -293,12 +323,19 @@ def _bundle_facts(skill_path: Path, manifest: Path) -> dict[str, Any]:
     }
 
 
+def _is_price(line: str, match: re.Match[str]) -> bool:
+    """A price ($4.00, $5 per month, $20 on its own) rather than an argument ($1, $1 /path/to/project)."""
+    if _PRICE_TAIL_RE.match(line, match.end()) or _PRICE_HEAD_RE.search(line, 0, match.start()):
+        return True
+    return int(match.group(1)) > _MAX_ARG_INDEX and not _ARG_TAIL_RE.match(line, match.end())
+
+
 def _dollar_n(body: str, first_line: int) -> dict[str, Any]:
-    """Count ``$<number>`` tokens: price-like ones ($4.00, $4 / $20 per MTok) versus bare placeholders ($1)."""
+    """Count ``$<number>`` tokens: price-like ones ($4.00, $5, $4 / $20 per MTok) versus placeholders ($1, $1 /path)."""
     prices, placeholders, lines = 0, 0, []
     for number, line in enumerate(body.splitlines(), first_line):
         for match in _DOLLAR_N_RE.finditer(line):
-            if _PRICE_TAIL_RE.match(line, match.end()) or _PRICE_HEAD_RE.search(line, 0, match.start()):
+            if _is_price(line, match):
                 prices += 1
                 if number not in lines:
                     lines.append(number)
@@ -430,31 +467,50 @@ class Catalog:
 
 
 def _find_skills(folder: Path) -> list[Path]:
-    found = {
-        p.parent
-        for n in SKILL_MANIFEST_VARIANTS
-        for p in folder.rglob(n)
-        if not any(part in SCAN_EXCLUDED_DIRS for part in p.relative_to(folder).parts)
-    }
+    """Skill folders under ``folder``, symlinked ones included (Claude Code and Codex load those)."""
+    found: set[Path] = set()
+    for here, dirs, files in os.walk(folder, followlinks=True):
+        path = Path(here).absolute()
+        if path.is_symlink() and path.resolve() in {parent.resolve() for parent in path.parents}:
+            dirs.clear()  # a link back to one of its own parent folders
+            continue
+        dirs[:] = [d for d in dirs if d not in SCAN_EXCLUDED_DIRS]
+        if any(n in files for n in SKILL_MANIFEST_VARIANTS):
+            found.add(Path(here))
     return sorted(s for s in found if not any(parent in found for parent in s.parents))
+
+
+def _catalog_base(skill: Path) -> Path | None:
+    """The skills folder a skill is installed in: a harness root, or a workspace ``skills/`` folder (OpenClaw)."""
+    root, depth = _install_root(skill)
+    if root is not None:
+        return skill.absolute().parents[depth]
+    parent = skill.absolute().parent
+    return parent if parent.name == "skills" else None
+
+
+def _catalog_of(group: list[Path]) -> Catalog:
+    base = _catalog_base(group[0])
+    if base is not None:
+        return Catalog.of(_find_skills(base) or group, base)
+    return Catalog.of(group, Path(os.path.commonpath([s.resolve() for s in group])) if len(group) > 1 else None)
 
 
 def facts_for(skills: list[Path]) -> dict[Path, dict[str, Any]]:
     """Facts per skill, with the catalog they are installed in.
 
-    Several skills form their own catalog. A single skill under a known skills folder
-    (e.g. ``.claude/skills``) is measured against everything installed in that folder.
+    A skill installed in a skills folder (e.g. ``.claude/skills``, or an OpenClaw workspace ``skills/``) is
+    measured against everything installed in that folder, and skills in different folders are separate
+    installations. Skills outside any skills folder that are given together form their own catalog.
     """
-    members, base = skills, None
-    if len(skills) == 1:
-        root, depth = _install_root(skills[0])
-        if root is not None:
-            base = skills[0].absolute().parents[depth]
-            members = _find_skills(base) or skills
-    elif skills:
-        base = Path(os.path.commonpath([s.resolve() for s in skills]))
-    catalog = Catalog.of(members, base)
-    return {skill: skill_facts(skill, catalog) for skill in skills}
+    groups: dict[Path | None, list[Path]] = {}
+    for skill in skills:
+        base = _catalog_base(skill)
+        groups.setdefault(base.resolve() if base else None, []).append(skill)
+    catalogs: dict[Path, Catalog] = {}
+    for group in groups.values():
+        catalogs.update(dict.fromkeys(group, _catalog_of(group)))
+    return {skill: skill_facts(skill, catalogs[skill]) for skill in skills}
 
 
 def _utf16_units(value: Any) -> int:
@@ -616,8 +672,6 @@ def evaluate_profile(
         if "catalog_" in expression and not facts["catalog_size"]:
             continue
         if expression != "always" and not _Rule.evaluate(expression, names):
-            continue
-        if expression == "always" and rule["effect"] == "advisory":
             continue
         finding = {"id": rule["id"], "effect": rule["effect"], "message": _fill(rule["message"], facts)}
         for key in ("fix", "outcome"):

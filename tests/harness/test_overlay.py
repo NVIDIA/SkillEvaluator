@@ -490,6 +490,35 @@ def test_price_like_dollar_numbers_are_flagged_with_lines(tmp_path: Path):
     assert skill_facts(tmp_path / "b" / "skills" / "demo-skill")["dollar_placeholder_count"] == 1
 
 
+@pytest.mark.parametrize(
+    ("line", "prices", "placeholders"),
+    [
+        ("Budget is $5.", 1, 0),
+        ("The plan costs $20", 1, 0),
+        ("A $20 plan for the team (about $50).", 2, 0),
+        ("Batch $3 / $15 per MTok, or $5/month.", 3, 0),
+        ("Run $1 /path/to/project", 0, 1),
+        ("cp $1/$2 ~/notes; cd /tmp/$3", 0, 3),
+        ("Copy $5 /tmp/out and $6 ~/notes", 0, 2),
+        ("awk '{print $5}' and \"$9\"", 0, 2),
+        ("Use $0, $1 and $2 as the inputs.", 0, 3),
+    ],
+)
+def test_dollar_n_is_a_price_or_an_argument_not_both(tmp_path: Path, line: str, prices: int, placeholders: int):
+    facts = skill_facts(_skill(tmp_path, body=f"{BODY}{line}\n"))
+
+    assert (facts["dollar_literal_count"], facts["dollar_placeholder_count"]) == (prices, placeholders), line
+
+
+def test_standalone_prices_are_flagged_and_path_arguments_are_not(tmp_path: Path):
+    prices = _rows(_skill(tmp_path / "a", body=BODY + "The plan costs $20, with a $5 credit.\n"))
+    args = _rows(_skill(tmp_path / "b", body=BODY + "Run $1 /path/to/project, then cp $1/$2 out.\n"))
+
+    for harness, rule in (("claude-code", "CC-DOLLAR-N"), ("opencode", "OC-DOLLAR-N")):
+        assert any(f["id"] == rule and "2 price-like" in f["message"] for f in prices[harness]["findings"]), harness
+        assert rule not in _ids(args, harness), harness
+
+
 def test_every_oversized_file_long_line_and_unlisted_folder_is_counted(tmp_path: Path):
     skill = _skill(tmp_path)
     for rel, size in {"references/a.md": 51_201, "shared/b.md": 64_001, "shared/c.md": 51_200}.items():

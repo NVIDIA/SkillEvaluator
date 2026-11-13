@@ -54,8 +54,16 @@ _KNOWN_FIELDS = frozenset(
 )
 _FACT_RE = re.compile(r"\{([a-z0-9_]+)\}")
 _DOLLAR_N_RE = re.compile(r"(?<!\\)\$(\d+)(?!\w)")
-_PRICE_TAIL_RE = re.compile(r"[.,]\d|\s*(?:/|per\b)")
-_PRICE_HEAD_RE = re.compile(r"/\s*$")
+# Always a price: cents or thousands ($4.00), "per"/"each"/USD ($5 per month), a billing unit ($5/month),
+# or a spaced slash before another amount ($4 / $20).
+_PRICE_TAIL_RE = re.compile(
+    r"[.,]\d|\s+(?:per|each|usd)\b|\s*/\s*(?:mo(?:nth)?|y(?:ea)?r|day|week|h(?:ou)?r|user|seat|m?tok)\b(?!/)|\s+/\s+[$\d]",
+    re.IGNORECASE,
+)
+_PRICE_HEAD_RE = re.compile(r"\$\d[\d.,]*\s+/\s+$")
+# A bare $N past this index ($5, $20) is an amount, not an argument, unless a path or a closing quote/brace follows.
+_MAX_ARG_INDEX = 3
+_ARG_TAIL_RE = re.compile(r"\s*(?:/[^\s$\d]|~)|[\"'`}\]]")
 _KNOWN_ROOTS = (
     ".agents/skills",
     ".claude/skills",
@@ -289,12 +297,19 @@ def _bundle_facts(skill_path: Path, manifest: Path) -> dict[str, Any]:
     }
 
 
+def _is_price(line: str, match: re.Match[str]) -> bool:
+    """A price ($4.00, $5 per month, $20 on its own) rather than an argument ($1, $1 /path/to/project)."""
+    if _PRICE_TAIL_RE.match(line, match.end()) or _PRICE_HEAD_RE.search(line, 0, match.start()):
+        return True
+    return int(match.group(1)) > _MAX_ARG_INDEX and not _ARG_TAIL_RE.match(line, match.end())
+
+
 def _dollar_n(body: str, first_line: int) -> dict[str, Any]:
-    """Count ``$<number>`` tokens: price-like ones ($4.00, $4 / $20 per MTok) versus bare placeholders ($1)."""
+    """Count ``$<number>`` tokens: price-like ones ($4.00, $5, $4 / $20 per MTok) versus placeholders ($1, $1 /path)."""
     prices, placeholders, lines = 0, 0, []
     for number, line in enumerate(body.splitlines(), first_line):
         for match in _DOLLAR_N_RE.finditer(line):
-            if _PRICE_TAIL_RE.match(line, match.end()) or _PRICE_HEAD_RE.search(line, 0, match.start()):
+            if _is_price(line, match):
                 prices += 1
                 if number not in lines:
                     lines.append(number)

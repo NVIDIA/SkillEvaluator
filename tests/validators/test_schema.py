@@ -1308,7 +1308,7 @@ class TestMetadataIdPreviewBounds:
         skill_dir = tmp_path / "alias-id"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text(
-            f"---\nname: alias-id\ndescription: A skill whose metadata.id is a YAML alias graph\nmetadata:\n"
+            "---\nname: alias-id\ndescription: A skill whose metadata.id is a YAML alias graph\nmetadata:\n"
             + "\n".join(f"  {line}" for line in self._alias_bomb(20).splitlines())
             + "\n---\n\n# Alias\n\n## Instructions\n\n1. Run.\n",
             encoding="utf-8",

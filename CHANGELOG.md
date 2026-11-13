@@ -643,11 +643,11 @@ All notable changes to SkillEvaluator are documented in this file.
   different judge models; the arm scores include it.` A card with no lift says
   that no comparable result remains when the loaded results show that no
   attempt fed the lift, and otherwise that the loaded results cannot confirm
-  the comparison. It labels those cases `Left out of lift: different judge
-  models` in its per-trial evidence. In the canonical JSON the evaluator records the count in
-  `lift_excluded_cases`, its card lists the cases in `comparison_basis`, and
-  the matching evidence entries carry `comparison_excluded: true`. Scores and
-  lift are unchanged.
+  the comparison. It labels those cases
+  `Left out of lift: different judge models` in its per-trial evidence. In the
+  canonical JSON the evaluator records the count in `lift_excluded_cases`, its
+  card lists the cases in `comparison_basis`, and the matching evidence entries
+  carry `comparison_excluded: true`. Scores and lift are unchanged.
 
 - Tier 2 context deduplication now numbers `SHARED CONTENT n` blocks from the
   most repeated text, ties in first-seen order, instead of in first-seen order

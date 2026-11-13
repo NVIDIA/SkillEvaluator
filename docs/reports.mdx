@@ -1095,12 +1095,12 @@ or gate.
   timeout, still used tokens and are counted. So are the scored attempts of an
   arm that failed. `coverage.unscored_attempts` counts the attempts without a
   score. Such an attempt belongs to the case that its `failure.json` names in
-  `entry_id`, which the collector records from the task Harbor ran, so a
-  native task whose `[metadata] entry_id` differs from its directory keeps its
-  case. A run without that record gives the case whose task directory its
-  Harbor `result.json` or `config.json` names, or else the case its trial name
-  starts with. `resources` keeps its own totals, which need every attempt of an
-  arm scored and measured.
+  `entry_id`, which the collector records from the task the attempt ran with
+  either backend, so a native task whose `[metadata] entry_id` differs from
+  its directory keeps its case. A run without that record gives the case whose
+  task directory its Harbor `result.json` or `config.json` names, or else the
+  case its trial name starts with. `resources` keeps its own totals, which
+  need every attempt of an arm scored and measured.
 - Nothing is estimated. An attempt with a missing or invalid counter adds no
   tokens. A report trial whose trajectory recorded an invalid counter names
   it, never its value, in `invalid_token_counters`, and its `tokens` leave

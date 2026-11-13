@@ -296,7 +296,9 @@ class QualityScoreValidator(ValidatorBase):
             return False
         # The name must not continue a longer file name: ``other-run.mjs`` is not ``run.mjs``.
         script_name = "|".join(re.escape(name) for name in sorted(names))
-        invocation = re.compile(rf"\bnode\b[^\n]*?(?<![\w.-])(?:{script_name})(?![\w.-])")
+        # Shell separators end the command, so ``node --version; cat scripts/run.mjs`` is not
+        # an invocation of ``run.mjs``.
+        invocation = re.compile(rf"\bnode\b[^\n;&|)`]*?(?<![\w.-])(?:{script_name})(?![\w.-])")
         return invocation.search(content) is not None
 
     @staticmethod

@@ -1563,7 +1563,9 @@ class TestReliabilityErrorHandlingConfig:
         silent_skill = _write_issue_skill(tmp_path, name="probe-a", troubleshooting="Check the output directory.")
         mentioning_skill = _write_issue_skill(tmp_path, name="probe-b", troubleshooting="Report the error.")
 
-        silent = _validate_with(silent_skill, tmp_path, "expected_headers: []\nerror_handling: {mentioned: {points: 0}}\n")
+        silent = _validate_with(
+            silent_skill, tmp_path, "expected_headers: []\nerror_handling: {mentioned: {points: 0}}\n"
+        )
         mentioning = _validate_with(mentioning_skill, tmp_path, "expected_headers: []\n")
 
         assert MENTION_MESSAGE not in [message for message, _ in _reliability_issues(silent)]
@@ -1619,7 +1621,9 @@ class TestReliabilityErrorHandlingConfig:
 
         result = _validate_with(skill_dir, tmp_path)
 
-        lib_issues = [(m, d) for m, d in _reliability_issues(result) if m.startswith("Lib modules may lack error handling: ")]
+        lib_issues = [
+            (m, d) for m, d in _reliability_issues(result) if m.startswith("Lib modules may lack error handling: ")
+        ]
         assert len(lib_issues) == 1 and lib_issues[0][1] == 5
         names = lib_issues[0][0].removeprefix("Lib modules may lack error handling: ").split(", ")
         assert len(names) == 3 and set(names) < {"a.py", "b.py", "c.py", "d.py"}
@@ -1647,7 +1651,9 @@ class TestReliabilityErrorHandlingConfig:
 
         assert result.metadata["quality_scores"]["metrics"]["has_error_handling"] is True
 
-    @pytest.mark.parametrize("text", ["Check the exit\ncode first.", "Check the exit  code first.", "Check the exit\r\n  code."])
+    @pytest.mark.parametrize(
+        "text", ["Check the exit\ncode first.", "Check the exit  code first.", "Check the exit\r\n  code."]
+    )
     def test_multi_word_custom_terms_match_across_wrapped_or_repeated_whitespace(self, tmp_path: Path, text: str):
         skill_dir = _write_issue_skill(tmp_path, troubleshooting=text)
         config = 'expected_headers: []\nerror_handling:\n  mentioned:\n    terms: ["exit code"]\n'
@@ -1813,3 +1819,25 @@ def test_node_command_with_a_trailing_name_part_does_not_satisfy_the_run_script_
     skill = _script_skill(tmp_path, "run.mjs", "Run `node scripts/run.mjs.bak input.txt`.")
 
     assert any("Instructions don't mention 'run_script'" in message for message in _messages(skill))
+
+
+@pytest.mark.parametrize(
+    "instruction",
+    [
+        "Run `node --version; cat scripts/run.mjs`.",
+        "Run `node --version && cat scripts/run.mjs`.",
+        "Run `node --version | cat scripts/run.mjs`.",
+        "Run `node --version || cat scripts/run.mjs`.",
+        "Run `$(node --version) scripts/run.mjs`.",
+    ],
+)
+def test_unrelated_node_command_does_not_satisfy_the_run_script_check(tmp_path, instruction):
+    skill = _script_skill(tmp_path, "run.mjs", instruction)
+
+    assert any("Instructions don't mention 'run_script'" in message for message in _messages(skill))
+
+
+def test_node_command_with_flags_still_satisfies_the_run_script_check(tmp_path):
+    skill = _script_skill(tmp_path, "run.mjs", "Run `node --no-warnings scripts/run.mjs input.txt`.")
+
+    assert not any("run_script" in message for message in _messages(skill))

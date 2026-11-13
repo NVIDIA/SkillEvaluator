@@ -1,0 +1,12 @@
+harness: copilot-cli
+display_name: GitHub Copilot CLI
+verified: {version: 1.0.105, source: closed (cli-main.js inspected), date: 2026-11-01, method: proxy-captured canary probes x3 (BYOK), os: linux}
+roots:
+  project: [.github/skills, .agents/skills, .claude/skills]
+  user: [~/.copilot/skills, ~/.agents/skills]
+rules:
+  - {id: CP-ROOT, when: "install_root not in roots", effect: not_loaded, outcome: not found, message: "Copilot reads .github/.agents/.claude skills (project) and ~/.copilot or ~/.agents skills (user).", fix: "Install it under .github/skills, .agents/skills or .claude/skills."}
+notes:
+  - "Docs say skills only in immediate subfolders; runtime finds them 3 grouping levels deep."
+  - "Follows symlinks inside and outside the checkout (SDK docs say inside only)."
+  - "Project copy wins on duplicate names (3/3); missing name falls back to the folder name."

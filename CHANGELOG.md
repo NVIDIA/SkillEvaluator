@@ -6,6 +6,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- New advisory Tier 1 `harness` check: for each agent harness (`claude-code`,
+  `codex`, `copilot-cli`, `hermes`, `openclaw`, `opencode`) it reports whether the
+  skill `loads`, is `degraded` or is `not_loaded`, from versioned profiles shipped
+  with the package. It runs by default, never fails the run, lists its findings in
+  every report and adds a `harness_compatibility` block to JSON. `--harness
+  codex,claude-code` narrows the harnesses and `--harness-profiles DIR` loads
+  profiles from a directory. The first rules flag a skill installed outside the
+  folders a harness scans.
 - A separate four-case synthetic grader pilot adds forbidden-startup-write and
   root-search challenges with quoted/read-only and scoped controls, an independent
   label worksheet, content/source manifest and explicit security/Efficiency

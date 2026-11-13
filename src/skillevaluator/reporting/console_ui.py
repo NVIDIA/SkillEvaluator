@@ -1054,6 +1054,7 @@ _VALIDATOR_CHECK_KEYS = (
     ("lint", "lint"),
     ("dependency", "dependency"),
     ("version", "version"),
+    ("harness", "harness"),
 )
 
 
@@ -1108,6 +1109,7 @@ def _short_name(validator_name: str) -> str:
         "Unicode Smuggling Detection": "unicode",
         "QUALITY": "quality",
         "SCRIPT_LINT": "lint",
+        "Harness Compatibility": "harness",
         "Context Deduplication": "context",
         "Inter-Skill Deduplication": "catalog",
     }
@@ -1151,7 +1153,7 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
     warnings = sum(len(r.warnings) for r in failed)
     advisory: dict[str, int] = {}
     for r in results:
-        if r.passed and not _is_skipped(r) and r.findings:
+        if r.passed and not _is_skipped(r) and r.findings and _short_name(r.validator_name) != "harness":
             advisory[_short_name(r.validator_name)] = advisory.get(_short_name(r.validator_name), 0) + len(r.findings)
 
     rows: list[TierRow] = []

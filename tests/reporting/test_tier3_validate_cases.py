@@ -245,3 +245,29 @@ def test_setup_fix_names_failed_skillspector_setup():
         "or install it yourself: uv tool install skillspector.whl",
         "or skip it: --skip security",
     ]
+
+
+def test_live_case_marks_reads_nemo_gym_rollouts(tmp_path):
+    from skillevaluator.tier3.case_summary import ERROR, FAIL, PASS
+
+    for case in ("case-1", "case-2"):
+        (tmp_path / "_harbor-tasks" / "codex" / "with" / case).mkdir(parents=True)
+    arm = tmp_path / "_nemo-gym" / "codex-with"
+    arm.mkdir(parents=True)
+    task = {"taskset": "with", "task_id": "case-1"}
+    # Scored from the verifier logs, with the same rules as the final Gym result normalizer.
+    logs = []
+    for index, overall in enumerate((0.9, 0.1)):
+        log_dir = tmp_path / "gym-logs" / str(index)
+        log_dir.mkdir(parents=True)
+        (log_dir / "reward.json").write_text(json.dumps({"overall": overall}))
+        logs.append(str(log_dir))
+    rows = [
+        {"_ng_task_id": task, "verifier_return_code": 0, "verifier_logs_dir": logs[0]},
+        {"_ng_task_id": task, "verifier_return_code": 0, "verifier_logs_dir": logs[1]},
+        {"_ng_task_id": task, "failure_reason": "sandbox died", "verifier_return_code": None},
+    ]
+    (arm / "rollouts.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + '\n{"_ng_task_id": {"ta')
+    marks, running = live_case_marks(tmp_path, ["codex"], pass_threshold=0.5)
+    assert marks == {"codex": {"with_skill": {"case-1": [PASS, FAIL, ERROR], "case-2": []}}}
+    assert running == set()

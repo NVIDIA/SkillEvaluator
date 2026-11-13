@@ -4,6 +4,47 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Experimental `tier3 evaluate --backend nemo-gym` targets a native Gym task-folder
+  interface. Public `nemo-gym==0.7.0` is incompatible; public source candidate
+  `NVIDIA-NeMo/Gym@792fa142f58277aecff05d402061d647e9a92acf` exposes the required
+  `TARGET` help interface but still needs independent native runtime qualification.
+  CLI compatibility is checked before dataset generation or task staging, with bounded combined help output and process-group cleanup on timeout,
+  interruption or overflow. Doctor no longer treats an installed version as runtime readiness.
+  Live Codex, Claude Code and OpenCode support remains unverified. The adapter's
+  intended contract runs the Tier 3 cases on NeMo Gym instead
+  of Harbor (`--backend harbor`, the default, is unchanged). The same
+  `evals.json` cases are generated as task folders, and NeMo Gym's own
+  orchestrator, agent harness (Codex, Claude Code, OpenCode) and Docker sandbox
+  run them with the SkillEvaluator verifier. Its rollouts are written back as
+  the usual trial results, so scores, lift, reports and `result.json` are
+  shared; `result.json` records `execution_backend` with the NeMo Gym version.
+  Gym runs as a separate pinned process (`SKILL_EVAL_NEMO_GYM_BIN`) because it
+  needs Python 3.13.14 or later. Options the backend cannot honor (other
+  environment modes, `--harbor-keep-jobs`, `--stop-on-pass`, ...)
+  are rejected before anything runs, with no fallback to Harbor.
+  `--timeout-multiplier`, `--copy-repo`, `harbor.agent_workdir` and
+  `harbor.pre_agent_setup`, `skill_workspace.decoy_manifest` and
+  `--custom-dockerfile-mode preserve`, `harbor.base_image_mode` and native
+  `evals/harbor/` tasks work as on Harbor, and
+  `tier3 doctor --backend nemo-gym` checks Gym readiness. When a Gym process group
+  cannot be confirmed stopped after a timeout or interruption, no further arm starts
+  beside it and the failure is reported. After a timeout, the failed run still keeps
+  the scores of the arms that finished.
+
+### Fixed
+
+- A failed Tier 3 execution (for example a backend launch failure) now marks the
+  report payload, its summary and the affected agents as failed with their
+  errors, instead of only the top-level `result.json`. A report re-rendered by
+  `tier3 view` reads the status from the run's `result.json`. Scores from the
+  completed trials are kept.
+- Skill activation now credits a SKILL.md read wrapped in a shell, such as
+  `/bin/bash -lc 'cat skills/x/SKILL.md'`, which some agent harnesses record
+  instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL
+  config.json'`) are still not counted.
+
 ## 0.9.0 - 2026-11-13
 
 ### Fixed

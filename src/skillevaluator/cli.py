@@ -1558,6 +1558,7 @@ def _catalog_skill_entry(
         return entry
 
     entry["json_report"] = json_report.name
+    entry["report_scope"] = "single_skill"
     try:
         payload = json.loads(json_report.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
@@ -1568,6 +1569,30 @@ def _catalog_skill_entry(
     for key in ("overall_passed", "overall_status", "incomplete_scans", "severity_counts"):
         if key in payload:
             entry[key] = payload[key]
+    entry["report_verdict"] = {key: payload[key] for key in ("overall_passed", "overall_status") if key in payload}
+    return entry
+
+
+def _catalog_entry_with_metadata_id_conflicts(
+    skill: dict[str, object], conflicts: list[dict[str, object]]
+) -> dict[str, object]:
+    """Project catalog findings onto a member, retaining its independent report verdict."""
+    entry = dict(skill)
+    for conflict in conflicts:
+        members = conflict.get("skills")
+        if not isinstance(members, list) or entry.get("name") not in members:
+            continue
+        severity = conflict.get("severity")
+        if severity in ("critical", "high", "medium", "low"):
+            raw_counts = entry.get("severity_counts")
+            counts = dict(raw_counts) if isinstance(raw_counts, dict) else {}
+            previous = counts.get(severity, 0)
+            counts[severity] = (previous if isinstance(previous, int) else 0) + 1
+            entry["severity_counts"] = counts
+        if conflict.get("blocking"):
+            entry["passed"] = False
+            entry["overall_passed"] = False
+            entry["overall_status"] = "failed"
     return entry
 
 
@@ -1577,9 +1602,10 @@ def _write_catalog_summary(
     *,
     metadata_id_conflicts: list[dict[str, object]] | None = None,
 ) -> Path:
-    """Write a machine-readable fleet rollup for catalog validation."""
+    """Write catalog-context verdicts and counts; linked leaf reports retain single-skill scope."""
     from skillevaluator.reporting.base import _write_report_atomically
 
+    skills = [_catalog_entry_with_metadata_id_conflicts(skill, metadata_id_conflicts or []) for skill in skills]
     total = len(skills)
     passed = sum(1 for skill in skills if skill.get("passed"))
     failed = total - passed
@@ -3322,7 +3348,10 @@ def _workflow_report_options(func):
     help="Validation policy: default or registry [default: default; external is a compatibility alias].",
 )
 @click.option(
-    "--policy", "policy_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None,
+    "--policy",
+    "policy_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
     help="Custom policy YAML overlaid on top of --profile.",
 )
 @click.option("--previous-version", default=None, help="Previous version for version checks.")

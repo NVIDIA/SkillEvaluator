@@ -64,6 +64,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Folder validation preserves author and metadata ID advisories from passing
+  skills. Catalog summaries include duplicate ID severity counts and consistent
+  member verdicts, while explicitly labeling linked reports as single-skill
+  results and retaining their independent verdicts.
 - A failed Tier 3 execution (for example a backend launch failure) now marks the
   report payload, its summary and the affected agents as failed with their
   errors, instead of only the top-level `result.json`. A report re-rendered by

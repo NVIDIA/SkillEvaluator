@@ -191,46 +191,106 @@ def test_parallel_catalog_applies_the_registry_id_conflict(tmp_path: Path) -> No
     assert summary["metadata_id_conflicts"][0]["skills"] == ["first-skill", "second-skill"]
 
 
-def test_catalog_id_check_runs_only_when_the_schema_check_is_selected(tmp_path: Path) -> None:
+@pytest.mark.parametrize("workers", ["1", "2"])
+@pytest.mark.parametrize(
+    "selection",
+    [["--checks", "version"], ["--checks", "schema,version", "--skip", "schema"]],
+)
+def test_catalog_id_check_runs_only_when_the_schema_check_is_selected(
+    tmp_path: Path, workers: str, selection: list[str]
+) -> None:
     # --checks and --skip run exactly the checks they name: a catalog-wide
     # metadata.id conflict must not fail a run that did not select schema.
     catalog = tmp_path / "catalog"
     _write_skill_with_id(catalog, "first-skill", "Demo Author <author@example.com>", "shared-id")
     _write_skill_with_id(catalog, "second-skill", "Demo Author <author@example.com>", "shared-id")
 
-    # schema selected: the duplicate blocks under registry, as before.
-    assert _validate(catalog, tmp_path / "schema-on", "--profile", "registry") == 1
-
-    # schema deselected: the per-skill version checks pass, so the run passes.
-    assert (
-        CliRunner()
-        .invoke(
-            cli,
-            [
-                "validate", str(catalog), "--tiers", "1", "--no-llm",
-                "--checks", "version", "--profile", "registry",
-                "-r", "json", "-o", str(tmp_path / "checks-version"),
-            ],
-        )
-        .exit_code
-        == 0
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(catalog),
+            "--tiers",
+            "1",
+            "--no-llm",
+            *selection,
+            "--profile",
+            "registry",
+            "--workers",
+            workers,
+            "-r",
+            "json",
+            "-o",
+            str(tmp_path / "out"),
+        ],
     )
-    summary = json.loads((tmp_path / "checks-version" / "catalog-summary.json").read_text(encoding="utf-8"))
+    assert result.exit_code == 0, result.output
+    summary = json.loads((tmp_path / "out" / "catalog-summary.json").read_text(encoding="utf-8"))
     assert summary["metadata_id_conflicts"] == []
+    assert summary["overall_passed"] is True
+    assert summary["severity_totals"]["high"] == 0
 
-    # --skip schema is the same contract.
-    assert (
-        CliRunner()
-        .invoke(
-            cli,
-            [
-                "validate", str(catalog), "--tiers", "1", "--no-llm",
-                "--skip", "schema", "--profile", "registry",
-                "-r", "json", "-o", str(tmp_path / "skip-schema"),
-            ],
-        )
-        .exit_code
-        == 0
+
+@pytest.mark.parametrize("workers", ["1", "2"])
+@pytest.mark.parametrize(
+    ("profile", "override", "severity", "blocking"),
+    [
+        ("default", None, "medium", False),
+        ("registry", None, "high", True),
+        ("default", "high", "high", True),
+        ("registry", "low", "low", False),
+        ("default", "info", "info", False),
+    ],
+)
+@pytest.mark.parametrize("child_failure", [False, True])
+def test_catalog_conflicts_project_consistent_verdicts_counts_and_leaf_scope(
+    tmp_path: Path, workers: str, profile: str, override: str | None, severity: str, blocking: bool, child_failure: bool
+) -> None:
+    catalog = tmp_path / "skills"
+    _write_skill_with_id(catalog, "first-skill", "Demo Author <author@example.com>", "shared-id")
+    _write_skill_with_id(
+        catalog, "second-skill", "bad@example.com" if child_failure else "Demo Author <author@example.com>", "shared-id"
     )
-    summary = json.loads((tmp_path / "skip-schema" / "catalog-summary.json").read_text(encoding="utf-8"))
-    assert summary["metadata_id_conflicts"] == []
+    _write_skill_with_id(catalog, "third-skill", "Demo Author <author@example.com>", "third-skill")
+    options = ["--profile", profile, "--workers", workers]
+    if override:
+        policy = tmp_path / "policy.yaml"
+        policy.write_text(f"severity_overrides:\n  SCHEMA.metadata_id_duplicate: {override}\n", encoding="utf-8")
+        options += ["--policy", str(policy)]
+
+    out = tmp_path / "out"
+    assert _validate(catalog, out, *options) == int(blocking or child_failure)
+    summary = json.loads((out / "catalog-summary.json").read_text(encoding="utf-8"))
+    assert summary["metadata_id_conflicts"] == [
+        {
+            "metadata_id": "shared-id",
+            "skills": ["first-skill", "second-skill"],
+            "severity": severity,
+            "blocking": blocking,
+        }
+    ]
+    assert summary["overall_passed"] is not (blocking or child_failure)
+    expected_totals = {"critical": 0, "high": int(child_failure), "medium": 0, "low": 0}
+    if severity != "info":
+        expected_totals[severity] += 2
+    for entry in summary["skills"]:
+        own_failure = child_failure and entry["name"] == "second-skill"
+        conflict = entry["name"] != "third-skill"
+        expected_passed = not (own_failure or (conflict and blocking))
+        assert entry["passed"] is entry["overall_passed"] is expected_passed
+        assert entry["overall_status"] == ("passed" if expected_passed else "failed")
+        assert entry["report_scope"] == "single_skill"
+        assert entry["report_verdict"] == {
+            "overall_passed": not own_failure,
+            "overall_status": "failed" if own_failure else "passed",
+        }
+        expected_counts = {"critical": 0, "high": int(own_failure), "medium": 0, "low": 0}
+        if conflict and severity != "info":
+            expected_counts[severity] += 1
+        assert entry["severity_counts"] == expected_counts
+        leaf = json.loads((out / entry["report_dir"] / entry["json_report"]).read_text(encoding="utf-8"))
+        assert leaf["overall_passed"] is not own_failure
+        assert leaf["overall_status"] == ("failed" if own_failure else "passed")
+        if own_failure:
+            assert "metadata.id" not in entry["reason"]
+    assert summary["severity_totals"] == expected_totals

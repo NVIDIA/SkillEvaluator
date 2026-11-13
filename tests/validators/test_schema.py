@@ -1271,6 +1271,61 @@ Example.
         detail = next(d for d in result.success_details if d.check_name == "metadata_id_unique")
         assert detail.message == "2 declared metadata.id value(s) are unique within this collection"
 
+    @pytest.mark.parametrize("include_failure", [False, True])
+    def test_folder_api_preserves_child_advisories_once(self, tmp_path: Path, include_failure: bool):
+        from skillevaluator import tier1
+
+        skills = tmp_path / "skills"
+        team = self._write_skill(skills, "team-skill", "INVALID_ID")
+        manifest = team / "SKILL.md"
+        manifest.write_text(manifest.read_text().replace("Jane Doe <jane@example.com>", "Example Team"))
+        missing = self._write_skill(skills, "missing-author", "missing-author")
+        manifest = missing / "SKILL.md"
+        manifest.write_text(manifest.read_text().replace("  author: Jane Doe <jane@example.com>\n", ""))
+        if include_failure:
+            broken = self._write_skill(skills, "broken-author", "INVALID_ID")
+            manifest = broken / "SKILL.md"
+            manifest.write_text(manifest.read_text().replace("Jane Doe <jane@example.com>", "jane@example.com"))
+
+        (result,) = tier1.run_validation(tmp_path, checks="schema")
+
+        expected = [
+            ("author_missing", "low"),
+            ("author_without_email", "info"),
+            ("metadata_id_format", "medium"),
+        ]
+        if include_failure:
+            expected += [("author_format", "high"), ("metadata_id_format", "medium")]
+        assert sorted((finding.check_name, finding.severity.value) for finding in result.findings) == sorted(expected)
+        assert result.passed is not include_failure
+        assert result.summary.warnings == len(result.warnings) == (4 if include_failure else 3)
+        assert result.summary.errors == len(result.errors) == int(include_failure)
+        assert result.summary.low_count == 1
+        assert result.summary.medium_count == (2 if include_failure else 1)
+        assert result.summary.high_count == int(include_failure)
+        for name in ("team-skill", "missing-author"):
+            summaries = [detail for detail in result.success_details if detail.check_name == name]
+            assert len(summaries) == 1
+            checks = summaries[0].metadata["checks"]
+            assert len(checks) == summaries[0].metadata["total_checks"]
+            assert len({(check["name"], check["description"]) for check in checks}) == len(checks)
+            assert not any(detail.check_name.startswith(f"[{name}]") for detail in result.success_details)
+
+    def test_folder_api_preserves_recommended_id_advisory(self, tmp_path: Path):
+        from skillevaluator import tier1
+        from skillevaluator.validators.policy import ValidationPolicy
+
+        self._write_skill(tmp_path / "skills", "no-id", None)
+
+        (result,) = tier1.run_validation(
+            tmp_path, checks="schema", policy=ValidationPolicy(metadata_id_requirement="recommend")
+        )
+
+        assert result.passed
+        assert self._id_findings(result) == [("metadata_id_missing", "low")]
+        assert result.summary.warnings == len(result.warnings) == 1
+        assert result.summary.low_count == 1
+
 
 class TestMetadataIdPreviewBounds:
     """A rejected ``metadata.id`` must never be rendered by expanding its value."""
@@ -1320,3 +1375,14 @@ class TestMetadataIdPreviewBounds:
         assert len(findings) == 1
         assert "must be a string (got list)" in findings[0].message
         assert len(findings[0].line_content) <= 32
+
+    @pytest.mark.parametrize("id_value", ["&recursive [*recursive]", "&recursive {self: *recursive}"])
+    def test_recursive_id_is_rejected_with_bounded_evidence(self, tmp_path: Path, id_value: str):
+        skill = TestMetadataIdContract._write_skill(tmp_path, "recursive-id", id_value)
+
+        result = SchemaValidator().validate(skill)
+
+        assert result.passed
+        (finding,) = [finding for finding in result.findings if finding.check_name == "metadata_id_format"]
+        assert "must be a string" in finding.message
+        assert len(finding.line_content) <= 32

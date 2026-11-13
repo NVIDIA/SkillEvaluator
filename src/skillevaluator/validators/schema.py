@@ -225,8 +225,16 @@ class SchemaValidator(ValidatorBase):
                     checks=check_details,
                     total_checks=len(check_details),
                 )
+                # A passing child can still carry policy advisories. Keep its
+                # findings without merging its successes a second time.
+                for finding in skill_result.findings:
+                    result.add_finding(finding)
             else:
                 result.merge_with_prefix(skill_result, skill_dir.name)
+                # merge_with_prefix copies errors/warnings, but not severity
+                # counters. Count findings once in this collection's summary.
+                for finding in skill_result.findings:
+                    result.summary.tally_severity(finding.severity)
 
         result.merge(self._validate_metadata_id_uniqueness(declared_ids, skill_path))
         return result

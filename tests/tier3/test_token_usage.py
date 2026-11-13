@@ -543,3 +543,166 @@ def test_no_measured_attempt_gives_no_token_usage() -> None:
     bare = {"entry_id": "case-1", "trial_id": "case-1__a"}
     assert build_token_usage({"codex": _agent([bare], [bare])}) is None
     assert build_token_usage({}) is None
+
+
+# -- case rows are validated against the dataset's canonical IDs (issue #192) ----------
+
+# A real dataset ID that Harbor's 32-character trial name cuts short.
+_LONG_CASE = "huggingface-factory-peft-sft-local-return"
+_CUT_CASE = _LONG_CASE[:32].rstrip("_-")
+
+
+def test_a_cut_case_name_never_becomes_a_second_row_beside_its_dataset_case() -> None:
+    # The scored arm recorded Harbor's cut trial name; the other arm the full one.
+    agent = _agent([_trial(_CUT_CASE, 100, 20)], [_trial(_LONG_CASE, 90, 10)])
+
+    usage = build_token_usage({"codex": agent}, dataset_case_ids=[_LONG_CASE])
+
+    assert usage is not None
+    [row] = usage["agents"]["codex"]["cases"]
+    assert row["entry_id"] == _LONG_CASE
+    assert row["with_skill"]["totals"]["total_tokens"] == 120
+    assert row["baseline"]["totals"]["total_tokens"] == 100
+    assert usage["case_id_validation"] == {
+        "status": "validated",
+        "dataset_case_ids": 1,
+        "unmatched_case_ids": [],
+    }
+
+
+def test_an_arm_that_died_keeps_its_tokens_on_the_canonical_case() -> None:
+    # Both arms were killed before scoring, so only the cut trial name exists.
+    def killed(suffix: str) -> dict[str, Any]:
+        return {
+            "entry_id": _CUT_CASE,
+            "trial_id": f"{_CUT_CASE}__{suffix}",
+            "tokens": {"prompt": 40, "completion": 4},
+        }
+
+    agent = _agent(
+        [_trial("case-1", 100, 20)],
+        [_trial("case-1", 90, 10)],
+        unscored=[killed("a")],
+        unscored_baseline=[killed("b")],
+    )
+
+    usage = build_token_usage({"codex": agent}, dataset_case_ids=["case-1", _LONG_CASE])
+
+    assert usage is not None
+    rows = {row["entry_id"]: row for row in usage["agents"]["codex"]["cases"]}
+    assert sorted(rows) == ["case-1", _LONG_CASE]
+    assert rows[_LONG_CASE]["with_skill"]["totals"]["total_tokens"] == 44
+    assert rows[_LONG_CASE]["baseline"]["totals"]["total_tokens"] == 44
+    assert usage["case_id_validation"]["unmatched_case_ids"] == []
+
+
+def test_every_case_row_uses_a_dataset_id_at_most_once() -> None:
+    other = "huggingface-global-negative-serving"
+    agent = _agent(
+        [_trial(_LONG_CASE, 100, 20), _trial(other[:32].rstrip("_-"), 50, 5)],
+        [_trial(_CUT_CASE, 90, 10), _trial(other, 40, 4)],
+    )
+
+    usage = build_token_usage({"codex": agent}, dataset_case_ids=[_LONG_CASE, other])
+
+    assert usage is not None
+    ids = [row["entry_id"] for row in usage["agents"]["codex"]["cases"]]
+    assert ids == sorted({_LONG_CASE, other})
+    assert len(ids) == len(set(ids))
+
+
+def test_a_row_that_no_dataset_id_explains_is_marked_not_rendered_as_a_case() -> None:
+    agent = _agent([_trial("case-1", 100, 20)], [_trial("ghost-case", 90, 10)])
+
+    usage = build_token_usage({"codex": agent}, dataset_case_ids=["case-1"])
+
+    assert usage is not None
+    rows = {row["entry_id"]: row for row in usage["agents"]["codex"]["cases"]}
+    assert rows["case-1"].get("case_id_in_dataset") is None
+    assert rows["ghost-case"]["case_id_in_dataset"] is False
+    assert usage["case_id_validation"] == {
+        "status": "unverified_case_ids",
+        "dataset_case_ids": 1,
+        "unmatched_case_ids": ["ghost-case"],
+    }
+
+
+def test_two_dataset_ids_with_the_same_cut_name_are_never_guessed() -> None:
+    first = "huggingface-factory-peft-sft-local-return"
+    second = "huggingface-factory-peft-sft-local-detach"
+    assert first[:32] == second[:32]
+    agent = _agent([_trial("case-1", 100, 20)], [_trial("case-1", 90, 10)], unscored=[_trial(_CUT_CASE, 40, 4)])
+
+    usage = build_token_usage({"codex": agent}, dataset_case_ids=["case-1", first, second])
+
+    assert usage is not None
+    rows = {row["entry_id"]: row for row in usage["agents"]["codex"]["cases"]}
+    assert rows[_CUT_CASE]["case_id_in_dataset"] is False
+    assert usage["case_id_validation"]["unmatched_case_ids"] == [_CUT_CASE]
+
+
+def test_an_agent_without_scores_still_gets_canonical_case_rows() -> None:
+    # An optional agent the deadline killed: no scored attempt, usage only.
+    killed = {"entry_id": _CUT_CASE, "trial_id": f"{_CUT_CASE}__a", "tokens": {"prompt": 40, "completion": 4}}
+    claude = {
+        "trials": [],
+        "trials_baseline": [],
+        "usage_only_attempts": [{**killed, "scored": False}],
+        "usage_only_attempts_baseline": [],
+        "conditions": {
+            "with_skill": {"execution_status": "failed", "expected_attempts": 1, "scored_attempts": 0},
+            "without_skill": {"execution_status": "failed", "expected_attempts": 1, "scored_attempts": 0},
+        },
+        "execution_status": "failed",
+    }
+
+    usage = build_token_usage(
+        {"claude": claude, "codex": _agent([_trial(_LONG_CASE, 100, 20)], [_trial(_LONG_CASE, 90, 10)])},
+        dataset_case_ids=[_LONG_CASE],
+    )
+
+    assert usage is not None
+    assert [row["entry_id"] for row in usage["agents"]["claude"]["cases"]] == [_LONG_CASE]
+    assert usage["agents"]["claude"]["baseline"]["coverage"]["status"] == "unavailable"
+    assert usage["agents"]["claude"]["delta"]["status"] == "unavailable"
+    assert usage["case_id_validation"]["unmatched_case_ids"] == []
+
+
+def test_without_a_dataset_nothing_is_claimed_about_case_ids() -> None:
+    usage = build_token_usage({"codex": _agent([_trial("case-1", 100, 20)], [_trial("case-1", 90, 10)])})
+
+    assert usage is not None
+    assert "case_id_validation" not in usage
+    assert all("case_id_in_dataset" not in row for row in usage["agents"]["codex"]["cases"])
+
+
+def test_a_pass_at_k_case_named_by_its_cut_name_is_one_canonical_row() -> None:
+    agent = _agent([_trial(_LONG_CASE, 100, 20)], [_trial(_LONG_CASE, 90, 10)])
+    agent["pass_at_k"] = {"with_skill": {"k": 2, "cases": {_CUT_CASE: {"attempts_skipped": 0}}}}
+
+    usage = build_token_usage({"codex": agent}, dataset_case_ids=[_LONG_CASE])
+
+    assert usage is not None
+    [row] = usage["agents"]["codex"]["cases"]
+    assert row["entry_id"] == _LONG_CASE
+    assert row["with_skill"]["coverage"]["expected_attempts"] == 2
+
+
+@pytest.mark.parametrize("cut_first", [True, False], ids=["cut-first", "dataset-id-first"])
+def test_two_pass_at_k_keys_for_one_case_merge_the_same_way_in_either_order(cut_first: bool) -> None:
+    # Harbor's cut name and the dataset ID canonicalize onto one case. Which
+    # record survives must not depend on the order the payload lists them in:
+    # the key that is already a dataset ID wins, whichever comes first.
+    agent = _agent([_trial(_LONG_CASE, 100, 20)], [_trial(_LONG_CASE, 90, 10)])
+    records = [(_CUT_CASE, {"attempts_skipped": 2}), (_LONG_CASE, {"attempts_skipped": 0})]
+    agent["pass_at_k"] = {
+        "with_skill": {"k": 3, "cases": dict(records if cut_first else reversed(records))},
+    }
+
+    usage = build_token_usage({"codex": agent}, dataset_case_ids=[_LONG_CASE])
+
+    assert usage is not None
+    [row] = usage["agents"]["codex"]["cases"]
+    assert row["entry_id"] == _LONG_CASE
+    assert row["with_skill"]["coverage"]["expected_attempts"] == 3
+

@@ -190,6 +190,31 @@ All notable changes to SkillEvaluator are documented in this file.
 - Grader qualification reports null behavior-step results with a matching
   `not_checked` expectation as insufficient evidence instead of errors. Raw
   scores and unjudgeable rates are unchanged.
+- Tier 3 token usage rows are now validated against the evaluation dataset's own
+  case IDs. Every case row uses one of those IDs at most once, and an attempt
+  whose only name is Harbor's 32-character cut of a case name is attributed to
+  that case, so missing telemetry stays with the canonical case instead of
+  splitting into a row of its own. A row that still cannot be matched is marked
+  as an unverified case ID in every report and recorded under
+  `token_usage.case_id_validation`, rather than being shown as coverage of a
+  dataset case; a table that shows no such row, because it renders no case rows
+  or its row caps dropped them, names the unmatched case IDs instead.
+- The Tier 3 security scan no longer scores an agent clearing its own output
+  directory as a destructive command. One literal, recursive and forced `rm` of
+  a path inside the agent's output directory is cleanup. That directory is the
+  `output` directory of the directory the trace starts in, so no later `cd` or
+  `workdir` can name another one; the directory itself, anything outside it, a
+  sensitive or protected path, anything below the top level once the trace has
+  created a symbolic link, and every compound, globbed or dynamic command form
+  still score as before.
+- The Tier 3 security scan no longer reads the license URL in a source file's
+  copyright header as data exfiltration. A `http://` or `https://` URL on a
+  comment line of a license or copyright notice is prose, so the header's own
+  URL no longer makes a long file write look like an upload; a URL the file
+  writes outside such a notice, a docstring link for instance, is still read as
+  before. A curl, wget or httpie word keeps its meaning wherever it appears,
+  including inside a notice, and a comment leader that is also executable shell
+  (`*)`, `--`, `;`, `%`, `//cmd`) never starts a notice.
 - A failed Tier 3 execution (for example a backend launch failure) now marks the
   report payload, its summary and the affected agents as failed with their
   errors, instead of only the top-level `result.json`. A report re-rendered by
@@ -258,6 +283,12 @@ All notable changes to SkillEvaluator are documented in this file.
   failure. With SkillSpector v2.13.4, a hook with a `"timeout"` key also gets
   a `static_parse_limit` row on the manifest, so that scan is recorded as
   incomplete in the same way.
+
+- `validate` no longer repeats its header box in short terminal windows or
+  when a log warning prints mid-run. Only the tier that is still running is
+  redrawn; the header and finished tiers print once, and log records print
+  through the live view's console. The progress line now prints once, above
+  the final verdict.
 
 ## 0.9.0 - 2026-11-13
 

@@ -3207,7 +3207,7 @@
                 {% for row in tier3_token_usage.rows if row.note %}
                 <p class="t3-section-hint">{{ row.agent if row.agent is not none else 'All agents' }}: {{ row.note }}</p>
                 {% endfor %}
-                {% for note in [tier3_token_usage.more_cases, tier3_token_usage.dropped_cases] if note %}
+                {% for note in [tier3_token_usage.more_cases, tier3_token_usage.dropped_cases, tier3_token_usage.unverified_cases] if note %}
                 <p class="t3-section-hint">{{ note }}</p>
                 {% endfor %}
                 </div>

@@ -26,9 +26,11 @@ from skillevaluator.constants import (
 from skillevaluator.publication_evidence import result_has_publication_evidence, result_publication_evidence
 from skillevaluator.publication_text import publication_confusable_skeleton
 from skillevaluator.reporting.base import (
+    AgentDimensionGate,
     PublicationTargetIdentity,
     ReporterBase,
     agent_eval_baseline_not_applicable,
+    agent_eval_dimension_breakdown,
     agent_eval_dimension_verdict,
     agent_eval_publication_dataset_provenance,
     agent_eval_publication_evaluated_at,
@@ -69,6 +71,7 @@ from skillevaluator.tier3_environments import HARBOR_ENV_MODES
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
+    from skillevaluator.reporting.base import PublicationAssessment
 
 
 # These fields are empty because the orchestration input did not supply them,
@@ -76,6 +79,8 @@ if TYPE_CHECKING:
 _SOURCE_UNRECORDED = "not recorded (not supplied by the orchestration input)"
 # Case rows of the token usage table. The card has a size limit; the JSON payload keeps every case.
 _MAX_TOKEN_USAGE_CASE_ROWS = 50
+# The card's uppercase vocabulary for one shared publication assessment status.
+_ASSESSMENT_STATUSES = {"pass": "PASS", "neutral": "NEUTRAL", "fail": "FAIL", "incomplete": "INCOMPLETE"}
 
 _SIGNAL_DESCRIPTIONS = {
     "security": "unsafe operations, secret leakage, and unauthorized access",
@@ -190,7 +195,10 @@ class BenchmarkReporter(ReporterBase):
         skill_name = _publication_safe_skill_name(display_skill_name)
         private_labels = _private_environment_labels(ae)
         policy = _benchmark_policy(results, ae, expected_skill_name=expected_skill_name)
-        status = _overall_status(results, ae, policy, expected_skill_name=expected_skill_name)
+        # One assessment decides the verdict and explains it, so the rendered
+        # evidence cannot drift from the status printed above it.
+        assessment = _publication_assessment(results, ae, expected_skill_name=expected_skill_name)
+        status = _assessment_status(assessment)
 
         run_verdict = ae.get("verdict") if isinstance(ae, dict) else None
         run_reason = ae.get("verdict_reason") if isinstance(ae, dict) else None
@@ -212,7 +220,13 @@ class BenchmarkReporter(ReporterBase):
         lines: list[str] = (
             [tier3_callout, "", f"# Skill Benchmark: {skill_name}", ""]
             if self.report_scope == "tier3"
-            else [f"# Skill Benchmark: {skill_name}", "", _verdict_callout(status), ""]
+            else [
+                f"# Skill Benchmark: {skill_name}",
+                "",
+                _verdict_callout(status),
+                "",
+                *_verdict_evidence_lines(status, assessment, ae, private_labels),
+            ]
         )
         if self.report_scope == "tier3":
             lines.extend(
@@ -1102,6 +1116,20 @@ def _advisory_agent_eval_skip_message(results: list[ValidationResult]) -> str | 
     return None
 
 
+def _publication_assessment(
+    results: list[ValidationResult],
+    ae: dict[str, Any] | None,
+    *,
+    expected_skill_name: str | None = None,
+) -> PublicationAssessment:
+    """Return the one assessment the card's verdict and its explanation share."""
+    return resolve_run_status(
+        results,
+        agent_eval=ae,
+        expected_skill_name=expected_skill_name,
+    ).publication_assessment
+
+
 def _overall_status(
     results: list[ValidationResult],
     ae: dict[str, Any] | None,
@@ -1113,7 +1141,12 @@ def _overall_status(
     # benchmark's uppercase vocabulary while every reporter shares one
     # publication assessment implementation.
     del benchmark_policy
-    return resolve_run_status(results, agent_eval=ae, expected_skill_name=expected_skill_name).publication.verdict
+    return _assessment_status(_publication_assessment(results, ae, expected_skill_name=expected_skill_name))
+
+
+def _assessment_status(assessment: PublicationAssessment) -> str:
+    """Project one assessment onto the card's uppercase verdict vocabulary."""
+    return _ASSESSMENT_STATUSES.get(assessment.status, assessment.status.upper())
 
 
 def _is_blocking_publication_skip(
@@ -1134,9 +1167,178 @@ def _verdict_callout(status: str) -> str:
         "PASS": "✅ **Overall verdict: PASS — Recommended for publication**",
         "FAIL": "❌ **Overall verdict: FAIL — Publication blocked**",
         "INCOMPLETE": "⚠️ **Overall verdict: INCOMPLETE — Required evidence is missing**",
-        "NEUTRAL": "**Overall verdict: NEUTRAL — One or more dimensions remain below PASS**",
+        "NEUTRAL": "**Overall verdict: NEUTRAL — Publication decision deferred**",
     }
     return f"> {labels.get(status, f'**Overall verdict: {status}**')}"
+
+
+# The decision each status records, in the words of the assessment that
+# produced it. A status without a rule here falls back to its recorded reasons.
+_VERDICT_RULES = {
+    "PASS": "every publication-required tier passed and the Tier 3 dimension gate passed.",
+    "NEUTRAL": (
+        "every publication-required tier completed, but no supported agent scored at or above the "
+        "dimension PASS boundary on every dimension."
+    ),
+    "FAIL": "the evidence below blocks publication.",
+    "INCOMPLETE": "required evidence is missing or unproven, as recorded below.",
+}
+
+_GATE_LABELS = {
+    "pass": "pass",
+    "neutral": "neutral",
+    "fail": "fail",
+    "inconclusive": "inconclusive",
+}
+
+_DIMENSION_GATE_STATE_TEXT = {
+    "never_activated": "the skill never activated, so its scores are diagnostic only",
+    "incomplete_evidence": "no complete dimension set was recorded, so the gate read nothing from this agent",
+    "not_supported": "execution did not succeed, so the gate did not consider this agent",
+}
+
+
+def _dimension_boundaries() -> str:
+    return (
+        f"an agent passes when every dimension is at or above {DIMENSION_VERDICT_PASS_THRESHOLD:.0%} "
+        f"and fails when any dimension is below {DIMENSION_VERDICT_NEUTRAL_THRESHOLD:.0%}"
+    )
+
+
+def _dimension_gate_evidence(
+    entry: AgentDimensionGate,
+    agent: dict[str, Any],
+    private_labels: tuple[str, ...],
+) -> str:
+    """Describe, in one cell, what the gate read from one agent."""
+    if entry.state == "scored":
+        failing = [item for item in entry.scores if item[1] < DIMENSION_VERDICT_NEUTRAL_THRESHOLD]
+        below_pass = [
+            item
+            for item in entry.scores
+            if DIMENSION_VERDICT_NEUTRAL_THRESHOLD <= item[1] < DIMENSION_VERDICT_PASS_THRESHOLD
+        ]
+        if failing:
+            listed = "; ".join(f"{name.title()} {_single_score_label(score)}" for name, score in failing)
+            return f"{listed} below the {DIMENSION_VERDICT_NEUTRAL_THRESHOLD:.0%} FAIL boundary"
+        if below_pass:
+            listed = "; ".join(f"{name.title()} {_single_score_label(score)}" for name, score in below_pass)
+            return f"{listed} below the {DIMENSION_VERDICT_PASS_THRESHOLD:.0%} PASS boundary"
+        lowest = min(entry.scores, key=lambda item: item[1])
+        return (
+            f"every dimension at or above the {DIMENSION_VERDICT_PASS_THRESHOLD:.0%} PASS boundary "
+            f"(lowest: {lowest[0].title()} {_single_score_label(lowest[1])})"
+        )
+    text = _DIMENSION_GATE_STATE_TEXT[entry.state]
+    # Name why the agent was held out when the run recorded a reason, so an
+    # excluded agent is visible here rather than silently absent.
+    if excluded := "; ".join(str(arm) for arm in incomplete_arms(agent)):
+        return f"{text} ({_publication_safe_inline(excluded, private_labels)})"
+    return text
+
+
+def _verdict_evidence_lines(
+    status: str,
+    assessment: PublicationAssessment,
+    ae: dict[str, Any] | None,
+    private_labels: tuple[str, ...],
+) -> list[str]:
+    """Render the rule and the evidence that produced *status*.
+
+    Every statement here is read from ``assessment`` — the same object
+    ``_overall_status`` projects the printed verdict from — and from the
+    per-agent breakdown ``agent_eval_dimension_verdict`` folds into the Tier 3
+    verdict that assessment carries. The explanation therefore cannot describe
+    a decision other than the one in the callout above it.
+    """
+    tier3 = assessment.tier3
+    breakdown = agent_eval_dimension_breakdown(tier3.payload if isinstance(tier3.payload, dict) else ae)
+    gate_passed = tier3.status in {"pass", "neutral"} and any(entry.verdict == "pass" for entry in breakdown)
+    rule = _VERDICT_RULES.get(status, "recorded below.")
+    if status == "PASS" and not gate_passed:
+        rule = "every publication-required tier passed; " + (
+            "the recorded Tier 3 verdict is pass."
+            if assessment.benchmark_policy.get("tier3_required")
+            else "Tier 3 was optional by policy."
+        )
+    elif status == "NEUTRAL" and gate_passed:
+        rule = (
+            "every publication-required tier completed and the Tier 3 dimension gate passed, "
+            "but the recorded Tier 3 verdict is neutral."
+        )
+    lines = [
+        "### Why This Verdict",
+        "",
+        f"- Decision: **{status}** — {rule}",
+    ]
+
+    policy_note = (
+        "required for publication" if assessment.benchmark_policy.get("tier3_required") else "optional by policy"
+    )
+    if tier3.status == "skipped":
+        evidence_note = (
+            "recorded agent scores do not certify a skipped evaluation."
+            if breakdown
+            else "no dimension evidence was recorded."
+        )
+        lines.append(f"- Tier 3 live evaluation: skipped ({policy_note}); {evidence_note}")
+    else:
+        completeness = "publication-complete" if tier3.evidence_complete else "not publication-complete"
+        lines.append(
+            f"- Tier 3 evidence: **{tier3.status.upper()}** ({completeness}; {policy_note}). "
+            f"Dimension gate: {_dimension_boundaries()}."
+        )
+
+    for reason in assessment.reasons or (() if status == "PASS" else (tier3.reason,) if tier3.reason else ()):
+        lines.append(f"- Blocking: {_publication_safe_inline(reason, private_labels)}")
+
+    agents = _agents(ae)
+    if breakdown:
+        lines.extend(
+            [
+                "",
+                "| Agent | Dimension gate | Evidence the gate read |",
+                "|---|---|---|",
+            ]
+        )
+        for entry in breakdown:
+            agent = agents.get(entry.name, {})
+            gate = _GATE_LABELS.get(entry.verdict or "", "not counted")
+            lines.append(
+                "| "
+                + " | ".join(
+                    (
+                        _md_cell(_agent_display_label(entry.name, agent, private_labels), private_labels),
+                        _trusted_md_cell(gate),
+                        _md_cell(_dimension_gate_evidence(entry, agent, private_labels), private_labels),
+                    )
+                )
+                + " |"
+            )
+        # Say why a row that looks worse than the verdict does not contradict
+        # it, but only about rows this table actually shows.
+        if status == "PASS" and gate_passed and any(entry.verdict == "fail" for entry in breakdown):
+            lines.extend(
+                [
+                    "",
+                    (
+                        "A failing agent does not overturn this gate: it asks whether any one supported agent "
+                        "passed every dimension, and one did."
+                    ),
+                ]
+            )
+        elif status == "PASS" and gate_passed and any(entry.verdict is None for entry in breakdown):
+            lines.extend(
+                [
+                    "",
+                    (
+                        "An agent the gate did not count contributed no evidence either way: the gate asks "
+                        "whether any one supported agent passed every dimension, and one did."
+                    ),
+                ]
+            )
+    lines.append("")
+    return lines
 
 
 def _skill_name(results: list[ValidationResult], ae: dict[str, Any] | None) -> str | None:

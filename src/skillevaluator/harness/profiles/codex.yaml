@@ -12,6 +12,10 @@ rules:
   - {id: CX-DESC-MISSING, when: "description_missing or description_empty or description_type != 'str'", effect: not_loaded, message: "Skill dropped: Codex requires a string description.", fix: "Add a non-empty string description."}
   - {id: CX-STRICT-YAML, when: "frontmatter_tab_indent or frontmatter_duplicate_keys", effect: not_loaded, message: "Skill dropped: invalid YAML (tabs or duplicate keys).", fix: "Use spaces, not tabs, and remove duplicate keys."}
   - {id: CX-BOM, when: "frontmatter_bom", effect: not_loaded, outcome: rejected, message: "Skill dropped: SKILL.md starts with a UTF-8 BOM.", fix: "Save SKILL.md as UTF-8 without a BOM."}
+  - {id: CX-NESTED, when: "nested_skill_md_exact", effect: degraded, message: "The nested SKILL.md is loaded as a second, separate skill.", fix: "Move the nested skill to its own folder under the skills root, or rename its SKILL.md."}
+  - {id: CX-DEPTH, when: "grouping_depth > 5", effect: not_loaded, outcome: not found, message: "Beyond Codex's scan depth of 6.", fix: "Install the skill at most 5 folders below the skills root."}
+  - {id: CX-SYMLINK-FILE, when: "skill_md_symlink", effect: not_loaded, message: "Symlinked SKILL.md files are skipped (codex#15756).", fix: "Copy SKILL.md into the folder instead of symlinking the file (a symlinked folder works)."}
+  - {id: CX-CASING, when: "not manifest_name_exact", effect: not_loaded, message: "Non-canonical name (skill.md/Skill.md): never loaded, on Linux or macOS (3/3 each).", fix: "Rename the file to SKILL.md (exact casing)."}
 notes:
   - "Explicit $skill injects the whole SKILL.md (145 KB tested)."
   - "Follows symlinked skill folders (inside or outside the root)."

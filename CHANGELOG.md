@@ -12,6 +12,11 @@ All notable changes to SkillEvaluator are documented in this file.
   comment helpers, and needs no Pages configuration or history branch. Future
   generated bundles include the template; archived bundles and the released
   onboarding CLI retain their existing hosted publisher setup.
+- `harness` rules for where `SKILL.md` lives: casing, nested manifests, symlinked
+  manifests and resources, OpenClaw symlink escapes, Codex scan depth, and files
+  Hermes leaves out of its file list. Tier 1 `schema` now reports a symlinked or
+  nested `SKILL.md` (MEDIUM), and the `skill.md` naming finding explains the
+  macOS/Linux difference.
 - `harness` rules for descriptions: missing or empty descriptions, Claude Code and
   Codex listing cuts, Copilot CLI's 1,024 UTF-16 unit limit, quotes escaped in the
   Copilot CLI and OpenClaw lists, and Hermes's 60-character listing; `-v` shows
@@ -198,18 +203,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Add `SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL` to set the model that Claude 5.5
-  or later requests name as the server-side refusal fallback, or to turn it off
-  with `none`, `off`, `disabled`, `false` or `0`. The Claude API answers HTTP
-  400 (`'claude-opus-4-8' is not a valid fallback target for
-  'claude-sonnet-5-5'`) when the fixed `claude-opus-4-8` target does not suit
-  the request model, which made such a model unusable for LLM checks and as a
-  Tier 3 judge. A fallback equal to the request model is no longer sent. The
-  default is unchanged. The Harbor verifier receives the variable like
-  `LLM_JUDGE_FALLBACK_MODELS`; its Bedrock refusal retry uses it too, adding
-  the judge model's geography prefix to a bare name and using a full Bedrock
-  ID as given. The reusable CI workflows do not take the variable.
-
+- The comments-only consumer template now grants its required read and PR-comment
+  permissions only to the comment job, with no workflow-wide token permissions.
 - The behavior evidence gate no longer keeps a score for an expectation that
   names an observed artifact but also asks for something only the final answer
   could show. "Writes `report.py` and explains why each column was dropped" was
@@ -439,6 +434,22 @@ All notable changes to SkillEvaluator are documented in this file.
   `/root/.bashrc`, or `/etc/sudoers` scored 0.0 in 0.9.0 and now scores 1.0,
   and a view of a credential store such as `~/.netrc` still scores 0.0. Both
   the host checker and the bundled Harbor verifier apply the fix.
+- `BENCHMARK.md` now shows the evidence and the policy that decided its overall
+  verdict. The card used to print `Overall verdict: PASS — Recommended for
+  publication` with nothing behind it, so a reader who saw an agent with no
+  dimension scores and another agent below the documented 40% FAIL boundary had
+  no way to tell why the gate still passed. A "Why This Verdict" block under the
+  callout now names the rule that fired, the Tier 3 evidence state with its
+  publication policy, each blocking reason, and, per agent, what the dimension
+  gate read: which agent passed every dimension, which dimension fell below the
+  FAIL or PASS boundary, and which agent the gate did not count, naming the
+  excluded arm when the run recorded one. A PASS that rests on one agent while
+  another fails a dimension now says so. The block is rendered from the same
+  publication assessment the printed verdict is projected from, and from the
+  per-agent breakdown the Tier 3 dimension verdict folds, so it cannot describe
+  a different decision. Optional or skipped Tier 3 runs are explained using
+  their recorded policy, and threshold-adjacent scores retain enough precision
+  to stay in their actual verdict band. No verdict changes.
 - `--tolerate-baseline-timeouts` (added in 0.9.0) now follows its own rules
   in the printed run verdict, in the notes of both reports and during result
   collection. The `RUN QUALITY VERDICT` line that `tier3 evaluate` prints
@@ -455,6 +466,39 @@ All notable changes to SkillEvaluator are documented in this file.
   evidence; with no other in-range count for that attempt the agent is
   refused as `no_progress_evidence`, where result collection used to stop
   with `browser-unsafe JSON integer` and write no `result.json` or report.
+
+- A native Codex `exec` wrapper that calls the freeform `apply_patch` tool with
+  the patch as a bare string is decoded instead of being discarded. The bounded
+  statement grammar read every argument as an object literal, so
+  `const r1 = await tools.apply_patch("*** Begin Patch\n...");` followed by
+  another call made the whole wrapper
+  `unsupported_native_codex_exec_wrapper`: the patch and its sibling calls went
+  ungraded, although the same wrapper written as
+  `tools.apply_patch({input: "..."})` decoded. A single- or double-quoted
+  string is now read as that tool's `input`. Nothing is interpreted: a template
+  literal, a concatenation, an extra argument, an unterminated string and a
+  bare string passed to any other tool are still rejected, and the object path
+  keeps its character gates unchanged.
+- A tool call the harness reports as exiting 0 is no longer recorded as failed
+  because its output holds error words. An agent that read a document *about*
+  errors, such as a `SKILL.md` headed `# Troubleshooting: command not found`,
+  lost that call's component activation in the plugin component signals. An
+  explicit zero exit status in every correlated result's header now passes the
+  call, as a harness success flag already did. Only the harness's own header
+  lines are read, so a body that spells `exit_code=0` still reports nothing,
+  and a result with no exit status, or a non-zero one, is judged by its text
+  exactly as before.
+- Add `SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL` to set the model that Claude 5.5
+  or later requests name as the server-side refusal fallback, or to turn it off
+  with `none`, `off`, `disabled`, `false` or `0`. The Claude API answers HTTP
+  400 (`'claude-opus-4-8' is not a valid fallback target for
+  'claude-sonnet-5-5'`) when the fixed `claude-opus-4-8` target does not suit
+  the request model, which made such a model unusable for LLM checks and as a
+  Tier 3 judge. A fallback equal to the request model is no longer sent. The
+  default is unchanged. The Harbor verifier receives the variable like
+  `LLM_JUDGE_FALLBACK_MODELS`; its Bedrock refusal retry uses it too, adding
+  the judge model's geography prefix to a bare name and using a full Bedrock
+  ID as given. The reusable CI workflows do not take the variable.
 
 ## 0.9.0 - 2026-11-13
 

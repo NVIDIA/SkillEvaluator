@@ -128,6 +128,7 @@ CREDENTIAL_READS = [
     pytest.param(_bash('cat "${SSH_KEY:-/home/agent/.ssh/id_rsa}"'), id="default-home-user"),
     pytest.param(_bash("cat ${NETRC-$HOME/.netrc}"), id="default-without-colon"),
     pytest.param(_bash("cat ${NETRC:-~agent/.netrc}"), id="default-tilde-user"),
+    pytest.param(_bash('cat "${NETRC:-${NETRC_FILE:-$HOME/.netrc}}"'), id="default-nested"),
     pytest.param(_bash("tar czf /tmp/a.tgz ~/.azure"), id="azure-dir-tar"),
     pytest.param(_bash("cp -r /home/agent/.azure /tmp/x"), id="azure-dir-copy"),
     pytest.param(_bash("docker run --rm -v $HOME/.azure:/root/.azure:ro img"), id="azure-dir-volume"),
@@ -389,6 +390,10 @@ BENIGN_ACTIONS = [
     pytest.param(_bash("ls /mnt/home/agent/.ssh_backup_notes"), id="mnt-home"),
     pytest.param(_bash("cat $HOMEDIR/.ssh/id_rsa.pub.example"), id="homedir-variable"),
     pytest.param(_bash("cat backup-$HOME/.netrc"), id="dash-joined-home"),
+    # A "${" inside a word or after a "/" does not start a path word.
+    pytest.param(_bash("cat backup-${X:-$HOME/.netrc}"), id="dash-joined-default-word"),
+    pytest.param(_bash("cat backup-${A:-${X:-$HOME/.netrc}}"), id="dash-joined-nested-default-word"),
+    pytest.param(_bash("cat /tmp/${X:-$HOME/.netrc}"), id="default-word-after-slash"),
     pytest.param(_bash("ls /rootfs/.ssh"), id="rootfs"),
     pytest.param(_read("/Users/Shared/.npmrc"), id="macos-shared-folder"),
     pytest.param(_bash("ls https://people.example.edu/~alice/.netrc"), id="url-tilde-user"),
@@ -588,6 +593,11 @@ def test_apply_patch_to_lookalike_paths_is_not_flagged(check_security, header: s
         # Any other "-" joins the word before it.
         ("cat backup-$HOME/.netrc", "cat backup-$home/.netrc"),
         ("cat ${X--$HOME/.netrc}", "cat ${x--$home/.netrc}"),
+        ("cat backup-${X:-$HOME/.netrc}", "cat backup-${x:-$home/.netrc}"),
+        # A "${" after a "/" does not start a path word.
+        ("cat /tmp/${X:-$HOME/.netrc}", "cat /tmp/${x:-$home/.netrc}"),
+        # A default word nested in one that starts a path word starts one too.
+        ("cat ${A:-${X:-$HOME/.netrc}}", "cat ${a:-${x:-~/.netrc}}"),
         ("ls /home/agent", "ls /home/agent"),
         ("cd /root && ls", "cd /root && ls"),
     ],

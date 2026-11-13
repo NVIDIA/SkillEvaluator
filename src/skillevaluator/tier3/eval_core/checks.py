@@ -423,11 +423,13 @@ _SENSITIVE_PATH_DIRECTORIES = frozenset({"~/.azure", "~/.config/opencode"})
 # /Users/Shared), /root, $HOME and ${HOME} (quoted or not), and ~user that
 # starts a path word, so the "~alice" of "https://host/~alice/.netrc" stays.
 # Backslashes become "/" first, so C:\Users\<user> is a home spelling too. The
-# default word of "${VAR:-word}" or "${VAR-word}" starts a path word too; its
-# operator (group 1) is kept, while any other "-" joins the word before it, so
-# "backup-$HOME/.netrc" stays.
+# default word of a "${VAR:-word}" or "${VAR-word}" that starts a path word
+# starts one too, as does a default word nested in it; the "${VAR:-" openers
+# (group 1) are kept. A "${" after a "/" or inside a word starts none, and any
+# other "-" joins the word before it, so "backup-$HOME/.netrc",
+# "backup-${X:-$HOME/.netrc}" and "/tmp/${X:-$HOME/.netrc}" stay.
 _HOME_ANCHOR_RE = re.compile(
-    r"(?:(\$\{\w+:?-)|(?<![\w.~$-]))"
+    r"(?:(?<![\w.~$/-])((?:\$\{\w+:?-)+)|(?<![\w.~$-]))"
     r"(?:/home/[^/\s'\"`;|&<>()]+|/users/(?!shared/)[^/\s'\"`;|&<>()]+|/root|\"?\$\{home\}\"?|\"?\$home\"?"
     r"|(?<!/)~[a-z_][a-z0-9_.-]*)"
     r"(?=/)"

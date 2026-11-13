@@ -671,6 +671,110 @@ def test_contained_transfer_refuses_outside_source_before_destination_or_staging
     asyncio.run(exercise())
 
 
+async def _download_directory(
+    environment: SkillEvaluatorLocalEnvironment,
+    transfer: str,
+    source: str,
+    target: Path,
+) -> None:
+    if transfer == "download":
+        await environment.download_dir(source, target)
+    elif transfer == "excluded":
+        await environment.download_dir_with_exclusions(source_dir=source, target_dir=target, exclude=["*.log"])
+    else:
+        await environment.download_dir_filtered(source_dir=source, target_dir=target, include=["*.txt"])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="real local subprocess backend requires POSIX")
+@pytest.mark.parametrize("transfer", ["download", "excluded", "filtered"])
+@pytest.mark.parametrize("spelling", ["workspace", "logs", "home", "relative"])
+def test_every_directory_download_refuses_dotdot_paths_that_leave_the_run_directory(
+    local_output_environment: SkillEvaluatorLocalEnvironment,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transfer: str,
+    spelling: str,
+) -> None:
+    """download_dir and both tar/find downloads refuse the same sources, whichever root the path starts from."""
+    environment = local_output_environment
+    outside = tmp_path.resolve() / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_bytes(b"outside sentinel\n")
+    prefix, host_base = {
+        "workspace": ("/workspace", environment._workspace),
+        "logs": ("/logs", environment._logs_dir),
+        "home": ("~", environment._home),
+        "relative": ("", environment._workspace),
+    }[spelling]
+    relative = os.path.relpath(outside, host_base)
+    assert relative.startswith("..")
+    source = f"{prefix}/{relative}" if prefix else relative
+    target = tmp_path / "destination"
+    target.mkdir()
+    (target / "retained.txt").write_bytes(b"destination sentinel\n")
+
+    async def exercise() -> None:
+        await environment.start()
+        try:
+            before = set(environment._root.rglob("*"))
+            commands: list[str] = []
+            original_exec = environment.exec
+
+            async def observe_exec(command: str, **kwargs):
+                commands.append(command)
+                return await original_exec(command, **kwargs)
+
+            monkeypatch.setattr(environment, "exec", observe_exec)
+            with pytest.raises(ValueError, match="outside"):
+                await _download_directory(environment, transfer, source, target)
+            assert commands == [], "a source outside the run directory must be refused before find or tar"
+            assert _contained_transfer_files(target) == {"retained.txt": b"destination sentinel\n"}
+            assert _contained_transfer_files(outside) == {"secret.txt": b"outside sentinel\n"}
+            assert set(environment._root.rglob("*")) == before
+        finally:
+            await environment.stop(delete=False)
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="real local subprocess backend requires POSIX")
+@pytest.mark.parametrize("transfer", ["download", "excluded", "filtered"])
+def test_every_directory_download_accepts_dotdot_paths_that_stay_inside_the_run_directory(
+    local_output_environment: SkillEvaluatorLocalEnvironment, tmp_path: Path, transfer: str
+) -> None:
+    """A ".." that resolves inside the run directory is fine, and the filters still apply."""
+    environment = local_output_environment
+    target = tmp_path / "destination"
+
+    async def exercise() -> None:
+        await environment.start()
+        try:
+            kept = environment._resolve_path("/workspace/kept")
+            (kept / "nested").mkdir(parents=True)
+            (kept / "answer.txt").write_bytes(b"inside\n")
+            (kept / "notes.md").write_bytes(b"notes\n")
+            (kept / "run.log").write_bytes(b"noise\n")
+            (kept / "nested" / "summary.txt").write_bytes(b"nested\n")
+            environment._resolve_path("/workspace/skills").mkdir(exist_ok=True)
+            await _download_directory(environment, transfer, "/workspace/skills/../kept", target)
+        finally:
+            await environment.stop(delete=False)
+
+    asyncio.run(exercise())
+
+    expected = {
+        "download": {
+            "answer.txt": b"inside\n",
+            "notes.md": b"notes\n",
+            "run.log": b"noise\n",
+            "nested/summary.txt": b"nested\n",
+        },
+        "excluded": {"answer.txt": b"inside\n", "notes.md": b"notes\n", "nested/summary.txt": b"nested\n"},
+        "filtered": {"answer.txt": b"inside\n", "nested/summary.txt": b"nested\n"},
+    }[transfer]
+    assert _contained_transfer_files(target) == expected
+
+
 @pytest.mark.skipif(os.name == "nt", reason="real local subprocess backend requires POSIX")
 @pytest.mark.parametrize("method", ["download_dir_with_exclusions", "download_dir_filtered"])
 @pytest.mark.parametrize("kind", ["symlink", "hardlink"])

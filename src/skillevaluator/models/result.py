@@ -731,6 +731,12 @@ class ValidationResult:
                 *(carried if isinstance(carried, list) else []),
                 *(f"[{prefix}] {path}" for path in unparsed if isinstance(path, str)),
             ]
+        omitted = other.metadata.get("semgrep_unparsed_files_omitted")
+        if type(omitted) is int and omitted > 0:
+            carried_omitted = self.metadata.get("semgrep_unparsed_files_omitted")
+            self.metadata["semgrep_unparsed_files_omitted"] = omitted + (
+                carried_omitted if type(carried_omitted) is int else 0
+            )
 
         # Merge summary
         self.summary.errors += other.summary.errors

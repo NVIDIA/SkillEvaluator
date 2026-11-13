@@ -173,3 +173,28 @@ def test_json_report_counts_unparsed_semgrep_files_beyond_its_cap() -> None:
     result.metadata["semgrep_unparsed_files"] = result.metadata["semgrep_unparsed_files"][:1000]
     row = json.loads(JSONReporter(include_timestamp=False).render_all([result]))["results"][0]
     assert "semgrep_unparsed_files_omitted" not in row
+
+
+def test_omitted_unparsed_semgrep_count_survives_a_retained_round_trip() -> None:
+    from skillevaluator.reporting.retained import retained_results
+
+    result = ValidationResult(validator_name="Code Risk Analysis", validator_description="Static code analysis")
+    result.metadata["semgrep_unparsed_files"] = [f"scripts/f{i}.sh" for i in range(1005)]
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    assert payload["results"][0]["semgrep_unparsed_files_omitted"] == 5
+
+    (restored,) = retained_results(payload)
+    again = json.loads(JSONReporter(include_timestamp=False).render_all([restored]))
+
+    assert len(again["results"][0]["semgrep_unparsed_files"]) == 1000
+    assert again["results"][0]["semgrep_unparsed_files_omitted"] == 5
+
+
+def test_folder_merge_adds_up_omitted_unparsed_semgrep_counts() -> None:
+    merged = ValidationResult()
+    for prefix, count in (("a", 3), ("b", 4)):
+        part = ValidationResult()
+        part.metadata["semgrep_unparsed_files_omitted"] = count
+        merged.merge_with_prefix(part, prefix)
+
+    assert merged.metadata["semgrep_unparsed_files_omitted"] == 7

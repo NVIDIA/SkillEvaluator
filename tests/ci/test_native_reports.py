@@ -435,7 +435,15 @@ def test_runtime_retains_public_json_and_regenerates_each_native_tier(tmp_path, 
     if tier == 2:
         # CI supplies an advisory policy even for native JSON without gating.
         payload["results"][0]["gating"] = {"tier": 2, "blocking": False}
-        payload["gating"] = {"tiers": {"2": {"blocking": False, "validators": ["Context Optimization"]}}}
+        payload["gating"] = {
+            "tiers": {
+                "2": {
+                    "blocking": False,
+                    "validators": ["Context Optimization"],
+                    "validator_policies": [{"validator": "Context Optimization", "blocking": False}],
+                }
+            }
+        }
     assert json.loads((output / f"skillevaluator-tier{tier}.json").read_text()) == payload
     document = (output / f"skillevaluator-tier{tier}.html").read_text()
     assert "ARTIFACT HTML" not in document

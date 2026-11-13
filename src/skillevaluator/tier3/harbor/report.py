@@ -128,17 +128,25 @@ def _pick_best_agent(
 ) -> str:
     """Select the same best agent identity as the canonical Tier 3 report."""
     from skillevaluator.evaluation.tier3_report import _canonical_agent_rank_from_info
+    from skillevaluator.tier3.harbor.baseline_timeouts import kept_with_failed_baseline
 
-    best_agent = ""
-    best_rank: tuple[float, float] | None = None
+    # Keyed by whether the agent was kept with a failed baseline, which the
+    # canonical report ranks below every agent with a complete baseline.
+    best: dict[bool, tuple[tuple[float, float], str]] = {}
+    # Agents skipped here that were not kept with a failed baseline, for
+    # example a complete agent that never activated the skill. The canonical
+    # report ranks any of them it can rank above every tolerated agent, so a
+    # tolerated agent must not stand in for them.
+    skipped_complete: list[dict[str, Any]] = []
     scored_metric_sets: set[frozenset[str]] = set()
     for agent in sorted(agents_data):
         data = agents_data[agent]
-        if not _findings_eligible(data):
-            continue
         persisted = persisted_agents.get(agent) if isinstance(persisted_agents, dict) else None
         ranking_data = persisted if isinstance(persisted, dict) else data
-        if not _findings_eligible(ranking_data):
+        tolerated = kept_with_failed_baseline(ranking_data)
+        if not _findings_eligible(data) or not _findings_eligible(ranking_data):
+            if not tolerated:
+                skipped_complete.append(ranking_data)
             continue
         standard_metrics = report_data.metrics_for_condition(ranking_data, "with_skill")
         with_scores = ranking_data.get("with_skill")
@@ -146,6 +154,8 @@ def _pick_best_agent(
             not isinstance(with_scores, dict)
             or any(metric_value(with_scores, metric) is None for metric in standard_metrics)
         ):
+            if not tolerated:
+                skipped_complete.append(ranking_data)
             continue
         rank = _canonical_agent_rank_from_info(ranking_data)
         if rank is None:
@@ -156,10 +166,30 @@ def _pick_best_agent(
             scored_metric_sets.add(frozenset(standard_metrics))
         if len(scored_metric_sets) > 1:
             return ""
-        if best_rank is None or rank > best_rank:
-            best_rank = rank
-            best_agent = agent
-    return best_agent
+        if tolerated not in best or rank > best[tolerated][0]:
+            best[tolerated] = (rank, agent)
+    if False in best:
+        return best[False][1]
+    # Like the canonical report, rank every complete agent before any tolerated
+    # one. When the canonical best agent is a complete agent skipped here,
+    # there are no findings to show.
+    if True not in best or any(_canonical_agent_rank_from_info(data) is not None for data in skipped_complete):
+        return ""
+    return best[True][1]
+
+
+def _kept_with_failed_baseline(
+    agent: str,
+    agents_data: dict[str, dict[str, Any]],
+    persisted_agents: dict[str, dict[str, Any]] | None,
+) -> bool:
+    """Return whether the in-memory or persisted data of ``agent`` keeps it with a failed baseline."""
+    from skillevaluator.tier3.harbor.baseline_timeouts import kept_with_failed_baseline
+
+    persisted = persisted_agents.get(agent) if isinstance(persisted_agents, dict) else None
+    return any(
+        isinstance(data, dict) and kept_with_failed_baseline(data) for data in (agents_data.get(agent), persisted)
+    )
 
 
 def _findings_eligible(agent_data: dict[str, Any]) -> bool:
@@ -1240,6 +1270,17 @@ def display_findings_report(
             console.print()
     else:
         best_agent = harbor_agents[0] if harbor_agents else ""
+        # The terminal summary drops never-activated agents before it calls
+        # here, so an agent kept with a failed baseline can be the only one
+        # left. Rank it against every agent, as the canonical report does, so
+        # it never stands in for a complete agent ranked above it.
+        if (
+            best_agent
+            and len(agents_data) > 1
+            and _kept_with_failed_baseline(best_agent, agents_data, loaded_agents)
+            and _pick_best_agent(agents_data, loaded_agents) != best_agent
+        ):
+            best_agent = ""
 
     if (
         not best_agent

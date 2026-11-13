@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import TYPE_CHECKING, Any
 
-from skillevaluator.inference import LLMClient, LLMClientError, LLMVerdict
+from skillevaluator.inference import LLMClient, LLMVerdict, parse_bounded_llm_verdict
 from skillevaluator.models.result import Severity
 
 if TYPE_CHECKING:
@@ -197,7 +197,17 @@ def _render_user_prompt(cluster: ContentCluster, shared: dict[str, int] | None =
 
 
 def analyze_cluster(client: LLMClient, cluster: ContentCluster) -> LLMVerdict:
-    """Run LLM analysis on a single content cluster."""
+    """Run LLM analysis on a single content cluster.
+
+    The reply is checked before it can become a finding: a verdict outside
+    ``VALID_VERDICTS``, a confidence that is not a number from 0 to 1, or a
+    rationale or suggestion that is not a bounded string raises
+    :class:`~skillevaluator.inference.LLMClientError`.
+
+    The verdict's ``model`` is the client's ``model_used`` right after the
+    call. The client keeps it per thread, so concurrent clusters keep their
+    own answering model.
+    """
     user_prompt = build_user_prompt(cluster)
     data = client.extract_json_from_response(
         SYSTEM_PROMPT,
@@ -205,16 +215,11 @@ def analyze_cluster(client: LLMClient, cluster: ContentCluster) -> LLMVerdict:
         response_schema=VERDICT_JSON_SCHEMA,
         schema_name="dedup_verdict",
     )
-
-    verdict = data.get("verdict", "")
-    if verdict not in VALID_VERDICTS:
-        raise LLMClientError(f"LLM returned unknown verdict '{verdict}'. Expected one of: {VALID_VERDICTS}")
-
-    return LLMVerdict(
-        verdict=verdict,
-        confidence=float(data.get("confidence", 0.0)),
-        reasoning=data.get("rationale", data.get("reasoning", "")),
-        suggestion=data.get("suggestion", ""),
+    return parse_bounded_llm_verdict(
+        data,
+        valid_verdicts=VALID_VERDICTS,
+        context="Content deduplication LLM",
+        model=getattr(client, "model_used", None),
     )
 
 

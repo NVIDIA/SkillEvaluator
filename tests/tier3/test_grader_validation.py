@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 import threading
@@ -443,6 +444,91 @@ def test_provenance_records_resolved_judge_controls_and_verifier_files(tmp_path)
     assert any(name.endswith("/checks.py") for name in digests)
     assert any(name.endswith("/evidence.py") for name in digests)
     assert len(provenance["verifier_sha256"]) == 64
+
+
+@pytest.mark.parametrize("package_root", ["src", "site-packages"])
+@pytest.mark.parametrize("use_alias", [False, True], ids=["canonical", "symlink-alias"])
+def test_verifier_provenance_preserves_relative_hashes_through_source_alias(
+    monkeypatch, tmp_path, package_root, use_alias
+):
+    from skillevaluator.tier3.harbor import adapter
+
+    source = tmp_path / package_root
+    module = source / "skillevaluator/tier3/grader_validation.py"
+    module.parent.mkdir(parents=True)
+    module.touch()
+    contents = {
+        "skillevaluator/tier3/eval_core/checks.py": b"checks\n",
+        "skillevaluator/tier3/harbor/templates/eval.py": b"verifier\n",
+    }
+    for name, content in contents.items():
+        path = source / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    imported_root = source
+    if use_alias:
+        imported_root = tmp_path / "source-alias"
+        imported_root.symlink_to(source, target_is_directory=True)
+    monkeypatch.setattr(gv, "__file__", str(imported_root / module.relative_to(source)))
+    monkeypatch.setattr(adapter, "_VERIFIER_FILES", [imported_root / name for name in reversed(contents)])
+    output = tmp_path / "qualification"
+    output.mkdir()
+    report = gv.qualify(
+        gv.REFERENCE_SUITE,
+        gv.load_suite(gv.REFERENCE_SUITE),
+        [],
+        output,
+        1,
+        1,
+        1,
+        "assessment",
+        SimpleNamespace(provider="openai", model="test-model"),
+        {},
+        {},
+    )
+    expected_digest = hashlib.sha256()
+    for name, content in contents.items():
+        expected_digest.update(name.encode() + b"\0" + len(content).to_bytes(8, "big") + content)
+    assert report["provenance"]["verifier_file_sha256"] == {
+        name: hashlib.sha256(content).hexdigest() for name, content in contents.items()
+    }
+    assert report["provenance"]["verifier_sha256"] == expected_digest.hexdigest()
+    assert json.loads((output / "grader-validation.json").read_text())["provenance"] == report["provenance"]
+
+
+@pytest.mark.parametrize("symlink_escape", [False, True], ids=["outside-file", "symlink-escape"])
+def test_verifier_provenance_rejects_files_outside_source_root(monkeypatch, tmp_path, symlink_escape):
+    from skillevaluator.tier3.harbor import adapter
+
+    source = tmp_path / "site-packages"
+    module = source / "skillevaluator/tier3/grader_validation.py"
+    module.parent.mkdir(parents=True)
+    module.touch()
+    outside = tmp_path / "outside.py"
+    outside.write_text("outside source boundary\n")
+    verifier = outside
+    if symlink_escape:
+        verifier = module.parent / "escaped.py"
+        verifier.symlink_to(outside)
+    monkeypatch.setattr(gv, "__file__", str(module))
+    monkeypatch.setattr(adapter, "_VERIFIER_FILES", [verifier])
+    output = tmp_path / "qualification"
+    output.mkdir()
+    with pytest.raises(ValueError, match="not in the subpath"):
+        gv.qualify(
+            gv.REFERENCE_SUITE,
+            gv.load_suite(gv.REFERENCE_SUITE),
+            [],
+            output,
+            1,
+            1,
+            1,
+            "assessment",
+            SimpleNamespace(provider="openai", model="test-model"),
+            {},
+            {},
+        )
+    assert not (output / "grader-validation.json").exists()
 
 
 def test_split_separation_and_gates(judge_server, tmp_path):

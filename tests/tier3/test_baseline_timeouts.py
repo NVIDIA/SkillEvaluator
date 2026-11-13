@@ -61,6 +61,22 @@ def _doc_block(name: str, lead: str) -> str:
     return block
 
 
+def _changelog_entry(lead: str) -> str:
+    """Return the one CHANGELOG.md bullet that starts with ``lead``, whitespace-normalized."""
+    entries: list[list[str]] = []
+    in_entry = False
+    for line in (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8").splitlines():
+        if line.startswith("- "):
+            entries.append([line])
+            in_entry = True
+        elif in_entry and line.startswith("  "):
+            entries[-1].append(line)
+        else:
+            in_entry = False
+    [entry] = [text for text in (" ".join(" ".join(lines).split()) for lines in entries) if text.startswith(lead)]
+    return entry
+
+
 # -- synthetic arm-level Harbor jobs ------------------------------------------
 
 
@@ -380,7 +396,7 @@ def test_out_of_range_harbor_counter_falls_back_to_the_trajectory_and_the_change
     assert results["execution_status"] == "succeeded"
     assert results["agents"]["opencode"][RECORD_KEY]["failures"][0]["output_tokens"] == 42
     # The entry refuses the agent only when the attempt has no other count in range.
-    entry = _doc_block("CHANGELOG.md", "- `--tolerate-baseline-timeouts` (see its entry under Added)")
+    entry = _changelog_entry("- `--tolerate-baseline-timeouts` (added in 0.9.0) now follows its own rules")
     assert "with no other in-range count for that attempt the agent is refused as `no_progress_evidence`" in entry
 
 

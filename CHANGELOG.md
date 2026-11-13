@@ -456,6 +456,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Plugin CLI preflight uses bounded, no-follow configuration loading for both
+  plugin directories and explicit manifests. Combined validation binds plugin
+  scores and runtime evidence to the returned run, retains partial scores when
+  latest changes, and never borrows another run's scores for missing artifacts.
+
 - `skillevaluator view` no longer asks the LLM again when it regenerates a
   missing `report.html` for a Tier 3 run that saved its report feedback in
   `result.json`. The regenerated report shows the conclusions,

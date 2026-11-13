@@ -800,6 +800,7 @@ def _partial_agent_eval_result(
     failure: str,
     results_dir: Path | None,
     env_mode: str,
+    plugin_run: bool = False,
 ) -> ValidationResult | None:
     """Normalize an engine run that produced usable results alongside errors.
 
@@ -809,7 +810,8 @@ def _partial_agent_eval_result(
     report, but never gate the exit code. Returns ``None`` unless the engine
     mapping can be proven to be THIS run's fresh output (in-memory agents data
     plus a ``latest`` results dir matching the engine's ``run_dir``), so a
-    stale earlier run is never reported as fresh.
+    stale earlier run is never reported as fresh. Plugin runs instead normalize
+    the exact returned directory, preserving partial scores when latest moves.
     """
     from skillevaluator.evaluation.tier3_report import agent_eval_result_from_run
     from skillevaluator.tier3.results_location import resolve_latest_results
@@ -820,16 +822,21 @@ def _partial_agent_eval_result(
     if not run_dir_value or not Path(str(run_dir_value)).is_dir():
         return None
     try:
-        latest = resolve_latest_results(target_path, results_dir)
-        latest = latest.resolve() if latest.is_symlink() else latest
-        if latest.resolve() != Path(str(run_dir_value)).resolve():
-            return None
-        result = agent_eval_result_from_run(
-            target_path,
-            results_dir=results_dir,
-            env_mode=env_mode,
-            engine_result=engine_result,
-        )
+        if plugin_run:
+            from skillevaluator.cli_plugin import plugin_result_from_execution
+
+            result = plugin_result_from_execution(target_path, engine_result, env_mode=env_mode)
+        else:
+            latest = resolve_latest_results(target_path, results_dir)
+            latest = latest.resolve() if latest.is_symlink() else latest
+            if latest.resolve() != Path(str(run_dir_value)).resolve():
+                return None
+            result = agent_eval_result_from_run(
+                target_path,
+                results_dir=results_dir,
+                env_mode=env_mode,
+                engine_result=engine_result,
+            )
     except Exception:
         return None
     if result is None:
@@ -1121,6 +1128,7 @@ def _run_agent_eval_or_skip(
             failure=failure,
             results_dir=results_dir,
             env_mode=env_mode,
+            plugin_run=plugin_options is not None,
         )
         if partial is not None:
             return _attach_plugin_report(partial, engine_result)
@@ -1133,12 +1141,17 @@ def _run_agent_eval_or_skip(
         )
 
     try:
-        result = agent_eval_result_from_run(
-            target_path,
-            results_dir=results_dir,
-            env_mode=env_mode,
-            engine_result=engine_result if isinstance(engine_result, dict) else None,
-        )
+        if plugin_options is not None:
+            from skillevaluator.cli_plugin import plugin_result_from_execution
+
+            result = plugin_result_from_execution(target_path, engine_result, env_mode=env_mode)
+        else:
+            result = agent_eval_result_from_run(
+                target_path,
+                results_dir=results_dir,
+                env_mode=env_mode,
+                engine_result=engine_result if isinstance(engine_result, dict) else None,
+            )
     except Exception as exc:
         return _attach_plugin_report(
             advisory_skip_result(
@@ -3682,7 +3695,13 @@ def evaluate(
     from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
 
     try:
-        merged_config, _ = load_evals_config(skill_path)
+        if plugin_options is not None:
+            from skillevaluator.cli_core import resolve_plugin_path
+            from skillevaluator.tier3.plugin_workflow import _load_config
+
+            merged_config, _ = _load_config(resolve_plugin_path(skill_path))
+        else:
+            merged_config, _ = load_evals_config(skill_path)
     except EvalsConfigError as exc:
         raise click.UsageError(str(exc)) from exc
     harbor_config = merged_config.get("harbor", {})

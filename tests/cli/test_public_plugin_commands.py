@@ -3,6 +3,7 @@
 
 import io
 import json
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -136,6 +137,82 @@ def _scored_run(results, run_id, score):
     return run_dir
 
 
+@pytest.mark.parametrize("manifest_input", [False, True], ids=["root", "manifest"])
+@pytest.mark.parametrize("unsafe", ["config-link", "evals-link", "root-link", "oversized", "malformed"])
+def test_plugin_cli_preflight_refuses_unsafe_config_without_unbounded_reads(
+    tmp_path, monkeypatch, manifest_input, unsafe
+):
+    from skillevaluator.evaluation.service import EvaluationService
+    from skillevaluator.tier3.plugin_workflow import MAX_CONFIG_BYTES
+
+    source = _live_report_source(tmp_path)
+    evals = source / "evals"
+    evals.mkdir()
+    config = evals / "config.yml"
+    secret = "LOCAL_SECRET_DO_NOT_PRINT"
+    malformed = f"schema_version: [{secret}\n"
+    if unsafe == "config-link":
+        outside = tmp_path / "outside-private.yml"
+        outside.write_text(malformed, encoding="utf-8")
+        config.symlink_to(outside)
+    elif unsafe == "evals-link":
+        outside = tmp_path / "outside-evals"
+        evals.rmdir()
+        outside.mkdir()
+        (outside / "config.yml").write_text(malformed, encoding="utf-8")
+        evals.symlink_to(outside, target_is_directory=True)
+    elif unsafe == "root-link":
+        config.write_text(malformed, encoding="utf-8")
+        linked = tmp_path / "linked-plugin"
+        linked.symlink_to(source, target_is_directory=True)
+        source = linked
+    elif unsafe == "oversized":
+        config.write_text("schema_version: 1\n#" + "x" * MAX_CONFIG_BYTES, encoding="utf-8")
+    else:
+        config.write_text(malformed, encoding="utf-8")
+
+    unbounded_reads = []
+    read_text = Path.read_text
+
+    def observe_read(path, *args, **kwargs):
+        if path.name in {"config.yml", "config.yaml"}:
+            unbounded_reads.append(path)
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", observe_read)
+    monkeypatch.setattr(
+        EvaluationService, "evaluate_plugin", lambda *_a, **_kw: pytest.fail("Unsafe config reached execution")
+    )
+    target = source / ".claude-plugin/plugin.json" if manifest_input else source
+    result = CliRunner().invoke(
+        cli, ["tier3", "evaluate-plugin", str(target), "--agents", "opencode", "--progress", "off"]
+    )
+
+    assert result.exit_code == 2, (result.output, result.exception)
+    assert "bounded plugin eval configuration" in result.output
+    assert secret not in result.output
+    assert unbounded_reads == []
+
+
+@pytest.mark.parametrize("manifest_input", [False, True], ids=["root", "manifest"])
+def test_plugin_cli_preflight_enforces_authored_cost_requirement(tmp_path, monkeypatch, manifest_input):
+    from skillevaluator.evaluation.service import EvaluationService
+
+    source = _live_report_source(tmp_path)
+    (source / "evals").mkdir()
+    (source / "evals/config.yml").write_text("schema_version: 1\nharbor:\n  max_cost_usd: 0.5\n", encoding="utf-8")
+    monkeypatch.setattr(
+        EvaluationService, "evaluate_plugin", lambda *_a, **_kw: pytest.fail("Invalid budget reached execution")
+    )
+    target = source / ".claude-plugin/plugin.json" if manifest_input else source
+    result = CliRunner().invoke(
+        cli, ["tier3", "evaluate-plugin", str(target), "--agents", "opencode", "--progress", "off"]
+    )
+
+    assert result.exit_code == 2, (result.output, result.exception)
+    assert "max_cost_usd requires harbor.price_file" in result.output
+
+
 def _live_json_report(source, engine_result, results, output):
     report = project_plugin_runtime(engine_result, provenance={"plugin": "demo", "runtime_evidence": {}})
     assert report is not None
@@ -150,6 +227,91 @@ def _live_json_report(source, engine_result, results, output):
         console=Console(file=io.StringIO()),
     )
     return json.loads((output / "plugin-report.json").read_text(encoding="utf-8"))
+
+
+def _combined_plugin_result(source, engine_result, results, monkeypatch):
+    from skillevaluator.cli import _run_agent_eval_or_skip
+    from skillevaluator.evaluation import PluginOptions, tier3_report
+    from skillevaluator.evaluation.service import EvaluationService
+
+    report = project_plugin_runtime(engine_result, provenance={"plugin": "demo", "runtime_evidence": {}})
+    engine_result["plugin_runtime_report"] = report.payload()
+
+    def execute(*_args, **_kwargs):
+        # Another execution finishes before combined validation normalizes this one.
+        publish_latest_results(results / "demo", "20261110_010002")
+        return engine_result
+
+    normalize = tier3_report.agent_eval_result_from_directory
+
+    def without_judge(*args, **kwargs):
+        # Keep artifact selection and normalization real; no optional provider calls.
+        kwargs["use_llm_judge"] = False
+        return normalize(*args, **kwargs)
+
+    monkeypatch.setattr(EvaluationService, "evaluate_plugin", execute)
+    monkeypatch.setattr(tier3_report, "agent_eval_result_from_directory", without_judge)
+    return _run_agent_eval_or_skip(
+        source,
+        agents="opencode",
+        env_mode="docker",
+        skip_baseline=False,
+        n_concurrent=1,
+        max_agents=None,
+        results_dir=results,
+        validate_source=False,
+        plugin_options=PluginOptions(),
+    )
+
+
+@pytest.mark.parametrize("partial", [False, True], ids=["succeeded", "partial-failure"])
+def test_combined_plugin_report_uses_returned_run_when_latest_moves(tmp_path, monkeypatch, partial):
+    source = _live_report_source(tmp_path)
+    results = tmp_path / "results"
+    current = _scored_run(results, "20261110_010001", 0.2)
+    _scored_run(results, "20261110_010002", 0.9)
+    engine = {
+        "execution_status": "failed" if partial else "succeeded",
+        "agents": {"opencode": {"with_skill": {}}},
+        "run_id": current.name,
+        "run_dir": str(current),
+    }
+    if partial:
+        engine["execution_errors"] = ["Another agent crashed", "Another agent crashed"]
+
+    result = _combined_plugin_result(source, engine, results, monkeypatch)
+
+    assert result.metadata["agent_eval"]["run_id"] == "20261110_010001"
+    assert result.metadata["agent_eval"]["overall_score"] == pytest.approx(0.2)
+    assert result.metadata["plugin_runtime_report"]["run_id"] == "20261110_010001"
+    if partial:
+        assert result.passed is False
+        assert result.errors == ["Another agent crashed"]
+        assert result.metadata["agent_eval"]["execution_status"] != "skipped"
+
+
+@pytest.mark.parametrize("returned_run", [None, "missing", "empty", "malformed"])
+def test_combined_plugin_report_without_exact_scores_cannot_borrow_latest(tmp_path, monkeypatch, returned_run):
+    source = _live_report_source(tmp_path)
+    results = tmp_path / "results"
+    _scored_run(results, "20261110_010002", 0.9)
+    engine = {"execution_status": "succeeded"}
+    if returned_run is not None:
+        run_dir = results / "demo" / "20261110_010001"
+        engine.update(run_id=run_dir.name, run_dir=str(run_dir))
+        if returned_run == "empty":
+            run_dir.mkdir()
+        elif returned_run == "malformed":
+            run_dir = _scored_run(results, run_dir.name, 0.2)
+            (run_dir / "opencode/with-skill/summary.json").write_text("{broken", encoding="utf-8")
+
+    result = _combined_plugin_result(source, engine, results, monkeypatch)
+
+    assert result.passed is False
+    assert result.metadata["agent_eval"]["execution_status"] == "skipped"
+    assert result.metadata["agent_eval"].get("overall_score") is None
+    assert result.metadata["agent_eval"].get("run_id") != "20261110_010002"
+    assert result.metadata["plugin_runtime_report"] == engine["plugin_runtime_report"]
 
 
 @pytest.mark.parametrize("scored", [True, False], ids=["scored", "no-scores"])

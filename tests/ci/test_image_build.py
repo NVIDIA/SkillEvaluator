@@ -146,11 +146,51 @@ def test_pull_requests_read_but_never_write_the_layer_cache():
         assert step["with"]["context"] == "."
         assert step["with"]["file"] == "ci/Dockerfile.tier1"
         assert step["with"]["load"] == "true" and "push" not in step["with"]
-    # These events run in main's cache scope on input that a pull request controls.
+    # Privileged events must never execute PR-controlled image/cache code.
     for path in (ROOT / ".github/workflows").glob("*.yml"):
-        triggers = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)["on"]
+        document = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+        triggers = document["on"]
         triggers = [triggers] if isinstance(triggers, str) else triggers
-        assert {"pull_request_target", "workflow_run", "issue_comment"}.isdisjoint(triggers), path.name
+        assert "pull_request_target" not in triggers, path.name
+        if "issue_comment" in triggers:
+            # NVSkills requests pass metadata to an immutable trusted service;
+            # they must not gain local steps, PR checkouts, or cache writers.
+            assert path.name == "request-nvskills-ci.yml"
+            assert set(triggers) == {"issue_comment", "pull_request", "push"}
+            assert document["on"]["issue_comment"] == {"types": ["created"]}
+            assert document["permissions"] == {"contents": "read"}
+            assert set(document["jobs"]) == {"request"}
+            caller = document["jobs"]["request"]
+            assert set(caller) == {"if", "permissions", "uses", "secrets"}
+            assert re.fullmatch(r"NVIDIA/skills/\.github/workflows/team-request\.yml@[0-9a-f]{40}", caller["uses"])
+            assert caller["permissions"] == {"contents": "read", "pull-requests": "read", "statuses": "read"}
+            assert caller["secrets"] == {"NVSKILLS_CI_DISPATCH_TOKEN": "${{ secrets.NVSKILLS_CI_DISPATCH_TOKEN }}"}
+        if "workflow_run" in triggers:
+            # The consumer listener calls only the immutable trusted publishers;
+            # it has no local steps, candidate checkout or image build/cache job.
+            assert path.name == "skill-feedback-all-tiers.yml"
+            assert set(triggers) == {"workflow_run"}
+            publishers = {"feedback": "feedback-all-tiers.yml", "benchmarks": "publish-benchmarks.yml"}
+            assert set(document["jobs"]) == set(publishers)
+            feedback = document["jobs"]["feedback"]
+            source = feedback["uses"].rsplit("@", 1)[1]
+            for name, publisher in publishers.items():
+                caller = document["jobs"][name]
+                expected_keys = {"uses", "with", "permissions"} if name == "benchmarks" else {"uses", "with"}
+                assert set(caller) == expected_keys
+                assert re.fullmatch(
+                    rf"NVIDIA/SkillEvaluator/\.github/workflows/{re.escape(publisher)}@[0-9a-f]{{40}}",
+                    caller["uses"],
+                )
+                assert caller["uses"].rsplit("@", 1)[1] == source
+                assert caller["with"]["tools-repository"] == "NVIDIA/SkillEvaluator"
+                assert caller["with"]["tools-ref"] == source
+                assert caller["with"] == feedback["with"]
+            assert document["jobs"]["benchmarks"]["permissions"] == {
+                "contents": "write",
+                "actions": "read",
+                "pull-requests": "write",
+            }
 
 
 def test_release_builds_reuse_no_cached_layers():

@@ -27,6 +27,7 @@ from skillevaluator.reporting import (
     MarkdownReporter,
     SARIFReporter,
 )
+from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION
 from skillevaluator.tier1.commands import emit_reports
 
 _SKILLSPECTOR_2_12_LLM_PROVENANCE = Path(__file__).parents[1] / "fixtures" / "skillspector-2.12.0-llm-provenance.json"
@@ -214,8 +215,8 @@ class TestCLIReporter:
         output = CLIReporter().render_all([result])
 
         assert "SKIP" in output
-        assert "Required validations passed" in output
-        assert "live evaluation skipped" in output
+        assert "Passed required checks" in output
+        assert "1 skipped" in output
 
     @pytest.mark.parametrize(
         ("baseline", "lift", "expected_baseline", "expected_lift"),
@@ -380,7 +381,7 @@ class TestCLIReporter:
 
         assert result.passed is True
         assert "same-name similarity match" in output
-        assert "All validations passed" in output
+        assert "Passed required checks" in output
 
     def test_render_finding_shows_both_related_paths(self) -> None:
         result = _similarity_result()
@@ -504,6 +505,116 @@ class TestJSONReporter:
         assert data["overall_passed"] is False
         assert data["total_validators"] == 2
         assert len(data["results"]) == 2
+
+    @staticmethod
+    def _clean_schema_result() -> ValidationResult:
+        """A single-skill schema result with no finding, as a clean skill gives."""
+        result = ValidationResult(
+            validator_name="Schema & Repository Governance",
+            validator_description="Validate SKILL.md frontmatter and repository structure",
+        )
+        result.add_success("manifest_exists", "Found skill manifest: SKILL.md")
+        result.add_success("frontmatter_valid", "Valid frontmatter for skill 'simple'")
+        result.add_success("naming_convention", "Folder name 'simple' follows kebab-case convention")
+        return result
+
+    def test_render_all_names_the_explicit_skill_of_a_clean_single_skill_run(self) -> None:
+        data = json.loads(
+            JSONReporter(
+                include_timestamp=False,
+                target_path="https://github.com/example/skills/tree/main/skills/simple",
+                explicit_skill_name="simple",
+            ).render_all([self._clean_schema_result()])
+        )
+
+        assert data["skills"] == [{"name": "simple", "passed": True, "issue_count": 0}]
+
+    def test_render_all_names_the_skill_at_a_local_target_path(self, tmp_path: Path) -> None:
+        skill = tmp_path / "simple"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("---\nname: simple\n---\n", encoding="utf-8")
+
+        data = json.loads(
+            JSONReporter(include_timestamp=False, target_path=str(skill)).render_all([self._clean_schema_result()])
+        )
+
+        assert [entry["name"] for entry in data["skills"]] == ["simple"]
+        assert data["target_path"] == str(skill)
+
+    def test_render_all_records_the_evaluator_version_and_target(self, success_result: ValidationResult) -> None:
+        from skillevaluator import __version__
+
+        target = "https://github.com/example/skills/tree/main/skills/test-skill"
+        data = json.loads(JSONReporter(include_timestamp=False, target_path=target).render_all([success_result]))
+        programmatic = json.loads(JSONReporter(include_timestamp=False).render_all([success_result]))
+
+        assert data["version"] == __version__
+        assert data["target_path"] == target
+        assert programmatic["version"] == __version__
+        assert programmatic["target_path"] is None
+
+    def test_render_all_lists_the_html_top_issues_without_the_html_anchor(
+        self, mixed_results: list[ValidationResult]
+    ) -> None:
+        output = JSONReporter(include_timestamp=False).render_all(mixed_results)
+        data = json.loads(output)
+        html_rows = _html_report_data(HTMLReporter(include_timestamp=False).render_all(mixed_results))["top_issues"]
+
+        assert [(row["message"], row["severity"], row["total_count"]) for row in data["top_issues"]] == [
+            ("AWS Access Key ID detected", "critical", 1),
+            ("Generic API key pattern detected", "high", 1),
+        ]
+        assert all(
+            set(row) == {"message", "severity", "total_count", "skills_affected", "category", "suggestion"}
+            for row in data["top_issues"]
+        )
+        assert data["top_issues"] == [
+            {key: value for key, value in row.items() if key != "issue_key"} for row in html_rows
+        ]
+        # The anchor hashes finding text, which CI redaction cannot refresh.
+        assert all(row["issue_key"] not in output for row in html_rows)
+
+    def test_top_issues_cover_every_tier_while_the_html_panel_lists_tier1(
+        self, success_result: ValidationResult
+    ) -> None:
+        results = [success_result, _similarity_result(severity=Severity.HIGH)]
+
+        data = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+        html = HTMLReporter(include_timestamp=False).render_all(results)
+
+        assert [row["message"] for row in data["top_issues"]] == ["same-name similarity match"]
+        assert data["top_issues"] == [
+            {key: value for key, value in row.items() if key != "issue_key"}
+            for row in _html_report_data(html)["top_issues"]
+        ]
+        # The HTML summary panel lists the Tier 1 rows only.
+        assert "same-name similarity match" not in _html_tab(html, "tier1")
+
+    def test_gating_tiers_record_each_validator_policy(self) -> None:
+        schema = ValidationResult(validator_name="Schema & Repository Governance")
+        schema.metadata["gating"] = {"tier": 1, "blocking": True}
+        blocking_dedup = ValidationResult(validator_name="Context Deduplication")
+        blocking_dedup.metadata["gating"] = {"tier": 2, "blocking": True}
+        advisory_dedup = ValidationResult(validator_name="Inter-Skill Deduplication")
+        advisory_dedup.metadata["gating"] = {"tier": 2, "blocking": False}
+
+        data = json.loads(JSONReporter(include_timestamp=False).render_all([schema, blocking_dedup, advisory_dedup]))
+
+        assert data["gating"]["tiers"] == {
+            "1": {
+                "blocking": True,
+                "validators": ["Schema & Repository Governance"],
+                "validator_policies": [{"validator": "Schema & Repository Governance", "blocking": True}],
+            },
+            "2": {
+                "blocking": True,
+                "validators": ["Context Deduplication", "Inter-Skill Deduplication"],
+                "validator_policies": [
+                    {"validator": "Context Deduplication", "blocking": True},
+                    {"validator": "Inter-Skill Deduplication", "blocking": False},
+                ],
+            },
+        }
 
     def test_render_all_persists_typed_rubric_execution_metadata(self) -> None:
         result = ValidationResult(
@@ -937,7 +1048,7 @@ def test_tier1_dashboard_reconciles_only_tier1_findings() -> None:
     tier_cards = html.split('class="tier-cards', 1)[1].split('<section class="exec-summary', 1)[0]
     assert re.search(r"<strong>1</strong> finding</span>", tier_cards)
     assert '<span class="tier-card-sev-pill high">1 high</span>' in tier_cards
-    assert re.search(r"<strong>1</strong> duplicate\(s\)</span>", tier_cards)
+    assert re.search(r"<strong>1</strong> finding\(s\)</span>", tier_cards)
     # The gate policy counts each tier's unique findings.
     gate_policy = html.split('class="gate-policy"', 1)[1].split("</div>", 1)[0]
     assert "0 critical · 2 high · 0 medium · 0 low" in gate_policy
@@ -1155,6 +1266,40 @@ def test_folded_pii_finding_in_a_folder_run_counts_each_location_once(tmp_path) 
 
     markdown = MarkdownReporter().render_all([result])
     assert re.search(rf"\| `{finding.finding_id}` \| HIGH \| [^|]+ \| 2 \| PII Scan \|", markdown)
+
+
+def test_top_issues_count_a_folded_pii_finding_as_one_record(tmp_path) -> None:
+    from skillevaluator.validators.security import SecurityValidator
+
+    skill = tmp_path / "simple"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: simple\ndescription: A sample skill.\n---\n# Simple\n\n\n"
+        "See /Users/johndoe/a.\nSee /Users/johndoe/b.\nSee /Users/johndoe/c.\n",
+        encoding="utf-8",
+    )
+    result = SecurityValidator(use_llm=False).validate_pii_only(skill)
+    result.validator_name = "PII Scan"
+    [finding] = [finding for finding in result.findings if "/Users/johndoe/" in finding.message]
+    assert finding.metadata["occurrence_count"] == 3
+
+    data = json.loads(JSONReporter(include_timestamp=False, target_path=str(skill)).render_all([result]))
+
+    # finding_groups lists each folded location; top_issues counts raw finding
+    # records, the unit of skills[].issue_count, so the folded finding counts once.
+    [group] = [group for group in data["finding_groups"] if group["finding_id"] == finding.finding_id]
+    assert len(group["occurrences"]) == 3
+    [issue] = [issue for issue in data["top_issues"] if "/Users/johndoe/" in issue["message"]]
+    assert issue["total_count"] == 1
+    assert data["skills"] == [{"name": "simple", "passed": False, "issue_count": len(result.findings)}]
+    assert sum(issue["total_count"] for issue in data["top_issues"]) == data["skills"][0]["issue_count"]
+
+    # The JSON field table in the CI docs states that unit.
+    docs = (Path(__file__).resolve().parents[2] / "docs" / "ci-integration.mdx").read_text(encoding="utf-8")
+    rows = {line.split(" | ", 1)[0]: line for line in docs.splitlines() if line.startswith("| `")}
+    assert "`total_count` of raw finding records" in rows["| `top_issues`"]
+    assert "raw occurrences" not in rows["| `top_issues`"]
+    assert "`issue_count` counts raw finding records" in rows["| `skills`"]
 
 
 def test_finding_group_occurrences_do_not_copy_the_source_line() -> None:
@@ -1716,7 +1861,7 @@ class TestTier3HarborCanonicalPayload:
         cli_output = CLIReporter().render_all([result])
         assert "SKIP" in cli_output
         assert "Validation failed" not in cli_output
-        assert "Required validations passed" in cli_output
+        assert "Passed required checks" in cli_output
 
     def test_legacy_summary_without_execution_status_is_unknown(self, tmp_path: Path) -> None:
         from skillevaluator.tier3.harbor.report_data import load_agent_data
@@ -1964,6 +2109,32 @@ class TestGatingSplit:
         assert "same-name similarity match" in tier2
         assert "Intra-skill check was not run" not in tier2
 
+    @pytest.mark.parametrize("tier", [2, 3])
+    @pytest.mark.parametrize("comprehensive", [False, True])
+    def test_emit_reports_uses_recorded_tier_for_custom_validator_names(
+        self, tmp_path: Path, tier: int, comprehensive: bool
+    ) -> None:
+        result = _similarity_result(severity=Severity.HIGH) if tier == 2 else _failed_result("Custom live evaluation")
+        result.validator_name = "Custom recorded check"
+        result.metadata["gating"] = {"tier": tier, "blocking": tier == 2}
+        before = JSONReporter(include_timestamp=False).render_all([result])
+        scope = {"requested_tiers": (tier,), "displayed_tiers": (1, 2, 3)} if comprehensive else {}
+
+        assert (
+            emit_reports([result], report_formats=("html",), output_dir=tmp_path, basename="recorded", **scope) is False
+        )
+
+        output = (tmp_path / "recorded.html").read_text(encoding="utf-8")
+        panel = _html_tab(output, f"tier{tier}")
+        assert "No check evidence was recorded for this tier." not in panel
+        if tier == 2:
+            assert "same-name similarity match" in panel
+        else:
+            assert 'class="tab-content active"' in panel
+        if not comprehensive:
+            assert 'id="tab-tier1"' not in output
+        assert JSONReporter(include_timestamp=False).render_all([result]) == before
+
     def test_default_html_reporter_classifies_similarity_as_tier2(self) -> None:
         output = HTMLReporter(include_timestamp=False).render_all([_similarity_result(severity=Severity.HIGH)])
 
@@ -2139,8 +2310,8 @@ class TestHTMLReporter:
         assert "performing well across evaluated dimensions" not in output
 
         markdown = MarkdownReporter(include_timestamp=False).render_all([result])
-        assert "composite lift = N/A" in markdown
-        assert "composite lift = +0.00" not in markdown
+        assert "Skill Lift = N/A" in markdown
+        assert "Skill Lift = +0.00" not in markdown
 
     def test_standalone_tier3_report_uses_skillevaluator_branding(self, tmp_path: Path) -> None:
         """Standalone Tier 3 HTML should use the canonical SkillEvaluator branding."""
@@ -2314,8 +2485,9 @@ class TestMarkdownReporter:
         """Tier 3 Markdown should include compact Harbor and evidence links."""
         output = MarkdownReporter(include_timestamp=False).render_all([_tier3_harbor_result()])
 
-        assert "**Harbor logs:** [Open Harbor logs](" in output
-        assert "**Harbor analysis:** [Open Harbor analysis](" in output
+        assert re.search(
+            r"^- \*\*[^*]+:\*\* \[Harbor logs\]\(https://[^)]+\) · \[Harbor analysis\]\(", output, re.MULTILINE
+        )
         assert "https://harbor.example.test/jobs/log-analyzer" in output
         assert "Evidence: [View Step 9](" in output
         assert "log-analyzer-001?step=9" in output
@@ -2355,6 +2527,25 @@ class TestMarkdownReporter:
 
         assert "### Evaluator Scores" in output
         assert "| Accuracy | 0.90 | NO SCORE | NO SCORE |" in output
+
+    def test_markdown_names_skill_lift_and_pass_rate_difference(self) -> None:
+        result = _tier3_harbor_result()
+        agent_eval = result.metadata["agent_eval"]
+        agent_eval["composite_lift"] = 0.2
+        agent_eval["overall_lift"] = 0.2
+        agent_eval["attempt_policy"] = {"max_attempts": 2, "pass_threshold": 0.6}
+        agent_eval["pass_at_k"] = {
+            "with_skill": {"k": 2, "pass_threshold": 0.6, "rate": 0.75},
+            "without_skill": {"k": 2, "pass_threshold": 0.6, "rate": 0.5},
+            "lift": {"delta": 0.25},
+        }
+
+        output = MarkdownReporter(include_timestamp=False).render_all([result])
+
+        assert "Skill Lift = +0.20" in output
+        assert SKILL_LIFT_DEFINITION in output
+        assert "Pass@2 (supporting reliability" in output
+        assert "Pass-rate difference +25.0 percentage points" in output
 
     def test_render_tier3_normalized_evidence_uses_distinct_evidence_ids(self) -> None:
         result = _tier3_harbor_result()
@@ -2664,3 +2855,107 @@ class TestTopIssuesDeepLink:
             )
         )
         return result
+
+
+@pytest.mark.parametrize("reporter", [CLIReporter, MarkdownReporter, HTMLReporter])
+def test_all_harbor_jobs_are_navigable_without_attribution_guessing(reporter):
+    from copy import deepcopy
+
+    result = _tier3_harbor_result()
+    viewer = result.metadata["agent_eval"]["harbor_viewer"]
+    viewer["jobs"] += [
+        {
+            "url": "https://harbor.example.test/jobs/second",
+            "analysis_url": "https://harbor.example.test/analysis/second",
+            "name": "<job>[bad](x)",
+        },
+        {"url": "https://harbor.example.test/jobs/third"},
+        {"url": "https://harbor.example.test/jobs/second", "name": "duplicate"},
+        {"url": "javascript:alert(99)", "name": "unsafe"},
+    ]
+    original = deepcopy(result)
+    output = reporter().render_all([result])
+    assert "https://harbor.example.test/jobs/second" in output
+    assert "https://harbor.example.test/analysis/second" in output
+    assert "https://harbor.example.test/jobs/third" in output
+    assert "Job 3" in output
+    assert "Results" in output
+    assert "javascript:alert(99)" not in output
+    if reporter is HTMLReporter:
+        assert "&lt;job&gt;[bad](x)" in output
+        assert "<job>" not in output
+        panel = output.split('class="t3-harbor-panel"', 1)[1].split("</div>\n            </div>", 1)[0]
+        assert panel.count('href="https://harbor.example.test/jobs/second"') == 1
+    elif reporter is MarkdownReporter:
+        assert "&lt;job&gt;&#91;bad&#93;(x)" in output
+    else:
+        assert "<job>[bad](x)" in output
+    assert result == original
+
+
+def test_html_discloses_only_recorded_validated_provenance_without_changing_payload():
+    from copy import deepcopy
+
+    result = _tier3_harbor_result()
+    ae = result.metadata["agent_eval"]
+    ae["evaluator_version"] = "recorded-evaluator-v1"
+    ae["dataset_digest"] = "sha256:" + "a" * 64
+    ae["dataset_digest_algorithm"] = "skill-evaluator-dataset-snapshot/1"
+    ae["agents"] = {"agent": {"model": "recorded-model-v1"}}
+    result.metadata["evaluated_source"] = {"repository": "org/skill", "commit": "b" * 40}
+    original = deepcopy(result)
+    output = HTMLReporter(include_timestamp=False).render_all([result])
+    diagnostics = output.split('id="tier3-page-provenance"', 1)[1].split("</section>", 1)[0]
+    assert "Recorded evaluation provenance" in diagnostics
+    assert "recorded-evaluator-v1" in diagnostics
+    assert "recorded-model-v1" in diagnostics
+    assert "sha256:" + "a" * 64 in diagnostics
+    assert "org/skill" in diagnostics and "b" * 40 in diagnostics
+    assert result == original
+
+
+@pytest.mark.parametrize("reporter", [CLIReporter, MarkdownReporter, HTMLReporter])
+@pytest.mark.parametrize("summary_only", [False, True])
+def test_legacy_analysis_only_harbor_evidence_is_available(reporter, summary_only):
+    result = _tier3_harbor_result()
+    ae = result.metadata["agent_eval"]
+    ae.pop("harbor_viewer", None)
+    viewer = {"analysis_url": "https://harbor.example.test/analysis-only"}
+    if summary_only:
+        ae["summary"]["harbor_viewer"] = viewer
+    else:
+        ae["harbor_viewer"] = viewer
+    output = reporter().render_all([result])
+    assert "https://harbor.example.test/analysis-only" in output
+    assert "Run analysis" in output
+
+
+@pytest.mark.parametrize("colored", [False, True])
+def test_cli_harbor_job_labels_remain_neutral_and_literal(colored):
+    from io import StringIO
+
+    from rich.console import Console
+
+    stream = StringIO()
+    console = Console(
+        file=stream, force_terminal=colored, color_system="standard" if colored else None, record=True, width=160
+    )
+    payload = {
+        "harbor_viewer": {
+            "jobs": [
+                {
+                    "name": "Job 3 [bad]",
+                    "url": "https://example.test/jobs/3",
+                    "analysis_url": "https://example.test/analysis/3",
+                }
+            ]
+        }
+    }
+    CLIReporter._print_harbor_artifacts(payload, console)
+    output = stream.getvalue()
+    assert "Job 3 [bad]" in output
+    assert "Harbor logs: Results https://example.test/jobs/3" in output
+    assert "Harbor analysis: https://example.test/analysis/3" in output
+    assert "Job 3 [bad]" in console.export_text()
+    if colored:
+        assert "\x1b[1mJob 3 [bad]\x1b[0m" in output

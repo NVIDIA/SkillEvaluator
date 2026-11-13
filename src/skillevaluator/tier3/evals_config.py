@@ -46,6 +46,7 @@ _HARBOR_KEYS = {
     "max_cases",
     "timeout_multiplier",
     "agent_runtime_preflight",
+    "tolerate_baseline_timeouts",
     "agent_workdir",
     "resources",
     "runtime_env",
@@ -53,6 +54,11 @@ _HARBOR_KEYS = {
     "passthrough_env",
     "setup_commands",
     "agents",
+    "max_agent_tokens",
+    "max_judge_calls",
+    "max_attempts_total",
+    "max_cost_usd",
+    "price_file",
 }
 HARBOR_TASK_SOURCES = {"auto", "evals_json", "native_harbor"}
 # Harbor 0.22 multiplies its 600-second default verifier/build timeout by
@@ -226,6 +232,12 @@ def _validate_config(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
                 config_path,
                 "harbor.agent_runtime_preflight",
             )
+        if "tolerate_baseline_timeouts" in harbor_raw:
+            harbor["tolerate_baseline_timeouts"] = _bool(
+                harbor_raw["tolerate_baseline_timeouts"],
+                config_path,
+                "harbor.tolerate_baseline_timeouts",
+            )
         if "agent_workdir" in harbor_raw:
             harbor["agent_workdir"] = _non_empty_string(
                 harbor_raw["agent_workdir"],
@@ -252,6 +264,17 @@ def _validate_config(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
             harbor["pre_agent_setup"] = _pre_agent_setup(pre_agent_setup_value, config_path)
         if "agents" in harbor_raw:
             harbor["agents"] = _agents(harbor_raw["agents"], config_path)
+        for name in ("max_agent_tokens", "max_judge_calls", "max_attempts_total"):
+            if name in harbor_raw:
+                harbor[name] = _int_at_least(harbor_raw[name], 0, config_path, f"harbor.{name}")
+        if "max_cost_usd" in harbor_raw:
+            harbor["max_cost_usd"] = _float_between(
+                harbor_raw["max_cost_usd"], 0.0, math.inf, config_path, "harbor.max_cost_usd"
+            )
+        if "price_file" in harbor_raw:
+            harbor["price_file"] = _non_empty_string(harbor_raw["price_file"], config_path, "harbor.price_file")
+        if "max_cost_usd" in harbor and "price_file" not in harbor:
+            raise EvalsConfigError(f"{config_path}: harbor.max_cost_usd requires harbor.price_file")
 
         out["harbor"] = harbor
 

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import unicodedata
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta, timezone
@@ -13,10 +14,16 @@ from pathlib import Path
 import pytest
 from scripts.ci import check_public_benchmarks as benchmark_gate
 
+from skillevaluator.evaluation.tier3_report import _validation_result_from_payload, build_agent_eval_payload
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.publication_evidence import stamp_publication_evidence
 from skillevaluator.reporting import BenchmarkReporter
+from skillevaluator.reporting.base import agent_eval_dimension_verdict
 from skillevaluator.reporting.benchmark import _publication_safe_inline, _verdict_callout
+from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION
+from skillevaluator.tier3.harbor.collector import collect_harbor_results
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_SCORE_POLICY, overall_score
+from skillevaluator.tier3.harbor.report_data import load_agent_data
 
 PASS_GOLDEN = Path(__file__).resolve().parent / "benchmark_pass" / "BENCHMARK.md"
 FAIL_GOLDEN = Path(__file__).resolve().parent / "benchmark_fail" / "BENCHMARK.md"
@@ -184,6 +191,11 @@ def _live_tier3_result() -> ValidationResult:
             "evaluator_container_revision": "ghcr.io/nvidia/skillevaluator@sha256:0117bc2e3e54da4244a656466526c5b1b5a559ea0117bc2e3e54da4244a65646",
         },
         "attempt_policy": {"max_attempts": 3, "pass_threshold": 0.5, "stop_on_pass": False},
+        "pass_at_k": {
+            "with_skill": {"k": 3, "pass_threshold": 0.5, "rate": 0.75},
+            "without_skill": {"k": 3, "pass_threshold": 0.5, "rate": 0.5},
+            "lift": {"delta": 0.25},
+        },
         "agents": {
             "claude-code": {
                 "model": "claude-sonnet",
@@ -427,6 +439,37 @@ def test_benchmark_requires_tier3_by_default() -> None:
     assert "- Tasks: not recorded (legacy or non-live result)" in rendered
     assert "- Attempts per task: not recorded (legacy or non-live result)" in rendered
     assert "- Environment: not recorded (legacy or non-live result)" in rendered
+
+
+def test_benchmark_records_the_writer_version_when_no_tier3_version_is_recorded() -> None:
+    rendered = BenchmarkReporter(
+        include_timestamp=False,
+        skill_name="demo-skill",
+        evaluator_version="1.2.3",
+    ).render_all(_deterministic_results())
+
+    assert "- Skill: `demo-skill`" in rendered
+    assert "- Evaluator version: `1.2.3`" in rendered
+    assert "- Evaluation date: not recorded (legacy or non-live result)" in rendered
+
+
+def test_benchmark_keeps_the_recorded_tier3_evaluator_version() -> None:
+    rendered = BenchmarkReporter(include_timestamp=False, evaluator_version="9.9.9").render_all(
+        [*_deterministic_results(), _live_tier3_result()]
+    )
+
+    assert "- Evaluator version: `0.8.2`" in rendered
+    assert "9.9.9" not in rendered
+
+
+@pytest.mark.parametrize("retired_identity", ["SkillsEval", "SkillsE\u0301val"])
+def test_benchmark_writer_version_is_normalized_like_a_recorded_one(retired_identity: str) -> None:
+    rendered = BenchmarkReporter(include_timestamp=False, evaluator_version=retired_identity).render_all(
+        _deterministic_results()
+    )
+
+    assert retired_identity not in rendered
+    assert "- Evaluator version: `SkillEvaluator`" in rendered
 
 
 def test_tier1_only_cli_result_cannot_publish_without_tier3() -> None:
@@ -1092,6 +1135,8 @@ def test_verdict_callout_falls_back_for_future_statuses() -> None:
 
 def test_benchmark_pass_card_matches_golden() -> None:
     rendered = BenchmarkReporter(include_timestamp=True).render_all([*_deterministic_results(), _live_tier3_result()])
+    assert SKILL_LIFT_DEFINITION not in rendered
+    assert "Pass@3 (supporting reliability" not in rendered
     assert rendered == PASS_GOLDEN.read_text(encoding="utf-8")
     assert "| Tier 1 | Static validation | **PASSED** |" in rendered
     assert "| Tier 2 | Semantic deduplication | **PASSED WITH OBSERVATIONS** |" in rendered
@@ -1126,6 +1171,148 @@ def test_benchmark_no_baseline_never_fabricates_uplift() -> None:
     assert "Publication Recommendation" not in rendered
 
 
+# The baseline has no skill to discover or route to, so the verifier records
+# skill_execution and skill_efficiency as not applicable in that arm.
+_DEFAULT_RUN_SCORES = {
+    "with": {
+        "security": 1.0,
+        "skill_execution": 1.0,
+        "skill_efficiency": 0.9,
+        "accuracy": 0.9,
+        "goal_accuracy": 1.0,
+        "behavior_check": 0.8,
+    },
+    "without": {
+        "security": 1.0,
+        "skill_execution": None,
+        "skill_efficiency": None,
+        "accuracy": 0.5,
+        "goal_accuracy": 0.4,
+        "behavior_check": 0.5,
+    },
+}
+
+
+def _collected_default_run(tmp_path: Path) -> ValidationResult:
+    """Collect a default run with its baseline from Harbor verifier output and build its Tier 3 result."""
+    cases = ["case-1", "case-2"]
+    for arm, scores in _DEFAULT_RUN_SCORES.items():
+        job = tmp_path / "jobs" / f"demo-skill-codex-{arm}"
+        trials = [f"{case}__attempt1" for case in cases]
+        for case, trial in zip(cases, trials, strict=True):
+            row = {
+                **scores,
+                "entry_id": case,
+                "metric_set": DEFAULT_METRIC_SET,
+                "score_policy": DEFAULT_SCORE_POLICY,
+                "details": {
+                    metric: {"score": None, "status": "not_applicable", "reason": "No skill under test"}
+                    for metric, value in scores.items()
+                    if value is None
+                },
+            }
+            verifier = job / trial / "verifier"
+            verifier.mkdir(parents=True)
+            numeric = {metric: value for metric, value in scores.items() if value is not None}
+            (verifier / "reward.json").write_text(json.dumps({**numeric, "overall": overall_score(row)}))
+            (verifier / "skill_evaluator_reward.json").write_text(json.dumps(row))
+        idle = ("n_errored_trials", "n_running_trials", "n_pending_trials", "n_cancelled_trials", "n_retries")
+        stats = {
+            "n_completed_trials": len(trials),
+            **dict.fromkeys(idle, 0),
+            "evals": {"codex": {"n_trials": len(trials), "n_errors": 0, "reward_stats": {"reward": {"1.0": trials}}}},
+        }
+        (job / "result.json").write_text(json.dumps({"n_total_trials": len(trials), "stats": stats}))
+    collect_harbor_results(
+        "demo-skill",
+        ["codex"],
+        tmp_path / "results",
+        tmp_path / "jobs",
+        expected_cases=len(cases),
+        expected_case_ids=cases,
+        expected_trials=len(cases),
+    )
+    payload = build_agent_eval_payload(
+        "demo-skill",
+        load_agent_data(tmp_path / "results"),
+        dataset=[{"id": case, "expected_skill": "demo-skill"} for case in cases],
+        attempt_policy={"max_attempts": 1, "pass_threshold": 0.5, "stop_on_pass": False},
+        run_config={"agents": {"codex": {"model": "gpt-codex"}}},
+        env_mode="docker",
+        evaluated_at="2026-07-24T12:30:00+00:00",
+        evaluator_version="0.8.2",
+        run_id=_TIER3_RUN_ID,
+        publication_target=dict(_PUBLICATION_TARGET),
+        use_llm_judge=False,
+    )
+    result = _validation_result_from_payload(payload)
+    assert result is not None
+    return _bind_target(result)
+
+
+def test_benchmark_baseline_without_the_skill_can_pass(tmp_path: Path) -> None:
+    tier3 = _collected_default_run(tmp_path)
+    agent = tier3.metadata["agent_eval"]["agents"]["codex"]
+    # Discoverability and Efficiency have no baseline, so the lift compares the
+    # other three dimensions: 0.9333 - 0.65, not 0.94 - 0.65.
+    assert agent["not_applicable_metrics"]["without_skill"] == ["skill_execution", "skill_efficiency"]
+    assert [row["id"] for row in agent["dimensions"] if row["baseline"] is None] == ["discoverability", "efficiency"]
+    assert (agent["with_skill"], agent["baseline"], agent["lift"]) == (0.94, 0.65, 0.2833)
+
+    rendered = BenchmarkReporter(include_timestamp=True).render_all([*_deterministic_results(), tier3])
+    benchmark = tmp_path / "BENCHMARK.md"
+    benchmark.write_text(rendered, encoding="utf-8")
+    _files, offenders = benchmark_gate.find_offenders([benchmark])
+
+    assert "**Overall verdict: PASS" in rendered
+    assert "| Tier 3 | Live agent evaluation | **PASS** |" in rendered
+    # The Overall row shows the two scores the lift subtracts, 0.9333 and 0.65.
+    assert "| Overall | 65.0% → 93.3% (+28.3 points) |" in rendered
+    assert "Overall for codex compares only the dimensions both arms scored" in rendered
+    # The baseline ran, it just has no skill to discover or route to.
+    assert "| Discoverability | 100.0% — baseline N/A (no skill in the baseline arm) |" in rendered
+    assert "| Efficiency | 90.0% — baseline N/A (no skill in the baseline arm) |" in rendered
+    assert "baseline not run" not in rendered
+    assert offenders == []
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        # Without the applicability record, a missing baseline is missing evidence.
+        {"not_applicable_metrics": {"without_skill": []}},
+        # The baseline scored accuracy, so Correctness needs its baseline.
+        {"correctness": {"baseline": None, "lift": None}},
+        # A dimension the baseline could not score has no lift either.
+        {"efficiency": {"lift": 0.0}},
+        # A five-dimension score minus a three-dimension baseline.
+        {"agent": {"lift": 0.29}},
+        # accuracy is not applicable when a case has no reference, which holds for
+        # both arms. A baseline that alone records it is missing its Correctness
+        # score, even when its baseline and lift add up over Security and Effectiveness.
+        {
+            "not_applicable_metrics": {"without_skill": ["skill_execution", "skill_efficiency", "accuracy"]},
+            "correctness": {"baseline": None, "lift": None},
+            "agent": {"baseline": 0.725, "lift": 0.225},
+        },
+    ],
+)
+def test_benchmark_baseline_without_the_skill_still_needs_matching_evidence(
+    tmp_path: Path,
+    changes: dict[str, dict[str, object]],
+) -> None:
+    payload = _collected_default_run(tmp_path).metadata["agent_eval"]
+    agent = payload["agents"]["codex"]
+    assert agent_eval_dimension_verdict(payload) == "pass"
+
+    containers = {"agent": agent, "not_applicable_metrics": agent["not_applicable_metrics"]}
+    containers.update((row["id"], row) for row in agent["dimensions"])
+    for target, change in changes.items():
+        containers[target].update(change)
+
+    assert agent_eval_dimension_verdict(payload) is None
+
+
 def test_benchmark_zero_and_negative_lift_use_percentage_points() -> None:
     from skillevaluator.reporting.benchmark import _score_transition, _score_transition_values
 
@@ -1137,7 +1324,7 @@ def test_benchmark_zero_and_negative_lift_use_percentage_points() -> None:
     assert _score_transition_values(0.50004, 0.500049) == "50.0% → 50.0% (±0.0 points)"
     assert _score_transition_values(0.500049, 0.50004) == "50.0% → 50.0% (±0.0 points)"
     assert _score_transition_values(None, 0.92) == "92.0% — baseline not run; uplift unavailable"
-    assert _score_transition_values(0.5, None) == "Not available"
+    assert _score_transition_values(0.5, None) == "Not scored with the skill — baseline 50.0%; uplift unavailable"
     assert _score_transition({"baseline": float("nan"), "with_skill": 0.92}) == "Not available"
     assert _score_transition({"baseline": 0.5, "with_skill": float("inf")}) == "Not available"
 

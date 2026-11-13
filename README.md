@@ -19,7 +19,7 @@ the [NVIDIA Verified Skills pipeline](https://github.com/NVIDIA/skills).
 
 ## Bring skill evaluation to your repository
 
-Check changed skills in GitHub or GitLab with Tier 1 quality checks, SkillSpector
+Check changed skills in GitHub or GitLab with quality checks, SkillSpector
 security scanning and reports. Choose folders and thresholds; no evaluator code
 to import.
 
@@ -173,7 +173,8 @@ Cite the paper and record the SkillEvaluator release or commit; see [CITATION.cf
 
 See [the documentation](https://docs.nvidia.com/skills/skillevaluator/) for
 setup, tier guides, reports, CI integration, CLI reference, and
-[performance dashboard](docs/reports.mdx#performance-dashboard).
+[performance dashboard](docs/reports.mdx#performance-dashboard). To let an agent run
+SkillEvaluator, install [`skills/skillevaluator/`](skills/skillevaluator/).
 
 ## Installation and third-party software
 

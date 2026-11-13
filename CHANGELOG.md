@@ -146,6 +146,33 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- An author value is no longer rejected for containing a Unicode joiner. The
+  character guard matched all of category `C`, so ZWNJ (U+200C) and ZWJ
+  (U+200D), which Persian, Arabic and Devanagari names need to render, plus a
+  soft hyphen and any code point unassigned in the running interpreter's
+  Unicode data, all failed `SCHEMA.author_format` at HIGH under both bundled
+  profiles. The guard now rejects controls, surrogates and private-use code
+  points plus the bidirectional marks, embeddings, overrides, isolates and the
+  byte-order mark, and its message says so. An unassigned code point no longer
+  makes the verdict depend on the interpreter's Unicode version.
+- A bare email address whose domain has no dot, such as `root@buildhost`, is
+  reported as a malformed author rather than as "Author has no email address".
+  The bare-email pattern required a dotted domain, so an intranet address took
+  the plain-attribution path. The discriminator is now a word character on each
+  side of the `@`, which still leaves a social handle such as
+  `Jane Doe (@jdoe)`, a bare `@jdoe` or `Platform Team @ Example` alone, and
+  now also catches a non-ASCII local part.
+- An advisory carried from a passing skill into a collection result now names
+  the skill it came from, in its location and in `metadata.collection_skill`.
+  The findings were preserved but attributed to nothing, so a collection run
+  could not say which member produced one. The per-skill roll-up also stops
+  reporting "All schema and structure checks passed" next to a list of that
+  skill's advisories.
+- A `catalog-summary.json` entry lists the catalog-wide findings behind its
+  verdict under `catalog_findings`. The duplicate `metadata.id` check already
+  failed the member and bumped its `severity_counts`, but a catalog validates
+  each skill on its own, so nothing in that skill's output said what caused
+  either.
 - Folder validation preserves author and metadata ID advisories from passing
   skills. Catalog summaries include duplicate ID severity counts and consistent
   member verdicts, while explicitly labeling linked reports as single-skill

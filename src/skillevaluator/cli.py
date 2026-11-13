@@ -1576,12 +1576,30 @@ def _catalog_skill_entry(
 def _catalog_entry_with_metadata_id_conflicts(
     skill: dict[str, object], conflicts: list[dict[str, object]]
 ) -> dict[str, object]:
-    """Project catalog findings onto a member, retaining its independent report verdict."""
+    """Project catalog findings onto a member, retaining its independent report verdict.
+
+    The findings themselves are listed under ``catalog_findings`` so the
+    verdict and the severity bump above can be traced back to what caused
+    them: a catalog validates each skill on its own, so these findings exist
+    nowhere else in that skill's output.
+    """
     entry = dict(skill)
+    recorded: list[dict[str, object]] = []
     for conflict in conflicts:
         members = conflict.get("skills")
         if not isinstance(members, list) or entry.get("name") not in members:
             continue
+        names = [str(member) for member in members]
+        others = ", ".join(name for name in names if name != entry.get("name"))
+        recorded.append(
+            {
+                "category": "SCHEMA",
+                "check_name": "metadata_id_duplicate",
+                "severity": conflict.get("severity"),
+                "blocking": bool(conflict.get("blocking")),
+                "message": f"metadata.id '{conflict.get('metadata_id')}' is also declared by {others}",
+            }
+        )
         severity = conflict.get("severity")
         if severity in ("critical", "high", "medium", "low"):
             raw_counts = entry.get("severity_counts")
@@ -1593,6 +1611,8 @@ def _catalog_entry_with_metadata_id_conflicts(
             entry["passed"] = False
             entry["overall_passed"] = False
             entry["overall_status"] = "failed"
+    if recorded:
+        entry["catalog_findings"] = recorded
     return entry
 
 

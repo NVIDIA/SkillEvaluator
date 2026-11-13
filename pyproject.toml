@@ -38,11 +38,14 @@ license-files = [
 # Base install is static-validation capable (Tier 1) and must NOT pull Harbor
 # or LLM clients. Those live behind the extras below.
 dependencies = [
+    # Tier 1 Code Risk Analysis and Dependency Vulnerability Audit scanners.
+    "bandit>=1.9.4",
     "click>=8.3.3,<9",
     "idna>=3.10,<4",
     "jinja2>=3.1",
     "markdown-it-py>=4.2,<5",
     "packaging>=24",
+    "pip-audit>=2.10.0",
     "pydantic>=2.11.0",
     "pyyaml>=6.0",
     # Dataset-authored signal patterns require a per-match timeout.
@@ -75,11 +78,9 @@ tier3 = [
     # PYTHON_DOTENV_DISABLED, which keeps Harbor from loading .env files, needs 1.2.0.
     "python-dotenv>=1.2.0",
 ]
-# Static security scanners (floors raised to the established release baseline).
-security = [
-    "bandit>=1.9.4",
-    "pip-audit>=2.10.0",
-]
+# Bandit and pip-audit are core dependencies; the extra stays so existing
+# `skillevaluator[security]` installs keep resolving.
+security = []
 # Verify GitHub-signed execution receipts for the optional CI report publisher.
 publisher = [
     "pyjwt[crypto]>=2.13.0",

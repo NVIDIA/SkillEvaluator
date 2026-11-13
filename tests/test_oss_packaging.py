@@ -392,20 +392,22 @@ def test_public_docs_explain_the_single_nvidia_credential_skillspector_path() ->
     assert "Only the selected provider settings and basic process environment" in configuration
 
 
-def test_security_extra_uses_pip_audit_without_bundling_safety() -> None:
+def test_core_dependencies_ship_tier1_python_scanners_without_safety() -> None:
     project = _project()
-    security = project["project"]["optional-dependencies"]["security"]
+    core = project["project"]["dependencies"]
     lock_names = {package["name"] for package in _lock()["package"]}
 
-    assert any(requirement.startswith("pip-audit") for requirement in security)
-    assert not any(requirement.startswith("safety") for requirement in security)
+    assert any(requirement.startswith("bandit") for requirement in core)
+    assert any(requirement.startswith("pip-audit") for requirement in core)
+    assert not any(requirement.startswith("safety") for requirement in core)
+    assert project["project"]["optional-dependencies"]["security"] == []
     assert "safety" not in lock_names
     assert "safety-schemas" not in lock_names
     assert "nltk" not in lock_names
 
 
-def test_security_extra_does_not_bundle_external_or_unused_scanner_dependencies() -> None:
-    security = [Requirement(raw) for raw in _project()["project"]["optional-dependencies"]["security"]]
+def test_core_dependencies_do_not_bundle_external_or_unused_scanner_dependencies() -> None:
+    security = [Requirement(raw) for raw in _project()["project"]["dependencies"]]
     lock_names = {package["name"] for package in _lock()["package"]}
 
     for external_scanner in ("semgrep", "skillspector"):

@@ -237,8 +237,8 @@ class ExternalTool:
         if self._configuration_error:
             return self._configuration_error
         bundled_scanner_hint = (
-            "Bundled with the security extra — reinstall with: "
-            'uv tool install "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"'
+            "Bundled with SkillEvaluator — reinstall with: "
+            'uv tool install --reinstall "skillevaluator @ git+https://github.com/NVIDIA/SkillEvaluator.git"'
         )
         hints = {
             "gitleaks": (

@@ -193,8 +193,12 @@ def build_conversation_summary(traj: dict[str, Any], question: str) -> str:
 
 
 _BEHAVIOR_EVIDENCE_MAX_CHARS = 4000
-_DEFAULT_BEHAVIOR_FINAL_RESPONSE_LIMIT = 800
-_DEFAULT_BEHAVIOR_CHECK_BUDGET = 8000
+# A realistic final answer runs to a few thousand characters, so the old 800
+# cap cut grading-relevant text out of the middle of ordinary answers (issue
+# #234). Allow a whole answer through, and keep the total budget finite by
+# reconciling it with the tool-history headroom in _behavior_check_budget.
+_DEFAULT_BEHAVIOR_FINAL_RESPONSE_LIMIT = 8000
+_DEFAULT_BEHAVIOR_CHECK_BUDGET = _DEFAULT_BEHAVIOR_FINAL_RESPONSE_LIMIT + 4000
 _DEFAULT_TOOL_HISTORY_HEADROOM = 4000
 _MIN_BEHAVIOR_HISTORY_HEADROOM = 1600
 _SECTION_COMPACT_TOOL_HISTORY = "COMPACT TOOL HISTORY"
@@ -224,6 +228,17 @@ def _behavior_check_budget() -> int:
     final_limit = _behavior_final_response_limit()
     base_budget = _env_positive_int("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", _DEFAULT_BEHAVIOR_CHECK_BUDGET)
     return max(base_budget, final_limit + _DEFAULT_TOOL_HISTORY_HEADROOM)
+
+
+def _behavior_user_request_limit() -> int:
+    """Return the behavior evidence allowance for the user request section.
+
+    The request the agent answered is required evidence, like the answer
+    itself, so it gets the same allowance instead of a fixed 800 characters.
+    It is still appended before the optional exploration output in the compact
+    tool history, so a long request costs history, never the final answer.
+    """
+    return _behavior_final_response_limit()
 
 
 _BEHAVIOR_WRITE_TOOLS = {
@@ -386,8 +401,11 @@ def build_behavior_evidence(
     file_changes = "\n\n".join(_collect_file_change_evidence(traj))
     final = get_final_response(traj)
     history = build_conversation_summary(traj, question)
+    user_request_limit = _behavior_user_request_limit()
     user_needed = (
-        min(800, len(_SECTION_USER_REQUEST) + len(question.strip()) + 2) if question and question.strip() else 0
+        min(user_request_limit, len(_SECTION_USER_REQUEST) + len(question.strip()) + 2)
+        if question and question.strip()
+        else 0
     )
     history_needed = len(_SECTION_COMPACT_TOOL_HISTORY) + len(history.strip()) + 2 if history and history.strip() else 0
     tail_needed = user_needed + (2 if user_needed and history_needed else 0) + history_needed
@@ -441,7 +459,7 @@ def build_behavior_evidence(
         _SECTION_USER_REQUEST,
         question,
         remaining,
-        section_limit=800,
+        section_limit=user_request_limit,
     )
 
     remaining = _append_section_with_budget(parts, _SECTION_COMPACT_TOOL_HISTORY, history, remaining)
@@ -971,17 +989,17 @@ def _build_verified_facts_section(facts: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _final_answer_reaches_judge(final: str, evidence: str) -> bool:
-    """Return True when every character of the final answer appears in *evidence*.
+def _source_reaches_judge(source: str, evidence: str) -> bool:
+    """Return True when every character of *source* appears in *evidence*.
 
-    A long answer can arrive in two pieces: the compact history repeats the
+    A long source can arrive in two pieces: the compact history repeats the
     first 1,500 characters of a text-only final step, and the final-response
-    section keeps the end. Find the longest prefix of the answer present in
-    *evidence*; the answer is complete when the rest is present too.
+    section keeps the end. Find the longest prefix of the source present in
+    *evidence*; the source is complete when the rest is present too.
     Whitespace at the split does not count, because the history section
     drops trailing whitespace.
     """
-    answer = final.strip()
+    answer = source.strip()
     lo, hi = 0, len(answer)
     while lo < hi:
         mid = (lo + hi + 1) // 2
@@ -990,6 +1008,80 @@ def _final_answer_reaches_judge(final: str, evidence: str) -> bool:
         else:
             hi = mid - 1
     return answer[lo:].lstrip() in evidence
+
+
+def _final_answer_reaches_judge(final: str, evidence: str) -> bool:
+    """Return True when every character of the final answer appears in *evidence*."""
+    return _source_reaches_judge(final, evidence)
+
+
+_BEHAVIOR_SECTION_LABELS = (
+    (_SECTION_FINAL_RESPONSE, "final response"),
+    (_SECTION_USER_REQUEST, "user request"),
+    (_SECTION_FILE_CHANGES, "file changes"),
+    (_SECTION_COMPACT_TOOL_HISTORY, "compact tool history"),
+)
+# Only the final answer gates the behavior judge. It is the one piece of
+# required evidence with a small, bounded source and a dedicated cap of its
+# own, so a gap in it means a limit cut text the judge needed, never that the
+# run was simply large (issue #234). File changes and the tool history have
+# unbounded sources that any finite budget shortens on a long run, so their
+# completeness is reported for diagnosis but never withholds a score. The user
+# request reaches the judge twice (its own reserved section and the head of
+# the compact history), so it is reported the same way.
+_BEHAVIOR_REQUIRED_EVIDENCE = (_SECTION_FINAL_RESPONSE,)
+_BEHAVIOR_EVIDENCE_GAP_HINT = (
+    "Raise SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT and SKILL_EVAL_BEHAVIOR_CHECK_BUDGET, "
+    "or shorten the case, then re-run"
+)
+
+
+def _behavior_evidence_completeness(
+    traj: dict[str, Any],
+    question: str,
+    evidence: str,
+) -> tuple[bool, list[str], list[str]]:
+    """Report which behavior evidence sections reached the judge whole.
+
+    Every section is compared against its complete source rather than against
+    another budgeted rendering, so a cut the budget and the final-response cap
+    both applied cannot hide behind either one. Returns
+    ``(required_complete, required_missing, incomplete_sections)``.
+    """
+    sources = {
+        _SECTION_FINAL_RESPONSE: get_final_response(traj),
+        _SECTION_USER_REQUEST: question,
+        _SECTION_FILE_CHANGES: "\n\n".join(_collect_file_change_evidence(traj)),
+        _SECTION_COMPACT_TOOL_HISTORY: build_conversation_summary(traj, question),
+    }
+    required_missing: list[str] = []
+    incomplete: list[str] = []
+    for section, label in _BEHAVIOR_SECTION_LABELS:
+        source = str(sources.get(section) or "")
+        if not source.strip() or _source_reaches_judge(source, evidence):
+            continue
+        incomplete.append(label)
+        if section in _BEHAVIOR_REQUIRED_EVIDENCE:
+            required_missing.append(label)
+    return not required_missing, required_missing, incomplete
+
+
+def behavior_evidence_gap(omitted: Any) -> str:
+    """Describe the required behavior evidence missing from a bundle, or ``""``.
+
+    A behavior score read off evidence whose final answer was silently
+    shortened grades the evidence loss, not the agent, so callers use this to
+    withhold the score and raise an explicit evaluation error instead.
+    """
+    if not isinstance(omitted, dict) or omitted.get("required_complete", True):
+        return ""
+    missing = [str(item).strip() for item in omitted.get("required_missing") or [] if str(item).strip()]
+    names = ", ".join(missing) or "required evidence"
+    reason = str(omitted.get("reason") or "").strip()
+    detail = f" ({reason})" if reason else ""
+    return (
+        f"behavior_check evidence is incomplete: {names} did not reach the judge{detail}. {_BEHAVIOR_EVIDENCE_GAP_HINT}"
+    )
 
 
 def build_metric_evidence_bundles(
@@ -1094,13 +1186,21 @@ def build_metric_evidence_bundles(
             bc_causes.append("final response shortened to fit SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT")
     bc_trunc = bool(bc_causes)
     bc_reason = "; ".join(bc_causes)
+    bc_evidence = _prepend_facts(bc_text)
+    # ``truncated`` says only that something was dropped, which on a long run
+    # is ordinary. Completeness says whether the evidence the judge must read
+    # survived, so the judge can refuse to score an evidence-loss artifact.
+    bc_required_ok, bc_required_missing, bc_incomplete = _behavior_evidence_completeness(traj, question, bc_evidence)
     bundles["behavior_check"] = {
-        "prompt_evidence": _prepend_facts(bc_text),
+        "prompt_evidence": bc_evidence,
         "evidence_refs": refs["behavior_check"],
         "omitted": {
             "count": 1 if bc_trunc else 0,
             "truncated": bc_trunc,
             "reason": bc_reason,
+            "required_complete": bc_required_ok,
+            "required_missing": bc_required_missing,
+            "incomplete_sections": bc_incomplete,
         },
         "verified": facts,
     }

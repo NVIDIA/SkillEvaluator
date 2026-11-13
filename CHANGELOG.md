@@ -61,7 +61,9 @@ All notable changes to SkillEvaluator are documented in this file.
   individual, and combined performance. It reports the departure from additive
   gains and retains source identities and trial evidence. Invalid inputs exit
   with code 2. Incomplete or incomparable experiments and output I/O failures
-  exit with code 1.
+  exit with code 1. Configuration failures identify their arm, trial progress
+  uses stderr, and output roots honor `SKILLEVALUATOR_RESULTS_DIR` with canonical
+  paths. Documentation describes trial noise and sequential configuration order.
 
 - Read-only Tier 3 `history` lists retained Skill Lift runs chronologically,
   separates incompatible configurations into segments, preserves unavailable

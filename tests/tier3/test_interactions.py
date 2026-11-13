@@ -327,6 +327,32 @@ def test_missing_results_and_empty_errors_are_incomplete(tmp_path, failure):
     assert "interaction" not in report
 
 
+def test_failed_configuration_reasons_identify_each_arm(tmp_path):
+    matrix = _matrix(tmp_path)
+    for config in matrix[1:]:
+        config["error"] = "same setup failure"
+    report = compare_configurations(matrix, metric="goal_accuracy", n_attempts=1)
+    assert report["reasons"] == [f"config-{index}: same setup failure" for index in (1, 2, 3)]
+
+
+def test_terminal_deduplicates_failure_reasons(capsys):
+    from skillevaluator.tier3.interaction_commands import _print_report
+
+    _print_report(
+        {
+            "status": "incomplete",
+            "metric": "goal_accuracy",
+            "skills": [],
+            "run_dir": "/results/experiment",
+            "reasons": ["baseline: setup failed"] * 2,
+            "agents": {"codex": {"status": "incomparable", "reasons": ["missing evidence"] * 2}},
+        }
+    )
+    output = capsys.readouterr().out
+    assert output.count("baseline: setup failed") == 1
+    assert output.count("missing evidence") == 1
+
+
 def _fake_engine(monkeypatch, scores=(0.50, 0.75, 0.70, 0.65), *, on_run=None):
     calls = []
 
@@ -396,6 +422,43 @@ def test_group_runs_n_plus_two_configurations(monkeypatch, tmp_path):
     assert len(calls) == 5
     assert len(calls[-1].include_skills) == 2
     assert report["agents"]["codex"]["interaction"] == pytest.approx(0.15)
+
+
+@pytest.mark.parametrize("use_cli_root", [False, True])
+def test_results_root_honors_environment_and_explicit_precedence(monkeypatch, tmp_path, use_cli_root):
+    source = _source(tmp_path)
+    skills = [_skill(tmp_path, name) for name in ("a", "b")]
+    env_root = tmp_path / "env-results"
+    cli_root = tmp_path / "cli-results" if use_cli_root else None
+    monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(env_root))
+    _fake_engine(monkeypatch)
+    report = run_interaction(skills, eval_source=source, options=EvaluationOptions(source, results_dir=cli_root))
+    assert Path(report["run_dir"]).parent == (cli_root or env_root).resolve()
+
+
+def test_results_root_resolves_symlinked_parent(monkeypatch, tmp_path):
+    source = _source(tmp_path)
+    skills = [_skill(tmp_path, name) for name in ("a", "b")]
+    real_root = tmp_path / "real-results"
+    real_root.mkdir()
+    linked_root = tmp_path / "linked-results"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+    _fake_engine(monkeypatch)
+    report = run_interaction(
+        skills, eval_source=source, options=EvaluationOptions(source, results_dir=linked_root / "runs")
+    )
+    assert Path(report["run_dir"]).parent == real_root / "runs"
+
+
+def test_results_root_symlink_into_selected_skill_is_rejected(monkeypatch, tmp_path):
+    source = _source(tmp_path)
+    skills = [_skill(tmp_path, name) for name in ("a", "b")]
+    linked_root = tmp_path / "linked-results"
+    linked_root.symlink_to(skills[1], target_is_directory=True)
+    calls = _fake_engine(monkeypatch)
+    with pytest.raises(ValueError, match="Save interaction results outside"):
+        run_interaction(skills, eval_source=source, options=EvaluationOptions(source, results_dir=linked_root / "runs"))
+    assert calls == []
 
 
 def test_existing_harbor_staging_installs_the_configuration_and_keeps_tasks_fixed(monkeypatch, tmp_path):
@@ -615,6 +678,35 @@ def test_cli_reports_signed_interaction_and_keeps_json_clean(monkeypatch, tmp_pa
     else:
         assert "Interaction: -0.3000 (negative)" in result.stdout
         assert "combined lift: +0.1500" in result.stdout
+
+
+def test_cli_sends_each_arms_progress_to_stderr(monkeypatch, tmp_path):
+    from skillevaluator.tier3.harbor.progress import ProgressEvent, Tier3RunPlan
+
+    source = _source(tmp_path)
+    skills = [_skill(tmp_path, name) for name in ("a", "b")]
+
+    def evaluate(self, options, *, progress_reporter=None):
+        if progress_reporter is not None:
+            progress_reporter.start(
+                Tier3RunPlan(skill_name=options.skill_path.name, environment=options.env_mode, agents=("codex",))
+            )
+            progress_reporter.emit(ProgressEvent(stage="fixture-trial", state="running"))
+            progress_reporter.emit(ProgressEvent(stage="fixture-trial", state="complete"))
+            progress_reporter.close()
+        return _evidence(
+            options.results_dir / "run",
+            {"case-1": [0.5]},
+            condition="without-skill" if options.skip_with_skill else "with-skill",
+        )
+
+    monkeypatch.setattr(EvaluationService, "evaluate", evaluate)
+    result = CliRunner().invoke(
+        cli, ["tier3", "interact", *(str(path) for path in skills), "--eval-source", str(source), "--json"]
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["status"] == "complete"
+    assert result.stderr.count("fixture-trial: running") == 4
 
 
 @pytest.mark.parametrize("failure", [None, TimeoutError(), ValueError("evaluation failed")])

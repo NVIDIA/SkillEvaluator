@@ -98,7 +98,10 @@ config enables it. Source-config companion selections, partial task suites, and
 `pre_agent_setup` are rejected before execution. Skill roots must have distinct
 names and be self-contained: runtime snapshots include each skill's files,
 while common task inputs belong in the fixed source's `evals/files/`. Results
-must be outside the selected skills and evaluation source.
+must be outside the selected skills and evaluation source. The output root uses
+`--results-dir`, then `SKILLEVALUATOR_RESULTS_DIR`, then `interaction-results`
+beside the source. User-home shortcuts and symlinked parents are resolved before
+checking that the output stays outside the inputs.
 
 The default outcome metric is `goal_accuracy`; `--metric accuracy` is also
 available. These compare task outcomes on the same cases instead of the
@@ -126,9 +129,19 @@ a negative interaction means less; zero means additive. For example, baseline
 below baseline. For more than two skills this is total departure from additive
 individual gains, rather than an isolated higher-order interaction.
 
+These signs describe the observed estimate, without a confidence interval or
+statistical significance test. A small interaction can reflect trial noise;
+with one attempt on ten binary-outcome cases, one outcome changing in an
+individual or combined configuration moves the interaction by 0.10. Configurations
+run sequentially: baseline, each individual, then combined. Provider changes,
+rate limiting, or timeouts during a long experiment can therefore align with
+configuration order. Repeat the experiment before interpreting a small
+interaction as a reliable effect.
+
 The terminal prints baseline, individual and combined scores, combined lift,
 and signed interaction separately for each agent/model. Add `--json` for a
-machine-readable report on stdout; progress goes to stderr. Every experiment
+machine-readable report on stdout; each configuration's trial progress goes to
+stderr. Every experiment
 also saves `interaction.json`, its fixed evaluation source, and independent
 Tier 3 run directories containing reports, dataset snapshots, and trial
 evidence. The interaction report records original source paths, content

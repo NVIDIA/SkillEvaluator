@@ -13,7 +13,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from skillevaluator.evaluation import EvaluationOptions, EvaluationService
 from skillevaluator.tier3.decoy_identity import (
@@ -22,6 +22,9 @@ from skillevaluator.tier3.decoy_identity import (
     decoy_source_digest,
 )
 from skillevaluator.tier3.harbor.secure_copy import copytree_secure, tree_content_fingerprint_secure
+
+if TYPE_CHECKING:
+    from skillevaluator.tier3.harbor.progress import ProgressReporter
 
 OUTCOME_METRICS = ("goal_accuracy", "accuracy", "overall")
 _RUNTIME_ENTRY_FIELDS = frozenset({"has_skill", "evaluated_skill", "skill_workspace_mode", "workspace_skill_names"})
@@ -138,7 +141,7 @@ def compare_configurations(
     if len(configurations) < 4:
         raise ValueError("Expected baseline, at least two individuals, and combined evidence")
     failures = [
-        str(config.get("error") or "Configuration failed or returned no result")
+        f"{config['id']}: {config.get('error') or 'Configuration failed or returned no result'}"
         for config in configurations
         if "error" in config or "result" not in config
     ]
@@ -289,6 +292,7 @@ def run_interaction(
     options: EvaluationOptions,
     metric: str = "goal_accuracy",
     on_configuration: Callable[[str], None] | None = None,
+    progress_reporter: ProgressReporter | None = None,
 ) -> dict[str, Any]:
     """Freeze reviewed inputs once, then delegate every arm to the Tier 3 service."""
     from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
@@ -297,6 +301,7 @@ def run_interaction(
         validate_output_provenance_key_location,
     )
     from skillevaluator.tier3.harbor.runner import _reserve_run_dir
+    from skillevaluator.tier3.results_location import ENV_RESULTS_DIR
     from skillevaluator.tier3.workflow import _validate_skill_root
 
     selected = _selected_skills(skills)
@@ -316,8 +321,9 @@ def run_interaction(
     attempts = options.n_attempts if options.n_attempts is not None else 1
     if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
         raise ValueError("n_attempts must be a positive integer")
-    root = (options.results_dir or source.parent / "interaction-results").absolute()
-    if any(root.resolve().is_relative_to(path) or path.is_relative_to(root.resolve()) for path in [source, *selected]):
+    root = Path(options.results_dir or os.environ.get(ENV_RESULTS_DIR) or source.parent / "interaction-results")
+    root = root.expanduser().resolve()
+    if any(root.is_relative_to(path) or path.is_relative_to(root) for path in [source, *selected]):
         raise ValueError("Save interaction results outside the evaluation source and selected skill roots")
     validate_output_provenance_key_location(source, root, reference_skills_dir=None, workspace_skill_paths=selected)
     service = EvaluationService()
@@ -387,7 +393,8 @@ def run_interaction(
                             stop_on_pass=False,
                             skill_workspace_mode="group" if companions else "isolated",
                             include_skills=companions,
-                        )
+                        ),
+                        progress_reporter=progress_reporter,
                     )
                     config["result"] = result
                     if failure := service.failure_reason(result):

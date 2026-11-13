@@ -47,7 +47,7 @@ from skillevaluator.tier3_environments import all_env_modes
     "--results-dir",
     type=click.Path(file_okay=False, path_type=Path),
     default=None,
-    help="Output root outside the inputs; defaults to interaction-results beside --eval-source.",
+    help="Output root outside the inputs; defaults to SKILLEVALUATOR_RESULTS_DIR or interaction-results beside --eval-source.",
 )
 @click.option("--harbor-keep-jobs", is_flag=True, help="Keep raw Harbor jobs as well as the collected evidence.")
 @click.option("--json", "as_json", is_flag=True, help="Print the complete interaction report as JSON.")
@@ -74,6 +74,7 @@ def interact_command(
     from contextlib import redirect_stdout
 
     from skillevaluator.evaluation import EvaluationOptions
+    from skillevaluator.tier3.harbor.progress import create_progress_reporter
     from skillevaluator.tier3.interactions import run_interaction
 
     try:
@@ -94,6 +95,7 @@ def interact_command(
                 ),
                 metric=metric,
                 on_configuration=lambda name: click.echo(f"Tier 3 interaction: running {name}", err=True),
+                progress_reporter=create_progress_reporter("auto", stream=click.get_text_stream("stderr")),
             )
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
@@ -109,13 +111,13 @@ def interact_command(
 
 def _print_report(report: dict[str, Any]) -> None:
     click.echo(f"Interaction evaluation: {report['status']} ({report['metric']})")
-    for reason in report.get("reasons", []):
+    for reason in dict.fromkeys(report.get("reasons", [])):
         click.echo(f"  {reason}")
     names = [skill["name"] for skill in report["skills"]]
     for agent, score in report.get("agents", {}).items():
         click.echo(f"{agent}: {score['status']}")
         if score["status"] != "complete":
-            for reason in score.get("reasons", []):
+            for reason in dict.fromkeys(score.get("reasons", [])):
                 click.echo(f"  {reason}")
             continue
         click.echo(f"  Baseline: {score['baseline']:.4f}")

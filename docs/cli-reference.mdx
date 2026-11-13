@@ -545,7 +545,7 @@ skillevaluator tier3 interact ./skills/a ./skills/b \
 | `--n-attempts` | `1` | Positive fixed attempt budget for every case; disables early stopping. |
 | `--n-concurrent` | Source config or `4` | Concurrent trials within a configuration. |
 | `--metric` | `goal_accuracy` | Outcome metric: `goal_accuracy`, `accuracy`, or `overall` for `custom_only` grading. |
-| `--results-dir` | `interaction-results` beside the source | Output root outside all inputs. |
+| `--results-dir` | `SKILLEVALUATOR_RESULTS_DIR` or `interaction-results` beside the source | Output root outside all inputs; home shortcuts and symlinked parents are resolved. |
 | `--harbor-keep-jobs` | Off | Retain raw Harbor jobs alongside collected evidence. |
 | `--json` | Off | Print the complete JSON report on stdout; progress uses stderr. |
 

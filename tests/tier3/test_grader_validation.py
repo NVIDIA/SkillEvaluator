@@ -919,3 +919,73 @@ def test_nonfinite_options_rejected_before_provider(monkeypatch, args):
     result = CliRunner().invoke(cli, ["tier3", "validate-grader", *args])
     assert result.exit_code == 2, result.output
     assert "finite" in result.output
+
+
+def test_policy_cli_without_platform_nonblocking_flag(monkeypatch, qualification_policy):
+    monkeypatch.delattr(gv.os, "O_NONBLOCK", raising=False)
+    monkeypatch.setattr(gv, "resolve_llm_provider", lambda: pytest.fail("provider accessed"))
+    result = CliRunner().invoke(
+        cli,
+        ["tier3", "validate-grader", "--qualification-policy", str(qualification_policy), "--check-suite", "--json"],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["qualification"]["status"] == "ready"
+
+
+def test_live_correct_unavailable_case_meets_observed_category_only(judge_server, qualification_policy, tmp_path):
+    value = json.loads(qualification_policy.read_text())
+    value["min_category_cases"] = {"unavailable_evidence": 1}
+    value["max_rates"] = dict.fromkeys(value["max_rates"], 1)
+    qualification_policy.write_text(json.dumps(value))
+    output = tmp_path / "observed-category"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "tier3",
+            "validate-grader",
+            "--qualification-policy",
+            str(qualification_policy),
+            "--case",
+            "arithmetic",
+            "--case",
+            "wrong-answer",
+            "--case",
+            "missing",
+            "--repeats",
+            "1",
+            "--json",
+            "-o",
+            str(output),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.output)
+    decision = receipt["qualification"]
+    assert decision["status"] == "passed"
+    assert decision["categories"]["unavailable_evidence"]["observed_cases"] == 1
+    assert decision["categories"]["unavailable_evidence"]["observed_met"] is True
+    assert decision["metrics"]["overall"]["scored_class_counts"] == {"pass": 1, "fail": 1}
+    assert receipt == json.loads((output / "grader-validation.json").read_text())
+
+
+@pytest.mark.parametrize("flag", ["--max-false-pass-rate", "--max-false-fail-rate", "--max-unjudgeable-rate"])
+@pytest.mark.parametrize("offline", [True, False])
+def test_policy_rejects_legacy_gate_flags_before_provider(monkeypatch, qualification_policy, tmp_path, flag, offline):
+    monkeypatch.setattr(gv, "resolve_llm_provider", lambda: pytest.fail("provider accessed"))
+    output = tmp_path / "not-written"
+    args = [
+        "tier3",
+        "validate-grader",
+        "--qualification-policy",
+        str(qualification_policy),
+        flag,
+        "0",
+        "-o",
+        str(output),
+    ]
+    if offline:
+        args.append("--check-suite")
+    result = CliRunner().invoke(cli, args)
+    assert result.exit_code == 2, result.output
+    assert "cannot combine" in result.output
+    assert not output.exists()

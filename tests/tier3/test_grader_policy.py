@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 
 import pytest
 
@@ -73,7 +74,7 @@ def test_policy_identity_and_label_only_readiness(tmp_path):
     assert decision["metrics"]["accuracy"]["expected_class_counts"] == {"pass": 1, "fail": 1}
     assert decision["metrics"]["accuracy"]["scored_class_counts"] is None
     assert decision["metrics"]["accuracy"]["rate_checks"] is None
-    assert decision["categories"]["positive"]["scored_cases"] is None
+    assert decision["categories"]["positive"]["observed_cases"] is None
 
 
 @pytest.mark.parametrize(
@@ -123,8 +124,10 @@ def test_bounded_policy_read(tmp_path, content):
 def test_nonregular_policy(tmp_path):
     with pytest.raises(ValueError):
         gp.load_qualification_policy(tmp_path)
-    import os
 
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform has no FIFO creation")
+def test_fifo_policy_rejected_without_blocking(tmp_path):
     fifo = tmp_path / "fifo"
     os.mkfifo(fifo)
     with pytest.raises(ValueError):
@@ -175,10 +178,10 @@ def test_unscored_cannot_satisfy_class_or_category(observed):
     decision = gp.evaluate_qualification(report(cases(), observed), cases(), policy())
     assert decision["status"] == "insufficient_evidence"
     assert decision["metrics"]["accuracy"]["scored_class_counts"] == {"pass": 0, "fail": 0}
-    assert decision["categories"]["positive"]["scored_cases"] == 0
+    assert decision["categories"]["positive"]["observed_cases"] == 0
     assert {r["code"] for r in decision["reasons"]} >= {
         "scored_class_coverage",
-        "scored_category_coverage",
+        "observed_category_coverage",
         "missing_rate",
     }
 
@@ -213,9 +216,8 @@ def test_tuning_observations_cannot_fill_assessment_coverage():
     tuning = copy.deepcopy(selected[1])
     tuning.update(id="tuning", split="tuning")
     value = report([selected[0], tuning])
-    decision = gp.evaluate_qualification(value, selected, policy())
-    assert decision["status"] == "insufficient_evidence"
-    assert decision["metrics"]["accuracy"]["scored_class_counts"]["fail"] == 0
+    with pytest.raises(ValueError, match="scope"):
+        gp.evaluate_qualification(value, selected, policy())
     with pytest.raises(ValueError, match="assessment"):
         gp.preflight_qualification([tuning], gv.DEFAULT_THRESHOLDS, policy())
 
@@ -253,3 +255,90 @@ def test_experimental_example_intentionally_fails_bundled_label_coverage():
         ("security", "fail"),
         ("skill_efficiency", "fail"),
     }
+
+
+def test_policy_read_without_nonblocking_flag(tmp_path, monkeypatch):
+    path = tmp_path / "policy.json"
+    path.write_text(json.dumps(policy()))
+    monkeypatch.delattr(gp.os, "O_NONBLOCK", raising=False)
+    assert gp.load_qualification_policy(path) == policy()
+
+
+@pytest.mark.parametrize("label", ["not_applicable", "insufficient_evidence"])
+@pytest.mark.parametrize("observed", ["matching", "error", "pass", "fail", "other_abstention"])
+def test_category_observed_coverage_distinguishes_correct_expected_abstentions(label, observed):
+    selected = cases()
+    unavailable = {
+        "id": "u",
+        "split": "assessment",
+        "category": "unavailable_evidence",
+        "expected": {"overall": "insufficient_evidence", "metrics": {"accuracy": label}},
+    }
+    selected.append(unavailable)
+    value = report(selected)
+    verdict = (
+        label
+        if observed == "matching"
+        else ("not_applicable" if label == "insufficient_evidence" else "insufficient_evidence")
+        if observed == "other_abstention"
+        else observed
+    )
+    for row in value["attempts"][-1]["observations"]:
+        if row["metric"] == "accuracy":
+            row["observed"] = verdict
+    value["metrics"]["accuracy"] = gv.summarize(
+        [row for attempt in value["attempts"] for row in attempt["observations"] if row["metric"] == "accuracy"]
+    )
+    criteria = policy(min_category_cases={"unavailable_evidence": 1}, max_rates=dict.fromkeys(gp.RATES, 0))
+    decision = gp.evaluate_qualification(value, selected, criteria)
+    assert decision["status"] == ("passed" if observed == "matching" else "insufficient_evidence")
+    category = decision["categories"]["unavailable_evidence"]
+    assert category["observed_cases"] == int(observed == "matching")
+    assert category["observed_met"] is (observed == "matching")
+    assert "scored_cases" not in category and "scored_met" not in category
+    assert decision["metrics"]["accuracy"]["scored_class_counts"] == {"pass": 1, "fail": 1}
+    for check in decision["metrics"]["accuracy"]["rate_checks"].values():
+        assert check["measurement"]["rate"] == 0
+
+
+def test_broader_report_cannot_dilute_selected_case_false_passes():
+    selected = cases()
+    extras = [dict(copy.deepcopy(selected[1]), id=f"extra-{i}") for i in range(20)]
+    value = report(selected + extras)
+    selected_fail = value["attempts"][1]
+    for row in selected_fail["observations"]:
+        row["observed"] = "pass"
+    value["metrics"]["accuracy"] = gv.summarize(
+        [row for attempt in value["attempts"] for row in attempt["observations"] if row["metric"] == "accuracy"]
+    )
+    assert value["metrics"]["accuracy"]["false_pass_rate"]["rate"] == pytest.approx(1 / 21)
+    assert gp.evaluate_qualification(value, selected + extras, policy())["status"] == "passed"
+    with pytest.raises(ValueError, match="scope"):
+        gp.evaluate_qualification(value, selected, policy())
+    exact = report(selected)
+    exact["attempts"][1] = selected_fail
+    exact["metrics"]["accuracy"] = gv.summarize(
+        [row for attempt in exact["attempts"] for row in attempt["observations"] if row["metric"] == "accuracy"]
+    )
+    decision = gp.evaluate_qualification(exact, selected, policy())
+    assert decision["status"] == "failed"
+    assert decision["metrics"]["accuracy"]["rate_checks"]["false_pass_rate"]["measurement"]["rate"] == 1
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda r: r["provenance"].update(case_ids=["p", "f", "extra"]),
+        lambda r: r["provenance"].update(case_ids=["p"]),
+        lambda r: r["provenance"].update(case_ids=["p", "f", "p"]),
+        lambda r: r["provenance"].update(split="tuning"),
+        lambda r: r["attempts"].pop(),
+        lambda r: r["attempts"][0].update(case="extra"),
+        lambda r: r["attempts"][0]["observations"][0].update(judgment="extra:overall"),
+    ],
+)
+def test_report_provenance_and_attempt_scope_must_agree(mutation):
+    value = report(cases())
+    mutation(value)
+    with pytest.raises(ValueError, match="scope"):
+        gp.evaluate_qualification(value, cases(), policy())

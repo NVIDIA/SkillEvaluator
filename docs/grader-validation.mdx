@@ -219,7 +219,9 @@ limits to an **assessment-only** run. It is off by default. `--split tuning` and
 coverage. `--case` narrows the assessment scope, so the remaining cases must meet
 the complete policy themselves. Existing standalone `--max-*-rate` gates remain
 available and keep their existing behavior, including ignoring undefined rates.
-If combined with a policy, both sets of checks apply.
+A policy cannot be combined with any standalone `--max-*-rate` gate. Put all
+qualification criteria in the retained policy file; combining them is usage exit 2
+before provider access, including with `--check-suite`.
 
 Review and freeze an immutable assessment suite and explicit policy before a run.
 The repository's [experimental example](https://github.com/NVIDIA/SkillEvaluator/blob/main/examples/grader-qualification-policy.json)
@@ -263,27 +265,33 @@ key ordering do not change the hash; policy content does.
 `qualification.scope` names the selected assessment case IDs. Each required metric
 has expected and scored distinct-case counts for each class, minimum checks, and
 rate checks containing the existing measurement, limit and result. Category
-checks have expected and scored case counts too. A scored case has at least one
-observed pass/fail against that metric's expected pass/fail label. Behavior-step
+checks separately report `expected_cases`, `observed_cases`, `expected_met` and
+`observed_met`. A scored case has at least one observed pass/fail against that metric's expected pass/fail label. Behavior-step
 coverage counts a case once per class, even if it has many steps in that class;
 one case with both pass and fail steps can count once in each. Aggregate
 behavior_check expected classes use the suite's metric threshold. Repeats never
-create additional cases. A category's scored count includes cases with at least
-one scored known-class observation among the required metrics. N/A, errors and
-insufficient-evidence observations cannot fill scored coverage. Missing category
+create additional cases. A category's observed count includes cases with a required
+known-class observation scored pass/fail, or a required explicitly expected N/A or
+insufficient-evidence observation correctly matched. Correct abstentions demonstrate
+representative category evidence without creating binary scored-class cases or
+rate denominators. Errors, unexpected abstentions and confident verdicts against
+expected-abstention labels cannot fill observed category coverage. Missing category
 criteria impose no category minimum.
 
 | Phase/status | Meaning |
 | --- | --- |
-| `preflight` / `ready` | Expected labels meet coverage minima only. Scored counts and rate checks are null/unobserved; no grader reliability result exists. |
+| `preflight` / `ready` | Expected labels meet coverage minima only. Scored class counts, observed category counts and rate checks are null/unobserved; no grader reliability result exists. |
 | `preflight` / `insufficient_evidence` | Expected labels cannot meet the policy. No verifier attempts or provider access occur. |
-| `evaluated` / `passed` | Expected and scored coverage meet all minima, every required rate is available, and no rate exceeds its limit. |
+| `evaluated` / `passed` | Expected/scored class and expected/observed category coverage meet all minima, every required rate is available, and no rate exceeds its limit. |
 | `evaluated` / `failed` | Coverage and rates are available, but at least one rate exceeds its limit; equality passes. |
-| `evaluated` / `insufficient_evidence` | A required metric/rate or expected/scored coverage is missing. This takes precedence when an available rate also exceeds a limit; every reason is retained. |
+| `evaluated` / `insufficient_evidence` | A required metric/rate, expected/scored class coverage or expected/observed category coverage is missing. This takes precedence when an available rate also exceeds a limit; every reason is retained. |
 
 Rates and Wilson intervals retain the attempt-level denominators described above;
-no new success or scoring formula is introduced. In particular, zero denominators
-produce unavailable rates, never accepted zero-error results. Structured
+no new success or scoring formula is introduced. Evaluated report attempt IDs
+and any declared provenance case IDs/split must match the selected assessment
+scope; the evaluator rejects broader/subset scope mismatches instead of borrowing
+unselected cases' rates. Observation case identities must match their attempt too.
+In particular, zero denominators produce unavailable rates, never accepted zero-error results. Structured
 `qualification.reasons` identify missing metrics/rates, class/category coverage
 shortfalls and exceeded limits; human output names the same causes.
 

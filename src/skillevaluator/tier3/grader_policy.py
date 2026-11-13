@@ -11,7 +11,7 @@ import math
 import os
 import re
 import stat
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 from skillevaluator.utils.structured_data import load_bounded_json
@@ -26,8 +26,12 @@ def load_qualification_policy(path: Path) -> dict:
     """Read a bounded regular JSON file and reject incomplete/unknown policy criteria."""
     from skillevaluator.tier3.grader_validation import CATEGORIES, METRICS, _object
 
-    # O_NONBLOCK prevents a raced-in FIFO from blocking before fstat rejects it.
-    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    # Nonblocking open protects against FIFOs where supported. Native Windows
+    # has no O_NONBLOCK; check file type first there and still verify the fd.
+    if not hasattr(os, "O_NONBLOCK") and not stat.S_ISREG(path.stat().st_mode):
+        raise ValueError("qualification policy must be a regular file")
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(path, flags)
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_POLICY_BYTES:
@@ -108,14 +112,11 @@ def _decision(cases, thresholds, policy, report=None):
     evaluated = report is not None
     reasons = []
     metrics = {}
-    scored_categories = set()
-    observed = {
-        (attempt["case"], row["metric"], row["judgment"])
-        for attempt in (report or {}).get("attempts", [])
-        if attempt["case"] in expected
-        for row in attempt["observations"]
-        if row["observed"] in CLASSES
-    }
+    observed_categories = set()
+    observed = defaultdict(set)
+    for attempt in (report or {}).get("attempts", []):
+        for row in attempt["observations"]:
+            observed[attempt["case"], row["metric"], row["judgment"]].add(row["observed"])
     for metric in policy["required_metrics"]:
         classes = {label: set() for label in CLASSES}
         scored = {label: set() for label in CLASSES}
@@ -125,11 +126,15 @@ def _decision(cases, thresholds, policy, report=None):
                 if row["metric"] != metric:
                     continue
                 labelled = True
+                verdicts = observed[case_id, metric, row["judgment"]]
+                binary_scored = bool(verdicts.intersection(CLASSES))
                 if row["expected"] in CLASSES:
                     classes[row["expected"]].add(case_id)
-                    if (case_id, metric, row["judgment"]) in observed:
+                    if binary_scored:
                         scored[row["expected"]].add(case_id)
-                        scored_categories.add(case_id)
+                        observed_categories.add(case_id)
+                elif row["expected"] in {"not_applicable", "insufficient_evidence"} and row["expected"] in verdicts:
+                    observed_categories.add(case_id)
         if not labelled:
             reasons.append(
                 {"code": "missing_metric", "metric": metric, "message": f"{metric}: required metric has no labels"}
@@ -209,16 +214,16 @@ def _decision(cases, thresholds, policy, report=None):
         }
     categories = {}
     counts = Counter(case["category"] for case in cases)
-    scored_counts = Counter(case["category"] for case in cases if case["id"] in scored_categories)
+    observed_counts = Counter(case["category"] for case in cases if case["id"] in observed_categories)
     for category, minimum in policy["min_category_cases"].items():
         categories[category] = {
             "minimum": minimum,
             "expected_cases": counts[category],
-            "scored_cases": scored_counts[category] if evaluated else None,
+            "observed_cases": observed_counts[category] if evaluated else None,
             "expected_met": counts[category] >= minimum,
-            "scored_met": scored_counts[category] >= minimum if evaluated else None,
+            "observed_met": observed_counts[category] >= minimum if evaluated else None,
         }
-        for phase, actual in (("expected", counts[category]), ("scored", scored_counts[category])):
+        for phase, actual in (("expected", counts[category]), ("observed", observed_counts[category])):
             if (phase == "expected" or evaluated) and actual < minimum:
                 reasons.append(
                     {
@@ -259,5 +264,22 @@ def evaluate_qualification(report, cases, policy) -> dict:
     """Evaluate distinct-case coverage and existing attempt-level rates together."""
     from skillevaluator.tier3.grader_validation import DEFAULT_THRESHOLDS
 
-    thresholds = DEFAULT_THRESHOLDS | report.get("provenance", {}).get("thresholds", {})
+    # The existing summaries describe all report attempts. Never attach them to
+    # a subset's scope, where unselected cases could dilute error rates.
+    selected = {case["id"] for case in cases}
+    provenance = report.get("provenance", {})
+    declared = provenance.get("case_ids", list(selected))
+    if (
+        not isinstance(declared, list)
+        or any(not isinstance(case_id, str) for case_id in declared)
+        or len(declared) != len(selected)
+        or set(declared) != selected
+        or {attempt["case"] for attempt in report.get("attempts", [])} != selected
+        or provenance.get("split", "assessment") != "assessment"
+    ):
+        raise ValueError("qualification report scope must match the selected assessment cases")
+    for attempt in report.get("attempts", []):
+        if any(row["judgment"].split(":")[0] != attempt["case"] for row in attempt["observations"]):
+            raise ValueError("qualification observation scope must match its attempt case")
+    thresholds = DEFAULT_THRESHOLDS | provenance.get("thresholds", {})
     return _decision(cases, thresholds, policy, report)

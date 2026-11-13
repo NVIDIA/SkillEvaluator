@@ -662,6 +662,10 @@ def validate_grader(
         }.items():
             if value is not None and not math.isfinite(value):
                 raise ValueError(f"--{name} must be finite")
+        if qualification_policy is not None and any(
+            value is not None for value in (max_false_pass_rate, max_false_fail_rate, max_unjudgeable_rate)
+        ):
+            raise ValueError("cannot combine --qualification-policy with --max-*-rate gates; put limits in the policy")
         policy = load_qualification_policy(qualification_policy) if qualification_policy is not None else None
         if policy is not None and split != "assessment":
             raise ValueError("qualification policies require --split assessment")

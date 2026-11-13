@@ -795,7 +795,9 @@ usage, suite or provider configuration. Gates use assessment only with split all
 With `--qualification-policy FILE`, exit 1 also means failed or insufficient policy
 evidence. Missing required metrics/rates and unmet distinct-case class/category
 minima cannot pass; repeats and behavior steps do not add cases. The policy only
-accepts `--split assessment`. Offline `ready` means expected-label coverage only,
+accepts `--split assessment` and cannot be combined with standalone `--max-*-rate`
+gates; put its criteria in the policy file. These combinations are usage exit 2
+before provider access. Offline `ready` means expected-label coverage only,
 with scored counts/rates unobserved. Live insufficient preflight retains a
 `not_run` receipt with no attempts before provider access. Covered live runs retain the
 evaluated decision in JSON stdout and `grader-validation.json`. Policy identity,

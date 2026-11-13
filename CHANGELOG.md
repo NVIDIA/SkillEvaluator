@@ -288,11 +288,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
-- Install Bandit and pip-audit with the base package, so `pip install
-  skillevaluator` or `uv tool install skillevaluator` runs every required
-  Tier 1 scanner without an extra. The `security` extra stays as an empty
-  alias, so existing `skillevaluator[security]` installs keep working. The
-  Bandit and pip-audit install hints now say to reinstall SkillEvaluator.
+- Install Bandit with the base package, so `pip install skillevaluator` or
+  `uv tool install skillevaluator` runs every default Tier 1 check without an
+  extra. pip-audit, used only by the opt-in dependency audit
+  (`--check dependency`), stays in the `security` extra. The Bandit install hint
+  now says to reinstall SkillEvaluator.
 
 - Remove `skillevaluator.quality_config.quality_config_provenance(path, config)`.
   Use `load_quality_config_with_provenance(path)` instead: it loads the config

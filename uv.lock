@@ -2566,7 +2566,6 @@ dependencies = [
     { name = "jinja2" },
     { name = "markdown-it-py" },
     { name = "packaging" },
-    { name = "pip-audit" },
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "regex" },
@@ -2582,6 +2581,7 @@ all = [
     { name = "mcp" },
     { name = "oauthlib" },
     { name = "openai" },
+    { name = "pip-audit" },
     { name = "pyjwt", extra = ["crypto"] },
     { name = "python-dotenv" },
 ]
@@ -2605,6 +2605,9 @@ llm = [
 ]
 publisher = [
     { name = "pyjwt", extra = ["crypto"] },
+]
+security = [
+    { name = "pip-audit" },
 ]
 tier2 = [
     { name = "anthropic" },
@@ -2641,7 +2644,7 @@ requires-dist = [
     { name = "oauthlib", marker = "extra == 'tier3'", specifier = ">=4.0.0" },
     { name = "openai", marker = "extra == 'llm'", specifier = ">=2.21.0" },
     { name = "packaging", specifier = ">=24" },
-    { name = "pip-audit", specifier = ">=2.10.0" },
+    { name = "pip-audit", marker = "extra == 'security'", specifier = ">=2.10.0" },
     { name = "pydantic", specifier = ">=2.11.0" },
     { name = "pyjwt", extras = ["crypto"], marker = "extra == 'publisher'", specifier = ">=2.13.0" },
     { name = "pyjwt", extras = ["crypto"], marker = "extra == 'tier3'", specifier = ">=2.13.0" },

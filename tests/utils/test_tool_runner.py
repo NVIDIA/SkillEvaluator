@@ -419,17 +419,18 @@ class TestExternalTool:
         assert "[security]" not in tool.get_install_hint()
 
     def test_bundled_scanner_hints_point_at_reinstalling_skillevaluator(self):
-        """Scanners shipped as core dependencies hint at reinstalling SkillEvaluator.
+        """Bundled scanners hint at reinstalling SkillEvaluator, not a bare pip install.
 
-        Bare ``pip install <scanner>`` is misleading for the documented
-        install paths (uv tool / pipx), where the fix is reinstalling
-        skillevaluator itself; no extra is needed.
+        Bandit is a core dependency, so the fix needs no extra; pip-audit
+        ships with the security extra.
         """
         with patch("shutil.which", return_value=None):
-            for command in ("bandit", "pip-audit"):
-                hint = ExternalTool(command, command).get_install_hint()
-                assert "uv tool install --reinstall" in hint, f"{command}: {hint}"
-                assert "[security]" not in hint and "[all]" not in hint, f"{command}: {hint}"
+            bandit_hint = ExternalTool("bandit", "bandit").get_install_hint()
+            pip_audit_hint = ExternalTool("pip-audit", "pip-audit").get_install_hint()
+
+        assert "uv tool install --reinstall" in bandit_hint
+        assert "[security]" not in bandit_hint and "[all]" not in bandit_hint
+        assert "[all]" in pip_audit_hint or "[security]" in pip_audit_hint
 
     def test_semgrep_hint_uses_a_separate_tool_install(self):
         with patch("shutil.which", return_value=None):

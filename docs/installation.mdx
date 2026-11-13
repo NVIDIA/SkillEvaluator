@@ -24,7 +24,7 @@ This project will download and install additional third-party open source softwa
 - Git for installs from the repository and for the bundled-example checkout.
 - Docker, only for the container install and Tier 3 Docker-mode evaluation.
 - No API key is needed for deterministic Tier 1 checks. The base package
-  includes Bandit and pip-audit; Tier 1 provisions SkillSpector and
+  includes Bandit; Tier 1 provisions SkillSpector and
   Gitleaks itself, and Semgrep is optional (see [System tools](#system-tools)). LLM-backed checks and Tiers 2–3 use a configured provider — see
   [Providers & Credentials](configuration.mdx).
 
@@ -57,12 +57,13 @@ clients install with the extra; an API key is still required for the model call.
 For other features, select their extras or use the optional evaluation bundle:
 
 ```bash title="Install with selected extras"
+uv tool install --python 3.13 --reinstall "skillevaluator[security] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
 uv tool install --python 3.13 --reinstall "skillevaluator[tier2,tier3] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
 uv tool install --python 3.13 --reinstall "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
 ```
 
 These are alternatives: include all the extras you need in the chosen command.
-`all` includes `tier2` and `tier3`; it excludes the optional
+`all` includes `tier2`, `tier3`, and `security`; it excludes the optional
 `dashboard` extra and external tools.
 
 To pick up the latest commit later, rerun the install with `--reinstall`,
@@ -107,7 +108,7 @@ Editable extras work the same way as the one-liner:
 
 ```bash title="Editable install with selected extras"
 python -m pip install -e .
-python -m pip install -e ".[llm]"
+python -m pip install -e ".[security]"
 python -m pip install -e ".[all,dev]"
 ```
 
@@ -160,7 +161,7 @@ The image does not bundle the external Semgrep, SkillSpector, or Gitleaks execut
 
 ## Choosing extras
 
-The base package completes the schema, PII, license, quality, Unicode, script-lint, and hygiene checks on its own. `quality-check` needs no scanner setup. When you run the full static suite, the base package also runs Bandit and pip-audit, and scanner-backed checks report INCOMPLETE until the required external scanners are available (see [System tools](#system-tools)). Running without an LLM or API key does not remove those scanner requirements. Everything else lives behind an extra:
+The base package completes the schema, PII, license, quality, Unicode, script-lint, and hygiene checks on its own. `quality-check` needs no scanner setup. When you run the full static suite, the base package also runs Bandit, and scanner-backed checks report INCOMPLETE until the required external scanners are available (see [System tools](#system-tools)). Running without an LLM or API key does not remove those scanner requirements. Everything else lives behind an extra:
 
 [Harbor](https://github.com/harbor-framework/harbor) is the open-source agent
 evaluation framework that the `tier3` extra installs for live task execution
@@ -171,13 +172,13 @@ and environment backends.
 | `llm` | Shared LLM and embedding clients used by LLM-backed checks, Tier 2, and Tier 3 |
 | `tier2` | Intra-skill deduplication and local-catalog inter-skill similarity; includes `llm` |
 | `tier3` | Docker, local, and cloud live-agent evaluation through Harbor (pins `harbor==0.25.0` and requires `python-dotenv>=1.2.0`); includes `llm` |
-| `security` | Kept for compatibility; Bandit and pip-audit now install with the base package |
-| `all` | `tier2` and `tier3` in one bundle |
+| `security` | pip-audit, for the opt-in dependency audit (Bandit is in the base package) |
+| `all` | `tier2`, `tier3`, and `security` in one bundle |
 | `dashboard` | Local Streamlit tables for comparing saved reports and retained runs (`skillevaluator dashboard`); not included in `all` |
 | `dev` | Build, test, coverage, and formatting tools for contributors |
 
 <Tip>
-`[all]` installs the evaluator extras (`tier2`, `tier3`); add `dashboard` with `[all,dashboard]`. External scanner tools, Docker, agent CLIs, and the Harbor extras for managed sandbox backends (such as `harbor[modal]==0.25.0`) stay separate no matter which extra you pick — see [Agents & Sandboxes](agents-and-sandboxes.mdx#where-trials-run).
+`[all]` installs the evaluator extras (`tier2`, `tier3`, `security`); add `dashboard` with `[all,dashboard]`. External scanner tools, Docker, agent CLIs, and the Harbor extras for managed sandbox backends (such as `harbor[modal]==0.25.0`) stay separate no matter which extra you pick — see [Agents & Sandboxes](agents-and-sandboxes.mdx#where-trials-run).
 </Tip>
 
 ## System tools

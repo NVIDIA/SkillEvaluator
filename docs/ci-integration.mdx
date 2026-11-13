@@ -152,7 +152,7 @@ jobs:
             });
 ```
 
-SkillEvaluator installs Bandit and pip-audit. Semgrep and SkillSpector
+SkillEvaluator installs Bandit, and the `security` extra adds pip-audit. Semgrep and SkillSpector
 stay in separate uv tool environments, while Gitleaks is installed from its
 official [releases](https://github.com/gitleaks/gitleaks/releases). Report
 filenames embed a sortable timestamp (`skillevaluator-output-<timestamp>.md`),

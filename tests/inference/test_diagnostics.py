@@ -30,6 +30,15 @@ def test_http_status_without_echoing_response_or_request(status):
     assert "example.invalid" not in diagnostic
 
 
+@pytest.mark.parametrize("status", [404, 410])
+def test_unavailable_model_points_to_the_model_setting(status):
+    response = httpx.Response(status, request=httpx.Request("POST", "https://example.invalid"))
+    diagnostic = llm_failure_diagnostic(APIStatusError("x", response=response, body=None))
+    assert "default may not be callable" in diagnostic
+    assert "SKILL_EVAL_LLM_MODEL" in diagnostic
+    assert "llm-model" in diagnostic
+
+
 @pytest.mark.parametrize(
     "body",
     [

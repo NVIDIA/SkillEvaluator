@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from skillevaluator.models.result import Severity
 from skillevaluator.models.skill import SkillMetadata
 from skillevaluator.validators.schema import SchemaValidator
 
@@ -1058,10 +1059,16 @@ Example.
         [
             ("jane@example.com", "contains an email address"),
             ("Jane Doe jane@example.com", "contains an email address"),
+            # An intranet host has no dot, but the value is still only an email.
+            ("root@buildhost", "contains an email address"),
+            ("jane@example", "contains an email address"),
+            ("Jos\u00e9@example.com", "contains an email address"),
             ("Jane Doe <jane>", "angle brackets"),
             ("Jane Doe <jane@example.com> and team", "angle brackets"),
-            ("Jane\u202eDoe", "control or invisible formatting"),
-            ("Jane\tDoe", "control or invisible formatting"),
+            ("Jane\u202eDoe", "control, private-use, or bidirectional formatting"),
+            ("Jane\tDoe", "control, private-use, or bidirectional formatting"),
+            ("Jane\u2066Doe", "control, private-use, or bidirectional formatting"),
+            ("Jane\ue000Doe", "control, private-use, or bidirectional formatting"),
             ("---", "no letters or digits"),
             ("J" * 257, "longer than 256 characters"),
         ],
@@ -1123,7 +1130,79 @@ Example.
         assert len(findings) == 1
         assert findings[0].severity == Severity.HIGH
         assert "has no email address matching the required domain" in findings[0].message
+        assert findings[0].metadata.get("shape_ok") is False
         assert SchemaValidator(policy=policy).validate(member).passed
+
+    def test_domain_restriction_rejects_well_formed_author_outside_the_domain(self, tmp_path: Path):
+        """The other half of the domain branch: a correct shape in the wrong domain still blocks.
+
+        The domain check is the only blocking author rule an organization
+        policy keeps, so a regression that accepted any domain has to fail a
+        test rather than only the bare-name case above.
+        """
+        import re
+
+        from skillevaluator.models.result import Severity
+        from skillevaluator.validators.policy import ValidationPolicy, default_policy
+
+        policy = ValidationPolicy(
+            profile="org",
+            author_email_regex=re.compile(r"@example\.org>$"),
+            severity_overrides=dict(default_policy().severity_overrides),
+        )
+        outsider = self._write_skill(tmp_path, name="org-outsider", author_line="Jane Doe <jane@other.com>")
+
+        result = SchemaValidator(policy=policy).validate(outsider)
+
+        findings = [f for f in result.findings if f.check_name == "author_format"]
+        assert len(findings) == 1
+        assert findings[0].severity == Severity.HIGH
+        assert "Author email does not match the required domain" in findings[0].message
+        assert findings[0].metadata.get("shape_ok") is True
+        assert findings[0].metadata.get("domain_ok") is False
+        assert not result.passed
+
+    @pytest.mark.parametrize(
+        "author",
+        [
+            "Jane\u200cDoe",  # ZWNJ: required by Persian and Devanagari names
+            "Jane\u200dDoe",  # ZWJ
+            "Jane\u00adDoe",  # soft hyphen
+            "Jane\u0530Doe",  # unassigned in Unicode 16, assigned in some later version
+        ],
+    )
+    def test_joiners_and_unassigned_code_points_are_accepted_in_an_author(self, tmp_path: Path, author: str):
+        """The character guard rejects spoofing characters, not every Unicode category C.
+
+        ZWNJ/ZWJ are needed to render Persian, Arabic and Devanagari names, and
+        an unassigned code point would make the verdict depend on the running
+        interpreter's Unicode data rather than on the value.
+        """
+        from skillevaluator.validators.policy import load_profile
+
+        skill_dir = self._write_skill(tmp_path, name="joiner-author", author_line=f'"{author} <jane@example.com>"')
+
+        result = SchemaValidator(policy=load_profile("default")).validate(skill_dir)
+
+        assert not [f for f in result.findings if f.check_name.startswith("author")], result.errors
+        assert result.passed, result.errors
+
+    @pytest.mark.parametrize(
+        "author",
+        ["Jane Doe (@jdoe)", "Team (@org-handle)", "@jdoe", "Platform Team @ Example"],
+    )
+    def test_social_handles_are_not_mistaken_for_a_bare_email(self, tmp_path: Path, author: str):
+        """Widening the bare-email pattern must not turn a documented handle into a HIGH finding."""
+        from skillevaluator.models.result import Severity
+        from skillevaluator.validators.policy import load_profile
+
+        skill_dir = self._write_skill(tmp_path, name="handle-author", author_line=f'"{author}"')
+
+        result = SchemaValidator(policy=load_profile("default")).validate(skill_dir)
+
+        assert result.passed, result.errors
+        findings = [f for f in result.findings if f.check_name.startswith("author")]
+        assert [(f.check_name, f.severity) for f in findings] == [("author_without_email", Severity.INFO)]
 
     def test_default_validator_uses_public_profile(self, tmp_path: Path):
         """Constructing SchemaValidator() without a policy accepts public domains."""
@@ -1150,7 +1229,7 @@ class TestMetadataIdContract:
         (skill_dir / "SKILL.md").write_text(
             f"""---
 name: {name}
-description: A skill used by the test suite to check the metadata.id contract
+description: Use when testing the metadata.id contract. A skill used by the test suite to check the contract
 metadata:
   author: Jane Doe <jane@example.com>
 {id_block}---
@@ -1327,6 +1406,83 @@ Example.
         assert result.summary.low_count == 1
 
 
+class TestCollectionAdvisoryIdentity:
+    """A preserved advisory must say which skill in the collection produced it.
+
+    Collection validation keeps the advisories of the skills that passed, but
+    a consumer reading the collection result also has to be able to attribute
+    each one, which a finding carried over unchanged does not allow.
+    """
+
+    @staticmethod
+    def _write_skill(root: Path, name: str, *, author_line: str, id_line: str | None) -> Path:
+        skill_dir = root / name
+        skill_dir.mkdir(parents=True)
+        id_block = f"  id: {id_line}\n" if id_line is not None else ""
+        (skill_dir / "SKILL.md").write_text(
+            f"""---
+name: {name}
+description: Use when testing collection advisories. A skill used by the test suite to check collection-level advisory handling
+metadata:
+  author: {author_line}
+{id_block}---
+
+# {name}
+
+## Instructions
+
+1. Run.
+
+## Examples
+
+Example.
+""",
+            encoding="utf-8",
+        )
+        return skill_dir
+
+    def test_carried_advisory_names_its_skill(self, tmp_path: Path):
+        from skillevaluator.models.result import Severity
+        from skillevaluator.validators.policy import load_profile
+
+        skills = tmp_path / "skills"
+        self._write_skill(skills, "advisory-skill", author_line="Example Team", id_line="INVALID_ID")
+
+        skill_result = SchemaValidator(policy=load_profile("default")).validate(skills / "advisory-skill")
+        collection = SchemaValidator(policy=load_profile("default")).validate(tmp_path)
+
+        assert skill_result.passed, skill_result.errors
+        carried = {f.check_name: f for f in collection.findings if f.metadata.get("collection_skill")}
+        assert carried.keys() >= {"author_without_email", "metadata_id_format"}
+        assert carried["author_without_email"].severity == Severity.INFO
+        assert carried["metadata_id_format"].severity == Severity.MEDIUM
+        for finding in carried.values():
+            assert finding.metadata["collection_skill"] == "advisory-skill"
+            assert finding.file_path.startswith("[advisory-skill] ")
+        assert any("[advisory-skill] " in warning for warning in collection.warnings)
+        # An advisory from a passing child stays advisory: it cannot fail the collection.
+        assert collection.passed, collection.errors
+        assert not collection.errors
+        assert not [f for f in collection.findings if f.severity.is_error()]
+        # The roll-up must not claim everything passed while advisories exist.
+        rollup = next(d for d in collection.success_details if d.check_name == "advisory-skill")
+        assert rollup.metadata["advisory_findings"] == len(skill_result.findings)
+        assert "advisory finding(s)" in rollup.message
+
+    def test_collection_of_clean_skills_carries_no_advisories(self, tmp_path: Path):
+        """Negative case: nothing is invented for a skill with no findings of its own."""
+        skills = tmp_path / "skills"
+        self._write_skill(skills, "clean-skill", author_line="Jane Doe <jane@example.com>", id_line="clean-skill")
+
+        collection = SchemaValidator().validate(tmp_path)
+
+        assert collection.passed, collection.errors
+        assert not [f for f in collection.findings if f.metadata.get("collection_skill")]
+        rollup = next(d for d in collection.success_details if d.check_name == "clean-skill")
+        assert rollup.message == "All schema and structure checks passed"
+        assert rollup.metadata["advisory_findings"] == 0
+
+
 class TestMetadataIdPreviewBounds:
     """A rejected ``metadata.id`` must never be rendered by expanding its value."""
 
@@ -1386,3 +1542,118 @@ class TestMetadataIdPreviewBounds:
         (finding,) = [finding for finding in result.findings if finding.check_name == "metadata_id_format"]
         assert "must be a string" in finding.message
         assert len(finding.line_content) <= 32
+
+
+def _write_skill(
+    root: Path, frontmatter: str, body: str = "# Portable\n\n## Instructions\n\n1. Step\n\n## Examples\n\nExample.\n"
+) -> Path:
+    skill_dir = root / "skills" / "portable-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(f"---\n{frontmatter}---\n\n{body}", encoding="utf-8")
+    return skill_dir
+
+
+_BASE_FM = (
+    "name: portable-skill\n"
+    "description: Use when checking harness portability of a skill.\n"
+    "metadata:\n  author: Test User <testuser@example.com>\n"
+)
+
+
+def _checks(result, name: str) -> list:
+    return [finding for finding in result.findings if finding.check_name == name]
+
+
+class TestSchemaPortabilityChecks:
+    """Spec-valid patterns that agent harnesses load differently (Tier 1, harness-neutral)."""
+
+    def test_clean_skill_has_no_portability_findings(self, tmp_path: Path):
+        result = SchemaValidator().validate(_write_skill(tmp_path, _BASE_FM))
+
+        assert result.passed, result.errors
+        names = {
+            "duplicate_key",
+            "manifest_bom",
+            "manifest_symlink",
+            "manifest_size",
+            "nested_manifest",
+            "description_utf16_length",
+            "description_trigger",
+            "unknown_field",
+        }
+        assert not [f for f in result.findings if f.check_name in names]
+
+    def test_duplicate_top_level_key_is_high(self, tmp_path: Path):
+        result = SchemaValidator().validate(_write_skill(tmp_path, _BASE_FM + "description: Second value.\n"))
+
+        findings = _checks(result, "duplicate_key")
+        assert not result.passed
+        assert [f.metadata["key"] for f in findings] == ["description"]
+        assert findings[0].severity == "high"
+        assert findings[0].line_number == 6
+
+    def test_duplicate_nested_key_is_reported_with_path(self, tmp_path: Path):
+        fm = _BASE_FM + "  author: Other User <other@example.com>\n"
+        result = SchemaValidator().validate(_write_skill(tmp_path, fm))
+
+        assert [f.metadata["key"] for f in _checks(result, "duplicate_key")] == ["metadata.author"]
+
+    def test_same_key_in_different_mappings_is_not_duplicate(self, tmp_path: Path):
+        fm = _BASE_FM + "  tags:\n    - name: a\n    - name: b\n"
+        result = SchemaValidator().validate(_write_skill(tmp_path, fm))
+
+        assert not _checks(result, "duplicate_key")
+
+    def test_bom_is_medium_and_does_not_fail(self, tmp_path: Path):
+        skill_dir = _write_skill(tmp_path, _BASE_FM)
+        manifest = skill_dir / "SKILL.md"
+        manifest.write_bytes(b"\xef\xbb\xbf" + manifest.read_bytes())
+
+        result = SchemaValidator().validate(skill_dir)
+
+        assert result.passed, result.errors
+        assert [f.severity for f in _checks(result, "manifest_bom")] == ["medium"]
+
+    def test_description_over_utf16_limit_is_medium(self, tmp_path: Path):
+        description = "Use when testing. " + "\U0001f600" * 600
+        fm = _BASE_FM.replace("Use when checking harness portability of a skill.", description)
+        result = SchemaValidator().validate(_write_skill(tmp_path, fm))
+
+        findings = _checks(result, "description_utf16_length")
+        assert result.passed, result.errors
+        assert [f.metadata["utf16_units"] for f in findings] == [len(description.encode("utf-16-le")) // 2]
+
+    def test_bmp_description_at_limit_has_no_utf16_finding(self, tmp_path: Path):
+        fm = _BASE_FM.replace("Use when checking harness portability of a skill.", "Use when x. " + "a" * 1012)
+        result = SchemaValidator().validate(_write_skill(tmp_path, fm))
+
+        assert not _checks(result, "description_utf16_length")
+
+    @pytest.mark.parametrize(
+        ("description", "expected"),
+        [
+            ("Formats tables. Use when the user asks for a table.", False),
+            ("Use this skill to format tables in reports.", False),
+            ("Formats tables, charts and other structured report content nicely. Use when needed.", True),
+            ("Formats tables in reports.", True),
+            ("Formats tables, charts and structured report sections. Use when needed.", True),
+        ],
+    )
+    def test_description_trigger_window(self, tmp_path: Path, description: str, expected: bool):
+        fm = _BASE_FM.replace("Use when checking harness portability of a skill.", description)
+        findings = _checks(SchemaValidator().validate(_write_skill(tmp_path, fm)), "description_trigger")
+
+        assert bool(findings) is expected
+        assert all(f.severity == "low" for f in findings)
+
+    def test_portability_severity_can_be_overridden_by_policy(self, tmp_path: Path):
+        from skillevaluator.validators.policy import ValidationPolicy
+
+        skill_dir = _write_skill(tmp_path, _BASE_FM)
+        manifest = skill_dir / "SKILL.md"
+        manifest.write_bytes(b"\xef\xbb\xbf" + manifest.read_bytes())
+        policy = ValidationPolicy(severity_overrides={"SCHEMA.manifest_bom": Severity.HIGH})
+        result = SchemaValidator(policy=policy).validate(skill_dir)
+
+        assert not result.passed
+        assert [f.severity for f in _checks(result, "manifest_bom")] == ["high"]

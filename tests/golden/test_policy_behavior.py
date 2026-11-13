@@ -33,7 +33,7 @@ def _write_skill(root: Path, name: str, author_line: str | None) -> Path:
     skill.mkdir(parents=True)
     meta = f"metadata:\n  author: {author_line}\n" if author_line else ""
     (skill / "SKILL.md").write_text(
-        f"---\nname: {name}\ndescription: A test skill for policy behavior checks.\n{meta}---\n"
+        f"---\nname: {name}\ndescription: Use when checking policy behavior. A test skill for policy behavior checks.\n{meta}---\n"
         + _BODY.format(name=name),
         encoding="utf-8",
     )
@@ -170,6 +170,40 @@ def test_catalog_reports_shared_metadata_id_and_blocks_under_registry(tmp_path: 
     }
 
 
+def test_a_skill_that_fails_on_its_own_keeps_its_reason_over_the_id_conflict(tmp_path: Path) -> None:
+    """A skill with its own failure and a shared ID is counted and reported once.
+
+    Without the `name not in failed` dedup guard in `_record_metadata_id_failures`
+    the skill would be listed twice, so the scoreboard and the raised error
+    would claim more failures than there are skills, and the conflict reason
+    would overwrite the skill's real one in `catalog-summary.json`.
+    """
+    catalog = tmp_path / "catalog"
+    # A bare email is a blocking author_format value, so this skill fails on its own.
+    _write_skill_with_id(catalog, "first-skill", "dev@example.com", "shared-id")
+    _write_skill_with_id(catalog, "second-skill", "Demo Author <author@example.com>", "shared-id")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate", str(catalog), "--tiers", "1", "--no-llm", "--checks", "schema",
+            "-r", "json", "-o", str(tmp_path / "out"), "--profile", "registry",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "2/2 skills failed validation" in result.output
+    assert "3/2" not in result.output
+    summary = json.loads((tmp_path / "out" / "catalog-summary.json").read_text(encoding="utf-8"))
+    skills = {skill["name"]: skill for skill in summary["skills"]}
+    assert set(skills) == {"first-skill", "second-skill"}
+    conflict_reason = "metadata.id 'shared-id' is also declared by"
+    assert conflict_reason not in skills["first-skill"]["reason"]
+    assert conflict_reason in skills["second-skill"]["reason"]
+    assert skills["first-skill"]["passed"] is False
+    assert skills["second-skill"]["passed"] is False
+
+
 def test_catalog_without_shared_ids_records_no_conflicts(tmp_path: Path) -> None:
     catalog = tmp_path / "catalog"
     _write_skill_with_id(catalog, "first-skill", "Demo Author <author@example.com>", "first-skill")
@@ -288,6 +322,21 @@ def test_catalog_conflicts_project_consistent_verdicts_counts_and_leaf_scope(
         if conflict and severity != "info":
             expected_counts[severity] += 1
         assert entry["severity_counts"] == expected_counts
+        # The findings behind the verdict and the severity bump are auditable
+        # per member, and a member with no conflict carries none.
+        if conflict:
+            other = "second-skill" if entry["name"] == "first-skill" else "first-skill"
+            assert entry["catalog_findings"] == [
+                {
+                    "category": "SCHEMA",
+                    "check_name": "metadata_id_duplicate",
+                    "severity": severity,
+                    "blocking": blocking,
+                    "message": f"metadata.id 'shared-id' is also declared by {other}",
+                }
+            ]
+        else:
+            assert "catalog_findings" not in entry
         leaf = json.loads((out / entry["report_dir"] / entry["json_report"]).read_text(encoding="utf-8"))
         assert leaf["overall_passed"] is not own_failure
         assert leaf["overall_status"] == ("failed" if own_failure else "passed")

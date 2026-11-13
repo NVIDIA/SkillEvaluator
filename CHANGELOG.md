@@ -6,6 +6,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Classify explicit `SKILL.md` ownership contacts (`metadata.pic` and
+  `metadata.email`) as `PII.ownership_emails`, still HIGH by default. Add
+  `--policy` to `tier1` and `tier1 validate` so operators can permit reviewed
+  ownership metadata without allowing ordinary email occurrences.
+- Retain bounded SkillSpector completeness diagnostics in JSON reports and
+  show file/line, phase, and reason in incomplete-scan errors. Preserve details
+  across scan stages, folder aggregation, and policy application.
+
 - Add an `error_handling` section to the `--quality-config` file for
   Reliability's three error-handling rules: the `SKILL.md` mention check and
   the `scripts` and `lib` code checks. Each sets `points`, `message`,
@@ -296,6 +304,11 @@ All notable changes to SkillEvaluator are documented in this file.
   counted RAGAS call, as before.
 
 ### Changed
+
+- A `PII.emails` severity override in `--policy` no longer applies to the
+  `metadata.pic` and `metadata.email` contacts in a skill's own `SKILL.md`. They
+  now report as `PII.ownership_emails`, HIGH by default, so a run that passed
+  through that override fails until the policy also sets `PII.ownership_emails`.
 
 - Remove `skillevaluator.quality_config.quality_config_provenance(path, config)`.
   Use `load_quality_config_with_provenance(path)` instead: it loads the config

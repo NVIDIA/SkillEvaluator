@@ -156,6 +156,11 @@ PLUGIN_CONTAINED_MODE = "contained"
 # Skill manifest file name variants (case-insensitive search)
 SKILL_MANIFEST_VARIANTS = ("SKILL.md", "skill.md")
 
+# SKILL.md size thresholds (bytes) where common agent harnesses start cutting,
+# refusing, or skipping the file: 16,000-64,000 character whole-file reads,
+# 50 KiB tool-output truncation, and a 256,000-byte discovery cap.
+SKILL_MD_SIZE_THRESHOLDS = ((256_000, "high"), (50 * 1024, "medium"), (32 * 1024, "low"))
+
 # Some harnesses show only the first ~60 characters of each description in
 # their skill list, so the "when to use" trigger should appear within it.
 DESCRIPTION_TRIGGER_WINDOW = 60

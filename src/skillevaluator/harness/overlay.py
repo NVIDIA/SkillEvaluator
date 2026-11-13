@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -136,6 +137,64 @@ def _install_root(skill_path: Path) -> tuple[str | None, int]:
     return None, 0
 
 
+# OpenClaw 2026.10.9 cjk-chars.ts: CJK code points cost 4-16 chars, every other UTF-16 unit 1.
+_OPENCLAW_CJK = (
+    (3, ((0xB7, 0xB7), (0x3000, 0x319F), (0x4E00, 0x9FA5), (0xAC00, 0xD7AF), (0xFF01, 0xFF60))),
+    (
+        11,
+        (
+            (0x1100, 0x11FF),
+            (0x2E80, 0x2FFF),
+            (0x31A0, 0x4DFF),
+            (0x9FA6, 0x9FFF),
+            (0xA000, 0xA4FF),
+            (0xA700, 0xA707),
+            (0xA960, 0xA97F),
+            (0xD7B0, 0xD7FF),
+            (0xF900, 0xFAFF),
+        ),
+    ),
+    (
+        7,
+        (
+            (0x2C7, 0x2C7),
+            (0x2C9, 0x2CB),
+            (0x2D9, 0x2D9),
+            (0x2EA, 0x2EB),
+            (0x305, 0x305),
+            (0x323, 0x323),
+            (0xFE10, 0xFE4F),
+            (0xFF61, 0xFFDC),
+            (0xFFE0, 0xFFE6),
+        ),
+    ),
+    (10, ((0x1D360, 0x1D371),)),
+    (
+        14,
+        (
+            (0x16FE0, 0x16FFF),
+            (0x1AFF0, 0x1AFFF),
+            (0x1B000, 0x1B16F),
+            (0x1F200, 0x1F2FF),
+            (0x20000, 0x2FA1F),
+            (0x30000, 0x3347F),
+        ),
+    ),
+)
+# Room OpenClaw keeps for its truncation notice; the skills_read path adds a JSON wrapper and cuts ~1% sooner.
+_OPENCLAW_READ_OVERHEAD = 73
+
+
+def _openclaw_read_chars(text: str) -> int:
+    """SKILL.md size as OpenClaw's tool-result cap measures it."""
+    extra = 0
+    for ch in text:
+        cp = ord(ch)
+        if cp >= 0x80:
+            extra += next((w for w, rs in _OPENCLAW_CJK if any(a <= cp <= b for a, b in rs)), 0)
+    return _OPENCLAW_READ_OVERHEAD + len(text.encode("utf-16-le", "surrogatepass")) // 2 + extra
+
+
 def _read_manifest(skill_path: Path) -> tuple[Path, bytes, str, str, dict[str, Any]]:
     manifest = next(
         (skill_path / n for n in SKILL_MANIFEST_VARIANTS if (skill_path / n).exists()), skill_path / "SKILL.md"
@@ -191,7 +250,7 @@ def _paths(items: list[str]) -> str:
 
 def _bundle_facts(skill_path: Path, manifest: Path) -> dict[str, Any]:
     base = skill_path.resolve()
-    links, escapes, unlisted = [], [], []
+    links, escapes, sizes, long_lines, unlisted = [], [], [], [], []
     for path in _bundle_files(skill_path, manifest):
         rel = path.relative_to(skill_path).as_posix()
         if path.is_symlink():
@@ -200,13 +259,28 @@ def _bundle_facts(skill_path: Path, manifest: Path) -> dict[str, Any]:
             if target != base and base not in target.parents:
                 escapes.append(rel)
             continue
+        lines = path.read_bytes().decode("utf-8", "replace").splitlines()
+        sizes.append((rel, path.stat().st_size, len(lines)))
+        long_lines += [rel] * sum(len(line) > 2000 for line in lines)
         if rel.split("/", 1)[0] not in _HERMES_LINKED_DIRS:
             unlisted.append(rel)
+    largest = max(sizes, key=lambda item: item[1], default=("", 0, 0))
+    paged = [rel for rel, size, count in sizes if size > 51200 or count > 2000]
+    multi_read = [rel for rel, size, _ in sizes if size > 64000]
     return {
         "resource_symlinks": len(links),
         "resource_symlink_paths": _paths(links),
         "resource_symlink_escapes": len(escapes),
         "resource_symlink_escape_paths": _paths(escapes),
+        "largest_resource": largest[0],
+        "largest_resource_bytes": largest[1],
+        "largest_resource_lines": largest[2],
+        "files_over_51200": len(paged),
+        "files_over_51200_paths": _paths(paged),
+        "files_over_64000": len(multi_read),
+        "files_over_64000_paths": _paths(multi_read),
+        "long_line_count": len(long_lines),
+        "long_line_files": _paths(list(dict.fromkeys(long_lines))),
         "hermes_unlisted_files": len(unlisted),
         "hermes_unlisted_dirs": _paths(list(dict.fromkeys(rel.split("/", 1)[0] for rel in unlisted))),
     }
@@ -233,6 +307,8 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         if skill_path.is_dir()
         else []
     )
+    match = FRONTMATTER_PATTERN.match(text)
+    body = match.group(2) if match else text
     custom = {k: v for k, v in data.items() if str(k) not in _KNOWN_FIELDS}
     name = _skill_name(skill_path, data)
     duplicates = catalog.duplicates(skill_path, name) if catalog else []
@@ -246,6 +322,12 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         "nested_skill_md_exact": any(p.name == "SKILL.md" and not p.is_symlink() for p in nested),
         "skill_md_symlink": manifest.is_symlink(),
         "skill_dir_symlink_target": target,
+        "skill_md_bytes": len(raw),
+        "skill_md_lines": len(text.splitlines()),
+        "openclaw_read_chars": _openclaw_read_chars(text),
+        # OpenCode strips front matter and wraps the body before its tool-output cut.
+        "opencode_body_output_bytes": len(f'<skill_content name="{name}">\n# Skill: {name}\n\n{body.strip()}'.encode()),
+        "opencode_body_output_lines": 3 + len(body.strip().splitlines()),
         "frontmatter_missing": manifest.is_file() and FRONTMATTER_PATTERN.match(text) is None,
         "description_missing": "description" not in data,
         "description_empty": isinstance(description, str) and not description.strip(),
@@ -260,8 +342,14 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         "frontmatter_tab_indent": _tab_indent_breaks_yaml(fm_yaml),
         "custom_fields": ", ".join(map(str, custom)),
         "custom_field_chars": sum(len(v) if isinstance(v, str) else len(yaml.safe_dump(v)) for v in custom.values()),
+        "skill_md_chars": len(text),
+        "skill_md_tokens": len(raw) // 4,
         "description_over": max(0, (len(description) if isinstance(description, str) else 0) - 1024),
         "utf16_over": max(0, (_utf16_units(description)) - 1024),
+        # Hermes skill_view returns JSON (ensure_ascii=False, budget in code points): SKILL.md + description + ~400 chars.
+        "hermes_view_chars": len(json.dumps(text, ensure_ascii=False))
+        + len(json.dumps(description if isinstance(description, str) else "", ensure_ascii=False))
+        + 400,
         **_bundle_facts(skill_path, manifest),
         "catalog_size": catalog.size if catalog else 0,
         "catalog_desc_chars": catalog.desc_chars if catalog else 0,

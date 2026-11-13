@@ -12,6 +12,11 @@ All notable changes to SkillEvaluator are documented in this file.
   comment helpers, and needs no Pages configuration or history branch. Future
   generated bundles include the template; archived bundles and the released
   onboarding CLI retain their existing hosted publisher setup.
+- `harness` rules for delivery limits: Claude Code's body cap, OpenCode's
+  51,200-byte / 2,000-line reads and long lines, OpenClaw's whole-read and
+  weighted result caps, Hermes's 100,000-character `skill_view` budget and Codex's
+  ~10K-token shell-output cut. Tier 1 `schema` now reports `SKILL.md` size tiers
+  (32 KiB LOW, 50 KiB MEDIUM, 256,000 bytes HIGH).
 - The `harness` check measures a skill together with the skills installed beside
   it: list budgets (scaled by the context window), duplicate names and which copy
   each harness uses, and OpenClaw's prompt cap and compact list. A `catalog` line

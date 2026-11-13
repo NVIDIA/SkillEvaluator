@@ -1625,6 +1625,28 @@ class TestSchemaPortabilityChecks:
         assert result.passed, result.errors
         assert len(_checks(result, "manifest_symlink")) == 1
 
+    @pytest.mark.parametrize(
+        ("size", "severity"),
+        [(32 * 1024 + 1, "low"), (50 * 1024 + 1, "medium"), (256_001, "high")],
+    )
+    def test_manifest_size_thresholds(self, tmp_path: Path, size: int, severity: str):
+        skill_dir = _write_skill(tmp_path, _BASE_FM)
+        manifest = skill_dir / "SKILL.md"
+        padding = size - len(manifest.read_bytes())
+        manifest.write_text(manifest.read_text() + "x" * padding)
+
+        findings = _checks(SchemaValidator().validate(skill_dir), "manifest_size")
+
+        assert [f.severity for f in findings] == [severity]
+        assert findings[0].metadata["size_bytes"] == size
+
+    def test_manifest_at_low_threshold_has_no_size_finding(self, tmp_path: Path):
+        skill_dir = _write_skill(tmp_path, _BASE_FM)
+        manifest = skill_dir / "SKILL.md"
+        manifest.write_text(manifest.read_text() + "x" * (32 * 1024 - len(manifest.read_bytes())))
+
+        assert not _checks(SchemaValidator().validate(skill_dir), "manifest_size")
+
     def test_nested_manifest_is_medium(self, tmp_path: Path):
         skill_dir = _write_skill(tmp_path, _BASE_FM)
         (skill_dir / "references" / "inner").mkdir(parents=True)

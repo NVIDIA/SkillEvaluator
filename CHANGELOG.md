@@ -60,6 +60,19 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Behavior checks no longer score a final answer that the evidence limits
+  shortened. The final-response allowance rises from 800 to 8,000 characters,
+  with the total behavior evidence budget reconciled to 12,000, so an ordinary
+  answer reaches the judge whole instead of losing its middle; the user request
+  is reserved alongside it, ahead of the optional exploration output in the
+  compact tool history. The `behavior_check` evidence record now reports
+  whether the required evidence is complete, not only whether something was
+  dropped. When the final answer still cannot fit, the judge returns an
+  explicit evaluation error and no behavior score, rather than grading the
+  evidence loss as a behavior failure, and that missing score stays missing
+  instead of being averaged in as a zero.
+  `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT` and
+  `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET` still override both limits.
 - The supporting Tier 3 Pass@k table displays an unavailable or skipped
   baseline rate as `N/A`, preserving an observed baseline rate of `0%`.
 - Tier 3 budget summaries disclose measured usage above configured limits,
@@ -530,6 +543,14 @@ All notable changes to SkillEvaluator are documented in this file.
   include accessible descriptions, links to data tables and visible fallbacks
   when canvas initialization is unavailable; Tier 1 reports omit chart assets.
 
+- Root help shows the SkillEvaluator wordmark in more terminals: the
+  one-line wordmark still needs 115 columns, 76-114 columns now get the same
+  letters stacked (SKILL over EVALUATOR), and 60-75 columns get a two-row
+  wordmark. Narrower terminals keep the plain title. A wordmark that the
+  terminal's output encoding cannot print is skipped: gbk and big5hkscs lack
+  the half blocks of the two-row one, so they get the plain title at 60-75
+  columns.
+
 - Separate HTML Tier 2 evidence into within-skill and across-skill comparisons,
   with recorded completion, duplicate, affected-path, and catalog counts. Keep
   skipped or unavailable comparisons distinct from completed zero-match scans.
@@ -765,6 +786,14 @@ All notable changes to SkillEvaluator are documented in this file.
   and `--type skill` still validates the target as a skill.
 
 - The unknown-artifact CLI guidance links to the published content-types documentation route.
+
+- Code Risk Analysis reports Semgrep file-level parse errors as one partial-scan
+  error that names up to 20 unparsed files, relative to the skill and with the
+  line of the first error, instead of the first three truncated messages. The
+  check stays `incomplete` because Semgrep skips the code it cannot parse. The
+  JSON report lists the files in `semgrep_unparsed_files` (up to 1,000, with
+  `semgrep_unparsed_files_omitted` counting the rest); other Semgrep errors are
+  reported as before.
 
 - Security checks preserve authored evaluation files and their findings while
   excluding generated outputs. Fully inspected skills with only missing-path

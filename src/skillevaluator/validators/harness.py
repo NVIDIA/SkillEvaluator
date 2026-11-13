@@ -34,6 +34,7 @@ class HarnessValidator(ValidatorBase):
         return "Advisory: whether each agent harness loads, degrades or drops the skill"
 
     def validate(self, skill_path: Path) -> ValidationResult:
+        skill_path = skill_path.parent if skill_path.is_file() else skill_path
         profiles = load_profiles(self.harnesses, self.profiles_dir)
         skills = [skill_path] if self._is_skill_directory(skill_path) else self._find_all_skills(skill_path)
         result = ValidationResult(validator_name=self.name, validator_description=self.description)

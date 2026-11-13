@@ -214,11 +214,14 @@ _network_lookup_readings = _shared_checks._network_lookup_readings
 _network_redirection = _shared_checks._network_redirection
 _network_shell_tokens = _shared_checks._network_shell_tokens
 _network_tokens_exfiltrate = _shared_checks._network_tokens_exfiltrate
+_normalize_sensitive_path_text = _shared_checks._normalize_sensitive_path_text
 _normalize_skill_names = _shared_checks._normalize_skill_names
 _normalized_write_path = _shared_checks._normalized_write_path
+_normpath_word = _shared_checks._normpath_word
 _number_may_fail = _shared_checks._number_may_fail
 _parse_unit_starts = _shared_checks._parse_unit_starts
 _pass_to_reference = _shared_checks._pass_to_reference
+_path_entry_in = _shared_checks._path_entry_in
 _path_with_shell_cwd = _shared_checks._path_with_shell_cwd
 _pipeline_last_stage_keeps_bindings = _shared_checks._pipeline_last_stage_keeps_bindings
 _pipeline_upstream_names_script = _shared_checks._pipeline_upstream_names_script
@@ -272,11 +275,15 @@ _script_path_matches = _shared_checks._script_path_matches
 _search_path_is_root = _shared_checks._search_path_is_root
 _secret_exposure_finding = _shared_checks._secret_exposure_finding
 _security_finding = _shared_checks._security_finding
+_sensitive_path_match = _shared_checks._sensitive_path_match
+_sensitive_write_target = _shared_checks._sensitive_write_target
 _shell_c_payload = _shared_checks._shell_c_payload
 _shell_c_positional = _shared_checks._shell_c_positional
 _shell_executable = _shared_checks._shell_executable
 _shell_substitution_payloads = _shared_checks._shell_substitution_payloads
 _shell_tokens = _shared_checks._shell_tokens
+_shell_write_targets = _shared_checks._shell_write_targets
+_shell_write_texts = _shared_checks._shell_write_texts
 _skill_match_details = _shared_checks._skill_match_details
 _skill_md_arg = _shared_checks._skill_md_arg
 _skill_name_from_ref = _shared_checks._skill_name_from_ref
@@ -308,6 +315,8 @@ normalize_optional_reference = _shared_checks.normalize_optional_reference
 normalize_expected_behaviors = _shared_checks.normalize_expected_behaviors
 resolve_should_trigger = _shared_checks.resolve_should_trigger
 score_skill_execution = _shared_checks.score_skill_execution
+skill_efficiency_not_applicable_reason = _shared_checks.skill_efficiency_not_applicable_reason
+skill_execution_not_applicable_reason = _shared_checks.skill_execution_not_applicable_reason
 
 # All 148 constant initializers are AST-identical at the fixed base; shared
 # constants added since are aliased here too.
@@ -363,6 +372,7 @@ _DYNAMIC_ARGUMENT_RE = _shared_checks._DYNAMIC_ARGUMENT_RE
 _EMPTY_REFERENCE_SHELLS = _shared_checks._EMPTY_REFERENCE_SHELLS
 _EXECUTION_TOOL_HINTS = _shared_checks._EXECUTION_TOOL_HINTS
 _EXPORTED_MARK = _shared_checks._EXPORTED_MARK
+_FD_REDIRECT_TARGET_RE = _shared_checks._FD_REDIRECT_TARGET_RE
 _FILE_READ_VERBS = _shared_checks._FILE_READ_VERBS
 _FUNCTION_HEADER_NAME_RE = _shared_checks._FUNCTION_HEADER_NAME_RE
 _GLUED_AKIA_BODY = _shared_checks._GLUED_AKIA_BODY
@@ -372,7 +382,10 @@ _GLUED_KEYWORD_RE = _shared_checks._GLUED_KEYWORD_RE
 _GROUPING_TOKENS = _shared_checks._GROUPING_TOKENS
 _HEREDOC_DELIMITER_RE = _shared_checks._HEREDOC_DELIMITER_RE
 _HEREDOC_REDIRECTS = _shared_checks._HEREDOC_REDIRECTS
+_HOME_ANCHOR_RE = _shared_checks._HOME_ANCHOR_RE
+_HOME_CREDENTIAL_PATHS = _shared_checks._HOME_CREDENTIAL_PATHS
 _HOME_DIR_PREFIX_RE = _shared_checks._HOME_DIR_PREFIX_RE
+_HOME_SENSITIVE_WRITE_PATHS = _shared_checks._HOME_SENSITIVE_WRITE_PATHS
 _HOME_SHORTHAND_RE = _shared_checks._HOME_SHORTHAND_RE
 _HTTPIE_BODY_FLAGS = _shared_checks._HTTPIE_BODY_FLAGS
 _INERT_PRINT_COMMANDS = _shared_checks._INERT_PRINT_COMMANDS
@@ -386,6 +399,7 @@ _INTERPRETER_GRAMMARS = _shared_checks._INTERPRETER_GRAMMARS
 _JUSTIFYING_SHELLS = _shared_checks._JUSTIFYING_SHELLS
 _LAST_STAGE_IN_CURRENT_SHELL = _shared_checks._LAST_STAGE_IN_CURRENT_SHELL
 _LAST_STAGE_IN_SUBSHELL = _shared_checks._LAST_STAGE_IN_SUBSHELL
+_LINE_CONTINUATION_RE = _shared_checks._LINE_CONTINUATION_RE
 _LISTING_ACTS_ON_NAMES = _shared_checks._LISTING_ACTS_ON_NAMES
 _LITERAL_DOLLAR = _shared_checks._LITERAL_DOLLAR
 _LOOP_HEADER_WORDS = _shared_checks._LOOP_HEADER_WORDS
@@ -421,6 +435,8 @@ _OUTPUT_REDIRECTS = _shared_checks._OUTPUT_REDIRECTS
 _PARSES_WHOLE_TEXT_FIRST = _shared_checks._PARSES_WHOLE_TEXT_FIRST
 _PASS_THROUGH_WRAPPERS = _shared_checks._PASS_THROUGH_WRAPPERS
 _PATH_ARG_KEYS = _shared_checks._PATH_ARG_KEYS
+_PATH_COMPONENT_END = _shared_checks._PATH_COMPONENT_END
+_PATH_WORD_RE = _shared_checks._PATH_WORD_RE
 _PIPELINE_OPTION_RE = _shared_checks._PIPELINE_OPTION_RE
 _POSITIONAL_SET_RE = _shared_checks._POSITIONAL_SET_RE
 _PREFIX_EXPANDS_FIRST = _shared_checks._PREFIX_EXPANDS_FIRST
@@ -428,9 +444,11 @@ _PREFIX_OUTLIVES_SPECIAL_BUILTIN = _shared_checks._PREFIX_OUTLIVES_SPECIAL_BUILT
 _PROC_CWD_ALIAS_RE = _shared_checks._PROC_CWD_ALIAS_RE
 _PROC_ROOT_ALIAS_RE = _shared_checks._PROC_ROOT_ALIAS_RE
 _PROMPT_INJECTION_PATTERNS = _shared_checks._PROMPT_INJECTION_PATTERNS
+_PROTECTED_WRITE_PATHS = _shared_checks._PROTECTED_WRITE_PATHS
 _PUNCTUATION_PIECE_RE = _shared_checks._PUNCTUATION_PIECE_RE
 _PUNCTUATION_RUN_RE = _shared_checks._PUNCTUATION_RUN_RE
 _QUOTED_NEWLINE = _shared_checks._QUOTED_NEWLINE
+_QUOTED_STRING_RE = _shared_checks._QUOTED_STRING_RE
 _QUOTED_SYNTAX_MARK = _shared_checks._QUOTED_SYNTAX_MARK
 _READONLY_ATTRIBUTES = _shared_checks._READONLY_ATTRIBUTES
 _READONLY_MARK = _shared_checks._READONLY_MARK
@@ -440,6 +458,7 @@ _READ_OPTIONS_WITH_ARG = _shared_checks._READ_OPTIONS_WITH_ARG
 _READ_TOOL_HINTS = _shared_checks._READ_TOOL_HINTS
 _REDIRECTION_OPERATOR_RE = _shared_checks._REDIRECTION_OPERATOR_RE
 _REDIRECTION_WORD_RE = _shared_checks._REDIRECTION_WORD_RE
+_REDIRECT_TARGET_RE = _shared_checks._REDIRECT_TARGET_RE
 _REFERENCE_MARK = _shared_checks._REFERENCE_MARK
 _REFERENCE_SHELLS = _shared_checks._REFERENCE_SHELLS
 _REFUSED_ASSIGNMENT_GOES_ON = _shared_checks._REFUSED_ASSIGNMENT_GOES_ON
@@ -457,6 +476,10 @@ _SCRIPT = _shared_checks._SCRIPT
 _SCRIPT_INTERPRETERS = _shared_checks._SCRIPT_INTERPRETERS
 _SECRET_PATTERNS = _shared_checks._SECRET_PATTERNS
 _SECRET_VAR_NAME_RE = _shared_checks._SECRET_VAR_NAME_RE
+_SED_IN_PLACE_FLAG_RE = _shared_checks._SED_IN_PLACE_FLAG_RE
+_SED_OPERANDS_RE = _shared_checks._SED_OPERANDS_RE
+_SED_SCRIPT_OPTION_RE = _shared_checks._SED_SCRIPT_OPTION_RE
+_SENSITIVE_PATH_DIRECTORIES = _shared_checks._SENSITIVE_PATH_DIRECTORIES
 _SENSITIVE_WRITE_PATHS = _shared_checks._SENSITIVE_WRITE_PATHS
 _SHELL_ASSIGNMENT_RE = _shared_checks._SHELL_ASSIGNMENT_RE
 _SHELL_COMMAND_INTERPRETERS = _shared_checks._SHELL_COMMAND_INTERPRETERS
@@ -465,6 +488,7 @@ _SHELL_METACHARS = _shared_checks._SHELL_METACHARS
 _SHELL_NAME_RE = _shared_checks._SHELL_NAME_RE
 _SHELL_SEPARATORS = _shared_checks._SHELL_SEPARATORS
 _SHELL_VARIABLE_RE = _shared_checks._SHELL_VARIABLE_RE
+_SHELL_WORD = _shared_checks._SHELL_WORD
 _SOURCING_COMMANDS = _shared_checks._SOURCING_COMMANDS
 _SPECIAL_BUILTINS = _shared_checks._SPECIAL_BUILTINS
 _SPECIAL_BUILTIN_ERROR_STOPS = _shared_checks._SPECIAL_BUILTIN_ERROR_STOPS
@@ -473,6 +497,7 @@ _STDIN_DEPENDENT_WRAPPERS = _shared_checks._STDIN_DEPENDENT_WRAPPERS
 _STDIN_TEXT_CONSUMERS = _shared_checks._STDIN_TEXT_CONSUMERS
 _SYNTAX_SHAPE_RE = _shared_checks._SYNTAX_SHAPE_RE
 _SYNTAX_WORDS = _shared_checks._SYNTAX_WORDS
+_TEE_OPERANDS_RE = _shared_checks._TEE_OPERANDS_RE
 _TRANSPARENT_COMMAND_PREFIXES = _shared_checks._TRANSPARENT_COMMAND_PREFIXES
 _UNAUTHORIZED_PATHS = _shared_checks._UNAUTHORIZED_PATHS
 _UNDECIDABLE = _shared_checks._UNDECIDABLE
@@ -3374,10 +3399,11 @@ def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary)
             RagasAI(content=agent_text),
         ]
         # Collections metrics take the messages and reference as keywords, not a SingleTurnSample.
+        scorer_timeout = _remaining_judge_timeout(_resolve_judge_wall_time_budget())
         result = loop.run_until_complete(
             asyncio.wait_for(
                 metric.ascore(user_input=user_input, reference=ground_truth),
-                timeout=_remaining_judge_timeout(_resolve_judge_wall_time_budget()),
+                timeout=scorer_timeout,
             )
         )
     finally:
@@ -3838,9 +3864,22 @@ def skill_metrics_applicable(
     return any(str(name).strip().lower() in staged for name in candidates if name and str(name).strip())
 
 
-def _skill_metric_not_applicable():
-    """Scoreless ``skill_execution`` / ``skill_efficiency`` result for an arm without the skill."""
-    return {"score": None, "status": NOT_APPLICABLE_STATUS, "reason": SKILL_METRICS_NOT_APPLICABLE_REASON}
+def _skill_metric_not_applicable(reason=SKILL_METRICS_NOT_APPLICABLE_REASON):
+    """Scoreless ``skill_execution`` / ``skill_efficiency`` result.
+
+    The default reason covers an arm without the skill. An eval case that gives
+    the metric nothing to score passes its own reason.
+    """
+    return {"score": None, "status": NOT_APPLICABLE_STATUS, "reason": reason}
+
+
+def _case_skill_metric_reasons(should_trigger, expected_skill):
+    """Return the skill metrics this eval case leaves N/A, each with its reason."""
+    reasons = {
+        "skill_execution": skill_execution_not_applicable_reason(should_trigger, expected_skill),
+        "skill_efficiency": skill_efficiency_not_applicable_reason(should_trigger, expected_skill),
+    }
+    return {metric: reason for metric, reason in reasons.items() if reason}
 
 
 def _reward_overall(result, details):
@@ -4003,6 +4042,11 @@ def main():
                 skill_execution=_skill_metric_not_applicable(),
                 skill_efficiency=_skill_metric_not_applicable(),
             )
+        else:
+            # A skill metric the case gives nothing to score stays N/A, as on the judged path.
+            for metric, na_reason in _case_skill_metric_reasons(should_trigger, expected_skill).items():
+                skill_scores[metric] = None
+                judge_details[metric] = _skill_metric_not_applicable(na_reason)
         result = {
             "security": 0,
             **skill_scores,
@@ -4113,8 +4157,10 @@ def main():
         sef_score = None
         details["skill_efficiency"] = _skill_metric_not_applicable()
     elif not should_trigger or not expected_skill:
-        sef_score = 1.0
-        details["skill_efficiency"] = {"message": "Skipped (negative or no expected_skill)"}
+        sef_score = None
+        details["skill_efficiency"] = _skill_metric_not_applicable(
+            skill_efficiency_not_applicable_reason(should_trigger, expected_skill)
+        )
     elif not tool_calls:
         sef_score = 0.0
         details["skill_efficiency"] = {"message": "No tool calls in trajectory"}

@@ -19,10 +19,11 @@ import stat
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+from collections.abc import Sequence
+from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn
 
-from harbor.environments.base import BaseEnvironment, ExecResult, OutputCallback, OutputStream
+from harbor.environments.base import BaseEnvironment, EnvironmentPath, ExecResult, OutputCallback, OutputStream
 from harbor.environments.capabilities import EnvironmentCapabilities
 from harbor.models.environment_type import EnvironmentType
 
@@ -77,6 +78,7 @@ _BLOCKED_COMMAND_ENV_PREFIXES = ("DYLD_", "LD_", "PYTHON")
 # Harbor transports Claude Code prompts through an uppercased UUID-named
 # variable; keep that contract narrow so unrelated Harbor controls stay private.
 _HARBOR_INSTRUCTION_ENV_RE = re.compile(r"HARBOR_(?:INSTRUCTION|CLAUDE_CODE_INSTRUCTION_[0-9A-F]{32})")
+_CLAUDE_INSTRUCTION_ENV_RE = re.compile(r"CLAUDE_CODE_INSTRUCTION_[0-9A-F]{32}")
 _INNER_ENV_BOOTSTRAP = """
 import json
 import os
@@ -530,6 +532,63 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
     def capabilities(self) -> EnvironmentCapabilities:
         return EnvironmentCapabilities(mounted=True)
 
+    def is_path_mounted(self, environment_path: EnvironmentPath, host_path: Path) -> bool:
+        """Report direct host mappings so Harbor does not copy outputs onto themselves."""
+        path = PurePosixPath(environment_path)
+        try:
+            if self._resolve_path(str(path)).resolve() != host_path.resolve():
+                return False
+        except ValueError:
+            return False
+        # A parent mapping does not cover a child redirected elsewhere.
+        return all(
+            local.resolve() == host_path.joinpath(*child.relative_to(path).parts).resolve()
+            for remote, local in self._path_map()
+            if (child := PurePosixPath(remote)) != path and child.is_relative_to(path)
+        )
+
+    @property
+    def _logs_dir(self) -> Path:
+        """Expose a coherent /logs tree without sharing collected destinations."""
+        return self._root / "runtime-logs"
+
+    @property
+    def _artifact_staging_dir(self) -> Path:
+        """Keep sandbox writes separate from Harbor's collected output destinations."""
+        # Explicit destinations also copy the convention directory. Sharing
+        # their host path would make a transfer delete its own source.
+        return self._logs_dir / "artifacts"
+
+    def _prepare_log_dirs(self) -> None:
+        for directory in (self._logs_dir, self._artifact_staging_dir):
+            directory.mkdir(parents=True, exist_ok=True)
+            if stat_is_link_or_reparse(directory.lstat()):
+                raise ValueError(f"local logs directory cannot be a symlink: {directory}")
+        # Keep role logs in Harbor's retained host locations. Only these
+        # controlled aliases let paths constructed from /logs reach them;
+        # transfers of a role still resolve directly to its real host path.
+        for role, host in (
+            ("agent", self.trial_paths.agent_dir),
+            ("verifier", self.trial_paths.verifier_dir),
+            ("user-agent", self.trial_paths.user_agent_dir),
+        ):
+            alias = self._logs_dir / role
+            target = host.resolve()
+            try:
+                metadata = alias.lstat()
+            except FileNotFoundError:
+                alias.symlink_to(target, target_is_directory=True)
+                continue
+            if not stat.S_ISLNK(metadata.st_mode) or alias.readlink() != target:
+                raise ValueError(f"local logs parent contains an unexpected role entry: {alias}")
+
+    def _reject_logs_parent_transfer(self, path: Path) -> None:
+        # Internal role aliases must never enter a downloaded artifact, and a
+        # parent upload must not replace them. Reject before changing any
+        # source/destination files; secure_copy keeps its no-follow policy.
+        if self._logs_dir.resolve().is_relative_to(path.resolve()):
+            raise ValueError("local logs parent cannot be transferred; select a role or the artifacts directory")
+
     @classmethod
     def preflight(cls) -> None:
         return None
@@ -574,6 +633,7 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
             self._home / ".codex",
         ):
             path.mkdir(parents=True, exist_ok=True)
+        self._prepare_log_dirs()
         self._copy_environment_bundle()
         self._sandbox = local_sandbox.detect(self._sandbox_mode)
         plan = self._sandbox.plan
@@ -735,6 +795,7 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         target = self._resolve_path(target_dir)
         if not self._path_is_within_allowed_local_roots(target):
             raise ValueError(f"local mode upload target is outside the run directory: {target_dir}")
+        self._reject_logs_parent_transfer(target)
         # Prepare and rewrite privately so a failed upload retains the previous
         # verifier. The final secure copy handles overlays and rollback.
         with tempfile.TemporaryDirectory(prefix="skillevaluator-local-upload-") as directory:
@@ -793,10 +854,35 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         source = self._resolve_path(source_dir)
         if not self._path_is_within_allowed_local_roots(source):
             raise ValueError(f"local mode download source is outside the run directory: {source_dir}")
+        self._reject_logs_parent_transfer(source)
         target = Path(target_dir)
         if target.exists():
             shutil.rmtree(target)
         copytree_secure(source, target, dirs_exist_ok=True)
+
+    async def download_dir_with_exclusions(
+        self,
+        *,
+        source_dir: str,
+        target_dir: Path | str,
+        exclude: list[str],
+    ) -> None:
+        self._reject_logs_parent_transfer(self._resolve_path(source_dir))
+        await super().download_dir_with_exclusions(source_dir=source_dir, target_dir=target_dir, exclude=exclude)
+
+    async def download_dir_filtered(
+        self,
+        *,
+        source_dir: str,
+        target_dir: Path | str,
+        include: Sequence[str] | None = None,
+        exclude: Sequence[str] | None = None,
+        protect: Sequence[str] | None = None,
+    ) -> None:
+        self._reject_logs_parent_transfer(self._resolve_path(source_dir))
+        await super().download_dir_filtered(
+            source_dir=source_dir, target_dir=target_dir, include=include, exclude=exclude, protect=protect
+        )
 
     async def exec(
         self,
@@ -1340,10 +1426,10 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
             "TMPDIR": str(self._tmp),
             "HARBOR_WORKSPACE_DIR": str(self._workspace),
             "HARBOR_TESTS_DIR": str(self._tests),
-            "HARBOR_LOGS_DIR": str(self.trial_paths.trial_dir),
+            "HARBOR_LOGS_DIR": str(self._logs_dir),
             "HARBOR_AGENT_LOGS_DIR": str(self.trial_paths.agent_dir),
             "HARBOR_VERIFIER_DIR": str(self.trial_paths.verifier_dir),
-            "HARBOR_ARTIFACTS_DIR": str(self.trial_paths.artifacts_dir),
+            "HARBOR_ARTIFACTS_DIR": str(self._artifact_staging_dir),
             "HARBOR_SOLUTION_DIR": str(self._solution),
             "HARBOR_INSTALLED_AGENT_DIR": str(self._installed_agent),
             "HARBOR_SKILLS_DIR": str(self._workspace / "skills"),
@@ -1698,8 +1784,11 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         return os.pathsep.join(parts)
 
     def _rewrite_env_values(self, env: dict[str, str]) -> dict[str, str]:
-        """Map Harbor container paths that are passed through environment values."""
-        return {key: self._rewrite_raw_paths(value) for key, value in env.items()}
+        """Map runtime paths while preserving Claude's instruction payload verbatim."""
+        return {
+            key: value if _CLAUDE_INSTRUCTION_ENV_RE.fullmatch(key) else self._rewrite_raw_paths(value)
+            for key, value in env.items()
+        }
 
     @staticmethod
     def _filter_command_env(env: dict[str, str], *, protected: set[str]) -> dict[str, str]:
@@ -1718,6 +1807,8 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
                 )
             if key in protected or key in {"HOME", "TMPDIR", "PATH", "PWD"}:
                 continue
+            if key.startswith("CLAUDE_CODE_INSTRUCTION") and _CLAUDE_INSTRUCTION_ENV_RE.fullmatch(key) is None:
+                continue
             if (
                 key.startswith("HARBOR_")
                 and key != "HARBOR_DECLARED_PORTS"
@@ -1731,8 +1822,9 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         return [
             ("/logs/agent", self.trial_paths.agent_dir),
             ("/logs/verifier", self.trial_paths.verifier_dir),
-            ("/logs/artifacts", self.trial_paths.artifacts_dir),
-            ("/logs", self.trial_paths.trial_dir),
+            ("/logs/user-agent", self.trial_paths.user_agent_dir),
+            ("/logs/artifacts", self._artifact_staging_dir),
+            ("/logs", self._logs_dir),
             ("/workspace", self._workspace),
             ("/tests", self._tests),
             ("/solution", self._solution),
@@ -1830,11 +1922,14 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         if path is None:
             return self._workspace
         raw = str(path)
+        # Normalize logical spellings before choosing a role mapping, without
+        # following untrusted filesystem links through the virtual parent.
+        logical = str(PurePosixPath(raw))
         for remote, local in self._path_map():
-            if raw == remote:
+            if logical == remote:
                 return local
-            if raw.startswith(remote + "/"):
-                return local / raw[len(remote) + 1 :]
+            if logical.startswith(remote + "/"):
+                return local / logical[len(remote) + 1 :]
         if raw.startswith("~/"):
             return self._home / raw[2:]
         candidate = Path(raw)

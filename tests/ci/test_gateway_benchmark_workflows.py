@@ -211,3 +211,132 @@ def test_gitlab_enriched_tier1_rejects_noncanonical_baseline_opt_in(tmp_path):
     result, evidence = _run_gitlab_enriched(tmp_path, {"SKILL_EVAL_SECURITY_BASELINES": "TRUE"})
     assert result.returncode != 0
     assert evidence is None
+
+
+def _aggregate_tier1_source(tmp_path, env, *, recomputed, marker=True):
+    """Run the aggregate's Tier 1 selection with a stubbed pinned-tools decision."""
+    import os
+
+    document = yaml.safe_load((ROOT / "ci/gitlab/all-tiers.yml").read_text())
+    script = "\n".join(document["skill-evaluation-aggregate"]["script"])
+    selection = script[script.index("skills_changed=true") : script.index("if [ -d skill-evaluator-native ]")]
+    (tmp_path / "skill-evaluator-report").mkdir()
+    (tmp_path / "skill-evaluator-report" / "source.txt").write_text("keyless")
+    enriched = tmp_path / "skill-evaluator-enriched-tier1"
+    enriched.mkdir()
+    (enriched / "source.txt").write_text("enriched")
+    if marker:  # A committed or forged file must never decide the gate.
+        (enriched / "enriched-tier1-skipped.json").write_text('{"status": "skipped"}')
+    (tmp_path / "skill-evaluator-results" / "tier1").mkdir(parents=True)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "calls.txt"
+    stub = bin_dir / "python"
+    stub.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {calls}\n" + recomputed + "\n")
+    stub.chmod(0o755)
+    result = subprocess.run(
+        ["sh", "-c", "set -eu\n" + selection + 'printf %s "$SKILL_EVAL_SKILLS_CHANGED" > exported.txt\n'],
+        cwd=tmp_path,
+        env={
+            "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin",
+            "SKILL_EVAL_TOOLS_DIR": "/pinned/tools",
+            "CI_PROJECT_DIR": str(tmp_path),
+            **env,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    copied = tmp_path / "skill-evaluator-results" / "tier1" / "source.txt"
+    invoked = calls.read_text().splitlines() if calls.exists() else []
+    exported = tmp_path / "exported.txt"
+    _aggregate_tier1_source.exported = exported.read_text() if exported.exists() else None
+    return result.returncode, copied.read_text() if copied.exists() else None, invoked
+
+
+MR = {
+    "SKILL_EVAL_TIER1_LLM": "true",
+    "CI_PIPELINE_SOURCE": "merge_request_event",
+    "CI_PROJECT_ID": "42",
+    "CI_MERGE_REQUEST_SOURCE_PROJECT_ID": "42",
+    "CI_DEFAULT_BRANCH": "main",
+}
+
+
+@pytest.mark.parametrize(("recomputed", "expected"), [("echo false", "keyless"), ("echo true", "enriched")])
+def test_gitlab_aggregate_recomputes_the_skill_change_skip(tmp_path, recomputed, expected):
+    """No skill change keeps the keyless gate; a marker file alone never does."""
+    code, source, invoked = _aggregate_tier1_source(tmp_path, MR, recomputed=recomputed)
+    assert code == 0
+    assert source == expected
+    assert invoked == [f"-I /pinned/tools/ci/select_changed_skills.py --skills-changed --workspace {tmp_path}"]
+
+
+def test_gitlab_aggregate_fails_closed_when_the_skip_cannot_be_recomputed(tmp_path):
+    code, source, _ = _aggregate_tier1_source(tmp_path, MR, recomputed="exit 2")
+    assert code != 0
+    assert source is None
+
+
+def test_gitlab_default_branch_aggregate_never_skips_enriched_evidence(tmp_path):
+    env = {
+        "SKILL_EVAL_TIER1_LLM": "true",
+        "CI_PIPELINE_SOURCE": "push",
+        "CI_COMMIT_BRANCH": "main",
+        "CI_DEFAULT_BRANCH": "main",
+        "CI_COMMIT_REF_PROTECTED": "true",
+        "CI_PROJECT_ID": "42",
+    }
+    code, source, invoked = _aggregate_tier1_source(tmp_path, env, recomputed="echo false")
+    assert (code, source, invoked) == (0, "enriched", [])
+
+
+@pytest.mark.parametrize(
+    ("recomputed", "exported"), [("echo false", "false"), ("echo true", "true"), ("exit 2", "unknown")]
+)
+def test_gitlab_aggregate_exports_the_paid_tier_decision(tmp_path, recomputed, exported):
+    """Without enriched Tier 1, an unknown answer only keeps Tier 2/3 reported as incomplete."""
+    env = {**MR, "SKILL_EVAL_TIER1_LLM": "false"}
+    code, source, _ = _aggregate_tier1_source(tmp_path, env, recomputed=recomputed)
+    assert (code, source) == (0, "keyless")
+    assert _aggregate_tier1_source.exported == exported
+
+
+def _run_native_tier(tmp_path, recomputed):
+    import os
+
+    document = yaml.safe_load((ROOT / "ci/gitlab/all-tiers.yml").read_text())
+    script = "\n".join(document["skill-evaluation-native"]["script"])
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "calls.txt"
+    (bin_dir / "python").write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> {calls}\n"
+        'case "$2" in */select_changed_skills.py) ' + recomputed + " ;; esac\n"
+        "exit 3\n"  # Stop at admission, before any installation or provider work.
+    )
+    (bin_dir / "python").chmod(0o755)
+    env = {
+        "PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin",
+        "SKILL_EVAL_TIERS": "1,2,3",
+        "SKILL_EVAL_TIER": "3",
+        "SKILL_EVAL_TOOLS_DIR": "/pinned/tools",
+        "CI_PROJECT_DIR": str(tmp_path),
+    }
+    result = subprocess.run(["sh", "-c", script], env=env, capture_output=True, text=True, check=False)
+    return result, calls.read_text().splitlines()
+
+
+def test_gitlab_paid_tier_skips_before_admission_when_no_skill_changed(tmp_path):
+    result, calls = _run_native_tier(tmp_path, "echo false; exit 0")
+    assert result.returncode == 0
+    assert "Tier 3 did not run" in result.stdout
+    assert calls == [f"-I /pinned/tools/ci/select_changed_skills.py --skills-changed --workspace {tmp_path}"]
+
+
+@pytest.mark.parametrize("recomputed", ["echo true; exit 0", "exit 2"])
+def test_gitlab_paid_tier_runs_when_a_skill_changed_or_the_answer_is_unknown(tmp_path, recomputed):
+    result, calls = _run_native_tier(tmp_path, recomputed)
+    assert result.returncode == 3  # Reached admission: the tier was not skipped.
+    assert calls[-1].endswith("ci/eligible_gitlab.py")

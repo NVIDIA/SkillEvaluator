@@ -240,6 +240,9 @@ SIMILARITY_DEFAULT_MODEL = EMBEDDING_DEFAULT_NVIDIA
 SIMILARITY_CHUNK_SIZE = 512  # tokens per chunk for full-body mode
 SIMILARITY_CHUNK_OVERLAP = 64  # token overlap between chunks
 
+# Longest rationale or suggestion string accepted from one Tier 2 LLM verdict.
+TIER2_LLM_MAX_RESPONSE_SCALAR_CHARS = 8_192
+
 
 # =============================================================================
 # CONTEXT DEDUPLICATION CONSTANTS (Phase 1)
@@ -273,13 +276,13 @@ CONTENT_DEDUP_MAX_FILES = 256
 CONTENT_DEDUP_MAX_DISCOVERED_PATHS = 4096
 CONTENT_DEDUP_MAX_FILE_BYTES = 1 * 1024 * 1024
 CONTENT_DEDUP_MAX_TOTAL_BYTES = 8 * 1024 * 1024
-CONTENT_DEDUP_MAX_CHUNKS = 512
+CONTENT_DEDUP_MAX_CHUNKS = 1024
 CONTENT_DEDUP_MAX_PAIR_COMPARISONS = CONTENT_DEDUP_MAX_CHUNKS * (CONTENT_DEDUP_MAX_CHUNKS - 1) // 2
 # All-pairs clustering does one multiply-add per vector component per chunk
-# pair. The budget lets embeddings of up to 2,048 dimensions reach the chunk
+# pair. The budget lets embeddings of up to 1,024 dimensions reach the chunk
 # ceiling; wider embeddings get a lower effective chunk limit derived from it
-# (418 chunks at 3,072 dimensions, 362 at 4,096).
-CONTENT_DEDUP_SCALAR_BUDGET_DIMENSION = 2048
+# (836 chunks at 1,536 dimensions, 724 at 2,048, 591 at 3,072, 512 at 4,096).
+CONTENT_DEDUP_SCALAR_BUDGET_DIMENSION = 1024
 CONTENT_DEDUP_MAX_SCALAR_COMPARISONS = CONTENT_DEDUP_MAX_PAIR_COMPARISONS * CONTENT_DEDUP_SCALAR_BUDGET_DIMENSION
 CONTENT_DEDUP_MAX_LLM_CLUSTERS = 50
 

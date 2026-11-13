@@ -968,6 +968,7 @@ def _run_agent_eval_or_skip(
     timeout_multiplier: float | None = None,
     harbor_keep_jobs: bool = False,
     agent_runtime_preflight: bool | None = None,
+    tolerate_baseline_timeouts: bool | None = None,
     block_on_agent_eval: bool = False,
     validate_source: bool = True,
     repo_context_exclude_paths: tuple[Path, ...] = (),
@@ -1033,6 +1034,7 @@ def _run_agent_eval_or_skip(
         timeout_multiplier=timeout_multiplier,
         harbor_keep_jobs=harbor_keep_jobs,
         agent_runtime_preflight=agent_runtime_preflight,
+        tolerate_baseline_timeouts=tolerate_baseline_timeouts,
         evaluated_source=evaluated_source,
         repo_context_exclude_paths=repo_context_exclude_paths,
     )
@@ -1456,6 +1458,11 @@ def _catalog_child_argv_from_ctx(
         argv.append("--agent-runtime-preflight")
     elif agent_runtime_preflight is False:
         argv.append("--no-agent-runtime-preflight")
+    tolerate_baseline_timeouts = params.get("tolerate_baseline_timeouts")
+    if tolerate_baseline_timeouts is True:
+        argv.append("--tolerate-baseline-timeouts")
+    elif tolerate_baseline_timeouts is False:
+        argv.append("--no-tolerate-baseline-timeouts")
     # Every child renders its own BENCHMARK.md, so the identity has to reach
     # each one: dropping it here would publish a catalog of cards that all say
     # the evaluated source was never recorded.
@@ -1468,6 +1475,8 @@ def _catalog_child_argv_from_ctx(
     if _report_formats_explicit():
         for fmt in params.get("report_formats") or ():
             argv.extend(["-r", fmt])
+    if catalog_root is not None:
+        argv.extend(["--catalog-root", str(catalog_root)])
     argv.extend(["-o", str(output_dir)])
     return argv
 
@@ -1626,6 +1635,7 @@ def _validate_catalog(
                 "content_type": "skill",
                 "output_dir": skill_output,
                 "results_dir": _catalog_results_dir(ctx, skill_dir, resolved_target),
+                "catalog_root": resolved_target,
             }
             reason = ""
             try:
@@ -2022,6 +2032,9 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help="Concurrent catalog skill jobs when validating a folder of skills. "
     "Values above 1 run skills in parallel processes and disable the per-skill pipeline view.",
 )
+# Set by a catalog run on each per-skill job: the folder of skills that the job's
+# skill belongs to, which the security check judges missing references against.
+@click.option("--catalog-root", type=click.Path(file_okay=False, path_type=Path), default=None, hidden=True)
 @click.option(
     "--dedup/--no-dedup",
     "--tier2/--no-tier2",
@@ -2242,6 +2255,16 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help="Run an extra agent-only execution of the first staged task before measured Tier 3 [default: disabled].",
 )
 @click.option(
+    "--tolerate-baseline-timeouts/--no-tolerate-baseline-timeouts",
+    default=None,
+    cls=GroupedOption,
+    help_group=_TIER3_GROUP,
+    help=(
+        "Keep an agent scored on its clean with-skill arm when only baseline attempts hit the agent "
+        "execution timeout; its baseline and uplift are not reported [default: disabled]."
+    ),
+)
+@click.option(
     "--evaluated-source-repository",
     default=None,
     cls=GroupedOption,
@@ -2312,7 +2335,9 @@ def validate(
     timeout_multiplier: float | None,
     harbor_keep_jobs: bool,
     agent_runtime_preflight: bool | None,
+    tolerate_baseline_timeouts: bool | None,
     workers: int,
+    catalog_root: Path | None,
     evaluated_source_repository: str | None,
     evaluated_source_revision: str | None,
     evaluator_container_revision: str | None,
@@ -2523,6 +2548,7 @@ def validate(
         previous_version=previous_version,
         policy=policy,
         content_type=resolved_type,
+        target_root=catalog_root.resolve() if catalog_root is not None else None,
         fail_fast=fail_fast,
         continue_on_failure=continue_on_failure,
         on_check=_on_check if quiet else None,
@@ -2662,6 +2688,7 @@ def validate(
             timeout_multiplier=timeout_multiplier,
             harbor_keep_jobs=harbor_keep_jobs,
             agent_runtime_preflight=agent_runtime_preflight,
+            tolerate_baseline_timeouts=tolerate_baseline_timeouts,
             block_on_agent_eval=block_on_agent_eval_effective,
             validate_source=preflight_tier3_source,
             evaluated_source=evaluated_source,
@@ -2723,6 +2750,10 @@ def validate(
             agent_eval_payload.setdefault("applicability", "required")
             agent_eval_payload.setdefault("reason_code", "tier3_source_present")
             agent_eval_payload.setdefault("source_kind", source_kind)
+            from skillevaluator.evaluation.tier3_report import fit_token_usage
+
+            # Measured token usage makes room for these keys when the payload is at its limits.
+            fit_token_usage(agent_eval_payload)
         tier3_result.metadata["gating"] = {"tier": 3, "blocking": block_on_agent_eval_effective}
 
     # Reporters and the exit gate consume the same finalized result objects.
@@ -2763,6 +2794,9 @@ def validate(
         policy=policy,
         target_path=target_display,
         expected_skill_name=publication_name,
+        # A Git remote URL in ``target_display`` cannot be probed for SKILL.md,
+        # and a clean run has no finding path to infer the skill from.
+        explicit_skill_name=publication_name if resolved_type == CONTENT_TYPE_SKILL and target_path.is_dir() else None,
         content_label=content_label,
         announce_paths=not quiet,
         sarif_scan_root=target_path,
@@ -2784,7 +2818,9 @@ def validate(
         # stays as the last line of defence: the renderer re-validates the
         # carriers it is handed, and a producer can record one after the fact.
         try:
-            BenchmarkReporter(skill_name=publication_name).save(results, output_dir / BENCHMARK_FILENAME)
+            BenchmarkReporter(skill_name=publication_name, evaluator_version=__version__).save(
+                results, output_dir / BENCHMARK_FILENAME
+            )
         except EvaluatedSourceConflict as exc:
             # Publication fails closed on a contradictory identity, so report which
             # values disagreed rather than letting the card write a guess.
@@ -3373,6 +3409,14 @@ def _tier2_workflow(
     default=None,
     help="Run an extra agent-only execution of the first staged task before the full matrix [default: disabled].",
 )
+@click.option(
+    "--tolerate-baseline-timeouts/--no-tolerate-baseline-timeouts",
+    default=None,
+    help=(
+        "Keep an agent scored on its clean with-skill arm when only baseline attempts hit the agent "
+        "execution timeout; its baseline and uplift are not reported [default: disabled]."
+    ),
+)
 @click.option("--timeout-multiplier", type=float, default=None)
 @click.option("--override-cpus", type=int, default=None)
 @click.option("--override-memory-mb", type=int, default=None)
@@ -3445,6 +3489,7 @@ def evaluate(
     results_dir: Path | None,
     harbor_keep_jobs: bool,
     agent_runtime_preflight: bool | None,
+    tolerate_baseline_timeouts: bool | None,
     timeout_multiplier: float | None,
     override_cpus: int | None,
     override_memory_mb: int | None,
@@ -3533,6 +3578,7 @@ def evaluate(
         results_dir=results_dir,
         harbor_keep_jobs=harbor_keep_jobs,
         agent_runtime_preflight=agent_runtime_preflight,
+        tolerate_baseline_timeouts=tolerate_baseline_timeouts,
         timeout_multiplier=timeout_multiplier,
         override_cpus=override_cpus,
         override_memory_mb=override_memory_mb,
@@ -3575,7 +3621,7 @@ def evaluate(
                 console.print(
                     Panel(
                         Text(
-                            "Intended for trusted skills and least-privilege service accounts. Harbor 0.24.0 single-pod "
+                            "Intended for trusted skills and least-privilege service accounts. Harbor 0.25.0 single-pod "
                             "GKE execution shares the pod service account and metadata server with evaluated skill commands.",
                             style="yellow",
                         ),

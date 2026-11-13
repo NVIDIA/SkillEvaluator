@@ -44,20 +44,14 @@ All notable changes to SkillEvaluator are documented in this file.
   `/bin/bash -lc 'cat skills/x/SKILL.md'`, which some agent harnesses record
   instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL
   config.json'`) are still not counted.
-
-- `judge_attempts.json` now masks credentials in JSON-escaped text, as in
-  RAGAS prompts and in the tool-call arguments that judge prompts quote. A
-  line break there is the two characters `\n`, so an `Authorization`, API-key
-  or `Cookie` header value, a `--token` or `-u user:password` flag value, or a
-  key such as `sk-proj-...` that started the next line was saved in clear. The
-  same held after an escaped non-ASCII character such as `\u00a0`, for an
-  `Authorization` or API-key header value or a flag value after an escaped
-  tab (`\t`), also when the header or flag starts a line, for a flag value in
-  escaped quotes (`--token \"value\"`), and for a quoted header or flag value
-  escaped twice, as when a RAGAS prompt repeats an earlier tool call. A RAGAS
-  `replied` entry for a reply with no text and no tool call, such as a
-  refusal or a content-filter stop, now saves the whole reply body instead of
-  an empty reply.
+- `judge_attempts.json` now masks `Cookie` header values, credential flag values
+  (`--token`, `--password`, `-u user:password`, `--cookie`) and keys such as
+  `sk-proj-...` that start a line in JSON-escaped text, as in RAGAS prompts and
+  replies. A line break there is the two characters `\n`, and these values were
+  saved in clear after it, or after an escaped tab (`\t`) or non-ASCII character
+  (`\u00a0`). A RAGAS `replied` entry for a reply with no text and no tool call,
+  such as a refusal or a content-filter stop, now saves the whole reply body
+  instead of an empty reply.
 
 ## 0.9.0 - 2026-11-13
 

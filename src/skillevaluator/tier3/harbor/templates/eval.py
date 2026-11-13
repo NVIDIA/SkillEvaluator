@@ -2822,11 +2822,35 @@ def _judge_retry_feedback(problem):
     )
 
 
+# RAGAS writes its input into the prompt as JSON, and tool-call arguments are
+# JSON, so a line break or tab in that text arrives as the two characters "\n",
+# "\r" or "\t", and a non-ASCII character such as a no-break space as "\u00a0".
+# A header, flag or key that starts a line there follows the last letter or
+# digit of the escape, where patterns that need a line start, a space or a word
+# boundary before it do not match, and an unquoted value on the line before
+# can read on through the escape into the next line's header name. So the
+# text between escapes is masked line by line first, and the whole text after.
+_JUDGE_EVIDENCE_ESCAPE_RE = re.compile(r"(\\(?:[nrt]|u[0-9a-fA-F]{4}))")
+
+
+def _mask_judge_evidence_shapes(text):
+    """Mask the credential forms and key shapes that depend on what precedes them."""
+    redacted = _shared_checks._mask_finding_evidence_credentials(text, preserve_header_format=True)
+    redacted = redact_secrets_in_log_line(redacted)
+    for pattern in _SECRET_PATTERNS:
+        redacted = pattern.sub("<redacted>", redacted)
+    return redacted
+
+
 def _redact_judge_evidence(text):
     """Mask credentials in a judge prompt, reply, or problem before it is saved."""
+    # Text and escapes alternate.
+    parts = _JUDGE_EVIDENCE_ESCAPE_RE.split(str(text))
+    if len(parts) > 1:
+        parts[::2] = [_mask_judge_evidence_shapes(part) if part else part for part in parts[::2]]
     # Share finding credential semantics without imposing the finding scanner's
     # 2,000-character input budget on the longer judge prompt and reply budgets.
-    redacted = _shared_checks._mask_finding_evidence_credentials(str(text), preserve_header_format=True)
+    redacted = _shared_checks._mask_finding_evidence_credentials("".join(parts), preserve_header_format=True)
     redacted = _redact_configured_credentials(_redact_evidence_text(redacted))
     for pattern in _SECRET_PATTERNS:
         redacted = pattern.sub("<redacted>", redacted)

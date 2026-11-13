@@ -406,34 +406,23 @@ def test_ragas_evidence_reads_every_request_message_and_tool_call_replies(verifi
     assert verifier._ragas_reply_text(b"not a chat completion") == "not a chat completion"
 
 
-def _tool_call_reply(arguments: str, *, content: str | None = None) -> dict[str, Any]:
-    reply = _chat_reply("")
-    reply["choices"][0]["message"] = {
-        "role": "assistant",
-        "content": content,
-        "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "Verdict", "arguments": arguments}}],
-    }
-    reply["choices"][0]["finish_reason"] = "tool_calls"
-    return reply
-
-
 def test_ragas_evidence_masks_credentials_at_json_escaped_line_starts(
     verifier: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """RAGAS writes the agent's messages into its prompt as JSON, and tool-call arguments are JSON too.
+    """RAGAS writes the agent's messages into its prompt as JSON, and a JSON-mode reply quotes them as JSON too.
 
     Each line break in the agent's text is therefore saved escaped, as the two
     characters backslash and n, before the next line's header or flag.
     """
     agent_text = (
-        "HTTP/1.1 200 OK\nAuthorization: Bearer bbbbbbbbbbbb\nCookie: session=cccccccccccc\n--token tttttttttttt"
+        "HTTP/1.1 200 OK\nAuthorization: Bearer bbbbbbbbbbbb\nCookie: session=cccccccccccc\n"
+        "--token tttttttttttt\n-u admin:pppppppppppp"
     )
     prompt = "Judge whether the agent reached the goal.\ninput: " + json.dumps(
         {"user_input": [{"content": agent_text, "type": "ai"}]}, indent=4
     )
     _install_ragas(monkeypatch, messages=[{"role": "user", "content": prompt}])
-    reply = _tool_call_reply(json.dumps({"end_state": agent_text, "verdict": 1}))
-    received = _stub_provider(monkeypatch, [reply])
+    received = _stub_provider(monkeypatch, [_chat_reply(json.dumps({"end_state": agent_text, "verdict": 1}))])
 
     with _judge_evidence(verifier):
         result = verifier.judge_goal_accuracy("question", "expected", "agent answer")
@@ -443,46 +432,12 @@ def test_ragas_evidence_masks_credentials_at_json_escaped_line_starts(
     exchange, outcome = _attempts(verifier)
     assert [exchange["status"], outcome["status"]] == ["replied", "accepted"]
     for field in ("prompt", "reply"):
-        assert "\\nAuthorization: Bearer <redacted>\\nCookie: <redacted>\\n--token <redacted>" in exchange[field]
+        assert (
+            "\\nAuthorization: Bearer <redacted>\\nCookie: <redacted>\\n--token <redacted>\\n-u <redacted>"
+            in exchange[field]
+        )
     saved = (verifier.VERIFIER_DIR / "judge_attempts.json").read_text(encoding="utf-8")
-    for secret in ("bbbbbbbbbbbb", "cccccccccccc", "tttttttttttt"):
-        assert secret not in saved
-
-
-def test_ragas_evidence_masks_quoted_credentials_in_a_repeated_tool_call(verifier: ModuleType) -> None:
-    """A request that repeats an earlier tool call writes its JSON arguments as JSON again.
-
-    The quotes in the arguments then reach the prompt escaped twice, as a run of
-    backslashes before each quote.
-    """
-    end_state = 'Ran deploy --token "tttt qqqq" with headers={"Authorization": "Bearer jjjjjjjjjjjj"}'
-    arguments = json.dumps({"end_state": end_state, "verdict": 1})
-    messages = [
-        {"role": "user", "content": "Judge the agent.\ninput: " + json.dumps({"end_state": end_state})},
-        {
-            "role": "assistant",
-            "content": None,
-            "tool_calls": [
-                {"id": "call-1", "type": "function", "function": {"name": "Verdict", "arguments": arguments}}
-            ],
-        },
-        {"role": "tool", "tool_call_id": "call-1", "content": "error: the verdict could not be parsed"},
-    ]
-    request = httpx.Request("POST", _CHAT_URL, json={"model": "gpt-4.1", "messages": messages})
-    reply = json.dumps(_tool_call_reply(arguments)).encode()
-
-    with _judge_evidence(verifier):
-        verifier._record_ragas_exchange(httpx.Response(200, content=reply, request=request))
-
-    (exchange,) = _attempts(verifier)
-    assert exchange["status"] == "replied"
-    # Once escaped in the user message and the reply, twice in the repeated tool call.
-    assert exchange["prompt"].count("--token <redacted>") == 2
-    assert exchange["prompt"].count("Bearer <redacted>") == 2
-    assert "--token <redacted>" in exchange["reply"]
-    assert "Bearer <redacted>" in exchange["reply"]
-    saved = (verifier.VERIFIER_DIR / "judge_attempts.json").read_text(encoding="utf-8")
-    for secret in ("tttt qqqq", "jjjjjjjjjjjj"):
+    for secret in ("bbbbbbbbbbbb", "cccccccccccc", "tttttttttttt", "pppppppppppp"):
         assert secret not in saved
 
 

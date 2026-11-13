@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from skillevaluator.models.result import Severity, ValidationResult
 from skillevaluator.validators.script_lint import ScriptLintValidator
 
 
@@ -46,8 +47,22 @@ class TestScriptLintValidator:
         (scripts / "flat.py").write_text("#!/usr/bin/env python3\nimport sys\nprint(sys.argv)\n")
         (scripts / "a.js").write_text("console.log('a')\n")
         result = ScriptLintValidator().validate(skill_with_scripts)
-        assert "flat_script" in [f.check_name for f in result.findings]
-        assert any("1 Node script(s) not linted" in m for m in result.messages), result.messages
+        checks = [f.check_name for f in result.findings]
+        assert "flat_script" in checks
+        (note,) = [f for f in result.findings if f.check_name == "node_scripts_not_linted"]
+        assert note.severity == Severity.INFO
+        assert "1 Node script(s) not linted" in note.message
+
+    def test_node_note_survives_folder_aggregation(self, skill_with_scripts):
+        scripts = skill_with_scripts / "scripts"
+        (scripts / "flat.py").write_text("#!/usr/bin/env python3\nimport sys\nprint(sys.argv)\n")
+        (scripts / "a.js").write_text("console.log('a')\n")
+        single = ScriptLintValidator().validate(skill_with_scripts)
+        folder = ValidationResult()
+        folder.merge_with_prefix(single, "skill-a")
+        assert any(
+            f.check_name == "node_scripts_not_linted" and f.file_path.startswith("[skill-a]") for f in folder.findings
+        )
 
     def test_node_scripts_do_not_add_a_second_completed_check(self, skill_with_scripts):
         scripts = skill_with_scripts / "scripts"

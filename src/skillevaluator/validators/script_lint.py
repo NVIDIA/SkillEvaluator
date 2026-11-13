@@ -158,8 +158,18 @@ class ScriptLintValidator(ValidatorBase):
         if not result.findings:
             result.add_success(check_name="lint", message=f"All {len(py_files)} script(s) passed lint checks{suffix}")
         elif node_files:
-            # The findings carry the verdict; keep the Node note without counting another check.
-            result.add_message(not_linted)
+            # The findings carry the verdict. Keep the Node note as an informational finding:
+            # unlike a message it survives folder aggregation and the JSON report, and it does
+            # not count as another completed check.
+            result.add_finding(
+                Finding(
+                    category="SCRIPT_LINT",
+                    severity=Severity.INFO,
+                    check_name="node_scripts_not_linted",
+                    message=not_linted,
+                    file_path=node_files[0].parent.name,
+                )
+            )
         return result
 
     def _lint_script(self, script: Path, result: ValidationResult) -> None:

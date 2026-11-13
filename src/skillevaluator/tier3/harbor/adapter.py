@@ -1544,7 +1544,6 @@ def build_eval_base_image(
         f"    {_BASE_APT_PACKAGES} \\",
     ]
     if extra_apt:
-        lines[-1] += " \\"
         lines.append("    " + " ".join(extra_apt) + " \\")
     lines.append("    && rm -rf /var/lib/apt/lists/*")
 
@@ -4389,7 +4388,6 @@ def _write_dockerfile(
         f"    {_BASE_APT_PACKAGES} \\",
     ]
     if apt_pkgs:
-        dockerfile_lines[-1] += " \\"
         dockerfile_lines.append("    " + " ".join(apt_pkgs) + " \\")
     dockerfile_lines.append("    && rm -rf /var/lib/apt/lists/*")
 
@@ -4525,7 +4523,6 @@ def _write_default_environment_dockerfile(
         f"    {_BASE_APT_PACKAGES} \\",
     ]
     if apt_pkgs:
-        dockerfile_lines[-1] += " \\"
         dockerfile_lines.append("    " + " ".join(apt_pkgs) + " \\")
     dockerfile_lines.append("    && rm -rf /var/lib/apt/lists/*")
     if include_verifier_deps:

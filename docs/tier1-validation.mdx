@@ -144,8 +144,9 @@ Precedence, highest to lowest: `--policy` overlay, `--profile` flag, `SKILLEVALU
 
 <Accordion title="Permit reviewed ownership contacts without allowing other email addresses">
   Contacts in the single-line `metadata.pic` and `metadata.email` fields of
-  `SKILL.md` use the separate `PII.ownership_emails` check. Both that check and
-  ordinary `PII.emails` findings remain **HIGH and blocking by default**.
+  the skill's own `SKILL.md` (the one at the root of the scanned skill) use the
+  separate `PII.ownership_emails` check. Both that check and ordinary
+  `PII.emails` findings remain **HIGH and blocking by default**.
 
   If your repository policy permits those ownership contacts, pass an explicit
   policy file. The finding stays visible in the report as informational.
@@ -161,8 +162,9 @@ Precedence, highest to lowest: `--policy` overlay, `--profile` flag, `SKILLEVALU
 
   Supported values are one address or `Name <address>` in valid YAML. The same
   address in body text, a people directory, another metadata field, or another
-  file still uses the ordinary email policy. Ambiguous YAML, aliases, and block
-  scalars also retain that policy. Credential checks remain blocking.
+  file (including a `SKILL.md` nested in a subdirectory) still uses the ordinary
+  email policy. Ambiguous YAML, aliases, and block scalars also retain that
+  policy. Credential checks remain blocking.
 
   Keep this policy under repository-owner review; the scanner does not discover
   or trust a policy from the skill automatically. Existing `PII.emails` overrides

@@ -3014,7 +3014,7 @@ class SecurityValidator(ValidatorBase):
             except ValueError:
                 relative_path = file_path.name
 
-            for finding_data in self._scan_file_for_pii(file_path, protected_usernames):
+            for finding_data in self._scan_file_for_pii(file_path, protected_usernames, skill_root=skill_path):
                 pii_found = True
                 value = finding_data.get("matched_value")
                 key: object = (
@@ -3303,12 +3303,21 @@ class SecurityValidator(ValidatorBase):
         """True when a line is a YAML frontmatter fence, including BOM-prefixed openers."""
         return line.strip().removeprefix("\ufeff").strip() == "---"
 
-    def _scan_file_for_pii(self, file_path: Path, protected_usernames: set[str] | None = None) -> list[dict]:
+    def _scan_file_for_pii(
+        self,
+        file_path: Path,
+        protected_usernames: set[str] | None = None,
+        skill_root: Path | None = None,
+    ) -> list[dict]:
         """Scan a single file for PII patterns, yielding findings with full context.
 
         ``protected_usernames`` is the set of author/submitter identities used by
         the home-path check; when omitted it is resolved from the file's parent
         directory so the method stays usable standalone.
+
+        ``skill_root`` is the directory being scanned. Only the manifest sitting
+        directly in it may declare ownership contacts; a ``SKILL.md`` nested
+        deeper in the tree is ordinary content. It defaults to the file's parent.
         """
         if protected_usernames is None:
             protected_usernames = self._protected_home_usernames(file_path.parent)
@@ -3321,7 +3330,9 @@ class SecurityValidator(ValidatorBase):
 
         lines = content.split("\n")
         author_emails = self._frontmatter_author_emails(file_path, lines)
-        ownership_spans = ownership_email_spans(file_path, content)
+        skill_root = file_path.parent if skill_root is None else skill_root
+        is_root_manifest = skill_root in (file_path.parent, file_path)
+        ownership_spans = ownership_email_spans(file_path, content) if is_root_manifest else {}
         comment_lines = _comment_line_numbers(file_path, lines)
         global_exceptions = self.pii_patterns.get("exceptions", {}).get("allowed_paths", [])
         compiled = self._compile_pii_patterns(global_exceptions)

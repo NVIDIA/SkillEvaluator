@@ -100,6 +100,53 @@ def test_other_markdown_files_cannot_claim_skill_ownership_metadata(tmp_path):
     assert {f.check_name for f in result.findings} == {"emails"}
 
 
+@pytest.mark.parametrize("name", ["SKILL.md", "skill.md"])
+@pytest.mark.parametrize("nested", ["references", "references/vendored/deep", "scripts"])
+def test_nested_skill_manifest_cannot_claim_ownership_metadata(tmp_path, nested, name):
+    skill, _ = scan(tmp_path, "description: Plain skill")
+    folder = skill / nested
+    folder.mkdir(parents=True)
+    (folder / name).write_text(
+        f"---\nname: vendored\nmetadata:\n  pic: {ADDRESS}\n---\nVendored notes.\n", encoding="utf-8"
+    )
+    result = SecurityValidator(submitter_usernames=[]).validate_pii_only(skill)
+    apply_policy([result], POLICY)
+    assert not result.passed
+    assert [(f.check_name, f.severity) for f in result.findings] == [("emails", Severity.HIGH)]
+    assert result.findings[0].metadata["occurrences"] == [{"file": f"{nested}/{name}", "line": 4}]
+
+
+def test_root_ownership_does_not_cover_nested_manifest_contacts(tmp_path):
+    skill, _ = scan(tmp_path, f"metadata:\n  pic: {ADDRESS}")
+    (skill / "references").mkdir()
+    (skill / "references" / "SKILL.md").write_text(
+        f"---\nname: vendored\nmetadata:\n  pic: {ADDRESS}\n  email: other@company.com\n---\n", encoding="utf-8"
+    )
+    result = SecurityValidator(submitter_usernames=[]).validate_pii_only(skill)
+    apply_policy([result], POLICY)
+    assert not result.passed
+    by_check = {(f.check_name, f.metadata["matched_value"]): f.severity for f in result.findings}
+    assert by_check == {
+        ("ownership_emails", ADDRESS): Severity.INFO,
+        ("emails", ADDRESS): Severity.HIGH,
+        ("emails", "other@company.com"): Severity.HIGH,
+    }
+
+
+def test_nested_manifest_is_not_exempt_when_scanning_a_skill_collection(tmp_path):
+    collection = tmp_path / "skills"
+    skill = collection / "contact-skill"
+    (skill / "references").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: contact-skill\ndescription: Plain skill\n---\n", encoding="utf-8")
+    (skill / "references" / "SKILL.md").write_text(
+        f"---\nname: vendored\nmetadata:\n  pic: {ADDRESS}\n---\n", encoding="utf-8"
+    )
+    result = SecurityValidator(submitter_usernames=[]).validate_pii_only(collection)
+    apply_policy([result], POLICY)
+    assert not result.passed
+    assert any(f.check_name == "emails" and f.severity == Severity.HIGH for f in result.findings)
+
+
 def test_credentials_in_the_same_skill_still_block(tmp_path):
     _, result = scan(tmp_path, f"metadata:\n  pic: {ADDRESS}", 'password = "sample-sensitive-value"')
     apply_policy([result], POLICY)

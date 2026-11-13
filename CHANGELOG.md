@@ -40,7 +40,21 @@ All notable changes to SkillEvaluator are documented in this file.
   beside it and the failure is reported. After a timeout, the failed run still keeps
   the scores of the arms that finished.
 
+### Changed
+
+- Install Bandit with the base package, so `pip install skillevaluator` or
+  `uv tool install skillevaluator` runs every default Tier 1 check without an
+  extra. pip-audit, used only by the opt-in dependency audit
+  (`--check dependency`), stays in the `security` extra. The Bandit install hint
+  now says to reinstall SkillEvaluator.
+
 ### Documentation
+
+- The README opens with a three-column **Get started** section: run the CLI
+  directly (`pip install skillevaluator`, then
+  `skillevaluator validate ./my-skill --tiers 1`), add checks to your repository
+  with `skillevaluator ci init` or a CI template, or install the agent skill with
+  `npx skills add NVIDIA/SkillEvaluator`.
 
 - A new Metrics Reference page defines every number the CLI, HTML report, JSON
   report and `BENCHMARK.md` show: the six Tier 3 evaluator signals, the five

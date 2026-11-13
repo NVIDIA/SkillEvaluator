@@ -95,9 +95,11 @@ Full flag tables: [Tier 1](references/commands-tier1.md),
 4. **Add LLM checks** when a provider is set: `skillevaluator tier1 <skill-dir>`
    (rubric, LLM security, verification) and `skillevaluator tier2 <skill-dir>`.
 5. **Prepare Tier 3 cases.** If `<skill-dir>/evals/evals.json` is missing, first
-   capture author guidance in `<skill-dir>/evals/EVAL.md` or a file passed with `--prompt`.
-   Generate with `skillevaluator create-eval-dataset <skill-dir> --full`, then review it.
-   The default prefers author guidance, then matching retained traces. Skill-only
+   capture task requests and observable outcomes in `<skill-dir>/evals/EVAL.md`;
+   headings alone do not qualify. Generate with
+   `skillevaluator create-eval-dataset <skill-dir> --full --prompt <skill-dir>/evals/EVAL.md`,
+   then review it. The default prefers author guidance, then matching retained
+   traces; existing datasets need `--force` or `--refine`. Skill-only
    generation requires explicit opt-in with `--grounding skill`. Review:
    positive cases (explicit, implicit, contextual) and at least one negative
    case with `"expected_skill": null`. Required shape: top-level `skill_name`

@@ -56,6 +56,7 @@ from skillevaluator.provider_config import (
     resolve_llm_provider,
     skillspector_reasoning_effort,
 )
+from skillevaluator.skillspector_diagnostics import completeness_record, merge_completeness
 from skillevaluator.skillspector_provenance import SKILLSPECTOR_LLM_ANALYZERS, sanitize_skillspector_llm_provenance
 from skillevaluator.skillspector_reference_caveats import reference_caveat_metadata
 from skillevaluator.spdx import is_spdx_only_html_comment
@@ -75,6 +76,7 @@ from skillevaluator.validators.base import (
     ValidatorBase,
     iter_scannable_files,
 )
+from skillevaluator.validators.pii_ownership import ownership_email_spans
 from skillevaluator.validators.pii_waivers import PIIWaiverSet, configured_pii_categories, pii_evidence_sha256
 from skillevaluator.validators.skillspector_scope import (
     IssueScope,
@@ -3782,9 +3784,15 @@ class SecurityValidator(ValidatorBase):
                         for note in gap_notes:
                             result.add_warning(note)
                     else:
-                        result.add_error(
-                            _skillspector_incomplete_analysis_error(completeness_status, ledger_exceptions)
+                        diagnostic = completeness_record(analysis_completeness, stage_name)
+                        result.metadata["skillspector_completeness"] = merge_completeness(
+                            result.metadata.get("skillspector_completeness"), {"records": [diagnostic]}
                         )
+                        message = _skillspector_incomplete_analysis_error(completeness_status, ledger_exceptions)
+                        if not ledger_exceptions and diagnostic["limitations"]:
+                            # No incomplete file to name: the limitation is the only stated reason.
+                            message = f"{message}. Limitation: {diagnostic['limitations'][0]}"
+                        result.fail_gate(message)
                         result.mark_scan_incomplete(stage_name)
 
         status = data.get("status")
@@ -5206,7 +5214,9 @@ class SecurityValidator(ValidatorBase):
                 relative_path = file_path.name
 
             waive = waivers.matcher(file_path) if waivers is not None else None
-            for finding_data in self._scan_file_for_pii(file_path, protected_usernames, waive=waive):
+            for finding_data in self._scan_file_for_pii(
+                file_path, protected_usernames, skill_root=skill_path, waive=waive
+            ):
                 pii_found = True
                 value = finding_data.get("matched_value")
                 key: object = (
@@ -5803,6 +5813,7 @@ class SecurityValidator(ValidatorBase):
         self,
         file_path: Path,
         protected_usernames: set[str] | None = None,
+        skill_root: Path | None = None,
         *,
         waive: Callable[[str, int, str], bool] | None = None,
     ) -> list[dict]:
@@ -5813,6 +5824,10 @@ class SecurityValidator(ValidatorBase):
         directory so the method stays usable standalone. ``waive`` returns
         whether a PII waiver covers a candidate (category, line, value); a
         waived candidate is skipped as if it did not match.
+
+        ``skill_root`` is the directory being scanned. Only the manifest sitting
+        directly in it may declare ownership contacts; a ``SKILL.md`` nested
+        deeper in the tree is ordinary content. It defaults to the file's parent.
         """
         if protected_usernames is None:
             protected_usernames = self._protected_home_usernames(file_path.parent)
@@ -5825,6 +5840,9 @@ class SecurityValidator(ValidatorBase):
 
         lines = content.split("\n")
         author_emails = self._frontmatter_author_emails(file_path, lines)
+        skill_root = file_path.parent if skill_root is None else skill_root
+        is_root_manifest = skill_root in (file_path.parent, file_path)
+        ownership_spans = ownership_email_spans(file_path, content) if is_root_manifest else {}
         comment_lines = _comment_line_numbers(file_path, lines)
         global_exceptions = self.pii_patterns.get("exceptions", {}).get("allowed_paths", [])
         compiled = self._compile_pii_patterns(global_exceptions)
@@ -5842,6 +5860,7 @@ class SecurityValidator(ValidatorBase):
                 protected_usernames,
                 author_emails,
                 comment_lines,
+                ownership_spans,
                 waive=waive,
             )
         return findings
@@ -5899,6 +5918,7 @@ class SecurityValidator(ValidatorBase):
         protected_usernames: set[str] | None = None,
         author_emails: dict[int, str] | None = None,
         comment_lines: frozenset[int] | None = None,
+        ownership_spans: dict[int, list[tuple[int, int]]] | None = None,
         *,
         waive: Callable[[str, int, str], bool] | None = None,
     ) -> None:
@@ -5912,6 +5932,7 @@ class SecurityValidator(ValidatorBase):
         """
         protected_usernames = protected_usernames or set()
         author_emails = author_emails or {}
+        ownership_spans = ownership_spans or {}
         comment_lines = comment_lines if comment_lines is not None else _comment_line_numbers(file_path, lines)
         line_exceptions = exceptions
         excepted_card_digits: frozenset[str] = frozenset()
@@ -5928,7 +5949,11 @@ class SecurityValidator(ValidatorBase):
 
             scan_line = line
             if category == "emails" and (author_email := author_emails.get(line_num)):
-                scan_line = re.sub(re.escape(author_email), "author@example.com", line, count=1, flags=re.IGNORECASE)
+                # Keep source offsets intact for adjacent ownership contacts in
+                # flow YAML; substituting a different-length address shifts them.
+                scan_line = re.sub(
+                    re.escape(author_email), lambda match: " " * len(match.group()), line, count=1, flags=re.IGNORECASE
+                )
 
             matches = list(regex.finditer(scan_line))
             if excepted_card_digits:
@@ -5981,19 +6006,39 @@ class SecurityValidator(ValidatorBase):
             if category == "gps_coordinates" and self._is_near_zero_gps(line):
                 confidence = "low"
 
-            findings.append(
-                {
+            # Preserve the first occurrence of each email class on a line.
+            # An ownership contact must not hide an ordinary address beside it.
+            candidates = [(category, match)]
+            if category == "emails":
+                classes = {}
+                for candidate in matches:
+                    check = (
+                        "ownership_emails"
+                        if candidate.span() in ownership_spans.get(line_num, [])
+                        else "emails"
+                    )
+                    classes.setdefault(check, candidate)
+                candidates = list(classes.items())
+            for check, candidate in candidates:
+                finding = {
                     "file": file_path.name,
                     "line": line_num,
                     "line_content": line,
                     "severity": pattern_def.get("severity", "medium"),
                     "description": pattern_def.get("description", category),
                     "suggestion": pattern_def.get("suggestion"),
-                    "category": category,
+                    "category": check,
                     "confidence": confidence,
-                    "matched_value": self._reported_value(match),
+                    "matched_value": self._reported_value(candidate),
                 }
-            )
+                if check == "ownership_emails":
+                    finding["description"] = "Ownership contact email in skill metadata"
+                    finding["suggestion"] = (
+                        "Review whether ownership contacts are permitted for this repository. "
+                        "If approved, set PII.ownership_emails to info in an explicit --policy file; "
+                        "otherwise remove the address or use a placeholder."
+                    )
+                findings.append(finding)
 
     @staticmethod
     def _reported_value(match: re.Match) -> str:

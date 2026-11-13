@@ -410,6 +410,7 @@ jobs:
           tests/validators/test_rubric_eval.py
           tests/reporting
           tests/test_cli.py
+          tests/test_cli_stdout_encoding.py
           tests/test_harbor_output_provenance.py
           tests/test_harbor_runner_status.py
           tests/test_harbor_runtime_skill_isolation.py

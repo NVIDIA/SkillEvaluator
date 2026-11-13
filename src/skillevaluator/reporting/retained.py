@@ -266,7 +266,7 @@ def retained_results(
         # Retain source identity under the exact carrier consumed by reporters.
         if payload.get("evaluated_source") is not None:
             metadata["evaluated_source"] = mapping(payload["evaluated_source"], "evaluated_source")
-        for key in ("incomplete_scans", "gate_failures"):
+        for key in ("incomplete_scans", "gate_failures", "semgrep_unparsed_files"):
             if key in row:
                 metadata[key] = _strings(row[key], key)
         for key in (TIER1_REQUIRED_CHECKS_KEY, TIER1_UNSCANNED_PATHS_KEY):

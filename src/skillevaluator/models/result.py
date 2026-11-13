@@ -722,6 +722,15 @@ class ValidationResult:
             self.metadata["gate_failures"] = gate_failures
         if scanners := {**self.scanners, **other.scanners}:
             self.metadata["scanners"] = scanners
+        # Keep each skill's unparsed files, prefixed like errors and findings so
+        # skills stay distinguishable when a folder holds several.
+        unparsed = other.metadata.get("semgrep_unparsed_files")
+        if isinstance(unparsed, list) and unparsed:
+            carried = self.metadata.get("semgrep_unparsed_files")
+            self.metadata["semgrep_unparsed_files"] = [
+                *(carried if isinstance(carried, list) else []),
+                *(f"[{prefix}] {path}" for path in unparsed if isinstance(path, str)),
+            ]
 
         # Merge summary
         self.summary.errors += other.summary.errors

@@ -131,3 +131,45 @@ def test_status_handles_sanitized_finding_without_location():
     result = ValidationResult(validator_name="Security Scan")
     result.add_finding(Finding(category="X", severity=Severity.LOW, check_name="c", message="m", file_path=None))
     assert result_status(result).value == "passed"
+
+
+def test_json_report_lists_every_unparsed_semgrep_file_and_round_trips() -> None:
+    """The error text names at most 20 files; the saved JSON keeps the full list."""
+    from skillevaluator.reporting.retained import retained_results
+
+    paths = [f"scripts/f{i}.sh" for i in range(25)]
+    result = ValidationResult(validator_name="Code Risk Analysis", validator_description="Static code analysis")
+    result.metadata["semgrep_unparsed_files"] = paths
+    result.mark_scan_incomplete("semgrep")
+    result.add_error("Semgrep partial scan: 25 file(s) could not be fully parsed")
+
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+
+    assert payload["results"][0]["semgrep_unparsed_files"] == paths
+    (restored,) = retained_results(payload)
+    assert restored.metadata["semgrep_unparsed_files"] == paths
+
+
+def test_json_report_omits_malformed_unparsed_semgrep_files() -> None:
+    result = ValidationResult(validator_name="Code Risk Analysis", validator_description="Static code analysis")
+    result.metadata["semgrep_unparsed_files"] = ["scripts/a.sh", 3, "", None]
+
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+
+    assert payload["results"][0]["semgrep_unparsed_files"] == ["scripts/a.sh"]
+    result.metadata["semgrep_unparsed_files"] = "scripts/a.sh"
+    rendered = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    assert "semgrep_unparsed_files" not in rendered["results"][0]
+
+
+def test_json_report_counts_unparsed_semgrep_files_beyond_its_cap() -> None:
+    result = ValidationResult(validator_name="Code Risk Analysis", validator_description="Static code analysis")
+    result.metadata["semgrep_unparsed_files"] = [f"scripts/f{i}.sh" for i in range(1005)]
+
+    row = json.loads(JSONReporter(include_timestamp=False).render_all([result]))["results"][0]
+
+    assert len(row["semgrep_unparsed_files"]) == 1000
+    assert row["semgrep_unparsed_files_omitted"] == 5
+    result.metadata["semgrep_unparsed_files"] = result.metadata["semgrep_unparsed_files"][:1000]
+    row = json.loads(JSONReporter(include_timestamp=False).render_all([result]))["results"][0]
+    assert "semgrep_unparsed_files_omitted" not in row

@@ -22,6 +22,7 @@ from skillevaluator.constants import (
     PLUGIN_CONTAINED_MANIFEST_DIR,
     PLUGIN_CONTAINED_MANIFEST_FILE,
     PLUGIN_MANIFEST_FILES,
+    QUALITY_DEFAULT_MIN_SCORE,
     SCAN_EXCLUDED_DIRS,
     SCAN_EXCLUDED_FILES,
     SKILL_MANIFEST_FILE,
@@ -292,7 +293,7 @@ def run_validation(
     checks: str | None = None,
     use_llm: bool = False,
     llm_verify: bool = False,
-    min_score: int = 70,
+    min_score: int = QUALITY_DEFAULT_MIN_SCORE,
     quality_config: Path | None = None,
     pii_waivers: Path | None = None,
     previous_version: str | None = None,
@@ -525,7 +526,7 @@ def run_validation(
 
 
 def run_quality_check(
-    target_path: Path, *, min_score: int = 70, quality_config: Path | None = None
+    target_path: Path, *, min_score: int = QUALITY_DEFAULT_MIN_SCORE, quality_config: Path | None = None
 ) -> list[ValidationResult]:
     validator = QualityScoreValidator(min_score=min_score, quality_config=quality_config)
     return [
@@ -539,7 +540,7 @@ def run_quality_check(
     ]
 
 
-def run_rubric_eval(target_path: Path, *, min_score: int = 70) -> list[ValidationResult]:
+def run_rubric_eval(target_path: Path, *, min_score: int = QUALITY_DEFAULT_MIN_SCORE) -> list[ValidationResult]:
     validator = RubricEvalValidator(min_score=min_score)
     return [
         _as_result(

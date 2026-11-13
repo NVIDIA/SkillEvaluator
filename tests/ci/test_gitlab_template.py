@@ -40,9 +40,12 @@ def _run_template(tmp_path, extra_env, *, scanner_exit=0, existing_report=False)
         "done\n"
         'printf \'%s\\n%s\\n%s\\n%s\\n\' "$SCAN_MODE" "${DIFF_BASE_SHA:-}" "${DIFF_HEAD_SHA:-}" "$MIN_SCORE" > "$report_dir/evidence.txt"\n'
         'printf \'%s\' "${REPORT_RUN_URL:-}" > "$report_dir/run_url.txt"\n'
+        'printf \'%s\' "$report_dir" > "$report_dir/temp_location.txt"\n'
         f"exit {scanner_exit}\n"
     )
     stub.chmod(0o755)
+    temporary = tmp_path / "temporary reports"
+    temporary.mkdir()
     # Start from a clean environment so a suite run inside GitLab CI cannot leak its own job variables.
     outer = {key: value for key, value in os.environ.items() if not key.startswith(("CI_", "GITLAB_", "SKILL_EVAL_"))}
     env = {
@@ -55,6 +58,7 @@ def _run_template(tmp_path, extra_env, *, scanner_exit=0, existing_report=False)
         "SKILL_EVAL_PATHS": "skills",
         "SKILL_EVAL_MIN_SCORE": "80",
         "SKILL_EVAL_SCAN_MODE": "auto",
+        "TMPDIR": str(temporary),
         **extra_env,
     }
     result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, check=False)
@@ -66,6 +70,17 @@ def test_gitlab_job_runs_all_skills_on_push_and_keeps_output(tmp_path):
     result, evidence = _run_template(tmp_path, {})
     assert result.returncode == 0
     assert evidence == ["all", "", "", "80"]
+
+
+def test_gitlab_job_uses_and_cleans_configured_temporary_storage(tmp_path):
+    temporary = tmp_path / "custom temporary storage"
+    temporary.mkdir()
+    result, evidence = _run_template(tmp_path, {"TMPDIR": str(temporary)})
+    assert result.returncode == 0, result.stderr
+    assert evidence == ["all", "", "", "80"]
+    location = Path((tmp_path / "workspace/skill-evaluator-report/temp_location.txt").read_text())
+    assert location.parent == temporary
+    assert not location.exists()
 
 
 def test_gitlab_baseline_opt_in_rejects_noncanonical_boolean_and_inherited_policy(tmp_path):

@@ -409,6 +409,9 @@ class GymCleanupError(RuntimeError):
     """``gym eval run`` could not be confirmed stopped, so its servers or sandboxes may still be running."""
 
 
+_GYM_EARLIER_RUN_NOT_STOPPED = "an earlier NeMo Gym run could not be confirmed stopped"
+
+
 @contextlib.contextmanager
 def _signals_raise_keyboard_interrupt() -> Any:
     """While Gym runs, turn SIGTERM/SIGHUP into one KeyboardInterrupt so Gym's cleanup still runs."""
@@ -499,6 +502,11 @@ def _run_gym(
         # Signal 0 finds no member once the group is empty; killed members get a moment to be reaped.
         deadline = time.monotonic() + _HARBOR_RUN_REAP_SECONDS
         while True:
+            # As PID 1 or a subreaper we adopt Gym's orphans, and on Linux signal 0 still finds a zombie,
+            # so reap our own dead members first. The leader is already reaped, so Popen keeps its status.
+            with contextlib.suppress(ChildProcessError):
+                while os.waitpid(-process.pid, os.WNOHANG)[0]:
+                    pass
             try:
                 os.killpg(process.pid, 0)
             except ProcessLookupError:
@@ -563,6 +571,10 @@ def _run_gym(
                 try:
                     _stop()
                 except Exception as stop_error:
+                    if isinstance(stop_error, GymCleanupError) and reporter is not None:
+                        # The interrupt still ends the run; the progress output says Gym may be running.
+                        with contextlib.suppress(Exception):
+                            reporter.emit(ProgressEvent(stage="cleanup", state="failed", detail=str(stop_error)))
                     raise interrupt from stop_error
                 raise
     finally:
@@ -1037,72 +1049,78 @@ def run_nemo_gym_eval(
             dataset_truth = None
             dataset_warning = f"Dataset snapshot was not recorded: {type(exc).__name__}"
 
+        # Set once a Gym group cannot be confirmed stopped. Nothing else is launched beside it, but the
+        # arms that finished are still collected, so the failed run keeps their scores.
+        cleanup_error: GymCleanupError | None = None
         for agent in agents:
             reporter.emit(ProgressEvent(stage=f"agent:{agent}", state="running", detail="NeMo Gym"))
             agent_model, model_url, api_key = endpoints[agent]
             errors_before = len(launch_errors)
+            blocked_before_agent = cleanup_error is not None
             for planned_agent, arm, arm_dir, task_case_ids in planned:
                 if planned_agent != agent:
                     continue
                 arm_errors: list[str] = []
                 secrets = {value for value in judge_process_env.values() if len(value) >= MIN_EXACT_SECRET_CHARS}
                 rollouts_path = gym_root / f"{agent}-{arm}" / "rollouts.jsonl"
-                rollouts_path.parent.mkdir(parents=True, exist_ok=True)
                 log_path = rollouts_path.with_name("gym.log")
-                try:
-                    credentials, arm_timeout = _refresh_adc_credentials(
-                        {**judge_process_env, MODEL_API_KEY_ENV: api_key},
-                        policy_uses_provider_key=policy_uses_provider_key,
-                        timeout_s=timeout_s,
-                    )
-                except (RuntimeError, ValueError) as exc:
-                    arm_errors.append(f"Vertex AI ADC credentials could not be refreshed: {exc}")
+                if cleanup_error is not None:
+                    arm_errors.append(f"gym eval run was not started: {_GYM_EARLIER_RUN_NOT_STOPPED}")
                 else:
-                    launch_env = gym_launch_environment(credentials)
-                    secrets |= {
-                        value
-                        for value in credentials.values()
-                        if len(value) >= MIN_EXACT_SECRET_CHARS and value != "EMPTY"
-                    }
-                    secrets |= secret_values_from_environment(launch_env)
-                    reporter.set_secret_values(secrets)
-                    command = gym_eval_command(
-                        gym,
-                        arm_dir,
-                        agent=agent,
-                        model=agent_model,
-                        model_url=model_url,
-                        rollouts_path=rollouts_path,
-                        n_attempts=attempts,
-                        n_concurrent=concurrency,
-                        sandbox=sandbox,
-                        inherit_sandbox_environment=agent == "codex" and sandbox == "docker",
-                    )
-                    reporter.emit(
-                        ProgressEvent(stage=f"agent:{agent}", state="running", detail=f"NeMo Gym {arm}-skill arm")
-                    )
-                    with log_path.open("w", encoding="utf-8") as log:
-                        try:
-                            returncode = _run_gym(
-                                command,
-                                cwd=rollouts_path.parent,
-                                env=launch_env,
-                                log=log,
-                                timeout_s=arm_timeout,
-                                secret_values=secrets,
-                                reporter=reporter,
-                            )
-                        except GymLaunchError as exc:
-                            arm_errors.append(f"gym eval run could not start: {exc}")
-                        except GymCleanupError as exc:
-                            # Gym may still be running: end the evaluation instead of starting another arm beside it.
-                            reporter.emit(ProgressEvent(stage=f"agent:{agent}", state="failed", detail=str(exc)))
-                            raise
-                        else:
-                            if returncode is None:
-                                arm_errors.append(f"gym eval run timed out after {arm_timeout:.0f}s")
-                            elif returncode != 0:
-                                arm_errors.append(f"gym eval run exited {returncode}; see {log_path}")
+                    rollouts_path.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        credentials, arm_timeout = _refresh_adc_credentials(
+                            {**judge_process_env, MODEL_API_KEY_ENV: api_key},
+                            policy_uses_provider_key=policy_uses_provider_key,
+                            timeout_s=timeout_s,
+                        )
+                    except (RuntimeError, ValueError) as exc:
+                        arm_errors.append(f"Vertex AI ADC credentials could not be refreshed: {exc}")
+                    else:
+                        launch_env = gym_launch_environment(credentials)
+                        secrets |= {
+                            value
+                            for value in credentials.values()
+                            if len(value) >= MIN_EXACT_SECRET_CHARS and value != "EMPTY"
+                        }
+                        secrets |= secret_values_from_environment(launch_env)
+                        reporter.set_secret_values(secrets)
+                        command = gym_eval_command(
+                            gym,
+                            arm_dir,
+                            agent=agent,
+                            model=agent_model,
+                            model_url=model_url,
+                            rollouts_path=rollouts_path,
+                            n_attempts=attempts,
+                            n_concurrent=concurrency,
+                            sandbox=sandbox,
+                            inherit_sandbox_environment=agent == "codex" and sandbox == "docker",
+                        )
+                        reporter.emit(
+                            ProgressEvent(stage=f"agent:{agent}", state="running", detail=f"NeMo Gym {arm}-skill arm")
+                        )
+                        with log_path.open("w", encoding="utf-8") as log:
+                            try:
+                                returncode = _run_gym(
+                                    command,
+                                    cwd=rollouts_path.parent,
+                                    env=launch_env,
+                                    log=log,
+                                    timeout_s=arm_timeout,
+                                    secret_values=secrets,
+                                    reporter=reporter,
+                                )
+                            except GymLaunchError as exc:
+                                arm_errors.append(f"gym eval run could not start: {exc}")
+                            except GymCleanupError as exc:
+                                cleanup_error = exc
+                                arm_errors.append(str(exc))
+                            else:
+                                if returncode is None:
+                                    arm_errors.append(f"gym eval run timed out after {arm_timeout:.0f}s")
+                                elif returncode != 0:
+                                    arm_errors.append(f"gym eval run exited {returncode}; see {log_path}")
                 rows = [_redacted_row(row, secrets) for row in read_rollouts(rollouts_path, arm_errors)]
                 failures = {
                     task: [redact_progress_detail(reason, secret_values=secrets) for reason in reasons]
@@ -1120,15 +1138,20 @@ def run_nemo_gym_eval(
                     f"{agent} {arm}-skill: {redact_progress_detail(error, secret_values=secrets)}"
                     for error in arm_errors
                 ]
-            reporter.emit(
-                ProgressEvent(
-                    stage=f"agent:{agent}",
-                    state="failed",
-                    detail=f"one or more NeMo Gym runs failed; see {gym_root}/{agent}-*/gym.log",
+            if cleanup_error is not None:
+                # The row says that Gym may still be running, or why this agent never started.
+                detail = f"not started: {_GYM_EARLIER_RUN_NOT_STOPPED}" if blocked_before_agent else str(cleanup_error)
+                reporter.emit(ProgressEvent(stage=f"agent:{agent}", state="failed", detail=detail))
+            else:
+                reporter.emit(
+                    ProgressEvent(
+                        stage=f"agent:{agent}",
+                        state="failed",
+                        detail=f"one or more NeMo Gym runs failed; see {gym_root}/{agent}-*/gym.log",
+                    )
+                    if len(launch_errors) > errors_before
+                    else ProgressEvent(stage=f"agent:{agent}", state="complete")
                 )
-                if len(launch_errors) > errors_before
-                else ProgressEvent(stage=f"agent:{agent}", state="complete")
-            )
 
         reporter.emit(ProgressEvent(stage="collection", state="running"))
         results = collect_harbor_results(

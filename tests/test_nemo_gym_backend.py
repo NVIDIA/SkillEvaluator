@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from pathlib import Path
 
 import click
@@ -1741,6 +1742,7 @@ def test_stop_failure_during_an_interrupt_keeps_the_interrupt(tmp_path: Path, mo
     class _InterruptOnce(_RecordingReporter):
         pass
 
+    reporter = _InterruptOnce()
     stuck = _make_gym_stop_fail(monkeypatch, deny_final_kill=True)
     threading.Timer(0.5, lambda: os.kill(os.getpid(), signal.SIGINT)).start()
     try:
@@ -1751,11 +1753,16 @@ def test_stop_failure_during_an_interrupt_keeps_the_interrupt(tmp_path: Path, mo
                 env=dict(os.environ),
                 log=log,
                 timeout_s=30,
-                reporter=_InterruptOnce(),
+                reporter=reporter,
             )
     finally:
         _kill_leaders(stuck)
     assert isinstance(raised.value.__cause__, RuntimeError)
+    # The interrupt still ends the run, and the progress output says Gym may still be running.
+    assert any(
+        event.stage == "cleanup" and event.state == "failed" and "could not be confirmed stopped" in event.detail
+        for event in reporter.events
+    )
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups and signals")
@@ -1807,36 +1814,186 @@ def test_gym_group_that_cannot_be_confirmed_stopped_raises(tmp_path: Path, monke
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups and signals")
-def test_unconfirmed_gym_stop_ends_the_run_before_the_next_arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import sys
-
+@pytest.mark.parametrize("hanging_launch", [1, 2])
+def test_unconfirmed_gym_stop_launches_nothing_more_and_keeps_finished_arms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hanging_launch: int
+) -> None:
     skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch)
     probe_gym = os.environ["SKILL_EVAL_NEMO_GYM_BIN"]
     launches = tmp_path / "launches"
     hanging_gym = tmp_path / "hanging-gym"
+    # Launches before ``hanging_launch`` run the fake Gym to completion; that launch hangs.
     hanging_gym.write_text(
         f"#!{sys.executable}\nimport os, sys, time\nfrom pathlib import Path\n"
         "if sys.argv[1:] == ['eval', 'run', '--help']:\n"
         f"    os.execv({probe_gym!r}, [{probe_gym!r}, *sys.argv[1:]])\n"
-        f"with Path({str(launches)!r}).open('a') as launched: launched.write(f'{{os.getpid()}}\\n')\n"
+        f"launches = Path({str(launches)!r})\n"
+        "earlier = launches.read_text().split() if launches.exists() else []\n"
+        "with launches.open('a') as launched: launched.write(f'{os.getpid()}\\n')\n"
+        f"if len(earlier) + 1 < {hanging_launch}:\n"
+        f"    os.execv({probe_gym!r}, [{probe_gym!r}, *sys.argv[1:]])\n"
         "time.sleep(60)\n"
     )
     hanging_gym.chmod(0o755)
     monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_BIN", str(hanging_gym))
-    monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_TIMEOUT_S", "1")
+    # A finishing launch needs time to complete; a lone hanging launch only needs to time out.
+    monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_TIMEOUT_S", "1" if hanging_launch == 1 else "15")
     stuck = _make_gym_stop_fail(monkeypatch, deny_final_kill=True)
     reporter = _RecordingReporter()
     try:
-        with pytest.raises(RuntimeError, match="could not be confirmed stopped"):
-            _run_fake_gym(skill, tmp_path, progress_reporter=reporter)
+        result = _run_fake_gym(skill, tmp_path, n_attempts=1, max_cases=1, progress_reporter=reporter)
     finally:
         _kill_leaders(stuck)
-    # The baseline arm never launched beside the group that would not stop.
-    assert [int(pid) for pid in launches.read_text().split()] == stuck
+    launched = [int(pid) for pid in launches.read_text().split()]
+    # Nothing launched after the group that would not stop.
+    assert len(launched) == hanging_launch and launched[-1:] == stuck
+    assert result["execution_status"] == "failed"
+    assert Path(result["result_path"]).is_file()
+    errors = result["execution_errors"]
+    assert any(error.startswith("codex ") and "could not be confirmed stopped" in error for error in errors)
+    agent = result["agents"]["codex"]
+    if hanging_launch == 1:
+        assert any("without-skill: gym eval run was not started" in error for error in errors)
+        assert agent["num_trials_with"] == 0
+    else:
+        # The with-skill arm finished before the baseline hung: its trial is still scored.
+        assert agent["num_trials_with"] == 1
+    assert agent["num_trials_without"] == 0
     assert any(
         event.stage == "agent:codex" and event.state == "failed" and "could not be confirmed stopped" in event.detail
         for event in reporter.events
     )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups and signals")
+def test_gym_group_member_that_outlives_the_leader_is_not_confirmed_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import contextlib
+    import signal
+    import time
+
+    from skillevaluator.tier3.harbor import runner as harbor_runner
+    from skillevaluator.tier3.nemo_gym.runner import GymCleanupError, _run_gym
+
+    ready = tmp_path / "member.pid"
+    leader = (
+        "import pathlib, subprocess, sys, time\n"
+        "member = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"pathlib.Path({str(ready)!r}).write_text(str(member.pid))\n"
+        "time.sleep(60)\n"
+    )
+    groups: list[int] = []
+    real_killpg = os.killpg
+
+    def failing_terminate(process, **_kwargs) -> None:
+        # Fail the stop, as a refused killpg does, once the member has joined the group.
+        deadline = time.monotonic() + 60
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        groups.append(process.pid)
+        raise PermissionError(1, "Operation not permitted")
+
+    def leader_only_kill(pgid: int, sig: int) -> None:
+        # The final SIGKILL reaches only the leader, so it is reaped while the member stays in its group.
+        if pgid in groups and sig == signal.SIGKILL:
+            os.kill(pgid, sig)
+        else:
+            real_killpg(pgid, sig)
+
+    monkeypatch.setattr(harbor_runner, "_terminate_harbor_process_tree", failing_terminate)
+    monkeypatch.setattr(os, "killpg", leader_only_kill)
+    monkeypatch.setattr(harbor_runner, "_HARBOR_RUN_REAP_SECONDS", 2.0)
+    try:
+        with (tmp_path / "gym.log").open("w") as log, pytest.raises(GymCleanupError):
+            _run_gym([sys.executable, "-c", leader], cwd=tmp_path, env=dict(os.environ), log=log, timeout_s=0.5)
+    finally:
+        for pgid in groups:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                real_killpg(pgid, signal.SIGKILL)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups and signals")
+def test_permission_error_from_the_group_probe_is_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.tier3.harbor import runner as harbor_runner
+    from skillevaluator.tier3.nemo_gym.runner import _run_gym
+
+    stuck = _make_gym_stop_fail(monkeypatch, deny_final_kill=False)
+    # Room for the denied probes and the one after them, even on a loaded machine.
+    monkeypatch.setattr(harbor_runner, "_HARBOR_RUN_REAP_SECONDS", 3.0)
+    stopping_killpg = os.killpg
+    denials = [0]
+
+    def probe_denied_twice(pgid: int, sig: int) -> None:
+        # macOS answers EPERM for a group of zombies until they are reaped: keep probing.
+        if sig == 0 and pgid in stuck and denials[0] < 2:
+            denials[0] += 1
+            raise PermissionError(1, "Operation not permitted")
+        stopping_killpg(pgid, sig)
+
+    monkeypatch.setattr(os, "killpg", probe_denied_twice)
+    try:
+        with (tmp_path / "gym.log").open("w") as log:
+            code = _run_gym(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                cwd=tmp_path,
+                env=dict(os.environ),
+                log=log,
+                timeout_s=0.5,
+            )
+    finally:
+        _kill_leaders(stuck)
+    assert code is None
+    assert denials == [2]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="needs Linux PR_SET_CHILD_SUBREAPER")
+def test_dead_gym_members_left_as_our_zombies_are_not_reported_running(tmp_path: Path) -> None:
+    import subprocess
+
+    import skillevaluator
+
+    # Like SkillEvaluator as a container's PID 1 without an init, a subreaper adopts Gym's orphans,
+    # and on Linux signal 0 still finds them as zombies until they are reaped.
+    script = tmp_path / "subreaper.py"
+    script.write_text(
+        "import ctypes, os, sys, time\n"
+        "from pathlib import Path\n"
+        "libc = ctypes.CDLL(None, use_errno=True)\n"
+        "if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER\n"
+        "    raise OSError(ctypes.get_errno(), 'prctl(PR_SET_CHILD_SUBREAPER) failed')\n"
+        "from skillevaluator.tier3.harbor import runner as harbor_runner\n"
+        "from skillevaluator.tier3.nemo_gym.runner import _run_gym\n"
+        "ready = Path(sys.argv[1])\n"
+        "def failing_terminate(process, **_kwargs):\n"
+        "    deadline = time.monotonic() + 60\n"
+        "    while not ready.exists() and time.monotonic() < deadline:\n"
+        "        time.sleep(0.05)\n"
+        "    raise PermissionError(1, 'Operation not permitted')\n"
+        "harbor_runner._terminate_harbor_process_tree = failing_terminate\n"
+        "leader = (\n"
+        "    'import pathlib, subprocess, sys, time\\n'\n"
+        "    \"member = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\\n\"\n"
+        "    'pathlib.Path(sys.argv[1]).write_text(str(member.pid))\\n'\n"
+        "    'time.sleep(60)\\n'\n"
+        ")\n"
+        "with open(os.devnull, 'w') as log:\n"
+        "    code = _run_gym([sys.executable, '-c', leader, str(ready)], cwd=ready.parent,\n"
+        "                    env=dict(os.environ), log=log, timeout_s=0.5)\n"
+        "print(code)\n"
+    )
+    source_root = str(Path(skillevaluator.__file__).resolve().parents[1])
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [source_root, os.environ.get("PYTHONPATH")]))}
+    completed = subprocess.run(
+        [sys.executable, str(script), str(tmp_path / "member.pid")],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        env=env,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "None"
 
 
 def test_incompatible_gym_cli_is_rejected_before_staging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

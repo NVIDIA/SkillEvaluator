@@ -694,9 +694,11 @@ failed trial, and the arm keeps its other scored trials. Excess rollouts are rep
 as execution errors and scoring remains bounded by the planned attempts. Any launch
 or rollout-count failure marks the
 run, the agent's progress row and the report as failed. If Gym's process group cannot be
-confirmed stopped after a timeout or interruption, the evaluation aborts instead of starting
-the next arm beside it, so check for leftover Gym servers and Docker sandboxes before you
-run again. A finished run updates `latest`
+confirmed stopped after a timeout or interruption, no further arm starts beside it. After a
+timeout, the run records that as an execution error, finishes as failed and keeps the scores
+of the arms that finished. After an interruption, the progress output reports it and the run
+ends. Either way, check for leftover Gym servers and Docker sandboxes before you run again.
+A finished run updates `latest`
 and records the same dataset snapshot and publication target as a Harbor run. As on
 Harbor without `--harbor-keep-jobs`, the staged tasks and per-trial files are removed at
 the end; Gym's own redacted `gym.log` and its `rollouts.jsonl` stay under `_nemo-gym/`

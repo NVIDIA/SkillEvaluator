@@ -542,6 +542,33 @@ def test_skill_directories_with_url_delimiters_still_aggregate(tmp_path, monkeyp
     assert sorted(s["path"] for s in tier2["skills"]) == sorted(f"skills/{name}" for name in names)
 
 
+def test_retained_reports_record_the_repository_relative_target_not_the_runner_path(consumer, tmp_path, monkeypatch):
+    from skillevaluator.models import ValidationResult
+    from skillevaluator.reporting.json_reporter import JSONReporter
+
+    def execute(args, **_kwargs):
+        if "catalog" in args:
+            return 0
+        result = ValidationResult(
+            validator_name="Context Deduplication", metadata={"gating": {"tier": 2, "blocking": False}}
+        )
+        # The evaluator records the target as the CI passed it, an absolute runner path.
+        document = JSONReporter(target_path=args[args.index("tier2") + 1]).render_all([result])
+        (Path(args[args.index("-o") + 1]) / "skillevaluator-tier2.json").write_text(document)
+        return 0
+
+    monkeypatch.setattr(run_tiers, "run_command", execute)
+    reports = tmp_path / "reports"
+    env = env_for(consumer, NVIDIA_API_KEY="test-provider-value-1234")
+    assert run_tiers.evaluate(2, consumer, reports, env) == 0
+
+    targets = {
+        child.name: json.loads((child / "skillevaluator-tier2.json").read_text())["target_path"]
+        for child in sorted((reports / "tier2").glob("skill-*"))
+    }
+    assert targets == {"skill-001": "skills/alpha", "skill-002": "skills/beta"}
+
+
 def write_attempt(staging, tier, attempt, env, status):
     """Lay out one downloaded tier artifact as actions/download-artifact does for a pattern."""
     artifact = staging / f"skill-evaluator-tier{tier}-attempt-{attempt}"
@@ -736,8 +763,9 @@ def test_retained_tier2_reports_apply_ci_advisory_policy(consumer, tmp_path, fai
     env = env_for(consumer)
     source = {"repository": "example/consumer", "commit": env["REPORT_COMMIT"]}
     result.metadata["evaluated_source"] = source
-    document = JSONReporter().render_all([result])
+    document = JSONReporter(target_path=str(skill)).render_all([result])
     original = json.loads(document)
+    assert original["target_path"] == str(skill)
     assert original["overall_passed"] is False
     assert original["results"][0]["gating"] == {"tier": 2, "blocking": True}
     assert original["gating"]["tiers"]["2"]["validator_policies"] == [
@@ -749,7 +777,7 @@ def test_retained_tier2_reports_apply_ci_advisory_policy(consumer, tmp_path, fai
     reports = tmp_path / "reports"
     destination = reports / "tier2/skill-001"
 
-    outcome = run_tiers._retain(raw, destination, 2, set(), skill, 1)
+    outcome = run_tiers._retain(raw, destination, 2, set(), skill, 1, "skills/alpha")
 
     assert outcome == {"status": status, "metrics": {"findings": int(failed)}, "complete": not incomplete}
     retained = json.loads((destination / "skillevaluator-tier2.json").read_text())
@@ -763,7 +791,9 @@ def test_retained_tier2_reports_apply_ci_advisory_policy(consumer, tmp_path, fai
     assert retained["results"][0]["status"] == status
     assert retained["results"][0]["passed"] is False
     assert retained["evaluated_source"] == source
-    for key in set(original) - {"gating", "overall_passed", "overall_status", "results"}:
+    # The evaluator saw the runner's absolute path; the retained report keeps the repository path.
+    assert retained["target_path"] == "skills/alpha"
+    for key in set(original) - {"gating", "overall_passed", "overall_status", "results", "target_path"}:
         assert retained[key] == original[key], key
     for key in set(original["results"][0]) - {"gating"}:
         assert retained["results"][0][key] == original["results"][0][key], key

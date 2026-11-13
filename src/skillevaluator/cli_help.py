@@ -64,6 +64,10 @@ _WORDMARK_STACKED = "\n".join(
 _WORDMARK_SMALL = """█▀ █▄▀ █ █   █     █▀▀ █ █ ▄▀█ █   █ █ ▄▀█ ▀█▀ █▀█ █▀█
 ▄█ █ █ █ █▄▄ █▄▄   ██▄ ▀▄▀ █▀█ █▄▄ █▄█ █▀█  █  █▄█ █▀▄"""
 
+# Narrowest terminal that gets any wordmark. The version line can be as wide as the small
+# one, so fitting alone would show it at 58-59 columns, where the plain title is intended.
+_WORDMARK_MIN_WIDTH = 60
+
 
 def _welcome_banner(command: click.Command, ctx: click.Context, *, width: int) -> RenderableType | None:
     """Brand interactive root help without adding output to command execution."""
@@ -87,7 +91,7 @@ def _welcome_banner(command: click.Command, ctx: click.Context, *, width: int) -
         (
             art
             for art in (_WORDMARK, _WORDMARK_STACKED, _WORDMARK_SMALL)
-            if supports_blocks and width >= max(len(subtitle), *map(len, art.splitlines()))
+            if supports_blocks and width >= max(_WORDMARK_MIN_WIDTH, len(subtitle), *map(len, art.splitlines()))
         ),
         None,
     )

@@ -69,7 +69,7 @@ def test_small_help_uses_two_row_wordmark(terminal, monkeypatch, terminal_width)
     assert all(len(line) <= terminal_width for line in banner.splitlines())
 
 
-@pytest.mark.parametrize("formatter_width,terminal_width", [(78, 40), (78, 57)])
+@pytest.mark.parametrize("formatter_width,terminal_width", [(78, 40), (78, 57), (78, 58), (78, 59)])
 def test_narrow_help_uses_compact_banner(terminal, monkeypatch, formatter_width, terminal_width):
     monkeypatch.setattr(shutil, "get_terminal_size", lambda: os.terminal_size((terminal_width, 40)))
     banner = root_help(formatter_width).split("Usage:", 1)[0]

@@ -403,3 +403,15 @@ def test_tab_after_spaces_that_breaks_yaml_is_flagged(tmp_path: Path):
     (skill / "SKILL.md").write_text("---\nname: demo-skill\nmetadata:\n  \tauthor: x\n---\nBody\n")
 
     assert skill_facts(skill)["frontmatter_tab_indent"] is True
+
+
+def test_lone_surrogate_description_is_counted_not_fatal(tmp_path: Path):
+    skill = _skill(tmp_path, desc='"Use when checking \\ud800 harness compatibility."')
+
+    assert skill_facts(skill)["description_utf16_units"] > 0
+
+
+def test_trigger_cut_at_the_listing_window_counts_as_missing(tmp_path: Path):
+    facts = skill_facts(_skill(tmp_path, desc="x" * 55 + " Use when checking harness compatibility."))
+
+    assert facts["trigger_end"] > 60

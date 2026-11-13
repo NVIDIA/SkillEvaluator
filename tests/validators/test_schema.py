@@ -1636,6 +1636,7 @@ class TestSchemaPortabilityChecks:
             ("Use this skill to format tables in reports.", False),
             ("Formats tables, charts and other structured report content nicely. Use when needed.", True),
             ("Formats tables in reports.", True),
+            ("Formats tables, charts and structured report sections. Use when needed.", True),
         ],
     )
     def test_description_trigger_window(self, tmp_path: Path, description: str, expected: bool):

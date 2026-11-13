@@ -10,7 +10,7 @@ limits: {listing_desc_chars: 60}
 listing: {cut: 60}
 rules:
   - {id: HM-ROOT, when: "install_root not in roots", effect: not_loaded, outcome: not found, message: "Hermes reads ~/.hermes/skills, and project .hermes/skills or .agents/skills only when trusted.", fix: "Install it under ~/.hermes/skills, or .hermes/skills or .agents/skills in a trusted repo."}
-  - {id: HM-DESC-60, when: "trigger_offset is None or trigger_offset > 60", effect: advisory, outcome: listing shortened, message: "The skill list shows only the first ~60 chars of the description (57 + '...' in 0.16, a word boundary near 59 on main), and the trigger isn't in them.", fix: "Put the trigger (\"Use when …\") in the first 57 characters."}
+  - {id: HM-DESC-60, when: "trigger_end is None or trigger_end > 60", effect: advisory, outcome: listing shortened, message: "The skill list shows only the first ~60 chars of the description (57 + '...' in 0.16, a word boundary near 59 on main), and the trigger isn't in them.", fix: "Put the trigger (\"Use when …\") in the first 57 characters."}
   - {id: HM-DESC-MISSING, when: "description_missing or description_empty", effect: degraded, message: "Listed by name with an empty description.", fix: "Add a non-empty string description."}
   - {id: HM-DUP-KEY, when: "frontmatter_duplicate_keys", effect: advisory, message: "Duplicate keys: last value wins.", fix: "Remove the duplicate frontmatter key."}
 notes:

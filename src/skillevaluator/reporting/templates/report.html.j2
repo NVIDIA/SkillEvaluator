@@ -1701,6 +1701,10 @@
             <button class="view-toggle-btn active" id="view-skill" onclick="switchView('skill')">By {{ content_label | lower }}</button>
             <button class="view-toggle-btn" id="view-validator" onclick="switchView('validator')">By check</button>
         </div>
+        {% for result in results if not result.passed %}
+        {% set reference_summary = result.metadata.get('skillspector_reference_summary') | skillspector_reference_summary %}
+        {% if reference_summary %}<p class="reference-analysis-summary" style="font-size: 0.875rem; color: var(--text-secondary);">{{ reference_summary }}</p>{% endif %}
+        {% endfor %}
 
         {# ==================== SKILL-CENTRIC VIEW ==================== #}
         <div id="results-by-skill" class="results-view active">
@@ -1846,7 +1850,7 @@
                         </table>
                         {% if skill_data.quality.metrics is defined %}
                         <div style="margin-top: 0.5rem; font-size: 0.8rem; color: var(--text-secondary);">
-                            Tokens: {{ skill_data.quality.metrics.total_tokens }}
+                            Est. tokens{% if skill_data.quality.metrics.estimate_method is defined %} ({{ skill_data.quality.metrics.estimate_method }}){% endif %}: {{ skill_data.quality.metrics.total_tokens }}
                             {% if skill_data.quality.metrics.recommended_max_tokens is defined %}
                             (recommended max: &lt;{{ skill_data.quality.metrics.recommended_max_tokens }})
                             {% endif %}
@@ -3150,7 +3154,7 @@
             <details class="t3-details" open>
                 <summary>Measured Agent Resources</summary>
                 <div class="t3-details-body">
-                <p class="t3-section-hint">Efficiency scores measure routing and productive tool use. These separate measurements show observed agent resource use. Delta = with skill minus baseline; negative means less use. Judge and setup time are excluded. Deltas require complete telemetry and matching case counts in both arms. LLM and tool seconds split the agent's trajectory time; inferred LLM time also includes harness and queue time.</p>
+                <p class="t3-section-hint">Efficiency scores measure routing and productive tool use. These separate measurements show observed agent resource use, including failed task outcomes. Lower use alone does not establish improved task quality or Efficiency. Delta = with skill minus baseline; negative means less use. Judge and setup time are excluded. Deltas require complete execution evidence, complete telemetry and matching case counts in both arms. Pairing does not certify matched concurrency or budget, or judge-model agreement. Reused baseline measurements are historical, not fresh or independent evidence. LLM and tool seconds split the agent's trajectory time; inferred LLM time also includes harness and queue time.</p>
                 {% set t3_resource_rows = [
                     ('tokens', 'Prompt + completion tokens (cache included)', '{:,.0f}', 'total'),
                     ('agent_seconds', 'Agent execution seconds', '{:,.1f} s', 'total'),

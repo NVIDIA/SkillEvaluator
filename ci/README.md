@@ -37,6 +37,7 @@ policy label. Profile names do not control network access or report visibility.
 | `artifact-name` | Keep `skill-evaluator-tier1` for the optional publisher |
 | `report-base-url` | Optional own Pages URL, only after hosted publication is configured |
 | `scan-workers` | `4`; skills scanned at once, from 1 to 16. `1` scans one skill at a time |
+| `enforcement-mode` | `strict` (default) blocks on failed verdicts; `advisory` keeps complete policy/score failures non-blocking but still blocks runtime/evidence/incomplete failures |
 | `security-baselines` | `false`; explicitly apply reviewed per-skill SkillSpector baselines as described below |
 
 The runtime discovers exact-case `SKILL.md` files, rejects unsafe paths and
@@ -326,6 +327,9 @@ the basic PR workflow remains keyless. Provider billing and content transmission
 apply. A configured LLM run is not proof of Tier 2 or Tier 3 evaluation.
 
 ## Maintainer release procedure
+
+Start with the [product release checklist](../RELEASING.md), which covers when
+to rebuild the image, refresh templates and CLI pins, and publish through Kitmaker.
 
 Release publication is deliberate and manual. Consumer files become usable
 after the official image is published and verified; source templates contain

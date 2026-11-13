@@ -4,6 +4,7 @@
 import asyncio
 import hashlib
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -120,10 +121,12 @@ def test_intent_case_002_keeps_all_authored_behaviors():
 
     case_002 = cases[1]
 
-    assert "The agent validates the invoice total against the ledger" in case_002["expected_behavior"]
-    assert "The agent reports each mismatched row" in case_002["expected_behavior"]
-    assert "The agent executed reconcile.py or explained how to run it" in case_002["expected_behavior"]
-    assert "The agent read the sample-skill SKILL.md before taking action" not in case_002["expected_behavior"]
+    assert case_002["expected_behavior"][:2] == [
+        "The agent validates the invoice total against the ledger",
+        "The agent reports each mismatched row",
+    ]
+    # The no-skill baseline is graded on the same behaviors, so none grades skill use.
+    assert not [item for item in case_002["expected_behavior"] if re.search(r"SKILL\.md|reconcile\.py", item)]
 
 
 @pytest.mark.parametrize("existing_dataset", [False, True], ids=["generated-cases", "authored-cases"])
@@ -181,7 +184,8 @@ def test_main_trace_refines_real_trajectory_without_losing_authored_content(
         assert "expected outcome taken from an observed run; confirm it is correct" in case["review"]["reasons"]
         assert not any("used the sample-skill skill" in behavior for behavior in case["assertions"])
 
-    assert "The agent read SKILL.md before taking action" in case["assertions"]
+    # Reading the skill's SKILL.md is skill use, which the no-skill baseline is not graded on.
+    assert not [assertion for assertion in case["assertions"] if "SKILL.md" in assertion]
     assert "The agent executed: python reconcile.py inv.csv" in case["assertions"]
     trajectory_inputs = [entry for entry in result.dataset["generation"]["inputs"] if entry["kind"] == "trajectory"]
     assert len(trajectory_inputs) == 1
@@ -422,11 +426,12 @@ def test_template_refinement_deduplicates_standard_behaviors_and_keeps_trajector
     refined = generate_dataset._refine_from_trajectory_template([case], {"case-1": trajectory})[0]
 
     behaviors = refined["expected_behavior"]
-    assert behaviors[:3] == [
+    # The SKILL.md read is skill use, which the no-skill baseline is not graded on, so it is skipped.
+    assert behaviors[:2] == [
         "The agent uses the approved workflow",
-        "The agent read SKILL.md before taking action",
         "The agent executed: python reconcile.py inv.csv",
     ]
+    assert not [behavior for behavior in behaviors if "SKILL.md" in behavior]
     assert behaviors.count(generate_dataset._FINAL_RESPONSE_BEHAVIOR) == 1
     assert behaviors.count(generate_dataset.SECURITY_BEHAVIOR) == 1
     assert behaviors[-2:] == [generate_dataset._FINAL_RESPONSE_BEHAVIOR, generate_dataset.SECURITY_BEHAVIOR]
@@ -531,12 +536,12 @@ def test_llm_refinement_falls_back_and_flags_missing_case_ids(monkeypatch):
     assert generate_dataset.SECURITY_BEHAVIOR in prompts[0]
 
 
-def test_default_skill_grounding_keeps_template_cases_and_records_generation(tmp_path):
+def test_explicit_skill_grounding_keeps_template_cases_and_records_generation(tmp_path):
     skill = _skill_dir(tmp_path)
     parsed = generate_dataset._parse_skill(skill)
     expected_cases = generate_dataset._generate_simple(parsed)
 
-    result = generate_dataset.main([str(skill), "--no-llm"])
+    result = generate_dataset.main([str(skill), "--no-llm", "--grounding", "skill"])
 
     assert result.dataset["generation"]["grounding"] == "skill"
     assert result.dataset["generation"]["mode"] == "template_requested"
@@ -617,7 +622,7 @@ def test_template_fallback_records_safe_reason(tmp_path, monkeypatch):
         raise ProviderConfigurationError("credential-value-that-must-not-leak")
 
     monkeypatch.setattr("skillevaluator.provider_config.resolve_llm_provider", provider_unavailable)
-    result = generate_dataset.main([str(skill), "--dry-run"])
+    result = generate_dataset.main([str(skill), "--dry-run", "--grounding", "skill"])
 
     record = result.dataset["generation"]
     assert record["mode"] == "template_fallback"

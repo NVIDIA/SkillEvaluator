@@ -141,6 +141,7 @@ def test_direct_workflow_generates_missing_dataset_then_evaluates(skill, configu
 def test_starter_guidance_command_replaces_the_existing_dataset(skill):
     dataset = _dataset(skill)
     original = dataset.read_bytes()
+    (skill / "evals" / "EVAL.md").write_text("## Questions\n- Summarize this text\n", encoding="utf-8")
     result = CliRunner().invoke(create_dataset, [str(skill), "--full", "--force", "--no-llm"])
     assert result.exit_code == 0, result.output
     assert dataset.read_bytes() != original

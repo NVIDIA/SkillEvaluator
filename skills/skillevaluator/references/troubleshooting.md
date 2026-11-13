@@ -16,6 +16,6 @@
 | Skill never activated | Description and prompts do not match | Name the tasks in the description; add explicit cases |
 | Agent auth fails | Agent credential not exported where `skillevaluator` runs | Export it on the host; `doctor -a AGENT` |
 | `AgentTimeoutError` or rate-limit errors | Slow model or too much concurrency | `--timeout-multiplier 2`, lower `--n-concurrent` |
-| Custom Dockerfile build fails | Base image lacks tools the agent or grader needs | Fix `<skill-dir>/evals/environment/Dockerfile`; rerun with `--harbor-keep-jobs` to read the build log |
+| Custom Dockerfile build fails | Base image lacks tools the agent or grader needs, or `python3 -I` cannot import the verifier packages (`ENV PIP_USER=1`, `PIP_TARGET` or `PYTHONPATH` installs) | Fix `<skill-dir>/evals/environment/Dockerfile`; install verifier packages into `python3`'s site-packages; rerun with `--harbor-keep-jobs` to read the build log |
 | Results need debugging | Harbor jobs deleted by default | Rerun with `--harbor-keep-jobs`, then `skillevaluator harbor-view JOBS_DIR` |
 | Lift differs between runs | LLM judges and agents are stochastic | Increase `--n-attempts`; compare only identical setups |

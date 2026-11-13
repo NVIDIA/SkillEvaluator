@@ -158,6 +158,39 @@ def test_fix_section_for_tier1_and_tier2():
     assert not any(r.label == "what to fix" for r in summarize_tier2([ValidationResult(validator_name="d")])[2])
 
 
+def test_failed_hook_gate_with_incomplete_scan_is_listed_as_failed_not_as_setup():
+    """A Critical plus failed gate outranks an incomplete scan, as in result_status and the other reporters."""
+    from skillevaluator.models.result import Finding, Severity, ValidationResult
+    from skillevaluator.reporting.console_ui import summarize_tier1
+    from skillevaluator.reporting.run_status import Status, result_status
+
+    gate = "hooks/hooks.json: SkillSpector could not model these hooks; this check cannot pass while they are present"
+    security = ValidationResult(validator_name="Security Scan")
+    security.add_structured_finding(
+        Finding(
+            category="SECURITY",
+            severity=Severity.CRITICAL,
+            check_name="skillspector_hook_payload_unverified",
+            message="SkillSpector could not fully model the hooks in hooks/hooks.json",
+            file_path="hooks/hooks.json",
+            suggestion="Review hooks/hooks.json and every file its hooks run.",
+        )
+    )
+    security.fail_gate(gate)
+    security.mark_scan_incomplete("skillspector")
+    assert security.is_incomplete
+    assert result_status(security) is Status.FAILED
+
+    ok, rows = summarize_tier1([security], lineup=["security"])
+    text = _text(rows)
+    assert not ok
+    assert "0/1 checks passed  ·  1 failed" in text
+    assert "1 didn't run" not in text
+    assert f"{'security':<12}{gate}" in text
+    assert not any(r.label == "setup" for r in rows)
+    assert "--skip security" not in text
+
+
 def _trial(job: Path, name: str, result: dict | None) -> None:
     trial = job / name
     trial.mkdir(parents=True)
@@ -238,6 +271,32 @@ def test_setup_fix_names_failed_skillspector_setup():
         "or install it yourself: uv tool install skillspector.whl",
         "or skip it: --skip security",
     ]
+
+
+def test_live_case_marks_reads_nemo_gym_rollouts(tmp_path):
+    from skillevaluator.tier3.case_summary import ERROR, FAIL, PASS
+
+    for case in ("case-1", "case-2"):
+        (tmp_path / "_harbor-tasks" / "codex" / "with" / case).mkdir(parents=True)
+    arm = tmp_path / "_nemo-gym" / "codex-with"
+    arm.mkdir(parents=True)
+    task = {"taskset": "with", "task_id": "case-1"}
+    # Scored from the verifier logs, with the same rules as the final Gym result normalizer.
+    logs = []
+    for index, overall in enumerate((0.9, 0.1)):
+        log_dir = tmp_path / "gym-logs" / str(index)
+        log_dir.mkdir(parents=True)
+        (log_dir / "reward.json").write_text(json.dumps({"overall": overall}))
+        logs.append(str(log_dir))
+    rows = [
+        {"_ng_task_id": task, "verifier_return_code": 0, "verifier_logs_dir": logs[0]},
+        {"_ng_task_id": task, "verifier_return_code": 0, "verifier_logs_dir": logs[1]},
+        {"_ng_task_id": task, "failure_reason": "sandbox died", "verifier_return_code": None},
+    ]
+    (arm / "rollouts.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + '\n{"_ng_task_id": {"ta')
+    marks, running = live_case_marks(tmp_path, ["codex"], pass_threshold=0.5)
+    assert marks == {"codex": {"with_skill": {"case-1": [PASS, FAIL, ERROR], "case-2": []}}}
+    assert running == set()
 
 
 def _security_without_llm():

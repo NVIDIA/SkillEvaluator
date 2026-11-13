@@ -67,6 +67,7 @@ from skillevaluator.reporting.terminal_styles import (
     grade_style,
     lift_style,
 )
+from skillevaluator.skillspector_references import reference_summary_message
 from skillevaluator.utils.rich_markup import strip_terminal_controls
 
 if TYPE_CHECKING:
@@ -1133,6 +1134,8 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
     When *lineup* is given, the per-check ticker stays in the completed
     section with each check's final state (failed checks in red).
     """
+    from skillevaluator.reporting.run_status import Status, result_status
+
     # A check recorded as not applicable did not run: it is neither a pass nor
     # a failure, so it is listed on its own row and left out of the counts.
     not_applicable = [r for r in results if _is_not_applicable(r)]
@@ -1140,8 +1143,9 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
 
     user_skipped = [r for r in results if _is_user_skipped(r)]
     failed = [r for r in results if not r.passed and not _is_skipped(r)]
-    incomplete = [r for r in failed if r.is_incomplete]
-    broken = [r for r in failed if not r.is_incomplete]
+    # A blocking finding or failed gate outranks an incomplete scan, as on every other surface.
+    incomplete = [r for r in failed if result_status(r) is Status.INCOMPLETE]
+    broken = [r for r in failed if result_status(r) is not Status.INCOMPLETE]
     # Warnings from passing validators surface as advisories below; only the
     # failing validators' warnings belong on the headline checks row.
     warnings = sum(len(r.warnings) for r in failed)
@@ -1205,13 +1209,14 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
                 [(f"{suppressed_security} scanner {noun} suppressed outside agent control paths", MUTED)],
             )
         )
+    for r in failed:
+        if reference_summary := reference_summary_message((r.metadata or {}).get("skillspector_reference_summary")):
+            rows.append(TierRow("references", [(reference_summary, MUTED)], fit="wrap"))
 
     quality = _quality_stats(results)
     if quality:
         grade, score = quality
         quality_result = next((r for r in results if _quality_stats([r])), None)
-        from skillevaluator.reporting.run_status import result_status
-
         status = result_status(quality_result).value if quality_result else "unavailable"
         rows.append(
             TierRow("quality", [(grade, f"bold {grade_style(grade, status=status)}"), (f"  {score:.1f} / 100", TEXT)])

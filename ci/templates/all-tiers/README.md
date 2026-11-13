@@ -281,7 +281,8 @@ contains only a secret name, never the key itself. The caller resolves
 `secrets[vars.SKILL_EVAL_GATEWAY_SECRET]` into the reusable workflow's generic
 `LLM_API_KEY`; other repositories can select their own gateway and secret names
 during local onboarding. Missing
-prerequisites remain visible in the reports. A passing Tier 1 gate is not an
+prerequisites remain visible in the reports of runs that start the provider-backed
+jobs (see below for which PRs skip them). A passing Tier 1 gate is not an
 all-tier evaluation pass. Forks retain keyless Tier 1 checks. On PRs, ordinary software changes
 select no skills, skill changes select the affected skills, and CI configuration
 changes select the collection. Pushes to `main` and manual runs scan the collection.
@@ -292,13 +293,29 @@ skill, and its report lists Tier 2 and Tier 3 as skipped because no skill
 changed. Fork PRs never run the paid tiers, so their reports keep the existing
 Tier 2 and Tier 3 reason.
 
+Because the generated caller only starts on skill or caller changes, the
+same-repository PRs that now skip the paid jobs are the setup PRs: onboarding,
+pin bumps, and model, secret or gateway changes to the caller. Such a PR no
+longer shows a wrong model or a missing key. The first provider-backed run is the push to the
+default branch after it merges, a manual run there, or the next PR that changes
+a skill. To exercise a caller change with providers before merging, set
+`scan-mode: all` in the caller on that PR and read the results in the run's
+artifact; that PR gets no automatic comment, because the listener approves only
+the default branch's caller. Before merging, restore `auto` and then refresh
+`trusted-caller-blobs` for the final caller. `ci demo` cannot exercise an unmerged
+setup: it requires the all-tier scan caller on the default branch and rejects a
+setup that has not merged, and its skill-change PR branches from the default
+branch. Use `ci demo` after the setup merges.
+
 If a provider returns HTTP 404, verify that the selected model accepts chat
 requests with your account. Presence in the public model catalog alone does not
 prove serving availability. Change the caller's `model` input to an accessible
 model and refresh `trusted-caller-blobs` before retrying; do not change global
-provider defaults to troubleshoot one repository.
+provider defaults to troubleshoot one repository. A PR that only changes the
+caller skips the provider-backed jobs, so the new model is first exercised by the
+push after it merges, unless that PR temporarily uses `scan-mode: all` as described above.
 
-The setup PR can exercise checks, but its first automatic comment requires
+The setup PR runs the keyless Tier 1 scan of every skill, but its first automatic comment requires
 the consumer feedback listener on `main` and a subsequent PR run. Repository
 maintainers configure branch protection separately if they want the Tier 1
 aggregate check to block merges.

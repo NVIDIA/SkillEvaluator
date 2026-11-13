@@ -249,6 +249,12 @@ All notable changes to SkillEvaluator are documented in this file.
   a `static_parse_limit` row on the manifest, so that scan is recorded as
   incomplete in the same way.
 
+- `validate` no longer repeats its header box in short terminal windows or
+  when a log warning prints mid-run. Only the tier that is still running is
+  redrawn; the header and finished tiers print once, and log records print
+  through the live view's console. The progress line now prints once, above
+  the final verdict.
+
 ## 0.9.0 - 2026-11-13
 
 ### Fixed

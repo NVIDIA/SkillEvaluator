@@ -6,6 +6,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- A separate four-case synthetic grader pilot adds forbidden-startup-write and
+  root-search challenges with quoted/read-only and scoped controls, an independent
+  label worksheet, content/source manifest and explicit security/Efficiency
+  availability policy. Task Overall failures remain independent of composite
+  scores. This diagnostic pilot establishes no all-metrics qualification,
+  statistical representativeness, release approval or Jira acceptance;
+  independent automated review is pending.
 - Experimental `tier3 evaluate --backend nemo-gym` targets a native Gym task-folder
   interface. Public `nemo-gym==0.7.0` is incompatible; public source candidate
   `NVIDIA-NeMo/Gym@792fa142f58277aecff05d402061d647e9a92acf` exposes the required

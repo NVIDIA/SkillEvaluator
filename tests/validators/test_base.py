@@ -5,7 +5,16 @@
 
 from pathlib import Path
 
-from skillevaluator.validators.base import ValidationResult, ValidatorBase, iter_scannable_files
+import pytest
+
+from skillevaluator.validators.base import (
+    Finding,
+    Severity,
+    ValidationResult,
+    ValidatorBase,
+    continue_on_failure_scope,
+    iter_scannable_files,
+)
 
 
 class TestValidationResult:
@@ -296,6 +305,47 @@ class TestValidatorBase:
         assert "Testing 2 skill(s)" in result.messages[0]
         assert any("skill-a" in m for m in result.messages)
         assert any("skill-b" in m for m in result.messages)
+
+    @pytest.mark.parametrize(
+        ("check_name", "continue_on_failure", "visited"),
+        [
+            ("configuration", False, ["skill-a"]),
+            ("configuration", True, ["skill-a", "skill-b"]),
+            ("per-skill", False, ["skill-a", "skill-b"]),
+        ],
+    )
+    def test_validate_folder_or_skill_stops_at_a_critical_unless_its_check_is_exempt(
+        self, tmp_path, check_name, continue_on_failure, visited
+    ):
+        """A CRITICAL stops the walk, except for checks in _FAIL_FAST_EXEMPT_CHECKS."""
+        root = tmp_path / "skills"
+        for name in ["skill-a", "skill-b"]:
+            (root / name).mkdir(parents=True)
+            (root / name / "SKILL.md").write_text(f"---\nname: {name}\n---", encoding="utf-8")
+        seen = []
+
+        def validate_single(path):
+            seen.append(path.name)
+            result = ValidationResult()
+            result.add_structured_finding(
+                Finding(
+                    category="SECURITY",
+                    severity=Severity.CRITICAL,
+                    check_name=check_name,
+                    message="Critical",
+                    file_path="SKILL.md",
+                )
+            )
+            return result
+
+        class PerSkillValidator(ConcreteValidator):
+            _FAIL_FAST_EXEMPT_CHECKS = frozenset({"per-skill"})
+
+        with continue_on_failure_scope(continue_on_failure):
+            result = PerSkillValidator()._validate_folder_or_skill(root, validate_single, action_description="Testing")
+
+        assert seen == visited
+        assert not result.passed
 
     def test_validate_folder_or_skill_no_fallback(self, tmp_path):
         """Test template method without fallback for empty folders."""

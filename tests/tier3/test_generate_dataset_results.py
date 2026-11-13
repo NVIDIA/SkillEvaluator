@@ -327,7 +327,7 @@ def test_dry_run_plain_refine_uses_generated_cases_without_a_trajectory(tmp_path
         "---\nname: my-skill\ndescription: Does useful work\n---\n",
         encoding="utf-8",
     )
-    result = generate_dataset.main([str(skill), "--no-llm", "--dry-run", "--refine"])
+    result = generate_dataset.main([str(skill), "--grounding", "skill", "--no-llm", "--dry-run", "--refine"])
 
     assert result.status == "preview"
     assert result.cases_count == 1
@@ -344,11 +344,11 @@ def test_plain_refine_keeps_generated_cases_when_collection_is_unavailable(tmp_p
     monkeypatch.setattr(generate_dataset, "_discover_trajectories", lambda *_args, **_kwargs: ({}, {}))
     monkeypatch.setattr(generate_dataset, "_run_agent_collect_trajectories", lambda *_args, **_kwargs: ({}, {}))
 
-    result = generate_dataset.main([str(skill), "--no-llm", "--refine"])
+    result = generate_dataset.main([str(skill), "--grounding", "skill", "--no-llm", "--refine"])
 
     assert result.status == "created"
     assert result.cases_count == 1
-    assert result.dataset["evals"][0]["expected_output"].startswith("The agent used the my-skill skill")
+    assert result.dataset["evals"][0]["expected_output"] == "A correct, complete result for: does useful work"
 
 
 def test_main_invalid_skill_raises_domain_error_without_printing(tmp_path, capsys):
@@ -369,7 +369,7 @@ def test_main_reports_created_dataset_with_written_payload(tmp_path, extra_args,
         encoding="utf-8",
     )
 
-    result = generate_dataset.main([str(skill), "--no-llm", *extra_args])
+    result = generate_dataset.main([str(skill), "--grounding", "skill", "--no-llm", *extra_args])
 
     assert result.status == "created"
     assert result.path == skill / "evals" / "evals.json"
@@ -387,7 +387,7 @@ def test_main_full_with_author_negative_writes_four_cases(tmp_path):
         encoding="utf-8",
     )
 
-    result = generate_dataset.main([str(skill), "--no-llm", "--full"])
+    result = generate_dataset.main([str(skill), "--grounding", "skill", "--no-llm", "--full"])
 
     assert result.cases_count == 4
     assert any(case["id"].endswith("-neg-001") for case in result.dataset["evals"])
@@ -414,7 +414,7 @@ def test_force_write_failure_preserves_existing_dataset(tmp_path, monkeypatch):
     monkeypatch.setattr(generate_dataset.json, "dump", _partial_dump)
 
     with pytest.raises(DatasetGenerationError, match="Could not write dataset"):
-        generate_dataset.main([str(skill), "--no-llm", "--force"])
+        generate_dataset.main([str(skill), "--grounding", "skill", "--no-llm", "--force"])
 
     assert output.read_bytes() == original
     assert list(evals.iterdir()) == [output]
@@ -432,7 +432,7 @@ def test_force_write_preserves_existing_dataset_permissions(tmp_path):
     output.write_text('{"skill_name":"original","evals":[]}\n', encoding="utf-8")
     output.chmod(0o640)
 
-    generate_dataset.main([str(skill), "--no-llm", "--force"])
+    generate_dataset.main([str(skill), "--grounding", "skill", "--no-llm", "--force"])
 
     assert stat.S_IMODE(output.stat().st_mode) == 0o640
 
@@ -448,7 +448,7 @@ def test_main_reports_existing_dataset_as_unchanged(tmp_path):
     output = evals / "evals.json"
     output.write_text('{"skill_name": "my-skill", "evals": []}', encoding="utf-8")
 
-    result = generate_dataset.main([str(skill), "--no-llm"])
+    result = generate_dataset.main([str(skill), "--grounding", "skill", "--no-llm"])
 
     assert result.status == "unchanged"
     assert result.path == output
@@ -485,7 +485,7 @@ def test_concurrent_programmatic_generation_has_no_cross_talk(tmp_path):
         skills.append(skill)
 
     def _generate(skill):
-        return EvaluationService().create_dataset(DatasetOptions(skill_path=skill, no_llm=True))
+        return EvaluationService().create_dataset(DatasetOptions(skill_path=skill, no_llm=True, grounding="skill"))
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(_generate, skills))

@@ -20,6 +20,8 @@ import hashlib
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from skillevaluator.skillspector_diagnostics import merge_completeness
+
 
 class Severity(StrEnum):
     """Standardized severity levels for validation findings.
@@ -647,7 +649,12 @@ class ValidationResult:
         incomplete = list(dict.fromkeys([*self.incomplete_scans, *other.incomplete_scans]))
         gate_failures = [*self.gate_failures, *other.gate_failures]
         scanners = {**self.scanners, **other.scanners}
+        completeness = merge_completeness(
+            self.metadata.get("skillspector_completeness"), other.metadata.get("skillspector_completeness")
+        )
         self.metadata.update(other.metadata)
+        if completeness:
+            self.metadata["skillspector_completeness"] = completeness
         if incomplete:
             self.metadata["incomplete_scans"] = incomplete
         if scanners:
@@ -667,6 +674,13 @@ class ValidationResult:
 
     def merge_with_prefix(self, other: ValidationResult, prefix: str) -> None:
         """Merge another result, prefixing all errors/warnings with skill name."""
+        completeness = merge_completeness(
+            self.metadata.get("skillspector_completeness"),
+            other.metadata.get("skillspector_completeness"),
+            prefix=prefix,
+        )
+        if completeness:
+            self.metadata["skillspector_completeness"] = completeness
         if not other.passed:
             self.passed = False
 
@@ -678,14 +692,17 @@ class ValidationResult:
         # Prefix findings with skill name in file_path
         for finding in other.findings:
             metadata = finding.metadata
-            listed = metadata.get("occurrences") if isinstance(metadata, dict) else None
-            if isinstance(listed, list):
+            for key in ("occurrences", "skillspector_occurrences"):
+                listed = metadata.get(key) if isinstance(metadata, dict) else None
+                if not isinstance(listed, list):
+                    continue
                 # A check that folds repeats (the PII scan) lists each location
-                # in metadata; prefix those like file_path so the finding's own
-                # location still matches its first listed one.
+                # in metadata, and a SkillSpector AE1 finding lists the lines
+                # that name its file; prefix those like file_path so the
+                # finding's own location still matches its first listed one.
                 metadata = {
                     **metadata,
-                    "occurrences": [
+                    key: [
                         {**item, "file": f"[{prefix}] {item['file']}"}
                         if isinstance(item, dict) and isinstance(item.get("file"), str)
                         else item

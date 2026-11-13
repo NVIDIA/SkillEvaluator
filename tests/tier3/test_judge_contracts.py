@@ -1096,3 +1096,20 @@ def test_binary_ragas_score_is_saved_as_an_accepted_attempt(tmp_path: Path) -> N
 
 def test_judge_contract_is_reserved_reward_metadata() -> None:
     assert "judge_contract" in RESERVED_METRIC_NAMES
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"headers": {"Authorization": "Bearer pa\\"CANARY_JUDGE_SUFFIX"}}',
+        'headers["Authorization"] = "Bearer pa\\"CANARY_JUDGE_SUFFIX"',
+        'headers["Authorization"] = f"Bearer pa\\"CANARY_JUDGE_SUFFIX"',
+        '{"headers": {"X-API-Key": "pa\\"CANARY_JUDGE_SUFFIX"}}',
+        'headers["X-API-Key"] = "pa\\"CANARY_JUDGE_SUFFIX"',
+        'curl -H \'Authorization: Bearer "pa\\"CANARY_JUDGE_SUFFIX"\' https://x',
+    ],
+)
+def test_judge_header_format_preservation_masks_escaped_secret_suffixes(text: str) -> None:
+    evidence = eval_template._redact_judge_evidence(text)
+    assert "CANARY_JUDGE_SUFFIX" not in evidence
+    assert "<redacted>" in evidence

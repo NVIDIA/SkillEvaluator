@@ -618,6 +618,52 @@ class TestAnalyzeCluster:
             analyze_cluster(mock_client, make_cluster())
 
 
+_DUPLICATE_REPLY = {"verdict": "DUPLICATE", "confidence": 0.9, "rationale": "Same content", "suggestion": "Remove one"}
+
+
+class TestAnsweringModel:
+    """The verdict names the model that answered, which can be a server-side fallback."""
+
+    def test_verdict_records_the_model_that_answered(self, make_cluster) -> None:
+        mock_client = MagicMock(spec=LLMClient)
+        mock_client.extract_json_from_response.return_value = dict(_DUPLICATE_REPLY)
+        mock_client.model_used = "claude-opus-4-8"
+
+        result = analyze_cluster(mock_client, make_cluster())
+
+        assert result.model == "claude-opus-4-8"
+        assert (result.verdict, result.confidence) == ("DUPLICATE", 0.9)
+
+    def test_model_is_kept_as_the_client_named_it(self, make_cluster) -> None:
+        # Reports sanitize the model; the verdict keeps what the client said.
+        mock_client = MagicMock(spec=LLMClient)
+        mock_client.extract_json_from_response.return_value = dict(_DUPLICATE_REPLY)
+        mock_client.model_used = "https://proxy.example.test/v1"
+
+        assert analyze_cluster(mock_client, make_cluster()).model == "https://proxy.example.test/v1"
+
+    @pytest.mark.parametrize("model_used", [None, 42, ["claude-opus-4-8"]], ids=["none", "number", "list"])
+    def test_verdict_names_no_model_unless_the_client_gives_a_string(self, make_cluster, model_used: object) -> None:
+        mock_client = MagicMock(spec=LLMClient)
+        mock_client.extract_json_from_response.return_value = dict(_DUPLICATE_REPLY)
+        mock_client.model_used = model_used
+
+        assert analyze_cluster(mock_client, make_cluster()).model is None
+
+    def test_client_without_model_used_gives_no_model(self, make_cluster) -> None:
+        class Client:
+            def extract_json_from_response(self, *_args, **_kwargs):
+                return {"verdict": "INTENTIONAL_DETAIL", "confidence": 0.8}
+
+        result = analyze_cluster(Client(), make_cluster())
+
+        assert result == LLMVerdict("INTENTIONAL_DETAIL", 0.8, "", "")
+        assert result.model is None
+
+    def test_positional_verdict_has_no_model(self) -> None:
+        assert LLMVerdict("DUPLICATE", 0.9, "r", "s").model is None
+
+
 class TestVerdictToSeverity:
     def test_duplicate_high_confidence(self) -> None:
         v = LLMVerdict("DUPLICATE", 0.9, "r", "s")

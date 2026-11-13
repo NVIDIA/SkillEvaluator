@@ -32,7 +32,7 @@ from skillevaluator.inference.diagnostics import llm_failure_diagnostic
 from skillevaluator.inference.types import LLMClientError, LLMClientRefusedError, LLMClientTruncatedError
 from skillevaluator.logging_config import get_logger
 from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
-from skillevaluator.utils.redaction import redact_sensitive_text
+from skillevaluator.utils.redaction import credential_safe_cut, redact_sensitive_text
 
 logger = get_logger(__name__)
 
@@ -52,7 +52,8 @@ _MAX_EXPLANATION_CHARS = 600
 _MAX_CASE_EVIDENCE_CHARS = 300_000
 # A field is masked over ``limit * 4 + 256`` characters, cut back to the last
 # whitespace. Text with no whitespace after its limit is masked over this many
-# characters instead, so the token that crosses the limit is kept.
+# characters instead, so the token that crosses the limit is kept; past this
+# window it is cut back to the last punctuation no credential contains.
 _MAX_UNBROKEN_MASK_CHARS = 65_536
 # Ends every shortened field, as in ``redact_sensitive_text(max_len=...)``.
 _TRUNCATED_MARKER = "...<truncated>"
@@ -245,68 +246,444 @@ def _finite_score(value: Any) -> float | None:
     return round(number, 4) if number is not None else None
 
 
-def _starts_absolute_path(value: str, index: int) -> bool:
-    """Whether a POSIX, home, UNC or drive-letter absolute path starts at ``index``.
+# Characters that continue a name, so a root right after one is not a root (``a/b`` is not ``/b``).
+_NAME_CHARS = "_.~-"
+# An absolute-path root: POSIX or UNC, the home of this or another user (``~/``,
+# ``~alice/``), a drive letter, or a home variable.
+_ABSOLUTE_PATH_ROOT_PATTERN = r"[\\/]|~[\w.-]*[\\/]|[A-Za-z]:[\\/]|(?:\$HOME|\$\{HOME\}|%USERPROFILE%)[\\/]"
+_ABSOLUTE_PATH_ROOT = re.compile(_ABSOLUTE_PATH_ROOT_PATTERN)
+# A root right after one of these starts a path of its own: ``/opt/bin,/home/a``,
+# ``--out=/home/a``, ``log(/home/a)``. A colon counts unless it is a drive letter's.
+_PATH_LIST_SEPARATORS = ",;:=([{"
+# Like a URL (``_URL_SPAN_RE``), it may start right after a ``\n`` ``\r`` or ``\t`` escape.
+_FILE_URL_LOCALHOST_PATH_RE = re.compile(r"(?i)(?:\b|(?<=(?-i:\\[nrt])))(?P<prefix>file://localhost)(?P<path>/\S*)")
+# The rest of a Windows folder name after ``\n`` ``\r`` or ``\t``.
+_FOLDER_NAME_TAIL = re.compile(r"[\w.~$%-]*")
+_BACKSLASHES = re.compile(r"\\+")
+# The first character of a UNC share name (``\\nas01\share``).
+_UNC_SHARE_START = re.compile(r"[\w.~$-]")
+# A ``\u`` or ``\x`` escape of one character, after its backslash (``\u201c``,
+# ``\xa0``, ``\x1b``).
+_ESCAPED_CHARACTER = re.compile(r"u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}")
+# How many folders named only ``n`` ``r`` or ``t`` in a row (``\r\n``) are read
+# together as escapes or as folders.
+_LINE_ESCAPE_CHAIN = 8
+# The rest of a folder named like an escape (``x64@2``, ``x64(1)``): up to a
+# separator, whitespace, quote or the ``[`` of an ANSI code.
+_ESCAPED_FOLDER_NAME_TAIL = re.compile(r"[^\\/\s\"'<>|\[]*")
+# An ANSI control sequence, raw or escaped as in JSON or repr text: a color
+# code (``\u001b[1m``, ``\x1b[1;38;2;255;255;255m``, ``\x1b[38:5:208m``) or
+# another one, such as erase line (``\x1b[K``) or cursor up (``\x1b[1A``). A
+# path may start right after one: ``ERROR\u001b[0m/home/a``, ``\r\x1b[K/home/a``.
+_ANSI_CODE_END = re.compile(r"(?:\x1b|\\+(?:u001[bB]|x1[bB]))\[[0-9:;?]{0,64}[A-Za-z]\Z")
+_ANSI_CODE_AFTER_BACKSLASHES = re.compile(r"(?:u001[bB]|x1[bB])\[[0-9:;?]{0,64}[A-Za-z]")
+# The longest such code that ``_ANSI_CODE_END`` looks back for.
+_ANSI_CODE_LOOKBACK = 80
+# A URL that path masking leaves unchanged: any scheme but ``file:`` and a
+# ``+file:`` one such as ``git+file:``, which name local paths. The scheme is at
+# most 64 characters, so a long dotted word is not rescanned from every word
+# boundary. The URL ends at whitespace; at a character a URL never holds
+# unencoded (``"`` ``<`` ``>`` a backtick ``^`` ``{`` ``|`` ``}``, an ANSI
+# escape raw or as ``\u001b`` ``\x1b``); at a single quote, which closes a
+# quoted URL far more often than it appears in one; at a ``\n`` ``\r`` or
+# ``\t`` escape (JSON or repr text), so the next line is not part of it; and
+# before an absolute-path root or another scheme that follows a
+# ``,`` or ``;`` (a list), a ``,`` or ``;`` and an option or variable name with
+# ``=`` (``DOC=https://h/e;LOG=/home/a``, ``,--find-links=file:///home/a``), or
+# a Markdown ``](``. So a ``file:`` URL in a list is masked. The escape's
+# backslash may be doubled (JSON inside JSON). It is a Windows folder instead
+# when a name of ``_FOLDER_NAME_TAIL`` characters and as many backslashes
+# follow it, and no escaped character such as ``\u001b`` or ``\xa0`` follows
+# those unless a name and as many backslashes follow it too:
+# ``C:\Users\t\runs``, ``C:\\Users\\t\\runs``, ``\t\x64\runs``. Other backslashes stay in the
+# URL, so a Windows path in one is kept unless a folder or file name in it
+# starts with ``n`` ``r`` or ``t`` and is not such a folder (``\notes.txt``,
+# ``\runs(old)\``). So in
+# ``{"doc":"https://host/e","log":"/home/a/<id>"}``,
+# ``"https://host/e\nLOG=/home/a/<id>"`` or ``https://host/a,/home/a/<id>`` the
+# path after the URL is still masked. The scheme starts after such an escape,
+# not inside it: ``\nfile:///home/a`` is a ``file:`` URL, not ``nfile:``.
+_URL_SPAN_RE = re.compile(
+    r"(?i)(?:\b(?<!\\)|(?<=(?-i:\\[nrt])))(?!(?:[a-z0-9+.-]{0,62}\+)?file:)[a-z][a-z0-9+.-]{0,63}://"
+    r"(?:(?!(?:[,;](?:-{0,2}[a-z_][\w.-]*=)?|\]\()(?:"
+    + _ABSOLUTE_PATH_ROOT_PATTERN
+    + r"|[a-z][a-z0-9+.-]{0,63}:)|(?<!\\)\\+(?-i:u001[bB]|x1[bB])|(?<!\\)(\\+)(?-i:[nrt])(?!"
+    + _FOLDER_NAME_TAIL.pattern
+    + r"\1(?!\\)(?:(?!(?-i:"
+    + _ESCAPED_CHARACTER.pattern
+    + r"))|(?-i:"
+    + _ESCAPED_CHARACTER.pattern
+    + r")"
+    + _FOLDER_NAME_TAIL.pattern
+    + r"\1(?!\\|(?-i:"
+    + _ESCAPED_CHARACTER.pattern
+    + r")))))[^\s\"'<>`^{|}\x1b])*"
+)
 
-    The character before it must not belong to a name, so ``a/b`` is not read as ``/b``.
+
+def _separates_folders(value: str, index: int, count: int) -> bool:
+    """Whether exactly ``count`` backslashes are at ``index``, as between two folder names.
+
+    In JSON the next name may start with an escaped letter or digit, whose
+    backslash follows them: ``\\\\t\\\\\\u00e9cole`` is a folder ``t`` before a
+    folder whose name starts with an escaped ``\\u00e9``.
     """
-    if index and (value[index - 1].isalnum() or value[index - 1] in "_.~-"):
+    if not value.startswith("\\" * count, index):
         return False
-    head = value[index : index + 3]
-    if head[:1] in ("/", "\\"):
+    if value[index + count : index + count + 1] != "\\":
         return True
-    if head[:1] == "~":
-        return head[1:2] in ("/", "\\")
-    return len(head) == 3 and head[0].isascii() and head[0].isalpha() and head[1] == ":" and head[2] in "/\\"
+    half = count // 2
+    end = index + count + half
+    return (
+        bool(half)
+        and not count % 2
+        and value.startswith("\\" * half, index + count)
+        and value[end : end + 1] != "\\"
+        and _escapes_name_character(value, end)
+    )
+
+
+def _escapes_name_character(value: str, index: int) -> bool:
+    """Whether a ``\\u`` or ``\\x`` escape of a letter or digit (``\\u00e9``) is at ``index``, after its backslash."""
+    escape = _ESCAPED_CHARACTER.match(value, index)
+    return escape is not None and chr(int(escape.group()[1:], 16)).isalnum()
+
+
+def _follows_line_escape(value: str, index: int) -> bool:
+    """Whether a JSON or repr escape for a line break or tab (``\\n`` ``\\r`` ``\\t``) ends right before ``index``.
+
+    Its backslash may be doubled, as in JSON inside JSON. A Windows folder name
+    and as many backslashes after it make it a folder instead, unless another
+    escape follows them: ``C:\\Users\\t\\runs`` has a folder ``t``, while
+    ``\\n\\u001b[2m`` starts a line with an ANSI color code. That escape is a
+    folder too when a name and the same backslashes follow it
+    (``C:\\Users\\t\\u1234\\runs``). An even run of backslashes, a name, then
+    half as many backslashes and a share name start a UNC path instead:
+    ``\\\\nas01\\share`` (``\\\\\\\\nas01\\\\share`` in JSON), but not a server
+    named only ``n`` ``r`` or ``t`` before an escaped character: ``\\\\n\\u201c``
+    is a doubled escape before a single one (JSON around repr text). A folder
+    named only ``n`` ``r`` or ``t`` before another such escape is read with the
+    escapes after it, so ``\\r\\n\\u001b[2m`` is three escapes.
+    """
+    if index < 2 or value[index - 2] != "\\" or value[index - 1] not in "nrt":
+        return False
+    start = index - 2
+    while start and value[start - 1] == "\\":
+        start -= 1
+    count = index - 1 - start
+    name_end = _FOLDER_NAME_TAIL.match(value, index).end()
+    half = count // 2
+    if (
+        not count % 2
+        and value.startswith("\\" * half, name_end)
+        and _UNC_SHARE_START.match(value, name_end + half)
+        and (name_end > index or not _ESCAPED_CHARACTER.match(value, name_end + half))
+    ):
+        return False
+    # A bounded number of steps, so the scan stays linear on a long chain.
+    for _step in range(_LINE_ESCAPE_CHAIN):
+        if not _separates_folders(value, name_end, count):
+            return True
+        after = name_end + count
+        if name_end > index or value[after : after + 1] not in ("n", "r", "t"):
+            break
+        index = after + 1
+        name_end = _FOLDER_NAME_TAIL.match(value, index).end()
+    else:
+        return True
+    escape = _ESCAPED_CHARACTER.match(value, name_end + count)
+    if escape is None:
+        return False
+    # Folders named like escapes in a row (``\\t\\x64\\x86\\runs``) are
+    # folders when a name that is not one follows them with the same
+    # backslashes; escaped characters in a row (``\\n\\ud83d\\udcc1/srv``)
+    # end at a root or other text.
+    for _step in range(_LINE_ESCAPE_CHAIN):
+        escape_name_end = _ESCAPED_FOLDER_NAME_TAIL.match(value, escape.end()).end()
+        if not _separates_folders(value, escape_name_end, count):
+            return True
+        escape = _ESCAPED_CHARACTER.match(value, escape_name_end + count)
+        if escape is None:
+            return False
+    return True
+
+
+def _escape_backslashes_end(value: str, index: int) -> int | None:
+    """Where the backslashes end when the one at ``index`` belongs to an escape that is not a path.
+
+    That is a ``\\n`` ``\\r`` or ``\\t`` escape, or the start of an ANSI code
+    (``\\u001b[1m``, ``\\u001b[K``), after which a path may start on its own.
+    """
+    if value[index] != "\\":
+        return None
+    end = _BACKSLASHES.match(value, index).end()
+    if value[end : end + 1] in ("n", "r", "t") and _follows_line_escape(value, end + 1):
+        return end
+    if _ANSI_CODE_AFTER_BACKSLASHES.match(value, end):
+        return end
+    return None
+
+
+def _follows_ansi_code(value: str, index: int) -> bool:
+    """Whether an ANSI code (``\\u001b[0m``, ``\\x1b[K`` or a raw one) ends right before ``index``."""
+    previous = value[index - 1 : index]
+    return (
+        previous.isascii()
+        and previous.isalpha()
+        and _ANSI_CODE_END.search(value, max(0, index - _ANSI_CODE_LOOKBACK), index) is not None
+    )
+
+
+def _follows_split_ansi_code(value: str, index: int) -> bool:
+    """Whether ANSI codes end right before ``index`` and a line escape or path separator precedes them.
+
+    So in ``/opt/a.py\\r\\x1b[K/srv/<id>`` the root after the codes starts a path of its own.
+    """
+    if value[index] not in "/\\~$%" and value[index + 1 : index + 2] != ":":
+        return False
+    if (
+        value.find("[", max(0, index - _ANSI_CODE_LOOKBACK), index) == -1
+        or not _follows_ansi_code(value, index)
+        or not _starts_absolute_path(value, index)
+    ):
+        return False
+    code_start = None
+    for _step in range(_LINE_ESCAPE_CHAIN):
+        if not _follows_ansi_code(value, index):
+            break
+        match = _ANSI_CODE_END.search(value, max(0, index - _ANSI_CODE_LOOKBACK), index)
+        if match is None:
+            break
+        index = code_start = match.start()
+    if not code_start:
+        return False
+    if _follows_line_escape(value, code_start):
+        # The codes are escaped like the line escape (``\\r\\u001b[K``,
+        # ``\\\\r\\\\x1b[K``); a raw ESC, or one escaped with other
+        # backslashes, follows a folder named ``n`` ``r`` or ``t``.
+        escape_start = code_start - 2
+        while escape_start and value[escape_start - 1] == "\\":
+            escape_start -= 1
+        count = code_start - 1 - escape_start
+        # The code's own backslashes: as many as the escape's, or after an
+        # escaped separator (``C:\\\\work\\\\t\\\\\\u001b[0m``) half as many more.
+        backslashes = _BACKSLASHES.match(value, code_start)
+        code_backslashes = backslashes.end() - code_start if backslashes else 0
+        return code_backslashes == count or (not count % 2 and code_backslashes == count + count // 2)
+    return value[code_start - 1] in _PATH_LIST_SEPARATORS and _follows_path_separator(value, code_start)
+
+
+def _starts_absolute_path(value: str, index: int) -> bool:
+    """Whether a POSIX, home, UNC, drive-letter or home-variable absolute path starts at ``index``.
+
+    The character before it must not belong to a name, so ``a/b`` is not read as ``/b``,
+    unless it ends a ``\\n`` ``\\r`` or ``\\t`` escape or an ANSI code. The backslash of
+    such an escape or code is never a root, so ``\\nevals/results`` stays a relative path.
+    """
+    if value[index] not in "/\\~$%" and value[index + 1 : index + 2] != ":":
+        return False
+    if (
+        index
+        and (value[index - 1].isalnum() or value[index - 1] in _NAME_CHARS)
+        and not _follows_line_escape(value, index)
+        and not _follows_ansi_code(value, index)
+    ):
+        return False
+    if _escape_backslashes_end(value, index) is not None:
+        return False
+    return _ABSOLUTE_PATH_ROOT.match(value, index) is not None
+
+
+def _follows_path_separator(value: str, index: int) -> bool:
+    """Whether the character before ``index`` ends an earlier path or option.
+
+    The colon of a drive letter (``C:\\``) does not: it belongs to the path.
+    """
+    if not index or value[index - 1] not in _PATH_LIST_SEPARATORS:
+        return False
+    if value[index - 1] != ":":
+        return True
+    letter = index - 2
+    is_drive = (
+        letter >= 0
+        and value[letter].isascii()
+        and value[letter].isalpha()
+        and (
+            letter == 0
+            or not (value[letter - 1].isalnum() or value[letter - 1] in _NAME_CHARS + "/\\")
+            or _follows_line_escape(value, letter)
+            or _follows_ansi_code(value, letter)
+        )
+    )
+    return not is_drive
+
+
+def _path_start(value: str, start: int, end: int) -> int | None:
+    """Where the absolute path that ends at ``end`` starts, searching from ``start``.
+
+    It starts at the first root, unless a later root follows a path separator
+    (``/opt/bin,/home/a``, ``PATH=/usr/bin:/home/a``) or a ``\\n`` ``\\r`` or
+    ``\\t`` escape, also with ANSI codes after it (``\\r\\x1b[K``); then that
+    later root starts it and the text before it is kept. An ANSI code on its
+    own does not split a path, as one colored in parts
+    (``\\u001b[34m/srv/ci\\u001b[0m/runs``) is still one path. A separator that
+    is not followed by a root (``/home/a/my(project)``) is part of the path.
+    Only the first backslash of a run can be a root, so ``evals\\\\results``
+    (JSON) is not read as ``\\results``.
+    """
+    for index in range(end, start, -1):
+        if (
+            (value[index - 1] in _PATH_LIST_SEPARATORS and _follows_path_separator(value, index))
+            or _follows_line_escape(value, index)
+            or _follows_split_ansi_code(value, index)
+        ) and _starts_absolute_path(value, index):
+            return index
+    index = start
+    while index <= end:
+        if _starts_absolute_path(value, index):
+            return index
+        # Skip the rest of a run of backslashes at once, so a long run is not
+        # rescanned from each of its backslashes.
+        if value[index] == "\\":
+            index = _BACKSLASHES.match(value, index).end()
+        else:
+            index += 1
+    return None
+
+
+def _path_spellings(path: Path) -> set[str]:
+    """``path`` as written natively, with ``/``, and with ``\\`` escaped as in JSON."""
+    native = str(path)
+    return {native, path.as_posix(), native.replace("\\", "\\\\")}
+
+
+def _home_dir() -> Path | None:
+    try:
+        return Path.home()
+    except (KeyError, OSError, RuntimeError):
+        return None
+
+
+def _local_skill_dir(skill_path: Path, run_dir: Path) -> Path | None:
+    """The evaluated skill's directory on this machine, when it is known.
+
+    An explicit ``--skill`` is already resolved. An inferred skill is only the
+    recorded name, but a run kept in the skill's own ``evals/results``
+    directory still names the skill directory.
+    """
+    if skill_path.is_absolute():
+        return skill_path
+    candidate = run_dir.parent.parent.parent
+    if (
+        run_dir.parent.name == "results"
+        and run_dir.parent.parent.name == "evals"
+        and candidate.name
+        and _name_key(candidate.name) == _name_key(skill_path.name)
+    ):
+        return candidate
+    return None
 
 
 @dataclass(frozen=True)
 class _Scrubber:
-    """Replace the run's host path with its ID and redact credentials in text sent to the provider."""
+    """Replace local paths and redact credentials in text sent to the provider.
 
-    host_paths: tuple[str, ...]
+    The run's directory becomes its ID, the evaluated skill's directory its
+    name, and the home directory ``~``.
+    """
+
+    # This machine's paths, longest first, as one alternation; group ``p<n>``
+    # is replaced with ``replacements[n]``.
+    local_paths: re.Pattern[str] | None
+    replacements: tuple[str, ...]
     run_id: str
     # A separator, then the run ID as a whole path segment (not ``<id>_old`` or ``<id>.log``).
     run_reference: re.Pattern[str]
 
     @classmethod
-    def for_run(cls, run_dir: Path) -> _Scrubber:
-        paths = (str(run_dir), run_dir.as_posix())
+    def for_run(cls, run_dir: Path, *, skill_dir: Path | None = None, home: Path | None = None) -> _Scrubber:
         run_id = run_dir.name
+        # The run directory is replaced wherever it occurs, as a prefix of
+        # longer names too. The skill and home directories are replaced only as
+        # whole paths, so ``/home/alice2`` is not read as ``~2``; one right after
+        # a JSON or repr escape for a line break or tab (``\n`` ``\r`` ``\t``)
+        # starts a line, so it counts as whole.
+        entries: dict[str, tuple[str, bool]] = {}
+        for spelling in (str(run_dir), run_dir.as_posix()):
+            entries.setdefault(spelling, (run_id, False))
+        for directory, replacement in ((skill_dir, skill_dir.name if skill_dir else ""), (home, "~")):
+            if directory is not None and replacement:
+                for spelling in _path_spellings(directory):
+                    entries.setdefault(spelling, (replacement, True))
+        ordered = sorted(
+            ((spelling, *entry) for spelling, entry in entries.items() if len(spelling) > 1),
+            key=lambda entry: len(entry[0]),
+            reverse=True,
+        )
+        alternatives = [
+            rf"(?:(?<![\w.~-])|(?<=\\[nrt]))(?P<p{index}>{re.escape(spelling)})(?![\w-]|\.\w)"
+            if whole
+            else rf"(?P<p{index}>{re.escape(spelling)})"
+            for index, (spelling, _replacement, whole) in enumerate(ordered)
+        ]
         return cls(
-            tuple(dict.fromkeys(path for path in paths if len(path) > 1)),
+            re.compile("|".join(alternatives)) if alternatives else None,
+            tuple(replacement for _spelling, replacement, _whole in ordered),
             run_id,
             re.compile(r"[\\/]" + re.escape(run_id) + r"(?![\w-]|\.\w)"),
         )
 
-    def paths(self, value: str) -> str:
-        """``value`` with each absolute path that ends in the run's directory replaced by the run ID.
+    def _local(self, match: re.Match[str]) -> str:
+        return self.replacements[int(str(match.lastgroup)[1:])]
 
-        This run's own path is replaced first, spaces included. A copied run
-        keeps its ID, so the path it had on another machine is found by its
-        last segment: the path starts at the first absolute-path root after
-        the preceding whitespace or quote. Such a path that contains a space
-        is not recognized. Relative paths are kept.
+    def paths(self, value: str) -> str:
+        """``value`` with local paths replaced, and each absolute path that ends in the run's directory.
+
+        This machine's run, skill and home directories are replaced first,
+        spaces included; the longest wins. A copied run keeps its ID, so the
+        path it had on another machine is found by its last segment: the path
+        starts at the first absolute-path root after the preceding whitespace
+        or quote (also right after an ANSI code such as a color code), or at a
+        later root that follows ``,;:=([{`` or a ``\\n`` ``\\r`` or ``\\t``
+        escape, also with ANSI codes in between. Such a path that contains a
+        space is not recognized. Relative paths are kept.
+        A URL is left unchanged, up to where ``_URL_SPAN_RE`` ends it, unless
+        its scheme is ``file:`` or ends in ``+file:``.
         """
-        for host_path in self.host_paths:
-            value = value.replace(host_path, self.run_id)
-        if not self.run_id or self.run_id not in value:
-            return value
+
+        def scrub_segment(segment: str) -> str:
+            if self.local_paths is not None:
+
+                def scrub_localhost_file_url(match: re.Match[str]) -> str:
+                    path = self.local_paths.sub(self._local, match.group("path"))
+                    return f"{match.group('prefix')}/{path.lstrip('/')}"
+
+                segment = _FILE_URL_LOCALHOST_PATH_RE.sub(scrub_localhost_file_url, segment)
+                segment = self.local_paths.sub(self._local, segment)
+            if not self.run_id or self.run_id not in segment:
+                return segment
+            pieces: list[str] = []
+            done = floor = 0
+            for match in self.run_reference.finditer(segment):
+                start = match.start()
+                # The walk back stops at the previous match, so the scan stays linear.
+                while start > floor and not segment[start - 1].isspace() and segment[start - 1] not in "\"'`<>|":
+                    start -= 1
+                root = _path_start(segment, start, match.start())
+                floor = match.end()
+                if root is not None:
+                    pieces.extend((segment[done:root], self.run_id))
+                    done = match.end()
+            pieces.append(segment[done:])
+            return "".join(pieces)
+
         pieces: list[str] = []
-        done = floor = 0
-        for match in self.run_reference.finditer(value):
-            start = match.start()
-            # The walk back stops at the previous match, so the scan stays linear.
-            while start > floor and not value[start - 1].isspace() and value[start - 1] not in "\"'`<>|":
-                start -= 1
-            root = next(
-                (index for index in range(start, match.start() + 1) if _starts_absolute_path(value, index)), None
-            )
-            floor = match.end()
-            if root is not None:
-                pieces.extend((value[done:root], self.run_id))
-                done = match.end()
-        pieces.append(value[done:])
+        done = 0
+        for match in _URL_SPAN_RE.finditer(value):
+            pieces.append(scrub_segment(value[done : match.start()]))
+            pieces.append(match.group())
+            done = match.end()
+        pieces.append(scrub_segment(value[done:]))
         return "".join(pieces)
 
     def text(self, value: str, limit: int | None = None) -> str:
@@ -317,7 +694,10 @@ class _Scrubber:
         bounded window, as in the plugin evidence helpers, and drops the
         token cut at the window's edge. When that token starts before
         ``limit`` (compact JSON, a minified error), a larger window is masked
-        so the field is not blanked. A shortened field ends in the marker.
+        so the field is not blanked. Text longer than that window is cut at
+        its last punctuation that no credential contains (``,`` ``"`` ``}``),
+        so a long minified body keeps its prefix too. A shortened field ends
+        in the marker.
         """
         value = self.paths(value)
         if limit is None:
@@ -325,6 +705,9 @@ class _Scrubber:
         window = limit * 4 + 256
         if len(value) > window and not any(char.isspace() for char in value[limit:window]):
             window = max(window, _MAX_UNBROKEN_MASK_CHARS)
+            if len(value) > window:
+                masked = redact_sensitive_text(value[: credential_safe_cut(value, window)])
+                return masked[: limit - len(_TRUNCATED_MARKER)] + _TRUNCATED_MARKER
         masked = redact_sensitive_text(value, max_input_chars=window)
         if len(masked) <= limit and len(value) <= window:
             return masked
@@ -569,15 +952,18 @@ def _scrub(value: Any, scrub: _Scrubber) -> Any:
     return value
 
 
-def compact_run_context(payload: dict[str, Any], *, run_dir: Path) -> dict[str, Any]:
+def compact_run_context(
+    payload: dict[str, Any], *, run_dir: Path, skill_dir: Path | None = None, home: Path | None = None
+) -> dict[str, Any]:
     """Trim the payload to the evidence the feedback chat may cite.
 
     Only the run id is included, not the run's host path. Absolute paths that
-    end in the run's directory (here, or where a copied run first ran) and
-    credential-shaped text are masked in each string before it is shortened, so
-    a cut cannot leave part of either behind.
+    end in the run's directory (here, or where a copied run first ran), the
+    skill directory ``skill_dir`` (written as its name), the ``home`` directory
+    (written as ``~``) and credential-shaped text are masked in each string
+    before it is shortened, so a cut cannot leave part of any of them behind.
     """
-    scrub = _Scrubber.for_run(run_dir)
+    scrub = _Scrubber.for_run(run_dir, skill_dir=skill_dir, home=home)
     runtime_seconds = _finite_number(payload.get("runtime_seconds"))
     if runtime_seconds is not None and runtime_seconds <= 0.0:
         runtime_seconds = None
@@ -685,7 +1071,10 @@ def open_feedback_session(skill_path: Path, run_dir: Path) -> Tier3FeedbackSessi
     run_dir = assert_completed_run_dir(run_dir)
     resolve_llm_provider()
     payload = load_agent_eval_payload(skill_path, run_dir)
-    return Tier3FeedbackSession(run_context=compact_run_context(payload, run_dir=run_dir))
+    context = compact_run_context(
+        payload, run_dir=run_dir, skill_dir=_local_skill_dir(skill_path, run_dir), home=_home_dir()
+    )
+    return Tier3FeedbackSession(run_context=context)
 
 
 __all__ = [

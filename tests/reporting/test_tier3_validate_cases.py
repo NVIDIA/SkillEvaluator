@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +10,18 @@ import pytest
 
 from skillevaluator.reporting.console_ui import ViewProgressReporter, _fit_row, tier3_case_rows, tier3_fix_rows
 from skillevaluator.tier3.case_summary import live_case_marks
+
+
+@pytest.fixture(autouse=True)
+def _no_skillspector_provider(monkeypatch):
+    monkeypatch.delenv("SKILLSPECTOR_PROVIDER", raising=False)
+
+
+class _TtyStream(io.StringIO):
+    """A stream that reports itself as a terminal, which the live view requires."""
+
+    def isatty(self):
+        return True
 
 
 def _text(rows):
@@ -70,7 +83,7 @@ def test_fix_rows():
     assert rows[1].label == "what to fix"
     assert [r.label for r in rows if r.glyph in "123" and r.glyph != " "] == ["001, 002"] * 3
     assert "Goal not met: asked for a file" in text and "claude-code" not in text
-    assert "→ add the file" in text and "+1 more in report.html" in text
+    assert "→ add the file" in text and "+1 more in detailed reports" in text
     assert "(claude-code)" in _text(tier3_fix_rows([finding], agents=2))
     long = {
         **finding,
@@ -264,15 +277,14 @@ def test_llm_fix_without_a_provider_gives_every_export(monkeypatch):
     assert item.actions[0] == "export SKILL_EVAL_LLM_PROVIDER=nv_build NVIDIA_API_KEY='your-api-key'"
 
 
-def test_live_view_prints_log_records_through_its_own_console():
-    import io
-
+def test_live_view_prints_log_records_through_its_own_console(monkeypatch):
     from rich.console import Console
 
     from skillevaluator.logging_config import get_logger
     from skillevaluator.reporting.console_ui import ValidateView
 
-    out = io.StringIO()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    out = _TtyStream()
     view = ValidateView(
         "skill: x", [(1, "Static", "static")], console=Console(file=out, force_terminal=True, width=100)
     )
@@ -297,6 +309,90 @@ def test_llm_fix_points_at_doctor_when_the_provider_call_fails(monkeypatch):
         "check the key and model with: skillevaluator doctor --tier 2 --verify-models",
         "or rerun without --llm-verify",
     ]
+
+
+def test_missing_skillspector_with_llm_still_gets_the_install_fix():
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.reporting.console_ui import _only_llm_stages_missing, summarize_tier1
+
+    security = ValidationResult(
+        validator_name="Security Scan", passed=False, metadata={"incomplete_scans": ["skillspector-llm"]}
+    )
+    security.add_warning(
+        "skillspector not installed - skipping security scan. Install with: uv tool install skillspector."
+    )
+    assert not _only_llm_stages_missing(security)
+    text = _text(summarize_tier1([security])[1])
+    assert "security didn't run" in text
+    assert "→ uv tool install skillspector" in text
+    assert "→ or skip it: --skip security" in text
+    assert "LLM review" not in text
+
+
+def test_llm_fix_with_openai_and_no_key_names_both_accepted_variables(monkeypatch):
+    from skillevaluator.reporting.console_ui import _llm_fix
+
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    for name in ("SKILL_EVAL_LLM_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    item = _llm_fix([_security_without_llm()])
+    assert item.actions == [
+        "export OPENAI_API_KEY='your-api-key'",
+        "or export SKILL_EVAL_LLM_API_KEY='your-api-key'",
+        "or rerun without --llm / --llm-verify",
+    ]
+
+
+def test_llm_fix_follows_a_skillspector_adapter_chosen_directly(monkeypatch):
+    from skillevaluator.reporting.console_ui import _llm_fix
+
+    for name in ("SKILL_EVAL_LLM_PROVIDER", "SKILL_EVAL_LLM_API_KEY", "NVIDIA_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SKILLSPECTOR_PROVIDER", "anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "set-for-the-adapter")
+    security = _security_without_llm()
+    security.metadata["incomplete_scans"] = ["skillspector-llm"]
+    item = _llm_fix([security])
+    assert item.problem == "security LLM review didn't run: SkillSpector's anthropic provider call failed"
+    assert item.actions == [
+        "check ANTHROPIC_API_KEY and SKILLSPECTOR_MODEL for SKILLSPECTOR_PROVIDER=anthropic",
+        "or rerun without --llm",
+    ]
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    item = _llm_fix([security])
+    assert (
+        item.problem
+        == "security LLM review didn't run: ANTHROPIC_API_KEY is not set for SKILLSPECTOR_PROVIDER=anthropic"
+    )
+    assert item.actions == ["export ANTHROPIC_API_KEY='your-api-key'", "or rerun without --llm"]
+
+    monkeypatch.setenv("SKILLSPECTOR_PROVIDER", "bedrock")
+    item = _llm_fix([security])
+    assert item.actions[0] == "check your AWS credentials and SKILLSPECTOR_MODEL for SKILLSPECTOR_PROVIDER=bedrock"
+
+
+def test_llm_fix_still_covers_the_public_provider_for_llm_verify_with_a_direct_adapter(monkeypatch):
+    from skillevaluator.reporting.console_ui import _llm_fix
+
+    for name in ("SKILL_EVAL_LLM_PROVIDER", "SKILL_EVAL_LLM_API_KEY", "NVIDIA_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SKILLSPECTOR_PROVIDER", "anthropic")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    item = _llm_fix([_security_without_llm()])
+    assert item.problem == (
+        "security LLM review didn't run: ANTHROPIC_API_KEY is not set for SKILLSPECTOR_PROVIDER=anthropic; "
+        "--llm-verify: No provider is configured"
+    )
+    assert item.actions == [
+        "export ANTHROPIC_API_KEY='your-api-key'",
+        "export SKILL_EVAL_LLM_PROVIDER=nv_build NVIDIA_API_KEY='your-api-key'",
+        "or rerun without --llm / --llm-verify",
+    ]
+
+    security = _security_without_llm()
+    security.metadata["incomplete_scans"] = ["llm-verification"]
+    assert "SkillSpector" not in _llm_fix([security]).problem
 
 
 def test_scanners_row_keeps_the_version_when_only_the_llm_stage_failed():
@@ -324,15 +420,15 @@ def test_tier1_summary_counts_named_checks_and_their_sub_checks():
     assert "1/3 checks passed (13 sub-checks)  ·  1 failed  ·  1 didn't run" in _text(rows)
 
 
-def test_live_view_draws_the_header_and_finished_tiers_once():
-    import io
+def test_live_view_draws_the_header_and_finished_tiers_once(monkeypatch):
     import re
 
     from rich.console import Console
 
     from skillevaluator.reporting.console_ui import TierRow, ValidateView, Verdict
 
-    out = io.StringIO()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    out = _TtyStream()
     console = Console(file=out, force_terminal=True, width=100, height=10)
     view = ValidateView("x", [(1, "Static", "static"), (2, "Dedup", "dedup")], console=console)
     view.start()
@@ -347,3 +443,17 @@ def test_live_view_draws_the_header_and_finished_tiers_once():
     assert text.count("skillevaluator validate") == 1
     assert text.count("tier 0 done") == 1
     assert text.count("tier 1 done") == 1
+
+
+def test_tier1_summary_after_fail_fast_counts_the_checks_that_never_ran():
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.reporting.console_ui import summarize_tier1
+
+    lineup = ["schema", "version", "security", "pii", "license", "code-integrity", "unicode", "quality", "lint"]
+    schema = ValidationResult(validator_name="Schema & Repository Governance", passed=False)
+    schema.errors.append("Author not specified in metadata")
+    _ok, rows = summarize_tier1([schema], lineup=lineup, stopped_early=True)
+    assert "0/9 checks passed  ·  1 failed  ·  8 not run" in _text(rows)
+    # A full run, or a call without a lineup, still counts only the checks that returned results.
+    assert "0/1 checks passed  ·  1 failed" in _text(summarize_tier1([schema], lineup=lineup)[1])
+    assert "0/1 checks passed  ·  1 failed" in _text(summarize_tier1([schema], stopped_early=True)[1])

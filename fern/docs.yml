@@ -32,12 +32,18 @@ navigation:
       - page: Quickstart
         path: ../docs/quickstart.mdx
         slug: quickstart
+      - page: Reproducible Terminal Demo
+        path: ../docs/starter-demo.mdx
+        slug: starter-demo
       - page: Installation
         path: ../docs/installation.mdx
         slug: installation
       - page: Providers & Credentials
         path: ../docs/configuration.mdx
         slug: configuration
+      - page: Evaluate from Your Agent
+        path: ../docs/agent-skill.mdx
+        slug: agent-skill
   - section: Evaluate Your Skill
     skip-slug: true
     contents:
@@ -50,9 +56,15 @@ navigation:
       - page: "Tier 3: Live Evaluation"
         path: ../docs/tier3-live-evaluation.mdx
         slug: tier3-live-evaluation
+      - page: Grader Validation
+        path: ../docs/grader-validation.mdx
+        slug: grader-validation
       - page: Eval Datasets
         path: ../docs/eval-datasets.mdx
         slug: eval-datasets
+      - page: Trace Datasets
+        path: ../docs/trace-datasets.mdx
+        slug: trace-datasets
       - page: Agents & Sandboxes
         path: ../docs/agents-and-sandboxes.mdx
         slug: agents-and-sandboxes
@@ -95,6 +107,9 @@ navigation:
       - page: Environment Variables
         path: ../docs/environment-variables.mdx
         slug: environment-variables
+      - page: Advanced CI
+        path: ../docs/advanced-ci.mdx
+        slug: advanced-ci
       - page: Contributing
         path: ../docs/developer-guide.mdx
         slug: developer-guide

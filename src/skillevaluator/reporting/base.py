@@ -1145,6 +1145,30 @@ def _agent_eval_execution_errors_clear(payload: dict[str, Any] | None) -> bool:
     return True
 
 
+# The metrics a baseline without the skill under test cannot score. It has no
+# skill to discover or route to, so the verifier records them as not applicable.
+BASELINE_NOT_APPLICABLE_SKILL_METRICS = ("skill_execution", "skill_efficiency")
+
+
+def agent_eval_baseline_not_applicable(agent: dict[str, Any], dimension: dict[str, Any]) -> bool:
+    """Return whether the baseline recorded a dimension as not applicable instead of scoring it.
+
+    Only the skill metrics qualify. Any other metric is not applicable when the
+    case has no reference to judge against, which holds for both arms, so a
+    dimension that is missing only its baseline is missing evidence.
+    """
+    config = DIMENSION_MAPPING.get(_agent_eval_safe_text(dimension.get("id")))
+    if config is None or dimension.get("baseline") is not None or dimension.get("lift") is not None:
+        return False
+    raw_not_applicable = agent.get("not_applicable_metrics")
+    recorded = raw_not_applicable.get("without_skill") if isinstance(raw_not_applicable, dict) else None
+    if not isinstance(recorded, list):
+        return False
+    return all(
+        metric in BASELINE_NOT_APPLICABLE_SKILL_METRICS and metric in recorded for metric in config["evaluators"]
+    )
+
+
 def _agent_eval_dimension_scores(
     agent: dict[str, Any],
     *,
@@ -1165,6 +1189,7 @@ def _agent_eval_dimension_scores(
 
     scores: list[float] = []
     baselines: list[float] = []
+    compared_scores: list[float] = []
     for dimension_id in DIMENSION_MAPPING:
         dimension = dimensions.get(dimension_id)
         if dimension is None:
@@ -1172,14 +1197,18 @@ def _agent_eval_dimension_scores(
         value = dimension.get("with_skill") if "with_skill" in dimension else dimension.get("score")
         score = _agent_eval_finite_score(value)
         baseline = _agent_eval_finite_score(dimension.get("baseline"))
-        if score is None or (require_baseline and baseline is None):
+        # A baseline without the skill under test has no baseline and no lift
+        # on the dimensions the skill metrics feed.
+        baseline_not_applicable = agent_eval_baseline_not_applicable(agent, dimension)
+        if score is None or (require_baseline and baseline is None and not baseline_not_applicable):
             return None
-        if require_baseline:
+        if require_baseline and not baseline_not_applicable:
             assert baseline is not None
             lift = _agent_eval_finite_number(dimension.get("lift"))
             if lift is None or not math.isclose(lift, score - baseline, rel_tol=1e-9, abs_tol=5e-4):
                 return None
             baselines.append(baseline)
+            compared_scores.append(score)
         scores.append(score)
 
     agent_score = _agent_eval_finite_score(agent.get("with_skill", agent.get("overall_score")))
@@ -1194,7 +1223,8 @@ def _agent_eval_dimension_scores(
         agent_baseline = _agent_eval_finite_score(agent.get("baseline"))
         agent_lift = _agent_eval_finite_number(agent.get("lift"))
         if (
-            agent_baseline is None
+            not baselines
+            or agent_baseline is None
             or agent_lift is None
             or not math.isclose(
                 agent_baseline,
@@ -1202,7 +1232,13 @@ def _agent_eval_dimension_scores(
                 rel_tol=1e-9,
                 abs_tol=5e-4,
             )
-            or not math.isclose(agent_lift, agent_score - agent_baseline, rel_tol=1e-9, abs_tol=5e-4)
+            # The lift compares both arms on the dimensions the baseline scored.
+            or not math.isclose(
+                agent_lift,
+                sum(compared_scores) / len(compared_scores) - agent_baseline,
+                rel_tol=1e-9,
+                abs_tol=5e-4,
+            )
         ):
             return None
     return scores
@@ -2469,29 +2505,13 @@ def passes_required_gate(result: ValidationResult) -> bool:
     return bool(result.passed or is_advisory_agent_eval_skip(result))
 
 
-def _finding_legacy_lines(result: ValidationResult) -> set[str]:
-    """Return the legacy error and warning lines that only repeat a structured finding."""
-    represented = {finding.to_legacy_string() for finding in result.findings}
-    for finding in result.findings:
-        # merge_with_prefix puts skill labels before legacy messages but inside
-        # structured finding paths. Recognize both forms, including nested merges.
-        location = finding.location
-        prefix = ""
-        while location.startswith("[") and "] " in location:
-            label, _, location = location.partition("] ")
-            prefix += label + "] "
-            represented.add(f"{prefix}{finding.tag} {finding.message} in {location}")
-    return represented
-
-
 def additional_errors(result: ValidationResult) -> list[str]:
     """Return errors not already displayed through a structured finding.
 
     Findings also populate the legacy error list. Keep independent errors,
     including execution diagnostics, without repeating those mirrored entries.
     """
-    represented = _finding_legacy_lines(result)
-    return [error for error in result.errors if error not in represented]
+    return result.independent_errors()
 
 
 def additional_warnings(result: ValidationResult) -> list[str]:
@@ -2500,8 +2520,7 @@ def additional_warnings(result: ValidationResult) -> list[str]:
     Medium and low findings also populate the legacy warning list. Some
     scanners report why they did not run as a warning, so keep those lines.
     """
-    represented = _finding_legacy_lines(result)
-    return [warning for warning in result.warnings if warning not in represented]
+    return result.independent_warnings()
 
 
 _SOURCE_VALIDATION_ERROR_STATUSES = frozenset({"missing", "error"})

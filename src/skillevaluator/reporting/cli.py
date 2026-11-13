@@ -22,12 +22,14 @@ Consoles are created with ``emoji=False`` so ``:name:`` codes in that text
 
 from __future__ import annotations
 
+import math
 from io import StringIO
 from typing import TYPE_CHECKING
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from skillevaluator.constants import (
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
@@ -35,19 +37,30 @@ from skillevaluator.constants import (
 )
 from skillevaluator.reporting.base import (
     ReporterBase,
+    _agent_eval_finite_number,
     additional_errors,
+    additional_warnings,
     get_skip_reason,
     is_advisory_agent_eval_skip,
+    is_cleanly_skipped,
     passes_required_gate,
     source_validation_errors,
     source_validation_preview,
 )
+from skillevaluator.reporting.finding_verification import finding_verification
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
-    normalize_harbor_viewer_for_display,
+    harbor_job_links,
     safe_url,
 )
-from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
+from skillevaluator.reporting.presentation import FinalRenderContext, build_final_render_context, trial_coverage
+from skillevaluator.reporting.run_status import Status, result_status
+from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION, pass_at_k_summary
+from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, RED, TEXT, grade_style, lift_style
+from skillevaluator.tier3.baseline_store import baseline_description
+from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
+from skillevaluator.tier3.evidence_volume import format_evidence_volume
+from skillevaluator.tier3.version_comparison import version_comparison_lines
 from skillevaluator.utils.rich_markup import escape_markup
 
 if TYPE_CHECKING:
@@ -82,12 +95,27 @@ def _rich_source_error(error: dict[str, str]) -> str:
     return escape_markup(text)
 
 
+def _rich_line(text: str) -> str:
+    """Return one bounded, single-line message inert to Rich markup."""
+    line = " ".join(text.replace("\r\n", "\n").replace("\r", "\n").split())
+    if len(line) > _SKIP_REASON_MAX_CHARS:
+        line = line[: _SKIP_REASON_MAX_CHARS - 1] + "…"
+    return escape_markup(line)
+
+
 def _rich_skip_reason(result: ValidationResult) -> str:
     """Return one bounded, single-line skip reason inert to Rich markup."""
-    reason = " ".join(get_skip_reason(result).replace("\r\n", "\n").replace("\r", "\n").split())
-    if len(reason) > _SKIP_REASON_MAX_CHARS:
-        reason = reason[: _SKIP_REASON_MAX_CHARS - 1] + "…"
-    return escape_markup(reason)
+    return _rich_line(get_skip_reason(result))
+
+
+def _coverage_notice_messages(agent_eval: object) -> list[str]:
+    """Return the Tier 3 coverage notice messages the Tier 3 block prints."""
+    notices = agent_eval.get("coverage_notices") if isinstance(agent_eval, dict) else None
+    return [
+        notice["message"]
+        for notice in (notices if isinstance(notices, list) else [])
+        if isinstance(notice, dict) and isinstance(notice.get("message"), str) and notice["message"]
+    ]
 
 
 class CLIReporter(ReporterBase):
@@ -97,7 +125,13 @@ class CLIReporter(ReporterBase):
     Supports both direct printing and string capture for testing.
     """
 
-    def __init__(self, console: Console | None = None, *, report_formats: Iterable[str] = ()) -> None:
+    def __init__(
+        self,
+        console: Console | None = None,
+        *,
+        report_formats: Iterable[str] = (),
+        presentation_context: FinalRenderContext | None = None,
+    ) -> None:
         """Initialize CLI reporter.
 
         Args:
@@ -108,6 +142,7 @@ class CLIReporter(ReporterBase):
         """
         self._console = console
         self._report_formats = tuple(report_formats)
+        self._presentation_context = presentation_context
 
     @property
     def console(self) -> Console:
@@ -159,12 +194,35 @@ class CLIReporter(ReporterBase):
 
     def _render_all_results(self, results: list[ValidationResult], console: Console) -> None:
         """Render all results with summary table and failure details."""
+        context = self._presentation_context or build_final_render_context(results)
         # Print summary table
-        self._print_summary_table(results, console)
+        self._print_summary_table(results, console, presentation=context)
         console.print()
 
+        failed = [result for result in results if not passes_required_gate(result)]
+        # A non-blocking Tier 3 result (the ``validate`` default) can fail with
+        # no findings; its coverage notes still say which agent arm failed.
+        non_blocking = [
+            result
+            for result in results
+            if passes_required_gate(result)
+            and (result.findings or _coverage_notice_messages((result.metadata or {}).get("agent_eval")))
+        ]
+        rendered_result_ids = {id(result) for result in (*failed, *non_blocking)}
+        for result in results:
+            metadata = result.metadata if isinstance(result.metadata, dict) else {}
+            agent_eval = metadata.get("agent_eval")
+            if (
+                result.validator_name == "AGENT_EVAL"
+                and id(result) not in rendered_result_ids
+                and not self._is_advisory_agent_eval_skip(result)
+                and isinstance(agent_eval, dict)
+                and result_status(result) not in {Status.SKIPPED, Status.INCOMPLETE}
+            ):
+                self._print_agent_eval_tables(agent_eval, console)
+                rendered_result_ids.add(id(result))
+
         # Print detailed results for failures
-        failed = [r for r in results if not passes_required_gate(r)]
         if failed:
             console.print(
                 Panel.fit(
@@ -176,7 +234,6 @@ class CLIReporter(ReporterBase):
             for result in failed:
                 self.render_result(result, console)
 
-        non_blocking = [result for result in results if passes_required_gate(result) and result.findings]
         if non_blocking:
             console.print(
                 Panel.fit(
@@ -188,22 +245,30 @@ class CLIReporter(ReporterBase):
             for result in non_blocking:
                 self.render_result(result, console)
 
-        # Print overall status
-        advisory_skips = [result for result in results if self._is_advisory_agent_eval_skip(result)]
-        run_status = resolve_run_status(results)
-        required_passed = run_status.headline == Status.PASSED
-        if run_status.headline == Status.INCOMPLETE:
-            console.print("\n[bold yellow][INCOMPLETE] Validation evidence is incomplete[/bold yellow]\n")
-        elif required_passed:
-            if advisory_skips:
-                console.print(
-                    "\n[bold green][PASS] Required validations passed[/bold green] "
-                    f"[yellow]({len(advisory_skips)} live evaluation skipped)[/yellow]\n"
-                )
-            else:
-                console.print("\n[bold green][PASS] All validations passed[/bold green]\n")
-        else:
-            console.print("\n[bold red][FAIL] Validation failed[/bold red]\n")
+        # Successful results do not enter the detailed failure/finding sections.
+        rendered = rendered_result_ids
+        for result in results:
+            if id(result) not in rendered:
+                agent_eval = result.metadata.get("agent_eval")
+                if isinstance(agent_eval, dict):
+                    provenance_line, provenance_is_template = dataset_provenance_display(
+                        agent_eval.get("dataset_provenance")
+                    )
+                    if provenance_line:
+                        console.print(Text(f"  {provenance_line}", style="yellow" if provenance_is_template else "dim"))
+                    self._print_harbor_artifacts(agent_eval, console)
+
+        color = {Status.PASSED: "green", Status.FAILED: "red"}.get(context.command_status, "yellow")
+        console.print(f"\n[bold {color}][{context.command_status.verdict}] {context.command_label}[/bold {color}]")
+        for number, tier in context.tiers.items():
+            if not tier.displayed:
+                continue
+            console.print(f"Tier {number}: {tier.summary}", highlight=False, soft_wrap=True)
+        if context.tiers[3].status not in (Status.NOT_RUN, Status.SKIPPED):
+            console.print(context.coverage.text, highlight=False, soft_wrap=True)
+            for line in context.coverage.details:
+                console.print(line, highlight=False, soft_wrap=True)
+        console.print(f"Publication eligibility: {context.publication_label}\n")
 
     def render_result(self, result: ValidationResult, console: Console) -> None:
         """Render a single validation result."""
@@ -216,7 +281,7 @@ class CLIReporter(ReporterBase):
         qs = result.metadata.get("quality_scores") if result.metadata else None
         qs_all = result.metadata.get("quality_scores_all") if result.metadata else None
         if qs and qs.get("dimensions"):
-            grade_colors = {"A": "green", "B": "green", "C": "yellow", "D": "red", "F": "red"}
+            grade_colors = {grade: grade_style(grade, status=result_status(result).value) for grade in "ABCDF"}
             skills_list = qs_all or [qs]
             self._print_quality_table(qs, skills_list, grade_colors, console)
 
@@ -259,7 +324,7 @@ class CLIReporter(ReporterBase):
         """Format a dimension score cell with color coding."""
         d = dims.get(dname, {})
         s = d.get("score", 0)
-        c = "green" if s >= 80 else ("yellow" if s >= 60 else "red")
+        c = GREEN if s >= 80 else (AMBER if s >= 60 else RED)
         return f"[{c}]{s:.0f}[/{c}]"
 
     @staticmethod
@@ -285,7 +350,7 @@ class CLIReporter(ReporterBase):
             console.print(f"\n  [{gc}]Overall: {avg_score:.1f}/100 (Grade: {avg_grade_text})[/{gc}]")
             console.print(f"  [dim]Skill Type:[/dim] {stype}\n")
 
-        table = Table(title="Quality Scores by Skill", border_style="cyan", show_header=True)
+        table = Table(title="Quality Scores by Skill", border_style=FAINT, show_header=True)
         table.add_column("Skill", style="bold")
         table.add_column("Grade", justify="center")
         table.add_column("Score", justify="right")
@@ -338,7 +403,7 @@ class CLIReporter(ReporterBase):
             console.print(f"  [dim]{escape_markup(str(summary))}[/dim]")
         console.print()
 
-        table = Table(title="Rubric Evaluation", border_style="cyan", show_header=True)
+        table = Table(title="Rubric Evaluation", border_style=FAINT, show_header=True)
         table.add_column("Criterion", style="bold")
         table.add_column("Score", justify="center")
         table.add_column("Pass", justify="center")
@@ -359,42 +424,167 @@ class CLIReporter(ReporterBase):
         console.print()
 
     @staticmethod
+    def _print_harbor_artifacts(agent_eval: dict, console: Console) -> None:
+        jobs = harbor_job_links(agent_eval)
+        if jobs:
+            console.print("  [bold]Harbor artifacts:[/bold]")
+        for job in jobs:
+            console.print(f"    [bold]{escape_markup(job['name'])}[/bold]", highlight=False)
+            if job.get("url"):
+                console.print(f"    Harbor logs: Results {escape_markup(job['url'])}", soft_wrap=True, highlight=False)
+            if job.get("analysis_url"):
+                console.print(
+                    f"    Harbor analysis: {escape_markup(job['analysis_url'])}", soft_wrap=True, highlight=False
+                )
+
+    @staticmethod
     def _print_agent_eval_tables(agent_eval: dict, console: Console) -> None:
         """Print Tier 3 agent evaluation results."""
+        if agent_eval.get("baseline"):
+            console.print(escape_markup(baseline_description(agent_eval["baseline"])))
         verdict = agent_eval.get("verdict", "unknown")
+        best_agent = agent_eval.get("best_agent")
+        multiple_agents = isinstance(agent_eval.get("agents_run"), list) and len(agent_eval["agents_run"]) > 1
         composite = agent_eval.get("composite_lift")
         runtime = agent_eval.get("runtime_seconds", 0.0)
 
-        vc = "green" if verdict == "pass" else ("red" if verdict == "fail" else "yellow")
-        composite_text = f"{composite:+.2f}" if isinstance(composite, int | float) else "N/A"
+        vc = GREEN if verdict == "pass" else (RED if verdict == "fail" else AMBER)
+        scored_lift = (
+            isinstance(composite, int | float) and not isinstance(composite, bool) and math.isfinite(composite)
+        )
+        composite_text = f"{composite:+.2f}" if scored_lift else "N/A"
+        composite_style = lift_style(composite) if scored_lift else "dim"
         verdict_text = escape_markup(str(verdict).upper())
-        console.print(f"\n  [{vc}]Verdict: {verdict_text} (composite lift = {composite_text})[/{vc}]")
+        verdict_reason = agent_eval.get("verdict_reason")
+        safe_reason = f" — {escape_markup(str(verdict_reason))}" if verdict == "fail" and verdict_reason else ""
+        lift_label = (
+            "Skill Lift (for reference)" if verdict == "fail" and scored_lift and composite > 0 else "Skill Lift"
+        )
+        console.print(
+            f"\n  [{vc}]Verdict: {verdict_text}[/{vc}]{safe_reason} "
+            f"({lift_label} = [{composite_style}]{composite_text}[/{composite_style}])"
+        )
+        if scored_lift:
+            console.print(Text(SKILL_LIFT_DEFINITION, style="dim"), soft_wrap=True)
+        if pass_summary := pass_at_k_summary(agent_eval.get("pass_at_k"), agent_eval.get("attempt_policy")):
+            console.print(f"  [dim]{pass_summary}[/dim]")
+        for label, count_data, numerator in (
+            ("Required checks passed", agent_eval.get("required_checks"), "passed"),
+            ("Goals met", agent_eval.get("correct_answers"), "correct"),
+            ("Security clean", agent_eval.get("security_clean"), "clean"),
+        ):
+            with_skill = count_data.get("with_skill") if isinstance(count_data, dict) else None
+            without_skill = count_data.get("without_skill") if isinstance(count_data, dict) else None
+            difference = count_data.get("difference") if isinstance(count_data, dict) else None
+            with_counts = (with_skill.get(numerator), with_skill.get("scored")) if isinstance(with_skill, dict) else ()
+            without_counts = (
+                (without_skill.get(numerator), without_skill.get("scored")) if isinstance(without_skill, dict) else ()
+            )
+            valid_with = (
+                len(with_counts) == 2
+                and all(isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in with_counts)
+                and with_counts[1] > 0
+            )
+            valid_without = (
+                len(without_counts) == 2
+                and all(
+                    isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in without_counts
+                )
+                and without_counts[1] > 0
+            )
+            if valid_with:
+                suffix = f" ({best_agent})" if multiple_agents and best_agent else ""
+                line = f"  {label}{suffix}: {with_counts[0]}/{with_counts[1]}"
+                if valid_without:
+                    if isinstance(difference, int) and not isinstance(difference, bool):
+                        delta = f"{difference:+d}"
+                    elif isinstance(difference, int | float) and not isinstance(difference, bool):
+                        delta = f"{difference:+.1f} pp"
+                    else:
+                        delta = "N/A"
+                    line += f" | {without_counts[0]}/{without_counts[1]} | {delta}"
+                else:
+                    line += " | N/A | N/A"
+                console.print(line)
+        provenance_line, provenance_is_template = dataset_provenance_display(agent_eval.get("dataset_provenance"))
+        if provenance_line:
+            console.print(Text(f"  {provenance_line}", style="yellow" if provenance_is_template else "dim"))
         if verdict == "inconclusive":
             console.print(
                 "  [yellow]Skill never activated. Scores are diagnostic only; no lift verdict was computed.[/yellow]"
             )
         if runtime:
             console.print(f"  [dim]Runtime: {runtime:.1f}s[/dim]")
-        harbor_viewer = normalize_harbor_viewer_for_display(agent_eval)
-        if harbor_viewer.get("job_url") or harbor_viewer.get("analysis_url"):
-            console.print("  [dim]Harbor artifacts:[/dim]")
-            if harbor_viewer.get("job_url"):
-                console.print(
-                    f"    [dim]Harbor logs:[/dim] [cyan]{escape_markup(harbor_viewer['job_url'])}[/cyan]",
-                    soft_wrap=True,
+        evidence_line = format_evidence_volume(agent_eval.get("evidence_volume"))
+        if evidence_line:
+            style = "yellow" if evidence_line.startswith("Limited evidence:") else "dim"
+            console.print(f"  [{style}]{evidence_line}[/{style}]")
+        sufficiency = agent_eval.get("dataset_sufficiency")
+        if isinstance(sufficiency, dict):
+            status = str(sufficiency.get("status") or "provisional")
+            style = "yellow" if status == "provisional" else "green"
+            line = (
+                sufficiency.get("coverage_summary")
+                or f"Dataset sufficiency: {status} — {sufficiency.get('reason', '')}"
+            )
+            console.print(f"  [{style}]{line}[/{style}]")
+        CLIReporter._print_harbor_artifacts(agent_eval, console)
+        pass_at_k = agent_eval.get("pass_at_k")
+        with_skill_pass = pass_at_k.get("with_skill") if isinstance(pass_at_k, dict) else None
+        case_arm_label = "with skill"
+        case_summaries = with_skill_pass.get("cases") if isinstance(with_skill_pass, dict) else None
+        if not isinstance(case_summaries, dict) or not case_summaries:
+            without_skill_pass = pass_at_k.get("without_skill") if isinstance(pass_at_k, dict) else None
+            case_summaries = without_skill_pass.get("cases") if isinstance(without_skill_pass, dict) else None
+            case_arm_label = "without skill"
+        if isinstance(case_summaries, dict) and case_summaries:
+            title = "Tier 3 Cases" if case_arm_label == "with skill" else "Tier 3 Cases (without skill)"
+            table = Table(title=title, border_style=FAINT, show_header=True)
+            table.add_column("Case", style="bold")
+            table.add_column("Score", justify="right")
+            table.add_column("Result")
+            table.add_column("Warnings")
+            for case_id, case in case_summaries.items():
+                if not isinstance(case, dict):
+                    continue
+                score = case.get("best_score")
+                score_text = f"{score:.2f}" if isinstance(score, int | float) and not isinstance(score, bool) else "N/A"
+                if case.get("passed") is True:
+                    result_text = "[green]PASS[/green]"
+                elif (
+                    isinstance(case.get("attempts_used"), int)
+                    and not isinstance(case.get("attempts_used"), bool)
+                    and case.get("attempts_used") > 0
+                ):
+                    result_text = "[red]FAIL[/red]"
+                    reason = case.get("reason")
+                    if isinstance(reason, str) and reason:
+                        result_text += f" — {escape_markup(reason)}"
+                else:
+                    result_text = "[yellow]not scored[/yellow]"
+                warnings = case.get("warnings")
+                warning_text = (
+                    "; ".join(str(item) for item in warnings if isinstance(item, str))
+                    if isinstance(warnings, list)
+                    else ""
                 )
-            if harbor_viewer.get("analysis_url"):
-                console.print(
-                    f"    [dim]Harbor analysis:[/dim] [cyan]{escape_markup(harbor_viewer['analysis_url'])}[/cyan]",
-                    soft_wrap=True,
+                table.add_row(
+                    escape_markup(str(case_id)),
+                    score_text,
+                    result_text,
+                    f"[yellow]WARNING[/yellow] {escape_markup(warning_text)}" if warning_text else "",
                 )
+            if table.rows:
+                console.print(table)
+                console.print()
+        console.print(f"  {trial_coverage(agent_eval).text}")
         console.print()
 
         evaluators = agent_eval.get("evaluators", {})
         if evaluators:
             table = Table(
                 title="Evaluator Scores (Skill Lift)",
-                border_style="cyan",
+                border_style=FAINT,
                 show_header=True,
             )
             table.add_column("Evaluator", style="bold")
@@ -417,7 +607,7 @@ class CLIReporter(ReporterBase):
                         else "NO SCORE"
                     )
                 else:
-                    lc = "green" if lift > 0.01 else ("red" if lift < -0.01 else "dim")
+                    lc = lift_style(lift)
                     lift_text = f"[{lc}]{lift:+.2f}[/{lc}]"
                 table.add_row(
                     escape_markup(str(name).replace("_", " ").title()),
@@ -439,6 +629,19 @@ class CLIReporter(ReporterBase):
             console.print(table)
             console.print()
 
+        # Name arms that ran but failed, so a missing baseline or score is not read as an arm that never ran.
+        coverage_messages = _coverage_notice_messages(agent_eval)
+        if coverage_messages:
+            console.print("[bold]Agent coverage notes[/bold]")
+            for message in coverage_messages:
+                console.print(f"  • {escape_markup(message)}", soft_wrap=True)
+            console.print()
+
+        from skillevaluator.reporting.tier3_token_usage import VALIDATE_CASE_POINTER, render_token_usage_table
+
+        if render_token_usage_table(console, agent_eval.get("token_usage"), case_pointer=VALIDATE_CASE_POINTER):
+            console.print()
+
         recommendations = agent_eval.get("recommendations") or []
         if recommendations:
             printed = False
@@ -457,7 +660,7 @@ class CLIReporter(ReporterBase):
                     url = safe_url(evidence.get("url"))
                     if url:
                         link_text = escape_markup(harbor_evidence_link_text(evidence))
-                        console.print(f"    [dim]{link_text}:[/dim] [cyan]{escape_markup(url)}[/cyan]", soft_wrap=True)
+                        console.print(f"    [dim]{link_text}:[/dim] [dim]{escape_markup(url)}[/dim]", soft_wrap=True)
             if printed:
                 console.print()
 
@@ -465,7 +668,7 @@ class CLIReporter(ReporterBase):
         if any(v.get("score") is not None for v in insights.values()):
             table = Table(
                 title="LLM-as-Judge Insights",
-                border_style="cyan",
+                border_style=FAINT,
                 show_header=True,
             )
             table.add_column("Dimension", style="bold")
@@ -558,7 +761,15 @@ class CLIReporter(ReporterBase):
                     console.print(f"  [yellow][WARN][/yellow] {escape_markup(str(warning))}")
             return
 
-        if errors:
+        # Warnings no finding repeats, such as why a scan is incomplete.
+        warnings = additional_warnings(result)
+        if warnings:
+            if errors:
+                console.print()
+            console.print("[dim]Warnings:[/dim]")
+            for warning in warnings:
+                console.print(f"  [yellow][WARN][/yellow] {escape_markup(str(warning))}")
+        if errors or warnings:
             console.print()
         console.print("[dim]Issues:[/dim]")
         for i, finding in enumerate(result.findings, 1):
@@ -577,6 +788,13 @@ class CLIReporter(ReporterBase):
         )
         console.print(f"     [dim]File:[/dim]    {escape_markup(str(finding.location))}")
         console.print(f"     [dim]Check:[/dim]   {escape_markup(str(finding.check_name))}")
+        verification = finding_verification(finding)
+        if verification:
+            label = f"{verification.verdict} ({verification.confidence} confidence)"
+            console.print(f"     [dim]LLM verification:[/dim] {escape_markup(label)}")
+            if verification.reasoning:
+                console.print(f"     [dim]Reasoning:[/dim] {escape_markup(verification.reasoning)}")
+            console.print(f"     [dim]{escape_markup(verification.severity_effect)}[/dim]")
         related_paths = _related_paths(finding)
         if related_paths:
             console.print(f"     [dim]Related paths:[/dim] {escape_markup(' <-> '.join(related_paths))}")
@@ -602,7 +820,9 @@ class CLIReporter(ReporterBase):
                 console.print(f"       [dim]{escape_markup(overflow_note)}[/dim]")
         console.print()
 
-    def _print_summary_table(self, results: list[ValidationResult], console: Console) -> None:
+    def _print_summary_table(
+        self, results: list[ValidationResult], console: Console, *, presentation: FinalRenderContext | None = None
+    ) -> None:
         """Print summary table for all validators."""
         table = Table(
             title="SkillEvaluator Validation Results",
@@ -611,27 +831,29 @@ class CLIReporter(ReporterBase):
             border_style="green",
             title_style="bold green",
         )
-        table.add_column("Validator", style="cyan")
+        table.add_column("Validator", style=TEXT)
         table.add_column("Status", justify="center")
         table.add_column("Details")
 
         for result in results:
-            advisory_skip = result_status(result) == Status.SKIPPED
-            status = (
-                "[yellow]SKIP[/yellow]"
-                if advisory_skip
-                else "[bold yellow]INCOMPLETE[/bold yellow]"
-                if result_status(result) == Status.INCOMPLETE
-                else "[green]PASS[/green]"
-                if result.passed
-                else "[red]FAIL[/red]"
-            )
+            outcome = presentation.result_statuses[id(result)] if presentation else result_status(result).value
+            advisory_skip = outcome == "skipped"
+            status = {
+                "skipped": "[yellow]SKIP[/yellow]",
+                "not_applicable": "[dim]N/A[/dim]",
+                "incomplete": "[bold yellow]INCOMPLETE[/bold yellow]",
+                "passed": "[green]PASS[/green]",
+                "pass": "[green]PASS[/green]",
+            }.get(outcome, "[red]FAIL[/red]")
             s = result.summary
             static_test_evidence = self._static_test_evidence_message(result)
 
-            if advisory_skip:
+            if advisory_skip or (outcome == "not_applicable" and is_cleanly_skipped(result)):
                 details = _rich_skip_reason(result)
-            elif result_status(result) == Status.INCOMPLETE:
+            elif outcome == "not_applicable":
+                # Keep the recorded reason; "N/A │ 1 checks passed" contradicts itself.
+                details = _rich_line(result.success_details[0].message) if result.success_details else "Not applicable"
+            elif outcome == "incomplete":
                 scanners = escape_markup(", ".join(result.incomplete_scans))
                 details = f"[bold yellow]{scanners} did not complete[/bold yellow]"
                 counts = []
@@ -658,9 +880,52 @@ class CLIReporter(ReporterBase):
                     parts.append(f"{s.warnings} warnings")
                 details = ", ".join(parts) if parts else "Failed"
 
+            agent_eval = result.metadata.get("agent_eval")
+            if (
+                result.validator_name == "AGENT_EVAL"
+                and isinstance(agent_eval, dict)
+                and agent_eval.get("verdict") == "fail"
+            ):
+                raw_summary = agent_eval.get("summary")
+                summary = raw_summary if isinstance(raw_summary, dict) else agent_eval
+                reason = agent_eval.get("verdict_reason") or summary.get("verdict_reason")
+                if isinstance(reason, str) and reason:
+                    details = escape_markup(reason)
+                    lift = _agent_eval_finite_number(summary.get("overall_lift"))
+                    if lift is None:
+                        lift = _agent_eval_finite_number(agent_eval.get("composite_lift"))
+                    if lift is not None:
+                        details += f"; lift [{lift_style(lift)}]{lift:+.2f}[/]"
+
+            if outcome in {"pass", "passed"}:
+                quality = result.metadata.get("quality_scores")
+                if isinstance(quality, dict):
+                    score = _agent_eval_finite_number(quality.get("overall_score"))
+                    if score is not None:
+                        grade = str(quality.get("grade", "?"))
+                        details += f"; quality {escape_markup(grade)} {score:.1f}/100"
+                agent = result.metadata.get("agent_eval")
+                if isinstance(agent, dict):
+                    raw_summary = agent.get("summary")
+                    summary = raw_summary if isinstance(raw_summary, dict) else agent
+                    lift = _agent_eval_finite_number(summary.get("overall_lift", agent.get("composite_lift")))
+                    if (
+                        lift is not None
+                        and agent.get("verdict") != "inconclusive"
+                        and summary.get("verdict") != "inconclusive"
+                    ):
+                        details += f"; lift [{lift_style(lift)}]{lift:+.2f}[/]"
+                    elif agent.get("verdict") == "inconclusive":
+                        details += "; inconclusive (skill never activated)"
             table.add_row(escape_markup(str(result.validator_name)), status, details)
 
         console.print(table)
+
+        for result in results:
+            agent_eval = result.metadata.get("agent_eval")
+            if isinstance(agent_eval, dict) and (comparison := agent_eval.get("prior_version_comparison")):
+                for line in version_comparison_lines(comparison):
+                    console.print(escape_markup(line))
 
     @staticmethod
     def _static_test_evidence_message(result: ValidationResult) -> str | None:

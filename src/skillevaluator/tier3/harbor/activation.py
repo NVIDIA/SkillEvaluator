@@ -12,6 +12,7 @@ from typing import Any
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRIC_SET,
     LEGACY_METRIC_SET,
+    NOT_APPLICABLE_STATUS,
     metric_set_for_reward,
     metric_value,
 )
@@ -23,13 +24,19 @@ def _activation_state(reward: Mapping[str, Any]) -> str:
     if not isinstance(execution, Mapping):
         return "unknown"
     message = execution.get("message")
-    if execution.get("should_trigger") is False or (
-        isinstance(message, str)
-        and message
-        in {
-            "No expected_skill -- skipped",
-            "Negative case, no skill identified",
-        }
+    # The verifier records an N/A skill_execution with ``status``; older rewards
+    # used one of the legacy messages below for the same cases.
+    if (
+        execution.get("should_trigger") is False
+        or execution.get("status") == NOT_APPLICABLE_STATUS
+        or (
+            isinstance(message, str)
+            and message
+            in {
+                "No expected_skill -- skipped",
+                "Negative case, no skill identified",
+            }
+        )
     ):
         return "not_applicable"
     standard_sets = {DEFAULT_METRIC_SET, LEGACY_METRIC_SET}

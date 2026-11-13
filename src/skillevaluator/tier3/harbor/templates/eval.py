@@ -112,6 +112,26 @@ if _CHECKS_PATH.is_file():
 else:  # Source-tree template: the canonical module lives in the package.
     from skillevaluator.tier3.eval_core import checks as _shared_checks
 
+_DECLARATIVE_CHECKS_PATH = _SCRIPT_TESTS_DIR / "declarative_checks.py"
+if _DECLARATIVE_CHECKS_PATH.is_file():
+    _declarative_spec = importlib.util.spec_from_file_location(
+        "_skillevaluator_shared_declarative_checks", _DECLARATIVE_CHECKS_PATH
+    )
+    assert _declarative_spec and _declarative_spec.loader
+    _shared_declarative_checks = importlib.util.module_from_spec(_declarative_spec)
+    _had_checks_module = "checks" in sys.modules
+    _previous_checks_module = sys.modules.get("checks")
+    sys.modules["checks"] = _shared_checks
+    try:
+        _declarative_spec.loader.exec_module(_shared_declarative_checks)
+    finally:
+        if _had_checks_module:
+            sys.modules["checks"] = _previous_checks_module
+        else:
+            sys.modules.pop("checks", None)
+else:
+    from skillevaluator.tier3.eval_core import declarative_checks as _shared_declarative_checks
+
 AMBIGUOUS_OUTER_EXEC_OBSERVATION = _shared_checks.AMBIGUOUS_OUTER_EXEC_OBSERVATION
 UNOBSERVED_INNER_CALL = _shared_checks.UNOBSERVED_INNER_CALL
 UNSUPPORTED_NATIVE_CODEX_EXEC = _shared_checks.UNSUPPORTED_NATIVE_CODEX_EXEC
@@ -194,11 +214,14 @@ _network_lookup_readings = _shared_checks._network_lookup_readings
 _network_redirection = _shared_checks._network_redirection
 _network_shell_tokens = _shared_checks._network_shell_tokens
 _network_tokens_exfiltrate = _shared_checks._network_tokens_exfiltrate
+_normalize_sensitive_path_text = _shared_checks._normalize_sensitive_path_text
 _normalize_skill_names = _shared_checks._normalize_skill_names
 _normalized_write_path = _shared_checks._normalized_write_path
+_normpath_word = _shared_checks._normpath_word
 _number_may_fail = _shared_checks._number_may_fail
 _parse_unit_starts = _shared_checks._parse_unit_starts
 _pass_to_reference = _shared_checks._pass_to_reference
+_path_entry_in = _shared_checks._path_entry_in
 _path_with_shell_cwd = _shared_checks._path_with_shell_cwd
 _pipeline_last_stage_keeps_bindings = _shared_checks._pipeline_last_stage_keeps_bindings
 _pipeline_upstream_names_script = _shared_checks._pipeline_upstream_names_script
@@ -252,11 +275,15 @@ _script_path_matches = _shared_checks._script_path_matches
 _search_path_is_root = _shared_checks._search_path_is_root
 _secret_exposure_finding = _shared_checks._secret_exposure_finding
 _security_finding = _shared_checks._security_finding
+_sensitive_path_match = _shared_checks._sensitive_path_match
+_sensitive_write_target = _shared_checks._sensitive_write_target
 _shell_c_payload = _shared_checks._shell_c_payload
 _shell_c_positional = _shared_checks._shell_c_positional
 _shell_executable = _shared_checks._shell_executable
 _shell_substitution_payloads = _shared_checks._shell_substitution_payloads
 _shell_tokens = _shared_checks._shell_tokens
+_shell_write_targets = _shared_checks._shell_write_targets
+_shell_write_texts = _shared_checks._shell_write_texts
 _skill_match_details = _shared_checks._skill_match_details
 _skill_md_arg = _shared_checks._skill_md_arg
 _skill_name_from_ref = _shared_checks._skill_name_from_ref
@@ -284,8 +311,12 @@ _without_plain_patch_headers = _shared_checks._without_plain_patch_headers
 _without_redirections = _shared_checks._without_redirections
 check_error_recovery = _shared_checks.check_error_recovery
 check_script_execution = _shared_checks.check_script_execution
+normalize_optional_reference = _shared_checks.normalize_optional_reference
+normalize_expected_behaviors = _shared_checks.normalize_expected_behaviors
 resolve_should_trigger = _shared_checks.resolve_should_trigger
 score_skill_execution = _shared_checks.score_skill_execution
+skill_efficiency_not_applicable_reason = _shared_checks.skill_efficiency_not_applicable_reason
+skill_execution_not_applicable_reason = _shared_checks.skill_execution_not_applicable_reason
 
 # All 148 constant initializers are AST-identical at the fixed base; shared
 # constants added since are aliased here too.
@@ -341,6 +372,7 @@ _DYNAMIC_ARGUMENT_RE = _shared_checks._DYNAMIC_ARGUMENT_RE
 _EMPTY_REFERENCE_SHELLS = _shared_checks._EMPTY_REFERENCE_SHELLS
 _EXECUTION_TOOL_HINTS = _shared_checks._EXECUTION_TOOL_HINTS
 _EXPORTED_MARK = _shared_checks._EXPORTED_MARK
+_FD_REDIRECT_TARGET_RE = _shared_checks._FD_REDIRECT_TARGET_RE
 _FILE_READ_VERBS = _shared_checks._FILE_READ_VERBS
 _FUNCTION_HEADER_NAME_RE = _shared_checks._FUNCTION_HEADER_NAME_RE
 _GLUED_AKIA_BODY = _shared_checks._GLUED_AKIA_BODY
@@ -350,7 +382,10 @@ _GLUED_KEYWORD_RE = _shared_checks._GLUED_KEYWORD_RE
 _GROUPING_TOKENS = _shared_checks._GROUPING_TOKENS
 _HEREDOC_DELIMITER_RE = _shared_checks._HEREDOC_DELIMITER_RE
 _HEREDOC_REDIRECTS = _shared_checks._HEREDOC_REDIRECTS
+_HOME_ANCHOR_RE = _shared_checks._HOME_ANCHOR_RE
+_HOME_CREDENTIAL_PATHS = _shared_checks._HOME_CREDENTIAL_PATHS
 _HOME_DIR_PREFIX_RE = _shared_checks._HOME_DIR_PREFIX_RE
+_HOME_SENSITIVE_WRITE_PATHS = _shared_checks._HOME_SENSITIVE_WRITE_PATHS
 _HOME_SHORTHAND_RE = _shared_checks._HOME_SHORTHAND_RE
 _HTTPIE_BODY_FLAGS = _shared_checks._HTTPIE_BODY_FLAGS
 _INERT_PRINT_COMMANDS = _shared_checks._INERT_PRINT_COMMANDS
@@ -364,6 +399,7 @@ _INTERPRETER_GRAMMARS = _shared_checks._INTERPRETER_GRAMMARS
 _JUSTIFYING_SHELLS = _shared_checks._JUSTIFYING_SHELLS
 _LAST_STAGE_IN_CURRENT_SHELL = _shared_checks._LAST_STAGE_IN_CURRENT_SHELL
 _LAST_STAGE_IN_SUBSHELL = _shared_checks._LAST_STAGE_IN_SUBSHELL
+_LINE_CONTINUATION_RE = _shared_checks._LINE_CONTINUATION_RE
 _LISTING_ACTS_ON_NAMES = _shared_checks._LISTING_ACTS_ON_NAMES
 _LITERAL_DOLLAR = _shared_checks._LITERAL_DOLLAR
 _LOOP_HEADER_WORDS = _shared_checks._LOOP_HEADER_WORDS
@@ -399,6 +435,8 @@ _OUTPUT_REDIRECTS = _shared_checks._OUTPUT_REDIRECTS
 _PARSES_WHOLE_TEXT_FIRST = _shared_checks._PARSES_WHOLE_TEXT_FIRST
 _PASS_THROUGH_WRAPPERS = _shared_checks._PASS_THROUGH_WRAPPERS
 _PATH_ARG_KEYS = _shared_checks._PATH_ARG_KEYS
+_PATH_COMPONENT_END = _shared_checks._PATH_COMPONENT_END
+_PATH_WORD_RE = _shared_checks._PATH_WORD_RE
 _PIPELINE_OPTION_RE = _shared_checks._PIPELINE_OPTION_RE
 _POSITIONAL_SET_RE = _shared_checks._POSITIONAL_SET_RE
 _PREFIX_EXPANDS_FIRST = _shared_checks._PREFIX_EXPANDS_FIRST
@@ -406,9 +444,11 @@ _PREFIX_OUTLIVES_SPECIAL_BUILTIN = _shared_checks._PREFIX_OUTLIVES_SPECIAL_BUILT
 _PROC_CWD_ALIAS_RE = _shared_checks._PROC_CWD_ALIAS_RE
 _PROC_ROOT_ALIAS_RE = _shared_checks._PROC_ROOT_ALIAS_RE
 _PROMPT_INJECTION_PATTERNS = _shared_checks._PROMPT_INJECTION_PATTERNS
+_PROTECTED_WRITE_PATHS = _shared_checks._PROTECTED_WRITE_PATHS
 _PUNCTUATION_PIECE_RE = _shared_checks._PUNCTUATION_PIECE_RE
 _PUNCTUATION_RUN_RE = _shared_checks._PUNCTUATION_RUN_RE
 _QUOTED_NEWLINE = _shared_checks._QUOTED_NEWLINE
+_QUOTED_STRING_RE = _shared_checks._QUOTED_STRING_RE
 _QUOTED_SYNTAX_MARK = _shared_checks._QUOTED_SYNTAX_MARK
 _READONLY_ATTRIBUTES = _shared_checks._READONLY_ATTRIBUTES
 _READONLY_MARK = _shared_checks._READONLY_MARK
@@ -418,6 +458,7 @@ _READ_OPTIONS_WITH_ARG = _shared_checks._READ_OPTIONS_WITH_ARG
 _READ_TOOL_HINTS = _shared_checks._READ_TOOL_HINTS
 _REDIRECTION_OPERATOR_RE = _shared_checks._REDIRECTION_OPERATOR_RE
 _REDIRECTION_WORD_RE = _shared_checks._REDIRECTION_WORD_RE
+_REDIRECT_TARGET_RE = _shared_checks._REDIRECT_TARGET_RE
 _REFERENCE_MARK = _shared_checks._REFERENCE_MARK
 _REFERENCE_SHELLS = _shared_checks._REFERENCE_SHELLS
 _REFUSED_ASSIGNMENT_GOES_ON = _shared_checks._REFUSED_ASSIGNMENT_GOES_ON
@@ -435,6 +476,10 @@ _SCRIPT = _shared_checks._SCRIPT
 _SCRIPT_INTERPRETERS = _shared_checks._SCRIPT_INTERPRETERS
 _SECRET_PATTERNS = _shared_checks._SECRET_PATTERNS
 _SECRET_VAR_NAME_RE = _shared_checks._SECRET_VAR_NAME_RE
+_SED_IN_PLACE_FLAG_RE = _shared_checks._SED_IN_PLACE_FLAG_RE
+_SED_OPERANDS_RE = _shared_checks._SED_OPERANDS_RE
+_SED_SCRIPT_OPTION_RE = _shared_checks._SED_SCRIPT_OPTION_RE
+_SENSITIVE_PATH_DIRECTORIES = _shared_checks._SENSITIVE_PATH_DIRECTORIES
 _SENSITIVE_WRITE_PATHS = _shared_checks._SENSITIVE_WRITE_PATHS
 _SHELL_ASSIGNMENT_RE = _shared_checks._SHELL_ASSIGNMENT_RE
 _SHELL_COMMAND_INTERPRETERS = _shared_checks._SHELL_COMMAND_INTERPRETERS
@@ -443,6 +488,7 @@ _SHELL_METACHARS = _shared_checks._SHELL_METACHARS
 _SHELL_NAME_RE = _shared_checks._SHELL_NAME_RE
 _SHELL_SEPARATORS = _shared_checks._SHELL_SEPARATORS
 _SHELL_VARIABLE_RE = _shared_checks._SHELL_VARIABLE_RE
+_SHELL_WORD = _shared_checks._SHELL_WORD
 _SOURCING_COMMANDS = _shared_checks._SOURCING_COMMANDS
 _SPECIAL_BUILTINS = _shared_checks._SPECIAL_BUILTINS
 _SPECIAL_BUILTIN_ERROR_STOPS = _shared_checks._SPECIAL_BUILTIN_ERROR_STOPS
@@ -451,6 +497,7 @@ _STDIN_DEPENDENT_WRAPPERS = _shared_checks._STDIN_DEPENDENT_WRAPPERS
 _STDIN_TEXT_CONSUMERS = _shared_checks._STDIN_TEXT_CONSUMERS
 _SYNTAX_SHAPE_RE = _shared_checks._SYNTAX_SHAPE_RE
 _SYNTAX_WORDS = _shared_checks._SYNTAX_WORDS
+_TEE_OPERANDS_RE = _shared_checks._TEE_OPERANDS_RE
 _TRANSPARENT_COMMAND_PREFIXES = _shared_checks._TRANSPARENT_COMMAND_PREFIXES
 _UNAUTHORIZED_PATHS = _shared_checks._UNAUTHORIZED_PATHS
 _UNDECIDABLE = _shared_checks._UNDECIDABLE
@@ -581,6 +628,13 @@ logger = logging.getLogger(__name__)
 
 def _env_path(name, default):
     return Path(os.environ.get(name, str(default)))
+
+
+def _declarative_workspace_roots():
+    roots = [Path.cwd(), Path("/workspace"), Path("/workspace/output")]
+    if artifact_root := os.environ.get("HARBOR_ARTIFACTS_DIR"):
+        roots.append(Path(artifact_root))
+    return list(dict.fromkeys(roots))
 
 
 LOGS_DIR = _env_path("HARBOR_LOGS_DIR", "/logs")
@@ -2096,7 +2150,7 @@ def _call_bedrock(prompt, model, max_tokens, temperature, timeout=90, provenance
     except _JudgeRefusedError:
         raise
     except Exception as exc:
-        if _STRICT_JUDGE_REQUESTS_LEFT.get() is not None and _strict_judge_failure(exc)[1]:
+        if _STRICT_JUDGE_REQUESTS_LEFT.get() is not None and _strict_judge_failure(exc, "bedrock")[1]:
             # The strict policy lets the next candidate answer for an unavailable model.
             raise
         return None, f"Bedrock request failed: {exc}"
@@ -2228,14 +2282,16 @@ def _call_judge_model(prompt, provider, model, max_tokens, temperature, response
     )
 
 
-def _strict_judge_failure(error):
+def _strict_judge_failure(error, provider=None):
     """Describe a failed strict judge request and whether the next candidate may answer instead.
 
     Only unavailability moves on: a transient HTTP status, connection failure
     or Bedrock throttling that outlasted its one retry, a model the provider
     does not have or the key cannot use (_should_try_fallback and
     _strict_model_unavailable), or a used-up per-model request limit.
-    Everything else ends the judge.
+    Everything else ends the judge. A Bedrock error keeps the
+    "Bedrock request failed" label that _call_bedrock gives the errors it
+    returns, so a model that moved on reads the same as one that ended the judge.
     """
     if isinstance(error, _JudgeRefusedError):
         return str(error), False
@@ -2246,7 +2302,8 @@ def _strict_judge_failure(error):
         if _strict_judge_error_stops(error):
             return detail, False
         return detail, model_unavailable or _strict_model_unavailable(error) or _is_retriable_http_status(error.code)
-    detail = f"Public provider call failed: {error}"
+    label = "Bedrock request failed" if provider == "bedrock" else "Public provider call failed"
+    detail = f"{label}: {error}"
     if isinstance(error, TimeoutError) and "LLM judge time budget exhausted" in str(error):
         return detail, False
     if _is_certificate_failure(error) or _strict_judge_error_stops(error):
@@ -2283,7 +2340,7 @@ def _call_strict_judge(provider, requested_model, models, call_model):
         try:
             content, error = call_model(candidate_model, provenance)
         except Exception as exc:
-            detail, move_on = _strict_judge_failure(exc)
+            detail, move_on = _strict_judge_failure(exc, provider)
             errors.append(f"{candidate_model}: {detail}")
             if not move_on:
                 # Keep the earlier models' errors, so the reason shows why they were passed over.
@@ -2881,6 +2938,10 @@ def _record_judge_attempt(
     if score is not None:
         entry["score"] = score
     attempts.append(entry)
+    _write_judge_attempts(attempts)
+
+
+def _write_judge_attempts(attempts):
     try:
         path = _verifier_output_dir() / JUDGE_ATTEMPTS_FILE_NAME
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -3079,7 +3140,7 @@ BEHAVIOR_CHECK_JSON_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "step": {"type": "integer"},
-                    "passed": {"type": "boolean"},
+                    "passed": {"type": ["boolean", "null"]},
                     "reason": {"type": "string"},
                 },
                 "required": ["step", "passed", "reason"],
@@ -3219,10 +3280,90 @@ def _ragas_goal_accuracy_enabled():
     return _is_native_openai_chat_url("openai", request_url)
 
 
+def _ragas_message_text(message):
+    content = message.get("content")
+    if not isinstance(content, str):
+        content = json.dumps(message.get("tool_calls") if content is None else content, default=str)
+    return f"[{message.get('role', 'unknown')}]\n{content}"
+
+
+def _ragas_request_text(body):
+    """Return the judge model and the messages of one RAGAS chat-completions request as text."""
+    try:
+        request = json.loads(body)
+        return request.get("model"), "\n\n".join(_ragas_message_text(message) for message in request["messages"])
+    except (ValueError, LookupError, TypeError, AttributeError):
+        return None, body.decode("utf-8", "replace")
+
+
+def _ragas_reply_text(body):
+    """Return the judge's answer in one chat-completions reply: its text, or the tool-call arguments RAGAS parses."""
+    try:
+        message = json.loads(body)["choices"][0]["message"]
+        if message.get("content") or not message.get("tool_calls"):
+            return str(message.get("content") or "")
+        return "\n".join(str(call["function"]["arguments"]) for call in message["tool_calls"])
+    except (ValueError, LookupError, TypeError, AttributeError):
+        return body.decode("utf-8", "replace")
+
+
+def _record_ragas_exchange(response, problem=None):
+    """Save one RAGAS judge request and its reply, or the HTTP error, as a goal_accuracy attempt.
+
+    _record_judge_attempt redacts the full texts before it shortens them, so the
+    error body is not cut here.
+    """
+    try:
+        model, prompt = _ragas_request_text(response.request.content)
+        reply = None
+        if problem is None and response.is_success:
+            reply = _ragas_reply_text(response.content)
+        elif problem is None:
+            problem = f"HTTP {response.status_code}: {response.text}"
+        _record_judge_attempt(
+            "goal_accuracy",
+            1,
+            prompt=prompt,
+            reply=reply,
+            problem=problem,
+            method="ragas",
+            model=model or _judge_attempt_model(),
+            status="replied" if reply is not None else None,
+        )
+    except TimeoutError:
+        # The required-judge deadline alarm, not an evidence failure.
+        raise
+    except Exception as error:
+        # Saving evidence must never change a score or hide a provider error.
+        logger.warning("Could not save RAGAS judge evidence: %s", type(error).__name__)
+
+
+async def _save_ragas_exchange(response):
+    """httpx response hook: RAGAS builds its own prompts and parses its own replies, so save both here."""
+    try:
+        await response.aread()
+    except Exception as error:
+        _record_ragas_exchange(response, f"the reply was not received ({type(error).__name__})")
+        raise
+    _record_ragas_exchange(response)
+
+
+def _ragas_evidence_http_client(openai_module):
+    """Return the SDK's default async HTTP client with the evidence hook, or None to score without evidence."""
+    try:
+        return openai_module.DefaultAsyncHttpxClient(event_hooks={"response": [_save_ragas_exchange]})
+    except TimeoutError:
+        raise
+    except Exception as error:
+        logger.warning("Could not save RAGAS judge evidence: %s", type(error).__name__)
+        return None
+
+
 def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary):
     """Use RAGAS AgentGoalAccuracyWithReference for high-quality two-step evaluation."""
     import asyncio
 
+    import openai
     from openai import AsyncOpenAI
     from ragas.llms.base import llm_factory
     from ragas.messages import AIMessage as RagasAI
@@ -3239,7 +3380,14 @@ def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary)
     suffix = "/chat/completions"
     if not request_url.endswith(suffix) or not _is_native_openai_chat_url("openai", request_url):
         raise RuntimeError("RAGAS goal accuracy requires the selected canonical OpenAI provider")
-    client = AsyncOpenAI(api_key=api_key, base_url=request_url[: -len(suffix)])
+    # The response hook saves each RAGAS request and reply to judge_attempts.json.
+    # It runs in the loop below, whose tasks copy this context, so it sees the
+    # verifier's judge evidence list. Closing the client also closes this one.
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url=request_url[: -len(suffix)],
+        http_client=_ragas_evidence_http_client(openai),
+    )
     loop = asyncio.new_event_loop()
     try:
         # Build the scorer inside the try so a setup failure still closes the client.
@@ -3251,10 +3399,11 @@ def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary)
             RagasAI(content=agent_text),
         ]
         # Collections metrics take the messages and reference as keywords, not a SingleTurnSample.
+        scorer_timeout = _remaining_judge_timeout(_resolve_judge_wall_time_budget())
         result = loop.run_until_complete(
             asyncio.wait_for(
                 metric.ascore(user_input=user_input, reference=ground_truth),
-                timeout=_remaining_judge_timeout(_resolve_judge_wall_time_budget()),
+                timeout=scorer_timeout,
             )
         )
     finally:
@@ -3375,8 +3524,14 @@ def _behavior_prompt_example(expected_count):
             "results": [
                 {
                     "step": step,
-                    "passed": step % 2 == 1,
-                    "reason": "Seen in the transcript." if step % 2 == 1 else "Not seen in the transcript.",
+                    "passed": None if step % 3 == 0 else step % 3 == 1,
+                    "reason": (
+                        "Required tool output was not captured."
+                        if step % 3 == 0
+                        else "Seen in the transcript."
+                        if step % 3 == 1
+                        else "Observed output violates the requirement."
+                    ),
                 }
                 for step in range(1, expected_count + 1)
             ],
@@ -3386,6 +3541,7 @@ def _behavior_prompt_example(expected_count):
 
 
 def judge_behavior_check(conversation_text, expected_behaviors):
+    expected_behaviors = normalize_expected_behaviors(expected_behaviors)
     if not _has_judge_reference(expected_behaviors):
         return _judge_not_applicable(_NO_EXPECTED_BEHAVIOR_REASON, results=[])
 
@@ -3404,7 +3560,12 @@ EXPECTED BEHAVIORS:
 
 Respond with ONLY one JSON object. "results" must hold exactly {expected_count} entries, one per \
 expected behavior: "step" is the behavior's number (each number from 1 to {expected_count} exactly \
-once), "passed" is true (observed) or false (not observed), and "reason" is under 15 words. Add a \
+once), "passed" is true (observed), false (evidence supports a violation or absence), or null \
+when missing or incomplete evidence prevents checking the behavior. Missing artifact contents, \
+unavailable tool output, or a truncated trace require null, NOT false, for checks that depend on \
+that evidence. A missing observation alone is not proof the behavior failed. Explain that evidence gap \
+in "reason" (under 15 words). An unrelated task \
+can be a valid negative control: evaluate its stated behavior without requiring skill use. Add a \
 one-sentence "summary". Do not include a score: it is computed from the results.
 Example of the shape for this task's {expected_count} behaviors (the values are only an illustration):
 {_behavior_prompt_example(expected_count)}"""
@@ -3422,35 +3583,56 @@ Example of the shape for this task's {expected_count} behaviors (the values are 
             return None
         return candidate
 
-    parsed, error, _provenance = _call_validated_json_judge(
-        prompt,
-        lambda payload: _behavior_payload_error(payload, expected_count),
-        call_public_llm,
-        extract_json,
-        metric="behavior_check",
-        salvage=salvage,
-        max_tokens=BEHAVIOR_JUDGE_MAX_TOKENS,
-        response_schema=BEHAVIOR_CHECK_JSON_SCHEMA,
-        schema_name="behavior_check_judgment",
-    )
+    try:
+        parsed, error, _provenance = _call_validated_json_judge(
+            prompt,
+            lambda payload: _behavior_payload_error(payload, expected_count),
+            call_public_llm,
+            extract_json,
+            metric="behavior_check",
+            salvage=salvage,
+            max_tokens=BEHAVIOR_JUDGE_MAX_TOKENS,
+            response_schema=BEHAVIOR_CHECK_JSON_SCHEMA,
+            schema_name="behavior_check_judgment",
+        )
+    except Exception as exc:
+        error = f"Required behavior_check judge raised {type(exc).__name__}: {exc}"
     if error:
-        return _judge_error(error, results=[])
+        return _judge_error(error, results=[], expectations=_behavior_expectations(expected_behaviors, [], error))
 
-    # A salvaged reply leaves the behaviors after the cut unjudged; they count as not observed.
+    # Keep the conservative score denominator without calling missing verdicts failures.
     results = sorted(parsed["results"], key=lambda result: result["step"])
     score = sum(1 for result in results if result["passed"]) / expected_count
     return {
         "score": round(score, 4),
         "reason": parsed.get("summary", ""),
         "results": results,
+        "expectations": _behavior_expectations(expected_behaviors, results),
     }
+
+
+def _behavior_expectations(expected_behaviors, results, error=""):
+    by_step = {result["step"]: result for result in results}
+    return [
+        {
+            "step": step,
+            "requirement": requirement,
+            "status": ("met" if by_step[step]["passed"] else "unmet")
+            if step in by_step and type(by_step[step]["passed"]) is bool
+            else "not_checked",
+            "reason": by_step[step].get("reason", "")
+            if step in by_step
+            else _redact_configured_credentials(error) or "No judgment returned for this expectation",
+        }
+        for step, requirement in enumerate(expected_behaviors, 1)
+    ]
 
 
 def _behavior_payload_error(parsed, expected_count, *, allow_partial=False):
     """Describe what is wrong with a behavior reply, or return ``None`` when it is usable.
 
     Each expected behavior is judged exactly once, identified by its 1-based
-    ``step`` number, with a boolean ``passed``. *allow_partial* accepts a
+    ``step`` number, with a boolean ``passed`` or an explicit null abstention. *allow_partial* accepts a
     salvaged prefix that judges each of its steps once. The score is computed
     from the verdicts, so a ``score`` field in the reply is ignored.
     """
@@ -3466,8 +3648,16 @@ def _behavior_payload_error(parsed, expected_count, *, allow_partial=False):
         return f'"results" has {len(results)} entries; it needs exactly {expected_count}, one per behavior'
     if any(not isinstance(result, dict) for result in results):
         return 'every "results" entry must be an object'
-    if any(not isinstance(result.get("passed"), bool) for result in results):
-        return 'every "results" entry needs "passed" set to true or false'
+    if any(
+        "passed" not in result or (result["passed"] is not None and type(result["passed"]) is not bool)
+        for result in results
+    ):
+        return 'every "results" entry needs "passed" set to true, false, or null'
+    if any(
+        result["passed"] is None and (not isinstance(result.get("reason"), str) or not result["reason"].strip())
+        for result in results
+    ):
+        return 'unchecked entries need a nonempty "reason" explaining the missing evidence'
     steps = [result.get("step") for result in results]
     if any(isinstance(step, bool) or not isinstance(step, int) for step in steps):
         return 'every "results" entry needs an integer "step" number'
@@ -3577,7 +3767,15 @@ def _call_required_judge(metric, judge, *args, allow_not_applicable=False, **kwa
                 finally:
                     signal.signal(signal.SIGALRM, previous_alarm_handler)
     except Exception as exc:
-        result = _judge_error(f"Required {metric} judge raised {type(exc).__name__}: {exc}")
+        error = f"Required {metric} judge raised {type(exc).__name__}: {exc}"
+        metadata = {}
+        if metric == "behavior_check":
+            expected_behaviors = kwargs.get("expected_behaviors", args[1] if len(args) > 1 else [])
+            metadata = {
+                "results": [],
+                "expectations": _behavior_expectations(expected_behaviors or [], [], error),
+            }
+        result = _judge_error(error, **metadata)
     finally:
         _ACTIVE_JUDGE_DEADLINE.reset(token)
         _ACTIVE_JUDGE_CALLS.reset(calls_token)
@@ -3666,9 +3864,22 @@ def skill_metrics_applicable(
     return any(str(name).strip().lower() in staged for name in candidates if name and str(name).strip())
 
 
-def _skill_metric_not_applicable():
-    """Scoreless ``skill_execution`` / ``skill_efficiency`` result for an arm without the skill."""
-    return {"score": None, "status": NOT_APPLICABLE_STATUS, "reason": SKILL_METRICS_NOT_APPLICABLE_REASON}
+def _skill_metric_not_applicable(reason=SKILL_METRICS_NOT_APPLICABLE_REASON):
+    """Scoreless ``skill_execution`` / ``skill_efficiency`` result.
+
+    The default reason covers an arm without the skill. An eval case that gives
+    the metric nothing to score passes its own reason.
+    """
+    return {"score": None, "status": NOT_APPLICABLE_STATUS, "reason": reason}
+
+
+def _case_skill_metric_reasons(should_trigger, expected_skill):
+    """Return the skill metrics this eval case leaves N/A, each with its reason."""
+    reasons = {
+        "skill_execution": skill_execution_not_applicable_reason(should_trigger, expected_skill),
+        "skill_efficiency": skill_efficiency_not_applicable_reason(should_trigger, expected_skill),
+    }
+    return {metric: reason for metric, reason in reasons.items() if reason}
 
 
 def _reward_overall(result, details):
@@ -3724,16 +3935,78 @@ def write_reward_outputs(result, overall):
     REWARD_TXT.write_text(str(sanitized_overall))
 
 
+def _dependency_context(skill: str, *, skills_root: Path = Path("/workspace/skills")) -> dict[str, Any]:
+    """Read bounded dependency evidence from the evaluator-staged skill."""
+    context: dict[str, Any] = {
+        "apt": [],
+        "pip": [],
+        "skill_text": "",
+        "skill_dirs": [],
+        "skill_modules": set(),
+        "script_imports": set(),
+    }
+    if not skill or skill in {".", ".."} or Path(skill).name != skill:
+        return context
+    root = skills_root / skill
+    if not root.is_dir():
+        return context
+    context["skill_dirs"] = [
+        str(root),
+        f"/root/.claude/skills/{skill}",
+        f"/root/.agents/skills/{skill}",
+        f"/root/.config/opencode/skills/{skill}",
+        f"/etc/codex/skills/{skill}",
+    ]
+    remaining = 1024 * 1024
+    for index, path in enumerate(root.rglob("*")):
+        if index >= 4096 or remaining <= 0:
+            break
+        if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
+            continue
+        relative = path.relative_to(root)
+        if path.suffix == ".py":
+            context["skill_modules"].add(path.stem)
+            context["skill_modules"].update(relative.parts[:-1])
+        if path.name == "__init__.py":
+            context["skill_modules"].add(path.parent.name)
+        dependency = path.parent.name == "scripts" and path.name in {"requirements.txt", "apt-packages.txt"}
+        if not dependency and path.name.lower() != "skill.md" and "scripts" not in relative.parts:
+            continue
+        try:
+            with path.open("rb") as stream:
+                data = stream.read(min(remaining, 128 * 1024))
+        except OSError:
+            continue
+        remaining -= len(data)
+        content = data.decode("utf-8", errors="replace")
+        if dependency:
+            key = "pip" if path.name == "requirements.txt" else "apt"
+            context[key].extend(
+                line.split("#", 1)[0].strip()
+                for line in content.splitlines()
+                if line.strip() and not line.lstrip().startswith(("#", "-"))
+            )
+        else:
+            context["skill_text"] += "\n" + content
+            if "scripts" in relative.parts and path.suffix == ".py":
+                imports = re.finditer(r"(?m)^\s*(?:from\s+([\w.]+)\s+import\b|import\s+([\w.]+))", content)
+                context["script_imports"].update((match.group(1) or match.group(2)).split(".")[0] for match in imports)
+    context["skill_modules"] = sorted(context["skill_modules"])
+    context["script_imports"] = sorted(context["script_imports"])
+    return context
+
+
 def main():
     entry = json.loads(ENTRY_PATH.read_text(encoding="utf-8"))
     traj, traj_meta = load_trajectory_with_fallback(ATIF_PATH, ATIF_PATH.parent)
 
     expected_skill = entry.get("expected_skill") or ""
-    expected_script = entry.get("expected_script") or ""
+    expected_script = normalize_optional_reference(entry.get("expected_script"))
     should_trigger = resolve_should_trigger(entry)
     evaluated_skill = entry.get("evaluated_skill") or ""
     acceptable_skills = _resolve_acceptable_skills(entry, expected_skill)
-    expected_behavior = entry.get("expected_behavior", [])
+    expected_behavior = normalize_expected_behaviors(entry.get("expected_behavior", []))
+    declarative_checks = entry.get("checks", [])
     question = entry.get("question", "")
     ground_truth = entry.get("ground_truth", "")
     workspace_mode = entry.get("skill_workspace_mode", "isolated")
@@ -3769,6 +4042,11 @@ def main():
                 skill_execution=_skill_metric_not_applicable(),
                 skill_efficiency=_skill_metric_not_applicable(),
             )
+        else:
+            # A skill metric the case gives nothing to score stays N/A, as on the judged path.
+            for metric, na_reason in _case_skill_metric_reasons(should_trigger, expected_skill).items():
+                skill_scores[metric] = None
+                judge_details[metric] = _skill_metric_not_applicable(na_reason)
         result = {
             "security": 0,
             **skill_scores,
@@ -3779,6 +4057,38 @@ def main():
             "trajectory_source": traj_meta.get("source"),
             "trajectory_detail": traj_meta.get("warning") or traj_meta.get("note"),
         }
+        if declarative_checks:
+            direct_results = _shared_declarative_checks.evaluate_declarative_checks(
+                declarative_checks,
+                tool_calls=[],
+                final_response="",
+                workspace_roots=_declarative_workspace_roots(),
+            )
+            direct_results = _shared_declarative_checks.mark_no_skill_script_checks(
+                declarative_checks,
+                direct_results,
+                has_skill=entry.get("has_skill", True),
+                skill_metrics_on=skill_metrics_on,
+                evaluated_skill=evaluated_skill,
+            )
+            judged_count = len(expected_behavior) if _has_judge_reference(expected_behavior) else 0
+            base_behavior = {
+                "score": judge_scores["behavior_check"],
+                "status": "accepted" if judged_count else "not_applicable",
+                "reason": "No trajectory or reconstructible agent log"
+                if judged_count
+                else _NO_EXPECTED_BEHAVIOR_REASON,
+                "results": [
+                    {"step": index + 1, "passed": False, "reason": "No trajectory or reconstructible agent log"}
+                    for index in range(judged_count)
+                ],
+            }
+            behavior_result = _shared_declarative_checks.combine_behavior_check(
+                base_behavior, direct_results, judged_count
+            )
+            judge_scores["behavior_check"] = behavior_result["score"]
+            judge_details["behavior_check"] = behavior_result
+            result["behavior_check"] = behavior_result["score"]
         if judge_details:
             result["details"] = judge_details
         write_reward_outputs(result, 0.0)
@@ -3818,9 +4128,26 @@ def main():
             require_evaluated_skill=True,
             skill_tool_names=skill_tools,
             acceptable_skills=acceptable_skills,
+            dependency_context=_dependency_context(evaluated_skill or expected_skill),
         )
         se_score = skill_execution_result["score"]
         details["skill_execution"] = skill_execution_result["details"]
+        if skill_execution_result.get("status") == "environment_invalid":
+            recovery = skill_execution_result["details"]["error_recovery"]
+            write_reward_outputs(
+                {
+                    "evaluation_status": "failed",
+                    "evaluation_errors": {"environment": recovery["reason"]},
+                    "environment_issues": recovery["environment_issues"],
+                    "entry_id": entry.get("id"),
+                    "metric_set": DEFAULT_METRIC_SET,
+                    "score_policy": DEFAULT_SCORE_POLICY,
+                    "details": details,
+                },
+                0.0,
+            )
+            logger.error("[environment] %s", recovery["reason"])
+            raise SystemExit(1)
     else:
         se_score = None
         details["skill_execution"] = _skill_metric_not_applicable()
@@ -3830,8 +4157,10 @@ def main():
         sef_score = None
         details["skill_efficiency"] = _skill_metric_not_applicable()
     elif not should_trigger or not expected_skill:
-        sef_score = 1.0
-        details["skill_efficiency"] = {"message": "Skipped (negative or no expected_skill)"}
+        sef_score = None
+        details["skill_efficiency"] = _skill_metric_not_applicable(
+            skill_efficiency_not_applicable_reason(should_trigger, expected_skill)
+        )
     elif not tool_calls:
         sef_score = 0.0
         details["skill_efficiency"] = {"message": "No tool calls in trajectory"}
@@ -3859,7 +4188,8 @@ def main():
     )
 
     # Every judge attempt below is saved to judge_attempts.json as it happens.
-    judge_evidence_token = _ACTIVE_JUDGE_EVIDENCE.set([])
+    judge_attempts = []
+    judge_evidence_token = _ACTIVE_JUDGE_EVIDENCE.set(judge_attempts)
     try:
         # ── Eval 4: accuracy (LLM judge) ─────────────────────────────────
         acc_result = _call_required_judge(
@@ -3887,17 +4217,45 @@ def main():
         details["goal_accuracy"] = ga_result
 
         # ── Eval 6: behavior_check (LLM judge) ───────────────────────────
-        bc_result = _call_required_judge(
-            "behavior_check",
-            judge_behavior_check,
-            bundles["behavior_check"]["prompt_evidence"],
-            expected_behavior,
-            allow_not_applicable=not _has_judge_reference(expected_behavior),
-        )
+        if declarative_checks:
+            if _has_judge_reference(expected_behavior):
+                bc_result = _call_required_judge(
+                    "behavior_check",
+                    judge_behavior_check,
+                    bundles["behavior_check"]["prompt_evidence"],
+                    expected_behavior,
+                )
+            else:
+                bc_result = _judge_not_applicable(_NO_EXPECTED_BEHAVIOR_REASON, results=[])
+        else:
+            bc_result = _call_required_judge(
+                "behavior_check",
+                judge_behavior_check,
+                bundles["behavior_check"]["prompt_evidence"],
+                expected_behavior,
+                allow_not_applicable=not _has_judge_reference(expected_behavior),
+            )
+        if declarative_checks:
+            direct_results = _shared_declarative_checks.evaluate_declarative_checks(
+                declarative_checks,
+                tool_calls=tool_calls,
+                final_response=_get_final_response(traj),
+                workspace_roots=_declarative_workspace_roots(),
+            )
+            direct_results = _shared_declarative_checks.mark_no_skill_script_checks(
+                declarative_checks,
+                direct_results,
+                has_skill=entry.get("has_skill", True),
+                skill_metrics_on=skill_metrics_on,
+                evaluated_skill=evaluated_skill,
+            )
+            judged_count = len(expected_behavior) if _has_judge_reference(expected_behavior) else 0
+            bc_result = _shared_declarative_checks.combine_behavior_check(bc_result, direct_results, judged_count)
         bc_score = bc_result["score"]
         details["behavior_check"] = bc_result
     finally:
         _ACTIVE_JUDGE_EVIDENCE.reset(judge_evidence_token)
+        _write_judge_attempts(judge_attempts)
 
     # persist refs + omission metadata onto the metric details
     attach_metric_evidence_refs(details, {m: bundles[m]["evidence_refs"] for m in bundles})

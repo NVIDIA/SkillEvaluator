@@ -545,6 +545,7 @@ class TestJSONReporter:
         ("working_directory", "target"),
         [
             ("simple", "."),
+            ("simple", "./"),
             ("simple/nested", ".."),
             (".", "simple"),
             (".", "./simple"),

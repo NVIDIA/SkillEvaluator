@@ -731,7 +731,10 @@ cap. The artifact is bounded for browser loading, not a complete evidence archiv
 ### The five dimensions
 
 With `default` or `default_plus_custom` grading, reports lead with five
-dimensions, each answering one question:
+dimensions, each answering one question. The
+[Metrics Reference](/skills/skillevaluator/metrics-reference) gives each one's exact
+formula, range, units and evidence source, and shows how to recompute it from
+the files on this page:
 
 | Dimension | Question answered | Signals and source |
 | --- | --- | --- |
@@ -1026,6 +1029,20 @@ Routing/tool-productivity efficiency remains a separate score. Missing counters
 and incomplete arms produce null totals or deltas (`N/A` in HTML). Resource
 deltas require matching case counts and complete measurements in both arms;
 they do not measure evaluator tokens, setup time, price, or statistical savings.
+
+`resources.scope` includes failed task outcomes when execution evidence is
+complete. `resources.interpretation` explains the limits of these observed
+consumption diagnostics: lower use alone does not establish improved task
+quality or Efficiency. A task failure can consume fewer resources than a
+successful outcome. Matching case counts does not certify equal concurrency
+or budget, or actual judge-model agreement. Review task outcomes and run
+conditions alongside the raw differences before making an improvement claim.
+
+Baseline reuse checks configuration and evidence compatibility but deliberately
+excludes concurrency and budget from its identity. Reused baseline measurements
+remain historical observations from the source run, not fresh consumption or
+independent evidence in the current run. Reports retain the source and timestamp;
+see [Reuse a baseline](/skills/skillevaluator/tier3-live-evaluation#reuse-a-baseline).
 
 | Measurement | Meaning |
 | --- | --- |

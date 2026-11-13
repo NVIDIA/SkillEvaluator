@@ -27,8 +27,8 @@ this same policy `external`; that label does not publish your repository or repo
 
 ### Copy the ready-to-use template
 
-Open [skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.8.0/skill-checks.yml)
-from the [ready-to-use templates](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/bundles/0.8.0).
+Open [skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.9.0/skill-checks.yml)
+from the [ready-to-use templates](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/bundles/0.9.0).
 Use GitHub's **Raw** view to copy it into `.github/workflows/skill-checks.yml`.
 The template already supplies pinned workflow and image versions.
 
@@ -50,8 +50,8 @@ Use your own skill folders. Keep `auto` to scan changed skills in PRs;
 `all` checks the configured collection. If your default branch is not `main`,
 update the template's push branch.
 
-The 0.8.0 template pins a workflow that does not accept `enforcement-mode`;
-leave that input out when using the released template.
+The 0.9.0 template supports `enforcement-mode`. Omit it for strict merge
+gating, or choose advisory enforcement as described below.
 
 ### Commit the workflow and open a skill PR
 
@@ -89,12 +89,10 @@ required security or schema check.
 
 <AccordionGroup>
   <Accordion title="Use advisory enforcement">
-    This unreleased feature requires both a reusable workflow commit and a
-    scanner image digest that include `enforcement-mode` support. The 0.8.0
-    bundle does not accept this input. Use the reviewed commit SHA of a
-    supporting workflow and the published immutable digest of its matching
-    image; changing only the input on the 0.8.0 template causes workflow
-    validation to fail.
+    The 0.9.0 bundle pins a matching workflow and scanner image with
+    `enforcement-mode` support. For an existing 0.8.0 workflow, review both
+    pins together before adding this input; the older workflow does not
+    accept it.
 
     With compatible pins, omit `enforcement-mode` or set it to `strict` for
     merge gating. Set `enforcement-mode: advisory` for visibility runs:
@@ -175,7 +173,7 @@ succeeds**. It needs a second workflow plus one-time hosting and approval settin
   get both workflows.
 </Card>
 
-Copy [publish-skill-reports.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.8.0/publish-skill-reports.yml)
+Copy [publish-skill-reports.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.9.0/publish-skill-reports.yml)
 from the same template folder as your scan workflow. Complete the one-time setup below,
 or let the [CLI](/skills/skillevaluator/cli-onboarding) handle it.
 

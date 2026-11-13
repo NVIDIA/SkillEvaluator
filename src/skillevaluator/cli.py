@@ -22,6 +22,7 @@ from skillevaluator import __version__
 from skillevaluator.cli_help import GroupedOption, RichGroup
 from skillevaluator.config import load_pii_patterns
 from skillevaluator.constants import (
+    QUALITY_DEFAULT_MIN_SCORE,
     SIMILARITY_DEFAULT_MAX_ENTRIES,
     SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
     SIMILARITY_MAX_ENTRIES,
@@ -1186,12 +1187,21 @@ def _ensure_autopilot_dataset(
             provider = resolve_llm_provider()
         except ProviderConfigurationError:
             no_llm = True
+            if evaluation_params is not None and evaluation_params.get("backend") == "nemo-gym":
+                from skillevaluator.tier3.workflow import _source_snapshot, nemo_gym_preflight_errors
+
+                params = {**evaluation_params, "skill_path": skill_path}
+                with _source_snapshot(skill_path) as source_path:
+                    errors = nemo_gym_preflight_errors(source_path, params)
+                if errors:
+                    raise click.UsageError("; ".join(errors)) from None
             echo("Autopilot: no public provider key is configured; generating one deterministic case.")
         else:
             no_llm = False
             if evaluation_params is not None:
                 from skillevaluator.tier3.workflow import (
                     _preflight_environment,
+                    _preflight_nemo_gym,
                     _preflight_options,
                     _source_snapshot,
                 )
@@ -1201,10 +1211,14 @@ def _ensure_autopilot_dataset(
                 # leave existing authored sources untouched above.
                 params = {**evaluation_params, "skill_path": skill_path}
                 with _source_snapshot(skill_path) as source_path:
-                    environment_kwargs = _preflight_options(source_path, params)
-                if prepare_environment is not None:
-                    prepare_environment()
-                _preflight_environment(params, environment_kwargs=environment_kwargs)
+                    if params.get("backend") == "nemo-gym":
+                        _preflight_nemo_gym(source_path, params)
+                    else:
+                        environment_kwargs = _preflight_options(source_path, params)
+                if params.get("backend") != "nemo-gym":
+                    if prepare_environment is not None:
+                        prepare_environment()
+                    _preflight_environment(params, environment_kwargs=environment_kwargs)
             provider_name, model_name = safe_llm_labels(provider.provider, provider.model)
             echo(f"Autopilot: generating one case with {provider_name} / {model_name}.")
 
@@ -1384,8 +1398,8 @@ def _catalog_child_argv_from_ctx(
         argv.append("--block-on-dedup")
     elif block_on_dedup is False:
         argv.append("--no-block-on-dedup")
-    min_score = params.get("min_score", 70)
-    if min_score != 70:
+    min_score = params.get("min_score", QUALITY_DEFAULT_MIN_SCORE)
+    if min_score != QUALITY_DEFAULT_MIN_SCORE:
         argv.extend(["--min-score", str(min_score)])
     if params.get("quality_config"):
         argv.extend(["--quality-config", str(Path(params["quality_config"]).resolve())])
@@ -1988,7 +2002,7 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
 @click.option(
     "--min-score",
     type=int,
-    default=70,
+    default=QUALITY_DEFAULT_MIN_SCORE,
     show_default=True,
     cls=GroupedOption,
     help_group=_TIER1_GROUP,
@@ -2877,7 +2891,7 @@ validate.help_group_descriptions = {
 
 @cli.command("quality-check")
 @_target_argument
-@click.option("--min-score", type=int, default=70, show_default=True)
+@click.option("--min-score", type=int, default=QUALITY_DEFAULT_MIN_SCORE, show_default=True)
 @click.option(
     "--quality-config",
     type=QUALITY_CONFIG_PATH,
@@ -2905,7 +2919,7 @@ def quality_check(
 
 @cli.command("rubric-eval")
 @_target_argument
-@click.option("--min-score", type=int, default=70, show_default=True)
+@click.option("--min-score", type=int, default=QUALITY_DEFAULT_MIN_SCORE, show_default=True)
 @_report_options
 def rubric_eval(target_path: Path, min_score: int, report_formats: tuple[str, ...], output_dir: Path) -> None:
     """Run LLM-as-judge rubric evaluation for a skill."""
@@ -3185,7 +3199,7 @@ def _workflow_report_options(func):
 @click.option(
     "--llm/--no-llm", default=None, help="Include rubric, LLM security, and verification [default: when configured]."
 )
-@click.option("--min-score", type=click.IntRange(0, 100), default=70, show_default=True)
+@click.option("--min-score", type=click.IntRange(0, 100), default=QUALITY_DEFAULT_MIN_SCORE, show_default=True)
 @click.option(
     "--quality-config",
     type=QUALITY_CONFIG_PATH,
@@ -3338,6 +3352,13 @@ def _tier2_workflow(
 )
 @click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE)
 @click.option(
+    "--backend",
+    default="harbor",
+    show_default=True,
+    type=click.Choice(["harbor", "nemo-gym"]),
+    help="Tier 3 execution backend: Harbor, or NeMo Gym's orchestrator, agent harness and sandbox.",
+)
+@click.option(
     "--environment-kwarg",
     "--ek",
     multiple=True,
@@ -3478,6 +3499,7 @@ def evaluate(
     skill_path: Path,
     agents: str | None,
     env_mode: str,
+    backend: str,
     environment_kwarg: tuple[str, ...],
     autopilot: bool,
     skip_baseline: bool,
@@ -3559,7 +3581,7 @@ def evaluate(
             skill_path,
             progress=progress,
             evaluation_params=click.get_current_context().params,
-            prepare_environment=prepare_local_runtime if env_mode == "local" else None,
+            prepare_environment=prepare_local_runtime if backend == "harbor" and env_mode == "local" else None,
         )
 
     parsed_environment_kwargs = _parse_environment_kwargs_cli(environment_kwarg, env_mode=env_mode)
@@ -3568,6 +3590,7 @@ def evaluate(
         skill_path=skill_path,
         agents=agents,
         env_mode=env_mode,
+        backend=backend,
         environment_kwarg=environment_kwarg,
         skip_baseline=skip_baseline,
         skip_with_skill=skip_with_skill,
@@ -3603,7 +3626,7 @@ def evaluate(
         environment_kwargs=parsed_environment_kwargs,
     )
     try:
-        if env_mode == "local":
+        if backend == "harbor" and env_mode == "local":
             if not local_runtime_offered:
                 prepare_local_runtime()
             from rich.panel import Panel
@@ -3621,7 +3644,7 @@ def evaluate(
                     padding=(0, 1),
                 )
             )
-        elif env_mode == "gke":
+        elif backend == "harbor" and env_mode == "gke":
             from skillevaluator.tier3.commands import parse_agents
             from skillevaluator.tier3.harbor.runner import (
                 is_gke_vertex_workload_identity_active,
@@ -3685,9 +3708,26 @@ def evaluate(
 @click.option("--no-llm", is_flag=True, help="Use local templates only.")
 @click.option("--dry-run", is_flag=True, help="Preview without writing.")
 @click.option("--force", is_flag=True, help="Overwrite existing evals/evals.json.")
-@click.option("--prompt", type=click.Path(exists=True, path_type=Path), default=None)
-@click.option("--grounding", type=click.Choice(["skill", "intent", "trace"]), default="skill")
-@click.option("--refine", is_flag=True, help="Refine cases using existing or collected trajectories.")
+@click.option(
+    "--prompt",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Author guidance with content beyond headings (default: evals/EVAL.md).",
+)
+@click.option(
+    "--grounding",
+    type=click.Choice(["auto", "skill", "intent", "trace"]),
+    default="auto",
+    show_default=True,
+    help="Auto requires substantive author guidance or usable matching retained traces; "
+    "existing datasets need --force or --refine. Explicit trace opts into refinement; "
+    "use skill for skill-only starters.",
+)
+@click.option(
+    "--refine",
+    is_flag=True,
+    help="Opt into refinement using retained or collected trajectories after grounding selection.",
+)
 @click.option("--from-results", type=click.Path(exists=True, path_type=Path), default=None)
 @click.option("--results-dir", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=None)
 def create_dataset(
@@ -3702,7 +3742,7 @@ def create_dataset(
     from_results: Path | None,
     results_dir: Path | None,
 ) -> None:
-    """Create synthetic eval datasets for agent skill evaluation."""
+    """Create eval datasets from author guidance, retained traces, or explicit skill grounding."""
     from skillevaluator.evaluation import DatasetGenerationError, DatasetOptions, EvaluationService
 
     try:
@@ -3846,6 +3886,7 @@ _DOCTOR_OPTION_TIERS = {
     "env_mode": frozenset({"3"}),
     "environment_kwarg": frozenset({"3"}),
     "agent_model": frozenset({"3"}),
+    "backend": frozenset({"3"}),
 }
 
 
@@ -3878,6 +3919,13 @@ def _doctor_tier_options(*, timeout_help: str):
 
 def _tier3_doctor_options(func):
     """Add the Tier 3 options shared by doctor and tier3 doctor."""
+    func = click.option(
+        "--backend",
+        default="harbor",
+        show_default=True,
+        type=click.Choice(["harbor", "nemo-gym"]),
+        help="Tier 3 execution backend to check: Harbor, or NeMo Gym.",
+    )(func)
     func = click.option("--agent-model", multiple=True, help="Per-agent model override, AGENT=MODEL.")(func)
     func = click.option(
         "--environment-kwarg",
@@ -3908,6 +3956,7 @@ def _run_doctor(
     timeout: float = DEFAULT_PROBE_TIMEOUT_SEC,
     agent_model: tuple[str, ...] = (),
     verify_models: bool = False,
+    backend: str = "harbor",
 ) -> int:
     """Validate every option before any probe, then check each selected tier in order."""
     selected_tiers = ("1", "2", "3") if tier == "all" else (tier,)
@@ -3945,6 +3994,7 @@ def _run_doctor(
                     verify_models=verify_models,
                     agent_model=agent_model,
                     environment_kwargs=parsed_environment_kwargs,
+                    backend=backend,
                 )
             )
         else:

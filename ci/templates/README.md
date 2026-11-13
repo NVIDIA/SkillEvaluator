@@ -19,7 +19,7 @@ a separate demo repository.
 ## Get a version you can run
 
 **These source templates contain placeholders.** Copy the
-[ready-to-use configurations](../bundles/0.8.0/README.md) instead; their reviewed
+[ready-to-use configurations](../bundles/0.9.0/README.md) instead; their reviewed
 workflow commits and container image digest are already filled in.
 
 Open a file in that folder and use GitHub's **Raw** view to copy its complete

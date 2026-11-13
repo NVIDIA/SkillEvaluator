@@ -150,6 +150,7 @@ def test_native_tier3_engine_failure_still_emits_incomplete_evidence(consumer, t
         == 0
     )
     report = json.loads((tmp_path / "skillevaluator-tier3.json").read_text())
+    assert [entry["name"] for entry in report["skills"]] == ["alpha"]
     assert report["results"][0]["status"] == "incomplete"
     assert report["gating"]["tiers"]["3"]["blocking"] is False
     assert report["results"][0]["gating"] == {"tier": 3, "blocking": False}
@@ -179,6 +180,23 @@ def test_setup_workflow_only_change_selects_full_collection(consumer):
     git = ["git", "-C", str(consumer), "-c", "user.name=CI tests", "-c", "user.email=ci@example.com"]
     subprocess.run([*git, "add", "."], check=True)
     subprocess.run([*git, "commit", "-m", "setup"], check=True, capture_output=True)
+    selected, selection = run_tiers.select_skills(
+        consumer, env_for(consumer, DIFF_BASE_SHA=base, SKILL_EVAL_SCAN_MODE="auto")
+    )
+    assert [p.name for p in selected] == ["alpha", "beta"]
+    assert selection["reason"] == "ci_configuration_changed"
+
+
+def test_hidden_setup_gitlink_still_selects_full_collection(consumer):
+    """Setup detection reads the same list as the paid-job skip, so .gitmodules cannot hide it."""
+    base = subprocess.check_output(["git", "-C", str(consumer), "rev-parse", "HEAD"], text=True).strip()
+    (consumer / ".gitmodules").write_text(
+        '[submodule "actions"]\n\tpath = .github/actions\n\turl = ./actions\n\tignore = all\n'
+    )
+    git = ["git", "-C", str(consumer), "-c", "user.name=CI tests", "-c", "user.email=ci@example.com"]
+    subprocess.run([*git, "add", ".gitmodules"], check=True)
+    subprocess.run([*git, "update-index", "--add", "--cacheinfo", f"160000,{'b' * 40},.github/actions"], check=True)
+    subprocess.run([*git, "commit", "-m", "setup gitlink"], check=True, capture_output=True)
     selected, selection = run_tiers.select_skills(
         consumer, env_for(consumer, DIFF_BASE_SHA=base, SKILL_EVAL_SCAN_MODE="auto")
     )

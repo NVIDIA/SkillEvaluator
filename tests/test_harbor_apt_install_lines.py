@@ -66,6 +66,8 @@ _CASES = [
     pytest.param(None, _BASE_PACKAGES, id="base-only"),
     pytest.param("tree\n", [*_BASE_PACKAGES, "tree"], id="one-extra"),
     pytest.param("zstd\n# comment\ntree\n", [*_BASE_PACKAGES, "tree", "zstd"], id="two-extras-and-comment"),
+    pytest.param("\r\n  \r\n\t\r\n", _BASE_PACKAGES, id="blank-whitespace-crlf"),
+    pytest.param(" tree \r\n\t\r\n zstd\r\n", [*_BASE_PACKAGES, "tree", "zstd"], id="packages-crlf"),
 ]
 
 

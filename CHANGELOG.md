@@ -668,8 +668,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 1 skill-type detection and the script-based checks recognise Node scripts
   (`.mjs`, `.cjs`, `.js`) under `scripts/` and `tools/`, so a Node-script skill
   is no longer typed guide-only. A `node scripts/<file>` command counts as the
-  documented invocation. Script lint still parses Python only and reports how
-  many Node scripts it did not lint. The rubric judge also receives Node scripts
+  documented invocation, including commands with shell substitutions, quoted
+  option values, and captured output. Node modes that do not execute the script
+  (such as `--version` or `--check`) do not count. Script lint still parses Python
+  only and reports how many Node scripts it did not lint. The rubric judge also receives Node scripts
   and files from `tools/`. Scores of Node-script skills can change because they
   now get the script-based checks.
 

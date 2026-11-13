@@ -11,6 +11,6 @@
       {"word": "skills", "count": 1}
     ]
   },
-  "quality": {"score": 84.5, "grade": "B", "status": "passed", "exit_code": 0, "publication": "incomplete"},
-  "regressed": {"score": 71.0, "grade": "C", "status": "failed", "exit_code": 1, "publication": "fail"}
+  "quality": {"score": 86.2, "grade": "B", "status": "passed", "exit_code": 0, "publication": "incomplete"},
+  "regressed": {"score": 72.8, "grade": "C", "status": "failed", "exit_code": 1, "publication": "fail"}
 }

@@ -68,7 +68,7 @@ def quality_report():
     return {
         "overall_status": "passed",
         "overall_passed": True,
-        "quality_summary": [{"overall_score": 84.5, "grade": "B"}],
+        "quality_summary": [{"overall_score": 86.2, "grade": "B"}],
         "publication_status": "incomplete",
         "publication": {"eligible": False, "reasons": ["Live evaluation did not run"]},
     }

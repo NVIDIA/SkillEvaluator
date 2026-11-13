@@ -13,8 +13,8 @@ directory, adds this folder's task and input fixture, then executes the real
 text-analysis script and CLI. It compares their results to `expected.json`:
 
 - The fixture has 4 words, 2 lines, 27 characters and 2 sentences.
-- Original documentation scores 84.5/100 (B) and passes the explicit 80 threshold.
-- A separate, deliberately shortened copy scores 71/100 (C) and fails that same
+- Original documentation scores 86.2/100 (B) and passes the explicit 80 threshold.
+- A separate, deliberately shortened copy scores 72.8/100 (C) and fails that same
   threshold. The runner expects that command's exit code 1, then exits 0 itself.
 - The passing report still has `publication_status: incomplete`: static quality
   is not security coverage or evidence that an agent benefits from the skill.

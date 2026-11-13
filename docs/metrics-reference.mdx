@@ -451,7 +451,7 @@ Quality = 0.35 * Correctness
 
 | Area | Weight | What triggers a deduction |
 | --- | --- | --- |
-| Correctness | 35% | XML tags in frontmatter, the name or the description (15 each), invalid or reserved name (15 each), missing `version` or `metadata.author` / `metadata.tags` (5 each), Windows-style paths (10), `SKILL.md` linking to `README.md` (5), no examples (5), plus the type-specific checks below |
+| Correctness | 35% | XML tags in frontmatter, the name or the description (15 each), invalid or reserved name (15 each), missing `metadata.author` / `metadata.tags` (5 each), Windows-style paths (10), `SKILL.md` linking to `README.md` (5), no examples (5), plus the type-specific checks below |
 | Discoverability | 25% | Description under 20 characters (20), vague words (15), first or second person (15), no trigger wording (10), short or non-conforming skill name (10 each), over 200 characters (5), no `## Purpose` (5), broad description with no negative triggers (5) |
 | Reliability | 25% | No mention of error handling (10), missing `## Prerequisites`, `## Limitations`, `## Troubleshooting` (5 each), scripts or library modules with no error handling (5) |
 | Efficiency | 15% | Over the 5,000 estimated-token budget (15), instructions with no action verbs (15), deeply nested references (10), high line repetition (10), corporate buzzwords, non-descriptive reference filenames, non-doc files in `references/`, instructions not in list format (5 each) |

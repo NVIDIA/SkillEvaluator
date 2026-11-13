@@ -76,7 +76,7 @@ print(json.dumps({
     )
     assert json.loads(result.stdout) == {
         "passed": [True, True, True, True],
-        "scores": [67.8, 67.8, 67.8, 67.8],
+        "scores": [69.5, 69.5, 69.5, 69.5],
         "explicit_override_passed": False,
     }
 
@@ -85,7 +85,7 @@ def test_raising_efficiency_severity_keeps_cli_minimum_score_failure(
     below_threshold_skill: Path, tmp_path: Path
 ) -> None:
     result = QualityScoreValidator(min_score=70).validate(below_threshold_skill)
-    assert result.metadata["quality_scores"]["overall_score"] == 67.8
+    assert result.metadata["quality_scores"]["overall_score"] == 69.5
     assert not result.passed
     policy = tmp_path / "stricter-policy.yaml"
     policy.write_text("severity_overrides:\n  QUALITY.quality_efficiency: medium\n", encoding="utf-8")
@@ -111,7 +111,7 @@ def test_raising_efficiency_severity_keeps_cli_minimum_score_failure(
     assert stricter.exit_code == 1, stricter.output
     output = strip_terminal_controls(stricter.output)
     assert "[PASS] All validations passed" not in output
-    assert "67.8/100 is below the required 70/100" in output
+    assert "69.5/100 is below the required 70/100" in output
 
 
 def test_pipeline_explains_minimum_score_failure(below_threshold_skill: Path) -> None:
@@ -123,7 +123,7 @@ def test_pipeline_explains_minimum_score_failure(below_threshold_skill: Path) ->
     assert "".join(result.gate_failures[0].split()) in "".join(fix_text.split())
     fix = first_fix([result])
     assert fix is not None
-    assert "67.8/100 is below the required 70/100" in fix[0][0]
+    assert "69.5/100 is below the required 70/100" in fix[0][0]
 
 
 def test_json_report_includes_minimum_score_failure(below_threshold_skill: Path) -> None:

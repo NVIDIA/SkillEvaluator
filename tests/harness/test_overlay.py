@@ -111,6 +111,22 @@ def test_symlinked_skill_folder_counts_where_the_link_is(tmp_path: Path):
     assert skill_facts(link)["install_root"] == ".claude/skills"
 
 
+def test_parent_segments_do_not_make_a_false_root(tmp_path: Path):
+    _skill(tmp_path)
+    (tmp_path / ".claude" / "skills").mkdir(parents=True)
+
+    assert skill_facts(tmp_path / ".claude" / "skills" / ".." / ".." / "skills" / "demo-skill")["install_root"] is None
+
+
+def test_missing_home_folder_does_not_stop_the_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    def no_home() -> Path:
+        raise RuntimeError("no home")
+
+    monkeypatch.setattr(Path, "home", no_home)
+
+    assert skill_facts(_rooted(tmp_path))["install_root"] == ".agents/skills"
+
+
 def test_manifest_file_target_checks_its_skill(tmp_path: Path):
     result = HarnessValidator("claude-code").validate(_rooted(tmp_path) / "SKILL.md")
 

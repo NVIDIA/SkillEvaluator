@@ -2776,10 +2776,8 @@ def validate(
         apply_policy(results, policy)
     tier1_ok, tier1_rows = summarize_tier1(results, lineup=check_lineup)
     harness_rows = harness_block(results)
-    if harness_rows and quiet:
+    if harness_rows:
         view.set_harness(harness_panel(harness_rows, width=view.width, verbose=verbose), harness_note(harness_rows))
-    elif harness_rows:
-        console.print(harness_panel(harness_rows, verbose=True))
     view.tier_done(0, failed=not tier1_ok, rows=tier1_rows)
     tier1_gate_results = list(results)
     tier2_gate_results: list[ValidationResult] = []
@@ -3071,6 +3069,8 @@ def validate(
             agent_eval=agent_eval,
             presentation_context=presentation_context,
         )
+    if harness_rows and not quiet:
+        console.print(harness_panel(harness_rows, verbose=True))
     if gate_failed:
         raise click.ClickException("validation failed")
 

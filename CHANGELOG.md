@@ -731,10 +731,12 @@ All notable changes to SkillEvaluator are documented in this file.
   missing-reference warning above, when the report lists a `missing` reference
   on a line that has no ledger row, lists an `ambiguous` reference on any
   line, or flags one of its lists as truncated with a key that ends in
-  `_truncated`, such as `ledger_exceptions_truncated`. Only the line of a
-  ledger row is checked for a file left out of the scanned copy, so the line of
-  a reference without a row, or one that a truncated list left out, could name
-  a file such as `versions/install.sh` and pass unnoticed.
+  `_truncated`, such as `ledger_exceptions_truncated`. A `partial` report whose
+  only listed gap is a referenced image no longer passes with the image
+  warning alone in those cases either. Only the line of a ledger row is checked
+  for a file left out of the scanned copy, so the line of a reference without a
+  row, or one that a truncated list left out, could name a file such as
+  `versions/install.sh` and pass unnoticed.
 
 - A PII finding no longer keeps its `evidence_sha256` after CI redaction masks
   a credential inside the value the finding reports. In 0.8.0 the finding kept

@@ -2299,6 +2299,21 @@ def _skillspector_missing_references_have_rows(references: list, rows: list[Mapp
     return True
 
 
+def _skillspector_reference_evidence_unmatched(completeness: Mapping[str, object]) -> bool:
+    """Whether a report whose ledger has no missing-reference row lists a gap that nothing reads.
+
+    SkillSpector gives every ``missing`` or ``ambiguous`` reference a ledger
+    row, so with none, such an entry in the ``references`` of *completeness*
+    names a line that no check reads, and a ``*_truncated`` flag means a row
+    may have been cut off. The report is then not accepted on the strength of
+    its other gaps, such as a referenced image.
+    """
+    references = completeness.get("references")
+    return _skillspector_flags_truncation(completeness) or (
+        isinstance(references, list) and not _skillspector_missing_references_have_rows(references, [])
+    )
+
+
 def _skillspector_missing_reference_notes(
     ledger_exceptions: list[dict],
     analyzer_statuses: list[dict],
@@ -3745,14 +3760,18 @@ class SecurityValidator(ValidatorBase):
                         # incomplete.
                         accepted_reference_caveats = None
                     if gap_notes is None:
-                        raster_note = _skillspector_passive_raster_note(
-                            ledger_exceptions,
-                            analyzer_statuses,
-                            counts,
-                            limitations,
-                            analysis_completeness.get("scope_exclusions", []),
-                            data.get("components"),
-                            scanned_root,
+                        raster_note = (
+                            None
+                            if _skillspector_reference_evidence_unmatched(analysis_completeness)
+                            else _skillspector_passive_raster_note(
+                                ledger_exceptions,
+                                analyzer_statuses,
+                                counts,
+                                limitations,
+                                analysis_completeness.get("scope_exclusions", []),
+                                data.get("components"),
+                                scanned_root,
+                            )
                         )
                         gap_notes = None if raster_note is None else [raster_note]
                     if accepted_reference_caveats is not None:

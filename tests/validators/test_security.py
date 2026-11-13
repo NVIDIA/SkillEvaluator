@@ -36,6 +36,7 @@ from skillevaluator.validators.security import (
     _skillspector_name_keys,
     _skillspector_reference_caveat_error,
     _skillspector_reference_caveat_notes,
+    _skillspector_reference_evidence_unmatched,
     _skillspector_reference_line_avoids,
     _skillspector_reference_row_is_advisory,
     _skillspector_report_path_is_bundled_file,
@@ -9670,6 +9671,19 @@ class TestSkillspectorMissingReferences:
             for value in (False, None):
                 assert not refused(**{flag: value}), (flag, value)
 
+    def test_reference_evidence_without_a_row_is_unmatched(self) -> None:
+        resolved = {"source_path": "SKILL.md", "line": 8, "status": "resolved"}
+        missing = {"source_path": "SKILL.md", "line": 10, "status": "missing"}
+
+        assert not _skillspector_reference_evidence_unmatched({})
+        assert not _skillspector_reference_evidence_unmatched({"references": None})
+        assert not _skillspector_reference_evidence_unmatched({"references": [resolved, {"status": "rejected"}, "x"]})
+        assert not _skillspector_reference_evidence_unmatched({"references": [resolved], "references_truncated": False})
+        assert _skillspector_reference_evidence_unmatched({"references": [resolved, missing]})
+        assert _skillspector_reference_evidence_unmatched({"references": [{**missing, "status": "ambiguous"}]})
+        assert _skillspector_reference_evidence_unmatched({"references": [], "ledger_exceptions_truncated": True})
+        assert _skillspector_reference_evidence_unmatched({"ledger_exceptions_truncated": 1})
+
     def test_pre_2_12_unresolved_row_needs_a_missing_reference_on_its_line(self) -> None:
         row = _reference_report("2.11.2")["analysis_completeness"]["ledger_exceptions"][0]
         missing = {"source_path": "SKILL.md", "line": 10, "status": "missing"}
@@ -10642,7 +10656,17 @@ class TestSkillspectorMissingReferences:
         ]
 
     @pytest.mark.parametrize(
-        "case", ["both", "image-only", "not-an-image", "ambiguous-reference", "line-names-a-left-out-file"]
+        "case",
+        [
+            "both",
+            "image-only",
+            "image-only-with-an-unmatched-missing-reference",
+            "image-only-with-an-ambiguous-reference",
+            "image-only-with-a-truncated-list",
+            "not-an-image",
+            "ambiguous-reference",
+            "line-names-a-left-out-file",
+        ],
     )
     @patch("skillevaluator.validators.security.Tools")
     def test_missing_reference_with_a_referenced_image(self, mock_tools, tmp_path: Path, case: str) -> None:
@@ -10658,8 +10682,16 @@ class TestSkillspectorMissingReferences:
         (skill / "assets" / "logo.png").write_bytes(b"not an image" if case == "not-an-image" else _png_bytes())
         payload = _reference_report("2.13.3", "image-and-missing")
         completeness = payload["analysis_completeness"]
-        if case == "image-only":
+        if case.startswith("image-only"):
             completeness["ledger_exceptions"] = completeness["ledger_exceptions"][1:]
+            if case == "image-only":
+                # SkillSpector records every missing reference with a row, so no row means no such reference.
+                completeness["references"] = [r for r in completeness["references"] if r["status"] != "missing"]
+            elif case.endswith("ambiguous-reference"):
+                completeness["references"][1]["status"] = "ambiguous"
+            elif case.endswith("truncated-list"):
+                completeness["references"] = [r for r in completeness["references"] if r["status"] != "missing"]
+                completeness["ledger_exceptions_truncated"] = True
         elif case == "ambiguous-reference":
             completeness["ledger_exceptions"][0]["reason_code"] = "reference_unresolved"
 

@@ -12,13 +12,14 @@ from typing import Any
 
 import yaml
 
-from skillevaluator.constants import SKILL_MANIFEST_VARIANTS
+from skillevaluator.constants import DESCRIPTION_TRIGGER_PATTERN, SKILL_MANIFEST_VARIANTS
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 from skillevaluator.validators.schema import _duplicate_frontmatter_keys
 
 PROFILES_DIR = Path(__file__).parent / "profiles"
 HARNESS_STATUSES = ("loads", "degraded", "not_loaded")
 _EFFECT_RANK = {"advisory": 0, "degraded": 1, "not_loaded": 2}
+_TRIGGER_RE = re.compile(DESCRIPTION_TRIGGER_PATTERN, re.IGNORECASE)
 _CLAUDE_ONLY_FIELDS = (
     "argument-hint",
     "when_to_use",
@@ -67,9 +68,11 @@ class HarnessResult:
     version: str
     verified_date: str
     findings: list[dict[str, str]] = field(default_factory=list)
+    listed: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "listed": self.listed,
             "harness": self.harness,
             "display_name": self.display_name,
             "status": self.status,
@@ -160,26 +163,52 @@ def skill_facts(skill_path: Path) -> dict[str, Any]:
     """Compute the facts profile rules refer to."""
     manifest, raw, text, fm_yaml, data = _read_manifest(skill_path)
     description = data.get("description")
+    trigger = _TRIGGER_RE.search(description) if isinstance(description, str) else None
     root, depth = _install_root(skill_path)
     custom = {k: v for k, v in data.items() if str(k) not in _KNOWN_FIELDS}
     name = _skill_name(skill_path, data)
     return {
         "skill_name": name,
+        "description_text": description if isinstance(description, str) else "",
         "install_root": root,
         "grouping_depth": depth,
         "frontmatter_missing": manifest.is_file() and FRONTMATTER_PATTERN.match(text) is None,
+        "description_missing": "description" not in data,
+        "description_empty": isinstance(description, str) and not description.strip(),
         "description_type": type(description).__name__ if description is not None else "none",
+        "description_codepoints": len(description) if isinstance(description, str) else 0,
+        "description_has_quote": isinstance(description, str) and '"' in description,
+        "description_utf16_units": len(description.encode("utf-16-le")) // 2 if isinstance(description, str) else 0,
+        "trigger_offset": trigger.start() if trigger else None,
+        "name_missing": "name" not in data,
         "frontmatter_bom": raw.startswith(b"\xef\xbb\xbf"),
         "frontmatter_duplicate_keys": bool(_duplicate_frontmatter_keys(fm_yaml)),
         "frontmatter_tab_indent": _tab_indent_breaks_yaml(fm_yaml),
         "custom_fields": ", ".join(map(str, custom)),
         "custom_field_chars": sum(len(v) if isinstance(v, str) else len(yaml.safe_dump(v)) for v in custom.values()),
+        "description_over": max(0, (len(description) if isinstance(description, str) else 0) - 1024),
+        "utf16_over": max(0, (len(description.encode("utf-16-le")) // 2 if isinstance(description, str) else 0) - 1024),
     }
 
 
 def facts_for(skills: list[Path]) -> dict[Path, dict[str, Any]]:
     """Facts per skill."""
     return {skill: skill_facts(skill) for skill in skills}
+
+
+def listed_description(profile: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
+    """What the profile says this harness puts in the model's skill list for the description."""
+    listing = profile.get("listing") or {}
+    text = facts["description_text"]
+    limit = listing.get("drop_over_utf16")
+    if limit and facts["description_utf16_units"] > limit:
+        return {"mode": "dropped", "text": ""}
+    if not text or (listing.get("name_only_over") and len(text) > listing["name_only_over"]):
+        return {"mode": "name_only", "text": ""}
+    cut = listing.get("cut")
+    if cut and len(text) > cut:
+        return {"mode": "cut", "text": text[:cut], "limit": cut}
+    return {"mode": "full", "text": text}
 
 
 class _Rule:
@@ -320,6 +349,7 @@ def evaluate_profile(
         version=str(verified.get("version", "")),
         verified_date=str(verified.get("date", "")),
         findings=findings,
+        listed=listed_description(profile, facts),
     )
 
 

@@ -8,6 +8,9 @@ limits: {scan_depth: unlimited, desc_cap: none, list_cap: none, tool_output: "2,
 listing: {}
 rules:
   - {id: OC-ROOT, when: "install_root not in roots", effect: not_loaded, outcome: not found, message: "OpenCode reads .opencode, .claude and .agents skill folders.", fix: "Install it under .opencode/skills, .claude/skills or .agents/skills."}
+  - {id: OC-NAME-MISSING, when: "name_missing", effect: not_loaded, outcome: rejected, message: "Skill dropped: OpenCode requires a name.", fix: "Add a name field matching the folder name."}
+  - {id: OC-DESC-MISSING, when: "description_missing or description_type != 'str'", effect: not_loaded, message: "Loaded but hidden from the model's skill list (no string description).", fix: "Add a non-empty string description."}
+  - {id: OC-DESC-EMPTY, when: "description_empty", effect: degraded, message: "Listed by name only.", fix: "Add a non-empty string description."}
   - {id: OC-DUP-KEY, when: "frontmatter_duplicate_keys", effect: not_loaded, outcome: rejected, message: "Skill dropped: duplicate frontmatter keys.", fix: "Remove the duplicate frontmatter key."}
   - {id: OC-FM-STRIPPED, when: "custom_field_chars > 200", effect: advisory, message: "Frontmatter is stripped when the skill is used, so the text in {custom_fields} never reaches the model.", fix: "Move instructions from frontmatter into the SKILL.md body."}
 notes:

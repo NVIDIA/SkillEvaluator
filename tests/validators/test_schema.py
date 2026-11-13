@@ -1229,7 +1229,7 @@ class TestMetadataIdContract:
         (skill_dir / "SKILL.md").write_text(
             f"""---
 name: {name}
-description: A skill used by the test suite to check the metadata.id contract
+description: Use when testing the metadata.id contract. A skill used by the test suite to check the contract
 metadata:
   author: Jane Doe <jane@example.com>
 {id_block}---
@@ -1422,7 +1422,7 @@ class TestCollectionAdvisoryIdentity:
         (skill_dir / "SKILL.md").write_text(
             f"""---
 name: {name}
-description: A skill used by the test suite to check collection-level advisory handling
+description: Use when testing collection advisories. A skill used by the test suite to check collection-level advisory handling
 metadata:
   author: {author_line}
 {id_block}---
@@ -1613,6 +1613,37 @@ class TestSchemaPortabilityChecks:
 
         assert result.passed, result.errors
         assert [f.severity for f in _checks(result, "manifest_bom")] == ["medium"]
+
+    def test_description_over_utf16_limit_is_medium(self, tmp_path: Path):
+        description = "Use when testing. " + "\U0001f600" * 600
+        fm = _BASE_FM.replace("Use when checking harness portability of a skill.", description)
+        result = SchemaValidator().validate(_write_skill(tmp_path, fm))
+
+        findings = _checks(result, "description_utf16_length")
+        assert result.passed, result.errors
+        assert [f.metadata["utf16_units"] for f in findings] == [len(description.encode("utf-16-le")) // 2]
+
+    def test_bmp_description_at_limit_has_no_utf16_finding(self, tmp_path: Path):
+        fm = _BASE_FM.replace("Use when checking harness portability of a skill.", "Use when x. " + "a" * 1012)
+        result = SchemaValidator().validate(_write_skill(tmp_path, fm))
+
+        assert not _checks(result, "description_utf16_length")
+
+    @pytest.mark.parametrize(
+        ("description", "expected"),
+        [
+            ("Formats tables. Use when the user asks for a table.", False),
+            ("Use this skill to format tables in reports.", False),
+            ("Formats tables, charts and other structured report content nicely. Use when needed.", True),
+            ("Formats tables in reports.", True),
+        ],
+    )
+    def test_description_trigger_window(self, tmp_path: Path, description: str, expected: bool):
+        fm = _BASE_FM.replace("Use when checking harness portability of a skill.", description)
+        findings = _checks(SchemaValidator().validate(_write_skill(tmp_path, fm)), "description_trigger")
+
+        assert bool(findings) is expected
+        assert all(f.severity == "low" for f in findings)
 
     def test_portability_severity_can_be_overridden_by_policy(self, tmp_path: Path):
         from skillevaluator.validators.policy import ValidationPolicy

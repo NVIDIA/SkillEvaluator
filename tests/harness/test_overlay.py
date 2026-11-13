@@ -80,6 +80,24 @@ def test_bom_is_not_loaded_by_codex_only(tmp_path: Path):
     assert {h for h, s in status.items() if s != "loads"} == {"codex"}
 
 
+def test_utf16_overflow_is_not_loaded_by_copilot(tmp_path: Path):
+    status = _status(_skill(tmp_path, desc="Use when testing emoji. " + "\U0001f600" * 600))
+
+    assert status["copilot-cli"] == "not_loaded"
+    assert status["codex"] == "loads"
+
+
+def test_copilot_shows_body_for_missing_description_but_drops_non_string(tmp_path: Path):
+    skill = tmp_path / "skills" / "no-desc"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: no-desc\n---\nCustom skill\n", encoding="utf-8")
+    rows = _rows(skill)
+    assert rows["copilot-cli"]["status"] == "degraded"
+    assert "CP-DESC-MISSING" in _ids(rows, "copilot-cli") and "CP-STRICT-YAML" not in _ids(rows, "copilot-cli")
+    listed = _skill(tmp_path / "list", desc="[a, b]")
+    assert "CP-STRICT-YAML" in _ids(_rows(listed), "copilot-cli")
+
+
 def test_install_root_only_applies_inside_known_harness_roots(tmp_path: Path):
     skill = tmp_path / ".claude" / "skills" / "demo-skill"
     skill.parent.mkdir(parents=True)
@@ -283,6 +301,45 @@ def test_harness_check_command_rejects_unknown_harness(tmp_path: Path):
     assert "Unknown harness: nope" in result.output
 
 
+def _rows(skill: Path) -> dict[str, dict]:
+    return {r.harness: r.to_dict() for r in evaluate_harnesses(skill)}
+
+
+def _ids(rows: dict[str, dict], harness: str) -> set[str]:
+    return {f["id"] for f in rows[harness]["findings"]}
+
+
+def test_listed_description_projection(tmp_path: Path):
+    desc = "Use when " + "a" * 1600
+    rows = _rows(_skill(tmp_path, desc=desc))
+
+    assert rows["hermes"]["listed"] == {"mode": "cut", "text": desc[:60], "limit": 60}
+    assert rows["claude-code"]["listed"]["limit"] == 1536
+    assert rows["codex"]["listed"]["limit"] == 1024
+    assert rows["copilot-cli"]["listed"]["mode"] == "dropped"
+    assert rows["opencode"]["listed"]["mode"] == rows["openclaw"]["listed"]["mode"] == "full"
+
+
+def test_fix_reaches_findings_and_panels(tmp_path: Path):
+    skill = _skill(tmp_path, desc="Use when testing emoji. " + "\U0001f600" * 600)
+    result = HarnessValidator().validate(skill)
+    finding = next(f for f in result.findings if f.check_name == "CP-DESC-LIMIT")
+
+    assert finding.suggestion == "Cut the description by at least 200 UTF-16 units."
+    out = CliRunner().invoke(cli, ["harness-check", str(skill), "-v"], env={"COLUMNS": "120"}).output
+    assert "→ Cut the description by at least 200 UTF-16 units." in out
+    assert "Description in the model's skill list" in out
+
+
+@pytest.mark.parametrize(("harness", "rule"), [("codex", "CX-DESC-CUT"), ("copilot-cli", "CP-DESC-LIMIT")])
+def test_description_limit_is_1024(tmp_path: Path, harness: str, rule: str):
+    at = _rows(_skill(tmp_path / "at", desc="Use when " + "a" * 1015))
+    over = _rows(_skill(tmp_path / "over", desc="Use when " + "a" * 1016))
+
+    assert rule not in _ids(at, harness)
+    assert any(f["id"] == rule and "1 over" in f["message"] for f in over[harness]["findings"])
+
+
 def test_tier1_summary_gives_harness_its_own_line(tmp_path: Path):
     results = run_validation(_rooted(tmp_path), checks="schema,harness", harness="all")
     _, rows = summarize_tier1(results)
@@ -290,6 +347,12 @@ def test_tier1_summary_gives_harness_its_own_line(tmp_path: Path):
 
     assert labels["harness"].startswith("1 not loaded")
     assert "harness" not in labels.get("advisories", "")
+
+
+def test_quotes_in_description_are_escaped_in_copilot_and_openclaw_lists(tmp_path: Path):
+    rows = _rows(_skill(tmp_path, desc='Use when asked to "summarize" a file.'))
+    assert "CP-DESC-ESCAPED" in _ids(rows, "copilot-cli") and "OW-DESC-ESCAPED" in _ids(rows, "openclaw")
+    assert "CC-DESC-ESCAPED" not in _ids(rows, "claude-code") and rows["copilot-cli"]["status"] == "loads"
 
 
 def _rule_ids(skill: Path, harness: str, config: dict | None = None) -> set[str]:

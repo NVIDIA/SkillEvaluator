@@ -138,6 +138,29 @@ def _detail_grid(rows: list[dict[str, Any]], verbose: bool) -> Table | None:
     return grid if grid.row_count else None
 
 
+_LISTING = {
+    "cut": "cut to {limit} chars",
+    "name_only": "name only",
+    "dropped": "not listed",
+    "shortened": "shortened (over list budget)",
+}
+
+
+def _listing_grid(rows: list[dict[str, Any]]) -> Table | None:
+    grid = Table.grid(padding=(0, 2), expand=True)
+    grid.add_column(no_wrap=True, style=TEXT)
+    grid.add_column(no_wrap=True, style=MUTED)
+    grid.add_column(ratio=1, style=MUTED)
+    for row in rows:
+        listed = row.get("listed") or {}
+        if listed.get("mode", "full") == "full":
+            continue
+        text = listed.get("text", "")
+        shown = f"“{text[:57]}…”" if len(text) > 57 else f"“{text}”" if text else "-"
+        grid.add_row(row["harness"], _LISTING[listed["mode"]].format(limit=listed.get("limit", "")), shown)
+    return grid if grid.row_count else None
+
+
 def _subtitle(rows: list[dict[str, Any]]) -> tuple[Text, str]:
     done = [row for row in rows if row["status"] not in ("pending", "checking")]
     if len(done) < len(rows):
@@ -170,6 +193,9 @@ def harness_panel(
         grid = _detail_grid(rows, verbose) if verbose else _compact_grid(rows)
         if grid is not None:
             parts.extend([Text(), grid])
+        listing = _listing_grid(rows) if verbose else None
+        if listing is not None:
+            parts.extend([Text(), Text("Description in the model's skill list (from the profile):", MUTED), listing])
     flagged = any(row.get("findings") for row in all_rows)
     if footer and (flagged or verbose):
         parts.extend([Text(), Text(footer + ("" if verbose else VERBOSE_HINT), MUTED)])

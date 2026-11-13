@@ -235,8 +235,8 @@ def skill_facts(skill_path: Path) -> dict[str, Any]:
         "description_type": type(description).__name__ if description is not None else "none",
         "description_codepoints": len(description) if isinstance(description, str) else 0,
         "description_has_quote": isinstance(description, str) and '"' in description,
-        "description_utf16_units": len(description.encode("utf-16-le")) // 2 if isinstance(description, str) else 0,
-        "trigger_offset": trigger.start() if trigger else None,
+        "description_utf16_units": _utf16_units(description),
+        "trigger_end": trigger.end() if trigger else None,
         "name_missing": "name" not in data,
         "frontmatter_bom": raw.startswith(b"\xef\xbb\xbf"),
         "frontmatter_duplicate_keys": bool(_duplicate_frontmatter_keys(fm_yaml)),
@@ -252,6 +252,10 @@ def skill_facts(skill_path: Path) -> dict[str, Any]:
 def facts_for(skills: list[Path]) -> dict[Path, dict[str, Any]]:
     """Facts per skill."""
     return {skill: skill_facts(skill) for skill in skills}
+
+
+def _utf16_units(value: Any) -> int:
+    return len(value.encode("utf-16-le", "surrogatepass")) // 2 if isinstance(value, str) else 0
 
 
 def listed_description(profile: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:

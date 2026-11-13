@@ -772,7 +772,7 @@ class SchemaValidator(ValidatorBase):
             )
 
         description = frontmatter.description
-        utf16_units = len(description.encode("utf-16-le")) // 2
+        utf16_units = len(description.encode("utf-16-le", "surrogatepass")) // 2
         if len(description) <= DESCRIPTION_MAX_LENGTH < utf16_units:
             findings.append(
                 self._portability_finding(
@@ -787,8 +787,8 @@ class SchemaValidator(ValidatorBase):
             )
 
         trigger = _TRIGGER_RE.search(description)
-        if trigger is None or trigger.start() >= DESCRIPTION_TRIGGER_WINDOW:
-            where = "no 'Use when ...' trigger" if trigger is None else f"trigger starts at character {trigger.start()}"
+        if trigger is None or trigger.end() > DESCRIPTION_TRIGGER_WINDOW:
+            where = "no 'Use when ...' trigger" if trigger is None else f"its trigger at characters {trigger.start()}-{trigger.end()}"
             findings.append(
                 self._portability_finding(
                     "description_trigger",

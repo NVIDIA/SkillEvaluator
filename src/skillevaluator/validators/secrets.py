@@ -26,9 +26,10 @@ from skillevaluator.utils.tool_runner import (
 from skillevaluator.validators.base import Finding, ValidationResult, ValidatorBase
 
 # Directory names Gitleaks skips at any depth. Unlike the file-walk scans, it
-# keeps ``evals/`` in scope because evals.json, graders and task inputs are
-# authored and published with the skill. ``.evals/`` is treated the same way,
-# as SkillSpector treats it. Generated output below either, such as
+# keeps ``evals/`` in scope because evals.json, graders and task inputs there
+# are authored and covered by the publication digest. ``.evals/`` stays in
+# scope too, as it does for SkillSpector, although the digest leaves out a
+# root ``.evals/``. Generated output below either, such as
 # ``evals/results/``, still matches the ``results`` entry.
 _GITLEAKS_EXCLUDED_DIRS = SCAN_EXCLUDED_DIRS - {"evals", ".evals"}
 

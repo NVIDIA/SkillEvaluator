@@ -349,9 +349,9 @@ class TestSkillspectorFilteredCopy:
 # =============================================================================
 
 
-# Eval definition dirs hold authored, published files (evals.json, graders,
-# task inputs), so Gitleaks keeps them in scope; only generated output below
-# them is skipped.
+# Gitleaks keeps eval definition dirs in scope: evals/ holds authored
+# evals.json, graders and task inputs, and .evals/ is scanned the same way, as
+# SkillSpector scans it. Only generated output below them is skipped.
 _AUTHORED_EVAL_DIRS = frozenset({"evals", ".evals"})
 
 

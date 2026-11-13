@@ -248,6 +248,25 @@ def _paths(items: list[str]) -> str:
     return ", ".join(items[:3]) + (f" +{len(items) - 3} more" if len(items) > 3 else "")
 
 
+def _read_text(path: Path) -> tuple[int, list[str]] | None:
+    """Size and lines of a text file a harness could read; None for binary data and files that can't be read.
+
+    The check is advisory, so anything odd is skipped instead of raised: binary data (a NUL byte in the
+    first 8 KiB), a pipe or device that would block, a broken or looping link, a file without permission.
+    """
+    try:
+        if not path.is_file():
+            return None
+        with path.open("rb") as handle:
+            head = handle.read(8192)
+            if b"\0" in head:
+                return None
+            data = head + handle.read()
+    except OSError:
+        return None
+    return len(data), data.decode("utf-8", "replace").splitlines()
+
+
 def _bundle_facts(skill_path: Path, manifest: Path) -> dict[str, Any]:
     base = skill_path.resolve()
     links, escapes, sizes, long_lines, unlisted = [], [], [], [], []
@@ -255,18 +274,21 @@ def _bundle_facts(skill_path: Path, manifest: Path) -> dict[str, Any]:
         rel = path.relative_to(skill_path).as_posix()
         if path.is_symlink():
             links.append(rel)
-            target = path.resolve()
-            if target != base and base not in target.parents:
-                escapes.append(rel)
-            continue
-        lines = path.read_bytes().decode("utf-8", "replace").splitlines()
-        sizes.append((rel, path.stat().st_size, len(lines)))
-        long_lines += [rel] * sum(len(line) > 2000 for line in lines)
-        if rel.split("/", 1)[0] not in _HERMES_LINKED_DIRS:
+            target = Path(os.path.realpath(path))  # unlike Path.resolve(), no error on a symlink loop
+            if target == base or base in target.parents:
+                continue  # counted under its own path
+            escapes.append(rel)  # OpenCode follows it, so what it points to is read (and cut) like any file
+        elif rel.split("/", 1)[0] not in _HERMES_LINKED_DIRS:
             unlisted.append(rel)
+        text = _read_text(path)
+        if text is not None:
+            size, lines = text
+            sizes.append((rel, size, len(lines)))
+            long_lines += [rel] * sum(len(line) > 2000 for line in lines)
     largest = max(sizes, key=lambda item: item[1], default=("", 0, 0))
     paged = [rel for rel, size, count in sizes if size > 51200 or count > 2000]
-    multi_read = [rel for rel, size, _ in sizes if size > 64000]
+    # Only OpenCode is known to follow symlinks to files outside the skill; OpenClaw's reads are not tested there.
+    multi_read = [rel for rel, size, _ in sizes if size > 64000 and rel not in escapes]
     return {
         "resource_symlinks": len(links),
         "resource_symlink_paths": _paths(links),

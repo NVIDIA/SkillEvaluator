@@ -529,6 +529,18 @@ def _skillspector_provider_retry_row(row: object) -> bool:
     )
 
 
+def _skillspector_flags_truncation(container: Mapping[str, object]) -> bool:
+    """Return whether a report object has a ``*_truncated`` key that is neither ``false`` nor ``null``.
+
+    SkillSpector flags a list it cut short this way, as in
+    ``ledger_exceptions_truncated``, and what it left out may be a different gap.
+    """
+    return any(
+        isinstance(key, str) and key.endswith("_truncated") and value is not False and value is not None
+        for key, value in container.items()
+    )
+
+
 def _skillspector_provider_retries_exhausted(data: object) -> bool:
     """Return whether a failed LLM-stage report shows only an LLM provider outage.
 
@@ -560,10 +572,7 @@ def _skillspector_provider_retries_exhausted(data: object) -> bool:
         if any(container.get(key) for key in _SKILLSPECTOR_REPORT_FAILURE_MARKERS):
             return False
         # A truncated list may hide a different cause.
-        if any(
-            isinstance(key, str) and key.endswith("_truncated") and value is not False and value is not None
-            for key, value in container.items()
-        ):
+        if _skillspector_flags_truncation(container):
             return False
 
     rows = completeness.get("ledger_exceptions")
@@ -2325,6 +2334,39 @@ def _skillspector_missing_reference_warning(rows: list[Mapping[str, object]]) ->
     )
 
 
+def _skillspector_missing_references_have_rows(references: list, rows: list[Mapping[str, object]]) -> bool:
+    """Whether *references* holds only objects, none ``ambiguous``, each ``missing`` one on the line of a row in *rows*.
+
+    Only the line of a row is read for the names it holds
+    (:func:`_skillspector_reference_line_avoids`), so a ``missing`` entry on
+    any other line, which SkillSpector reported without a row, would never be.
+    """
+    locations = {(row.get("path"), row.get("start_line")) for row in rows}
+    for reference in references:
+        if not isinstance(reference, dict) or reference.get("status") == "ambiguous":
+            return False
+        if reference.get("status") == "missing":
+            path, line = reference.get("source_path"), reference.get("line")
+            if not isinstance(path, str) or type(line) is not int or (path, line) not in locations:
+                return False
+    return True
+
+
+def _skillspector_reference_evidence_unmatched(completeness: Mapping[str, object]) -> bool:
+    """Whether a report whose ledger has no missing-reference row lists a gap that nothing reads.
+
+    SkillSpector gives every ``missing`` or ``ambiguous`` reference a ledger
+    row, so with none, such an entry in the ``references`` of *completeness*
+    names a line that no check reads, and a ``*_truncated`` flag means a row
+    may have been cut off. The report is then not accepted on the strength of
+    its other gaps, such as a referenced image.
+    """
+    references = completeness.get("references")
+    return _skillspector_flags_truncation(completeness) or (
+        isinstance(references, list) and not _skillspector_missing_references_have_rows(references, [])
+    )
+
+
 def _skillspector_missing_reference_notes(
     ledger_exceptions: list[dict],
     analyzer_statuses: list[dict],
@@ -2398,14 +2440,8 @@ def _skillspector_missing_reference_notes(
         ):
             return None
 
-    locations = {(row["path"], row.get("start_line")) for row in reference_rows}
-    for reference in references:
-        if not isinstance(reference, dict) or reference.get("status") == "ambiguous":
-            return None
-        if reference.get("status") == "missing":
-            path, line = reference.get("source_path"), reference.get("line")
-            if not isinstance(path, str) or type(line) is not int or (path, line) not in locations:
-                return None
+    if not _skillspector_missing_references_have_rows(references, reference_rows):
+        return None
 
     notes = [_skillspector_missing_reference_warning(reference_rows)]
     if other_rows:
@@ -4112,14 +4148,18 @@ class SecurityValidator(ValidatorBase):
                         # incomplete.
                         accepted_reference_caveats = None
                     if gap_notes is None:
-                        raster_note = _skillspector_passive_raster_note(
-                            gap_rows,
-                            gap_statuses,
-                            gap_counts,
-                            gap_limitations,
-                            analysis_completeness.get("scope_exclusions", []),
-                            data.get("components"),
-                            scanned_root,
+                        raster_note = (
+                            None
+                            if _skillspector_reference_evidence_unmatched(analysis_completeness)
+                            else _skillspector_passive_raster_note(
+                                gap_rows,
+                                gap_statuses,
+                                gap_counts,
+                                gap_limitations,
+                                analysis_completeness.get("scope_exclusions", []),
+                                data.get("components"),
+                                scanned_root,
+                            )
                         )
                         gap_notes = None if raster_note is None else [raster_note]
                     other_gaps: list[str] = []

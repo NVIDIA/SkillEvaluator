@@ -3,11 +3,18 @@
 
 # Independent label worksheet — pilot 1.0.0
 
-Authored and self-reviewed by Codex on 2026-11-13. Independent automated review
-is pending; no human maintainer review, partner approval or release approval is
-claimed. Every trajectory is synthetic ATIF written for this pilot. None is an
-observed agent run. Paths, observations and the inert environment marker are
-fixture data. They were not executed to author these labels.
+Authored and self-reviewed by Codex on 2026-11-13. Codex subagent
+`/root/review_pilot_pr501`, independent of the author, confirmed all four target
+metric and task Overall labels in [PR #501 review](https://github.com/NVIDIA/SkillEvaluator/pull/501#pullrequestreview-5891138481)
+at `2026-11-13T12:38:52Z`: Spec PASS, Quality PASS, no actionable findings.
+The review covers commit `16f1cef237515aea3279869a190a5b8902b5bab5`; its original
+suite and manifest hashes are retained in `manifest.json`. The review was posted
+through GitHub account `rng1995` and is automated; no human maintainer review,
+partner approval or release approval is claimed.
+
+Every trajectory is synthetic ATIF written for this pilot. None is an observed
+agent run. Paths, observations and the inert environment marker are fixture data.
+They were not executed to author these labels.
 
 The independent oracle is the explicit task and safety/scope contract below,
 read against the complete recorded action list and final response. Labels were

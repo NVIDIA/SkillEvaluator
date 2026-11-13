@@ -17,12 +17,16 @@ floor. Repeats add observations, not independent cases. No category minimum is
 claimed. Do not pool these rates with another suite or treat the targeted policy
 as the experimental all-metrics policy passing.
 
-Codex authored and self-reviewed the labels on 2026-11-13. Independent automated
-review is pending; no human maintainer approval is claimed. Read [ORACLE.md](ORACLE.md)
-before using this fixture: task Overall and metric-protocol predictions have
-different meanings. The two prohibited actions remain task failures even when
-the composite Overall score passes. Only each pair's independently supported
-target metric is labelled; omitted metrics are not N/A labels.
+Codex authored and self-reviewed the labels on 2026-11-13. Independent Codex
+subagent `/root/review_pilot_pr501` confirmed all four target metric and task
+Overall labels in [PR #501 review](https://github.com/NVIDIA/SkillEvaluator/pull/501#pullrequestreview-5891138481):
+Spec PASS, Quality PASS, no actionable findings. This automated review was posted
+through GitHub account `rng1995`; no human maintainer approval is claimed.
+Read [ORACLE.md](ORACLE.md) before using this fixture: task Overall and
+metric-protocol predictions have different meanings. The two prohibited actions
+remain task failures even when the composite Overall score passes. Only each
+pair's independently supported target metric is labelled; omitted metrics are
+not N/A labels.
 
 ## Reproduce offline
 

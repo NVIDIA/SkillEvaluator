@@ -32,6 +32,7 @@ commands referenced below.
 | [similarity-check](#similarity-check) | Detect duplicate content across a collection | Embeddings provider key |
 | [tier3 evaluate](#tier3-evaluate) | Run Tier 3 live agent evaluation | Provider key plus a credential the selected agents can use (one `NVIDIA_API_KEY` covers both on NVIDIA Build), backend (Docker by default) |
 | [tier3 select-decoys](#tier3-select-decoys) | Save a reproducible set of neighboring skills for group evaluation | Local description-embedding catalog, skill collection, embeddings provider key |
+| [tier3 interact](#tier3-interact) | Measure departure from additive skill gains | At least two skills, one reviewed evaluation source, Tier 3 runtime and credentials |
 | [tier3 compare-versions](#tier3-compare-versions) | Compare current and prior retained with-skill scores without writes | Two compatible retained runs |
 | [create-eval-dataset](#create-eval-dataset) | Generate synthetic eval datasets | LLM provider key (none with `--no-llm`) |
 | [init-custom-grader](#init-custom-grader) | Scaffold a bring-your-own-grader starter | Nothing |
@@ -181,7 +182,7 @@ pipeline.
 | --- | --- |
 | `tier1` | `validate`, `quality-check`, `rubric-eval`, `security-scan`, `pii-scan`, `lint-scripts` |
 | `tier2` | `context-optimization-check`, `dedup-scan`, `similarity-check` |
-| `tier3` | `evaluate`, `select-decoys`, `create-eval-dataset`, `migrate-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `feedback`, `validate`, `harbor-view`, `import-metrics`, `import-traces`, `accept-traces` |
+| `tier3` | `evaluate`, `interact`, `select-decoys`, `create-eval-dataset`, `migrate-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `feedback`, `validate`, `harbor-view`, `import-metrics`, `import-traces`, `accept-traces` |
 
 `health-check` and [models](#models) are top-level only. The expert commands
 [tier3 evaluate](#tier3-evaluate), [tier3 select-decoys](#tier3-select-decoys),
@@ -523,6 +524,38 @@ skill's parent directory. Evaluation validates and reuses the selection
 without contacting the embedding provider. See
 [Select a reproducible decoy set](agents-and-sandboxes.mdx#select-a-reproducible-decoy-set)
 for a complete example and the limits of similarity-based selection.
+
+## tier3 interact
+
+Run a fixed-source skill interaction experiment:
+
+```bash
+skillevaluator tier3 interact ./skills/a ./skills/b \
+  --eval-source ./reviewed-suite --n-attempts 3 --agents codex --json
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `SKILLS...` | Required | At least two distinct skill directories. |
+| `--eval-source` | Required | Skill directory containing the reviewed `evals/` source reused for every configuration. |
+| `-a`, `--agents` | Provider-native agent | Comma-separated Harbor agents. |
+| `--model` | Provider/config model | Global agent model override. |
+| `--env-mode` | `docker` | Existing Harbor environment backend. |
+| `--environment-kwarg`, `--ek` | None | Repeatable backend `KEY=VALUE`; never pass secrets. |
+| `--n-attempts` | `1` | Positive fixed attempt budget for every case; disables early stopping. |
+| `--n-concurrent` | Source config or `4` | Concurrent trials within a configuration. |
+| `--metric` | `goal_accuracy` | Outcome metric: `goal_accuracy`, `accuracy`, or `overall` for `custom_only` grading. |
+| `--results-dir` | `SKILLEVALUATOR_RESULTS_DIR` or `interaction-results` beside the source | Output root outside all inputs; home shortcuts and symlinked parents are resolved. |
+| `--harbor-keep-jobs` | Off | Retain raw Harbor jobs alongside collected evidence. |
+| `--json` | Off | Print the complete JSON report on stdout; progress uses stderr. |
+
+Runs baseline, each individual skill, and the combined selection. Saves
+`interaction.json`, fixed-source evidence, and separate Tier 3 results for every
+configuration. Exit 0 means a comparable experiment completed; positive,
+negative, and zero interaction all use exit 0. Exit 1 means incomplete or
+incomparable evidence. Invalid command arguments use Click's usage-error exit.
+See [Skill interaction experiments](/skills/skillevaluator/tier3-live-evaluation#skill-interaction-experiments)
+for the calculation, input restrictions, attempt budget, and interpretation.
 
 ## tier3 compare-versions
 

@@ -61,11 +61,27 @@ class ErrorHandlingConfig(TypedDict):
     lib: CodeErrorHandlingRule
 
 
+class TokenBudgetRule(TypedDict):
+    """Deduction when the estimated SKILL.md token count is above max_tokens."""
+
+    points: int | float
+    message: str
+    suggestion: str
+    max_tokens: int
+
+
+class EfficiencyConfig(TypedDict):
+    """Efficiency rules; a rule with points 0 is skipped."""
+
+    token_budget: TokenBudgetRule
+
+
 class QualityConfig(TypedDict):
     """Validated deterministic quality configuration."""
 
     expected_headers: list[ExpectedHeader]
     error_handling: ErrorHandlingConfig
+    efficiency: EfficiencyConfig
 
 
 class QualityConfigProvenance(TypedDict):
@@ -124,6 +140,12 @@ def _validate_entries(value: object, source: str, location: str, *, ignore_case:
     return list(value)
 
 
+def _validate_positive_int(value: object, source: str, location: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise QualityConfigError(f"{source}: {location} must be a positive integer")
+    return value
+
+
 # Sections made of named rules. Every rule takes points, message and suggestion, plus the one
 # rule-specific key listed here with the function that validates it.
 _RuleSetting = tuple[str, Callable[[object, str, str], object]]
@@ -132,6 +154,9 @@ _RULE_SECTIONS: dict[str, dict[str, _RuleSetting]] = {
         "mentioned": ("terms", partial(_validate_entries, ignore_case=True)),
         "scripts": ("markers", partial(_validate_entries, ignore_case=False)),
         "lib": ("markers", partial(_validate_entries, ignore_case=False)),
+    },
+    "efficiency": {
+        "token_budget": ("max_tokens", _validate_positive_int),
     },
 }
 _TOP_LEVEL_KEYS = frozenset({"expected_headers", *_RULE_SECTIONS})

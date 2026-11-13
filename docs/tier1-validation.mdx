@@ -461,7 +461,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     | Reliability | 25% | Error handling, prerequisites, limitations, troubleshooting, and implementation safeguards |
     | Efficiency | 15% | Estimated token budget, body length, repetition, instruction clarity, and reference use |
 
-    The 5,000-token budget for `SKILL.md` is a recommendation, not a hard limit. Token counts are estimates (characters divided by 4), not tokenizer output: each model family counts differently, and dense files with tables, identifiers or code spans usually have fewer than 4 characters per token, so the estimate runs low. `metrics.estimated_tokens` holds the estimate and `metrics.estimate_method` names how it was made; `metrics.total_tokens` is kept as the same value for existing consumers. A larger `SKILL.md` gets a MEDIUM `quality_efficiency` finding and a 15-point Efficiency deduction. The finding does not fail the check by itself, but the deduction can still take the score below `--min-score`.
+    The 5,000-token budget for `SKILL.md` is a recommendation, not a hard limit. Token counts are estimates (characters divided by 4), not tokenizer output: each model family counts differently, and dense files with tables, identifiers or code spans usually have fewer than 4 characters per token, so the estimate runs low. `metrics.estimated_tokens` holds the estimate and `metrics.estimate_method` names how it was made; `metrics.total_tokens` is kept as the same value for existing consumers. A larger `SKILL.md` gets a MEDIUM `quality_efficiency` finding and a 15-point Efficiency deduction. The finding does not fail the check by itself, but the deduction can still take the score below `--min-score`. The limit and the deduction are set in the quality config file described below.
 
     Grades are A for scores of at least 90, B for at least 80, C for at least 70, D for at least 60, and F below 60. The default `--min-score` is 70. Passing requires the score to reach that minimum and no HIGH or CRITICAL quality findings under the active policy.
 
@@ -486,7 +486,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
       If a quality score changes unexpectedly, inspect the finding message rather than adding keywords. The checker rewards usable instructions and evidence in their relevant context, not vocabulary alone.
     </Tip>
 
-    **Quality config file.** Pass `--quality-config PATH` to `quality-check`, `tier1`, or `validate` to adjust the Reliability rules below. The file has two optional sections, `expected_headers` and `error_handling`. Anything you leave out keeps its packaged value from `quality-default.yaml`, and any list you set replaces the packaged list rather than merging with it.
+    **Quality config file.** Pass `--quality-config PATH` to `quality-check`, `tier1`, or `validate` to adjust the rules below. The file has three optional sections: `expected_headers` and `error_handling` for Reliability, and `efficiency` for the token budget. Anything you leave out keeps its packaged value from `quality-default.yaml`, and any list you set replaces the packaged list rather than merging with it.
 
     **Expected headings.** Reliability deducts points when `SKILL.md` lacks an expected heading. The packaged `quality-default.yaml` expects `## Prerequisites` (or `## Requirements`), `## Limitations`, and `## Troubleshooting` (or `## Common Issues` or `## FAQ`), each worth 5 points. Omit `expected_headers` to keep that list. A list you set replaces it, so copy any default entries you want to keep. Set `expected_headers: []` to turn heading checks off.
 
@@ -541,7 +541,24 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     Each rule also takes `message` and `suggestion`. The `scripts` and `lib` findings append up to three file names to the message, as in `Scripts may lack error handling: run.py`. The `try:`/`except` pair always counts as error handling and is not configurable. See the packaged `quality-default.yaml` for every default term and marker. The `quality_config` digest in the report covers only the rules your file sets, not the packaged values it leaves out, so the digest changes only when your file's rules change.
 
-    The file is checked before any validation runs. A file that is missing, unreadable, not UTF-8, invalid YAML, has an unknown key (such as `point` instead of `points`), lists the same heading twice, has a negative or non-numeric `points`, an empty `terms` or `markers` list, or a repeated entry in one of those lists is a usage error: the command exits with code 2 and names the file and the problem. `validate` checks the file even when `--checks` leaves out `quality`.
+    **Token budget.** Efficiency deducts points when `SKILL.md` is larger than a token limit, set in the `efficiency` section under `token_budget`. As with `error_handling`, an omitted key keeps its packaged value and `points: 0` turns the rule off, so it adds no finding. This file raises the limit and changes nothing else:
+
+    ```yaml title="quality.yaml"
+    efficiency:
+      token_budget:
+        max_tokens: 8000
+    ```
+
+    | Field | Packaged value | Meaning |
+    | --- | --- | --- |
+    | `max_tokens` | `5000` | A positive whole number. The rule deducts when the estimated size of `SKILL.md` is above it; a file estimated at exactly `max_tokens` passes |
+    | `points` | `15` | Non-negative number deducted from Efficiency. `0` turns the rule off |
+    | `message` | See `quality-default.yaml` | Start of the finding message |
+    | `suggestion` | See `quality-default.yaml` | Fix suggestion attached to the finding |
+
+    The size is an estimate, not a tokenizer count: the number of characters in `SKILL.md`, frontmatter included, divided by 4 and rounded down. Files in `references/` and `scripts/` are not counted. The finding appends the estimate and the limit to `message`, as in `Large skill. ...: ~6200 estimated tokens at 4 characters per token, recommended max <5000; a real tokenizer may count more`. Reports show the limit in force as `recommended_max_tokens` in the quality metrics, whether or not the rule is turned off.
+
+    The file is checked before any validation runs. A file that is missing, unreadable, not UTF-8, invalid YAML, has an unknown key (such as `point` instead of `points`), lists the same heading twice, has a negative or non-numeric `points`, a `max_tokens` that is not a positive whole number, an empty `terms` or `markers` list, or a repeated entry in one of those lists is a usage error: the command exits with code 2 and names the file and the problem. `validate` checks the file even when `--checks` leaves out `quality`.
 
     ```text title="Example error"
     Error: Invalid value for '--quality-config': quality.yaml: unknown key(s) in expected_headers[0]: point (allowed: alternatives, heading, message, points, suggestion)

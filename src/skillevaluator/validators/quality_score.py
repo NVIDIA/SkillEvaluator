@@ -34,7 +34,6 @@ from skillevaluator.constants import (
     QUALITY_CHARS_PER_TOKEN,
     QUALITY_DEFAULT_MIN_SCORE,
     QUALITY_EXCLUDED_DIRS,
-    QUALITY_RECOMMENDED_MAX_TOKENS,
     QUALITY_RESERVED_NAMES,
     QUALITY_RESOURCE_DIRS,
 )
@@ -407,7 +406,10 @@ class QualityScoreValidator(ValidatorBase):
             validator_name="QUALITY",
             validator_description=self.description,
         )
-        qs = QualityScoreResult(skill_name=skill_path.name)
+        qs = QualityScoreResult(
+            skill_name=skill_path.name,
+            recommended_max_tokens=self.quality_config["efficiency"]["token_budget"]["max_tokens"],
+        )
 
         manifest = self._find_skill_manifest(skill_path)
         if not manifest:
@@ -864,19 +866,16 @@ class QualityScoreValidator(ValidatorBase):
 
         # The token budget is a recommendation: exceeding it is advisory (MEDIUM),
         # and the deduction still counts toward the --min-score gate.
-        if qs.total_tokens > QUALITY_RECOMMENDED_MAX_TOKENS:
+        budget = self.quality_config["efficiency"]["token_budget"]
+        if budget["points"] and qs.total_tokens > budget["max_tokens"]:
             dim.deduct(
-                15,
+                budget["points"],
                 "warning",
                 (
-                    f"Large skill (~{qs.total_tokens} estimated tokens at {QUALITY_CHARS_PER_TOKEN} characters per token, "
-                    f"recommended max <{QUALITY_RECOMMENDED_MAX_TOKENS}; a real tokenizer may count more). "
-                    f"Per agentskills.io, SKILL.md should be concise (~500 lines) — "
-                    f"large skill bodies increase token cost after invocation; long or unfocused "
-                    f"top-level descriptions can degrade agent routing accuracy"
+                    f"{budget['message']}: ~{qs.total_tokens} estimated tokens at {QUALITY_CHARS_PER_TOKEN} "
+                    f"characters per token, recommended max <{budget['max_tokens']}; a real tokenizer may count more"
                 ),
-                "Keep required sections concise; move detailed examples, reference material, "
-                "and supporting docs to the references/ directory",
+                budget["suggestion"],
             )
 
         # Repetition (compare against non-empty lines to avoid false positives from blank lines)

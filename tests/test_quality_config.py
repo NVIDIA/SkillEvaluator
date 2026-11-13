@@ -466,3 +466,104 @@ def test_digest_does_not_declare_packaged_headings_when_the_key_is_omitted(tmp_p
     assert _digest(omitted) != _digest(empty)
     assert _digest(bare) == quality_config_digest({})
     assert _digest(bare) != _digest(None)
+
+
+PACKAGED_TOKEN_BUDGET = {
+    "points": 15,
+    "message": (
+        "Large skill. Per agentskills.io, SKILL.md should be concise (~500 lines) — large skill bodies increase "
+        "token cost after invocation; long or unfocused top-level descriptions can degrade agent routing accuracy"
+    ),
+    "suggestion": (
+        "Keep required sections concise; move detailed examples, reference material, "
+        "and supporting docs to the references/ directory"
+    ),
+    "max_tokens": 5000,
+}
+
+
+def test_packaged_token_budget_matches_former_hard_coded_values() -> None:
+    token_budget = load_quality_config()["efficiency"]["token_budget"]
+
+    assert token_budget == PACKAGED_TOKEN_BUDGET
+    assert type(token_budget["points"]) is int
+
+
+def test_custom_file_with_only_a_token_limit_keeps_every_other_packaged_value(tmp_path: Path) -> None:
+    config_path = tmp_path / "quality.yaml"
+    config_path.write_text("efficiency:\n  token_budget:\n    max_tokens: 8000\n", encoding="utf-8")
+    packaged = load_quality_config()
+
+    config = load_quality_config(config_path)
+
+    assert config["efficiency"]["token_budget"] == {**PACKAGED_TOKEN_BUDGET, "max_tokens": 8000}
+    assert config["expected_headers"] == packaged["expected_headers"]
+    assert config["error_handling"] == packaged["error_handling"]
+
+
+def test_custom_file_without_efficiency_keeps_the_packaged_token_budget(tmp_path: Path) -> None:
+    assert load_quality_config(_write_config(tmp_path, ""))["efficiency"]["token_budget"] == PACKAGED_TOKEN_BUDGET
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        ("efficiency: []\n", r"efficiency must be a mapping"),
+        ("efficiency:\n", r"efficiency must be a mapping"),
+        ("efficiency:\n  repetition: {}\n", r"unknown key\(s\) in efficiency: repetition"),
+        ("efficiency:\n  token_budget: 8000\n", r"efficiency\.token_budget must be a mapping"),
+        (
+            "efficiency:\n  token_budget:\n    max_token: 8000\n",
+            r"unknown key\(s\) in efficiency\.token_budget: max_token "
+            r"\(allowed: max_tokens, message, points, suggestion\)",
+        ),
+        ("efficiency:\n  token_budget:\n    max_tokens: 0\n", r"efficiency\.token_budget\.max_tokens must be a positive"),
+        ("efficiency:\n  token_budget:\n    max_tokens: -1\n", r"efficiency\.token_budget\.max_tokens must be a positive"),
+        ("efficiency:\n  token_budget:\n    max_tokens: 5000.0\n", r"efficiency\.token_budget\.max_tokens must be a positive"),
+        ("efficiency:\n  token_budget:\n    max_tokens: true\n", r"efficiency\.token_budget\.max_tokens must be a positive"),
+        ('efficiency:\n  token_budget:\n    max_tokens: "8000"\n', r"efficiency\.token_budget\.max_tokens must be a positive"),
+        ("efficiency:\n  token_budget:\n    max_tokens:\n", r"efficiency\.token_budget\.max_tokens must be a positive"),
+        ("efficiency:\n  token_budget:\n    points: -1\n", r"efficiency\.token_budget\.points must be a non-negative"),
+        ('efficiency:\n  token_budget:\n    message: ""\n', r"efficiency\.token_budget\.message must be a non-empty"),
+    ],
+)
+def test_quality_config_rejects_invalid_efficiency(tmp_path: Path, body: str, match: str) -> None:
+    config_path = _write_config(tmp_path, body)
+
+    with pytest.raises(QualityConfigError, match=rf"^{tmp_path}.*{match}"):
+        load_quality_config(config_path)
+
+
+def test_packaged_file_must_declare_every_token_budget_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator import quality_config
+
+    incomplete = tmp_path / "incomplete-default.yaml"
+    incomplete.write_text(
+        quality_config.DEFAULT_QUALITY_CONFIG.read_text(encoding="utf-8").replace("    max_tokens: 5000\n", ""),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(quality_config, "DEFAULT_QUALITY_CONFIG", incomplete)
+
+    with pytest.raises(QualityConfigError, match=r"efficiency\.token_budget is missing key\(s\): max_tokens"):
+        load_quality_config()
+
+
+def test_custom_digest_declares_only_the_efficiency_keys_the_file_sets(tmp_path: Path) -> None:
+    def write(name: str, body: str) -> Path:
+        path = tmp_path / name
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    limit_only = write("limit-only.yaml", "efficiency: {token_budget: {max_tokens: 8000}}\n")
+    other_limit = write("other-limit.yaml", "efficiency: {token_budget: {max_tokens: 9000}}\n")
+    empty_rule = write("empty-rule.yaml", "efficiency: {token_budget: {}}\n")
+    both_sections = write(
+        "both.yaml", "efficiency: {token_budget: {max_tokens: 8000}}\nerror_handling: {lib: {points: 0}}\n"
+    )
+
+    assert _digest(limit_only) == quality_config_digest({"efficiency": {"token_budget": {"max_tokens": 8000}}})
+    assert _digest(other_limit) != _digest(limit_only)
+    assert _digest(empty_rule) == quality_config_digest({})
+    assert _digest(both_sections) == quality_config_digest(
+        {"efficiency": {"token_budget": {"max_tokens": 8000}}, "error_handling": {"lib": {"points": 0}}}
+    )

@@ -48,13 +48,12 @@ from skillevaluator.constants import (
     QUALITY_CHARS_PER_TOKEN,
     QUALITY_DEFAULT_MIN_SCORE,
     QUALITY_GRADE_THRESHOLDS,
-    QUALITY_RECOMMENDED_MAX_TOKENS,
     QUALITY_SCORE_WEIGHTS,
     TIER3_LIFT_FAIL_THRESHOLD,
     TIER3_LIFT_PASS_THRESHOLD,
     TOKEN_EFFICIENCY_HALF_LIFE,
 )
-from skillevaluator.quality_config import load_quality_config_with_provenance
+from skillevaluator.quality_config import load_quality_config, load_quality_config_with_provenance
 from skillevaluator.tier3 import dataset_sufficiency
 from skillevaluator.tier3.eval_core.llm_judge import _ACCURACY_CRITERIA
 from skillevaluator.tier3.harbor.collector import (
@@ -396,7 +395,7 @@ def test_quality_grades_and_minimum_match_constants() -> None:
 def test_token_estimate_divisor_matches_constants() -> None:
     assert int(_every(r"`len\(SKILL\.md\) // (\d+)`", DOC)) == QUALITY_CHARS_PER_TOKEN
     budget = int(_one(r"Over the ([\d,]+) estimated-token budget").group(1).replace(",", ""))
-    assert budget == QUALITY_RECOMMENDED_MAX_TOKENS
+    assert budget == load_quality_config()["efficiency"]["token_budget"]["max_tokens"]
 
 
 def _quality_score_functions() -> dict[str, ast.FunctionDef]:
@@ -464,7 +463,7 @@ def _deduction_amounts_by_area() -> dict[str, set[int]]:
             if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "deduct"):
                 continue
             if not (call.args and isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, int)):
-                continue  # config-driven amount; covered by the reliability test instead
+                continue  # config-driven amount; the tests add it from the packaged quality config
             target = call.func.value
             if isinstance(target, ast.Attribute) and target.attr in areas:
                 amounts[target.attr].add(call.args[0].value)
@@ -480,6 +479,10 @@ def _documented_amounts(cell: str) -> set[int]:
 def test_tier1_deduction_amounts_are_fully_documented() -> None:
     """Every deduction size the scorer can apply appears in the page, and vice versa."""
     source = _deduction_amounts_by_area()
+    # Rule sections named after an area take their deduction from the packaged quality config.
+    packaged = load_quality_config()
+    for area in ("correctness", "discoverability", "efficiency"):
+        source[area] |= {int(rule["points"]) for rule in packaged.get(area, {}).values()}
     rows = _table_rows("Area")
     documented = {area.lower(): _documented_amounts(cells[1]) for area, cells in rows.items() if len(cells) > 1}
 

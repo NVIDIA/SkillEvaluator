@@ -107,6 +107,22 @@ All notable changes to SkillEvaluator are documented in this file.
   cannot be confirmed stopped after a timeout or interruption, no further arm starts
   beside it and the failure is reported. After a timeout, the failed run still keeps
   the scores of the arms that finished.
+- Add an `efficiency` section to the `--quality-config` file with a
+  `token_budget` rule, so the 5,000-token recommendation for `SKILL.md` is no
+  longer fixed in code. The rule sets `max_tokens`, `points`, `message`, and
+  `suggestion`; `points: 0` turns it off. The section is optional and overlays
+  the packaged values the same way `error_handling` does, so a file that sets
+  only `max_tokens` changes nothing else. Reports show the limit in force as
+  `recommended_max_tokens`. Scores are unchanged without a custom file. The
+  finding message is reworded: the estimate and the limit now follow the
+  message (`Large skill. ...: ~6200 estimated tokens at 4 characters per token,
+  recommended max <5000; a real tokenizer may count more`) instead of
+  sitting inside it. The packaged `quality_config` digest changes once, because
+  `quality-default.yaml` gained the section. The
+  `QUALITY_RECOMMENDED_MAX_TOKENS` constant is removed; read
+  `load_quality_config()["efficiency"]["token_budget"]["max_tokens"]` instead.
+  A `QualityScoreResult` built directly, without the validator, no longer
+  reports `recommended_max_tokens`.
 
 - Tier 1 **Incomplete referenced artifact analysis (AE1)** findings from
   SkillSpector now say why SkillSpector stopped inspecting the file that a skill

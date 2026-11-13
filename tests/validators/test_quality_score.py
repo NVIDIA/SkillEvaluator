@@ -1694,6 +1694,88 @@ class TestReliabilityErrorHandlingConfig:
         assert not _contains_any_word("nothing here", ["error", "failure"])
 
 
+def _write_sized_skill(tmp_path: Path, characters: int) -> Path:
+    """Write a skill whose SKILL.md is exactly ``characters`` long, so its estimate is characters // 4."""
+    skill_dir = tmp_path / "sized-skill"
+    skill_dir.mkdir(parents=True)
+    head = (
+        "---\nname: sized-skill\ndescription: A skill of a known size. Use for testing the token budget.\n---\n\n"
+        "# Sized Skill\n\n## Instructions\n\n1. Run the skill\n\n## Examples\n\n```\nexample\n```\n\n"
+    )
+    filler = "".join(f"Filler line number {index} for the token budget.\n" for index in range(characters // 20))
+    (skill_dir / "SKILL.md").write_text((head + filler)[: characters - 1] + "\n", encoding="utf-8")
+    return skill_dir
+
+
+def _token_budget_issues(result) -> list[dict]:
+    issues = result.metadata["quality_scores"]["dimensions"]["efficiency"]["issues"]
+    return [issue for issue in issues if "recommended max" in issue["message"]]
+
+
+class TestEfficiencyTokenBudgetConfig:
+    def test_packaged_budget_fires_only_above_5000_estimated_tokens(self, tmp_path: Path):
+        at_limit = _validate_with(_write_sized_skill(tmp_path / "at", 20003), tmp_path)
+        over_limit = _validate_with(_write_sized_skill(tmp_path / "over", 20004), tmp_path)
+
+        assert at_limit.metadata["quality_scores"]["metrics"]["total_tokens"] == 5000
+        assert _token_budget_issues(at_limit) == []
+        assert over_limit.metadata["quality_scores"]["metrics"]["total_tokens"] == 5001
+        (issue,) = _token_budget_issues(over_limit)
+        assert issue["deduction"] == 15
+        assert issue["severity"] == "warning"
+        assert issue["message"].startswith("Large skill. Per agentskills.io")
+        assert issue["message"].endswith(": ~5001 estimated tokens at 4 characters per token, recommended max <5000; a real tokenizer may count more")
+
+    def test_custom_limit_moves_the_threshold_and_the_reported_limit(self, tmp_path: Path):
+        skill_dir = _write_sized_skill(tmp_path, 24000)
+
+        raised = _validate_with(skill_dir, tmp_path, "efficiency:\n  token_budget:\n    max_tokens: 8000\n")
+        lowered = _validate_with(skill_dir, tmp_path, "efficiency:\n  token_budget:\n    max_tokens: 100\n")
+
+        assert _token_budget_issues(raised) == []
+        assert raised.metadata["quality_scores"]["metrics"]["recommended_max_tokens"] == 8000
+        (issue,) = _token_budget_issues(lowered)
+        assert issue["message"].endswith(": ~6000 estimated tokens at 4 characters per token, recommended max <100; a real tokenizer may count more")
+        assert lowered.metadata["quality_scores"]["metrics"]["recommended_max_tokens"] == 100
+
+    def test_report_metric_is_the_packaged_limit_without_a_custom_file(self, tmp_path: Path):
+        result = _validate_with(_write_sized_skill(tmp_path, 400), tmp_path)
+
+        assert result.metadata["quality_scores"]["metrics"]["recommended_max_tokens"] == 5000
+
+    def test_custom_points_message_and_suggestion_are_used(self, tmp_path: Path):
+        config = (
+            "efficiency:\n  token_budget:\n    points: 40\n"
+            "    message: Over the team budget\n    suggestion: Split the skill\n"
+        )
+
+        result = _validate_with(_write_sized_skill(tmp_path, 24000), tmp_path, config)
+
+        (issue,) = _token_budget_issues(result)
+        assert issue["message"] == (
+            "Over the team budget: ~6000 estimated tokens at 4"
+            " characters per token, recommended max <5000; a real tokenizer may count more"
+        )
+        assert issue["suggestion"] == "Split the skill"
+        assert issue["deduction"] == 40
+
+    def test_zero_points_turns_the_rule_off_but_keeps_the_metrics(self, tmp_path: Path):
+        skill_dir = _write_sized_skill(tmp_path, 24000)
+        default = _validate_with(skill_dir, tmp_path)
+
+        disabled = _validate_with(skill_dir, tmp_path, "efficiency:\n  token_budget:\n    points: 0\n")
+
+        assert _token_budget_issues(disabled) == []
+        metrics = disabled.metadata["quality_scores"]["metrics"]
+        assert metrics["total_tokens"] == 6000
+        assert metrics["recommended_max_tokens"] == 5000
+        dimensions = disabled.metadata["quality_scores"]["dimensions"]
+        assert dimensions["efficiency"]["score"] == default.metadata["quality_scores"]["dimensions"]["efficiency"]["score"] + 15
+
+    def test_result_built_without_a_config_omits_the_limit(self):
+        assert "recommended_max_tokens" not in QualityScoreResult(skill_name="test").to_dict()["metrics"]
+
+
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])
 @pytest.mark.parametrize(
     "extra_yaml",

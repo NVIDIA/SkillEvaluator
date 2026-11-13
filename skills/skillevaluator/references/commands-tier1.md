@@ -31,7 +31,7 @@ rubric, LLM security and finding verification when a provider is configured.
 | `--skip CHECKS` | none | Leave checks out (also `secrets` for Gitleaks); the run cannot certify Tier 1 |
 | `--llm / --no-llm` | on when a provider is configured | Explicit `--llm` requires a valid provider |
 | `--min-score INTEGER` | `70` | Quality and rubric minimum |
-| `--quality-config PATH` | packaged | Replace expected-heading rules |
+| `--quality-config PATH` | packaged | Adjust expected-heading, error-handling, and token-budget rules |
 | `--pii-waivers PATH` | none | Reviewed, expiring PII waivers |
 | `--profile TEXT` | `default` | Validation policy |
 

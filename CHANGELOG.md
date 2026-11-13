@@ -6,6 +6,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Classify explicit `SKILL.md` ownership contacts (`metadata.pic` and
+  `metadata.email`) as `PII.ownership_emails`, still HIGH by default. Add
+  `--policy` to `tier1` and `tier1 validate` so operators can permit reviewed
+  ownership metadata without allowing ordinary email occurrences.
+- Retain bounded SkillSpector completeness diagnostics in JSON reports and
+  show file/line, phase, and reason in incomplete-scan errors. Preserve details
+  across scan stages, folder aggregation, and policy application.
+
 - Add an `error_handling` section to the `--quality-config` file for
   Reliability's three error-handling rules: the `SKILL.md` mention check and
   the `scripts` and `lib` code checks. Each sets `points`, `message`,
@@ -297,13 +305,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
-- Root help shows the SkillEvaluator wordmark in more terminals: the
-  one-line wordmark still needs 115 columns, 76-114 columns now get the same
-  letters stacked (SKILL over EVALUATOR), and 60-75 columns get a two-row
-  wordmark. Narrower terminals keep the plain title. A wordmark that the
-  terminal's output encoding cannot print is skipped: gbk and big5hkscs lack
-  the half blocks of the two-row one, so they get the plain title at 60-75
-  columns.
+- A `PII.emails` severity override in `--policy` no longer applies to the
+  `metadata.pic` and `metadata.email` contacts in a skill's own `SKILL.md`. They
+  now report as `PII.ownership_emails`, HIGH by default, so a run that passed
+  through that override fails until the policy also sets `PII.ownership_emails`.
 
 - Remove `skillevaluator.quality_config.quality_config_provenance(path, config)`.
   Use `load_quality_config_with_provenance(path)` instead: it loads the config
@@ -381,6 +386,14 @@ All notable changes to SkillEvaluator are documented in this file.
   reports so charts work offline without CDN or source-map requests. Charts
   include accessible descriptions, links to data tables and visible fallbacks
   when canvas initialization is unavailable; Tier 1 reports omit chart assets.
+
+- Root help shows the SkillEvaluator wordmark in more terminals: the
+  one-line wordmark still needs 115 columns, 76-114 columns now get the same
+  letters stacked (SKILL over EVALUATOR), and 60-75 columns get a two-row
+  wordmark. Narrower terminals keep the plain title. A wordmark that the
+  terminal's output encoding cannot print is skipped: gbk and big5hkscs lack
+  the half blocks of the two-row one, so they get the plain title at 60-75
+  columns.
 
 - Separate HTML Tier 2 evidence into within-skill and across-skill comparisons,
   with recorded completion, duplicate, affected-path, and catalog counts. Keep
@@ -579,11 +592,10 @@ All notable changes to SkillEvaluator are documented in this file.
   asked (1, or 2 after a rejected reply, not counting the client's retries),
   in the skill's `rubric_eval` success detail or `llm_*` finding and, for a
   single skill, also in the `rubric_eval` object. It is left out when the
-  first request fails, for example with no provider configured.
-
-- Rubric retry diagnostics redact judge-supplied credentials before logging or truncating the rejection reason.
-
-- Rubric retry guidance links to the published environment-variable documentation route.
+  first request fails, for example with no provider configured. Rejection
+  diagnostics redact judge-supplied credentials before shortening the reason,
+  and collapse whitespace and controls to printable single-line text in logs,
+  retry notes and final invalid-response findings and summaries.
 
 - A default Tier 3 run with a baseline can reach a PASS or NEUTRAL publication
   verdict in BENCHMARK.md again. The baseline arm has no skill under test, so
@@ -650,6 +662,14 @@ All notable changes to SkillEvaluator are documented in this file.
   Tier 3 version, such as `--tiers 1`, now records the evaluator version
   instead of `Evaluator version: not recorded (legacy or non-live result)`; a
   version recorded by a Tier 3 run still wins.
+
+- `skillevaluator tier1 .` and `tier2 .`, run from inside the skill folder, name
+  the skill in the JSON `skills` and `contributors` lists, as `tier1 <folder>`
+  does. The report took the name from the path as typed, which is empty for
+  `.`, so a clean run with a narrowed check list, such as `--checks pii`,
+  listed no skill or one skill per check ID. The JSON that CI retains records
+  the skill's path relative to the repository root as `target_path`, no longer
+  the absolute path of the runner's workspace.
 
 - Tier 3 improvement recommendations respect each case's expected skill routing:
   passing negative controls no longer inherit activation-loss advice from positive
@@ -1085,7 +1105,6 @@ All notable changes to SkillEvaluator are documented in this file.
   every required check passes. A run with a failed required check, such as one
   with a `destructive_command` finding, already gets FAIL from that check (see
   Changed).
-
 
 ## 0.8.0 - 2026-11-05
 

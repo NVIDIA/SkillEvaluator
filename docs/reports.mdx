@@ -947,8 +947,10 @@ comparisons. A reported lift can therefore differ from subtracting the two
 displayed arm scores, even reversing their apparent direction. When no complete
 comparison with matching judge models remains, the affected metric, dimension,
 and overall lift are unavailable rather than zero. The HTML report's evaluator
-card says how many cases its lift left out, or, when it has no lift, that no
-comparable result remains, and its per-trial evidence labels those cases
+card says how many cases its lift left out. When it has no lift, the card says
+that no comparable result remains if its `comparison_basis` records
+`contributing_attempts` as 0, and otherwise that the loaded results cannot
+confirm the comparison. Its per-trial evidence labels those cases
 **Left out of lift: different judge models**. In the canonical JSON the
 evaluator records that count in `lift_excluded_cases`. Its card's
 `comparison_basis` lists in `case_ids` the lift's keys for the cases the loaded

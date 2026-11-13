@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from skillevaluator.models.result import Severity
 from skillevaluator.models.skill import SkillMetadata
 from skillevaluator.validators.schema import SchemaValidator
 
@@ -1541,3 +1542,86 @@ class TestMetadataIdPreviewBounds:
         (finding,) = [finding for finding in result.findings if finding.check_name == "metadata_id_format"]
         assert "must be a string" in finding.message
         assert len(finding.line_content) <= 32
+
+
+def _write_skill(
+    root: Path, frontmatter: str, body: str = "# Portable\n\n## Instructions\n\n1. Step\n\n## Examples\n\nExample.\n"
+) -> Path:
+    skill_dir = root / "skills" / "portable-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(f"---\n{frontmatter}---\n\n{body}", encoding="utf-8")
+    return skill_dir
+
+
+_BASE_FM = (
+    "name: portable-skill\n"
+    "description: Use when checking harness portability of a skill.\n"
+    "metadata:\n  author: Test User <testuser@example.com>\n"
+)
+
+
+def _checks(result, name: str) -> list:
+    return [finding for finding in result.findings if finding.check_name == name]
+
+
+class TestSchemaPortabilityChecks:
+    """Spec-valid patterns that agent harnesses load differently (Tier 1, harness-neutral)."""
+
+    def test_clean_skill_has_no_portability_findings(self, tmp_path: Path):
+        result = SchemaValidator().validate(_write_skill(tmp_path, _BASE_FM))
+
+        assert result.passed, result.errors
+        names = {
+            "duplicate_key",
+            "manifest_bom",
+            "manifest_symlink",
+            "manifest_size",
+            "nested_manifest",
+            "description_utf16_length",
+            "description_trigger",
+            "unknown_field",
+        }
+        assert not [f for f in result.findings if f.check_name in names]
+
+    def test_duplicate_top_level_key_is_high(self, tmp_path: Path):
+        result = SchemaValidator().validate(_write_skill(tmp_path, _BASE_FM + "description: Second value.\n"))
+
+        findings = _checks(result, "duplicate_key")
+        assert not result.passed
+        assert [f.metadata["key"] for f in findings] == ["description"]
+        assert findings[0].severity == "high"
+        assert findings[0].line_number == 6
+
+    def test_duplicate_nested_key_is_reported_with_path(self, tmp_path: Path):
+        fm = _BASE_FM + "  author: Other User <other@example.com>\n"
+        result = SchemaValidator().validate(_write_skill(tmp_path, fm))
+
+        assert [f.metadata["key"] for f in _checks(result, "duplicate_key")] == ["metadata.author"]
+
+    def test_same_key_in_different_mappings_is_not_duplicate(self, tmp_path: Path):
+        fm = _BASE_FM + "  tags:\n    - name: a\n    - name: b\n"
+        result = SchemaValidator().validate(_write_skill(tmp_path, fm))
+
+        assert not _checks(result, "duplicate_key")
+
+    def test_bom_is_medium_and_does_not_fail(self, tmp_path: Path):
+        skill_dir = _write_skill(tmp_path, _BASE_FM)
+        manifest = skill_dir / "SKILL.md"
+        manifest.write_bytes(b"\xef\xbb\xbf" + manifest.read_bytes())
+
+        result = SchemaValidator().validate(skill_dir)
+
+        assert result.passed, result.errors
+        assert [f.severity for f in _checks(result, "manifest_bom")] == ["medium"]
+
+    def test_portability_severity_can_be_overridden_by_policy(self, tmp_path: Path):
+        from skillevaluator.validators.policy import ValidationPolicy
+
+        skill_dir = _write_skill(tmp_path, _BASE_FM)
+        manifest = skill_dir / "SKILL.md"
+        manifest.write_bytes(b"\xef\xbb\xbf" + manifest.read_bytes())
+        policy = ValidationPolicy(severity_overrides={"SCHEMA.manifest_bom": Severity.HIGH})
+        result = SchemaValidator(policy=policy).validate(skill_dir)
+
+        assert not result.passed
+        assert [f.severity for f in _checks(result, "manifest_bom")] == ["high"]

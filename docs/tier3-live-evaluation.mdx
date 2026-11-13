@@ -1598,7 +1598,9 @@ best effort over these forms:
 
 - private key blocks, and the key shapes that log redaction masks, such as
   `sk-`, `nvapi-`, `AKIA`, GitHub tokens, and JWTs;
-- URL user info, as in `https://user:token@host`;
+- URL user info, as in `https://user:token@host`, also when the password holds an
+  `@` (`https://user:p@ss@host`): the user info runs to the last `@` before the
+  host;
 - `Authorization` header values (the `Bearer`, `Basic`, `Token`, or `Digest`
   word stays, and any other scheme, such as `ApiKey` or `SSWS`, is masked with
   its value), API-key and token headers such as `X-API-Key`, and `Cookie`
@@ -1665,7 +1667,12 @@ path in `grep -r token: /etc`, the words after a `.netrc`-like
 `login NAME password` phrase in prose, or, after an unmatched quote, the rest
 of the line after a credential name. Quotes are read from the start of each
 line, and unlike in a shell, a line break ends a quoted string here, so a
-quoted value ends at its closing quote or at the end of its line.
+quoted value ends at its closing quote or at the end of its line. A backslash
+escapes the next character in a double-quoted value, so `"pa\"ss"` is one
+value. A backslash before a line break is a line continuation, as in a shell:
+it is removed before the text is masked, so `curl -u \` followed by
+`user:password` on the next line is masked, and the evidence shows a continued
+command as one line.
 Only the first 2,000 characters are scanned. A word that this limit cuts in
 half is replaced with `<truncated>`, keeping a URL's scheme and host. The
 evidence is then cut to 500 characters, or 300 for prompt and response text.

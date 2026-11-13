@@ -2848,8 +2848,11 @@ _FINDING_EVIDENCE_PRIVATE_KEY_RE = re.compile(
     re.DOTALL,
 )
 # A URL scheme is at most 32 characters here, so a long dotted run is read
-# once. Userinfo holds no "/", so each run after "://" is read once too.
-_FINDING_EVIDENCE_URL_USERINFO_RE = re.compile(r"(\b[a-z][a-z0-9+.-]{0,31}://)[^/\s@'\"`]+@", re.IGNORECASE)
+# once. Userinfo holds no "/", so each run after "://" is read once too. A
+# password may hold an "@" (git and curl accept "https://bob:p@ss@host/"), so
+# the greedy run backtracks to the last "@" before the "/", whitespace or quote
+# that ends it, and the whole userinfo is masked.
+_FINDING_EVIDENCE_URL_USERINFO_RE = re.compile(r"(\b[a-z][a-z0-9+.-]{0,31}://)[^/\s'\"`]+@", re.IGNORECASE)
 # A word that the scan window cuts keeps a leading URL's scheme and host (and
 # a "--flag=" or "NAME=" before it): once its userinfo is masked, a host
 # carries no credential.
@@ -2918,14 +2921,15 @@ _FINDING_EVIDENCE_COOKIE_HEADER_RE = re.compile(
 )
 # A flag value: quoted (to its closing quote or the end of the line, also
 # JSON-escaped inside a shell string) or one word, which may hold escaped
-# spaces ("correct\ horse"). A masked private key is one value, although its
-# marker holds spaces. A word never starts at a shell operator: in
-# "git config --get github.token | curl ..." or "gh auth login --with-token <
-# token.txt" the flag or key has no value on the command line.
+# spaces ("correct\ horse"). A backslash escapes the next character in a
+# double-quoted value, so "pa\"ss" is one value. A masked private key is one
+# value, although its marker holds spaces. A word never starts at a shell
+# operator: in "git config --get github.token | curl ..." or "gh auth login
+# --with-token < token.txt" the flag or key has no value on the command line.
 _FINDING_EVIDENCE_FLAG_VALUE = (
     "(?:"
     + _FINDING_EVIDENCE_PRIVATE_KEY_MARKER
-    + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\"[^\"\r\n]*\"?|'[^'\r\n]*'?|(?![|&;<>])(?:\\.|[^\s'\"`\\])+)"
+    + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?|(?![|&;<>])(?:\\.|[^\s'\"`\\])+)"
 )
 # Any long flag whose name holds a credential word ("--password", "--db-password",
 # "--client-secret", "--github-token", "--oauth2-bearer", "--cookie"), and the
@@ -2960,7 +2964,7 @@ _FINDING_EVIDENCE_USER_FLAG_RE = re.compile(
     r"((?<![^\s'\"])(?:(?:-[A-Za-z]{0,8}?u|-U|--user|--proxy-user)(?:[ \t]+|=)"
     r"|-[A-Za-z]{0,8}?u(?=[^\s'\"`:=-][^\s'\"`:]*:)))"
     r"(?!" + _FINDING_EVIDENCE_DATE_FORMAT + r")(?![\"']?[^\s'\"`]*://)(?![\"']?[^\s'\"`:]*:/)"
-    r"(?:\"[^\"\r\n:]*:[^\"\r\n]*\"?|'[^'\r\n:]*:[^'\r\n]*'?|[^\s'\"`:]*:[^\s'\"`]*)"
+    r"(?:\"(?:\\.|[^\"\\\r\n:])*:(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n:]*:[^'\r\n]*'?|[^\s'\"`:]*:[^\s'\"`]*)"
 )
 # "-p" is a password after a login subcommand ("docker login -u bot -p VALUE",
 # also attached as "-pVALUE"; "az login -u ID -p VALUE"; "helm registry login
@@ -2980,7 +2984,7 @@ _FINDING_EVIDENCE_SSHPASS_RE = re.compile(r"(\bsshpass[ \t]+-p[ \t]*)" + _FINDIN
 _FINDING_EVIDENCE_MYSQL_PASSWORD_RE = re.compile(
     r"((?<![^\s;&|('\"`])(?:[^\s'\"`;&|()<>]{0,128}/s?bin/)?"
     r"(?:mysql|mysqldump|mysqladmin|mysqlimport|mysqlshow|mysqlcheck|mariadb|mariadb-dump)(?=[ \t])"
-    r"[^|;&\r\n]{0,256}?[ \t]-p)(?!ath\b|erm\b|rint|rune\b)(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^\s'\"`|;&]+)"
+    r"[^|;&\r\n]{0,256}?[ \t]-p)(?!ath\b|erm\b|rint|rune\b)(?:\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?|[^\s'\"`|;&]+)"
 )
 # "aws configure set aws_secret_access_key VALUE" and a .netrc entry
 # ("machine HOST login USER password VALUE"). A .netrc entry may span lines,
@@ -3019,7 +3023,7 @@ _FINDING_EVIDENCE_NETRC_PASSWORD_RE = re.compile(
     + _FINDING_EVIDENCE_NETRC_SEPARATOR
     + "password"
     + _FINDING_EVIDENCE_NETRC_SEPARATOR
-    + r")(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|"
+    + r")(?:\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?|"
     + _FINDING_EVIDENCE_NETRC_WORD
     + r"(?:[ \t]+(?!(?:machine|login|account|password|macdef|default)\b)"
     + _FINDING_EVIDENCE_NETRC_VALUE_WORD
@@ -3043,7 +3047,7 @@ _FINDING_EVIDENCE_ARGV_FLAG_RE = re.compile(
     r"([\"'])(" + _FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME + r"|-[pub])\1[ \t]*,\s{0,64}(?=[\"'][^-\"'])",
     re.IGNORECASE,
 )
-_FINDING_EVIDENCE_ARGV_VALUE_RE = re.compile(r"\"[^\"\r\n]*\"?|'[^'\r\n]*'?")
+_FINDING_EVIDENCE_ARGV_VALUE_RE = re.compile(r"\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?")
 _FINDING_EVIDENCE_ARGV_LOGIN_RE = re.compile(r"[\"']login[\"'][ \t]*,")
 _FINDING_EVIDENCE_ARGV_SSHPASS_RE = re.compile(r"[\"'](?:[^\s'\"]{0,128}/)?sshpass[\"'][ \t]*,\s{0,64}$")
 _FINDING_EVIDENCE_ARGV_MYSQL_RE = re.compile(
@@ -3112,7 +3116,7 @@ _FINDING_EVIDENCE_COUNTER_VALUE_RE = re.compile(
 # escaped spaces ("correct\ horse").
 _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE = re.compile(
     _FINDING_EVIDENCE_PRIVATE_KEY_MARKER
-    + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\"[^\"\r\n]*\"?|'[^'\r\n]*'?|\([^()\r\n]{0,256}\)?"
+    + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?|\([^()\r\n]{0,256}\)?"
     + r"|(?:\\.|[^\s'\"`;|&\\])+"
 )
 # Inside a quoted string a value that does not open its own quote runs to the
@@ -3150,7 +3154,7 @@ _FINDING_EVIDENCE_SHELL_STRING_LOOKBACK = 160
 # A word or quoted word stuck to the quote that closes a string around an
 # empty assignment ('"PASSWORD="hunter2' is PASSWORD=hunter2 to a shell, and
 # "'API_KEY='\"hunter2\"" is API_KEY=hunter2).
-_FINDING_EVIDENCE_STUCK_VALUE_RE = re.compile(r"\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^\s'\"`;|&()<>]+")
+_FINDING_EVIDENCE_STUCK_VALUE_RE = re.compile(r"\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?|[^\s'\"`;|&()<>]+")
 _FINDING_EVIDENCE_SPACES_RE = re.compile(r"[ \t]*")
 # "host.example:8443" is a host and port, not a "name: value" pair.
 _FINDING_EVIDENCE_PORT_RE = re.compile(r"[0-9]{1,5}(?![\w.-])")
@@ -3176,6 +3180,10 @@ def _redact_finding_evidence(text: Any, limit: int = 500) -> str:
             end -= 1
         url = _FINDING_EVIDENCE_CUT_URL_RE.match(raw, end)
         raw = raw[: url.end() if url else end]
+    # A backslash-newline joins the two lines, as a shell reads it, so the value
+    # on the continued line of "curl -u \<newline> user:pw" follows its flag for
+    # every rule below. The evidence shows the joined text.
+    raw = _LINE_CONTINUATION_RE.sub("", raw)
     redacted = _FINDING_EVIDENCE_PRIVATE_KEY_RE.sub(_FINDING_EVIDENCE_PRIVATE_KEY_MARKER, raw)
     # The network marker holds spaces, so a value rule below would mask only
     # its first word; <redacted> is one word to every rule.

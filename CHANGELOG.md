@@ -659,16 +659,19 @@ All notable changes to SkillEvaluator are documented in this file.
   value was kept. Path findings now record the protected entry they matched,
   such as `~/.bashrc`, and the longest one when several match, so a write to
   `/etc/profile.d/npm.sh` records `/etc/profile.d`. The other findings mask, as
-  a best effort, private key blocks, URL user info, `Authorization`, API-key,
-  and `Cookie` header values (including quoted and shell-escaped cookie values),
-  credential flags and assignments, `.netrc` passwords, and common token
-  prefixes, and keep the rest of the command
-  readable; a credential in another form, such as a `.pgpass` line, can still
-  appear. Scores are unchanged. Because path findings name the entry, the
-  without-skill baseline comparison now matches them by entry: a with-skill
-  write to `~/.bashrc` is attributed to the baseline prompt or environment when
-  the baseline also wrote to `~/.bashrc`, whatever each command wrote. Both the
-  host checker and the bundled Harbor verifier apply the fix.
+  a best effort, private key blocks, URL user info (also a password that holds
+  an `@`), `Authorization`, API-key, and `Cookie` header values (including
+  quoted and shell-escaped cookie values), credential flags and assignments
+  (also a double-quoted value with an escaped quote, and a value on a
+  backslash-continued line), `.netrc` passwords, and common token prefixes, and
+  keep the rest of the command readable; a backslash-newline is joined, as in a
+  shell, so a continued command shows as one line. A credential in another
+  form, such as a `.pgpass` line, can still appear. Scores are unchanged.
+  Because path findings name the entry, the without-skill baseline comparison
+  now matches them by entry: a with-skill write to `~/.bashrc` is attributed to
+  the baseline prompt or environment when the baseline also wrote to
+  `~/.bashrc`, whatever each command wrote. Both the host checker and the
+  bundled Harbor verifier apply the fix.
 
 - Read JSON, JSONL and YAML evaluation datasets as UTF-8 so Unicode prompts and
   answers load correctly on hosts with a non-UTF-8 default text encoding.

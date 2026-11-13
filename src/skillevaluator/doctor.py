@@ -38,7 +38,7 @@ _SCANNERS_BY_CHECK: dict[str, tuple[str, ...]] = {
     "dependency": ("pip_audit",),
 }
 # Older releases lack the CLI or report contract the validators parse: the
-# Bandit floor matches the security extra, and Gitleaks 8 introduced the
+# Bandit floor matches the core dependency, and Gitleaks 8 introduced the
 # ``detect`` command the secrets scan runs.
 _MINIMUM_SCANNER_VERSIONS: dict[str, tuple[int, int, int]] = {
     "bandit": (1, 9, 4),

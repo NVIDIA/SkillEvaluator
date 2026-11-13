@@ -6,6 +6,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Classify explicit `SKILL.md` ownership contacts (`metadata.pic` and
+  `metadata.email`) as `PII.ownership_emails`, still HIGH by default. Add
+  `--policy` to `tier1` and `tier1 validate` so operators can permit reviewed
+  ownership metadata without allowing ordinary email occurrences.
+- Retain bounded SkillSpector completeness diagnostics in JSON reports and
+  show file/line, phase, and reason in incomplete-scan errors. Preserve details
+  across scan stages, folder aggregation, and policy application.
+
 - Add an `error_handling` section to the `--quality-config` file for
   Reliability's three error-handling rules: the `SKILL.md` mention check and
   the `scripts` and `lib` code checks. Each sets `points`, `message`,
@@ -68,6 +76,15 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 3 `evaluate --compare-to RUN` and read-only `compare-versions` compare
   compatible retained skill versions, report paired per-agent deltas and
   regressions, and keep version comparisons separate from no-skill Skill Lift.
+
+- Add opt-in `tier3 interact` experiments for two or more skills. The command
+  uses one reviewed task suite and a fixed attempt budget to compare baseline,
+  individual, and combined performance. It reports the departure from additive
+  gains and retains source identities and trial evidence. Invalid inputs exit
+  with code 2. Incomplete or incomparable experiments and output I/O failures
+  exit with code 1. Configuration failures identify their arm, trial progress
+  uses stderr, and output roots honor `SKILLEVALUATOR_RESULTS_DIR` with canonical
+  paths. Documentation describes trial noise and sequential configuration order.
 
 - Read-only Tier 3 `history` lists retained Skill Lift runs chronologically,
   separates incompatible configurations into segments, preserves unavailable
@@ -288,6 +305,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- A `PII.emails` severity override in `--policy` no longer applies to the
+  `metadata.pic` and `metadata.email` contacts in a skill's own `SKILL.md`. They
+  now report as `PII.ownership_emails`, HIGH by default, so a run that passed
+  through that override fails until the policy also sets `PII.ownership_emails`.
+
 - Remove `skillevaluator.quality_config.quality_config_provenance(path, config)`.
   Use `load_quality_config_with_provenance(path)` instead: it loads the config
   and returns `(config, provenance)`, and its digest covers only the rules a
@@ -461,14 +483,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Code Risk Analysis reports Semgrep file-level parse errors as one partial-scan
-  error that names up to 20 unparsed files, relative to the skill and with the
-  line of the first error, instead of the first three truncated messages. The
-  check stays `incomplete` because Semgrep skips the code it cannot parse. The
-  JSON report lists the files in `semgrep_unparsed_files` (up to 1,000, with
-  `semgrep_unparsed_files_omitted` counting the rest); other Semgrep errors are
-  reported as before.
-
 - Configure CLI stdout to replace characters that its encoding cannot
   represent, so reports and root help complete on legacy Windows code pages.
   JSON dataset previews and validation output preserve Unicode values, using
@@ -510,6 +524,9 @@ All notable changes to SkillEvaluator are documented in this file.
   the PR or merge request's target revision. Policy files from the proposed
   changes cannot approve their own exceptions.
 
+- The `ci/gitlab/skill-evaluation.yml` template honors `TMPDIR` for temporary
+  scan reports and defaults to `/tmp`.
+
 - `skillevaluator validate` on a target with no skill, rules, workflows, or
   plugin, such as an ordinary source repository, no longer fails Tier 1 with
   three `No skills found` errors and exit 1 when every content scan passes.
@@ -526,6 +543,14 @@ All notable changes to SkillEvaluator are documented in this file.
   and `--type skill` still validates the target as a skill.
 
 - The unknown-artifact CLI guidance links to the published content-types documentation route.
+
+- Code Risk Analysis reports Semgrep file-level parse errors as one partial-scan
+  error that names up to 20 unparsed files, relative to the skill and with the
+  line of the first error, instead of the first three truncated messages. The
+  check stays `incomplete` because Semgrep skips the code it cannot parse. The
+  JSON report lists the files in `semgrep_unparsed_files` (up to 1,000, with
+  `semgrep_unparsed_files_omitted` counting the rest); other Semgrep errors are
+  reported as before.
 
 - Security checks preserve authored evaluation files and their findings while
   excluding generated outputs. Fully inspected skills with only missing-path
@@ -638,6 +663,14 @@ All notable changes to SkillEvaluator are documented in this file.
   Tier 3 version, such as `--tiers 1`, now records the evaluator version
   instead of `Evaluator version: not recorded (legacy or non-live result)`; a
   version recorded by a Tier 3 run still wins.
+
+- `skillevaluator tier1 .` and `tier2 .`, run from inside the skill folder, name
+  the skill in the JSON `skills` and `contributors` lists, as `tier1 <folder>`
+  does. The report took the name from the path as typed, which is empty for
+  `.`, so a clean run with a narrowed check list, such as `--checks pii`,
+  listed no skill or one skill per check ID. The JSON that CI retains records
+  the skill's path relative to the repository root as `target_path`, no longer
+  the absolute path of the runner's workspace.
 
 - Tier 3 improvement recommendations respect each case's expected skill routing:
   passing negative controls no longer inherit activation-loss advice from positive
@@ -783,6 +816,10 @@ All notable changes to SkillEvaluator are documented in this file.
   the digest of the unmasked value, so anyone holding the redacted report could
   confirm a guess for the masked part. Redaction now removes a digest that no
   longer matches the reported value.
+
+- Truncated `--llm-verify` replies with no complete verdicts no longer claim an
+  answering model. Complete verdicts still retain their model, and other LLM
+  parsers can still accept an empty result as complete evidence.
 
 - Tier 2 context deduplication now checks each chat-LLM verdict before it
   becomes a finding. When present, the confidence must be a JSON number from 0
@@ -1069,7 +1106,6 @@ All notable changes to SkillEvaluator are documented in this file.
   every required check passes. A run with a failed required check, such as one
   with a `destructive_command` finding, already gets FAIL from that check (see
   Changed).
-
 
 ## 0.8.0 - 2026-11-05
 

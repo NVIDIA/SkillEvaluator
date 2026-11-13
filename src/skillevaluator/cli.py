@@ -3196,6 +3196,10 @@ def _workflow_report_options(func):
 @click.option(
     "--profile", default=None, help="Validation policy [default: default; external is a compatibility alias]."
 )
+@click.option(
+    "--policy", "policy_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None,
+    help="Custom policy YAML overlaid on top of --profile.",
+)
 @click.option("--previous-version", default=None, help="Previous version for version checks.")
 @click.option(
     "--skillspector-baseline", type=SKILLSPECTOR_BASELINE_PATH, default=None, help=_SKILLSPECTOR_BASELINE_HELP
@@ -3210,6 +3214,7 @@ def _tier1_workflow(
     quality_config: Path | None,
     pii_waivers: Path | None,
     profile: str | None,
+    policy_path: Path | None,
     previous_version: str | None,
     skillspector_baseline: Path | None,
     report_formats: tuple[str, ...],
@@ -3220,7 +3225,7 @@ def _tier1_workflow(
     from skillevaluator.validators.policy import resolve_policy
 
     try:
-        policy = resolve_policy(profile=profile)
+        policy = resolve_policy(profile=profile, policy_path=policy_path)
     except (FileNotFoundError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     _offer_scanner_install(checks, skip)
@@ -4198,6 +4203,10 @@ from skillevaluator.tier3.grader_validation import validate_grader
 
 tier3.add_command(select_decoys_command, "select-decoys")
 tier3.add_command(validate_grader, "validate-grader")
+
+from skillevaluator.tier3.interaction_commands import interact_command
+
+tier3.add_command(interact_command, "interact")
 
 from skillevaluator.tier3.workflow import build_tier3_workflow
 

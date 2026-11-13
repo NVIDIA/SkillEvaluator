@@ -30,7 +30,11 @@ same evaluator commit; GitLab runs the same digest-pinned scanner image.
 Static CI checks receive no model key. Tier 2 and Tier 3 execute independently
 and retain their own native evidence, so one tier's failure does not erase the
 other reports. Changes to onboarding configuration trigger a full Tier 1 scan
-so the setup review exercises actual skills.
+so the setup review exercises actual skills with keyless checks. In automatic
+mode, configuration-only PRs/MRs skip paid Tier 1 LLM, Tier 2 and Tier 3 jobs;
+they do not validate provider setup. Provider-backed checks run on skill-changing
+PRs/MRs, default-branch pushes or eligible manual runs, or an explicit
+`scan-mode: all` run (`SKILL_EVAL_SCAN_MODE: all` on GitLab).
 
 Existing released Tier 1-only consumers keep their current workflow and
 bundled image pins. See [GitHub Actions](github-actions.mdx) or

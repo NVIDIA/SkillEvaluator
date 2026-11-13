@@ -35,8 +35,13 @@ It also documents SkillEvaluator's own callers and alternative feedback filename
 
 Only quality and security checks gate this CI integration. Tier 2 and Tier 3
 remain advisory even when failed or incomplete; deprecated Tier 3 required settings are ignored.
-Missing credentials, runtime or datasets must remain visible as incomplete or
-needs-action evidence. A passing scan does not mean all evaluation stages passed.
+When a tier is selected, missing credentials, runtime or datasets remain visible
+as incomplete or needs-action evidence. With the default `scan-mode: auto`, a
+configuration-only PR/MR runs the keyless Tier 1 gate and skips paid Tier 1 LLM,
+Tier 2 and Tier 3 jobs, so it does not validate provider setup. Provider checks
+first run on a skill-changing PR/MR, a default-branch push or eligible manual
+run, or an explicit `scan-mode: all` run (`SKILL_EVAL_SCAN_MODE: all` on GitLab).
+A passing scan does not mean all evaluation stages passed.
 
 Reports retain native evidence and an aggregate artifact for 14 days. Feedback
 links to the authenticated artifact for that run; download and extract it,

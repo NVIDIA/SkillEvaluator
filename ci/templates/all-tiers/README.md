@@ -280,8 +280,8 @@ of the existing repository Actions secret holding the gateway key. The selector
 contains only a secret name, never the key itself. The caller resolves
 `secrets[vars.SKILL_EVAL_GATEWAY_SECRET]` into the reusable workflow's generic
 `LLM_API_KEY`; other repositories can select their own gateway and secret names
-during local onboarding. Missing
-prerequisites remain visible in the reports. A passing Tier 1 gate is not an
+during local onboarding. Missing prerequisites remain visible in the reports
+when the corresponding job is selected. A passing Tier 1 gate is not an
 all-tier evaluation pass. Forks retain keyless Tier 1 checks. On PRs, ordinary software changes
 select no skills, skill changes select the affected skills, and CI configuration
 changes select the collection. Pushes to `main` and manual runs scan the collection.
@@ -292,11 +292,19 @@ skill, and its report lists Tier 2 and Tier 3 as skipped because no skill
 changed. Fork PRs never run the paid tiers, so their reports keep the existing
 Tier 2 and Tier 3 reason.
 
+A configuration-only setup PR therefore does not validate provider credentials,
+models or runtimes in automatic mode. Those checks first run on a skill-changing
+PR/MR, a push to the default branch, an eligible manual run on the default
+branch, or an explicitly requested `scan-mode: all` run
+(`SKILL_EVAL_SCAN_MODE: all` on GitLab). Fork PRs still receive no paid jobs.
+
 If a provider returns HTTP 404, verify that the selected model accepts chat
 requests with your account. Presence in the public model catalog alone does not
 prove serving availability. Change the caller's `model` input to an accessible
 model and refresh `trusted-caller-blobs` before retrying; do not change global
 provider defaults to troubleshoot one repository.
+For a configuration-only PR/MR, select `scan-mode: all` for the eligible retry;
+the automatic mode would skip the provider jobs again.
 
 The setup PR can exercise checks, but its first automatic comment requires
 the consumer feedback listener on `main` and a subsequent PR run. Repository

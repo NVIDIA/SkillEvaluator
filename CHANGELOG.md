@@ -35,8 +35,8 @@ All notable changes to SkillEvaluator are documented in this file.
   root skips the paid jobs (LLM-enriched Tier 1, Tier 2 and Tier 3): the keyless
   scan remains the Tier 1 gate and reports list Tier 2 and Tier 3 as skipped.
   GitHub fork PRs never run the paid tiers and keep their existing Tier 2/3
-  reason. The enriched scan applies reviewed security baselines like the keyless
-  scan.
+  reason. Setup guidance explains that configuration-only automatic runs do not
+  validate providers, and how to request an eligible all-skill retry.
 
 - HTML, Markdown, and terminal findings show recorded LLM verification verdicts,
   confidence, and reasoning, with an explanation of retained or downgraded severity.

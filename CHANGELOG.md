@@ -4,7 +4,21 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Tier 3 dataset fairness validation checks the skill's own identities and
+  nested judge expectations, recognizes required reads after negated actions,
+  and bounds diagnostics and repeated-negation work. Template prompts avoid
+  requiring bundled scripts; upgrade guidance explains strict CI preflight
+  failures for older datasets that grade skill use.
+
 ### Added
+
+- Dataset fairness validation checks the evaluated skill's own names and nested
+  graded text, distinguishes negated reads from required reads, and bounds
+  warning excerpts and repeated-match scanning. Common Unicode, Markdown and
+  script references are checked too; generated prompts avoid skill scripts.
+  Older datasets may need outcome-only wording to pass strict CI preflight.
 
 - Classify explicit `SKILL.md` ownership contacts (`metadata.pic` and
   `metadata.email`) as `PII.ownership_emails`, still HIGH by default. Add
@@ -56,8 +70,10 @@ All notable changes to SkillEvaluator are documented in this file.
   root skips the paid jobs (LLM-enriched Tier 1, Tier 2 and Tier 3): the keyless
   scan remains the Tier 1 gate and reports list Tier 2 and Tier 3 as skipped.
   GitHub fork PRs never run the paid tiers and keep their existing Tier 2/3
-  reason. The enriched scan applies reviewed security baselines like the keyless
-  scan.
+  reason. Setup guidance explains when provider configuration is exercised and
+  how to request an eligible all-skill check before merging.
+  When tiers run, GitLab keyless and native selectors both include changed
+  setup gitlinks despite committed submodule ignore settings.
 
 - HTML, Markdown, and terminal findings show recorded LLM verification verdicts,
   confidence, and reasoning, with an explanation of retained or downgraded severity.
@@ -416,9 +432,55 @@ All notable changes to SkillEvaluator are documented in this file.
   none can make Tier 3 block CI. Standalone validation and benchmark
   publication policies are unchanged.
 
+- Standalone `create-eval-dataset` and `DatasetOptions` now default to `auto`
+  grounding: substantive author guidance beyond headings first, then usable
+  matching retained trajectories from completed skill-scoped runs. Missing input
+  fails before provider access, collection, or writes; existing skill-only scripts must pass
+  `--grounding skill`, even with `--no-llm`. Auto trace selection preserves
+  authored cases and flags unmatched coverage and observed answers for review;
+  retained identity and trace files are checked before reading, and legacy
+  `cases` wrappers retain root metadata when converted to `evals`.
+  Provenance records the effective grounding and retained source hashes; auto
+  trace refinement records template fallback and a safe reason when its LLM
+  operation is unavailable or fails, preserving authored expectations and review
+  state.
+  Auto leaves existing datasets unchanged without `--force` or `--refine`,
+  including when matching traces exist; explicit trace grounding still opts into
+  in-place refinement. When auto selects traces, answer proposals that describe
+  skill use leave the inferred expected outcome empty for independent authoring
+  and review;
+  existing authored expectations are retained. Recovery guidance and examples name
+  usable author inputs, retained-results refinement, and explicit skill-only opt-in. Explicit grounding
+  modes remain available. Unattended autopilot keeps its skill-grounded one-case
+  starter behavior.
+
 - Give staged Tier 3 main images a fixed liveness healthcheck so Docker Compose
   2 can wait for readiness while authored image healthchecks remain suppressed.
   Keep custom service healthchecks and their readiness dependencies intact.
+
+- Generated eval datasets no longer grade skill use. Template cases from
+  `create-eval-dataset`, and the one starter case that `validate`, `tier3` and
+  `tier3 evaluate --autopilot` write when no dataset exists, asserted that the
+  agent read `SKILL.md`, ran the skill's script, or used or identified the
+  skill. The no-skill baseline is graded on the same expected output and
+  assertions and could not meet them, so its `behavior_check`, `accuracy` and
+  `goal_accuracy` scores dropped and lift was inflated. Template cases now
+  describe only the task outcome, and do not quote a skill description that
+  names the skill or its script; a template prompt calls a `SKILL.md` named in
+  the description `my SKILL.md`. The LLM generation and `--refine` prompts ask
+  for outcome checks, and template `--refine` no longer turns reads or runs of
+  `SKILL.md`, the skill directory or the skill's scripts into behaviors. The
+  autopilot starter case leaves out LLM or `EVAL.md` text that grades skill
+  use, and `create-eval-dataset` prints a warning for each generated case that
+  still grades it. The starter case from `init-custom-grader` and `init-harbor-task`
+  asserts the task outcome instead of "using the relevant skill workflow". The
+  negative template case is unchanged. `tier3 validate` now warns when a
+  prompt points at the skill's files or an expected output or assertion grades
+  skill use, including runs of the skill's own scripts. The warning fails
+  `--strict` and the strict dataset check that all-tier CI runs before its
+  advisory Tier 3 step; it never blocks a local run or autopilot. On newly
+  generated datasets, baseline scores rise and lift falls; existing datasets
+  are not rewritten.
 
 - Tier 3 tool efficiency counts writing, editing and patching files, scoped
   native searches and listings (`Grep`, `Glob`, `LS`, OpenCode `list`, Codex
@@ -493,6 +555,11 @@ All notable changes to SkillEvaluator are documented in this file.
   JSON dataset previews and validation output preserve Unicode values, using
   readable characters when the output encoding supports them and escapes otherwise.
 
+- Required Tier 3 judges recheck their wall-time deadline before accepting a
+  result, including when a dependency or logging handler swallowed the timeout
+  exception. Expired calls remain scoreless errors and restore their caller's
+  deadline context.
+
 - `skillevaluator view` no longer asks the LLM again when it regenerates a
   missing `report.html` for a Tier 3 run that saved its report feedback in
   `result.json`. The regenerated report shows the conclusions,
@@ -509,6 +576,13 @@ All notable changes to SkillEvaluator are documented in this file.
   rebuilt, with the LLM when a provider is configured, and its
   `what_to_fix.json` rewritten.
 
+- Generated Tier 3 images now build when any staged skill declares packages
+  in `apt-packages.txt`. The generated `apt-get install` line ended the base
+  package list with `\ \`, so the shell passed apt-get a package named " "
+  and the build failed with `Unable to locate package`. This affected the
+  shared eval base image, generated task Dockerfiles and the default
+  Dockerfile for native Harbor tasks.
+
 - Public MCP URL probes handle modern SDK client and stream APIs while retaining
   checked-address connections, header grants, response limits, and bounded
   cleanup. Redirect responses are refused before SDK-level redirect handling.
@@ -520,10 +594,26 @@ All notable changes to SkillEvaluator are documented in this file.
   to Harbor 0.25's `${VAR}` form in generated task TOML, without changing source
   declarations or agent JSON configuration.
 
+- Validate native verifier and step-verifier MCP references against their
+  verifier environment grants, retaining agent grants for agent servers and
+  the legacy default when no separate verifier grants are supplied. Invalid
+  declarations provide field/type and `${VAR}` hints without echoing values.
+
 - Keep local `/logs/artifacts`, `HARBOR_LOGS_DIR/artifacts`, and
   `HARBOR_ARTIFACTS_DIR` on the same private staging tree. Artifact collection
   preserves source files and retained role logs; local whole-log-tree transfers
   fail before modifying their destination.
+
+- With default or default-plus-custom grading, a Tier 3 task image now fails
+  to build when `python3 -I` cannot import the verifier's packages: idna,
+  openai, ragas or boto3. This happens, for example, when a custom Dockerfile
+  sets `ENV PIP_USER=1`, or when the packages are reachable only through
+  `PYTHONPATH`. The build-time import check ran plain `python`, which sees
+  those locations. `test.sh` runs the verifier as `python3 -I`, which does not.
+  Such images built, and then every trial's verifier failed on `import idna`,
+  or the goal-accuracy judge fell back from RAGAS to the custom judge when only
+  ragas was hidden. The check now runs as `python3 -I`. `custom_only` grading
+  never runs that verifier, so its images no longer run the check.
 
 - Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
   the PR or merge request's target revision. Policy files from the proposed
@@ -729,6 +819,31 @@ All notable changes to SkillEvaluator are documented in this file.
 - Treat empty and placeholder `expected_script` values as no script expectation,
   and ignore placeholder-only expected behavior entries when grading datasets.
 
+- Tier 3 security findings no longer keep credentials from the agent's
+  commands, the user prompt, or the agent's response in their `evidence`,
+  which is saved in `skill_evaluator_reward.json`, the collected results, and
+  the reports. In 0.8.0 a sensitive-path or sensitive-file-write finding stored
+  the whole command or tool input, such as
+  `echo 'export OPENAI_API_KEY=...' >> ~/.bashrc`; destructive-command,
+  prompt-injection, and refusal findings stored their text unmasked; and
+  network findings masked only known key shapes, so a `curl -u user:password`
+  value was kept. Path findings now record the protected entry they matched,
+  such as `~/.bashrc`, and the longest one when several match, so a write to
+  `/etc/profile.d/npm.sh` records `/etc/profile.d`. The other findings mask, as
+  a best effort, private key blocks, URL user info (also a password that holds
+  an `@`), `Authorization`, API-key, and `Cookie` header values (including
+  quoted and shell-escaped cookie values), credential flags and assignments
+  (also a double-quoted value with an escaped quote, and a value on a
+  backslash-continued line), `.netrc` passwords, and common token prefixes, and
+  keep the rest of the command readable; a backslash-newline is joined, as in a
+  shell, so a continued command shows as one line. A credential in another
+  form, such as a `.pgpass` line, can still appear. Scores are unchanged.
+  Because path findings name the entry, the without-skill baseline comparison
+  now matches them by entry: a with-skill write to `~/.bashrc` is attributed to
+  the baseline prompt or environment when the baseline also wrote to
+  `~/.bashrc`, whatever each command wrote. Both the host checker and the
+  bundled Harbor verifier apply the fix.
+
 - Read JSON, JSONL and YAML evaluation datasets as UTF-8 so Unicode prompts and
   answers load correctly on hosts with a non-UTF-8 default text encoding.
 
@@ -781,8 +896,12 @@ All notable changes to SkillEvaluator are documented in this file.
   (`reference_unresolved` from v2.12.0), a fatal or other ledger row, an
   uninspected file, a degraded analyzer, a limitation, or fewer findings
   counted after filtering than before still leaves the scan `INCOMPLETE`.
-
-- Missing-reference coverage checks retain standalone shell wildcards while ignoring leading Markdown bullets, so commands cannot hide uninspected files.
+  Every missing reference must match an accepted ledger location; ambiguous
+  references, unknown completeness fields and truncated evidence remain
+  `INCOMPLETE`. Nonfatal exclusions must name real uninspected paths. Line
+  checks retain standalone shell wildcards and recognize escaped spaces, and
+  accepted-reference warnings survive static/LLM finding deduplication. A
+  refused reference includes a short acceptance hint and documentation link.
 
 - Estimate Tier 1 instruction tokens from the parsed Markdown body, so `---`
   inside YAML values or comments does not count frontmatter as instructions.

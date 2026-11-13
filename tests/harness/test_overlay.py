@@ -477,6 +477,18 @@ def test_every_rule_has_a_fix_and_placeholders_are_filled(tmp_path: Path):
     assert {"OW-COMPACT", "OW-PROMPT-CAP"} <= _ids(rows, "openclaw")
 
 
+def test_rule_ids_named_in_messages_exist():
+    profiles = load_profiles("all")
+    known = {rule["id"] for profile in profiles for rule in profile["rules"]}
+    prefixes = "|".join(sorted({rule_id.split("-")[0] for rule_id in known}))
+    rule_id_pattern = rf"\b(?:{prefixes})-[A-Z0-9]+(?:-[A-Z0-9]+)*"
+    for profile in profiles:
+        for rule in profile["rules"]:
+            text = f"{rule['message']} {rule.get('fix', '')}"
+            for mentioned in re.findall(rule_id_pattern, text):
+                assert mentioned in known, f"{rule['id']} refers to {mentioned}, which no profile defines"
+
+
 def test_fix_reaches_findings_and_panels(tmp_path: Path):
     skill = _skill(tmp_path, desc="Use when testing emoji. " + "\U0001f600" * 600)
     result = HarnessValidator().validate(skill)

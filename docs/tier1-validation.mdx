@@ -287,6 +287,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     The check measures the skill together with the skills installed next to it. A single skill under a harness root such as `.claude/skills` is counted with everything in that folder; a folder of skills is its own catalog. That drives the list-budget rules (Claude Code and Codex ~8,000 description chars, Copilot 32 full descriptions, OpenClaw 150 skills or 18,000 chars) and a duplicate-name rule per harness that says which copy wins. A `catalog` line in the panel names the folder.
 
     Delivery rules: Claude Code's body cap, OpenCode's 51,200-byte / 2,000-line reads and lines over 2,000 characters, OpenClaw's whole-or-nothing read against its result caps, Hermes's 100,000-character `skill_view` budget, and Codex's ~10K-token cut when the model reads `SKILL.md` through the shell.
+
+    Placeholder rules: `$ARGUMENTS` and `${CLAUDE_SKILL_DIR}` are substituted only by Claude Code, and price-like `$N` text is replaced with arguments by Claude Code and OpenCode.
   </Accordion>
 
   <Accordion title="security — vulnerability scanning">

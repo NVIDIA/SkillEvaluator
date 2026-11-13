@@ -19,6 +19,8 @@ rules:
   - {id: CX-LIST-BUDGET, when: "catalog_desc_chars > list_budget_chars", effect: degraded, outcome: listing shortened, message: "The {catalog_size} skills in this folder have {catalog_desc_chars} description chars; Codex's skill list fits about {list_budget_chars} (2% of the context window at 4 bytes per token; 8,000 chars if unknown), so descriptions get shortened, then removed, then skills left out.", fix: "Shorten descriptions (trigger first) or install fewer skills here."}
   - {id: CX-DUP-NAME, when: "duplicate_name", effect: advisory, message: "Another skill is also named '{skill_name}' ({duplicate_paths}); Codex lists both, so the model sees two.", fix: "Give each skill a unique name."}
   - {id: CX-CASING, when: "not manifest_name_exact", effect: not_loaded, message: "Non-canonical name (skill.md/Skill.md): never loaded, on Linux or macOS (3/3 each).", fix: "Rename the file to SKILL.md (exact casing)."}
+  - {id: CX-ARGUMENTS, when: "uses_arguments_placeholder", effect: degraded, message: "$ARGUMENTS is not substituted: the model sees the literal text.", fix: "Describe the expected input in words instead of $ARGUMENTS."}
+  - {id: CX-SKILL-DIR, when: "uses_claude_skill_dir", effect: degraded, message: "${CLAUDE_SKILL_DIR} is not substituted: the model sees the literal text.", fix: "Use paths relative to SKILL.md."}
 notes:
   - "Explicit $skill injects the whole SKILL.md (145 KB tested)."
   - "Follows symlinked skill folders (inside or outside the root)."

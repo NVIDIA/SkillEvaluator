@@ -20,6 +20,8 @@ rules:
   - {id: HM-RESOURCE-SYMLINK, when: "resource_symlinks > 0", effect: degraded, message: "Symlinked files ({resource_symlink_paths}) are left out of the skill's file list.", fix: "Copy those files into the skill instead of symlinking them."}
   - {id: HM-LINKED-LAYOUT, when: "hermes_unlisted_files > 0", effect: advisory, message: "{hermes_unlisted_files} files outside references/, templates/, assets/ and scripts/ ({hermes_unlisted_dirs}) are left out of the skill's file list; the model finds them only if SKILL.md names their paths.", fix: "Move supporting files under references/, templates/, assets/ or scripts/."}
   - {id: HM-VIEW-BUDGET, when: "hermes_view_chars > 100000", effect: degraded, outcome: instructions not delivered, message: "When the model loads the skill, skill_view returns ~{hermes_view_chars} chars, over the 100,000-char tool-result budget (lower on models under ~167K context): the model gets a 1,500-char preview, not the instructions.", fix: "Keep SKILL.md under ~95,000 characters; move detail into references/ files."}
+  - {id: HM-ARGUMENTS, when: "uses_arguments_placeholder", effect: degraded, message: "$ARGUMENTS is not substituted: the model sees the literal text.", fix: "Describe the expected input in words instead of $ARGUMENTS."}
+  - {id: HM-SKILL-DIR, when: "uses_claude_skill_dir", effect: degraded, message: "${CLAUDE_SKILL_DIR} is not substituted: the model sees the literal text.", fix: "Use ${HERMES_SKILL_DIR} or paths relative to SKILL.md."}
 notes:
   - "Precedence: project > ~/.hermes/skills > skills.create_dir > external_dirs (project wins, 3/3)."
   - "Large bodies are spilled and paged through in small reads."

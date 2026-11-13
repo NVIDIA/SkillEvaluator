@@ -16,6 +16,8 @@ rules:
   - {id: CP-RELOAD, when: "always", effect: advisory, message: "New skills appear only after `/skills reload` or a restart; edits to existing skills apply at once."}
   - {id: CP-CASING, when: "not manifest_name_exact", effect: degraded, message: "Non-canonical name (skill.md/Skill.md): loaded on case-insensitive filesystems (macOS default APFS, 3/3), ignored on case-sensitive Linux (3/3). Works or breaks depending on the OS.", fix: "Rename the file to SKILL.md (exact casing)."}
   - {id: CP-DUP-NAME, when: "duplicate_name", effect: advisory, message: "Another skill is also named '{skill_name}' ({duplicate_paths}); Copilot uses one, and the project copy wins.", fix: "Give each skill a unique name."}
+  - {id: CP-ARGUMENTS, when: "uses_arguments_placeholder", effect: degraded, message: "$ARGUMENTS is not substituted: the model sees the literal text.", fix: "Describe the expected input in words instead of $ARGUMENTS."}
+  - {id: CP-SKILL-DIR, when: "uses_claude_skill_dir", effect: degraded, message: "${CLAUDE_SKILL_DIR} is not substituted: the model sees the literal text.", fix: "Use paths relative to SKILL.md."}
   - {id: CP-FM-STRIPPED, when: "custom_field_chars > 200", effect: advisory, message: "Frontmatter is stripped when the skill is used, so the text in {custom_fields} never reaches the model.", fix: "Move instructions from frontmatter into the SKILL.md body."}
   - {id: CP-DESC-ESCAPED, when: "description_has_quote", effect: advisory, outcome: text rewritten, message: "Double quotes in the description are shown to the model as &quot; in the skill list.", fix: "Use single quotes in the description if the exact text matters."}
 notes:

@@ -415,6 +415,15 @@ def test_bundle_files_symlinks_and_large_references(tmp_path: Path):
     assert "OC-REF-CUT" in _ids(rows, "opencode")
 
 
+def test_claude_placeholders_reach_other_harnesses_literally(tmp_path: Path):
+    rows = _rows(_skill(tmp_path, body=BODY + "Run ${CLAUDE_SKILL_DIR}/run.sh $ARGUMENTS\n"))
+
+    for harness in set(HARNESSES) - {"claude-code"}:
+        assert any(f["id"].endswith("-ARGUMENTS") for f in rows[harness]["findings"]), harness
+        assert any(f["id"].endswith("-SKILL-DIR") for f in rows[harness]["findings"]), harness
+    assert not rows["claude-code"]["findings"]
+
+
 def test_every_rule_has_a_fix_and_placeholders_are_filled(tmp_path: Path):
     for profile in load_profiles("all"):
         for rule in profile["rules"]:
@@ -468,6 +477,17 @@ def test_description_limit_is_1024(tmp_path: Path, harness: str, rule: str):
 
     assert rule not in _ids(at, harness)
     assert any(f["id"] == rule and "1 over" in f["message"] for f in over[harness]["findings"])
+
+
+def test_price_like_dollar_numbers_are_flagged_with_lines(tmp_path: Path):
+    prices = _rows(_skill(tmp_path / "a", body="# Prices\n\nInput $4.00, cache $0.25.\nBatch $4 / $20 per MTok.\n"))
+    safe = _rows(_skill(tmp_path / "b", body="Input USD 4.00, \\$0.25, $10k, $ARGUMENTS.\nRun on $1.\n"))
+
+    finding = next(f for f in prices["claude-code"]["findings"] if f["id"] == "CC-DOLLAR-N")
+    assert finding["message"].startswith("4 price-like $N tokens (lines 9, 10)")
+    assert "OC-DOLLAR-N" in _ids(prices, "opencode")
+    assert "CC-DOLLAR-N" not in _ids(safe, "claude-code") and "OC-DOLLAR-N" not in _ids(safe, "opencode")
+    assert skill_facts(tmp_path / "b" / "skills" / "demo-skill")["dollar_placeholder_count"] == 1
 
 
 def test_every_oversized_file_long_line_and_unlisted_folder_is_counted(tmp_path: Path):

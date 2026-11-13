@@ -37,6 +37,7 @@ policy label. Profile names do not control network access or report visibility.
 | `artifact-name` | Keep `skill-evaluator-tier1` for the optional publisher |
 | `report-base-url` | Optional own Pages URL, only after hosted publication is configured |
 | `scan-workers` | `4`; skills scanned at once, from 1 to 16. `1` scans one skill at a time |
+| `enforcement-mode` | `strict` (default) blocks on failed verdicts; `advisory` keeps complete policy/score failures non-blocking but still blocks runtime/evidence/incomplete failures |
 | `security-baselines` | `false`; explicitly apply reviewed per-skill SkillSpector baselines as described below |
 
 The runtime discovers exact-case `SKILL.md` files, rejects unsafe paths and

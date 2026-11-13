@@ -6,6 +6,19 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Add an `error_handling` section to the `--quality-config` file for
+  Reliability's three error-handling rules: the `SKILL.md` mention check and
+  the `scripts` and `lib` code checks. Each sets `points`, `message`,
+  `suggestion`, and its `terms` or `markers`; `points: 0` turns a rule off.
+  The section is optional and merges with the packaged values. A custom file
+  may now also omit `expected_headers`, which then falls back to the packaged
+  heading list; a list you set still replaces it and `[]` still turns heading
+  checks off. Without a
+  custom file, scores and findings are unchanged. The packaged
+  `quality_config` digest changes once, because `quality-default.yaml` gained
+  the section. A custom file's digest covers only the rules that file sets, so
+  existing custom files keep their digests and a digest changes only when the
+  file's rules change.
 - Tier 3 reports show token usage per case, per agent and over all agents, as
   a measurement that is not scored. The JSON payload gains `token_usage`;
   `BENCHMARK.md` gains a **Token Usage** section; the Markdown report, the HTML
@@ -55,6 +68,15 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 3 `evaluate --compare-to RUN` and read-only `compare-versions` compare
   compatible retained skill versions, report paired per-agent deltas and
   regressions, and keep version comparisons separate from no-skill Skill Lift.
+
+- Add opt-in `tier3 interact` experiments for two or more skills. The command
+  uses one reviewed task suite and a fixed attempt budget to compare baseline,
+  individual, and combined performance. It reports the departure from additive
+  gains and retains source identities and trial evidence. Invalid inputs exit
+  with code 2. Incomplete or incomparable experiments and output I/O failures
+  exit with code 1. Configuration failures identify their arm, trial progress
+  uses stderr, and output roots honor `SKILLEVALUATOR_RESULTS_DIR` with canonical
+  paths. Documentation describes trial noise and sequential configuration order.
 
 - Read-only Tier 3 `history` lists retained Skill Lift runs chronologically,
   separates incompatible configurations into segments, preserves unavailable
@@ -198,6 +220,13 @@ All notable changes to SkillEvaluator are documented in this file.
   optional, including the legacy alternate field, without changing numeric grades.
   Unrendered activation diagnostics remain in canonical exports without consuming
   HTML overview or failure-reason preview budgets.
+- The Tier 1 reusable workflow accepts `enforcement-mode: strict|advisory`
+  (default `strict`). Opt-in `advisory` keeps complete policy/score failures
+  non-blocking while retaining failed verdicts and reports and emitting a
+  workflow warning.
+  Configuration, scanner completeness, evidence, and runtime failures still
+  block. Advisory mode requires supporting workflow and scanner image pins;
+  the released 0.8.0 bundle does not accept this input.
 
 - Run SkillEvaluator's own `skills/` through the pinned three-tier GitHub
   callers, retaining Tier 1 as required and Tier 2/3 as advisory. A separate
@@ -268,11 +297,20 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Remove `skillevaluator.quality_config.quality_config_provenance(path, config)`.
+  Use `load_quality_config_with_provenance(path)` instead: it loads the config
+  and returns `(config, provenance)`, and its digest covers only the rules a
+  custom file sets. The report's `quality_config` field keeps its shape.
 - Upgrade the Tier 3 backend to Harbor 0.25.0. Align supported sandbox
   constructor options with the release while reserving automatic mounts and
   host Compose environment forwarding for evaluator policy. Preserve local
   agent, verifier, and artifact evidence under Harbor's new mount checks, and
   retain explicit Codex gateway URLs, credential aliases, and full model identifiers.
+
+- Tier 1 labels the `SKILL.md` token count as an estimate (characters / 4) in
+  the Large skill finding, the HTML report and the docs, and adds
+  `metrics.estimated_tokens` and `metrics.estimate_method` to the quality JSON.
+  `metrics.total_tokens` keeps the same value and scoring is unchanged.
 
 - Name Skill Lift as the headline comparison and label pass@k differences as
   supporting reliability across reports and terminal output.
@@ -444,6 +482,11 @@ All notable changes to SkillEvaluator are documented in this file.
   verdict line under it does, so the two agree, including with `--skip` and
   `--fail-fast`.
 
+- Configure CLI stdout to replace characters that its encoding cannot
+  represent, so reports and root help complete on legacy Windows code pages.
+  JSON dataset previews and validation output preserve Unicode values, using
+  readable characters when the output encoding supports them and escapes otherwise.
+
 - `skillevaluator view` no longer asks the LLM again when it regenerates a
   missing `report.html` for a Tier 3 run that saved its report feedback in
   `result.json`. The regenerated report shows the conclusions,
@@ -479,6 +522,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
   the PR or merge request's target revision. Policy files from the proposed
   changes cannot approve their own exceptions.
+
+- The `ci/gitlab/skill-evaluation.yml` template honors `TMPDIR` for temporary
+  scan reports and defaults to `/tmp`.
 
 - `skillevaluator validate` on a target with no skill, rules, workflows, or
   plugin, such as an ordinary source repository, no longer fails Tier 1 with
@@ -617,6 +663,16 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 2 includes qualifying shell comment blocks at end of file in context
   deduplication. Previously those blocks disappeared unless a blank line or
   code followed them, which could hide repeated guidance across shell files.
+- Tier 3 decodes the native Codex `exec` wrappers that Codex 0.161.0 emits:
+  inline `text(await tools.NAME(...))`, single-quoted string literals, and
+  literal `Promise.allSettled` batches rendered by an indexed `for`, indexed
+  `forEach`, or `forEach(text)`. Multi-call wrappers decode only when each call
+  owns its own JSON record of the outer output; dynamic arguments, shadowed
+  bindings, unsupported renderers, and missing, extra, reordered, or truncated
+  records, including duplicate JSON keys, remain unsupported. A nonzero exit
+  code or rejected promise in a record is graded as a failure. This restores
+  security and skill-execution scoring for those wrappers instead of the
+  neutral fallback.
 
 - All-tier CI retains Tier 2's native reports as advisory while preserving
   failed and incomplete evaluation outcomes. GitHub `ci status` validates the
@@ -743,6 +799,10 @@ All notable changes to SkillEvaluator are documented in this file.
   the digest of the unmasked value, so anyone holding the redacted report could
   confirm a guess for the masked part. Redaction now removes a digest that no
   longer matches the reported value.
+
+- Truncated `--llm-verify` replies with no complete verdicts no longer claim an
+  answering model. Complete verdicts still retain their model, and other LLM
+  parsers can still accept an empty result as complete evidence.
 
 - Tier 2 context deduplication now checks each chat-LLM verdict before it
   becomes a finding. When present, the confidence must be a JSON number from 0

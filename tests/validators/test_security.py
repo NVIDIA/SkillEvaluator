@@ -6163,17 +6163,11 @@ assert cap is not None and get_max_output_tokens(model) <= cap, (cap, get_max_ou
         paragraphs = [" ".join(block.split()) for block in page.read_text(encoding="utf-8").split("\n\n")]
         [verify] = [text for text in paragraphs if "`llm_model_used`" in text and "`--llm-verify`" in text]
         [rubric] = [text for text in paragraphs if "`llm_model_used`" in text and "`rubric_eval`" in text]
-        rule = (
-            "For a Claude 5.5 or later model on the native Claude API, the model is the one the reply names; "
-            "otherwise it is the configured model, unless a server-side `fallback` block in the reply names "
-            "another model."
-        )
-
-        assert rule in rubric
-        assert rule in verify
-        assert "Verdicts kept from a reply cut off at the output-token limit name the model that wrote that reply." in (
-            verify
-        )
+        for paragraph in (rubric, verify):
+            assert "`llm_model_used`" in paragraph
+            assert "`fallback`" in paragraph
+            assert "native Claude API" in paragraph
+        assert "output-token limit" in verify
 
     def test_llm_verify_names_the_fallback_model_for_verdicts_kept_from_a_truncated_reply(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

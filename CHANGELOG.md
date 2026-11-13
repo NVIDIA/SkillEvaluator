@@ -483,6 +483,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Harbor local mode keeps exclusion and filtered download archives inside the
+  allowed run directory, so pinned Harbor 0.25 transfers copy selected file
+  contents without granting host `/tmp` access. Filters retain exact protected
+  paths, and failed scans or unsafe destinations leave outputs untouched.
+
 - Configure CLI stdout to replace characters that its encoding cannot
   represent, so reports and root help complete on legacy Windows code pages.
   JSON dataset previews and validation output preserve Unicode values, using

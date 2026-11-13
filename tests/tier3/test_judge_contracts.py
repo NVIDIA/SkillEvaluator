@@ -806,6 +806,35 @@ def test_judge_evidence_masks_credentials_after_json_escaped_line_breaks(
         assert kept in redacted
 
 
+# json.dumps writes a tab as "\t" and, by default, a non-ASCII character as
+# "\uXXXX", so in JSON a credential can follow the letter t or a hex digit.
+@pytest.mark.parametrize(
+    ("text", "secret"),
+    [
+        pytest.param("Authorization:\tBearer bbbbbbbbbbbb", "bbbbbbbbbbbb", id="tab-authorization"),
+        pytest.param("Authorization: Bearer\tbbbbbbbbbbbb", "bbbbbbbbbbbb", id="tab-after-scheme"),
+        pytest.param('Authorization:\tDigest response="dddddddddddd"', "dddddddddddd", id="tab-digest"),
+        pytest.param("X-Api-Key:\tkkkkkkkkkkkk", "kkkkkkkkkkkk", id="tab-api-key"),
+        pytest.param("Cookie:\tsession=cccccccccccc", "cccccccccccc", id="tab-cookie"),
+        pytest.param("deploy --token\tvvvvvvvvvvvv", "vvvvvvvvvvvv", id="tab-token-flag"),
+        pytest.param("curl -u\tuuuu:pppppppppppp", "pppppppppppp", id="tab-user-flag"),
+        pytest.param("key\u00a0ghp_" + "g" * 36, "g" * 36, id="no-break-space-github-token"),
+        pytest.param("\u201csk-proj-" + "a" * 24 + "\u201d", "a" * 24, id="curly-quote-openai-key"),
+        pytest.param("\u2192Authorization: Bearer bbbbbbbbbbbb", "bbbbbbbbbbbb", id="arrow-authorization"),
+        pytest.param("run\u00a0--token tttttttttttt", "tttttttttttt", id="no-break-space-token-flag"),
+    ],
+)
+def test_judge_evidence_masks_credentials_after_json_escaped_tabs_and_non_ascii(text: str, secret: str) -> None:
+    assert secret not in eval_template._redact_judge_evidence(text)
+
+    for escaped in (json.dumps({"reply": text}), json.dumps(json.dumps({"reply": text}))):
+        assert "\\t" in escaped or "\\u" in escaped
+        redacted = eval_template._redact_judge_evidence(escaped)
+
+        assert secret not in redacted
+        assert "<redacted>" in redacted
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -818,6 +847,7 @@ def test_judge_evidence_masks_credentials_after_json_escaped_line_breaks(
         json.dumps(
             "Authorization is required.\npython -u script.py\n--token-limit 5\n\tcookie-jar ready\r\nC:\\new\\temp"
         ),
+        json.dumps("caf\u00e9 --token-limit 5\t\u201cAuthorization is required\u201d\tpython -u script.py"),
     ],
 )
 def test_judge_evidence_keeps_ordinary_text(text: str) -> None:

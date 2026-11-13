@@ -297,8 +297,12 @@ change to the model, secret or gateway settings, therefore runs no
 provider-backed tier. A wrong model or a missing secret first shows up in the
 push to the default branch after the merge, or in the next PR that changes a
 skill, not on the setup PR itself. To exercise the paid tiers before merging,
-include a skill change (`ci demo` opens one) or temporarily set
-`scan-mode: all` in the caller (`SKILL_EVAL_SCAN_MODE: all` on GitLab).
+change a file under a configured skill root in the same PR, or temporarily set
+`scan-mode: all` in the caller (`SKILL_EVAL_SCAN_MODE: all` on GitLab) and
+revert it before merging. `ci demo` cannot do this: it requires the all-tier
+scan caller on the default branch and rejects a setup that has not merged, and
+its skill-change PR branches from the default branch, so it never carries an
+unmerged caller change. Use `ci demo` after the setup merges.
 
 If a provider returns HTTP 404, verify that the selected model accepts chat
 requests with your account. Presence in the public model catalog alone does not
@@ -306,8 +310,8 @@ prove serving availability. Change the caller's `model` input to an accessible
 model and refresh `trusted-caller-blobs` before retrying; do not change global
 provider defaults to troubleshoot one repository. A PR that only changes the
 caller's `model` input skips the provider-backed tiers, so it cannot confirm the
-fix. Confirm it on a skill-change PR, with `scan-mode: all` set temporarily, or
-on the first run after the merge.
+fix. Confirm it by adding a skill change to the same PR, by setting
+`scan-mode: all` temporarily, or on the first run after the merge.
 
 The setup PR runs the keyless Tier 1 scan but, as it changes no skill, skips
 the provider-backed tiers. Its first automatic comment requires

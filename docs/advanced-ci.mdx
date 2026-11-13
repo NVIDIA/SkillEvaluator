@@ -45,8 +45,9 @@ a configured skill folder. A PR that changes only the CI setup, such as
 onboarding, a pin bump, or a model, secret or gateway change, runs the keyless
 Tier 1 scan of every skill and reports Tier 2 and Tier 3 as skipped. Its model
 and credentials are first exercised by the push to the default branch after the
-merge or by the next PR that changes a skill. To exercise them earlier, include
-a skill change or temporarily set `scan-mode: all`.
+merge or by the next PR that changes a skill. To exercise them before the merge,
+include a skill change in the same PR or temporarily set `scan-mode: all` in the
+caller. `skillevaluator ci demo` works only after the setup has merged.
 
 Reports retain native evidence and an aggregate artifact for 14 days. Feedback
 links to the authenticated artifact for that run; download and extract it,

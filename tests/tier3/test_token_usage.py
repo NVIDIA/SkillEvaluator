@@ -784,4 +784,3 @@ def test_two_pass_at_k_keys_for_one_case_merge_the_same_way_in_either_order(cut_
     [row] = usage["agents"]["codex"]["cases"]
     assert row["entry_id"] == _LONG_CASE
     assert row["with_skill"]["coverage"]["expected_attempts"] == 3
-

@@ -1115,7 +1115,13 @@ def _mapped_tool_calls(
     cursor.expect("=>")
     if inline:
         cursor.expect("text", "(")
-    cursor.take("await")
+        # The inline callback prints whatever the call expression evaluates to, so without `await`
+        # it renders the pending Promise instead of the tool's result and the outer output proves
+        # nothing about the call. The collected form may omit it: `Promise.allSettled` awaits
+        # whatever `.map` returns, so its record still describes the settled call.
+        cursor.expect("await")
+    else:
+        cursor.take("await")
     cursor.expect("tools", ".")
     function_name = cursor.name()
     cursor.expect("(")
@@ -1144,7 +1150,9 @@ def _extended_codex_program(source: str) -> tuple[list[tuple[str, dict[str, Any]
     over `.map` of such an array, bound calls, and renders. A single call keeps the upstream
     ownership: ``owner`` 0 owns the whole outer observation,
     -1 renders nothing. A lone call that prints its whole result has the ``("single",)`` format,
-    so its own exit code can mark it failed. With records, ``owner`` is None and ``record_format``
+    so its own exit code can mark it failed; the same call inlined into `Promise.allSettled`, whose
+    rejection the wrapper swallows, has the ``("settled_single",)`` format and is graded only once
+    its printed output proves it settled fulfilled. With records, ``owner`` is None and ``record_format``
     says how to split the outer observation; for inline renders it lists the call of each record
     in output order.
     """
@@ -1168,8 +1176,9 @@ def _extended_codex_program(source: str) -> tuple[list[tuple[str, dict[str, Any]
                     if calls:
                         return None
                     elements = cursor.literal()
-                    if not isinstance(elements, list):
-                        return None
+                    # `literal()` re-reads the same `[`, so it either returns the array or raises
+                    # `_NotStatic`; this narrows the `Any` it is declared to return.
+                    assert isinstance(elements, list)
                     arrays[variable] = elements
                     cursor.end_statement()
                     continue
@@ -1212,7 +1221,10 @@ def _extended_codex_program(source: str) -> tuple[list[tuple[str, dict[str, Any]
                 # no record can be proven to belong to the command at its position.
                 if len(mapped) != 1 or not cursor.at_end():
                     return None
-                return mapped, 0, ("single",)
+                # `Promise.allSettled` swallows a rejection, so a clean script exit does not prove
+                # this call ran: only the callback's own printed output does. Its own format keeps
+                # that weaker guarantee apart from a top-level lone call's.
+                return mapped, 0, ("settled_single",)
             else:
                 cursor.expect("text", "(")
                 if cursor.take("("):
@@ -1271,7 +1283,7 @@ def _exec_record(value: object, record_format: tuple, record_index: int) -> tupl
     form the scorers read, that makes an explicit outcome visible in the record's observation.
     """
     kind = record_format[0]
-    if kind in ("result", "single"):
+    if kind in ("result", "single", "settled_single"):
         return _returned_outcome(value) if isinstance(value, dict) else None
     if kind == "settled":
         settled = _settled_result(value)
@@ -1386,13 +1398,17 @@ def _resolve_exec_records(
         duplicate = False
     except _DuplicateKey:
         records, duplicate = None, True
-    if record_format == ("single",):
+    if record_format[0] in ("single", "settled_single"):
         header = _EXEC_OUTPUT_RE.match(observation)
+        printed = observation[header.end() :] if header is not None else observation
         # A lone call may print plain text, but a body that opens like a record and does not parse
         # is incomplete evidence: a cut-off failure must not score as a clean run.
-        incomplete = duplicate or (
-            records is None and header is not None and observation[header.end() :].lstrip()[:1] == "{"
-        )
+        incomplete = duplicate or (records is None and header is not None and printed.lstrip()[:1] == "{")
+        # An inlined call's rejection is swallowed by `Promise.allSettled`, so the script completes
+        # with nothing printed and a clean exit says only that the wrapper finished. The callback
+        # renders after its own `await` resolves, so printed output is the one proof it fulfilled.
+        if record_format[0] == "settled_single" and not printed.strip():
+            incomplete = True
         if incomplete:
             outer = {key: value for key, value in tool_call.items() if not key.startswith("_atif_")}
             return [{**outer, "_atif_normalization_status": UNSUPPORTED_NATIVE_CODEX_EXEC}]

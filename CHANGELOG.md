@@ -68,6 +68,11 @@ All notable changes to SkillEvaluator are documented in this file.
   own exit code or rejection. The form that prints inside the callback settles
   out of array order, so it is read only for a single command and otherwise
   stops grading rather than guessing which result belongs to which command.
+  That inline form is graded only on evidence it actually produced: the callback
+  must `await` the call, because an un-awaited one prints a pending promise
+  rather than the tool's result, and it must print something, because
+  `Promise.allSettled` swallows a rejection and would otherwise let a call that
+  never ran exit cleanly and read as a successful command.
 
 ## 0.9.0 - 2026-11-13
 

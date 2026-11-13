@@ -338,14 +338,40 @@ class TestLinkedRubricGuidance:
 
         assert collected["linked_markdown"] == {"GUIDE.md": "π"}
 
-    @pytest.mark.parametrize(("per_file", "total"), [(1, 1), (10, 1)])
-    def test_required_utf8_content_is_never_truncated(self, tmp_path, per_file, total):
+    @pytest.mark.parametrize(
+        ("earlier_guides", "total", "remaining"),
+        [
+            # The budget itself splits the character: nothing has been collected yet.
+            pytest.param(0, 1, 1, id="budget-splits-the-first-document"),
+            # The running total does: an earlier document leaves too few bytes for this one.
+            pytest.param(1, 8, 0, id="earlier-document-exhausts-the-budget"),
+        ],
+    )
+    def test_required_utf8_content_is_never_truncated(self, tmp_path, earlier_guides, total, remaining):
+        # The supplement budget is the only bound on required guidance, so it must stop the
+        # collection rather than cut a multi-byte character in half -- whether the budget is too
+        # small from the start or an earlier document has already spent it.
         root = _write_skill(tmp_path)
-        (root / "SKILL.md").write_text("[Guide](GUIDE.md)")
+        links = [f"[Earlier](earlier{index}.md)" for index in range(earlier_guides)]
+        (root / "SKILL.md").write_text("\n".join([*links, "[Guide](GUIDE.md)"]))
+        for index in range(earlier_guides):
+            (root / f"earlier{index}.md").write_text("x" * 8)
         (root / "GUIDE.md").write_text("π", encoding="utf-8")
 
-        with pytest.raises(_UnsafeRubricInputError):
-            _collect_supplementary_content(root, max_bytes_per_file=per_file, max_total_bytes=total)
+        with pytest.raises(_UnsafeRubricInputError, match=f"{remaining}-byte limit: GUIDE.md"):
+            _collect_supplementary_content(root, max_bytes_per_file=10, max_total_bytes=total)
+
+    def test_required_guidance_fits_when_the_budget_covers_every_document(self, tmp_path):
+        # The companion of the case above: the same two documents are collected whole as soon as
+        # the budget holds both, so the earlier read is spending the budget, not failing on it.
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("[Earlier](earlier0.md)\n[Guide](GUIDE.md)")
+        (root / "earlier0.md").write_text("x" * 8)
+        (root / "GUIDE.md").write_text("π", encoding="utf-8")
+
+        collected = _collect_supplementary_content(root, max_bytes_per_file=10, max_total_bytes=10)
+
+        assert collected["linked_markdown"] == {"earlier0.md": "x" * 8, "GUIDE.md": "π"}
 
     def test_required_guidance_is_not_bounded_by_the_preview_size(self, tmp_path):
         # The per-file bound summarizes optional previews; required guidance answers to the

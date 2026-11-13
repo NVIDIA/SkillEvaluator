@@ -394,6 +394,28 @@ All notable changes to SkillEvaluator are documented in this file.
   and a view of a credential store such as `~/.netrc` still scores 0.0. Both
   the host checker and the bundled Harbor verifier apply the fix.
 
+- A native Codex `exec` wrapper that calls the freeform `apply_patch` tool with
+  the patch as a bare string is decoded instead of being discarded. The bounded
+  statement grammar read every argument as an object literal, so
+  `const r1 = await tools.apply_patch("*** Begin Patch\n...");` followed by
+  another call made the whole wrapper
+  `unsupported_native_codex_exec_wrapper`: the patch and its sibling calls went
+  ungraded, although the same wrapper written as
+  `tools.apply_patch({input: "..."})` decoded. A single- or double-quoted
+  string is now read as that tool's `input`. Nothing is interpreted: a template
+  literal, a concatenation, an extra argument, an unterminated string and a
+  bare string passed to any other tool are still rejected, and the object path
+  keeps its character gates unchanged.
+- A tool call the harness reports as exiting 0 is no longer recorded as failed
+  because its output holds error words. An agent that read a document *about*
+  errors, such as a `SKILL.md` headed `# Troubleshooting: command not found`,
+  lost that call's component activation in the plugin component signals. An
+  explicit zero exit status in every correlated result's header now passes the
+  call, as a harness success flag already did. Only the harness's own header
+  lines are read, so a body that spells `exit_code=0` still reports nothing,
+  and a result with no exit status, or a non-zero one, is judged by its text
+  exactly as before.
+
 ## 0.9.0 - 2026-11-13
 
 ### Fixed

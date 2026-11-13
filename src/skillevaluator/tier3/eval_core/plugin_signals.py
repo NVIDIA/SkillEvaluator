@@ -51,8 +51,11 @@ owns that observation; otherwise its outcome is unknown.
 
 ``succeeded`` is tri-state. ``True``: a correlated result came back without a
 structured error flag or a failure/unavailable marker in the head of any of its
-content blocks or in its tail. ``False``: the correlated result is flagged or
-carries such a marker ("no such file" only counts for non-shell calls, whose
+content blocks or in its tail, or every correlated result's own status header
+states that the command exited 0, which outranks the text (a document *about*
+errors is the agent's answer, not this call's diagnostic). ``False``: the
+correlated result is flagged or carries such a marker without an explicit
+successful status ("no such file" only counts for non-shell calls, whose
 output is not a mix of several commands). A file read or skill load returns
 file text, so only its first line counts (past a harness's shell status lines),
 plus, for a shell read, any shell error line that names a ``SKILL.md``. ``None``:

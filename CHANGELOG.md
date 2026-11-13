@@ -42,6 +42,9 @@ All notable changes to SkillEvaluator are documented in this file.
   Additive `budget.observed_overruns` metadata is separate from admission
   `status`; limits are checked between logical admission units, so a completed
   run can exceed a cap without becoming partial or failed.
+- Grader qualification reports null behavior-step results with a matching
+  `not_checked` expectation as insufficient evidence instead of errors. Raw
+  scores and unjudgeable rates are unchanged.
 - A failed Tier 3 execution (for example a backend launch failure) now marks the
   report payload, its summary and the affected agents as failed with their
   errors, instead of only the top-level `result.json`. A report re-rendered by

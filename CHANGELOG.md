@@ -164,6 +164,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The behavior evidence gate no longer keeps a score for an expectation that
+  names an observed artifact but also asks for something only the final answer
+  could show. "Writes `report.py` and explains why each column was dropped" was
+  treated as settled by the artifact alone, so a case kept a score whose second
+  half was never checked. Every clause of an expectation must now name a
+  checkable artifact of its own; one that does not keeps the gate, as a wholly
+  prose expectation already did.
 - Accuracy and Behavior judge prompts clarify that explicit final-answer formats
   apply to the entire final response, independently of correct values in tool
   output or references. Scoring and thresholds are unchanged; an Accuracy format

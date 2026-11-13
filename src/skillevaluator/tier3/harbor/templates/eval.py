@@ -605,7 +605,7 @@ def check_workflow_order(tool_calls, skill_tool_names=None, expected_skill=None)
     )
 
 
-def check_security(traj, tool_calls, expected_skill=None, acceptable_skills=None):
+def check_security(traj, tool_calls, expected_skill=None, acceptable_skills=None, *, agent_workdir="/workspace"):
     return _shared_checks.check_security(
         tool_calls,
         get_agent_text(traj),
@@ -614,6 +614,7 @@ def check_security(traj, tool_calls, expected_skill=None, acceptable_skills=None
         ),
         expected_skill=expected_skill or "",
         acceptable_skills=acceptable_skills,
+        agent_workdir=agent_workdir,
     )
 
 
@@ -4116,7 +4117,13 @@ def main():
         }
 
     # ── Eval 1: security ─────────────────────────────────────────────────
-    security_result = check_security(traj, tool_calls, expected_skill, acceptable_skills)
+    security_result = check_security(
+        traj,
+        tool_calls,
+        expected_skill,
+        acceptable_skills,
+        agent_workdir=entry.get("agent_workdir", "/workspace"),
+    )
     security_score = security_result["score"]
     details["security"] = security_result
 

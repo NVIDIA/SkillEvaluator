@@ -991,3 +991,103 @@ def test_a_table_without_the_marked_row_names_the_unmatched_case_ids_instead() -
     # A rendered marked row still gets the explanation of the mark.
     full, _ = token_usage_rows(usage)
     assert unverified_case_ids_note(usage, full) == UNVERIFIED_CASE_NOTE
+
+
+@pytest.mark.parametrize("renderer", ["terminal", "benchmark"])
+def test_hidden_ids_are_redacted_in_full_before_the_display_limit(renderer: str) -> None:
+    from skillevaluator.reporting.benchmark import _md_cell
+    from skillevaluator.reporting.tier3_token_usage import render_token_usage_table
+    from skillevaluator.tier3.harbor.progress import redact_progress_detail
+
+    fake_secret = "fixture-sensitive-" + "X" * 160
+    usage = _unverified_usage([])
+    usage["case_id_validation"]["unmatched_case_ids"] = [fake_secret]
+
+    def safe(value: str) -> str:
+        return redact_progress_detail(value, secret_values={fake_secret})
+
+    if renderer == "terminal":
+        output = io.StringIO()
+        console = Console(file=output, width=240, force_terminal=False)
+        assert render_token_usage_table(console, usage, case_pointer=VALIDATE_CASE_POINTER, text=safe)
+        rendered = output.getvalue()
+    else:
+        rendered = "\n".join(
+            token_usage_markdown_lines(
+                usage,
+                heading="## Token Usage",
+                agent_label=str,
+                cell=lambda value: _md_cell(value, (fake_secret,)),
+                max_case_rows=50,
+            )
+        )
+
+    assert "fixture-sensitive-" not in rendered
+    assert "X" * 40 not in rendered
+    assert "1 case ID(s) could not be matched" in rendered
+    assert ("Isolated sandbox" if renderer == "benchmark" else "<redacted>") in rendered
+
+
+@pytest.mark.parametrize("pruned", [False, True])
+def test_hidden_ids_are_escaped_in_markdown_benchmark_and_html(run_result: tuple[Path, Any], pruned: bool) -> None:
+    _run, result = run_result
+    hostile = "zz-<img src=x onerror=alert(1)>|`ghost`\n[click](javascript:alert(1))"
+    cases = [_unverified_case(f"case-{index:03d}") for index in range(70)]
+    cases.append(_unverified_case(hostile, in_dataset=False))
+    usage = _unverified_usage(cases)
+    usage["case_id_validation"]["unmatched_case_ids"] = [hostile]
+    result.metadata["agent_eval"]["token_usage"] = usage
+    if pruned:
+        drop_token_usage_cases(usage)
+
+    markdown = MarkdownReporter().render_all([result])
+    benchmark = BenchmarkReporter(include_timestamp=False).render_all([result])
+    report = HTMLReporter(include_timestamp=False).render_all([result])
+    sections = [
+        _section(markdown, "### Token Usage"),
+        _section(benchmark, "## Token Usage"),
+        report.split('<div id="t3-token-usage">', 1)[1].split("</details>", 1)[0],
+    ]
+    for section in sections:
+        assert "A row marked" not in section
+        assert "1 case ID(s) could not be matched" in section
+        assert "ghost" in section
+        assert "<img" not in section
+        assert UNVERIFIED_CASE_MARK not in section
+    for section in sections[:2]:
+        assert "[click](javascript:" not in section
+        assert "&lt;img src=x onerror=alert(1)&gt;" in section
+
+
+def test_hidden_id_escaping_expansion_is_bounded_after_formatting() -> None:
+    from skillevaluator.reporting.markdown import _markdown_untrusted_table_cell
+
+    usage = _unverified_usage([])
+    usage["case_id_validation"]["unmatched_case_ids"] = ["<img>" * 200]
+
+    lines = token_usage_markdown_lines(
+        usage,
+        heading="### Token Usage",
+        agent_label=str,
+        cell=_markdown_untrusted_table_cell,
+        max_case_rows=50,
+    )
+    [note] = [line for line in lines if "case ID(s) could not be matched" in line]
+
+    assert "<img>" not in note
+    assert "…" in note
+    assert len(note) < 450
+
+
+def test_hidden_id_names_remain_sorted_deduplicated_and_bounded() -> None:
+    usage = _unverified_usage([])
+    usage["case_id_validation"]["unmatched_case_ids"] = ["z" * 1000, "alpha", "alpha", "beta"]
+
+    note = unverified_case_ids_note(usage)
+
+    assert note is not None
+    assert "3 case ID(s)" in note
+    assert "alpha, beta, " in note
+    assert "z" * 1000 not in note
+    assert "…" in note
+    assert len(note) < 600

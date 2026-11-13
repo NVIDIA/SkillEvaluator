@@ -414,7 +414,7 @@ class TestExternalTool:
 
         assert (
             tool.get_install_hint() == "Install with: uv tool install "
-            "https://github.com/NVIDIA/SkillSpector/releases/download/v2.13.3/skillspector-2.13.3-py3-none-any.whl"
+            "https://github.com/NVIDIA/SkillSpector/releases/download/v2.13.4/skillspector-2.13.4-py3-none-any.whl"
         )
         assert "[security]" not in tool.get_install_hint()
 

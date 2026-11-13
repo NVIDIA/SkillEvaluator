@@ -3699,6 +3699,10 @@ def _call_required_judge(metric, judge, *args, allow_not_applicable=False, **kwa
                     except OSError:
                         signal.signal(signal.SIGALRM, previous_alarm_handler)
             result = judge(*args, **kwargs)
+            # Dependency and logging handlers can swallow the alarm exception.
+            # Never accept a result returned after this call's wall-time budget.
+            if time.monotonic() >= deadline:
+                raise TimeoutError("LLM judge time budget exhausted")
         finally:
             if alarm_armed:
                 try:

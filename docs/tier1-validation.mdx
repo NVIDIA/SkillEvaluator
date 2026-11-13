@@ -97,7 +97,7 @@ for skills. Its Tier 1 LLM checks still run only when requested.
   skillevaluator validate ./my-skill --tiers 1 --llm --llm-verify
   ```
 
-  Confirmed findings keep their original severity. High-confidence false positives stay visible but are downgraded to INFO and carry verification metadata explaining the review. Static scanning always runs first — if a requested LLM stage is unavailable or returns unusable evidence, the run does not silently turn green. `security-scan` and `pii-scan` accept `--llm-verify` too.
+  Confirmed findings keep their original severity. High-confidence false positives stay visible but are downgraded to INFO and carry verification metadata explaining the review. Each finding that gets a verdict names the provider and model that gave it as `llm_provider` and `llm_model_used` in its JSON metadata. For a Claude 5.5 or later model on the native Claude API, the model is the one the reply names; otherwise it is the configured model, unless a server-side `fallback` block in the reply names another model. Verdicts kept from a reply cut off at the output-token limit name the model that wrote that reply. Static scanning always runs first — if a requested LLM stage is unavailable or returns unusable evidence, the run does not silently turn green. `security-scan` and `pii-scan` accept `--llm-verify` too.
 
   HTML, Markdown, and terminal reports show the recorded verification verdict, confidence, and reasoning beside each finding, together with its reported severity.
 </Steps>
@@ -119,6 +119,18 @@ Reports for any of these runs are selected with `-r`/`--report` (`cli`, `json`, 
 | Plugin | `plugin` | A bundle-reference `agent_plugin.yaml`/`.yml` manifest, or a contained `.claude-plugin/plugin.json` manifest |
 
 Plugins are validated against their public contract; the `quality`, `lint`, and `version` checks are skill-only and are skipped for plugins, rules, and workflows.
+
+When `--type auto` finds none of these signals, for example in an ordinary source repository, the target's type is `unknown`. There is no manifest to check, so Tier 1:
+
+- Records `schema`, `version`, and `quality` as not applicable instead of failing them with `No skills found`. The terminal summary and the HTML report count them as N/A. The JSON and Markdown reports list them as skipped, with a skip reason that starts with `not applicable`. No report counts them as passes.
+- Still runs the content scans (`security`, `pii`, `license`, `code-integrity`, `unicode`, `lint`, and `dependency` when selected), so a real secret or card number still fails the run. The security scan keeps its unrestricted scope.
+- Passes when those scans pass. A misspelled `--checks` name still fails. Tier 2 deduplication still runs on the target unless you pass `--no-dedup` or `--tiers 1`, and can still fail the run.
+- Adds a root `tier1_applicability` object to the JSON report, whichever checks `--checks` and `--skip` select: `applicability` (`not_applicable`), `reason_code` (`unsupported_content_type`), `detected_content_type` (`unknown`), and `supported_content_types`.
+- Is never eligible for publication, because a not-applicable check is not evidence.
+
+Auto-detection also reads the directory names in the target's absolute path. A repository whose path includes a directory named `skills`, `team-skills`, `team-rules`, `workflows`, or `team-workflows`, such as a CI checkout at `/home/runner/work/skills/skills`, is detected as that type, not as `unknown`, and Tier 1 validates it as that type, as before. `--type` forces a type but cannot select `unknown`.
+
+A target folder that itself holds a manifest entry in any letter case (`SKILL.md`, `workflow-rules.mdc`, `agent_plugin.yaml`, `agent_plugin.yml`, or `.claude-plugin/plugin.json`), such as `Skill.md`, or a manifest symlink whose target is missing, is a broken artifact rather than a folder without one, so its manifest checks still run and fail. A `.claude-plugin` folder without a `plugin.json`, such as a marketplace's, does not count. This applies only to the target's own entries: a mis-cased manifest below the target is not discovered; validate that folder directly. Pass `--type skill` (or another type) to validate any target as that type; a missing `SKILL.md` then fails as before. A folder that holds skills below it, such as `.claude/skills/<name>/SKILL.md` or `.agents/skills/<name>/SKILL.md`, is still validated as a collection of skills.
 
 For collections, pass a folder containing skills under `skills/` or `team-skills/`. Folder-level validation discovers each live `SKILL.md` below the target while excluding configured names such as `evals`, `results`, `versions`, `.git`, `.venv`, `node_modules`, and `__pycache__`.
 
@@ -201,7 +213,24 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     The LLM pass requires a configured provider. It enriches the static result but does not replace static findings or make missing scanner evidence pass.
 
-    SkillSpector's text pattern analyzers cannot read images, so it reports the analysis of a skill that references a PNG or JPEG file as `partial`. SkillEvaluator accepts that gap with a warning instead of `INCOMPLETE` only when the report shows no other gap and no fatal scope exclusion, and each referenced image is a regular, single-link (not hard-linked), non-executable file whose bytes have the chunk structure of a PNG or the marker structure of a JPEG and that is not reached through a symlink. The gap is accepted for at most 256 images and 128 MiB of image data in total. An image is never accepted inside a `hooks`, `scripts`, `tools`, `agents`, `commands`, `prompts`, `rules`, `team-rules` or `workflows` directory at any depth, or under a top-level `config`, `skills`, `.mcp`, `.agents`, `.claude`, `.codex`, `.continue`, `.cursor`, `.gemini` or `.windsurf` directory (names compared without regard to case). The structure check corroborates the file type; it does not decode the image or prove that it renders. PNG IDAT compressed data and ancillary chunks, and JPEG entropy-coded data and APPn or COM segments, are not inspected and can still carry other bytes. The image content itself is not assessed. Any other partial reason still leaves the scan `INCOMPLETE`. SkillSpector also reports a High `AE1` (incomplete referenced artifact analysis) finding for such an image; from v2.12.0 it omits that finding when the skill renders a PNG with Markdown image syntax, such as `![Logo](assets/logo.png)`. An `AE1` finding fails the check like any other High finding.
+    SkillSpector's text pattern analyzers cannot read images, so it reports the analysis of a skill that references a PNG or JPEG file as `partial`. SkillEvaluator accepts that gap with a warning instead of `INCOMPLETE` only when the report shows no other gap apart from the missing references described next, and no fatal scope exclusion, and each referenced image is a regular, single-link (not hard-linked), non-executable file whose bytes have the chunk structure of a PNG or the marker structure of a JPEG and that is not reached through a symlink. The gap is accepted for at most 256 images and 128 MiB of image data in total. An image is never accepted inside a `hooks`, `scripts`, `tools`, `agents`, `commands`, `prompts`, `rules`, `team-rules` or `workflows` directory at any depth, or under a top-level `config`, `skills`, `.mcp`, `.agents`, `.claude`, `.codex`, `.continue`, `.cursor`, `.gemini` or `.windsurf` directory (names compared without regard to case). The structure check corroborates the file type; it does not decode the image or prove that it renders. PNG IDAT compressed data and ancillary chunks, and JPEG entropy-coded data and APPn or COM segments, are not inspected and can still carry other bytes. The image content itself is not assessed. Any other partial reason, except the missing references described next, still leaves the scan `INCOMPLETE`. SkillSpector also reports a High `AE1` (incomplete referenced artifact analysis) finding for such an image; from v2.12.0 it omits that finding when the skill renders a PNG with Markdown image syntax, such as `![Logo](assets/logo.png)`. An `AE1` finding fails the check like any other High finding.
+
+    SkillSpector also reports the analysis as `partial` when the skill's instructions name a file that it did not scan, such as a file the skill writes at run time (`output/notes.md`) or a source file elsewhere in the repository. SkillEvaluator accepts that gap with a warning instead of `INCOMPLETE` when each such reference meets all of these conditions:
+
+    - It is a nonfatal `reference_resolution` row for one line of a file that the report lists once as a component and that is a regular, single-link file of at most 1,000,000 bytes inside the skill, not reached through a symlink.
+    - The report's `references` list records a `missing` reference on that line, quotes part of the line, and records no `ambiguous` reference there.
+    - The line, at most 10,000 characters long, names nothing in the skill that SkillSpector did not inspect: a symlink, a file the report does not list, a directory that holds no listed file, such as `versions/`, `node_modules/` or `evals/results/`, which SkillEvaluator leaves out of the scanned copy, anything inside such a directory, or a directory that holds any of these, even beside listed files. A `.git` directory counts by its own name, by its Git hooks other than `*.sample` templates, and by every other entry in it that is not part of Git's own layout, such as a script placed there, with everything inside that entry. Git's own files, such as `HEAD`, `config`, `index`, `packed-refs` or `ORIG_HEAD`, and what its `objects`, `refs`, `logs` and `info` directories hold, such as branch names, do not count. Names are compared without regard to case or Unicode normalization, in the line as written and as a Markdown renderer or a reader of file paths may read it: with backslash escapes of ASCII punctuation (such as `node\_modules`) removed, HTML character references (such as `&#118;`) resolved and percent-escapes decoded, up to three of these steps in any order. A skill with more than 50,000 files and directories, or nested more than 64 directories deep, is not checked, and its scan stays `INCOMPLETE`. The work of checking a report's lines is also bounded: when it would take longer, such as for many long lines beside thousands of files left out of the scan, the scan stays `INCOMPLETE`.
+    - A word in the line that a shell, cmd.exe, PowerShell or Windows would expand or unquote is read as a pattern, and none of those names may match it. In the pattern, quotes and escapes are removed, a group such as `(v)` stands for what it holds, also right after `]` as in `[v](e)rsions`, each expansion, set of alternatives, extended glob or numeric range may stand for any text, and each bracket expression for any one character. The word is read the way POSIX shells read globs, brace and parameter expansions, `$(...)` and quotes (`v*/*.sh`, `vers?ons`, `v[e]rsions`, `v{e,x}rsions`, `$DIR/run.sh`, `ver""sions`); the way zsh reads groups (`(v)ersions`, `(v|x)ersions`), numeric ranges (`run<1-9>.sh`), the `EXTENDED_GLOB` operators `^`, `#` and `~` (`ver^x`, `verr#sions`, and `v*~x`, read as `v*`), where `x#` as a whole part, such as `C#`, matches only names made of `x`, and globbing flags such as `(#a2)` or `(#c1)`, which make the whole word stand for any text (`(#a2)virsions/x`); the way bash and ksh read extended globs (`@(v)ersions`, `!(x)`); the way cmd.exe reads the `^` escape (`ver^sions`), variables (`%DIR%`, `!DIR!`) and batch parameters (`%1`, `%~dp0`); the way PowerShell reads backtick escapes; with `\` as a directory separator (`v*\i*.sh`); and with a Windows short (8.3) name or a Samba mangled name, a path part with text after a `~` such as `NODE_M~1/BOOTST~1.SH`, standing for any name that holds the part's first character, such as any name with an `n` for `NODE_M~1`. So `3~5` is read as written, as `3`, and as any name with a `3`. A span between backticks is read as Markdown code, as written and with its backticks removed, not as a command, so a plural written as `` `topic`s `` is read as `topics`. A word made only of `*`, such as a list marker, is not read this way. Prose with this syntax is read the same way: a price such as `$5`, a list such as `{a,b}`, `%APPDATA%` or a lone `^` stands for any text, so a line with one stays `INCOMPLETE` whenever anything is left out of the scan, and `approx~10` stays `INCOMPLETE` when a name left out holds an `a`.
+    - The check reads names that are written in the reported line, in the spellings above. It does not read other lines and does not run commands, so it does not detect a name on another line, such as `DIR=node_modules` set on one line and used as `sh $DIR/run.sh` on the next, or a name that a command prints or builds, such as `printf` output in backticks, a list piped into `xargs sh`, `find -exec`, or a PowerShell string joined with `+`. It is meant to keep an instruction that names a left-out file `INCOMPLETE`, not to catch a skill written to hide one. Without this check, such a skill passes whenever SkillSpector reports no missing reference in it; with it, the skill also passes when every line SkillSpector reports is another missing reference, such as `output/notes.md`. SkillSpector's own analyzers, not this check, assess the instructions it scanned.
+    - When the target is a single file, such as `skillevaluator security-scan path/to/SKILL.md`, SkillSpector scans that file alone, so every other file and directory beside it counts as not inspected. A line in it that names a file beside it, such as `scripts/install.sh`, keeps the scan `INCOMPLETE`.
+    - Tier 3 output in its default location, `<skill>/evals/results`, is left out of the scanned copy too, so it counts as not inspected. The rest of `evals/`, such as `evals/evals.json` and input fixtures in `evals/files`, is scanned. After a Tier 3 run, a line that names `results`, a file the run leaves there, such as `report.html` or `summary.json`, or, when the run used `--harbor-keep-jobs`, any bundled file (the kept Harbor tasks hold a copy of the skill) keeps the scan `INCOMPLETE`, although the same line passed before the run. Writing Tier 3 results outside the skill, with `--results-dir` or `SKILLEVALUATOR_RESULTS_DIR`, keeps a run from changing the result.
+    - The scan covers the whole target. When the target is a folder or a plugin that holds skills, such as `skillevaluator security-scan path/to/skills/`, `skillevaluator validate path/to/skills/` (which checks each skill as its own job) or `validate` on a plugin, each skill in it is scanned on its own, and a line may name a file elsewhere in the target that the skill's scan did not inspect, so those skills' missing references keep their scans `INCOMPLETE`.
+
+    Any other gap must be a referenced image that SkillEvaluator accepts as described above, and the scan then carries both warnings. Without such images, the report must also show no partially or entirely uninspected file, no limitation and no fatal scope exclusion, and every analyzer must have completed or be not applicable or disabled. In either case the report must count as many findings after filtering as before it. The warning names the file and line of up to three of the references; it does not quote the referenced path. Files not in the scan, including any outside the scanned path, are not inspected.
+
+    SkillSpector v2.12.0 to v2.13.3 report these references as `reference_missing`, and v2.10 and v2.11 as `reference_unresolved`, which SkillEvaluator accepts under the same conditions. A v2.13.3 report whose only gaps are such references is also accepted from the report alone as a missing-reference caveat: an INFO finding that keeps SkillSpector's `partial` status and is recorded as `skillspector_reference_caveats` in the JSON report. It replaces the warning above, and whenever the scan has a known target, as through `validate`, `tier1` or `security-scan`, it is accepted only when the conditions above hold too. A reference that matches several bundled files (`reference_unresolved` from v2.12.0, `ambiguous` in the `references` list before it) still leaves the scan `INCOMPLETE`.
+
+    From v2.13.4, SkillSpector no longer reports such a scan as `partial`. When it inspected every bundled file and the only gaps are references to files the skill does not bundle, it reports the status `complete_with_caveats` and lists each reference as a caveat. SkillEvaluator accepts these caveats under the same conditions and shows the missing-reference warning above, and the findings of an accepted report are checked as in any other complete scan. A caveat on a path that is not a bundled file, or one that fails a condition above, such as a line that names a file left out of the scan, leaves the scan `INCOMPLETE`; as for a `partial` report, the report's findings are still checked and reported. Unlike a v2.13.3 caveat, these caveats are never accepted from the report alone, so they leave a scan without a known target `INCOMPLETE`, and an accepted report carries no `skillspector_reference_caveats` entry. SkillSpector gives this status only when every gap is a nonfatal `reference_missing` row, so a report with no caveat, or with a caveat that is not a nonfatal `reference_missing` row in phase `reference_resolution`, contradicts itself: SkillEvaluator does not trust it, and the scan is `INCOMPLETE` without its findings. The same holds for `complete_with_caveats` from a release before v2.13.4.
 
     **Agent control paths.** SkillSpector rules describe attacks on an agent, so a match is an agent threat only in a file the agent reads or runs. When `validate` or `tier1` detects a skill, rules, workflows, or plugin artifact, the `security` check keeps findings on agent control paths and suppresses the rest:
 
@@ -399,6 +428,10 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     Each criterion is scored from 0 to 10. The local evaluator, not the model's boolean, treats 7 or higher as passing. The overall score is an importance-weighted mean, and the rubric passes only when that score reaches `--min-score` and every criterion passes.
 
+    If the judge's reply is not valid JSON, misses, repeats or invents a criterion, or gives a criterion a score outside 0 to 10 or a pass flag that is not a boolean, `rubric-eval` asks the judge once more and names the problem, keeping the first 500 characters of it. A second such reply fails the rubric with a HIGH `llm_invalid_response` finding, or `llm_unavailable` when it is still not JSON. A rate limit, server error or other transient provider error is retried by the LLM client as set by `SKILL_EVAL_LLM_MAX_RETRIES` (see [LLM retries and judge time budget](/skills/skillevaluator/environment-variables#llm-retries-and-judge-time-budget)). A request that still fails after those retries, a refusal or a truncated reply is not asked again.
+
+    The JSON report records `judge_attempts`, the number of times `rubric-eval` asked the judge (1, or 2 after a rejected reply), in the skill's `rubric_eval` success detail or `llm_invalid_response` / `llm_unavailable` finding and, for a single skill, also in the `rubric_eval` object. The client's own retries are not counted. When the first request fails, for example because no provider is configured, no reply came back and `judge_attempts` is left out.
+
     The JSON report names the provider and model that gave each score as `llm_provider` and `llm_model_used` in the skill's `rubric_eval` success detail and, for a single skill, also in the `rubric_eval` object. For a Claude 5.5 or later model on the native Claude API, the model is the one the reply names; otherwise it is the configured model, unless a server-side `fallback` block in the reply names another model. A Claude 5.5 or later model's refusal can be answered by the server-side fallback model, and the API can send a repeat of that request straight to it; the report then names the fallback model, not the configured model.
 
     ```bash title="Rubric evaluation"
@@ -443,12 +476,75 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     nonmatching declarations are reported as skipped. Version ranges, URL/path
     dependencies, dynamic or Poetry metadata, malformed declarations, and
     missing or failed scanner evidence leave the audit `INCOMPLETE`. Supply
-    pinned `requirements.txt` for unresolved declarations. `pip-audit` is the
+    pinned `requirements.txt` for unresolved declarations. A requirements line
+    that ends in a backslash continues on the next line unless it is a comment
+    line, as in `pip install -r`, so a pin after a comment line that ends in a
+    backslash is audited. `pip-audit` is the
     primary scanner; Safety supplies secondary coverage for requirements files
     when installed separately. The audit may use network-backed vulnerability databases.
     JSON and HTML export data retain `dependency_coverage` per target, including
     requested and actually audited pins. Unreadable declarations have unknown
     declaration counts and an empty audited inventory, not a completed scan.
+
+    Each advisory is a `DEPENDENCY` finding whose check name is the advisory ID
+    (a numeric Safety ID reads `SAFETY-<id>`). It points at the requirements
+    file and the line that pins the package, or at `pyproject.toml`, so it
+    appears in JSON `findings`, the severity counts, and SARIF results.
+    `validate` on a folder of skills validates each skill as its own job, so
+    each skill's report lists its advisories. When one dependency check covers
+    several skills, as with `validate --type rules` or `--type workflows` on a
+    folder, or `DependencySecurityValidator().validate()` on a folder in
+    Python, a skill whose audit passes is summarized as one passed check, so
+    its medium or low advisories are not listed; validate that skill on its own
+    to see them. The finding metadata records:
+
+    - `package_name` and `resolved_version`: the package and version the
+      scanner checked.
+    - `declared_constraint` and `declaration`: the exact pin as the target
+      spells it, such as `PyYAML==5.3`, and where it is declared (`line 3`, or
+      `optional group docs, declaration 2` in `pyproject.toml`). The raw line,
+      with its markers and options, is never copied.
+    - `resolution_status` and `dependency_relationship`: `resolved` and
+      `direct` when the advisory matches an audited exact pin. Only exact pins
+      are audited, with `--no-deps`, so the advisory applies to the version the
+      target declares. Safety reads the raw requirements file, so it can
+      report a version that no audited pin declares, such as a pin skipped
+      because its marker does not match the scanner platform. That advisory is
+      `unbound`: `declared_constraint`, `declaration`, and
+      `dependency_relationship` are `null`, and the finding has no line.
+    - `dependency_role`: `runtime`, `dev`, `test`, `docs`, or `build`, from a
+      whole word of the requirements file name or the optional group name.
+      Words are split at `-`, `_`, and `.`. `dev`, `devel`, `develop`,
+      `development`, `devtools`, `lint`, and `linting` mean `dev`; `test`,
+      `tests`, `testing`, `testutils`, `pytest`, and `unittest` mean `test`;
+      `doc`, `docs`, and `documentation` mean `docs`; `build` means `build`.
+      So `requirements-dev.txt` is `dev`, while `requirements-latest.txt` and
+      `requirements-docker.txt` are `runtime`.
+    - `advisory_id`, `advisory_source` (`pip-audit` or `Safety`),
+      `affected_range` (Safety only; `null` for pip-audit), `fixed_versions`,
+      and `aliases`.
+
+    A `high` or `critical` advisory fails the run. A Python caller that builds
+    `DependencySecurityValidator(fail_on_medium=True)` also fails on a `medium`
+    pip-audit advisory; those findings record `fail_on_medium: true` in their
+    metadata, so a policy overlay keeps that rule. Safety's severity is its
+    level word or, when Safety runs with an API key, its CVSS object: the
+    CVSS v3 level, then the v3 score, then the v2 score and level. A score
+    that is not a number from 0 to 10 is skipped, and a Safety advisory with
+    none of these is `medium`. When pip-audit already reported
+    the same advisory ID or CVE for that package version, Safety's copy is
+    left out, so one vulnerability is one finding. A critical advisory does not
+    stop a folder run at that skill, as a critical finding of other checks
+    does without `--continue-on-failure`: every skill is audited.
+
+    A policy overlay can change one advisory with `DEPENDENCY.<advisory-id>`,
+    such as `DEPENDENCY.PYSEC-2020-176: low`, or every advisory with
+    `DEPENDENCY.*`. When one dependency check covers several skills, the
+    overlay sees only the advisories that check lists, so it cannot raise a
+    medium or low advisory of a skill whose audit passed. The warnings that say
+    why an audit is `INCOMPLETE`, such as a line without an exact pin, still
+    appear in the CLI and Markdown reports next to the advisories, and after a
+    policy overlay changes an advisory's severity.
 
     ```bash title="Opt-in dependency audit"
     skillevaluator validate ./my-skill --checks dependency

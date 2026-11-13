@@ -1313,10 +1313,40 @@ setting that cut evidence: `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`,
 `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`, or both. Raise each setting it
 names; raising the budget does not clear a cut made by the final-response
 limit. Larger budgets send longer judge prompts and use more evaluator
-tokens. The behavior budget never falls below the final-response limit plus
-4,000 characters, so raising the limit leaves room for the tool history. Set these variables in the host environment;
+tokens. The *default* behavior budget never falls below the final-response
+limit plus 4,000 characters, so raising the limit alone leaves room for the
+tool history; a budget you set yourself is used exactly as set. Set these
+variables in the host environment;
 SkillEvaluator forwards them to the verifier. Defaults and accepted values are
 in [Judge evidence budgets](/skills/skillevaluator/environment-variables#judge-evidence-budgets).
+
+`behavior_check`'s `omitted` record carries four further keys, because
+`truncated` alone cannot say whether the judge still had what it needed:
+
+- `incomplete_sections` — the evidence sections whose complete source did not
+  reach the judge, by name: `final response`, `user request`, `file changes`,
+  `compact tool history`. Each is compared against its unclipped source, so
+  `file changes` and `compact tool history` also appear when a single write
+  body or tool result was longer than its own per-entry allowance, not only
+  when the overall budget was exceeded.
+- `required_complete` and `required_missing` — whether the *required*
+  evidence survived. Only `final response` is required: file changes and the
+  tool history grow with the run, so any finite budget shortens them on a long
+  trajectory, and their loss is reported but never withholds a score.
+- `expected_behaviors_verified` — whether the deterministic fact list already
+  settles every expected behavior, in which case the evidence that was cut
+  cannot change the judge's answer.
+
+When `required_complete` is `false`, `behavior_check` returns an evaluation
+error with no score instead of grading the evidence loss as a behavior
+failure, and **the case then has no overall score at all** — an unscored
+metric that is not "not applicable" leaves `overall_score` null, so the case
+drops out of any gate or comparison keyed on it. Raise the two settings the
+`reason` names, or shorten the case, and re-run. The one exception is
+`expected_behaviors_verified`: when every expected behavior names an artifact
+path or backtick-quoted snippet that the deterministic fact list above the
+evidence already marks observed, the missing text cannot change the answer, so
+the case is judged and scored normally.
 
 ### Judge requests and retries
 

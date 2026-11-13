@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -562,6 +563,79 @@ def test_behavior_evidence_keeps_write_when_prompt_is_long() -> None:
     assert "/workspace/output/test_gpu_engine_selection.py" in evidence
 
 
+def _evidence_section(evidence: str, title: str) -> str:
+    """Return the body of *title*'s section, or ``""`` when it is absent."""
+    start = evidence.find(f"{title}\n")
+    if start == -1:
+        return ""
+    body_start = start + len(title) + 1
+    ends = [
+        evidence.find(f"\n\n{other}\n", body_start)
+        for other in ("FILE CHANGES", "FINAL RESPONSE", "USER REQUEST", "COMPACT TOOL HISTORY")
+        if other != title
+    ]
+    ends = [end for end in ends if end != -1]
+    return evidence[body_start : min(ends)] if ends else evidence[body_start:]
+
+
+def test_behavior_evidence_user_request_allowance_is_capped_above_the_old_800() -> None:
+    # The USER REQUEST section gets its own allowance of
+    # _DEFAULT_BEHAVIOR_USER_REQUEST_LIMIT characters: enough for an ordinary
+    # Tier 3 task prompt, which the old fixed 800 cut, but not the whole
+    # final-response allowance, which would spend up to 8,000 of the budget on
+    # a second copy of a question the compact tool history already repeats and
+    # leave no room for the tool calls.
+    question = "QSTART_" + ("q" * 1000) + "_QMID_" + ("q" * 1800) + "_QEND"
+    assert len(question) == 2818
+    traj = {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {"tool_call_id": f"run-{idx}", "function_name": "Bash", "arguments": {"command": f"pytest -k t{idx}"}}
+                ],
+                "observation": {"results": [{"source_call_id": f"run-{idx}", "content": f"{idx} passed"}]},
+            }
+            for idx in range(12)
+        ]
+        + [{"source": "agent", "message": "FINAL_ANSWER_BODY all tests pass."}]
+    }
+
+    evidence = build_behavior_evidence(traj, question, max_chars=12000)
+    user_section = _evidence_section(evidence, "USER REQUEST")
+
+    # Past the old 800-character cap, which dropped everything from offset 511
+    # to the last 256 characters.
+    assert "QSTART_" in user_section
+    assert "_QMID_" in user_section
+    assert "_QEND" in user_section
+    # But still capped: the section is bounded by its own allowance, not by the
+    # 8,000-character final-response allowance, which would carry all 2,818.
+    assert "...[truncated]..." in user_section
+    assert len(user_section) <= atif_helpers._DEFAULT_BEHAVIOR_USER_REQUEST_LIMIT
+
+    # The final answer is untouched, and the tool history still carries tool
+    # calls — the evidence a non-file behavior is judged on.
+    assert "FINAL_ANSWER_BODY all tests pass." in _evidence_section(evidence, "FINAL RESPONSE")
+    assert "Agent called: Bash" in _evidence_section(evidence, "COMPACT TOOL HISTORY")
+
+    # Nothing of the request is actually lost: the compact tool history opens
+    # with the whole question.
+    assert question in evidence
+
+
+def test_behavior_evidence_user_request_limit_never_exceeds_the_final_response_limit(monkeypatch) -> None:
+    # Lowering the final-response limit must still shrink the whole bundle,
+    # so the user-request allowance follows it down.
+    assert atif_helpers._behavior_user_request_limit() == atif_helpers._DEFAULT_BEHAVIOR_USER_REQUEST_LIMIT
+
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "500")
+    assert atif_helpers._behavior_user_request_limit() == 500
+
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "20000")
+    assert atif_helpers._behavior_user_request_limit() == atif_helpers._DEFAULT_BEHAVIOR_USER_REQUEST_LIMIT
+
+
 def test_behavior_evidence_does_not_treat_read_like_tool_names_as_writes() -> None:
     traj = {
         "steps": [
@@ -751,29 +825,55 @@ def test_behavior_evidence_default_keeps_a_realistic_final_answer() -> None:
 
 
 def test_behavior_evidence_final_response_explicit_arg() -> None:
-    traj = _trajectory_with_long_final_response()
+    # The answer is 4,031 characters: under the 8,000-character default it
+    # survives whole, and a per-call limit of 3,000 cuts its middle. Without
+    # that span the explicit argument changes nothing and the test proves
+    # nothing (the defaults produce a 2,231-character answer, which fits
+    # either way).
+    traj = _trajectory_with_long_final_response(middle=2500, tail=1500)
+
+    default_evidence = build_behavior_evidence(traj, "question", max_chars=8000)
+    assert "START_MARKER_" in default_evidence
+    assert "_LATE_MARKER_" in default_evidence
+    assert "...[truncated]..." not in default_evidence
 
     evidence = build_behavior_evidence(traj, "question", max_chars=8000, final_response_limit=3000)
     assert "START_MARKER_" in evidence
-    assert "_LATE_MARKER_" in evidence
-    assert "...[truncated]..." not in evidence
+    assert "_LATE_MARKER_" not in evidence
+    assert "...[truncated]..." in evidence
 
 
 def test_behavior_evidence_standalone_reconciles_max_chars(monkeypatch) -> None:
-    traj = _trajectory_with_long_final_response()
+    traj = _trajectory_with_long_final_response(middle=2500, tail=1500)
 
-    # When final_response_limit is explicitly passed without max_chars, max_chars expands
-    evidence = build_behavior_evidence(traj, "question", final_response_limit=3000)
+    # When final_response_limit is explicitly passed without max_chars, max_chars
+    # expands to hold it: a 6,000-character limit carries the whole 4,031-character
+    # answer even though the standalone floor is only 4,000 characters.
+    evidence = build_behavior_evidence(traj, "question", final_response_limit=6000)
     assert "START_MARKER_" in evidence
     assert "_LATE_MARKER_" in evidence
     assert "...[truncated]..." not in evidence
+    assert len(evidence) > atif_helpers._BEHAVIOR_EVIDENCE_MAX_CHARS
+
+    # And a lower per-call limit still binds, so the expansion follows the
+    # argument rather than ignoring it.
+    tight = build_behavior_evidence(traj, "question", final_response_limit=3000)
+    assert "_LATE_MARKER_" not in tight
+    assert "...[truncated]..." in tight
 
     # When SKILL_EVAL_BEHAVIOR_CHECK_BUDGET is set in env, standalone call uses it
     monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "12000")
-    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "3000")
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "6000")
     env_evidence = build_behavior_evidence(traj, "question")
     assert "START_MARKER_" in env_evidence
     assert "_LATE_MARKER_" in env_evidence
+    assert "...[truncated]..." not in env_evidence
+
+    # The env limit binds downwards too, on the same budget.
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "3000")
+    tight_env = build_behavior_evidence(traj, "question")
+    assert "_LATE_MARKER_" not in tight_env
+    assert "...[truncated]..." in tight_env
 
 
 def test_behavior_check_budget_and_compactor_env_override(monkeypatch) -> None:
@@ -797,16 +897,51 @@ def test_behavior_check_budget_auto_reconciles_tool_history_headroom(monkeypatch
     from skillevaluator.tier3.eval_core import atif_helpers
     from skillevaluator.tier3.eval_core.llm_judge import _behavior_check_budget as judge_budget
 
-    # If only final response limit is set to a large value, budget expands with headroom (4000)
-    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "8000")
-    assert atif_helpers._behavior_check_budget() == 12000
-    assert judge_budget() == 12000
+    # If only final response limit is set to a large value, the DEFAULT budget
+    # expands with headroom (4000).
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "16000")
+    assert atif_helpers._behavior_check_budget() == 20000
+    assert judge_budget() == 20000
 
-    # Equal explicit budget (8000) and exceeded explicit budget (6000) both reserve tool-history headroom (4000)
-    for explicit_budget in ("8000", "6000"):
+    # Unparseable and non-positive values are not budgets, so they fall back to
+    # that same reconciled default rather than being honoured.
+    for unusable in ("16k", "1.5", "0", "-100"):
+        monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", unusable)
+        assert atif_helpers._behavior_check_budget() == 20000
+        assert judge_budget() == 20000
+
+
+def test_explicit_behavior_check_budget_is_honoured_below_the_default_floor(monkeypatch, caplog) -> None:
+    # An operator pins this to cap the judge prompt for a small-context model.
+    # Quietly raising it to the final-response limit plus 4,000 would defeat
+    # the only reason to set it, so it is used as set and warned about.
+    from skillevaluator.tier3.eval_core import atif_helpers
+    from skillevaluator.tier3.eval_core.llm_judge import _behavior_check_budget as judge_budget
+
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "8000")
+    monkeypatch.setattr(atif_helpers, "_warned_behavior_budgets", set())
+
+    for explicit_budget, expected in (("2000", 2000), ("6000", 6000), ("8000", 8000), ("16000", 16000)):
         monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", explicit_budget)
-        assert atif_helpers._behavior_check_budget() == 12000
-        assert judge_budget() == 12000
+        assert atif_helpers._behavior_check_budget() == expected
+        assert judge_budget() == expected
+
+    # A budget too small to hold the final response beside any tool history is
+    # warned about, naming both settings, rather than silently dropped.
+    monkeypatch.setattr(atif_helpers, "_warned_behavior_budgets", set())
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "2000")
+    with caplog.at_level(logging.WARNING, logger=atif_helpers.__name__):
+        assert atif_helpers._behavior_check_budget() == 2000
+    assert "SKILL_EVAL_BEHAVIOR_CHECK_BUDGET=2000" in caplog.text
+    assert "SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT" in caplog.text
+
+    # A budget with room for the answer and some history is not warned about.
+    caplog.clear()
+    monkeypatch.setattr(atif_helpers, "_warned_behavior_budgets", set())
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "9600")
+    with caplog.at_level(logging.WARNING, logger=atif_helpers.__name__):
+        assert atif_helpers._behavior_check_budget() == 9600
+    assert caplog.text == ""
 
 
 def _trajectory_with_failed_verification_and_long_claim(*, include_file_changes: bool = False) -> dict:

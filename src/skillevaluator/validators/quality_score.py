@@ -28,6 +28,7 @@ import yaml
 
 from skillevaluator.constants import (
     EXECUTABLE_SKILL_DIRS,
+    QUALITY_DEFAULT_MIN_SCORE,
     QUALITY_EXCLUDED_DIRS,
     QUALITY_RECOMMENDED_MAX_TOKENS,
     QUALITY_RESERVED_NAMES,
@@ -247,7 +248,7 @@ class QualityScoreValidator(ValidatorBase):
     existing SkillEvaluator SchemaValidator checks.
     """
 
-    def __init__(self, min_score: int = 70, quality_config: Path | None = None) -> None:
+    def __init__(self, min_score: int = QUALITY_DEFAULT_MIN_SCORE, quality_config: Path | None = None) -> None:
         self.min_score = min_score
         self.quality_config = load_quality_config(quality_config)
         self.quality_config_provenance = quality_config_provenance(quality_config, self.quality_config)

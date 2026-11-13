@@ -118,6 +118,54 @@ def test_parent_segments_do_not_make_a_false_root(tmp_path: Path):
     assert skill_facts(tmp_path / ".claude" / "skills" / ".." / ".." / "skills" / "demo-skill")["install_root"] is None
 
 
+def test_plain_parent_segment_keeps_the_root(tmp_path: Path):
+    skill = tmp_path / ".claude" / "skills" / "demo-skill"
+    (skill.parent / "group").mkdir(parents=True)
+    _skill(tmp_path / "src").rename(skill)
+
+    facts = skill_facts(skill.parent / "group" / ".." / "demo-skill")
+
+    assert facts["install_root"] == ".claude/skills"
+    assert facts["grouping_depth"] == 0
+
+
+def test_parent_segment_after_a_symlink_goes_to_the_real_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    home.mkdir()
+    (project / "sub").mkdir(parents=True)
+    skill = project / ".claude" / "skills" / "demo-skill"
+    skill.parent.mkdir(parents=True)
+    _skill(tmp_path / "src").rename(skill)
+    (home / "link").symlink_to(project / "sub", target_is_directory=True)
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    # home/link/.. is the project folder, even though home/.claude/skills would be a user root.
+    assert skill_facts(home / "link" / ".." / ".claude" / "skills" / "demo-skill")["install_root"] == ".claude/skills"
+
+
+def test_parent_segment_after_a_symlink_does_not_lose_the_root(tmp_path: Path):
+    store = tmp_path / "store"
+    skill = _rooted(store)
+    (tmp_path / "project").mkdir()
+    (tmp_path / "project" / "link").symlink_to(skill.parent, target_is_directory=True)
+
+    # project/link/.. is store/.agents, so the skill sits in .agents/skills.
+    assert (
+        skill_facts(tmp_path / "project" / "link" / ".." / "skills" / "demo-skill")["install_root"] == ".agents/skills"
+    )
+
+
+def test_symlinked_skills_folder_counts_where_the_link_is(tmp_path: Path):
+    link = tmp_path / "project" / ".claude" / "skills"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(_rooted(tmp_path / "real").parent, target_is_directory=True)
+    (link / "group").mkdir()
+
+    assert skill_facts(link / "demo-skill")["install_root"] == ".claude/skills"
+    assert skill_facts(link / "group" / ".." / "demo-skill")["install_root"] == ".claude/skills"
+
+
 def test_missing_home_folder_does_not_stop_the_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     def no_home() -> Path:
         raise RuntimeError("no home")

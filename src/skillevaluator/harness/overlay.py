@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import ast
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -94,12 +93,27 @@ def load_profiles(names: str | list[str] = "all", profiles_dir: Path | None = No
     return [yaml.safe_load(available[n].read_text(encoding="utf-8")) for n in requested]
 
 
+def _link_location_parts(path: Path) -> tuple[str, ...]:
+    # Like os.path.normpath, but ".." after a symlink steps to the link target's parent, as the filesystem does.
+    parts: list[str] = []
+    for part in path.absolute().parts:
+        if part != "..":
+            parts.append(part)
+            continue
+        here = Path(*parts)
+        if here.is_symlink():
+            parts = list(here.resolve().parent.parts)
+        elif len(parts) > 1:
+            parts.pop()
+    return tuple(parts)
+
+
 def _install_root(skill_path: Path) -> tuple[str | None, int]:
     # Harnesses scan the folder a skill is installed in, so a symlinked skill counts where the link is.
-    parts = Path(os.path.normpath(skill_path.absolute())).parts
+    parts = _link_location_parts(skill_path)
     try:
         home = Path.home()
-        homes = {Path(os.path.normpath(home.absolute())).parts, home.resolve().parts}
+        homes = {_link_location_parts(home), home.resolve().parts}
     except (KeyError, RuntimeError):
         homes = set()
     for root in sorted(_KNOWN_ROOTS, key=lambda r: -len(r.split("/"))):

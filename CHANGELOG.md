@@ -6,6 +6,22 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Tier 3 reports show token usage per case, per agent and over all agents, as
+  a measurement that is not scored. The JSON payload gains `token_usage`;
+  `BENCHMARK.md` gains a **Token Usage** section; the Markdown report, the HTML
+  report (under Measured Agent Resources), `validate --verbose` and
+  `tier3 evaluate --verbose` show the same numbers. Cached tokens are part of
+  the prompt and are not added again. Attempts that failed before scoring count
+  as usage. Missing counters leave a partial total and are never estimated.
+  The with-skill change needs complete counts for the same attempts in both
+  arms, and both arms must have succeeded. Token usage never displaces score
+  evidence: it joins the report payload last, and its case rows, then its sums,
+  are left out, with a note, when the payload would pass its size or node
+  limits, also after the run's next steps, `tier3 evaluate`'s case findings and
+  `validate`'s applicability fields join it. A baseline that did not run is
+  shown as not run, and a reused baseline's tokens are marked as used in the
+  run it came from.
+
 - Capability-gated CI onboarding for protected Tier 1 `--llm`/SkillSpector
   checks, independent Tier 3 gateway/judge settings and native agent models.
   Combined reports retain source-bound `BENCHMARK.md` cards for every outcome;
@@ -665,6 +681,23 @@ All notable changes to SkillEvaluator are documented in this file.
   such a trial now has no LLM or tool seconds and, like other unmeasured trials,
   leaves its arm's LLM and tool totals `N/A` (`null` in JSON). Native ATIF
   timing is unchanged.
+
+- Tier 3 reports no longer say `baseline not run` for an agent whose baseline
+  arm ran but failed, for example after one baseline attempt hit the agent
+  timeout. `BENCHMARK.md` now shows that agent's with-skill scores as
+  `90.0% — baseline incomplete (1 of 2 attempts scored); uplift unavailable`,
+  or `baseline unavailable` when no baseline attempt scored, and keeps
+  `baseline not run` for a skipped baseline. An **Agent coverage** list under
+  the score table names each failed arm, including a failed with-skill arm,
+  with its scored and expected attempts and the first Harbor exception type in
+  words, such as `agent timeout error`; the Tier 3 row of the tier status
+  table names the agent and arm. The JSON payload records the same facts in
+  `coverage_notices`, which the HTML report shows under
+  **Agent coverage notes** and the full terminal report
+  (`validate --verbose` or `-r cli`) prints in the Tier 3 block, also when
+  Tier 3 is non-blocking. The compact default `validate` view leaves them to
+  the HTML and JSON reports and `BENCHMARK.md`. A failed arm still fails the
+  agent and the run, and the notes say so.
 
 - Tier 3 standard judges under `LLM_JUDGE_RETRY_POLICY=strict` with Bedrock
   as the provider no longer label a Bedrock error that the policy treats as an

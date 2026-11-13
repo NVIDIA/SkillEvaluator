@@ -109,6 +109,19 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Behavior checks no longer score a final answer that the evidence limits
+  shortened. The final-response allowance rises from 800 to 8,000 characters,
+  with the total behavior evidence budget reconciled to 12,000, so an ordinary
+  answer reaches the judge whole instead of losing its middle; the user request
+  is reserved alongside it, ahead of the optional exploration output in the
+  compact tool history. The `behavior_check` evidence record now reports
+  whether the required evidence is complete, not only whether something was
+  dropped. When the final answer still cannot fit, the judge returns an
+  explicit evaluation error and no behavior score, rather than grading the
+  evidence loss as a behavior failure, and that missing score stays missing
+  instead of being averaged in as a zero.
+  `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT` and
+  `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET` still override both limits.
 - Code Risk Analysis reports Semgrep file-level parse errors as one partial-scan
   error that names up to 20 unparsed files, relative to the skill and with the
   line of the first error, instead of the first three truncated messages. The

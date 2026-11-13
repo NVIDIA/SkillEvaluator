@@ -752,6 +752,12 @@ _SECTION_USER_REQUEST = _shared_atif._SECTION_USER_REQUEST
 _env_positive_int = _shared_atif._env_positive_int
 _behavior_final_response_limit = _shared_atif._behavior_final_response_limit
 _behavior_check_budget = _shared_atif._behavior_check_budget
+_behavior_user_request_limit = _shared_atif._behavior_user_request_limit
+_BEHAVIOR_SECTION_LABELS = _shared_atif._BEHAVIOR_SECTION_LABELS
+_BEHAVIOR_REQUIRED_EVIDENCE = _shared_atif._BEHAVIOR_REQUIRED_EVIDENCE
+_BEHAVIOR_EVIDENCE_GAP_HINT = _shared_atif._BEHAVIOR_EVIDENCE_GAP_HINT
+_behavior_evidence_completeness = _shared_atif._behavior_evidence_completeness
+behavior_evidence_gap = _shared_atif.behavior_evidence_gap
 _BEHAVIOR_WRITE_TOOLS = _shared_atif._BEHAVIOR_WRITE_TOOLS
 _BEHAVIOR_EXEC_TOOLS = _shared_atif._BEHAVIOR_EXEC_TOOLS
 _BEHAVIOR_WRITE_COMMAND_MARKERS = _shared_atif._BEHAVIOR_WRITE_COMMAND_MARKERS
@@ -3479,14 +3485,36 @@ def _behavior_prompt_example(expected_count):
     )
 
 
-def judge_behavior_check(conversation_text, expected_behaviors):
+def judge_behavior_check(conversation_text, expected_behaviors, *, evidence_omitted=None):
+    """Judge expected behaviors, or refuse when required evidence did not reach the judge.
+
+    *evidence_omitted* is the behavior_check bundle's omission accounting. When
+    it reports that required evidence is incomplete, no model is called and an
+    explicit evaluation error is returned with no score: grading a shortened
+    final answer scores the evidence loss, not the agent.
+    """
     expected_behaviors = normalize_expected_behaviors(expected_behaviors)
     if not _has_judge_reference(expected_behaviors):
         return _judge_not_applicable(_NO_EXPECTED_BEHAVIOR_REASON, results=[])
 
     expected_count = len(expected_behaviors)
     behaviors_text = "\n".join(f"{i + 1}. {b}" for i, b in enumerate(expected_behaviors))
+
+    gap = behavior_evidence_gap(evidence_omitted)
+    if gap:
+        return _judge_error(gap, results=[], expectations=_behavior_expectations(expected_behaviors, [], gap))
+
     conversation = _compact_behavior_conversation(conversation_text)
+    if evidence_omitted is not None and conversation != conversation_text:
+        # The bundle is built to fit this budget, so a second cut here would
+        # drop evidence nothing has accounted for. Refuse rather than score it.
+        second_cut = (
+            "behavior_check evidence was shortened again inside the judge, past the omission accounting. "
+            f"{_BEHAVIOR_EVIDENCE_GAP_HINT}"
+        )
+        return _judge_error(
+            second_cut, results=[], expectations=_behavior_expectations(expected_behaviors, [], second_cut)
+        )
 
     prompt = f"""You are evaluating whether an AI agent showed each expected behavior during a task. \
 Read the conversation and decide, for each numbered behavior, whether it was observed.
@@ -4167,6 +4195,7 @@ def main():
                     judge_behavior_check,
                     bundles["behavior_check"]["prompt_evidence"],
                     expected_behavior,
+                    evidence_omitted=bundles["behavior_check"]["omitted"],
                 )
             else:
                 bc_result = _judge_not_applicable(_NO_EXPECTED_BEHAVIOR_REASON, results=[])
@@ -4176,6 +4205,7 @@ def main():
                 judge_behavior_check,
                 bundles["behavior_check"]["prompt_evidence"],
                 expected_behavior,
+                evidence_omitted=bundles["behavior_check"]["omitted"],
                 allow_not_applicable=not _has_judge_reference(expected_behavior),
             )
         if declarative_checks:

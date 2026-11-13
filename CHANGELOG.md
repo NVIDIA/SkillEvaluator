@@ -211,6 +211,13 @@ All notable changes to SkillEvaluator are documented in this file.
   optional, including the legacy alternate field, without changing numeric grades.
   Unrendered activation diagnostics remain in canonical exports without consuming
   HTML overview or failure-reason preview budgets.
+- The Tier 1 reusable workflow accepts `enforcement-mode: strict|advisory`
+  (default `strict`). Opt-in `advisory` keeps complete policy/score failures
+  non-blocking while retaining failed verdicts and reports and emitting a
+  workflow warning.
+  Configuration, scanner completeness, evidence, and runtime failures still
+  block. Advisory mode requires supporting workflow and scanner image pins;
+  the released 0.8.0 bundle does not accept this input.
 
 - Run SkillEvaluator's own `skills/` through the pinned three-tier GitHub
   callers, retaining Tier 1 as required and Tier 2/3 as advisory. A separate
@@ -462,6 +469,11 @@ All notable changes to SkillEvaluator are documented in this file.
   `semgrep_unparsed_files_omitted` counting the rest); other Semgrep errors are
   reported as before.
 
+- Configure CLI stdout to replace characters that its encoding cannot
+  represent, so reports and root help complete on legacy Windows code pages.
+  JSON dataset previews and validation output preserve Unicode values, using
+  readable characters when the output encoding supports them and escapes otherwise.
+
 - `skillevaluator view` no longer asks the LLM again when it regenerates a
   missing `report.html` for a Tier 3 run that saved its report feedback in
   `result.json`. The regenerated report shows the conclusions,
@@ -635,6 +647,16 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 2 includes qualifying shell comment blocks at end of file in context
   deduplication. Previously those blocks disappeared unless a blank line or
   code followed them, which could hide repeated guidance across shell files.
+- Tier 3 decodes the native Codex `exec` wrappers that Codex 0.161.0 emits:
+  inline `text(await tools.NAME(...))`, single-quoted string literals, and
+  literal `Promise.allSettled` batches rendered by an indexed `for`, indexed
+  `forEach`, or `forEach(text)`. Multi-call wrappers decode only when each call
+  owns its own JSON record of the outer output; dynamic arguments, shadowed
+  bindings, unsupported renderers, and missing, extra, reordered, or truncated
+  records, including duplicate JSON keys, remain unsupported. A nonzero exit
+  code or rejected promise in a record is graded as a failure. This restores
+  security and skill-execution scoring for those wrappers instead of the
+  neutral fallback.
 
 - All-tier CI retains Tier 2's native reports as advisory while preserving
   failed and incomplete evaluation outcomes. GitHub `ci status` validates the

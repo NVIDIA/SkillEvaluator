@@ -44,6 +44,17 @@ All notable changes to SkillEvaluator are documented in this file.
   `/bin/bash -lc 'cat skills/x/SKILL.md'`, which some agent harnesses record
   instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL
   config.json'`) are still not counted.
+- Tier 3 reads the native Codex wrapper that runs a literal command array
+  through `.map`, so a skill read batched that way is graded instead of scoring
+  as an unsupported wrapper. The decoder stays a bounded static one: every array
+  element is still a literal, the callback may only hand that element to one
+  named tool, and a reused or shadowed binding, a changed index or payload, a
+  computed key or tool name, or a duplicate, missing, extra, reordered or
+  truncated result record leaves the whole wrapper unsupported. Each command is
+  matched to the settled result at its own position and carries that result's
+  own exit code or rejection. The form that prints inside the callback settles
+  out of array order, so it is read only for a single command and otherwise
+  stops grading rather than guessing which result belongs to which command.
 
 ## 0.9.0 - 2026-11-13
 

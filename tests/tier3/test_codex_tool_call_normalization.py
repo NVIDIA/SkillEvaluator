@@ -1869,3 +1869,371 @@ def test_lone_call_record_after_leading_whitespace_is_graded(extractor, source, 
     assert "normalization_status" not in calls[0]
     assert calls[0]["is_error"] is True
     assert _error_recovery(trajectory, extractor)["score"] == 0.0
+
+
+# ── Dynamic literal array/map wrappers (#236) ──
+
+_MAP_ARRAY = 'const cmds=["cat a.md","cat b.md"];'
+_MAP_COLLECTED = _MAP_ARRAY + "const results=await Promise.allSettled(cmds.map(async cmd=>tools.exec_command({cmd})));"
+# The wrapper reported in #236: a literal array mapped by an async arrow that prints each result.
+_MAP_INLINE_ONE = 'const cmds = ["cat guide.md"];\nawait Promise.allSettled(cmds.map(async cmd => text(await tools.exec_command({cmd}))));'
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "callback",
+    [
+        pytest.param("async cmd=>tools.exec_command({cmd})", id="async-arrow"),
+        pytest.param("cmd=>tools.exec_command({cmd})", id="plain-arrow"),
+        pytest.param("async (cmd) => await tools.exec_command({cmd})", id="parenthesized-await"),
+    ],
+)
+@pytest.mark.parametrize(("renderer", "shape"), _RENDERERS)
+def test_dynamic_map_gives_each_command_its_own_record(extractor, callback, renderer, shape):
+    source = f"{_MAP_ARRAY}const results=await Promise.allSettled(cmds.map({callback}));{renderer}"
+    records = _failed_exit_records(shape, 0)
+    calls = extractor(_trajectory(source, _record_observation(records)))
+
+    assert [call["action"] for call in calls] == ["exec_command", "exec_command"]
+    assert [call["action_input"] for call in calls] == [{"cmd": "cat a.md"}, {"cmd": "cat b.md"}]
+    assert [call["observation_status"] for call in calls] == ["mapped_outer_exec_result"] * 2
+    assert [call["observation"] for call in calls] == _expected_records(records)
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_dynamic_map_of_object_literals_passes_each_element_whole(extractor):
+    source = (
+        'const args=[{cmd:"cat a.md"},{session_id:1,chars:""}];'
+        "const results=await Promise.allSettled(args.map(async a=>tools.exec_command(a)));"
+        "results.forEach(text);"
+    )
+    records = [{"status": "fulfilled", "value": {"exit_code": 0}}] * 2
+    calls = extractor(_trajectory(source, _record_observation(records)))
+
+    assert [call["action_input"] for call in calls] == [{"cmd": "cat a.md"}, {"session_id": 1, "chars": ""}]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_dynamic_map_inline_single_command_owns_its_own_record(extractor):
+    record = {"exit_code": 0, "output": "# Guide\n"}
+    trajectory = _trajectory(_MAP_INLINE_ONE, _record_observation([record]))
+    calls = extractor(trajectory)
+
+    assert [call["action"] for call in calls] == ["exec_command"]
+    assert calls[0]["action_input"] == {"cmd": "cat guide.md"}
+    assert calls[0]["observation_status"] == "mapped_outer_exec_result"
+    assert "normalization_status" not in calls[0]
+    assert _error_recovery(trajectory, extractor)["first_attempt_clean"] is True
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_dynamic_map_inline_failed_read_carries_its_exit_status(extractor):
+    record = {"exit_code": 1, "output": "cat: guide.md: No such file\n"}
+    trajectory = _trajectory(_MAP_INLINE_ONE, _record_observation([record]))
+    calls = extractor(trajectory)
+
+    assert calls[0]["is_error"] is True
+    assert calls[0]["observation"].endswith("\nexit_code=1")
+    assert _error_recovery(trajectory, extractor)["first_attempt_clean"] is False
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_dynamic_map_inline_failed_skill_read_gets_no_activation_credit(extractor):
+    source = (
+        'const cmds=["cat /skills/example/SKILL.md"];'
+        "await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({cmd}))));"
+    )
+    record = {"exit_code": 1, "output": "cat: No such file\n"}
+    calls = extractor(_trajectory(source, _record_observation([record])))
+    result = _scorer(extractor, "check_activation")(calls, "example")
+
+    assert calls[0]["is_error"] is True
+    assert result["score"] == 0.0
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_dynamic_map_destructive_command_is_still_flagged(extractor):
+    source = (
+        'const cmds=["rm -rf /workspace/project"];'
+        "await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({cmd}))));"
+    )
+    result = _security_result(source, extractor)
+
+    assert result["passed"] is False
+    assert [finding["type"] for finding in result["findings"]] == ["destructive_command"]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "source",
+    [
+        # Ambiguous ownership: each callback prints when its own promise settles, not in array order.
+        pytest.param(
+            'const cmds=["cat a.md","cat b.md"];'
+            "await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({cmd}))));",
+            id="inline-batch-without-provable-owner",
+        ),
+        # Dynamic arguments that are not literals.
+        pytest.param(
+            'const base="cat a.md";const cmds=[base];'
+            "await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({cmd}))));",
+            id="identifier-element",
+        ),
+        pytest.param(
+            "const cmds=[`cat a.md`];"
+            "await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({cmd}))));",
+            id="template-literal-element",
+        ),
+        pytest.param(
+            'const cmds=["cat a.md",...more];'
+            "await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({cmd}))));",
+            id="spread-element",
+        ),
+        pytest.param(
+            'const cmds=["cat a.md"];await Promise.allSettled(cmds.map(async cmd=>text(await tools[name]({cmd}))));',
+            id="computed-tool-member",
+        ),
+        pytest.param(
+            "await Promise.allSettled(other.map(async cmd=>text(await tools.exec_command({cmd}))));",
+            id="undeclared-array",
+        ),
+        pytest.param(
+            "const cmds=[];await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({cmd}))));",
+            id="empty-array",
+        ),
+        # Changed payloads: the element must reach the tool exactly as the array declared it.
+        pytest.param(
+            'const cmds=["cat a.md"];'
+            'await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({cmd:cmd+" -n"}))));',
+            id="derived-payload",
+        ),
+        pytest.param(
+            'const cmds=["cat a.md"];'
+            "await Promise.allSettled(cmds.map(async c=>text(await tools.exec_command({cmd:c}))));",
+            id="renamed-payload-key",
+        ),
+        pytest.param(
+            'const cmds=["cat a.md"];'
+            'await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({["cmd"]:cmd}))));',
+            id="computed-payload-key",
+        ),
+        pytest.param(
+            'const cmds=["cat a.md"];'
+            "await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({cmd,cmd}))));",
+            id="duplicate-payload-key",
+        ),
+        pytest.param(
+            'const cmds=["cat a.md"];'
+            "await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({...cmd}))));",
+            id="spread-payload",
+        ),
+        pytest.param(
+            _MAP_ARRAY + "const results=await Promise.allSettled(cmds.map(async cmd=>tools.exec_command(cmd)));"
+            "results.forEach(text);",
+            id="whole-element-is-not-an-object",
+        ),
+        # Shadowed bindings.
+        pytest.param(
+            'const cmds=["cat a.md"];'
+            "await Promise.allSettled(cmds.map(async text=>text(await tools.exec_command({cmd:text}))));",
+            id="shadowed-text",
+        ),
+        pytest.param(
+            'const cmds=["cat a.md"];'
+            "await Promise.allSettled(cmds.map(async tools=>text(await tools.exec_command({cmd:tools}))));",
+            id="shadowed-tools",
+        ),
+        pytest.param(
+            'const cmds=["cat a.md"];'
+            "await Promise.allSettled(cmds.map(async cmds=>text(await tools.exec_command({cmds}))));",
+            id="shadowed-array-binding",
+        ),
+        pytest.param(
+            _MAP_COLLECTED + "results.forEach((results,i)=>text({i,...results}));",
+            id="shadowed-results-binding",
+        ),
+        pytest.param(
+            _MAP_ARRAY + "const cmds=await Promise.allSettled(cmds.map(async cmd=>tools.exec_command({cmd})));"
+            "cmds.forEach(text);",
+            id="reused-array-binding",
+        ),
+        # Changed indexes: a renderer must print each record at its own position.
+        pytest.param(
+            _MAP_COLLECTED + "results.forEach((r,i)=>text({i:i+1,...r}));",
+            id="shifted-record-index",
+        ),
+        pytest.param(
+            _MAP_COLLECTED + "for (let i = 0; i < results.length; i++) text({i, ...results[i+1]});",
+            id="shifted-results-index",
+        ),
+        pytest.param(
+            _MAP_COLLECTED + "results.map((r,i)=>text({i,...r}));",
+            id="unsupported-renderer-map",
+        ),
+        # Other wrappers the grammar does not prove.
+        pytest.param(
+            'const cmds=["cat a.md"];await Promise.all(cmds.map(async cmd=>text(await tools.exec_command({cmd}))));',
+            id="promise-all",
+        ),
+        pytest.param(
+            'const cmds=["cat a.md"];'
+            "await Promise.allSettled(cmds.filter(async cmd=>text(await tools.exec_command({cmd}))));",
+            id="filter-not-map",
+        ),
+        pytest.param(
+            _MAP_INLINE_ONE + 'text(await tools.exec_command({cmd:"pwd"}));',
+            id="statement-after-inline-batch",
+        ),
+        pytest.param(
+            'text(await tools.exec_command({cmd:"pwd"}));' + _MAP_INLINE_ONE,
+            id="call-before-array-batch",
+        ),
+    ],
+)
+def test_dynamic_map_forms_it_cannot_prove_stay_unsupported(extractor, source):
+    calls = extractor(_trajectory(source, _record_observation([{"exit_code": 0, "output": "ok\n"}])))
+
+    assert len(calls) == 1
+    assert calls[0]["action"] == "exec"
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "records",
+    [
+        pytest.param(_ALL_SETTLED_SPREAD_RECORDS[:1], id="missing-record"),
+        pytest.param([*_ALL_SETTLED_SPREAD_RECORDS, {"i": 2, "status": "fulfilled", "value": {}}], id="extra-record"),
+        pytest.param(list(reversed(_ALL_SETTLED_SPREAD_RECORDS)), id="reordered-records"),
+        pytest.param([_ALL_SETTLED_SPREAD_RECORDS[0], _ALL_SETTLED_SPREAD_RECORDS[0]], id="duplicate-index"),
+        pytest.param([{"i": 0, "status": "fulfilled"}, _ALL_SETTLED_SPREAD_RECORDS[1]], id="malformed-record"),
+        pytest.param(
+            [{**_ALL_SETTLED_SPREAD_RECORDS[0], "extra": True}, _ALL_SETTLED_SPREAD_RECORDS[1]],
+            id="extra-key",
+        ),
+    ],
+)
+def test_dynamic_map_untrusted_records_stay_unsupported(extractor, records):
+    source = _MAP_COLLECTED + "results.forEach((r,i)=>text({i,...r}));"
+    calls = extractor(_trajectory(source, _record_observation(records)))
+
+    assert len(calls) == 1
+    assert calls[0]["action"] == "exec"
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "records",
+    [
+        '{"i":0,"i":1,"status":"fulfilled","value":{}}\n{"i":1,"status":"fulfilled","value":{}}',
+        '{"i":0,"status":"fulfilled","value":{"exit_code":1,"exit_code":0}}\n{"i":1,"status":"fulfilled","value":{}}',
+    ],
+    ids=["index", "nested"],
+)
+def test_dynamic_map_duplicate_record_keys_stay_unsupported(extractor, records):
+    source = _MAP_COLLECTED + "results.forEach((r,i)=>text({i,...r}));"
+    calls = extractor(_trajectory(source, _RECORD_FRAME[0] + records))
+
+    assert len(calls) == 1
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "observation",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("partial", id="without-output-header"),
+        pytest.param(_record_observation(_ALL_SETTLED_SPREAD_RECORDS).rsplit("\n", 1)[0], id="truncated"),
+        pytest.param(_record_observation(_ALL_SETTLED_SPREAD_RECORDS) + "\nextra", id="trailing-text"),
+    ],
+)
+def test_dynamic_map_incomplete_observation_stays_unsupported(extractor, observation):
+    source = _MAP_COLLECTED + "results.forEach((r,i)=>text({i,...r}));"
+    calls = extractor(_trajectory(source, observation))
+
+    assert len(calls) == 1
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param('{"exit_code":0,"out', id="truncated-record"),
+        pytest.param('{"exit_code":1,"exit_code":0}', id="duplicate-key"),
+    ],
+)
+def test_dynamic_map_inline_incomplete_record_stays_unsupported(extractor, body):
+    calls = extractor(_trajectory(_MAP_INLINE_ONE, _RECORD_FRAME[0] + body))
+
+    assert len(calls) == 1
+    assert calls[0]["action"] == "exec"
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    ("record", "is_error"),
+    [
+        pytest.param({"i": 0, "status": "fulfilled", "value": {"exit_code": 0}}, False, id="exit-zero"),
+        pytest.param({"i": 0, "status": "fulfilled", "value": {"exit_code": 4}}, True, id="nonzero-exit"),
+        pytest.param({"i": 0, "status": "rejected", "reason": {"error": "boom"}}, True, id="rejected"),
+        pytest.param({"i": 0, "status": "fulfilled", "value": {"output": "x"}}, None, id="no-exit-code"),
+    ],
+)
+def test_dynamic_map_record_carries_its_own_outcome(extractor, record, is_error):
+    source = (
+        'const cmds=["cat a.md"];'
+        "const results=await Promise.allSettled(cmds.map(async cmd=>tools.exec_command({cmd})));"
+        "results.forEach((r,i)=>text({i,...r}));"
+    )
+    calls = extractor(_trajectory(source, _record_observation([record])))
+
+    assert len(calls) == 1
+    assert calls[0].get("is_error") is is_error
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_dynamic_map_array_longer_than_the_call_limit_stays_unsupported(extractor):
+    commands = ",".join(f'"cat {index}.md"' for index in range(129))
+    source = (
+        f"const cmds=[{commands}];"
+        "await Promise.allSettled(cmds.map(async cmd=>text(await tools.exec_command({cmd}))));"
+    )
+    calls = extractor(_trajectory(source))
+
+    assert len(calls) == 1
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_dynamic_map_with_incomplete_records_stops_grading(extractor):
+    # A truncated batch is missing evidence, not a partial score: every deterministic check
+    # reports an unsupported wrapper instead of grading what little came back.
+    source = (
+        'const cmds=["cat /skills/example/SKILL.md","python /skills/example/scripts/run.py"];'
+        "const results=await Promise.allSettled(cmds.map(async cmd=>tools.exec_command({cmd})));"
+        "results.forEach((r,i)=>text({i,...r}));"
+    )
+    complete = _record_observation(
+        [
+            {"i": 0, "status": "fulfilled", "value": {"exit_code": 0, "output": "# Example\n"}},
+            {"i": 1, "status": "fulfilled", "value": {"exit_code": 0, "output": "run.py completed\n"}},
+        ]
+    )
+    calls = extractor(_trajectory(source, complete.rsplit("\n", 1)[0]))
+    results = [
+        _scorer(extractor, "check_activation")(calls, "example"),
+        _scorer(extractor, "check_script_execution")(calls, "run.py"),
+        _scorer(extractor, "check_workflow_order")(calls, expected_skill="example"),
+        _scorer(extractor, "check_negative_case")(calls, "example"),
+        _scorer(extractor, "check_routing")(calls, "example"),
+        _scorer(extractor, "check_tool_efficiency")(calls, expected_skill="example", expected_script="run.py"),
+        _scorer(extractor, "check_error_recovery")(calls),
+    ]
+
+    assert {result["passed"] for result in results} == {None}
+    assert {result["score"] for result in results} == {0.5}
+    assert {result["supported"] for result in results} == {False}

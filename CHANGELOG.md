@@ -6,6 +6,19 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Add an `error_handling` section to the `--quality-config` file for
+  Reliability's three error-handling rules: the `SKILL.md` mention check and
+  the `scripts` and `lib` code checks. Each sets `points`, `message`,
+  `suggestion`, and its `terms` or `markers`; `points: 0` turns a rule off.
+  The section is optional and merges with the packaged values. A custom file
+  may now also omit `expected_headers`, which then falls back to the packaged
+  heading list; a list you set still replaces it and `[]` still turns heading
+  checks off. Without a
+  custom file, scores and findings are unchanged. The packaged
+  `quality_config` digest changes once, because `quality-default.yaml` gained
+  the section. A custom file's digest covers only the rules that file sets, so
+  existing custom files keep their digests and a digest changes only when the
+  file's rules change.
 - Tier 3 reports show token usage per case, per agent and over all agents, as
   a measurement that is not scored. The JSON payload gains `token_usage`;
   `BENCHMARK.md` gains a **Token Usage** section; the Markdown report, the HTML
@@ -268,6 +281,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Remove `skillevaluator.quality_config.quality_config_provenance(path, config)`.
+  Use `load_quality_config_with_provenance(path)` instead: it loads the config
+  and returns `(config, provenance)`, and its digest covers only the rules a
+  custom file sets. The report's `quality_config` field keeps its shape.
 - Upgrade the Tier 3 backend to Harbor 0.25.0. Align supported sandbox
   constructor options with the release while reserving automatic mounts and
   host Compose environment forwarding for evaluator policy. Preserve local

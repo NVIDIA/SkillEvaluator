@@ -1125,11 +1125,15 @@ def _quality_stats(results: list[ValidationResult]) -> tuple[str, float] | None:
     return None
 
 
-def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = None) -> tuple[bool, list[TierRow]]:
+def summarize_tier1(
+    results: list[ValidationResult], lineup: list[str] | None = None, *, stopped_early: bool = False
+) -> tuple[bool, list[TierRow]]:
     """Build the Tier 1 section rows from its validator results.
 
     When *lineup* is given, the per-check ticker stays in the completed
-    section with each check's final state (failed checks in red).
+    section with each check's final state (failed checks in red). When
+    *stopped_early* is set (``--fail-fast`` ended the run at its first failure),
+    the lineup checks that have no result are counted as not run.
     """
     user_skipped = [r for r in results if _is_user_skipped(r)]
     failed = [r for r in results if not r.passed and not _is_skipped(r)]
@@ -1157,15 +1161,21 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
     checks = set(map(check_of, ran))
     broken_checks = set(map(check_of, broken))
     incomplete_checks = set(map(check_of, incomplete)) - broken_checks
-    skipped_checks = set(map(check_of, user_skipped)) - checks
+    # A --skip inside a check that still ran (secrets within code-integrity) counts under its own name.
+    skipped_checks = {_skip_name(r.validator_name) if check_of(r) in checks else check_of(r) for r in user_skipped}
+    # --fail-fast returns before the later checks produce a result; the lineup above still lists them.
+    seen = set(map(check_of, results))
+    not_run = [name for name in lineup or () if name not in seen] if stopped_early else []
     passed_checks = len(checks) - len(broken_checks) - len(incomplete_checks)
-    checks_segments: list[tuple[str, str]] = [(f"{passed_checks}/{len(checks)} checks passed", TEXT)]
+    checks_segments: list[tuple[str, str]] = [(f"{passed_checks}/{len(checks) + len(not_run)} checks passed", TEXT)]
     if sub_checks := sum(r.summary.checks_performed for r in ran):
         checks_segments.append((f" ({sub_checks} sub-checks)", MUTED))
     if broken_checks:
         checks_segments += [("  ·  ", FAINT), (f"{len(broken_checks)} failed", f"bold {RED}")]
     if incomplete_checks:
         checks_segments += [("  ·  ", FAINT), (f"{len(incomplete_checks)} didn't run", f"bold {RED}")]
+    if not_run:
+        checks_segments += [("  ·  ", FAINT), (f"{len(not_run)} not run", MUTED)]
     if skipped_checks:
         checks_segments += [("  ·  ", FAINT), (f"{len(skipped_checks)} skipped", MUTED)]
     if warnings:
@@ -1257,31 +1267,80 @@ def _setup_fix(results: list[ValidationResult]) -> FixItem:
 
 
 def _only_llm_stages_missing(result: ValidationResult) -> bool:
-    """True when the check itself ran and only its ``--llm`` / ``--llm-verify`` stage did not."""
+    """True when the check itself ran and only its ``--llm`` / ``--llm-verify`` stage did not.
+
+    ``skillspector-llm`` is also recorded when SkillSpector is missing or its baseline is
+    rejected, before any scan runs; only a recorded SkillSpector version shows its static
+    scan completed.
+    """
     scans = result.incomplete_scans
-    return bool(scans) and all(s.endswith("-llm") or s.startswith("llm-") for s in scans)
+    if not scans or not all(s.endswith("-llm") or s.startswith("llm-") for s in scans):
+        return False
+    return "skillspector-llm" not in scans or "skillspector" in result.scanners
 
 
 def _llm_fix(results: list[ValidationResult]) -> FixItem:
     """One item for checks whose LLM stage could not run: a missing key or a failed provider call."""
-    from skillevaluator.provider_config import resolve_llm_provider
-
     checks = ", ".join(dict.fromkeys(_short_name(r.validator_name) for r in results))
     scans = {s for r in results for s in r.incomplete_scans}
     flags = " / ".join(
         f for f, on in (("--llm", "skillspector-llm" in scans), ("--llm-verify", "llm-verification" in scans)) if on
     )
+    # SkillSpector reads its own provider settings when SKILLSPECTOR_PROVIDER names an adapter, so the
+    # public provider matters only for the other stages.
+    direct = _skillspector_adapter_fix() if "skillspector-llm" in scans else None
+    parts = [direct] if direct else []
+    if direct is None or "llm-verification" in scans:
+        reason, fixes = _public_provider_fix()
+        parts.append((f"--llm-verify: {reason}" if direct else reason, fixes))
+    reasons = "; ".join(reason for reason, _ in parts)
+    actions = [action for _, fixes in parts for action in fixes]
+    return FixItem(
+        "setup", f"{checks} LLM review didn't run: {reasons}", [*actions, f"or rerun without {flags or '--llm'}"]
+    )
+
+
+def _public_provider_fix() -> tuple[str, list[str]]:
+    """The problem and actions for the provider behind ``SKILL_EVAL_LLM_*``: a missing key or a failed call."""
+    from skillevaluator.provider_config import resolve_llm_provider
+
     try:
         resolve_llm_provider()
     except ValueError as exc:
         reason, *setup = str(exc).splitlines() or [""]
+        reason = reason.rstrip(".")
         exports = [line.strip().removeprefix("export ") for line in setup if line.strip().startswith("export ")]
-        problem = f"{checks} LLM review didn't run: {reason.rstrip('.')}"
-        action = f"export {' '.join(exports)}" if exports else "set up an LLM provider and key, then rerun"
-    else:
-        problem = f"{checks} LLM review didn't run: the LLM provider call failed"
-        action = "check the key and model with: skillevaluator doctor --tier 2 --verify-models"
-    return FixItem("setup", problem, [action, f"or rerun without {flags or '--llm'}"])
+        # Some errors name the accepted keys without an export line ("OPENAI_API_KEY or SKILL_EVAL_LLM_API_KEY ...").
+        keys = list(dict.fromkeys(re.findall(r"\b[A-Z][A-Z0-9_]*_KEY\b", reason)))
+        if exports:
+            return reason, [f"export {' '.join(exports)}"]
+        if keys:
+            return reason, [f"{'or ' if i else ''}export {key}='your-api-key'" for i, key in enumerate(keys)]
+        return reason, ["set up an LLM provider and key, then rerun"]
+    return "the LLM provider call failed", [
+        "check the key and model with: skillevaluator doctor --tier 2 --verify-models"
+    ]
+
+
+def _skillspector_adapter_fix() -> tuple[str, list[str]] | None:
+    """The problem and actions for a failed SkillSpector LLM stage when ``SKILLSPECTOR_PROVIDER`` names its adapter.
+
+    ``None`` when it does not: SkillSpector then runs on the provider bridged from ``SKILL_EVAL_LLM_*``.
+    """
+    from skillevaluator.validators.security import _SKILLSPECTOR_EXPLICIT_PROVIDER_ENV
+
+    adapter = os.environ.get("SKILLSPECTOR_PROVIDER", "").strip().lower()
+    if adapter not in _SKILLSPECTOR_EXPLICIT_PROVIDER_ENV:
+        return None
+    key = next(
+        (name for name in sorted(_SKILLSPECTOR_EXPLICIT_PROVIDER_ENV[adapter]) if name.endswith("_API_KEY")), None
+    )
+    if key is not None and not os.environ.get(key, "").strip():
+        return f"{key} is not set for SKILLSPECTOR_PROVIDER={adapter}", [f"export {key}='your-api-key'"]
+    credentials = key or "your AWS credentials"
+    return f"SkillSpector's {adapter} provider call failed", [
+        f"check {credentials} and SKILLSPECTOR_MODEL for SKILLSPECTOR_PROVIDER={adapter}"
+    ]
 
 
 def _skip_name(validator_name: str) -> str:

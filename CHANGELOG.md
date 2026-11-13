@@ -4,6 +4,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+## 0.9.0 - 2026-11-13
+
 ### Fixed
 
 - Tier 3 dataset fairness validation checks the skill's own identities and

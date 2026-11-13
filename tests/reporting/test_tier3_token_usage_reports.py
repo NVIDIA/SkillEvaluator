@@ -810,6 +810,10 @@ def test_docs_and_changelog_describe_the_token_usage_contract() -> None:
         "left out without a record",
     ):
         assert field in section, field
-    unreleased = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8").split("\n## ", 2)[1]
-    added = unreleased.split("### Added\n", 1)[1].split("\n### ", 1)[0]
-    assert "token usage per case" in added
+    changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    added_sections = [
+        section.split("### Added\n", 1)[1].split("\n### ", 1)[0]
+        for section in changelog.split("\n## ")[1:]
+        if "### Added\n" in section
+    ]
+    assert any("token usage per case" in section for section in added_sections)

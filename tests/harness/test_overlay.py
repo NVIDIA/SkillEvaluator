@@ -3,6 +3,7 @@
 """Tests for the advisory harness check, panel and harness-check command."""
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -387,6 +388,69 @@ def test_duplicate_names_report_each_harness_winner(tmp_path: Path):
     assert "(filler-copy)" in next(f["message"] for f in rows["opencode"]["findings"] if f["id"] == "OC-DUP-NAME")
 
 
+def _install(folder: Path, dirname: str, name: str | None = None) -> Path:
+    skill = folder / dirname
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        f"---\nname: {name or dirname}\ndescription: Use when testing catalogs.\n---\n{BODY}", encoding="utf-8"
+    )
+    return skill
+
+
+def test_separate_skills_folders_are_separate_catalogs(tmp_path: Path):
+    claude = [_install(tmp_path / ".claude" / "skills", n) for n in ("alpha", "beta")]
+    codex = [_install(tmp_path / ".codex" / "skills", n) for n in ("alpha", "gamma", "delta")]
+
+    facts = facts_for([*claude, *codex])
+
+    assert [facts[s]["catalog_size"] for s in claude] == [2, 2]
+    assert [facts[s]["catalog_size"] for s in codex] == [3, 3, 3]
+    assert not any(f["duplicate_name"] for f in facts.values())
+    assert facts[claude[0]]["catalog_base"].endswith(".claude/skills")
+
+
+def test_unrooted_skills_given_together_stay_one_catalog(tmp_path: Path):
+    pack = [_install(tmp_path / "pack", n, name="same") for n in ("one", "two")]
+
+    facts = facts_for(pack)
+
+    assert {f["catalog_size"] for f in facts.values()} == {2}
+    assert all(f["duplicate_name"] for f in facts.values())
+
+
+def test_workspace_skills_folder_counts_its_siblings(tmp_path: Path):
+    first = _install(tmp_path / "skills", "first", name="same")
+    _install(tmp_path / "skills", "second", name="same")
+
+    facts = facts_for([first])[first]
+
+    assert facts["install_root"] is None
+    assert facts["catalog_size"] == 2 and facts["catalog_base"].endswith("skills")
+    assert "OW-DUP-NAME" in _ids(_rows(first), "openclaw")
+
+
+def test_symlinked_skill_folders_count_toward_the_catalog(tmp_path: Path):
+    skills = tmp_path / ".claude" / "skills"
+    real = _install(skills, "real", name="same")
+    store = _install(tmp_path / "store", "linked", name="same")
+    (skills / "linked").symlink_to(store, target_is_directory=True)
+    (skills / "loop").symlink_to(skills, target_is_directory=True)  # a link back to its own folder
+
+    facts = facts_for([real])[real]
+
+    assert facts["catalog_size"] == 2
+    assert facts["duplicate_name"]
+
+
+def test_reload_guidance_reaches_findings(tmp_path: Path):
+    rows = _rows(_skill(tmp_path))
+
+    reload = {f["id"]: f for r in rows.values() for f in r["findings"] if f["id"].endswith("RELOAD")}
+    assert set(reload) == {"CP-RELOAD", "OC-RELOAD"}
+    assert {f["effect"] for f in reload.values()} == {"advisory"}
+    assert {r["status"] for r in rows.values()} == {"loads"}
+
+
 def test_listed_description_projection(tmp_path: Path):
     desc = "Use when " + "a" * 1600
     rows = _rows(_skill(tmp_path, desc=desc))
@@ -534,6 +598,60 @@ def test_every_oversized_file_long_line_and_unlisted_folder_is_counted(tmp_path:
     assert facts["hermes_unlisted_dirs"] == "python, shared"
     assert {"OC-REF-CUT", "OC-LONG-LINES"} <= _ids(rows, "opencode")
     assert {"HM-LINKED-LAYOUT"} <= _ids(rows, "hermes") and "OW-REF-BUDGET" in _ids(rows, "openclaw")
+
+
+def test_unreadable_resources_are_skipped_not_raised(tmp_path: Path):
+    skill = _skill(tmp_path)
+    refs = skill / "references"
+    refs.mkdir()
+    (refs / "ok.md").write_text("x" * 100)
+    (refs / "locked.md").write_text("secret")
+    (refs / "locked.md").chmod(0)
+    (refs / "dangling.md").symlink_to(tmp_path / "missing.md")
+    (refs / "loop").symlink_to(refs / "loop")
+    os.mkfifo(refs / "pipe")  # reading a pipe would block forever
+
+    facts = skill_facts(skill)
+    result = HarnessValidator().validate(skill)
+
+    assert facts["largest_resource"] == "references/ok.md"
+    assert facts["resource_symlinks"] == 2
+    assert result.metadata["harness_compatibility"][str(skill)]
+
+
+def test_symlinked_reference_outside_the_skill_still_needs_paging(tmp_path: Path):
+    skill = _skill(tmp_path)
+    (skill / "references").mkdir()
+    shared = tmp_path / "shared.md"
+    shared.write_text("line\n" * 20_000 + "w" * 2_001 + "\n")
+    (skill / "references" / "shared.md").symlink_to(shared)
+    (skill / "real").mkdir()
+    (skill / "real" / "big.md").write_text("line\n" * 20_000)
+    (skill / "references" / "big.md").symlink_to(skill / "real" / "big.md")
+    facts = skill_facts(skill)
+    rows = _rows(skill)
+
+    assert facts["resource_symlinks"] == 2 and facts["resource_symlink_escapes"] == 1
+    # The link into the skill is counted once, under its real path; the one leaving it is read through the link.
+    assert facts["files_over_51200_paths"] == "real/big.md, references/shared.md"
+    assert facts["long_line_files"] == "references/shared.md"
+    assert {"OC-REF-CUT", "OC-LONG-LINES"} <= _ids(rows, "opencode")
+    # OpenClaw is not known to read through links, so its multi-read count stays on files inside the skill.
+    assert facts["files_over_64000_paths"] == "real/big.md" and "OW-REF-BUDGET" in _ids(rows, "openclaw")
+
+
+def test_binary_resources_are_not_read_as_text(tmp_path: Path):
+    skill = _skill(tmp_path)
+    (skill / "assets").mkdir()
+    (skill / "assets" / "padded.bin").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 5_000 + bytes(range(256)))
+    (skill / "assets" / "photo.png").write_bytes(bytes(range(256)) * 400)
+    facts = skill_facts(skill)
+    rows = _rows(skill)
+
+    assert (facts["long_line_count"], facts["files_over_51200"], facts["files_over_64000"]) == (0, 0, 0)
+    assert facts["largest_resource"] == ""
+    assert not {"OC-REF-CUT", "OC-LONG-LINES"} & _ids(rows, "opencode")
+    assert "OW-REF-BUDGET" not in _ids(rows, "openclaw")
 
 
 def test_compact_view_shows_worst_finding_per_harness_and_catalog(tmp_path: Path):

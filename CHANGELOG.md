@@ -35,6 +35,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Grader qualification reports null behavior-step results with a matching
+  `not_checked` expectation as insufficient evidence instead of errors. Raw
+  scores and unjudgeable rates are unchanged.
 - Tier 3 token usage rows are now validated against the evaluation dataset's own
   case IDs. Every case row uses one of those IDs at most once, and an attempt
   whose only name is Harbor's 32-character cut of a case name is attributed to

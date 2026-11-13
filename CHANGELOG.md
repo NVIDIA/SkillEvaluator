@@ -291,6 +291,11 @@ All notable changes to SkillEvaluator are documented in this file.
   agent, verifier, and artifact evidence under Harbor's new mount checks, and
   retain explicit Codex gateway URLs, credential aliases, and full model identifiers.
 
+- Tier 1 labels the `SKILL.md` token count as an estimate (characters / 4) in
+  the Large skill finding, the HTML report and the docs, and adds
+  `metrics.estimated_tokens` and `metrics.estimate_method` to the quality JSON.
+  `metrics.total_tokens` keeps the same value and scoring is unchanged.
+
 - Name Skill Lift as the headline comparison and label pass@k differences as
   supporting reliability across reports and terminal output.
 

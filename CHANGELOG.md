@@ -81,6 +81,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Update the managed SkillSpector scanner and Tier 1 CI image from 2.13.3 to
+  the latest release, 2.13.4, with matching verified wheel and source hashes.
+  This fixes false LP1 findings for scoped `allowed-tools` grants and improves
+  recovery of malformed LLM responses. SkillSpector 2.13.4 can still report
+  JSON files containing a `timeout` key as partial analysis; those scans
+  remain incomplete rather than being treated as successful.
+
 - The rubric judge's reference supplement budget is configurable through
   `SKILLEVALUATOR_RUBRIC_SUPPLEMENT_BYTES` and defaults to one mebibyte instead
   of 30,000 bytes, which a real linked guide graph outgrows. Required linked

@@ -460,8 +460,10 @@ _PATH_COMPONENT_END = r"(?=/|$|[\s'\"`;|&<>(),:])"
 _SHELL_WORD = r"(?:\\.|\"[^\"]*\"|'[^']*'|[^\s;|&<>()'\"`\\])+"
 _QUOTED_STRING_RE = re.compile(r"'[^']*'|\"[^\"\\]*(?:\\.[^\"\\]*)*\"|\$'[^'\\]*(?:\\.[^'\\]*)*'", re.DOTALL)
 # Where _shell_text_regions looks next: an escape, a quote, a "#", a
-# here-document or here-string operator, or a new line.
+# here-document or here-string operator, or a new line. The tokens that open a
+# quoted string are the ones that end with one of _QUOTE_CHARS.
 _SHELL_SCAN_RE = re.compile(r"[\\'\"#\n]|\$'|<<<?")
+_QUOTE_CHARS = frozenset("'\"")
 # A "#" after one of these, or at the start of the text, starts a word and so a comment.
 _COMMENT_WORD_BREAKS = frozenset(" \t\r\n;|&()<>")
 # The delimiter word after a "<<" operator, read on its own line, as
@@ -919,7 +921,7 @@ def _shell_text_regions(text: str) -> tuple[list[int], list[int]]:
             index = token.start()
             if token.group() == "\\":
                 index += 2
-            elif token.group() in ("'", '"', "$'") and (quote := _QUOTED_STRING_RE.match(text, index, end)):
+            elif token.group()[-1] in _QUOTE_CHARS and (quote := _QUOTED_STRING_RE.match(text, index, end)):
                 quoted.extend(quote.span())
                 index = quote.end()
             else:
@@ -930,7 +932,7 @@ def _shell_text_regions(text: str) -> tuple[list[int], list[int]]:
         index, char = token.start(), token.group()
         if char == "\\":
             index += 2
-        elif char in ("'", '"', "$'"):
+        elif char[-1] in _QUOTE_CHARS:
             if quote := _QUOTED_STRING_RE.match(text, index):
                 quoted.extend(quote.span())
                 index = quote.end()

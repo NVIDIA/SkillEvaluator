@@ -322,6 +322,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     Default Tier 1 does not import or execute target-controlled Python code. The `test_discovery` result is filename evidence only: it counts regular, in-tree, non-symlink `test_*.py` and `*_test.py` candidates without parsing or importing them. It reports `execution_performed=false` and `coverage_measured=false`; test success and code coverage must be established separately in a trusted project environment or an explicit sandbox.
 
     A missing, timed-out, crashed, or malformed Bandit, Semgrep, Gitleaks, or SkillSpector run is treated as `INCOMPLETE`: terminal and saved reports are non-green and `validate` exits non-zero. See [Scanner setup](#scanner-setup) for installation.
+    A Semgrep `PartialParsing` error, where Semgrep could not parse part of a file but scanned the rest, is a warning that names the file and line, not an `INCOMPLETE` scan; the unparsed code is not checked by Semgrep. Any other Semgrep error keeps the scan `INCOMPLETE`, and every error is listed in full.
   </Accordion>
 
   <Accordion title="unicode — smuggling detection">

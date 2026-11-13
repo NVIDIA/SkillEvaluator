@@ -470,6 +470,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Code Risk Analysis no longer marks Semgrep incomplete for a `PartialParsing`
+  error, where Semgrep could not parse part of a file and scanned the rest. It
+  adds a warning that names the file and line (valid bash such as
+  `exec 3<>"/dev/tcp/127.0.0.1/$PORT"` triggers one), and the success message
+  says how many files were only partly parsed. Any other Semgrep error type
+  keeps the scan incomplete. Every Semgrep error is now reported in full, not
+  only the first three cut at 100 characters. Refs #463.
+
 - Configure CLI stdout to replace characters that its encoding cannot
   represent, so reports and root help complete on legacy Windows code pages.
   JSON dataset previews and validation output preserve Unicode values, using

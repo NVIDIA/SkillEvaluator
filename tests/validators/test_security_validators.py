@@ -714,6 +714,87 @@ class TestCodeRiskValidator:
             finding.check_name == "python.lang.security.audit.dangerous-system-call" for finding in result.findings
         )
 
+    @staticmethod
+    def _partial_parsing_error(path: str, line: int, col: int) -> dict:
+        span = {"file": path, "start": {"line": line, "col": col, "offset": 0}, "end": {"line": line, "col": col + 1}}
+        return {
+            "code": 3,
+            "level": "warn",
+            "type": ["PartialParsing", [{"path": path, **{k: v for k, v in span.items() if k != "file"}}]],
+            "message": f"Syntax error at line {path}:{line}:\n `>` was unexpected",
+            "path": path,
+            "spans": [span],
+        }
+
+    def test_semgrep_partial_parsing_is_a_warning_not_an_incomplete_scan(self, tmp_path: Path) -> None:
+        result = ValidationResult()
+        script = tmp_path / "bin" / "run.sh"
+        output = json.dumps({"results": [], "errors": [self._partial_parsing_error(str(script), 3, 8)]})
+
+        CodeRiskValidator()._process_semgrep_output(output, result, skill_root=tmp_path)
+
+        assert result.passed
+        assert not result.errors
+        assert not result.is_incomplete
+        assert result.warnings == [
+            "Semgrep could not parse part of bin/run.sh at line 3, column 8; it scanned the rest of the file. "
+            "The unparsed code was not checked by Semgrep."
+        ]
+        assert any("1 file(s) only partly parsed" in message for message in result.messages)
+
+    def test_semgrep_reports_every_affected_path_without_truncation(self, tmp_path: Path) -> None:
+        result = ValidationResult()
+        errors = [self._partial_parsing_error(str(tmp_path / f"s{i}.sh"), i + 1, 1) for i in range(5)]
+        errors.append({"type": "Timeout", "message": "x" * 300 + " timed out", "path": str(tmp_path / "slow.py")})
+        output = json.dumps({"results": [], "errors": errors})
+
+        CodeRiskValidator()._process_semgrep_output(output, result, skill_root=tmp_path)
+
+        assert len(result.warnings) == 5
+        assert all(f"s{i}.sh" in warning for i, warning in enumerate(result.warnings))
+        assert result.is_incomplete
+        assert any(error.endswith("x" * 300 + " timed out") for error in result.errors)
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            {"type": "SyntaxError", "message": "Syntax error at line a.py:1"},
+            {"type": ["SyntaxError", []], "message": "Syntax error at line a.py:1"},
+            {"type": ["Timeout", []], "message": "timeout"},
+            {"type": "PartialParsingX", "message": "other"},
+            {"type": None, "message": "unknown shape"},
+        ],
+    )
+    def test_semgrep_other_error_types_keep_the_scan_incomplete(self, error: dict) -> None:
+        result = ValidationResult()
+
+        CodeRiskValidator()._process_semgrep_output(json.dumps({"results": [], "errors": [error]}), result)
+
+        assert result.is_incomplete
+        assert not result.passed
+        assert any(error["message"] in message for message in result.errors)
+
+    def test_semgrep_partial_parsing_with_spans_only_in_type_and_findings_kept(self) -> None:
+        result = ValidationResult()
+        finding = {
+            "check_id": "bash.curl-pipe-sh",
+            "path": "a.sh",
+            "start": {"line": 1},
+            "extra": {"severity": "WARNING", "message": "pipe to shell"},
+        }
+        error = {
+            "type": ["PartialParsing", [{"path": "a.sh", "start": {"line": 7, "col": 2}}]],
+            "message": "Syntax error",
+        }
+
+        CodeRiskValidator()._process_semgrep_output(
+            json.dumps({"results": [finding], "errors": [error]}), result, exit_code=1
+        )
+
+        assert not result.is_incomplete
+        assert any("a.sh at line 7, column 2" in warning for warning in result.warnings)
+        assert any(f.check_name == "bash.curl-pipe-sh" for f in result.findings)
+
     def test_semgrep_accepts_valid_clean_report(self) -> None:
         result = ValidationResult()
 

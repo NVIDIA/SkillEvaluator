@@ -9,6 +9,7 @@ code quality issues, and potential bugs via CWE/OWASP patterns.
 
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 
@@ -32,6 +33,14 @@ def _semgrep_file_excludes(skill_path: Path) -> list[str]:
 
 
 REQUIRE_SEMGREP_ENV = "SKILLEVALUATOR_REQUIRE_SEMGREP"
+
+
+def _semgrep_error_type(error: dict) -> str | None:
+    """Return the name of a Semgrep error ``type``, which is a string or a list such as ``["PartialParsing", [spans]]``."""
+    error_type = error.get("type")
+    if isinstance(error_type, list) and error_type:
+        error_type = error_type[0]
+    return error_type if isinstance(error_type, str) else None
 
 
 class CodeRiskValidator(ValidatorBase):
@@ -305,7 +314,9 @@ class CodeRiskValidator(ValidatorBase):
         elif tool_result.exit_code in (0, 1):
             # Exit code 0 = clean, 1 = findings; both emit JSON on stdout
             result.record_scanner("semgrep", Tools.semgrep.version)
-            self._process_semgrep_output(tool_result.stdout, result, exit_code=tool_result.exit_code)
+            self._process_semgrep_output(
+                tool_result.stdout, result, exit_code=tool_result.exit_code, skill_root=skill_path.resolve()
+            )
         else:
             error_msg = tool_result.stderr or tool_result.stdout or "no diagnostic output"
             result.add_error(f"Semgrep error (exit code {tool_result.exit_code}): {error_msg[:200]}")
@@ -319,8 +330,12 @@ class CodeRiskValidator(ValidatorBase):
         result: ValidationResult,
         *,
         exit_code: int | None = None,
+        skill_root: Path | None = None,
     ) -> None:
-        """Parse Semgrep JSON output and report findings."""
+        """Parse Semgrep JSON output and report findings.
+
+        ``skill_root`` shortens the file paths in parse warnings to skill-relative ones.
+        """
         data = parse_json_output(output)
         if data is None:
             result.add_error("Semgrep did not return valid JSON; scan did not complete")
@@ -359,11 +374,24 @@ class CodeRiskValidator(ValidatorBase):
             result.mark_scan_incomplete("semgrep")
             return
 
-        # Report scan errors (limit to avoid noise)
-        for error in scan_errors[:3]:
-            message = str(error.get("message") or error.get("type") or "Unknown scan error")
-            result.add_error(f"Semgrep scan error: {message[:100]}")
-        if scan_errors:
+        # A PartialParsing error is file-level: Semgrep recovered and scanned the rest of
+        # that file, so it is reported as a warning naming the file and span. Any other
+        # error (a failed rule, a timeout, a fatal error, an unknown shape) leaves the scan
+        # incomplete. Every error is reported, with its full message.
+        blocking_errors = []
+        partial_files = 0
+        for error in scan_errors:
+            warning = self._semgrep_partial_parse_warning(error, skill_root)
+            if warning is None:
+                blocking_errors.append(error)
+                message = " ".join(
+                    str(error.get("message") or _semgrep_error_type(error) or "Unknown scan error").split()
+                )
+                result.add_error(f"Semgrep scan error: {message}")
+            else:
+                partial_files += 1
+                result.add_warning(warning)
+        if blocking_errors:
             result.mark_scan_incomplete("semgrep")
 
         if exit_code == 1 and not findings:
@@ -374,10 +402,11 @@ class CodeRiskValidator(ValidatorBase):
             result.mark_scan_incomplete("semgrep")
 
         if not findings:
-            if not scan_errors and not result.is_incomplete:
+            if not blocking_errors and not result.is_incomplete:
+                suffix = f" in the parsed code ({partial_files} file(s) only partly parsed)" if partial_files else ""
                 result.add_success(
                     check_name="semgrep",
-                    message="Semgrep: No security issues found",
+                    message=f"Semgrep: No security issues found{suffix}",
                 )
             return
 
@@ -385,6 +414,36 @@ class CodeRiskValidator(ValidatorBase):
 
         for finding in findings:
             self._report_semgrep_finding(result, finding)
+
+    @staticmethod
+    def _semgrep_partial_parse_warning(error: dict, skill_root: Path | None) -> str | None:
+        """Return a warning for a Semgrep ``PartialParsing`` error, or ``None`` for any other error."""
+        if _semgrep_error_type(error) != "PartialParsing":
+            return None
+        spans = error.get("spans")
+        if not isinstance(spans, list):
+            spans = []
+        error_type = error.get("type")
+        if not spans and isinstance(error_type, list) and len(error_type) > 1 and isinstance(error_type[1], list):
+            spans = error_type[1]
+        spans = [span for span in spans if isinstance(span, dict)]
+        path = str(
+            error.get("path") or (spans[0].get("file") or spans[0].get("path") if spans else "") or "unknown file"
+        )
+        if skill_root is not None:
+            with contextlib.suppress(ValueError, OSError):
+                path = Path(path).resolve().relative_to(skill_root).as_posix()
+        places = []
+        for span in spans:
+            start = span.get("start")
+            if isinstance(start, dict) and isinstance(start.get("line"), int):
+                column = start.get("col")
+                places.append(f"line {start['line']}" + (f", column {column}" if isinstance(column, int) else ""))
+        where = f" at {'; '.join(places)}" if places else ""
+        return (
+            f"Semgrep could not parse part of {path}{where}; it scanned the rest of the file. "
+            "The unparsed code was not checked by Semgrep."
+        )
 
     def _report_semgrep_finding(self, result: ValidationResult, finding: dict) -> None:
         """Report a single Semgrep finding."""

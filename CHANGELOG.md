@@ -811,8 +811,11 @@ All notable changes to SkillEvaluator are documented in this file.
   complete scan, and a folder scan goes on to the next skill. This applies
   only to SkillSpector's nonfatal, whole-file row on a manifest whose BH1
   finding says its hook payload is `unmodeled`, also under a baseline, and
-  only when the report accounts for the row exactly. SkillSpector records the
-  same row for a manifest it read only in part: with v2.13.4, whose row counts
+  only when the report accounts for the row exactly. This covers only
+  manifests and hook evidence the scanner reports, without claiming coverage
+  for inline plugin-manifest hooks or other unreported hook locations.
+  SkillSpector records the same row for a manifest it read only in part:
+  with v2.13.4, whose row counts
   the records it read, a manifest with a record that is not a parsed hook
   declaration, such as a skipped handler or a permission rule, stays
   `INCOMPLETE`; with v2.13.3, only a BH1 with 2,048 or more declarations does,

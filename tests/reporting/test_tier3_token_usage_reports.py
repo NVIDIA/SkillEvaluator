@@ -1082,10 +1082,14 @@ def test_docs_and_changelog_describe_the_token_usage_contract() -> None:
         if "### Added\n" in section
     ]
     assert any("token usage per case" in section for section in added_sections)
-    unreleased = changelog.split("\n## ", 2)[1]
-    fixed = unreleased.split("### Fixed\n", 1)[1].split("\n### ", 1)[0]
-    entries = [" ".join(entry.split()) for entry in fixed.split("\n- ")]
-    (entry,) = [entry for entry in entries if entry.startswith("Tier 3 token usage per case")]
+    # The Fixed entry is found in any release section, so a release heading above it can change.
+    fixed_entries = [
+        " ".join(entry.split()).removeprefix("- ")
+        for section in changelog.split("\n## ")[1:]
+        if "### Fixed\n" in section
+        for entry in section.split("### Fixed\n", 1)[1].split("\n### ", 1)[0].split("\n- ")
+    ]
+    (entry,) = [entry for entry in fixed_entries if entry.startswith("Tier 3 token usage per case")]
     assert "now counts each attempt in the case it belongs to." in entry
     # The table needs no --verbose: a run whose arms all failed never shows a case summary.
     assert "`tier3 evaluate` prints the agent token sums for a run whose arms all failed" in entry

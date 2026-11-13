@@ -730,10 +730,12 @@ hard-unsupported and fails closed before agent-runtime discovery —
 directs you to WSL2 or `--env-mode docker`. Only `claude-code`, `codex`,
 and `opencode` can run in local mode.
 
-Local mode does not install the pinned CLI releases. Each trial checks the
-installed version against the selected model instead and fails before the agent
-starts when it is too old: Claude 5.5 and later models need Claude Code 2.1.280
-or newer, and GPT-6 models need Codex 0.159.1 or newer.
+When the selected agent's CLI is missing, a local-mode run offers to install it
+under `SKILLEVALUATOR_RUNTIME_DIR`, at the release Harbor installs; without a
+terminal it prints the `npm install` command instead. Each trial checks the
+installed version against the selected model and fails before the agent starts
+when it is too old: Claude 5.5 and later models need Claude Code 2.1.280 or
+newer, and GPT-6 models need Codex 0.159.1 or newer.
 
 The sandbox policy is controlled by environment variables:
 

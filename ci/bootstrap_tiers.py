@@ -24,14 +24,8 @@ from skillevaluator.tier3.harbor.local_runtime import managed_install_argv, mana
 
 
 def install_agent(agent: str) -> None:
-    argv = managed_install_argv(agent)
-    if agent == "opencode":
-        # Unlike interactive local setup, CI never resolves an unpinned npm package.
-        # Docker runs install the same release through Harbor's agent kwargs.
-        from skillevaluator.tier3.harbor.runner import OPENCODE_VERSION
-
-        argv[-1] = f"opencode-ai@{OPENCODE_VERSION}"
-    subprocess.run(argv, check=True, timeout=600)
+    # The managed install pins the same release Harbor installs for Docker runs.
+    subprocess.run(managed_install_argv(agent), check=True, timeout=600)
     print(f"Installed {agent} in {managed_runtime_prefix(agent)}")
 
 

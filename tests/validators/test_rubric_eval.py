@@ -1306,6 +1306,58 @@ class TestInvalidReplyRetry:
         assert finding.metadata == {"judge_attempts": 2}
         assert problem in finding.message
 
+    @pytest.mark.parametrize("padding", ["", "x" * 410 + " "], ids=["bare", "padded"])
+    def test_second_invalid_reply_redacts_credentials_in_the_finding_and_summary(self, tmp_path, padding):
+        secret = "sk-syntheticcredential123456789"
+        checks = _complete_checks()
+        checks.append({**checks[0], "id": padding + secret})
+
+        result, requests = _validate_with(tmp_path, _reply(checks), _reply(checks))
+
+        assert len(requests) == 2
+        rubric = result.metadata["rubric_eval"]
+        (finding,) = _llm_findings(result)
+        assert finding.check_name == "llm_invalid_response"
+        for reported in (finding.message, rubric["summary"]):
+            assert "sk-synthetic" not in reported
+            assert "sk-<redacted>" in reported
+        assert not result.passed
+
+    def test_second_invalid_reply_bounds_the_finding_and_summary(self, tmp_path):
+        checks = _complete_checks()
+        checks.append({**checks[0], "id": "x" * 20_000})
+
+        result, _requests = _validate_with(tmp_path, _reply(checks), _reply(checks))
+
+        rubric = result.metadata["rubric_eval"]
+        (finding,) = _llm_findings(result)
+        for reported in (finding.message, rubric["summary"]):
+            assert reported.startswith("LLM judge returned invalid rubric evidence: unexpected criterion ids: xxx")
+            assert reported.endswith("x ... [truncated]")
+            assert len(reported) == 500 + len(" ... [truncated]")
+
+    def test_judge_chosen_ids_are_collapsed_to_one_line_in_every_report_of_the_problem(self, tmp_path):
+        first = _complete_checks()
+        first.append({**first[0], "id": "x\n[ERROR] forged line\x1b[31m\x00\u202e end"})
+        second = _complete_checks()
+        second.append({**second[0], "id": "y\r\n\n[ERROR] other\x07\t\tline"})
+
+        with patch("skillevaluator.validators.rubric_eval.logger") as log:
+            result, requests = _validate_with(tmp_path, _reply(first), _reply(second))
+
+        prefix = "LLM judge returned invalid rubric evidence: unexpected criterion ids: "
+        retry_problem = f"{prefix}x [ERROR] forged line [31m end"
+        first_request, retry = requests
+        assert retry["user"] == f"{first_request['user']}\n{_RETRY_MARKER}{retry_problem}. {_RETRY_TAIL}"
+        (rejected,) = [call for call in log.warning.call_args_list if "rejected" in call.args[0]]
+        assert rejected.args[1:] == (retry_problem,)
+
+        reported_problem = f"{prefix}y [ERROR] other line"
+        rubric = result.metadata["rubric_eval"]
+        (finding,) = _llm_findings(result)
+        assert finding.message == reported_problem
+        assert rubric["summary"] == reported_problem
+
     def test_second_unparseable_reply_reports_unavailable(self, tmp_path):
         result, requests = _validate_with(tmp_path, _reply(_invalid_checks("missing")), "still not json")
 

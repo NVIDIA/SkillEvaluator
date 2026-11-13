@@ -20,6 +20,7 @@ import os
 import posixpath
 import re
 import stat
+import unicodedata
 from collections import Counter, deque
 from pathlib import Path
 from typing import Any
@@ -212,12 +213,20 @@ def _rubric_report_problem(report: Any, criteria: list[dict]) -> str | None:
 
 
 def _bounded_problem(problem: str) -> str:
-    """Shorten a rejection reason for the log line and the retry note.
+    """Make a rejection reason safe to log, send back to the judge and report.
 
     The reason quotes the judge's own text, such as an invented criterion id,
-    which has no length limit.
+    which has no length limit and can hold a credential, a newline or another
+    control character. Credentials are redacted, control characters and runs
+    of whitespace become one space (as in ``finding_verification`` for
+    reasoning), and the result is cut to ``_MAX_RETRY_PROBLEM_CHARS``. Used for
+    the log line, the retry note, and the finding and summary of a second
+    invalid reply.
     """
     problem = redact_sensitive_text(problem)
+    problem = " ".join(
+        "".join(" " if unicodedata.category(character).startswith("C") else character for character in problem).split()
+    )
     if len(problem) <= _MAX_RETRY_PROBLEM_CHARS:
         return problem
     return f"{problem[:_MAX_RETRY_PROBLEM_CHARS]} ... [truncated]"
@@ -796,7 +805,7 @@ class RubricEvalValidator(ValidatorBase):
                 report=report,
                 skill_path=skill_path,
                 manifest=manifest,
-                message=validation_error,
+                message=_bounded_problem(validation_error),
                 check_name="llm_invalid_response",
                 suggestion="Retry rubric evaluation; the judge response did not contain valid complete criterion evidence",
                 judge_attempts=judge_attempts,

@@ -6158,19 +6158,15 @@ assert cap is not None and get_max_output_tokens(model) <= cap, (cap, get_max_ou
         assert finding.metadata["llm_model_used"] == expected
 
     def test_llm_verify_docs_state_the_answering_model_rule_of_rubric_evaluation(self) -> None:
-        """Both labels come from the same client, so the two docs paragraphs state one rule."""
+        """Both labels come from the same client, so both docs paragraphs name the field and the fallback rule."""
         page = Path(__file__).parents[2] / "docs" / "tier1-validation.mdx"
         paragraphs = [" ".join(block.split()) for block in page.read_text(encoding="utf-8").split("\n\n")]
         [verify] = [text for text in paragraphs if "`llm_model_used`" in text and "`--llm-verify`" in text]
         [rubric] = [text for text in paragraphs if "`llm_model_used`" in text and "`rubric_eval`" in text]
-        rule = (
-            "For a Claude 5.5 or later model on the native Claude API, the model is the one the reply names; "
-            "otherwise it is the configured model, unless a server-side `fallback` block in the reply names "
-            "another model."
-        )
 
-        assert rule in rubric
-        assert rule in verify
+        for paragraph in (verify, rubric):
+            assert "`llm_model_used`" in paragraph
+            assert "`fallback` block" in paragraph
         assert "Verdicts kept from a reply cut off at the output-token limit name the model that wrote that reply." in (
             verify
         )

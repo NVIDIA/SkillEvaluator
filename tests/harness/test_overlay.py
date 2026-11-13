@@ -3,13 +3,14 @@
 """Tests for the advisory harness check, panel and harness-check command."""
 
 import json
+import re
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
 from skillevaluator.cli import cli
-from skillevaluator.harness import HARNESS_STATUSES, evaluate_harnesses, load_profiles, skill_facts
+from skillevaluator.harness import HARNESS_STATUSES, evaluate_harnesses, facts_for, load_profiles, skill_facts
 from skillevaluator.harness.overlay import PROFILES_DIR
 from skillevaluator.harness.report import harness_block, harness_note, harness_panel
 from skillevaluator.models.result import Severity
@@ -313,12 +314,140 @@ def test_harness_check_command_rejects_unknown_harness(tmp_path: Path):
     assert "Unknown harness: nope" in result.output
 
 
+def _catalog(root: Path, count: int, desc_len: int = 300) -> Path:
+    skills = root / ".claude" / "skills"
+    for index in range(count):
+        skill = skills / f"filler-{index:03d}"
+        skill.mkdir(parents=True)
+        desc = ("Use when testing catalog budgets. " + "x" * desc_len)[:desc_len]
+        (skill / "SKILL.md").write_text(f"---\nname: filler-{index:03d}\ndescription: {desc}\n---\n{BODY}")
+    return skills
+
+
 def _rows(skill: Path) -> dict[str, dict]:
     return {r.harness: r.to_dict() for r in evaluate_harnesses(skill)}
 
 
 def _ids(rows: dict[str, dict], harness: str) -> set[str]:
     return {f["id"] for f in rows[harness]["findings"]}
+
+
+def test_single_skill_is_measured_against_its_installed_folder(tmp_path: Path):
+    _catalog(tmp_path, 40)
+    rows = _rows(tmp_path / ".claude" / "skills" / "filler-000")
+
+    assert rows["claude-code"]["status"] == "degraded"
+    assert "CC-LIST-BUDGET" in _ids(rows, "claude-code")
+    assert "CP-LIST-BUDGET" in _ids(rows, "copilot-cli")
+    message = next(f["message"] for f in rows["claude-code"]["findings"] if f["id"] == "CC-LIST-BUDGET")
+    assert message.startswith("The 40 skills in this folder have 12,000 description chars")
+    assert rows["claude-code"]["listed"] == rows["codex"]["listed"] == {"mode": "shortened", "text": ""}
+    assert rows["claude-code"]["catalog"]["size"] == 40
+
+
+def test_listing_budget_scales_with_context_window(tmp_path: Path):
+    skill = _catalog(tmp_path, 34) / "filler-000"
+
+    def ids(tokens: int) -> set[str]:
+        rows = {r.harness: r.to_dict() for r in evaluate_harnesses(skill, config={"context_tokens": tokens})}
+        return _ids(rows, "claude-code") | _ids(rows, "codex")
+
+    assert {"CC-LIST-BUDGET", "CX-LIST-BUDGET"} <= ids(0)
+    assert not {"CC-LIST-BUDGET", "CX-LIST-BUDGET"} & ids(272000)
+    assert {"CC-LIST-BUDGET", "CX-LIST-BUDGET"} & ids(200000) == {"CC-LIST-BUDGET"}
+
+
+def test_skill_outside_a_skills_folder_has_no_catalog_rules(tmp_path: Path):
+    rows = _rows(_skill(tmp_path))
+
+    assert not any(
+        f["id"].endswith(("LIST-BUDGET", "DUP-NAME", "PRECEDENCE")) for r in rows.values() for f in r["findings"]
+    )
+
+
+def test_folder_of_skills_is_its_own_catalog(tmp_path: Path):
+    skills = _catalog(tmp_path, 3)
+    facts = facts_for(sorted(skills.iterdir()))
+
+    assert {f["catalog_size"] for f in facts.values()} == {3}
+    assert {f["catalog_desc_chars"] for f in facts.values()} == {900}
+
+
+def test_duplicate_names_report_each_harness_winner(tmp_path: Path):
+    skills = _catalog(tmp_path, 2)
+    copy = skills / "filler-copy"
+    copy.mkdir()
+    (copy / "SKILL.md").write_text(f"---\nname: filler-000\ndescription: Use when testing duplicates.\n---\n{BODY}")
+    rows = _rows(skills / "filler-000")
+
+    assert rows["opencode"]["status"] == "degraded"
+    assert {"CC-PRECEDENCE", "CX-DUP-NAME", "CP-DUP-NAME", "HM-DUP-NAME", "OW-DUP-NAME", "OC-DUP-NAME"} <= {
+        f["id"] for r in rows.values() for f in r["findings"]
+    }
+    assert "(filler-copy)" in next(f["message"] for f in rows["opencode"]["findings"] if f["id"] == "OC-DUP-NAME")
+
+
+def _install(folder: Path, dirname: str, name: str | None = None) -> Path:
+    skill = folder / dirname
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        f"---\nname: {name or dirname}\ndescription: Use when testing catalogs.\n---\n{BODY}", encoding="utf-8"
+    )
+    return skill
+
+
+def test_separate_skills_folders_are_separate_catalogs(tmp_path: Path):
+    claude = [_install(tmp_path / ".claude" / "skills", n) for n in ("alpha", "beta")]
+    codex = [_install(tmp_path / ".codex" / "skills", n) for n in ("alpha", "gamma", "delta")]
+
+    facts = facts_for([*claude, *codex])
+
+    assert [facts[s]["catalog_size"] for s in claude] == [2, 2]
+    assert [facts[s]["catalog_size"] for s in codex] == [3, 3, 3]
+    assert not any(f["duplicate_name"] for f in facts.values())
+    assert facts[claude[0]]["catalog_base"].endswith(".claude/skills")
+
+
+def test_unrooted_skills_given_together_stay_one_catalog(tmp_path: Path):
+    pack = [_install(tmp_path / "pack", n, name="same") for n in ("one", "two")]
+
+    facts = facts_for(pack)
+
+    assert {f["catalog_size"] for f in facts.values()} == {2}
+    assert all(f["duplicate_name"] for f in facts.values())
+
+
+def test_workspace_skills_folder_counts_its_siblings(tmp_path: Path):
+    first = _install(tmp_path / "skills", "first", name="same")
+    _install(tmp_path / "skills", "second", name="same")
+
+    facts = facts_for([first])[first]
+
+    assert facts["install_root"] is None
+    assert facts["catalog_size"] == 2 and facts["catalog_base"].endswith("skills")
+    assert "OW-DUP-NAME" in _ids(_rows(first), "openclaw")
+
+
+def test_symlinked_skill_folders_count_toward_the_catalog(tmp_path: Path):
+    skills = tmp_path / ".claude" / "skills"
+    real = _install(skills, "real", name="same")
+    store = _install(tmp_path / "store", "linked", name="same")
+    (skills / "linked").symlink_to(store, target_is_directory=True)
+    (skills / "loop").symlink_to(skills, target_is_directory=True)  # a link back to its own folder
+
+    facts = facts_for([real])[real]
+
+    assert facts["catalog_size"] == 2
+    assert facts["duplicate_name"]
+
+
+def test_reload_guidance_reaches_findings(tmp_path: Path):
+    rows = _rows(_skill(tmp_path))
+
+    reload = {f["id"]: f for r in rows.values() for f in r["findings"] if f["id"].endswith("RELOAD")}
+    assert set(reload) == {"CP-RELOAD", "OC-RELOAD"}
+    assert {f["effect"] for f in reload.values()} == {"advisory"}
+    assert {r["status"] for r in rows.values()} == {"loads"}
 
 
 def test_listed_description_projection(tmp_path: Path):
@@ -346,6 +475,17 @@ def test_bundle_files_symlinks_and_large_references(tmp_path: Path):
     assert "HM-RESOURCE-SYMLINK" in _ids(rows, "hermes")
 
 
+def test_every_rule_has_a_fix_and_placeholders_are_filled(tmp_path: Path):
+    for profile in load_profiles("all"):
+        for rule in profile["rules"]:
+            assert rule["when"] == "always" or rule.get("fix"), rule["id"]
+    skills = _catalog(tmp_path, 200, desc_len=400)
+    rows = _rows(skills / "filler-000")
+    messages = [f["message"] + f.get("fix", "") for r in rows.values() for f in r["findings"]]
+    assert messages and not any(re.search(r"\{[a-z0-9_]+\}", m) for m in messages)
+    assert {"OW-COMPACT", "OW-PROMPT-CAP"} <= _ids(rows, "openclaw")
+
+
 def test_fix_reaches_findings_and_panels(tmp_path: Path):
     skill = _skill(tmp_path, desc="Use when testing emoji. " + "\U0001f600" * 600)
     result = HarnessValidator().validate(skill)
@@ -364,6 +504,17 @@ def test_description_limit_is_1024(tmp_path: Path, harness: str, rule: str):
 
     assert rule not in _ids(at, harness)
     assert any(f["id"] == rule and "1 over" in f["message"] for f in over[harness]["findings"])
+
+
+def test_compact_view_shows_worst_finding_per_harness_and_catalog(tmp_path: Path):
+    _catalog(tmp_path, 40)
+    block = harness_block(run_validation(tmp_path / ".claude" / "skills" / "filler-000", checks="harness"))
+    compact, full = _render(harness_panel(block)), _render(harness_panel(block, verbose=True))
+
+    assert "catalog  40 skills in" in compact and "(12,000 desc" in compact
+    assert "not found" in compact and "listing shortened" in compact
+    assert "[CX-ROOT]" not in compact and "[CX-ROOT]" in full and "[CX-LIST-BUDGET]" in full
+    assert len(compact.splitlines()) < len(full.splitlines())
 
 
 def test_tier1_summary_gives_harness_its_own_line(tmp_path: Path):

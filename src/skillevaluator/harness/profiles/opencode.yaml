@@ -13,6 +13,8 @@ rules:
   - {id: OC-DESC-EMPTY, when: "description_empty", effect: degraded, message: "Listed by name only.", fix: "Add a non-empty string description."}
   - {id: OC-DUP-KEY, when: "frontmatter_duplicate_keys", effect: not_loaded, outcome: rejected, message: "Skill dropped: duplicate frontmatter keys.", fix: "Remove the duplicate frontmatter key."}
   - {id: OC-NESTED, when: "nested_skill_md", effect: degraded, message: "The nested SKILL.md is loaded as a second, separate skill.", fix: "Move the nested skill to its own folder under the skills root, or rename its SKILL.md."}
+  - {id: OC-DUP-NAME, when: "duplicate_name", effect: degraded, message: "Another skill is also named '{skill_name}' ({duplicate_paths}); OpenCode picks a random one each run (concurrent loading, last write wins).", fix: "Give each skill a unique name."}
+  - {id: OC-RELOAD, when: "always", effect: advisory, message: "Skill list and text are cached at startup; edits need a restart."}
   - {id: OC-CASING, when: "not manifest_name_exact", effect: degraded, message: "Non-canonical name (skill.md/Skill.md): loaded on case-insensitive filesystems (macOS default APFS, 3/3), ignored on case-sensitive Linux (3/3). Works or breaks depending on the OS.", fix: "Rename the file to SKILL.md (exact casing)."}
   - {id: OC-FM-STRIPPED, when: "custom_field_chars > 200", effect: advisory, message: "Frontmatter is stripped when the skill is used, so the text in {custom_fields} never reaches the model.", fix: "Move instructions from frontmatter into the SKILL.md body."}
 notes:

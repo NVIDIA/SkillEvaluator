@@ -110,6 +110,16 @@ def _compact_grid(rows: list[dict[str, Any]]) -> Table | None:
     return grid if grid.row_count else None
 
 
+def _catalog_line(rows: list[dict[str, Any]]) -> Text | None:
+    catalog = next((row["catalog"] for row in rows if row.get("catalog")), None)
+    if not catalog or catalog["size"] < 2:
+        return None
+    folder = catalog["folder"].replace(str(Path.home()), "~", 1) if catalog["folder"] else "this folder"
+    return Text.assemble(
+        ("catalog  ", MUTED), (f"{catalog['size']} skills in {folder} ({catalog['desc_chars']:,} desc chars)", TEXT)
+    )
+
+
 def _detail_grid(rows: list[dict[str, Any]], verbose: bool) -> Table | None:
     """Every finding with its fix, under a line naming the harness, its status and verified version."""
     grid = Table.grid(padding=(0, 2), expand=True)
@@ -189,6 +199,9 @@ def harness_panel(
     for skill, rows in block.items():
         if parts:
             parts.append(Text())
+        catalog = _catalog_line(rows)
+        if catalog is not None:
+            parts.extend([catalog, Text()])
         parts.append(_summary_line(rows, f"{Path(skill).name}   " if many else ""))
         grid = _detail_grid(rows, verbose) if verbose else _compact_grid(rows)
         if grid is not None:

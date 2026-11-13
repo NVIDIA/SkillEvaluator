@@ -282,6 +282,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     Description rules: missing or empty descriptions, Claude Code and Codex listing cuts, Copilot CLI's 1,024 UTF-16 unit limit, quotes escaped in the Copilot CLI and OpenClaw lists, and Hermes's 60-character listing. `-v` also shows the description each harness puts in the model's skill list.
 
     Location rules: `SKILL.md` casing, nested manifests, symlinked manifests and resources, OpenClaw symlink escapes, Codex scan depth, and files Hermes leaves out of its file list (outside `references/`, `templates/`, `assets/` and `scripts/`).
+
+    The check measures the skill together with the skills installed next to it. A single skill under a harness root such as `.claude/skills`, or in a workspace `skills/` folder, is counted with everything in that folder (symlinked skill folders included). Skills in different folders are separate installations, and a folder of skills is its own catalog. That drives the list-budget rules (Claude Code and Codex ~8,000 description chars, Copilot 32 full descriptions, OpenClaw 150 skills or 18,000 chars) and a duplicate-name rule per harness that says which copy wins. A `catalog` line in the panel names the folder. Copilot CLI and OpenCode also get an advisory note on when new or edited skills are picked up.
   </Accordion>
 
   <Accordion title="security — vulnerability scanning">

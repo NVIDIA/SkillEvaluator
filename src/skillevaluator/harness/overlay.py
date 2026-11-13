@@ -13,7 +13,12 @@ from typing import Any
 
 import yaml
 
-from skillevaluator.constants import DESCRIPTION_TRIGGER_PATTERN, SKILL_MANIFEST_VARIANTS, SKILL_NOT_SHIPPED_DIRS
+from skillevaluator.constants import (
+    DESCRIPTION_TRIGGER_PATTERN,
+    SCAN_EXCLUDED_DIRS,
+    SKILL_MANIFEST_VARIANTS,
+    SKILL_NOT_SHIPPED_DIRS,
+)
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 from skillevaluator.validators.schema import _duplicate_frontmatter_keys
 
@@ -70,6 +75,7 @@ class HarnessResult:
     verified_date: str
     findings: list[dict[str, str]] = field(default_factory=list)
     listed: dict[str, Any] = field(default_factory=dict)
+    catalog: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -80,6 +86,7 @@ class HarnessResult:
             "verified_version": self.version,
             "verified_date": self.verified_date,
             "findings": self.findings,
+            "catalog": self.catalog,
         }
 
 
@@ -205,8 +212,12 @@ def _bundle_facts(skill_path: Path, manifest: Path) -> dict[str, Any]:
     }
 
 
-def skill_facts(skill_path: Path) -> dict[str, Any]:
-    """Compute the facts profile rules refer to."""
+def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, Any]:
+    """Compute the facts profile rules refer to (see profiles README).
+
+    ``catalog`` describes the other skills installed alongside this one; without it the
+    catalog facts are zero and catalog rules are skipped.
+    """
     manifest, raw, text, fm_yaml, data = _read_manifest(skill_path)
     description = data.get("description")
     trigger = _TRIGGER_RE.search(description) if isinstance(description, str) else None
@@ -224,6 +235,7 @@ def skill_facts(skill_path: Path) -> dict[str, Any]:
     )
     custom = {k: v for k, v in data.items() if str(k) not in _KNOWN_FIELDS}
     name = _skill_name(skill_path, data)
+    duplicates = catalog.duplicates(skill_path, name) if catalog else []
     return {
         "skill_name": name,
         "description_text": description if isinstance(description, str) else "",
@@ -251,12 +263,87 @@ def skill_facts(skill_path: Path) -> dict[str, Any]:
         "description_over": max(0, (len(description) if isinstance(description, str) else 0) - 1024),
         "utf16_over": max(0, (_utf16_units(description)) - 1024),
         **_bundle_facts(skill_path, manifest),
+        "catalog_size": catalog.size if catalog else 0,
+        "catalog_desc_chars": catalog.desc_chars if catalog else 0,
+        "catalog_base": str(catalog.base) if catalog and catalog.base else "",
+        "duplicate_name": bool(duplicates),
+        "duplicate_paths": ", ".join(duplicates[:3]),
     }
 
 
+@dataclass
+class Catalog:
+    """The skills installed together in one folder: what list budgets and name clashes depend on."""
+
+    names: dict[Path, str]
+    size: int
+    desc_chars: int
+    base: Path | None = None
+
+    @classmethod
+    def of(cls, skills: list[Path], base: Path | None = None) -> Catalog:
+        names, chars = {}, 0
+        for skill in skills:
+            _, _, _, _, data = _read_manifest(skill)
+            names[skill.resolve()] = _skill_name(skill, data)
+            description = data.get("description")
+            chars += len(description) if isinstance(description, str) else 0
+        return cls(names=names, size=len(skills), desc_chars=chars, base=base)
+
+    def duplicates(self, skill: Path, name: str) -> list[str]:
+        own = skill.resolve()
+        return [self._display(other) for other, other_name in self.names.items() if other != own and other_name == name]
+
+    def _display(self, path: Path) -> str:
+        base = (self.base or path.parent).resolve()
+        return path.relative_to(base).as_posix() if base in path.parents else str(path)
+
+
+def _find_skills(folder: Path) -> list[Path]:
+    """Skill folders under ``folder``, symlinked ones included (Claude Code and Codex load those)."""
+    found: set[Path] = set()
+    for here, dirs, files in os.walk(folder, followlinks=True):
+        path = Path(here).absolute()
+        if path.is_symlink() and path.resolve() in {parent.resolve() for parent in path.parents}:
+            dirs.clear()  # a link back to one of its own parent folders
+            continue
+        dirs[:] = [d for d in dirs if d not in SCAN_EXCLUDED_DIRS]
+        if any(n in files for n in SKILL_MANIFEST_VARIANTS):
+            found.add(Path(here))
+    return sorted(s for s in found if not any(parent in found for parent in s.parents))
+
+
+def _catalog_base(skill: Path) -> Path | None:
+    """The skills folder a skill is installed in: a harness root, or a workspace ``skills/`` folder (OpenClaw)."""
+    root, depth = _install_root(skill)
+    if root is not None:
+        return skill.absolute().parents[depth]
+    parent = skill.absolute().parent
+    return parent if parent.name == "skills" else None
+
+
+def _catalog_of(group: list[Path]) -> Catalog:
+    base = _catalog_base(group[0])
+    if base is not None:
+        return Catalog.of(_find_skills(base) or group, base)
+    return Catalog.of(group, Path(os.path.commonpath([s.resolve() for s in group])) if len(group) > 1 else None)
+
+
 def facts_for(skills: list[Path]) -> dict[Path, dict[str, Any]]:
-    """Facts per skill."""
-    return {skill: skill_facts(skill) for skill in skills}
+    """Facts per skill, with the catalog they are installed in.
+
+    A skill installed in a skills folder (e.g. ``.claude/skills``, or an OpenClaw workspace ``skills/``) is
+    measured against everything installed in that folder, and skills in different folders are separate
+    installations. Skills outside any skills folder that are given together form their own catalog.
+    """
+    groups: dict[Path | None, list[Path]] = {}
+    for skill in skills:
+        base = _catalog_base(skill)
+        groups.setdefault(base.resolve() if base else None, []).append(skill)
+    catalogs: dict[Path, Catalog] = {}
+    for group in groups.values():
+        catalogs.update(dict.fromkeys(group, _catalog_of(group)))
+    return {skill: skill_facts(skill, catalogs[skill]) for skill in skills}
 
 
 def _utf16_units(value: Any) -> int:
@@ -267,12 +354,19 @@ def listed_description(profile: dict[str, Any], facts: dict[str, Any]) -> dict[s
     """What the profile says this harness puts in the model's skill list for the description."""
     listing = profile.get("listing") or {}
     text = facts["description_text"]
+    budget = listing.get("budget") or {}
+    over_budget = facts["catalog_size"] and (
+        facts["catalog_desc_chars"] > (facts.get("list_budget_chars") or budget.get("desc_chars", float("inf")))
+        or facts["catalog_size"] > budget.get("skills", float("inf"))
+    )
     limit = listing.get("drop_over_utf16")
     if limit and facts["description_utf16_units"] > limit:
         return {"mode": "dropped", "text": ""}
     if not text or (listing.get("name_only_over") and len(text) > listing["name_only_over"]):
         return {"mode": "name_only", "text": ""}
-    cut = listing.get("cut")
+    cut = budget.get("cut") if over_budget else listing.get("cut")
+    if over_budget and not cut:
+        return {"mode": "shortened", "text": ""}
     if cut and len(text) > cut:
         return {"mode": "cut", "text": text[:cut], "limit": cut}
     return {"mode": "full", "text": text}
@@ -378,6 +472,16 @@ def model_config(profile: dict[str, Any], config: dict[str, Any] | None = None) 
     }
 
 
+def listing_budget_chars(profile: dict[str, Any], context_tokens: int) -> int:
+    """Characters the harness reserves for the skill list: a share of the context window when the profile
+    gives ``chars_per_context_token`` and the window is known, else the fixed ``desc_chars`` (0 = no budget)."""
+    budget = (profile.get("listing") or {}).get("budget") or {}
+    per_token = budget.get("chars_per_context_token")
+    if per_token and context_tokens:
+        return int(context_tokens * per_token)
+    return int(budget.get("desc_chars", 0))
+
+
 def evaluate_profile(
     profile: dict[str, Any], facts: dict[str, Any], config: dict[str, Any] | None = None
 ) -> HarnessResult:
@@ -390,6 +494,7 @@ def evaluate_profile(
     roots = profile.get("roots", {})
     all_roots = [*roots.get("project", []), *roots.get("user", [])]
     setup = model_config(profile, config)
+    facts = {**facts, "list_budget_chars": listing_budget_chars(profile, setup["context_tokens"])}
     names = {**facts, **setup, "always": True, "roots": _RootList(all_roots, roots)}
     findings: list[dict[str, str]] = []
     worst = -1
@@ -397,9 +502,9 @@ def evaluate_profile(
         expression = str(rule["when"])
         if "install_root" in expression and (facts["install_root"] is None or names["native_root"]):
             continue
-        if expression != "always" and not _Rule.evaluate(expression, names):
+        if "catalog_" in expression and not facts["catalog_size"]:
             continue
-        if expression == "always" and rule["effect"] == "advisory":
+        if expression != "always" and not _Rule.evaluate(expression, names):
             continue
         finding = {"id": rule["id"], "effect": rule["effect"], "message": _fill(rule["message"], facts)}
         for key in ("fix", "outcome"):
@@ -417,6 +522,11 @@ def evaluate_profile(
         verified_date=str(verified.get("date", "")),
         findings=findings,
         listed=listed_description(profile, facts),
+        catalog={
+            "size": facts["catalog_size"],
+            "desc_chars": facts["catalog_desc_chars"],
+            "folder": facts["catalog_base"],
+        },
     )
 
 

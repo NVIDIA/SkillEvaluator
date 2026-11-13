@@ -16,6 +16,7 @@ rules:
   - {id: HM-SYMLINK-FILE, when: "skill_md_symlink", effect: not_loaded, message: "Symlinked SKILL.md files are not loaded.", fix: "Copy SKILL.md into the folder instead of symlinking the file (a symlinked folder works)."}
   - {id: HM-DUP-KEY, when: "frontmatter_duplicate_keys", effect: advisory, message: "Duplicate keys: last value wins.", fix: "Remove the duplicate frontmatter key."}
   - {id: HM-CASING, when: "not manifest_name_exact", effect: not_loaded, message: "Non-canonical name (skill.md/Skill.md): never loaded, on Linux or macOS (3/3 each).", fix: "Rename the file to SKILL.md (exact casing)."}
+  - {id: HM-DUP-NAME, when: "duplicate_name", effect: advisory, message: "Another skill is also named '{skill_name}' ({duplicate_paths}); Hermes uses one: project, then ~/.hermes/skills.", fix: "Give each skill a unique name."}
   - {id: HM-RESOURCE-SYMLINK, when: "resource_symlinks > 0", effect: degraded, message: "Symlinked files ({resource_symlink_paths}) are left out of the skill's file list.", fix: "Copy those files into the skill instead of symlinking them."}
   - {id: HM-LINKED-LAYOUT, when: "hermes_unlisted_files > 0", effect: advisory, message: "{hermes_unlisted_files} files outside references/, templates/, assets/ and scripts/ ({hermes_unlisted_dirs}) are left out of the skill's file list; the model finds them only if SKILL.md names their paths.", fix: "Move supporting files under references/, templates/, assets/ or scripts/."}
 notes:

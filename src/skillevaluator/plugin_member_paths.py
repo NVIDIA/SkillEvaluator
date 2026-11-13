@@ -202,7 +202,8 @@ def _unscanned_skill_finding(reader: PluginRootReader, manifest_rel: PurePosixPa
 
     The skill sits deep in an ``evals/``, ``results/``, or ``versions/`` folder
     inside a skill of the declared folder (a skill's own evaluation output or
-    snapshots, which the whole-tree security, secret, and Unicode scans prune).
+    snapshots, which the plugin source snapshot drops before the whole-tree
+    security, secret, and Unicode scans run).
     Codex searches the folder recursively and loads it. Every client view
     reports it with the same text, so the merged inventory keeps one finding.
     """

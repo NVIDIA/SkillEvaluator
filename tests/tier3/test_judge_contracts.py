@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 from tests.conftest import load_harbor_eval_template
 
-from skillevaluator.tier3.eval_core import llm_judge
+from skillevaluator.tier3.eval_core import atif_helpers, llm_judge
 from skillevaluator.tier3.harbor.metrics import RESERVED_METRIC_NAMES
 
 eval_template = load_harbor_eval_template("harbor_template_eval_judge_contracts")
@@ -148,6 +148,84 @@ def test_accuracy_prompt_gives_no_free_criterion_to_a_response_without_an_answer
     assert "every criterion is false" in prompt
     # A correct refusal still scores when the expected answer is a refusal.
     assert "unless the expected answer is itself a refusal" in prompt
+
+
+@pytest.mark.parametrize(
+    ("requirement", "final_response"),
+    [
+        ("Return only a number.", "83"),
+        ("Return only a number.", "The computed quantity is 83.\nCalculation finished."),
+        ("Return only a number.", "Quantity: 83"),
+        ("Return only a number.", "```text\n83\n```"),
+        ("Explain the quantity.", "The computed quantity is 83."),
+        ("Use the prefix COUNT= before the quantity.", "COUNT=83"),
+        ("Return the quantity with units and a short explanation.", "83 items remain after counting."),
+    ],
+    ids=["bare-number", "prose", "label", "fence", "no-format", "required-prefix", "required-units-prose"],
+)
+def test_format_judges_receive_complete_final_response_separate_from_tool_and_reference(
+    monkeypatch, requirement: str, final_response: str
+) -> None:
+    # Catch response extraction, evidence misframing, or drift between deployed
+    # prompts. The provider is stopped at its boundary; no semantic verdict is faked.
+    question = f"Count the available items. {requirement}"
+    trajectory = {
+        "steps": [
+            {"source": "user", "message": question},
+            {
+                "source": "agent",
+                "tool_calls": [{"tool_call_id": "count-1", "function_name": "count_items", "arguments": {}}],
+                "observation": {"results": [{"source_call_id": "count-1", "content": "83"}]},
+            },
+            {"source": "agent", "message": final_response},
+        ]
+    }
+    captured = []
+    for module, builder in (
+        (llm_judge, atif_helpers.build_metric_evidence_bundles),
+        (eval_template, eval_template.build_metric_evidence_bundles),
+    ):
+        bundles = builder(trajectory, question, ground_truth="83", expected_behavior=[requirement])
+        prompts = _capture_prompts(module, monkeypatch)
+        module.judge_accuracy(question, "83", bundles["accuracy"]["prompt_evidence"])
+        module.judge_behavior_check(bundles["behavior_check"]["prompt_evidence"], [requirement])
+        assert len(prompts) == 2
+        accuracy, behavior = prompts
+        assert "EXPECTED ANSWER:\n83\n" in accuracy
+        assert f"FINAL RESPONSE\n{final_response}\n\nKEY OBSERVATIONS\n83" in accuracy
+        assert f"FINAL RESPONSE\n{final_response}\n\nUSER REQUEST\n{question}" in behavior
+        assert "COMPACT TOOL HISTORY\n" in behavior
+        assert "count_items" in behavior
+        assert "83" in behavior.split("COMPACT TOOL HISTORY\n", 1)[1]
+        assert f"EXPECTED BEHAVIORS:\n1. {requirement}" in behavior
+        for prompt in prompts:
+            assert "judge the entire final response literally" in prompt
+            assert "independently of factual correctness" in prompt
+            assert "Do not extract a compliant answer" in prompt
+            assert "extra prose, a label, or a code fence violates that requirement" in prompt
+            assert "Required prefixes, units, or prose are valid when they match the stated format" in prompt
+        assert "Wording leniency does not relax explicit format constraints" in accuracy
+        assert "When the complete final response establishes a format violation, mark that behavior false" in behavior
+        assert "keep null when missing or incomplete evidence prevents checking it" in behavior
+        captured.append(prompts)
+    assert captured[0] == captured[1]
+
+
+def test_format_judges_keep_direct_unsectioned_inputs_compatible(judge_module, monkeypatch) -> None:
+    prompts = _capture_prompts(judge_module, monkeypatch)
+    direct_response = "COUNT=83"
+
+    judge_module.judge_accuracy("Use the prefix COUNT=.", "83", direct_response)
+    judge_module.judge_behavior_check(direct_response, ["Use the prefix COUNT=."])
+
+    assert prompts[0].endswith(
+        "SELECTED EVIDENCE (final response + produced artifacts; low-relevance steps may be omitted):\nCOUNT=83"
+    )
+    assert "CONVERSATION:\nCOUNT=83\n\nEXPECTED BEHAVIORS:" in prompts[1]
+    for prompt in prompts:
+        assert "When a FINAL RESPONSE section is supplied" in prompt
+        assert "its contents are the final answer" in prompt
+        assert "context, not part of that answer" in prompt
 
 
 def test_goal_prompt_omits_empty_tool_section_and_keeps_real_one(judge_module, monkeypatch) -> None:

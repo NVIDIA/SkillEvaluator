@@ -134,6 +134,142 @@ def test_local_exec_writes_and_reads_logical_artifact_paths(
     assert environment._resolve_path("/logs/artifacts/answer.txt").read_text(encoding="utf-8") == "agent-answer"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Native Windows local mode is unsupported")
+@pytest.mark.parametrize("destination", [None, "logs/artifacts"])
+def test_local_artifact_parent_paths_publish_and_collect_step_snapshots(
+    local_output_environment: SkillEvaluatorLocalEnvironment,
+    destination: str | None,
+) -> None:
+    """Computing the artifact child from /logs must reach the publish directory."""
+    environment = local_output_environment
+    handler = ArtifactHandler(artifacts=[], logger=logging.getLogger(__name__))
+    filenames = ("parent.txt", "relative.txt", "computed.txt")
+
+    async def exercise() -> None:
+        await environment.start()
+        try:
+            for step_name, answer in (("first", "first-answer"), ("second", "second-answer")):
+                result = await environment.exec(
+                    f'printf {answer} > "$HARBOR_LOGS_DIR/artifacts/parent.txt" && '
+                    f"cd /logs && printf {answer} > artifacts/relative.txt && "
+                    f'logs=/logs; child=artifacts; printf {answer} > "$logs/$child/computed.txt"; '
+                    'cat "$HARBOR_ARTIFACTS_DIR/parent.txt" '
+                    '"$HARBOR_ARTIFACTS_DIR/relative.txt" "$HARBOR_ARTIFACTS_DIR/computed.txt"'
+                )
+                assert result.return_code == 0, result.stderr
+                assert result.stdout == answer * 3
+                handler.begin_collection()
+                entry = await handler._download_artifact(
+                    source_env=environment,
+                    artifacts_dir=environment.trial_paths.step_artifacts_dir(step_name),
+                    artifact=ArtifactConfig(source="/logs/artifacts", destination=destination),
+                    convention_source="/logs/artifacts",
+                )
+                assert entry.status == "ok"
+                for filename in filenames:
+                    assert environment._resolve_path(f"/logs/artifacts/{filename}").read_text() == answer
+        finally:
+            await environment.stop(delete=True)
+
+    asyncio.run(exercise())
+
+    assert not environment._root.exists()
+    for step_name, answer in (("first", "first-answer"), ("second", "second-answer")):
+        recorded_dir = environment.trial_paths.step_artifacts_dir(step_name) / "logs" / "artifacts"
+        for filename in filenames:
+            assert (recorded_dir / filename).read_text() == answer
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Native Windows local mode is unsupported")
+def test_local_parent_logs_paths_preserve_retained_role_logs(
+    local_output_environment: SkillEvaluatorLocalEnvironment,
+) -> None:
+    environment = local_output_environment
+    roles = ("agent", "verifier", "user-agent")
+    for role in roles:
+        (environment.trial_paths.trial_dir / role).mkdir(exist_ok=True)
+
+    async def exercise() -> None:
+        await environment.start()
+        try:
+            result = await environment.exec(
+                "logs=/logs; for role in agent verifier user-agent; do "
+                'printf retained > "$logs/$role/session.jsonl" || exit; done'
+            )
+            assert result.return_code == 0, result.stderr
+            for role in roles:
+                host_logs = environment.trial_paths.trial_dir / role
+                assert environment.is_path_mounted(f"/logs/{role}", host_logs)
+                assert (host_logs / "session.jsonl").read_text() == "retained"
+        finally:
+            await environment.stop(delete=True)
+
+    asyncio.run(exercise())
+
+    for role in roles:
+        assert (environment.trial_paths.trial_dir / role / "session.jsonl").read_text() == "retained"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Native Windows local mode is unsupported")
+@pytest.mark.parametrize("transfer", ["download", "excluded", "filtered", "upload"])
+def test_local_parent_logs_transfers_fail_before_mutating_files(
+    local_output_environment: SkillEvaluatorLocalEnvironment,
+    tmp_path: Path,
+    transfer: str,
+) -> None:
+    """The virtual parent must never copy its internal aliases as user artifacts."""
+    environment = local_output_environment
+    target = tmp_path / "downloaded-logs"
+    target.mkdir()
+    marker = target / "retained.txt"
+    marker.write_text("previous download")
+    role_log = environment.trial_paths.agent_dir / "session.jsonl"
+    role_log.write_text("retained role log")
+
+    async def exercise() -> None:
+        await environment.start()
+        try:
+            with pytest.raises(ValueError, match="logs parent"):
+                if transfer == "download":
+                    await environment.download_dir("/logs", target)
+                elif transfer == "excluded":
+                    await environment.download_dir_with_exclusions(source_dir="/logs", target_dir=target, exclude=[])
+                elif transfer == "filtered":
+                    await environment.download_dir_filtered(source_dir="/logs", target_dir=target, include=["*"])
+                else:
+                    await environment.upload_dir(target, "/logs")
+            assert marker.read_text() == "previous download"
+            assert role_log.read_text() == "retained role log"
+        finally:
+            await environment.stop(delete=True)
+
+    asyncio.run(exercise())
+    assert marker.read_text() == "previous download"
+    assert role_log.read_text() == "retained role log"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Native Windows local mode is unsupported")
+def test_local_role_transfer_normalizes_logical_path_spelling(
+    local_output_environment: SkillEvaluatorLocalEnvironment,
+    tmp_path: Path,
+) -> None:
+    environment = local_output_environment
+    source = environment.trial_paths.agent_dir / "session.jsonl"
+    source.write_text("retained role log", encoding="utf-8")
+    target = tmp_path / "downloaded-role"
+
+    async def exercise() -> None:
+        await environment.start()
+        try:
+            await environment.download_dir("/logs/./agent", target)
+        finally:
+            await environment.stop(delete=True)
+
+    asyncio.run(exercise())
+    assert (target / "session.jsonl").read_text(encoding="utf-8") == "retained role log"
+    assert source.read_text(encoding="utf-8") == "retained role log"
+
+
 def test_local_artifact_collection_retains_source_and_separate_step_snapshots(
     local_output_environment: SkillEvaluatorLocalEnvironment,
 ) -> None:

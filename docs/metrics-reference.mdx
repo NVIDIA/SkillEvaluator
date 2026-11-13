@@ -41,7 +41,8 @@ Two things to know before reading further:
 | [The five dimensions](#the-five-dimensions) | CLI, HTML, `BENCHMARK.md` | 0.0–1.0 (shown as a percentage) | Weighted mean of the signals above |
 | [Overall Score](#overall-score) | CLI, HTML, `BENCHMARK.md` | 0.0–1.0 (shown as a percentage) | Equal-weight mean of the five dimensions |
 | [pass@k rate](#attempt-verdicts-and-passk) | CLI, HTML, `pass_at_k_lift.json` | 0.0–1.0 (shown as a percentage) | Counting cases with at least one passing attempt |
-| [Pass-rate difference](#attempt-verdicts-and-passk) | HTML, `pass_at_k_lift.json` | −100 to +100 percentage points | Difference of the two arms' pass rates |
+| [Pass-rate difference](#attempt-verdicts-and-passk) | `pass_at_k_lift.json` | −1.0 to +1.0, a difference of two rates | Difference of the two arms' pass rates |
+| [Pass-rate difference, as displayed](#attempt-verdicts-and-passk) | HTML, CLI | −100 to +100 percentage points | The same difference, multiplied by 100 for display |
 | [Skill Lift](#skill-lift) | CLI, HTML, `lift.json` | −1.0 to +1.0, in Overall Score units | With-skill Overall minus baseline Overall |
 | [Uplift in `BENCHMARK.md`](#percentages-and-points-in-benchmarkmd) | `BENCHMARK.md` | percentage points | Difference of the two displayed percentages |
 | [Quality Score](#tier-1-quality-score) | `quality-check`, `validate`, HTML | 0–100 points | Tier 1 static analysis of `SKILL.md` |
@@ -354,7 +355,11 @@ pass@k rate = passed_cases / total_cases
 ```
 
 **Range and units:** 0.0–1.0, unitless; shown as a percentage. The cross-arm
-**Pass-rate difference** is in percentage points.
+**Pass-rate difference** is stored as a difference of those two rates — a
+fraction from −1.0 to +1.0 — and only the rendered surfaces scale it: the HTML
+column and the CLI multiply by 100 and label the result percentage points. A
+with-skill arm at 19/20 against a baseline at 12/20 writes `0.35` to
+`pass_at_k_lift.json` and shows `+35 percentage points`.
 
 Each arm's rate carries a two-sided 95% **Wilson score interval** over cases
 ([`collector.py`, `_wilson_score_interval`](https://github.com/NVIDIA/SkillEvaluator/blob/main/src/skillevaluator/tier3/harbor/collector.py)),
@@ -446,13 +451,23 @@ Quality = 0.35 * Correctness
 
 | Area | Weight | What triggers a deduction |
 | --- | --- | --- |
-| Correctness | 35% | XML tags in frontmatter (15), invalid or reserved name (15), missing `scripts/` for a script-based skill (25), undocumented scripts (10), missing `version` or `metadata.author` / `metadata.tags` (5 each), Windows-style paths (10), `SKILL.md` linking to `README.md` (5), no examples (5) |
+| Correctness | 35% | XML tags in frontmatter, the name or the description (15 each), invalid or reserved name (15 each), missing `version` or `metadata.author` / `metadata.tags` (5 each), Windows-style paths (10), `SKILL.md` linking to `README.md` (5), no examples (5), plus the type-specific checks below |
 | Discoverability | 25% | Description under 20 characters (20), vague words (15), first or second person (15), no trigger wording (10), short or non-conforming skill name (10 each), over 200 characters (5), no `## Purpose` (5), broad description with no negative triggers (5) |
 | Reliability | 25% | No mention of error handling (10), missing `## Prerequisites`, `## Limitations`, `## Troubleshooting` (5 each), scripts or library modules with no error handling (5) |
 | Efficiency | 15% | Over the 5,000 estimated-token budget (15), instructions with no action verbs (15), deeply nested references (10), high line repetition (10), corporate buzzwords, non-descriptive reference filenames, non-doc files in `references/`, instructions not in list format (5 each) |
 
+Correctness also applies **type-specific** checks, chosen by the detected skill
+type. Only one block below can fire on a given skill:
+
+| Skill type | What triggers a deduction |
+| --- | --- |
+| script-based, hybrid | No `scripts/` or `tools/` directory (25); the directory exists but holds no `.py` or `.sh` file (10); no documented scripts in table format (10); instructions never mention `run_script` (10) |
+| lib-based | Detected as lib-based but no Python module found (15); module found but no `pyproject.toml` (10); module found but no API or import documentation (10); resource directories present with no resource documentation in `SKILL.md` (5) |
+| resource-based | No documentation of the available resources (10) |
+| guide-only | Fewer than 20 non-blank body lines (15) |
+
 The Reliability rules and the expected-heading list are configurable with
-`--quality-config`; see
+`--quality-config`, so those deductions are defaults rather than fixed; see
 [Tier 1 validation](/skills/skillevaluator/tier1-validation).
 
 **Range and units:** 0–100 points. Grades are A at 90 or above, B at 80, C at
@@ -507,12 +522,17 @@ overall       = (1.0 + 0.8 + 0.9375 + 0.875 + 0.8) / 5 = 0.8825
 
 **Skill Lift** — `<run>/<agent>/lift.json`, under `overall.with_skill`,
 `overall.without_skill` and `overall.delta`, with `basis` naming the shared
-comparison and `judge_mixed_cases` listing excluded cases.
+comparison and `judge_mixed_cases` giving, per judge metric, how many cases were
+excluded. The case ids themselves are not in `judge_mixed_cases`; they appear in
+`basis.excluded_cases`, each with `reason: "judge_mixed"`, capped at 64 entries.
 
 **pass@k** — `<run>/<agent>/pass_at_k_lift.json` and each arm's
 `summary.json` under `pass_at_k`: `passed_cases`, `total_cases`, `rate`,
 `rate_interval` (the Wilson bounds), `pass_threshold`, `k`, and the per-case
-`cases` map with each attempt's score and verdict.
+`cases` map with each attempt's score and verdict. In `pass_at_k_lift.json`,
+`delta` and `count_derived_delta` are differences of the two arms' `rate`
+values, so they are fractions from −1.0 to +1.0, not percentage points —
+multiply by 100 to get the figure the HTML and CLI print.
 
 **The run configuration that produced them** — `run_config.json` records the
 judge provider and model separately from the agent's, and `result.json` embeds
@@ -568,8 +588,9 @@ per metric a confusion matrix, a false-pass rate among known failures, a
 false-fail rate among known passes, an unjudgeable rate — each with numerator,
 denominator and a Wilson 95% interval — plus repeat disagreement and score
 spread. Labels that can be re-derived mechanically are re-checked independently
-of the grader. A bundled 14-case reference suite ships in the wheel; it is
-intentionally small and is not a reliability benchmark.
+of the grader. A bundled 16-case reference suite (14 assessment, 2 tuning)
+ships in the wheel; it is intentionally small and is not a reliability
+benchmark.
 
 The measured baseline it publishes is unflattering and is published anyway: on
 the bundled assessment split, both tested judge models passed every known task
@@ -647,12 +668,13 @@ and one environment, at one point in time.
 
 **With `--n-attempts 1` and a handful of cases, a run is a smoke test, not a
 benchmark.** One attempt per case gives pass@1 with no repeatability signal at
-all, and the Wilson interval on four cases has a half-width of roughly 0.40 —
-twice the 0.20 the dataset-sufficiency policy asks for, which is why such a
-result is marked provisional. A single run at that
-size can tell you the harness worked, the skill activated, and nothing obviously
-caught fire. It cannot support a claim that the skill improves agent
-performance.
+all, and the Wilson interval on four cases has a half-width of up to 0.35 —
+well over the 0.20 the dataset-sufficiency policy asks for, which is why such a
+result is marked provisional. The narrowest a 4-case interval ever gets is
+0.2449, at 0/4 or 4/4, which is still wider than the policy allows. A single
+run at that size can tell you the harness worked, the skill activated, and
+nothing obviously caught fire. It cannot support a claim that the skill
+improves agent performance.
 
 Reasonable readings of a result:
 

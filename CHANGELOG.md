@@ -45,7 +45,11 @@ All notable changes to SkillEvaluator are documented in this file.
   intervals, `validate-grader`, the dataset-sufficiency label and the opt-in
   judge character facts, and states that no inter-rater agreement study against
   human-labeled trajectories has been published. Tier 1 validation, Tier 3 live
-  evaluation and the reports page link to it.
+  evaluation and the reports page link to it. A regression test parses the
+  constants, thresholds, weights and deduction sizes out of the page and
+  asserts them against the live values in `constants.py`,
+  `tier3/dataset_sufficiency.py`, the default quality config and the bundled
+  grader suite, so retuning any of them fails CI instead of rotting the page.
 
 ### Fixed
 

@@ -107,6 +107,18 @@ All notable changes to SkillEvaluator are documented in this file.
   instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL
   config.json'`) are still not counted.
 
+- `validate` Tier 1 output: when only the `--llm` / `--llm-verify` stage
+  can't run, `what to fix` gives the exact `export` lines for the missing
+  provider or key instead of a scanner install or `--skip security`, and the
+  scanners row keeps the scanner version (`SkillSpector 2.12.0, LLM didn't
+  run`). A missing SkillSpector or a rejected baseline under `--llm` still
+  gets the scanner fix, and a `SKILLSPECTOR_PROVIDER` adapter set directly
+  gets advice for its own key instead of the public provider's. The summary
+  row now also gives the sub-check count (`9/10 checks passed (22
+  sub-checks)`). It counts validators, as the `Tier 1: 9 of 10 checks passed`
+  verdict line under it does, so the two agree, including with `--skip` and
+  `--fail-fast`.
+
 ## 0.9.0 - 2026-11-13
 
 ### Fixed

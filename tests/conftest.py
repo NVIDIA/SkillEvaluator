@@ -43,9 +43,10 @@ def _isolate_operator_vertex_routing(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _isolate_operator_judge_policies(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep tests on the default judge policies even when the host shell opts in to others."""
+    """Keep tests on the default judge policies and refusal fallback even when the host shell sets others."""
     monkeypatch.delenv("LLM_JUDGE_FALLBACK_POLICY", raising=False)
     monkeypatch.delenv("LLM_JUDGE_RETRY_POLICY", raising=False)
+    monkeypatch.delenv("SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL", raising=False)
 
 
 # =============================================================================

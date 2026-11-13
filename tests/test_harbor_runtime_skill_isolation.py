@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import shutil
@@ -4251,6 +4252,164 @@ def test_rebase_reasserts_verifier_constraint_after_authored_dependencies(tmp_pa
     dockerfile = (task / "environment" / "Dockerfile").read_text(encoding="utf-8")
     assert dockerfile.rfind("langchain-community<0.4.2") > dockerfile.find("langchain-community>=0.4.2")
     assert dockerfile.rfind("from ragas.llms.base import llm_factory") > dockerfile.find("langchain-community>=0.4.2")
+
+
+_FAKE_VERIFIER_MODULES = {
+    "boto3/__init__.py": "",
+    "idna/__init__.py": "",
+    "openai/__init__.py": "class AsyncOpenAI:\n    pass\n",
+    "ragas/__init__.py": "",
+    "ragas/llms/__init__.py": "",
+    "ragas/llms/base.py": "def llm_factory(*args, **kwargs):\n    return None\n",
+    "ragas/messages.py": "class AIMessage:\n    pass\n\n\nclass HumanMessage:\n    pass\n",
+    "ragas/metrics/__init__.py": "",
+    "ragas/metrics/collections.py": "class AgentGoalAccuracyWithReference:\n    pass\n",
+}
+
+
+def _write_fake_verifier_modules(root: Path) -> None:
+    for relative, source in _FAKE_VERIFIER_MODULES.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+
+
+def _third_party_imports(source: str) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.add(node.module.split(".")[0])
+    return {name for name in names if name not in sys.stdlib_module_names and name != "__future__"}
+
+
+def _verifier_smoke_command(dockerfile: str) -> list[str] | None:
+    lines = [line for line in dockerfile.splitlines() if adapter_module._VERIFIER_IMPORT_SMOKE in line]
+    if not lines:
+        return None
+    assert len(lines) == 1
+    argv = json.loads(lines[0].removeprefix("RUN "))
+    assert argv[:4] == ["/bin/sh", "-c", adapter_module._MANAGED_PATH_SHELL, "skillevaluator"]
+    return argv
+
+
+def test_verifier_dependency_smoke_covers_every_verifier_third_party_import() -> None:
+    bundled = {path.stem for path in adapter_module._VERIFIER_FILES}
+    imported = set().union(
+        *(_third_party_imports(path.read_text(encoding="utf-8")) for path in adapter_module._VERIFIER_FILES)
+    )
+    # The verifier works without these: google.auth falls back to the metadata
+    # server and gcloud, skillevaluator to the bundled siblings, and boto3
+    # imports botocore.
+    optional = {"botocore", "google", "skillevaluator"}
+    expected = imported - bundled - optional
+
+    assert expected == _third_party_imports(adapter_module._VERIFIER_IMPORT_SMOKE)
+    installed = {
+        requirement.split("~")[0].split(">")[0].split("<")[0] for requirement in adapter_module._VERIFIER_DEPS.split()
+    }
+    assert expected <= installed
+
+
+def test_shared_eval_base_image_keeps_verifier_dependency_smoke(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, target, references_dir, _ = _write_projection_fixture(tmp_path)
+    built: list[str] = []
+
+    def fake_run(cmd: list[str], *args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(cmd, 1, "", "")
+        assert cmd[:2] == ["docker", "build"]
+        built.append((Path(cmd[-1]) / "Dockerfile").read_text(encoding="utf-8"))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(adapter_module.subprocess, "run", fake_run)
+
+    # The shared image serves every grading mode, so it keeps the check.
+    assert adapter_module.build_eval_base_image(target, references_dir)
+    assert len(built) == 1
+    argv = _verifier_smoke_command(built[0])
+    assert argv is not None
+    assert argv[4:7] == ["python3", "-I", "-c"]
+
+
+@pytest.mark.parametrize("grading_mode", ["default", "custom_only"])
+@pytest.mark.parametrize("mode", ["generated", "preserve", "rebase"])
+def test_verifier_dependency_smoke_runs_like_the_verifier(tmp_path: Path, mode: str, grading_mode: str) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    options: dict[str, str] = {}
+    if mode != "generated":
+        (target / "evals" / "environment" / "Dockerfile").write_text(
+            "FROM python:3.12-slim\nENV PIP_USER=1\n",
+            encoding="utf-8",
+        )
+    if mode == "rebase":
+        options = {"base_image": "skillevaluator-base:test", "custom_dockerfile_mode": "rebase"}
+
+    task = generate_harbor_tasks(
+        target,
+        tmp_path / f"verifier-smoke-{mode}-{grading_mode}",
+        grading_mode=grading_mode,
+        **options,
+    )[0]
+
+    dockerfile = (task / "environment" / "Dockerfile").read_text(encoding="utf-8")
+    test_sh = (task / "tests" / "test.sh").read_text(encoding="utf-8")
+    argv = _verifier_smoke_command(dockerfile)
+    assert dockerfile.count('"pip", "install"') == 1
+    if grading_mode == "custom_only":
+        # test.sh never runs eval.py, so its imports are not a build requirement.
+        assert "/eval.py" not in test_sh
+        assert argv is None
+        return
+    assert argv is not None
+    command = argv[4:]
+    verifier = next(line for line in test_sh.splitlines() if line.endswith('/eval.py"'))
+    assert command[:3] == ["python3", "-I", "-c"]
+    assert verifier.split()[:2] == command[:2]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the exec-form RUN starts /bin/sh")
+def test_verifier_dependency_smoke_fails_when_isolated_verifier_cannot_import(tmp_path: Path) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    task = generate_harbor_tasks(target, tmp_path / "verifier-smoke-behavior")[0]
+    argv = _verifier_smoke_command((task / "environment" / "Dockerfile").read_text(encoding="utf-8"))
+    assert argv is not None
+
+    image = tmp_path / "image"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(image)], check=True)
+    site_packages = Path(
+        subprocess.run(
+            [str(image / "bin" / "python3"), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+    path = os.pathsep.join([str(image / "bin"), "/usr/bin", "/bin"])
+
+    def smoke(**env: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(argv, env={"PATH": path, **env}, capture_output=True, text=True, timeout=60)
+
+    # A PIP_TARGET-style install that only PYTHONPATH reaches is invisible to `python3 -I`.
+    pythonpath = tmp_path / "pythonpath"
+    _write_fake_verifier_modules(pythonpath)
+    hidden = smoke(PYTHONPATH=str(pythonpath))
+    assert hidden.returncode != 0
+    assert "ModuleNotFoundError" in hidden.stderr
+
+    _write_fake_verifier_modules(site_packages)
+    installed = smoke()
+    assert installed.returncode == 0, installed.stderr
+
+    for package in sorted({relative.split("/")[0] for relative in _FAKE_VERIFIER_MODULES}):
+        shutil.rmtree(site_packages / package)
+        missing = smoke()
+        assert missing.returncode != 0, package
+        assert f"No module named '{package}'" in missing.stderr
+        _write_fake_verifier_modules(site_packages)
 
 
 def test_baseline_rejects_target_manifest_payload_with_appended_comment(tmp_path: Path) -> None:

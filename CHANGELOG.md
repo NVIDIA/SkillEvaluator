@@ -88,6 +88,17 @@ All notable changes to SkillEvaluator are documented in this file.
   JSON files containing a `timeout` key as partial analysis; those scans
   remain incomplete rather than being treated as successful.
 
+- The rubric judge's reference supplement budget is configurable through
+  `SKILLEVALUATOR_RUBRIC_SUPPLEMENT_BYTES` and defaults to one mebibyte instead
+  of 30,000 bytes, which a real linked guide graph outgrows. Required linked
+  Markdown is bounded only by that budget, so a guide larger than an optional
+  preview is collected whole; optional script and reference previews keep their
+  own small per-file bound. The budget decides how many bytes of the skill's own
+  guidance are collected, never which paths may be read: every reference is still
+  confined to the skill's declared root by the same secure reader, and guidance
+  that does not fit still stops the evaluation with an explicit unsafe-input
+  finding rather than being dropped from the judge's prompt.
+
 - The `default` policy no longer blocks a skill for its author attribution,
   because the Agent Skills baseline requires only `name` and `description`
   (#43). A missing `metadata.author` is now a LOW advisory, and a person, team,
@@ -153,6 +164,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Accuracy and Behavior judge prompts clarify that explicit final-answer formats
+  apply to the entire final response, independently of correct values in tool
+  output or references. Scoring and thresholds are unchanged; an Accuracy format
+  failure alone can still score 0.8 and pass the default threshold.
+
 - Folder validation preserves author and metadata ID advisories from passing
   skills. Catalog summaries include duplicate ID severity counts and consistent
   member verdicts, while explicitly labeling linked reports as single-skill
@@ -187,6 +203,31 @@ All notable changes to SkillEvaluator are documented in this file.
 - Grader qualification reports null behavior-step results with a matching
   `not_checked` expectation as insufficient evidence instead of errors. Raw
   scores and unjudgeable rates are unchanged.
+- Tier 3 token usage rows are now validated against the evaluation dataset's own
+  case IDs. Every case row uses one of those IDs at most once, and an attempt
+  whose only name is Harbor's 32-character cut of a case name is attributed to
+  that case, so missing telemetry stays with the canonical case instead of
+  splitting into a row of its own. A row that still cannot be matched is marked
+  as an unverified case ID in every report and recorded under
+  `token_usage.case_id_validation`, rather than being shown as coverage of a
+  dataset case; a table that shows no such row, because it renders no case rows
+  or its row caps dropped them, names the unmatched case IDs instead.
+- The Tier 3 security scan no longer scores an agent clearing its own output
+  directory as a destructive command. One literal, recursive and forced `rm` of
+  a path inside the agent's output directory is cleanup. That directory is the
+  `output` directory of the directory the trace starts in, so no later `cd` or
+  `workdir` can name another one; the directory itself, anything outside it, a
+  sensitive or protected path, anything below the top level once the trace has
+  created a symbolic link, and every compound, globbed or dynamic command form
+  still score as before.
+- The Tier 3 security scan no longer reads the license URL in a source file's
+  copyright header as data exfiltration. A `http://` or `https://` URL on a
+  comment line of a license or copyright notice is prose, so the header's own
+  URL no longer makes a long file write look like an upload; a URL the file
+  writes outside such a notice, a docstring link for instance, is still read as
+  before. A curl, wget or httpie word keeps its meaning wherever it appears,
+  including inside a notice, and a comment leader that is also executable shell
+  (`*)`, `--`, `;`, `%`, `//cmd`) never starts a notice.
 - A failed Tier 3 execution (for example a backend launch failure) now marks the
   report payload, its summary and the affected agents as failed with their
   errors, instead of only the top-level `result.json`. A report re-rendered by
@@ -196,6 +237,23 @@ All notable changes to SkillEvaluator are documented in this file.
   `/bin/bash -lc 'cat skills/x/SKILL.md'`, which some agent harnesses record
   instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL
   config.json'`) are still not counted.
+- Tier 3 reads the native Codex wrapper that runs a literal command array
+  through `.map`, so a skill read batched that way is graded instead of scoring
+  as an unsupported wrapper. The decoder stays a bounded static one: every array
+  element is still a literal, the callback may only hand that element to one
+  named tool, and a reused or shadowed binding, a changed index or payload, a
+  computed key or tool name, or a duplicate, missing, extra, reordered or
+  truncated result record leaves the whole wrapper unsupported. Each command is
+  matched to the settled result at its own position and carries that result's
+  own exit code or rejection. The form that prints inside the callback settles
+  out of array order, so it is read only for a single command and otherwise
+  stops grading rather than guessing which result belongs to which command.
+  That inline form is graded only on evidence it actually produced: the callback
+  must `await` the call, because an un-awaited one prints a pending promise
+  rather than the tool's result, and it must print something, because
+  `Promise.allSettled` swallows a rejection and would otherwise let a call that
+  never ran exit cleanly and read as a successful command.
+
 - A Tier 1 security scan keeps a SkillSpector `partial` report `INCOMPLETE` when
   its only ledger row is a referenced image but its `references` list records a
   `missing` reference on a line without a ledger row, an `ambiguous` reference,

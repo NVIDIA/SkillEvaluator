@@ -649,6 +649,8 @@ def render_agent_eval_html_report(
             _apply_saved_feedback(canonical_payload, saved_feedback, engine_result, run_dir, skill_path)
         else:
             _apply_case_findings(canonical_payload, engine_result, run_dir, skill_path, use_llm=use_llm_judge)
+        # Restored feedback and fresh findings both join after the initial size budget.
+        fit_token_usage(canonical_payload)
     if engine_result is not None and isinstance(canonical_payload, dict):
         # Persist only the compact feedback contract needed by the CLI. The
         # complete canonical payload remains in the HTML report and can be much
@@ -657,6 +659,13 @@ def render_agent_eval_html_report(
             "schema_version": _TIER3_FEEDBACK_SCHEMA_VERSION,
             **{field: list(canonical_payload.get(field) or []) for field in _TIER3_FEEDBACK_FIELDS},
         }
+        from skillevaluator.tier3.token_usage import per_agent_token_usage
+
+        # The terminal summary prints token usage per agent; per-case rows stay in the report files.
+        if token_usage := per_agent_token_usage(canonical_payload.get("token_usage")):
+            engine_result["token_usage"] = token_usage
+        else:
+            engine_result.pop("token_usage", None)
 
     target = output_path.expanduser().resolve() if output_path is not None else run_dir / "report.html"
     from skillevaluator.publication_identity import publication_target_name
@@ -864,8 +873,10 @@ def build_agent_eval_payload(
     overall_score = _finite_float(raw_overall_score) if execution_status == "succeeded" else None
     overall_lift = _finite_float(best.get("lift"))
     # Baseline calibration scores measure no skill, so they never set a skill verdict.
+    # The verdict reads the agents the best agent is picked from.
+    verdict_agents = _headline_agents(agent_payloads, score_field=score_field)
     verdict = (
-        _overall_verdict_from_agents(agent_payloads)
+        _overall_verdict_from_agents(verdict_agents)
         if overall_score is not None and not baseline_only
         else VERDICT_NEUTRAL
     )
@@ -953,8 +964,9 @@ def build_agent_eval_payload(
     if best_agent and _agent_quality_verdict(agent_payloads.get(best_agent, {})) == verdict:
         verdict_source = agent_payloads[best_agent]
     else:
+        # The reason and counts come from an agent the verdict was read from.
         verdict_source = next(
-            (agent for agent in agent_payloads.values() if _agent_quality_verdict(agent) == verdict),
+            (agent for agent in verdict_agents.values() if _agent_quality_verdict(agent) == verdict),
             None,
         )
 
@@ -1027,7 +1039,12 @@ def build_agent_eval_payload(
             {
                 "severity": "warn",
                 "title": "Inconclusive: skill never activated",
-                "message": "The skill was never activated in any positive with-skill trial. Scores are diagnostic only; no lift verdict was computed.",
+                "message": (
+                    "The skill was never activated in any positive with-skill trial"
+                    # An agent kept with a failed baseline did not decide this verdict.
+                    + ("" if len(verdict_agents) == len(agent_payloads) else " of an agent with a complete baseline")
+                    + ". Scores are diagnostic only; no lift verdict was computed."
+                ),
             }
         ]
         deterministic_suggestions = ["Check skill loading and agent support, then rerun the evaluation."]
@@ -1134,6 +1151,27 @@ def build_agent_eval_payload(
         payload["case_selection"] = dict(case_selection)
     if harbor_summary:
         payload["harbor_viewer"] = harbor_summary
+    from skillevaluator.reporting.tier3_coverage import coverage_notices
+
+    # Name each arm that ran but failed, so no report reads its missing scores
+    # as an arm that never ran.
+    if notices := coverage_notices(agent_payloads):
+        payload["coverage_notices"] = notices
+    from skillevaluator.tier3.token_usage import USAGE_ONLY_ATTEMPT_KEYS, build_token_usage
+
+    # Measured, never scored: token usage per case and agent, counting attempts
+    # that failed before scoring. Scores and ``resources`` do not read it. It
+    # joins the payload after the budget, so it never displaces score evidence.
+    baseline_record = (run_config or {}).get("baseline")
+    token_usage = build_token_usage(
+        {
+            name: {**agent, **{key: agents.get(name, {}).get(key) for key in USAGE_ONLY_ATTEMPT_KEYS}}
+            for name, agent in agent_payloads.items()
+        },
+        mode=mode,
+        # A reused baseline's copied trajectories hold the tokens of the run it came from.
+        baseline_reused=isinstance(baseline_record, dict) and baseline_record.get("mode") == "reused",
+    )
 
     _layer_llm_insights(
         payload,
@@ -1165,6 +1203,10 @@ def build_agent_eval_payload(
         )
     payload = _sanitize_json_numbers(payload)
     _enforce_report_payload_budget(payload, report_budget, enforce_size=enforce_embedded_size)
+    if token_usage:
+        payload["token_usage"] = _sanitize_json_numbers(token_usage)
+        if enforce_embedded_size:
+            fit_token_usage(payload)
     return payload
 
 
@@ -1601,6 +1643,89 @@ def _enforce_report_payload_budget(
         _replace_with_minimal_payload(payload, report_budget)
 
     refresh_signal()
+
+
+# ``report_truncation.omitted`` keys that only token usage adds.
+_TOKEN_USAGE_OMISSIONS = ("token_usage", "token_usage_case_rows")
+
+
+def fit_token_usage(payload: dict[str, Any]) -> None:
+    """Keep measured token usage from costing a bounded payload its report limits.
+
+    Token usage is unscored, so it may never push a payload past the embedded
+    size budget or make it fail the report serialization limits (nodes, depth
+    and text) that every reporter checks. It joins the payload last, after the
+    size budget, so it gives way first: its per-case rows, then its sums, each
+    drop recorded in ``report_truncation``. If not even that record fits, the
+    token usage and its records go, which leaves the payload as it is without
+    token usage. Code that adds fields to a built payload, such as case findings
+    or ``validate``'s applicability keys, calls this again.
+    """
+    omitted = _report_omissions(payload)
+    if "token_usage" not in payload and not (omitted and any(key in omitted for key in _TOKEN_USAGE_OMISSIONS)):
+        return
+    if _token_usage_fits(payload):
+        return
+    if "token_usage" in payload:
+        from skillevaluator.tier3.token_usage import drop_token_usage_cases
+
+        dropped = drop_token_usage_cases(payload["token_usage"])
+        if (
+            dropped
+            and _record_token_usage_omission(payload, "token_usage_case_rows", dropped)
+            and _token_usage_fits(payload)
+        ):
+            return
+        del payload["token_usage"]
+        if _record_token_usage_omission(payload, "token_usage", 1) and _token_usage_fits(payload):
+            return
+    _remove_token_usage_omissions(payload)
+
+
+def _report_omissions(payload: dict[str, Any]) -> dict[str, Any] | None:
+    truncation = payload.get("report_truncation")
+    omitted = truncation.get("omitted") if isinstance(truncation, dict) else None
+    return omitted if isinstance(omitted, dict) else None
+
+
+def _token_usage_fits(payload: dict[str, Any]) -> bool:
+    from skillevaluator.reporting.base import agent_eval_report_serialization_issue
+
+    # The minimal last-resort payload carries no details.
+    if "payload_sections" in (_report_omissions(payload) or {}):
+        return False
+    try:
+        size = _serialized_payload_size(payload)
+    except (TypeError, ValueError):
+        return False
+    return size <= _MAX_EMBEDDED_REPORT_BYTES and agent_eval_report_serialization_issue(payload) is None
+
+
+def _record_token_usage_omission(payload: dict[str, Any], section: str, count: int) -> bool:
+    """Count a token usage drop in ``report_truncation``; ``False`` when its record cannot take it."""
+    if "report_truncation" not in payload:
+        payload["report_truncation"] = _ReportBudget(omitted={section: count}).signal()
+        return True
+    omitted = _report_omissions(payload)
+    if omitted is None:
+        return False
+    previous = omitted.get(section)
+    total = count + (previous if isinstance(previous, int) and not isinstance(previous, bool) else 0)
+    payload["report_truncation"]["omitted"] = dict(sorted({**omitted, section: total}.items()))
+    return True
+
+
+def _remove_token_usage_omissions(payload: dict[str, Any]) -> None:
+    """Take token usage's keys out of ``report_truncation``, and the record when only they made it."""
+    omitted = _report_omissions(payload)
+    if omitted is None or not any(key in omitted for key in _TOKEN_USAGE_OMISSIONS):
+        return
+    remaining = {key: value for key, value in omitted.items() if key not in _TOKEN_USAGE_OMISSIONS}
+    truncation = payload["report_truncation"]
+    if remaining or truncation.get("artifact_loading"):
+        truncation["omitted"] = remaining
+    else:
+        del payload["report_truncation"]
 
 
 def _serialized_payload_size(payload: dict[str, Any]) -> int:
@@ -4557,10 +4682,27 @@ def _build_baseline_only_conclusions(
     return conclusions
 
 
+def _headline_agents(
+    agents: dict[str, dict[str, Any]], *, score_field: str = "with_skill"
+) -> dict[str, dict[str, Any]]:
+    """Return the agents that set the run's best agent and verdict.
+
+    An agent kept by --tolerate-baseline-timeouts is set aside whenever an
+    agent with a complete baseline ranks, so the headline score and verdict
+    both come from complete evidence.
+    """
+    from skillevaluator.tier3.harbor.baseline_timeouts import kept_with_failed_baseline
+
+    complete = {name: agent for name, agent in agents.items() if not kept_with_failed_baseline(agent)}
+    if any(_canonical_agent_rank(agent, score_field=score_field) is not None for agent in complete.values()):
+        return complete
+    return agents
+
+
 def _pick_best_agent(agents: dict[str, dict[str, Any]], *, score_field: str = "with_skill") -> str:
     eligible = {
         name: rank
-        for name, agent in agents.items()
+        for name, agent in _headline_agents(agents, score_field=score_field).items()
         if (rank := _canonical_agent_rank(agent, score_field=score_field)) is not None
     }
     activated = {name: rank for name, rank in eligible.items() if not _never_activated(agents[name])}

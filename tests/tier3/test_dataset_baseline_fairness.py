@@ -724,6 +724,99 @@ def test_skill_md_in_the_skill_itself_still_warns(assertion):
     assert warning.startswith("assertions grades skill use")
 
 
+@pytest.mark.parametrize(
+    "assertion",
+    [
+        "The agent never edits files before reading SKILL.md",
+        "The agent does not run any command without first reading SKILL.md",
+        "The agent should not proceed until it has read SKILL.md",
+        "The agent doesn't act before it reads SKILL.md",
+        "The agent did not modify files while reading SKILL.md",
+        "The agent did not touch the output while it read SKILL.md",
+        "The agent did not change files yet read SKILL.md",
+        "The agent did not modify files after reading SKILL.md",
+        "The agent used the skill",
+        "The agent followed the skill's instructions",
+        "The agent read the contents of SKILL.md",
+        "The agent ran cat SKILL.md",
+        "The agent ran python3 -I review.py",
+        "The agent read SKILL\u200b.md",
+        "The agent read \uff33\uff2b\uff29\uff2c\uff2c.md",
+        "The agent read **SKILL.md**",
+        "The agent read [SKILL.md](SKILL.md)",
+    ],
+)
+def test_reviewed_skill_use_requirements_warn(assertion):
+    warnings = _baseline_fairness_warnings(_entry(expected_behavior=[assertion]), skill_scripts=["review.py"])
+    assert len(warnings) == 1
+    assert "grades skill use" in warnings[0]
+
+
+@pytest.mark.parametrize("negation", ["not", "never", "not actually", "without first", "doesn't"])
+def test_directly_negated_reads_remain_fair(negation):
+    assert _baseline_fairness_warnings(_entry(expected_behavior=[f"The agent {negation} read SKILL.md"])) == []
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"expected_behavior": [{"text": "The agent read SKILL.md"}]},
+        {"expected_behavior": [["The agent read SKILL.md"]]},
+        {"expected_behavior": "The agent read SKILL.md"},
+        {"ground_truth": ["The agent read SKILL.md"]},
+        {"ground_truth": {"result": "The agent read SKILL.md"}},
+        {"ground_truth": {"The agent read SKILL.md": True}},
+    ],
+)
+def test_nested_graded_text_warns(fields):
+    warnings = _baseline_fairness_warnings(_entry(**fields))
+    assert len(warnings) == 1
+    assert "grades skill use" in warnings[0]
+
+
+@pytest.mark.parametrize("expected_skill", [None, "rr", "", "<omitted>"])
+@pytest.mark.parametrize("field", ["prompt", "assertions"])
+@pytest.mark.parametrize("own_name", ["release-review", "release-audit"])
+def test_validation_checks_directory_and_frontmatter_names(tmp_path, expected_skill, field, own_name):
+    skill = _write_release_review_skill(tmp_path, [])
+    (skill / "SKILL.md").write_text("---\nname: release-audit\ndescription: Review releases\n---\n")
+    dataset = skill / "evals" / "evals.json"
+    payload = json.loads(dataset.read_text())
+    case = payload["evals"][0]
+    case["expected_skill"] = expected_skill
+    if expected_skill == "<omitted>":
+        del case["expected_skill"]
+    case[field] = f"Use the skill at skills/{own_name}" if field == "prompt" else [f"The agent used {own_name}"]
+    dataset.write_text(json.dumps(payload))
+    warnings = [r for r in validate_skillevaluators(skill) if "skill_execution" in r.message]
+    assert len(warnings) == 1
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        _entry(question="read" + " " * 200_000 + "SKILL.md"),
+        _entry(expected_behavior=["read" + " " * 200_000 + "SKILL.md"]),
+    ],
+)
+def test_fairness_warning_excerpts_are_bounded(entry):
+    (warning,) = _baseline_fairness_warnings(entry)
+    assert len(warning) < 600
+
+
+@pytest.mark.parametrize("prompt", ["Run ./scripts/review.py on manifest.yaml", "Use the release-review skill"])
+def test_prompt_requiring_skill_scripts_or_explicit_skill_warns(prompt):
+    warnings = _baseline_fairness_warnings(_entry(question=prompt), skill_scripts=["review.py"])
+    assert len(warnings) == 1
+    assert "points at the skill's files" in warnings[0]
+
+
+def test_template_prompt_does_not_require_a_skill_script():
+    skill = _skill(description="Runs ./scripts/review.py against a manifest", scripts=["review.py"])
+    for case in generate_dataset._generate_full(skill):
+        assert "review.py" not in case["question"]
+
+
 def test_warnings_name_the_fields_the_dataset_uses(tmp_path: Path):
     # evals.jsonl is always read as legacy, but its lines may use agentskills.io names.
     skill = tmp_path / "release-review"
@@ -1293,6 +1386,33 @@ def test_huge_alias_with_many_unmatched_leaves_finishes_with_a_generous_resource
         "assert len(warnings) == 1 and 'not fully checked' in warnings[0]"
     )
     subprocess.run([sys.executable, "-c", code], check=True, timeout=30)
+
+
+@pytest.mark.parametrize(
+    ("text", "scripts"),
+    [
+        ("The agent used the installed skill", []),
+        ("The agent used installed skill", []),
+        ("The agent ran python3 -I -B -q -u -O review.py", ["review.py"]),
+        ("The agent ran python3 review.py", ["\uff52\uff45\uff56\uff49\uff45\uff57.py"]),
+        ("The agent ran python3 review.py", ["revie\u200bw.py"]),
+        ("The agent used **release-review**.", []),
+        ("The agent used [release-review](reference.md).", []),
+        ("The agent ran **review.py**", ["review.py"]),
+    ],
+)
+def test_incoming_wording_and_normalized_script_references_warn(text, scripts):
+    assert _baseline_fairness_warnings(_case(prompt="Check manifest.yaml", assertions=[text]), skill_scripts=scripts)
+
+
+@pytest.mark.parametrize("adverb", ["ever", "even", "once", "also", "really"])
+def test_single_adverb_does_not_turn_a_negated_read_into_a_requirement(adverb):
+    assert (
+        _baseline_fairness_warnings(
+            _case(prompt="Check manifest.yaml", assertions=[f"The agent did not {adverb} read SKILL.md"])
+        )
+        == []
+    )
 
 
 # --- Negation that covers something else, odd shapes, names and bounds --------

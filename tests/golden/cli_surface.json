@@ -1143,6 +1143,18 @@
           "type": "boolean"
         },
         {
+          "is_flag": true,
+          "name": "tolerate_baseline_timeouts",
+          "opts": [
+            "--tolerate-baseline-timeouts"
+          ],
+          "param_type": "option",
+          "secondary_opts": [
+            "--no-tolerate-baseline-timeouts"
+          ],
+          "type": "boolean"
+        },
+        {
           "name": "timeout_multiplier",
           "opts": [
             "--timeout-multiplier"
@@ -3345,6 +3357,18 @@
               "type": "boolean"
             },
             {
+              "is_flag": true,
+              "name": "tolerate_baseline_timeouts",
+              "opts": [
+                "--tolerate-baseline-timeouts"
+              ],
+              "param_type": "option",
+              "secondary_opts": [
+                "--no-tolerate-baseline-timeouts"
+              ],
+              "type": "boolean"
+            },
+            {
               "name": "timeout_multiplier",
               "opts": [
                 "--timeout-multiplier"
@@ -4296,6 +4320,18 @@
             "type": "boolean"
           },
           {
+            "is_flag": true,
+            "name": "tolerate_baseline_timeouts",
+            "opts": [
+              "--tolerate-baseline-timeouts"
+            ],
+            "param_type": "option",
+            "secondary_opts": [
+              "--no-tolerate-baseline-timeouts"
+            ],
+            "type": "boolean"
+          },
+          {
             "name": "timeout_multiplier",
             "opts": [
               "--timeout-multiplier"
@@ -4578,6 +4614,14 @@
           ],
           "param_type": "option",
           "type": "integer range"
+        },
+        {
+          "name": "catalog_root",
+          "opts": [
+            "--catalog-root"
+          ],
+          "param_type": "option",
+          "type": "directory"
         },
         {
           "default": "True",
@@ -4885,6 +4929,18 @@
           "param_type": "option",
           "secondary_opts": [
             "--no-agent-runtime-preflight"
+          ],
+          "type": "boolean"
+        },
+        {
+          "is_flag": true,
+          "name": "tolerate_baseline_timeouts",
+          "opts": [
+            "--tolerate-baseline-timeouts"
+          ],
+          "param_type": "option",
+          "secondary_opts": [
+            "--no-tolerate-baseline-timeouts"
           ],
           "type": "boolean"
         },

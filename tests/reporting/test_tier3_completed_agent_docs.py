@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from html import unescape
@@ -15,6 +16,7 @@ from tests.reporting.test_tier3_scoped_reports import result_with_completed_peer
 from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
 from skillevaluator.models import ValidationResult
 from skillevaluator.reporting import BenchmarkReporter, HTMLReporter
+from skillevaluator.reporting.html import VERDICT_WORDS
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 
 REPO = Path(__file__).resolve().parents[2]
@@ -42,6 +44,16 @@ def _run_details(raw_html: str) -> str:
     """Return the text of the collapsed Run details & provenance panel."""
     start = raw_html.index('<details class="run-metadata"')
     return _plain(raw_html[start : raw_html.index("</details>", start)])
+
+
+def _embedded_tier3(raw_html: str) -> dict:
+    """Return the full Tier 3 payload the HTML report embeds for download."""
+    match = re.search(
+        r'<script type="application/json" id="tier3-full"( data-encoding="base64")?>(.*?)</script>', raw_html, re.DOTALL
+    )
+    assert match is not None
+    body = match.group(2)
+    return json.loads(base64.b64decode(body).decode("utf-8") if match.group(1) else body)
 
 
 def _hero_command_status(raw_html: str) -> str:
@@ -154,6 +166,12 @@ def test_documented_labels_match_a_run_with_a_failed_peer() -> None:
         assert label in html
     # The standalone quality labels follow the run; completed-agent details keep its score.
     assert "card follow the run's verdict" in section
+    # The payload keeps neutral, but the HTML report, also its embedded payload, shows fail.
+    assert "The payload keeps `neutral` for a failed run" in section
+    assert f"shows a failed run's verdict as `fail`, labelled {VERDICT_WORDS['fail']}" in section
+    assert "the full Tier 3 payload embedded in the HTML report records `fail` too" in section
+    assert _embedded_tier3(raw)["verdict"] == "fail"
+    assert 'data-verdict="fail"' in raw
     assert "Tier 3 quality: Changes required" in html
     assert "Changes required" in section
     assert _hero_command_status(raw) == "Changes required"
@@ -167,6 +185,25 @@ def test_documented_labels_match_a_run_with_a_failed_peer() -> None:
     assert NEEDS_ATTENTION in card
     assert "Recovered timeout attempts: 1" in card
     assert "Overall verdict: FAIL" in card
+
+
+def test_documented_label_matches_a_successful_neutral_run() -> None:
+    # Dimensions at 0.45 over a 0.40 baseline: the run succeeded with a neutral verdict.
+    payload = build_agent_eval_payload(
+        "demo",
+        {"opencode": _agent(0.45)},
+        dataset=[{"id": "case-a"}],
+        attempt_policy={"max_attempts": 1, "stop_on_pass": False, "pass_threshold": 0.5},
+        use_llm_judge=False,
+    )
+    assert (payload["execution_status"], payload["verdict"]) == ("succeeded", "neutral")
+    result = ValidationResult(validator_name="AGENT_EVAL")
+    result.metadata["agent_eval"] = payload
+    raw = HTMLReporter(report_scope="tier3").render(result)
+
+    assert f"A `neutral` verdict of a successful run reads {VERDICT_WORDS['neutral']}." in _section()
+    assert f"Tier 3 quality: {VERDICT_WORDS['neutral']}" in _plain(raw)
+    assert _embedded_tier3(raw)["verdict"] == "neutral"
 
 
 def test_recovered_count_is_the_shown_agents_own() -> None:

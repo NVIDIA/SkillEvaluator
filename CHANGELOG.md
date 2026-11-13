@@ -40,7 +40,21 @@ All notable changes to SkillEvaluator are documented in this file.
   beside it and the failure is reported. After a timeout, the failed run still keeps
   the scores of the arms that finished.
 
+### Changed
+
+- Install Bandit with the base package, so `pip install skillevaluator` or
+  `uv tool install skillevaluator` runs every default Tier 1 check without an
+  extra. pip-audit, used only by the opt-in dependency audit
+  (`--check dependency`), stays in the `security` extra. The Bandit install hint
+  now says to reinstall SkillEvaluator.
+
 ### Documentation
+
+- The README opens with a three-column **Get started** section: run the CLI
+  directly (`pip install skillevaluator`, then
+  `skillevaluator validate ./my-skill --tiers 1`), add checks to your repository
+  with `skillevaluator ci init` or a CI template, or install the agent skill with
+  `npx skills add NVIDIA/SkillEvaluator`.
 
 - A new Metrics Reference page defines every number the CLI, HTML report, JSON
   report and `BENCHMARK.md` show: the six Tier 3 evaluator signals, the five
@@ -92,6 +106,25 @@ All notable changes to SkillEvaluator are documented in this file.
   `/bin/bash -lc 'cat skills/x/SKILL.md'`, which some agent harnesses record
   instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL
   config.json'`) are still not counted.
+- A Tier 1 security scan keeps a SkillSpector `partial` report `INCOMPLETE` when
+  its only ledger row is a referenced image but its `references` list records a
+  `missing` reference on a line without a ledger row, an `ambiguous` reference,
+  or a list flagged as truncated with a key that ends in `_truncated`, such as
+  `ledger_exceptions_truncated`. Such a report no longer passes with the image
+  warning alone, because nothing reads the line of that reference for a file
+  left out of the scanned copy.
+
+- `validate` Tier 1 output: when only the `--llm` / `--llm-verify` stage
+  can't run, `what to fix` gives the exact `export` lines for the missing
+  provider or key instead of a scanner install or `--skip security`, and the
+  scanners row keeps the scanner version (`SkillSpector 2.12.0, LLM didn't
+  run`). A missing SkillSpector or a rejected baseline under `--llm` still
+  gets the scanner fix, and a `SKILLSPECTOR_PROVIDER` adapter set directly
+  gets advice for its own key instead of the public provider's. The summary
+  row now also gives the sub-check count (`9/10 checks passed (22
+  sub-checks)`). It counts validators, as the `Tier 1: 9 of 10 checks passed`
+  verdict line under it does, so the two agree, including with `--skip` and
+  `--fail-fast`.
 
 ## 0.9.0 - 2026-11-13
 

@@ -11,8 +11,10 @@ from click.testing import CliRunner
 from skillevaluator.cli import cli
 from skillevaluator.harness import HARNESS_STATUSES, evaluate_harnesses, load_profiles, skill_facts
 from skillevaluator.harness.overlay import PROFILES_DIR
+from skillevaluator.harness.report import harness_block, harness_note, harness_panel
 from skillevaluator.models.result import Severity
-from skillevaluator.tier1.commands import DEFAULT_CHECKS
+from skillevaluator.reporting.console_ui import final_check_ticker_row, summarize_tier1
+from skillevaluator.tier1.commands import DEFAULT_CHECKS, run_validation
 from skillevaluator.validators.harness import HarnessValidator
 
 HARNESSES = ["claude-code", "codex", "copilot-cli", "hermes", "openclaw", "opencode"]
@@ -187,6 +189,14 @@ def test_cli_rejects_unknown_harness(tmp_path: Path):
     assert "Unknown harness: nope" in result.output
 
 
+def _render(panel) -> str:
+    from rich.console import Console
+
+    console = Console(width=120, record=True, color_system=None)
+    console.print(panel)
+    return console.export_text()
+
+
 def test_harness_check_runs_by_default_and_never_fails(tmp_path: Path):
     assert "harness" in DEFAULT_CHECKS
     result = HarnessValidator("claude-code,codex").validate(_rooted(tmp_path))
@@ -200,6 +210,70 @@ def test_harness_check_runs_by_default_and_never_fails(tmp_path: Path):
     assert {r["harness"]: r["status"] for r in rows} == {"claude-code": "not_loaded", "codex": "loads"}
 
 
+def test_harness_check_alone_marks_ticker_and_panel(tmp_path: Path):
+    results = run_validation(_rooted(tmp_path), checks="harness", harness="all")
+    block = harness_block(results)
+
+    assert [r.validator_name for r in results] == ["Harness Compatibility"]
+    assert any(text == "! harness" for text, _ in final_check_ticker_row(["harness"], results).segments)
+    assert harness_note(block) == "skill won't load in claude-code"
+    text = _render(harness_panel(block))
+    assert "Harness compatibility" in text and "advisory" not in text
+    assert "not found" in text and "[CC-ROOT]" not in text
+    assert "1 of 6 not loaded" in text and "Details and fixes: -v" in text
+    full = _render(harness_panel(block, verbose=True))
+    assert "NOT LOADED" in full and "[CC-ROOT]" in full
+
+
+def test_clean_skill_panel_is_one_line(tmp_path: Path):
+    block = harness_block(run_validation(_skill(tmp_path), checks="harness"))
+
+    assert harness_note(block) is None
+    text = _render(harness_panel(block))
+    assert "6 of 6 load" in text and "harness-check" not in text
+
+
+def test_validate_shows_panel_and_verdict_note(tmp_path: Path):
+    skill = _rooted(tmp_path)
+    result = CliRunner().invoke(
+        cli, ["validate", str(skill), "--tiers", "1", "--checks", "schema,harness", "-o", str(tmp_path / "r")]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Harness compatibility" in result.output and "· advisory" not in result.output
+    assert "! harness: skill won't load in claude-code" in result.output
+
+
+def test_harness_check_command_exits_zero_and_writes_json(tmp_path: Path):
+    skill = _rooted(tmp_path)
+    out = tmp_path / "h.json"
+    result = CliRunner().invoke(
+        cli, ["harness-check", str(skill), "--harness", "codex,claude-code", "--json", str(out)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Harness compatibility · demo-skill" in result.output
+    assert "1 of 2 not loaded" in result.output
+    rows = next(iter(json.loads(out.read_text())["harness_compatibility"].values()))
+    assert [r["status"] for r in rows] == ["loads", "not_loaded"]
+
+
+def test_harness_check_command_rejects_unknown_harness(tmp_path: Path):
+    result = CliRunner().invoke(cli, ["harness-check", str(_skill(tmp_path)), "--harness", "nope"])
+
+    assert result.exit_code == 2
+    assert "Unknown harness: nope" in result.output
+
+
+def test_tier1_summary_gives_harness_its_own_line(tmp_path: Path):
+    results = run_validation(_rooted(tmp_path), checks="schema,harness", harness="all")
+    _, rows = summarize_tier1(results)
+    labels = {row.label: "".join(text for text, _ in row.segments) for row in rows}
+
+    assert labels["harness"].startswith("1 not loaded")
+    assert "harness" not in labels.get("advisories", "")
+
+
 def test_native_root_skips_root_rules(tmp_path):
     skill = tmp_path / ".claude" / "skills" / "demo"
     skill.mkdir(parents=True)
@@ -210,3 +284,12 @@ def test_native_root_skips_root_rules(tmp_path):
 
     assert "CX-ROOT" in ids({})
     assert not {i for i in ids({"native_root": True}) if i.endswith("-ROOT")}
+
+
+def test_harness_note_names_the_skill_not_the_harness():
+    block = {
+        "a": [{"harness": "codex", "status": "not_loaded"}, {"harness": "hermes", "status": "degraded"}],
+        "b": [{"harness": "opencode", "status": "not_loaded"}, {"harness": "hermes", "status": "loads"}],
+    }
+
+    assert harness_note(block) == "2 skills won't load in codex, opencode · skill loads degraded in hermes"

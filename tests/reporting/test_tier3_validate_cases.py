@@ -24,6 +24,17 @@ class _TtyStream(io.StringIO):
         return True
 
 
+def _live_console(out, **kwargs):
+    """A Rich console the live view will draw on.
+
+    ``color_system=None`` keeps the test from caching a colour code on Rich's shared Style
+    objects, which later tests (the banner colour test) would then read instead of their own.
+    """
+    from rich.console import Console
+
+    return Console(file=out, force_terminal=True, color_system=None, **kwargs)
+
+
 def _text(rows):
     return "\n".join(f"{r.label:<12}" + "".join(chunk for chunk, _ in r.segments) for r in rows)
 
@@ -278,16 +289,12 @@ def test_llm_fix_without_a_provider_gives_every_export(monkeypatch):
 
 
 def test_live_view_prints_log_records_through_its_own_console(monkeypatch):
-    from rich.console import Console
-
     from skillevaluator.logging_config import get_logger
     from skillevaluator.reporting.console_ui import ValidateView
 
     monkeypatch.setenv("TERM", "xterm-256color")
     out = _TtyStream()
-    view = ValidateView(
-        "skill: x", [(1, "Static", "static")], console=Console(file=out, force_terminal=True, width=100)
-    )
+    view = ValidateView("skill: x", [(1, "Static", "static")], console=_live_console(out, width=100))
     view.start()
     get_logger("skillevaluator.test_live_view").warning("LLM call failed")
     view.stop()
@@ -423,13 +430,11 @@ def test_tier1_summary_counts_named_checks_and_their_sub_checks():
 def test_live_view_draws_the_header_and_finished_tiers_once(monkeypatch):
     import re
 
-    from rich.console import Console
-
     from skillevaluator.reporting.console_ui import TierRow, ValidateView, Verdict
 
     monkeypatch.setenv("TERM", "xterm-256color")
     out = _TtyStream()
-    console = Console(file=out, force_terminal=True, width=100, height=10)
+    console = _live_console(out, width=100, height=10)
     view = ValidateView("x", [(1, "Static", "static"), (2, "Dedup", "dedup")], console=console)
     view.start()
     for index in range(2):

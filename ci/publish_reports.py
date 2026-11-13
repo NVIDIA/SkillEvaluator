@@ -120,6 +120,15 @@ def _scanner_list(value):
     return isinstance(value, list) and len(value) <= MAX_FILES and all(isinstance(item, str) for item in value)
 
 
+def advisory_downgraded(summary: dict) -> bool:
+    enforcement = summary.get("enforcement")
+    return (
+        isinstance(enforcement, dict)
+        and enforcement.get("mode") == "advisory"
+        and enforcement.get("downgraded") is True
+    )
+
+
 def validate_summary(summary: dict) -> None:
     if not isinstance(summary, dict) or not isinstance(summary.get("skills"), list):
         raise PublicationError("The report summary lacks its skill list.")
@@ -219,6 +228,20 @@ def validate_summary(summary: dict) -> None:
     )
     if summary["overall_status"] != expected_status:
         raise PublicationError("The summary status contradicts its skill results.")
+    enforcement = summary.get("enforcement")
+    if enforcement is not None:
+        if (
+            not isinstance(enforcement, dict)
+            or enforcement.get("mode") not in {"strict", "advisory"}
+            or type(enforcement.get("downgraded")) is not bool
+        ):
+            raise PublicationError("The summary enforcement metadata is invalid.")
+        if enforcement["downgraded"] and not (
+            enforcement["mode"] == "advisory"
+            and summary["overall_status"] == "failed"
+            and summary["overall_passed"] is False
+        ):
+            raise PublicationError("The summary enforcement metadata contradicts its verdict.")
     for key in ("total_validators", "total_errors", "total_warnings"):
         if not _integer(summary.get(key)) or summary[key] != sum(row.get(key, 0) for row in rows):
             raise PublicationError("The summary aggregates contradict its per-skill result counts.")
@@ -951,7 +974,7 @@ def publish(
     provenance = _validate_workflow_provenance(api, repository, run)
     artifact = _select_artifact(api, repository, run)
     summary, reports = read_artifact(api.download_artifact(artifact["id"]))
-    successful = summary["overall_passed"] or summary["overall_status"] == "skipped"
+    successful = summary["overall_passed"] or summary["overall_status"] == "skipped" or advisory_downgraded(summary)
     if (run["conclusion"] == "success") != successful:
         raise PublicationError("The workflow conclusion contradicts the report artifact verdict.")
     if summary["overall_status"] == "skipped" and summary["selection"]["head"] != run["head_sha"]:

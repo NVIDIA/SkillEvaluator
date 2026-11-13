@@ -693,6 +693,16 @@ All notable changes to SkillEvaluator are documented in this file.
   the HTML and JSON reports and `BENCHMARK.md`. A failed arm still fails the
   agent and the run, and the notes say so.
 
+- Tier 3 coverage notices now name the exception type Harbor recorded under a
+  job whose statistics miss a trial. The collector reports that job failure as
+  `trial <label> recorded VerifierOutputParseError: <message>`, and the notice's
+  `failure` now reads `verifier output parse error`, live and from a saved run,
+  instead of `null` or the type of a later error. The HTML Tier 3 dimension
+  table no longer says that a Not applicable dimension keeps the verdict
+  NEUTRAL, which was wrong when another dimension is below 0.40 and the agent
+  is FAIL. The row now reads `It has no score, so the agent cannot PASS.`, and
+  its reason ends with a period.
+
 - Tier 3 standard judges under `LLM_JUDGE_RETRY_POLICY=strict` with Bedrock
   as the provider no longer label a Bedrock error that the policy treats as an
   unavailable model, such as throttling, a missing or inaccessible model, or

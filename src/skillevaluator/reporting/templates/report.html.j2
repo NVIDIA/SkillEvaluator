@@ -2844,7 +2844,8 @@
                         <td>N/A</td><td>N/A</td><td>N/A</td>
                         <td><span class="t3-pill warning">Not applicable</span></td>
                         <td></td>
-                        <td class="t3-reasoning">{{ dim.reason or "Not applicable: its signals had nothing to judge in any eval case." }} It has no score, so the agent's verdict stays NEUTRAL and cannot PASS.</td>
+                        {% set na_reason = dim.reason or "Not applicable: its signals had nothing to judge in any eval case" %}
+                        <td class="t3-reasoning">{{ na_reason }}{{ "" if na_reason.endswith(".") else "." }} It has no score, so the agent cannot PASS.</td>
                     </tr>
                     {% endfor %}
                     </tbody>

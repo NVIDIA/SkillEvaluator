@@ -4,14 +4,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
-### Changed
-
-- Tier 1 now labels the `SKILL.md` token count as an estimate (characters / 4)
-  in the Large skill finding, HTML report and docs, and adds
-  `metrics.estimated_tokens` and `metrics.token_estimate_method` to the quality
-  JSON. `metrics.total_tokens` is unchanged. The estimate and scoring are
-  unchanged.
-
 ### Added
 
 - Capability-gated CI onboarding for protected Tier 1 `--llm`/SkillSpector
@@ -214,6 +206,11 @@ All notable changes to SkillEvaluator are documented in this file.
   counted RAGAS call, as before.
 
 ### Changed
+
+- Tier 1 labels the `SKILL.md` token count as an estimate (characters / 4) in
+  the Large skill finding, the HTML report and the docs, and adds
+  `metrics.estimated_tokens` and `metrics.estimate_method` to the quality JSON.
+  `metrics.total_tokens` keeps the same value and scoring is unchanged.
 
 - Name Skill Lift as the headline comparison and label pass@k differences as
   supporting reliability across reports and terminal output.

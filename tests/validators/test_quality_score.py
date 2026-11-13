@@ -1509,7 +1509,7 @@ def test_instruction_token_estimate_uses_frontmatter_boundary(tmp_path, newline,
     assert metrics["frontmatter_tokens"] == len(frontmatter.rstrip("\n")) // 4
     assert metrics["total_tokens"] == len(content) // 4
     assert metrics["estimated_tokens"] == metrics["total_tokens"]
-    assert metrics["token_estimate_method"] == "characters/4"
+    assert metrics["estimate_method"] == "characters/4"
 
 
 @pytest.mark.parametrize(
@@ -1534,3 +1534,34 @@ def test_instruction_tokens_do_not_infer_frontmatter_from_body_separators(tmp_pa
     assert metrics["has_frontmatter"] is False
     assert metrics["frontmatter_tokens"] == 0
     assert metrics["instructions_tokens"] == 0
+
+
+def _estimate_skill(tmp_path):
+    skill = tmp_path / "estimate-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: estimate-skill\ndescription: Summarizes files. Use when the user asks for a summary.\n---\n\n"
+        "# Estimate skill\n\n## Instructions\n\n1. Read the file.\n2. Summarize it.\n"
+    )
+    return skill
+
+
+def test_token_estimate_labels_survive_redaction(tmp_path):
+    """No quality metric, including the estimate labels, is rewritten as a secret."""
+    from skillevaluator.utils.redaction import redact_sensitive_data
+
+    result = QualityScoreValidator().validate(_estimate_skill(tmp_path))
+    metrics = result.metadata["quality_scores"]["metrics"]
+
+    assert redact_sensitive_data(metrics) == metrics
+    assert metrics["estimate_method"] == "characters/4"
+    assert metrics["estimated_tokens"] == metrics["total_tokens"]
+
+
+def test_html_report_labels_the_token_count_as_an_estimate(tmp_path):
+    from skillevaluator.reporting import HTMLReporter
+
+    result = QualityScoreValidator().validate(_estimate_skill(tmp_path))
+    html = HTMLReporter(include_timestamp=False, explicit_skill_name="estimate-skill").render(result)
+
+    assert "Est. tokens (characters/4):" in html

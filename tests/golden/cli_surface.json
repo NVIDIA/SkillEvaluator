@@ -592,11 +592,12 @@
         },
         {
           "choices": [
+            "auto",
             "skill",
             "intent",
             "trace"
           ],
-          "default": "skill",
+          "default": "auto",
           "name": "grounding",
           "opts": [
             "--grounding"
@@ -2971,11 +2972,12 @@
             },
             {
               "choices": [
+                "auto",
                 "skill",
                 "intent",
                 "trace"
               ],
-              "default": "skill",
+              "default": "auto",
               "name": "grounding",
               "opts": [
                 "--grounding"

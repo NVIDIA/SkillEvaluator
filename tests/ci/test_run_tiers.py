@@ -150,6 +150,7 @@ def test_native_tier3_engine_failure_still_emits_incomplete_evidence(consumer, t
         == 0
     )
     report = json.loads((tmp_path / "skillevaluator-tier3.json").read_text())
+    assert [entry["name"] for entry in report["skills"]] == ["alpha"]
     assert report["results"][0]["status"] == "incomplete"
     assert report["gating"]["tiers"]["3"]["blocking"] is False
     assert report["results"][0]["gating"] == {"tier": 3, "blocking": False}

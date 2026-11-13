@@ -3708,9 +3708,26 @@ def evaluate(
 @click.option("--no-llm", is_flag=True, help="Use local templates only.")
 @click.option("--dry-run", is_flag=True, help="Preview without writing.")
 @click.option("--force", is_flag=True, help="Overwrite existing evals/evals.json.")
-@click.option("--prompt", type=click.Path(exists=True, path_type=Path), default=None)
-@click.option("--grounding", type=click.Choice(["skill", "intent", "trace"]), default="skill")
-@click.option("--refine", is_flag=True, help="Refine cases using existing or collected trajectories.")
+@click.option(
+    "--prompt",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Author guidance with content beyond headings (default: evals/EVAL.md).",
+)
+@click.option(
+    "--grounding",
+    type=click.Choice(["auto", "skill", "intent", "trace"]),
+    default="auto",
+    show_default=True,
+    help="Auto requires substantive author guidance or usable matching retained traces; "
+    "existing datasets need --force or --refine. Explicit trace opts into refinement; "
+    "use skill for skill-only starters.",
+)
+@click.option(
+    "--refine",
+    is_flag=True,
+    help="Opt into refinement using retained or collected trajectories after grounding selection.",
+)
 @click.option("--from-results", type=click.Path(exists=True, path_type=Path), default=None)
 @click.option("--results-dir", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=None)
 def create_dataset(
@@ -3725,7 +3742,7 @@ def create_dataset(
     from_results: Path | None,
     results_dir: Path | None,
 ) -> None:
-    """Create synthetic eval datasets for agent skill evaluation."""
+    """Create eval datasets from author guidance, retained traces, or explicit skill grounding."""
     from skillevaluator.evaluation import DatasetGenerationError, DatasetOptions, EvaluationService
 
     try:

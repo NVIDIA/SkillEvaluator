@@ -33,6 +33,36 @@ All notable changes to SkillEvaluator are documented in this file.
   beside it and the failure is reported. After a timeout, the failed run still keeps
   the scores of the arms that finished.
 
+### Fixed
+
+- A failed Tier 3 execution (for example a backend launch failure) now marks the
+  report payload, its summary and the affected agents as failed with their
+  errors, instead of only the top-level `result.json`. A report re-rendered by
+  `tier3 view` reads the status from the run's `result.json`. Scores from the
+  completed trials are kept.
+- Skill activation now credits a SKILL.md read wrapped in a shell, such as
+  `/bin/bash -lc 'cat skills/x/SKILL.md'`, which some agent harnesses record
+  instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL
+  config.json'`) are still not counted.
+
+## 0.9.0 - 2026-11-13
+
+### Fixed
+
+- Tier 3 dataset fairness validation checks the skill's own identities and
+  nested judge expectations, recognizes required reads after negated actions,
+  and bounds diagnostics and repeated-negation work. Template prompts avoid
+  requiring bundled scripts; upgrade guidance explains strict CI preflight
+  failures for older datasets that grade skill use.
+
+### Added
+
+- Dataset fairness validation checks the evaluated skill's own names and nested
+  graded text, distinguishes negated reads from required reads, and bounds
+  warning excerpts and repeated-match scanning. Common Unicode, Markdown and
+  script references are checked too; generated prompts avoid skill scripts.
+  Older datasets may need outcome-only wording to pass strict CI preflight.
+
 - Classify explicit `SKILL.md` ownership contacts (`metadata.pic` and
   `metadata.email`) as `PII.ownership_emails`, still HIGH by default. Add
   `--policy` to `tier1` and `tier1 validate` so operators can permit reviewed
@@ -135,6 +165,9 @@ All notable changes to SkillEvaluator are documented in this file.
   `gating.tiers` entry adds `validator_policies`, which says for each check
   whether it gates the exit code; the tier's `blocking` is `true` when any one
   of them does. The keys are additive, and existing keys keep their shape.
+  Local skill aliases such as `.` retain the folder name in `skills`, and
+  native Tier 3 CI reports retain their single skill identity. Published CI
+  JSON omits absolute host `target_path` values.
 
 - Import production trace exports into redacted review candidates with
   `tier3 import-traces`, then promote only explicitly human-reviewed expectations
@@ -445,9 +478,55 @@ All notable changes to SkillEvaluator are documented in this file.
   none can make Tier 3 block CI. Standalone validation and benchmark
   publication policies are unchanged.
 
+- Standalone `create-eval-dataset` and `DatasetOptions` now default to `auto`
+  grounding: substantive author guidance beyond headings first, then usable
+  matching retained trajectories from completed skill-scoped runs. Missing input
+  fails before provider access, collection, or writes; existing skill-only scripts must pass
+  `--grounding skill`, even with `--no-llm`. Auto trace selection preserves
+  authored cases and flags unmatched coverage and observed answers for review;
+  retained identity and trace files are checked before reading, and legacy
+  `cases` wrappers retain root metadata when converted to `evals`.
+  Provenance records the effective grounding and retained source hashes; auto
+  trace refinement records template fallback and a safe reason when its LLM
+  operation is unavailable or fails, preserving authored expectations and review
+  state.
+  Auto leaves existing datasets unchanged without `--force` or `--refine`,
+  including when matching traces exist; explicit trace grounding still opts into
+  in-place refinement. When auto selects traces, answer proposals that describe
+  skill use leave the inferred expected outcome empty for independent authoring
+  and review;
+  existing authored expectations are retained. Recovery guidance and examples name
+  usable author inputs, retained-results refinement, and explicit skill-only opt-in. Explicit grounding
+  modes remain available. Unattended autopilot keeps its skill-grounded one-case
+  starter behavior.
+
 - Give staged Tier 3 main images a fixed liveness healthcheck so Docker Compose
   2 can wait for readiness while authored image healthchecks remain suppressed.
   Keep custom service healthchecks and their readiness dependencies intact.
+
+- Generated eval datasets no longer grade skill use. Template cases from
+  `create-eval-dataset`, and the one starter case that `validate`, `tier3` and
+  `tier3 evaluate --autopilot` write when no dataset exists, asserted that the
+  agent read `SKILL.md`, ran the skill's script, or used or identified the
+  skill. The no-skill baseline is graded on the same expected output and
+  assertions and could not meet them, so its `behavior_check`, `accuracy` and
+  `goal_accuracy` scores dropped and lift was inflated. Template cases now
+  describe only the task outcome, and do not quote a skill description that
+  names the skill or its script; a template prompt calls a `SKILL.md` named in
+  the description `my SKILL.md`. The LLM generation and `--refine` prompts ask
+  for outcome checks, and template `--refine` no longer turns reads or runs of
+  `SKILL.md`, the skill directory or the skill's scripts into behaviors. The
+  autopilot starter case leaves out LLM or `EVAL.md` text that grades skill
+  use, and `create-eval-dataset` prints a warning for each generated case that
+  still grades it. The starter case from `init-custom-grader` and `init-harbor-task`
+  asserts the task outcome instead of "using the relevant skill workflow". The
+  negative template case is unchanged. `tier3 validate` now warns when a
+  prompt points at the skill's files or an expected output or assertion grades
+  skill use, including runs of the skill's own scripts. The warning fails
+  `--strict` and the strict dataset check that all-tier CI runs before its
+  advisory Tier 3 step; it never blocks a local run or autopilot. On newly
+  generated datasets, baseline scores rise and lift falls; existing datasets
+  are not rewritten.
 
 - Tier 3 tool efficiency counts writing, editing and patching files, scoped
   native searches and listings (`Grep`, `Glob`, `LS`, OpenCode `list`, Codex
@@ -512,19 +591,20 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- A failed Tier 3 execution (for example a backend launch failure) now marks the
-  report payload, its summary and the affected agents as failed with their
-  errors, instead of only the top-level `result.json`. A report re-rendered by
-  `tier3 view` reads the status from the run's `result.json`. Scores from the
-  completed trials are kept.
-- Skill activation now credits a SKILL.md read wrapped in a shell, such as
-  `/bin/bash -lc 'cat skills/x/SKILL.md'`, which some agent harnesses record
-  instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL
-  config.json'`) are still not counted.
+- Harbor local mode keeps exclusion and filtered download archives inside the
+  allowed run directory, so pinned Harbor 0.25 transfers copy selected file
+  contents without granting host `/tmp` access. Filters retain exact protected
+  paths, and failed scans or unsafe destinations leave outputs untouched.
+
 - Configure CLI stdout to replace characters that its encoding cannot
   represent, so reports and root help complete on legacy Windows code pages.
   JSON dataset previews and validation output preserve Unicode values, using
   readable characters when the output encoding supports them and escapes otherwise.
+
+- Required Tier 3 judges recheck their wall-time deadline before accepting a
+  result, including when a dependency or logging handler swallowed the timeout
+  exception. Expired calls remain scoreless errors and restore their caller's
+  deadline context.
 
 - `skillevaluator view` no longer asks the LLM again when it regenerates a
   missing `report.html` for a Tier 3 run that saved its report feedback in

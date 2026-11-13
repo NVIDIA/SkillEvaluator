@@ -107,7 +107,9 @@ def _starter_evals_entry(skill_path: Path, case_id: str) -> dict[str, Any]:
         "expected_output": "Replace this with the expected outcome.",
         "expected_skill": skill_path.name,
         "assertions": [
-            "The agent addresses the task using the relevant skill workflow.",
+            # The no-skill baseline is graded on the same assertions, so grade the
+            # outcome, not skill use (skill_execution scores that).
+            "The agent's final response completes the task in the prompt.",
         ],
     }
 
@@ -432,7 +434,7 @@ def create_dataset(
     dry_run: bool = False,
     force: bool = False,
     prompt: Path | None = None,
-    grounding: str = "skill",
+    grounding: str = "auto",
     refine: bool = False,
     from_results: Path | None = None,
     results_dir: Path | None = None,
@@ -451,7 +453,7 @@ def create_dataset(
         argv.append("--force")
     if prompt:
         argv.extend(["--prompt", str(prompt.resolve())])
-    if grounding != "skill":
+    if grounding != "auto":
         argv.extend(["--grounding", grounding])
     if refine:
         argv.append("--refine")

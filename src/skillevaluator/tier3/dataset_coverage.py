@@ -93,6 +93,7 @@ def starter_guidance(skill_path: Path) -> str | None:
     path = shlex.quote(str(skill_path))
     return (
         result["message"] + "\n"
+        "Add author guidance in evals/EVAL.md or pass --prompt before replacing the starter.\n"
         f"Replace the starter with a full dataset using: skillevaluator create-eval-dataset {path} --full --force\n"
         "`--force` overwrites the starter and discards any edits to it.\n"
         f"Inspect coverage with: skillevaluator tier3 validate {path}"

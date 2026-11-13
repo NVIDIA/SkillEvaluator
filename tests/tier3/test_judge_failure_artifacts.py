@@ -832,7 +832,10 @@ def test_ragas_goal_judge_obeys_the_required_judge_time_budget(
     else:
         if not hasattr(signal, "setitimer") or signal.getitimer(signal.ITIMER_REAL)[0] > 0:
             pytest.skip("free POSIX interval timer required")
-        monkeypatch.setattr(verifier, "_JUDGE_WALL_TIME_BUDGET_SEC", 0.05)
+        # Give setup ample time; deliver the alarm only once scoring is active.
+        # A 50ms setup deadline could fire inside a library's logging handler.
+        monkeypatch.setattr(verifier, "_JUDGE_WALL_TIME_BUDGET_SEC", 30.0)
+        monkeypatch.setattr(verifier, "time", SimpleNamespace(monotonic=lambda: elapsed[0]))
         scorer_sleep = 30.0
         real_remaining = verifier._remaining_judge_timeout
         scorer_bounds: list[float] = []
@@ -855,6 +858,11 @@ def test_ragas_goal_judge_obeys_the_required_judge_time_budget(
         async def ascore(self, **_kwargs):
             if cutoff == "scorer_timeout":
                 elapsed[0] = 1.0
+            else:
+                # The real timer represents expiry of the virtual deadline.
+                # Fallback must see that expiry too, after scoring is cancelled.
+                elapsed[0] = 31.0
+                signal.setitimer(signal.ITIMER_REAL, 0.01)
             try:
                 await asyncio.sleep(scorer_sleep)
             except asyncio.CancelledError:
@@ -878,6 +886,65 @@ def test_ragas_goal_judge_obeys_the_required_judge_time_budget(
     # The cut-off scoring work is cancelled and the client is closed once, not left to the loop's teardown.
     assert cancelled == [True]
     assert [instance.closed for instance in client.instances] == [1]
+
+
+@pytest.mark.parametrize("elapsed", [0.5, 1.0, 1.5])
+@pytest.mark.parametrize("not_applicable", [False, True])
+def test_required_judge_rechecks_its_deadline_after_a_swallowed_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, elapsed: float, not_applicable: bool
+) -> None:
+    verifier = _load_verifier(tmp_path)
+    clock = [0.0]
+    monkeypatch.setattr(verifier, "signal", SimpleNamespace())
+    monkeypatch.setattr(verifier, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(verifier, "_JUDGE_WALL_TIME_BUDGET_SEC", 1.0)
+
+    def judge():
+        # A library or logging handler can catch the interval timer's exception.
+        try:
+            clock[0] = elapsed
+            raise TimeoutError("caught by a dependency")
+        except TimeoutError:
+            return (
+                {"score": None, "status": "not_applicable", "reason": "no reference"}
+                if not_applicable
+                else {"score": 0.75, "reason": "completed"}
+            )
+
+    result = verifier._call_required_judge("accuracy", judge, allow_not_applicable=not_applicable)
+
+    if elapsed >= 1.0:
+        assert result["status"] == "error"
+        assert result["score"] is None
+        assert "time budget exhausted" in result["reason"]
+    elif not_applicable:
+        assert result["status"] == "not_applicable"
+        assert result["score"] is None
+    else:
+        assert result["score"] == 0.75
+        assert result.get("status") != "error"
+    assert verifier._ACTIVE_JUDGE_DEADLINE.get() is None
+
+
+def test_required_judge_rechecks_the_inherited_deadline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    verifier = _load_verifier(tmp_path)
+    clock = [0.0]
+    monkeypatch.setattr(verifier, "signal", SimpleNamespace())
+    monkeypatch.setattr(verifier, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(verifier, "_JUDGE_WALL_TIME_BUDGET_SEC", 10.0)
+    token = verifier._ACTIVE_JUDGE_DEADLINE.set(0.25)
+
+    def judge():
+        clock[0] = 0.5
+        return {"score": 1.0}
+
+    try:
+        result = verifier._call_required_judge("accuracy", judge)
+        assert result["status"] == "error"
+        assert result["score"] is None
+        assert verifier._ACTIVE_JUDGE_DEADLINE.get() == 0.25
+    finally:
+        verifier._ACTIVE_JUDGE_DEADLINE.reset(token)
 
 
 def test_verifier_main_keeps_genuine_zero_judge_verdicts_scoreable(

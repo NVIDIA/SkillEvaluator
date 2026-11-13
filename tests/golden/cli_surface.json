@@ -592,11 +592,12 @@
         },
         {
           "choices": [
+            "auto",
             "skill",
             "intent",
             "trace"
           ],
-          "default": "skill",
+          "default": "auto",
           "name": "grounding",
           "opts": [
             "--grounding"
@@ -825,6 +826,18 @@
           "type": "text"
         },
         {
+          "choices": [
+            "harbor",
+            "nemo-gym"
+          ],
+          "default": "harbor",
+          "name": "backend",
+          "opts": [
+            "--backend"
+          ],
+          "param_type": "option"
+        },
+        {
           "default": "False",
           "is_flag": true,
           "name": "verify_models",
@@ -890,6 +903,18 @@
           "name": "env_mode",
           "opts": [
             "--env-mode"
+          ],
+          "param_type": "option"
+        },
+        {
+          "choices": [
+            "harbor",
+            "nemo-gym"
+          ],
+          "default": "harbor",
+          "name": "backend",
+          "opts": [
+            "--backend"
           ],
           "param_type": "option"
         },
@@ -2947,11 +2972,12 @@
             },
             {
               "choices": [
+                "auto",
                 "skill",
                 "intent",
                 "trace"
               ],
-              "default": "skill",
+              "default": "auto",
               "name": "grounding",
               "opts": [
                 "--grounding"
@@ -3054,6 +3080,18 @@
               "type": "text"
             },
             {
+              "choices": [
+                "harbor",
+                "nemo-gym"
+              ],
+              "default": "harbor",
+              "name": "backend",
+              "opts": [
+                "--backend"
+              ],
+              "param_type": "option"
+            },
+            {
               "default": "False",
               "is_flag": true,
               "name": "verify_models",
@@ -3119,6 +3157,18 @@
               "name": "env_mode",
               "opts": [
                 "--env-mode"
+              ],
+              "param_type": "option"
+            },
+            {
+              "choices": [
+                "harbor",
+                "nemo-gym"
+              ],
+              "default": "harbor",
+              "name": "backend",
+              "opts": [
+                "--backend"
               ],
               "param_type": "option"
             },
@@ -4146,6 +4196,14 @@
               ],
               "param_type": "option",
               "type": "float range"
+            },
+            {
+              "name": "qualification_policy",
+              "opts": [
+                "--qualification-policy"
+              ],
+              "param_type": "option",
+              "type": "path"
             }
           ]
         },
@@ -4226,6 +4284,18 @@
             "name": "env_mode",
             "opts": [
               "--env-mode"
+            ],
+            "param_type": "option"
+          },
+          {
+            "choices": [
+              "harbor",
+              "nemo-gym"
+            ],
+            "default": "harbor",
+            "name": "backend",
+            "opts": [
+              "--backend"
             ],
             "param_type": "option"
           },

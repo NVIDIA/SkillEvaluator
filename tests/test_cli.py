@@ -641,6 +641,7 @@ def test_doctor_without_tier_keeps_checking_only_live_evaluation(doctor_calls, c
             "verify_models": False,
             "agent_model": (),
             "environment_kwargs": {},
+            "backend": "harbor",
         }
     ]
 

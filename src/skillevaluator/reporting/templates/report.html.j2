@@ -2561,7 +2561,7 @@
                 {% endif %}
                 {% endif %}
                 {% if tolerated_baselines and not completed_agent %}
-                <span class="tolerated-baseline"><strong>Needs attention:</strong> other execution failures remain.</span>
+                <span class="tolerated-baseline"><strong>Needs attention:</strong> baseline timeouts were tolerated.</span>
                 {% endif %}
                 {% for tolerated in tolerated_baselines or [] %}
                 <span class="tolerated-baseline">Baseline incomplete for <strong>{{ tolerated.name }}</strong>{% if tolerated.scored_attempts is not none and tolerated.expected_attempts is not none %} ({{ tolerated.scored_attempts }} of {{ tolerated.expected_attempts }} attempts scored){% endif %}: kept by <code>--tolerate-baseline-timeouts</code>, so its baseline and uplift are not reported.</span>

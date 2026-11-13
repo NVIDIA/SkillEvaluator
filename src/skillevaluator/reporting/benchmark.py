@@ -283,7 +283,7 @@ class BenchmarkReporter(ReporterBase):
         elif tolerated_lines:
             # No completed-agent result (for example, a cost limit left the
             # best agent's coverage short), but the tolerated baselines remain.
-            lines.extend(["**Needs attention:** other execution failures remain.", *tolerated_lines, ""])
+            lines.extend(["**Needs attention:** baseline timeouts were tolerated.", *tolerated_lines, ""])
         self._render_metadata(
             lines,
             results,

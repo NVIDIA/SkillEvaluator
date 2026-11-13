@@ -1211,19 +1211,26 @@ def test_reports_name_tolerated_agents_without_a_completed_agent_result(tmp_path
     assert payload["best_agent"] == "codex"
     assert (completed_agent_result(payload) is None) is codex_short
     assert _tolerated_line("opencode") in benchmark
-    assert benchmark.count("**Needs attention:** other execution failures remain.") == 1
+    assert benchmark.count("**Needs attention:**") == 1
     assert "Baseline incomplete for <strong>opencode</strong> (1 of 2 attempts scored)" in html
-    attention = (
-        '<span class="tolerated-baseline"><strong>Needs attention:</strong> other execution failures remain.</span>'
+    attention = "**Needs attention:** baseline timeouts were tolerated."
+    html_attention = (
+        '<span class="tolerated-baseline"><strong>Needs attention:</strong> baseline timeouts were tolerated.</span>'
     )
     if codex_short:
+        # Nothing before the note names other failures, so it names the cause.
         assert "Completed agent: **codex**" not in benchmark
-        assert attention in html
+        assert f"{attention}\n{_tolerated_line('opencode')}" in benchmark
+        assert "other execution failures" not in benchmark.lower()
+        assert html_attention in html
+        assert "other execution failures" not in html.lower()
     else:
         # The completed-agent lead already says that other failures need attention.
         assert "Completed agent: **codex**" in benchmark
+        assert "**Needs attention:** other execution failures remain." in benchmark
         assert "Other execution failures need attention. This is not a whole-run or publication PASS." in html
-        assert attention not in html
+        assert attention not in benchmark
+        assert html_attention not in html
 
 
 # -- pure rules -----------------------------------------------------------------

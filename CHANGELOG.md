@@ -50,14 +50,15 @@ All notable changes to SkillEvaluator are documented in this file.
   reads the same agents as the run verdict, so a tolerated agent that passes
   no longer prints PASS beside a complete agent that fails or never
   activated the skill; the line now reads FAIL or INCONCLUSIVE, as the
-  reports do. `BENCHMARK.md` and `report.html` keep the "Needs attention"
-  note and the `Baseline incomplete` line for each tolerated agent also when
-  a cost limit left the best agent's attempts short, where both left them
-  out. An output-token count past the JSON-safe integer range (above
-  2^53 - 1) in a timed-out attempt is no longer progress evidence; with no
-  other in-range count for that attempt the agent is refused as
-  `no_progress_evidence`, where result collection used to stop with
-  `browser-unsafe JSON integer` and write no `result.json` or report.
+  reports do. `BENCHMARK.md` and `report.html` now keep the "Needs
+  attention" note and the `Baseline incomplete` line for each tolerated
+  agent also when a cost limit leaves the best agent's attempts short; both
+  reports used to leave them out in that case. An output-token count past
+  the JSON-safe integer range (above 2^53 - 1) in a timed-out attempt is no
+  longer progress evidence; with no other in-range count for that attempt
+  the agent is refused as `no_progress_evidence`, where result collection
+  used to stop with `browser-unsafe JSON integer` and write no
+  `result.json` or report.
 
 ## 0.9.0 - 2026-11-13
 

@@ -1314,6 +1314,11 @@ def test_reports_name_tolerated_agents_without_a_completed_agent_result(tmp_path
         assert "other execution failures" not in benchmark.lower()
         assert html_attention in html
         assert "other execution failures" not in html.lower()
+        entry = _changelog_entry("- `--tolerate-baseline-timeouts` (added in 0.9.0) now follows its own rules")
+        assert (
+            "also when a cost limit leaves the best agent's attempts short; both reports used to leave them out "
+            "in that case." in entry
+        )
     else:
         # The completed-agent lead already says that other failures need attention.
         assert "Completed agent: **codex**" in benchmark

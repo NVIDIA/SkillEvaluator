@@ -248,6 +248,11 @@ def skipped_checks(skip: str | None) -> set[str]:
     return _parse_checks(skip)
 
 
+def runs_schema_check(checks: str | None, skip: str | None) -> bool:
+    """True when a run with these ``--checks``/``--skip`` values runs the schema check."""
+    return "schema" in _enabled_checks(checks) and "schema" not in skipped_checks(skip)
+
+
 def runs_secrets_scan(checks: str | None, skip: str | None) -> bool:
     """True when a run with these ``--checks``/``--skip`` values executes the Gitleaks scan."""
     return "code-integrity" in _enabled_checks(checks) and not {"code-integrity", "secrets"} & skipped_checks(skip)

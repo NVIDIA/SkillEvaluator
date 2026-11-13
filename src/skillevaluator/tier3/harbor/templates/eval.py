@@ -753,10 +753,13 @@ _env_positive_int = _shared_atif._env_positive_int
 _behavior_final_response_limit = _shared_atif._behavior_final_response_limit
 _behavior_check_budget = _shared_atif._behavior_check_budget
 _behavior_user_request_limit = _shared_atif._behavior_user_request_limit
+_DEFAULT_BEHAVIOR_USER_REQUEST_LIMIT = _shared_atif._DEFAULT_BEHAVIOR_USER_REQUEST_LIMIT
+_env_int_or_none = _shared_atif._env_int_or_none
 _BEHAVIOR_SECTION_LABELS = _shared_atif._BEHAVIOR_SECTION_LABELS
 _BEHAVIOR_REQUIRED_EVIDENCE = _shared_atif._BEHAVIOR_REQUIRED_EVIDENCE
 _BEHAVIOR_EVIDENCE_GAP_HINT = _shared_atif._BEHAVIOR_EVIDENCE_GAP_HINT
 _behavior_evidence_completeness = _shared_atif._behavior_evidence_completeness
+_expected_behaviors_verified = _shared_atif._expected_behaviors_verified
 behavior_evidence_gap = _shared_atif.behavior_evidence_gap
 _BEHAVIOR_WRITE_TOOLS = _shared_atif._BEHAVIOR_WRITE_TOOLS
 _BEHAVIOR_EXEC_TOOLS = _shared_atif._BEHAVIOR_EXEC_TOOLS
@@ -808,6 +811,7 @@ _assemble = _shared_atif._assemble
 _BACKTICK_TOKEN_RE = _shared_atif._BACKTICK_TOKEN_RE
 _VERIFIED_FACTS_MAX = _shared_atif._VERIFIED_FACTS_MAX
 _VERIFIED_FACT_LINE_MAX = _shared_atif._VERIFIED_FACT_LINE_MAX
+_checkable_tokens = _shared_atif._checkable_tokens
 build_verified_facts = _shared_atif.build_verified_facts
 _build_verified_facts_section = _shared_atif._build_verified_facts_section
 build_metric_evidence_bundles = _shared_atif.build_metric_evidence_bundles
@@ -3124,6 +3128,19 @@ refused), every criterion is false, unless the expected answer is itself a refus
 Be lenient on wording, but strict on factual correctness and on any output format the user \
 question explicitly requires.
 
+For FORMAT_FOLLOWED, judge the entire final response literally against only the format explicitly \
+required by the USER QUESTION, independently of factual correctness.
+When a FINAL RESPONSE section is supplied, its contents are the final answer; other section \
+headings, tool results, history, and artifacts are context, not part of that answer.
+Inspect every line of the final response, including text after an initially valid answer. \
+Line breaks do not end the final response. Do not mentally remove labels or Markdown fence characters \
+when checking the stated format.
+Do not extract a compliant answer from surrounding noncompliant text or substitute a correct \
+value from tool output or the expected answer.
+If only a number is required, extra prose, a label, or a code fence violates that requirement.
+Required prefixes, units, or prose are valid when they match the stated format.
+Wording leniency does not relax explicit format constraints.
+
 Respond with ONLY one JSON object with a "criteria" object holding exactly these five keys, each \
 true or false, and a one-sentence "reason". Do not include a score: it is computed from the criteria.
 Example of the shape (the values are only an illustration):
@@ -3524,6 +3541,25 @@ CONVERSATION:
 
 EXPECTED BEHAVIORS:
 {behaviors_text}
+
+For each numbered behavior, check only what that behavior requires.
+A format-only behavior does not require the answer's value to be factually correct: a wrong value \
+can still satisfy its format. If a behavior also requires factual correctness, evaluate that requirement too.
+For a behavior about final-response format, judge the entire final response literally against only \
+the stated format requirement, independently of factual correctness.
+When a FINAL RESPONSE section is supplied, its contents are the final answer; other section \
+headings, tool results, history, and artifacts are context, not part of that answer.
+Inspect every line of the final response, including text after an initially valid answer. \
+Line breaks do not end the final response. Do not mentally remove labels or Markdown fence characters \
+when checking the stated format.
+Do not extract a compliant answer from surrounding noncompliant text or substitute a correct \
+value from tool output or the expected answer.
+If only a number is required, extra prose, a label, or a code fence violates that requirement.
+Required prefixes, units, or prose are valid when they match the stated format.
+When the complete final response establishes a format violation, mark that behavior false; \
+keep null when missing or incomplete evidence prevents checking it.
+Before returning, ensure each passed value agrees with its reason: a reason establishing a violation \
+requires false, not true; an evidence gap that prevents checking requires null.
 
 Respond with ONLY one JSON object. "results" must hold exactly {expected_count} entries, one per \
 expected behavior: "step" is the behavior's number (each number from 1 to {expected_count} exactly \

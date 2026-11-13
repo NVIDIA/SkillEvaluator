@@ -36,6 +36,7 @@ from skillevaluator.validators.security import (
     _skillspector_name_keys,
     _skillspector_reference_caveat_error,
     _skillspector_reference_caveat_notes,
+    _skillspector_reference_evidence_unmatched,
     _skillspector_reference_line_avoids,
     _skillspector_reference_row_is_advisory,
     _skillspector_report_path_is_bundled_file,
@@ -9691,6 +9692,145 @@ class TestSkillspectorMissingReferences:
         payload["analysis_completeness"]["analyzer_statuses"].remove(universal)
         assert _missing_reference_notes(payload, skill) is None
 
+    @staticmethod
+    def _install_script_case(tmp_path: Path, version: str) -> tuple[Path, dict, str]:
+        """The notes writer with a second line that runs ``versions/install.sh``, which the scanned copy leaves out.
+
+        The report is the capture for the first line only, with the line count of ``SKILL.md`` raised to match.
+        """
+        line = "Also run `versions/install.sh` and write the log to `output/log.txt`."
+        skill = _write_skill(
+            tmp_path / "notes-writer",
+            {
+                **_NOTES_WRITER_FILES,
+                "SKILL.md": f"{_NOTES_WRITER_FILES['SKILL.md']}\n{line}\n",
+                "versions/install.sh": "#!/bin/sh\necho ready\n",
+            },
+        )
+        payload = _reference_report(version)
+        next(component for component in payload["components"] if component["path"] == "SKILL.md")["lines"] += 2
+        return skill, payload, line
+
+    @staticmethod
+    def _assert_refused(result: ValidationResult, version: str) -> None:
+        row = "SKILL.md:10 [reference_resolution; reference_missing]"
+        assert result.is_incomplete
+        assert result.incomplete_scans == ["skillspector"]
+        assert result.errors == [
+            _caveat_error(row)
+            if version == "2.13.4"
+            else f"skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+            f"{row}; security scan did not complete{_REFERENCE_REJECTION_HELP}"
+        ]
+        assert not result.warnings
+        assert "skillspector_reference_caveats" not in result.metadata
+
+    @pytest.mark.parametrize("version", ["2.12.0", "2.13.3", "2.13.4"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_line_naming_a_file_left_out_of_the_scan_stays_incomplete_with_a_row(
+        self, mock_tools, tmp_path: Path, version: str
+    ) -> None:
+        """The second line of ``_install_script_case`` is refused once SkillSpector gives it a row."""
+        skill, payload, line = self._install_script_case(tmp_path, version)
+        completeness = payload["analysis_completeness"]
+        completeness["ledger_exceptions"].append(
+            {**completeness["ledger_exceptions"][0], "start_line": 12, "end_line": 12}
+        )
+        completeness["references"].append(
+            {
+                "source_path": "SKILL.md",
+                "line": 12,
+                "column": 11,
+                "evidence": line,
+                "target_path": None,
+                "status": "missing",
+                "disposition": "partial",
+                "reference_kind": "quoted_or_code",
+            }
+        )
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert mock_tools.skillspector.run.call_args.args[0][1] != str(skill.resolve())
+        assert result.incomplete_scans == ["skillspector"]
+        assert not result.warnings
+
+    @pytest.mark.parametrize("status", ["missing", "ambiguous"])
+    @pytest.mark.parametrize("version", ["2.12.0", "2.13.3", "2.13.4"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_reference_without_a_ledger_row_stays_incomplete(
+        self, mock_tools, tmp_path: Path, version: str, status: str
+    ) -> None:
+        """Nothing reads the line of a reference that has no row, so it could name a file the scan left out."""
+        skill, payload, line = self._install_script_case(tmp_path, version)
+        payload["analysis_completeness"]["references"].append(
+            {
+                "source_path": "SKILL.md",
+                "line": 12,
+                "column": 11,
+                "evidence": line,
+                "target_path": None,
+                "status": status,
+                "disposition": "partial",
+                "reference_kind": "quoted_or_code",
+            }
+        )
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        self._assert_refused(result, version)
+
+    @pytest.mark.parametrize("flag", ["ledger_exceptions_truncated", "references_truncated"])
+    @pytest.mark.parametrize("version", ["2.12.0", "2.13.3", "2.13.4"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_truncated_report_stays_incomplete(self, mock_tools, tmp_path: Path, version: str, flag: str) -> None:
+        """A list SkillSpector cut short may leave out the line that names a file the scan left out."""
+        skill, payload, _line = self._install_script_case(tmp_path, version)
+        payload["analysis_completeness"][flag] = True
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        self._assert_refused(result, version)
+
+    def test_every_missing_reference_needs_a_row_on_its_line(self, tmp_path: Path) -> None:
+        skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
+        missing = {"source_path": "SKILL.md", "line": 8, "status": "missing"}
+        evidence = "Write the summary to `output/notes.md` and keep it short."
+
+        def refused(*extra: object) -> bool:
+            payload = _reference_report("2.13.3")
+            payload["analysis_completeness"]["references"].extend(extra)
+            return _missing_reference_notes(payload, skill) is None
+
+        assert not refused()
+        # Another reference on the line of the row needs no row of its own; a resolved or rejected one never does.
+        assert not refused({**missing, "line": 10, "evidence": evidence})
+        assert not refused({**missing, "status": "resolved"}, {**missing, "line": 3, "status": "rejected"})
+        # A missing reference on another line or in another file has no row, and nothing else reads its line.
+        assert refused(missing)
+        assert refused({**missing, "source_path": "scripts/summarize.py", "line": 10})
+        assert refused({**missing, "source_path": None})
+        for line in (None, True, "10", 10.0, [10], {"line": 10}):
+            assert refused({**missing, "line": line}), line
+        assert refused({**missing, "source_path": ["SKILL.md"], "line": 10})
+        # No reference elsewhere may be ambiguous either.
+        assert refused({**missing, "status": "ambiguous"})
+        assert refused({**missing, "line": 10, "status": "ambiguous"})
+
+    def test_reference_evidence_without_a_row_is_unmatched(self) -> None:
+        resolved = {"source_path": "SKILL.md", "line": 8, "status": "resolved"}
+        missing = {"source_path": "SKILL.md", "line": 10, "status": "missing"}
+
+        assert not _skillspector_reference_evidence_unmatched({})
+        assert not _skillspector_reference_evidence_unmatched({"references": None})
+        assert not _skillspector_reference_evidence_unmatched({"references": [resolved, {"status": "rejected"}]})
+        assert _skillspector_reference_evidence_unmatched({"references": [resolved, "x"]})
+        assert not _skillspector_reference_evidence_unmatched({"references": [resolved], "references_truncated": False})
+        assert _skillspector_reference_evidence_unmatched({"references": [resolved, missing]})
+        assert _skillspector_reference_evidence_unmatched({"references": [{**missing, "status": "ambiguous"}]})
+        assert _skillspector_reference_evidence_unmatched({"references": [], "ledger_exceptions_truncated": True})
+        assert _skillspector_reference_evidence_unmatched({"ledger_exceptions_truncated": 1})
+
     def test_pre_2_12_unresolved_row_needs_a_missing_reference_on_its_line(self) -> None:
         row = _reference_report("2.11.2")["analysis_completeness"]["ledger_exceptions"][0]
         missing = {"source_path": "SKILL.md", "line": 10, "status": "missing"}
@@ -10663,7 +10803,17 @@ class TestSkillspectorMissingReferences:
         ]
 
     @pytest.mark.parametrize(
-        "case", ["both", "image-only", "not-an-image", "ambiguous-reference", "line-names-a-left-out-file"]
+        "case",
+        [
+            "both",
+            "image-only",
+            "image-only-with-an-unmatched-missing-reference",
+            "image-only-with-an-ambiguous-reference",
+            "image-only-with-a-truncated-list",
+            "not-an-image",
+            "ambiguous-reference",
+            "line-names-a-left-out-file",
+        ],
     )
     @patch("skillevaluator.validators.security.Tools")
     def test_missing_reference_with_a_referenced_image(self, mock_tools, tmp_path: Path, case: str) -> None:
@@ -10679,8 +10829,16 @@ class TestSkillspectorMissingReferences:
         (skill / "assets" / "logo.png").write_bytes(b"not an image" if case == "not-an-image" else _png_bytes())
         payload = _reference_report("2.13.3", "image-and-missing")
         completeness = payload["analysis_completeness"]
-        if case == "image-only":
+        if case.startswith("image-only"):
             completeness["ledger_exceptions"] = completeness["ledger_exceptions"][1:]
+            if case == "image-only":
+                # SkillSpector records every missing reference with a row, so no row means no such reference.
+                completeness["references"] = [r for r in completeness["references"] if r["status"] != "missing"]
+            elif case.endswith("ambiguous-reference"):
+                completeness["references"][1]["status"] = "ambiguous"
+            elif case.endswith("truncated-list"):
+                completeness["references"] = [r for r in completeness["references"] if r["status"] != "missing"]
+                completeness["ledger_exceptions_truncated"] = True
         elif case == "ambiguous-reference":
             completeness["ledger_exceptions"][0]["reason_code"] = "reference_unresolved"
 

@@ -13,7 +13,13 @@ from skillevaluator.validators.policy import ValidationPolicy, load_policy_file
 
 def test_default_policy_digest_and_summary_stay_compatible():
     policy = ValidationPolicy()
-    payload = {"profile": "default", "audience": "all", "author_email_regex": None, "severity_overrides": {}}
+    payload = {
+        "profile": "default",
+        "audience": "all",
+        "author_email_regex": None,
+        "severity_overrides": {},
+        "metadata_id_requirement": "ignore",
+    }
     expected = (
         "sha256:" + hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     )
@@ -24,6 +30,7 @@ def test_default_policy_digest_and_summary_stay_compatible():
         "digest",
         "author_email_regex",
         "severity_overrides",
+        "metadata_id_requirement",
         "source",
     }
 

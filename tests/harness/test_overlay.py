@@ -251,6 +251,18 @@ def test_single_skill_is_measured_against_its_installed_folder(tmp_path: Path):
     assert rows["claude-code"]["catalog"]["size"] == 40
 
 
+def test_listing_budget_scales_with_context_window(tmp_path: Path):
+    skill = _catalog(tmp_path, 34) / "filler-000"
+
+    def ids(tokens: int) -> set[str]:
+        rows = {r.harness: r.to_dict() for r in evaluate_harnesses(skill, config={"context_tokens": tokens})}
+        return _ids(rows, "claude-code") | _ids(rows, "codex")
+
+    assert {"CC-LIST-BUDGET", "CX-LIST-BUDGET"} <= ids(0)
+    assert not {"CC-LIST-BUDGET", "CX-LIST-BUDGET"} & ids(272000)
+    assert {"CC-LIST-BUDGET", "CX-LIST-BUDGET"} & ids(200000) == {"CC-LIST-BUDGET"}
+
+
 def test_skill_outside_a_skills_folder_has_no_catalog_rules(tmp_path: Path):
     rows = _rows(_skill(tmp_path))
 
@@ -397,10 +409,10 @@ def _sized(root: Path, fact: str, target: int) -> Path:
     ("harness", "rule", "fact", "limit"),
     [
         ("hermes", "HM-VIEW-BUDGET", "hermes_view_chars", 100_000),
-        ("openclaw", "OW-READ-BUDGET", "skill_md_bytes", 16_000),
-        ("openclaw", "OW-READ-REFUSED", "skill_md_bytes", 64_000),
+        ("openclaw", "OW-READ-BUDGET", "openclaw_read_chars", 16_000),
+        ("openclaw", "OW-READ-REFUSED", "openclaw_read_chars", 64_000),
         ("codex", "CX-SHELL-READ", "skill_md_bytes", 40_000),
-        ("opencode", "OC-BODY-CUT", "skill_md_bytes", 51_200),
+        ("opencode", "OC-BODY-CUT", "opencode_body_output_bytes", 51_200),
     ],
 )
 def test_body_limits_fire_just_over_the_limit(tmp_path: Path, harness: str, rule: str, fact: str, limit: int):
@@ -512,13 +524,70 @@ def test_harness_check_accepts_model_config(tmp_path: Path):
     assert "OW-READ-BUDGET" not in out.read_text()
 
 
-def test_openclaw_read_budget_counts_utf8_bytes(tmp_path: Path):
-    skill = _skill(tmp_path, body="\u65c5" * 8_000)
+def test_openclaw_read_budget_weights_cjk_not_utf8_bytes(tmp_path: Path):
+    kana = _skill(tmp_path / "kana", body="\u3042" * 8_000)
+    cyrillic = _skill(tmp_path / "cyr", body="\u0430" * 20_000)
 
-    assert "OW-READ-BUDGET" in _rule_ids(skill, "openclaw", {"context_tokens": 64_000})
+    assert skill_facts(kana)["skill_md_bytes"] < 32_000 < skill_facts(cyrillic)["skill_md_bytes"]
+    assert "OW-READ-BUDGET" in _rule_ids(kana, "openclaw", {"custom_provider": True})
+    assert "OW-READ-BUDGET" not in _rule_ids(cyrillic, "openclaw", {"custom_provider": True})
+
+
+def test_openclaw_read_chars_counts_code_units(tmp_path: Path):
+    flat = skill_facts(_skill(tmp_path / "flat", body="a" * 1_000))["openclaw_read_chars"]
+    lines = skill_facts(_skill(tmp_path / "lines", body="a\n" * 500))["openclaw_read_chars"]
+    emoji = skill_facts(_skill(tmp_path / "emoji", body="\U0001f600" * 500))["openclaw_read_chars"]
+
+    assert lines == flat == emoji
 
 
 def test_hermes_view_budget_counts_code_points(tmp_path: Path):
     skill = _skill(tmp_path, body="\u65c5" * 60_000)
 
     assert "HM-VIEW-BUDGET" not in _rule_ids(skill, "hermes")
+
+
+def test_claude_allowed_tools_blocks_headless_load(tmp_path: Path):
+    skill = _skill(tmp_path, extra="allowed-tools: Read\n")
+
+    assert "CC-ALLOWED-TOOLS-HEADLESS" not in _rule_ids(skill, "claude-code")
+    assert "CC-ALLOWED-TOOLS-HEADLESS" in _rule_ids(skill, "claude-code", {"headless": True})
+
+
+def test_native_root_skips_root_rules(tmp_path):
+    skill = tmp_path / ".claude" / "skills" / "demo"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: demo\ndescription: Demo skill for root checks.\n---\nBody.\n")
+
+    def ids(cfg):
+        return {f["id"] for r in evaluate_harnesses(skill, "all", config=cfg) for f in r.findings}
+
+    assert "CX-ROOT" in ids({})
+    assert not {i for i in ids({"native_root": True}) if i.endswith("-ROOT")}
+
+
+def test_copilot_drops_skill_without_front_matter(tmp_path: Path):
+    skill = tmp_path / ".github" / "skills" / "bare"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("# Bare\n\nNo front matter here.\n")
+
+    assert "CP-NO-FRONTMATTER" in _rule_ids(skill, "copilot-cli")
+    assert "CP-NO-FRONTMATTER" not in _rule_ids(_skill(tmp_path), "copilot-cli")
+
+
+def test_version_outside_profile_adds_advisory(tmp_path: Path):
+    skill = _skill(tmp_path)
+
+    assert "VERSION-UNVERIFIED" not in _rule_ids(skill, "codex", {"harness_versions": {"codex": "0.166.0"}})
+    assert "VERSION-UNVERIFIED" in _rule_ids(skill, "codex", {"harness_versions": {"codex": "0.170.0"}})
+    assert "VERSION-UNVERIFIED" not in _rule_ids(skill, "codex", {"harness_versions": {"claude-code": "9.9.9"}})
+
+
+def test_cli_harness_version_flag(tmp_path: Path):
+    skill = _skill(tmp_path)
+    result = CliRunner().invoke(
+        cli, ["harness-check", str(skill), "--harness", "codex", "--harness-version", "codex=0.170.0", "-v"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "0.170.0" in result.output

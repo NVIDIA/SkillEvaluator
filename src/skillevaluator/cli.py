@@ -2472,6 +2472,18 @@ validate.help_group_descriptions = {
     is_flag=True,
     help="Skills are activated by an explicit mention (e.g. Codex $skill), not opened by the model.",
 )
+@click.option(
+    "--headless",
+    is_flag=True,
+    help="The harness runs non-interactively (e.g. claude -p in CI) with default permissions.",
+)
+@click.option(
+    "--harness-version",
+    "harness_versions",
+    multiple=True,
+    metavar="HARNESS=VERSION",
+    help="The release you run, e.g. codex=0.170.0; a release other than the profile's verified one is flagged.",
+)
 def harness_check(
     target_path: Path,
     harness: str,
@@ -2481,6 +2493,8 @@ def harness_check(
     context_tokens: int,
     custom_provider: bool,
     explicit_invocation: bool,
+    headless: bool,
+    harness_versions: tuple[str, ...],
 ) -> None:
     """Show whether each agent harness loads, degrades or drops a skill (advisory; exits 0)."""
     from skillevaluator.harness.report import run_harness_check
@@ -2491,6 +2505,8 @@ def harness_check(
             "context_tokens": context_tokens,
             "custom_provider": custom_provider,
             "explicit_invocation": explicit_invocation,
+            "headless": headless,
+            "harness_versions": dict(_split_harness_version(v) for v in harness_versions),
         }
         block = run_harness_check(
             target_path, harness, harness_profiles, console=make_view_console(), verbose=verbose, config=config
@@ -2510,6 +2526,13 @@ def harness_check(
             )
     if json_path is not None:
         json_path.write_text(json.dumps({"harness_compatibility": block}, indent=2), encoding="utf-8")
+
+
+def _split_harness_version(value: str) -> tuple[str, str]:
+    name, sep, version = value.partition("=")
+    if not sep or not name.strip() or not version.strip():
+        raise click.BadParameter(f"expected HARNESS=VERSION, got {value!r}", param_hint="--harness-version")
+    return name.strip(), version.strip()
 
 
 @cli.command("quality-check")

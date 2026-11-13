@@ -113,6 +113,64 @@ def _install_root(skill_path: Path) -> tuple[str | None, int]:
     return None, 0
 
 
+# OpenClaw 2026.10.9 cjk-chars.ts: CJK code points cost 4-16 chars, every other UTF-16 unit 1.
+_OPENCLAW_CJK = (
+    (3, ((0xB7, 0xB7), (0x3000, 0x319F), (0x4E00, 0x9FA5), (0xAC00, 0xD7AF), (0xFF01, 0xFF60))),
+    (
+        11,
+        (
+            (0x1100, 0x11FF),
+            (0x2E80, 0x2FFF),
+            (0x31A0, 0x4DFF),
+            (0x9FA6, 0x9FFF),
+            (0xA000, 0xA4FF),
+            (0xA700, 0xA707),
+            (0xA960, 0xA97F),
+            (0xD7B0, 0xD7FF),
+            (0xF900, 0xFAFF),
+        ),
+    ),
+    (
+        7,
+        (
+            (0x2C7, 0x2C7),
+            (0x2C9, 0x2CB),
+            (0x2D9, 0x2D9),
+            (0x2EA, 0x2EB),
+            (0x305, 0x305),
+            (0x323, 0x323),
+            (0xFE10, 0xFE4F),
+            (0xFF61, 0xFFDC),
+            (0xFFE0, 0xFFE6),
+        ),
+    ),
+    (10, ((0x1D360, 0x1D371),)),
+    (
+        14,
+        (
+            (0x16FE0, 0x16FFF),
+            (0x1AFF0, 0x1AFFF),
+            (0x1B000, 0x1B16F),
+            (0x1F200, 0x1F2FF),
+            (0x20000, 0x2FA1F),
+            (0x30000, 0x3347F),
+        ),
+    ),
+)
+# Room OpenClaw keeps for its truncation notice; the skills_read path adds a JSON wrapper and cuts ~1% sooner.
+_OPENCLAW_READ_OVERHEAD = 73
+
+
+def _openclaw_read_chars(text: str) -> int:
+    """SKILL.md size as OpenClaw's tool-result cap measures it."""
+    extra = 0
+    for ch in text:
+        cp = ord(ch)
+        if cp >= 0x80:
+            extra += next((w for w, rs in _OPENCLAW_CJK if any(a <= cp <= b for a, b in rs)), 0)
+    return _OPENCLAW_READ_OVERHEAD + len(text.encode("utf-16-le")) // 2 + extra
+
+
 def _read_manifest(skill_path: Path) -> tuple[Path, bytes, str, str, dict[str, Any]]:
     manifest = next(
         (skill_path / n for n in SKILL_MANIFEST_VARIANTS if (skill_path / n).exists()), skill_path / "SKILL.md"
@@ -286,6 +344,11 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         "skill_dir_symlink_target": target,
         "skill_md_bytes": len(raw),
         "skill_md_lines": len(text.splitlines()),
+        "openclaw_read_chars": _openclaw_read_chars(text),
+        # OpenCode strips front matter and wraps the body before its tool-output cut.
+        "opencode_body_output_bytes": len(f'<skill_content name="{name}">\n# Skill: {name}\n\n{body.strip()}'.encode()),
+        "opencode_body_output_lines": 3 + len(body.strip().splitlines()),
+        "frontmatter_missing": manifest.is_file() and FRONTMATTER_PATTERN.match(text) is None,
         "description_missing": "description" not in data,
         "description_empty": isinstance(description, str) and not description.strip(),
         "description_type": type(description).__name__ if description is not None else "none",
@@ -391,7 +454,7 @@ def listed_description(profile: dict[str, Any], facts: dict[str, Any]) -> dict[s
     text = facts["description_text"]
     budget = listing.get("budget") or {}
     over_budget = facts["catalog_size"] and (
-        facts["catalog_desc_chars"] > budget.get("desc_chars", float("inf"))
+        facts["catalog_desc_chars"] > (facts.get("list_budget_chars") or budget.get("desc_chars", float("inf")))
         or facts["catalog_size"] > budget.get("skills", float("inf"))
     )
     limit = listing.get("drop_over_utf16")
@@ -484,7 +547,10 @@ class _Rule:
 
 def model_config(profile: dict[str, Any], config: dict[str, Any] | None = None) -> dict[str, Any]:
     """Resolve the user's setup for one profile: ``context_tokens`` (0 = unknown), ``custom_provider`` and
-    ``explicit_invocation`` (skills are activated by an explicit mention rather than opened by the model).
+    ``explicit_invocation`` (skills are activated by an explicit mention rather than opened by the model) and
+    ``headless`` (a non-interactive run, e.g. ``claude -p``, with default permissions) and ``native_root``
+    (evaluate as if installed in each harness's own skills root, so root rules are skipped). ``harness_versions``
+    maps a harness to the release the user runs; a release other than the profile's verified one adds an advisory.
 
     An unknown window falls back to the profile's ``config_defaults`` for a custom provider when one is set.
     """
@@ -494,7 +560,27 @@ def model_config(profile: dict[str, Any], config: dict[str, Any] | None = None) 
     if not tokens and custom:
         tokens = int(profile.get("config_defaults", {}).get("custom_provider_context_tokens", 0))
     explicit = bool(config.get("explicit_invocation", False))
-    return {"context_tokens": tokens, "custom_provider": custom, "explicit_invocation": explicit}
+    headless = bool(config.get("headless", False))
+    native_root = bool(config.get("native_root", False))
+    versions = config.get("harness_versions") or {}
+    return {
+        "harness_version": str(versions.get(profile["harness"], "")),
+        "context_tokens": tokens,
+        "custom_provider": custom,
+        "explicit_invocation": explicit,
+        "headless": headless,
+        "native_root": native_root,
+    }
+
+
+def listing_budget_chars(profile: dict[str, Any], context_tokens: int) -> int:
+    """Characters the harness reserves for the skill list: a share of the context window when the profile
+    gives ``chars_per_context_token`` and the window is known, else the fixed ``desc_chars`` (0 = no budget)."""
+    budget = (profile.get("listing") or {}).get("budget") or {}
+    per_token = budget.get("chars_per_context_token")
+    if per_token and context_tokens:
+        return int(context_tokens * per_token)
+    return int(budget.get("desc_chars", 0))
 
 
 def evaluate_profile(
@@ -503,17 +589,19 @@ def evaluate_profile(
     """Evaluate one profile's rules against precomputed skill facts (stricter effect wins).
 
     ``config`` describes the user's model setup (see :func:`model_config`); rules read it as
-    ``context_tokens``, ``custom_provider`` and ``explicit_invocation``. Without it, rules assume an unknown context,
-    a native provider and model-initiated activation.
+    ``context_tokens``, ``custom_provider``, ``explicit_invocation`` and ``headless``. Without it, rules assume an
+    unknown context, a native provider, model-initiated activation and an interactive session.
     """
     roots = profile.get("roots", {})
     all_roots = [*roots.get("project", []), *roots.get("user", [])]
-    names = {**facts, **model_config(profile, config), "always": True, "roots": _RootList(all_roots, roots)}
+    setup = model_config(profile, config)
+    facts = {**facts, "list_budget_chars": listing_budget_chars(profile, setup["context_tokens"])}
+    names = {**facts, **setup, "always": True, "roots": _RootList(all_roots, roots)}
     findings: list[dict[str, str]] = []
     worst = -1
     for rule in profile.get("rules", []):
         expression = str(rule["when"])
-        if "install_root" in expression and facts["install_root"] is None:
+        if "install_root" in expression and (facts["install_root"] is None or names["native_root"]):
             continue
         if "catalog_" in expression and not facts["catalog_size"]:
             continue
@@ -529,6 +617,16 @@ def evaluate_profile(
         worst = max(worst, _EFFECT_RANK[rule["effect"]])
     status = "not_loaded" if worst == 2 else "degraded" if worst == 1 else "loads"
     verified = profile.get("verified", {})
+    declared, checked = setup["harness_version"], str(verified.get("version", ""))
+    if declared and declared != checked and not checked.startswith(f"{declared} "):
+        findings.append(
+            {
+                "id": "VERSION-UNVERIFIED",
+                "effect": "advisory",
+                "message": f"Profile verified on {checked}; you run {declared}, so its rules may not hold.",
+                "fix": "Re-run the drift canaries for this release before relying on the result.",
+            }
+        )
     return HarnessResult(
         harness=profile["harness"],
         display_name=profile.get("display_name", profile["harness"]),

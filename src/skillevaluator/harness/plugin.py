@@ -42,10 +42,12 @@ OUTCOME_EFFECT = {
     "listed": None,
     "runs": None,
     "deferred": "advisory",
+    "trust_gated": "advisory",
     "registered": "degraded",
     "not_observed": "degraded",
 }
 OUTCOME_TEXT = {
+    "trust_gated": "{n} {kind}: run only after the user trusts the plugin's current content (or with a per-run trust bypass).",
     "deferred": "{n} {kind}: registered; tool schemas reach the model only when it searches for or asks to use them.",
     "registered": "{n} {kind}: started or registered, but nothing reached the model in canary runs.",
     "not_observed": "{n} {kind}: not registered or delivered in canary runs.",
@@ -91,6 +93,8 @@ def plugin_facts(root: Path) -> dict[str, Any]:
     facts["any_manifest"] = any(v for k, v in facts.items() if k.startswith("fmt_"))
     facts["default_dirs"] = any((root / d).is_dir() for d in DEFAULT_DIRS)
     facts["components"] = {kind: count(root) for kind, count in COMPONENTS.items()}
+    skills = list((root / "skills").rglob("SKILL.md")) if (root / "skills").is_dir() else []
+    facts["max_skill_bytes"] = max((f.stat().st_size for f in skills), default=0)
     return facts
 
 

@@ -109,3 +109,19 @@ def test_harness_check_prints_plugin_panel(tmp_path: Path):
     result = CliRunner().invoke(cli, ["harness-check", str(root)])
     assert result.exit_code == 0, result.output
     assert "Plugin compatibility" in result.output and "opencode" in result.output
+
+
+def test_codex_agent_plugins_cap_and_hooks(tmp_path: Path):
+    def bundle(name: str, manifest: str, data: dict) -> Path:
+        root = _plugin(tmp_path / name, manifest, data)
+        (root / "skills/demo/SKILL.md").write_text(
+            "---\nname: demo\ndescription: Use when testing.\n---\n" + "x" * 8200
+        )
+        (root / "hooks").mkdir()
+        (root / "hooks/hooks.json").write_text(json.dumps({"hooks": {"Stop": []}}))
+        return root
+
+    agent = _status(bundle("a", "plugin.json", {"$schema": AGENT_V1, "name": "demo", "version": "1"}))["codex"]
+    codex = _status(bundle("c", ".codex-plugin/plugin.json", {"name": "demo", "version": "1"}))["codex"]
+    assert agent[0] == "degraded" and {"CX-PLUGIN-SKILL-CAP", "CX-PLUGIN-AGENT-HOOKS"} <= set(agent[1])
+    assert codex[0] == "loads" and "CX-PLUGIN-HOOKS" in codex[1] and "CX-PLUGIN-SKILL-CAP" not in codex[1]

@@ -1552,9 +1552,12 @@ def test_a_refused_plan_line_before_the_frame_turns_progress_off_with_a_notice(
         """Refuses some of the first writes, which print the plan lines before Live starts."""
 
         def write(self, text: str) -> int:
-            writes.append(text)
-            if len(writes) in refused_writes:
-                raise BlockingIOError(errno.EAGAIN, "write could not complete without blocking", 0)
+            # Dropping the console's held output also writes an empty string,
+            # which carries nothing to refuse.
+            if text:
+                writes.append(text)
+                if len(writes) in refused_writes:
+                    raise BlockingIOError(errno.EAGAIN, "write could not complete without blocking", 0)
             return super().write(text)
 
     stream = NonBlockingTerminal()
@@ -1590,6 +1593,86 @@ def test_a_refused_plan_line_before_the_frame_turns_progress_off_with_a_notice(
     second_run = stream.getvalue()[len(first_run) :]
     assert second_run.count("Agents / models:") == 1
     assert "display stopped" not in second_run
+
+
+class _WouldBlockTerminal(io.RawIOBase):
+    """A terminal file another process made non-blocking: some writes would block and take nothing."""
+
+    def __init__(self, refused_writes: set[int]) -> None:
+        super().__init__()
+        self.refused_writes = refused_writes
+        self.calls = 0
+        self.received = bytearray()
+
+    def writable(self) -> bool:
+        return True
+
+    def isatty(self) -> bool:
+        return True
+
+    def write(self, data: Any) -> int | None:
+        self.calls += 1
+        if self.calls in self.refused_writes:
+            # What a raw write returns for EAGAIN.
+            return None
+        self.received += bytes(data)
+        return len(data)
+
+
+@pytest.mark.parametrize(
+    ("refused_writes", "plan_line", "notice"),
+    [
+        ({1}, "Agents / models:", _STOP_NOTICE),
+        ({2}, "Provider:", _STOP_NOTICE),
+        ({3}, "Run plan:", _STOP_NOTICE),
+        # The terminal stays full: it also refuses the stream's flush before
+        # the notice and then the notice.
+        ({1, 2, 3}, "Agents / models:", _LATE_STOP_NOTICE),
+    ],
+    ids=["agents-line-refused", "provider-line-refused", "run-plan-line-refused", "agents-line-and-notice-refused"],
+)
+def test_a_plan_line_refused_by_a_buffered_terminal_stream_is_printed_once(
+    monkeypatch: pytest.MonkeyPatch,
+    refused_writes: set[int],
+    plan_line: str,
+    notice: str,
+) -> None:
+    from rich.console import Console
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    terminal = _WouldBlockTerminal(refused_writes)
+    # Shaped like the standard error stream the CLI passes. Its buffer keeps a
+    # line the terminal refused and sends it with the next write.
+    stream = io.TextIOWrapper(io.BufferedWriter(terminal), encoding="utf-8", newline="\n", line_buffering=True)
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=60)
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    assert reporter.is_active is False
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="complete", detail="agent finished"))
+    reporter.close()
+    # The terminal takes whatever the stream still holds once the run is over.
+    terminal.refused_writes = set()
+    stream.flush()
+    output = terminal.received.decode("utf-8")
+
+    # The refused line reaches the terminal once, from the stream's buffer,
+    # and the run's output ends with the stop notice. When the notice is
+    # refused too, the stream still sends the copy of it that it took, so
+    # only the late notice is counted then.
+    assert output.count(plan_line) == 1
+    assert output.count(notice) == 1
+    assert f"\n{output}".endswith(f"\n{notice}\n")
+    assert "Harbor Run Configuration" not in output
+    assert "agent finished" not in output
 
 
 class _InterleavingLock:

@@ -509,7 +509,12 @@ class RichProgressReporter(PlainProgressReporter):
                         # Drawing failed before Live started, for example on a
                         # plan line printed above where the frame goes. There
                         # is no frame to stop, but progress is off for the run
-                        # all the same, so the notice is due.
+                        # all the same, so the notice is due. A stream that
+                        # refuses a write can still have taken it, as standard
+                        # error's buffer does, and then sends it with the
+                        # notice. Rich's copy of the refused line is dropped
+                        # first so the line is not printed twice.
+                        self._drop_refused_writes()
                         self._stop_live_after_failure(None)
                 finally:
                     # Reset even when Live never started, so a failed start
@@ -546,9 +551,7 @@ class RichProgressReporter(PlainProgressReporter):
                 return
         try:
             # Live keeps the last frame it drew, with its stages still running,
-            # so explain why it no longer updates. Before Live started, this
-            # thread's console holds at most a refused plan line, which moves
-            # no cursor, so sending it first does no harm.
+            # so explain why it no longer updates.
             self._write_line(_DISPLAY_STOPPED_NOTICE)
         except Exception:
             logger.debug("Tier 3 progress stop notice failed", exc_info=True)

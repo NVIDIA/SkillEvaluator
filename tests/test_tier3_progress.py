@@ -1595,6 +1595,62 @@ def test_a_refused_plan_line_before_the_frame_turns_progress_off_with_a_notice(
     assert "display stopped" not in second_run
 
 
+@pytest.mark.parametrize(
+    "refused_from",
+    ["plan-line", "update"],
+    ids=["refused-from-the-plan-line", "refused-from-an-update"],
+)
+def test_writes_refused_until_the_run_closes_are_not_sent_with_the_next_run(
+    monkeypatch: pytest.MonkeyPatch,
+    refused_from: str,
+) -> None:
+    from rich.console import Console
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    class NonBlockingTerminal(_TTYBuffer):
+        """Refuses every write while ``refusing`` is set, and keeps nothing it refused."""
+
+        refusing = False
+
+        def write(self, text: str) -> int:
+            if self.refusing and text:
+                raise BlockingIOError(errno.EAGAIN, "write could not complete without blocking", 0)
+            return super().write(text)
+
+    stream = NonBlockingTerminal()
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=60)
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    stream.refusing = refused_from == "plan-line"
+    reporter.start(_plan(progress))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+    stream.refusing = True
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="still evaluating"))
+    assert reporter.is_active is False
+    # The terminal still refuses what close() writes: the late notice, and
+    # after a refused frame the write that shows the cursor again.
+    reporter.close()
+    stream.refusing = False
+    first_run = stream.getvalue()
+
+    reporter.start(_plan(progress))
+    reporter.close()
+    second_run = stream.getvalue()[len(first_run) :]
+    # Nothing the terminal refused during the failed run comes out first.
+    assert second_run.startswith("Agents / models:")
+    assert second_run.count("Agents / models:") == 1
+    assert "display stopped" not in second_run
+    assert "still evaluating" not in second_run
+
+
 class _WouldBlockTerminal(io.RawIOBase):
     """A terminal file another process made non-blocking: some writes would block and take nothing."""
 

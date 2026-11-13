@@ -602,6 +602,9 @@ class RichProgressReporter(PlainProgressReporter):
                 self._write_line(_DISPLAY_STOPPED_LATE_NOTICE)
         except Exception:
             logger.debug("Tier 3 progress terminal restore failed", exc_info=True)
+            # Still refused when the run ends, so none of it belongs to a
+            # later run on this reporter.
+            self._drop_refused_writes()
 
     def _render_plan(self, plan: Tier3RunPlan) -> None:
         self._live_plan = plan

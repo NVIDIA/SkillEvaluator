@@ -1,0 +1,20 @@
+harness: opencode
+display_name: OpenCode
+verified: {version: 1.19.5, source: "v1.19.5 @ 810c0eba1a73", date: 2026-11-01, method: proxy-captured canary probes x3 + source, os: linux}
+roots:
+  project: [.opencode/skills, .opencode/skill, .claude/skills, .agents/skills]
+  user: [~/.config/opencode/skills, ~/.claude/skills, ~/.agents/skills]
+limits: {scan_depth: unlimited, desc_cap: none, list_cap: none, tool_output: "2,000 lines / 50 KB, rest spilled to a file"}
+listing: {}
+rules:
+  - {id: OC-ROOT, when: "install_root not in roots", effect: not_loaded, outcome: not found, message: "OpenCode reads .opencode, .claude and .agents skill folders.", fix: "Install it under .opencode/skills, .claude/skills or .agents/skills."}
+  - {id: OC-NAME-MISSING, when: "name_missing", effect: not_loaded, outcome: rejected, message: "Skill dropped: OpenCode requires a name.", fix: "Add a name field matching the folder name."}
+  - {id: OC-DESC-MISSING, when: "description_missing or description_type != 'str'", effect: not_loaded, message: "Loaded but hidden from the model's skill list (no string description).", fix: "Add a non-empty string description."}
+  - {id: OC-DESC-EMPTY, when: "description_empty", effect: degraded, message: "Listed by name only.", fix: "Add a non-empty string description."}
+  - {id: OC-DUP-KEY, when: "frontmatter_duplicate_keys", effect: not_loaded, outcome: rejected, message: "Skill dropped: duplicate frontmatter keys.", fix: "Remove the duplicate frontmatter key."}
+  - {id: OC-NESTED, when: "nested_skill_md", effect: degraded, message: "The nested SKILL.md is loaded as a second, separate skill.", fix: "Move the nested skill to its own folder under the skills root, or rename its SKILL.md."}
+  - {id: OC-CASING, when: "not manifest_name_exact", effect: degraded, message: "Non-canonical name (skill.md/Skill.md): loaded on case-insensitive filesystems (macOS default APFS, 3/3), ignored on case-sensitive Linux (3/3). Works or breaks depending on the OS.", fix: "Rename the file to SKILL.md (exact casing)."}
+  - {id: OC-FM-STRIPPED, when: "custom_field_chars > 200", effect: advisory, message: "Frontmatter is stripped when the skill is used, so the text in {custom_fields} never reaches the model.", fix: "Move instructions from frontmatter into the SKILL.md body."}
+notes:
+  - "Docs (V1) say one level deep and a 1-1024 description; runtime matches the V2 docs: recursive, no length cap."
+  - "Tolerant of tabs, bare colons and BOM. Follows all symlinks tested."

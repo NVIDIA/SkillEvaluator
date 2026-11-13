@@ -57,7 +57,7 @@ def run_public_plugin_validation(
         result.add_error(f"Unknown Tier 1 check(s): {', '.join(sorted(unknown))}")
         return [result]
     active = enabled - skipped
-    selected = active - {"dependency"}
+    selected = active - {"dependency", "harness"}
     if "code-integrity" in active:
         selected |= {"hygiene", "secrets"} - skipped
     selected = frozenset(selected)
@@ -210,6 +210,16 @@ def run_public_plugin_validation(
         if loaded_waivers.applied:
             waiver_result.add_message(f"PII waivers suppressed {len(loaded_waivers.applied)} reviewed PII value(s)")
         results.append(waiver_result)
+    if "harness" in active:
+        # Packaged profiles describe standalone skill installs; applying their
+        # location rules to a native plugin would invent a compatibility verdict.
+        harness = ValidationResult(validator_name="Harness Compatibility", metadata={"plugin_check": "harness"})
+        harness.add_success(
+            "harness_applicability",
+            "Not applicable: standalone harness profiles do not assess native plugin loading.",
+            not_applicable=True,
+        )
+        results.append(harness)
     public_names = {
         "Private Manifest and Component Checks": "Plugin Schema & Component Checks",
         "Private Tree Coverage": "Plugin Tree Coverage",

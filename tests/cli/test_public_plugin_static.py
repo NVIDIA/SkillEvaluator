@@ -93,6 +93,98 @@ def test_schema_failure_stops_before_scanner_construction_when_fail_fast(tmp_pat
     assert any(not result.passed for result in results)
 
 
+@pytest.fixture
+def plugin_with_local_scanners(tmp_path, monkeypatch):
+    from skillevaluator.tier1 import commands
+
+    root = tmp_path / "plugin"
+    manifest = root / ".claude-plugin/plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"name":"demo"}', encoding="utf-8")
+    member = root / "skills/demo/SKILL.md"
+    member.parent.mkdir(parents=True)
+    member.write_text(
+        "---\nname: demo\ndescription: Use when checking project workflows.\n"
+        "license: MIT\nmetadata:\n  author: Demo Author\n---\n"
+        "# Demo\n\n## Instructions\n\nRead the project and explain its workflow.\n",
+        encoding="utf-8",
+    )
+
+    def clean_external_scan(_validator, _path):
+        result = ValidationResult()
+        result.add_success("external_scan", "External scanner completed")
+        return result
+
+    monkeypatch.setattr(commands.SecurityValidator, "_run_skillspector", clean_external_scan)
+    monkeypatch.setattr(commands.SecretsValidator, "_validate_single_skill", clean_external_scan)
+    return root, member.parent
+
+
+def test_default_plugin_retains_real_checks_and_records_harness_applicability(plugin_with_local_scanners):
+    from skillevaluator.publication_evidence import tier1_required_checks
+    from skillevaluator.reporting.base import missing_tier1_publication_checks
+    from skillevaluator.reporting.presentation import result_execution_status
+
+    root, _member = plugin_with_local_scanners
+    results = run_validation(root, content_type="plugin")
+
+    assert set(tier1_required_checks(skill_like=True)) <= {result.metadata.get("plugin_check") for result in results}
+    assert missing_tier1_publication_checks(results) == ()
+    harness = next(result for result in results if result.validator_name == "Harness Compatibility")
+    assert result_execution_status(harness) == "not_applicable"
+    assert harness.findings == []
+    assert "harness_compatibility" not in harness.metadata
+    assert "native plugin loading" in harness.success_details[0].message
+    assert all("harness" not in result.metadata["tier1_required_checks"] for result in results)
+
+
+def test_explicit_plugin_harness_is_na_in_cli_and_summary(plugin_with_local_scanners, tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from skillevaluator.cli import cli
+    from skillevaluator.reporting.console_ui import summarize_tier1
+    from skillevaluator.tier1 import commands
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Standalone install-location profiles must not assess native plugin loading")
+
+    monkeypatch.setattr(commands.HarnessValidator, "validate", forbidden)
+    root, _member = plugin_with_local_scanners
+    results = run_validation(root, content_type="plugin", checks="harness")
+    _passed, rows = summarize_tier1(results, lineup=["schema", "harness"])
+    text = "\n".join(row.label + " " + "".join(value for value, _style in row.segments) for row in rows)
+    assert "n/a harness" in text
+    assert "native plugin loading" in text
+    assert "✓ harness" not in text
+
+    reports = tmp_path / "reports"
+    invoked = CliRunner().invoke(
+        cli, ["validate", str(root), "--tiers", "1", "--checks", "harness", "-r", "cli,json", "-o", str(reports)]
+    )
+    assert invoked.exit_code == 0, invoked.output
+    assert "N/A" in invoked.output
+    assert "native plugin loading" in invoked.output
+    assert "✓ harness" not in invoked.output
+    report = json.loads(next(reports.glob("*.json")).read_text())
+    assert "harness_compatibility" not in report
+    harness = next(row for row in report["results"] if row["validator"] == "Harness Compatibility")
+    assert harness["findings"] == []
+    assert harness["success_details"][0]["metadata"]["not_applicable"] is True
+    assert report["publication_status"] == "incomplete"  # Harness applicability cannot certify the omitted checks.
+
+
+def test_default_skill_keeps_the_actual_harness_check(plugin_with_local_scanners):
+    from skillevaluator.reporting.presentation import result_execution_status
+
+    _root, member = plugin_with_local_scanners
+    results = run_validation(member)
+
+    harness = next(result for result in results if result.validator_name == "Harness Compatibility")
+    assert result_execution_status(harness) == "pass"
+    assert len(harness.metadata["harness_compatibility"][str(member)]) == 6
+    assert not any(detail.metadata.get("not_applicable") for detail in harness.success_details)
+
+
 def test_selected_skipped_checks_stay_explicit(tmp_path):
     manifest = tmp_path / ".claude-plugin/plugin.json"
     manifest.parent.mkdir()

@@ -77,7 +77,15 @@
 - [x] Add focused regression coverage and retain the original live-run evidence.
 - [x] Correct false-passing aggregate context work-limit stops and audit the other context early returns without relaxing their bounds.
 
-### Task 7: Verify and retain real evaluation evidence
+### Task 7: Integrate the updated base without losing applicable checks
+
+- [x] Merge the updated base and preserve both changelog sections.
+- [x] Confirm locked Click generation leaves the intentional CLI snapshot unchanged.
+- [x] Share the optional catalog policy with rendered benchmark tier tables.
+- [x] Record explicit native-plugin harness applicability without inventing native compatibility evidence.
+- [x] Retain real standalone harness execution evidence after completed profile evaluation, including clean results.
+
+### Task 8: Verify and retain real evaluation evidence
 
 - [ ] Run both samples through the public three-tier workflow with immutable source provenance and explicit runtime settings.
 - [ ] Keep original reference bundles and any contained materializations distinct.

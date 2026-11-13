@@ -506,6 +506,13 @@ def test_validate_json_names_a_clean_single_skill_and_records_the_evaluator(
     repo = tmp_path / "repo"
     skill = repo / "skills" / "simple"
     shutil.copytree(FIXTURE, skill)
+    manifest = skill / "SKILL.md"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            "description: Summarize", "description: Use when notes need action items. Summarize"
+        ),
+        encoding="utf-8",
+    )
     if in_git_checkout:
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
         subprocess.run(

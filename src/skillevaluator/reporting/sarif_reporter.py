@@ -122,7 +122,7 @@ def _normalize_artifact_uri(
         normalized = path.as_posix()
     else:
         normalized = path.as_posix()
-    return quote(normalized, safe="/:@%")
+    return quote(normalized, safe="/:@")
 
 
 def _physical_location(

@@ -6,6 +6,42 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Canonical `comment-skill-checks.yml` reusable workflow and source template for
+  the standard scored Tier 1 PR comment without hosted reports. It verifies the
+  existing signed receipts and native evidence, reuses the shared report and
+  comment helpers, and needs no Pages configuration or history branch. Future
+  generated bundles include the template; archived bundles and the released
+  onboarding CLI retain their existing hosted publisher setup.
+- `harness` rules for where `SKILL.md` lives: casing, nested manifests, symlinked
+  manifests and resources, OpenClaw symlink escapes, Codex scan depth, and files
+  Hermes leaves out of its file list. Tier 1 `schema` now reports a symlinked or
+  nested `SKILL.md` (MEDIUM), and the `skill.md` naming finding explains the
+  macOS/Linux difference.
+- `harness` rules for descriptions: missing or empty descriptions, Claude Code and
+  Codex listing cuts, Copilot CLI's 1,024 UTF-16 unit limit, quotes escaped in the
+  Copilot CLI and OpenClaw lists, and Hermes's 60-character listing; `-v` shows
+  the description each harness lists. Tier 1 `schema` now reports a description
+  over 1,024 UTF-16 units (MEDIUM) and no "Use when ..." trigger in its first 60
+  characters (LOW).
+- `harness` rules for frontmatter parsing: duplicate keys and tab indentation
+  (strict YAML parsers drop the skill), a UTF-8 BOM (Codex), no front matter
+  (Copilot CLI) and long custom frontmatter that never reaches the model. Tier 1
+  `schema` now reports duplicate frontmatter keys (HIGH) and a UTF-8 BOM (MEDIUM).
+- New `skillevaluator harness-check <skill>` command and a "Harness compatibility"
+  panel after the Tier 1 results of `validate`: one line per harness with its most
+  serious finding and an outcome label (`not found`, `rejected`, `listing
+  shortened`, ...), then `+N more` and the note count; `-v` shows every finding
+  with its fix. The checks line shows `! harness`, Tier 1 gets a `harness` summary
+  line, and the result box names the harnesses that won't load the skill.
+  `harness-check` always exits 0; `--json PATH` writes the block.
+- New advisory Tier 1 `harness` check: for each agent harness (`claude-code`,
+  `codex`, `copilot-cli`, `hermes`, `openclaw`, `opencode`) it reports whether the
+  skill `loads`, is `degraded` or is `not_loaded`, from versioned profiles shipped
+  with the package. It runs by default, never fails the run, lists its findings in
+  every report and adds a `harness_compatibility` block to JSON. `--harness
+  codex,claude-code` narrows the harnesses and `--harness-profiles DIR` loads
+  profiles from a directory. The first rules flag a skill installed outside the
+  folders a harness scans.
 - Complete the public plugin workflow: supported-format detection, bounded component
   checks and bundled-skill validation, advisory deduplication and compatible local
   catalogs, shared runtime options and loading adapters, MCP/behavior evidence,
@@ -174,6 +210,23 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The comments-only consumer template now grants its required read and PR-comment
+  permissions only to the comment job, with no workflow-wide token permissions.
+- The behavior evidence gate no longer keeps a score for an expectation that
+  names an observed artifact but also asks for something only the final answer
+  could show. "Writes `report.py` and explains why each column was dropped" was
+  treated as settled by the artifact alone, so a case kept a score whose second
+  half was never checked. Every clause of an expectation must now name a
+  checkable artifact of its own; one that does not keeps the gate, as a wholly
+  prose expectation already did.
+- SARIF `artifactLocation.uri` values percent-encode a `%` in a file name as
+  `%25`. A file such as `a%20b.md` no longer shares the URI of `a b.md`, and
+  `100%.md` no longer produces an invalid URI.
+- Accuracy and Behavior judge prompts clarify that explicit final-answer formats
+  apply to the entire final response, independently of correct values in tool
+  output or references. Scoring and thresholds are unchanged; an Accuracy format
+  failure alone can still score 0.8 and pass the default threshold.
+
 - Automatic SkillSpector discovery verifies the pinned release before using an
   installed executable, selects the verified managed runtime for mismatched or
   unverifiable versions, and reports the selection. Explicit executable
@@ -200,23 +253,16 @@ All notable changes to SkillEvaluator are documented in this file.
   incomplete, rather than advisory passes. Disabled or inapplicable analysis
   records explicit skips; malformed dependency parsing remains non-green.
   Aggregate limits are unchanged and reported with their observed counts.
+- Native plugin validation handles the standalone-only harness check as explicit
+  advisory N/A. Ordinary skill harness checks retain their profiles and record
+  completed evaluation evidence even when they have no findings. Benchmark tier
+  tables share the verified optional-catalog rule used by publication verdicts.
 
 - Plugin CLI preflight uses bounded, no-follow configuration loading for both
   plugin directories and explicit manifests. Combined validation binds plugin
   scores and runtime evidence to the returned run, retains partial scores when
   latest changes, and never borrows another run's scores for missing artifacts.
 
-- The behavior evidence gate no longer keeps a score for an expectation that
-  names an observed artifact but also asks for something only the final answer
-  could show. "Writes `report.py` and explains why each column was dropped" was
-  treated as settled by the artifact alone, so a case kept a score whose second
-  half was never checked. Every clause of an expectation must now name a
-  checkable artifact of its own; one that does not keeps the gate, as a wholly
-  prose expectation already did.
-- Accuracy and Behavior judge prompts clarify that explicit final-answer formats
-  apply to the entire final response, independently of correct values in tool
-  output or references. Scoring and thresholds are unchanged; an Accuracy format
-  failure alone can still score 0.8 and pass the default threshold.
 
 - An author value is no longer rejected for containing a Unicode joiner. The
   character guard matched all of category `C`, so ZWNJ (U+200C) and ZWJ
@@ -297,23 +343,29 @@ All notable changes to SkillEvaluator are documented in this file.
   as an unverified case ID in every report and recorded under
   `token_usage.case_id_validation`, rather than being shown as coverage of a
   dataset case; a table that shows no such row, because it renders no case rows
-  or its row caps dropped them, names the unmatched case IDs instead.
+  or its row caps dropped them, names the unmatched case IDs instead. Hidden
+  case names receive the same Markdown escaping, publication-label masking and
+  terminal secret redaction as visible rows, before their displayed length is
+  bounded.
 - The Tier 3 security scan no longer scores an agent clearing its own output
   directory as a destructive command. One literal, recursive and forced `rm` of
-  a path inside the agent's output directory is cleanup. That directory is the
-  `output` directory of the directory the trace starts in, so no later `cd` or
-  `workdir` can name another one; the directory itself, anything outside it, a
-  sensitive or protected path, anything below the top level once the trace has
-  created a symbolic link, and every compound, globbed or dynamic command form
-  still score as before.
+  a path inside `/workspace/output` or an output directory established by the
+  trusted staged runtime configuration is cleanup. A tool call's first or
+  later `cwd`/`workdir` and shell directory changes cannot establish another
+  owned root. The directory itself, sensitive or protected paths, compound,
+  globbed, parent-escaping or dynamic forms retain conservative scoring.
+  After observed symlink creation, only an unadorned direct leaf can qualify;
+  unknown command directories cannot qualify. Literal quoting is inert
+  because expansions and escapes are rejected before operands are parsed.
 - The Tier 3 security scan no longer reads the license URL in a source file's
   copyright header as data exfiltration. A `http://` or `https://` URL on a
-  comment line of a license or copyright notice is prose, so the header's own
-  URL no longer makes a long file write look like an upload; a URL the file
-  writes outside such a notice, a docstring link for instance, is still read as
-  before. A curl, wget or httpie word keeps its meaning wherever it appears,
-  including inside a notice, and a comment leader that is also executable shell
-  (`*)`, `--`, `;`, `%`, `//cmd`) never starts a notice.
+  comment line of a license or copyright notice is prose within recognized
+  shell comments and bounded, simple literal file-write actions (`cat`, `tee`
+  or `apply_patch` heredocs). Expanding shell strings and heredocs cannot claim
+  an inert notice context. Other URLs, including docstring links, and mixed or
+  uncertain shell actions retain conservative oversized-action handling. A
+  curl, wget or httpie word keeps its meaning wherever it appears, including
+  inside a notice; executable shell leaders cannot borrow a notice either.
 - A failed Tier 3 execution (for example a backend launch failure) now marks the
   report payload, its summary and the affected agents as failed with their
   errors, instead of only the top-level `result.json`. A report re-rendered by
@@ -405,6 +457,81 @@ All notable changes to SkillEvaluator are documented in this file.
   redrawn; the header and finished tiers print once, and log records print
   through the live view's console. The progress line now prints once, above
   the final verdict.
+- Tier 3 security grading now handles more cases, on top of the 0.9.0
+  home-directory spellings fix. A home path in the default word of a
+  `${VAR:-word}` or `${VAR-word}` that starts a path word now matches, so
+  `cat "${SSH_KEY:-$HOME/.ssh/id_rsa}"` and
+  `echo x >> "${GIT_CONFIG:-$HOME/.gitconfig}"` score Security 0.0 (1.0 in
+  0.9.0), while `cat backup-$HOME/.netrc` and
+  `cat backup-${X:-$HOME/.netrc}` keep 1.0. The quoted strings that
+  bound a redirection, `tee`, or `sed -i` target are found as the shell finds
+  them: an escaped `\'` opens none, a quote in a `#` comment pairs only
+  within its line, and one in a here-document body never pairs past the
+  body. So after `# Show what's in the profile`, the read
+  `echo '--> zprofile'; cat ~/.zprofile; echo '--> done'` now scores 1.0
+  (0.0 in 0.9.0), and `sed -i '/old-path/d' $HOME/.zprofile` scores 0.0
+  (1.0 in 0.9.0). A redirection, `tee`, or `sed` inside a quoted string or a
+  comment no longer hides the writes after it, so
+  `echo "Step 1 -> check"; echo x >> "$HOME/.zprofile"` scores 0.0. The
+  `view` command of `str_replace_editor` or `str_replace_based_edit_tool` is
+  checked as a read, like a `Read`: a view of `/root/.gitconfig`,
+  `/root/.bashrc`, or `/etc/sudoers` scored 0.0 in 0.9.0 and now scores 1.0,
+  and a view of a credential store such as `~/.netrc` still scores 0.0. Both
+  the host checker and the bundled Harbor verifier apply the fix.
+- `BENCHMARK.md` now shows the evidence and the policy that decided its overall
+  verdict. The card used to print `Overall verdict: PASS — Recommended for
+  publication` with nothing behind it, so a reader who saw an agent with no
+  dimension scores and another agent below the documented 40% FAIL boundary had
+  no way to tell why the gate still passed. A "Why This Verdict" block under the
+  callout now names the rule that fired, the Tier 3 evidence state with its
+  publication policy, each blocking reason, and, per agent, what the dimension
+  gate read: which agent passed every dimension, which dimension fell below the
+  FAIL or PASS boundary, and which agent the gate did not count, naming the
+  excluded arm when the run recorded one. A PASS that rests on one agent while
+  another fails a dimension now says so. The block is rendered from the same
+  publication assessment the printed verdict is projected from, and from the
+  per-agent breakdown the Tier 3 dimension verdict folds, so it cannot describe
+  a different decision. Optional or skipped Tier 3 runs are explained using
+  their recorded policy, and threshold-adjacent scores retain enough precision
+  to stay in their actual verdict band. No verdict changes.
+- `--tolerate-baseline-timeouts` (added in 0.9.0) now follows its own rules
+  in the printed run verdict, in the notes of both reports and during result
+  collection. The `RUN QUALITY VERDICT` line that `tier3 evaluate` prints
+  reads the same agents as the run verdict, so a tolerated agent that passes
+  no longer prints PASS beside a complete agent that fails or never
+  activated the skill; the line now reads FAIL or INCONCLUSIVE, as the
+  reports do. `BENCHMARK.md` and `report.html` now keep the "Needs
+  attention" note and the `Baseline incomplete` line for each tolerated
+  agent also when a cost limit leaves the best agent's attempts short; both
+  reports used to leave them out in that case. `report.html` also keeps the
+  note when its overview reads Inconclusive because the complete agent never
+  activated the skill. An output-token count past the JSON-safe integer
+  range (above 2^53 - 1) in a timed-out attempt is no longer progress
+  evidence; with no other in-range count for that attempt the agent is
+  refused as `no_progress_evidence`, where result collection used to stop
+  with `browser-unsafe JSON integer` and write no `result.json` or report.
+
+- A native Codex `exec` wrapper that calls the freeform `apply_patch` tool with
+  the patch as a bare string is decoded instead of being discarded. The bounded
+  statement grammar read every argument as an object literal, so
+  `const r1 = await tools.apply_patch("*** Begin Patch\n...");` followed by
+  another call made the whole wrapper
+  `unsupported_native_codex_exec_wrapper`: the patch and its sibling calls went
+  ungraded, although the same wrapper written as
+  `tools.apply_patch({input: "..."})` decoded. A single- or double-quoted
+  string is now read as that tool's `input`. Nothing is interpreted: a template
+  literal, a concatenation, an extra argument, an unterminated string and a
+  bare string passed to any other tool are still rejected, and the object path
+  keeps its character gates unchanged.
+- A tool call the harness reports as exiting 0 is no longer recorded as failed
+  because its output holds error words. An agent that read a document *about*
+  errors, such as a `SKILL.md` headed `# Troubleshooting: command not found`,
+  lost that call's component activation in the plugin component signals. An
+  explicit zero exit status in every correlated result's header now passes the
+  call, as a harness success flag already did. Only the harness's own header
+  lines are read, so a body that spells `exit_code=0` still reports nothing,
+  and a result with no exit status, or a non-zero one, is judged by its text
+  exactly as before.
 
 ## 0.9.0 - 2026-11-13
 
@@ -747,6 +874,15 @@ All notable changes to SkillEvaluator are documented in this file.
   the Large skill finding, the HTML report and the docs, and adds
   `metrics.estimated_tokens` and `metrics.estimate_method` to the quality JSON.
   `metrics.total_tokens` keeps the same value and scoring is unchanged.
+
+- Tier 1 skill-type detection and the script-based checks recognise Node scripts
+  (`.mjs`, `.cjs`, `.js`) under `scripts/` and `tools/`, so a Node-script skill
+  is no longer typed guide-only. A skill whose scripts are all Node scripts is not
+  asked for a `run_script` call; one that also bundles Python or shell scripts
+  keeps the check. Script lint still parses Python only and reports how many Node
+  scripts it did not lint. The rubric judge also receives Node scripts and files
+  from `tools/`. Scores of Node-script skills can change because they now get the
+  script-based checks.
 
 - Name Skill Lift as the headline comparison and label pass@k differences as
   supporting reliability across reports and terminal output.

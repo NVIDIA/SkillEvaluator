@@ -50,6 +50,13 @@ DEFAULT_ALLOWED_SKILL_DIRS = frozenset(
 # SkillEvaluator name; ``tools/`` is the agentskills.io name.
 EXECUTABLE_SKILL_DIRS = ("scripts", "tools")
 
+# File patterns that count as skill scripts under ``EXECUTABLE_SKILL_DIRS``.
+# Script lint parses Python only; Node scripts are recognised for skill-type
+# detection and the script-based checks but are reported as not linted.
+PYTHON_SCRIPT_PATTERNS = ("*.py",)
+NODE_SCRIPT_PATTERNS = ("*.mjs", "*.cjs", "*.js")
+EXECUTABLE_SCRIPT_PATTERNS = (*PYTHON_SCRIPT_PATTERNS, "*.sh", *NODE_SCRIPT_PATTERNS)
+
 # Env var that lets consumers EXTEND the allowed skill-root directory set per
 # repo (comma- or whitespace-separated) without editing bundled config — e.g.
 # ``SKILLEVALUATOR_SCHEMA_ALLOWED_DIRS="data,fixtures"``. Names are added to,
@@ -148,6 +155,14 @@ PLUGIN_CONTAINED_MODE = "contained"
 
 # Skill manifest file name variants (case-insensitive search)
 SKILL_MANIFEST_VARIANTS = ("SKILL.md", "skill.md")
+
+# Some harnesses show only the first ~60 characters of each description in
+# their skill list, so the "when to use" trigger should appear within it.
+DESCRIPTION_TRIGGER_WINDOW = 60
+DESCRIPTION_TRIGGER_PATTERN = (
+    r"\buse (?:this (?:skill )?|it )?(?:when|for|to|if|whenever)\b"
+    r"|\bwhen (?:the user|a user|you|asked)\b|\btriggers?\b"
+)
 
 # Banned/deprecated packages
 BANNED_PACKAGES = [
@@ -736,6 +751,10 @@ PLUGIN_COMPONENT_MAX_ITEMS = 256
 PLUGIN_CONFIG_MAX_BYTES = 256 * 1024
 
 SCAN_ARTIFACT_DIRS = frozenset({"evals", ".evals", "results", ".results", "versions", ".versions"})
+
+# Folders no harness reads as part of a skill: VCS data, caches and dependencies. The artifact
+# folders above are not in this set because harnesses scan them like any other folder.
+SKILL_NOT_SHIPPED_DIRS = SCAN_EXCLUDED_DIRS - SCAN_ARTIFACT_DIRS
 
 PLUGIN_TREE_PRUNED_DIRS = SCAN_EXCLUDED_DIRS - {"__pycache__"}
 

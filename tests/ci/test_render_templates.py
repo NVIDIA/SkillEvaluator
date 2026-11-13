@@ -29,6 +29,20 @@ def test_release_templates_are_copyable_and_bind_the_actual_caller(tmp_path):
     publisher = yaml.load((output / "publish-skill-reports.yml").read_text(), Loader=yaml.BaseLoader)
     assert publisher["jobs"]["reports"]["with"]["trusted-caller-blobs"] == blob
     assert publisher["jobs"]["reports"]["with"]["tools-ref"] == "b" * 40
+    comments = yaml.load((output / "comment-skill-checks.yml").read_text(), Loader=yaml.BaseLoader)
+    assert comments["permissions"] == {}
+    assert comments["jobs"]["comment"]["permissions"] == {
+        "contents": "read",
+        "actions": "read",
+        "pull-requests": "write",
+    }
+    assert comments["on"]["workflow_run"] == {"workflows": ["Skill checks"], "types": ["completed"]}
+    assert set(comments["on"]["workflow_dispatch"]["inputs"]) == {"run-id", "run-attempt"}
+    assert all(value["required"] == "true" for value in comments["on"]["workflow_dispatch"]["inputs"].values())
+    assert comments["jobs"]["comment"]["with"]["trusted-caller-blobs"] == blob
+    assert comments["jobs"]["comment"]["with"]["trusted-evaluator-shas"] == "b" * 40
+    assert comments["jobs"]["comment"]["with"]["tools-ref"] == "b" * 40
+    assert "report-base-url" not in comments["jobs"]["comment"]["with"]
     for template in output.glob("*.yml"):
         assert "RELEASE_" not in template.read_text()
     assert "YOUR_REPORT_BASE_URL" in (output / "publish-skill-reports.yml").read_text()
@@ -65,6 +79,11 @@ def test_separate_publisher_revision_preserves_scanner_and_caller_trust(tmp_path
     assert publisher["with"]["tools-ref"] == publisher_ref
     assert publisher["with"]["trusted-evaluator-shas"] == scanner_ref
     assert publisher["with"]["trusted-caller-blobs"] == blob
+    comments = yaml.load((output / "comment-skill-checks.yml").read_text(), Loader=yaml.BaseLoader)["jobs"]["comment"]
+    assert comments["uses"].endswith("@" + publisher_ref)
+    assert comments["with"]["tools-ref"] == publisher_ref
+    assert comments["with"]["trusted-evaluator-shas"] == scanner_ref
+    assert comments["with"]["trusted-caller-blobs"] == blob
     assert publisher_ref in (output / "README.md").read_text()
     for name in ("skill-checks.yml", "skill-checks-llm.yml", "gitlab-skill-checks.yml"):
         content = (output / name).read_text()
@@ -100,9 +119,10 @@ def test_unpinned_or_invalid_release_identity_is_rejected(tmp_path, ref, image, 
 def test_fork_verification_templates_point_to_the_fork(tmp_path):
     output = tmp_path / "out"
     release.render_templates(output, "b" * 40, "ghcr.io/example/scan@sha256:" + "a" * 64, "example/scan")
-    text = (output / "publish-skill-reports.yml").read_text()
-    assert "example/scan/.github/workflows/" in text
-    assert "tools-repository: example/scan" in text
+    for filename in ("publish-skill-reports.yml", "comment-skill-checks.yml"):
+        text = (output / filename).read_text()
+        assert "example/scan/.github/workflows/" in text
+        assert "tools-repository: example/scan" in text
 
 
 def test_existing_release_output_is_preserved(tmp_path):

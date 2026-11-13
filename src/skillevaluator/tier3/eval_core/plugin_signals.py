@@ -51,8 +51,11 @@ owns that observation; otherwise its outcome is unknown.
 
 ``succeeded`` is tri-state. ``True``: a correlated result came back without a
 structured error flag or a failure/unavailable marker in the head of any of its
-content blocks or in its tail. ``False``: the correlated result is flagged or
-carries such a marker ("no such file" only counts for non-shell calls, whose
+content blocks or in its tail, or every correlated result's own status header
+states that the command exited 0, which outranks the text (a document *about*
+errors is the agent's answer, not this call's diagnostic). ``False``: the
+correlated result is flagged or carries such a marker without an explicit
+successful status ("no such file" only counts for non-shell calls, whose
 output is not a mix of several commands). A file read or skill load returns
 file text, so only its first line counts (past a harness's shell status lines),
 plus, for a shell read, any shell error line that names a ``SKILL.md``. ``None``:
@@ -137,7 +140,13 @@ from typing import Any, NamedTuple
 
 import regex
 
-from skillevaluator.tier3.eval_core.checks import _APPLY_PATCH_COMMAND_RE, _APPLY_PATCH_HEADER_RE, _FILE_READ_VERBS
+from skillevaluator.tier3.eval_core.checks import (
+    _APPLY_PATCH_COMMAND_RE,
+    _APPLY_PATCH_HEADER_RE,
+    _FILE_READ_VERBS,
+    _STR_REPLACE_EDITORS,
+    _is_editor_view,
+)
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     MAPPED_OUTER_EXEC_OBSERVATION,
     normalize_tool_call,
@@ -255,8 +264,8 @@ _PATCH_TOOLS = frozenset({"apply_patch", "applypatch", "patch"})
 # Where harnesses put that body: Codex ``input``, OpenCode ``patchText``, Hermes
 # ``patch``, and ``raw`` or ``value`` for a tool input that was not a JSON object.
 _PATCH_BODY_KEYS = ("input", "patch", "patchText", "content", "raw", "value")
-# Text editor tools: they write, except for their ``view`` command, which reads.
-_STR_REPLACE_EDITORS = frozenset({"str_replace_editor", "str_replace_based_edit_tool"})
+# Text editor tools (_STR_REPLACE_EDITORS) write, except for their ``view``
+# command, which reads (_is_editor_view).
 _WRITE_TOOLS = (
     _PATCH_TOOLS
     | _STR_REPLACE_EDITORS
@@ -564,6 +573,18 @@ _STATUS_LINE_PREFIX_RES = (
 _SHELL_STATUS_LINE_RE = re.compile(
     r"chunk id:.*|wall time:.*|process exited with code -?\d+|exit code:\s*-?\d+"
     r"|original token count:.*|total output lines:.*|output:",
+    re.IGNORECASE,
+)
+# The exit status inside such a header line, in the spellings the converters emit
+# (``exit_code=0``, ``Process exited with code 0``).
+_EXIT_STATUS_LINE_RE = re.compile(
+    r"\[?(?:exit[ _]code|return[ _]code|process[ \t]+exited[ \t]+with[ \t]+code)\]?[ \t]*[=:]?[ \t]*(-?\d+)\]?",
+    re.IGNORECASE,
+)
+# Every line a harness may put in that header, including the converter's
+# ``status=`` line, which ``_SHELL_STATUS_LINE_RE`` does not cover.
+_STATUS_HEADER_LINE_RE = re.compile(
+    rf"{_SHELL_STATUS_LINE_RE.pattern}|status[ \t]*=[ \t]*\w+|{_EXIT_STATUS_LINE_RE.pattern}",
     re.IGNORECASE,
 )
 # A shell tool's error line about a file (``cat: <dir>/SKILL.md: Permission denied``).
@@ -2006,6 +2027,32 @@ def _content_read_scan(text: str, *, shell: bool) -> str:
     return "\n".join(lines)
 
 
+def _header_exit_status(text: str) -> int | None:
+    """The exit status a harness states in its own header above a result's body.
+
+    Only complete status lines before the body are read, so a document whose
+    own text spells ``exit_code=0`` never reports an outcome. ``None`` when the
+    header states no status, or when two of its lines disagree.
+    """
+    status: int | None = None
+    for line in text[:_FAILURE_SCAN_CHARS].splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.casefold() == "output:":
+            break  # the body starts on the next line
+        if not _STATUS_HEADER_LINE_RE.fullmatch(stripped):
+            break
+        match = _EXIT_STATUS_LINE_RE.fullmatch(stripped)
+        if match is None:
+            continue
+        code = int(match.group(1))
+        if status is not None and status != code:
+            return None
+        status = code
+    return status
+
+
 def _outcome(
     correlated: Sequence[_Result], *, shell: bool, content_read: bool = False
 ) -> tuple[str | None, bool | None]:
@@ -2013,7 +2060,8 @@ def _outcome(
 
     A structured outcome wins: any failure flag fails the call, and the
     harness's own success report (Claude Code ``tool_result_is_error: false``,
-    a Codex ``completed`` status) passes it whatever the text says. Without
+    a Codex ``completed`` status, or an explicit zero exit status in every
+    correlated result's header) passes it whatever the text says. Without
     one, failure text is read on the result's lead lines only. For a
     ``content_read`` (a file read or a skill load) the body is file or skill
     text, so only the first line of a result (past a harness's shell status
@@ -2028,6 +2076,12 @@ def _outcome(
     if any(result.uncertain for result in correlated):
         return text, None
     if any(flag is False for flag in flags):
+        return text, True
+    # A command the harness reports as exiting 0 succeeded, however its output reads: a
+    # document *about* errors is the agent's answer, not this call's diagnostic. Only an
+    # explicit success counts, so a result that states no status, or a non-zero one, is
+    # still judged by its text.
+    if all(_header_exit_status(result.text) == 0 for result in correlated):
         return text, True
     if not text.strip():
         return text, None
@@ -2570,11 +2624,6 @@ def _manifest_operands(command: Sequence[str]) -> list[str]:
     if io.verb not in _FILE_READER_VERBS or _sed_in_place(io):
         return []
     return [*io.operands, *io.inputs]
-
-
-def _is_editor_view(fn_base: str, args: Mapping[str, Any]) -> bool:
-    """A text editor tool call running its ``view`` command (a read)."""
-    return fn_base in _STR_REPLACE_EDITORS and str(args.get("command") or "").casefold() == "view"
 
 
 def _member_manifest_match(path: str, members: Sequence[str]) -> str | None:

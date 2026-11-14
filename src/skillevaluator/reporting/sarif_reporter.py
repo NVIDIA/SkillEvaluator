@@ -11,6 +11,7 @@ validators without structured findings are omitted.
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -100,29 +101,102 @@ def _resolve_artifact_path(file_path: str, scan_root: Path | None) -> Path:
     return path
 
 
+def _quote_uri_path(text: str, safe: str = "/:@") -> str:
+    """Percent-encode a POSIX-style path for use in a URI.
+
+    A file name that is not valid UTF-8 arrives with surrogate escapes; its
+    original bytes are encoded (``caf\\udce9.md`` becomes ``caf%E9.md``).
+    """
+    try:
+        octets = text.encode("utf-8", "surrogateescape")
+    except UnicodeEncodeError:
+        octets = text.encode("utf-8", "surrogatepass")
+    return quote(octets, safe=safe)
+
+
+def _relative_reference(normalized: str) -> str:
+    """Return a relative URI reference whose first segment cannot read as a scheme."""
+    uri = _quote_uri_path(normalized)
+    # RFC 3986 section 4.2: a colon in the first segment would make
+    # ``notes:v2.md`` parse as scheme ``notes``; a dot segment keeps it a path.
+    if ":" in uri.split("/", 1)[0]:
+        return f"./{uri}"
+    return uri
+
+
+def _file_uri(path: Path) -> str:
+    """Return an absolute ``file:`` URI for a path outside the workspace."""
+    posix = path.as_posix()
+    if posix.startswith("//"):  # UNC: //server/share/...
+        host, _, rest = posix[2:].partition("/")
+        return f"file://{_quote_uri_path(host, safe='')}/{_quote_uri_path(rest)}"
+    if posix.startswith("/"):
+        return f"file://{_quote_uri_path(posix)}"
+    return f"file:///{_quote_uri_path(posix)}"  # drive letter: C:/...
+
+
+def _unresolved_artifact_path(file_path: str, scan_root: Path | None) -> Path | None:
+    """Return the absolute path a finding names, without following its symlinks.
+
+    ``None`` when the path has a ``..`` segment: after a symlinked directory
+    that names a different file than the lexically normalized path would.
+    """
+    path = Path(file_path.replace("\\", "/"))
+    if ".." in path.parts:
+        return None
+    if not path.is_absolute():
+        if scan_root is None:
+            return None
+        path = scan_root.resolve() / path
+    return Path(os.path.normpath(path))
+
+
+def _workspace_relative_path(
+    path: Path,
+    file_path: str,
+    workspace_root: Path,
+    scan_root: Path | None,
+) -> Path | None:
+    """Return the artifact path relative to the workspace root, or ``None``.
+
+    The resolved path is tried first. A symlink inside the workspace whose
+    target is outside it keeps the path of the link, which is what the
+    finding is about.
+    """
+    root = workspace_root.resolve()
+    candidates = [path.resolve()]
+    unresolved = _unresolved_artifact_path(file_path, scan_root)
+    if unresolved is not None:
+        candidates.append(unresolved)
+    for candidate in candidates:
+        try:
+            return candidate.relative_to(root)
+        except ValueError:
+            continue
+    return None
+
+
 def _normalize_artifact_uri(
     file_path: str,
     workspace_root: Path | None,
     scan_root: Path | None = None,
 ) -> str:
-    """Return a repository-relative, URI-encoded artifact path for SARIF."""
+    """Return a URI-encoded SARIF artifact location.
+
+    Paths inside the workspace become repository-relative references; other
+    absolute paths become ``file:`` URIs.
+    """
     path = _resolve_artifact_path(file_path, scan_root)
-    if workspace_root is not None:
-        try:
-            # Windows paths can be rooted (``\\workspace\\...``) without a
-            # drive, in which case ``is_absolute()`` is false until resolved.
-            if path.is_absolute() or path.root:
-                relative = path.resolve().relative_to(workspace_root.resolve())
-                normalized = relative.as_posix()
-            else:
-                normalized = path.as_posix()
-        except ValueError:
-            normalized = path.as_posix()
-    elif path.is_absolute():
-        normalized = path.as_posix()
-    else:
-        normalized = path.as_posix()
-    return quote(normalized, safe="/:@%")
+    # Windows paths can be rooted (``\\workspace\\...``) without a drive, in
+    # which case ``is_absolute()`` is false until resolved.
+    if workspace_root is not None and (path.is_absolute() or path.root):
+        relative = _workspace_relative_path(path, file_path, workspace_root, scan_root)
+        if relative is not None:
+            return _relative_reference(relative.as_posix())
+        return _file_uri(path.resolve())
+    if path.is_absolute():
+        return _file_uri(path)
+    return _relative_reference(path.as_posix())
 
 
 def _physical_location(

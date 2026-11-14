@@ -1244,37 +1244,91 @@ def _agent_eval_dimension_scores(
     return scores
 
 
+@dataclass(frozen=True)
+class AgentDimensionGate:
+    """What the Tier 3 dimension gate made of one recorded agent.
+
+    ``state`` says why the agent did or did not reach the gate:
+
+    ``scored``
+        The gate read a complete dimension set and ``verdict`` is the agent's
+        own verdict.
+    ``never_activated``
+        The skill never activated, so the agent is inconclusive by record
+        rather than by score.
+    ``incomplete_evidence``
+        The agent ran but carried no dimension set the gate could score, so it
+        contributed nothing to the verdict.
+    ``not_supported``
+        The agent's execution did not succeed, so the gate never considered it.
+
+    ``scores`` holds the dimension scores the gate read, in
+    ``DIMENSION_MAPPING`` order, and is empty unless ``state`` is ``scored``.
+    """
+
+    name: str
+    state: str
+    verdict: str | None
+    scores: tuple[tuple[str, float], ...] = ()
+
+
+def agent_eval_dimension_breakdown(
+    payload: dict[str, Any] | None,
+    *,
+    require_baseline: bool = True,
+) -> tuple[AgentDimensionGate, ...]:
+    """Return the per-agent evidence the Tier 3 dimension gate reads.
+
+    ``agent_eval_dimension_verdict`` folds this breakdown into the one verdict
+    it returns, so a report that renders the breakdown shows the evidence that
+    verdict was computed from and cannot drift from it.
+    """
+    breakdown: list[AgentDimensionGate] = []
+    for name, agent in _agent_eval_agents(payload).items():
+        if _agent_eval_safe_text(agent.get("execution_status")).lower() != "succeeded":
+            breakdown.append(AgentDimensionGate(name, "not_supported", None))
+            continue
+        activation = agent.get("skill_activation")
+        if isinstance(activation, dict) and activation.get("status") == "never_activated":
+            breakdown.append(AgentDimensionGate(name, "never_activated", "inconclusive"))
+            continue
+        scores = _agent_eval_dimension_scores(agent, require_baseline=require_baseline)
+        if scores is None:
+            breakdown.append(AgentDimensionGate(name, "incomplete_evidence", None))
+            continue
+        if any(score < DIMENSION_VERDICT_NEUTRAL_THRESHOLD for score in scores):
+            verdict = "fail"
+        elif any(score < DIMENSION_VERDICT_PASS_THRESHOLD for score in scores):
+            verdict = "neutral"
+        else:
+            verdict = "pass"
+        breakdown.append(
+            AgentDimensionGate(
+                name,
+                "scored",
+                verdict,
+                tuple(zip(DIMENSION_MAPPING, scores, strict=True)),
+            )
+        )
+    return tuple(breakdown)
+
+
 def agent_eval_dimension_verdict(
     payload: dict[str, Any] | None,
     *,
     require_baseline: bool = True,
 ) -> str | None:
     """Recompute a Tier 3 verdict from complete supported-agent dimensions."""
-    supported_agents = [
-        agent
-        for agent in _agent_eval_agents(payload).values()
-        if _agent_eval_safe_text(agent.get("execution_status")).lower() == "succeeded"
+    supported = [
+        entry
+        for entry in agent_eval_dimension_breakdown(payload, require_baseline=require_baseline)
+        if entry.state != "not_supported"
     ]
-    if not supported_agents:
+    if not supported:
         return None
 
-    verdicts: list[str] = []
-    has_partial_evidence = False
-    for agent in supported_agents:
-        activation = agent.get("skill_activation")
-        if isinstance(activation, dict) and activation.get("status") == "never_activated":
-            verdicts.append("inconclusive")
-            continue
-        scores = _agent_eval_dimension_scores(agent, require_baseline=require_baseline)
-        if scores is None:
-            has_partial_evidence = True
-            continue
-        if any(score < DIMENSION_VERDICT_NEUTRAL_THRESHOLD for score in scores):
-            verdicts.append("fail")
-        elif any(score < DIMENSION_VERDICT_PASS_THRESHOLD for score in scores):
-            verdicts.append("neutral")
-        else:
-            verdicts.append("pass")
+    verdicts = [entry.verdict for entry in supported if entry.verdict is not None]
+    has_partial_evidence = any(entry.state == "incomplete_evidence" for entry in supported)
 
     if "pass" in verdicts:
         return "pass"
@@ -2654,7 +2708,9 @@ class ReporterBase(ABC):
         Raises:
             UnsafeReportPathError: If the destination cannot be written safely.
         """
-        payload = self.render_all(results).encode("utf-8")
+        # A file name that is not valid UTF-8 reaches messages as lone
+        # surrogates; write those as escapes instead of failing the report.
+        payload = self.render_all(results).encode("utf-8", "backslashreplace")
         _write_report_atomically(output_path, payload)
 
     def get_file_extension(self) -> str:

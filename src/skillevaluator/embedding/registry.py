@@ -49,6 +49,7 @@ from skillevaluator.embedding.extractor import (
     MAX_MANIFEST_BYTES,
     ContentEntry,
     ExtractionResult,
+    ManifestEncodingError,
     discover_and_extract_detailed,
     extract_from_skill,
 )
@@ -106,7 +107,7 @@ _CATALOG_ENTRY_FIELDS = frozenset(
 
 
 class InvalidExplicitSkillError(ValueError):
-    """Explicit skills have no root ``SKILL.md`` with valid name and description frontmatter.
+    """Explicit skills have no root UTF-8 ``SKILL.md`` with valid name and description frontmatter.
 
     :meth:`EmbeddingRegistry.build_from_paths` raises it before any embedding
     request. The message names every such skill, in sorted order, only by its
@@ -266,7 +267,8 @@ class EmbeddingRegistry:
             raise ValueError("Explicit skill collection exceeds its supported entry count")
         entries = []
         # Every skill is checked, so one error names all skills whose frontmatter
-        # needs fixing. Limit and link errors still stop at their own skill.
+        # needs fixing, including a SKILL.md that is not UTF-8. Limit and link
+        # errors still stop at their own skill.
         invalid = []
         for path in unique:
             try:
@@ -280,15 +282,18 @@ class EmbeddingRegistry:
                     raise ValueError("Explicit skill paths must not contain links or parent traversal")
             if not current.resolve(strict=True).is_relative_to(root):
                 raise ValueError("An explicit skill is outside the checkout root")
-            entry = extract_from_skill(current)
+            try:
+                entry = extract_from_skill(current)
+            except ManifestEncodingError:
+                entry = None
             if entry is None:
                 invalid.append(relative.as_posix())
             else:
                 entries.append(entry)
         if invalid:
             raise InvalidExplicitSkillError(
-                "Each explicit skill requires a root SKILL.md whose frontmatter is a valid YAML mapping "
-                f"with a non-empty string name and description: {', '.join(invalid)}"
+                "Each explicit skill requires a root SKILL.md, saved as UTF-8, whose frontmatter is a valid YAML "
+                f"mapping with a non-empty string name and description: {', '.join(invalid)}"
             )
         return self._build_entries(root, entries, 1, False)
 

@@ -1053,6 +1053,27 @@ def test_skill_without_valid_frontmatter_stops_the_catalog_with_a_frontmatter_re
     assert alpha.split(" | ")[2] == f"INCOMPLETE · issues unknown · {reason}"
 
 
+@pytest.mark.parametrize("encoding", ["cp1252", "utf-16"])
+def test_skill_md_that_is_not_utf8_stops_the_catalog_with_a_frontmatter_reason(
+    consumer, tmp_path, monkeypatch, encoding
+):
+    # A SKILL.md saved as Windows-1252 or UTF-16 is named with the skills whose
+    # frontmatter is invalid, and the reason points at the frontmatter.
+    zeta = consumer / "skills" / "zeta"
+    zeta.mkdir()
+    (zeta / "SKILL.md").write_bytes("---\nname: zeta\ndescription: Café menu.\n---\nInstructions.\n".encode(encoding))
+    _reports, _env, tier, log = _evaluate_tier2_with_unselected_game(
+        consumer, tmp_path, monkeypatch, "name: 2048\ndescription: Play the game."
+    )
+    assert tier["reason"] == (
+        "A skill's invalid SKILL.md frontmatter stopped the comparison catalog; its diagnostics name the skill."
+    )
+    assert log.strip() == (
+        "Each explicit skill requires a root SKILL.md, saved as UTF-8, whose frontmatter is a valid YAML "
+        "mapping with a non-empty string name and description: skills/game, skills/zeta"
+    )
+
+
 @pytest.mark.parametrize(
     "frontmatter",
     [

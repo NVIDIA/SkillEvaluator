@@ -834,6 +834,10 @@ def test_public_docs_show_tier_two_collection_and_catalog_workflows() -> None:
     unnamed = "no skill, not even one whose frontmatter is invalid"
     assert f"the diagnostics then name {unnamed}" in " ".join(guide.split())
     assert f"the log then names {unnamed}." in catalog_entries[0]
+    # A SKILL.md that is not UTF-8 is named with them, under the same reason.
+    encoding = "that is not valid UTF-8, such as one saved as UTF-16 or as Windows-1252 with an accented letter"
+    assert f"{encoding}, stops the catalog with the same reason and is named the same way" in " ".join(guide.split())
+    assert f"{encoding}, stops the catalog with the same reason and is named the same way" in catalog_entries[0]
     assert "NVI" + "DIA" + "_INFERENCE_KEY" not in public_docs  # oss-boundary-anchor: docs-retired-credential
 
 

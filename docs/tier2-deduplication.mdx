@@ -32,7 +32,9 @@ mapping with a non-empty string `name` and `description`, such as `name: 2048`,
 request. Tier 2 then checks no skill and is incomplete. Its reason says that a
 skill's frontmatter is the cause, and the retained catalog diagnostics name
 every such skill by its path in the repository. Quote such a value, as in
-`name: "2048"`.
+`name: "2048"`. A `SKILL.md` that is not valid UTF-8, such as one saved as
+UTF-16 or as Windows-1252 with an accented letter, stops the catalog with the
+same reason and is named the same way; save it as UTF-8.
 Frontmatter over a [structure or length limit](#defaults-and-safety-limits)
 also stops the catalog, but with the reason that points at provider and
 embedding configuration, and the diagnostics then name no skill, not even one

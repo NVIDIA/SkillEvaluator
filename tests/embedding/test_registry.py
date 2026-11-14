@@ -127,8 +127,8 @@ def test_build_explicit_paths_names_a_skill_without_valid_frontmatter(
         EmbeddingRegistry(client).build_from_paths(tmp_path, [alpha, game])
 
     assert str(caught.value) == (
-        "Each explicit skill requires a root SKILL.md whose frontmatter is a valid YAML mapping "
-        "with a non-empty string name and description: skills/game"
+        "Each explicit skill requires a root SKILL.md, saved as UTF-8, whose frontmatter is a valid YAML "
+        "mapping with a non-empty string name and description: skills/game"
     )
     assert isinstance(caught.value, registry_module.InvalidExplicitSkillError)
     assert str(tmp_path) not in str(caught.value)
@@ -156,12 +156,61 @@ def test_build_explicit_paths_names_every_skill_without_valid_frontmatter(tmp_pa
         EmbeddingRegistry(client).build_from_paths(tmp_path, skills)
 
     assert str(caught.value) == (
-        "Each explicit skill requires a root SKILL.md whose frontmatter is a valid YAML mapping "
-        "with a non-empty string name and description: skills/game, skills/quiz, skills/zeta"
+        "Each explicit skill requires a root SKILL.md, saved as UTF-8, whose frontmatter is a valid YAML "
+        "mapping with a non-empty string name and description: skills/game, skills/quiz, skills/zeta"
     )
     client.embed.assert_not_called()
     client.embed_single.assert_not_called()
     client.embed_chunked.assert_not_called()
+
+
+@pytest.mark.parametrize("encoding", ["cp1252", "utf-16", "utf-16-le"])
+def test_build_explicit_paths_names_a_skill_whose_manifest_is_not_utf8(
+    tmp_path: Path, write_skill, encoding: str
+) -> None:
+    # A SKILL.md saved in another encoding, for example by a Windows editor or a
+    # PowerShell redirect, is named with the skills whose frontmatter is invalid.
+    alpha = write_skill(tmp_path / "skills", "alpha", description="First fixture")
+    skills = [alpha]
+    for name, manifest in (
+        ("zeta", "---\nname: zeta\ndescription: Café menu.\n---\n\n# Zeta\n".encode(encoding)),
+        ("game", b"---\nname: 2048\ndescription: Play the game.\n---\n\n# Game\n"),
+        ("beta", "---\nname: beta\ndescription: Café menu.\n---\n\n# Beta\n".encode(encoding)),
+    ):
+        skill = tmp_path / "skills" / name
+        skill.mkdir()
+        (skill / "SKILL.md").write_bytes(manifest)
+        skills.append(skill)
+    client = _make_mock_client([[1.0, 0.0], [0.0, 1.0]])
+
+    with pytest.raises(registry_module.InvalidExplicitSkillError) as caught:
+        EmbeddingRegistry(client).build_from_paths(tmp_path, skills)
+
+    assert str(caught.value) == (
+        "Each explicit skill requires a root SKILL.md, saved as UTF-8, whose frontmatter is a valid YAML "
+        "mapping with a non-empty string name and description: skills/beta, skills/game, skills/zeta"
+    )
+    assert str(tmp_path) not in str(caught.value)
+    client.embed.assert_not_called()
+    client.embed_single.assert_not_called()
+    client.embed_chunked.assert_not_called()
+
+
+def test_manifest_that_is_not_utf8_keeps_its_error_outside_explicit_paths(tmp_path: Path, write_skill) -> None:
+    # Only build_from_paths names such a skill; a directory scan still stops
+    # with the extractor's error.
+    write_skill(tmp_path / "skills", "alpha", description="First fixture")
+    zeta = tmp_path / "skills" / "zeta"
+    zeta.mkdir()
+    (zeta / "SKILL.md").write_bytes(b"---\nname: zeta\ndescription: Caf\xe9 menu.\n---\n\n# Zeta\n")
+    client = _make_mock_client([[1.0, 0.0], [0.0, 1.0]])
+
+    with pytest.raises(ValueError) as caught:
+        EmbeddingRegistry(client).build_from_directory(tmp_path / "skills", "skill")
+
+    assert str(caught.value) == "Manifest is not valid UTF-8: SKILL.md"
+    assert not isinstance(caught.value, registry_module.InvalidExplicitSkillError)
+    client.embed.assert_not_called()
 
 
 @pytest.mark.parametrize(

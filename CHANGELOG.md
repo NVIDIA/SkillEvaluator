@@ -219,6 +219,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- The starter walkthrough identifies the PASS message as the success summary;
+  the runner's final line gives the report and editable-starter directory.
+
 - The README's Tier 1 row now covers harness compatibility and links to the
   `harness` check.
 - `THIRD_PARTY_NOTICES.md` lists Bandit under the base dependencies. It has
@@ -248,9 +251,6 @@ All notable changes to SkillEvaluator are documented in this file.
   grader suite, so retuning any of them fails CI instead of rotting the page.
 
 ### Fixed
-
-- The starter walkthrough identifies the PASS message as the success summary;
-  the runner's final line gives the report and editable-starter directory.
 
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
   of `harness-check` no longer show internal test notes in their messages.

@@ -10839,10 +10839,10 @@ class TestSkillspectorMissingReferences:
             ("Run sh *a\x05$ now.", "xa\x05$", True),
             ("Run sh *a\x05$ now.", "xa\x05b", False),
             ("Run sh *a%05$ now.", "xa\x05b", False),
-            ("Run sh *a$ now.", "xab", False),
+            ("Run sh *a\ue000$ now.", "xa\ue000b", False),
             ("$ printf '%05d' 7 > output/notes.md", ".git", False),
             ("$ printf '%05d' 7 > output/notes.md", "evals", False),
-            ("$ echo %02 %03 %04 %05  > output/notes.md", ".git", False),
+            ("$ echo %02 %03 %04 %05 \ue000 > output/notes.md", ".git", False),
             ("$ printf '%05d' $X > output/notes.md", ".git", True),
             ("$ sh v*/i*.sh %05 > output/notes.md", "install.sh", True),
             # A shell keeps an escaped or quoted space in a word.
@@ -10885,7 +10885,7 @@ class TestSkillspectorMissingReferences:
             ('Run `printf \'{"h": "%03d", "m": "%03d"}\' 3 4` and write `output/notes.md`.', ".git", False),
             ('Run `printf \'{"h": "%04d", "m": "%04d"}\' 3 4` and write `output/notes.md`.', "evals", False),
             ('Run `jq -n \'{"a": "%02", "b": "%05"}\'` and write `output/notes.md`.', ".git", False),
-            ('Run `curl -d \'{"a": 1, "b": 2}\' x ` and write `output/notes.md`.', ".git", False),
+            ('Run `curl -d \'{"a": 1, "b": 2}\' x \ue000\ue001\ue002` and write `output/notes.md`.', ".git", False),
             ("Run `sh setup%02{' ',}helper.sh` now.", "setup\x02 helper.sh", True),
             ("Run `sh setup\\ {a,b}%03.sh` now.", "setup b\x03.sh", True),
             # Compact JSON whose braces and commas are unquoted is brace expansion
@@ -11030,7 +11030,7 @@ class TestSkillspectorMissingReferences:
             # Control and private-use characters in the word do not change its reading.
             ("'{a, b}\x02'", ("{a, b}\x02", "{a, b}\x02")),
             ("'{a,\x03 b}.\x04'", ("{a,\x03 b}.\x04", "{a,\x03 b}.\x04")),
-            ("'{a, b}'{c,d}", ("{a, b}*", "{a, b}*")),
+            ("'\ue000{a, b}'\ue001{c,d}", ("\ue000{a, b}\ue001*", "\ue000{a, b}\ue001*")),
         ],
     )
     def test_joined_word_reads_brace_and_cmd_syntax_as_a_shell_does(self, word: str, readings: tuple[str, str]) -> None:
@@ -11047,8 +11047,8 @@ class TestSkillspectorMissingReferences:
             _skillspector_stand_ins,
         )
 
-        assert _skillspector_stand_ins(["a\x02\x03\x04\x05", ""], 3) == ""
-        assert _skillspector_stand_ins(["x", ""], 2) == ""
+        assert _skillspector_stand_ins(["a\x02\x03\x04\x05", ""], 3) == "\ue000\ue001\ue002"
+        assert _skillspector_stand_ins(["\ue000x", "\ue002"], 2) == "\ue001\ue003"
         every = "".join(
             chr(code)
             for first, last in ((0xE000, 0xF8FF), (0xF0000, 0xFFFFD), (0x100000, 0x10FFFD))

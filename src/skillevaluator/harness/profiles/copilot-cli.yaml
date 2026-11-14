@@ -28,3 +28,6 @@ notes:
   - "Docs say skills only in immediate subfolders; runtime finds them 3 grouping levels deep."
   - "Follows symlinks inside and outside the checkout (SDK docs say inside only)."
   - "Project copy wins on duplicate names (3/3); missing name falls back to the folder name."
+plugin:
+  rules:
+    - {id: CP-PLUGIN-FORMAT, when: "not (fmt_claude or fmt_agent_v1 or fmt_copilot or fmt_root_json)", effect: not_loaded, outcome: rejected, message: "Copilot CLI installs .claude-plugin, .github/plugin, .plugin and plugin.json bundles; Codex- and Cursor-only bundles are refused.", fix: "Add .claude-plugin/plugin.json (Copilot reads it)."}

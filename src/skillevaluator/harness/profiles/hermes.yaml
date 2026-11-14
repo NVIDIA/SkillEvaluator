@@ -32,3 +32,6 @@ notes:
   - "Precedence: project > ~/.hermes/skills > skills.create_dir > external_dirs (project wins, 3/3)."
   - "Large bodies are spilled and paged through in small reads."
   - "Pin the commit: the displayed version string did not match the installed code."
+plugin:
+  rules:
+    - {id: HM-PLUGIN-FORMAT, when: "not (fmt_agent_v1 or fmt_hermes_native)", effect: not_loaded, outcome: rejected, message: "Hermes installs Agent Plugins v1 (plugin.json with the agent-plugins.org $schema) or native plugin.yaml plugins only.", fix: "Add an Agent Plugins v1 plugin.json."}

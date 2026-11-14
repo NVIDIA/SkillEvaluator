@@ -36,6 +36,7 @@ COMPONENTS = {
 }
 # Folders a harness can pick up without any manifest (Claude Code inline plugins).
 DEFAULT_DIRS = ("skills", "commands", "agents", "hooks")
+DECLARED_COMPONENT_KEYS = ("skills", "commands", "agents", "hooks", "mcpServers", "lspServers")
 # What a component outcome means for the plugin's status. Outcomes come from canary probes.
 OUTCOME_EFFECT = {
     "delivered": None,
@@ -71,7 +72,7 @@ def is_plugin_root(path: Path) -> bool:
 
 def plugin_facts(root: Path) -> dict[str, Any]:
     """Facts about a plugin folder: manifest formats, manifest validity, name and component counts."""
-    facts: dict[str, Any] = {"plugin_name": root.name, "manifest_invalid": False}
+    facts: dict[str, Any] = {"plugin_name": root.name, "manifest_invalid": False, "declares_components": False}
     for fmt, rel in MANIFESTS.items():
         path = root / rel
         facts[f"fmt_{fmt}"] = path.is_file()
@@ -85,6 +86,8 @@ def plugin_facts(root: Path) -> dict[str, Any]:
             continue
         if isinstance(data, dict) and isinstance(data.get("name"), str) and data["name"]:
             facts["plugin_name"] = data["name"]
+        if isinstance(data, dict) and any(data.get(key) for key in DECLARED_COMPONENT_KEYS):
+            facts["declares_components"] = True
         if fmt == "root_json":
             facts["fmt_agent_v1"] = isinstance(data, dict) and str(data.get("$schema", "")).startswith(
                 AGENT_PLUGINS_SCHEMA
@@ -129,7 +132,7 @@ def evaluate_plugin(profile: dict[str, Any], facts: dict[str, Any]) -> HarnessRe
                 }
             )
             worst = max(worst, _EFFECT_RANK[effect])
-        if facts.get("any_manifest") and not any(facts["components"].values()):
+        if facts.get("any_manifest") and not facts["declares_components"] and not any(facts["components"].values()):
             prefix = str(profile["rules"][0]["id"]).split("-")[0]
             findings.append(
                 {

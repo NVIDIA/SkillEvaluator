@@ -152,3 +152,11 @@ def test_dangling_skill_link_does_not_abort_plugin_facts(tmp_path: Path):
     (tmp_path / "skills" / "gone").mkdir(parents=True)
     (tmp_path / "skills" / "gone" / "SKILL.md").symlink_to(tmp_path / "missing.md")
     assert plugin_facts(tmp_path)["max_skill_bytes"] == 0
+
+
+def test_components_declared_in_the_manifest_are_not_reported_missing(tmp_path: Path):
+    (tmp_path / ".claude-plugin").mkdir()
+    manifest = {"name": "p", "commands": "./custom/commands"}
+    (tmp_path / ".claude-plugin" / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+    claude = next(p for p in load_profiles() if p["harness"] == "claude-code")
+    assert not evaluate_plugin(claude, plugin_facts(tmp_path)).findings

@@ -828,6 +828,12 @@ def test_public_docs_show_tier_two_collection_and_catalog_workflows() -> None:
     assert len(catalog_entries) == 1
     assert f"{condition} builds the catalog from all of them" in catalog_entries[0]
     assert "With one skill there is no catalog, and such frontmatter does not stop Tier 2." in catalog_entries[0]
+    # The edge-case table states the same condition.
+    assert "In [automatic CI](#tier-2-in-automatic-ci) with more than one skill, stops the comparison catalog" in guide
+    # A limit error stops at its own skill, so CI then names no invalid skill.
+    unnamed = "no skill, not even one whose frontmatter is invalid"
+    assert f"the diagnostics then name {unnamed}" in " ".join(guide.split())
+    assert f"the log then names {unnamed}." in catalog_entries[0]
     assert "NVI" + "DIA" + "_INFERENCE_KEY" not in public_docs  # oss-boundary-anchor: docs-retired-credential
 
 

@@ -35,8 +35,9 @@ every such skill by its path in the repository. Quote such a value, as in
 `name: "2048"`.
 Frontmatter over a [structure or length limit](#defaults-and-safety-limits)
 also stops the catalog, but with the reason that points at provider and
-embedding configuration; run `similarity-check` on the skill root to find that
-manifest.
+embedding configuration, and the diagnostics then name no skill, not even one
+whose frontmatter is invalid as described above. Run `similarity-check` on the
+skill root to find the manifest over the limit.
 
 The aggregate artifact preserves native Tier 2 JSON and HTML, including
 deduplication and catalog-similarity findings. Failed, missing or incomplete
@@ -606,7 +607,7 @@ handling terms before sending confidential skill content to a hosted endpoint.
     | Catalog path is missing | Returns an error and does not rebuild it silently |
     | Candidate lacks a root `SKILL.md`, or its frontmatter is not a valid YAML mapping with a non-empty string name and description | Rejects the catalog query and says what the frontmatter needs |
     | A manifest's frontmatter exceeds a structure limit, or its name or description is longer than 16,384 characters | Fails with an error that names the manifest, before any embedding request |
-    | A manifest's name or description is not a string, such as `name: 2048`, or its frontmatter is not a mapping | Excludes the manifest with a coverage reason, as for invalid YAML, and reports the scan as incomplete. In [automatic CI](#tier-2-in-automatic-ci), stops the comparison catalog and names the skill |
+    | A manifest's name or description is not a string, such as `name: 2048`, or its frontmatter is not a mapping | Excludes the manifest with a coverage reason, as for invalid YAML, and reports the scan as incomplete. In [automatic CI](#tier-2-in-automatic-ci) with more than one skill, stops the comparison catalog and names the skill |
     | A skill contains an exactly named, single-link regular `AGENTS.md` plus `CLAUDE.md -> AGENTS.md` | Validates and skips the unrelated compatibility alias while discovering `SKILL.md` |
     | The collection contains a relative directory alias such as `.agents -> .claude` whose target is a regular directory in the same collection | Skips the alias without following it, so manifests in the target are discovered once |
     | Candidate matches multiple catalog entries | Reports matches in descending similarity order |

@@ -22,6 +22,15 @@ from typing import Any, ClassVar
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _rich_detects_interactive_terminals(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Rich reads TTY_INTERACTIVE when it builds a console, and
+    # TTY_INTERACTIVE=0 turns off the in-place redraws that the tests with a
+    # forced terminal drive. Clear it so they draw the same frames wherever
+    # they run.
+    monkeypatch.delenv("TTY_INTERACTIVE", raising=False)
+
+
 class _TTYBuffer(io.StringIO):
     def isatty(self) -> bool:
         return True

@@ -141,19 +141,18 @@ def test_documented_labels_match_a_run_with_a_failed_peer() -> None:
     for text in ("summary.overall_score", "summary.overall_lift", "`neutral`"):
         assert text in section
     for label in (
-        "Completed-agent result. Other execution failures need attention",
         "Completed Agent Score",
-        "Quality Verdict",
         "Tier 3 quality",
         "Run details & provenance",
-        "Best performing agent",
         "Skill Lift",
         "Best-agent lift",
     ):
         assert label in section
         assert label in html
+    assert "Completed-agent result; other execution failures need attention" in html
+    assert result.metadata["agent_eval"]["best_agent"] in html
     # The standalone quality labels follow the run; completed-agent details keep its score.
-    assert "card follow the run's verdict" in section
+    assert "status follows the run's verdict" in section
     assert "Tier 3 quality: Changes required" in html
     assert "Changes required" in section
     assert _hero_command_status(raw) == "Changes required"
@@ -216,7 +215,8 @@ def test_no_fallback_to_a_lower_complete_agent() -> None:
     # The HTML still names the best agent and shows its lift.
     assert "even when its evidence is incomplete" in section
     assert payload["summary"]["overall_lift"] == pytest.approx(0.4)
-    assert "Best performing agent: opencode" in html
+    assert "Recorded best agent: opencode" in html
+    assert 'data-primary-metric="score"' not in raw
     assert "Skill Lift +0.40" in html
     assert "Best-agent lift: +0.40" in _run_details(raw)
 

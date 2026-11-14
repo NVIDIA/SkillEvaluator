@@ -250,10 +250,8 @@ def test_header_shows_one_verdict_and_skill_name_is_the_only_h1() -> None:
     html = _render(_results())
     header = html.split('<header class="main-header">', 1)[1].split("</header>", 1)[0]
 
-    assert re.findall(r'class="header-status-badge verdict-badge (\w+)" data-verdict="(\w+)"', header) == [
-        ("fail", "fail")
-    ]
-    assert "Changes required" in header
+    assert 'class="header-status-badge' not in header
+    assert 'class="hero-command-status verdict-chip fail">Changes required</p>' in html
     assert "Download JSON" in header
     assert re.findall(r"<h1[^>]*>([^<]+)</h1>", html) == ["demo"]
 
@@ -265,10 +263,7 @@ def _gated(results: list[ValidationResult], tier: int, *, blocking: bool = True)
 
 
 def _header_verdict(html: str) -> list[tuple[str, str]]:
-    header = html.split('<header class="main-header">', 1)[1].split("</header>", 1)[0]
-    return re.findall(
-        r'data-verdict="(\w+)">.*?<span class="sr-only">Verdict: </span>([^<]+)</span>', header, re.DOTALL
-    )
+    return re.findall(r'<p class="hero-command-status verdict-chip (\w+)">([^<]+)</p>', html)
 
 
 def _tier_card_verdicts(html: str) -> list[tuple[str, str]]:
@@ -379,7 +374,7 @@ def test_theme_selector_has_a_name_and_system_light_dark_choices() -> None:
     assert '<select id="report-theme"' in html
     assert all(f'<option value="{theme}">' in html for theme in ("system", "light", "dark"))
     assert "matchMedia('(prefers-color-scheme: dark)')" in html
-    assert "localStorage.removeItem('skillevaluator-theme')" in html
+    assert "localStorage.setItem('skillevaluator-theme', reportThemePreference)" in html
 
 
 def test_tier3_charts_are_redrawn_with_print_colors() -> None:
@@ -443,14 +438,11 @@ def _rules(css: str):
 
 
 def test_dark_colors_never_reach_print() -> None:
-    html = _render(_results())
-    css = "\n".join(re.findall(r"<style>(.*?)</style>", html, flags=re.DOTALL))
-    dark_rules = [(media, selector, body) for media, selector, body in _rules(css) if 'data-theme="dark"' in selector]
-
-    assert dark_rules
-    for media, selector, body in dark_rules:
-        literal_colors = re.search(r"#[0-9a-fA-F]{3,8}\b|rgba?\(", body)
-        assert not literal_colors or any(query.startswith("@media screen") for query in media), selector
+    css = (TEMPLATES / "report_ui.css.j2").read_text(encoding="utf-8")
+    print_rules = [(selector, body) for media, selector, body in _rules(css) if "@media print" in media]
+    palette = next(body for selector, body in print_rules if "[data-theme=dark]" in selector)
+    assert "--bg:#fff" in palette and "--dark-text:#1e293b" in palette
+    assert "--badge-fail-bg:#fee2e2" in palette
 
 
 def test_print_shows_the_header_and_one_results_view() -> None:
@@ -460,64 +452,50 @@ def test_print_shows_the_header_and_one_results_view() -> None:
     hidden = " ".join(selector for selector, body in print_rules if "display:none" in body)
 
     assert ".main-header" in shown
-    assert ".header-brand .se-logo" in shown
     assert ".header-controls" in hidden and ".skip-link" in hidden
-    assert "#results-by-validator>.validator-card" in hidden
+    assert ".results-view:not(#results-by-skill)" in hidden
 
 
-def test_logo_is_in_the_sidebar_and_the_header_with_unique_ids() -> None:
+def test_native_brand_header_replaces_sidebar_and_decorative_logo() -> None:
     html = _render(_results())
+    header = html.split('<header class="main-header">', 1)[1].split("</header>", 1)[0]
+    assert '<div class="logo-section">' in header
+    assert '<p class="header-title">SkillEvaluator</p>' in header
+    assert '<aside class="report-sidebar"' not in html
+    assert len(_outline(html).ids) == len(set(_outline(html).ids))
 
-    assert html.count('class="se-logo"') == 2
-    assert 'class="brand-mark"' not in html
-    # Both copies sit next to the visible name, so they are decorative and carry no ids.
-    assert len(re.findall(r'<svg class="se-logo"[^>]*aria-hidden="true"', html)) == 2
-    assert ' id="se-logo' not in html
 
-
-def test_no_workspace_font_size_is_below_eleven_pixels() -> None:
-    css = (TEMPLATES / "report_ui.css.j2").read_text(encoding="utf-8")
-    sizes = [float(size) for size in re.findall(r"font-size:(\d+(?:\.\d+)?)px", css)]
-
-    assert sizes
-    assert min(sizes) >= 11
+def test_native_body_uses_readable_sixteen_pixel_default() -> None:
+    html = _render(_results())
+    body = re.search(r"body\s*\{([^}]+)\}", html).group(1)
+    assert "line-height: 1.6" in body
+    assert "font-family: -apple-system" in body
+    assert "font-size:" not in body  # Browser default is 16px; no workspace shrink.
 
 
 def _px(value: str, unit: str) -> float:
     return float(value) * (16 if unit == "rem" else 1)
 
 
-def test_template_text_under_eleven_pixels_is_overridden_or_unused() -> None:
-    """Every small size in report.html.j2 is unused or raised to 11 px by the workspace stylesheet."""
+def test_native_presentation_stylesheets_match_pinned_reference() -> None:
+    from hashlib import sha256
+
     template = (TEMPLATES / "report.html.j2").read_text(encoding="utf-8")
-    workspace = (TEMPLATES / "report_ui.css.j2").read_text(encoding="utf-8")
-    styles = "\n".join(re.findall(r"<style[^>]*>(.*?)</style>", template, flags=re.DOTALL))
-    markup = re.sub(r"<style[^>]*>.*?</style>", "", template, flags=re.DOTALL)
-    size = r"font-size:\s*(\d*\.?\d+)(px|rem)\b"
-    raised = {
-        re.findall(r"\.([\w-]+)", part)[-1]
-        for _media, selector, body in _rules(workspace)
-        if any(_px(value, unit) >= 11 for value, unit in re.findall(size, body))
-        for part in selector.split(",")
-        if re.search(r"\.[\w-]+", part)
-    }
-    too_small = set()
-    for _media, selector, body in _rules(styles):
-        if not any(_px(value, unit) < 11 for value, unit in re.findall(size, body)):
-            continue
-        for part in selector.split(","):
-            name = re.findall(r"\.([\w-]+)", part)[-1]
-            if name not in raised and re.search(rf'class="[^"]*(?<![\w-]){re.escape(name)}(?![\w-])', markup):
-                too_small.add(name)
-    inline = [_px(value, unit) for value, unit in re.findall(r'style="[^"]*?' + size, markup)]
-
-    assert not too_small
-    assert inline
-    assert min(inline) >= 11
+    # Canonical product branding may change comments; every native declaration stays pinned.
+    # Expected comment-free digests were computed once from the approved 31019ce3b reference.
+    blocks = [
+        re.sub(r"/\*.*?\*/", "", block, flags=re.DOTALL)
+        for block in re.findall(r"<style>(.*?)</style>", template, re.DOTALL)
+    ]
+    assert [sha256(block.encode()).hexdigest() for block in blocks] == [
+        "9a5dbf4ca0521d8c4130e82fc65a5ed0188d9d667e119323bf6b3c29871d2146",
+        "2f7d5555e6ff116aa4f95c0e3a4b620a549267c9ec38c95a7dd3a30fd9a04bc6",
+        "f02e0b64bdb8ebe7e9fd65c6fd45cace436a961a60a0b6552d18a06db7780cba",
+        "1997da9ee6f5b7cdefabbebffe2fa3d0101fce091f533e2f59403c2e2ce58875",
+    ]
 
 
-def test_short_table_cells_do_not_break_mid_word() -> None:
+def test_table_overflow_is_scoped_to_scroll_containers() -> None:
     css = (TEMPLATES / "report_ui.css.j2").read_text(encoding="utf-8")
-
-    assert "td,th{overflow-wrap:anywhere}" not in css
-    assert "td,th{overflow-wrap:break-word}th{white-space:nowrap}" in css
+    assert ".table-scroll,.table-container,.summary-table-container,.top-issues-content,.contributor-content" in css
+    assert "max-width:100%;overflow-x:auto" in css

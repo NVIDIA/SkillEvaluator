@@ -9,7 +9,82 @@
 </div>
 {% endif %}
 {%- endmacro %}
-{% from "logo.svg.j2" import se_logo %}<html lang="en">
+{% from "telemetry.html.j2" import render_telemetry %}
+{% from "plugin_evidence.html.j2" import render_plugin_evidence %}{% macro insight_plain_evidence(value) -%}
+{% if value %}
+{% if value | string | length > 240 %}
+<details class="t3-eval-evidence"><summary>Evidence</summary><p class="t3-dim-hint">{{ value }}</p></details>
+{% else %}<p class="t3-dim-hint">Evidence: {{ value }}</p>{% endif %}
+{% endif %}
+{%- endmacro %}
+{% macro insight_cards(items, mode='recommendation') -%}
+<div class="t3-sug-stack">
+{% if mode == 'conclusion' %}
+                    {% for conclusion in items %}
+                        {% set sev = conclusion.severity or 'warn' %}
+                        {% set sev_class = 'severity-pass' if sev in ('pass','ok') else ('severity-fail' if sev in ('fail','critical','high') else 'severity-warn') %}
+                        {% set sev_pill = 'ok' if sev in ('pass','ok') else ('critical' if sev in ('fail','critical','high') else 'warning') %}
+                        {% set source = (conclusion.source or 'deterministic') %}
+                        <div class="t3-sug-card {{ sev_class }}">
+                            <span class="t3-sug-num">{{ loop.index }}</span>
+                            <div>
+                                <div class="t3-sug-title">
+                                    {{ conclusion.title }}
+                                    <span class="t3-pill {{ sev_pill }}">{{ sev }}</span>
+                                    <span class="t3-insight-source insight-source-{{ source }}">{{ source }}</span>
+                                </div>
+                                <div class="t3-sug-body">{{ conclusion.message }}</div>
+                                    {% if conclusion.check %}<p class="t3-dim-hint">Check: {{ conclusion.check }}</p>{% endif %}
+                                    {{ insight_plain_evidence(conclusion.evidence_text) }}
+                                {% if conclusion.evidence and conclusion.evidence.url %}<a class="t3-evidence-link" href="{{ conclusion.evidence.url }}" target="_blank" rel="noopener">View {{ conclusion.evidence.label or 'evidence' }}</a>{% endif %}
+                            </div>
+                            <div class="t3-sug-actions">
+                                <button class="t3-copy-btn" data-report-action="copy" data-copy-text="{{ conclusion.title ~ ': ' ~ conclusion.message }}">Copy</button>
+                            </div>
+                        </div>
+                    {% endfor %}
+{% else %}
+                        {% for reco in items %}
+                            {% set sev = reco.severity or 'warn' %}
+                            {% set sev_class = 'severity-pass' if sev in ('pass','ok') else ('severity-fail' if sev in ('fail','critical','high') else 'severity-warn') %}
+                            {% set source = (reco.source or 'deterministic') %}
+                            <div class="t3-sug-card {{ sev_class }}">
+                                <span class="t3-sug-num">{{ loop.index }}</span>
+                                <div>
+                                    <div class="t3-sug-title">
+                                        <span class="t3-sug-cat">{{ reco.category or 'Action' }}</span>
+                                        {% if reco.title %}<span style="font-weight:700;">{{ reco.title }}</span>{% endif %}
+                                        <span class="t3-insight-source insight-source-{{ source }}">{{ source }}</span>
+                                    </div>
+                                    <div class="t3-sug-body">{{ reco.message }}</div>
+                                    {% if reco.problem %}
+                                    {% if reco.problem_in_diagnostics %}<a class="t3-evidence-link" href="#tier3-execution-errors">Recorded problem in Diagnostics</a>
+                                    {% else %}<details class="t3-eval-evidence"><summary>Recorded problem</summary><p class="t3-dim-hint">{{ reco.problem }}</p></details>{% endif %}
+                                    {% endif %}
+                                    {% if reco.check %}<p class="t3-dim-hint">Check: {{ reco.check }}</p>{% endif %}
+                                    {% if reco.insight_kind == 'execution_action' %}<p class="t3-dim-hint">Scope: {{ reco.metric or 'evaluation' }}{% if reco.agent %} · Agent: {{ reco.agent }}{% endif %}{% if reco.case_id or reco.case %} · Case: {{ reco.case_id or reco.case }}{% endif %}{% if reco.condition %} · Condition: {{ reco.condition }}{% endif %}{% if reco.strength %} · Strength: {{ reco.strength }}{% endif %}</p>{% endif %}
+                                    {{ insight_plain_evidence(reco.evidence_text) }}
+                                    {% if reco.evidence and reco.evidence.url %}
+                                    <a class="t3-evidence-link" href="{{ reco.evidence.url }}" target="_blank" rel="noopener">View {{ reco.evidence.label or 'evidence' }}</a>
+                                    {% endif %}
+                                </div>
+                                <div class="t3-sug-actions">
+                                    <button class="t3-copy-btn" data-report-action="copy" data-copy-text="{{ reco.message }}">Copy</button>
+                                </div>
+                            </div>
+                        {% endfor %}
+{% endif %}
+</div>
+{%- endmacro %}
+{% macro insight_next_steps(steps) -%}
+{% if steps %}
+<p class="t3-next-steps-conclusion">Next steps for the run:</p>
+<ol class="t3-next-steps-list">
+{% for step in steps %}<li><strong>{{ step.problem }}</strong> [{{ step.target }}{% if step.strength and step.strength != 'supported' %} · {{ step.strength }}{% endif %}]: {{ step.action }} Check: {{ step.check }}{% if step.evidence and step.evidence | string | length <= 240 %} Evidence: {{ step.evidence }}{% endif %}{% if step.evidence and step.evidence | string | length > 240 %}{{ insight_plain_evidence(step.evidence) }}{% endif %}</li>{% endfor %}
+</ol>
+{% endif %}
+{%- endmacro %}
+<html lang="en" data-default-theme="{{ 'dark' if tier3 else 'light' }}" data-theme="{{ 'dark' if tier3 else 'light' }}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -51,7 +126,6 @@
             --badge-fail-bg: #fee2e2;
             --badge-fail-tx: #991b1b;
         }
-        @media screen {
         [data-theme="dark"] {
             --primary-color: #0c111b;
             --secondary-color: #76b900;
@@ -86,7 +160,6 @@
             --badge-fail-bg: #7f1d1d;
             --badge-fail-tx: #fecaca;
         }
-        }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         html { scroll-behavior: smooth; }
         body {
@@ -119,7 +192,8 @@
         /* Brand block. Sized to mirror the hero panel one row down so the
            page reads as a single visual hierarchy rather than two competing
            type scales (hero title is 1.8rem/800; brand sits a hair larger to
-           keep "SkillEvaluator" as the top-level identifier). */
+           keep "SkillEvaluator" as the top-level identifier). Public branding uses
+           the canonical name; the native style declarations are unchanged. */
         .header-title {
             font-size: 2rem;
             font-weight: 800;
@@ -199,9 +273,8 @@
         }
         .header-status-badge.pass { background: rgba(255,255,255,0.95); color: var(--success-color); }
         .header-status-badge.fail { background: #fecaca; color: #991b1b; border: 1px solid #fca5a5; }
-        .header-status-badge.warn { background: #fef3c7; color: #92400e; border: 1px solid #f59e0b; }
-        @media screen { [data-theme="dark"] .header-status-badge.fail { background: #450a0a; color: #fca5a5; border-color: #991b1b; } }
-        @media screen { [data-theme="dark"] .header-status-badge.warn { background: #451a03; color: #fcd34d; border-color: #92400e; } }
+        .header-status-badge.warn { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+        [data-theme="dark"] .header-status-badge.fail { background: #450a0a; color: #fca5a5; border-color: #991b1b; }
         .container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
         .nav-tabs { display: flex; gap: 0.5rem; margin: 1.5rem 0; flex-wrap: wrap; }
         .nav-tab {
@@ -216,7 +289,7 @@
             transition: all 0.2s ease;
         }
         .nav-tab:hover { border-color: var(--secondary-color); color: var(--secondary-color); }
-        .nav-tab.active { background: var(--secondary-color); color: var(--on-accent); border-color: var(--secondary-color); }
+        .nav-tab.active { background: var(--secondary-color); color: white; border-color: var(--secondary-color); }
         .tab-content { display: none; }
         .tab-content.active { display: block; }
         .dashboard {
@@ -271,9 +344,9 @@
         .status-badge.pass { background: #dcfce7; color: #166534; }
         .status-badge.fail { background: #fee2e2; color: #991b1b; }
         .status-badge.warn { background: #fef3c7; color: #92400e; }
-        @media screen { [data-theme="dark"] .status-badge.pass { background: #14532d; color: #86efac; } }
-        @media screen { [data-theme="dark"] .status-badge.fail { background: #450a0a; color: #fca5a5; } }
-        @media screen { [data-theme="dark"] .status-badge.warn { background: #451a03; color: #fcd34d; } }
+        [data-theme="dark"] .status-badge.pass { background: #14532d; color: #86efac; }
+        [data-theme="dark"] .status-badge.fail { background: #450a0a; color: #fca5a5; }
+        [data-theme="dark"] .status-badge.warn { background: #451a03; color: #fcd34d; }
         .section-header {
             color: var(--dark-text);
             font-weight: 600;
@@ -299,9 +372,10 @@
             transition: all 0.2s ease;
         }
         .filter-btn:hover { border-color: var(--secondary-color); }
-        .filter-btn.active { background: var(--secondary-color); color: var(--on-accent); border-color: var(--secondary-color); }
+        .filter-btn.active { background: var(--secondary-color); color: white; border-color: var(--secondary-color); }
         .filter-btn.success.active { background: var(--success-color); border-color: var(--success-color); }
         .filter-btn.danger.active { background: var(--danger-color); border-color: var(--danger-color); }
+        .filter-btn.warning.active { background: var(--warning-color); border-color: var(--warning-color); }
         .table-section { margin: 1.25rem 0; }
         .table-toggle {
             background: var(--bg);
@@ -372,7 +446,7 @@
         .validator-collapsible:hover { background: var(--bg-secondary); }
         .validator-collapsible.active {
             background: var(--secondary-color);
-            color: var(--on-accent);
+            color: white;
             border-color: var(--secondary-color);
             border-radius: 8px 8px 0 0;
         }
@@ -385,7 +459,6 @@
         .collapsible-header .status-indicator.warn { background: var(--warning-color); }
         .validator-collapsible.active .status-indicator.pass { background: #86efac; }
         .validator-collapsible.active .status-indicator.fail { background: #fca5a5; }
-        .validator-collapsible.active .status-indicator.warn { background: #fcd34d; }
         .validator-content {
             max-height: 0;
             overflow: hidden;
@@ -423,10 +496,10 @@
         .severity-medium { background: #fef3c7; color: #92400e; }
         .severity-low { background: #f3f4f6; color: #4b5563; }
         .severity-info { background: #dbeafe; color: #1e40af; }
-        @media screen { [data-theme="dark"] .severity-critical, [data-theme="dark"] .severity-high { background: #450a0a; color: #fca5a5; } }
-        @media screen { [data-theme="dark"] .severity-medium { background: #451a03; color: #fcd34d; } }
-        @media screen { [data-theme="dark"] .severity-low { background: #374151; color: #9ca3af; } }
-        @media screen { [data-theme="dark"] .severity-info { background: #1e3a8a; color: #93c5fd; } }
+        [data-theme="dark"] .severity-critical, [data-theme="dark"] .severity-high { background: #450a0a; color: #fca5a5; }
+        [data-theme="dark"] .severity-medium { background: #451a03; color: #fcd34d; }
+        [data-theme="dark"] .severity-low { background: #374151; color: #9ca3af; }
+        [data-theme="dark"] .severity-info { background: #1e3a8a; color: #93c5fd; }
         .finding-meta { display: flex; flex-wrap: wrap; gap: 0.75rem; color: var(--text-secondary); font-size: 0.8rem; margin-top: 0.375rem; }
         .finding-meta span { display: flex; align-items: center; gap: 0.25rem; }
         .llm-verification { margin-top: 0.625rem; padding: 0.5rem 0.75rem; border: 1px solid var(--border-color); border-radius: 6px; font-size: 0.8rem; overflow-wrap: anywhere; }
@@ -452,7 +525,7 @@
             border-left: 3px solid var(--success-color);
             color: #166534;
         }
-        @media screen { [data-theme="dark"] .suggestion { background: #14532d; color: #bbf7d0; } }
+        [data-theme="dark"] .suggestion { background: #14532d; color: #bbf7d0; }
         footer {
             margin-top: 2rem;
             padding: 1.25rem 2rem;
@@ -469,7 +542,7 @@
             padding: 0.5rem 0.75rem;
             border-radius: 6px;
             background: var(--secondary-color);
-            color: var(--on-accent);
+            color: white;
             border: none;
             cursor: pointer;
             font-size: 0.75rem;
@@ -530,6 +603,7 @@
         }
         .skill-name .status-dot.pass { background: var(--success-color); }
         .skill-name .status-dot.fail { background: var(--danger-color); }
+        .skill-name .status-dot.warn { background: var(--warning-color); }
         .skill-checks-summary {
             display: flex;
             align-items: center;
@@ -595,7 +669,7 @@
             font-size: 0.75rem;
             color: #166534;
         }
-        @media screen { [data-theme="dark"] .check-finding .finding-suggestion { background: #14532d; color: #bbf7d0; } }
+        [data-theme="dark"] .check-finding .finding-suggestion { background: #14532d; color: #bbf7d0; }
         .metadata-tag {
             display: inline-block;
             background: var(--bg-secondary);
@@ -624,7 +698,7 @@
             transition: all 0.2s ease;
         }
         .view-toggle-btn:hover { border-color: var(--secondary-color); }
-        .view-toggle-btn.active { background: var(--secondary-color); color: var(--on-accent); border-color: var(--secondary-color); }
+        .view-toggle-btn.active { background: var(--secondary-color); color: white; border-color: var(--secondary-color); }
         .results-view { display: none; }
         .results-view.active { display: block; }
         .skills-summary-bar {
@@ -714,7 +788,7 @@
             cursor: pointer;
             transition: all 0.15s ease;
         }
-        .skill-pill:hover { background: var(--secondary-color); color: var(--on-accent); }
+        .skill-pill:hover { background: var(--secondary-color); color: white; }
         /* Pair the skill pill (jumps to finding) with a small quality-score
            link so the two destinations stay distinct: the issue lives in the
            main pill, the quality score lives in the trailing ``Q`` chip. */
@@ -744,7 +818,7 @@
             transition: all 0.15s ease;
             border-left: 1px solid var(--border-color);
         }
-        .quality-pill:hover { background: var(--warning-color); color: var(--on-warning); }
+        .quality-pill:hover { background: var(--warning-color); color: white; }
         .top-issues-active-row { background: var(--bg-secondary) !important; outline: 2px solid var(--secondary-color); outline-offset: -2px; }
 
         /* Contributor Summary */
@@ -813,8 +887,10 @@
         }
         .contributor-item-pill.pass { background: #dcfce7; color: #166534; }
         .contributor-item-pill.fail { background: #fee2e2; color: #991b1b; }
-        @media screen { [data-theme="dark"] .contributor-item-pill.pass { background: #14532d; color: #86efac; } }
-        @media screen { [data-theme="dark"] .contributor-item-pill.fail { background: #450a0a; color: #fca5a5; } }
+        .contributor-item-pill.warn { background: #fef3c7; color: #92400e; }
+        [data-theme="dark"] .contributor-item-pill.pass { background: #14532d; color: #86efac; }
+        [data-theme="dark"] .contributor-item-pill.fail { background: #450a0a; color: #fca5a5; }
+        [data-theme="dark"] .contributor-item-pill.warn { background: #451a03; color: #fcd34d; }
         .contributor-item-pill:hover { opacity: 0.8; }
 
         .skill-filter-banner {
@@ -830,7 +906,7 @@
             color: #1e40af;
             position: sticky; top: 8rem; z-index: 49;
         }
-        @media screen { [data-theme="dark"] .skill-filter-banner { background: #1e3a5f; border-color: #2563eb; color: #93c5fd; } }
+        [data-theme="dark"] .skill-filter-banner { background: #1e3a5f; border-color: #2563eb; color: #93c5fd; }
         .skill-filter-banner.visible { display: flex; }
         .skill-filter-banner .clear-filter {
             margin-left: auto;
@@ -844,11 +920,11 @@
             font-size: 0.8rem;
         }
         .skill-filter-banner .clear-filter:hover { background: rgba(0,0,0,0.08); }
-        @media screen { [data-theme="dark"] .skill-filter-banner .clear-filter:hover { background: rgba(255,255,255,0.1); } }
+        [data-theme="dark"] .skill-filter-banner .clear-filter:hover { background: rgba(255,255,255,0.1); }
         .count-badge {
             display: inline-block;
             background: var(--danger-color);
-            color: var(--on-danger);
+            color: white;
             padding: 0.125rem 0.5rem;
             border-radius: 10px;
             font-size: 0.7rem;
@@ -878,7 +954,7 @@
             transition: all 0.2s ease;
         }
         .severity-filter-btn:hover { border-color: var(--secondary-color); }
-        .severity-filter-btn.active { background: var(--secondary-color); color: var(--on-accent); border-color: var(--secondary-color); }
+        .severity-filter-btn.active { background: var(--secondary-color); color: white; border-color: var(--secondary-color); }
         .severity-filter-btn.active.critical-btn { background: var(--critical-color); border-color: var(--critical-color); }
         .severity-filter-btn.active.high-btn { background: var(--high-color); border-color: var(--high-color); }
 
@@ -896,9 +972,9 @@
         .confidence-badge.high-conf { background: #fee2e2; color: #991b1b; }
         .confidence-badge.medium-conf { background: #fef3c7; color: #92400e; }
         .confidence-badge.low-conf { background: #f3f4f6; color: #6b7280; border: 1px dashed #d1d5db; }
-        @media screen { [data-theme="dark"] .confidence-badge.high-conf { background: #450a0a; color: #fca5a5; } }
-        @media screen { [data-theme="dark"] .confidence-badge.medium-conf { background: #451a03; color: #fcd34d; } }
-        @media screen { [data-theme="dark"] .confidence-badge.low-conf { background: #374151; color: #9ca3af; border-color: #4b5563; } }
+        [data-theme="dark"] .confidence-badge.high-conf { background: #450a0a; color: #fca5a5; }
+        [data-theme="dark"] .confidence-badge.medium-conf { background: #451a03; color: #fcd34d; }
+        [data-theme="dark"] .confidence-badge.low-conf { background: #374151; color: #9ca3af; border-color: #4b5563; }
 
         /* Low-confidence finding styling */
         .check-finding.low-confidence {
@@ -943,7 +1019,7 @@
             font-weight: 600;
             color: var(--secondary-color);
         }
-        @media screen { [data-theme="dark"] .finding-suggestion.truncatable::after { background: #14532d; } }
+        [data-theme="dark"] .finding-suggestion.truncatable::after { background: #14532d; }
         .finding-suggestion.truncatable.expanded {
             max-height: none;
         }
@@ -986,9 +1062,10 @@
         .severity-breakdown-item.sev-high { background: #fee2e2; color: #991b1b; }
         .severity-breakdown-item.sev-medium { background: #fef3c7; color: #92400e; }
         .severity-breakdown-item.sev-low { background: #f3f4f6; color: #4b5563; }
-        @media screen { [data-theme="dark"] .severity-breakdown-item.sev-critical, [data-theme="dark"] .severity-breakdown-item.sev-high { background: #450a0a; color: #fca5a5; } }
-        @media screen { [data-theme="dark"] .severity-breakdown-item.sev-medium { background: #451a03; color: #fcd34d; } }
-        @media screen { [data-theme="dark"] .severity-breakdown-item.sev-low { background: #374151; color: #9ca3af; } }
+        [data-theme="dark"] .severity-breakdown-item.sev-critical,
+        [data-theme="dark"] .severity-breakdown-item.sev-high { background: #450a0a; color: #fca5a5; }
+        [data-theme="dark"] .severity-breakdown-item.sev-medium { background: #451a03; color: #fcd34d; }
+        [data-theme="dark"] .severity-breakdown-item.sev-low { background: #374151; color: #9ca3af; }
         .severity-breakdown-label {
             font-size: 0.65rem;
             font-weight: 700;
@@ -998,7 +1075,7 @@
             margin-top: 0.5rem;
         }
         .severity-breakdown-label.advisory { color: #92400e; }
-        @media screen { [data-theme="dark"] .severity-breakdown-label.advisory { color: #fcd34d; } }
+        [data-theme="dark"] .severity-breakdown-label.advisory { color: #fcd34d; }
         .advisory-note {
             font-size: 0.65rem;
             font-style: italic;
@@ -1015,8 +1092,8 @@
         /* Dedup finding collapsible cards */
         .dedup-finding-high { border: 1px solid #fca5a5; background: #fef2f2; }
         .dedup-finding-medium { border: 1px solid #fde68a; background: #fffbeb; }
-        @media screen { [data-theme="dark"] .dedup-finding-high { border-color: #991b1b; background: #450a0a; } }
-        @media screen { [data-theme="dark"] .dedup-finding-medium { border-color: #92400e; background: #451a03; } }
+        [data-theme="dark"] .dedup-finding-high { border-color: #991b1b; background: #450a0a; }
+        [data-theme="dark"] .dedup-finding-medium { border-color: #92400e; background: #451a03; }
         .dedup-recommendation {
             margin-top: 0.75rem; padding: 0.75rem;
             background: var(--bg-secondary); border-radius: 6px;
@@ -1131,6 +1208,7 @@
         .tier-card.fail::before { background: var(--danger-color); }
         .tier-card.warn { background: linear-gradient(135deg, rgba(187, 128, 9, 0.10) 0%, var(--bg) 70%); }
         .tier-card.warn::before { background: var(--warning-color); }
+        .tier-card.skipped { opacity: 0.7; }
         .tier-card.skipped::before { background: var(--text-secondary); }
         .tier-card-head {
             display: flex;
@@ -1152,9 +1230,9 @@
             border-radius: 999px;
             letter-spacing: 0.05em;
         }
-        .tier-card.pass .tier-card-verdict { background: var(--badge-pass-bg); color: var(--badge-pass-tx); border: 1px solid currentColor; }
-        .tier-card.fail .tier-card-verdict { background: var(--badge-fail-bg); color: var(--badge-fail-tx); border: 1px solid currentColor; }
-        .tier-card.warn .tier-card-verdict { background: var(--badge-warn-bg); color: var(--badge-warn-tx); border: 1px solid currentColor; }
+        .tier-card.pass .tier-card-verdict { background: var(--success-color); color: white; }
+        .tier-card.fail .tier-card-verdict { background: var(--danger-color); color: white; }
+        .tier-card.warn .tier-card-verdict { background: var(--warning-color); color: white; }
         .tier-card.skipped .tier-card-verdict { background: var(--bg-tertiary); color: var(--text-secondary); }
         .tier-card-title {
             font-size: 1.05rem;
@@ -1192,6 +1270,9 @@
             text-decoration: none;
         }
         .tier-card-link:hover { border-color: var(--secondary-color); background: var(--bg-secondary); }
+        .tier-card-jobs { display: flex; flex-direction: column; gap: 0.35rem; margin-top: 0.2rem; width: 100%; }
+        .tier-card-job { display: flex; flex-direction: column; gap: 0.15rem; }
+        .tier-card-job-label { font-size: 0.72rem; font-weight: 700; color: var(--dark-text); }
         .tier-card-sev {
             display: flex;
             flex-wrap: wrap;
@@ -1207,7 +1288,7 @@
             background: var(--bg);
         }
         .tier-card-sev-pill.crit { color: var(--danger-color); border-color: var(--danger-color); }
-        .tier-card-sev-pill.high { color: var(--high-color); border-color: var(--high-color); }
+        .tier-card-sev-pill.high { color: #d29922; border-color: #d29922; }
         .tier-card-sev-pill.med { color: var(--warning-color); border-color: var(--warning-color); }
         .tier-card-sev-pill.low { color: var(--text-secondary); }
         .chart-grid {
@@ -1224,8 +1305,6 @@
             box-shadow: var(--shadow);
         }
         .chart-card h3 { font-size: 0.95rem; color: var(--text-secondary); margin-bottom: 0.75rem; }
-        .chart-description,.chart-fallback { font-size: 0.82rem; color: var(--text-secondary); }
-        .chart-notices pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.75rem; }
         .table-scroll { max-width: 100%; overflow-x: auto; margin: 1rem 0; border-radius: 10px; border: 1px solid var(--border-color); -webkit-overflow-scrolling: touch; }
         .table-scroll .summary-table { margin: 0; }
         .pass-at-k-table { min-width: 720px; }
@@ -1238,9 +1317,338 @@
             .agent-hero-top { align-items: flex-start; }
             .tier-cards { grid-template-columns: 1fr; }
         }
+        {%- if plugin_view or tier3_plugin %}
+        /* Plugin sections (Tier 1 static metadata and Tier 3 plugin evidence) */
+        .plugin-section { background: var(--bg); border: 1px solid var(--border-color); border-left: 4px solid var(--secondary-color); border-radius: 12px; padding: 1rem 1.15rem; margin: 0 0 1.25rem; box-shadow: var(--shadow); }
+        .plugin-section-head { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+        .plugin-section-head h3 { margin: 0; font-size: 1.05rem; color: var(--dark-text); }
+        .plugin-hint { color: var(--text-secondary); font-size: 0.85rem; margin: 0.4rem 0; }
+        .plugin-subsection { margin-top: 1rem; }
+        .plugin-subsection h4 { margin: 0 0 0.5rem; font-size: 0.95rem; color: var(--dark-text); display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+        .plugin-stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 0.55rem; margin: 0.5rem 0; }
+        .plugin-stat { background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; padding: 0.5rem 0.65rem; display: flex; flex-direction: column; gap: 0.15rem; }
+        .plugin-stat-value { font-size: 1.1rem; font-weight: 800; color: var(--dark-text); font-variant-numeric: tabular-nums; }
+        .plugin-stat-label { font-size: 0.7rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.03em; }
+        .plugin-pill { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; }
+        .plugin-pill.ok { background: var(--badge-pass-bg); color: var(--badge-pass-tx); }
+        .plugin-pill.warn { background: var(--badge-warn-bg); color: var(--badge-warn-tx); }
+        .plugin-pill.fail { background: var(--badge-fail-bg); color: var(--badge-fail-tx); }
+        .plugin-pill.neutral { background: var(--bg-secondary); color: var(--text-secondary); border: 1px solid var(--border-color); }
+        .plugin-callout { border: 1px solid var(--border-color); border-left: 4px solid var(--secondary-color); border-radius: 8px; padding: 0.65rem 0.85rem; margin: 0.65rem 0; font-size: 0.875rem; color: var(--dark-text); background: var(--bg-secondary); }
+        .plugin-callout.warn { border-left-color: var(--warning-color); background: var(--badge-warn-bg); }
+        .plugin-callout ul { margin: 0.35rem 0 0; padding-left: 1.2rem; }
+        .plugin-subtle { color: var(--text-secondary); font-size: 0.78rem; font-weight: 500; }
+        .plugin-headline { font-size: 1.05rem; margin: 0 0 0.5rem; color: var(--dark-text); }
+        .plugin-headline.bad strong { color: var(--danger-color); }
+        {%- endif %}
     </style>
+        <style>
+            .t3-subtabs { display:flex; gap:0.25rem; background:var(--bg); border-radius:10px; padding:0.25rem; margin-bottom:1.25rem; overflow-x:auto; border:1px solid var(--border-color); }
+            .t3-subtab { padding:0.65rem 1rem; cursor:pointer; border:none; background:transparent; color:var(--text-secondary); font-weight:600; font-size:0.9rem; border-radius:8px; white-space:nowrap; }
+            .t3-subtab:hover { background:var(--bg-secondary); color:var(--dark-text); }
+            .t3-subtab.active { color:var(--dark-text); background:var(--bg-secondary); box-shadow:var(--shadow); }
+            .t3-page { display:none; }
+            .t3-page.active { display:block; }
+            .t3-agent-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:1rem; margin-top:1rem; }
+            .t3-agent-card { background:var(--bg); border:1px solid var(--border-color); border-radius:10px; padding:1rem; border-top:3px solid var(--accent-color); box-shadow:var(--shadow); }
+            .t3-agent-name { font-weight:700; }
+            .t3-agent-score { font-size:1.75rem; font-weight:700; margin:0.25rem 0; }
+            .t3-mini-bar { height:7px; background:var(--bg-tertiary); border-radius:999px; overflow:hidden; margin-top:0.5rem; }
+            .t3-mini-bar > span { display:block; height:100%; background:var(--accent-color); }
+            .t3-finding-card { background:var(--bg); border:1px solid var(--border-color); border-radius:10px; padding:1rem; margin:0.5rem 0; box-shadow:var(--shadow); }
+            .t3-finding-card.ok { border-left:4px solid var(--success-color); }
+            .t3-finding-card.warning { border-left:4px solid var(--warning-color); }
+            .t3-finding-card.critical { border-left:4px solid var(--danger-color); }
+            .t3-checks { list-style:none; margin:0.6rem 0 0; padding:0; }
+            .t3-checks li { margin:0; padding:0.3rem 0; color:var(--text-secondary); font-size:0.85rem; border-bottom:1px solid var(--bg-tertiary); }
+            .t3-checks li:last-child { border-bottom:none; }
+            .t3-pill { display:inline-block; padding:0.15rem 0.5rem; border-radius:4px; font-size:0.7rem; font-weight:700; text-transform:uppercase; }
+            .t3-pill.ok, .t3-pill.pass { background:var(--badge-pass-bg); color:var(--badge-pass-tx); }
+            .t3-pill.warning, .t3-pill.warn, .t3-pill.neutral { background:var(--badge-warn-bg); color:var(--badge-warn-tx); }
+            .t3-pill.critical, .t3-pill.fail { background:var(--badge-fail-bg); color:var(--badge-fail-tx); }
+            .t3-pill.unavailable { background:var(--bg-tertiary); color:var(--text-secondary); }
+            .t3-collapsed { background:var(--bg); border:1px solid var(--border-color); border-radius:10px; padding:0.75rem 1rem; margin-top:1rem; box-shadow:var(--shadow); }
+            .t3-section { margin-top:1.5rem; }
+            .t3-pre { background:var(--bg); border:1px solid var(--border-color); border-radius:6px; padding:0.75rem; overflow:auto; font-size:0.78rem; max-height:280px; }
+            .t3-section h3 { margin-bottom:0.75rem; }
+            .t3-details { background:var(--bg); border:1px solid var(--border-color); border-radius:12px; box-shadow:var(--shadow); margin-top:1rem; overflow:hidden; }
+            .t3-details > summary { cursor:pointer; list-style:none; display:flex; justify-content:space-between; align-items:center; gap:0.75rem; padding:0.9rem 1rem; font-weight:800; color:var(--dark-text); }
+            .t3-details > summary::-webkit-details-marker { display:none; }
+            .t3-details > summary::after { content:'▼'; color:var(--text-secondary); font-size:0.9rem; font-weight:800; transition:transform 0.2s ease; }
+            .t3-details[open] > summary::after { content:'▲'; }
+            .t3-details-body { border-top:1px solid var(--border-color); padding:1rem; }
+            .t3-details-body > .t3-section:first-child { margin-top:0; }
+            /* INCOMPLETE plugin-run callout (organized summary of unresolved deps) */
+            .t3-incomplete-callout { background:linear-gradient(180deg, rgba(220,38,38,0.08), var(--bg)); border:1px solid var(--danger-color); border-left:5px solid var(--danger-color); border-radius:12px; padding:1rem 1.15rem; margin:0 0 1rem; box-shadow:var(--shadow); }
+            .t3-incomplete-head { display:flex; align-items:center; gap:0.6rem; margin-bottom:0.5rem; flex-wrap:wrap; }
+            .t3-incomplete-badge { background:var(--danger-color); color:#fff; font-weight:800; font-size:0.72rem; letter-spacing:0.06em; padding:0.22rem 0.6rem; border-radius:6px; }
+            .t3-incomplete-title { font-weight:800; color:var(--dark-text); }
+            .t3-incomplete-body { margin:0 0 0.8rem; color:var(--text-secondary); font-size:0.9rem; line-height:1.5; }
+            .t3-incomplete-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(118px, 1fr)); gap:0.55rem; margin-bottom:0.8rem; }
+            .t3-incomplete-grid > div { background:var(--bg); border:1px solid var(--border-color); border-radius:8px; padding:0.5rem 0.65rem; display:flex; flex-direction:column; gap:0.15rem; }
+            .t3-incomplete-num { font-size:1.35rem; font-weight:800; line-height:1; }
+            .t3-incomplete-num.ok { color:var(--success-color); }
+            .t3-incomplete-num.bad { color:var(--danger-color); }
+            .t3-incomplete-env { font-size:1rem; font-weight:800; color:var(--dark-text); font-family:monospace; }
+            .t3-incomplete-grid > div span:last-child { font-size:0.7rem; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.03em; }
+            .t3-incomplete-link { display:inline-block; font-weight:700; color:var(--danger-color); text-decoration:none; font-size:0.85rem; }
+            .t3-incomplete-link:hover { text-decoration:underline; }
+            .t3-dataset-card { border-left:4px solid var(--secondary-color); }
+            .t3-dataset-hero { background:var(--bg); border:1px solid var(--border-color); border-radius:12px; padding:1.25rem; box-shadow:var(--shadow); margin-bottom:1rem; }
+            .t3-dataset-hero h2 { margin:0; color:var(--secondary-color); font-size:1.3rem; }
+            .t3-dataset-list { display:grid; grid-template-columns:1fr; gap:1rem; }
+            .t3-ds-card { background:var(--bg); border:1px solid var(--border-color); border-left:4px solid var(--secondary-color); border-radius:12px; padding:1.1rem 1.2rem; box-shadow:var(--shadow); }
+            details.t3-ds-card { padding:0; overflow:hidden; }
+            details.t3-ds-card > summary { cursor:pointer; list-style:none; padding:1rem 1.2rem; display:flex; align-items:center; gap:0.75rem; }
+            details.t3-ds-card > summary::-webkit-details-marker { display:none; }
+            details.t3-ds-card > summary::after { content:'▼'; color:var(--text-secondary); font-size:0.9rem; font-weight:800; margin-left:auto; flex-shrink:0; }
+            details.t3-ds-card[open] > summary::after { content:'▲'; }
+            details.t3-ds-card > .t3-ds-body { border-top:1px solid var(--border-color); padding:0 1.2rem 1rem; }
+            .t3-ds-head { display:flex; align-items:center; justify-content:space-between; gap:0.75rem; flex-wrap:wrap; margin-bottom:0.85rem; }
+            .t3-ds-id { color:var(--secondary-color); font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-weight:800; font-size:1rem; }
+            .t3-ds-meta { display:flex; gap:0.5rem; flex-wrap:wrap; color:var(--text-secondary); font-size:0.8rem; }
+            .t3-ds-chip { background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:999px; padding:0.18rem 0.6rem; }
+            .t3-ds-field { margin:0.8rem 0; }
+            .t3-ds-label { display:block; color:var(--text-secondary); font-size:0.72rem; font-weight:800; letter-spacing:0.05em; text-transform:uppercase; margin-bottom:0.2rem; }
+            .t3-ds-value { font-size:0.92rem; line-height:1.55; white-space:pre-wrap; }
+            .t3-ds-gt { color:var(--text-secondary); font-style:italic; }
+            .t3-ds-behaviors { counter-reset:behavior; list-style:none; margin:0.45rem 0 0; padding:0; display:grid; gap:0.35rem; }
+            .t3-ds-behaviors li { counter-increment:behavior; display:grid; grid-template-columns:1.7rem 1fr; gap:0.5rem; align-items:start; color:var(--dark-text); font-size:0.87rem; line-height:1.45; }
+            .t3-ds-behaviors li::before { content:counter(behavior); display:inline-flex; align-items:center; justify-content:center; width:1.35rem; height:1.35rem; border-radius:999px; background:var(--bg-secondary); color:var(--secondary-color); font-weight:800; font-size:0.72rem; border:1px solid var(--border-color); }
+            .t3-conclusion { border-left:4px solid var(--warning-color); }
+            .t3-conclusion.pass { border-left-color:var(--success-color); }
+            .t3-conclusion.fail { border-left-color:var(--danger-color); }
+            .t3-agent-scorecards-row { display:grid; grid-template-columns:minmax(220px,0.85fr) repeat(2,minmax(260px,1fr)); gap:1.25rem; align-items:stretch; margin-top:0.75rem; }
+            .t3-agent-scorecard-list { display:grid; gap:1rem; align-content:start; }
+            .t3-overview-lead { background:linear-gradient(135deg,var(--bg),var(--bg-secondary)); border:1px solid var(--border-color); border-left:4px solid var(--secondary-color); border-radius:12px; padding:1rem 1.15rem; box-shadow:var(--shadow); color:var(--dark-text); line-height:1.55; margin:0 0 1rem; }
+            .t3-other-agent-notes { background:var(--bg); border:1px solid var(--border-color); border-left:4px solid var(--warning-color); border-radius:12px; padding:0.95rem 1.1rem; box-shadow:var(--shadow); margin:0 0 1rem; }
+            #tier3-viewer-delivery-warning { overflow-wrap:anywhere; }
+            .t3-other-agent-notes strong { color:var(--dark-text); }
+            .t3-other-agent-notes ul { margin:0.45rem 0 0; padding-left:1.15rem; color:var(--dark-text); display:grid; gap:0.25rem; }
+            .t3-other-agent-notes li { line-height:1.45; }
+            .t3-harbor-panel { background:var(--bg); border:1px solid var(--border-color); border-left:4px solid var(--secondary-color); border-radius:12px; padding:0.95rem 1.1rem; box-shadow:var(--shadow); margin:0 0 1rem; display:flex; gap:1rem; justify-content:space-between; align-items:center; flex-wrap:wrap; }
+            .t3-harbor-panel strong { color:var(--dark-text); }
+            .t3-harbor-panel p { color:var(--text-secondary); margin:0.2rem 0 0; font-size:0.85rem; line-height:1.45; }
+            .t3-harbor-actions { display:flex; gap:0.45rem; flex-wrap:wrap; }
+            .t3-harbor-link, .t3-evidence-link { display:inline-flex; align-items:center; gap:0.3rem; border:1px solid var(--border-color); border-radius:7px; background:var(--bg-secondary); color:var(--secondary-color); text-decoration:none; font-weight:800; }
+            .t3-harbor-link { padding:0.42rem 0.75rem; font-size:0.8rem; }
+            .t3-harbor-panel-multi { flex-direction:column; align-items:stretch; }
+            .t3-harbor-jobs { display:flex; flex-direction:column; gap:0.55rem; width:100%; }
+            .t3-harbor-job { display:flex; justify-content:space-between; align-items:center; gap:0.75rem; flex-wrap:wrap; }
+            .t3-harbor-job-label { color:var(--dark-text); font-weight:700; font-size:0.85rem; }
+            .t3-evidence-link { padding:0.22rem 0.55rem; font-size:0.76rem; margin-top:0.45rem; }
+            .t3-harbor-link:hover, .t3-evidence-link:hover { border-color:var(--secondary-color); background:var(--bg); color:var(--accent-color); }
+            .t3-next-steps { background:var(--bg); border:1px solid var(--border-color); border-radius:12px; padding:1rem 1.15rem; box-shadow:var(--shadow); margin:0 0 1rem; }
+            .t3-next-steps-head { display:flex; justify-content:space-between; gap:0.75rem; align-items:center; flex-wrap:wrap; margin-bottom:0.7rem; }
+            .t3-next-steps-head h3 { margin:0; color:var(--dark-text); font-size:1rem; }
+            .t3-next-steps-conclusion { margin:0 0 0.65rem; color:var(--dark-text); line-height:1.5; }
+            .t3-next-steps-list { margin:0; padding-left:1.15rem; color:var(--dark-text); display:grid; gap:0.35rem; }
+            .t3-link-btn { background:var(--secondary-color); border:1px solid var(--secondary-color); color:white; border-radius:7px; padding:0.38rem 0.75rem; font-size:0.78rem; font-weight:800; cursor:pointer; }
+            .t3-link-btn:hover { filter:brightness(0.95); }
+            .t3-agent-link { background:transparent; border:0; color:var(--secondary-color); font:inherit; font-weight:800; padding:0; cursor:pointer; text-decoration:underline; text-decoration-thickness:1px; text-underline-offset:2px; }
+            .t3-agent-link:hover { color:var(--accent-color); }
+            .t3-agent-deeplink { cursor:pointer; transition:transform 0.15s ease, border-color 0.15s ease; }
+            .t3-agent-deeplink:hover, .t3-agent-deeplink:focus { border-color:var(--secondary-color); transform:translateY(-1px); outline:none; }
+            /* Invisible scroll target inside each agent panel. ``scroll-margin-top``
+               keeps the anchor below the sticky Tier 3 sub-tab nav when jumped to. */
+            .t3-agent-anchor { display:block; width:0; height:0; overflow:hidden; scroll-margin-top:80px; }
+            @media(max-width:1100px){.t3-agent-scorecards-row{grid-template-columns:1fr}.t3-agent-scorecard-list{grid-template-columns:repeat(auto-fit,minmax(220px,1fr));}}
+
+            /* Sticky Tier 3 sub-tab nav */
+            .t3-subtabs { position:sticky; top:0; z-index:5; }
+
+            /* Score chip (reusable 0-1 score badge) */
+            .t3-score-chip { display:inline-flex; align-items:center; gap:0.35rem; padding:0.18rem 0.55rem; border-radius:6px; font-weight:700; font-size:0.85rem; font-variant-numeric:tabular-nums; border:1px solid transparent; }
+            .t3-score-chip.ok { background:var(--badge-pass-bg); color:var(--badge-pass-tx); }
+            .t3-score-chip.warn { background:var(--badge-warn-bg); color:var(--badge-warn-tx); }
+            .t3-score-chip.fail { background:var(--badge-fail-bg); color:var(--badge-fail-tx); }
+            .t3-score-chip.neutral { background:var(--bg-secondary); color:var(--text-secondary); border-color:var(--border-color); }
+            .t3-delta { font-weight:700; font-size:0.78rem; padding:0.1rem 0.4rem; border-radius:4px; font-variant-numeric:tabular-nums; }
+            .t3-delta.up { color:var(--success-color); background:rgba(34,197,94,0.12); }
+            .t3-delta.down { color:var(--danger-color); background:rgba(239,68,68,0.12); }
+            .t3-delta.flat { color:var(--text-secondary); background:var(--bg-tertiary); }
+
+            /* Agent tabs (horizontal pill bar inside Agent Details) */
+            .t3-agent-tabs { display:flex; gap:0.25rem; flex-wrap:wrap; padding:0.3rem; background:var(--bg-secondary); border-radius:10px; border:1px solid var(--border-color); margin-bottom:1rem; }
+            .t3-agent-tab-btn { background:transparent; border:none; color:var(--text-secondary); font-weight:700; font-size:0.88rem; padding:0.55rem 1rem; border-radius:8px; cursor:pointer; display:inline-flex; align-items:center; gap:0.5rem; white-space:nowrap; transition:background 0.15s, color 0.15s; }
+            .t3-agent-tab-btn:hover { color:var(--dark-text); background:var(--bg); }
+            .t3-agent-tab-btn .t3-tab-dot { width:0.6rem; height:0.6rem; border-radius:50%; background:var(--accent); display:inline-block; }
+            .t3-agent-tab-btn .t3-tab-score { font-size:0.75rem; font-weight:600; color:var(--text-secondary); padding-left:0.25rem; }
+            .t3-agent-tab-btn.active { background:var(--bg); color:var(--dark-text); box-shadow:var(--shadow); border-bottom:3px solid var(--accent); border-radius:8px 8px 4px 4px; }
+            .t3-agent-tab-btn.active .t3-tab-score { color:var(--dark-text); }
+            .t3-agent-panel { display:none; }
+            .t3-agent-panel.active { display:block; }
+
+            /* Agent KPI strip */
+            .t3-kpi-strip { display:grid; grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); gap:0.75rem; margin-bottom:1rem; }
+            .t3-kpi-card { background:var(--bg); border:1px solid var(--border-color); border-radius:10px; padding:0.85rem 1rem; box-shadow:var(--shadow); }
+            .t3-kpi-card .t3-kpi-label { font-size:0.7rem; font-weight:700; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.05em; }
+            .t3-kpi-card .t3-kpi-value { font-size:1.5rem; font-weight:800; line-height:1.2; margin-top:0.2rem; font-variant-numeric:tabular-nums; }
+            .t3-kpi-card .t3-kpi-sub { font-size:0.78rem; color:var(--text-secondary); margin-top:0.15rem; }
+
+            /* Dimension pill strip (compact horizontal mapping) */
+            .t3-dim-strip { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:0.5rem; margin:0.75rem 0 1rem; padding:0.75rem; background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:10px; }
+            .t3-dim-pill { background:var(--bg); border:1px solid var(--border-color); border-radius:8px; padding:0.55rem 0.75rem; display:flex; flex-direction:column; gap:0.15rem; }
+            .t3-dim-pill .t3-dim-name { font-size:0.72rem; font-weight:800; text-transform:uppercase; color:var(--text-secondary); letter-spacing:0.04em; }
+            .t3-dim-pill .t3-dim-score { font-size:1.1rem; font-weight:800; font-variant-numeric:tabular-nums; }
+            .t3-dim-pill .t3-dim-lift { font-size:0.72rem; font-weight:600; }
+
+            /* Vertical evaluator card stack */
+            .t3-eval-stack { display:flex; flex-direction:column; gap:0.85rem; }
+            .t3-eval-card { background:var(--bg); border:1px solid var(--border-color); border-radius:12px; padding:1rem 1.1rem; box-shadow:var(--shadow); border-left:4px solid var(--border-color); }
+            .t3-eval-card.ok { border-left-color:var(--success-color); }
+            .t3-eval-card.warn, .t3-eval-card.warning { border-left-color:var(--warning-color); }
+            .t3-eval-card.fail, .t3-eval-card.critical { border-left-color:var(--danger-color); }
+            .t3-eval-card.unavailable { border-left-color:var(--text-secondary); }
+            .t3-eval-head { display:grid; grid-template-columns:1fr auto auto; gap:1rem; align-items:center; }
+            @media(max-width:720px){.t3-eval-head{grid-template-columns:1fr;gap:0.5rem;}}
+            .t3-eval-title { font-weight:800; font-size:1rem; color:var(--dark-text); }
+            .t3-eval-desc { display:block; font-size:0.78rem; font-weight:500; color:var(--text-secondary); margin-top:0.15rem; }
+            .t3-eval-gauge { position:relative; width:64px; height:64px; flex-shrink:0; }
+            .t3-eval-gauge svg { width:100%; height:100%; transform:rotate(-90deg); }
+            .t3-eval-gauge .t3-gauge-track { fill:none; stroke:var(--bg-tertiary); stroke-width:8; }
+            .t3-eval-gauge .t3-gauge-arc { fill:none; stroke-width:8; stroke-linecap:round; transition:stroke-dashoffset 0.6s ease; }
+            .t3-eval-gauge .t3-gauge-text { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:0.9rem; font-variant-numeric:tabular-nums; }
+            .t3-eval-bars { margin-top:0.75rem; display:grid; grid-template-columns:80px 1fr auto; gap:0.5rem 0.75rem; align-items:center; font-size:0.82rem; }
+            .t3-eval-bars .t3-bar-label { color:var(--text-secondary); font-weight:600; }
+            .t3-eval-bars .t3-bar-track { height:8px; background:var(--bg-tertiary); border-radius:999px; overflow:hidden; position:relative; }
+            .t3-eval-bars .t3-bar-fill { height:100%; border-radius:999px; }
+            .t3-eval-bars .t3-bar-value { font-weight:700; font-variant-numeric:tabular-nums; min-width:2.5rem; text-align:right; }
+            .t3-eval-evidence { margin-top:0.85rem; }
+            .t3-eval-evidence > summary { cursor:pointer; list-style:none; color:var(--text-secondary); font-size:0.82rem; font-weight:600; padding:0.35rem 0; }
+            .t3-eval-evidence > summary::-webkit-details-marker { display:none; }
+            .t3-eval-evidence > summary::before { content:'▸'; display:inline-block; margin-right:0.4rem; transition:transform 0.15s ease; }
+            .t3-eval-evidence[open] > summary::before { transform:rotate(90deg); }
+            .t3-eval-evidence ul { list-style:none; margin:0.45rem 0 0; padding:0; display:grid; gap:0.3rem; }
+            .t3-eval-evidence li { display:grid; grid-template-columns:auto 1fr auto auto; gap:0.5rem; align-items:center; padding:0.35rem 0.55rem; background:var(--bg-secondary); border-radius:6px; font-size:0.82rem; }
+            .t3-eval-evidence li .t3-ev-id { font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-weight:700; color:var(--secondary-color); }
+            .t3-eval-evidence li .t3-ev-count { font-size:0.7rem; color:var(--text-secondary); font-weight:700; padding:0.1rem 0.4rem; border-radius:4px; background:var(--bg-tertiary); }
+            .t3-eval-evidence li .t3-ev-notes { color:var(--text-secondary); font-size:0.78rem; }
+            .t3-eval-evidence li .t3-ev-detail { grid-column:1 / -1; display:flex; flex-wrap:wrap; align-items:center; gap:0.5rem; }
+            .t3-eval-evidence li .t3-ev-detail .t3-evidence-link { margin-top:0; }
+            .t3-ev-excerpt { font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-size:0.76rem; padding:0.15rem 0.4rem; border-radius:4px; background:var(--bg-tertiary); color:var(--text-secondary); overflow-wrap:anywhere; }
+            .t3-score-reason { border-bottom:1px dotted currentColor; cursor:help; }
+
+            /* Attempt Details: ACES-style chip table for per-case attempt scores */
+            .t3-attempt-list { display:flex; flex-wrap:wrap; gap:6px; min-width:180px; }
+            .t3-attempt-chip { display:inline-block; padding:3px 8px; border-radius:4px; font-size:0.76rem; font-weight:600; white-space:nowrap; font-variant-numeric:tabular-nums; }
+            a.t3-attempt-chip { text-decoration:none; }
+            a.t3-attempt-chip:hover { outline:1px solid currentColor; }
+            .t3-attempt-chip.pass { background:rgba(34,197,94,0.18); color:var(--success-color); }
+            .t3-attempt-chip.warn { background:rgba(234,179,8,0.18); color:var(--warning-color); }
+            .t3-attempt-chip.fail { background:rgba(239,68,68,0.18); color:var(--danger-color); }
+            .t3-attempt-chip.muted { background:var(--bg-secondary); color:var(--text-secondary); border:1px dashed var(--border-color); }
+            a.t3-attempt-case-link { color:inherit; text-decoration:underline; text-underline-offset:2px; }
+            a.t3-attempt-case-link:hover { color:var(--accent-color); }
+
+            /* Lift split-bar visual */
+            .t3-lift-row { display:grid; grid-template-columns:140px 1fr; gap:0.85rem; align-items:center; padding:0.45rem 0; border-bottom:1px dashed var(--border-color); }
+            .t3-lift-row:last-child { border-bottom:none; }
+            .t3-lift-row .t3-lift-label { font-size:0.82rem; color:var(--text-secondary); font-weight:600; }
+            .t3-lift-bar { position:relative; height:18px; background:var(--bg-tertiary); border-radius:999px; overflow:hidden; }
+            .t3-lift-bar .t3-lift-base { position:absolute; left:0; top:0; bottom:0; background:var(--text-secondary); opacity:0.45; }
+            .t3-lift-bar .t3-lift-with { position:absolute; left:0; top:0; bottom:0; }
+            .t3-lift-bar .t3-lift-with.up { background:var(--success-color); }
+            .t3-lift-bar .t3-lift-with.down { background:var(--danger-color); }
+            .t3-lift-bar .t3-lift-with.flat { background:var(--secondary-color); }
+            .t3-lift-bar .t3-lift-text { position:absolute; inset:0; display:flex; align-items:center; justify-content:flex-end; padding:0 0.6rem; font-size:0.72rem; font-weight:700; color:var(--dark-text); mix-blend-mode:plus-lighter; gap:0.4rem; }
+            .t3-lift-agent-block { background:var(--bg); border:1px solid var(--border-color); border-radius:10px; padding:0.6rem 0.9rem 0.85rem; margin-bottom:0.75rem; box-shadow:var(--shadow); }
+            .t3-lift-agent-block > h4 { display:flex; gap:0.5rem; align-items:center; margin:0 0 0.5rem; font-size:0.95rem; font-weight:800; }
+            .t3-lift-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:0.5rem 1.1rem; }
+            .t3-lift-case-block { padding:0.35rem 0; }
+            .t3-lift-case-id { font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-weight:700; font-size:0.82rem; color:var(--secondary-color); margin-bottom:0.25rem; display:flex; flex-wrap:wrap; align-items:center; gap:0.45rem 0.75rem; }
+            .t3-lift-trial-links { display:flex; flex-wrap:wrap; gap:0.4rem; font-family:inherit; font-weight:700; }
+            .t3-lift-trial-links .t3-evidence-link { margin-top:0; }
+
+            /* Suggestions stacked cards & category chips */
+            .t3-sug-stack { display:flex; flex-direction:column; gap:0.7rem; }
+            .t3-sug-card { background:var(--bg); border:1px solid var(--border-color); border-radius:10px; padding:0.9rem 1rem; box-shadow:var(--shadow); border-left:4px solid var(--secondary-color); display:grid; grid-template-columns:auto 1fr auto; gap:0.75rem; align-items:start; }
+            .t3-sug-card.severity-pass { border-left-color:var(--success-color); }
+            .t3-sug-card.severity-warn { border-left-color:var(--warning-color); }
+            .t3-sug-card.severity-fail { border-left-color:var(--danger-color); }
+            .t3-sug-num { display:inline-flex; align-items:center; justify-content:center; width:1.7rem; height:1.7rem; border-radius:50%; background:var(--bg-secondary); border:1px solid var(--border-color); font-weight:800; font-size:0.78rem; color:var(--secondary-color); }
+            .t3-sug-body { font-size:0.92rem; line-height:1.55; color:var(--dark-text); }
+            .t3-sug-title { font-weight:800; color:var(--dark-text); display:flex; gap:0.55rem; align-items:center; flex-wrap:wrap; }
+            .t3-sug-cat { display:inline-block; padding:0.1rem 0.45rem; border-radius:4px; font-size:0.68rem; font-weight:800; text-transform:uppercase; letter-spacing:0.04em; background:var(--bg-secondary); color:var(--secondary-color); border:1px solid var(--border-color); }
+            .t3-sug-actions { display:flex; gap:0.35rem; }
+            .t3-copy-btn { background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:6px; padding:0.25rem 0.55rem; font-size:0.72rem; font-weight:700; color:var(--text-secondary); cursor:pointer; }
+            .t3-copy-btn:hover { color:var(--dark-text); background:var(--bg); }
+            .t3-copy-btn.copied { color:var(--success-color); border-color:var(--success-color); }
+
+            /* Provenance key-value grid */
+            .t3-prov-grid { display:grid; grid-template-columns:minmax(140px, 0.3fr) 1fr auto; gap:0.4rem 0.85rem; align-items:center; padding:0.25rem 0; }
+            .t3-prov-grid .t3-prov-label { font-weight:700; color:var(--dark-text); font-size:0.85rem; padding:0.4rem 0; }
+            .t3-prov-grid .t3-prov-value { font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-size:0.8rem; color:var(--text-secondary); background:var(--bg-secondary); padding:0.45rem 0.65rem; border-radius:6px; word-break:break-all; }
+            .t3-prov-grid .t3-prov-action { display:flex; gap:0.4rem; }
+            .t3-download-grid { display:flex; flex-wrap:wrap; gap:0.5rem; }
+            .t3-download-grid .t3-copy-btn { padding:0.4rem 0.85rem; font-size:0.78rem; }
+            /* Insight source tag (deterministic vs LLM) */
+            .t3-insight-source { display:inline-block; padding:0.05rem 0.4rem; border-radius:4px; font-size:0.65rem; font-weight:800; text-transform:uppercase; letter-spacing:0.04em; vertical-align:middle; margin-left:0.35rem; }
+            .insight-source-deterministic { background:var(--bg-secondary); color:var(--text-secondary); border:1px solid var(--border-color); }
+            .insight-source-llm { background:rgba(139,92,246,0.18); color:#8b5cf6; border:1px solid rgba(139,92,246,0.4); }
+            /* Reasoning column wraps at a comfortable width */
+            .t3-reasoning { font-size:0.85rem; color:var(--dark-text); max-width:520px; line-height:1.45; white-space:normal; }
+            .t3-reasoning-list { margin:0; padding-left:1.05rem; }
+            .t3-reasoning-list li { margin-bottom:0.2rem; }
+            .t3-reasoning-list li:last-child { margin-bottom:0; }
+            /* One-liner hint shown beneath a dimension name in tables */
+            .t3-dim-hint { color:var(--text-secondary); font-size:0.78rem; font-weight:400; margin-top:0.15rem; line-height:1.35; }
+            /* Reusable section hint paragraph used above several Tier 3 tables */
+            .t3-section-hint { color:var(--text-secondary); font-size:0.85rem; margin:0 0 0.75rem; }
+            /* Per-agent score+lift cell used in the consolidated dimension table */
+            .t3-mad-cell { display:flex; flex-direction:column; align-items:flex-start; gap:0.2rem; min-width:84px; }
+            .t3-mad-score-row { display:flex; align-items:center; gap:0.45rem; width:100%; }
+            .t3-mad-score { font-weight:700; font-variant-numeric:tabular-nums; }
+            .t3-mad-bar { flex:1; height:6px; min-width:48px; background:var(--bg-tertiary); border-radius:999px; overflow:hidden; }
+            .t3-mad-bar > span { display:block; height:100%; border-radius:999px; }
+            .t3-mad-lift { font-size:0.74rem; font-weight:700; font-variant-numeric:tabular-nums; }
+            /* Integration (plugin composition). Deliberately NOT table-shaped: it is a
+               2-arm ablation, not another dimension lift row, and the visual language
+               has to say so at a glance. */
+            .t3-details.t3-integration { border-left:4px solid #8b5cf6; }
+            .t3-integ-compare { display:flex; flex-wrap:wrap; align-items:stretch; gap:0.75rem; margin:0.25rem 0 0.25rem; }
+            .t3-integ-arm, .t3-integ-delta { flex:1 1 190px; background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:10px; padding:0.75rem 0.9rem; }
+            .t3-integ-delta { border-style:dashed; border-color:#8b5cf6; background:rgba(139,92,246,0.08); }
+            .t3-integ-arm-label { font-size:0.72rem; font-weight:800; text-transform:uppercase; letter-spacing:0.04em; color:var(--text-secondary); }
+            .t3-integ-arm-score { font-size:1.7rem; font-weight:700; font-variant-numeric:tabular-nums; margin:0.15rem 0; color:var(--dark-text); }
+            .t3-integ-arm-note { font-size:0.76rem; color:var(--text-secondary); line-height:1.35; }
+            .t3-integ-vs { align-self:center; font-weight:800; color:var(--text-secondary); font-size:0.9rem; }
+            .t3-integ-callout { background:var(--bg-secondary); border:1px dashed var(--warning-color); border-radius:10px; padding:0.85rem 1rem; color:var(--dark-text); font-size:0.88rem; }
+            .t3-integ-callout-title { font-weight:700; color:var(--warning-color); }
+            .t3-integ-evidence { margin-top:0.85rem; padding-top:0.75rem; border-top:1px solid var(--border-color); }
+            .t3-integ-evidence-title { font-weight:700; font-size:0.85rem; margin-bottom:0.4rem; }
+            .t3-integ-chips { display:flex; flex-wrap:wrap; gap:0.4rem; }
+            .t3-integ-chip { background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:999px; padding:0.18rem 0.6rem; font-size:0.76rem; color:var(--text-secondary); }
+            .t3-integ-chip strong { color:var(--dark-text); }
+            .t3-integ-chip.good { border-color:var(--success-color); color:var(--success-color); }
+            .t3-integ-chip.bad { border-color:var(--warning-color); color:var(--warning-color); }
+            /* Tier summary chip strip on the global hero */
+            .agent-hero-tiers { display:flex; flex-wrap:wrap; gap:0.5rem; margin-top:0.65rem; }
+            .agent-hero-tier-chip { background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:999px; padding:0.2rem 0.65rem; font-size:0.78rem; color:var(--text-secondary); }
+            .agent-hero-tier-chip strong { color:var(--dark-text); }
+            .agent-hero-tier-chip.pass strong { color:var(--success-color); }
+            .agent-hero-tier-chip.fail strong { color:var(--danger-color); }
+            .agent-hero-tier-chip.warn strong { color:var(--warning-color); }
+
+            /* Search/filter input */
+            .t3-filter-bar { display:flex; gap:0.5rem; align-items:center; margin:0 0 0.85rem; flex-wrap:wrap; }
+            .t3-filter-input { flex:1; min-width:220px; padding:0.5rem 0.75rem; border:1px solid var(--border-color); border-radius:8px; background:var(--bg); color:var(--dark-text); font-size:0.88rem; }
+            .t3-filter-input:focus { outline:none; border-color:var(--secondary-color); box-shadow:0 0 0 2px rgba(118,185,0,0.15); }
+            .t3-filter-count { font-size:0.78rem; color:var(--text-secondary); font-weight:600; }
+
+            /* Print-friendly */
+            @media print {
+                .t3-subtabs, .t3-agent-tabs, .t3-copy-btn, .t3-filter-bar { display:none !important; }
+                .t3-page, .t3-agent-panel { display:block !important; page-break-inside:avoid; }
+                .t3-eval-card, .t3-sug-card, .t3-kpi-card, .t3-pivot-wrap, .t3-lift-agent-block { page-break-inside:avoid; box-shadow:none; }
+                .t3-details { box-shadow:none; }
+                .t3-details > summary::after { display:none; }
+                .t3-eval-evidence { display:block; }
+                .t3-eval-evidence > summary { display:none; }
+            }
+        </style>
 <style>{% include "report_ui.css.j2" %}</style>
-<noscript><style>.t3-page,.t3-agent-panel,.table-container,.tab-content,.results-view,.skill-content,.validator-content,.top-issues-content,.contributor-content{display:block!important;max-height:none!important;overflow:visible!important}.filter-group,.view-toggle-section,.report-searchbar,.header-controls{display:none!important}.table-container,.top-issues-content,.summary-table-container,.contributor-content{overflow-x:auto!important}</style></noscript>
+<noscript><style>.dedup-subtab,.t3-page,.t3-agent-panel,.table-container,.tab-content,.results-view,.skill-content,.validator-content,.top-issues-content,.contributor-content{display:block!important;max-height:none!important;overflow:visible!important}.filter-group,.view-toggle-section,.report-searchbar,.header-controls{display:none!important}.table-container,.top-issues-content,.summary-table-container,.contributor-content{overflow-x:auto!important}</style></noscript>
 </head>
 <body>
     {% set ci = ci_context | default({}, true) %}
@@ -1261,15 +1669,11 @@
     {% set check_words = {'pass': 'Passed', 'fail': 'Failed', 'incomplete': 'Incomplete', 'skipped': 'Skipped', 'not_applicable': 'N/A'} %}
     <header class="main-header">
         <div class="header-content">
-            <div class="header-brand">
-                {{ se_logo("se-logo-header", 28, "") }}
-                <div>
-                    <p class="header-title">SkillEvaluator</p>
-                    <p class="header-subtitle">{% if timestamp %}Generated <time>{{ timestamp }}</time> · {% endif %}Version {{ version }}</p>
-                </div>
+            <div class="logo-section">
+                <p class="header-title">SkillEvaluator</p>
+                <div class="header-subtitle-row"><p class="header-subtitle">NVIDIA Benchmark for Agent Skills Evaluation</p></div>
             </div>
             <div class="header-meta">
-                <span class="header-status-badge verdict-badge {{ verdict_class }}" data-verdict="{{ verdict_key }}"><span class="verdict-dot" aria-hidden="true"></span><span class="sr-only">Verdict: </span>{% if report_scope == 'tier3' and tier3_verdict == 'fail' %}FAIL{% else %}{{ verdict_label }}{% endif %}{% if report_scope == 'tier3' and tier3_verdict == 'fail' and tier3.get('verdict_reason') %} — {{ tier3.get('verdict_reason') }}{% endif %}</span>
                 <div class="header-controls">
                     <label class="theme-control" for="report-theme">Theme <select id="report-theme" onchange="setReportTheme(this.value)"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
                     {% if ci.get('canonical_json_url') %}<a class="export-btn" href="{{ ci.canonical_json_url }}" download="skillevaluator-report.json">↓ Download JSON</a>{% else %}
@@ -1280,17 +1684,6 @@
             </div>
         </div>
     </header>
-    <aside class="report-sidebar" aria-label="Report navigation">
-        <a class="sidebar-brand" href="#report-workspace">{{ se_logo("se-logo-sidebar", 28, "") }}<span class="sidebar-brand-text">SkillEvaluator<small>Evaluation report</small></span></a>
-        <span class="sidebar-label">THIS REPORT</span>
-        <a href="#report-workspace" data-report-section="report-workspace" class="sidebar-current" aria-current="location">Summary</a>
-        {% for number, tier in presentation.tiers.items() if tier.displayed or (tabs | selectattr('id', 'equalto', 'tier' ~ number) | list) %}
-        <a href="#tab-tier{{ number }}" data-report-tier="tier{{ number }}">Tier {{ number }}</a>
-        {% endfor %}
-        <a href="#run-metadata" data-report-section="run-metadata">Run details</a>
-        {% if ci.get('report_index_url') %}<a class="sidebar-index-link" href="{{ ci.report_index_url }}">← All skills</a>{% endif %}
-        <div class="sidebar-footer">Evidence you can inspect.<br>Self-contained report.</div>
-    </aside>
     <main class="container" id="report-workspace" tabindex="-1">
         {% if ci.get('report_index_url') %}<nav class="report-breadcrumb" aria-label="Breadcrumb"><a href="{{ ci.report_index_url }}">All skills</a> / <span aria-current="page">{{ content_label | default('Skill') }} report</span></nav>{% endif %}
         {% set has_tier1 = tabs | selectattr('id', 'equalto', 'tier1') | list | length > 0 %}
@@ -1310,6 +1703,13 @@
         {% set hero_title = explicit_skill_name | default(none) or friendly_label or (tier3.skill_name if has_tier3 and tier3.skill_name else (target_display or title)) %}
         {% set hero_score = completed_agent.score if completed_agent else (tier3.overall_score if has_tier3 and tier3.overall_score is not none else none) %}
         {% set hero_trials = presentation.coverage.text %}
+        {% set overview_coverage = namespace(known=true, scored=0, expected=0) %}
+        {% for arm in [presentation.coverage.with_skill, presentation.coverage.baseline] %}
+            {% if arm.status != 'skipped' %}
+                {% if arm.scored is none or arm.expected is none %}{% set overview_coverage.known = false %}
+                {% else %}{% set overview_coverage.scored = overview_coverage.scored + arm.scored %}{% set overview_coverage.expected = overview_coverage.expected + arm.expected %}{% endif %}
+            {% endif %}
+        {% endfor %}
         {% set hero_metric_count = ((tier3.metric_ids or tier3.evaluators or {}) | length) if has_tier3 else 0 %}
         {% set hero_harbor = (tier3.get('harbor_viewer') or tier3.get('summary', {}).get('harbor_viewer') or {}) if has_tier3 else {} %}
         {% set hero_harbor_job_url = hero_harbor.get('job_url') %}
@@ -1322,18 +1722,6 @@
                     <p class="hero-command-status verdict-chip {{ verdict_class }}">{{ presentation.command_label }}</p>
                     {% if presentation.required_failed or presentation.required_incomplete %}<p class="hero-decision-reason">{{ presentation.required_failed }} failed · {{ presentation.required_incomplete }} incomplete required check(s). See tier evidence for reasons.</p>{% endif %}
                     {% if presentation.advisory_unfavorable %}<p class="hero-decision-reason">{{ presentation.advisory_unfavorable }} advisory check(s) failed or incomplete; advisory checks do not change the required result.</p>{% endif %}
-                    {#-
-                        Show the *full* path/URL only when it actually adds
-                        information (i.e. it differs from the friendly label).
-                        For users running ``skillevaluator validate skills/foo`` from
-                        the repo root the two strings are identical and the
-                        subtitle becomes noise.
-                    -#}
-                    {% if target_path and target_path.startswith('https://') and target_path != hero_title and target_display != hero_title %}
-                    <div class="agent-hero-subtitle">
-                        <a href="{{ target_path }}" target="_blank" rel="noopener noreferrer" title="{{ target_path }}">{{ target_display or target_path }}</a>
-                    </div>
-                    {% endif %}
                     {#- In a folder scan this is the only sign that some skills were not reported. -#}
                     {% if has_tier1 or has_tier2 %}<p class="hero-skills">{{ content_label_plural }}: {{ passed_skills }} of {{ total_skills }} passed</p>{% endif %}
                 </div>
@@ -1356,18 +1744,14 @@
                     {% set t3_key = tier3_verdict if tier3_verdict in ['pass', 'fail', 'neutral'] else 'incomplete' %}
                     <span class="verdict-chip {{ {'pass': 'pass', 'fail': 'fail'}.get(t3_key, 'warn') }}">Tier 3 quality: {{ advisory_fail_word if tier3_advisory_fail else verdict_words[t3_key] }}</span>
                     {% if t3_key == 'incomplete' and tier3_status_reason %}<p class="hero-reason">{{ tier3_status_reason }}</p>{% endif %}
-                    <div class="agent-hero-score {{ 'score-pass' if hero_score is not none and hero_score >= 0.8 else ('score-warn' if hero_score is not none and hero_score >= 0.6 else 'score-fail') }}">{{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}<span class="hero-score-label">{{ presentation.score_scope }}{{ ' (baseline)' if tier3.get('mode') == 'baseline_only' else '' }}</span></div>
-                    <div class="agent-hero-detail">
-                        <div><strong>Best performing agent:</strong> {{ tier3.best_agent or 'N/A' }}</div>
-                        {% if tier3.get('mode') == 'baseline_only' %}<div>Baseline-only run (<code>--skip-with-skill</code>): no with-skill arm, so no skill lift was measured.</div>{% endif %}
-                        {% if completed_agent and completed_agent.needs_attention %}<div class="score-warn">Completed-agent result. Other execution failures need attention; see agent details.</div>{% endif %}
-                    </div>
+                    {% if tier3.get('mode') == 'baseline_only' %}<p class="hero-reason">Baseline-only calibration; no skill lift measured.</p>{% endif %}
+                    {% if completed_agent and completed_agent.needs_attention %}<p class="hero-reason">Completed-agent result; other execution failures need attention.</p>{% endif %}
                 {% endif %}
                 {% endif %}
                     {% if report_scope == 'tier3' %}
                     <p class="publication-line" data-publication-status="not-assessed"><span class="publication-label">Publication eligibility</span> <span class="status-badge warn">Not assessed (Tier 3 only)</span></p>
                     {% else %}
-                    <p class="publication-line" data-publication-status="{{ publication_status }}"><span class="publication-label">Publication eligibility</span> <span class="status-badge {{ publication_class }}">{{ publication_words.get(publication_status, publication_status | title) }}</span>{% if publication_reasons %} <span class="publication-reasons">{{ publication_reasons | join(' ') }}</span>{% endif %}</p>
+                    <p class="publication-line" data-publication-status="{{ publication_status }}"><span class="publication-label">Publication eligibility</span> <span class="status-badge {{ publication_class }}">{{ publication_words.get(publication_status, publication_status | title) }}</span></p>{% if publication_reasons %}<details class="publication-reasons"><summary>Eligibility reasons</summary><ul>{% for reason in publication_reasons %}<li>{{ reason }}</li>{% endfor %}</ul></details>{% endif %}
                     {% endif %}
                 </div>
             </div>
@@ -1382,7 +1766,7 @@
                     <p class="tier-card-title">{{ {1:'Security & Static Validation',2:'Deduplication',3:'Live Agent Evaluation'}[number] }}</p>
                 </div>
 {% endmacro %}
-            <div class="tier-cards{{ ' single-tier' if single_tier else '' }}{{ ' tier-line' if single_tier and has_tier1 else '' }}">
+            <nav aria-label="Tier navigation" class="tier-cards{{ ' single-tier' if single_tier else '' }}{{ ' tier-line' if single_tier and has_tier1 else '' }}">
                 {% if has_tier1 %}
                 {% set t1_class = 'fail' if tier1_summary.failed_count else ('warn' if tier1_summary.incomplete_count else ('skipped' if tier1_summary.executed_count == 0 else 'pass')) %}
                 <div class="tier-card {{ t1_class }}{% if initial_tab == 'tier1' %} active{% endif %}"
@@ -1402,20 +1786,12 @@
                     <p class="tier-card-title">Security &amp; Static Validation</p>
                     <div class="tier-card-stats">
                         {% if not single_tier %}
-                        <span><strong>{{ ui_t1_pass }}</strong> of {{ ui_t1_executed }} checks passed</span>{% if ui_t1_na %}<span><strong>{{ ui_t1_na }}</strong> not applicable</span>{% endif %}
-                        {% if tier1_summary.skipped_count %}<span><strong>{{ tier1_summary.skipped_count }}</strong> skipped</span>{% endif %}
-                        {% if tier1_summary.issue_count %}<span><strong>{{ tier1_summary.issue_count }}</strong> finding{{ 's' if tier1_summary.issue_count != 1 else '' }}</span>{% endif %}
+                        {% if tier1_summary.issue_count %}<span><strong>{{ tier1_summary.issue_count }}</strong> finding{{ 's' if tier1_summary.issue_count != 1 else '' }}</span>
+                        {% elif ui_t1_executed %}<span><strong>{{ ui_t1_pass }}</strong> of {{ ui_t1_executed }} checks passed</span>
+                        {% elif ui_t1_na %}<span><strong>{{ ui_t1_na }}</strong> not applicable</span>
+                        {% else %}<span>No checks ran</span>{% endif %}
                         {% endif %}
-                        {% if skillspector_versions %}<span title="SkillSpector version that ran the Tier 1 security scan">SkillSpector <strong>v{{ skillspector_versions | join(', v') }}</strong></span>{% endif %}
                     </div>
-                    {% if not single_tier and (tier1_summary.critical or tier1_summary.high or tier1_summary.medium or tier1_summary.low) %}
-                    <div class="tier-card-sev">
-                        {% if tier1_summary.critical %}<span class="tier-card-sev-pill crit">{{ tier1_summary.critical }} critical</span>{% endif %}
-                        {% if tier1_summary.high %}<span class="tier-card-sev-pill high">{{ tier1_summary.high }} high</span>{% endif %}
-                        {% if tier1_summary.medium %}<span class="tier-card-sev-pill med">{{ tier1_summary.medium }} medium</span>{% endif %}
-                        {% if tier1_summary.low %}<span class="tier-card-sev-pill low">{{ tier1_summary.low }} low</span>{% endif %}
-                    </div>
-                    {% endif %}
                 </div>
                 {% elif presentation.tiers[1].displayed %}{{ absent_tier_tile(1, presentation.tiers[1]) }}
                 {% endif %}
@@ -1437,10 +1813,10 @@
                     </div>
                     <p class="tier-card-title">Deduplication</p>
                     <div class="tier-card-stats">
-                        <span><strong>{{ tier2_summary.passed_count }}</strong> of {{ tier2_summary.executed_count }} checks passed</span>
-                        {% if tier2_summary.not_applicable_count %}<span><strong>{{ tier2_summary.not_applicable_count }}</strong> not applicable</span>{% endif %}
-                        {% if tier2_summary.skipped_count %}<span><strong>{{ tier2_summary.skipped_count }}</strong> skipped</span>{% endif %}
-                        {% if tier2_summary.issue_count %}<span><strong>{{ tier2_summary.issue_count }}</strong> finding(s)</span>{% endif %}
+                        {% if tier2_summary.issue_count %}<span><strong>{{ tier2_summary.issue_count }}</strong> finding(s)</span>
+                        {% elif tier2_summary.executed_count %}<span><strong>{{ tier2_summary.passed_count }}</strong> of {{ tier2_summary.executed_count }} checks passed</span>
+                        {% elif tier2_summary.not_applicable_count %}<span><strong>{{ tier2_summary.not_applicable_count }}</strong> not applicable</span>
+                        {% else %}<span>No checks ran</span>{% endif %}
                     </div>
                 </div>
                 {% elif presentation.tiers[2].displayed %}{{ absent_tier_tile(2, presentation.tiers[2]) }}
@@ -1468,27 +1844,17 @@
                         {% if tier3_is_skipped %}
                         <span>{{ tier3_skip_message }}</span>
                         {% else %}
-                        <span>Best agent score <strong>{{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}</strong></span>
-                        {% if tier3.get('overall_lift') is not none %}<span>lift <strong>{{ "%+.2f" | format(tier3.get('overall_lift')) }}</strong></span>{% endif %}
-                        <span class="trial-coverage">{{ hero_trials }}</span>
+                        <span class="trial-coverage">{% if overview_coverage.known %}<strong>{{ overview_coverage.scored }}</strong> of {{ overview_coverage.expected }} attempts scored{% else %}{{ hero_trials }}{% endif %}</span>
                         {% endif %}
                     </div>
-                    {% if hero_harbor_job_url or hero_harbor_analysis_url %}
-                    <div class="tier-card-links" onclick="event.stopPropagation()">
-                        {% if hero_harbor_job_url %}<a class="tier-card-link" href="{{ hero_harbor_job_url }}" target="_blank" rel="noopener">Harbor logs</a>{% endif %}
-                        {% if hero_harbor_analysis_url %}<a class="tier-card-link" href="{{ hero_harbor_analysis_url }}" target="_blank" rel="noopener">Harbor analysis</a>{% endif %}
-                    </div>
-                    {% endif %}
+
                 </div>
                 {% elif presentation.tiers[3].displayed %}{{ absent_tier_tile(3, presentation.tiers[3]) }}
                 {% endif %}
 
-            </div>
+            </nav>
         </section>
-        <nav class="mobile-tier-nav" aria-label="Tier navigation">
-            {% for number, tier in presentation.tiers.items() if tier.displayed or (tabs | selectattr('id', 'equalto', 'tier' ~ number) | list) %}<a href="#tab-tier{{ number }}" data-report-tier="tier{{ number }}">Tier {{ number }}</a>{% endfor %}
-        </nav>
-        <div id="report-evidence" class="workspace-heading" tabindex="-1"><h2>Findings &amp; evidence</h2><p>Each check with its results and the evidence behind them.</p></div>
+        <div id="report-evidence" class="workspace-heading" tabindex="-1"><h2>Findings &amp; evidence</h2></div>
         {% set workspace_tabs = [] %}
         {% for number, tier in presentation.tiers.items() %}
             {% set existing_tab = tabs | selectattr('id', 'equalto', 'tier' ~ number) | list %}
@@ -1498,6 +1864,7 @@
         {% for tab in workspace_tabs %}
         <div id="tab-{{ tab.id }}" class="tab-content {{ 'active' if tab.id == initial_tab else '' }}" tabindex="-1" aria-label="{{ tab.label }}">
         {% if tab.empty | default(false) %}
+            {{ render_plugin_evidence(plugin_evidence, tab.id) }}
             <section class="tier-empty"><h2>{{ tab.label }} · {{ presentation.tiers[tab.number].summary }}</h2><p>No check evidence was recorded for this tier.</p></section>
         {% elif tab.id == 'tier1' %}
         {% set results = tier1_display_results %}
@@ -1520,6 +1887,13 @@
             {% set t1_class = {'pass': 'pass', 'fail': 'fail'}.get(t1_key, 'warn') %}
             {% set t1_all_checks = total_validators + ui_t1_na + (skipped_count or 0) %}
             {% set qualities = skills.values() | selectattr('quality', 'defined') | map(attribute='quality') | selectattr('overall_score', 'defined') | list %}
+            <div class="dashboard">
+                <div class="dashboard-card"><h3 class="dashboard-card-title">Validators Run</h3><p class="dashboard-card-value">{{ total_validators }}</p><p class="dashboard-card-subtitle">{{ skipped_count }} skipped · {{ ui_t1_na }} not applicable</p></div>
+                <div class="dashboard-card success"><h3 class="dashboard-card-title">Passed</h3><p class="dashboard-card-value">{{ passed_count }}</p><p class="dashboard-card-subtitle">{{ pass_percentage ~ '% success rate' if total_validators else 'No executed checks' }}</p></div>
+                <div class="dashboard-card danger"><h3 class="dashboard-card-title">Failed</h3><p class="dashboard-card-value">{{ failed_count }}</p><p class="dashboard-card-subtitle">{{ incomplete_count }} incomplete</p></div>
+                <div class="dashboard-card"><h3 class="dashboard-card-title">Findings</h3><p class="dashboard-card-value">{{ tier1_summary.issue_count or 0 }}</p><p class="dashboard-card-subtitle">{% set severity_separator = joiner(' · ') %}{% for level in ['critical', 'high', 'medium', 'low'] %}{% if tier1_summary[level] %}{{ severity_separator() }}{{ tier1_summary[level] }} {{ level }}{% endif %}{% endfor %}{% if not tier1_summary.issue_count %}None reported{% endif %}</p></div>
+            </div>
+            <details class="t3-details"><summary>Tier 1 result and next steps</summary>
             <section class="exec-summary {{ t1_class }}" aria-labelledby="exec-summary-title">
                 <div class="exec-verdict">
                     <h2 id="exec-summary-title" class="exec-title"><span class="sr-only">Tier 1 result: </span><span class="verdict-chip {{ t1_class }}">{{ verdict_words[t1_key] }}</span></h2>
@@ -1588,6 +1962,8 @@
                 </div>
                 {% endif %}
             </section>
+
+            </details>
 
             {# ==================== FINDING TYPES ==================== #}
             {% if top_issues %}
@@ -2095,26 +2471,38 @@
         </div>
         {% endfor %}
         </div>{# End of results-by-validator #}
-        {% elif tab.id == 'tier2' %}
+                {{ render_plugin_evidence(plugin_evidence, 'tier1') }}
+{% elif tab.id == 'tier2' %}
         {# ==================== TIER 2: SEMANTIC OVERLAP ==================== #}
 
-        <nav aria-label="Tier 2 comparison scopes" class="tier2-scope-nav">
-            {% for scope in tier2_scopes %}<a href="#tier2-{{ scope.id }}">{{ scope.label }}</a>{% endfor %}
-        </nav>
+        <div class="dashboard">
+            <div class="dashboard-card">
+                <h3 class="dashboard-card-title">Checks Run</h3>
+                <p class="dashboard-card-value">{{ tier2_summary.executed_count }}</p>
+                <p class="dashboard-card-subtitle">Intra-Skill + Inter-Skill</p>
+            </div>
+            <div class="dashboard-card danger">
+                <h3 class="dashboard-card-title">Findings</h3>
+                <p class="dashboard-card-value">{{ tier2_summary.issue_count }}</p>
+                <p class="dashboard-card-subtitle">Recorded Tier 2 findings; completion and scope are shown below.</p>
+            </div>
+        </div>
+        <div class="nav-tabs tier2-subtabs" style="margin-top:1rem;" role="tablist" aria-label="Tier 2 comparison scopes">
+            <button class="nav-tab active" id="dedup-tab-intra" type="button" role="tab" aria-controls="dedup-intra" aria-selected="true" tabindex="0" onclick="showDedupTab('intra')">Intra-Skill</button>
+            <button class="nav-tab" id="dedup-tab-inter" type="button" role="tab" aria-controls="dedup-inter" aria-selected="false" tabindex="-1" onclick="showDedupTab('inter')">Inter-Skill</button>
+        </div>
         {% for scope in tier2_scopes %}
+        {% set dedup_id = 'intra' if scope.id == 'within' else 'inter' %}
+        <div id="dedup-{{ dedup_id }}" class="dedup-subtab" style="display:{{ 'block' if loop.first else 'none' }};" role="tabpanel" aria-labelledby="dedup-tab-{{ dedup_id }}" tabindex="0">
         <section id="tier2-{{ scope.id }}" aria-labelledby="tier2-{{ scope.id }}-title">
             <h2 id="tier2-{{ scope.id }}-title">{{ scope.label }}</h2>
             <p>{{ 'Redundant content among files in the evaluated skill.' if scope.id == 'within' else 'Semantic overlap with catalog entries or among a collection of skills.' }}</p>
             {% if not scope.not_run %}
-            <div class="dashboard">
-                {#- Across skills counts every similarity match, not only duplicates. -#}
+            <dl class="tier2-scope-summary">
                 {% for label, value in [('Checks completed', scope.completed), ('Duplicate findings' if scope.id == 'within' else 'Similarity matches', scope.duplicates), ('Affected files' if scope.id == 'within' else 'Affected skills', scope.affected), ('Catalog entries compared', scope.catalog_entries)] %}
-                <div class="dashboard-card">
-                    <h3 class="dashboard-card-title">{{ label }}</h3>
-                    <p class="dashboard-card-value">{{ 'Not applicable' if label == 'Catalog entries compared' and scope.catalog_not_applicable else (value if value is not none else 'Unavailable') }}</p>
-                </div>
+                <div><dt>{{ label }}</dt><dd>{{ 'Not applicable' if label == 'Catalog entries compared' and scope.catalog_not_applicable else (value if value is not none else 'Unavailable') }}</dd></div>
                 {% endfor %}
-            </div>
+            </dl>
             {% endif %}
             {% for note in scope.notes %}<p class="t3-section-hint">{{ note }}</p>{% endfor %}
             {% for result in scope.results %}
@@ -2173,9 +2561,11 @@
                 {% endfor %}
             {% endfor %}
         </section>
+        </div>
         {% endfor %}
 
-        {% elif tab.id == 'tier3' %}
+                {{ render_plugin_evidence(plugin_evidence, 'tier2') }}
+{% elif tab.id == 'tier3' %}
         {# ==================== TIER 3: AGENT EVALUATION (dimensions-first, schema v2.0) ==================== #}
         {% if tier3 %}
 
@@ -2216,270 +2606,7 @@
             {% set _ = t3_agent_panel_ids.update({name: 'tier3-agent-panel-' ~ loop.index0}) %}
         {% endfor %}
 
-        <style>
-            .t3-subtabs { display:flex; gap:0.25rem; background:var(--bg); border-radius:10px; padding:0.25rem; margin-bottom:1.25rem; overflow-x:auto; border:1px solid var(--border-color); }
-            .t3-subtab { padding:0.65rem 1rem; cursor:pointer; border:none; background:transparent; color:var(--text-secondary); font-weight:600; font-size:0.9rem; border-radius:8px; white-space:nowrap; }
-            .t3-subtab:hover { background:var(--bg-secondary); color:var(--dark-text); }
-            .t3-subtab.active { color:var(--dark-text); background:var(--bg-secondary); box-shadow:var(--shadow); }
-            .t3-page { display:none; }
-            .t3-page.active { display:block; }
-            .t3-agent-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:1rem; margin-top:1rem; }
-            .t3-agent-card { background:var(--bg); border:1px solid var(--border-color); border-radius:10px; padding:1rem; border-top:3px solid var(--accent-color); box-shadow:var(--shadow); }
-            .t3-agent-name { font-weight:700; }
-            .t3-agent-score { font-size:1.75rem; font-weight:700; margin:0.25rem 0; }
-            .t3-mini-bar { height:7px; background:var(--bg-tertiary); border-radius:999px; overflow:hidden; margin-top:0.5rem; }
-            .t3-mini-bar > span { display:block; height:100%; background:var(--accent-color); }
-            .t3-finding-card { background:var(--bg); border:1px solid var(--border-color); border-radius:10px; padding:1rem; margin:0.5rem 0; box-shadow:var(--shadow); }
-            .t3-finding-card.ok { border-left:4px solid var(--success-color); }
-            .t3-finding-card.warning { border-left:4px solid var(--warning-color); }
-            .t3-finding-card.critical { border-left:4px solid var(--danger-color); }
-            .t3-checks { list-style:none; margin:0.6rem 0 0; padding:0; }
-            .t3-checks li { margin:0; padding:0.3rem 0; color:var(--text-secondary); font-size:0.85rem; border-bottom:1px solid var(--bg-tertiary); }
-            .t3-checks li:last-child { border-bottom:none; }
-            .t3-pill { display:inline-block; padding:0.15rem 0.5rem; border-radius:4px; font-size:0.7rem; font-weight:700; text-transform:uppercase; }
-            .t3-pill.ok, .t3-pill.pass { background:var(--badge-pass-bg); color:var(--badge-pass-tx); }
-            .t3-pill.warning, .t3-pill.warn, .t3-pill.neutral { background:var(--badge-warn-bg); color:var(--badge-warn-tx); }
-            .t3-pill.critical, .t3-pill.fail { background:var(--badge-fail-bg); color:var(--badge-fail-tx); }
-            .t3-collapsed { background:var(--bg); border:1px solid var(--border-color); border-radius:10px; padding:0.75rem 1rem; margin-top:1rem; box-shadow:var(--shadow); }
-            .t3-section { margin-top:1.5rem; }
-            .t3-pre { background:var(--bg); border:1px solid var(--border-color); border-radius:6px; padding:0.75rem; overflow:auto; font-size:0.78rem; max-height:280px; }
-            .t3-section h3 { margin-bottom:0.75rem; }
-            .t3-details { background:var(--bg); border:1px solid var(--border-color); border-radius:12px; box-shadow:var(--shadow); margin-top:1rem; overflow:hidden; }
-            .t3-details > summary { cursor:pointer; list-style:none; display:flex; justify-content:space-between; align-items:center; gap:0.75rem; padding:0.9rem 1rem; font-weight:800; color:var(--dark-text); }
-            .t3-details > summary::-webkit-details-marker { display:none; }
-            .t3-details > summary::after { content:'▼'; color:var(--text-secondary); font-size:0.9rem; font-weight:800; transition:transform 0.2s ease; }
-            .t3-details[open] > summary::after { content:'▲'; }
-            .t3-details-body { border-top:1px solid var(--border-color); padding:1rem; }
-            .t3-details-body > .t3-section:first-child { margin-top:0; }
-            .t3-dataset-card { border-left:4px solid var(--secondary-color); }
-            .t3-dataset-hero { background:var(--bg); border:1px solid var(--border-color); border-radius:12px; padding:1.25rem; box-shadow:var(--shadow); margin-bottom:1rem; }
-            .t3-dataset-hero h2 { margin:0; color:var(--secondary-color); font-size:1.3rem; }
-            .t3-dataset-list { display:grid; grid-template-columns:1fr; gap:1rem; }
-            .t3-ds-card { background:var(--bg); border:1px solid var(--border-color); border-left:4px solid var(--secondary-color); border-radius:12px; padding:1.1rem 1.2rem; box-shadow:var(--shadow); }
-            details.t3-ds-card { padding:0; overflow:hidden; }
-            details.t3-ds-card > summary { cursor:pointer; list-style:none; padding:1rem 1.2rem; display:flex; align-items:center; gap:0.75rem; }
-            details.t3-ds-card > summary::-webkit-details-marker { display:none; }
-            details.t3-ds-card > summary::after { content:'▼'; color:var(--text-secondary); font-size:0.9rem; font-weight:800; margin-left:auto; flex-shrink:0; }
-            details.t3-ds-card[open] > summary::after { content:'▲'; }
-            details.t3-ds-card > .t3-ds-body { border-top:1px solid var(--border-color); padding:0 1.2rem 1rem; }
-            .t3-ds-head { display:flex; align-items:center; justify-content:space-between; gap:0.75rem; flex-wrap:wrap; margin-bottom:0.85rem; }
-            .t3-ds-id { color:var(--secondary-color); font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-weight:800; font-size:1rem; }
-            .t3-ds-meta { display:flex; gap:0.5rem; flex-wrap:wrap; color:var(--text-secondary); font-size:0.8rem; }
-            .t3-ds-chip { background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:999px; padding:0.18rem 0.6rem; }
-            .t3-ds-field { margin:0.8rem 0; }
-            .t3-ds-label { display:block; color:var(--text-secondary); font-size:0.72rem; font-weight:800; letter-spacing:0.05em; text-transform:uppercase; margin-bottom:0.2rem; }
-            .t3-ds-value { font-size:0.92rem; line-height:1.55; white-space:pre-wrap; }
-            .t3-ds-gt { color:var(--text-secondary); font-style:italic; }
-            .t3-ds-behaviors { counter-reset:behavior; list-style:none; margin:0.45rem 0 0; padding:0; display:grid; gap:0.35rem; }
-            .t3-ds-behaviors li { counter-increment:behavior; display:grid; grid-template-columns:1.7rem 1fr; gap:0.5rem; align-items:start; color:var(--dark-text); font-size:0.87rem; line-height:1.45; }
-            .t3-ds-behaviors li::before { content:counter(behavior); display:inline-flex; align-items:center; justify-content:center; width:1.35rem; height:1.35rem; border-radius:999px; background:var(--bg-secondary); color:var(--secondary-color); font-weight:800; font-size:0.72rem; border:1px solid var(--border-color); }
-            .t3-ds-diagnostics { list-style:none; margin:0.45rem 0 0; padding:0; }
-            .t3-ds-diagnostics > li { margin-top:0.65rem; padding:0.65rem; border:1px solid var(--border-color); border-radius:0.4rem; overflow-wrap:anywhere; color:var(--dark-text); font-size:0.87rem; line-height:1.45; }
-            .t3-ds-diagnostics > li > div { margin-top:0.25rem; }
-            .t3-conclusion { border-left:4px solid var(--warning-color); }
-            .t3-conclusion.pass { border-left-color:var(--success-color); }
-            .t3-conclusion.fail { border-left-color:var(--danger-color); }
-            .t3-agent-scorecards-row { display:grid; grid-template-columns:minmax(220px,0.85fr) repeat(2,minmax(260px,1fr)); gap:1.25rem; align-items:stretch; margin-top:0.75rem; }
-            .t3-agent-scorecard-list { display:grid; gap:1rem; align-content:start; }
-            .t3-overview-lead .tolerated-baseline { display:block; margin-top:0.35rem; }
-            .t3-overview-lead { background:linear-gradient(135deg,var(--bg),var(--bg-secondary)); border:1px solid var(--border-color); border-left:4px solid var(--secondary-color); border-radius:12px; padding:1rem 1.15rem; box-shadow:var(--shadow); color:var(--dark-text); line-height:1.55; margin:0 0 1rem; }
-            .t3-dataset-provenance { margin:0 0 1rem; padding:0.7rem 0.9rem; border-left:4px solid var(--border-color); border-radius:6px; background:var(--bg-secondary); color:var(--dark-text); }
-            .t3-dataset-provenance.warning { border-left-color:var(--warning-color); background:var(--badge-warn-bg); color:var(--badge-warn-tx); }
-            .t3-harbor-panel { background:var(--bg); border:1px solid var(--border-color); border-left:4px solid var(--secondary-color); border-radius:12px; padding:0.95rem 1.1rem; box-shadow:var(--shadow); margin:0 0 1rem; display:flex; gap:1rem; justify-content:space-between; align-items:center; flex-wrap:wrap; }
-            .t3-harbor-panel strong { color:var(--dark-text); }
-            .t3-harbor-panel p { color:var(--text-secondary); margin:0.2rem 0 0; font-size:0.85rem; line-height:1.45; }
-            .t3-harbor-actions { display:flex; gap:0.45rem; flex-wrap:wrap; }
-            .t3-harbor-link, .t3-evidence-link { display:inline-flex; align-items:center; gap:0.3rem; border:1px solid var(--border-color); border-radius:7px; background:var(--bg-secondary); color:var(--secondary-color); text-decoration:none; font-weight:800; }
-            .t3-harbor-link { padding:0.42rem 0.75rem; font-size:0.8rem; }
-            .t3-evidence-link { padding:0.22rem 0.55rem; font-size:0.76rem; margin-top:0.45rem; }
-            .t3-harbor-link:hover, .t3-evidence-link:hover { border-color:var(--secondary-color); background:var(--bg); color:var(--accent-color); }
-            .t3-next-steps { background:var(--bg); border:1px solid var(--border-color); border-radius:12px; padding:1rem 1.15rem; box-shadow:var(--shadow); margin:0 0 1rem; }
-            .t3-next-steps-head { display:flex; justify-content:space-between; gap:0.75rem; align-items:center; flex-wrap:wrap; margin-bottom:0.7rem; }
-            .t3-next-steps-head h3 { margin:0; color:var(--dark-text); font-size:1rem; }
-            .t3-next-steps-conclusion { margin:0 0 0.65rem; color:var(--dark-text); line-height:1.5; }
-            .t3-next-steps-list { margin:0; padding-left:1.15rem; color:var(--dark-text); display:grid; gap:0.35rem; }
-            .t3-link-btn { background:var(--secondary-color); border:1px solid var(--secondary-color); color:var(--on-accent); border-radius:7px; padding:0.38rem 0.75rem; font-size:0.78rem; font-weight:800; cursor:pointer; }
-            .t3-link-btn:hover { filter:brightness(0.95); }
-            .t3-agent-link { background:transparent; border:0; color:var(--secondary-color); font:inherit; font-weight:800; padding:0; cursor:pointer; text-decoration:underline; text-decoration-thickness:1px; text-underline-offset:2px; }
-            .t3-agent-link:hover { color:var(--accent-color); }
-            .t3-agent-deeplink { cursor:pointer; transition:transform 0.15s ease, border-color 0.15s ease; }
-            .t3-agent-deeplink:hover, .t3-agent-deeplink:focus { border-color:var(--secondary-color); transform:translateY(-1px); outline:none; }
-            /* Invisible scroll target inside each agent panel. ``scroll-margin-top``
-               keeps the anchor below the sticky Tier 3 sub-tab nav when jumped to. */
-            .t3-agent-anchor { display:block; width:0; height:0; overflow:hidden; scroll-margin-top:80px; }
-            @media(max-width:1100px){.t3-agent-scorecards-row{grid-template-columns:1fr}.t3-agent-scorecard-list{grid-template-columns:repeat(auto-fit,minmax(220px,1fr));}}
 
-            /* Sticky Tier 3 sub-tab nav */
-            .t3-subtabs { position:sticky; top:0; z-index:5; }
-
-            /* Score chip (reusable 0-1 score badge) */
-            .t3-score-chip { display:inline-flex; align-items:center; gap:0.35rem; padding:0.18rem 0.55rem; border-radius:6px; font-weight:700; font-size:0.85rem; font-variant-numeric:tabular-nums; border:1px solid transparent; }
-            .t3-score-chip.ok { background:var(--badge-pass-bg); color:var(--badge-pass-tx); }
-            .t3-score-chip.warn { background:var(--badge-warn-bg); color:var(--badge-warn-tx); }
-            .t3-score-chip.fail { background:var(--badge-fail-bg); color:var(--badge-fail-tx); }
-            .t3-score-chip.neutral { background:var(--bg-secondary); color:var(--text-secondary); border-color:var(--border-color); }
-            .t3-delta { font-weight:700; font-size:0.78rem; padding:0.1rem 0.4rem; border-radius:4px; font-variant-numeric:tabular-nums; }
-            .t3-delta.up { color:var(--success-color); background:rgba(34,197,94,0.12); }
-            .t3-delta.down { color:var(--danger-color); background:rgba(239,68,68,0.12); }
-            .t3-delta.flat { color:var(--text-secondary); background:var(--bg-tertiary); }
-
-            /* Agent tabs (horizontal pill bar inside Agent Details) */
-            .t3-agent-tabs { display:flex; gap:0.25rem; flex-wrap:wrap; padding:0.3rem; background:var(--bg-secondary); border-radius:10px; border:1px solid var(--border-color); margin-bottom:1rem; }
-            .t3-agent-tab-btn { background:transparent; border:none; color:var(--text-secondary); font-weight:700; font-size:0.88rem; padding:0.55rem 1rem; border-radius:8px; cursor:pointer; display:inline-flex; align-items:center; gap:0.5rem; white-space:nowrap; transition:background 0.15s, color 0.15s; }
-            .t3-agent-tab-btn:hover { color:var(--dark-text); background:var(--bg); }
-            .t3-agent-tab-btn .t3-tab-dot { width:0.6rem; height:0.6rem; border-radius:50%; background:var(--accent); display:inline-block; }
-            .t3-agent-tab-btn .t3-tab-score { font-size:0.75rem; font-weight:600; color:var(--text-secondary); padding-left:0.25rem; }
-            .t3-agent-tab-btn.active { background:var(--bg); color:var(--dark-text); box-shadow:var(--shadow); border-bottom:3px solid var(--accent); border-radius:8px 8px 4px 4px; }
-            .t3-agent-tab-btn.active .t3-tab-score { color:var(--dark-text); }
-            .t3-agent-panel { display:none; }
-            .t3-agent-panel.active { display:block; }
-
-            /* Agent KPI strip */
-            .t3-kpi-strip { display:grid; grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); gap:0.75rem; margin-bottom:1rem; }
-            .t3-kpi-card { background:var(--bg); border:1px solid var(--border-color); border-radius:10px; padding:0.85rem 1rem; box-shadow:var(--shadow); }
-            .t3-kpi-card .t3-kpi-label { font-size:0.7rem; font-weight:700; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.05em; }
-            .t3-kpi-card .t3-kpi-value { font-size:1.5rem; font-weight:800; line-height:1.2; margin-top:0.2rem; font-variant-numeric:tabular-nums; }
-            .t3-kpi-card .t3-kpi-sub { font-size:0.78rem; color:var(--text-secondary); margin-top:0.15rem; }
-
-            /* Dimension pill strip (compact horizontal mapping) */
-            .t3-dim-strip { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:0.5rem; margin:0.75rem 0 1rem; padding:0.75rem; background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:10px; }
-            .t3-dim-pill { background:var(--bg); border:1px solid var(--border-color); border-radius:8px; padding:0.55rem 0.75rem; display:flex; flex-direction:column; gap:0.15rem; }
-            .t3-dim-pill .t3-dim-name { font-size:0.72rem; font-weight:800; text-transform:uppercase; color:var(--text-secondary); letter-spacing:0.04em; }
-            .t3-dim-pill .t3-dim-score { font-size:1.1rem; font-weight:800; font-variant-numeric:tabular-nums; }
-            .t3-dim-pill .t3-dim-lift { font-size:0.72rem; font-weight:600; }
-
-            /* Vertical evaluator card stack */
-            .t3-eval-stack { display:flex; flex-direction:column; gap:0.85rem; }
-            .t3-eval-card { background:var(--bg); border:1px solid var(--border-color); border-radius:12px; padding:1rem 1.1rem; box-shadow:var(--shadow); border-left:4px solid var(--border-color); }
-            .t3-eval-card.ok { border-left-color:var(--success-color); }
-            .t3-eval-card.warn, .t3-eval-card.warning { border-left-color:var(--warning-color); }
-            .t3-eval-card.fail, .t3-eval-card.critical { border-left-color:var(--danger-color); }
-            .t3-eval-head { display:grid; grid-template-columns:1fr auto auto; gap:1rem; align-items:center; }
-            @media(max-width:720px){.t3-eval-head{grid-template-columns:1fr;gap:0.5rem;}}
-            .t3-eval-title { font-weight:800; font-size:1rem; color:var(--dark-text); }
-            .t3-eval-desc { display:block; font-size:0.78rem; font-weight:500; color:var(--text-secondary); margin-top:0.15rem; }
-            .t3-eval-gauge { position:relative; width:64px; height:64px; flex-shrink:0; }
-            .t3-eval-gauge svg { width:100%; height:100%; transform:rotate(-90deg); }
-            .t3-eval-gauge .t3-gauge-track { fill:none; stroke:var(--bg-tertiary); stroke-width:8; }
-            .t3-eval-gauge .t3-gauge-arc { fill:none; stroke-width:8; stroke-linecap:round; transition:stroke-dashoffset 0.6s ease; }
-            .t3-eval-gauge .t3-gauge-text { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:0.9rem; font-variant-numeric:tabular-nums; }
-            .t3-eval-bars { margin-top:0.75rem; display:grid; grid-template-columns:80px 1fr auto; gap:0.5rem 0.75rem; align-items:center; font-size:0.82rem; }
-            .t3-eval-bars .t3-bar-label { color:var(--text-secondary); font-weight:600; }
-            .t3-eval-bars .t3-bar-track { height:8px; background:var(--bg-tertiary); border-radius:999px; overflow:hidden; position:relative; }
-            .t3-eval-bars .t3-bar-fill { height:100%; border-radius:999px; }
-            .t3-eval-bars .t3-bar-value { font-weight:700; font-variant-numeric:tabular-nums; min-width:2.5rem; text-align:right; }
-            .t3-eval-evidence { margin-top:0.85rem; }
-            .t3-eval-evidence > summary { cursor:pointer; list-style:none; color:var(--text-secondary); font-size:0.82rem; font-weight:600; padding:0.35rem 0; }
-            .t3-eval-evidence > summary::-webkit-details-marker { display:none; }
-            .t3-eval-evidence > summary::before { content:'▸'; display:inline-block; margin-right:0.4rem; transition:transform 0.15s ease; }
-            .t3-eval-evidence[open] > summary::before { transform:rotate(90deg); }
-            .t3-eval-evidence ul { list-style:none; margin:0.45rem 0 0; padding:0; display:grid; gap:0.3rem; }
-            .t3-eval-evidence li { display:grid; grid-template-columns:auto 1fr auto auto; gap:0.5rem; align-items:center; padding:0.35rem 0.55rem; background:var(--bg-secondary); border-radius:6px; font-size:0.82rem; }
-            .t3-eval-evidence li .t3-ev-id { font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-weight:700; color:var(--secondary-color); }
-            .t3-eval-evidence li .t3-ev-count { font-size:0.7rem; color:var(--text-secondary); font-weight:700; padding:0.1rem 0.4rem; border-radius:4px; background:var(--bg-tertiary); }
-            .t3-eval-evidence li .t3-ev-notes { color:var(--text-secondary); font-size:0.78rem; }
-            .t3-eval-evidence li .t3-ev-detail { grid-column:1 / -1; display:flex; flex-wrap:wrap; align-items:center; gap:0.5rem; }
-            .t3-ev-excerpt { font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-size:0.76rem; padding:0.15rem 0.4rem; border-radius:4px; background:var(--bg-tertiary); color:var(--text-secondary); overflow-wrap:anywhere; }
-            .t3-eval-evidence li .t3-ev-lift-excluded { color:var(--text-secondary); font-size:0.76rem; font-weight:600; }
-            .t3-eval-lift-note { max-width:16rem; }
-            .t3-score-reason { border-bottom:1px dotted currentColor; cursor:help; }
-
-            /* Attempt Details: SkillEvaluator-style chip table for per-case attempt scores */
-            .t3-attempt-list { display:flex; flex-wrap:wrap; gap:6px; min-width:180px; }
-            .t3-attempt-chip { display:inline-block; padding:3px 8px; border-radius:4px; font-size:0.76rem; font-weight:600; white-space:nowrap; font-variant-numeric:tabular-nums; }
-            .t3-attempt-chip.pass { background:rgba(34,197,94,0.18); color:var(--success-color); }
-            .t3-attempt-chip.warn { background:rgba(234,179,8,0.18); color:var(--warning-color); }
-            .t3-attempt-chip.fail { background:rgba(239,68,68,0.18); color:var(--danger-color); }
-            .t3-attempt-chip.muted { background:var(--bg-secondary); color:var(--text-secondary); border:1px dashed var(--border-color); }
-
-            /* Lift split-bar visual */
-            .t3-lift-row { display:grid; grid-template-columns:140px 1fr; gap:0.85rem; align-items:center; padding:0.45rem 0; border-bottom:1px dashed var(--border-color); }
-            .t3-lift-row:last-child { border-bottom:none; }
-            .t3-lift-row .t3-lift-label { font-size:0.82rem; color:var(--text-secondary); font-weight:600; }
-            .t3-lift-bar { position:relative; height:18px; background:var(--bg-tertiary); border-radius:999px; overflow:hidden; }
-            .t3-lift-bar .t3-lift-base { position:absolute; left:0; top:0; bottom:0; background:var(--text-secondary); opacity:0.45; }
-            .t3-lift-bar .t3-lift-with { position:absolute; left:0; top:0; bottom:0; }
-            .t3-lift-bar .t3-lift-with.up { background:var(--success-color); }
-            .t3-lift-bar .t3-lift-with.down { background:var(--danger-color); }
-            .t3-lift-bar .t3-lift-with.flat { background:var(--secondary-color); }
-            .t3-lift-bar .t3-lift-text { position:absolute; inset:0; display:flex; align-items:center; justify-content:flex-end; padding:0 0.6rem; font-size:0.72rem; font-weight:700; color:var(--dark-text); mix-blend-mode:plus-lighter; gap:0.4rem; }
-            .t3-lift-agent-block { background:var(--bg); border:1px solid var(--border-color); border-radius:10px; padding:0.6rem 0.9rem 0.85rem; margin-bottom:0.75rem; box-shadow:var(--shadow); }
-            .t3-lift-agent-block > h4 { display:flex; gap:0.5rem; align-items:center; margin:0 0 0.5rem; font-size:0.95rem; font-weight:800; }
-            .t3-lift-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:0.5rem 1.1rem; }
-            .t3-lift-case-block { padding:0.35rem 0; }
-            .t3-lift-case-id { font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-weight:700; font-size:0.82rem; color:var(--secondary-color); margin-bottom:0.25rem; }
-
-            /* Suggestions stacked cards & category chips */
-            .t3-sug-stack { display:flex; flex-direction:column; gap:0.7rem; }
-            .t3-sug-card { background:var(--bg); border:1px solid var(--border-color); border-radius:10px; padding:0.9rem 1rem; box-shadow:var(--shadow); border-left:4px solid var(--secondary-color); display:grid; grid-template-columns:auto 1fr auto; gap:0.75rem; align-items:start; }
-            .t3-sug-card.severity-pass { border-left-color:var(--success-color); }
-            .t3-sug-card.severity-warn { border-left-color:var(--warning-color); }
-            .t3-sug-card.severity-fail { border-left-color:var(--danger-color); }
-            .t3-sug-num { display:inline-flex; align-items:center; justify-content:center; width:1.7rem; height:1.7rem; border-radius:50%; background:var(--bg-secondary); border:1px solid var(--border-color); font-weight:800; font-size:0.78rem; color:var(--secondary-color); }
-            .t3-sug-body { font-size:0.92rem; line-height:1.55; color:var(--dark-text); }
-            .t3-sug-title { font-weight:800; color:var(--dark-text); display:flex; gap:0.55rem; align-items:center; flex-wrap:wrap; }
-            .t3-sug-cat { display:inline-block; padding:0.1rem 0.45rem; border-radius:4px; font-size:0.68rem; font-weight:800; text-transform:uppercase; letter-spacing:0.04em; background:var(--bg-secondary); color:var(--secondary-color); border:1px solid var(--border-color); }
-            .t3-sug-actions { display:flex; gap:0.35rem; }
-            .t3-copy-btn { background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:6px; padding:0.25rem 0.55rem; font-size:0.72rem; font-weight:700; color:var(--text-secondary); cursor:pointer; }
-            .t3-copy-btn:hover { color:var(--dark-text); background:var(--bg); }
-            .t3-copy-btn.copied { color:var(--success-color); border-color:var(--success-color); }
-
-            /* Provenance key-value grid */
-            .t3-prov-grid { display:grid; grid-template-columns:minmax(140px, 0.3fr) 1fr auto; gap:0.4rem 0.85rem; align-items:center; padding:0.25rem 0; }
-            .t3-prov-grid .t3-prov-label { font-weight:700; color:var(--dark-text); font-size:0.85rem; padding:0.4rem 0; }
-            .t3-prov-grid .t3-prov-value { font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-size:0.8rem; color:var(--text-secondary); background:var(--bg-secondary); padding:0.45rem 0.65rem; border-radius:6px; word-break:break-all; }
-            .t3-prov-grid .t3-prov-action { display:flex; gap:0.4rem; }
-            .t3-download-grid { display:flex; flex-wrap:wrap; gap:0.5rem; }
-            .t3-download-grid .t3-copy-btn { padding:0.4rem 0.85rem; font-size:0.78rem; }
-            .t3-truncation-notice { background:var(--badge-warn-bg); border:1px solid var(--warning-color); border-left:4px solid var(--warning-color); border-radius:10px; color:var(--dark-text); margin:0 0 1rem; padding:0.8rem 1rem; }
-            .t3-truncation-notice strong { display:block; margin-bottom:0.3rem; }
-            .t3-truncation-notice ul { display:flex; flex-wrap:wrap; gap:0.25rem 1rem; margin:0.35rem 0 0; padding-left:1.2rem; font-size:0.82rem; color:var(--text-secondary); }
-            .t3-coverage-notice ul { display:block; font-size:0.88rem; color:var(--dark-text); }
-            /* Insight source tag (deterministic vs LLM) */
-            .t3-insight-source { display:inline-block; padding:0.05rem 0.4rem; border-radius:4px; font-size:0.65rem; font-weight:800; text-transform:uppercase; letter-spacing:0.04em; vertical-align:middle; margin-left:0.35rem; }
-            .insight-source-deterministic { background:var(--bg-secondary); color:var(--text-secondary); border:1px solid var(--border-color); }
-            .insight-source-llm { background:rgba(139,92,246,0.18); color:#8b5cf6; border:1px solid rgba(139,92,246,0.4); }
-            /* Reasoning column wraps at a comfortable width */
-            .t3-reasoning { font-size:0.85rem; color:var(--dark-text); max-width:520px; line-height:1.45; white-space:normal; }
-            .t3-reasoning-list { margin:0; padding-left:1.05rem; }
-            .t3-reasoning-list li { margin-bottom:0.2rem; }
-            .t3-reasoning-list li:last-child { margin-bottom:0; }
-            /* One-liner hint shown beneath a dimension name in tables */
-            .t3-dim-hint { color:var(--text-secondary); font-size:0.78rem; font-weight:400; margin-top:0.15rem; line-height:1.35; }
-            /* Reusable section hint paragraph used above several Tier 3 tables */
-            .t3-section-hint { color:var(--text-secondary); font-size:0.85rem; margin:0 0 0.75rem; }
-            /* Multi-Agent Dimension Lift cell layout */
-            .t3-mad-cell { display:flex; flex-direction:column; align-items:flex-start; gap:0.2rem; min-width:84px; }
-            .t3-mad-score-row { display:flex; align-items:center; gap:0.45rem; width:100%; }
-            .t3-mad-score { font-weight:700; font-variant-numeric:tabular-nums; }
-            .t3-mad-bar { flex:1; height:6px; min-width:48px; background:var(--bg-tertiary); border-radius:999px; overflow:hidden; }
-            .t3-mad-bar > span { display:block; height:100%; border-radius:999px; }
-            .t3-mad-lift { font-size:0.74rem; font-weight:700; font-variant-numeric:tabular-nums; }
-            /* Tier summary chip strip on the global hero */
-            .agent-hero-tiers { display:flex; flex-wrap:wrap; gap:0.5rem; margin-top:0.65rem; }
-            .agent-hero-tier-chip { background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:999px; padding:0.2rem 0.65rem; font-size:0.78rem; color:var(--text-secondary); }
-            .agent-hero-tier-chip strong { color:var(--dark-text); }
-            .agent-hero-tier-chip.pass strong { color:var(--success-color); }
-            .agent-hero-tier-chip.fail strong { color:var(--danger-color); }
-            .agent-hero-tier-chip.warn strong { color:var(--warning-color); }
-
-            /* Search/filter input */
-            .t3-filter-bar { display:flex; gap:0.5rem; align-items:center; margin:0 0 0.85rem; flex-wrap:wrap; }
-            .t3-filter-input { flex:1; min-width:220px; padding:0.5rem 0.75rem; border:1px solid var(--border-color); border-radius:8px; background:var(--bg); color:var(--dark-text); font-size:0.88rem; }
-            .t3-filter-input:focus { outline:none; border-color:var(--secondary-color); box-shadow:0 0 0 2px rgba(118,185,0,0.15); }
-            .t3-filter-count { font-size:0.78rem; color:var(--text-secondary); font-weight:600; }
-
-            /* Print-friendly */
-            @media print {
-                .t3-subtabs, .t3-agent-tabs, .t3-copy-btn, .t3-filter-bar { display:none !important; }
-                .t3-page, .t3-agent-panel { display:block !important; page-break-inside:avoid; }
-                .t3-eval-card, .t3-sug-card, .t3-kpi-card, .t3-pivot-wrap, .t3-lift-agent-block { page-break-inside:avoid; box-shadow:none; }
-                .t3-details { box-shadow:none; }
-                .t3-details > summary::after { display:none; }
-                .t3-eval-evidence { display:block; }
-                .t3-eval-evidence > summary { display:none; }
-            }
-        </style>
 
         <nav class="t3-subtabs" role="tablist" aria-label="Live evaluation views">
             <button class="t3-subtab active" data-tier3-tab="overview" role="tab" id="tier3-tab-overview" aria-controls="tier3-page-overview" aria-selected="true" tabindex="0" onclick="showTier3SubTab('overview', this)">Overview</button>
@@ -2523,55 +2650,21 @@
         {% endif %}
 
         {% set t3_coverage_messages = (tier3.coverage_notices or []) | selectattr('message', 'string') | map(attribute='message') | select | list %}
-        {% if t3_coverage_messages %}
-        <div class="t3-truncation-notice t3-coverage-notice" id="tier3-coverage-notices" role="status">
-            <strong>Agent coverage notes</strong>
-            <ul>
-                {% for message in t3_coverage_messages %}
-                <li>{{ message }}</li>
-                {% endfor %}
-            </ul>
-        </div>
-        {% endif %}
-
         {# ---------- Overview ---------- #}
         <section class="t3-page active" id="tier3-page-overview" role="tabpanel" aria-labelledby="tier3-tab-overview" tabindex="0">
-            {% set t3_effect = (tier3.conclusions or []) | selectattr('title', 'equalto', 'Skill effect') | first %}
+            {% set t3_effect = (insights_view.conclusions or []) | selectattr('title', 'equalto', 'Skill effect') | first %}
             {# Set when the lead itself says that other failures need attention. #}
             {% set t3_lead_needs_attention = false %}
-            <div class="t3-overview-lead">
-                {% if tier3_is_skipped %}
-                <strong>Live evaluation skipped:</strong> {{ tier3_skip_message }}
-                Tier 3 is advisory and does not block required validation.
-                {% elif tier3_verdict == 'inconclusive' %}
-                <strong>Inconclusive: skill never activated.</strong>
-                Scores are diagnostic only; no lift verdict was computed. Check skill loading and agent support, then rerun the evaluation.
-                {% elif tier3.get('mode') == 'baseline_only' %}
-                <strong>Baseline-only calibration:</strong>
-                without-skill scores only, with a baseline calibration score of
-                {{ "%.2f" | format(tier3.overall_score) if tier3.overall_score is not none else "N/A" }}.
-                {% if t3_best_name %}Best performing agent is <strong>{{ t3_best_name }}</strong>.{% else %}No successfully scored agent is available.{% endif %}
-                No with-skill arm was run (<code>--skip-with-skill</code>), so no skill lift was measured.
-                {% else %}
-                {% if completed_agent and completed_agent.needs_attention %}
-                {% set t3_lead_needs_attention = true %}
-                <strong>Completed-agent result: {{ completed_agent.verdict | upper }}.</strong>
-                {{ completed_agent.name }} scored {{ "%.2f" | format(completed_agent.score) }}.
-                Other execution failures need attention. This is not a whole-run or publication PASS.
-                {% else %}
-                <strong>Verdict at a glance:</strong>
-                {{ advisory_fail_word if tier3_advisory_fail else (verdict_words.get(tier3_verdict) or tier3_verdict | title) }}{% if t3_effect %} · {{ t3_effect.message }}{% else %} with an overall score of
-                {{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}.
-                {% if t3_best_name %}Best performing agent is <strong>{{ t3_best_name }}</strong>{% else %}No successfully scored agent is available{% endif %}
-                {% if tier3.get('overall_lift') is not none %} with {{ "%+.2f" | format(tier3.get('overall_lift')) }} skill lift{% endif %}.
-                {% endif %}
-                {% endif %}
-                {% endif %}
-                {% if tolerated_baselines and not t3_lead_needs_attention %}
-                <span class="tolerated-baseline"><strong>Needs attention:</strong> baseline timeouts were tolerated.</span>
-                {% endif %}
+            <div class="t3-overview-lead" role="status">
+                {% if tier3_is_skipped %}<strong>Live evaluation skipped:</strong> {{ tier3_skip_message }}
+                {% elif tier3_verdict == 'inconclusive' %}<strong>Inconclusive: skill never activated.</strong> Scores are diagnostic only; no lift verdict was computed.
+                {% elif tier3.get('mode') == 'baseline_only' %}<strong>Baseline-only calibration.</strong> No with-skill arm; no skill lift measured.
+                {% elif completed_agent and completed_agent.needs_attention %}
+                <strong>Completed-agent result: {{ completed_agent.verdict | upper }}.</strong> Other execution failures need attention; not a whole-run or publication PASS.
+                {% else %}<strong>Live quality: {{ advisory_fail_word if tier3_advisory_fail else (verdict_words.get(tier3_verdict) or tier3_verdict | title) }}.</strong>{% endif %}
+                {% if t3_coverage_messages %}<a href="#tier3-coverage-notices">Some agent arms are incomplete; review scored coverage and comparison limits in Agent Details.</a>{% endif %}
                 {% for tolerated in tolerated_baselines or [] %}
-                <span class="tolerated-baseline">Baseline incomplete for <strong>{{ tolerated.name }}</strong>{% if tolerated.scored_attempts is not none and tolerated.expected_attempts is not none %} ({{ tolerated.scored_attempts }} of {{ tolerated.expected_attempts }} attempts scored){% endif %}: kept by <code>--tolerate-baseline-timeouts</code>, so its baseline and uplift are not reported.</span>
+                <span class="tolerated-baseline">Baseline incomplete for <strong>{{ tolerated.name }}</strong>{% if tolerated.scored_attempts is not none and tolerated.expected_attempts is not none %} ({{ tolerated.scored_attempts }} of {{ tolerated.expected_attempts }} attempts scored){% endif %}: baseline timeouts were tolerated by <code>--tolerate-baseline-timeouts</code>; baseline and uplift unavailable.</span>
                 {% endfor %}
             </div>
             {% if tier3_dataset_sufficiency and tier3_dataset_sufficiency.coverage_summary %}
@@ -2589,100 +2682,47 @@
             {% if tier3_dataset_provenance_line %}
             <p class="t3-dataset-provenance{{ ' warning' if tier3_dataset_provenance_warning else '' }}">{{ tier3_dataset_provenance_line }}</p>
             {% endif %}
-            {% if harbor_jobs %}
-            <div class="t3-harbor-panel">
-                <div>
-                    <strong>Harbor artifacts</strong>
-                    <p>Open retained logs, raw trajectories, artifacts, and generated Harbor analysis for this Tier 3 run.</p>
-                </div>
-                <div class="t3-harbor-actions">
-                    {% for job in harbor_jobs %}
-                    <div><strong>{{ job.name }}</strong>
-                    {% if job.url %}<a class="t3-harbor-link" href="{{ job.url }}" target="_blank" rel="noopener">Results</a>{% endif %}
-                    {% if job.analysis_url %}<a class="t3-harbor-link" href="{{ job.analysis_url }}" target="_blank" rel="noopener">Analysis</a>{% endif %}
-                    </div>
-                    {% endfor %}
-                </div>
-            </div>
-            {% endif %}
-            <div class="dashboard">
-                <div class="dashboard-card {{ 'success' if tier3_verdict == 'pass' else ('danger' if tier3_verdict == 'fail' else '') }}">
-                    <h3 class="dashboard-card-title">{{ 'Quality Verdict' if report_scope == 'tier3' and completed_agent else 'Verdict' }}</h3>
-                    <p class="dashboard-card-value">{{ verdict_words['skipped'] if tier3_is_skipped else (advisory_fail_word if tier3_advisory_fail else (verdict_words.get(tier3_verdict) or tier3_verdict | title)) }}</p>
-                    <p class="dashboard-card-subtitle">{% if report_scope == 'tier3' and completed_agent and completed_agent.reason %}{{ completed_agent.reason }}{% else %}{{ "No skill verdict: baseline-only run" if tier3.get('mode') == 'baseline_only' else ('Completed-agent quality; lift shown separately' if report_scope == 'tier3' and completed_agent else 'Evaluation outcome') }}{% endif %}</p>
-                </div>
-                <div class="dashboard-card">
+            {% if hero_score is none %}<p class="t3-quality-unavailable" id="tier3-quality-unavailable">Quality measurements unavailable for the run result.{% if t3_best_name %} Recorded best agent: {{ t3_best_name }}; review its scoped evidence in Agent Details.{% endif %} Review coverage and the recorded next action.</p>{% endif %}
+            <div class="dashboard t3-primary-metrics">
+                {% if hero_score is not none %}
+                <div class="dashboard-card" data-primary-metric="score">
                     <h3 class="dashboard-card-title">{{ 'Completed Agent Score' if completed_agent and completed_agent.needs_attention else 'Overall Score' }}</h3>
-                    <p class="dashboard-card-value">{{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}</p>
-                    <p class="dashboard-card-subtitle">{{ "Baseline calibration (no with-skill arm)" if tier3.get('mode') == 'baseline_only' else "Best run across evaluated dimensions" }}</p>
+                    <p class="dashboard-card-value">{{ "%.2f" | format(hero_score) }}</p>
+                    <p class="dashboard-card-subtitle">{{ completed_agent.name if completed_agent else (t3_best_name or 'Recorded quality') }}{% if tier3.get('mode') == 'baseline_only' %} · Baseline calibration (no with-skill arm){% endif %}</p>
                 </div>
-                <div class="dashboard-card">
-                    <h3 class="dashboard-card-title">Best Performing Agent</h3>
-                    <p class="dashboard-card-value" style="font-size:1.35rem;">{{ t3_best_name or 'N/A' }}</p>
-                    {% set t3_best_score = (t3_best.baseline if tier3.get('mode') == 'baseline_only' else t3_best.with_skill) if t3_best else none %}
-                    <p class="dashboard-card-subtitle">Score {{ "%.2f" | format(t3_best_score) if t3_best_score is not none else "N/A" }}</p>
-                </div>
-                <div class="dashboard-card">
+                <div class="dashboard-card" data-primary-metric="lift">
                     <h3 class="dashboard-card-title">Skill Lift</h3>
                     <p class="dashboard-card-value">{{ "%+.2f" | format(tier3.get('overall_lift')) if tier3.get('overall_lift') is not none else "N/A" }}</p>
-                    <p class="dashboard-card-subtitle">Skill Lift compares Overall on the metrics and cases both arms scored, so it can differ from subtracting the displayed Overall scores.</p>
-                    <p class="dashboard-card-subtitle">{% if tier3_verdict == 'fail' and tier3.get('overall_lift') is not none and tier3.get('overall_lift') > 0 %}shown for reference, not the verdict{% else %}Compared with baseline{% endif %}</p>
+                    <p class="dashboard-card-subtitle">{% if tier3.get('mode') == 'baseline_only' %}No with-skill arm{% elif tier3_verdict == 'inconclusive' %}Skill never activated{% elif tier3.get('overall_lift') is none %}{{ 'Comparison unavailable; baseline recorded' if t3_best and t3_best.baseline is not none else 'No comparable baseline' }}{% else %}Comparable scored cases{% endif %}</p>
                 </div>
-                {% set t3_correct_answers = tier3.get('correct_answers') or {} %}
-                {% set t3_correct_with = t3_correct_answers.get('with_skill') or {} %}
-                {% set t3_correct_without = t3_correct_answers.get('without_skill') or {} %}
-                <div class="dashboard-card">
-                    <h3 class="dashboard-card-title">Goals met</h3>
-                    <p class="dashboard-card-value" style="font-size:1.05rem;">
-                        {% if t3_correct_with.get('scored') %}
-                        {{ t3_correct_with.get('correct') }}/{{ t3_correct_with.get('scored') }} |
-                        {% if t3_correct_without.get('scored') %}
-                        {{ t3_correct_without.get('correct') }}/{{ t3_correct_without.get('scored') }} |
-                        {% if t3_correct_answers.get('difference') is not none %}
-                        {% if t3_correct_answers.get('difference_unit') == 'percentage_points' %}{{ "%+.1f pp" | format(t3_correct_answers.get('difference')) }}{% else %}{{ "%+d" | format(t3_correct_answers.get('difference')) }}{% endif %}
-                        {% else %}N/A{% endif %}
-                        {% else %}N/A | N/A{% endif %}
-                        {% else %}N/A{% endif %}
-                    </p>
-                    <p class="dashboard-card-subtitle">With skill | No skill | Difference</p>
-                </div>
-                {% set t3_required_checks = tier3.get('required_checks') or {} %}
-                {% set t3_required_with = t3_required_checks.get('with_skill') or {} %}
-                {% set t3_required_without = t3_required_checks.get('without_skill') or {} %}
-                <div class="dashboard-card">
-                    <h3 class="dashboard-card-title">Required Checks Passed</h3>
-                    <p class="dashboard-card-value" style="font-size:1.05rem;">
-                        {% if t3_required_with.get('scored') %}
-                        {{ t3_required_with.get('passed') }}/{{ t3_required_with.get('scored') }} |
-                        {% if t3_required_without.get('scored') %}
-                        {{ t3_required_without.get('passed') }}/{{ t3_required_without.get('scored') }} |
-                        {% if t3_required_checks.get('difference') is not none %}
-                        {% if t3_required_checks.get('difference_unit') == 'percentage_points' %}{{ "%+.1f pp" | format(t3_required_checks.get('difference')) }}{% else %}{{ "%+d" | format(t3_required_checks.get('difference')) }}{% endif %}
-                        {% else %}N/A{% endif %}
-                        {% else %}N/A | N/A{% endif %}
-                        {% else %}N/A{% endif %}
-                    </p>
-                    <p class="dashboard-card-subtitle">With skill | No skill | Difference</p>
-                </div>
-                {% set t3_security_clean = tier3.get('security_clean') or {} %}
-                {% set t3_security_with = t3_security_clean.get('with_skill') or {} %}
-                {% set t3_security_without = t3_security_clean.get('without_skill') or {} %}
-                <div class="dashboard-card">
-                    <h3 class="dashboard-card-title">Security Clean</h3>
-                    <p class="dashboard-card-value" style="font-size:1.05rem;">
-                        {% if t3_security_with.get('scored') %}
-                        {{ t3_security_with.get('clean') }}/{{ t3_security_with.get('scored') }} |
-                        {% if t3_security_without.get('scored') %}
-                        {{ t3_security_without.get('clean') }}/{{ t3_security_without.get('scored') }} |
-                        {% if t3_security_clean.get('difference') is not none %}
-                        {% if t3_security_clean.get('difference_unit') == 'percentage_points' %}{{ "%+.1f pp" | format(t3_security_clean.get('difference')) }}{% else %}{{ "%+d" | format(t3_security_clean.get('difference')) }}{% endif %}
-                        {% else %}N/A{% endif %}
-                        {% else %}N/A | N/A{% endif %}
-                        {% else %}N/A{% endif %}
-                    </p>
-                    <p class="dashboard-card-subtitle">With skill | No skill | Difference</p>
+                {% endif %}
+                <div class="dashboard-card" data-primary-metric="coverage">
+                    <h3 class="dashboard-card-title">Coverage</h3>
+                    <p class="dashboard-card-value t3-coverage-value">{% if overview_coverage.known %}{{ overview_coverage.scored }} of {{ overview_coverage.expected }} scored{% else %}{{ hero_trials }}{% endif %}</p>
+                    {% if overview_coverage.known and overview_coverage.expected > overview_coverage.scored %}<p class="dashboard-card-subtitle">{{ overview_coverage.expected - overview_coverage.scored }} unscored</p>{% endif %}
+                    <p class="dashboard-card-subtitle"><a href="#tier3-page-agents">Agent and condition coverage</a></p>
                 </div>
             </div>
+            <div class="t3-next-steps" id="tier3-next-steps-preview">
+                <div class="t3-next-steps-head"><h3>Next action</h3><a class="t3-link-btn" href="#tier3-page-suggestions">Open Full Insights</a></div>
+                {% set primary_step = (insights_view.next_steps or []) | first %}
+                {% set primary_recommendation = (insights_view.recommendations or []) | first %}
+                {% if primary_step %}<p>{{ primary_step.action }}</p>
+                {% elif primary_recommendation %}<p>{{ primary_recommendation.title or primary_recommendation.message }}</p>
+                {% else %}<p>No next action was recorded.</p>{% endif %}
+                {% if insights_view.execution_errors %}<p><a href="#tier3-execution-errors">Full execution errors in Diagnostics</a></p>{% endif %}
+            </div>
+            {% set secondary = namespace(rows=[]) %}
+            {% for key, label, count in [('correct_answers', 'Goals met', 'correct'), ('required_checks', 'Required Checks Passed', 'passed'), ('security_clean', 'Security Clean', 'clean')] %}
+                {% set family = tier3.get(key) or {} %}
+                {% if (family.get('with_skill') or {}).get('scored') or (family.get('without_skill') or {}).get('scored') %}{% set _ = secondary.rows.append((label, family, count)) %}{% endif %}
+            {% endfor %}
+            {% if secondary.rows %}<div class="table-scroll"><table class="summary-table" id="tier3-secondary-outcomes">
+                <caption>Recorded outcomes</caption><thead><tr><th>Outcome</th><th>With skill</th><th>No skill</th><th>Difference</th></tr></thead><tbody>
+                {% for label, family, count in secondary.rows %}<tr><th scope="row">{{ label }}</th>
+                {% for condition in ['with_skill', 'without_skill'] %}{% set arm = family.get(condition) or {} %}<td>{% if arm.get('scored') %}{{ arm.get(count) if arm.get(count) is not none else 'N/A' }}/{{ arm.get('scored') }}{% else %}N/A{% endif %}</td>{% endfor %}
+                <td>{% if family.get('difference') is none %}N/A{% elif family.get('difference_unit') == 'percentage_points' %}{{ "%+.1f pp" | format(family.get('difference')) }}{% else %}{{ "%+d" | format(family.get('difference')) }}{% endif %}{% if family.get('reason') %} · {{ family.get('reason') }}{% endif %}</td></tr>{% endfor %}
+                </tbody></table></div>{% endif %}
             <details class="t3-details" id="tier3-number-key">
                 <summary>What each number means</summary>
                 <div class="t3-details-body">
@@ -2697,81 +2737,6 @@
                 </div>
             </details>
 
-            {% set t3_preview_conclusion = (tier3.conclusions[0] if tier3.conclusions and (tier3.conclusions | length) > 0 else None) %}
-            {% set t3_preview_recommendations = tier3.recommendations or [] %}
-            {% set t3_preview_suggestions = tier3.suggestions or [] %}
-            <div class="t3-next-steps" id="tier3-next-steps-preview">
-                <div class="t3-next-steps-head">
-                    <h3>Conclusion &amp; Next Steps</h3>
-                    <button class="t3-link-btn" type="button" onclick="showTier3SubTab('suggestions', document.querySelector('.t3-subtab[data-tier3-tab=&quot;suggestions&quot;]'))">Open Full Insights</button>
-                </div>
-                {% if t3_effect %}
-                {% set t3_fix_count = t3_preview_recommendations | length %}
-                <p class="t3-next-steps-conclusion">
-                    {% if t3_fix_count %}{{ t3_fix_count }} issue{{ 's' if t3_fix_count != 1 else '' }} to fix, most attempts lost first:{% else %}Nothing to fix in the available case evidence.{% endif %}
-                </p>
-                {% if t3_fix_count %}
-                <ol class="t3-next-steps-list">
-                    {% for reco in t3_preview_recommendations[:3] %}
-                    <li>
-                        <strong>{{ reco.title }}</strong> [{{ reco.category }}]: {{ reco.message }}
-                        {% if reco.evidence and reco.evidence.url %}
-                        <a class="t3-evidence-link" href="{{ reco.evidence.url }}" target="_blank" rel="noopener">View {{ reco.evidence.label or 'evidence' }}</a>
-                        {% endif %}
-                    </li>
-                    {% endfor %}
-                </ol>
-                {% endif %}
-                {% else %}
-                {% if t3_preview_conclusion %}
-                <p class="t3-next-steps-conclusion">
-                    {{ t3_preview_conclusion.message if t3_preview_conclusion.message is defined and t3_preview_conclusion.message else t3_preview_conclusion }}
-                </p>
-                {% endif %}
-                {% if t3_preview_recommendations %}
-                <ol class="t3-next-steps-list">
-                    {% for reco in t3_preview_recommendations[:3] %}
-                    <li>
-                        {{ reco.message if reco.message is defined and reco.message else reco }}
-                        {% if reco.evidence and reco.evidence.url %}
-                        <a class="t3-evidence-link" href="{{ reco.evidence.url }}" target="_blank" rel="noopener">View {{ reco.evidence.label or 'evidence' }}</a>
-                        {% endif %}
-                    </li>
-                    {% endfor %}
-                </ol>
-                {% elif t3_preview_suggestions %}
-                <ol class="t3-next-steps-list">
-                    {% for suggestion in t3_preview_suggestions[:3] %}
-                    <li>{{ suggestion }}</li>
-                    {% endfor %}
-                </ol>
-                {% else %}
-                <p class="t3-next-steps-conclusion">No recommendations were generated for this evaluation.</p>
-                {% endif %}
-                {% endif %}
-                {% set t3_run_next_steps = tier3.next_steps or [] %}
-                {% if t3_run_next_steps %}
-                <p class="t3-next-steps-conclusion" id="tier3-run-next-steps">Next steps for the run:</p>
-                <ol class="t3-next-steps-list">
-                    {% for step in t3_run_next_steps %}
-                    <li>
-                        <strong>{{ step.problem }}</strong> [{{ step.target }}{% if step.strength and step.strength != 'supported' %} · {{ step.strength }}{% endif %}]:
-                        {{ step.action }} Check: {{ step.check }}{% if step.evidence %} Evidence: {{ step.evidence }}{% endif %}
-                    </li>
-                    {% endfor %}
-                </ol>
-                {% endif %}
-                {% if (t3_source_errors | length) == 1 %}
-                <p class="t3-next-steps-conclusion">
-                    Source validation error: {% if t3_source_errors[0].path %}{{ t3_source_errors[0].path }}: {% endif %}{{ t3_source_errors[0].message }}
-                </p>
-                {% elif (t3_source_errors | length) > 1 %}
-                <p class="t3-next-steps-conclusion">
-                    {{ t3_source_errors | length }} source validation errors found. Open Full Insights to review the details.
-                </p>
-                {% endif %}
-            </div>
-
             {% set t3_na_dimensions = tier3.not_applicable_dimensions or [] %}
             {% if tier3_display_dimensions or t3_na_dimensions %}
             {% set t3_baseline_only = tier3.get('mode') == 'baseline_only' %}
@@ -2779,14 +2744,14 @@
             <details class="t3-details" id="tier3-dimension-lift" open>
                 <summary>Dimension Scores and Skill Lift (Best Performing Agent: {{ t3_best_name or 'N/A' }})</summary>
                 <div class="t3-details-body">
-                <p class="t3-section-hint">
+                <details class="t3-method"><summary>How dimension scores and lift are read</summary><p class="t3-section-hint">
                     Each dimension answers one question about the skill, scored from 0.00 to 1.00.
                     Score is the agent's result with the skill; Baseline is the same eval cases run without it;
                     Skill Lift compares Overall on the metrics and cases both arms scored, so it can differ from subtracting the displayed Overall scores. A dimension passes at {{ "%.2f" | format(tier3_dimension_pass_threshold) }} or above
                     and fails below {{ "%.2f" | format(tier3_dimension_neutral_threshold) }}.
                     Signals are the evaluator metrics behind each dimension, and Evidence says where they come from.
                     N/A means no measurement, never a score of zero; the note under it says why.
-                </p>
+                </p></details>
                 <div class="table-scroll">
                 <table class="summary-table" id="tier3-dimension-table">
                     <thead><tr>
@@ -2945,34 +2910,10 @@
             {% endif %}
 
             {% if t3_agents %}
-            <details class="t3-details" open>
-                <summary>Agent Scorecards</summary>
+            <details class="t3-details"{% if tier3_display_dimensions %} open{% endif %}>
+                <summary>Agent comparisons</summary>
                 <div class="t3-details-body">
                 <div class="t3-agent-scorecards-row">
-                    <div class="t3-agent-scorecard-list">
-                    {% for name, agent in t3_agents.items() %}
-                        {% set with_skill = agent.with_skill %}
-                        {% set lift = agent.lift %}
-                        {% set score_color = 'var(--text-secondary)' if with_skill is none else ('var(--success-color)' if with_skill >= 0.7 else ('var(--warning-color)' if with_skill >= 0.4 else 'var(--danger-color)')) %}
-                        {% set card_lift_color = 'var(--text-secondary)' if lift is none else ('var(--success-color)' if lift >= tier3_lift_pass_threshold else ('var(--danger-color)' if lift <= tier3_lift_fail_threshold else 'var(--text-secondary)')) %}
-                        <div class="t3-agent-card t3-agent-deeplink"
-                             role="button"
-                             tabindex="0"
-                             data-tier3-agent-link="{{ t3_agent_anchor_ids[name] }}"
-                             onclick="jumpToTier3Agent('{{ t3_agent_anchor_ids[name] }}')"
-                             onkeydown="tier3MaybeActivateAgentLink(event, '{{ t3_agent_anchor_ids[name] }}')"
-                             aria-label="Open Agent Details for {{ name }}"
-                             title="Open Agent Details for {{ name }}">
-                            <div class="t3-agent-name">{{ name }}</div>
-                            <div class="t3-agent-score" style="color:{{ score_color }};">{{ "%.2f" | format(with_skill) if with_skill is not none else "N/A" }}</div>
-                            <div style="color:{{ card_lift_color }};font-size:0.85rem;">
-                                {% if agent.get('skill_activation', {}).get('status') == 'never_activated' %}inconclusive: skill never activated{% elif lift is not none %}{{ "%+.2f" | format(lift) }} lift{% elif with_skill is none and agent.baseline is not none %}with-skill unavailable{% elif with_skill is none %}N/A lift{% elif agent.baseline is not none %}comparison unavailable{% else %}no baseline{% endif %}
-                            </div>
-                            <div style="color:var(--text-secondary);font-size:0.75rem;margin-top:0.25rem;">{{ agent.num_trials or 0 }} trials</div>
-                            {% if with_skill is not none %}<div class="t3-mini-bar"><span style="width:{{ (with_skill * 100) | round(0) }}%; background:{{ score_color }};"></span></div>{% endif %}
-                        </div>
-                    {% endfor %}
-                    </div>
                     {% set dimension_reference = ('tier3-multi-agent-dimension-table' if t3_agents | length > 1 else 'tier3-dimension-table') if tier3_display_dimensions else 'tier3-json-downloads' %}
                     {% set dimension_reference_label = 'Read the dimension scores table' if tier3_display_dimensions else 'Read JSON Downloads (dimension scores unavailable)' %}
                     <div class="chart-card">{{ tier3_chart('tier3-radar', 'Dimension Comparison (Radar)', 'Dimension scores for each agent, on a scale from 0 to 1; missing measurements are gaps.', dimension_reference, dimension_reference_label, 260) }}</div>
@@ -2982,6 +2923,7 @@
             </details>
             {% endif %}
 
+            {{ render_plugin_evidence(plugin_evidence, 'overview') }}
         </section>
 
         {# ---------- Trials ---------- #}
@@ -3157,10 +3099,10 @@
             {% endif %}
 
             {% if t3_agents %}
-            <details class="t3-details" open>
+            <details class="t3-details" id="tier3-agent-resources">
                 <summary>Measured Agent Resources</summary>
                 <div class="t3-details-body">
-                <p class="t3-section-hint">Efficiency scores measure routing and productive tool use. These separate measurements show observed agent resource use, including failed task outcomes. Lower use alone does not establish improved task quality or Efficiency. Delta = with skill minus baseline; negative means less use. Judge and setup time are excluded. Deltas require complete execution evidence, complete telemetry and matching case counts in both arms. Pairing does not certify matched concurrency or budget, or judge-model agreement. Reused baseline measurements are historical, not fresh or independent evidence. LLM and tool seconds split the agent's trajectory time; inferred LLM time also includes harness and queue time.</p>
+                <p class="t3-section-hint">Observed consumption includes failed outcomes; lower use does not imply quality. Partial coverage limits comparisons; unavailable values are N/A.</p>
                 {% set t3_resource_rows = [
                     ('tokens', 'Prompt + completion tokens (cache included)', '{:,.0f}', 'total'),
                     ('agent_seconds', 'Agent execution seconds', '{:,.1f} s', 'total'),
@@ -3199,7 +3141,7 @@
                 {% endfor %}
                 {% if tier3_token_usage %}
                 <div id="t3-token-usage">
-                <p class="t3-section-hint"><strong>Token usage by case.</strong> {{ tier3_token_usage.note }}</p>
+                <p class="t3-section-hint"><strong>Token usage by case.</strong></p>
                 <div class="table-scroll"><table class="summary-table">
                     <thead><tr><th>Agent</th><th>Case</th><th>With skill</th><th>Baseline</th><th>Change</th><th>Measured attempts</th></tr></thead>
                     <tbody>
@@ -3216,9 +3158,13 @@
                 {% for note in [tier3_token_usage.more_cases, tier3_token_usage.dropped_cases, tier3_token_usage.unverified_cases] if note %}
                 <p class="t3-section-hint">{{ note }}</p>
                 {% endfor %}
+                <details class="t3-details" id="tier3-token-accounting"><summary>Token accounting</summary><p class="t3-section-hint">{{ tier3_token_usage.note }}</p></details>
                 </div>
                 {% endif %}
                 </div>
+                <details class="t3-details" id="tier3-resource-methods"><summary>Resource methods</summary>
+                <p class="t3-section-hint">Efficiency scores measure routing and productive tool use. These separate measurements show observed agent resource use, including failed task outcomes. Lower use alone does not establish improved task quality or Efficiency. Delta = with skill minus baseline; negative means less use. Judge and setup time are excluded. Deltas require complete execution evidence, complete telemetry and matching case counts in both arms. Pairing does not certify matched concurrency or budget, or judge-model agreement. Reused baseline measurements are historical, not fresh or independent evidence. LLM and tool seconds split the agent's trajectory time; inferred LLM time also includes harness and queue time.</p>
+                </details>
             </details>
             {% endif %}
 
@@ -3234,12 +3180,12 @@
             {% endfor %}
             {% set t3_steps_chart = steps_by_case_chart | default({'labels': [], 'datasets': []}) %}
             {# Charts moved above the heatmap so the visualization narrative is summary-chart -> pivot -> drill-down #}
-            {% if t3_token_coverage.all_agents_complete or t3_steps_chart.datasets %}
+            {% if (t3_token_coverage.all_agents_complete and not tier3_telemetry.token_chart) or t3_steps_chart.datasets %}
             <details class="t3-details" open>
                 <summary>Trial Charts</summary>
                 <div class="t3-details-body">
                 <div class="chart-grid">
-                    {% if t3_token_coverage.all_agents_complete %}<div class="chart-card">{{ tier3_chart('tier3-token-chart', 'With-Skill Token Usage by Agent', 'Prompt, completion and observed cached tokens summed across with-skill trials for each agent.', 't3-trials-table', 'Read token measurements in the trial table', 250) }}</div>{% endif %}
+                    {% if t3_token_coverage.all_agents_complete and not tier3_telemetry.token_chart %}<div class="chart-card">{{ tier3_chart('tier3-token-chart', 'With-Skill Token Usage by Agent', 'Prompt, completion and observed cached tokens summed across with-skill trials for each agent.', 't3-trials-table', 'Read token measurements in the trial table', 250) }}</div>{% endif %}
                     {% if t3_steps_chart.datasets %}<div class="chart-card">{{ tier3_chart('tier3-steps-chart', 'Steps per Eval Case by Agent and Condition', 'Average measured steps per eval case, grouped by agent and with-skill or baseline condition; incomplete measurements are gaps.', 't3-trials-table', 'Read individual step measurements in the trial table', 250) }}{% if t3_steps_chart.get('omitted_cases') %}<p style="color:var(--text-secondary);font-size:0.82rem;">Showing the first {{ t3_steps_chart.labels | length }} eval cases; {{ t3_steps_chart['omitted_cases'] }} more are in the JSON Downloads.</p>{% endif %}</div>{% endif %}
                 </div>
                 </div>
@@ -3611,10 +3557,24 @@
                 </div>
             </details>
             {% endif %}
+            {{ render_telemetry(tier3_telemetry) }}
+            {{ render_plugin_evidence(plugin_evidence, 'trials') }}
         </section>
 
         {# ---------- Agent Details ---------- #}
         <section class="t3-page" id="tier3-page-agents" role="tabpanel" aria-labelledby="tier3-tab-agents" tabindex="0">
+        {% if t3_coverage_messages %}
+        <div class="t3-truncation-notice t3-coverage-notice" id="tier3-coverage-notices" role="status">
+            <strong>Agent coverage notes</strong>
+            <ul>
+                {% for message in t3_coverage_messages %}
+                <li>{{ message }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+
             {% if t3_agents %}
             {% set t3_palette = ["#76b900","#8b5cf6","#ec4899","#06b6d4","#3b82f6","#f59e0b","#22c55e"] %}
             <nav class="t3-agent-tabs" role="tablist" aria-label="Agent details">
@@ -3658,6 +3618,13 @@
                    data-tier3-agent-panel-id="{{ t3_agent_panel_ids[name] }}"
                    tabindex="-1"
                    aria-hidden="true"></a>
+
+                {% set agent_coverage = presentation.coverage.agents.get(name, {}) %}
+                {% if agent_coverage %}<dl class="t3-agent-coverage" aria-label="Recorded agent condition coverage">
+                    {% for condition, label in [('with_skill', 'With skill'), ('without_skill', 'Without skill')] %}{% set arm = agent_coverage.get(condition) %}{% if arm %}
+                    <div><dt>{{ label }}</dt><dd>{% if arm.status == 'skipped' %}Skipped{% else %}{{ arm.scored if arm.scored is not none else '?' }} of {{ arm.expected if arm.expected is not none else '?' }} scored · {{ arm.status | title }}{% endif %}</dd></div>
+                    {% endif %}{% endfor %}
+                </dl>{% endif %}
 
                 {# KPI strip #}
                 <div class="t3-kpi-strip">
@@ -3854,10 +3821,12 @@
             {% else %}
             <p style="color:var(--text-secondary);">No per-agent data available.</p>
             {% endif %}
+            {{ render_plugin_evidence(plugin_evidence, 'agents') }}
         </section>
 
         {# ---------- Dataset ---------- #}
         <section class="t3-page" id="tier3-page-dataset" role="tabpanel" aria-labelledby="tier3-tab-dataset" tabindex="0">
+            {% if insights_view.execution_errors %}<p><a href="#tier3-execution-errors">Shared run execution errors are retained once in Diagnostics.</a></p>{% endif %}
             {% if t3_dataset %}
             <div class="t3-dataset-hero">
                 <h2>AgentSkills Dataset</h2>
@@ -3917,10 +3886,12 @@
                         <span class="t3-ds-label">Expectation diagnostics</span>
                         <p>Recorded verdicts, not inferred skill defects. Evidence excerpts are metric-level context; inspect the trial for attribution.</p>
                         {% for attempt in diagnostic.attempts %}
-                        <details class="t3-details" open>
+                        <details class="t3-details">
                             <summary>{{ attempt.agent }} · {{ 'With skill' if attempt.condition == 'with_skill' else 'Without skill' }} · {{ attempt.trial_id or 'No matched trial' }}</summary>
                             <div class="t3-details-body">
-                            {% for error in attempt.errors %}<p>{{ error }}</p>{% endfor %}
+                            {% set shared_errors = namespace(present=false) %}
+                            {% for error in attempt.errors %}{% if error in insights_view.execution_errors %}{% set shared_errors.present = true %}{% else %}<p>{{ error }}</p>{% endif %}{% endfor %}
+
                             {% if attempt.judge_note %}<p>{{ attempt.judge_note }}</p>{% endif %}
                             {% for status in ['unmet', 'not_checked', 'unscored', 'not_applicable', 'met'] %}
                             {% set judgments = attempt.judgments | selectattr('status', 'equalto', status) | list %}
@@ -3958,8 +3929,8 @@
 
         {# ---------- Insights (Conclusions + Recommendations) ---------- #}
         <section class="t3-page" id="tier3-page-suggestions" role="tabpanel" aria-labelledby="tier3-tab-suggestions" tabindex="0">
-            {% set t3_has_conclusions = tier3.conclusions and (tier3.conclusions | length) > 0 %}
-            {% set t3_recommendations = tier3.recommendations or [] %}
+            {% set t3_has_conclusions = insights_view.conclusions and (insights_view.conclusions | length) > 0 %}
+            {% set t3_recommendations = insights_view.recommendations or [] %}
             {% set t3_has_suggestions = (t3_recommendations | length) > 0 or (tier3.suggestions and (tier3.suggestions | length) > 0) %}
 
             {% if t3_source_errors %}
@@ -3974,6 +3945,7 @@
                 </div>
             </details>
             {% endif %}
+            <details class="t3-method"><summary>About insight sources</summary>
             <p style="color:var(--text-secondary);font-size:0.85rem;margin:0 0 0.85rem;">
                 Insights combine deterministic baselines (best performing agent, weakest dimension, coverage gaps)
                 with additional contextual observations and action items produced by an LLM-as-Judge.
@@ -3984,39 +3956,18 @@
                 tag marks judge-generated entries that may vary between runs.
                 {% if t3_evidence_links %}Evidence links open the matching Harbor trial or exact trajectory step when captured.{% endif %}
             </p>
+            </details>
 
             {% if t3_has_conclusions %}
             <details class="t3-details" id="tier3-conclusions" open>
                 <summary>Conclusions</summary>
                 <div class="t3-details-body">
-                    <div class="t3-sug-stack">
-                    {% for conclusion in tier3.conclusions %}
-                        {% set sev = conclusion.severity or 'warn' %}
-                        {% set sev_class = 'severity-pass' if sev in ('pass','ok') else ('severity-fail' if sev in ('fail','critical','high') else 'severity-warn') %}
-                        {% set sev_pill = 'ok' if sev in ('pass','ok') else ('critical' if sev in ('fail','critical','high') else 'warning') %}
-                        {% set source = (conclusion.source or 'deterministic') %}
-                        <div class="t3-sug-card {{ sev_class }}">
-                            <span class="t3-sug-num">{{ loop.index }}</span>
-                            <div>
-                                <div class="t3-sug-title">
-                                    {{ conclusion.title }}
-                                    <span class="t3-pill {{ sev_pill }}">{{ sev }}</span>
-                                    <span class="t3-insight-source insight-source-{{ source }}">{{ source }}</span>
-                                </div>
-                                <div class="t3-sug-body">{{ conclusion.message }}</div>
-                                {% if conclusion.evidence and conclusion.evidence.url %}
-                                <a class="t3-evidence-link" href="{{ conclusion.evidence.url }}" target="_blank" rel="noopener">View {{ conclusion.evidence.label or 'evidence' }}</a>
-                                {% endif %}
-                            </div>
-                            <div class="t3-sug-actions">
-                                <button class="t3-copy-btn" onclick='tier3CopyText(this, {{ ((conclusion.title ~ ': ' ~ conclusion.message) | tojson) }})'>Copy</button>
-                            </div>
-                        </div>
-                    {% endfor %}
-                    </div>
+                    {{ insight_cards(insights_view.conclusions, mode='conclusion') }}
                 </div>
             </details>
             {% endif %}
+
+            {% if t3_effect %}<p class="t3-next-steps-conclusion">{% if insights_case_fix_count %}{{ insights_case_fix_count }} issue{{ 's' if insights_case_fix_count != 1 else '' }} to fix, most attempts lost first:{% else %}Nothing to fix in the available case evidence.{% endif %}</p>{% endif %}
 
             {% if t3_has_suggestions %}
             <details class="t3-details" open>
@@ -4024,28 +3975,7 @@
                 <div class="t3-details-body">
                     <div class="t3-sug-stack">
                     {% if t3_recommendations %}
-                        {% for reco in t3_recommendations %}
-                            {% set sev = reco.severity or 'warn' %}
-                            {% set sev_class = 'severity-pass' if sev in ('pass','ok') else ('severity-fail' if sev in ('fail','critical','high') else 'severity-warn') %}
-                            {% set source = (reco.source or 'deterministic') %}
-                            <div class="t3-sug-card {{ sev_class }}">
-                                <span class="t3-sug-num">{{ loop.index }}</span>
-                                <div>
-                                    <div class="t3-sug-title">
-                                        <span class="t3-sug-cat">{{ reco.category or 'Action' }}</span>
-                                        {% if reco.title %}<span style="font-weight:700;">{{ reco.title }}</span>{% endif %}
-                                        <span class="t3-insight-source insight-source-{{ source }}">{{ source }}</span>
-                                    </div>
-                                    <div class="t3-sug-body">{{ reco.message }}</div>
-                                    {% if reco.evidence and reco.evidence.url %}
-                                    <a class="t3-evidence-link" href="{{ reco.evidence.url }}" target="_blank" rel="noopener">View {{ reco.evidence.label or 'evidence' }}</a>
-                                    {% endif %}
-                                </div>
-                                <div class="t3-sug-actions">
-                                    <button class="t3-copy-btn" onclick='tier3CopyText(this, {{ (reco.message | string | tojson) }})'>Copy</button>
-                                </div>
-                            </div>
-                        {% endfor %}
+                        {{ insight_cards(insights_view.recommendations) }}
                     {% else %}
                         {% for suggestion in tier3.suggestions %}
                             {% set fallback_evidence = none %}
@@ -4083,6 +4013,7 @@
             </details>
             {% endif %}
 
+            {{ insight_next_steps(remaining_insight_steps) }}
             {% if not t3_source_errors and not t3_has_conclusions and not t3_has_suggestions %}
             <p style="color:var(--text-secondary);">No evaluation insights were generated.</p>
             {% endif %}
@@ -4090,6 +4021,28 @@
 
         {# ---------- Diagnostics (raw SkillEvaluator data + downloads) ---------- #}
         <section class="t3-page" id="tier3-page-provenance" role="tabpanel" aria-labelledby="tier3-tab-provenance" tabindex="0">
+            {% if harbor_jobs %}
+            <div class="t3-harbor-panel">
+                <div>
+                    <strong>Harbor artifacts</strong>
+                    <p>Open retained logs, raw trajectories, artifacts, and generated Harbor analysis for this Tier 3 run.</p>
+                </div>
+                <div class="t3-harbor-actions">
+                    {% for job in harbor_jobs %}
+                    {% set job_labels = [] %}
+                    {% for row in t3_condition_trial_rows if job.url and row.trial.harbor_viewer and row.trial.harbor_viewer.job_url == job.url %}
+                        {% set label = row.agent ~ ' · ' ~ row.condition %}{% if label not in job_labels %}{% set _ = job_labels.append(label) %}{% endif %}
+                    {% endfor %}
+                    <div><strong>{{ job_labels | join('; ') if job_labels else ('Run analysis' if job.name == 'Run analysis' else 'Job ' ~ loop.index) }}</strong>
+                    <details class="t3-artifact-identifiers"><summary>Artifact identifiers</summary><code>{{ job.name }}</code>{% if job.url %}<div>{{ job.url }}</div>{% endif %}{% if job.analysis_url %}<div>{{ job.analysis_url }}</div>{% endif %}</details>
+                    {% if job.url %}<a class="t3-harbor-link" href="{{ job.url }}" target="_blank" rel="noopener">Results</a>{% endif %}
+                    {% if job.analysis_url %}<a class="t3-harbor-link" href="{{ job.analysis_url }}" target="_blank" rel="noopener">Analysis</a>{% endif %}
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+
             <p style="color:var(--text-secondary);">
                 Diagnostics preserve raw evaluation artifacts for deep dives and troubleshooting.
                 The main report leads with human-readable dimensions; the blocks below show the
@@ -4097,6 +4050,12 @@
                 one-click download.
             </p>
 
+            {% if insights_view.execution_errors %}
+            <details class="t3-details t3-execution-errors" id="tier3-execution-errors">
+                <summary>Full execution errors ({{ insights_view.execution_errors | length }})</summary>
+                <div class="t3-details-body"><ol>{% for error in insights_view.execution_errors %}<li><pre>{{ error }}</pre></li>{% endfor %}</ol></div>
+            </details>
+            {% endif %}
             <details class="t3-details">
                 <summary>Recorded evaluation provenance</summary>
                 <div class="t3-details-body">
@@ -4132,6 +4091,9 @@
                     <p style="color:var(--text-secondary);font-size:0.85rem;margin:0 0 0.75rem;">
                         Use these to share or attach the underlying data to a bug report.
                     </p>
+                    {% if ci.get('canonical_json_url') %}
+                    <a class="t3-harbor-link" href="{{ ci.canonical_json_url }}" download="skillevaluator-report.json">Download canonical report JSON</a>
+                    {% elif tier3_canonical_data %}
                     <div class="t3-download-grid">
                         <button class="t3-copy-btn" onclick="tier3DownloadJson('tier3-full', 'tier3-full.json')">Download Full Tier 3 Payload</button>
                         {% if t3_provenance.raw_evaluators %}
@@ -4147,9 +4109,10 @@
                         <button class="t3-copy-btn" onclick="tier3DownloadJson('tier3-timing', 'tier3-timing.json')">Download Pipeline Timing</button>
                         {% endif %}
                     </div>
+                    {% else %}<p>No canonical Tier 3 payload was recorded. The report JSON includes the supplied passive plugin snapshots.</p>{% endif %}
                 </div>
             </details>
-            <script type="application/json" id="tier3-full"{% if tier3_canonical_encoding == 'base64' %} data-encoding="base64"{% endif %}>{{ tier3_canonical_data | safe }}</script>
+            {% if not ci.get('canonical_json_url') and tier3_canonical_data %}<script type="application/json" id="tier3-full"{% if tier3_canonical_encoding == 'base64' %} data-encoding="base64"{% endif %}>{{ tier3_canonical_data | safe }}</script>{% endif %}
 
             {% if tier3.evaluators %}
             <details class="t3-details">
@@ -4246,10 +4209,11 @@
                 </div>
             </details>
             {% endif %}
+            {{ render_plugin_evidence(plugin_evidence, 'provenance') }}
         </section>
 
         {# Sub-tab switcher and Chart.js charts #}
-        {% if t3_agents or (t3_steps_chart is defined and t3_steps_chart.datasets) %}
+        {% if t3_agents or tier3_telemetry.token_chart or (t3_steps_chart is defined and t3_steps_chart.datasets) %}
         {% set chart_runtime, chart_notices = chart_assets() %}
         {% if chart_runtime %}
         <details class="chart-notices" id="tier3-chart-notices">
@@ -4438,10 +4402,22 @@
             var cards = container.querySelectorAll('[data-tier3-filterable]');
             var visible = 0;
             cards.forEach(function(card){
-                var hay = (card.getAttribute('data-tier3-filterable') || '').toLowerCase();
+                var details = [card].concat(Array.from(card.querySelectorAll('details')));
+                details.forEach(function(detail){
+                    if (detail.dataset.tier3SearchOpened) { detail.open = false; delete detail.dataset.tier3SearchOpened; }
+                });
+                var hay = ((card.getAttribute('data-tier3-filterable') || '') + ' ' + card.textContent).toLowerCase();
                 var match = !q || hay.indexOf(q) !== -1;
                 card.style.display = match ? '' : 'none';
-                if (match) visible++;
+                if (match) {
+                    visible++;
+                    if (q) details.forEach(function(detail){
+                        if (detail.tagName !== 'DETAILS' || detail.textContent.toLowerCase().indexOf(q) === -1) return;
+                        for (var ancestor = detail; ancestor && ancestor !== container; ancestor = ancestor.parentElement) {
+                            if (ancestor.tagName === 'DETAILS' && !ancestor.open) { ancestor.dataset.tier3SearchOpened = 'true'; ancestor.open = true; }
+                        }
+                    });
+                }
             });
             var counter = document.querySelector('[data-tier3-filter-count="' + containerId + '"]');
             if (counter) counter.textContent = visible + ' / ' + cards.length;
@@ -4596,6 +4572,18 @@
                         })
                     });
                 }
+                var recordedTokenChart = document.getElementById("tier3-recorded-token-chart");
+                var recordedTokenData = {{ tier3_telemetry.token_chart | tojson | safe }};
+                if (recordedTokenChart && recordedTokenData) {
+                    recordedTokenData.datasets.forEach(function(dataset, idx){ dataset.backgroundColor = palette[idx % palette.length] + "cc"; });
+                    createChart(recordedTokenChart, {
+                        type: "bar", data: recordedTokenData,
+                        options: chartOptions({ responsive: true,
+                            scales: { x: { stacked: true, ticks: { color: colors.tick, maxRotation: 45 }, grid: { display: false } }, y: { stacked: true, ticks: { color: colors.label }, grid: { color: colors.grid } } },
+                            plugins: { legend: { labels: { color: colors.label } } }
+                        })
+                    });
+                }
                 var tokenChart = document.getElementById("tier3-token-chart");
                 var tokenTotals = tokenTotalsByAgent();
                 var tokenAgents = Object.keys(tokenTotals);
@@ -4635,7 +4623,8 @@
             };
             document.addEventListener("DOMContentLoaded", function(){ window.rebuildTier3Charts(); });
             function redrawForPrint(isPrinting) {
-                if (printing === isPrinting) return;
+                // beforeprint can precede disclosure opening and print CSS. A subsequent
+                // print-media event must rebuild against the now-visible layout as well.
                 printing = isPrinting;
                 window.rebuildTier3Charts();
             }
@@ -4666,6 +4655,14 @@
         <details class="run-metadata" id="run-metadata">
             <summary>Run details &amp; provenance</summary>
             <div class="metadata-grid">
+                {% for owner in ['static', 'runtime'] %}{% set snapshot = plugin_evidence.metadata.get(owner) %}{% if snapshot %}
+                <div><strong>{{ owner | title }} evidence</strong><div>{{ snapshot.name }} · {{ snapshot.status }}</div>
+                    {% if snapshot.run_id is defined %}<div>Run ID: <code>{{ snapshot.run_id }}</code></div>{% endif %}
+                    {% if snapshot.execution_status is defined %}<div>Execution: {{ snapshot.execution_status }}</div>{% endif %}
+                    {% if snapshot.source is defined %}{% for key, value in snapshot.source.items() %}<div>{{ key | replace('_', ' ') | title }}: <code>{{ value }}</code></div>{% endfor %}{% endif %}
+                    {% if snapshot.notice %}<p>{{ snapshot.notice }}</p>{% endif %}
+                </div>{% endif %}{% endfor %}
+
                 {% if has_tier3 %}<div><strong>Agent evaluation</strong>                        {% if completed_agent and completed_agent.recovered_attempts %}<div>{{ completed_agent.recovered_attempts }} timeout attempt(s) recovered; failed history retained.</div>{% endif %}
                         <div class="trial-coverage">{{ hero_trials }}</div>{% for detail in presentation.coverage.details %}<div>{{ detail }}</div>{% endfor %}
                         <div><strong>Metrics:</strong> {{ hero_metric_count }} evaluators</div>
@@ -4673,6 +4670,7 @@
                         {% if tier3.get('overall_lift') is not none %}<div><strong>Best-agent lift:</strong> {{ "%+.2f" | format(tier3.get('overall_lift')) }}</div>{% endif %}
 </div>{% endif %}
                 {% if target_path %}<p class="header-meta-item"><strong>Target:</strong> {% if target_path.startswith('https://') %}<a href="{{ target_path }}" target="_blank" class="header-target-link" title="{{ target_path }}">{{ target_display or target_path }}</a>{% else %}{{ target_path }}{% endif %}</p>{% endif %}
+                {% if skillspector_versions %}<p>SkillSpector <strong>v{{ skillspector_versions | join(', v') }}</strong></p>{% endif %}
                 {% if profile %}<p class="header-meta-item"><strong>Profile:</strong> <span class="header-profile-badge profile-{{ profile }}">{{ profile }}</span></p>{% endif %}
                 {% if timestamp %}<p class="header-meta-item">Generated: {{ timestamp }}{% if version %} &middot; SkillEvaluator v{{ version }}{% endif %}</p>{% endif %}
 
@@ -4681,7 +4679,6 @@
                 {% if ci.get('image') %}<p><strong>Evaluator image</strong><code>{{ ci.image }}</code></p>{% endif %}
                 {% if ci.get('ci_conclusion') %}<p><strong>CI conclusion</strong>{{ ci.ci_conclusion }}</p>{% endif %}
             </div>
-        </details>
         {% if has_tier2 or has_tier3 %}
         {% set included_tiers = [] %}
         {% if has_tier1 %}{% set _ = included_tiers.append('tier1') %}{% endif %}
@@ -4697,6 +4694,8 @@
             {% if advisory_labels %}<span>Advisory ({{ advisory_labels | join(' + ') }}): <strong>{{ advisory_critical }} critical · {{ advisory_high }} high · {{ advisory_medium }} medium · {{ advisory_low }} low</strong>.{% if has_tier3 and 'tier3' in gating.advisory_tiers %} Tier 3 agent-eval findings are advisory and don't block merge.{% endif %}</span>{% endif %}
         </div>
         {% endif %}
+        </details>
+
     </main>
     <footer>Generated by <strong>SkillEvaluator</strong> — NVIDIA Benchmark for Agent Skills Evaluation</footer>
     <button id="backToTop" onclick="scrollToTop()" title="Back to Top">↑ Top</button>
@@ -4722,8 +4721,8 @@
         }
         function showTab(tabId, btn) { activateReportTier(tabId); }
         function filterValidators(status) {
-            const cards = document.querySelectorAll('.validator-card');
-            const rows = document.querySelectorAll('.summary-table tbody tr');
+            const cards = document.querySelectorAll('#tab-tier1 .validator-card');
+            const rows = document.querySelectorAll('#tab-tier1 .summary-table tbody tr');
             ['all', 'pass', 'fail', 'incomplete'].forEach(s => document.getElementById('filter-' + s)?.classList.remove('active'));
             document.getElementById('filter-' + status)?.classList.add('active');
             let visibleCount = 0;

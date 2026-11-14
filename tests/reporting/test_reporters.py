@@ -1089,9 +1089,11 @@ def test_tier1_dashboard_reconciles_only_tier1_findings() -> None:
     assert html_data["summary"]["total_issues"] == 2
     assert html_data["finding_counts"]["raw_occurrences"] == 4
     assert _findings_kpi(html) == ("1", "1 unique finding / 2 occurrences / 3 raw records / 1 duplicate reconciled")
-    tier_cards = html.split('class="tier-cards', 1)[1].split('<section class="exec-summary', 1)[0]
+    tier_cards = html.split('class="tier-cards', 1)[1].split("</nav>", 1)[0]
     assert re.search(r"<strong>1</strong> finding</span>", tier_cards)
-    assert '<span class="tier-card-sev-pill high">1 high</span>' in tier_cards
+    assert "tier-card-sev-pill" not in tier_cards
+    dashboard = html.split('id="tab-tier1"', 1)[1].split('<details class="t3-details">', 1)[0]
+    assert '<p class="dashboard-card-subtitle">1 high</p>' in dashboard
     assert re.search(r"<strong>1</strong> finding\(s\)</span>", tier_cards)
     # The gate policy counts each tier's unique findings.
     gate_policy = html.split('class="gate-policy"', 1)[1].split("</div>", 1)[0]
@@ -2146,7 +2148,11 @@ class TestGatingSplit:
         report_data = _html_report_data(output)
         assert reports_passed is False
         assert 'data-target-tab="tier2"' in output
-        assert "<strong>0</strong> of 1 checks passed" in output
+        tier2_card = output.split('data-target-tab="tier2"', 1)[1].split("</nav>", 1)[0]
+        assert 'class="tier-card-verdict">Changes required</span>' in tier2_card
+        assert "<strong>1</strong> finding(s)</span>" in tier2_card
+        tier2 = output.split('id="tab-tier2"', 1)[1]
+        assert re.search(r'Checks Run</h3>\s*<p class="dashboard-card-value">1</p>', tier2)
         assert report_data["gating"] == {
             "blocking_tiers": ["tier1", "tier2"],
             "advisory_tiers": ["tier3"],
@@ -2435,7 +2441,7 @@ class TestHTMLReporter:
         assert "Harbor analysis" in output
         assert "View Step 9" in output
         assert "log-analyzer-001?step=9" in output
-        assert "javascript:alert" not in output
+        assert not re.search(r'href=[\'"]javascript:', output)
 
     def test_failed_tier3_html_renders_na_without_top_performer(self) -> None:
         payload = build_agent_eval_payload(
@@ -2458,9 +2464,9 @@ class TestHTMLReporter:
 
         output = HTMLReporter(include_timestamp=False).render_all([result])
 
-        assert "No successfully scored agent is available" in output
+        assert "Quality measurements unavailable" in output
         assert "Default agent is the top performer" not in output
-        assert "Best Performing Agent" in output
+        assert 'data-primary-metric="score"' not in output
         assert ">N/A<" in output
         assert "performing well across evaluated dimensions" not in output
 
@@ -2562,7 +2568,7 @@ class TestHTMLReporter:
         ).read_text(encoding="utf-8")
 
         assert ">N/A<" in output
-        assert "No successfully scored agent" in output
+        assert "Quality measurements unavailable" in output
         assert "Missing reward for case-001" in output
         assert "-1.00" not in output
 
@@ -2880,9 +2886,9 @@ class TestSkillSpectorVersionReporting:
 
         # The version must not depend on the timestamped header line.
         html = HTMLReporter(include_timestamp=False, target_path="skills/example").render_all([first, second])
-        tier1_card = html.split("Security &amp; Static Validation", 1)[1].split("</section>", 1)[0]
+        run_details = html.split('id="run-metadata"', 1)[1].split("</details>", 1)[0]
 
-        assert "SkillSpector <strong>v2.12.0</strong>" in tier1_card
+        assert "SkillSpector <strong>v2.12.0</strong>" in run_details
         assert _html_report_data(html)["skillspector_versions"] == ["2.12.0"]
 
     @pytest.mark.parametrize("raw_version", [None, "", "unknown", "v2.12.0", "2.12.0<script>", 212])
@@ -3035,7 +3041,10 @@ def test_all_harbor_jobs_are_navigable_without_attribution_guessing(reporter):
     assert "https://harbor.example.test/jobs/third" in output
     assert "Job 3" in output
     assert "Results" in output
-    assert "javascript:alert(99)" not in output
+    if reporter is HTMLReporter:
+        assert not re.search(r'href=[\'"]javascript:', output)
+    else:
+        assert "javascript:alert(99)" not in output
     if reporter is HTMLReporter:
         assert "&lt;job&gt;[bad](x)" in output
         assert "<job>" not in output

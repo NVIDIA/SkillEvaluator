@@ -1,0 +1,40 @@
+{# Bounded retained evidence shares the report's native disclosure and table styles. #}
+{% macro render_section(section) -%}
+<details class="t3-details" id="plugin-{{ section.owner }}-{{ section.key }}">
+  <summary>{{ section.title }}{% if section.omitted %} · {{ section.omitted }} rows omitted{% endif %}{% if section.text_shortened %} · text shortened{% endif %}</summary>
+  {% for note in section.notes %}{% if note is not none %}<p>{{ note }}</p>{% endif %}{% endfor %}
+  {% if section.rows %}
+  <div class="table-scroll" tabindex="0" role="region" aria-label="{{ section.title }}">
+    <table class="contributor-table plugin-{{ section.owner }}-table">
+      <thead><tr>{% for column in section.columns %}<th scope="col">{{ column }}</th>{% endfor %}</tr></thead>
+      <tbody>{% for row in section.rows %}<tr>{% for cell in row %}<td>{{ 'unknown' if cell is none else cell }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+    </table>
+  </div>
+  {% endif %}
+  {% if section.omitted %}<p>{{ section.omitted }} more rows omitted ({{ section.total }} total).</p>{% endif %}
+  {% if section.text_shortened %}<p>Some text was shortened for display. The export preserves the retained snapshot; values shortened before retention cannot be recovered.</p>{% endif %}
+</details>
+{%- endmacro %}
+
+{% macro render_plugin_evidence(evidence, slot) -%}
+{% for owner in ['static', 'runtime'] %}
+{% set sections = evidence[slot] | selectattr('owner', 'equalto', owner) | list %}
+{% if sections %}
+{% set source = sections[0] %}
+<section{% if sections | selectattr('first') | list %} id="plugin-{{ owner }}-evidence"{% endif %} aria-label="{{ source.source_label }}">
+  <p class="plugin-evidence-source"><strong>{{ source.source_label }} · {{ source.name }}</strong> · {% if owner == 'runtime' %}Evidence {{ source.status }} · execution {{ source.execution_status }} · advisory snapshot; scores and validation gates unchanged.{% else %}Static snapshot · {{ source.status }}; does not demonstrate runtime loading or behavior.{% endif %}</p>
+  {% if source.truncated %}<p>Retained snapshot is bounded. Values shortened before retention cannot be recovered. Section summaries identify omitted rows and display shortening.</p>{% endif %}
+  {% for section in sections if not section.empty_observation %}
+  {{ render_section(section) }}
+  {% endfor %}
+  {% set empty = sections | selectattr('empty_observation') | list %}
+  {% if empty %}
+  <details class="t3-details" id="plugin-{{ owner }}-empty-{{ slot }}">
+    <summary>{{ empty | length }} empty observation{{ '' if empty | length == 1 else 's' }}</summary>
+    {% for section in empty %}{{ render_section(section) }}{% endfor %}
+  </details>
+  {% endif %}
+</section>
+{% endif %}
+{% endfor %}
+{%- endmacro %}

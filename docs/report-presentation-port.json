@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "reference": {
+    "project": "NVIDIA native SkillEvaluator report presentation",
+    "version": "1.13.1",
+    "commit": "75c5a82e3bb778edfed37012f603479347f3d205",
+    "template": "src/skillevaluator/reporting/templates/report.html.j2",
+    "template_sha256": "c4510eb4822e1ac24216cac98019f585cc03153b97e54007236a17c0f87fd9e3"
+  },
+  "native_styles": [
+    {
+      "block": "base",
+      "source_sha256": "895b844ecb6fc7076c54ab37c06236988c50359f9b953036368f88f019a52c23",
+      "comment_free_sha256": "9a5dbf4ca0521d8c4130e82fc65a5ed0188d9d667e119323bf6b3c29871d2146",
+      "adaptation": "Canonical public product name in a non-runtime comment; style declarations unchanged."
+    },
+    {
+      "block": "tier3",
+      "source_sha256": "7ea8d0bcb64f93365661832f2ade7a6362c040dcab653ba3fa56304d84f4a3f8",
+      "comment_free_sha256": "2f7d5555e6ff116aa4f95c0e3a4b620a549267c9ec38c95a7dd3a30fd9a04bc6",
+      "adaptation": null
+    }
+  ],
+  "presentation_reused": [
+    "Native system font stack, 16px body scale, palette and typography hierarchy",
+    "Header, hero, tier cards, severity treatment, tables and disclosures",
+    "Insights conclusion and recommendation cards with recorded source labels",
+    "Tier 2 intra-skill/inter-skill navigation and six Tier 3 sections",
+    "Dimension comparisons, evaluator evidence, trials and resource presentation"
+  ],
+  "intentional_adaptations": [
+    "Public scores, gates, applicability, source identity and publication assessments remain authoritative.",
+    "Chart.js 4.5.1 and its existing MIT notices remain pinned instead of the reference runtime version.",
+    "Canonical retained exports are separate from bounded, sanitized display projections.",
+    "Typed passive plugin evidence is routed into tier sections before rendering.",
+    "Overview summarizes recorded outcomes/actions; full Insights cards render once.",
+    "Routine metadata, passive evidence and resource methods use closed disclosures.",
+    "Recorded token/latency adapters support native-shaped and current public evidence without collection or rescoring.",
+    "Accessible active-control contrast, wrapped mobile controls, keyboard navigation, search, deep links, no-JS and print behavior are retained.",
+    "Collection similarity counts use public validator identities rather than copying the reference zero-count mapping defect.",
+    "Canonical public product branding is SkillEvaluator."
+  ],
+  "drift_checks": [
+    "tests/reporting/test_report_redesign.py::test_native_presentation_stylesheets_match_pinned_reference",
+    "tests/reporting/test_telemetry_view.py",
+    "tests/reporting/test_report_browser.py"
+  ],
+  "reference_reports_or_private_datasets_included": false
+}

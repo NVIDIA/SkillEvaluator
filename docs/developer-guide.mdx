@@ -81,15 +81,24 @@ pytest -n auto
 
 ### Check the HTML report in a browser
 
-`tests/reporting/browser_navigation_checks.py` opens the HTML report in a headless browser and checks navigation, focus, themes, print view and layout at three screen widths. pytest doesn't collect it, and it needs Playwright:
+The development extra includes Playwright. The dedicated browser suite checks
+all three tiers, Tier 3 subtabs, keyboard navigation, themes, JSON downloads,
+offline charts, print, and narrow layouts using synthetic reports. Regular
+pytest runs skip browser checks unless explicitly enabled:
 
 ```bash title="Run the HTML report browser checks"
-pip install playwright
 python -m playwright install chromium
-python tests/reporting/browser_navigation_checks.py browser-checks
+SKILLEVALUATOR_BROWSER_TESTS=1 pytest tests/reporting/test_report_browser.py -q
 ```
 
-The script renders its own fixture reports, then writes screenshots and `navigation-results.json` to `browser-checks/`. To use an installed Chrome instead of Playwright's Chromium, set `SKILLEVALUATOR_TEST_BROWSER` to the browser's executable or pass `--browser`.
+Set `SKILLEVALUATOR_BROWSER_SCREENSHOTS` to a directory to retain screenshots.
+To use an installed Chrome instead of Playwright's Chromium, set
+`SKILLEVALUATOR_TEST_BROWSER` to its executable. The convenience command
+`python tests/reporting/browser_navigation_checks.py browser-checks` runs the
+same suite and retains screenshots plus a test-result XML file. The dedicated
+HTML browser CI job builds a wheel and runs the suite outside the checkout
+against that installed wheel, so missing packaged templates and chart assets
+fail the same checks.
 
 ## Documentation and starter changes
 

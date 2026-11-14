@@ -1027,7 +1027,8 @@ def test_trial_charts_preserve_token_and_step_counter_semantics() -> None:
     html = _render_agent_payload(payload)
     trials_html = _tier3_page(html, "trials", "agents")
 
-    assert 'id="tier3-token-chart"' in trials_html
+    assert 'id="tier3-recorded-token-chart"' in trials_html
+    assert 'id="tier3-token-chart"' not in trials_html
     assert '{ label: "Prompt (total)"' in html
     assert '{ label: "Cached (included in prompt)"' in html
     steps_chart = re.search(r"function stepsByCaseDatasets\(\) \{.*?var chart = (.*?);\n", html, re.DOTALL)
@@ -3138,7 +3139,7 @@ def test_standalone_failed_tier3_report_shows_error_without_score(tmp_path: Path
     html = report.read_text(encoding="utf-8")
 
     assert "No Harbor job result" in html
-    assert "No successfully scored agent is available" in html
+    assert "Quality measurements unavailable" in html
     assert ">N/A<" in html
     assert "Default agent is the top performer" not in html
     assert 'onclick="tier3CopyText(this, "' not in html
@@ -3328,11 +3329,11 @@ def _render_paired_comparison(paired_comparison: object) -> str:
 @pytest.mark.parametrize("paired_comparison", [[1], "bad"], ids=["list", "string"])
 def test_pass_at_k_render_drops_nonmapping_paired_comparison(paired_comparison: object) -> None:
     html = _render_paired_comparison(paired_comparison)
-    sanitized = _embedded_tier3_payload(html)
+    retained = _embedded_tier3_payload(html)
 
     assert "Paired cases:" not in html
     assert "Exact McNemar p=" not in html
-    assert "paired_comparison" not in sanitized["agents"]["codex"]["pass_at_k"]["lift"]
+    assert retained["agents"]["codex"]["pass_at_k"]["lift"]["paired_comparison"] == paired_comparison
 
 
 @pytest.mark.parametrize(
@@ -3564,7 +3565,7 @@ def test_pass_at_k_render_derives_paired_delta_from_validated_outcomes() -> None
     paired = embedded["agents"]["codex"]["pass_at_k"]["lift"]["paired_comparison"]
 
     assert "Paired pass-rate delta: +25.0%." in html
-    assert paired["paired_rate_delta"] == 0.25
+    assert paired["paired_rate_delta"] == -1.0  # Export preserves original; visible delta above is validated.
 
 
 def test_pass_at_k_render_preserves_rounded_subnormal_mcnemar_probability() -> None:

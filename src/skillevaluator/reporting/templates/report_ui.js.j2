@@ -3,6 +3,7 @@
 let reportSkillStatus = 'all';
 let reportAffectedSkills = null;
 let reportValidatorStatus = 'all';
+let reportSearchOpenedDetails = new Set();
 function reportPressedButtons() {
     document.querySelectorAll('.tier-card[data-target-tab]').forEach(card => card.setAttribute('aria-pressed', card.classList.contains('active') ? 'true' : 'false'));
     document.querySelectorAll('.filter-btn,.severity-filter-btn,.view-toggle-btn').forEach(button => button.setAttribute('aria-pressed', button.classList.contains('active') ? 'true' : 'false'));
@@ -29,12 +30,31 @@ function applyReportSearch() {
             if (section.classList.contains('active')) { total++; if (shown) visible++; }
         });
     });
-    document.querySelectorAll('.summary-table tbody tr[data-status]').forEach(row => {
+    document.querySelectorAll('#tab-tier1 .summary-table tbody tr[data-status]').forEach(row => {
         row.style.display = (reportValidatorStatus === 'all' || row.dataset.status === reportValidatorStatus) && (!query || row.textContent.toLocaleLowerCase().includes(query)) ? '' : 'none';
     });
+    // Folded evidence remains searchable. Restore only disclosures search opened.
+    reportSearchOpenedDetails.forEach(detail => { detail.open = false; });
+    reportSearchOpenedDetails.clear();
+    let evidenceMatches = 0;
+    let firstEvidenceMatch = null;
+    if (query) {
+        document.querySelectorAll('details[id^="plugin-"],.t3-eval-evidence,.t3-ds-card,.t3-ds-card details').forEach(detail => {
+            if (!detail.textContent.toLocaleLowerCase().includes(query)) return;
+            evidenceMatches++;
+            if (!firstEvidenceMatch) firstEvidenceMatch = detail;
+            for (let node = detail; node; node = node.parentElement) {
+                if (node.tagName === 'DETAILS' && !node.open) {
+                    reportSearchOpenedDetails.add(node);
+                    node.open = true;
+                }
+            }
+        });
+    }
+    if (query && visible === 0 && firstEvidenceMatch) reportRevealTier(firstEvidenceMatch);
     const counter = document.getElementById('report-search-count');
-    counter.textContent = visible + ' of ' + total + ' shown';
-    document.getElementById('report-no-matches').hidden = visible !== 0;
+    counter.textContent = visible + ' of ' + total + ' shown' + (evidenceMatches ? ' · ' + evidenceMatches + ' evidence sections matched' : '');
+    document.getElementById('report-no-matches').hidden = visible !== 0 || evidenceMatches !== 0;
     ['skill-empty-msg','validator-empty-msg'].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
     reportPressedButtons();
 }
@@ -168,12 +188,19 @@ window.addEventListener('load', function() {
     }, 0);
 });
 
+// Navigating to a fragment on the same standalone file does not fire load again.
+window.addEventListener('hashchange', function() {
+    if (location.hash.length > 1) {
+        try { openReportDestination(decodeURIComponent(location.hash.slice(1))); } catch (err) { /* Ignore malformed fragments. */ }
+    }
+});
+
 // All entry points (sidebar, tiles, mobile links and evidence) use this tier state.
 function reportScrollBehavior() {
     return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
 }
 function reportMeasureNavigation() {
-    [['.mobile-tier-nav', '--mobile-nav-height'], ['.t3-subtabs', '--tier3-nav-height']].forEach(([selector, property]) => {
+    [['.main-header', '--report-header-height'], ['.mobile-tier-nav', '--mobile-nav-height'], ['.t3-subtabs', '--tier3-nav-height']].forEach(([selector, property]) => {
         const nav = document.querySelector(selector);
         const height = nav && nav.getClientRects().length ? nav.getBoundingClientRect().height : 0;
         document.documentElement.style.setProperty(property, height + 'px');
@@ -202,8 +229,10 @@ function activateReportTier(tierId, options = {}) {
         tile.classList.toggle('active', selected);
         tile.setAttribute('aria-pressed', String(selected));
     });
-    document.querySelectorAll('.mobile-tier-nav [data-report-tier]').forEach(link => {
-        if (link.dataset.reportTier === tierId) link.setAttribute('aria-current', 'location');
+    document.querySelectorAll('.nav-tabs [data-report-tier]').forEach(link => {
+        const selected = link.dataset.reportTier === tierId;
+        link.classList.toggle('active', selected);
+        if (selected) link.setAttribute('aria-current', 'location');
         else link.removeAttribute('aria-current');
     });
     reportMeasureNavigation();
@@ -242,36 +271,55 @@ function reportTabKeyboard(event) {
         event.target.click();
     }
 }
-let reportThemePreference = 'system';
+let reportThemePreference = document.documentElement.dataset.defaultTheme || 'light';
 const reportColorScheme = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 function applyReportTheme() {
     const theme = reportThemePreference === 'system' ? (reportColorScheme?.matches ? 'dark' : 'light') : reportThemePreference;
     document.documentElement.setAttribute('data-theme', theme);
     const control = document.getElementById('report-theme');
     if (control) control.value = reportThemePreference;
+    const icon = document.getElementById('theme-icon');
+    const text = document.getElementById('theme-text');
+    if (icon) icon.textContent = theme === 'dark' ? '☀' : '☾';
+    if (text) text.textContent = theme === 'dark' ? 'Light' : 'Dark';
     if (window.rebuildTier3Charts) window.rebuildTier3Charts();
 }
 function setReportTheme(preference) {
     reportThemePreference = ['light','dark'].includes(preference) ? preference : 'system';
     try {
-        if (reportThemePreference === 'system') localStorage.removeItem('skillevaluator-theme');
-        else localStorage.setItem('skillevaluator-theme', reportThemePreference);
+        localStorage.setItem('skillevaluator-theme', reportThemePreference);
     } catch (err) { /* Standalone reports work without storage. */ }
     applyReportTheme();
+}
+function toggleTheme() {
+    setReportTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
 }
 function initReportTheme() {
     try {
         const saved = localStorage.getItem('skillevaluator-theme');
-        reportThemePreference = ['light','dark'].includes(saved) ? saved : 'system';
+        reportThemePreference = ['light','dark','system'].includes(saved) ? saved : (document.documentElement.dataset.defaultTheme || 'light');
     } catch (err) { /* Follow system when storage is unavailable. */ }
     applyReportTheme();
     if (reportColorScheme?.addEventListener) reportColorScheme.addEventListener('change', function() {
         if (reportThemePreference === 'system') applyReportTheme();
     });
 }
+function showDedupTab(which) {
+    const panel = document.getElementById('dedup-' + which);
+    if (!panel) return;
+    document.querySelectorAll('.dedup-subtab').forEach(el => el.style.display = el === panel ? 'block' : 'none');
+    document.querySelectorAll('.tier2-subtabs .nav-tab').forEach(button => {
+        const selected = button.getAttribute('aria-controls') === panel.id;
+        button.classList.toggle('active', selected);
+        button.setAttribute('aria-selected', String(selected));
+        button.tabIndex = selected ? 0 : -1;
+    });
+}
 function reportRevealTier(target) {
     const panel = target.closest('.tab-content');
     if (panel) activateReportTier(panel.id.slice(4), {scroll:false, focus:false});
+    const dedup = target.closest('.dedup-subtab');
+    if (dedup) showDedupTab(dedup.id.slice('dedup-'.length));
     const local = target.closest('.t3-page');
     if (local) activateReportTabs('.t3-subtab', '.t3-page', local.id);
     const agent = target.closest('.t3-agent-panel');
@@ -291,7 +339,7 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         });
     });
-    document.querySelectorAll('.t3-subtabs,.t3-agent-tabs').forEach(list => list.addEventListener('keydown', reportTabKeyboard));
+    document.querySelectorAll('.t3-subtabs,.t3-agent-tabs,.tier2-subtabs').forEach(list => list.addEventListener('keydown', reportTabKeyboard));
     const initial = document.querySelector('.tab-content.active') || document.querySelector('.tab-content');
     if (initial) activateReportTier(initial.id.slice(4), {scroll:false, focus:false});
     reportCurrentSection('report-workspace');
@@ -303,7 +351,7 @@ document.addEventListener('DOMContentLoaded', function() {
     reportMeasureNavigation();
     if (window.ResizeObserver) {
         const observer = new ResizeObserver(reportMeasureNavigation);
-        document.querySelectorAll('.mobile-tier-nav,.t3-subtabs').forEach(nav => observer.observe(nav));
+        document.querySelectorAll('.main-header,.mobile-tier-nav,.t3-subtabs').forEach(nav => observer.observe(nav));
     }
     window.addEventListener('resize', reportMeasureNavigation);
     let navigationFrame = null;
@@ -332,4 +380,10 @@ document.addEventListener('DOMContentLoaded', function() {
         event.preventDefault();
         openReportDestination(id);
     });
+});
+
+// The copied native insight cards use inert data attributes for copy actions.
+document.addEventListener('click', function(event) {
+    const button = event.target.closest('[data-report-action="copy"]');
+    if (button && typeof tier3CopyText === 'function') tier3CopyText(button, button.dataset.copyText || '');
 });

@@ -106,7 +106,8 @@ def test_chart_canvases_explain_data_and_keep_visible_failure_fallback(agent_cou
     html = _tier3_html(agent_count=agent_count)
     report = _parse(html)
     canvases = {key: attrs for key, (tag, attrs) in report.elements.items() if tag == "canvas"}
-    assert canvases.keys() == {"tier3-radar", "tier3-metric-bar", "tier3-token-chart", "tier3-steps-chart"}
+    token_chart = "tier3-recorded-token-chart" if "tier3-recorded-token-chart" in canvases else "tier3-token-chart"
+    assert canvases.keys() == {"tier3-radar", "tier3-metric-bar", token_chart, "tier3-steps-chart"}
     for chart_id, attrs in canvases.items():
         assert attrs["role"] == "img"
         assert attrs["aria-label"]
@@ -155,7 +156,7 @@ def test_chart_initialization_failure_keeps_fallback_and_recovers() -> None:
     script = r"""
 const vm = require('node:vm');
 const controller = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
-const ids = ['tier3-radar', 'tier3-metric-bar', 'tier3-token-chart', 'tier3-steps-chart'];
+const ids = ['tier3-radar', 'tier3-metric-bar', 'tier3-recorded-token-chart', 'tier3-steps-chart'];
 const elements = {};
 ids.forEach(id => {
     elements[id] = {id, hidden: true};

@@ -306,6 +306,9 @@ def retained_results(
         if "skipped" in row:
             _require(type(row["skipped"]) is bool, "skipped must be boolean")
             metadata["skipped"] = row["skipped"]
+        if "optional_skip" in row:
+            _require(type(row["optional_skip"]) is bool, "optional_skip must be boolean")
+            metadata["optional_skip"] = row["optional_skip"]
         if "confirmed_failure" in row:
             _require(type(row["confirmed_failure"]) is bool, "confirmed_failure must be boolean")
             metadata["confirmed_failure"] = row["confirmed_failure"]

@@ -65,11 +65,6 @@ def _matrix_labels(html: str, agents: list[str]) -> dict[str, list[str]]:
     return {name: labels[index :: len(agents)] for index, name in enumerate(agents)}
 
 
-def _scorecard_labels(html: str) -> list[str]:
-    pattern = r'<div class="t3-agent-score"[^>]*>.*?</div>\s*<div[^>]*>(.*?)</div>'
-    return [_text(label) for label in re.findall(pattern, html, re.DOTALL)]
-
-
 def _lift_kpi_labels(html: str) -> list[str]:
     pattern = r'<div class="t3-kpi-label">Skill Lift</div>.*?<div class="t3-kpi-sub">(.*?)</div>'
     return [_text(label) for label in re.findall(pattern, html, re.DOTALL)]
@@ -88,7 +83,7 @@ def test_mixed_judge_comparison_is_unavailable_not_missing_baseline() -> None:
     assert dimension_labels["correctness"] == "comparison unavailable"
     assert dimension_labels["security"] == "+0.40 lift"
     assert labels["mixed"][-1] == "comparison unavailable"
-    assert _scorecard_labels(html) == ["+0.40 lift", "comparison unavailable"]
+    assert 'class="t3-agent-score"' not in html
     assert _lift_kpi_labels(html) == ["positive", "comparison unavailable"]
     assert "no baseline" not in html
 
@@ -104,7 +99,7 @@ def test_score_policy_mismatch_is_unavailable_not_missing_baseline() -> None:
     payload, html = _html({"codex": agent})
     assert (payload["agents"]["codex"]["baseline"], payload["agents"]["codex"]["lift"]) == (0.5, None)
     assert "baseline 0.50" in html
-    assert _scorecard_labels(html) == ["comparison unavailable"]
+    assert 'class="t3-agent-score"' not in html
     assert _lift_kpi_labels(html) == ["comparison unavailable"]
     assert "no baseline" not in html
 
@@ -114,6 +109,6 @@ def test_skipped_baseline_keeps_no_baseline_labels() -> None:
     assert payload["agents"]["skipped"]["baseline"] is None
     labels = _matrix_labels(html, list(payload["agents"]))
     assert labels["skipped"] == ["no baseline lift"] * (len(DIMENSION_MAPPING) + 1)
-    assert _scorecard_labels(html) == ["+0.40 lift", "no baseline"]
+    assert 'class="t3-agent-score"' not in html
     assert _lift_kpi_labels(html) == ["positive", "no baseline"]
     assert "comparison unavailable" not in html

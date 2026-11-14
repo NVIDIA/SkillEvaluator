@@ -126,10 +126,7 @@ def _augment(
                 row.setdefault("properties", {})["pluginComponent"] = component
         return json.dumps(data, indent=reporter.indent, ensure_ascii=True, allow_nan=False)
     if reporter.name == "html":
-        fragment = reporter._env.get_template("plugin_static_sections.html.j2").render(plugin_static=payload)
-        if "</main>" not in document:
-            raise ValueError("The HTML reporter did not provide its main content boundary")
-        return document.replace("</main>", fragment + "\n</main>", 1)
+        return reporter.render_all(results, plugin_static=payload)
     if reporter.name in {"markdown", "benchmark"}:
         return document.rstrip() + "\n\n" + _markdown(payload, publication=reporter.name == "benchmark").rstrip() + "\n"
     if reporter.name == "cli":
@@ -150,8 +147,11 @@ def render_plugin_static_reports(
     payload = projection.payload() if projection is not None else None
     rendered = {}
     for reporter in reporters:
-        document = reporter.render_all(results)
-        rendered[reporter.name] = (
-            _augment(reporter, document, results, projection, payload) if projection is not None else document
-        )
+        if reporter.name == "html" and projection is not None:
+            rendered[reporter.name] = reporter.render_all(results, plugin_static=payload)
+        else:
+            document = reporter.render_all(results)
+            rendered[reporter.name] = (
+                _augment(reporter, document, results, projection, payload) if projection is not None else document
+            )
     return rendered

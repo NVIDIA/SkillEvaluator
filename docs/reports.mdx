@@ -86,6 +86,12 @@ no-color, redirected, and string-rendered output retains readable paths.
 | `markdown` | Markdown for PR comments | You want the result posted on a pull request |
 | `sarif` | SARIF 2.1.0 JSON | GitHub Code Scanning or other SARIF consumers need inline annotations |
 
+HTML reports use a shared NVIDIA presentation across all three tiers, with
+numbered Insights cards, expandable findings, and tables alongside charts.
+Reports containing Tier 3 open in dark mode; other reports open in light mode.
+An explicit theme choice is remembered when browser storage is available.
+Reports, including charts, work without a network connection.
+
 ```bash title="One run, four report files"
 skillevaluator validate ./my-skill -r json,html,markdown,sarif -o reports
 ```
@@ -94,7 +100,7 @@ For gating a pipeline on the JSON output, see [Gate Your CI](/skills/skillevalua
 
 ## Reading the final status
 
-The compact terminal summary, full terminal report, and HTML header describe the
+The compact terminal summary, full terminal report, and HTML hero describe the
 same command outcome: **Passed required checks**, **Changes required**, or
 **Incomplete**. A confirmed failure takes precedence over missing evidence.
 Advisory tiers retain their own findings and execution status without changing
@@ -127,8 +133,8 @@ payloads are unchanged.
 
 ### Tier 2 comparison scopes and evidence
 
-The HTML Tier 2 view separates **Within this skill** (redundant content among
-its files) from **Across skills** (catalog or collection comparisons). Each
+The HTML Tier 2 view separates **Intra-Skill** (redundant content among
+its files) from **Inter-Skill** (catalog or collection comparisons). Each
 scope shows Checks completed, Duplicate findings, Affected files or skills,
 and Catalog entries compared. Completion uses recorded comparison
 evidence; a completed check can still fail its gate because it found duplicates.
@@ -144,17 +150,44 @@ so equal display names do not merge distinct skills. Token or context savings
 are not estimated from duplicate counts.
 
 HTML, terminal, and Markdown reports link every recorded Harbor job to its
-**Results** and available **Analysis**, using the job's recorded name or
-`Job N` when no name is available. Legacy single-job and analysis-only links
-remain usable. Job names do not establish which agent or condition produced a
-job. Links use the existing URL validation and output escaping.
+**Results** and available **Analysis**. HTML uses the recorded agent and condition
+when available, keeping exact job identities in Diagnostics. Otherwise it uses
+the recorded job name or `Job N`. Legacy single-job and analysis-only links
+remain usable. Job names alone do not establish agent or condition ownership.
+Links use the existing URL validation and output escaping.
 
 HTML disclosures show recorded scanner versions and LLM provenance, plus
 sanitized model, evaluator, dataset digest, and evaluated source metadata under
 Tier 3 Diagnostics. Missing values remain unavailable. These views use existing
 report data and do not read the source tree or contact providers while rendering.
-Full downloads and preview omission counts remain available; with-skill token
-charts are labeled separately from the resource table's two-arm comparisons.
+Full downloads and preview omission counts remain available. Recorded native
+token and latency details are available in Trials disclosures, alongside the
+current resource comparison tables. Both-condition token charts distinguish
+cached and uncached prompt tokens without counting cached reads twice.
+
+### Insights, diagnostics, and JSON downloads
+
+Overview shows a concise result, scored-attempt coverage and one recorded next
+action. Insights owns the complete conclusion and recommendation cards, with
+their original text, source, verification and evidence links. Full execution
+errors remain in Diagnostics. Routine configuration and provenance stay in the
+closed **Run details & provenance** footer; important execution or comparison
+limitations remain visible beside affected results. Rendering a saved run does
+not invoke a judge or change its scores.
+
+**Download Full Tier 3 Payload** returns the retained Tier 3 object, including
+unavailable values and its recorded verdict. The visible validation outcome
+can be stricter because it also accounts for execution failures and required
+checks. Presentation defaults do not replace the retained object.
+
+The HTML header's JSON export is a report snapshot, with supplied plugin
+static/runtime projections included. Its envelope differs from the CLI's
+`-r json` format. A CI report configured with a canonical JSON artifact links
+directly to that retained file instead of embedding another report snapshot.
+
+Plugin evidence appears within its relevant tier. Bounds notices distinguish
+omitted rows from shortened text. A shortened historical snapshot cannot
+recover the original text; use recorded evidence artifacts when available.
 
 ### Dataset generation provenance
 
@@ -200,25 +233,28 @@ and never clobbers the previous run.
 The HTML report is one self-contained file. It opens on the answer and puts
 the evidence below it:
 
-- **Header.** The skill name is the page title. The header shows one verdict,
-  the date and version, and **Download JSON**.
-- **Summary.** The verdict with a one-line reason, four numbers (checks passed,
-  findings, blocking critical and high findings, quality score with its
-  minimum), and **Fix first**: up to five places to fix, most severe first,
-  each linking to its evidence. When a required scanner did not finish, it is
-  listed first with the scanner's own reason, such as a timeout. Two scanners
-  reporting the same file and line take one entry.
+- **Header and summary.** Branding, one Theme control and **Download JSON**
+  sit above the target name and required-validation result. Publication
+  eligibility stays separate, with its reasons available on demand. One set
+  of tier cards opens the detailed evidence.
+- **Tier summaries.** Each tier shows its own completion and findings.
+  Tier 3 combines score and agent, lift and coverage in at most three primary
+  metric tiles. An incomplete run with unavailable quality measurements shows
+  that state directly, rather than a grid of empty score tiles. Full Insights
+  cards appear once in Insights; Overview links to them.
 - **Findings and evidence.** Every check with its findings and suggested fixes.
   Failed checks come first. Checks that report a raw ID, such as
   `SCRIPT_LINT`, show a plain name with the ID beside it. Scanner diagnostics
   and gate failures are always shown and printed; raw scanner lines that only
   repeat a finding are folded away.
-- **Run details.** Scope, the target path, provenance and the gate policy.
+- **Run details.** A closed footer holds routine identity, configuration,
+  target paths and provenance. Passive plugin inventories and source details
+  also stay folded, with recorded omissions and limitations disclosed.
 
-Use the sidebar or tier tiles to open a tier. A comprehensive `validate` report
+Use the tier cards to open a tier. A comprehensive `validate` report
 keeps all three tiers visible, including **Not run** and **Not run (not requested)**
 when evidence is absent. Targeted reports keep their narrower scope. On small
-screens, a sticky tier bar keeps navigation available while reading long evidence.
+screens, navigation and controls wrap within the viewport.
 Tier 3 retains Overview, Insights, Agent Details, Trials, Dataset and Diagnostics.
 For its tabs, Left/Right and Home/End move focus; Enter or Space opens the focused
 view. Finding links clear incompatible filters, open their evidence and move focus
@@ -231,7 +267,7 @@ native theme-aware scrollbars and respect reduced motion. Without JavaScript,
 all tier and agent evidence remains readable. Printing exposes supporting evidence
 and then restores disclosure and filter state when returning to the screen.
 
-Reports use 14-pixel body text with relaxed line spacing, distinct label/value
+Reports use 16-pixel body text with relaxed line spacing, distinct label/value
 gaps, and consistent space between cards, findings and table rows. Tier 3 view
 tabs wrap on narrow screens; wide evidence tables keep their own horizontal
 scroll area. The same reading rhythm applies in Light and Dark themes.
@@ -266,8 +302,9 @@ when it fails, because it does not require changes. Publication eligibility is
 shown separately from the command result. Summary reasons count required and
 advisory checks individually, including when a tier contains both. Eligibility is
 shown next to the verdict, because a report can pass its checks and still not
-be eligible for publication. The report follows the system light or dark theme
-until you pick one, and always prints dark text on white paper.
+be eligible for publication. Tier 3 reports default to dark and other reports to
+light; selecting System follows the device preference. Reports always print
+dark text on white paper.
 
 ## BENCHMARK.md
 
@@ -1020,8 +1057,8 @@ entry per failed arm:
 - `failure`: the first Harbor exception type in words, or `null`.
 - `message`: the sentence the reports show.
 
-The HTML report lists each message under **Agent coverage notes** at the top
-of the Tier 3 section. Its agent details label an agent whose baseline arm
+The HTML report keeps a short coverage cue near the Tier 3 result and retains
+the complete per-agent/arm messages in Agent Details. Its agent details label an agent whose baseline arm
 failed the way they label a skipped baseline, for example **no baseline** and
 `baseline N/A`, so the callout is what tells the two apart. The full terminal
 report, from `validate --verbose` or an explicit `-r cli`, prints the notes
@@ -1432,9 +1469,9 @@ agent is the successful agent with the highest with-skill score; an agent that
 never activated the skill is chosen only when no other successful agent has a
 score.
 
-- The HTML Tier 3 hero shows that agent's score and the warning
-  **Completed-agent result. Other execution failures need attention**. The
-  overview's score card reads **Completed Agent Score**.
+- The HTML Overview combines that agent's name and score in **Completed Agent
+  Score**, beside **Skill Lift** and **Coverage**. The warning remains
+  **Completed-agent result; other execution failures need attention**.
 - `tier3-benchmark.md` names the agent and gives its score and, when its
   baseline is comparable, its lift, followed by **Needs attention: other
   execution failures remain**. In a `validate` run, `BENCHMARK.md` shows the
@@ -1447,8 +1484,8 @@ score.
   scored. The HTML report and `tier3-benchmark.md` also give this count when
   every agent finished.
 
-In a standalone report, the **Tier 3 quality** chip and the **Quality Verdict**
-card follow the run's verdict. A failed run keeps `neutral`, which the HTML
+In a standalone report, the **Tier 3 quality** status follows the run's verdict.
+A failed run keeps `neutral`, which the HTML
 labels **Changes required**, even when the completed agent's own dimension
 verdict passes. The completed-agent details still describe that agent, and
 the command status in the same hero also reads **Changes required**.
@@ -1464,8 +1501,8 @@ metric sets, no completed-agent score is shown. The benchmark's leading
 verdict follows the run, so a neutral run still reads
 **Tier 3 completed-agent result: NEUTRAL** when no agent qualifies.
 
-When the run has a best agent, the HTML report names it as **Best performing
-agent**, and its **Skill Lift** card and the **Best-agent lift** line under
+When the run has a best agent, the HTML report names it with the score,
+and its **Skill Lift** card and the **Best-agent lift** line under
 **Run details & provenance** show that agent's lift when it has one, even when
 its evidence is incomplete. The payload keeps this lift in
 `summary.overall_lift` and records the failed run's `verdict` as `neutral`.

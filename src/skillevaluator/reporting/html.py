@@ -89,6 +89,8 @@ from skillevaluator.reporting.finding_summary import (
 )
 from skillevaluator.reporting.finding_verification import finding_verification
 from skillevaluator.reporting.harbor_viewer import harbor_job_links, normalize_agent_eval_harbor_links
+from skillevaluator.reporting.insights_view import build_insights_view
+from skillevaluator.reporting.plugin_evidence import build_plugin_evidence
 from skillevaluator.reporting.presentation import (
     FinalRenderContext,
     TierPresentation,
@@ -97,6 +99,7 @@ from skillevaluator.reporting.presentation import (
     success_is_not_applicable,
 )
 from skillevaluator.reporting.run_status import Status, result_status, result_tier
+from skillevaluator.reporting.telemetry_view import build_telemetry_view
 from skillevaluator.reporting.tier2_views import tier2_scope_views
 from skillevaluator.reporting.tier3_scope import (
     completed_agent_result,
@@ -1291,6 +1294,11 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
             key: str(step.get(key) or "")
             for key in ("kind", "target", "problem", "evidence", "action", "check", "strength")
         }
+        | {
+            key: _tier3_display_identifier(step[key])
+            for key in ("agent", "case", "case_id", "condition")
+            if isinstance(step.get(key), str)
+        }
         for step in _dict_list(payload.get("next_steps"))
     ]
     payload["dataset"] = [_sanitize_tier3_dataset_case(item) for item in _dict_list(payload.get("dataset"))]
@@ -1389,6 +1397,31 @@ def _script_safe_json(value: object) -> str:
         .replace("\u2028", "\\u2028")
         .replace("\u2029", "\\u2029")
     )
+
+
+def _unrepresented_insight_steps(view: dict[str, Any], *, failed: bool) -> list[dict[str, Any]]:
+    """Keep next steps unless a failed-run card already displays all their evidence."""
+    steps = [step for step in view.get("next_steps", []) if isinstance(step, dict)]
+    if not failed:
+        return steps
+    actions = [
+        item
+        for item in view.get("recommendations", [])
+        if isinstance(item, dict) and item.get("insight_kind") == "execution_action"
+    ]
+
+    def represented(step: dict[str, Any], card: dict[str, Any]) -> bool:
+        if not step.get("action") or step["action"] != card.get("message"):
+            return False
+        target = step.get("target") or "agent_eval"
+        if target != card.get("metric"):
+            return False
+        for field in ("problem", "check", "strength", "agent", "case", "case_id", "condition"):
+            if (step.get(field) or "") != (card.get(field) or ""):
+                return False
+        return (step.get("evidence") or "") == (card.get("evidence_text") or card.get("evidence") or "")
+
+    return [step for step in steps if not any(represented(step, card) for card in actions)]
 
 
 def _canonical_tier3_embed(payload: dict[str, Any] | None) -> tuple[str, str]:
@@ -3148,12 +3181,26 @@ class HTMLReporter(ReporterBase):
     def render(self, result: ValidationResult) -> str:
         return self.render_all([result])
 
-    def render_all(self, results: list[ValidationResult]) -> str:
+    def render_all(
+        self,
+        results: list[ValidationResult],
+        *,
+        plugin_static: object = None,
+        plugin_runtime: object = None,
+    ) -> str:
+        plugin_evidence = build_plugin_evidence(static=plugin_static, runtime=plugin_runtime)
         validate_report_scope(self.report_scope, results)
         tier1_results, tier2_results, tier3_results = self._split_results_by_tier(results)
         selected = select_agent_eval_candidate(tier3_results)
         raw_payload = selected[1] if selected is not None else None
         tier3_data = self._tier3_report_data(tier3_results, selected=selected)
+        # Export valid retained evidence exactly; display shaping below is deliberately
+        # conservative and must never rewrite the downloadable object.
+        canonical_tier3 = (
+            raw_payload
+            if raw_payload is not None and agent_eval_report_serialization_issue(raw_payload) is None
+            else tier3_data
+        )
         completed_agent = completed_agent_result(tier3_data)
         # Preserve the raw policy/provenance assessment, then let the emitted
         # payload make the decision only more conservative. Display shaping
@@ -3266,13 +3313,45 @@ class HTMLReporter(ReporterBase):
             or dataset_source == "unavailable"
         ):
             tier3_dataset_sufficiency = None
+        # Runtime-only plugin projections expose passive evidence in the native
+        # tabs without inventing an AGENT_EVAL result or canonical Tier 3 payload.
+        if tier3_data is None and any(plugin_evidence[slot] for slot in ("overview", "agents", "trials", "provenance")):
+            tier3_data = {
+                "skill_name": (plugin_evidence["runtime"] or plugin_evidence["static"] or {}).get(
+                    "name", "Plugin evidence"
+                ),
+                "overall_score": None,
+                "overall_lift": None,
+                "best_agent": None,
+                "verdict": "incomplete",
+                "execution_status": "incomplete",
+                "agents": {},
+                "summary": {},
+            }
+        tier3_telemetry = build_telemetry_view(tier3_data)
         tier3_preview, tier3_preview_notice = _bounded_tier3_preview(tier3_data)
+        insights_view = build_insights_view(tier3_preview or {})
+        insights_case_fix_count = len(insights_view.get("recommendations") or [])
+        # Older retained source checks and healthy runs may only have suggestions.
+        # Give those the same native cards in Overview and Insights.
+        if not insights_view.get("recommendations"):
+            insights_view = {
+                **insights_view,
+                "recommendations": [
+                    {"message": suggestion, "title": "", "category": "Action", "source": "deterministic"}
+                    for suggestion in (tier3_preview or {}).get("suggestions", [])
+                    if isinstance(suggestion, str) and suggestion
+                ],
+            }
+        remaining_insight_steps = _unrepresented_insight_steps(
+            insights_view, failed=(tier3_preview or {}).get("execution_status") == "failed"
+        )
         if isinstance(tier3_preview, dict) and isinstance(tier3_preview.get("evidence_volume"), dict):
             tier3_preview["evidence_volume"]["display"] = format_evidence_volume(tier3_preview["evidence_volume"]) or ""
         tier3_dataset_provenance_line, tier3_dataset_provenance_warning = dataset_provenance_display(
             tier3_data.get("dataset_provenance") if isinstance(tier3_data, dict) else None
         )
-        tier3_canonical_data, tier3_canonical_encoding = _canonical_tier3_embed(tier3_data)
+        tier3_canonical_data, tier3_canonical_encoding = _canonical_tier3_embed(canonical_tier3)
         tier3_truncation = tier3_data.get("report_truncation", {}) if isinstance(tier3_data, dict) else {}
 
         # Keep the Tier 1 dashboard scoped to Tier 1. Tier 2 and Tier 3 have
@@ -3503,7 +3582,7 @@ class HTMLReporter(ReporterBase):
             # Tier 3 is embedded once in ``#tier3-full``. The export helper
             # resolves this reference at download time, avoiding a second full
             # copy inside ``#report-data``.
-            "tier3": {"$ref": "#tier3-full"} if tier3_data else None,
+            "tier3": {"$ref": "#tier3-full"} if canonical_tier3 else None,
             "gating": gating,
             "publication": {
                 "status": publication.status,
@@ -3518,6 +3597,10 @@ class HTMLReporter(ReporterBase):
             "skillspector_versions": tier1_skillspector_versions,
             "skillspector_provenance": tier1_skillspector_provenance,
         }
+        if plugin_evidence["static"] is not None:
+            report_data["plugin_static"] = plugin_evidence["static"]
+        if plugin_evidence["runtime"] is not None:
+            report_data["plugin_runtime"] = plugin_evidence["runtime"]
         # CI-native pages link Download JSON to the retained canonical file, so
         # nothing on them reads an embedded copy. Only standalone reports embed it.
         report_json = None
@@ -3547,6 +3630,13 @@ class HTMLReporter(ReporterBase):
         if agent_eval_only and tier3_data:
             active_tabs = [t for t in active_tabs if t["id"] != "tier1"]
 
+        for tier_number in (1, 2):
+            tier_id = f"tier{tier_number}"
+            if plugin_evidence[tier_id] and not any(tab["id"] == tier_id for tab in active_tabs):
+                active_tabs.append(
+                    {"id": tier_id, "label": f"Tier {tier_number}", "empty": True, "number": tier_number}
+                )
+        active_tabs.sort(key=lambda tab: tab["id"])
         template = self._env.get_template("report.html.j2")
         cl = self.content_label
         return template.render(
@@ -3612,6 +3702,10 @@ class HTMLReporter(ReporterBase):
             content_label_plural=cl + "s",
             quality_scores=quality_scores_by_skill,
             tier3=tier3_preview,
+            insights_view=insights_view,
+            remaining_insight_steps=remaining_insight_steps,
+            insights_case_fix_count=insights_case_fix_count,
+            plugin_evidence=plugin_evidence,
             tier3_display_dimensions=_tier3_html_dimensions(tier3_data),
             tier3_dataset_provenance_line=tier3_dataset_provenance_line,
             tier3_dataset_provenance_warning=tier3_dataset_provenance_warning,
@@ -3621,6 +3715,7 @@ class HTMLReporter(ReporterBase):
             tier3_truncation=tier3_truncation,
             tier3_dataset_sufficiency=tier3_dataset_sufficiency,
             tier3_preview_notice=tier3_preview_notice,
+            tier3_telemetry=tier3_telemetry,
             # Measured, not scored. From the full display payload, with its own
             # per-agent cap: the preview walk can blank strings of late keys.
             tier3_token_usage=token_usage_table(

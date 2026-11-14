@@ -149,6 +149,15 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Standalone HTML reports use one NVIDIA presentation across all three tiers,
+  with consistent typography, a green header, numbered Insights cards, and
+  plugin evidence inside the relevant tier. Tier 3 reports default to dark
+  mode, while explicit theme choices remain available. Saved incomplete runs
+  show concise coverage and actions, with full errors retained in Diagnostics.
+  Overview links to complete Insights instead of repeating its cards; passive
+  evidence and routine run provenance stay folded. Recorded native token and
+  latency breakdowns are available under Trials without rerunning evaluations.
+
 - The HTTP 404 message for an unavailable LLM model now says the provider's default
   may not be callable with the key and points to `SKILL_EVAL_LLM_MODEL` (`llm-model`
   in the reusable workflow); `ci/README.md` notes the same.
@@ -246,6 +255,10 @@ All notable changes to SkillEvaluator are documented in this file.
   grader suite, so retuning any of them fails CI instead of rotting the page.
 
 ### Fixed
+
+- HTML's full Tier 3 download preserves the recorded canonical payload instead
+  of exporting display defaults. Plugin evidence accompanies standalone HTML
+  JSON snapshots, and retained optional-skip metadata survives JSON round trips.
 
 - Automatic SkillSpector selection now verifies the pinned release on first use
   and falls back to the verified managed wheel for a different or unverifiable

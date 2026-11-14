@@ -412,9 +412,15 @@ def _failed_case_findings(agent: str, cases: int) -> dict[str, Any]:
 
 
 def _verdict(html: str) -> str:
-    """The HTML hero's Tier 3 verdict chip, the reason for an incomplete verdict, and the score."""
-    hero = html.split('class="verdict-chip', 1)[1].split(">", 1)[1].split('<div class="agent-hero-detail"', 1)[0]
-    return " ".join(re.sub(r"<[^>]+>", " ", hero).split())
+    """Read the quality chip and its reason inside the hero, without trailing page content."""
+    hero = html.split('<section class="agent-hero"', 1)[1].split("</section>", 1)[0]
+    quality = re.search(r'<span class="verdict-chip [^"]+">(Tier 3 quality:.*?)</span>', hero, re.DOTALL)
+    assert quality
+    reasons = re.findall(r'<p class="hero-reason">(.*?)</p>', hero, re.DOTALL)
+    score = re.search(r'data-primary-metric="score">.*?<p class="dashboard-card-value">(.*?)</p>', html, re.DOTALL)
+    return " ".join(
+        re.sub(r"<[^>]+>", " ", " ".join([quality[1], *reasons, score[1] if score else "unavailable"])).split()
+    )
 
 
 @pytest.mark.parametrize("reuse_saved_feedback", [False, True], ids=["fresh-feedback", "saved-feedback"])

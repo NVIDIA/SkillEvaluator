@@ -357,6 +357,40 @@ def test_live_reports_are_incomplete_when_the_package_is(tmp_path, complete):
     assert ("plugin-components" in payload["incomplete_scans"]) is not complete
 
 
+@pytest.mark.parametrize("complete", [True, False], ids=["complete", "incomplete"])
+def test_run_directory_result_is_incomplete_when_the_package_is(tmp_path, complete):
+    from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory
+
+    source = _live_report_source(tmp_path)
+    run_dir = _scored_run(tmp_path / "results", "20261110_010001", 0.5)
+    engine_result = {
+        "execution_status": "succeeded",
+        "run_dir": str(run_dir),
+        "plugin_provenance": _provenance(complete),
+    }
+
+    # Every report built from the run directory, including the refreshed run report, shares this path.
+    result = agent_eval_result_from_directory(source, run_dir, engine_result=engine_result, use_llm_judge=False)
+
+    assert result.metadata["agent_eval"]["overall_score"] == pytest.approx(0.5)
+    assert result.incomplete_scans == ([] if complete else ["plugin-components"])
+    assert result.passed is complete
+
+
+def test_reports_without_scores_are_incomplete_when_the_package_is(tmp_path):
+    source = _live_report_source(tmp_path)
+    engine_result = {
+        "execution_status": "failed",
+        "error": "Fixture setup failed",
+        "plugin_provenance": _provenance(False),
+    }
+
+    payload = _live_json_report(source, engine_result, tmp_path / "results", tmp_path / "reports")
+
+    # No run directory backs this result, so the report hook itself must mark it.
+    assert {"canonical-score-summary", "plugin-components"} <= set(payload["incomplete_scans"])
+
+
 @pytest.mark.parametrize("scored", [True, False], ids=["scored", "no-scores"])
 def test_live_benchmark_card_names_the_plugin(tmp_path, scored):
     source = _live_report_source(tmp_path)

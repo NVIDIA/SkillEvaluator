@@ -18,10 +18,22 @@ if TYPE_CHECKING:
     from skillevaluator.reporting.plugin_runtime import RuntimePluginReport
 
 
+def mark_incomplete_plugin_package(result: ValidationResult, engine_result: object) -> None:
+    """Mark the result incomplete when the prepared plugin package was incomplete.
+
+    Components the run could not stage or start keep this from being a complete
+    plugin evaluation. Scores stay visible.
+    """
+    provenance = engine_result.get("plugin_provenance") if isinstance(engine_result, dict) else None
+    if isinstance(provenance, dict) and provenance.get("complete") is False:
+        result.mark_scan_incomplete("plugin-components")
+
+
 def attach_saved_plugin_evidence(result: ValidationResult, run_dir: Path, engine_result: dict | None) -> None:
     """Attach passive evidence without changing the canonical score payload."""
     from skillevaluator.reporting.plugin_runtime_io import RUNTIME_REPORT_FILENAME, load_plugin_runtime_report
 
+    mark_incomplete_plugin_package(result, engine_result)
     live = None
     if isinstance(engine_result, dict):
         inventory = engine_result.get("plugin_inventory")

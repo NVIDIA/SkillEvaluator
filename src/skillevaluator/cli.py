@@ -1201,15 +1201,15 @@ def _attach_plugin_report(result: ValidationResult, engine_result: object) -> Va
 
     A prepared package that was incomplete makes the result incomplete too.
     """
+    from skillevaluator.reporting.plugin_reports import mark_incomplete_plugin_package
+
     if isinstance(engine_result, dict):
         if "plugin_runtime_report" in engine_result:
             result.metadata["plugin_runtime_report"] = engine_result["plugin_runtime_report"]
         if isinstance(engine_result.get("plugin_inventory"), dict):
             result.metadata.setdefault("plugin", engine_result["plugin_inventory"])
-        provenance = engine_result.get("plugin_provenance")
-        if isinstance(provenance, dict) and provenance.get("complete") is False:
-            # Components the run could not stage or start keep this from being a complete plugin evaluation.
-            result.mark_scan_incomplete("plugin-components")
+    # Advisory skips are built without the run directory, so mark them here too.
+    mark_incomplete_plugin_package(result, engine_result)
     return result
 
 

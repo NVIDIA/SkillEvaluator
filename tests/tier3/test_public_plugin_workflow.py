@@ -222,3 +222,62 @@ def test_unsafe_mcp_refused_before_engine_call(tmp_path, monkeypatch):
     monkeypatch.setattr(EvaluationService, "evaluate", never)
     with pytest.raises(PreparationError, match="policy blocks"):
         EvaluationService().evaluate_plugin(EvaluationOptions(root, agents="claude-code"))
+
+
+def _scored_run(run_dir):
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+
+    for arm in ("with-skill", "without-skill"):
+        summary = run_dir / "opencode" / arm / "summary.json"
+        summary.parent.mkdir(parents=True)
+        summary.write_text(
+            json.dumps(
+                {
+                    "scores": dict.fromkeys(DEFAULT_METRICS, 0.8),
+                    "metrics": list(DEFAULT_METRICS),
+                    "num_trials": 1,
+                    "execution_status": "succeeded",
+                    "execution_errors": [],
+                    "expected_attempts": 1,
+                    "scored_attempts": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+    (run_dir / "run_config.json").write_text("{}", encoding="utf-8")
+    (run_dir / "result.json").write_text(json.dumps({"run_id": run_dir.name, "agents": {}}), encoding="utf-8")
+    return run_dir
+
+
+@pytest.mark.parametrize("complete", [True, False], ids=["complete", "incomplete"])
+def test_refreshed_run_report_is_incomplete_when_the_package_is(tmp_path, monkeypatch, complete):
+    root = _plugin(tmp_path / "plugin")
+    if not complete:
+        # A bundle-reference plugin: its packaged skill still runs, but the rule outside the root is never staged.
+        (root / ".claude-plugin/plugin.json").unlink()
+        manifest = {
+            "name": "demo",
+            "description": "Fixture.",
+            "version": "1.0.0",
+            "author": {"email": "dev@example.com"},
+            "rules": {"refs": ["github::other/lib::rules::style.md"]},
+        }
+        (root / "agent_plugin.yaml").write_text(json.dumps(manifest), encoding="utf-8")
+    run_dir = _scored_run(tmp_path / "results" / "demo" / "20261110_010001")
+
+    def engine(self, options, *, progress_reporter=None):
+        return {
+            "execution_status": "succeeded",
+            "run_id": run_dir.name,
+            "run_dir": str(run_dir),
+            "agents": {"opencode": {"with_skill": {}}},
+        }
+
+    monkeypatch.setattr(EvaluationService, "evaluate", engine)
+    result = EvaluationService().evaluate_plugin(EvaluationOptions(root, agents="opencode"))
+
+    assert result["plugin_provenance"]["complete"] is complete
+    assert result["report_status"] == "complete"
+    # The run-directory report that evaluate-plugin links carries the same incomplete mark as the requested formats.
+    report = Path(result["report_path"]).read_text(encoding="utf-8")
+    assert ("plugin-components" in report) is not complete

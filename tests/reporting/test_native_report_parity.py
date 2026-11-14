@@ -31,7 +31,7 @@ def _embedded_payload(html):
 def test_native_header_and_page_geometry_replace_sidebar_workspace():
     html = HTMLReporter(include_timestamp=False).render_all([ValidationResult(validator_name="Schema")])
     assert '<div class="logo-section">' in html
-    assert ">Skill Evaluator</p>" in html
+    assert ">SkillEvaluator</p>" in html
     assert '<aside class="report-sidebar"' not in html
     assert "body{font-family:ui-sans-serif" not in html
     assert ".container { max-width: 1200px; margin: 0 auto; padding: 2rem; }" in html

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Single-owner report hierarchy keeps evidence and scoped outcomes reachable."""
 
+import json
 import re
 from copy import deepcopy
 
@@ -240,3 +241,19 @@ def test_public_token_accounting_folds_generic_methods_but_keeps_specific_notice
     assert REUSED_BASELINE_NOTE in table
     assert "3 case row(s) were left out" in table
     assert TOKEN_USAGE_NOTE not in table
+
+
+def test_recorded_telemetry_loads_charts_without_quality_agent_entries():
+    result = _result("incomplete")
+    arm = {
+        "totals": {"prompt_tokens": 120, "cached_tokens": 40, "uncached_prompt_tokens": 80, "completion_tokens": 20},
+        "coverage": {"status": "complete", "measured_attempts": 1, "expected_attempts": 1},
+    }
+    result.metadata["agent_eval"]["token_usage"] = {"agents": {"recorded-agent": {"with_skill": arm, "baseline": arm}}}
+    assert result.metadata["agent_eval"]["agents"] == {}
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    assert 'id="tier3-recorded-token-chart"' in html
+    assert 'id="tier3-chart-runtime"' in html
+    chart = json.loads(re.search(r"var recordedTokenData = (.*?);", html)[1])
+    assert chart["labels"] == ["recorded-agent · With skill", "recorded-agent · Without skill"]
+    assert chart["datasets"][0]["data"] == [80, 80]

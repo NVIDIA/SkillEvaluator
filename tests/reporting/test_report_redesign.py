@@ -460,7 +460,7 @@ def test_native_brand_header_replaces_sidebar_and_decorative_logo() -> None:
     html = _render(_results())
     header = html.split('<header class="main-header">', 1)[1].split("</header>", 1)[0]
     assert '<div class="logo-section">' in header
-    assert '<p class="header-title">Skill Evaluator</p>' in header
+    assert '<p class="header-title">SkillEvaluator</p>' in header
     assert '<aside class="report-sidebar"' not in html
     assert len(_outline(html).ids) == len(set(_outline(html).ids))
 
@@ -481,10 +481,17 @@ def test_native_presentation_stylesheets_match_pinned_reference() -> None:
     from hashlib import sha256
 
     template = (TEMPLATES / "report.html.j2").read_text(encoding="utf-8")
-    blocks = [block for block in re.findall(r"<style>(.*?)</style>", template, re.DOTALL) if len(block) > 10000]
+    # Canonical product branding may change comments; every native declaration stays pinned.
+    # Expected comment-free digests were computed once from the approved 31019ce3b reference.
+    blocks = [
+        re.sub(r"/\*.*?\*/", "", block, flags=re.DOTALL)
+        for block in re.findall(r"<style>(.*?)</style>", template, re.DOTALL)
+    ]
     assert [sha256(block.encode()).hexdigest() for block in blocks] == [
-        "895b844ecb6fc7076c54ab37c06236988c50359f9b953036368f88f019a52c23",
-        "7ea8d0bcb64f93365661832f2ade7a6362c040dcab653ba3fa56304d84f4a3f8",
+        "9a5dbf4ca0521d8c4130e82fc65a5ed0188d9d667e119323bf6b3c29871d2146",
+        "2f7d5555e6ff116aa4f95c0e3a4b620a549267c9ec38c95a7dd3a30fd9a04bc6",
+        "f02e0b64bdb8ebe7e9fd65c6fd45cace436a961a60a0b6552d18a06db7780cba",
+        "1997da9ee6f5b7cdefabbebffe2fa3d0101fce091f533e2f59403c2e2ce58875",
     ]
 
 

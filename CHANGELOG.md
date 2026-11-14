@@ -447,6 +447,7 @@ All notable changes to SkillEvaluator are documented in this file.
   but text such as "the lookup-code skill is not needed for arithmetic"
   failed `--strict`. The prompt of such a case is still checked, and so is
   graded text that reads the skill's `SKILL.md` or runs one of its scripts.
+  A case labelled only with `expected_skill: null` is still checked in full.
 
 - `tier3 validate` no longer reads "the `SKILL.md` at
   /workspace/input/pdf-tools", "within ./pdf-tools" or "located in

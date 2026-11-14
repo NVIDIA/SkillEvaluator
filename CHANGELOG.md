@@ -207,10 +207,12 @@ All notable changes to SkillEvaluator are documented in this file.
   token, such as `--max_new_tokens`, are masked as their `-` spellings are.
   Both the host checker and the bundled Harbor verifier apply the fix.
 - Tier 3 sensitive-path findings, and write findings for a Write or Edit tool
-  path, list every protected entry the command or path touches, not only the
-  longest, so `tar czf k.tgz ~/.ssh ~/.aws/credentials` records
+  path or an `apply_patch`, list every protected entry the command, path, or
+  patch touches, not only the longest or the first, so
+  `tar czf k.tgz ~/.ssh ~/.aws/credentials` records
   `~/.ssh, .aws/credentials` and is no longer attributed to a without-skill
-  baseline that read only `~/.aws/credentials`. An entry that is part of a
+  baseline that read only `~/.aws/credentials`, and a patch that adds
+  `~/.bashrc` and `~/.ssh/authorized_keys` records `~/.bashrc, ~/.ssh`. An entry that is part of a
   longer one in the same path is still left out, so `/etc/profile.d/npm.sh`
   records `/etc/profile.d`. A shell write finding lists the protected files
   its redirection, `tee`, or `sed -i` targets name, so

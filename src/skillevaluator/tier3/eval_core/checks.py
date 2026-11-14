@@ -433,6 +433,8 @@ _HOME_SENSITIVE_WRITE_PATHS = [
     "~/.gitconfig",
 ]
 _PROTECTED_WRITE_PATHS = (*_SENSITIVE_WRITE_PATHS, *_HOME_SENSITIVE_WRITE_PATHS)
+# The entries an apply_patch file header may name, in the order its finding lists them.
+_APPLY_PATCH_PROTECTED_PATHS = (*_SENSITIVE_WRITE_PATHS, *_UNAUTHORIZED_PATHS, *_HOME_SENSITIVE_WRITE_PATHS)
 _SENSITIVE_PATH_DIRECTORIES = frozenset({"~/.azure", "~/.config/opencode"})
 # Home spellings rewritten to "~": /home/<user>, /Users/<user> (not the shared
 # /Users/Shared), /root, $HOME and ${HOME} (quoted or not), and ~user that
@@ -1461,7 +1463,7 @@ def _protected_write_entry(target: str, workdir: str | None) -> str | None:
         for candidate in (path, _HOME_DIR_PREFIX_RE.sub("~", path, count=1))
     ]
     for candidate, known, guessed in candidates:
-        for entry in (*_SENSITIVE_WRITE_PATHS, *_UNAUTHORIZED_PATHS, *_HOME_SENSITIVE_WRITE_PATHS):
+        for entry in _APPLY_PATCH_PROTECTED_PATHS:
             if guessed and (entry in _HOME_CREDENTIAL_PATHS or entry in _HOME_SENSITIVE_WRITE_PATHS):
                 continue
             anchor = f"~/{entry}" if entry.startswith(".") and known else entry
@@ -1494,11 +1496,19 @@ def _relative_dotfile_entry(target: str) -> str | None:
 
 
 def _apply_patch_protected_entry(patch: str, workdir: str | None) -> str | None:
-    """Return the protected-path entry the first protected apply_patch file header targets."""
-    for match in _APPLY_PATCH_HEADER_RE.finditer(patch):
-        if entry := _protected_write_entry(match.group(1), workdir) or _relative_dotfile_entry(match.group(1)):
-            return entry
-    return None
+    """Return the protected-path entries the apply_patch file headers target, as the evidence of its finding, or None.
+
+    Every protected header is listed, in the order of
+    _APPLY_PATCH_PROTECTED_PATHS whatever order the patch names them in, so a
+    patch that adds ~/.bashrc and ~/.ssh/authorized_keys records "~/.bashrc,
+    ~/.ssh", as a shell command that writes both files lists both.
+    """
+    found = {
+        entry
+        for match in _APPLY_PATCH_HEADER_RE.finditer(patch)
+        if (entry := _protected_write_entry(match.group(1), workdir) or _relative_dotfile_entry(match.group(1)))
+    }
+    return ", ".join(entry for entry in _APPLY_PATCH_PROTECTED_PATHS if entry in found) or None
 
 
 def _apply_patch_command_evidence(command: str) -> str:

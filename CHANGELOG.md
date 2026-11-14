@@ -6,6 +6,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- The `skillevaluator` agent skill now tells the agent to check for the CLI
+  and install it when missing (`uv tool install`, `pipx`, pip in a virtual
+  environment, or `uvx`), and adds a CLI-missing Tier 3 case.
 - Canonical `comment-skill-checks.yml` reusable workflow and source template for
   the standard scored Tier 1 PR comment without hosted reports. It verifies the
   existing signed receipts and native evidence, reuses the shared report and

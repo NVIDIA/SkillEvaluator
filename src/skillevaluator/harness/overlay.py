@@ -53,6 +53,17 @@ _KNOWN_FIELDS = frozenset(
     )
 )
 _FACT_RE = re.compile(r"\{([a-z0-9_]+)\}")
+_DOLLAR_N_RE = re.compile(r"(?<!\\)\$(\d+)(?!\w)")
+# Always a price: cents or thousands ($4.00), "per"/"each"/USD ($5 per month), a billing unit ($5/month),
+# or a spaced slash before another amount ($4 / $20).
+_PRICE_TAIL_RE = re.compile(
+    r"[.,]\d|\s+(?:per|each|usd)\b|\s*/\s*(?:mo(?:nth)?|y(?:ea)?r|day|week|h(?:ou)?r|user|seat|m?tok)\b(?!/)|\s+/\s+[$\d]",
+    re.IGNORECASE,
+)
+_PRICE_HEAD_RE = re.compile(r"\$\d[\d.,]*\s+/\s+$")
+# A bare $N past this index ($5, $20) is an amount, not an argument, unless a path or a closing quote/brace follows.
+_MAX_ARG_INDEX = 3
+_ARG_TAIL_RE = re.compile(r"\s*(?:/[^\s$\d]|~)|[\"'`}\]]")
 _KNOWN_ROOTS = (
     ".agents/skills",
     ".claude/skills",
@@ -308,6 +319,28 @@ def _bundle_facts(skill_path: Path, manifest: Path) -> dict[str, Any]:
     }
 
 
+def _is_price(line: str, match: re.Match[str]) -> bool:
+    """A price ($4.00, $5 per month, $20 on its own) rather than an argument ($1, $1 /path/to/project)."""
+    if _PRICE_TAIL_RE.match(line, match.end()) or _PRICE_HEAD_RE.search(line, 0, match.start()):
+        return True
+    return int(match.group(1)) > _MAX_ARG_INDEX and not _ARG_TAIL_RE.match(line, match.end())
+
+
+def _dollar_n(body: str, first_line: int) -> dict[str, Any]:
+    """Count ``$<number>`` tokens: price-like ones ($4.00, $5, $4 / $20 per MTok) versus placeholders ($1, $1 /path)."""
+    prices, placeholders, lines = 0, 0, []
+    for number, line in enumerate(body.splitlines(), first_line):
+        for match in _DOLLAR_N_RE.finditer(line):
+            if _is_price(line, match):
+                prices += 1
+                if number not in lines:
+                    lines.append(number)
+            else:
+                placeholders += 1
+    shown = ", ".join(map(str, lines[:5])) + (f" +{len(lines) - 5} more" if len(lines) > 5 else "")
+    return {"dollar_literal_count": prices, "dollar_literal_lines": shown, "dollar_placeholder_count": placeholders}
+
+
 def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, Any]:
     """Compute the facts profile rules refer to (see profiles README).
 
@@ -372,6 +405,9 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         "hermes_view_chars": len(json.dumps(text, ensure_ascii=False))
         + len(json.dumps(description if isinstance(description, str) else "", ensure_ascii=False))
         + 400,
+        **_dollar_n(body, text[: match.start(2)].count("\n") + 1 if match else 1),
+        "uses_arguments_placeholder": "$ARGUMENTS" in body,
+        "uses_claude_skill_dir": "${CLAUDE_SKILL_DIR}" in body,
         **_bundle_facts(skill_path, manifest),
         "catalog_size": catalog.size if catalog else 0,
         "catalog_desc_chars": catalog.desc_chars if catalog else 0,

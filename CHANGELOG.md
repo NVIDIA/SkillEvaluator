@@ -12,6 +12,9 @@ All notable changes to SkillEvaluator are documented in this file.
   comment helpers, and needs no Pages configuration or history branch. Future
   generated bundles include the template; archived bundles and the released
   onboarding CLI retain their existing hosted publisher setup.
+- `harness` rules for placeholders: price-like `$N` text that Claude Code and
+  OpenCode replace with arguments (with line numbers), and `$ARGUMENTS` and
+  `${CLAUDE_SKILL_DIR}`, which only Claude Code substitutes.
 - `harness` rules for delivery limits: Claude Code's body cap, OpenCode's
   51,200-byte / 2,000-line reads and long lines, OpenClaw's whole-read and
   weighted result caps, Hermes's 100,000-character `skill_view` budget and Codex's

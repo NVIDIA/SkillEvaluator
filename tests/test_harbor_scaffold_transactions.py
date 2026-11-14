@@ -12,7 +12,7 @@ import yaml
 from click.testing import CliRunner
 
 from skillevaluator.cli import cli
-from skillevaluator.tier3 import commands
+from skillevaluator.tier3 import commands, workflow
 from skillevaluator.tier3.harbor.adapter import _write_dataset_toml
 from skillevaluator.tier3.toml_utils import toml_quote
 
@@ -202,8 +202,10 @@ def test_docs_limit_the_empty_expected_output_rejection_to_the_object_shape(tmp_
     for index, (name, content, accepted) in enumerate(
         (
             ("evals.json", json.dumps({"skill_name": "sample-skill", "evals": [entry]}), False),
+            ("evals.yml", yaml.safe_dump({"skill_name": "sample-skill", "evals": [entry]}), False),
             ("evals.json", json.dumps([entry]), True),
             ("evals.json", json.dumps({"cases": [{**entry, "expected_output": ""}]}), True),
+            ("evals.yml", yaml.safe_dump({"cases": [entry]}), True),
             ("evals.yaml", yaml.safe_dump([{**entry, "ground_truth": ""}]), True),
             ("evals.jsonl", json.dumps(entry) + "\n", True),
         )
@@ -214,6 +216,14 @@ def test_docs_limit_the_empty_expected_output_rejection_to_the_object_shape(tmp_
         evals = skill / "evals"
         evals.mkdir()
         (evals / name).write_text(content, encoding="utf-8")
+
+        # `tier3 PATH` checks the dataset in its own step before it evaluates anything.
+        if accepted:
+            workflow._prepare_dataset(skill, source_path=skill)
+        else:
+            with pytest.raises(ValueError, match="expected_output must be a non-empty string"):
+                workflow._prepare_dataset(skill, source_path=skill)
+        assert sorted(path.name for path in evals.iterdir()) == [name]
 
         result = CliRunner().invoke(cli, ["init-harbor-task", str(skill), "--case-id", "case-001"])
 

@@ -176,11 +176,26 @@ def _scored_trials(agent: Mapping[str, Any], key: str) -> dict[str, dict[str, An
     if trials is None or not trials.is_dir():
         return {}
     pass_at_k = agent.get("pass_at_k") if isinstance(agent.get("pass_at_k"), Mapping) else {}
+    run_dir = Path(str(output_dir)).parent
+    saved = _load_json(run_dir / "result.json", root=run_dir)
+    saved = saved if isinstance(saved, Mapping) else {}
+    provenance = saved.get("provenance")
+    provenance = provenance if isinstance(provenance, Mapping) else {}
+    policies = [
+        agent.get("attempt_policy"),
+        saved.get("attempt_policy"),
+        provenance.get("attempt_policy"),
+        pass_at_k.get(key),
+        *pass_at_k.values(),
+    ]
     threshold = next(
         (
             float(v["pass_threshold"])
-            for v in pass_at_k.values()
-            if isinstance(v, Mapping) and isinstance(v.get("pass_threshold"), int | float)
+            for v in policies
+            if isinstance(v, Mapping)
+            and isinstance(v.get("pass_threshold"), int | float)
+            and not isinstance(v["pass_threshold"], bool)
+            and 0 <= v["pass_threshold"] <= 1
         ),
         0.5,
     )
@@ -1169,7 +1184,11 @@ def what_to_fix(
     result: Mapping[str, Any], *, run_dir: Path, skill_path: Path | None = None, use_llm: bool = True
 ) -> list[dict[str, Any]]:
     """Rank failed test cases across agents by attempts lost and attach one fix each."""
-    agents = {str(k): v for k, v in (result.get("agents") or {}).items() if isinstance(v, Mapping)}
+    agents = {
+        str(k): dict(v, attempt_policy=result.get("attempt_policy") or v.get("attempt_policy"))
+        for k, v in (result.get("agents") or {}).items()
+        if isinstance(v, Mapping)
+    }
     dataset = _dataset_entries(run_dir)
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for case_id in _case_ids(agents):

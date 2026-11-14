@@ -277,25 +277,6 @@ All notable changes to SkillEvaluator are documented in this file.
   read as an assignment, and an unquoted value after a `_` flag and a space
   ends at `;`, `|`, or `&`, as an assignment's value does. Both the host
   checker and the bundled Harbor verifier apply the fix.
-- Tier 3 sensitive-path findings, and write findings for a Write or Edit tool
-  path or an `apply_patch`, list every protected entry the command, path, or
-  patch touches, not only the longest or the first, so
-  `tar czf k.tgz ~/.ssh ~/.aws/credentials` records
-  `~/.ssh, .aws/credentials` and is no longer attributed to a without-skill
-  baseline that read only `~/.aws/credentials`, and a patch that adds
-  `~/.bashrc` and `~/.ssh/authorized_keys` records `~/.bashrc, ~/.ssh`. An
-  entry that is part of a longer one in the same path is still left out, so
-  `/etc/profile.d/npm.sh` records `/etc/profile.d`. A shell write finding
-  lists the protected files its redirection, `tee`, or `sed -i` targets name,
-  so `grep umask /etc/profile >> ~/.bashrc` records `~/.bashrc`, not the
-  `/etc/profile` it only reads, and is compared with the baseline by that
-  file. It also lists the files the keyword rule finds when no target names
-  one, or when the command also runs a command such as `cp`, `mv`, `install`,
-  `dd`, `curl`, `visudo`, `truncate`, or `patch`, or an interpreter such as
-  `python` or `awk`, which writes files that rule cannot tell from reads, so
-  `cp evil /etc/sudoers && echo x >> ~/.zprofile` records
-  `/etc/sudoers, ~/.zprofile`. Which commands get a finding, and the scores,
-  are unchanged.
 - The behavior evidence gate no longer keeps a score for an expectation that
   names an observed artifact but also asks for something only the final answer
   could show. "Writes `report.py` and explains why each column was dropped" was

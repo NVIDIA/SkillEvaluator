@@ -2625,12 +2625,69 @@ def test_docker_address_pool_note_removes_trial_containers_before_networks() -> 
 
 
 def test_docker_address_pool_note_without_exception_type() -> None:
-    _, reason = collector_module._exception_details(
-        {"exception_message": "Error response from daemon: all predefined address pools have been fully subnetted"}
+    message = (
+        "failed to create network case-001__attempt__env_default: "
+        "Error response from daemon: all predefined address pools have been fully subnetted"
     )
 
+    _, reason = collector_module._exception_details({"exception_message": message})
+
     assert reason.startswith(f"{_ADDRESS_POOL_NOTE_START} ")
-    assert reason.endswith("Error response from daemon: all predefined address pools have been fully subnetted")
+    assert reason.endswith(message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    (
+        "Verifier log: Error response from daemon: all predefined address pools have been fully subnetted",
+        "all predefined address pools have been fully subnetted; failed to create network demo_default: denied",
+    ),
+)
+def test_docker_address_pool_error_outside_compose_network_creation_gets_no_note(message: str) -> None:
+    assert collector_module._exception_details({"exception_type": "RuntimeError", "exception_message": message}) == (
+        "RuntimeError",
+        f"RuntimeError: {message}",
+    )
+
+
+@pytest.mark.parametrize(
+    "exception_type",
+    sorted(
+        collector_module._AGENT_RUNTIME_EXCEPTION_TYPES | collector_module._UNCONDITIONAL_AGENT_RUNTIME_EXCEPTION_TYPES
+    ),
+)
+def test_agent_runtime_failures_get_no_address_pool_note(exception_type: str) -> None:
+    message = _compose_network_failure("all predefined address pools have been fully subnetted")
+
+    assert collector_module._exception_details({"exception_type": exception_type, "exception_message": message}) == (
+        exception_type,
+        f"{exception_type}: {message}"[:600],
+    )
+
+
+def test_agent_failure_quoting_docker_address_pool_error_keeps_its_reason(tmp_path: Path) -> None:
+    # The agent read a log that quotes Docker's error, then failed on its own credential.
+    stdout = "\n".join(
+        (
+            *(f"read fixtures/compose-{index}.log" for index in range(8)),
+            "API Error: 401 Unauthorized",
+            "fixtures/compose-8.log: failed to create network demo_default: Error response from daemon: "
+            "all predefined address pools have been fully subnetted",
+        )
+    )
+    message = f"Command failed (exit 1): opencode run --format json\nstdout: {stdout}\nstderr: exit status 1"
+    trial_dir = tmp_path / "case-001__attempt"
+    trial_dir.mkdir()
+    (trial_dir / "result.json").write_text(
+        json.dumps({"exception_info": {"exception_type": "NonZeroAgentExitCodeError", "exception_message": message}}),
+        encoding="utf-8",
+    )
+
+    reason = _agent_runtime_failure_reason(trial_dir)
+
+    assert reason == f"NonZeroAgentExitCodeError: {message}"
+    assert "API Error: 401 Unauthorized" in reason
+    assert _ADDRESS_POOL_NOTE_START not in reason
 
 
 def test_other_docker_network_failures_get_no_address_pool_note() -> None:

@@ -154,6 +154,25 @@ def test_dangling_skill_link_does_not_abort_plugin_facts(tmp_path: Path):
     assert plugin_facts(tmp_path)["max_skill_bytes"] == 0
 
 
+def test_unreadable_skill_is_not_counted_as_delivered(tmp_path: Path):
+    (tmp_path / ".claude-plugin").mkdir()
+    (tmp_path / ".claude-plugin" / "plugin.json").write_text('{"name": "p"}', encoding="utf-8")
+    (tmp_path / "skills" / "gone").mkdir(parents=True)
+    (tmp_path / "skills" / "gone" / "SKILL.md").symlink_to(tmp_path / "missing.md")
+    (tmp_path / "skills" / "loop").mkdir()
+    (tmp_path / "skills" / "loop" / "SKILL.md").symlink_to(tmp_path / "skills" / "loop" / "SKILL.md")
+    facts = plugin_facts(tmp_path)
+    assert facts["components"]["skills"] == 0
+    assert facts["max_skill_bytes"] == 0
+    claude = next(p for p in load_profiles() if p["harness"] == "claude-code")
+    assert [f["id"] for f in evaluate_plugin(claude, facts).findings] == ["CC-PLUGIN-NO-COMPONENTS"]
+    (tmp_path / "skills" / "real").mkdir()
+    (tmp_path / "skills" / "real" / "SKILL.md").write_text("---\nname: real\n---\n", encoding="utf-8")
+    facts = plugin_facts(tmp_path)
+    assert facts["components"]["skills"] == 1
+    assert facts["max_skill_bytes"] > 0
+
+
 def test_components_declared_in_the_manifest_are_not_reported_missing(tmp_path: Path):
     (tmp_path / ".claude-plugin").mkdir()
     manifest = {"name": "p", "commands": "./custom/commands"}

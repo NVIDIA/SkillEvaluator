@@ -896,6 +896,40 @@ def test_template_prompt_names_a_skill_md_in_the_description_as_the_users_file(d
     assert case["ground_truth"] == f"A correct, complete result for: {task}"
 
 
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Follows the release-review skill's SKILL.md to check manifests.",
+        "Reads release-review's SKILL.md and reports errors.",
+        "Reads release-review\u2019s own SKILL.md and reports errors.",
+        "Follows the release-review SKILL.md to check manifests.",
+        "Uses the installed skill's SKILL.md to report errors.",
+        "Reads the installed release-review skill's SKILL.md and reports errors.",
+    ],
+)
+def test_template_task_is_generic_when_the_skill_owns_the_skill_md_it_reads(description):
+    # Renamed, "release-review's SKILL.md" would read "release-review's my SKILL.md".
+    skill = _skill(description=description, scripts=["review.py"], script_files=_SCRIPT_FILES)
+
+    assert generate_dataset._template_task(skill) == ("handle a typical request", None)
+    for case in generate_dataset._generate_full(skill):
+        assert "my SKILL.md" not in case["question"], case
+        assert _baseline_fairness_warnings(case, skill_scripts=_SCRIPT_FILES) == [], case
+
+
+@pytest.mark.parametrize(
+    ("description", "task"),
+    [
+        ("Reads the skill's SKILL.md and reports errors.", "reads my SKILL.md and reports errors"),
+        ("Reads its own SKILL.md and reports errors.", "reads my SKILL.md and reports errors"),
+        ("Reads my-tool's SKILL.md and reports errors.", "reads my-tool's skill.md and reports errors"),
+        ("Reads release-review's SKILL.md in ./pdf-tools.", "reads release-review's skill.md in ./pdf-tools"),
+    ],
+)
+def test_template_task_still_quotes_a_skill_md_no_skill_name_owns(description, task):
+    assert generate_dataset._template_task(_skill(description=description)) == (task, task)
+
+
 # Descriptions that name one of the skill's scripts without saying it is run.
 _SCRIPT_NAMING_DESCRIPTIONS = [
     "Checks release manifests with review.py and reports blockers.",

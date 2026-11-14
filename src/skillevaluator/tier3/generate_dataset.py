@@ -405,12 +405,25 @@ def _template_task(skill: dict[str, Any]) -> tuple[str, str | None]:
     task = _description_lower(skill)
     script_names = _script_file_names(skill)
     if evals_spec._prompt_skill_files_match(task, name, script_names):
+        if _skill_owns_skill_md(task, name):
+            return _GENERIC_TASK, None
         task = _BARE_SKILL_MD_RE.sub("my SKILL.md", task)
         if evals_spec._prompt_skill_files_match(task, name, script_names):
             return _GENERIC_TASK, None
     if evals_spec._skill_use_match(task, name, script_names) or _names_skill_script(task, script_names):
         return task, None
     return task, task
+
+
+def _skill_owns_skill_md(text: str, name: str) -> bool:
+    """Whether the skill's name, "the <name> skill's" or "the installed skill's" comes right before a SKILL.md.
+
+    That SKILL.md is the skill's own; renamed, it would read "<name>'s my SKILL.md".
+    """
+    name = re.escape(evals_spec._normalized_match_text(name))
+    owner = rf"(?:(?<![\w-]){name}(?:\s+skill)?|\binstalled(?:\s+{name})?\s+skill)" if name else r"\binstalled\s+skill"
+    owned = rf"{owner}(?:['\u2019]s)?(?:\s+own)?\s+['\"*_]*skill\.md\b"
+    return re.search(owned, evals_spec._normalized_match_text(text), re.IGNORECASE) is not None
 
 
 def _names_skill_script(text: str, scripts: Sequence[str]) -> bool:

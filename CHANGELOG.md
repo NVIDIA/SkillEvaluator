@@ -658,6 +658,13 @@ All notable changes to SkillEvaluator are documented in this file.
   reports blockers", in the expected output and first assertion. The no-skill
   baseline does not have the script. The graded text is now the generic
   outcome; the prompt still quotes the description.
+- A skill description that reads `SKILL.md` right after the skill's name,
+  "the `<name>` skill's" or "the installed skill's", such as "Reads
+  release-review's `SKILL.md`" or "Follows the release-review skill's
+  `SKILL.md`", now gives template cases the generic task "handle a typical
+  request" and generic graded text, as one that names `<name>/SKILL.md` does.
+  Before, the prompt and the graded text quoted a garbled task such as "reads
+  release-review's my `SKILL.md`".
 
 ## 0.9.0 - 2026-11-13
 

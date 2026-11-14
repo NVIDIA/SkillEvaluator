@@ -160,3 +160,13 @@ def test_components_declared_in_the_manifest_are_not_reported_missing(tmp_path: 
     (tmp_path / ".claude-plugin" / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
     claude = next(p for p in load_profiles() if p["harness"] == "claude-code")
     assert not evaluate_plugin(claude, plugin_facts(tmp_path)).findings
+
+
+def test_component_rule_replaces_the_generic_delivery_finding(tmp_path: Path):
+    manifest = {"$schema": "https://agent-plugins.org/schemas/v1/plugin.json", "name": "p"}
+    (tmp_path / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (tmp_path / "hooks").mkdir()
+    (tmp_path / "hooks" / "hooks.json").write_text('{"hooks": {"PreToolUse": []}}', encoding="utf-8")
+    codex = next(p for p in load_profiles() if p["harness"] == "codex")
+    ids = [f["id"] for f in evaluate_plugin(codex, plugin_facts(tmp_path)).findings]
+    assert "CX-PLUGIN-AGENT-HOOKS" in ids and "CX-PLUGIN-HOOKS" not in ids

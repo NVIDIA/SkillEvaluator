@@ -120,7 +120,7 @@ def evaluate_plugin(profile: dict[str, Any], facts: dict[str, Any]) -> HarnessRe
         for kind, outcome in (section.get("components") or {}).items():
             n = facts["components"].get(kind, 0)
             effect = OUTCOME_EFFECT[outcome]
-            if not n or effect is None:
+            if not n or effect is None or any(f["id"].endswith(f"-{kind.upper()}") for f in findings):
                 continue
             prefix = str(profile["rules"][0]["id"]).split("-")[0]
             findings.append(

@@ -3,8 +3,11 @@
 """Tests for plugin facts and per-harness plugin rules."""
 
 import json
+import os
+import threading
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from skillevaluator.cli import cli
@@ -171,6 +174,25 @@ def test_unreadable_skill_is_not_counted_as_delivered(tmp_path: Path):
     facts = plugin_facts(tmp_path)
     assert facts["components"]["skills"] == 1
     assert facts["max_skill_bytes"] > 0
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs named pipes")
+def test_named_pipe_skill_is_skipped_without_blocking(tmp_path: Path):
+    (tmp_path / ".claude-plugin").mkdir()
+    (tmp_path / ".claude-plugin" / "plugin.json").write_text('{"name": "p"}', encoding="utf-8")
+    (tmp_path / "skills" / "pipe").mkdir(parents=True)
+    fifo = tmp_path / "skills" / "pipe" / "SKILL.md"
+    os.mkfifo(fifo)
+    out: dict = {}
+    worker = threading.Thread(target=lambda: out.update(plugin_facts(tmp_path)), daemon=True)
+    worker.start()
+    worker.join(5)
+    if worker.is_alive():  # still blocked in open(); unblock it so the thread can end
+        os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        worker.join(5)
+        pytest.fail("plugin_facts blocked on a named-pipe SKILL.md")
+    assert out["components"]["skills"] == 0
+    assert out["max_skill_bytes"] == 0
 
 
 def test_components_declared_in_the_manifest_are_not_reported_missing(tmp_path: Path):

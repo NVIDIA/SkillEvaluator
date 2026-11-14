@@ -1069,10 +1069,21 @@ def build_agent_eval_payload(
 
     # Deterministic baselines render even when the LLM judge is unavailable, so
     # the Insights tab is never empty for a run that produced scores.
+    execution_recommendations = None
     if overall_score is None:
-        failure_message = "; ".join(execution_errors) or "Tier 3 evaluation did not produce a complete scored run"
-        deterministic_conclusions = [{"severity": "fail", "title": "Evaluation incomplete", "message": failure_message}]
-        deterministic_suggestions = [failure_message]
+        from skillevaluator.reporting.insights_view import build_insights_view
+
+        execution_insights = build_insights_view(
+            {
+                "execution_status": "failed",
+                "execution_errors": execution_errors,
+                "agents": agent_payloads,
+                "summary": summary,
+            }
+        )
+        deterministic_conclusions = execution_insights["conclusions"]
+        execution_recommendations = execution_insights["recommendations"]
+        deterministic_suggestions = [item["message"] for item in execution_recommendations]
     elif baseline_only:
         # A deliberate baseline-only run is complete, not failed: state the
         # calibration result so it is never read as a skill-lift measurement.
@@ -1101,7 +1112,7 @@ def build_agent_eval_payload(
             pass_threshold=_pass_threshold_from_policy(policy),
         )
         deterministic_suggestions = _suggestions_for_dimensions(best_dimensions)
-    recommendations = _attach_harbor_evidence_to_recommendations(
+    recommendations = execution_recommendations or _attach_harbor_evidence_to_recommendations(
         [
             {
                 "title": _recommendation_title_from(text),

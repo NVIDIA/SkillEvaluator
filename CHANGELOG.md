@@ -232,6 +232,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- The README's Tier 1 row now covers harness compatibility and links to the
+  `harness` check.
 - `THIRD_PARTY_NOTICES.md` lists Bandit under the base dependencies. It has
   been installed with the base package since it moved out of the `security`
   extra, but the notice still sat in the Security row, which now lists
@@ -260,10 +262,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- HTML's full Tier 3 download preserves the recorded canonical payload instead
-  of exporting display defaults. Plugin evidence accompanies standalone HTML
-  JSON snapshots, and retained optional-skip metadata survives JSON round trips.
-
+- The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
+  of `harness-check` no longer show internal test notes in their messages.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`
   calls. Codex passes its patch as a single `input` argument, which the write
   evidence helpers did not read, so a Codex patch contributed no FILE CHANGES
@@ -652,6 +652,10 @@ All notable changes to SkillEvaluator are documented in this file.
   by default, instead of staying on its first frame. These follow the 0.9.0
   Fixed entry that starts "The interactive Tier 3 progress view
   (`--progress rich`, or `auto` in a terminal) now keeps one height".
+
+- HTML's full Tier 3 download preserves the recorded canonical payload instead
+  of exporting display defaults. Plugin evidence accompanies standalone HTML
+  JSON snapshots, and retained optional-skip metadata survives JSON round trips.
 
 ## 0.9.0 - 2026-11-13
 

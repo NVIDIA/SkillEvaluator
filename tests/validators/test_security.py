@@ -10798,7 +10798,7 @@ class TestSkillspectorMissingReferences:
             ("Write each summary to `output/{name}.md`.", "evals", False),
             ("Is the user's summary in `output/notes.md`?", "evals", False),
             # A bold or italic label outside code is read as its text, and a "$"
-            # before whitespace or the end of the line as written.
+            # before whitespace or the end of the line as a literal "$".
             ("**Note:** Write the summary to `output/notes.md`.", "evals", False),
             ("*Tip:* write the summary to `output/notes.md`.", "evals", False),
             ("1. **Step 1:** write `output/notes.md`.", "evals", False),
@@ -10815,6 +10815,18 @@ class TestSkillspectorMissingReferences:
             ("Run tool --include=* and write `output/notes.md`.", "install.sh", True),
             ("Run *:* and write `output/notes.md`.", "install.sh", True),
             ("Run $ROOT/setup now: $", "versions", True),
+            # That "$" stays part of a word with other shell syntax, which may
+            # then name a file whose name ends in "$"; after another "$" it ends
+            # the parameter "$$". A line that holds the stand-in for it reads
+            # such a "$" as an expansion.
+            ("Run sh *a$ now.", "xa$", True),
+            ("Run sh setup?$ now.", "setupx$", True),
+            ("Run `sh *a$ now` and write `output/notes.md`.", "xa$", True),
+            ("Run sh 'a'$ now.", "a$", True),
+            ('Run sh "a$ b*" now.', "a$ bc", True),
+            ("Run sh *a$ now.", "xab", False),
+            ("Run sh $$ now.", "x", True),
+            ("Run sh *a\x05$ now.", "xa\x05b", True),
             # A shell keeps an escaped or quoted space in a word.
             ("Run `sh setup' 'helper.sh` to prepare.", "setup helper.sh", True),
             ('Run `sh setup" "helper.sh` to prepare.', "setup helper.sh", True),

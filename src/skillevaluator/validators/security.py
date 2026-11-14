@@ -1690,8 +1690,13 @@ _SKILLSPECTOR_LIST_MARKER_RE = re.compile(r"^[ \t]*\*(?=[ \t])")
 _SKILLSPECTOR_MARKDOWN_LABEL_RE = re.compile(r"(?<!\S)(\*{1,3})([^\W_][^*`]*?:)\1(?!\S)")
 _SKILLSPECTOR_BACKTICK_RUN_RE = re.compile(r"`+")
 # A ``$`` before whitespace or the end of the line, which a shell keeps as
-# written, as in a prompt such as ``$ python run.py``.
-_SKILLSPECTOR_LITERAL_DOLLAR_RE = re.compile(r"\$(?=\s|\Z)")
+# written, as in a prompt such as ``$ python run.py``; one after another ``$``
+# may end the parameter ``$$``.
+_SKILLSPECTOR_LITERAL_DOLLAR_RE = re.compile(r"(?<!\$)\$(?=\s|\Z)")
+# Stands for such a ``$`` while the words of a line are read as patterns
+# (:func:`_skillspector_shell_patterns`), so that it is not read as an
+# expansion; each pattern reads it as that ``$`` again.
+_SKILLSPECTOR_LITERAL_DOLLAR = "\x05"
 # Work that checking the lines of one report's missing references may take, in
 # units of about one character compared: decoding a line and reading its shell
 # groups and words costs 18,000 per character, each search of a decoded line
@@ -2282,8 +2287,12 @@ def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
     ``EXTENDED_GLOB`` operators (:func:`_skillspector_zsh_pattern`).
 
     Markdown and a shell prompt are read first: a leading list marker ``*``
-    is skipped, and so is a ``$`` before whitespace or the end of the line,
-    which a shell keeps as written. A bold or italic label outside code, such
+    is skipped, and a ``$`` before whitespace or the end of the line, which a
+    shell keeps as written, is read as a literal ``$``, not as an expansion
+    (:data:`_SKILLSPECTOR_LITERAL_DOLLAR_RE`). So ``$ python run.py`` adds
+    no pattern, and ``*a$`` stands for names that end in ``a$``. In a line
+    that already holds :data:`_SKILLSPECTOR_LITERAL_DOLLAR`, such a ``$`` is
+    read as an expansion. A bold or italic label outside code, such
     as ``**Note:**``, is read as its text, and each of its words, with its
     ``*``, split at whitespace and as a POSIX shell splits them, is also a
     pattern that is not split at ``=``, ``:`` or ``,``
@@ -2294,8 +2303,12 @@ def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
     """
     split_words: set[str] = set()
     label_words: set[str] = set()
+    texts = tuple(texts)
+    literal = all(_SKILLSPECTOR_LITERAL_DOLLAR not in text for text in texts)
     for text in texts:
-        text = _SKILLSPECTOR_LITERAL_DOLLAR_RE.sub("", _SKILLSPECTOR_LIST_MARKER_RE.sub("", text, count=1))
+        text = _SKILLSPECTOR_LIST_MARKER_RE.sub("", text, count=1)
+        if literal:
+            text = _SKILLSPECTOR_LITERAL_DOLLAR_RE.sub(_SKILLSPECTOR_LITERAL_DOLLAR, text)
         text, labels = _skillspector_markdown_labels(text)
         split_words.update(_SKILLSPECTOR_LINE_WORD_RE.findall(text))
         split_words.update(_SKILLSPECTOR_SHELL_WORD_RE.findall(text))
@@ -2310,6 +2323,8 @@ def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
             continue
         split = word in split_words
         for reading in _skillspector_shell_word(word):
+            if literal:
+                reading = reading.replace(_SKILLSPECTOR_LITERAL_DOLLAR, "$")
             for index, part in enumerate(reading.split("/")):
                 for piece in {part, *_SKILLSPECTOR_PATH_PART_SEPARATOR_RE.split(part)} if split else {part}:
                     patterns.update(

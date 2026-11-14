@@ -374,11 +374,13 @@ All notable changes to SkillEvaluator are documented in this file.
   the final verdict.
 
 - `validate path/to/SKILL.md` and `validate path/to/workflow-rules.mdc` now
-  validate the folder that holds the file, as passing the folder does. Before,
-  Tier 1 and Tier 2 received the file itself, so `schema`, `version` and
-  `quality` failed with `No skills found`, a run narrowed with `--checks` could
-  pass without scanning the skill's other files, and a run from inside the skill
-  wrote its reports into it.
+  validate the folder that holds the file, as passing the folder does, so a
+  file inside a symlinked folder is now refused unless `--no-dedup` is passed,
+  as that folder is. Before, Tier 1 and Tier 2 received the file itself:
+  `schema`, `version` and `quality` failed with `No skills found` for a skill,
+  and `schema` with `No workflow directories found` for a workflow; a run
+  narrowed with `--checks` could pass without scanning the skill's other files;
+  and a run from inside the skill wrote its reports into it.
 
 ## 0.9.0 - 2026-11-13
 

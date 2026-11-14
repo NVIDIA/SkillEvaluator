@@ -711,8 +711,13 @@ _MATCH_EXCERPT_CHARS = 80
 _MAX_FIELD_VALUES = 1000
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\[\]\n]+)\]\([^()\n]*\)")
 # The start of a path or URL: ./x, ../x, /x, ~/x, $HOME/x, %USERPROFILE%\x,
-# \\server\share, C:\x or C:/x, https://..., or a relative dir/ or dir\.
-_PATH_START_RE = r"(?:[./~$%\\]|[A-Za-z]:[\\/]|[A-Za-z][\w+.-]*://|[\w-]+[\\/])"
+# \\server\share, C:\x or C:/x, https://..., or a relative path that ends in a
+# slash (dir/), has a second one (dir/sub/x) or ends in a file name
+# (dir\SKILL.md). Word pairs such as "start/end" or "input/output" are not paths.
+_PATH_START_RE = (
+    r"(?:[./~$%\\]|[A-Za-z]:[\\/]|[A-Za-z][\w+.-]*://"
+    r"|[\w-]+[\\/](?:(?![\w-]|\.\w)|[\w.-]+[\\/]|[\w-]+\.\w))"
+)
 
 
 def _skill_files_re(skill_name: str | None) -> str:
@@ -734,7 +739,8 @@ def _skill_files_re(skill_name: str | None) -> str:
     preposition = rf"(?:in|of|from|under|inside|(?:at|within){path_target})"
     own_place = rf"(?:the\s+|its\s+|this\s+)?(?:installed\s+|own\s+)?{skill_place}(?![\w-])"
     if skill_name:
-        own_place = rf"(?:{own_place}|[`'\"]?(?:[^\s`'\"\\/]*[\\/])+{name}(?![\w.-]))"
+        # A sentence's final period still ends the name; release-review.bak does not.
+        own_place = rf"(?:{own_place}|[`'\"]?(?:[^\s`'\"\\/]*[\\/])+{name}(?![\w-]|\.\w))"
     elsewhere = rf"(?:\s+located)?\s+{preposition}\s+(?!{own_place})"
     alternatives.append(
         rf"\b{_READ_VERB_RE}(?:\s+{qualifier})*\s+(?:(?:the\s+)?contents\s+of\s+)?[`'\"*_\[]*SKILL\.md\b"
@@ -751,7 +757,7 @@ def _prompt_skill_files_re(skill_name: str | None, skill_scripts: tuple[str, ...
 
 @functools.lru_cache(maxsize=64)
 def _skill_use_assertion_re(
-    skill_name: str | None, skill_scripts: tuple[str, ...] = (), *, prompt: bool = False
+    skill_name: str | None, skill_scripts: tuple[str, ...] = (), *, prompt: bool = False, files_only: bool = False
 ) -> re.Pattern[str]:
     """Graded text about using the skill: its files, its name called a skill, "used <name>", or running its scripts.
 
@@ -763,15 +769,17 @@ def _skill_use_assertion_re(
     A skill script counts when a run verb or interpreter comes before its name
     ("ran review.py", "python3 ./review.py"), when "used" does and the name
     ends the clause or CLI arguments follow it, or when the text names it under
-    scripts/ or tools/.
+    scripts/ or tools/. With ``files_only``, only the skill's files and scripts
+    count, not wording that names the skill or says it was used.
     """
     name = re.escape(skill_name or "")
-    alternatives = [
-        _skill_files_re(skill_name),
-        rf"\b(?:{_SKILL_USE_VERB_RE}|{_READ_VERB_RE})\s+(?:(?:the|this|its|that)(?:\s+installed)?|installed)\s+skill\b"
-        rf"(?![\w-]|\.\w|\s+(?:levels?|sets?)\b)",
-    ]
-    if skill_name:
+    alternatives = [_skill_files_re(skill_name)]
+    if not files_only:
+        alternatives.append(
+            rf"\b(?:{_SKILL_USE_VERB_RE}|{_READ_VERB_RE})\s+(?:(?:the|this|its|that)(?:\s+installed)?|installed)\s+skill\b"
+            rf"(?![\w-]|\.\w|\s+(?:levels?|sets?)\b)"
+        )
+    if skill_name and not files_only:
         alternatives.extend(
             [
                 rf"(?<![\w-]){name}(?![\w-])(?:\s+(?:as|is)(?:\s+(?:the|a))?(?:\s+right)?)?"
@@ -781,7 +789,7 @@ def _skill_use_assertion_re(
         )
     # A template may explicitly route with "Use <name> to ...". Naming it as a
     # skill or pointing at its files/scripts requires the unavailable install.
-    if not prompt and skill_name:
+    if not prompt and not files_only and skill_name:
         alternatives.append(rf"\b{_SKILL_USE_VERB_RE}\s+[`'\"]?{name}(?![\w-])[`'\"]?{_SKILL_NAME_END_RE}")
     for script in skill_scripts:
         script = _normalized_match_text(script)
@@ -866,12 +874,15 @@ def _match_skill_text(
     skill_scripts: Sequence[str],
     *,
     prompt: bool,
+    files_only: bool = False,
     prepared_name: tuple[str, str] | None = None,
 ) -> str | None:
     text = _normalized_match_text(text)
     name, folded_name = prepared_name if prepared_name is not None else _prepared_skill_name(skill_name)
     scripts = tuple(skill_scripts)
-    generic_pattern = _prompt_skill_files_re(None, scripts) if prompt else _skill_use_assertion_re("", scripts)
+    generic_pattern = (
+        _prompt_skill_files_re(None, scripts) if prompt else _skill_use_assertion_re("", scripts, files_only=files_only)
+    )
     # Check generic wording first: an identity like "skill" or "read" must
     # not mask the noun or verb in "read SKILL.md" and bypass validation.
     matched = _first_unnegated_match(generic_pattern, text)
@@ -881,7 +892,7 @@ def _match_skill_text(
             pattern = (
                 _prompt_skill_files_re(_SKILL_NAME_MARKER, scripts)
                 if prompt
-                else _skill_use_assertion_re(_SKILL_NAME_MARKER, scripts)
+                else _skill_use_assertion_re(_SKILL_NAME_MARKER, scripts, files_only=files_only)
             )
             matched = _first_unnegated_match(pattern, masked)
     if matched is None:
@@ -978,8 +989,9 @@ def _baseline_fairness_warnings(
     names of the skill's own scripts. This is a wording heuristic, so it can
     miss skill use phrased another way and can flag task text that shares the
     skill's name. The expected output and assertions of a case labelled
-    ``should_trigger: false`` are not checked: they grade the skill going
-    unused, which the baseline meets however the text words it.
+    ``should_trigger: false`` grade the skill going unused, so they are checked
+    only for reading the skill's files or running its scripts, not for wording
+    that names the skill or its use ("the lookup-code skill is not needed").
     """
     warnings = []
     prompt = entry.get("question")
@@ -1022,8 +1034,7 @@ def _baseline_fairness_warnings(
             break
     # Only an explicit label: an entry whose expected_skill is null is still
     # checked against the skill's own names.
-    if "should_trigger" in entry and resolve_should_trigger(entry) is False:
-        return warnings
+    negative = "should_trigger" in entry and resolve_should_trigger(entry) is False
     texts = read(_authored_field(entry, "ground_truth", "expected_output"), entry.get("ground_truth"))
     texts += read(_authored_field(entry, "expected_behavior", "assertions"), entry.get("expected_behavior"))
     for field_name, text in texts:
@@ -1031,7 +1042,11 @@ def _baseline_fairness_warnings(
             (
                 match
                 for name in prepared_names
-                if (match := _match_skill_text(text, None, scripts, prompt=False, prepared_name=name))
+                if (
+                    match := _match_skill_text(
+                        text, None, scripts, prompt=False, files_only=negative, prepared_name=name
+                    )
+                )
             ),
             None,
         )

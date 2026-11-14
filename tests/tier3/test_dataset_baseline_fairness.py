@@ -725,6 +725,16 @@ def test_format_wording_and_negated_checks_do_not_warn(skill_name, text):
         "Reads SKILL.md in ./release-review before checking the manifest",
         "Reads SKILL.md within /workspace/skills-copy/release-review/",
         "Reads SKILL.md at C:\\agent\\release-review before checking the manifest",
+        # A sentence's final period ends the skill's name.
+        "Reads SKILL.md at ./release-review.",
+        "Reads SKILL.md at .opencode/skill/release-review.",
+        "Reads SKILL.md within /opt/release-review.",
+        "Reads SKILL.md at C:\\agent\\release-review.",
+        "Reads SKILL.md in ./release-review.",
+        # Word pairs joined by a slash are not paths.
+        "Re-read SKILL.md at start/end of each phase",
+        "Follow SKILL.md at input/output boundaries",
+        "Follow SKILL.md within read/write limits",
     ],
 )
 def test_skill_md_in_the_skill_itself_still_warns(assertion):
@@ -745,6 +755,8 @@ _LOCATED_SKILL_MD_PROMPTS = [
     "Read the SKILL.md at C:\\work\\pdf-tools and list its frontmatter errors.",
     "Read the SKILL.md at C:/work/pdf-tools and list its frontmatter errors.",
     "Read the SKILL.md at pdf-tools\\SKILL.md and list its frontmatter errors.",
+    "Read the SKILL.md at pdf-tools/ and list its frontmatter errors.",
+    "Read the SKILL.md at input/pdf-tools/ and list its frontmatter errors.",
     "Read the SKILL.md at https://github.com/org/pdf-tools and list its frontmatter errors.",
     "Read the SKILL.md at $HOME/pdf-tools and list its frontmatter errors.",
     "Read the SKILL.md within %USERPROFILE%\\pdf-tools and list its frontmatter errors.",
@@ -757,6 +769,44 @@ def test_skill_md_the_task_locates_does_not_warn(text):
     entry = _case("skill-reviewer", prompt=text, expected_output=text, assertions=[text])
 
     assert _baseline_fairness_warnings(entry) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Read the SKILL.md at /workspace/release-review.bak and list its frontmatter errors.",
+        "Read the SKILL.md at ./release-review-old and list its frontmatter errors.",
+        "Read the SKILL.md at ./release-review.v2/ and list its frontmatter errors.",
+    ],
+)
+def test_skill_md_at_a_path_that_only_starts_with_the_skill_name_does_not_warn(text):
+    entry = _case(prompt=text, expected_output=text, assertions=[text])
+
+    assert _baseline_fairness_warnings(entry) == []
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "Read the SKILL.md at ./release-review.",
+        "Read the SKILL.md at .opencode/skill/release-review.",
+    ],
+)
+def test_tier3_validate_strict_fails_a_prompt_that_reads_skill_md_in_the_skill_directory(tmp_path: Path, prompt):
+    skill = tmp_path / "release-review"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: release-review\ndescription: Review release manifests\n---\n", encoding="utf-8"
+    )
+    case = {"id": "release-review-001", "prompt": prompt, "expected_output": "Lists each blocker"}
+    (skill / "evals" / "evals.json").write_text(
+        json.dumps({"skill_name": "release-review", "evals": [case]}), encoding="utf-8"
+    )
+
+    result = CliRunner().invoke(cli, ["tier3", "validate", str(skill), "--strict", "--json"])
+
+    assert result.exit_code == 1, result.output
+    assert "prompt points at the skill's files" in result.output
 
 
 @pytest.mark.parametrize("prompt", _LOCATED_SKILL_MD_PROMPTS[:5])
@@ -782,8 +832,10 @@ def test_tier3_validate_strict_passes_a_prompt_that_locates_another_skill_md(tmp
         {"expected_output": "The lookup-code skill should not be triggered for plain arithmetic."},
         {"expected_output": "17 times 19 is 323; the lookup-code skill is not needed for arithmetic."},
         {"expected_output": "323", "assertions": ["The lookup-code skill is left unused for plain arithmetic"]},
+        {"expected_output": "Answers 323 rather than using lookup-code."},
+        {"expected_output": "323", "assertions": ["Should not trigger or load the skill"]},
     ],
-    ids=["not-triggered", "not-needed", "left-unused"],
+    ids=["not-triggered", "not-needed", "left-unused", "rather-than-using", "not-trigger-or-load"],
 )
 def test_negative_case_that_names_the_skill_does_not_warn(graded):
     # A should_trigger: false case grades the skill going unused, which the
@@ -793,6 +845,25 @@ def test_negative_case_that_names_the_skill_does_not_warn(graded):
 
     assert entry["expected_skill"] == "lookup-code"
     assert _baseline_fairness_warnings(entry) == []
+
+
+@pytest.mark.parametrize(
+    ("graded", "field"),
+    [
+        ({"expected_output": "The agent reads SKILL.md, sees it does not apply, and answers 323."}, "expected_output"),
+        ({"expected_output": "Reads lookup-code/SKILL.md and answers 323."}, "expected_output"),
+        ({"expected_output": "323", "assertions": ["The agent runs scripts/lookup.py and reports 323"]}, "assertions"),
+        ({"expected_output": "323", "assertions": ["Ran lookup.py, then answered 323"]}, "assertions"),
+    ],
+    ids=["reads-skill-md", "reads-name-skill-md", "runs-scripts-path", "ran-script"],
+)
+def test_negative_case_that_reads_the_skill_files_or_runs_its_scripts_still_warns(graded, field):
+    # The baseline has neither the skill's SKILL.md nor its scripts, whatever the label.
+    entry = _case("lookup-code", prompt="What is 17 times 19?", should_trigger=False, **graded)
+
+    (warning,) = _baseline_fairness_warnings(entry, skill_scripts=("lookup.py",))
+
+    assert warning.startswith(f"{field} grades skill use"), warning
 
 
 def test_legacy_negative_case_that_names_the_skill_does_not_warn():
@@ -853,6 +924,29 @@ def test_tier3_validate_strict_passes_a_negative_case_that_names_the_skill(tmp_p
     result = CliRunner().invoke(cli, ["tier3", "validate", str(skill), "--strict", "--json"])
 
     assert result.exit_code == 0, result.output
+
+
+def test_tier3_validate_strict_fails_a_negative_case_that_runs_a_skill_script(tmp_path: Path):
+    skill = tmp_path / "lookup-code"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "scripts").mkdir()
+    (skill / "scripts" / "lookup.py").write_text("print('lookup')\n", encoding="utf-8")
+    (skill / "SKILL.md").write_text("---\nname: lookup-code\ndescription: Look up codes\n---\n", encoding="utf-8")
+    case = {
+        "id": "lookup-code-neg-001",
+        "should_trigger": False,
+        "prompt": "What is 17 times 19?",
+        "expected_output": "323",
+        "assertions": ["Runs lookup.py, sees it does not apply, and answers 323"],
+    }
+    (skill / "evals" / "evals.json").write_text(
+        json.dumps({"skill_name": "lookup-code", "evals": [case]}), encoding="utf-8"
+    )
+
+    result = CliRunner().invoke(cli, ["tier3", "validate", str(skill), "--strict", "--json"])
+
+    assert result.exit_code == 1, result.output
+    assert "assertions grades skill use" in result.output
 
 
 @pytest.mark.parametrize(
@@ -1081,6 +1175,9 @@ def test_docs_say_which_skill_md_in_a_description_becomes_my_skill_md():
         assert mentions, where
         for start in mentions:
             assert claim in text[max(0, start - 200) : start], (where, text[max(0, start - 200) : start])
+    # The next sentence still names the command whose LLM prompts it means.
+    docs = " ".join(sources["docs/eval-datasets.mdx"].split())
+    assert "keeps it. `create-eval-dataset`'s LLM prompts ask for outcome checks." in docs
 
 
 def test_template_prompt_is_generic_when_the_description_names_the_skill_directory():

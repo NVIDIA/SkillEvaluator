@@ -441,20 +441,21 @@ All notable changes to SkillEvaluator are documented in this file.
   refused as `no_progress_evidence`, where result collection used to stop
   with `browser-unsafe JSON integer` and write no `result.json` or report.
 
-- `tier3 validate` no longer checks the expected output and assertions of a
-  `should_trigger: false` case for skill use. Such a case grades the skill
-  going unused, which the no-skill baseline meets, but text such as "the
-  lookup-code skill is not needed for arithmetic" failed `--strict`. The
-  prompt of such a case is still checked.
+- `tier3 validate` no longer flags wording that names the skill or its use in
+  the expected output and assertions of a `should_trigger: false` case. Such
+  a case grades the skill going unused, which the no-skill baseline meets,
+  but text such as "the lookup-code skill is not needed for arithmetic"
+  failed `--strict`. The prompt of such a case is still checked, and so is
+  graded text that reads the skill's `SKILL.md` or runs one of its scripts.
 
 - `tier3 validate` no longer reads "the `SKILL.md` at
   /workspace/input/pdf-tools", "within ./pdf-tools" or "located in
   ./pdf-tools" as the skill's own `SKILL.md`, so a skill that reviews other
   skills can pass `--strict`. "at" and "within" now name a location before a
-  path or URL, as "in" already did; "read `SKILL.md` at the start" still
-  warns. A path that ends in the skill's own name, such as "at
-  ./release-review" or "in ./release-review", is the skill's own directory,
-  so reading `SKILL.md` there now warns too.
+  path or URL, as "in" already did; "read `SKILL.md` at the start" and "at
+  start/end of each phase" still warn. A path that ends in the skill's own
+  name, such as "at ./release-review" or "in ./release-review.", is the
+  skill's own directory, so reading `SKILL.md` there now warns too.
 
 - Template cases from `create-eval-dataset` and the autopilot starter case no
   longer quote a skill description that names one of the skill's scripts

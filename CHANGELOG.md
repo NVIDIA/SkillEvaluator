@@ -519,6 +519,15 @@ All notable changes to SkillEvaluator are documented in this file.
   the judge model's geography prefix to a bare name and using a full Bedrock
   ID as given. The reusable CI workflows do not take the variable.
 
+- When the default report directory cannot be claimed, the error now gives
+  the reason and the way out: `Cannot safely reserve default report output
+  directory: <dir> (<reason>). Choose a report directory with
+  -o/--output-dir.` Before, it named only the directory. This happens when
+  both `reports/` and `<skill>-reports/` hold files written under another
+  ownership key, for example from containers that each start with a fresh
+  home directory. The refusal itself is unchanged, and `docs/reports.mdx`
+  explains it.
+
 ## 0.9.0 - 2026-11-13
 
 ### Fixed

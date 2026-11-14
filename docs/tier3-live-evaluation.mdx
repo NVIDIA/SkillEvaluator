@@ -1872,15 +1872,25 @@ or interpreter code that opens the file, do not receive the finding.
 Security findings keep credentials out of their `evidence`, which is saved in
 the verifier's `skill_evaluator_reward.json`, the collected results, and the
 reports. A sensitive-path or sensitive-file-write finding records only the
-protected entry it matched, such as `~/.bashrc` or `/root/.ssh`, never the
-command or tool input. When the text holds more than one entry, the longest
-wins, so a write to `/etc/profile.d/npm.sh` records `/etc/profile.d`, not
-`/etc/profile`. A path found through a home spelling, such as
-`/home/agent/.ssh/id_rsa` or `$HOME/.ssh`, records the `~/.ssh` entry, so the
-evidence holds no user name or home directory. The without-skill baseline
-comparison therefore matches these findings by entry: a with-skill write to
-`~/.bashrc` is attributed to the baseline prompt or environment when the
-baseline run also wrote to `~/.bashrc`, whatever each command wrote there.
+protected entries it matched, such as `~/.bashrc` or `/root/.ssh`, never the
+command or tool input. A command that holds several entries still gets one
+finding, which lists them in a fixed order, so
+`tar czf k.tgz ~/.ssh ~/.aws/credentials` records `~/.ssh, .aws/credentials`.
+An entry that is part of a longer one in the same path is left out, so a
+write to `/etc/profile.d/npm.sh` records `/etc/profile.d`, not `/etc/profile`,
+and `cat /root/.ssh/id_rsa` records `/root/.ssh`, not also `~/.ssh`. A shell
+write finding lists the protected files its redirection, `tee`, or `sed -i`
+targets name, so `grep umask /etc/profile >> ~/.bashrc` records `~/.bashrc`,
+not the `/etc/profile` it only reads; only when no target names one, as in
+`cat ~/.bashrc 2>/dev/null`, does it record the entry the earlier rule found.
+A path found through a home spelling, such as `/home/agent/.ssh/id_rsa` or
+`$HOME/.ssh`, records the `~/.ssh` entry, so the evidence holds no user name or
+home directory. The without-skill baseline comparison therefore matches these
+findings by their entries: a with-skill write to `~/.bashrc` is attributed to
+the baseline prompt or environment when the baseline run also wrote to
+`~/.bashrc`, whatever each command wrote there, while a with-skill read of
+`~/.ssh` and `~/.aws/credentials` is not the baseline's read of
+`~/.aws/credentials` alone.
 
 Destructive-command, network, prompt-injection, and refusal findings keep their
 command, prompt, or response text with credentials masked. The masking is a

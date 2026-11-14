@@ -3460,22 +3460,38 @@ _FINDING_EVIDENCE_AWS_CONFIGURE_SET_RE = re.compile(
 # "always-auth true" are kept. NAME may be single- or double-quoted and may
 # follow a "--" that ends the options. "git config --get" and "--unset" read
 # or remove a key and take no value. A separator word after NAME ("password =
-# VALUE", "token := VALUE") is no value; the assignment rule reads that form.
+# VALUE", "token := VALUE") is no value; the assignment rule reads that form
+# (see _FINDING_EVIDENCE_CONFIG_SET_SEPARATOR_RE).
 # The assignment rule also reads a quoted NAME, or one after "--", whose value
 # starts with a separator ('npm config set -- password ="..."'), as it did
 # before this rule read those NAMEs, and the unquoted value of such a NAME
 # ends at ";", "|" or "&", as a "_" flag's does, so a "NAME=VALUE" right after
 # it is still masked ('npm config set -- password K1;TOKEN="..."').
-_FINDING_EVIDENCE_CONFIG_SET_RE = re.compile(
+_FINDING_EVIDENCE_CONFIG_SET_NAME = (
     r"(\b(?:(?:npm|pnpm|yarn)[ \t]+config[ \t]+set|(?:npm|pnpm)[ \t]+set|git[ \t]+config)"
     r"(?:[ \t]+--?(?!-|get|unset)[\w-]{1,32}(?:=[^\s'\"`]{1,64})?){0,3}(?:[ \t]+(--)(?=[ \t]))?[ \t]+"
-    r"([\"'])?([^\s'\"`=-][^\s'\"`=]{0,255})(?(3)\3)[ \t]+(?!-|(?::=|=>|[=:])(?!\S))(?(2)(?![=:]))(?(3)(?![=:])))(?(2)"
+    r"([\"'])?([^\s'\"`=-][^\s'\"`=]{0,255})(?(3)\3)[ \t]+(?!-)(?(2)(?![=:]))(?(3)(?![=:])))"
+)
+_FINDING_EVIDENCE_CONFIG_SET_SEPARATOR = r"(?::=|=>|[=:])(?!\S)"
+_FINDING_EVIDENCE_CONFIG_SET_RE = re.compile(
+    _FINDING_EVIDENCE_CONFIG_SET_NAME
+    + "(?!"
+    + _FINDING_EVIDENCE_CONFIG_SET_SEPARATOR
+    + ")(?(2)"
     + _FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE
     + "|(?(3)"
     + _FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE
     + "|"
     + _FINDING_EVIDENCE_FLAG_VALUE
     + "))"
+)
+# An unquoted NAME followed by a separator word. The config set rule masked
+# that word as the value before it left this form to the assignment rule,
+# which then read each name after the separator, so the assignment rule reads
+# each name inside the value of NAME again ("npm config set _auth =
+# token=\"...\""; see _mask_credential_assignments).
+_FINDING_EVIDENCE_CONFIG_SET_SEPARATOR_RE = re.compile(
+    _FINDING_EVIDENCE_CONFIG_SET_NAME + _FINDING_EVIDENCE_CONFIG_SET_SEPARATOR
 )
 _FINDING_EVIDENCE_CONFIG_KEY_SPLIT_RE = re.compile(r"[./:]")
 _FINDING_EVIDENCE_CONFIG_CREDENTIAL_KEY_RE = re.compile(
@@ -3924,16 +3940,18 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
     sed_end = 0
     # Where the last value read for a name that starts no sed pattern or
     # replacement ends, read with no call and no call inside a tuple (see
-    # _flat_value_end).
+    # _flat_value_end), or where it starts for a config set NAME followed by a
+    # separator word, whose value was not read before.
     plain_end = 0
+    config_name_ends = {name.end(4) for name in _FINDING_EVIDENCE_CONFIG_SET_SEPARATOR_RE.finditer(text)}
     for match, name_sed_end in _assignment_name_matches(text):
         name, name_quote, separator = match.group(1, 2, 3)
         # A name inside a masked value is skipped, unless it starts a sed
         # pattern or replacement, or the value is that of a name in a sed
         # expression, and the masked text ends inside that expression, or it
         # starts no sed pattern or replacement and no value read for such a
-        # name holds it, as when no sed expression, call or call inside a
-        # tuple is read (see below).
+        # name holds it, as when no sed expression, call, call inside a tuple
+        # or config set value after a separator word is read (see below).
         overlapped = match.start() < pos
         if (
             (overlapped and pos >= (name_sed_end or sed_end) and (name_sed_end or match.start() < plain_end))
@@ -4014,7 +4032,7 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
         if value is None:
             continue
         if not name_sed_end:
-            plain_end = _flat_value_end(text, value)
+            plain_end = value.start() if match.end(1) in config_name_ends else _flat_value_end(text, value)
         if overlapped:
             # The value of a name in the sed pattern ran over this name, which
             # starts the replacement: in a shell command string a value is one

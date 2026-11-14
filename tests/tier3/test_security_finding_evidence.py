@@ -2090,6 +2090,18 @@ def test_call_sed_underscored_flag_and_config_rules_keep_ordinary_text(text: str
             "npm config set password = <redacted> && rm -rf /srv/app",
             id="config-set-spaced-equals",
         ),
+        # A credential name in that value is read again, as it was when the
+        # separator was masked as the value.
+        pytest.param(
+            f'npm config set _auth = token="{_PASSPHRASE}" && rm -rf /srv/app',
+            "npm config set _auth = <redacted> && rm -rf /srv/app",
+            id="config-set-spaced-equals-before-an-assignment",
+        ),
+        pytest.param(
+            f"yarn config set npmAuthToken := password:'{_PASSPHRASE}' && rm -rf /srv/app",
+            "yarn config set npmAuthToken := <redacted> && rm -rf /srv/app",
+            id="config-set-spaced-walrus-before-an-assignment",
+        ),
     ],
 )
 def test_underscored_flags_and_config_keys_keep_the_assignment_reading(copy: str, command: str, expected: str) -> None:
@@ -2144,6 +2156,10 @@ def test_underscored_flags_and_config_keys_keep_the_assignment_reading(copy: str
         pytest.param(f'credentials = Credentials(None, token="{_PAREN_PASSPHRASE}")', id="spaced-call-value"),
         pytest.param(f"apikey=(()TOKEN=){_API_TOKEN}", id="tuple-value-before-a-glued-word"),
         pytest.param(f"secret=(f(), x; password=g({_API_TOKEN}", id="unclosed-tuple-value"),
+        # So does the value of a credential name in the value of a config set
+        # key after a separator word.
+        pytest.param(f'npm config set _auth = token="{_PASSPHRASE}"', id="config-value-after-a-separator"),
+        pytest.param(f"yarn config set npmAuthToken := password:'{_PASSPHRASE}'", id="config-value-after-a-walrus"),
     ],
 )
 def test_a_value_next_to_a_newly_read_value_stays_masked(copy: str, command: str) -> None:

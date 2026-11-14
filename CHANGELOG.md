@@ -190,6 +190,20 @@ All notable changes to SkillEvaluator are documented in this file.
   `tier3/dataset_sufficiency.py`, the default quality config and the bundled
   grader suite, so retuning any of them fails CI instead of rotting the page.
 
+- The Tier 3 live evaluation guide said that `skillevaluator tier3 ./my-skill`
+  and `tier3 init-harbor-task` reject an empty `expected_output`. They reject
+  it only in a `{"skill_name", "evals"}` dataset. A flat dataset (a JSON or
+  YAML list, `{"cases": [...]}`, or any `evals.jsonl`) is legacy: there an
+  empty or whitespace-only `expected_output` or `ground_truth` is accepted and
+  makes `accuracy` and `goal_accuracy` N/A.
+
+- Reports & Results said that the HTML report labels a failed Tier 3 run's
+  `neutral` verdict **Changes required**. The `tier3` object of a
+  `validate --tier3` JSON report keeps `neutral` for a failed run, but the HTML
+  report and the full Tier 3 payload it embeds show the verdict as `fail`,
+  labelled **Changes required**. A `neutral` verdict of a successful run reads
+  **Neutral**.
+
 ### Fixed
 
 - The behavior evidence gate no longer keeps a score for an expectation that

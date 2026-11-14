@@ -417,3 +417,38 @@ def test_changelog_entry_matches_the_docs() -> None:
     assert len(entries) == 1
     assert "show the best agent's score when that agent's evidence is complete" in entries[0]
     assert "every Tier 3 run, from `tier3 evaluate` or a `validate` run that includes Tier 3" in entries[0]
+
+
+def _changelog_entry(lead: str) -> tuple[str, str, str]:
+    """Return the release heading, subsection heading and plain text of the one entry starting with ``lead``."""
+    release = subsection = ""
+    found: list[tuple[str, str, str]] = []
+    for block in (REPO / "CHANGELOG.md").read_text(encoding="utf-8").split("\n\n"):
+        first = block.strip().splitlines()[0] if block.strip() else ""
+        if first.startswith("## "):
+            release, subsection = first, ""
+        elif first.startswith("### "):
+            subsection = first
+        elif _plain(block).startswith(lead):
+            found.append((release, subsection, _plain(block)))
+    assert len(found) == 1
+    return found[0]
+
+
+def test_changelog_documents_the_failed_run_verdict_label() -> None:
+    # The docs correction is recorded under Unreleased, not inside a released section.
+    release, subsection, entry = _changelog_entry(
+        "- Reports & Results said that the HTML report labels a failed Tier 3 run's `neutral` verdict"
+    )
+    assert (release, subsection) == ("## Unreleased", "### Documentation")
+    result = result_with_completed_peer()
+    raw = HTMLReporter(report_scope="tier3").render(result)
+    report_tier3 = json.loads(JSONReporter().render_all([result]))["tier3"]
+    assert report_tier3["execution_status"] == "failed"
+    assert report_tier3["verdict"] == "neutral"
+    assert _embedded_tier3(raw)["verdict"] == "fail"
+    assert (
+        "The `tier3` object of a `validate --tier3` JSON report keeps `neutral` for a failed run, but the HTML "
+        f"report and the full Tier 3 payload it embeds show the verdict as `fail`, labelled {VERDICT_WORDS['fail']}."
+    ) in entry
+    assert f"A `neutral` verdict of a successful run reads {VERDICT_WORDS['neutral']}." in entry

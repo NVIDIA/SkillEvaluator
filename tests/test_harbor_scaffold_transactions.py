@@ -221,6 +221,31 @@ def test_docs_limit_the_empty_expected_output_rejection_to_the_object_shape(tmp_
         assert (evals / "harbor").exists() is accepted
 
 
+def test_changelog_limits_the_empty_expected_output_rejection_to_the_object_shape() -> None:
+    # The docs correction is recorded under Unreleased, not inside a released section.
+    lead = "- The Tier 3 live evaluation guide said that `skillevaluator tier3 ./my-skill`"
+    release = subsection = ""
+    found: list[tuple[str, str, str]] = []
+    changelog = (Path(__file__).resolve().parents[1] / "CHANGELOG.md").read_text(encoding="utf-8")
+    for block in changelog.split("\n\n"):
+        normalized = " ".join(block.split())
+        if normalized.startswith("## "):
+            release, subsection = normalized, ""
+        elif normalized.startswith("### "):
+            subsection = normalized
+        elif normalized.startswith(lead):
+            found.append((release, subsection, normalized))
+    assert len(found) == 1
+    release, subsection, entry = found[0]
+    assert (release, subsection) == ("## Unreleased", "### Documentation")
+    assert 'They reject it only in a `{"skill_name", "evals"}` dataset.' in entry
+    assert (
+        'A flat dataset (a JSON or YAML list, `{"cases": [...]}`, or any `evals.jsonl`) is legacy: there an empty '
+        "or whitespace-only `expected_output` or `ground_truth` is accepted and makes `accuracy` and "
+        "`goal_accuracy` N/A."
+    ) in entry
+
+
 def test_force_late_config_failure_preserves_complete_old_scaffold(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -35,3 +35,5 @@ notes:
 plugin:
   rules:
     - {id: HM-PLUGIN-FORMAT, when: "not (fmt_agent_v1 or fmt_hermes_native)", effect: not_loaded, outcome: rejected, message: "Hermes installs Agent Plugins v1 (plugin.json with the agent-plugins.org $schema) or native plugin.yaml plugins only.", fix: "Add an Agent Plugins v1 plugin.json."}
+    - {id: HM-PLUGIN-DISABLED, when: "fmt_agent_v1", effect: advisory, message: "Portable packages install disabled; nothing loads until `hermes plugins enable {plugin_name}`."}
+  components: {skills: listed, commands: not_observed, agents: not_observed, hooks: not_observed, mcp: not_observed, lsp: not_observed}

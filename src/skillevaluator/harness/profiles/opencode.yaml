@@ -33,3 +33,4 @@ notes:
 plugin:
   rules:
     - {id: OC-PLUGIN-FORMAT, when: "always", effect: not_loaded, outcome: not found, message: "OpenCode does not load manifest plugin bundles; its plugins are JS/TS modules in .opencode/plugin/ or npm packages in opencode.json.", fix: "Install the skills under .opencode/skills, or port the plugin to an OpenCode JS plugin."}
+  components: {}

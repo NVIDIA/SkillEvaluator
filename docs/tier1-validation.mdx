@@ -296,6 +296,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     Gate rules: Hermes `platforms` and OpenClaw `metadata.openclaw.requires` hide the skill on hosts that don't match.
 
     `harness-check` on a plugin folder also shows a plugin panel: which plugin formats each harness accepts (`.claude-plugin`, `.codex-plugin`, Copilot, Agent Plugins v1, Hermes `plugin.yaml`), and an empty plugin.
+
+    Plugin component rules cover skill namespacing, Codex's plugin-skill cap and Agent Plugins hooks, Copilot CLI MCP server names, disabled plugins, and components a harness registers but doesn't deliver.
   </Accordion>
 
   <Accordion title="security — vulnerability scanning">

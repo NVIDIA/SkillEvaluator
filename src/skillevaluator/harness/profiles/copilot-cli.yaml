@@ -31,3 +31,6 @@ notes:
 plugin:
   rules:
     - {id: CP-PLUGIN-FORMAT, when: "not (fmt_claude or fmt_agent_v1 or fmt_copilot or fmt_root_json)", effect: not_loaded, outcome: rejected, message: "Copilot CLI installs .claude-plugin, .github/plugin, .plugin and plugin.json bundles; Codex- and Cursor-only bundles are refused.", fix: "Add .claude-plugin/plugin.json (Copilot reads it)."}
+    - {id: CP-PLUGIN-AGENTV1, when: "fmt_agent_v1 and not fmt_claude and (components.commands > 0 or components.agents > 0 or components.hooks > 0)", effect: degraded, outcome: partly delivered, message: "From an Agent Plugins v1 bundle Copilot delivers skills and MCP tools only; commands, agents and hooks did not reach the model or run.", fix: "Also ship .claude-plugin/plugin.json."}
+    - {id: CP-PLUGIN-MCP-NAMES, when: "components.mcp > 0", effect: advisory, message: "MCP tool names are shown as <server>-<tool> and cut to 64 characters.", fix: "Keep server plus tool names under 64 characters."}
+  components: {skills: delivered, commands: listed, agents: delivered, hooks: runs, mcp: delivered, lsp: not_observed}

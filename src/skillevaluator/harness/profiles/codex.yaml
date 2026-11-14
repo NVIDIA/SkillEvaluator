@@ -31,3 +31,7 @@ notes:
 plugin:
   rules:
     - {id: CX-PLUGIN-FORMAT, when: "not (fmt_codex or fmt_claude or fmt_cursor or fmt_agent_v1)", effect: not_loaded, outcome: rejected, message: "Codex installs .codex-plugin, .claude-plugin, .cursor-plugin and Agent Plugins v1 bundles; this one has none of them.", fix: "Add .codex-plugin/plugin.json."}
+    - {id: CX-PLUGIN-NAMESPACE, when: "components.skills > 0", effect: advisory, message: "Plugin skills are named {plugin_name}:<skill>; a bare skill name does not invoke them.", fix: "Refer to plugin skills by their full {plugin_name}:<skill> name."}
+    - {id: CX-PLUGIN-SKILL-CAP, when: "fmt_agent_v1 and not (fmt_codex or fmt_claude or fmt_cursor) and max_skill_bytes > 8000", effect: degraded, outcome: cut, message: "Agent Plugins-format bundle with a {max_skill_bytes}-byte SKILL.md: Codex cuts plugin-skill bodies to 8,000 bytes and warns that the skill was truncated.", fix: "Keep each SKILL.md under 8,000 bytes; move detail into referenced files."}
+    - {id: CX-PLUGIN-AGENT-HOOKS, when: "fmt_agent_v1 and not (fmt_codex or fmt_claude or fmt_cursor) and components.hooks > 0", effect: degraded, outcome: not run, message: "Codex does not load hooks from Agent Plugins-format bundles, even with hook trust bypassed.", fix: "Add .codex-plugin/plugin.json if the hooks must run in Codex."}
+  components: {skills: listed, commands: not_observed, agents: not_observed, hooks: trust_gated, mcp: delivered, lsp: not_observed}

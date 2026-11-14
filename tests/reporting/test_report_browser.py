@@ -18,8 +18,8 @@ from pathlib import Path
 import pytest
 from browser_navigation_fixtures import _reward, _similarity_result, _tier1_results, render_fixtures
 
-from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
-from skillevaluator.models import ValidationResult
+from skillevaluator.evaluation.tier3_report import advisory_skip_result, build_agent_eval_payload
+from skillevaluator.models import Finding, ValidationResult
 from skillevaluator.reporting.html import HTMLReporter
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 
@@ -56,6 +56,85 @@ def _complete_result(skill: str, names: tuple[str, str], scores: tuple[float, fl
     }
     result = ValidationResult(validator_name="AGENT_EVAL")
     result.metadata["agent_eval"] = build_agent_eval_payload(skill, agents, dataset=cases, use_llm_judge=False)
+    return result
+
+
+def _edge_result(state):
+    """Synthetic retained shapes shared with missing-arm/telemetry unit coverage."""
+    with_rewards = [_reward("case-1__attempt1", "case-1", 0.9, 12)]
+    baseline_rewards = [_reward("case-1__baseline1", "case-1", 0.7, 20)]
+    info = {
+        "execution_status": "succeeded",
+        "expected_attempts": 2,
+        "scored_attempts": 2,
+        "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.9),
+        "without_skill": dict.fromkeys(DEFAULT_METRICS, 0.7),
+        "rewards": with_rewards,
+        "rewards_baseline": baseline_rewards,
+        "num_trials": 1,
+        "num_trials_baseline": 1,
+        "rewards_complete": True,
+        "rewards_baseline_complete": True,
+        "conditions": {
+            arm: {"execution_status": "succeeded", "expected_attempts": 1, "scored_attempts": 1}
+            for arm in ("with_skill", "without_skill")
+        },
+    }
+    agents = {"complete-peer": info}
+    if state == "mixed":
+        agents["failed-peer"] = {
+            "execution_status": "failed",
+            "expected_attempts": 2,
+            "scored_attempts": 0,
+            "execution_errors": ["AgentTimeoutError: failed-peer case-1 synthetic retained diagnostic"],
+            "with_skill": {},
+            "without_skill": {},
+            "rewards": [],
+            "rewards_baseline": [],
+            "num_trials": 0,
+            "num_trials_baseline": 0,
+        }
+    elif state == "custom-only":
+        info.update(
+            with_skill={},
+            without_skill={},
+            metrics_with_skill=[],
+            metrics_without_skill=[],
+            overall_with_skill=0.45,
+            overall_without_skill=0.45,
+        )
+        for rewards in (with_rewards, baseline_rewards):
+            rewards[0] = {
+                "entry_id": "case-1",
+                "metric_set": "custom-only",
+                "overall": 0.45,
+                "custom_metrics": {"task_quality": 0.45},
+            }
+    elif state == "missing-baseline":
+        info.update(
+            without_skill={},
+            rewards_baseline=[],
+            num_trials_baseline=0,
+            expected_attempts=1,
+            scored_attempts=1,
+            conditions={
+                "with_skill": {"execution_status": "succeeded", "expected_attempts": 1, "scored_attempts": 1},
+                "without_skill": {"execution_status": "skipped"},
+            },
+        )
+    elif state == "missing-telemetry":
+        for rewards in (with_rewards, baseline_rewards):
+            rewards[0].pop("_traj")
+    result = ValidationResult(validator_name="AGENT_EVAL")
+    result.metadata["agent_eval"] = build_agent_eval_payload(
+        "synthetic-edge",
+        agents,
+        dataset=[{"id": "case-1", "prompt": "Summarize synthetic input", "expected_output": "Synthetic summary"}],
+        use_llm_judge=False,
+    )
+    assert result.metadata["agent_eval"] is not None
+    if state == "mixed":
+        result.add_error("failed-peer did not complete")
     return result
 
 
@@ -183,7 +262,56 @@ def reports(tmp_path_factory):
         ),
         encoding="utf-8",
     )
+    (directory / "static-plugin.html").write_text(
+        HTMLReporter(include_timestamp=False).render_all([clean], plugin_static=static), encoding="utf-8"
+    )
     (directory / "plugin-snapshots.json").write_text(json.dumps({"plugin_static": static, "plugin_runtime": runtime}))
+    for state in ("mixed", "custom-only", "missing-baseline", "missing-telemetry"):
+        (directory / f"{state}.html").write_text(
+            HTMLReporter(include_timestamp=False, report_scope="tier3").render_all([_edge_result(state)]),
+            encoding="utf-8",
+        )
+    skipped = advisory_skip_result("Synthetic retained Tier 3 explicitly skipped", skill_name="synthetic-edge")
+    skipped.metadata["optional_skip"] = True
+    skipped.metadata["skip_reason"] = "Synthetic retained Tier 3 explicitly skipped"
+    (directory / "skipped-tier3.html").write_text(
+        HTMLReporter(include_timestamp=False, requested_tiers=(1, 2, 3), displayed_tiers=(1, 2, 3)).render_all(
+            [clean, skipped]
+        ),
+        encoding="utf-8",
+    )
+    incomplete_static = deepcopy(static)
+    incomplete_static.update(status="incomplete", truncated=True)
+    incomplete_static["sections"][0].update(
+        total=3, omitted=2, notes=["Inventory incomplete; retained observation only"]
+    )
+    incomplete_runtime = deepcopy(runtime)
+    incomplete_runtime.update(status="incomplete", execution_status="failed", evidence_complete=False)
+    incomplete_runtime["sections"][0]["rows"] = [["Not eligible: incomplete recorded arms"]]
+    incomplete_runtime["sections"][1]["rows"] = [[None]]
+    incomplete_runtime["sections"][2]["rows"] = [["Comparison unavailable; incomplete pair"]]
+    incomplete_runtime["sections"][3]["rows"] = [["Synthetic retained runtime timeout; no behavior conclusion"]]
+    (directory / "incomplete-plugin.html").write_text(
+        HTMLReporter(include_timestamp=False).render_all(
+            [_edge_result("mixed")], plugin_static=incomplete_static, plugin_runtime=incomplete_runtime
+        ),
+        encoding="utf-8",
+    )
+    similarity = ValidationResult(validator_name="Similarity Check")
+    similarity.add_success("index_built", "Indexed synthetic collection", entry_count=3, content_type="skill")
+    similarity.add_finding(
+        Finding(
+            category="SIMILARITY",
+            check_name="EXACT_DUPLICATE",
+            severity="high",
+            message="Synthetic collection duplicate",
+            file_path="skills/a/SKILL.md",
+            metadata={"path_a": "skills/a", "path_b": "skills/b"},
+        )
+    )
+    (directory / "nonzero-similarity.html").write_text(
+        HTMLReporter(include_timestamp=False).render_all([similarity]), encoding="utf-8"
+    )
     return directory, canonical, failed
 
 
@@ -434,3 +562,205 @@ def test_no_javascript_keeps_all_recorded_evidence_readable(browser, reports):
         assert tab.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
     finally:
         context.close()
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+@pytest.mark.parametrize("width", [1440, 390])
+def test_active_native_controls_have_readable_computed_contrast(page, reports, theme, width):
+    directory, _, _ = reports
+    page.set_viewport_size({"width": width, "height": 1000})
+    _open(page, directory)
+    page.locator("html").evaluate("(node, theme) => node.dataset.theme=theme", theme)
+    checked = []
+    for tier in ("tier1", "tier2"):
+        _tier(page, tier)
+        controls = page.locator(
+            ".view-toggle-btn:visible,.filter-btn:visible,.severity-filter-btn:visible,.nav-tab:visible"
+        )
+        assert controls.count() > 0
+        for control in controls.all():
+            # Inspect every actual control's active variant, including severity colors.
+            colors = control.evaluate("""node => {
+                node.classList.add('active');
+                const style=getComputedStyle(node);
+                return {foreground:style.color, background:style.backgroundColor, label:node.textContent.trim()};
+            }""")
+
+            def luminance(color):
+                channels = [int(value) / 255 for value in re.findall(r"[0-9]+", color)[:3]]
+                linear = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4 for value in channels]
+                return sum(value * weight for value, weight in zip(linear, (0.2126, 0.7152, 0.0722), strict=True))
+
+            values = sorted((luminance(colors["foreground"]), luminance(colors["background"])))
+            ratio = (values[1] + 0.05) / (values[0] + 0.05)
+            assert ratio >= 4.5, (theme, width, colors, ratio)
+            checked.append(colors["label"])
+    assert len(checked) >= 8
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_static_only_native_disclosures_have_shared_styles_without_chart_runtime(page, reports, theme):
+    directory, _, _ = reports
+    _open(page, directory, "static-plugin")
+    page.locator("html").evaluate("(node, theme) => node.dataset.theme=theme", theme)
+    assert page.evaluate("typeof Chart") == "undefined"
+    assert page.locator("#plugin-static-components").is_visible()
+    details = page.locator("details.t3-details").first
+    assert details.is_visible()
+    details.evaluate("node=>node.open=false")
+    styles = details.evaluate("""node => {
+        const detail=getComputedStyle(node), summary=getComputedStyle(node.querySelector('summary'));
+        return {radius:detail.borderRadius,border:detail.borderTopWidth,padding:summary.padding,
+            display:summary.display,arrow:getComputedStyle(node.querySelector('summary'),'::after').content};
+    }""")
+    assert styles == {"radius": "12px", "border": "1px", "padding": "14.4px 16px", "display": "flex", "arrow": '"▼"'}
+    details.locator("summary").click()
+    assert details.get_attribute("open") is not None
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+@pytest.mark.parametrize(
+    "fixture",
+    [
+        "mixed",
+        "custom-only",
+        "missing-baseline",
+        "missing-telemetry",
+        "skipped-tier3",
+        "incomplete-plugin",
+        "nonzero-similarity",
+    ],
+)
+def test_retained_edge_state_matrix_is_truthful_accessible_and_has_no_browser_errors(page, reports, fixture, width):
+    directory, _, _ = reports
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.on("console", lambda message: errors.append(message.text) if message.type == "error" else None)
+    page.set_viewport_size({"width": width, "height": 1000})
+    _open(page, directory, fixture)
+    if fixture == "nonzero-similarity":
+        _tier(page, "tier2")
+        page.locator("#dedup-tab-inter").click()
+        scope = page.locator("#dedup-inter")
+        assert "3 collection entries" in scope.inner_text()
+        assert "Synthetic collection duplicate" in scope.inner_text()
+        assert scope.locator("details").count() > 0
+        scope.locator("details").evaluate_all("nodes=>nodes.forEach(node=>node.open=true)")
+        assert scope.get_by_text("skills/a", exact=False).count() > 0
+        assert "Changes required" in page.locator('.tier-card[data-target-tab="tier2"]').inner_text()
+    elif fixture == "skipped-tier3":
+        tile = page.locator('.tier-card[data-target-tab="tier3"]')
+        assert "Skipped" in tile.inner_text()
+        _tier(page, "tier3")
+        assert (
+            "Live evaluation skipped: Synthetic retained Tier 3 explicitly skipped"
+            in page.locator("#tab-tier3").inner_text()
+        )
+        assert page.locator("#tier3-radar").count() == 0
+    else:
+        _tier(page, "tier3")
+        overview = page.locator("#tier3-page-overview")
+        if fixture in ("mixed", "incomplete-plugin"):
+            assert "Other execution failures need attention" in overview.inner_text()
+            assert "complete-peer" in overview.inner_text()
+            _subtab(page, "agents")
+            buttons = page.locator(".t3-agent-tab-btn")
+            assert buttons.count() == 2
+            buttons.filter(has_text="failed-peer").click()
+            failed_panel = page.locator(".t3-agent-panel.active")
+            assert failed_panel.get_attribute("data-tier3-agent") == "failed-peer"
+            assert failed_panel.locator(".t3-kpi-value").all_text_contents() == ["N/A", "N/A", "0"]
+            _subtab(page, "provenance")
+            page.locator("#tier3-page-provenance details").evaluate_all("nodes=>nodes.forEach(node=>node.open=true)")
+            assert (
+                "AgentTimeoutError: failed-peer case-1 synthetic retained diagnostic"
+                in page.locator("#tier3-page-provenance").inner_text()
+            )
+        elif fixture == "custom-only":
+            assert "Neutral" in overview.inner_text()
+            assert page.locator("#tier3-dimension-table").count() == 0
+            _subtab(page, "agents")
+            assert "Custom: task_quality" in page.locator("#tier3-page-agents").inner_text()
+        elif fixture == "missing-baseline":
+            assert "no baseline" in overview.inner_text()
+            _subtab(page, "trials")
+            page.locator("#tier3-page-trials details").evaluate_all("nodes=>nodes.forEach(node=>node.open=true)")
+            table = page.locator("#t3-trials-table")
+            assert table.is_visible()
+            assert table.locator("tbody tr").count() == 1
+            assert "With skill" in table.inner_text()
+            assert "Without skill" not in table.inner_text()
+        elif fixture == "missing-telemetry":
+            _subtab(page, "trials")
+            page.locator("#tier3-page-trials details").evaluate_all("nodes=>nodes.forEach(node=>node.open=true)")
+            table = page.locator("#t3-trials-table")
+            assert table.is_visible()
+            headers = table.locator("thead th").all_text_contents()
+            for label in ("Steps", "Tokens"):
+                column = headers.index(label)
+                assert [row.locator("td").nth(column).inner_text() for row in table.locator("tbody tr").all()] == [
+                    "—",
+                    "—",
+                ]
+            assert page.locator("#tier3-token-chart").count() == 0
+        if fixture == "incomplete-plugin":
+            _tier(page, "tier1")
+            assert "Status: incomplete" in page.locator("#plugin-static-evidence").inner_text()
+            inventory = page.locator("#plugin-static-components")
+            assert inventory.is_visible()
+            assert "2 more rows omitted (3 total)" in inventory.inner_text()
+            _tier(page, "tier3")
+            _subtab(page, "overview")
+            assert (
+                "Evidence status: incomplete. Execution status: failed."
+                in page.locator("#plugin-runtime-evidence").inner_text()
+            )
+            for tab, key, evidence in (
+                ("overview", "eligibility", "Not eligible"),
+                ("agents", "loading", "unknown"),
+                ("trials", "comparisons", "Comparison unavailable"),
+                ("provenance", "limitations", "no behavior conclusion"),
+            ):
+                _subtab(page, tab)
+                section = page.locator("#plugin-runtime-" + key)
+                assert section.is_visible()
+                assert evidence in section.inner_text()
+        for tab in ("overview", "suggestions", "agents", "trials", "dataset", "provenance"):
+            _subtab(page, tab)
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+    assert not errors
+
+
+def test_chart_runtime_unavailable_exposes_fallbacks_and_linked_tables_without_errors(page, reports):
+    directory, _, _ = reports
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.on("console", lambda message: errors.append(message.text) if message.type == "error" else None)
+    # Prevent the bundled inline runtime from creating Chart while all report JS executes normally.
+    page.add_init_script("Object.defineProperty(window,'Chart',{get:()=>undefined,set:()=>{},configurable:false})")
+    _open(page, directory)
+    assert page.evaluate("typeof Chart") == "undefined"
+    _tier(page, "tier3")
+    for tab, chart_ids in (
+        ("overview", ("tier3-radar", "tier3-metric-bar")),
+        ("trials", ("tier3-token-chart", "tier3-steps-chart")),
+    ):
+        _subtab(page, tab)
+        for chart_id in chart_ids:
+            canvas = page.locator("#" + chart_id)
+            assert canvas.count() == 1
+            assert not canvas.is_visible()
+            assert page.locator("#" + chart_id + "-fallback").is_visible()
+            link = page.locator("#" + chart_id + "-description a")
+            target = link.get_attribute("href")
+            link.click()
+            assert page.locator(target).is_visible()
+            assert page.locator(target).locator("table").count() or page.locator(target).evaluate(
+                "node=>node.tagName==='TABLE'"
+            )
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+            _subtab(page, tab)
+    assert not errors

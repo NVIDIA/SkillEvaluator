@@ -96,3 +96,12 @@ pre { max-width:100%;overflow:auto; } code,td,th,p { overflow-wrap:anywhere; }
  .agent-hero-title-block { flex:1 1 0; }
  .hero-side { flex:0 1 22rem;max-width:40%;overflow-wrap:anywhere; }
 }
+
+/* Bright native action colors need the existing dark palette foreground. */
+.nav-tab.active,.nav-tabs [aria-current=location],.view-toggle-btn.active,.filter-btn.active,.severity-filter-btn.active { color:#0c111b; }
+/* Light-theme critical/high colors are deep red; their dark-theme variants are bright. */
+.severity-filter-btn.active.critical-btn,.severity-filter-btn.active.high-btn { color:#fff; }
+[data-theme=dark] .severity-filter-btn.active.critical-btn,[data-theme=dark] .severity-filter-btn.active.high-btn { color:#0c111b; }
+
+/* Each retained baseline warning remains a separate readable notice. */
+.t3-overview-lead .tolerated-baseline { display:block; margin-top:.5rem; }

@@ -51,6 +51,20 @@ def test_skill_manifest_file_validates_like_its_folder(tmp_path: Path) -> None:
     assert {result["publication_target"]["skill_name"] for result in manifest[1]["results"]} == {"simple"}
 
 
+def test_lowercase_skill_manifest_file_validates_like_its_folder(tmp_path: Path) -> None:
+    # Rename the manifest itself, so the lowercase name is what the folder holds on any filesystem.
+    skill = tmp_path / "simple"
+    shutil.copytree(FIXTURE, skill)
+    (skill / "SKILL.md").rename(skill / "skill.md")
+    checks = ("--checks", "schema,version,quality")
+
+    folder = _validate(skill, tmp_path / "folder-reports", *checks)
+    manifest = _validate(skill / "skill.md", tmp_path / "manifest-reports", *checks)
+
+    assert manifest == folder
+    assert _skill_names(manifest[1]) == ["simple"]
+
+
 def test_skill_manifest_file_scans_the_whole_skill(tmp_path: Path) -> None:
     # Only the bundled script carries hidden characters, so a scan of SKILL.md alone would pass.
     skill = tmp_path / "simple"

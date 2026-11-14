@@ -1564,7 +1564,7 @@ def test_huge_alias_with_many_unmatched_leaves_finishes_with_a_generous_resource
         ("The agent used the installed skill", []),
         ("The agent used installed skill", []),
         ("The agent ran python3 -I -B -q -u -O review.py", ["review.py"]),
-        ("The agent ran python3 review.py", ["\uff32\uff25\uff36\uff29\uff25\uff37.py"]),
+        ("The agent ran python3 review.py", ["\uff52\uff45\uff56\uff49\uff45\uff57.py"]),
         ("The agent ran python3 review.py", ["revie\u200bw.py"]),
         ("The agent used **release-review**.", []),
         ("The agent used [release-review](reference.md).", []),

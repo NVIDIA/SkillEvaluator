@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -126,6 +127,17 @@ def _captured_text(value: str | bytes | None) -> str:
     return value
 
 
+def _skillspector_version(stdout: str, stderr: str) -> str | None:
+    """Read an unambiguous SkillSpector identity line, preserving release suffixes."""
+    pattern = r"skillspector(?:,?\s+version)?\s+v?(\d+\.\d+\.\d+[A-Za-z0-9._+-]*)"
+    versions = {
+        match.group(1)
+        for line in (stdout + "\n" + stderr).splitlines()
+        if (match := re.fullmatch(pattern, line.strip(), flags=re.IGNORECASE))
+    }
+    return versions.pop() if len(versions) == 1 else None
+
+
 class ExternalTool:
     """Wrapper for external CLI tools with consistent error handling.
 
@@ -152,8 +164,9 @@ class ExternalTool:
             override_env: Optional environment variable containing an explicit
                 absolute executable path. Invalid overrides fail closed rather
                 than silently falling back to another executable.
-            managed: When the tool is not installed, fall back to SkillEvaluator's
-                pinned provisioning: the verified SkillSpector wheel through
+            managed: Fall back to SkillEvaluator's pinned provisioning when the
+                tool is missing, or automatically discovered SkillSpector is not
+                the pinned release: the verified SkillSpector wheel through
                 ``uv tool run`` (a uv on PATH, else the one installed with
                 SkillEvaluator), or the downloaded Gitleaks binary.
         """
@@ -171,6 +184,7 @@ class ExternalTool:
         self._version: str | None = None
         self._uv_run: tuple[str, tuple[str, ...]] | None = None
         self._ensure: tuple[str, Callable[[], str | None]] | None = None
+        self._skillspector_candidate: str | None = None
         override_env = self.override_env
         name = self.name
 
@@ -189,8 +203,40 @@ class ExternalTool:
                 self.command,
                 prefer_interpreter_sibling=self._prefer_interpreter_sibling,
             )
-            if self._path is None and self._managed:
-                self._resolve_managed()
+            if self._managed:
+                if self._path is not None and self.command == "skillspector":
+                    # Discovery must stay cheap and must never execute a PATH
+                    # program during module import or unrelated CLI commands.
+                    self._skillspector_candidate = self._path
+                elif self._path is None:
+                    self._resolve_managed()
+
+    def _require_pinned_skillspector(self, version: str | None) -> None:
+        """Keep automatic SkillSpector resolution on the supported pinned release."""
+        if version == SKILLSPECTOR_VERSION:
+            return
+        detail = (
+            f"Automatically discovered SkillSpector {version or '(version could not be verified)'} "
+            f"at {self._path}; expected pinned version {SKILLSPECTOR_VERSION}."
+        )
+        self._path = None
+        self._version = None
+        self._resolve_managed()
+        override = self.override_env or "SKILLEVALUATOR_SKILLSPECTOR_PATH"
+        if self._path is not None:
+            logger.warning(
+                "%s Using the managed runtime via uv tool run. Set %s to an absolute executable path "
+                "for an intentional override.",
+                detail,
+                override,
+            )
+        else:
+            self._configuration_error = (
+                f"{detail} The pinned runtime requires uv and a valid SKILLEVALUATOR_RUNTIME_DIR; "
+                f"install uv or correct the runtime directory, or set {override} to an absolute executable path "
+                "for an intentional override."
+            )
+            logger.warning("%s", self._configuration_error)
 
     def _resolve_managed(self) -> None:
         if self.command == "skillspector":
@@ -227,6 +273,8 @@ class ExternalTool:
     @property
     def version(self) -> str | None:
         """The pinned release for managed installs, otherwise what the tool's version command reports."""
+        if self._skillspector_candidate is not None and self._skillspector_candidate == self._path:
+            self.run(["--version"], timeout=30, log_command=False)
         if self.resolution_source == "uv tool run":
             return SKILLSPECTOR_VERSION
         if self.resolution_source == "managed":
@@ -235,17 +283,34 @@ class ExternalTool:
             return None
         if self._version is None:
             argv = [self._path, "version" if self.command == "gitleaks" else "--version"]
+            options = {}
+            if self.command == "skillspector":
+                from skillevaluator.validators.security import _skillspector_process_env
+
+                options["env"] = _skillspector_process_env()
             try:
-                proc = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False)
+                proc = subprocess.run(
+                    argv, capture_output=True, text=True, errors="replace", timeout=30, check=False, **options
+                )
             except (OSError, subprocess.SubprocessError):
                 proc = None
-            match = proc and re.search(r"\d+\.\d+(?:\.\d+)?", proc.stdout or proc.stderr or "")
-            self._version = match.group(0) if match else ""
+            if self.command == "skillspector":
+                self._version = (
+                    _skillspector_version(proc.stdout or "", proc.stderr or "")
+                    if proc is not None and proc.returncode == 0
+                    else ""
+                ) or ""
+            else:
+                match = proc and (
+                    re.search(r"\d+\.\d+(?:\.\d+)?", proc.stdout or "")
+                    or re.search(r"\d+\.\d+(?:\.\d+)?", proc.stderr or "")
+                )
+                self._version = match.group(0) if match else ""
         return self._version or None
 
     @property
     def configuration_error(self) -> str | None:
-        """Return why an explicit executable override was rejected, if it was."""
+        """Return why executable selection could not satisfy the scanner configuration."""
         return self._configuration_error
 
     def get_install_hint(self) -> str:
@@ -301,13 +366,47 @@ class ExternalTool:
         Returns:
             ToolResult with stdout, stderr, and error info
         """
+        child_env = dict(env or {}) if replace_env else ({**os.environ, **env} if env else None)
+        requested_timeout = timeout
+        if self._skillspector_candidate is not None and self._skillspector_candidate == self._path:
+            from skillevaluator.validators.security import _skillspector_process_env
+
+            self._skillspector_candidate = None
+            started = time.monotonic()
+            try:
+                probe = subprocess.run(
+                    [self._path, "--version"],
+                    capture_output=True,
+                    text=True,
+                    errors="replace",
+                    timeout=min(30, timeout),
+                    check=False,
+                    env=_skillspector_process_env(child_env),
+                )
+            except (OSError, subprocess.SubprocessError):
+                probe = None
+            version = (
+                _skillspector_version(probe.stdout or "", probe.stderr or "")
+                if probe is not None and probe.returncode == 0
+                else None
+            )
+            self._version = version or ""
+            self._require_pinned_skillspector(version)
+            if version == SKILLSPECTOR_VERSION and args == ["--version"]:
+                return ToolResult(True, probe.stdout or "", probe.stderr or "", probe.returncode)
+            timeout -= time.monotonic() - started
+
         if not self.is_available:
             return ToolResult(
                 success=False,
                 stdout="",
                 stderr="",
                 exit_code=-1,
-                error_message=f"{self.name} not installed. {self.get_install_hint()}",
+                error_message=self.configuration_error or f"{self.name} not installed. {self.get_install_hint()}",
+            )
+        if timeout <= 0:
+            return ToolResult(
+                False, "", "", -1, error_message=f"{self.name} timed out after {requested_timeout} seconds"
             )
 
         launch_args = self._launch_args()
@@ -320,7 +419,6 @@ class ExternalTool:
             logger.info(f"Running {self.name}: {' '.join(cmd[:5])}...")
 
         try:
-            child_env = dict(env or {}) if replace_env else ({**os.environ, **env} if env else None)
             # Text mode decodes with Python's selected codec (the locale codec,
             # or UTF-8 in UTF-8 mode), which is what Python scanners write. A
             # strict decode of bytes outside that codec (a Windows traceback
@@ -349,7 +447,7 @@ class ExternalTool:
                 stdout=_captured_text(exc.stdout),
                 stderr=_captured_text(exc.stderr),
                 exit_code=-1,
-                error_message=f"{self.name} timed out after {timeout} seconds",
+                error_message=f"{self.name} timed out after {requested_timeout} seconds",
             )
         except FileNotFoundError:
             return ToolResult(

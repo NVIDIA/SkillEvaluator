@@ -7,6 +7,7 @@ Tests ExternalTool, parse_json_output, create_temp_config, cvss_to_severity,
 and Tools registry with mocked subprocess and filesystem where appropriate.
 """
 
+import importlib.util
 import locale
 import os
 import sys
@@ -458,6 +459,203 @@ class TestExternalTool:
             hint = tool.get_install_hint()
             assert "Install" in hint
             assert "PATH" in hint
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX fake console scripts")
+class TestAutomaticSkillSpectorVersion:
+    """Automatic resolution must not silently change the pinned scanner release."""
+
+    @pytest.fixture
+    def scanner_bin(self, tmp_path, monkeypatch):
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        monkeypatch.setenv("PATH", str(bindir))
+        monkeypatch.setenv("SKILLEVALUATOR_RUNTIME_DIR", str(tmp_path / "runtime"))
+        monkeypatch.delenv("SKILLEVALUATOR_SKILLSPECTOR_PATH", raising=False)
+        monkeypatch.setattr(sys, "executable", str(bindir / "python"))
+        # Provisioning has its own checksum/download tests. Keep selection offline.
+        monkeypatch.setattr(tool_runner, "ensure_skillspector_wheel", lambda: None)
+        monkeypatch.setattr(tool_runner, "_packaged_uv", lambda: None)
+        uv = bindir / "uv"
+        uv.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+        uv.chmod(0o755)
+        return bindir
+
+    @staticmethod
+    def _scanner(bindir, version_output, version_exit=0):
+        scanner = bindir / "skillspector"
+        scanner.write_text(
+            '#!/bin/sh\nif [ "$1" = "--version" ]; then\n'
+            f"  printf '%s\\n' '{version_output}'\n  exit {version_exit}\n"
+            "fi\nprintf 'direct scanner\\n'\n"
+        )
+        scanner.chmod(0o755)
+        return scanner
+
+    @pytest.mark.parametrize(
+        ("version_output", "version_exit"),
+        [
+            ("SkillSpector v2.11.2", 0),
+            ("SkillSpector v2.14.0", 0),
+            ("version unavailable", 0),
+            ("SkillSpector v2.13.4", 2),
+            ("SkillSpector v2.13.4rc1", 0),
+            ("SkillSpector v2.13.4_rc1", 0),
+            ("Dependency foo 2.13.4 initialized; scanner version unavailable", 0),
+            ("SkillSpector v2.13.4\nSkillSpector v2.11.2", 0),
+        ],
+    )
+    def test_mismatched_or_unverified_version_runs_pinned_wheel(
+        self, scanner_bin, version_output, version_exit, caplog, monkeypatch
+    ):
+        scanner = self._scanner(scanner_bin, version_output, version_exit)
+        monkeypatch.setattr(tool_runner.logger, "propagate", True)
+
+        tool = ExternalTool("SkillSpector", "skillspector", managed=True)
+        result = tool.run(["scan", "target"], log_command=False)
+
+        assert result.success
+        assert result.exit_code == 0
+        assert result.stdout.splitlines() == [
+            "tool",
+            "run",
+            "--quiet",
+            "--from",
+            str(scanner_bin.parent / "runtime/skillspector/2.13.4/skillspector-2.13.4-py3-none-any.whl"),
+            "skillspector",
+            "scan",
+            "target",
+        ]
+        assert tool.path == str(scanner_bin / "uv")
+        assert tool.version == "2.13.4"
+        assert tool.resolution_source == "uv tool run"
+        assert str(scanner) in caplog.text
+        assert "2.13.4" in caplog.text
+
+    def test_constructor_refresh_and_path_lookup_do_not_launch_scanner(self, scanner_bin):
+        scanner = self._scanner(scanner_bin, "SkillSpector v2.13.4")
+        marker = scanner_bin / "launched"
+        scanner.write_text(scanner.read_text().replace("#!/bin/sh\n", f"#!/bin/sh\n: > '{marker}'\n"))
+
+        tool = ExternalTool("SkillSpector", "skillspector", managed=True)
+        tool.refresh()
+
+        assert tool.path == str(scanner)
+        assert tool.is_available
+        assert not marker.exists()
+        assert tool.run(["scan", "target"], log_command=False).success
+        assert marker.exists()
+
+    def test_fresh_module_import_does_not_launch_scanner(self, scanner_bin, monkeypatch):
+        self._scanner(scanner_bin, "SkillSpector v2.13.4")
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            return CompletedProcess(argv, 0, "SkillSpector v2.13.4", "")
+
+        monkeypatch.setattr(tool_runner.subprocess, "run", run)
+        name = "skillevaluator.utils._tool_runner_import_test"
+        spec = importlib.util.spec_from_file_location(name, tool_runner.__file__)
+        module = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, name, module)
+
+        spec.loader.exec_module(module)
+
+        assert module.Tools.skillspector.path == str(scanner_bin / "skillspector")
+        assert calls == []
+
+    def test_lazy_probe_uses_sanitized_environment_and_caller_timeout(self, scanner_bin, monkeypatch):
+        self._scanner(scanner_bin, "SkillSpector v2.13.4")
+        monkeypatch.setenv("NVIDIA_API_KEY", "ambient-secret")
+        real_run = tool_runner.subprocess.run
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return real_run(argv, **kwargs)
+
+        monkeypatch.setattr(tool_runner.subprocess, "run", run)
+        tool = ExternalTool("SkillSpector", "skillspector", managed=True)
+        result = tool.run(
+            ["scan", "target"],
+            timeout=5,
+            env={"PATH": str(scanner_bin), "NVIDIA_API_KEY": "requested-scan-secret"},
+            replace_env=True,
+            log_command=False,
+        )
+
+        assert result.success
+        assert calls[0][0] == [str(scanner_bin / "skillspector"), "--version"]
+        assert 0 < calls[0][1]["timeout"] <= 5
+        assert calls[0][1]["env"] == {"PATH": str(scanner_bin)}
+        assert calls[-1][1]["env"]["NVIDIA_API_KEY"] == "requested-scan-secret"
+
+    def test_matching_pinned_version_uses_installed_scanner(self, scanner_bin):
+        scanner = self._scanner(scanner_bin, "SkillSpector v2.13.4")
+
+        tool = ExternalTool("SkillSpector", "skillspector", managed=True)
+
+        assert tool.run(["scan", "target"], log_command=False).stdout == "direct scanner\n"
+        assert tool.path == str(scanner)
+        assert tool.version == "2.13.4"
+        assert tool.resolution_source == "automatic"
+
+    def test_stale_scanner_falls_back_to_packaged_uv(self, scanner_bin, monkeypatch):
+        self._scanner(scanner_bin, "SkillSpector v2.11.2")
+        packaged_uv = scanner_bin / "packaged-uv"
+        (scanner_bin / "uv").rename(packaged_uv)
+        monkeypatch.setattr(tool_runner, "_packaged_uv", lambda: str(packaged_uv))
+
+        tool = ExternalTool("SkillSpector", "skillspector", managed=True)
+        result = tool.run(["scan", "target"], log_command=False)
+
+        assert result.success
+        assert result.exit_code == 0
+        assert result.stdout.splitlines()[:4] == ["tool", "run", "--quiet", "--from"]
+        assert result.stdout.splitlines()[4].endswith("/2.13.4/skillspector-2.13.4-py3-none-any.whl")
+        assert tool.path == str(packaged_uv)
+        assert tool.resolution_source == "uv tool run"
+
+    def test_explicit_older_override_is_preserved(self, scanner_bin, monkeypatch):
+        scanner = self._scanner(scanner_bin, "SkillSpector v2.11.2")
+        monkeypatch.setenv("SKILLEVALUATOR_SKILLSPECTOR_PATH", str(scanner))
+
+        tool = ExternalTool(
+            "SkillSpector", "skillspector", override_env="SKILLEVALUATOR_SKILLSPECTOR_PATH", managed=True
+        )
+
+        assert tool.run(["scan", "target"], log_command=False).stdout == "direct scanner\n"
+        assert tool.path == str(scanner.resolve())
+        assert tool.version == "2.11.2"
+        assert tool.resolution_source == "override:SKILLEVALUATOR_SKILLSPECTOR_PATH"
+
+    @pytest.mark.parametrize("unavailable", ["uv", "runtime"])
+    def test_mismatched_version_cannot_run_when_managed_runtime_unavailable(
+        self, scanner_bin, monkeypatch, unavailable
+    ):
+        scanner = self._scanner(scanner_bin, "SkillSpector v2.11.2")
+        if unavailable == "uv":
+            (scanner_bin / "uv").unlink()
+        else:
+            monkeypatch.setattr(tool_runner, "managed_skillspector_wheel", lambda: None)
+
+        tool = ExternalTool(
+            "SkillSpector", "skillspector", override_env="SKILLEVALUATOR_SKILLSPECTOR_PATH", managed=True
+        )
+        result = tool.run(["scan", "target"], log_command=False)
+
+        assert not tool.is_available
+        assert not result.success
+        assert result.exit_code == -1
+        assert result.stdout == ""
+        assert tool.configuration_error
+        assert result.error_message == tool.configuration_error
+        assert str(scanner) in tool.configuration_error
+        assert "2.11.2" in tool.configuration_error
+        assert "2.13.4" in tool.configuration_error
+        assert "uv" in tool.get_install_hint()
+        assert "SKILLEVALUATOR_SKILLSPECTOR_PATH" in tool.get_install_hint()
 
 
 class TestToolsRegistry:

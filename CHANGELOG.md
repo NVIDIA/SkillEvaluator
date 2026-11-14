@@ -247,9 +247,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - The eval dataset docs now say that a template prompt calls a `SKILL.md`
   `my SKILL.md` only when the skill's description reads, opens, loads,
-  consults or follows it without saying where it is. They said any `SKILL.md`
-  in the description was renamed, but "Validates `SKILL.md` frontmatter
-  fields" keeps its `SKILL.md`.
+  consults or follows that file without naming another place for it (such as
+  `at ./pdf-tools`). They said any `SKILL.md` in the description was renamed,
+  but "Validates `SKILL.md` frontmatter fields" keeps its `SKILL.md`.
 
 ### Fixed
 

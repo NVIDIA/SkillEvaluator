@@ -1207,6 +1207,37 @@ def test_docs_say_which_skill_md_in_a_description_becomes_my_skill_md():
     assert "keeps it. `create-eval-dataset`'s LLM prompts ask for outcome checks." in docs
 
 
+def _unreleased_changelog() -> str:
+    text = (_REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+    start = text.index("\n## Unreleased\n")
+    end = text.index("\n## ", start + 1)
+    return text[start:end]
+
+
+def test_docs_say_only_another_place_keeps_a_description_s_skill_md():
+    # Saying where SKILL.md is does not keep it: the skill's own place is still
+    # renamed. Only another place keeps the bare SKILL.md.
+    for description, renamed in (
+        ("Reads SKILL.md in the skill directory and reports errors.", True),
+        ("Reads SKILL.md in ./release-review and reports errors.", True),
+        ("Reads SKILL.md at ./pdf-tools and reports errors.", False),
+    ):
+        (case,) = generate_dataset._generate_simple(_skill(description=description))
+        assert ("my SKILL.md" in case["question"]) is renamed, case["question"]
+
+    sources = {
+        "docs/eval-datasets.mdx": (_REPO / "docs" / "eval-datasets.mdx").read_text(encoding="utf-8"),
+        "CHANGELOG.md Unreleased": _unreleased_changelog(),
+        "_template_task": generate_dataset._template_task.__doc__ or "",
+    }
+    for where, text in sources.items():
+        text = " ".join(text.split())
+        assert "without saying where" not in text, where
+        rule = text.find("without naming another place for it (such as ")
+        assert rule >= 0, where
+        assert "at ./pdf-tools" in text[rule : rule + 70], (where, text[rule : rule + 70])
+
+
 def test_template_prompt_is_generic_when_the_description_names_the_skill_directory():
     skill = _skill(description="Keeps skills/release-review/SKILL.md in sync with the docs")
 

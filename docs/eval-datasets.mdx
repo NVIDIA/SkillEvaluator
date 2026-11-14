@@ -103,10 +103,10 @@ script, or used the skill, cannot be met by the baseline and inflates lift.
 [How standard grading judges a trial](/skills/skillevaluator/tier3-live-evaluation#how-standard-grading-judges-a-trial)).
 Template cases from `create-eval-dataset` are outcome-only; when the skill's
 description reads, opens, loads, consults or follows a `SKILL.md` without
-saying where it is, the template prompt calls it `my SKILL.md`. A description
-that only names `SKILL.md` another way, such as "validates `SKILL.md`
-frontmatter", keeps it. `create-eval-dataset`'s LLM prompts ask for outcome
-checks. It prints a warning for each generated
+naming another place for it (such as `at ./pdf-tools`), the template prompt
+calls it `my SKILL.md`. A description that only names `SKILL.md` another way,
+such as "validates `SKILL.md` frontmatter", keeps it. `create-eval-dataset`'s
+LLM prompts ask for outcome checks. It prints a warning for each generated
 case that still grades skill use, and the autopilot starter case leaves such
 text out. `tier3 validate` warns when a prompt points at `skills/<name>`,
 `<name>/SKILL.md`, reading or following `SKILL.md`, the named skill, or one of

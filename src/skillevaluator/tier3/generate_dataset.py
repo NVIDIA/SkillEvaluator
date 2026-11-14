@@ -375,9 +375,10 @@ def _template_task(skill: dict[str, Any]) -> tuple[str, str | None]:
     """The task template prompts ask for, and the outcome their graded text quotes.
 
     Both come from the description. When it reads, opens, loads, consults or
-    follows a SKILL.md without saying where it is, as a prompt `tier3 validate`
-    flags would, each bare SKILL.md in it becomes "my SKILL.md", so the prompt
-    names the user's file rather than the skill's. A description that only
+    follows a SKILL.md without naming another place for it (such as "at
+    ./pdf-tools"), as a prompt `tier3 validate` flags would, each bare SKILL.md
+    in it becomes "my SKILL.md", so the prompt names the user's file rather
+    than the skill's. A description that only
     names SKILL.md another way ("validates SKILL.md frontmatter", "SKILL.md
     files") keeps it. A description that still points at the skill's files
     (skills/<name>, <name>/SKILL.md) gives a generic task. The outcome is None,

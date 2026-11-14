@@ -1778,6 +1778,40 @@ def test_sed_replacement_value_spliced_after_the_quote_stays_masked(
     assert _BASIC_PASSWORD not in json.dumps(result)
 
 
+@pytest.mark.parametrize("copy", ["template", "eval_core"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            f"sed -i 's/TOKEN=.*/export {'x' * 300} TOKEN='\"{_BASIC_PASSWORD}\"'/' /srv/app/env.sh",
+            id="long-replacement",
+        ),
+        pytest.param(
+            f"sed -i 's/TOKEN=.*{'x' * 300}/export TOKEN='\"{_BASIC_PASSWORD}\"'/' /srv/app/env.sh",
+            id="long-pattern",
+        ),
+        pytest.param(
+            f"sed -i 's/password=.*/{'x' * 300} password='\"{_BASIC_PASSWORD}\"'/' /srv/app/app.ini",
+            id="long-replacement-before-the-name",
+        ),
+    ],
+)
+def test_a_value_spliced_after_the_quote_of_a_long_sed_expression_stays_masked(copy: str, text: str) -> None:
+    # Judge evidence is masked with no 2,000-character cut. The parts of a sed
+    # expression are read up to 256 characters, and a credential name past
+    # them is read as it is when no sed expression is read.
+    mask = (
+        eval_template._redact_judge_evidence
+        if copy == "template"
+        else eval_core_checks._mask_finding_evidence_credentials
+    )
+
+    masked = mask(text)
+
+    assert "<redacted>" in masked
+    assert _BASIC_PASSWORD not in masked
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [

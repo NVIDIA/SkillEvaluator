@@ -3877,15 +3877,19 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
     # Where the sed expression ends whose pattern or replacement starts the
     # name whose value was masked last (0: that name starts neither).
     sed_end = 0
+    # Where the last value read for a name that starts no sed pattern or
+    # replacement ends.
+    plain_end = 0
     for match, name_sed_end in _assignment_name_matches(text):
         name, name_quote, separator = match.group(1, 2, 3)
         # A name inside a masked value is skipped, unless it starts a sed
         # pattern or replacement, or the value is that of a name in a sed
-        # expression, and the masked text ends inside that expression (see
-        # below).
+        # expression, and the masked text ends inside that expression, or it
+        # starts no sed pattern or replacement and no value read for such a
+        # name holds it, as when no sed expression is read (see below).
         overlapped = match.start() < pos
         if (
-            (overlapped and pos >= (name_sed_end or sed_end))
+            (overlapped and pos >= (name_sed_end or sed_end) and (name_sed_end or match.start() < plain_end))
             or not _FINDING_EVIDENCE_CREDENTIAL_NAME_RE.search(name)
             or (
                 _FINDING_EVIDENCE_LOCATION_NAME_RE.search(name) is not None
@@ -3962,6 +3966,8 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
             value = _assignment_value_match(text, start)
         if value is None:
             continue
+        if not name_sed_end:
+            plain_end = value.end()
         if overlapped:
             # The value of a name in the sed pattern ran over this name, which
             # starts the replacement: in a shell command string a value is one
@@ -3970,10 +3976,12 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
             # So it does for any other credential name inside the value of a
             # name in a sed expression, whose own value may run past it, as
             # in "s/TOKEN=.*/export TOKEN='"NEW"'/", where the pattern name's
-            # value ends at the quote before NEW. A name is read again only
+            # value ends at the quote before NEW. Such a name is read again
             # while the masked text ends inside its sed expression, whose
-            # parts are read up to 256 characters, so a long masked value is
-            # not read again for each name in it.
+            # parts are read up to 256 characters, and a name that starts no
+            # sed pattern or replacement is read as it is when no sed
+            # expression is read. So a long masked value is not read again
+            # for each name in it.
             pos = max(pos, value.end())
             continue
         parts.append(text[pos : value.start()])

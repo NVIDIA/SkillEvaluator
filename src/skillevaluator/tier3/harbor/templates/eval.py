@@ -677,6 +677,8 @@ JUDGE_REASONING_EFFORT = "medium"
 REASONING_MAX_COMPLETION_TOKENS = 32768
 ANTHROPIC_REFUSAL_FALLBACK_MODEL = "claude-opus-4-8"
 ANTHROPIC_SERVER_SIDE_FALLBACK_BETA = "server-side-fallback-2026-07-01"
+ANTHROPIC_REFUSAL_FALLBACK_MODEL_ENV = "SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL"
+_REFUSAL_FALLBACK_DISABLED_VALUES = frozenset({"none", "off", "disabled", "false", "0"})
 _ANTHROPIC_DNS_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 _ANTHROPIC_INTERNAL_LABEL_RE = re.compile(r"^[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?$")
 _ANTHROPIC_IPV6_ZONE_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
@@ -969,6 +971,21 @@ def _strict_judge_replies():
         return _judge_retry_policy() == "strict"
     except ValueError:
         return True
+
+
+def _refusal_fallback_target(model):
+    """Return the refusal fallback target for ``model``, or None for no fallback.
+
+    SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL replaces the built-in target; ``none``,
+    ``off``, ``disabled``, ``false`` or ``0`` turns it off. An empty value counts
+    as unset, and a target equal to ``model`` is never sent. Mirrors
+    ``provider_config.anthropic_refusal_fallback_model``.
+    """
+    value = os.environ.get(ANTHROPIC_REFUSAL_FALLBACK_MODEL_ENV, "").strip()
+    if value.casefold() in _REFUSAL_FALLBACK_DISABLED_VALUES:
+        return None
+    target = value or ANTHROPIC_REFUSAL_FALLBACK_MODEL
+    return None if target == str(model or "").strip() else target
 
 
 def _builtin_refusal_fallback_allowed():
@@ -1953,9 +1970,11 @@ def _call_anthropic(prompt, model, max_tokens, temperature, response_schema=None
     # Server-side fallback (beta, native Claude API only): a safety-classifier
     # refusal is retried on the fallback model within the same call.
     server_side_fallback = (
-        _is_claude_5_5_or_later(model)
+        _refusal_fallback_target(model)
+        if _is_claude_5_5_or_later(model)
         and urlparse(target_url).hostname == "api.anthropic.com"
         and _builtin_refusal_fallback_allowed()
+        else None
     )
 
     def _build_request(include_schema):
@@ -1978,7 +1997,7 @@ def _call_anthropic(prompt, model, max_tokens, temperature, response_schema=None
             "anthropic-version": "2023-06-01",
         }
         if server_side_fallback:
-            payload["fallbacks"] = [{"model": ANTHROPIC_REFUSAL_FALLBACK_MODEL}]
+            payload["fallbacks"] = [{"model": server_side_fallback}]
             headers["anthropic-beta"] = ANTHROPIC_SERVER_SIDE_FALLBACK_BETA
         return urllib.request.Request(target_url, data=json.dumps(payload).encode(), headers=headers)
 
@@ -2076,12 +2095,25 @@ def _classify_bedrock_retry_error(error):
     return is_network, type_name, None
 
 
+_BEDROCK_ANTHROPIC_PREFIX_RE = re.compile(r"(?:(?:[a-z]{2}|global)\.)?anthropic\.")
+
+
 def _bedrock_refusal_fallback_model(model):
-    """Return Opus 4.8 in the same Bedrock geography as a Claude 5.5 or later model, else None."""
-    prefix = re.match(r"(?:(?:[a-z]{2}|global)\.)?anthropic\.", str(model or ""))
+    """Return the Bedrock refusal fallback ID for a Claude 5.5 or later model, else None.
+
+    A bare name such as ``claude-opus-4-8`` gets the request model's geography
+    prefix. A value that is already a Bedrock ID (``us.anthropic.``,
+    ``global.anthropic.``, ``anthropic.``) is used as given.
+    """
+    prefix = _BEDROCK_ANTHROPIC_PREFIX_RE.match(str(model or ""))
     if prefix is None or not _is_claude_5_5_or_later(model):
         return None
-    return prefix.group(0) + ANTHROPIC_REFUSAL_FALLBACK_MODEL
+    target = _refusal_fallback_target(model)
+    if not target:
+        return None
+    bedrock_target = target if _BEDROCK_ANTHROPIC_PREFIX_RE.match(target) else prefix.group(0) + target
+    # Compare the resolved Bedrock ID, not the configured leaf name, with the request model.
+    return None if bedrock_target == str(model).strip() else bedrock_target
 
 
 def _call_bedrock(prompt, model, max_tokens, temperature, timeout=90, provenance=None):
@@ -2843,15 +2875,175 @@ def _judge_retry_feedback(problem):
     )
 
 
-def _redact_judge_evidence(text):
-    """Mask credentials in a judge prompt, reply, or problem before it is saved."""
+# RAGAS writes its input into the prompt as JSON, and tool-call arguments are
+# JSON, so a line break or tab in that text arrives as the two characters "\n",
+# "\r" or "\t". A header, flag or key that starts a line there follows the
+# letter of the escape, where patterns that need a line start, a space or a
+# word boundary before it do not match. So once the whole text is masked, the
+# text between these escapes is masked again as lines of their own.
+_JUDGE_EVIDENCE_ESCAPE_RE = re.compile(r"(\\[nrt])")
+
+
+def _mask_judge_evidence_text(text):
+    """Mask credentials in *text* read as one piece."""
     # Share finding credential semantics without imposing the finding scanner's
     # 2,000-character input budget on the longer judge prompt and reply budgets.
-    redacted = _shared_checks._mask_finding_evidence_credentials(str(text), preserve_header_format=True)
+    redacted = _shared_checks._mask_finding_evidence_credentials(text, preserve_header_format=True)
     redacted = _redact_configured_credentials(_redact_evidence_text(redacted))
     for pattern in _SECRET_PATTERNS:
         redacted = pattern.sub("<redacted>", redacted)
     return redacted
+
+
+def _mask_judge_evidence_line(text):
+    """Mask credentials in the text between two escapes, which is not trimmed."""
+    redacted = _shared_checks._mask_finding_evidence_credentials(text, preserve_header_format=True)
+    redacted = redact_secrets_in_log_line(redacted)
+    for pattern in _SECRET_PATTERNS:
+        redacted = pattern.sub("<redacted>", redacted)
+    return redacted
+
+
+# The markers the line pass writes in place of a value. The JWT pattern writes
+# "jwt-" before its marker, and markers next to each other are read as one.
+_JUDGE_EVIDENCE_LINE_MARKERS_RE = re.compile(
+    r"(?:(?:jwt-)?<redacted>|" + re.escape(_shared_checks._FINDING_EVIDENCE_PRIVATE_KEY_MARKER) + r")+"
+)
+# An unquoted value ends at whitespace, a quote, a backtick or a shell
+# operator, unless a backslash escapes it.
+_JUDGE_EVIDENCE_VALUE_END_RE = re.compile(r"[\s'\"`;|&()<>]")
+# The text after a marker runs to the next escape or marker.
+_JUDGE_EVIDENCE_SITE_END_RE = re.compile(
+    _JUDGE_EVIDENCE_ESCAPE_RE.pattern + "|" + _JUDGE_EVIDENCE_LINE_MARKERS_RE.pattern
+)
+
+
+def _judge_evidence_line_value_spans(text, masked):
+    """Return *text* as the line pass read it, and the spans of the values it replaced there to write *masked*.
+
+    The line pass only replaces values with markers, so the text between two
+    markers is found in *text* in order, and what lies between is a value.
+    """
+    # The shared masker reads the text without its shell line continuations.
+    text = _shared_checks._LINE_CONTINUATION_RE.sub("", text)
+    kept = _JUDGE_EVIDENCE_LINE_MARKERS_RE.split(masked)
+    start = len(kept[0])
+    end = len(text) - len(kept[-1])
+    if len(kept) == 1 or start > end or not text.startswith(kept[0]) or not text.endswith(kept[-1]):
+        return text, []
+    spans = []
+    for between in kept[1:-1]:
+        found = text.find(between, start, end)
+        if found < 0:
+            return text, spans
+        spans.append((start, found))
+        start = found + len(between)
+    spans.append((start, end))
+    return text, spans
+
+
+def _judge_evidence_value_sites(lines, mask_line):
+    """Map the text that each of *lines* can leave after a marker to the spans of the values to mask in it.
+
+    When an unquoted value that ends the line before reads on into a line,
+    it stops at whitespace, a quote, a backtick or a shell operator. So the
+    text left after its marker is the rest of the line from one of those
+    characters, up to the next value that is masked there, or to the line end.
+    """
+    sites = {}
+    for line in dict.fromkeys(lines):
+        masked = mask_line(line) if line else line
+        if masked == line:
+            continue
+        line, spans = _judge_evidence_line_value_spans(line, masked)
+        # A backslash that ends a value is left in place, as it is usually
+        # half of an escaped backslash: a line break escaped twice is "\\n",
+        # and the line ends before its "\n".
+        spans = [(start, start + len(line[start:end].rstrip("\\"))) for start, end in spans]
+        spans = [
+            (start, end)
+            for start, end in spans
+            if end > start and "<redacted" not in line[start:end] and _ERROR_REDACTION_MARKER not in line[start:end]
+        ]
+        if not spans:
+            continue
+        # The first place where each kind of character could end an unquoted
+        # value that read on into the line, with and without a backslash
+        # before it.
+        stops = {}
+        for found in _JUDGE_EVIDENCE_VALUE_END_RE.finditer(line, 0, spans[-1][0]):
+            char = found.group()
+            index = found.start()
+            stops.setdefault((" " if char.isspace() else char, line[index - 1 : index] == "\\"), index)
+        for stop in {0, *stops.values()}:
+            following = [(start - stop, end - stop) for start, end in spans if start >= stop]
+            if not following:
+                continue
+            rest = line[stop:]
+            if len(following) > 1:
+                sites.setdefault(rest[: following[1][0]], set()).add(following[0])
+            sites.setdefault(rest, set()).update(following)
+    return sites
+
+
+def _mask_judge_evidence_value_sites(text, sites):
+    """Mask the values of each text in *sites* that *text* holds between a marker and the next escape or marker."""
+    spans = []
+    after = None
+    for found in _JUDGE_EVIDENCE_SITE_END_RE.finditer(text):
+        if after is not None:
+            spans.extend((after + start, after + end) for start, end in sites.get(text[after : found.start()], ()))
+        after = None if found.group(1) else found.end()
+    if after is not None:
+        spans.extend((after + start, after + end) for start, end in sites.get(text[after:], ()))
+    if not spans:
+        return text
+    merged = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    parts = []
+    pos = 0
+    for start, end in merged:
+        parts.extend((text[pos:start], "<redacted>"))
+        pos = end
+    parts.append(text[pos:])
+    return "".join(parts)
+
+
+def _redact_judge_evidence(text):
+    """Mask credentials in a judge prompt, reply, or problem before it is saved."""
+    text = str(text)
+    # The whole text is masked first, so a form that runs over an escape (a
+    # private key block, a continued or quoted value, a value that holds "\n"
+    # or "\u00e4") is masked whole before the text is split at the escapes.
+    redacted = _mask_judge_evidence_text(text)
+    masked_lines = {}
+
+    def mask_line(line):
+        if line not in masked_lines:
+            masked_lines[line] = _mask_judge_evidence_line(line)
+        return masked_lines[line]
+
+    parts = _JUDGE_EVIDENCE_ESCAPE_RE.split(redacted)
+    if len(parts) > 1:
+        # Text and escapes alternate.
+        parts[::2] = [mask_line(part) if part else part for part in parts[::2]]
+        redacted = "".join(parts)
+    lines = _JUDGE_EVIDENCE_ESCAPE_RE.split(text)[::2]
+    if len(lines) == 1:
+        return redacted
+    # An unquoted value at the end of a line reads on through the escape, so
+    # the whole pass can mask the name that starts the next line with it:
+    # "--password A\n--token B" becomes "--password <redacted> B", where B no
+    # longer follows a name. The lines of the original text still hold the
+    # name, so a value the line pass masks on such a line is masked where the
+    # whole pass left it: in the rest of that line, which follows a marker.
+    # Other copies of the value are left as the whole pass left them.
+    sites = _judge_evidence_value_sites(lines[1:], mask_line)
+    return _mask_judge_evidence_value_sites(redacted, sites) if sites else redacted
 
 
 def _verifier_output_dir():
@@ -3270,14 +3462,20 @@ def _ragas_request_text(body):
 
 
 def _ragas_reply_text(body):
-    """Return the judge's answer in one chat-completions reply: its text, or the tool-call arguments RAGAS parses."""
+    """Return the judge's answer in one chat-completions reply: its text, or the tool-call arguments RAGAS parses.
+
+    A reply with neither, such as a refusal or a content-filter stop, is
+    returned whole, so the refusal or the finish reason is kept.
+    """
     try:
         message = json.loads(body)["choices"][0]["message"]
-        if message.get("content") or not message.get("tool_calls"):
-            return str(message.get("content") or "")
-        return "\n".join(str(call["function"]["arguments"]) for call in message["tool_calls"])
+        if message.get("content"):
+            return str(message["content"])
+        if message.get("tool_calls"):
+            return "\n".join(str(call["function"]["arguments"]) for call in message["tool_calls"])
     except (ValueError, LookupError, TypeError, AttributeError):
-        return body.decode("utf-8", "replace")
+        pass
+    return body.decode("utf-8", "replace")
 
 
 def _record_ragas_exchange(response, problem=None):

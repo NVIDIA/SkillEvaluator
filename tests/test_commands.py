@@ -506,6 +506,13 @@ def test_validate_json_names_a_clean_single_skill_and_records_the_evaluator(
     repo = tmp_path / "repo"
     skill = repo / "skills" / "simple"
     shutil.copytree(FIXTURE, skill)
+    manifest = skill / "SKILL.md"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            "description: Summarize", "description: Use when notes need action items. Summarize"
+        ),
+        encoding="utf-8",
+    )
     if in_git_checkout:
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
         subprocess.run(
@@ -665,8 +672,49 @@ def test_validate_default_in_skill_reports_refuses_unowned_sibling(
 
     assert result.exit_code != 0
     assert "safely reserve default report output" in result.output.lower()
+    assert "marker is missing, invalid, or bound to another path" in " ".join(result.output.split())
+    assert "-o/--output-dir" in result.output
     assert authored.read_text(encoding="utf-8") == "author-owned sentinel\n"
     assert list(sibling.iterdir()) == [authored]
+
+
+def test_validate_default_reports_under_changing_ownership_keys_end_with_an_actionable_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A new ownership key per run (a fresh HOME, a new container) cannot reuse earlier default folders."""
+    from skillevaluator.tier3.output_provenance import is_generated_output_root
+
+    workspace = tmp_path / "workspace"
+    shutil.copytree(FIXTURE, workspace / "simple")
+    monkeypatch.chdir(workspace)
+    command = ["validate", "--no-tier3", "simple", "--no-llm", "--no-tier2", "--checks", "schema", "--report", "json"]
+
+    def run_with_key(name: str, *extra: str):
+        state = tmp_path / name
+        state.mkdir(mode=0o700)
+        monkeypatch.setenv("SKILLEVALUATOR_OUTPUT_PROVENANCE_KEY_FILE", str(state / "key"))
+        return CliRunner().invoke(cli, [*command, *extra])
+
+    first = run_with_key("first-home")
+    assert first.exit_code == 0, first.output
+    assert is_generated_output_root(workspace / "reports")
+
+    second = run_with_key("second-home")
+    assert second.exit_code == 0, second.output
+    assert is_generated_output_root(workspace / "simple-reports")
+    kept = {path: path.read_bytes() for path in workspace.rglob("*") if path.is_file()}
+
+    third = run_with_key("third-home")
+    assert third.exit_code != 0
+    message = " ".join(third.output.split())
+    assert "safely reserve default report output directory" in message.lower()
+    assert "Choose a report directory with -o/--output-dir." in message
+    assert {path: path.read_bytes() for path in workspace.rglob("*") if path.is_file()} == kept
+
+    chosen = run_with_key("fourth-home", "-o", str(tmp_path / "chosen-reports"))
+    assert chosen.exit_code == 0, chosen.output
+    assert (tmp_path / "chosen-reports" / "BENCHMARK.md").is_file()
 
 
 def test_validate_rejects_case_alias_output_inside_publication_target(

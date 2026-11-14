@@ -1813,6 +1813,9 @@ def test_live_evaluation_docs_say_a_stream_can_still_send_refused_output_later()
     # The guide's description of the rich view states the same limit as the
     # CHANGELOG entry above, instead of saying refused frames can never be
     # drawn over later output. The paragraph is found by its opening words.
+    # The view drops its copy when every run ends, so the sentence is not
+    # tied to the drawing failure described just before it: after a failure
+    # there is no final table.
     lead = "In a terminal, `--progress auto` uses the `rich` view"
     guide = (Path(__file__).resolve().parents[1] / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
     blocks = [" ".join(block.split()) for block in guide.split("\n\n")]
@@ -1821,9 +1824,11 @@ def test_live_evaluation_docs_say_a_stream_can_still_send_refused_output_later()
     assert len(paragraphs) == 1
     paragraph = paragraphs[0]
     assert "never drawn over" not in paragraph
+    assert "The view then drops" not in paragraph
     assert (
-        "The view then drops its own copy of output the terminal still refuses, such as the final table, "
-        "so it does not draw that output over lines printed since." in paragraph
+        "When any run ends, whether or not drawing failed, the view drops its own copy of output the terminal "
+        "still refuses, such as a refused final table, so it does not draw that output over lines printed since."
+        in paragraph
     )
     assert (
         "A stream that keeps what the terminal refused, as standard error does, can still send it later, "

@@ -170,3 +170,20 @@ def test_component_rule_replaces_the_generic_delivery_finding(tmp_path: Path):
     codex = next(p for p in load_profiles() if p["harness"] == "codex")
     ids = [f["id"] for f in evaluate_plugin(codex, plugin_facts(tmp_path)).findings]
     assert "CX-PLUGIN-AGENT-HOOKS" in ids and "CX-PLUGIN-HOOKS" not in ids
+
+
+def _quoted_skill(tmp_path: Path) -> Path:
+    skill = tmp_path / ".claude" / "skills" / "demo"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        '---\nname: demo\ndescription: Use when testing "quoted" text.\n---\nBody.\n', encoding="utf-8"
+    )
+    return skill
+
+
+def test_findings_carry_their_rule_confidence(tmp_path: Path):
+    out = tmp_path / "h.json"
+    CliRunner().invoke(cli, ["harness-check", str(_quoted_skill(tmp_path)), "--json", str(out)])
+    block = json.loads(out.read_text(encoding="utf-8"))["harness_compatibility"]
+    findings = [f for rows in block.values() for row in rows for f in row["findings"]]
+    assert findings and all(f.get("confidence") for f in findings)

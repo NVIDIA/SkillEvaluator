@@ -709,7 +709,7 @@ def evaluate_profile(
         if expression != "always" and not _Rule.evaluate(expression, names):
             continue
         finding = {"id": rule["id"], "effect": rule["effect"], "message": _fill(rule["message"], facts)}
-        for key in ("fix", "versions", "outcome"):
+        for key in ("fix", "versions", "outcome", "confidence"):
             if rule.get(key):
                 finding[key] = _fill(rule[key], facts)
         findings.append(finding)

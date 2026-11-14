@@ -145,6 +145,11 @@ def _detail_grid(rows: list[dict[str, Any]], verbose: bool) -> Table | None:
                     (f"  [{finding['id']}]", MUTED),
                     *([("\n→ ", GREEN), (finding["fix"], MUTED)] if finding.get("fix") else []),
                     *([("\n  applies: ", MUTED), (finding["versions"], MUTED)] if finding.get("versions") else []),
+                    *(
+                        [("\n  confidence: ", MUTED), (finding["confidence"], MUTED)]
+                        if verbose and finding.get("confidence")
+                        else []
+                    ),
                 ),
             )
     return grid if grid.row_count else None

@@ -1393,7 +1393,8 @@ the case is judged and scored normally.
   token and `Cookie` header values, and credential flag values (`--token`,
   `--password`, `curl -u user:password`) are masked, also at the start of a
   line in JSON-escaped text such as RAGAS prompts, where a line break is the
-  two characters `\n`. Long prompts and replies are shortened. The prompts
+  two characters `\n`, and inside JSON-escaped quotes (`-u \"user:password\"`),
+  as in tool-call arguments. Long prompts and replies are shortened. The prompts
   contain the task question, expected answer, and agent evidence. Pass
   `--harbor-keep-jobs` to keep the Harbor trial directories that hold this
   file.

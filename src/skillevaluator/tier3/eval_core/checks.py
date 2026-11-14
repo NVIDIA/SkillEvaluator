@@ -3354,10 +3354,16 @@ _FINDING_EVIDENCE_COOKIE_HEADER_RE = re.compile(
 # value, although its marker holds spaces. A word never starts at a shell
 # operator: in "git config --get github.token | curl ..." or "gh auth login
 # --with-token < token.txt" the flag or key has no value on the command line.
+# A double-quoted value whose quotes are JSON-escaped (\"VALUE\"), as a shell
+# string reads in tool-call arguments and other JSON text, ends at the escaped
+# closing quote or the end of the line.
+_FINDING_EVIDENCE_ESCAPED_QUOTED_VALUE = r"\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?"
 _FINDING_EVIDENCE_FLAG_VALUE = (
     "(?:"
     + _FINDING_EVIDENCE_PRIVATE_KEY_MARKER
-    + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?|(?![|&;<>])(?:\\.|[^\s'\"`\\])+)"
+    + "|"
+    + _FINDING_EVIDENCE_ESCAPED_QUOTED_VALUE
+    + r"|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?|(?![|&;<>])(?:\\.|[^\s'\"`\\])+)"
 )
 # Any long flag whose name holds a credential word ("--password", "--db-password",
 # "--client-secret", "--github-token", "--oauth2-bearer", "--cookie"), and the
@@ -3385,14 +3391,16 @@ _FINDING_EVIDENCE_FLAG_VALUE_RE = re.compile(_FINDING_EVIDENCE_FLAG_VALUE)
 # "://" is a URL ("pip install -U git+https://..."), whose userinfo is already
 # masked, one whose first colon starts a "/" path is a remote path ("rsync
 # -u host:/data"), and a "+" with a "%" conversion before the first colon is
-# a date format ("date -u +%H:%M:%S"); "-u +admin:VALUE" is still masked.
-_FINDING_EVIDENCE_DATE_FORMAT = r"[\"']?\+[^\s'\"`:]*%"
+# a date format ("date -u +%H:%M:%S"); "-u +admin:VALUE" is still masked. A
+# quoted value may have JSON-escaped quotes (-u \"user:password\").
+_FINDING_EVIDENCE_DATE_FORMAT = r"(?:\\?[\"'])?\+[^\s'\"`:]*%"
 _FINDING_EVIDENCE_DATE_FORMAT_RE = re.compile(_FINDING_EVIDENCE_DATE_FORMAT)
 _FINDING_EVIDENCE_USER_FLAG_RE = re.compile(
     r"((?<![^\s'\"])(?:(?:-[A-Za-z]{0,8}?u|-U|--user|--proxy-user)(?:[ \t]+|=)"
     r"|-[A-Za-z]{0,8}?u(?=[^\s'\"`:=-][^\s'\"`:]*:)))"
-    r"(?!" + _FINDING_EVIDENCE_DATE_FORMAT + r")(?![\"']?[^\s'\"`]*://)(?![\"']?[^\s'\"`:]*:/)"
-    r"(?:\"(?:\\.|[^\"\\\r\n:])*:(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n:]*:[^'\r\n]*'?|[^\s'\"`:]*:[^\s'\"`]*)"
+    r"(?!" + _FINDING_EVIDENCE_DATE_FORMAT + r")(?!(?:\\?[\"'])?[^\s'\"`]*://)(?!(?:\\?[\"'])?[^\s'\"`:]*:/)"
+    r"(?:\\\"(?:[^\"\\\r\n:]|\\(?!\"))*:(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?"
+    r"|\"(?:\\.|[^\"\\\r\n:])*:(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n:]*:[^'\r\n]*'?|[^\s'\"`:]*:[^\s'\"`]*)"
 )
 # "-p" is a password after a login subcommand ("docker login -u bot -p VALUE",
 # also attached as "-pVALUE"; "az login -u ID -p VALUE"; "helm registry login
@@ -3412,7 +3420,9 @@ _FINDING_EVIDENCE_SSHPASS_RE = re.compile(r"(\bsshpass[ \t]+-p[ \t]*)" + _FINDIN
 _FINDING_EVIDENCE_MYSQL_PASSWORD_RE = re.compile(
     r"((?<![^\s;&|('\"`])(?:[^\s'\"`;&|()<>]{0,128}/s?bin/)?"
     r"(?:mysql|mysqldump|mysqladmin|mysqlimport|mysqlshow|mysqlcheck|mariadb|mariadb-dump)(?=[ \t])"
-    r"[^|;&\r\n]{0,256}?[ \t]-p)(?!ath\b|erm\b|rint|rune\b)(?:\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?|[^\s'\"`|;&]+)"
+    r"[^|;&\r\n]{0,256}?[ \t]-p)(?!ath\b|erm\b|rint|rune\b)(?:"
+    + _FINDING_EVIDENCE_ESCAPED_QUOTED_VALUE
+    + r"|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?|[^\s'\"`|;&]+)"
 )
 # "aws configure set aws_secret_access_key VALUE" and a .netrc entry
 # ("machine HOST login USER password VALUE"). A .netrc entry may span lines,
@@ -3451,7 +3461,9 @@ _FINDING_EVIDENCE_NETRC_PASSWORD_RE = re.compile(
     + _FINDING_EVIDENCE_NETRC_SEPARATOR
     + "password"
     + _FINDING_EVIDENCE_NETRC_SEPARATOR
-    + r")(?:\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?|"
+    + r")(?:"
+    + _FINDING_EVIDENCE_ESCAPED_QUOTED_VALUE
+    + r"|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?|"
     + _FINDING_EVIDENCE_NETRC_WORD
     + r"(?:[ \t]+(?!(?:machine|login|account|password|macdef|default)\b)"
     + _FINDING_EVIDENCE_NETRC_VALUE_WORD
@@ -3470,19 +3482,47 @@ _FINDING_EVIDENCE_COOKIE_FLAG_RE = re.compile(r"((?<![^\s'\"])-b[ \t]+)(?=[^\s]*
 # "-path", "-perm", "-print" and "-prune" are kept. An attached
 # "-uUSER:PASSWORD" element is masked by the -u rule below. Each element may
 # sit on its own line, as a formatter writes a long list, so up to 64 spaces
-# and line breaks may follow the comma.
+# and line breaks may follow the comma. In JSON text, such as tool-call
+# arguments, the quotes are escaped (\"--password\", \"VALUE\") and a line
+# break is the two characters "\n".
+_FINDING_EVIDENCE_ARGV_QUOTE = r"\\?[\"']"
+_FINDING_EVIDENCE_ARGV_SPACE = r"(?:\s|\\[nrt]){0,64}"
 _FINDING_EVIDENCE_ARGV_FLAG_RE = re.compile(
-    r"([\"'])(" + _FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME + r"|-[pub])\1[ \t]*,\s{0,64}(?=[\"'][^-\"'])",
+    r"("
+    + _FINDING_EVIDENCE_ARGV_QUOTE
+    + r")("
+    + _FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME
+    + r"|-[pub])\1[ \t]*,"
+    + _FINDING_EVIDENCE_ARGV_SPACE
+    + r"(?="
+    + _FINDING_EVIDENCE_ARGV_QUOTE
+    + r"[^-\"'])",
     re.IGNORECASE,
 )
-_FINDING_EVIDENCE_ARGV_VALUE_RE = re.compile(r"\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?")
-_FINDING_EVIDENCE_ARGV_LOGIN_RE = re.compile(r"[\"']login[\"'][ \t]*,")
-_FINDING_EVIDENCE_ARGV_SSHPASS_RE = re.compile(r"[\"'](?:[^\s'\"]{0,128}/)?sshpass[\"'][ \t]*,\s{0,64}$")
-_FINDING_EVIDENCE_ARGV_MYSQL_RE = re.compile(
-    r"[\"'](?:[^\s'\"]{0,128}/s?bin/)?"
-    r"(?:mysql|mysqldump|mysqladmin|mysqlimport|mysqlshow|mysqlcheck|mariadb|mariadb-dump)[\"'][ \t]*,"
+_FINDING_EVIDENCE_ARGV_VALUE_RE = re.compile(
+    _FINDING_EVIDENCE_ESCAPED_QUOTED_VALUE + r"|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?"
 )
-_FINDING_EVIDENCE_ARGV_ATTACHED_PASSWORD_RE = re.compile(r"([\"'])-p(?!ath\b|erm\b|rint|rune\b)([^\"'\r\n]+)\1")
+_FINDING_EVIDENCE_ARGV_LOGIN_RE = re.compile(
+    _FINDING_EVIDENCE_ARGV_QUOTE + "login" + _FINDING_EVIDENCE_ARGV_QUOTE + r"[ \t]*,"
+)
+_FINDING_EVIDENCE_ARGV_SSHPASS_RE = re.compile(
+    _FINDING_EVIDENCE_ARGV_QUOTE
+    + r"(?:[^\s'\"]{0,128}/)?sshpass"
+    + _FINDING_EVIDENCE_ARGV_QUOTE
+    + r"[ \t]*,"
+    + _FINDING_EVIDENCE_ARGV_SPACE
+    + "$"
+)
+_FINDING_EVIDENCE_ARGV_MYSQL_RE = re.compile(
+    _FINDING_EVIDENCE_ARGV_QUOTE
+    + r"(?:[^\s'\"]{0,128}/s?bin/)?"
+    + r"(?:mysql|mysqldump|mysqladmin|mysqlimport|mysqlshow|mysqlcheck|mariadb|mariadb-dump)"
+    + _FINDING_EVIDENCE_ARGV_QUOTE
+    + r"[ \t]*,"
+)
+_FINDING_EVIDENCE_ARGV_ATTACHED_PASSWORD_RE = re.compile(
+    "(" + _FINDING_EVIDENCE_ARGV_QUOTE + r")-p(?!ath\b|erm\b|rint|rune\b)([^\"'\r\n]+)\1"
+)
 # Bearer, Basic, Token and Digest stay visible after a credential name too
 # ("Authorization: Bearer <redacted>").
 _FINDING_EVIDENCE_AUTH_SCHEME = r"(?:(?:bearer|basic|token|digest)[ \t]+)?"

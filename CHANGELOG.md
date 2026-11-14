@@ -262,9 +262,14 @@ All notable changes to SkillEvaluator are documented in this file.
   (`--token`, `--password`, `-u user:password`, `--cookie`) and keys such as
   `sk-proj-...` that start a line in JSON-escaped text, as in RAGAS prompts and
   replies. A line break there is the two characters `\n`, and these values were
-  saved in clear after it or after an escaped tab (`\t`). A RAGAS `replied` entry
-  for a reply with no text and no tool call, such as a refusal or a
-  content-filter stop, now saves the whole reply body instead of an empty reply.
+  saved in clear after it or after an escaped tab (`\t`). Judge and security
+  finding evidence also masks a double-quoted `-u user:password`, MySQL `-p` or
+  `.netrc` password value, and the value in an argv list such as
+  `["tool", "--password", "..."]`, when JSON escapes the quotes (`\"...\"`), as
+  in the tool-call arguments every judge prompt holds; these were saved in clear.
+  A RAGAS `replied` entry for a reply with no text and no tool call, such as a
+  refusal or a content-filter stop, now saves the whole reply body instead of an
+  empty reply.
 - Code Risk Analysis reports Semgrep file-level parse errors as one partial-scan
   error that names up to 20 unparsed files, relative to the skill and with the
   line of the first error, instead of the first three truncated messages. The

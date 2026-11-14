@@ -1276,6 +1276,40 @@ def test_judge_evidence_masks_multi_line_tool_call_arguments() -> None:
         assert line not in redacted
 
 
+_QUOTED_SECRET = "Qx7Quoted" + "Secret9"
+
+
+# Tool-call arguments reach judge prompts as JSON, so a double-quoted shell
+# value or argv element arrives with escaped quotes (\"VALUE\"). Each is masked
+# there as in plain text, mid-line and at a JSON-escaped line start.
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(f'curl -u "admin:{_QUOTED_SECRET}" https://x', id="user-flag"),
+        pytest.param(f'curl --user="admin:{_QUOTED_SECRET}" https://x', id="user-flag-equals"),
+        pytest.param(f'curl --proxy-user "admin:{_QUOTED_SECRET}" https://x', id="proxy-user-flag"),
+        pytest.param(f'mysql -uroot -p"{_QUOTED_SECRET}" app', id="mysql-attached-password"),
+        pytest.param(f'machine db login bot password "{_QUOTED_SECRET}"', id="netrc-password"),
+        pytest.param(f'subprocess.run(["tool", "--password", "{_QUOTED_SECRET}"])', id="argv-password"),
+        pytest.param(f'subprocess.run(["curl", "-u", "admin:{_QUOTED_SECRET}", url])', id="argv-user"),
+        pytest.param(f'subprocess.run(["docker", "login", "-u", "bot", "-p", "{_QUOTED_SECRET}"])', id="argv-login"),
+        pytest.param(f'subprocess.run(["sshpass", "-p", "{_QUOTED_SECRET}", "ssh", "host"])', id="argv-sshpass"),
+        pytest.param(f'subprocess.run(["curl", "-b", "sid={_QUOTED_SECRET}", url])', id="argv-cookie"),
+        pytest.param(f'subprocess.run(["mysql", "-uroot", "-p{_QUOTED_SECRET}"])', id="argv-mysql-attached"),
+        pytest.param(f'subprocess.run([\n    "tool",\n    "--token",\n    "{_QUOTED_SECRET}",\n])', id="argv-per-line"),
+    ],
+)
+def test_judge_evidence_masks_json_escaped_quoted_values(text: str) -> None:
+    assert _QUOTED_SECRET not in eval_template._redact_judge_evidence(text)
+
+    for escaped in (json.dumps({"command": text}), json.dumps({"reply": f"ok\n{text}"})):
+        assert '\\"' in escaped
+        redacted = eval_template._redact_judge_evidence(escaped)
+
+        assert _QUOTED_SECRET not in redacted
+        assert "<redacted>" in redacted
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -1289,6 +1323,12 @@ def test_judge_evidence_masks_multi_line_tool_call_arguments() -> None:
             "Authorization is required.\npython -u script.py\n--token-limit 5\n\tcookie-jar ready\r\nC:\\new\\temp"
         ),
         json.dumps("caf\u00e9 --token-limit 5\t\u201cAuthorization is required\u201d\tpython -u script.py"),
+        # JSON-escaped quotes around a URL, a remote path, a date format and ordinary argv flags.
+        json.dumps('pip install -U "git+https://github.com/org/repo" && rsync -u "host:/data" . && date -u "+%H:%M"'),
+        json.dumps(
+            'subprocess.run(["mkdir", "-p", "out"]); ["ssh", "-p", "2222", "host"]; ["find", ".", "-path", "x"]'
+        ),
+        json.dumps('["date", "-u", "+%H:%M"]; ["pip", "install", "-U", "git+https://github.com/org/repo"]'),
     ],
 )
 def test_judge_evidence_keeps_ordinary_text(text: str) -> None:

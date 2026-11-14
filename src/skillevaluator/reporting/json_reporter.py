@@ -71,6 +71,9 @@ def _json_safe_benchmark_policy(value: object) -> dict[str, bool] | None:
     return policy or None
 
 
+_MAX_SEMGREP_UNPARSED_FILES = 1000
+
+
 def _tier1_scope_strings(value: object, field: str) -> list[str]:
     """Copy bounded scope evidence without narrowing its publication meaning.
 
@@ -429,6 +432,22 @@ class JSONReporter(ReporterBase):
         coverage = result.metadata.get("dependency_coverage")
         if isinstance(coverage, list):
             data["dependency_coverage"] = coverage
+
+        # Files Semgrep could not fully parse. The error message names at most 20;
+        # this keeps up to _MAX_SEMGREP_UNPARSED_FILES and counts the rest, so a
+        # report that was cut short says so instead of looking complete.
+        unparsed_files = result.metadata.get("semgrep_unparsed_files")
+        if isinstance(unparsed_files, list):
+            paths = [item for item in unparsed_files if isinstance(item, str) and 0 < len(item) <= 4096]
+            if paths:
+                data["semgrep_unparsed_files"] = paths[:_MAX_SEMGREP_UNPARSED_FILES]
+                # A report restored from JSON already carries the count of files it left out.
+                carried = result.metadata.get("semgrep_unparsed_files_omitted")
+                omitted = max(0, len(paths) - _MAX_SEMGREP_UNPARSED_FILES)
+                if type(carried) is int and carried > 0:
+                    omitted += carried
+                if omitted:
+                    data["semgrep_unparsed_files_omitted"] = omitted
 
         # Tier 1 SkillSpector file-role scoping: retained and suppressed issue
         # counts, and the raw versus applicable aggregate risk score.

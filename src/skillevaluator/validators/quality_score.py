@@ -27,7 +27,10 @@ from urllib.parse import unquote, urlsplit
 import yaml
 
 from skillevaluator.constants import (
+    EXECUTABLE_SCRIPT_PATTERNS,
     EXECUTABLE_SKILL_DIRS,
+    NODE_SCRIPT_PATTERNS,
+    PYTHON_SCRIPT_PATTERNS,
     QUALITY_CHARS_PER_TOKEN,
     QUALITY_DEFAULT_MIN_SCORE,
     QUALITY_EXCLUDED_DIRS,
@@ -270,7 +273,7 @@ class QualityScoreValidator(ValidatorBase):
     # -----------------------------------------------------------------
 
     @staticmethod
-    def _executable_files(skill_path: Path, patterns: tuple[str, ...] = ("*.py", "*.sh")) -> list[Path]:
+    def _executable_files(skill_path: Path, patterns: tuple[str, ...] = EXECUTABLE_SCRIPT_PATTERNS) -> list[Path]:
         files: list[Path] = []
         for dirname in EXECUTABLE_SKILL_DIRS:
             directory = skill_path / dirname
@@ -278,6 +281,18 @@ class QualityScoreValidator(ValidatorBase):
                 for pattern in patterns:
                     files.extend(sorted(directory.glob(pattern)))
         return files
+
+    @staticmethod
+    def _runs_only_node_scripts(script_files: list[Path]) -> bool:
+        """Whether every bundled script is a Node script.
+
+        ``run_script`` is the call the script checks look for in the instructions. It names a
+        runner this skill does not use when all its scripts are Node scripts, so such a skill is
+        not asked for it. Skills that also bundle Python or shell scripts keep the check.
+        """
+        return bool(script_files) and all(
+            any(script.match(pattern) for pattern in NODE_SCRIPT_PATTERNS) for script in script_files
+        )
 
     @staticmethod
     def _has_executable_directory(skill_path: Path) -> bool:
@@ -605,7 +620,9 @@ class QualityScoreValidator(ValidatorBase):
                 qs.has_scripts = True
                 qs.script_count = len(script_files)
                 if qs.script_count == 0:
-                    dim.deduct(10, "warning", "scripts/ or tools/ exists but contains no .py or .sh files")
+                    dim.deduct(
+                        10, "warning", "scripts/ or tools/ exists but contains no .py, .sh, .mjs, .cjs or .js files"
+                    )
             else:
                 dim.deduct(
                     25,
@@ -621,7 +638,7 @@ class QualityScoreValidator(ValidatorBase):
                     "No documented scripts in table format",
                     "Add '## Available Scripts' with table: | Script | Purpose | Arguments |",
                 )
-            if "run_script" not in content:
+            if "run_script" not in content and not self._runs_only_node_scripts(script_files):
                 dim.deduct(
                     10,
                     "warning",
@@ -795,7 +812,7 @@ class QualityScoreValidator(ValidatorBase):
 
         # Type-aware code quality
         if qs.skill_type in ("script-based", "hybrid"):
-            scripts = self._executable_files(skill_path, patterns=("*.py",))
+            scripts = self._executable_files(skill_path, patterns=PYTHON_SCRIPT_PATTERNS)
             self._check_code_error_handling(dim, scripts, error_handling["scripts"])
         elif qs.skill_type == "lib-based":
             lib_dir = QualityScoreValidator.find_lib_module(skill_path)

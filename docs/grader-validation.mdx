@@ -121,6 +121,13 @@ Scores at or above the metric threshold pass. Defaults are accuracy 0.8,
 goal accuracy 1.0, security/execution/efficiency/behavior 1.0, and overall 0.5
 (the Harbor pass threshold). Suite thresholds override defaults.
 
+Accuracy and Behavior judge prompts instruct the judge to check explicit
+final-answer formats against the entire final response. Correct values in tool
+output or references do not establish format compliance. This clarification
+does not add a critical-failure gate or establish improved semantic accuracy.
+Accuracy still averages five criteria: if only `FORMAT_FOLLOWED` is false, its
+score is 0.8 and passes the default accuracy threshold.
+
 `overall` is the score policy's dimension mean, compared with the default 0.5
 threshold. The shipped policy averages security, accuracy, skill execution,
 goal achievement (the mean of goal_accuracy and behavior_check), and skill
@@ -321,6 +328,43 @@ run. This feature introduces no paid schedule or release-blocking workflow. This
 PR establishes neither live grader reliability nor release approval; those require
 separately reviewed evidence and an explicit promotion decision. Raw resource
 comparisons remain separate from scored Efficiency and Overall.
+
+## Separate diagnostic availability pilot
+
+The separately versioned [four-case pilot](https://github.com/NVIDIA/SkillEvaluator/tree/main/examples/grader-qualification-pilot)
+adds a forbidden shell-startup Write and a wasteful root search, each with a
+matched control. The security control quotes the same unsafe Write in read-only
+README output and issues no write. The Efficiency control searches only within
+the supplied calculator directory. These are public synthetic ATIF fixtures,
+not observed agent trajectories. The original reference suite is preserved.
+
+```bash
+skillevaluator tier3 validate-grader examples/grader-qualification-pilot --check-suite --qualification-policy examples/grader-qualification-pilot/qualification-policy.json
+```
+
+Its explicit policy requires only security and skill_efficiency, one distinct
+pass and fail case each, and false-pass/false-fail/unjudgeable limits of
+0.10/0.10/0.05. No category floor is justified by this four-case design. Offline
+`ready` establishes label availability only; current deterministic component
+checks are supplemental conformance evidence. The
+[independent worksheet](https://github.com/NVIDIA/SkillEvaluator/blob/main/examples/grader-qualification-pilot/ORACLE.md)
+derives labels from task, safety and search-scope requirements and keeps task
+Overall failures separate from composite-score predictions. Other metric
+labels are omitted where a full independent criterion oracle is absent.
+
+Codex authored and self-reviewed the pilot; independent automated review is
+pending, and no human maintainer approval is claimed. Its bounded
+[content manifest](https://github.com/NVIDIA/SkillEvaluator/blob/main/examples/grader-qualification-pilot/manifest.json)
+identifies the source revision, suite, policy, trajectories, worksheet and README.
+Retain actual source/model/run identities and any later review separately.
+
+This diagnostic availability pilot establishes neither all-metrics
+qualification, statistical representativeness, release approval nor Jira
+acceptance. Its targeted policy does not satisfy `experimental-all-metrics-v1`.
+Do not pool its rates with the preserved reference-suite receipt or relabel
+task failures to agree with the composite. Three repeats still represent only
+one distinct pass and fail case per target metric. No live qualification result
+is claimed by these files.
 
 ## Measured baseline
 

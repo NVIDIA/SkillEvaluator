@@ -399,6 +399,7 @@ def test_security_extra_uses_pip_audit_without_bundling_safety() -> None:
 
     assert any(requirement.startswith("pip-audit") for requirement in security)
     assert not any(requirement.startswith("safety") for requirement in security)
+    assert any(requirement.startswith("bandit") for requirement in project["project"]["dependencies"])
     assert "safety" not in lock_names
     assert "safety-schemas" not in lock_names
     assert "nltk" not in lock_names
@@ -885,13 +886,17 @@ def test_launch_docs_address_scanner_and_naming_ambiguities() -> None:
     assert "are not interchangeable" in environment
 
 
-SKILLSPECTOR_RELEASE = "v2.13.3"
+SKILLSPECTOR_RELEASE = "v2.13.4"
 # Tag commit of SKILLSPECTOR_RELEASE. The Tier 1 CI image installs this commit's
 # source archive, so it must move together with the install instructions.
-SKILLSPECTOR_RELEASE_COMMIT = "38a1dfe93325d2f8bfcd4f8d0241eed706334915"
+SKILLSPECTOR_RELEASE_COMMIT = "54824463814a0be01360792523ec7245a69190fc"
 
 
 def test_skillspector_install_instructions_pin_one_release() -> None:
+    from skillevaluator.utils.scanner_install import SKILLSPECTOR_VERSION
+
+    assert f"v{SKILLSPECTOR_VERSION}" == SKILLSPECTOR_RELEASE
+
     sources = [
         REPO_ROOT / "README.md",
         *(REPO_ROOT / "docs").rglob("*.mdx"),

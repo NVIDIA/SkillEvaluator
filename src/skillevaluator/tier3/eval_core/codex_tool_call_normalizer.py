@@ -1046,18 +1046,120 @@ def _settled_renderer(cursor: _StaticExecSource, results: str, taken: set[str]) 
     return record_format
 
 
+# ── Dynamic literal array/map wrappers (#236) ──
+# Codex also batches a literal command array through `Array.prototype.map`: either collecting the
+# promises for one settled renderer, or printing each result inside the callback. Only the array is
+# "dynamic": every element is still a literal, the callback may do nothing but hand that element to
+# one fixed tool, and no binding may be reused or shadow a global the grammar relies on. The
+# collected form keeps `Promise.allSettled`'s input order, so the element at an index owns the
+# record at that index. The inline form prints when each promise settles, not in array order, so it
+# is decoded only when the array holds exactly one element; anything else leaves the wrapper
+# unsupported rather than guessing which command produced which result.
+
+
+def _mapped_arguments(cursor: _StaticExecSource, parameter: str) -> tuple[str | None, dict[str, Any]]:
+    """Read a mapped call's argument: the element itself, or an object literal naming it once.
+
+    Returns ``(shorthand_key, literal_properties)``. ``shorthand_key`` is None when the whole
+    element is the argument. Every other property must be a literal, so no element can reach the
+    tool changed, renamed or combined with another binding.
+    """
+    if cursor.peek() != "{":
+        if cursor.name() != parameter:
+            raise _NotStatic("arguments")
+        return None, {}
+    cursor.expect("{")
+    shorthand: str | None = None
+    properties: dict[str, Any] = {}
+    while not cursor.take("}"):
+        if shorthand is not None or properties:
+            cursor.expect(",")
+            if cursor.take("}"):
+                break
+        quoted = cursor.peek() in ("'", '"')
+        key = cursor.string() if quoted else cursor.name()
+        if key in ("__proto__", shorthand) or key in properties:
+            raise _NotStatic(key)
+        if cursor.take(":"):
+            properties[key] = cursor.literal()
+            continue
+        # A shorthand property: only the callback's own parameter, and only once.
+        if quoted or key != parameter or shorthand is not None:
+            raise _NotStatic(key)
+        shorthand = key
+    if shorthand is None:
+        raise _NotStatic("arguments")
+    return shorthand, properties
+
+
+def _mapped_tool_calls(
+    cursor: _StaticExecSource,
+    arrays: dict[str, list[Any]],
+    taken: set[str],
+    *,
+    inline: bool,
+) -> list[tuple[str, dict[str, Any]]] | None:
+    """Read ``<array>.map(<callback>)`` and return one call per literal element, in array order."""
+    elements = arrays.get(cursor.name())
+    if elements is None:
+        raise _NotStatic("map source")
+    cursor.expect(".", "map", "(")
+    if cursor.take("async"):
+        # `async` may not be separated from an async arrow's parameters by a line break.
+        cursor.same_line()
+    parenthesized = cursor.take("(")
+    parameter = cursor.binding(taken)
+    if parenthesized:
+        cursor.expect(")")
+    cursor.same_line()
+    cursor.expect("=>")
+    if inline:
+        cursor.expect("text", "(")
+        # The inline callback prints whatever the call expression evaluates to, so without `await`
+        # it renders the pending Promise instead of the tool's result and the outer output proves
+        # nothing about the call. The collected form may omit it: `Promise.allSettled` awaits
+        # whatever `.map` returns, so its record still describes the settled call.
+        cursor.expect("await")
+    else:
+        cursor.take("await")
+    cursor.expect("tools", ".")
+    function_name = cursor.name()
+    cursor.expect("(")
+    shorthand, properties = _mapped_arguments(cursor, parameter)
+    cursor.expect(")")
+    if inline:
+        cursor.expect(")")
+    cursor.expect(")")
+    if not elements or len(elements) > _MAX_TOOL_CALLS:
+        return None
+    calls: list[tuple[str, dict[str, Any]]] = []
+    for element in elements:
+        if shorthand is None:
+            if not isinstance(element, dict):
+                return None
+            calls.append((function_name, element))
+            continue
+        calls.append((function_name, {**properties, shorthand: element}))
+    return calls
+
+
 def _extended_codex_program(source: str) -> tuple[list[tuple[str, dict[str, Any]]], int | None, tuple] | None:
     """Decode the extended grammar into ``(calls, owner, record_format)``, or None outside it.
 
-    A single call keeps the upstream ownership: ``owner`` 0 owns the whole outer observation,
+    The statements are a literal command array, one `Promise.allSettled` over a literal batch or
+    over `.map` of such an array, bound calls, and renders. A single call keeps the upstream
+    ownership: ``owner`` 0 owns the whole outer observation,
     -1 renders nothing. A lone call that prints its whole result has the ``("single",)`` format,
-    so its own exit code can mark it failed. With records, ``owner`` is None and ``record_format``
+    so its own exit code can mark it failed; the same call inlined into `Promise.allSettled`, whose
+    rejection the wrapper swallows, has the ``("settled_single",)`` format and is graded only once
+    its printed output proves it settled fulfilled. With records, ``owner`` is None and ``record_format``
     says how to split the outer observation; for inline renders it lists the call of each record
     in output order.
     """
     cursor = _StaticExecSource(source)
     calls: list[tuple[str, dict[str, Any]]] = []
     bindings: dict[str, int] = {}
+    arrays: dict[str, list[Any]] = {}
     renders: list[tuple[int, bool]] = []
     taken: set[str] = set()
     statements = 0
@@ -1068,19 +1170,37 @@ def _extended_codex_program(source: str) -> tuple[list[tuple[str, dict[str, Any]
                 return None
             if cursor.take("const"):
                 variable = cursor.binding(taken)
-                cursor.expect("=", "await")
+                cursor.expect("=")
+                if cursor.peek() == "[":
+                    # A literal command array; only `.map` over it may turn it into calls.
+                    if calls:
+                        return None
+                    elements = cursor.literal()
+                    # `literal()` re-reads the same `[`, so it either returns the array or raises
+                    # `_NotStatic`; this narrows the `Any` it is declared to return.
+                    assert isinstance(elements, list)
+                    arrays[variable] = elements
+                    cursor.end_statement()
+                    continue
+                cursor.expect("await")
                 if cursor.take("Promise"):
                     if calls:
                         return None
-                    cursor.expect(".", "allSettled", "(", "[")
-                    while not cursor.take("]"):
-                        if calls:
-                            cursor.expect(",")
-                            if cursor.take("]"):
-                                break
-                        if len(calls) >= _MAX_TOOL_CALLS:
+                    cursor.expect(".", "allSettled", "(")
+                    if cursor.take("["):
+                        while not cursor.take("]"):
+                            if calls:
+                                cursor.expect(",")
+                                if cursor.take("]"):
+                                    break
+                            if len(calls) >= _MAX_TOOL_CALLS:
+                                return None
+                            calls.append(cursor.tool_call())
+                    else:
+                        mapped = _mapped_tool_calls(cursor, arrays, taken, inline=False)
+                        if mapped is None:
                             return None
-                        calls.append(cursor.tool_call())
+                        calls.extend(mapped)
                     cursor.expect(")")
                     cursor.end_statement()
                     record_format = _settled_renderer(cursor, variable, taken)
@@ -1088,6 +1208,23 @@ def _extended_codex_program(source: str) -> tuple[list[tuple[str, dict[str, Any]
                     return (calls, None, record_format) if calls and cursor.at_end() else None
                 bindings[variable] = len(calls)
                 calls.append(cursor.tool_call())
+            elif cursor.take("await"):
+                if calls:
+                    return None
+                cursor.expect("Promise", ".", "allSettled", "(")
+                mapped = _mapped_tool_calls(cursor, arrays, taken, inline=True)
+                if mapped is None:
+                    return None
+                cursor.expect(")")
+                cursor.end_statement()
+                # Each callback prints when its own promise settles, so with more than one element
+                # no record can be proven to belong to the command at its position.
+                if len(mapped) != 1 or not cursor.at_end():
+                    return None
+                # `Promise.allSettled` swallows a rejection, so a clean script exit does not prove
+                # this call ran: only the callback's own printed output does. Its own format keeps
+                # that weaker guarantee apart from a top-level lone call's.
+                return mapped, 0, ("settled_single",)
             else:
                 cursor.expect("text", "(")
                 if cursor.take("("):
@@ -1146,7 +1283,7 @@ def _exec_record(value: object, record_format: tuple, record_index: int) -> tupl
     form the scorers read, that makes an explicit outcome visible in the record's observation.
     """
     kind = record_format[0]
-    if kind in ("result", "single"):
+    if kind in ("result", "single", "settled_single"):
         return _returned_outcome(value) if isinstance(value, dict) else None
     if kind == "settled":
         settled = _settled_result(value)
@@ -1261,13 +1398,17 @@ def _resolve_exec_records(
         duplicate = False
     except _DuplicateKey:
         records, duplicate = None, True
-    if record_format == ("single",):
+    if record_format[0] in ("single", "settled_single"):
         header = _EXEC_OUTPUT_RE.match(observation)
+        printed = observation[header.end() :] if header is not None else observation
         # A lone call may print plain text, but a body that opens like a record and does not parse
         # is incomplete evidence: a cut-off failure must not score as a clean run.
-        incomplete = duplicate or (
-            records is None and header is not None and observation[header.end() :].lstrip()[:1] == "{"
-        )
+        incomplete = duplicate or (records is None and header is not None and printed.lstrip()[:1] == "{")
+        # An inlined call's rejection is swallowed by `Promise.allSettled`, so the script completes
+        # with nothing printed and a clean exit says only that the wrapper finished. The callback
+        # renders after its own `await` resolves, so printed output is the one proof it fulfilled.
+        if record_format[0] == "settled_single" and not printed.strip():
+            incomplete = True
         if incomplete:
             outer = {key: value for key, value in tool_call.items() if not key.startswith("_atif_")}
             return [{**outer, "_atif_normalization_status": UNSUPPORTED_NATIVE_CODEX_EXEC}]

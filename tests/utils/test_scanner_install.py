@@ -44,7 +44,7 @@ class TestSkillSpectorWheel:
         monkeypatch.setattr(scanner_install, "SKILLSPECTOR_WHEEL_SHA256", hashlib.sha256(payload).hexdigest())
         with (
             patch("urllib.request.urlopen", return_value=io.BytesIO(payload)),
-            patch("subprocess.run", return_value=CompletedProcess([], 0, "SkillSpector v2.13.3", "")) as run,
+            patch("subprocess.run", return_value=CompletedProcess([], 0, "SkillSpector v2.13.4", "")) as run,
         ):
             assert scanner_install.prepare_skillspector("/opt/uv") is None
         wheel = scanner_install.managed_skillspector_wheel()
@@ -100,7 +100,7 @@ class TestSkillSpectorWheel:
             patch("subprocess.run") as run,
         ):
             result = tool.run(["scan", "x"])
-        assert result.error_message == "SkillSpector 2.13.3 download failed checksum verification"
+        assert result.error_message == "SkillSpector 2.13.4 download failed checksum verification"
         run.assert_not_called()
 
     def test_pinned_wheel_url_matches_version(self):

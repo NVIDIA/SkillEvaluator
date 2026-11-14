@@ -238,7 +238,7 @@ class BudgetController:
 
     def metadata(self) -> dict[str, Any]:
         with self._lock:
-            return {
+            metadata = {
                 "limits": {
                     "max_agent_tokens": self.max_agent_tokens,
                     "max_judge_calls": self.max_judge_calls,
@@ -264,6 +264,8 @@ class BudgetController:
                 "attempts_not_run": len(self.not_run),
                 "not_run": list(self.not_run),
             }
+            metadata["observed_overruns"] = _budget_observations(metadata)[0]
+            return metadata
 
     @staticmethod
     def _not_run(agent: str, arm: str, case_id: str, attempt: int) -> dict[str, Any]:
@@ -277,32 +279,101 @@ class BudgetController:
         }
 
 
+_BUDGET_LIMITS = {
+    "agent_tokens": ("max_agent_tokens", "agent tokens"),
+    "judge_calls": ("max_judge_calls", "judge calls"),
+    "cost_usd": ("max_cost_usd", "cost"),
+    "attempts": ("max_attempts_total", "attempts"),
+}
+
+
+def _measured_number(value: Any) -> int | float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return None
+    return value if isinstance(value, int) or math.isfinite(value) else None
+
+
+def _budget_observations(metadata: dict[str, Any]) -> tuple[dict[str, Any], list[str], bool]:
+    """Derive reporting facts, including for legacy metadata, without changing admission."""
+    limits = metadata.get("limits", {})
+    if not isinstance(limits, dict):
+        return {}, ["limits invalid"], True
+    used = metadata.get("used")
+    used = used if isinstance(used, dict) else {}
+    unmeasured = metadata.get("unmeasured_attempts", {})
+    overruns: dict[str, Any] = {}
+    incomplete = []
+    configured = False
+    for key, (limit_key, label) in _BUDGET_LIMITS.items():
+        raw_cap = limits.get(limit_key)
+        if raw_cap is None:
+            continue
+        configured = True
+        cap = _measured_number(raw_cap)
+        if cap is None:
+            incomplete.append(f"{label} limit invalid")
+            continue
+        value = _measured_number(metadata.get("started_attempts") if key == "attempts" else used.get(key))
+        if value is None:
+            incomplete.append(f"{label} not measured")
+        else:
+            if value > cap:
+                overruns[key] = {"used": value, "limit": cap, "excess": value - cap}
+            if key != "attempts":
+                missing = _measured_number(unmeasured.get(key, 0)) if isinstance(unmeasured, dict) else None
+                if missing is None:
+                    incomplete.append(f"{label} measurement completeness unknown")
+                elif missing > 0:
+                    incomplete.append(f"{label} usage partially measured")
+    return overruns, incomplete, configured
+
+
+def _budget_number(value: Any, *, cost: bool = False, missing: str = "not measured") -> str:
+    number = _measured_number(value)
+    if number is None:
+        return missing
+    if cost:
+        return f"${number:,.2f}" if number == 0 or number >= 0.01 else f"${number:.6g}"
+    return f"{number:,}"
+
+
 def budget_line(metadata: dict[str, Any]) -> str:
-    status = metadata.get("status")
-    if status != "exhausted":
-        return "Budget: within configured limits"
-    used = metadata.get("used") or {}
-    limit = metadata.get("exhausted_limit") or "budget"
-    value = used.get({"agent_tokens": "agent_tokens", "judge_calls": "judge_calls", "cost": "cost_usd"}.get(limit, ""))
-    cap = (metadata.get("limits") or {}).get(
-        {"agent_tokens": "max_agent_tokens", "judge_calls": "max_judge_calls", "cost": "max_cost_usd"}.get(limit, "")
+    # Recompute from usage and limits: cached observations may be absent or stale.
+    overruns, incomplete, configured = _budget_observations(metadata)
+    observations = "; ".join(
+        f"{_BUDGET_LIMITS[key][1]} {_budget_number(row['used'], cost=key == 'cost_usd')} "
+        f"of {_budget_number(row['limit'], cost=key == 'cost_usd')}"
+        for key, row in overruns.items()
     )
-    shown = (
-        "not measured"
-        if value is None or value == "not measured"
-        else (f"${value:.2f}" if limit == "cost" else f"{value:,}")
-    )
-    cap_shown = "not configured" if cap is None else (f"${cap:.2f}" if limit == "cost" else f"{cap:,}")
-    planned = metadata.get("planned_attempts")
-    not_run = metadata.get("attempts_not_run", len(metadata.get("not_run") or []))
-    if limit == "attempts":
-        started = metadata.get("started_attempts", 0)
-        cap = (metadata.get("limits") or {}).get("max_attempts_total", "not configured")
-        return (
-            f"Budget exhausted (attempts {started:,} of {cap:,}): "
-            f"{not_run:,} of {planned:,} attempts not run; results are partial"
-        )
-    return (
-        f"Budget exhausted ({limit.replace('_', ' ')} {shown} of {cap_shown}): "
-        f"{not_run:,} of {planned:,} attempts not run; results are partial"
-    )
+    not_run = _measured_number(metadata.get("attempts_not_run"))
+    if not_run is None:
+        rows = metadata.get("not_run")
+        not_run = len(rows) if isinstance(rows, list) else 0
+    if metadata.get("status") == "exhausted":
+        limit = metadata.get("exhausted_limit")
+        key = {"cost": "cost_usd"}.get(limit, limit) if isinstance(limit, str) else None
+        limit_key, label = _BUDGET_LIMITS.get(key, ("", "budget"))
+        used = metadata.get("used")
+        used = used if isinstance(used, dict) else {}
+        limits = metadata.get("limits")
+        limits = limits if isinstance(limits, dict) else {}
+        value = metadata.get("started_attempts") if key == "attempts" else used.get(key)
+        shown = _budget_number(value, cost=key == "cost_usd")
+        cap = _budget_number(limits.get(limit_key), cost=key == "cost_usd", missing="not configured")
+        line = f"Budget exhausted ({label} {shown} of {cap})"
+    elif observations:
+        line = f"Budget overrun observed ({observations})"
+    elif incomplete:
+        line = "Budget: configured limits not fully verified"
+    else:
+        line = "Budget: within configured limits" if configured else "Budget: no limits configured"
+    if not_run:
+        planned = _budget_number(metadata.get("planned_attempts"), missing="unknown")
+        line += f": {not_run:,} of {planned} attempts not run; results are partial"
+    if observations and metadata.get("status") == "exhausted":
+        line += f"; overrun observed ({observations})"
+    if incomplete:
+        if observations or metadata.get("status") == "exhausted":
+            line += "; configured limits not fully verified"
+        line += f" ({'; '.join(incomplete)})"
+    return line

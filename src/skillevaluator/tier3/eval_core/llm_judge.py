@@ -29,12 +29,14 @@ from skillevaluator.provider_config import (
     effective_reasoning_effort,
 )
 from skillevaluator.tier3.eval_core.atif_helpers import (
+    _BEHAVIOR_EVIDENCE_GAP_HINT,
     _SECTION_COMPACT_TOOL_HISTORY,
     _SECTION_FINAL_RESPONSE,
     _SECTION_USER_REQUEST,
     _behavior_check_budget,
     _behavior_final_response_limit,
     _truncate_for_behavior,
+    behavior_evidence_gap,
 )
 from skillevaluator.tier3.eval_core.character_facts import append_character_facts
 from skillevaluator.tier3.eval_core.optional_reference import normalize_expected_behaviors
@@ -703,6 +705,19 @@ refused), every criterion is false, unless the expected answer is itself a refus
 Be lenient on wording, but strict on factual correctness and on any output format the user \
 question explicitly requires.
 
+For FORMAT_FOLLOWED, judge the entire final response literally against only the format explicitly \
+required by the USER QUESTION, independently of factual correctness.
+When a FINAL RESPONSE section is supplied, its contents are the final answer; other section \
+headings, tool results, history, and artifacts are context, not part of that answer.
+Inspect every line of the final response, including text after an initially valid answer. \
+Line breaks do not end the final response. Do not mentally remove labels or Markdown fence characters \
+when checking the stated format.
+Do not extract a compliant answer from surrounding noncompliant text or substitute a correct \
+value from tool output or the expected answer.
+If only a number is required, extra prose, a label, or a code fence violates that requirement.
+Required prefixes, units, or prose are valid when they match the stated format.
+Wording leniency does not relax explicit format constraints.
+
 Respond with ONLY one JSON object with a "criteria" object holding exactly these five keys, each \
 true or false, and a one-sentence "reason". Do not include a score: it is computed from the criteria.
 Example of the shape (the values are only an illustration):
@@ -886,6 +901,25 @@ CONVERSATION:
 EXPECTED BEHAVIORS:
 {behaviors}
 
+For each numbered behavior, check only what that behavior requires.
+A format-only behavior does not require the answer's value to be factually correct: a wrong value \
+can still satisfy its format. If a behavior also requires factual correctness, evaluate that requirement too.
+For a behavior about final-response format, judge the entire final response literally against only \
+the stated format requirement, independently of factual correctness.
+When a FINAL RESPONSE section is supplied, its contents are the final answer; other section \
+headings, tool results, history, and artifacts are context, not part of that answer.
+Inspect every line of the final response, including text after an initially valid answer. \
+Line breaks do not end the final response. Do not mentally remove labels or Markdown fence characters \
+when checking the stated format.
+Do not extract a compliant answer from surrounding noncompliant text or substitute a correct \
+value from tool output or the expected answer.
+If only a number is required, extra prose, a label, or a code fence violates that requirement.
+Required prefixes, units, or prose are valid when they match the stated format.
+When the complete final response establishes a format violation, mark that behavior false; \
+keep null when missing or incomplete evidence prevents checking it.
+Before returning, ensure each passed value agrees with its reason: a reason establishing a violation \
+requires false, not true; an evidence gap that prevents checking requires null.
+
 Respond with ONLY one JSON object. "results" must hold exactly {expected_count} entries, one per \
 expected behavior: "step" is the behavior's number (each number from 1 to {expected_count} exactly \
 once), "passed" is true (observed), false (evidence supports a violation or absence), or null \
@@ -1015,9 +1049,17 @@ def _behavior_prompt_example(expected_count: int) -> str:
 def judge_behavior_check(
     conversation_text: str,
     expected_behaviors: list[str],
+    *,
+    evidence_omitted: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Run the behavior check LLM judge; the score is the share of behaviors observed."""
+    """Run the behavior check LLM judge; the score is the share of behaviors observed.
+
+    *evidence_omitted* is the behavior_check bundle's omission accounting. When
+    it reports that required evidence did not reach the judge, no model is
+    called and an explicit evaluation error is returned with no score: grading
+    a shortened final answer scores the evidence loss, not the agent.
+    """
     expected_behaviors = normalize_expected_behaviors(expected_behaviors)
     if not _has_judge_reference(expected_behaviors):
         return _judge_not_applicable(_NO_EXPECTED_BEHAVIOR_REASON, results=[])
@@ -1025,7 +1067,22 @@ def judge_behavior_check(
     expected_count = len(expected_behaviors)
     behaviors_text = "\n".join(f"{i + 1}. {b}" for i, b in enumerate(expected_behaviors))
 
+    gap = behavior_evidence_gap(evidence_omitted)
+    if gap:
+        return _judge_error(gap, results=[], expectations=_behavior_expectations(expected_behaviors, [], gap))
+
     conversation = _compact_behavior_conversation(conversation_text)
+    if evidence_omitted is not None and conversation != conversation_text:
+        # The bundle is built to fit this budget, so a second cut here would
+        # drop evidence nothing has accounted for. Refuse rather than score it.
+        second_cut = (
+            "behavior_check evidence was shortened again inside the judge, past the omission accounting. "
+            f"{_BEHAVIOR_EVIDENCE_GAP_HINT}"
+        )
+        return _judge_error(
+            second_cut, results=[], expectations=_behavior_expectations(expected_behaviors, [], second_cut)
+        )
+
     prompt = BEHAVIOR_CHECK_PROMPT.format(
         conversation=conversation,
         behaviors=behaviors_text,

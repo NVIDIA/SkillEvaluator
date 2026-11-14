@@ -9,7 +9,7 @@ Each renderer escapes the agent and case names for its own format.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -44,6 +44,22 @@ VALIDATE_CASE_POINTER = "Token usage per case is in the HTML, Markdown and JSON 
 EVALUATE_CASE_POINTER = "Token usage per case is in report.html and tier3-benchmark.md in the run directory."
 #: Case rows per agent in the HTML table; the JSON payload keeps the rest.
 HTML_CASE_ROWS_PER_AGENT = 64
+#: Marks a case row whose ID is not one of the evaluation dataset's case IDs.
+UNVERIFIED_CASE_MARK = " (unverified case ID)"
+#: Explains that mark wherever a table carries one.
+UNVERIFIED_CASE_NOTE = (
+    "A row marked (unverified case ID) names an attempt whose case could not be matched to any case ID in the "
+    "evaluation dataset. Its tokens were measured, but the row does not stand for a dataset case: read it as a "
+    "report-integrity problem, not as coverage of that case."
+)
+#: Replaces that explanation where no marked row is rendered, naming the cases instead.
+UNVERIFIED_CASE_IDS_NOTE = (
+    "{count} case ID(s) could not be matched to any case ID in the evaluation dataset ({names}); this table shows "
+    "no row for them. Their tokens were measured, but they do not stand for dataset cases: read this as a "
+    "report-integrity problem, not as coverage of those cases."
+)
+#: Case IDs named in :data:`UNVERIFIED_CASE_IDS_NOTE` before the rest are summarized.
+UNVERIFIED_CASE_IDS_NAMED = 10
 
 
 @dataclass(frozen=True)
@@ -109,6 +125,8 @@ def _row(agent: str | None, case: str | None, item: Mapping[str, Any]) -> TokenU
     reason = delta.get("reason")
     not_run = any(_coverage(item.get(arm)).get("status") == "not_run" for arm in ("with_skill", "baseline"))
     note = reason if case is None and isinstance(reason, str) and reason and not not_run else None
+    if case is not None and item.get("case_id_in_dataset") is False:
+        case += UNVERIFIED_CASE_MARK
     return TokenUsageRow(
         agent,
         "All cases" if case is None else case,
@@ -129,6 +147,40 @@ def more_case_rows_note(count: int, *, code: Callable[[str], str] = lambda text:
 def reused_baseline_note(usage: object) -> str | None:
     """Say that the baseline tokens come from an earlier run when this run reused its baseline."""
     return REUSED_BASELINE_NOTE if _mapping(usage).get("baseline_reused") is True else None
+
+
+def unverified_case_ids_note(
+    usage: object,
+    rows: Sequence[TokenUsageRow] = (),
+    *,
+    case_label: Callable[[str], str] = str,
+) -> str | None:
+    """Explain the ``(unverified case ID)`` mark, or name the cases *rows* leaves out.
+
+    The mark lives on a case row, so its explanation is only useful once a
+    rendered row carries one. A table whose row caps or payload pruning
+    dropped every such row, and one that renders no case row at all, says
+    instead how many case IDs could not be matched and names them, so the
+    reader is not sent hunting for a mark that is not in the table.
+    ``case_label`` applies the renderer's redaction and escaping to each full
+    ID before its display text is bounded.
+    """
+    unmatched = _mapping(_mapping(usage).get("case_id_validation")).get("unmatched_case_ids")
+    names = (
+        sorted({case for case in unmatched if isinstance(case, str) and case}) if isinstance(unmatched, list) else []
+    )
+    if not names:
+        return None
+    if any(row.is_case and row.case.endswith(UNVERIFIED_CASE_MARK) for row in rows):
+        return UNVERIFIED_CASE_NOTE
+    listed = []
+    for case in names[:UNVERIFIED_CASE_IDS_NAMED]:
+        # Exact-secret and private-label filters must see the full ID.
+        label = case_label(case)
+        listed.append(label[:120] + ("…" if len(label) > 120 else ""))
+    if len(names) > len(listed):
+        listed.append(f"and {len(names) - len(listed)} more")
+    return UNVERIFIED_CASE_IDS_NOTE.format(count=len(names), names=", ".join(listed))
 
 
 def dropped_case_rows_note(usage: object) -> str | None:
@@ -221,6 +273,8 @@ def token_usage_markdown_lines(
         lines.extend([*notes, ""])
     if dropped := dropped_case_rows_note(usage):
         lines.extend([dropped, ""])
+    if unverified := unverified_case_ids_note(usage, rows, case_label=cell):
+        lines.extend([unverified, ""])
     if cases:
         lines.extend(["<details>", "<summary>Show token usage per case</summary>", "", header, separator])
         lines.extend(line(row) for row in cases)
@@ -262,7 +316,15 @@ def render_token_usage_table(
     for row in rows:
         if row.note:
             console.print(Text(f"  {text(row.agent if row.agent is not None else 'All agents')}: {text(row.note)}"))
-    pointer = " ".join(part for part in (case_pointer, dropped_case_rows_note(usage)) if part)
+    pointer = " ".join(
+        part
+        for part in (
+            case_pointer,
+            dropped_case_rows_note(usage),
+            unverified_case_ids_note(usage, rows, case_label=text),
+        )
+        if part
+    )
     console.print(Text(f"  {TOKEN_USAGE_NOTE} {COVERAGE_NOTE} {pointer}", style="dim"))
     return True
 
@@ -283,4 +345,5 @@ def token_usage_table(usage: object) -> dict[str, Any] | None:
         "reused_baseline": reused_baseline_note(usage),
         "more_cases": more_case_rows_note(omitted, code=str),
         "dropped_cases": dropped_case_rows_note(usage),
+        "unverified_cases": unverified_case_ids_note(usage, rows),
     }

@@ -777,6 +777,18 @@ def test_codex_explicit_invocation_delivers_whole(tmp_path: Path):
     assert "CX-SHELL-READ" not in _rule_ids(skill, "codex", {"custom_provider": True, "explicit_invocation": True})
 
 
+def test_harness_check_accepts_model_config(tmp_path: Path):
+    skill = _skill(tmp_path, body="x" * 20_000)
+    out = tmp_path / "out.json"
+
+    result = CliRunner().invoke(
+        cli, ["harness-check", str(skill), "--harness", "openclaw", "--context-tokens", "150000", "--json", str(out)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "OW-READ-BUDGET" not in out.read_text()
+
+
 def test_openclaw_read_budget_weights_cjk_not_utf8_bytes(tmp_path: Path):
     kana = _skill(tmp_path / "kana", body="\u3042" * 8_000)
     cyrillic = _skill(tmp_path / "cyr", body="\u0430" * 20_000)
@@ -798,6 +810,13 @@ def test_hermes_view_budget_counts_code_points(tmp_path: Path):
     skill = _skill(tmp_path, body="\u65c5" * 60_000)
 
     assert "HM-VIEW-BUDGET" not in _rule_ids(skill, "hermes")
+
+
+def test_claude_allowed_tools_blocks_headless_load(tmp_path: Path):
+    skill = _skill(tmp_path, extra="allowed-tools: Read\n")
+
+    assert "CC-ALLOWED-TOOLS-HEADLESS" not in _rule_ids(skill, "claude-code")
+    assert "CC-ALLOWED-TOOLS-HEADLESS" in _rule_ids(skill, "claude-code", {"headless": True})
 
 
 def test_native_root_skips_root_rules(tmp_path):

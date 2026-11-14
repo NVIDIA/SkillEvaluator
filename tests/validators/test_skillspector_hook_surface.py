@@ -49,6 +49,7 @@ from unittest.mock import patch
 
 import pytest
 
+from skillevaluator.reporting.json_reporter import JSONReporter
 from skillevaluator.reporting.run_status import Status, resolve_run_status
 from skillevaluator.utils.tool_runner import ToolResult
 from skillevaluator.validators.base import Severity, ValidationResult
@@ -456,20 +457,41 @@ class TestUnmodeledHooks:
             pytest.param({"SECURITY.*": Severity.LOW}, id="security-low"),
         ],
     )
+    @pytest.mark.parametrize(
+        ("name", "build"),
+        [
+            pytest.param(_PLUGIN_REPORT, _plugin, id="complete"),
+            # The v2.13.4 parse-limit row records the scan as incomplete.
+            pytest.param(_TIMEOUT_REPORT, _timeout_plugin, id="timeout-parse-limit"),
+        ],
+    )
     @patch("skillevaluator.validators.security.Tools")
     def test_policy_overrides_cannot_pass_the_hooks(
-        self, mock_tools, tmp_path: Path, overrides: dict[str, Severity]
+        self,
+        mock_tools,
+        tmp_path: Path,
+        overrides: dict[str, Severity],
+        name: str,
+        build: Callable[[Path], Path],
     ) -> None:
-        root = _plugin(tmp_path)
-        result = _validate(mock_tools, root, _report(_PLUGIN_REPORT))
+        """The gate failure keeps the check failed, also when another gap records the scan as incomplete."""
+        root = build(tmp_path)
+        result = _validate(mock_tools, root, _report(name))
 
         apply_policy([result], ValidationPolicy(severity_overrides=overrides))
 
         [finding] = _unverified(result)
         assert finding.severity in {Severity.INFO, Severity.LOW}
         assert not result.passed
-        assert result.status == "failed"
-        assert result.errors == [_gate("hooks/hooks.json")]
+        assert result.errors.count(_gate("hooks/hooks.json")) == 1
+        if name == _TIMEOUT_REPORT:
+            _assert_failed_with_incomplete_scan(result)
+        else:
+            assert result.status == "failed"
+            assert result.errors == [_gate("hooks/hooks.json")]
+            assert resolve_run_status([result]).of(result) == Status.FAILED
+        exported = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+        assert (exported["overall_status"], exported["results"][0]["status"]) == ("failed", "failed")
 
     @patch("skillevaluator.validators.security.Tools")
     def test_llm_verification_cannot_downgrade_the_hook_critical(self, mock_tools, tmp_path: Path) -> None:
@@ -735,6 +757,38 @@ class TestFolderScans:
             f"[{name}] .claude/settings.json" for name in ("a", "b")
         ]
 
+    @pytest.mark.parametrize("method", ["validate_security_only", "validate"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_a_policy_override_keeps_a_folder_scan_failed_beside_a_missing_reference(
+        self, mock_tools, tmp_path: Path, method: str
+    ) -> None:
+        """Each skill's gate failure is a confirmed failure that the folder result keeps.
+
+        A ``--policy`` override lowers each Critical, and each skill's
+        reference row records the scan as incomplete, but the check is still
+        reported as failed, not as a scan that did not run.
+        """
+        folder = tmp_path / "folder"
+        for name in ("a", "b"):
+            _write(folder / name, {**_SETTINGS_SKILL, "SKILL.md": _SETTINGS_MISSING_REFERENCE_SKILL_MD})
+        report = _report(_settings_missing_reference_report("2.13.4"))
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True, stdout=json.dumps(report), stderr="", exit_code=0
+        )
+        result = getattr(SecurityValidator(use_llm=False), method)(folder)
+
+        overrides = {"SECURITY.skillspector_hook_payload_unverified": Severity.INFO}
+        apply_policy([result], ValidationPolicy(severity_overrides=overrides))
+
+        assert {finding.severity for finding in _unverified(result)} == {Severity.INFO}
+        assert [gate for gate in result.gate_failures if "could not model" in gate] == [
+            f"[{name}] {_gate('.claude/settings.json')}" for name in ("a", "b")
+        ]
+        _assert_failed_with_incomplete_scan(result)
+        exported = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+        assert (exported["overall_status"], exported["results"][0]["status"]) == ("failed", "failed")
+
 
 class TestPartlyReadManifests:
     @pytest.mark.parametrize(
@@ -890,6 +944,8 @@ class TestOtherGapsStayIncomplete:
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
             f"{label}; security scan did not complete"
         )
+        # The incomplete-analysis gate alone is missing evidence, not a confirmed failure.
+        assert resolve_run_status([result]).of(result) == Status.INCOMPLETE
 
     def test_fatal_row_is_not_trusted(self) -> None:
         report = _report(_PLUGIN_REPORT)

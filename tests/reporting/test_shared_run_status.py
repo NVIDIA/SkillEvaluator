@@ -100,6 +100,26 @@ def test_confirmed_legacy_failure_survives_separate_missing_evidence():
     assert status.of(result) == Status.FAILED
 
 
+def test_confirmed_failure_survives_a_folder_merge():
+    """A folder keeps a member's confirmed failure; a member's gate failure alone stays missing evidence."""
+    confirmed = ValidationResult(validator_name="Security Scan")
+    confirmed.fail_gate("hooks/hooks.json: these hooks cannot pass this check")
+    confirmed.metadata["confirmed_failure"] = True
+    confirmed.mark_scan_incomplete("scanner")
+    incomplete = ValidationResult(validator_name="Security Scan")
+    incomplete.fail_gate("scanner reports incomplete analysis")
+    incomplete.mark_scan_incomplete("scanner")
+
+    for members, expected in (((confirmed, incomplete), Status.FAILED), ((incomplete,), Status.INCOMPLETE)):
+        folder = ValidationResult(validator_name="Security Scan")
+        for index, member in enumerate(members):
+            folder.merge_with_prefix(member, f"skill-{index}")
+        status = resolve_run_status([folder])
+        assert status.of(folder) == expected
+        assert status.headline == expected
+        assert status.missing == ("scanner",)
+
+
 def test_missing_scanner_process_error_alone_remains_incomplete():
     result = ValidationResult(validator_name="Scanner")
     result.add_error("The scanner produced no trustworthy report")

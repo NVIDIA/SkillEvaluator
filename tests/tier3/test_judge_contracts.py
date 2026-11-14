@@ -1409,6 +1409,9 @@ def test_judge_evidence_keeps_copies_of_line_values_elsewhere(text: str, kept: l
         json.dumps('subprocess.run(["mysql", "-e", "CREATE DATABASE app"]); subprocess.run(["mkdir", "-p", "data"])'),
         json.dumps('subprocess.run(["mysql", "-u", "root", "-p", "appdb"])'),
         json.dumps('run(["docker", "login", "--password-stdin", "-u", "bot"]); run(["git", "log", "-p"])'),
+        # The same with the quotes escaped twice, after a plain MySQL client element.
+        'run(["mysql", "-e", "x"]); '
+        + json.dumps(json.dumps('run(["mkdir", "-p", "data"]); run(["mysql", "-u", "root", "-p", "appdb"])')),
     ],
 )
 def test_judge_evidence_keeps_ordinary_text(text: str) -> None:
@@ -1431,6 +1434,29 @@ def test_judge_evidence_masks_passphrase_after_bare_p_element(argv: str) -> None
     text = json.dumps({"command": f"run({argv}); password: correct horse {_PASSPHRASE_WORD} staple"})
 
     assert eval_template._redact_judge_evidence(text) == json.dumps({"command": f"run({argv}); password: <redacted>"})
+
+
+_MYSQL_ARGUMENTS = json.dumps(
+    {"command": f'python -c \'import subprocess; subprocess.run(["mysql", "-uroot", "-p{_QUOTED_SECRET}"])\''}
+)
+
+
+# A RAGAS request that repeats a tool call writes the call's JSON arguments as
+# JSON again, so an attached "-pVALUE" element there is escaped twice
+# (\\\"-pVALUE\\\"). After a MySQL client element it is masked with its escapes
+# intact.
+@pytest.mark.parametrize(
+    "context",
+    [
+        pytest.param(f'Task: run subprocess.run(["mysql", "-uroot", "-p{_QUOTED_SECRET}"]).', id="plain"),
+        pytest.param(f"Task: run subprocess.run(['mysql', '-uroot', '-p{_QUOTED_SECRET}']).", id="single-quoted"),
+        pytest.param(f"Earlier call: {_MYSQL_ARGUMENTS}", id="json-escaped"),
+    ],
+)
+def test_judge_evidence_masks_twice_escaped_attached_password(context: str) -> None:
+    text = f"{context}\nRepeated: {json.dumps(_MYSQL_ARGUMENTS)}"
+
+    assert eval_template._redact_judge_evidence(text) == text.replace(_QUOTED_SECRET, "<redacted>")
 
 
 def test_salvaged_behavior_score_is_saved_as_a_salvage_attempt(tmp_path: Path) -> None:

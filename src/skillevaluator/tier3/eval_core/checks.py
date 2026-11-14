@@ -3484,10 +3484,12 @@ _FINDING_EVIDENCE_COOKIE_FLAG_RE = re.compile(r"((?<![^\s'\"])-b[ \t]+)(?=[^\s]*
 # sit on its own line, as a formatter writes a long list, so up to 64 spaces
 # and line breaks may follow the comma. In JSON text, such as tool-call
 # arguments, the quotes are escaped (\"--password\", \"VALUE\") and a line
-# break is the two characters "\n". An attached "-pVALUE" element never starts
-# at the bare quote of an escaped one, so a bare \"-p\" element (mkdir -p, a
-# prompting mysql -p) does not read the backslash of its closing quote as a
-# value.
+# break is the two characters "\n". An attached "-pVALUE" element opens at the
+# start of a backslash run and closes with the same run and quote, so a bare
+# \"-p\" element (mkdir -p, a prompting mysql -p) does not read the backslashes
+# of its closing quote as a value. An element escaped again (\\\"-pVALUE\\\"),
+# as when a RAGAS request repeats a tool call's JSON arguments as JSON, is
+# masked with its escapes intact.
 _FINDING_EVIDENCE_ARGV_QUOTE = r"\\?[\"']"
 _FINDING_EVIDENCE_ARGV_SPACE = r"(?:\s|\\[nrt]){0,64}"
 _FINDING_EVIDENCE_ARGV_FLAG_RE = re.compile(
@@ -3524,7 +3526,7 @@ _FINDING_EVIDENCE_ARGV_MYSQL_RE = re.compile(
     + r"[ \t]*,"
 )
 _FINDING_EVIDENCE_ARGV_ATTACHED_PASSWORD_RE = re.compile(
-    r"(?<!\\)(" + _FINDING_EVIDENCE_ARGV_QUOTE + r")-p(?!ath\b|erm\b|rint|rune\b)([^\"'\r\n]+)\1"
+    r"(?<!\\)((?:\\\\){0,3}" + _FINDING_EVIDENCE_ARGV_QUOTE + r")-p(?!ath\b|erm\b|rint|rune\b)([^\"'\r\n]+)\1"
 )
 # Bearer, Basic, Token and Digest stay visible after a credential name too
 # ("Authorization: Bearer <redacted>").

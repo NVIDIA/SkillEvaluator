@@ -73,8 +73,11 @@ def _scanner_row(tool: Any, timeout: float) -> Row:
     if not tool.is_available:
         return (label, "fail", f"not installed. {tool.get_install_hint()}")
     location = tool.path
-    if tool.resolution_source != "automatic":
+    if tool.resolution_source.startswith("override:"):
         location += f" (from {tool.override_env})"
+    elif tool.resolution_source != "automatic":
+        # Managed provisioning: "uv tool run" for SkillSpector, "managed" for Gitleaks.
+        location += f" ({tool.resolution_source})"
     version_args = ["version"] if tool.command == "gitleaks" else ["--version"]
     result = tool.run(version_args, timeout=timeout, log_command=False, **_probe_run_options(tool.command))
     if result.error_message:

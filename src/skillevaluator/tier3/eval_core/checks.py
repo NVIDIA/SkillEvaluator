@@ -3390,10 +3390,12 @@ _FINDING_EVIDENCE_FLAG_VALUE_RE = re.compile(_FINDING_EVIDENCE_FLAG_VALUE)
 # ends a word, and a "NAME=VALUE" right after it is still masked
 # ("--api_key K1;TOKEN=..."). A name with "_" joined to its value by "="
 # ("--api_key=VALUE") or followed by a separator ("--api_key = VALUE") is left
-# to the assignment rule (see _mask_credential_flags).
-_FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE_RE = re.compile(
+# to the assignment rule (see _mask_credential_flags). So is the value of a
+# quoted config key or one after "--" (see _FINDING_EVIDENCE_CONFIG_SET_RE).
+_FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE = (
     "(?:" + _FINDING_EVIDENCE_QUOTED_FLAG_VALUE + r"|(?![|&;<>])(?:\\.|[^\s'\"`\\;|&])+)"
 )
+_FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE_RE = re.compile(_FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE)
 # "-u", "-U" and "--user" also name ordinary options (python -u, pip -U, pip
 # --user), so only a value with a colon is masked: "user:password", or an API
 # key with an empty password ("-u KEY:"). curl also takes it attached
@@ -3453,12 +3455,19 @@ _FINDING_EVIDENCE_AWS_CONFIGURE_SET_RE = re.compile(
 # VALUE", "token := VALUE") is no value; the assignment rule reads that form.
 # The assignment rule also reads a quoted NAME, or one after "--", whose value
 # starts with a separator ('npm config set -- password ="..."'), as it did
-# before this rule read those NAMEs.
+# before this rule read those NAMEs, and the unquoted value of such a NAME
+# ends at ";", "|" or "&", as a "_" flag's does, so a "NAME=VALUE" right after
+# it is still masked ('npm config set -- password K1;TOKEN="..."').
 _FINDING_EVIDENCE_CONFIG_SET_RE = re.compile(
     r"(\b(?:(?:npm|pnpm|yarn)[ \t]+config[ \t]+set|(?:npm|pnpm)[ \t]+set|git[ \t]+config)"
     r"(?:[ \t]+--?(?!-|get|unset)[\w-]{1,32}(?:=[^\s'\"`]{1,64})?){0,3}(?:[ \t]+(--)(?=[ \t]))?[ \t]+"
-    r"([\"'])?([^\s'\"`=-][^\s'\"`=]{0,255})(?(3)\3)[ \t]+(?!-|(?::=|=>|[=:])(?!\S))(?(2)(?![=:]))(?(3)(?![=:])))"
+    r"([\"'])?([^\s'\"`=-][^\s'\"`=]{0,255})(?(3)\3)[ \t]+(?!-|(?::=|=>|[=:])(?!\S))(?(2)(?![=:]))(?(3)(?![=:])))(?(2)"
+    + _FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE
+    + "|(?(3)"
+    + _FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE
+    + "|"
     + _FINDING_EVIDENCE_FLAG_VALUE
+    + "))"
 )
 _FINDING_EVIDENCE_CONFIG_KEY_SPLIT_RE = re.compile(r"[./:]")
 _FINDING_EVIDENCE_CONFIG_CREDENTIAL_KEY_RE = re.compile(

@@ -1990,6 +1990,37 @@ def test_call_sed_underscored_flag_and_config_rules_keep_ordinary_text(text: str
             "./tool --api_key <redacted>;TOKEN=<redacted> && rm -rf /srv/app",
             id="spaced-underscored-flag-before-a-semicolon",
         ),
+        # So does the unquoted value of a quoted config key or one after "--".
+        pytest.param(
+            f'npm config set -- password {_API_TOKEN};DB_PASSWORD="{_PASSPHRASE}" && rm -rf /srv/app',
+            "npm config set -- password <redacted>;DB_PASSWORD=<redacted> && rm -rf /srv/app",
+            id="config-set-terminator-key-before-a-semicolon",
+        ),
+        pytest.param(
+            f'yarn config set -- npmAuthToken {_API_TOKEN}|TOKEN="{_PASSPHRASE}" && rm -rf /srv/app',
+            "yarn config set -- npmAuthToken <redacted>|TOKEN=<redacted> && rm -rf /srv/app",
+            id="config-set-terminator-key-before-a-pipe",
+        ),
+        pytest.param(
+            f'npm config set -- _authToken {_API_TOKEN}&&password="{_PASSPHRASE}" && rm -rf /srv/app',
+            "npm config set -- _authToken <redacted>&&password=<redacted> && rm -rf /srv/app",
+            id="config-set-terminator-key-before-an-and",
+        ),
+        pytest.param(
+            f'npm config set "password" {_API_TOKEN};auth=("bob", "{_BASIC_PASSWORD}") && rm -rf /srv/app',
+            'npm config set "password" <redacted>;auth=<redacted> && rm -rf /srv/app',
+            id="config-set-quoted-key-before-a-semicolon",
+        ),
+        pytest.param(
+            f'npm config set "//registry.npmjs.org/:_authToken" {_API_TOKEN}|TOKEN="{_PASSPHRASE}" && rm -rf /srv/app',
+            'npm config set "//registry.npmjs.org/:_authToken" <redacted>|TOKEN=<redacted> && rm -rf /srv/app',
+            id="config-set-quoted-key-before-a-pipe",
+        ),
+        pytest.param(
+            f"git config --global 'github.token' {_API_TOKEN}&&GH_TOKEN=\"{_PASSPHRASE}\" && rm -rf /srv/app",
+            "git config --global 'github.token' <redacted>&&GH_TOKEN=<redacted> && rm -rf /srv/app",
+            id="config-set-quoted-key-before-an-and",
+        ),
         pytest.param(
             f"npm config set password = '{_BASIC_PASSWORD}' && rm -rf /srv/app",
             "npm config set password = <redacted> && rm -rf /srv/app",
@@ -2005,6 +2036,28 @@ def test_underscored_flags_and_config_keys_keep_the_assignment_reading(copy: str
     ]
     for secret in (_API_TOKEN, _BASIC_PASSWORD, _PASSPHRASE_TAIL):
         assert secret not in json.dumps(result)
+
+
+@pytest.mark.parametrize("copy", ["template", "eval_core"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A value the assignment rule masks after the unquoted value of a
+        # quoted config key or one after "--" stays masked.
+        pytest.param(f'npm config set -- password abc;DB_PASSWORD="{_PASSPHRASE}"', id="terminator-key-semicolon"),
+        pytest.param(f'yarn config set -- npmAuthToken abc|TOKEN="{_PASSPHRASE}"', id="terminator-key-pipe"),
+        pytest.param(f'npm config set "_authToken" abc&&password="{_PASSPHRASE}"', id="quoted-key-and"),
+        pytest.param(f'npm config set "password" x;auth=("bob", "{_PASSPHRASE}")', id="quoted-key-tuple"),
+    ],
+)
+def test_a_value_next_to_a_newly_read_value_stays_masked(copy: str, command: str) -> None:
+    # The assignment rule masks the passphrase in each of these commands when
+    # the flag, config key or call before it is not read, so reading it must
+    # not leave the passphrase behind.
+    result = _security(copy, {"action": "Bash", "action_input": {"command": f"{command} && rm -rf /srv/app"}})
+
+    assert [finding["type"] for finding in result["findings"]] == ["destructive_command"]
+    assert _PASSPHRASE_TAIL not in json.dumps(result)
 
 
 class _CountingPattern:

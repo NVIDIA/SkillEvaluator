@@ -1934,8 +1934,9 @@ saved judge evidence use the same credential masker:
   `pnpm config set`, `yarn config set`, or `git config`, also after options
   such as `--location=global` or a `--` that ends them, and with a quoted key
   (`_authToken`, `npmAuthToken`, `"github.token"`); `git config --get` and
-  `--unset` take no value. A `.netrc` `password` value is masked too, also
-  when the entry spans lines in a here-document or a `printf` string;
+  `--unset` take no value. An unquoted value after a quoted key or one after
+  `--` ends at `;`, `|`, or `&`. A `.netrc` `password` value is masked too,
+  also when the entry spans lines in a here-document or a `printf` string;
 - values assigned to a credential name, such as `_authToken=...`,
   `aws_secret_access_key = ...`, `"password": "..."`, `token := "..."`,
   `os.environ["API_KEY"] = "..."`, `auth=HTTPBasicAuth("bob", "...")` (also

@@ -1443,11 +1443,12 @@ score.
   every agent finished.
 
 In a standalone report, the **Tier 3 quality** chip and the **Quality Verdict**
-card follow the run's verdict. The payload keeps `neutral` for a failed run,
-but the HTML report shows a failed run's verdict as `fail`, labelled
-**Changes required**, even when the completed agent's own dimension verdict
-passes; the full Tier 3 payload embedded in the HTML report records `fail` too.
-A `neutral` verdict of a successful run reads **Neutral**. The completed-agent
+card follow the run's verdict. The Tier 3 payload of a `validate --tier3` JSON
+report, its `tier3` object, keeps `neutral` for a failed run, but the HTML
+report shows a failed run's verdict as `fail`, labelled **Changes required**,
+even when the completed agent's own dimension verdict passes; the full Tier 3
+payload embedded in the HTML report records `fail` too. A `neutral` verdict of
+a successful run reads **Neutral**. The completed-agent
 details still describe that agent, and the command status in the same hero
 also reads **Changes required**.
 
@@ -1465,9 +1466,9 @@ verdict follows the run, so a neutral run still reads
 When the run has a best agent, the HTML report names it as **Best performing
 agent**, and its **Skill Lift** card and the **Best-agent lift** line under
 **Run details & provenance** show that agent's lift when it has one, even when
-its evidence is incomplete. The payload keeps this lift in
-`summary.overall_lift` and records the failed run's `verdict` as `neutral`.
-The lift is diagnostic evidence for one agent, not a whole-run lift.
+its evidence is incomplete. The JSON report's `tier3` object and the payload
+embedded in the HTML report both keep this lift in `summary.overall_lift`. The
+lift is diagnostic evidence for one agent, not a whole-run lift.
 
 To get a whole-run result, fix the failed agent and rerun the evaluation with
 every agent.

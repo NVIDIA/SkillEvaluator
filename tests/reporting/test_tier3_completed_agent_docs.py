@@ -17,6 +17,7 @@ from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
 from skillevaluator.models import ValidationResult
 from skillevaluator.reporting import BenchmarkReporter, HTMLReporter
 from skillevaluator.reporting.html import VERDICT_WORDS
+from skillevaluator.reporting.json_reporter import JSONReporter
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 
 REPO = Path(__file__).resolve().parents[2]
@@ -166,12 +167,25 @@ def test_documented_labels_match_a_run_with_a_failed_peer() -> None:
         assert label in html
     # The standalone quality labels follow the run; completed-agent details keep its score.
     assert "card follow the run's verdict" in section
-    # The payload keeps neutral, but the HTML report, also its embedded payload, shows fail.
-    assert "The payload keeps `neutral` for a failed run" in section
+    # The JSON report's Tier 3 payload keeps neutral, but the HTML report, also its
+    # embedded payload, shows fail. Both payloads keep the best agent's lift.
+    report_tier3 = json.loads(JSONReporter().render_all([result]))["tier3"]
+    embedded = _embedded_tier3(raw)
+    assert "The payload keeps `neutral`" not in section
+    assert (
+        "The Tier 3 payload of a `validate --tier3` JSON report, its `tier3` object, keeps `neutral` for a failed run"
+    ) in section
+    assert report_tier3["verdict"] == report_tier3["summary"]["verdict"] == "neutral"
     assert f"shows a failed run's verdict as `fail`, labelled {VERDICT_WORDS['fail']}" in section
     assert "the full Tier 3 payload embedded in the HTML report records `fail` too" in section
-    assert _embedded_tier3(raw)["verdict"] == "fail"
+    assert embedded["verdict"] == "fail"
     assert 'data-verdict="fail"' in raw
+    assert (
+        "The JSON report's `tier3` object and the payload embedded in the HTML report both keep this lift in "
+        "`summary.overall_lift`."
+    ) in section
+    assert "records the failed run's `verdict` as `neutral`" not in section
+    assert report_tier3["summary"]["overall_lift"] == embedded["summary"]["overall_lift"] == pytest.approx(0.4)
     assert "Tier 3 quality: Changes required" in html
     assert "Changes required" in section
     assert _hero_command_status(raw) == "Changes required"

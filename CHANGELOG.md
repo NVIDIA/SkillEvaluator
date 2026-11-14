@@ -154,6 +154,9 @@ All notable changes to SkillEvaluator are documented in this file.
   plugin evidence inside the relevant tier. Tier 3 reports default to dark
   mode, while explicit theme choices remain available. Saved incomplete runs
   show concise coverage and actions, with full errors retained in Diagnostics.
+  Overview links to complete Insights instead of repeating its cards; passive
+  evidence and routine run provenance stay folded. Recorded native token and
+  latency breakdowns are available under Trials without rerunning evaluations.
 
 - The HTTP 404 message for an unavailable LLM model now says the provider's default
   may not be callable with the key and points to `SKILL_EVAL_LLM_MODEL` (`llm-model`

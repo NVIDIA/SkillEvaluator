@@ -17,7 +17,9 @@ from pathlib import Path
 
 import pytest
 from browser_navigation_fixtures import _reward, _similarity_result, _tier1_results, render_fixtures
+from test_telemetry_view import _payload as _native_telemetry_payload
 
+from skillevaluator.evaluation.tier3_expectations import build_case_diagnostics
 from skillevaluator.evaluation.tier3_report import advisory_skip_result, build_agent_eval_payload
 from skillevaluator.models import Finding, ValidationResult
 from skillevaluator.reporting.html import HTMLReporter
@@ -203,6 +205,7 @@ def reports(tmp_path_factory):
             },
         }
     }
+    failed["case_diagnostics"], _ = build_case_diagnostics(failed["dataset"], failed["agents"])
     result = ValidationResult(validator_name="AGENT_EVAL")
     result.metadata["agent_eval"] = failed
     result.add_error("Retained evaluation did not complete")
@@ -312,6 +315,51 @@ def reports(tmp_path_factory):
     (directory / "nonzero-similarity.html").write_text(
         HTMLReporter(include_timestamp=False).render_all([similarity]), encoding="utf-8"
     )
+    native = ValidationResult(validator_name="AGENT_EVAL")
+    native.metadata["agent_eval"] = build_agent_eval_payload(
+        "native-telemetry",
+        {
+            "agent-a": {
+                "execution_status": "succeeded",
+                "expected_attempts": 4,
+                "scored_attempts": 4,
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.9),
+                "without_skill": dict.fromkeys(DEFAULT_METRICS, 0.7),
+                "rewards": [_reward(f"case-one__attempt{i}", "case-one", 0.9, 12) for i in (1, 2)],
+                "rewards_baseline": [_reward(f"case-one__baseline{i}", "case-one", 0.7, 20) for i in (1, 2)],
+                "num_trials": 2,
+                "num_trials_baseline": 2,
+                "conditions": {
+                    arm: {"execution_status": "succeeded", "expected_attempts": 2, "scored_attempts": 2}
+                    for arm in ("with_skill", "without_skill")
+                },
+            }
+        },
+        dataset=[{"id": "case-one", "prompt": "Summarize synthetic input", "expected_output": "Summary"}],
+        use_llm_judge=False,
+    )
+    native.metadata["agent_eval"].update(_native_telemetry_payload())
+    (directory / "native-telemetry.html").write_text(
+        HTMLReporter(include_timestamp=False).render_all([*_tier1_results(), _similarity_result(), native]),
+        encoding="utf-8",
+    )
+    qualityless = deepcopy(native)
+    qualityless.add_error("Synthetic retained quality-agent mapping unavailable")
+    qualityless.metadata["agent_eval"].update(
+        agents={},
+        trials=[],
+        cases=[],
+        dimensions=[],
+        best_agent=None,
+        overall_score=None,
+        overall_lift=None,
+        summary={},
+        execution_status="failed",
+        verdict="neutral",
+    )
+    (directory / "native-no-quality-agents.html").write_text(
+        HTMLReporter(include_timestamp=False, report_scope="tier3").render_all([qualityless]), encoding="utf-8"
+    )
     return directory, canonical, failed
 
 
@@ -398,7 +446,7 @@ def test_theme_defaults_and_explicit_preference_survive_reload(page, reports):
     assert page.locator("html").get_attribute("data-theme") == "light"
     _open(page, directory)
     assert page.locator("html").get_attribute("data-theme") == "dark"
-    page.locator(".theme-toggle").click()
+    page.locator("#report-theme").select_option("light")
     assert page.locator("html").get_attribute("data-theme") == "light"
     page.reload()
     assert page.locator("html").get_attribute("data-theme") == "light"
@@ -707,14 +755,15 @@ def test_retained_edge_state_matrix_is_truthful_accessible_and_has_no_browser_er
             assert page.locator("#tier3-token-chart").count() == 0
         if fixture == "incomplete-plugin":
             _tier(page, "tier1")
-            assert "Status: incomplete" in page.locator("#plugin-static-evidence").inner_text()
+            assert "Static snapshot · incomplete" in page.locator("#plugin-static-evidence").inner_text()
             inventory = page.locator("#plugin-static-components")
             assert inventory.is_visible()
+            inventory.locator("summary").click()
             assert "2 more rows omitted (3 total)" in inventory.inner_text()
             _tier(page, "tier3")
             _subtab(page, "overview")
             assert (
-                "Evidence status: incomplete. Execution status: failed."
+                "Evidence incomplete · execution failed · advisory snapshot"
                 in page.locator("#plugin-runtime-evidence").inner_text()
             )
             for tab, key, evidence in (
@@ -726,6 +775,8 @@ def test_retained_edge_state_matrix_is_truthful_accessible_and_has_no_browser_er
                 _subtab(page, tab)
                 section = page.locator("#plugin-runtime-" + key)
                 assert section.is_visible()
+                if section.get_attribute("open") is None:
+                    section.locator("summary").click()
                 assert evidence in section.inner_text()
         for tab in ("overview", "suggestions", "agents", "trials", "dataset", "provenance"):
             _subtab(page, tab)
@@ -744,14 +795,21 @@ def test_chart_runtime_unavailable_exposes_fallbacks_and_linked_tables_without_e
     _open(page, directory)
     assert page.evaluate("typeof Chart") == "undefined"
     _tier(page, "tier3")
+    token_chart = (
+        "tier3-recorded-token-chart" if page.locator("#tier3-recorded-token-chart").count() else "tier3-token-chart"
+    )
     for tab, chart_ids in (
         ("overview", ("tier3-radar", "tier3-metric-bar")),
-        ("trials", ("tier3-token-chart", "tier3-steps-chart")),
+        ("trials", (token_chart, "tier3-steps-chart")),
     ):
         _subtab(page, tab)
         for chart_id in chart_ids:
             canvas = page.locator("#" + chart_id)
             assert canvas.count() == 1
+            canvas.evaluate("""node=>{
+                for(let parent=node.parentElement;parent;parent=parent.parentElement)
+                    if(parent.tagName==='DETAILS')parent.open=true;
+            }""")
             assert not canvas.is_visible()
             assert page.locator("#" + chart_id + "-fallback").is_visible()
             link = page.locator("#" + chart_id + "-description a")
@@ -764,3 +822,172 @@ def test_chart_runtime_unavailable_exposes_fallbacks_and_linked_tables_without_e
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
             _subtab(page, tab)
     assert not errors
+
+
+@pytest.mark.parametrize("fixture", ["full", "incomplete", "mixed", "custom-only"])
+def test_overview_is_a_concise_projection_and_full_insights_have_one_owner(page, reports, fixture):
+    directory, _, _ = reports
+    _open(page, directory, fixture)
+    _tier(page, "tier3")
+    overview = page.locator("#tier3-page-overview")
+    assert overview.locator(".t3-sug-card").count() == 0
+    assert overview.locator(".dashboard-card").count() <= 3
+    assert page.locator("#run-metadata").get_attribute("open") is None
+    assert page.locator(".nav-tab:visible").count() == 0
+    assert page.locator(".header-status-badge").count() == 0
+    if fixture == "incomplete":
+        assert "28" in overview.inner_text() and "36" in overview.inner_text()
+        assert "unavailable" in overview.inner_text().lower()
+        assert overview.locator(".dashboard-card").filter(has_text="Overall Score").count() == 0
+    _subtab(page, "suggestions")
+    assert page.locator("#tier3-page-suggestions .t3-sug-card").count() > 0
+
+
+def test_folded_plugin_evidence_is_closed_then_revealed_by_its_existing_link_and_search(page, reports):
+    directory, _, _ = reports
+    _open(page, directory, "plugin")
+    _tier(page, "tier1")
+    component = page.locator("#plugin-static-components")
+    assert component.get_attribute("open") is None
+    assert not component.locator("table").is_visible()
+    page.locator("#report-search").fill("sample-skill")
+    assert component.locator("table").is_visible()
+    assert "sample-skill" in component.inner_text()
+    page.goto((directory / "plugin.html").as_uri() + "#plugin-runtime-loading")
+    loading = page.locator("#plugin-runtime-loading")
+    assert loading.is_visible()
+    assert loading.locator("table").is_visible()
+    assert "Recorded native delivery" in loading.inner_text()
+
+
+def test_mobile_overview_places_incomplete_result_and_recorded_action_before_metadata(page, reports):
+    directory, _, _ = reports
+    page.set_viewport_size({"width": 390, "height": 1000})
+    _open(page, directory, "incomplete")
+    _tier(page, "tier3")
+    _subtab(page, "overview")
+    overview = page.locator("#tier3-page-overview")
+    overview.scroll_into_view_if_needed()
+    action = overview.get_by_text("Rerun the incomplete evaluation", exact=False)
+    assert action.count() == 1
+    action_box = action.bounding_box()
+    assert action_box is not None and action_box["y"] + action_box["height"] <= 1000
+    assert page.locator(".main-header").bounding_box()["height"] <= 96
+    assert "8" in overview.inner_text() and "36" in overview.inner_text()
+    assert page.locator("#run-metadata").get_attribute("open") is None
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+def test_native_recorded_telemetry_is_folded_complete_and_draws_one_condition_aware_chart(page, reports, width):
+    directory, _, _ = reports
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.set_viewport_size({"width": width, "height": 1000})
+    _open(page, directory, "native-telemetry")
+    page.evaluate("filterValidators('fail')")
+    _tier(page, "tier3")
+    _subtab(page, "trials")
+    tokens = page.locator("#tier3-token-usage")
+    latency = page.locator("#tier3-latency-metrics")
+    assert tokens.get_attribute("open") is None and latency.get_attribute("open") is None
+    tokens.locator("summary").first.click()
+    text = tokens.inner_text()
+    for marker in (
+        "Prompt",
+        "Cached",
+        "Uncached prompt",
+        "Completion",
+        "Total",
+        "Efficiency Tokens",
+        "Without skill",
+        "case-one",
+    ):
+        assert marker.lower() in text.lower()
+    assert tokens.locator("table").first.is_visible()
+    assert tokens.locator("tbody tr:visible").count() == 9
+    assert page.locator("#tier3-token-chart").count() == 0
+    chart = page.locator("#tier3-recorded-token-chart")
+    page.wait_for_function("""() => {
+        const canvas=document.getElementById('tier3-recorded-token-chart');
+        return canvas&&!canvas.hidden&&window.Chart?.getChart(canvas);
+    }""")
+    data = chart.evaluate("node=>Chart.getChart(node).data")
+    assert any("With skill" in label for label in data["labels"])
+    assert any("Without skill" in label for label in data["labels"])
+    assert [series["label"] for series in data["datasets"]] == ["Uncached prompt", "Cached prompt", "Completion"]
+    assert sum(series["data"][0] for series in data["datasets"]) == 120
+    latency.locator("summary").first.click()
+    for marker in (
+        "LLM (s)",
+        "Tool (s)",
+        "LLM ms/token",
+        "Arm runtime (ms)",
+        "partial",
+        "Baseline timing is incomplete.",
+    ):
+        assert marker.lower() in latency.inner_text().lower()
+    page.locator("#t3-trials-table").evaluate("""node=>{
+        for(let parent=node.parentElement;parent;parent=parent.parentElement)
+            if(parent.tagName==='DETAILS')parent.open=true;
+    }""")
+    assert page.locator("#t3-trials-table tbody tr:visible").count() == 4
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+    assert not errors
+
+
+def test_native_recorded_chart_fallback_links_to_retained_table(page, reports):
+    directory, _, _ = reports
+    page.add_init_script("Object.defineProperty(window,'Chart',{get:()=>undefined,set:()=>{},configurable:false})")
+    _open(page, directory, "native-telemetry")
+    _tier(page, "tier3")
+    _subtab(page, "trials")
+    page.locator("#tier3-token-usage > summary").click()
+    assert not page.locator("#tier3-recorded-token-chart").is_visible()
+    fallback = page.locator("#tier3-recorded-token-chart-fallback")
+    assert fallback.is_visible()
+    fallback.locator("a").click()
+    assert page.locator("#t3-recorded-token-usage-table").is_visible()
+
+
+def test_recorded_chart_loads_even_when_quality_agent_mapping_is_unavailable(page, reports):
+    directory, _, _ = reports
+    _open(page, directory, "native-no-quality-agents")
+    _tier(page, "tier3")
+    _subtab(page, "trials")
+    page.locator("#tier3-token-usage > summary").click()
+    assert page.evaluate("typeof Chart") == "function"
+    page.wait_for_function("""() => {
+        const canvas=document.getElementById('tier3-recorded-token-chart');
+        return canvas&&!canvas.hidden&&window.Chart.getChart(canvas);
+    }""")
+    assert page.locator("#t3-recorded-token-usage-table").is_visible()
+    assert page.locator("#tier3-radar").count() == 0
+
+
+def test_search_reveals_hidden_runtime_and_nested_dataset_evidence_then_restores_state(page, reports):
+    directory, _, _ = reports
+    _open(page, directory, "plugin")
+    _tier(page, "tier1")
+    page.locator("#report-search").fill("Recorded native delivery")
+    loading = page.locator("#plugin-runtime-loading")
+    assert page.locator("#tier3-page-agents").is_visible()
+    assert loading.locator("table").is_visible()
+    _tier(page, "tier1")
+    page.locator("#report-search").fill("")
+    assert loading.get_attribute("open") is None
+
+    _open(page, directory, "incomplete")
+    _tier(page, "tier3")
+    _subtab(page, "dataset")
+    cases = page.locator("#t3-dataset-list > details")
+    assert cases.count() == 4
+    later_case = cases.nth(1)
+    assert later_case.get_attribute("open") is None
+    search = page.get_by_role("searchbox", name="Filter dataset", exact=True)
+    search.fill("No matched trial")
+    assert later_case.get_attribute("open") is not None
+    assert later_case.locator("details[open]").count() > 0
+    assert "No matched trial" in later_case.inner_text()
+    search.fill("")
+    assert later_case.get_attribute("open") is None

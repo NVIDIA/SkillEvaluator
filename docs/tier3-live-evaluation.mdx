@@ -717,6 +717,13 @@ Native agent execution, verifier artifacts, paired small/custom-Dockerfile runs 
 input-file handling still need independent qualification. Codex, Claude Code and
 OpenCode mappings remain experimental and do not establish end-to-end agent support.
 
+The Claude Code mapping uses the same pinned runtime version as Harbor, installed
+by Gym inside the sandbox. It enables native discovery and projects staged skills
+into the task workdir's `.claude/skills/` directory because Gym uses a private
+Claude configuration directory. The baseline uses the same discovery settings
+without the target skill. Gym's required Anthropic credential field receives only
+a placeholder; policy credentials remain in the model-server environment.
+
 ```bash
 # Requires a separately verified, pinned Gym task-folder implementation.
 export SKILL_EVAL_NEMO_GYM_BIN=/opt/nemo-gym/.venv/bin/gym

@@ -294,3 +294,74 @@ def test_complete_structured_coverage_takes_precedence_over_stale_run_summary(le
         payload["agents"]["agent-a"].update(scored_attempts=3, expected_attempts=6)
         payload["agents"]["agent-a"].pop("conditions")
     assert "3 of 6 attempts scored" in _project(payload)["conclusions"][0]["message"]
+
+
+def test_scoped_actions_never_inherit_another_agent_or_case_legacy_trace():
+    payload = _failed_payload()
+    blob = payload["recommendations"][0]
+    payload["recommendations"] = [
+        {**blob, "evidence": {"url": "https://example.test/a", "agent": "agent-a", "case_id": "case-a"}},
+        {**blob, "evidence": {"url": "https://example.test/b", "agent": "agent-b", "case_id": "case-b"}},
+    ]
+    payload["next_steps"] = [
+        {
+            "kind": "incomplete run",
+            "agent": "agent-a",
+            "case_id": "case-a",
+            "action": "Rerun only agent-a/case-a.",
+            "evidence": {"url": "https://example.test/a"},
+        },
+        {
+            "kind": "incomplete run",
+            "agent": "agent-b",
+            "case_id": "case-b",
+            "action": "Rerun only agent-b/case-b.",
+            "evidence": {"url": "https://example.test/b"},
+        },
+    ]
+    recommendations = _project(payload)["recommendations"]
+    for card in recommendations:
+        evidence = card.get("evidence") or {}
+        if card["message"] == "Rerun only agent-a/case-a.":
+            assert evidence["url"] == "https://example.test/a"
+            assert card.get("agent") == "agent-a" and card.get("case_id") == "case-a"
+        if card["message"] == "Rerun only agent-b/case-b.":
+            assert evidence["url"] == "https://example.test/b"
+            assert card.get("agent") == "agent-b" and card.get("case_id") == "case-b"
+    assert [card["message"] for card in recommendations if card.get("agent")] == [
+        "Rerun only agent-a/case-a.",
+        "Rerun only agent-b/case-b.",
+    ]
+
+
+def test_repeated_projection_preserves_coverage_case_and_trace_associations():
+    payload = _failed_payload()
+    first = _project(payload)
+    arm = next(card for card in first["conclusions"] if card.get("condition") == "with_skill")
+    first["conclusions"].remove(arm)
+    first["conclusions"].extend(
+        [
+            {**arm, "case_id": "case-a", "evidence": {"url": "https://example.test/a"}, "evidence_refs": ["trace-a"]},
+            {**arm, "case_id": "case-b", "evidence": {"url": "https://example.test/b"}, "evidence_refs": ["trace-b"]},
+        ]
+    )
+    before = copy.deepcopy(first)
+    second = _project({**payload, **first})
+    coverage = [card for card in second["conclusions"] if card.get("condition") == "with_skill"]
+    assert [(card["agent"], card["case_id"], card["evidence"]["url"], card["evidence_refs"]) for card in coverage] == [
+        ("agent-a", "case-a", "https://example.test/a", ["trace-a"]),
+        ("agent-a", "case-b", "https://example.test/b", ["trace-b"]),
+    ]
+    assert _project({**payload, **second}) == second
+    coverage[0]["evidence"]["url"] = "changed"
+    assert first == before
+
+
+@pytest.mark.parametrize("mode", ["with_skill_only", "baseline_only"])
+def test_explicit_non_skipped_conditions_override_stale_single_arm_mode(mode):
+    payload = _failed_payload()
+    payload["mode"] = mode
+    payload["scored_attempts"] = 1
+    payload["expected_attempts"] = 1
+    text = _project(payload)["conclusions"][0]["message"]
+    assert "3 of 6 attempts scored" in text

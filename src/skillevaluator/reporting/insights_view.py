@@ -41,7 +41,9 @@ def _run_coverage(payload: dict, summary: dict, agents: dict) -> tuple[int, int]
         conditions = agent.get("conditions")
         condition_counts = []
         if isinstance(conditions, dict):
-            for arm in arms:
+            # Explicit retained arm evidence takes precedence over an older mode.
+            agent_arms = [arm for arm in ("with_skill", "without_skill") if arm in conditions or arm in arms]
+            for arm in agent_arms:
                 record = conditions.get(arm)
                 if isinstance(record, dict) and record.get("execution_status") == "skipped":
                     continue
@@ -122,11 +124,19 @@ def build_insights_view(payload: dict) -> dict:
         return not conclusion or item.get("title") == "Evaluation incomplete"
 
     old_conclusions = _records(view["conclusions"])
+    failed_arms = [(name, arm) for name, agent in agents.items() for arm in incomplete_arms(agent)]
+
+    def refreshed_coverage(item: dict[str, Any]) -> bool:
+        return item.get("insight_kind") == "execution_coverage" and any(
+            item.get("agent") == name and item.get("condition") == arm.condition for name, arm in failed_arms
+        )
+
     retained_conclusions = [
         item
         for item in old_conclusions
         if not is_blob(item, conclusion=True)
-        and item.get("insight_kind") not in ("execution_summary", "execution_coverage")
+        and item.get("insight_kind") != "execution_summary"
+        and not refreshed_coverage(item)
     ]
     counts = _run_coverage(payload, summary, agents)
     count_text = (
@@ -150,21 +160,29 @@ def build_insights_view(payload: dict) -> dict:
             conclusions.append({**headline, "evidence": item["evidence"]})
     if not conclusions:
         conclusions.append(headline)
-    for name, agent in agents.items():
-        for arm in incomplete_arms(agent):
-            conclusions.append(
-                {
-                    "title": f"{name} · {'With skill' if arm.condition == 'with_skill' else 'Baseline'}",
-                    "message": f"{name}: {arm}.",
-                    "severity": "fail",
-                    "source": "deterministic",
-                    "category": "Execution",
-                    "metric": "agent_eval",
-                    "agent": name,
-                    "condition": arm.condition,
-                    "insight_kind": "execution_coverage",
-                }
+    for name, arm in failed_arms:
+        coverage = {
+            "title": f"{name} · {'With skill' if arm.condition == 'with_skill' else 'Baseline'}",
+            "message": f"{name}: {arm}.",
+            "severity": "fail",
+            "source": "deterministic",
+            "category": "Execution",
+            "metric": "agent_eval",
+            "agent": name,
+            "condition": arm.condition,
+            "insight_kind": "execution_coverage",
+        }
+        matches = [
+            item
+            for item in old_conclusions
+            if refreshed_coverage(item) and item.get("agent") == name and item.get("condition") == arm.condition
+        ]
+        if matches:
+            conclusions.extend(
+                {**coverage, **item, "title": coverage["title"], "message": coverage["message"]} for item in matches
             )
+        else:
+            conclusions.append(coverage)
     view["conclusions"] = _unique([*conclusions, *retained_conclusions])
     steps = [
         step for step in _records(view["next_steps"]) if isinstance(step.get("action"), str) and step["action"].strip()
@@ -178,7 +196,7 @@ def build_insights_view(payload: dict) -> dict:
                     {
                         **item,
                         "title": "Restore complete execution",
-                        "message": steps[0]["action"] if steps else fallback_action,
+                        "message": fallback_action,
                         "insight_kind": "execution_action",
                     }
                 )

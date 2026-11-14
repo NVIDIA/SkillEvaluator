@@ -98,7 +98,7 @@ def test_local_bootstrap_installs_the_opencode_release_docker_runs_pin(monkeypat
     assert runner._harbor_agent_kwargs("opencode", None, "docker") == {"version": runner.OPENCODE_VERSION}
 
 
-def test_local_bootstrap_runs_the_install_local_setup_offers(monkeypatch):
+def test_local_bootstrap_runs_the_pinned_install_that_local_setup_offers(monkeypatch):
     from skillevaluator.tier3.harbor import local_runtime
 
     def managed_install_argv(agent):

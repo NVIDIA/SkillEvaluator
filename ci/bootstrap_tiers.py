@@ -25,7 +25,7 @@ from skillevaluator.tier3.harbor.local_runtime import managed_install_argv, mana
 
 def install_agent(agent: str) -> None:
     argv = managed_install_argv(agent)
-    # The same pinned install local setup offers, at the release Harbor installs for Docker runs.
+    # Runs the same pinned install that local setup offers, at the release Harbor installs for Docker runs.
     subprocess.run(argv, check=True, timeout=600)
     print(f"Installed {agent} in {managed_runtime_prefix(agent)}")
 

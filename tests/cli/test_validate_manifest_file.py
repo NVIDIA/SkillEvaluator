@@ -95,8 +95,9 @@ def test_linked_skill_manifest_validates_the_folder_holding_the_link(tmp_path: P
     assert _skill_names(manifest[1]) == ["linked"]
 
 
-def test_manifest_in_linked_skill_folder_is_refused_before_default_tier2_run(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize("tiers", [(), ("--tiers", "1")], ids=["default-tiers", "tier1-only"])
+def test_manifest_in_linked_skill_folder_is_refused_like_the_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tiers: tuple[str, ...]
 ) -> None:
     target = tmp_path / "real-skill"
     target.mkdir()
@@ -108,15 +109,34 @@ def test_manifest_in_linked_skill_folder_is_refused_before_default_tier2_run(
         pytest.skip(f"Directory symlinks are unavailable: {exc}")
 
     def must_not_run(*_args, **_kwargs):
-        raise AssertionError("Validation must not receive a linked root when Tier 2 is enabled")
+        raise AssertionError("Validation must not receive a linked root unless --no-dedup is passed")
 
     monkeypatch.setattr(cli_module, "run_validation", must_not_run)
 
-    result = CliRunner().invoke(cli_module.cli, ["validate", str(linked_target / "SKILL.md")])
+    # The guard runs before --tiers narrows the run, so --tiers 1 alone does not skip it.
+    for argument in (linked_target, linked_target / "SKILL.md"):
+        result = CliRunner().invoke(cli_module.cli, ["validate", str(argument), *tiers])
 
-    assert result.exit_code == 2, result.output
-    assert "symlink or reparse point: linked-skill" in result.output
-    assert str(target) not in result.output
+        assert result.exit_code == 2, result.output
+        assert "symlink or reparse point: linked-skill" in result.output
+        assert str(target) not in result.output
+
+
+def test_manifest_in_linked_skill_folder_validates_like_the_folder_with_no_dedup(tmp_path: Path) -> None:
+    skill = tmp_path / "simple"
+    shutil.copytree(FIXTURE, skill)
+    linked = tmp_path / "linked"
+    try:
+        linked.symlink_to(skill, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"Directory symlinks are unavailable: {exc}")
+    args = ("--no-dedup", "--checks", "schema")
+
+    folder = _validate(linked, tmp_path / "folder-reports", *args)
+    manifest = _validate(linked / "SKILL.md", tmp_path / "manifest-reports", *args)
+
+    assert folder[0] == 0
+    assert manifest == folder
 
 
 def test_skill_manifest_file_keeps_default_reports_outside_the_skill(
@@ -133,6 +153,25 @@ def test_skill_manifest_file_keeps_default_reports_outside_the_skill(
     assert result.exit_code == 0, result.output
     assert (tmp_path / "simple-reports" / "BENCHMARK.md").is_file()
     assert not (skill / "reports").exists()
+
+
+def test_skill_manifest_file_refuses_an_output_dir_inside_the_skill(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    skill = tmp_path / "simple"
+    shutil.copytree(FIXTURE, skill)
+    monkeypatch.chdir(skill)
+    args = ("--tiers", "1", "--no-llm", "--checks", "schema", "-r", "json", "-o", "out")
+    message = "Report output must be outside the publication target; use an external --output-dir: out"
+
+    folder = CliRunner().invoke(cli_module.cli, ["validate", ".", *args])
+    manifest = CliRunner().invoke(cli_module.cli, ["validate", "SKILL.md", *args])
+
+    assert folder.exit_code == 1, folder.output
+    assert message in folder.output
+    assert manifest.exit_code == folder.exit_code, manifest.output
+    assert message in manifest.output
+    assert not (skill / "out").exists()
 
 
 def test_other_file_in_a_skill_is_validated_as_given(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

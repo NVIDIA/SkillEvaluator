@@ -959,8 +959,10 @@ def _sensitive_write_target(command: str) -> str | None:
 # The keyword rule reads an entry only where a path starts, as an apply_patch
 # header is read, so /opt/conda/etc/profile.d/conda.sh does not name
 # /etc/profile.d, while ../etc/sudoers does name /etc/sudoers. A path attached
-# to a short option, as in "cp -t/etc/sudoers.d", starts after the option.
-_KEYWORD_PATH_START = r"(?:(?<![\w~$-])|(?<=[\s'\"]-[a-z])|(?<=[\s'\"]-[a-z]{2}))"
+# to a short option or a cluster of them, as in "cp -t/etc/sudoers.d" or
+# "tar -xzvC/etc/profile.d", starts after the option letters. The entry is
+# group 1 of the pattern.
+_KEYWORD_PATH_START = r"(?:(?<![\w~$-])|(?<=[\s'\"])-[a-z]+)"
 # The file a source or . command reads: its first operand. The command starts
 # the text, a line (also after a "\n" escape, as an argv list prints a
 # newline), a list after ";", "&", "|", "(", "{" or "`", or a quote that opens
@@ -986,8 +988,8 @@ def _keyword_rule_entry(lowered: str) -> str | None:
     starts = [start for start, _ in sourced]
 
     def outside_sourced_file(mention: re.Match[str]) -> bool:
-        index = bisect.bisect_right(starts, mention.start()) - 1
-        return index < 0 or sourced[index][1] < mention.end()
+        index = bisect.bisect_right(starts, mention.start(1)) - 1
+        return index < 0 or sourced[index][1] < mention.end(1)
 
     return max(
         (
@@ -995,7 +997,7 @@ def _keyword_rule_entry(lowered: str) -> str | None:
             for entry in _SENSITIVE_WRITE_PATHS
             if any(
                 outside_sourced_file(mention)
-                for mention in re.finditer(_KEYWORD_PATH_START + re.escape(entry), lowered)
+                for mention in re.finditer(f"{_KEYWORD_PATH_START}({re.escape(entry)})", lowered)
             )
         ),
         key=len,

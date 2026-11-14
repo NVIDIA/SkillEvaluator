@@ -298,6 +298,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     `harness-check` on a plugin folder also shows a plugin panel: which plugin formats each harness accepts (`.claude-plugin`, `.codex-plugin`, Copilot, Agent Plugins v1, Hermes `plugin.yaml`), and an empty plugin.
 
     Plugin component rules cover skill namespacing, Codex's plugin-skill cap and Agent Plugins hooks, Copilot CLI MCP server names, disabled plugins, and components a harness registers but doesn't deliver.
+
+    `harness-check` takes the model setup some limits depend on: `--context-tokens`, `--custom-provider`, `--explicit-invocation` and `--headless`.
   </Accordion>
 
   <Accordion title="security — vulnerability scanning">

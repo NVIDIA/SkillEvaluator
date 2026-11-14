@@ -12,6 +12,9 @@ All notable changes to SkillEvaluator are documented in this file.
   comment helpers, and needs no Pages configuration or history branch. Future
   generated bundles include the template; archived bundles and the released
   onboarding CLI retain their existing hosted publisher setup.
+- `harness-check` takes the model setup some limits depend on: `--context-tokens`,
+  `--custom-provider`, `--explicit-invocation` and `--headless` (a Claude Code
+  skill with `allowed-tools` does not load headless).
 - Plugin component rules: skill namespacing, Codex's plugin-skill cap and Agent
   Plugins hooks, Copilot CLI MCP server names, disabled plugins, and components a
   harness does not deliver.

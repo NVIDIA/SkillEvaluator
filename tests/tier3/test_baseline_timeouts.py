@@ -51,6 +51,30 @@ LAUNCH_ERROR = "{agent} without-skill Harbor run failed: Harbor job did not comp
 ADC_LAUNCH_ERROR = (
     "opencode without-skill Harbor run failed: Harbor job exceeded Google ADC token lifetime (3300s) in gke mode"
 )
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _doc_block(name: str, lead: str) -> str:
+    """Return the one blank-line separated block of ``name`` that starts with ``lead``, whitespace-normalized."""
+    blocks = [" ".join(block.split()) for block in (REPO_ROOT / name).read_text(encoding="utf-8").split("\n\n")]
+    [block] = [block for block in blocks if block.startswith(lead)]
+    return block
+
+
+def _changelog_entry(lead: str) -> str:
+    """Return the one CHANGELOG.md bullet that starts with ``lead``, whitespace-normalized."""
+    entries: list[list[str]] = []
+    in_entry = False
+    for line in (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8").splitlines():
+        if line.startswith("- "):
+            entries.append([line])
+            in_entry = True
+        elif in_entry and line.startswith("  "):
+            entries[-1].append(line)
+        else:
+            in_entry = False
+    [entry] = [text for text in (" ".join(" ".join(lines).split()) for lines in entries) if text.startswith(lead)]
+    return entry
 
 
 # -- synthetic arm-level Harbor jobs ------------------------------------------
@@ -306,24 +330,45 @@ def test_reports_reload_the_tolerated_agent_from_disk(tmp_path: Path) -> None:
     assert load_agent_data(tmp_path / "results")["opencode"]["execution_status"] == "failed"
 
 
-@pytest.mark.parametrize("source", ["harbor_result", "trajectory"])
-def test_oversized_completion_counter_rejects_tolerance_without_aborting_collection(
-    tmp_path: Path, source: str
-) -> None:
-    huge_count = 10**400
-    launch_errors = _two_agent_jobs(tmp_path / "jobs", output_tokens=huge_count if source == "harbor_result" else None)
+def _completion_counter_jobs(tmp_path: Path, source: str, count: Any) -> list[str]:
+    """Return the launch errors of jobs whose timed-out baseline attempt reports ``count`` output tokens."""
+    launch_errors = _two_agent_jobs(tmp_path / "jobs", output_tokens=count if source == "harbor_result" else None)
     if source == "trajectory":
         trial = tmp_path / "jobs" / f"{SKILL}-opencode-without" / "case-002__without1"
         _write_json(
             trial / "agent" / "trajectory.json",
-            {"steps": [], "final_metrics": {"total_completion_tokens": huge_count}},
+            {"steps": [], "final_metrics": {"total_completion_tokens": count}},
         )
+    return launch_errors
+
+
+@pytest.mark.parametrize("source", ["harbor_result", "trajectory"])
+# Counts past the float range (either sign), past the JSON-safe integer range, and large floats.
+@pytest.mark.parametrize(
+    "count",
+    [10**400, -(10**400), 2**53, 2**70, 1e16, 1e300],
+    ids=["int-10pow400", "int-minus-10pow400", "int-2pow53", "int-2pow70", "float-1e16", "float-1e300"],
+)
+def test_oversized_completion_counter_rejects_tolerance_without_aborting_collection(
+    tmp_path: Path, source: str, count: Any
+) -> None:
+    launch_errors = _completion_counter_jobs(tmp_path, source, count)
 
     results = _collect(tmp_path, launch_errors)
 
     assert results["execution_status"] == "failed"
     assert RECORD_KEY not in results["agents"]["opencode"]
     assert results["agents"]["opencode"][REJECTION_KEY] == "no_progress_evidence"
+
+
+@pytest.mark.parametrize("source", ["harbor_result", "trajectory"])
+def test_completion_counter_at_the_json_safe_limit_proves_progress(tmp_path: Path, source: str) -> None:
+    launch_errors = _completion_counter_jobs(tmp_path, source, 2**53 - 1)
+
+    results = _collect(tmp_path, launch_errors)
+
+    assert results["execution_status"] == "succeeded"
+    assert results["agents"]["opencode"][RECORD_KEY]["failures"][0]["output_tokens"] == 2**53 - 1
 
 
 def test_trajectory_completion_tokens_prove_progress(tmp_path: Path) -> None:
@@ -335,6 +380,24 @@ def test_trajectory_completion_tokens_prove_progress(tmp_path: Path) -> None:
 
     assert results["execution_status"] == "succeeded"
     assert results["agents"]["opencode"][RECORD_KEY]["failures"][0]["output_tokens"] == 42
+
+
+@pytest.mark.parametrize("count", [2**53, 2**70, 1e16], ids=["int-2pow53", "int-2pow70", "float-1e16"])
+def test_out_of_range_harbor_counter_falls_back_to_the_trajectory_and_the_changelog_says_so(
+    tmp_path: Path, count: Any
+) -> None:
+    """Harbor's count past the JSON-safe range is no evidence, so an in-range trajectory count still proves progress."""
+    launch_errors = _two_agent_jobs(tmp_path / "jobs", output_tokens=count)
+    trial = tmp_path / "jobs" / f"{SKILL}-opencode-without" / "case-002__without1"
+    _write_json(trial / "agent" / "trajectory.json", {"steps": [], "final_metrics": {"total_completion_tokens": 42}})
+
+    results = _collect(tmp_path, launch_errors)
+
+    assert results["execution_status"] == "succeeded"
+    assert results["agents"]["opencode"][RECORD_KEY]["failures"][0]["output_tokens"] == 42
+    # The entry refuses the agent only when the attempt has no other count in range.
+    entry = _changelog_entry("- `--tolerate-baseline-timeouts` (added in 0.9.0) now follows its own rules")
+    assert "with no other in-range count for that attempt the agent is refused as `no_progress_evidence`" in entry
 
 
 @pytest.mark.parametrize(
@@ -654,7 +717,9 @@ def _render_reports(tmp_path: Path, results: dict[str, Any]) -> tuple[dict[str, 
     return payload, benchmark, html
 
 
-def _render_reports_and_message(tmp_path: Path, results: dict[str, Any]) -> tuple[dict[str, Any], str, str, str]:
+def _render_reports_and_message(
+    tmp_path: Path, results: dict[str, Any], *, max_attempts: int = 1
+) -> tuple[dict[str, Any], str, str, str]:
     """Like :func:`_render_reports`, and also return the Tier 3 result's ``agent_eval`` message."""
     from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory, render_agent_eval_html_report
 
@@ -665,7 +730,7 @@ def _render_reports_and_message(tmp_path: Path, results: dict[str, Any]) -> tupl
             "run_dir": str(run_dir),
             "attempt_policy": {
                 **results["attempt_policy"],
-                "max_attempts": 1,
+                "max_attempts": max_attempts,
                 "pass_threshold": 0.5,
                 "stop_on_pass": False,
             },
@@ -776,6 +841,7 @@ def test_verdict_comes_from_the_complete_peer_not_a_tolerated_agent(
     tmp_path: Path, peer: str, verdict: str, lead: str
 ) -> None:
     from skillevaluator.evaluation.tier3_report import _agent_quality_verdict
+    from skillevaluator.tier3.result_display import render_result
 
     # opencode activates the skill and passes every dimension and required
     # check (goal accuracy 1.0), but its baseline timed out. codex completes
@@ -801,11 +867,64 @@ def test_verdict_comes_from_the_complete_peer_not_a_tolerated_agent(
     assert f"> **Tier 3 completed-agent result: {verdict.upper()}**" in benchmark
     assert f"| Tier 3 | Live agent evaluation | **{verdict.upper()}** |" in benchmark
     assert lead in html
+    # The HTML overview says once that the tolerated baseline needs attention:
+    # in the completed-agent lead, or in its own note when the lead reads
+    # inconclusive, as BENCHMARK.md does in both cases.
+    overview = html.split('<div class="t3-overview-lead">', 1)[1].split("</div>", 1)[0]
+    lead_attention = "Other execution failures need attention."
+    tolerated_attention = "<strong>Needs attention:</strong> baseline timeouts were tolerated."
+    assert (lead_attention in overview) is (verdict == "fail")
+    assert (tolerated_attention in overview) is (verdict == "inconclusive")
+    assert "Baseline incomplete for <strong>opencode</strong> (1 of 2 attempts scored)" in overview
+    assert "**Needs attention:** other execution failures remain." in benchmark
     if verdict == "inconclusive":
         # The tolerated agent did activate the skill, so Insights names whose trials never did.
         assert payload["conclusions"][0]["message"].startswith(
             "The skill was never activated in any positive with-skill trial of an agent with a complete baseline."
         )
+        entry = _changelog_entry("- `--tolerate-baseline-timeouts` (added in 0.9.0) now follows its own rules")
+        assert (
+            "`report.html` also keeps the note when its overview reads Inconclusive because the complete agent "
+            "never activated the skill." in entry
+        )
+    # The run verdict that `tier3 evaluate` prints reads the same agents.
+    terminal = render_result(results)
+    assert "Tier 3 Evaluation: DEGRADED" in terminal
+    assert [line.strip() for line in terminal.splitlines() if line.startswith("RUN QUALITY VERDICT:")] == [
+        f"RUN QUALITY VERDICT: {verdict.upper()}"
+    ]
+    block = _doc_block("docs/tier3-live-evaluation.mdx", "For a tolerated agent, the baseline condition stays")
+    assert (
+        "The run's verdict and the `RUN QUALITY VERDICT` line that `tier3 evaluate` prints read the same agents:"
+        in block
+    )
+
+
+@pytest.mark.parametrize("field", ["with_skill", "without_skill", "dimensions_with_skill"])
+def test_printed_verdict_reads_every_agent_when_the_complete_peer_cannot_rank(tmp_path: Path, field: str) -> None:
+    from skillevaluator.tier3.result_display import render_result
+
+    # opencode passes and is tolerated. codex completes both arms, but its
+    # persisted scores are not a map, so it cannot rank and does not set the
+    # tolerated agent aside: the printed verdict reads every agent, and the
+    # summary still renders.
+    passing = {**SCORES, "goal_accuracy": 1.0}
+    jobs = tmp_path / "jobs"
+    _arm(jobs, "opencode", "with", [(case, "scored") for case in CASES], scores=passing, details=_activation(True))
+    _arm(jobs, "opencode", "without", [("case-001", "scored"), ("case-002", "timeout")])
+    _arm(jobs, "codex", "with", [(case, "scored") for case in CASES], details=_activation(True))
+    _arm(jobs, "codex", "without", [(case, "scored") for case in CASES])
+    results = _collect(tmp_path, [LAUNCH_ERROR.format(agent="opencode", count=1)])
+    assert results[RUN_KEY]["tolerated_agents"] == ["opencode"]
+    results.update({"skill_name": SKILL, "run_dir": str(tmp_path / "results")})
+    results["agents"]["codex"][field] = "not a score map"
+
+    terminal = render_result(results)
+
+    assert "Tier 3 Evaluation: DEGRADED" in terminal
+    assert [line.strip() for line in terminal.splitlines() if line.startswith("RUN QUALITY VERDICT:")] == [
+        "RUN QUALITY VERDICT: PASS"
+    ]
 
 
 def test_verdict_counts_come_from_a_complete_agent_that_set_the_verdict(tmp_path: Path) -> None:
@@ -836,12 +955,20 @@ def test_verdict_counts_come_from_a_complete_agent_that_set_the_verdict(tmp_path
 
 
 @pytest.mark.parametrize(
-    ("tolerated", "panel_agent"),
-    [((), "opencode"), (("opencode",), None), (("opencode", "claude-code"), None)],
+    ("tolerated", "panel_agent", "run_verdict"),
+    [
+        ((), "opencode", "FAIL"),
+        (("opencode",), None, "INCONCLUSIVE"),
+        (("opencode", "claude-code"), None, "INCONCLUSIVE"),
+    ],
     ids=["none-tolerated", "one-tolerated", "two-tolerated"],
 )
 def test_terminal_findings_panel_never_shows_a_tolerated_agent(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], tolerated: tuple[str, ...], panel_agent: str | None
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    tolerated: tuple[str, ...],
+    panel_agent: str | None,
+    run_verdict: str,
 ) -> None:
     from skillevaluator.tier3.result_display import render_result
 
@@ -862,8 +989,14 @@ def test_terminal_findings_panel_never_shows_a_tolerated_agent(
     results.update({"skill_name": SKILL, "run_dir": str(tmp_path / "results")})
 
     capsys.readouterr()
-    render_result(results)
+    rendered = render_result(results)
     printed = capsys.readouterr().out
+    # The run verdict reads only codex once every activated agent is tolerated
+    # (codex never activated). Without tolerance, opencode misses its goals
+    # (goal accuracy 0.8), so the run fails, as on main.
+    assert [line for line in rendered.splitlines() if line.startswith("RUN QUALITY VERDICT:")] == [
+        f"RUN QUALITY VERDICT: {run_verdict}"
+    ]
     written = sorted(path.parent.name for path in (tmp_path / "results").glob("*/findings.json"))
     if panel_agent is None:
         # The canonical best agent is codex, which has no findings to show. No
@@ -874,6 +1007,22 @@ def test_terminal_findings_panel_never_shows_a_tolerated_agent(
         # Without tolerance the one activated agent keeps its panel, as on main.
         assert f"{SKILL} / {panel_agent} — Findings" in printed
         assert written == [panel_agent]
+
+
+@pytest.mark.parametrize("tolerate", [True, False], ids=["tolerated", "default"])
+def test_failed_baseline_fails_the_run_unless_tolerated_and_the_docs_say_so(tmp_path: Path, tolerate: bool) -> None:
+    """The baseline arm stays failed either way; only the option keeps the agent and the run."""
+    results = _collect(tmp_path, _two_agent_jobs(tmp_path / "jobs"), tolerate_baseline_timeouts=tolerate)
+
+    payload, _benchmark, _html = _render_reports(tmp_path, results)
+
+    (notice,) = payload["coverage_notices"]
+    assert (notice["agent"], notice["code"], notice["state"]) == ("opencode", "baseline_failed", "incomplete")
+    assert payload["execution_status"] == ("succeeded" if tolerate else "failed")
+    assert ("The agent and the Tier 3 run are marked failed." in notice["message"]) is not tolerate
+    block = _doc_block("docs/reports.mdx", "An arm that ran but failed")
+    assert "fails the agent and the run unless `--tolerate-baseline-timeouts` keeps the agent scored" in block
+    assert "[Baseline timeouts](/skills/skillevaluator/tier3-live-evaluation#baseline-timeouts)" in block
 
 
 @pytest.mark.parametrize("kwargs", [{"grading_mode": "custom_only"}, {"skip_baseline": True}])
@@ -1080,18 +1229,26 @@ def test_stop_on_pass_recovered_timeout_beside_unrecovered_ones(tmp_path: Path) 
     assert results[RUN_KEY]["explained_launch_errors"] == launch_errors
 
 
-def test_cost_limit_attempts_that_never_ran_are_not_missing_baseline_attempts(tmp_path: Path) -> None:
+_COST_LIMIT_LAUNCH_ERROR = (
+    "opencode without-skill Harbor run failed: case-a attempt 2: Harbor job did not complete successfully: 1 errored"
+)
+
+
+def _collect_cost_limited(tmp_path: Path, *, codex_short: bool = False) -> dict[str, Any]:
+    """Collect attempt jobs a cost limit cut short; opencode's second case-a baseline attempt timed out.
+
+    The limit admitted no attempt of case-b for opencode. With ``codex_short``
+    it also left codex's second case-b attempt ``not_run`` in both arms.
+    """
     pytest.importorskip("harbor")
     from skillevaluator.tier3.harbor.runner import _merge_attempt_jobs
 
-    # A cost limit runs every attempt as its own job. It admitted no attempt
-    # of case-b for opencode, so neither arm expects case-b; only the timed-out
-    # second attempt of case-a is missing from the baseline.
+    codex_b_attempts = 1 if codex_short else 2
     plan = {
         ("opencode", "with"): {"case-a": ["pass", "pass"]},
         ("opencode", "without"): {"case-a": ["pass", "timeout"]},
-        ("codex", "with"): {"case-a": ["pass", "pass"], "case-b": ["pass", "pass"]},
-        ("codex", "without"): {"case-a": ["fail", "fail"], "case-b": ["fail", "fail"]},
+        ("codex", "with"): {"case-a": ["pass", "pass"], "case-b": ["pass"] * codex_b_attempts},
+        ("codex", "without"): {"case-a": ["fail", "fail"], "case-b": ["fail"] * codex_b_attempts},
     }
     for (agent, variant), cases in plan.items():
         jobs = [
@@ -1105,11 +1262,12 @@ def test_cost_limit_attempts_that_never_ran_are_not_missing_baseline_attempts(tm
         for arm in ("with", "without")
         for attempt in (1, 2)
     ]
-    launch_errors = [
-        "opencode without-skill Harbor run failed: case-a attempt 2: Harbor job did not complete successfully: 1 errored"
-    ]
-
-    results = collect_harbor_results(
+    if codex_short:
+        not_run += [
+            {"agent": "codex", "arm": arm, "case_id": "case-b", "attempt": 2, "status": "not_run"}
+            for arm in ("with", "without")
+        ]
+    return collect_harbor_results(
         skill_name=SKILL,
         agents=["opencode", "codex"],
         output_dir=tmp_path / "results",
@@ -1119,10 +1277,17 @@ def test_cost_limit_attempts_that_never_ran_are_not_missing_baseline_attempts(tm
         expected_case_ids=["case-a", "case-b"],
         case_id_by_task_selector={"case-a": "case-a", "case-b": "case-b"},
         expected_trials=4,
-        launch_errors=launch_errors,
+        launch_errors=[_COST_LIMIT_LAUNCH_ERROR],
         tolerate_baseline_timeouts=True,
         budget_not_run=not_run,
     )
+
+
+def test_cost_limit_attempts_that_never_ran_are_not_missing_baseline_attempts(tmp_path: Path) -> None:
+    # A cost limit runs every attempt as its own job. It admitted no attempt
+    # of case-b for opencode, so neither arm expects case-b; only the timed-out
+    # second attempt of case-a is missing from the baseline.
+    results = _collect_cost_limited(tmp_path)
 
     opencode = results["agents"]["opencode"]
     assert results["execution_status"] == "succeeded", results.get("warnings")
@@ -1132,7 +1297,50 @@ def test_cost_limit_attempts_that_never_ran_are_not_missing_baseline_attempts(tm
     record = opencode[RECORD_KEY]
     assert (record["expected_attempts"], record["scored_attempts"], record["failed_attempts"]) == (2, 1, 1)
     assert [(failure["case_id"], failure["attempt"]) for failure in record["failures"]] == [("case-a", 2)]
-    assert results[RUN_KEY]["explained_launch_errors"] == launch_errors
+    assert results[RUN_KEY]["explained_launch_errors"] == [_COST_LIMIT_LAUNCH_ERROR]
+
+
+@pytest.mark.parametrize("codex_short", [False, True], ids=["peer-complete", "peer-cost-limited"])
+def test_reports_name_tolerated_agents_without_a_completed_agent_result(tmp_path: Path, codex_short: bool) -> None:
+    from skillevaluator.reporting.tier3_scope import completed_agent_result
+
+    # With codex_short the cost limit also cut the best agent's coverage, so
+    # the reports have no completed-agent result; the tolerated baseline still
+    # needs attention and is named in both reports.
+    results = _collect_cost_limited(tmp_path, codex_short=codex_short)
+    assert results["execution_status"] == "succeeded", results.get("warnings")
+    assert results[RUN_KEY]["tolerated_agents"] == ["opencode"]
+
+    payload, benchmark, html, _message = _render_reports_and_message(tmp_path, results, max_attempts=2)
+
+    assert payload["best_agent"] == "codex"
+    assert (completed_agent_result(payload) is None) is codex_short
+    assert _tolerated_line("opencode") in benchmark
+    assert benchmark.count("**Needs attention:**") == 1
+    assert "Baseline incomplete for <strong>opencode</strong> (1 of 2 attempts scored)" in html
+    attention = "**Needs attention:** baseline timeouts were tolerated."
+    html_attention = (
+        '<span class="tolerated-baseline"><strong>Needs attention:</strong> baseline timeouts were tolerated.</span>'
+    )
+    if codex_short:
+        # Nothing before the note names other failures, so it names the cause.
+        assert "Completed agent: **codex**" not in benchmark
+        assert f"{attention}\n{_tolerated_line('opencode')}" in benchmark
+        assert "other execution failures" not in benchmark.lower()
+        assert html_attention in html
+        assert "other execution failures" not in html.lower()
+        entry = _changelog_entry("- `--tolerate-baseline-timeouts` (added in 0.9.0) now follows its own rules")
+        assert (
+            "also when a cost limit leaves the best agent's attempts short; both reports used to leave them out "
+            "in that case." in entry
+        )
+    else:
+        # The completed-agent lead already says that other failures need attention.
+        assert "Completed agent: **codex**" in benchmark
+        assert "**Needs attention:** other execution failures remain." in benchmark
+        assert "Other execution failures need attention. This is not a whole-run or publication PASS." in html
+        assert attention not in benchmark
+        assert html_attention not in html
 
 
 # -- pure rules -----------------------------------------------------------------

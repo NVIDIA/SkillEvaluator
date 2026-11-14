@@ -958,15 +958,17 @@ def _sensitive_write_target(command: str) -> str | None:
 
 # The keyword rule reads an entry only where a path starts, as an apply_patch
 # header is read, so /opt/conda/etc/profile.d/conda.sh does not name
-# /etc/profile.d.
-_KEYWORD_PATH_START = r"(?<![\w.~$-])"
+# /etc/profile.d, while ../etc/sudoers does name /etc/sudoers. A path attached
+# to a short option, as in "cp -t/etc/sudoers.d", starts after the option.
+_KEYWORD_PATH_START = r"(?:(?<![\w~$-])|(?<=[\s'\"]-[a-z])|(?<=[\s'\"]-[a-z]{2}))"
 # The file a source or . command reads: its first operand. The command starts
-# the text, a line, a list after ";", "&", "|", "(", "{" or "`", or a quoted
-# string (the script of a "bash -c"), after at most one shell keyword such as
-# "then" or "do". A "." anywhere else, as in "cp -r . /etc/profile.d", is an
-# operand of another command.
+# the text, a line (also after a "\n" escape, as an argv list prints a
+# newline), a list after ";", "&", "|", "(", "{" or "`", or a quote that opens
+# a string (the script of a "bash -c"), after at most one shell keyword such
+# as "then" or "do". A "." anywhere else, as in "cp -r . /etc/profile.d" or
+# 'cp -r "$SRC" . /etc/profile.d', is an operand of another command.
 _SOURCED_FILE_RE = re.compile(
-    r"(?:^|[\n;&|({`'\"])[ \t]*(?:(?:if|then|elif|else|do|while|until)[ \t]+)?"
+    r"(?:^|\\n|[\n;&|({`]|(?<![^\s\[,=(])['\"])[ \t]*(?:(?:if|then|elif|else|do|while|until)[ \t]+)?"
     r"(?:source|\.)[ \t]+(['\"]?)([^\s;&|()<>'\"`]+)\1(?=$|[\s;&|()<>'\"`])"
 )
 
@@ -978,13 +980,21 @@ def _keyword_rule_entry(lowered: str) -> str | None:
     command reads, so "source ~/.bashrc; npm test 2>&1" names none while
     ". ./patch.sh ~/.bashrc 2>/dev/null" still names ~/.bashrc.
     """
+    # The sourced files are in order and do not overlap, so only the last one
+    # that starts at or before a mention can hold it.
     sourced = [match.span(2) for match in _SOURCED_FILE_RE.finditer(lowered)]
+    starts = [start for start, _ in sourced]
+
+    def outside_sourced_file(mention: re.Match[str]) -> bool:
+        index = bisect.bisect_right(starts, mention.start()) - 1
+        return index < 0 or sourced[index][1] < mention.end()
+
     return max(
         (
             entry
             for entry in _SENSITIVE_WRITE_PATHS
             if any(
-                not any(start <= mention.start() and mention.end() <= end for start, end in sourced)
+                outside_sourced_file(mention)
                 for mention in re.finditer(_KEYWORD_PATH_START + re.escape(entry), lowered)
             )
         ),

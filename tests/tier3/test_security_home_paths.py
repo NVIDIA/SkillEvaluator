@@ -229,7 +229,18 @@ MAIN_WRITES = [
         id="copy-then-source-profile-d",
     ),
     pytest.param(_bash("cp -r . /etc/profile.d 2>/dev/null"), id="dot-operand-of-copy"),
+    # A closing quote does not start a command, so the "." after it is an operand.
+    pytest.param(_bash('rsync -a "$SRC/" . /etc/profile.d/ 2>&1'), id="dot-operand-after-quoted-source"),
+    pytest.param(_bash("rsync -a --exclude '.git' . /etc/profile.d/ 2>&1"), id="dot-operand-after-quoted-option"),
+    pytest.param(
+        _bash('sudo cp -r --no-preserve="mode" . /etc/sudoers.d 2>/dev/null'), id="dot-operand-after-quoted-value"
+    ),
     pytest.param(_bash("cp /tmp/x //etc/sudoers 2>&1"), id="double-slash-path-start"),
+    pytest.param(_bash("cp /tmp/x /tmp/../etc/sudoers.d/agent 2>&1"), id="parent-directory-path-start"),
+    pytest.param(_bash("cd / && cp /tmp/x ./etc/sudoers 2>&1"), id="relative-path-start"),
+    # A path attached to a short option starts after the option letters.
+    pytest.param(_bash("cp -t/etc/sudoers.d /tmp/agent 2>/dev/null"), id="attached-short-option"),
+    pytest.param(_bash("install -Dt/etc/profile.d x.sh 2>&1"), id="attached-short-option-pair"),
     # A read the keyword rule still flags, as documented.
     pytest.param(_bash("cat ~/.bashrc 2>/dev/null"), id="keyword-rule-read"),
 ]
@@ -277,8 +288,12 @@ BENIGN_ACTIONS = [
     pytest.param(_bash(". ~/.profile >/dev/null 2>&1 && make test"), id="dot-profile-quiet"),
     pytest.param(_bash('if [ -n "$CI" ]; then . ~/.bashrc; fi; make 2>&1'), id="dot-bashrc-after-then"),
     pytest.param(_bash("bash -lc 'source ~/.profile; cargo test 2>&1 | head'"), id="bash-lc-source-profile"),
+    pytest.param(_bash('bash -c "source ~/.bashrc && npm test 2>&1"'), id="bash-c-double-quoted-source"),
     pytest.param(
         _shell_argv("bash", "-lc", "source ~/.bashrc && pytest -q 2>&1 | tail -30"), id="argv-bash-lc-source-bashrc"
+    ),
+    pytest.param(
+        _shell_argv("bash", "-lc", "cd /w\nsource ~/.bashrc\npytest 2>&1 | tail"), id="argv-bash-lc-multiline-source"
     ),
     pytest.param(
         _bash("source /etc/profile.d/conda.sh && conda activate base && python train.py 2>&1 | tail -50"),
@@ -430,6 +445,13 @@ def test_keyword_rule_evidence_skips_the_sourced_file(check_security) -> None:
     result = check_security([_bash("source /etc/profile.d/conda.sh && sudo cp /tmp/umask.sh /etc/profile 2>&1")])
 
     assert [f["evidence"] for f in result["findings"] if f["type"] == "sensitive_file_write"] == ["/etc/profile"]
+
+
+def test_keyword_rule_reads_many_sourced_files_in_one_pass() -> None:
+    sourced = "; . ~/.bashrc" * 10_000
+
+    assert eval_core_checks._keyword_rule_entry(sourced + " > x") is None
+    assert eval_core_checks._keyword_rule_entry(sourced + "; cat ~/.bashrc > x") == "~/.bashrc"
 
 
 def test_home_directory_reads_of_non_credential_files_are_not_flagged(check_security) -> None:

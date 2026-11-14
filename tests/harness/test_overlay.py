@@ -526,6 +526,10 @@ def test_gating_and_claude_only_fields(tmp_path: Path):
     )
     rows = _rows(skill)
 
+    assert "HM-PLATFORMS" in _ids(rows, "hermes")
+    assert "Left out of the skill list unless the host has: bins pdftotext." in {
+        f["message"] for f in rows["openclaw"]["findings"]
+    }
     assert "OC-CLAUDE-ONLY" in _ids(rows, "opencode")
     assert not any(f["id"].endswith("CLAUDE-ONLY") for f in rows["claude-code"]["findings"])
 
@@ -562,6 +566,16 @@ def test_fix_reaches_findings_and_panels(tmp_path: Path):
     out = CliRunner().invoke(cli, ["harness-check", str(skill), "-v"], env={"COLUMNS": "120"}).output
     assert "→ Cut the description by at least 200 UTF-16 units." in out
     assert "Description in the model's skill list" in out
+
+
+def test_hermes_platforms_listing_every_os_is_not_flagged(tmp_path: Path):
+    everywhere = _rows(_skill(tmp_path / "a", extra="platforms: [linux, macos, windows]\n"))
+    mac_only = _rows(_skill(tmp_path / "b", extra="platforms: macos\n"))
+
+    assert "HM-PLATFORMS" not in _ids(everywhere, "hermes")
+    assert "Hidden from the skill list on linux, windows (platforms: macos)." in {
+        f["message"] for f in mac_only["hermes"]["findings"]
+    }
 
 
 def _sized(root: Path, fact: str, target: int) -> Path:

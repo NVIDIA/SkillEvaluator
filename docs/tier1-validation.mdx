@@ -292,6 +292,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     Placeholder rules: `$ARGUMENTS` and `${CLAUDE_SKILL_DIR}` are substituted only by Claude Code, and price-like `$N` text is replaced with arguments by Claude Code and OpenCode.
 
     Invocation rules: `disable-model-invocation` (ignored by Codex, Hermes and OpenCode), Codex's `agents/openai.yaml` implicit-invocation policy (Codex only), `allowed-tools`, Claude Code-only fields, and Hermes project trust.
+
+    Gate rules: Hermes `platforms` and OpenClaw `metadata.openclaw.requires` hide the skill on hosts that don't match.
   </Accordion>
 
   <Accordion title="security — vulnerability scanning">

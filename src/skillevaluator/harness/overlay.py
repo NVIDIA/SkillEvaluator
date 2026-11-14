@@ -355,6 +355,34 @@ def _codex_implicit_disabled(skill_path: Path) -> bool:
     return isinstance(policy, dict) and policy.get("allow_implicit_invocation") is False
 
 
+_HERMES_OS = {"linux": "linux", "macos": "darwin", "windows": "win32"}
+
+
+def _excluded_os(platforms: Any) -> str:
+    """Operating systems Hermes hides the skill on (it maps names, then prefix-matches sys.platform)."""
+    if not platforms:
+        return ""
+    wanted = [str(p).lower().strip() for p in (platforms if isinstance(platforms, list) else [platforms])]
+    mapped = [_HERMES_OS.get(p, p) for p in wanted]
+    return ", ".join(os for os, sys_name in _HERMES_OS.items() if not any(sys_name.startswith(m) for m in mapped))
+
+
+def _openclaw_gates(data: dict[str, Any]) -> str:
+    metadata = data.get("metadata")
+    claw = metadata.get("openclaw") if isinstance(metadata, dict) else None
+    if not isinstance(claw, dict):
+        return ""
+    requires = claw.get("requires") if isinstance(claw.get("requires"), dict) else {}
+    gates = [
+        f"{key} {', '.join(map(str, value)) if isinstance(value, list) else value}"
+        for key in ("bins", "anyBins", "env", "config")
+        if (value := requires.get(key))
+    ]
+    if claw.get("os"):
+        gates.append(f"os {', '.join(map(str, claw['os'])) if isinstance(claw['os'], list) else claw['os']}")
+    return "; ".join(gates)
+
+
 def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, Any]:
     """Compute the facts profile rules refer to (see profiles README).
 
@@ -380,6 +408,7 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
     match = FRONTMATTER_PATTERN.match(text)
     body = match.group(2) if match else text
     custom = {k: v for k, v in data.items() if str(k) not in _KNOWN_FIELDS}
+    platforms = data.get("platforms")
     name = _skill_name(skill_path, data)
     duplicates = catalog.duplicates(skill_path, name) if catalog else []
     return {
@@ -418,6 +447,9 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         "claude_only_fields": ", ".join(f for f in _CLAUDE_ONLY_FIELDS if f in data),
         "custom_fields": ", ".join(map(str, custom)),
         "custom_field_chars": sum(len(v) if isinstance(v, str) else len(yaml.safe_dump(v)) for v in custom.values()),
+        "platforms": ", ".join(map(str, platforms)) if isinstance(platforms, list) else str(platforms or ""),
+        "platforms_excluded": _excluded_os(platforms),
+        "openclaw_gates": _openclaw_gates(data),
         "skill_md_chars": len(text),
         "skill_md_tokens": len(raw) // 4,
         "description_over": max(0, (len(description) if isinstance(description, str) else 0) - 1024),

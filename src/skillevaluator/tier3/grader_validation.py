@@ -28,6 +28,7 @@ from skillevaluator.tier3.eval_core.atif_helpers import (
     get_final_response,
 )
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
+from skillevaluator.tier3.eval_core.declarative_checks import validate_declarative_checks
 
 SCHEMA = "skillevaluator.grader-qualification/v1"
 CATEGORIES = {"positive", "negative", "edge", "failure_recovery", "unavailable_evidence", "non_use", "baseline"}
@@ -46,6 +47,7 @@ ENTRY_FIELDS = {
     "question",
     "ground_truth",
     "expected_behavior",
+    "checks",
     "expected_skill",
     "expected_script",
     "should_trigger",
@@ -139,6 +141,10 @@ def load_suite(directory):
         for key in ("expected_behavior", "acceptable_skills", "acceptable_alternates", "workspace_skill_names"):
             if key in entry and (not isinstance(entry[key], list) or any(not isinstance(v, str) for v in entry[key])):
                 raise ValueError(f"entry.{key}: expected list of strings")
+        if "checks" in entry:
+            errors = validate_declarative_checks(entry["checks"])
+            if errors:
+                raise ValueError(f"entry.checks: {'; '.join(errors)}")
         expected = case["expected"]
         _object(expected, {"overall", "metrics"}, {"overall", "metrics"}, "expected")
         if not isinstance(expected["overall"], str) or expected["overall"] not in {

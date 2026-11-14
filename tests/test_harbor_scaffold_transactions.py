@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tomllib
 from pathlib import Path
 
@@ -12,7 +13,7 @@ import yaml
 from click.testing import CliRunner
 
 from skillevaluator.cli import cli
-from skillevaluator.tier3 import commands
+from skillevaluator.tier3 import commands, workflow
 from skillevaluator.tier3.harbor.adapter import _write_dataset_toml
 from skillevaluator.tier3.toml_utils import toml_quote
 
@@ -184,6 +185,82 @@ def test_scaffold_rejects_contract_invalid_existing_dataset_before_publish(
     assert result.exit_code != 0
     assert dataset.read_bytes() == before
     assert not (evals / "harbor").exists()
+
+
+def test_docs_limit_the_empty_expected_output_rejection_to_the_object_shape(tmp_path: Path) -> None:
+    # Only the {"skill_name", "evals"} shape requires a reference; a flat dataset is
+    # legacy, so an empty one is accepted and leaves accuracy and goal_accuracy N/A.
+    docs = (Path(__file__).resolve().parents[1] / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
+    normalized = " ".join(docs.split())
+    assert 'reject an empty `expected_output` only in a `{"skill_name", "evals"}` dataset' in normalized
+    assert (
+        'A flat dataset (a JSON or YAML list, `{"cases": [...]}`, or any `evals.jsonl`) is legacy: there an empty '
+        "or whitespace-only `expected_output` or `ground_truth` is accepted and makes `accuracy` and "
+        "`goal_accuracy` N/A."
+    ) in normalized
+
+    entry = {"id": "case-001", "prompt": "Q", "expected_output": " "}
+    for index, (name, content, accepted) in enumerate(
+        (
+            ("evals.json", json.dumps({"skill_name": "sample-skill", "evals": [entry]}), False),
+            ("evals.yml", yaml.safe_dump({"skill_name": "sample-skill", "evals": [entry]}), False),
+            ("evals.json", json.dumps([entry]), True),
+            ("evals.json", json.dumps({"cases": [{**entry, "expected_output": ""}]}), True),
+            ("evals.yml", yaml.safe_dump({"cases": [entry]}), True),
+            ("evals.yaml", yaml.safe_dump([{**entry, "ground_truth": ""}]), True),
+            ("evals.jsonl", json.dumps(entry) + "\n", True),
+        )
+    ):
+        root = tmp_path / str(index)
+        root.mkdir()
+        skill = _skill(root)
+        evals = skill / "evals"
+        evals.mkdir()
+        (evals / name).write_text(content, encoding="utf-8")
+
+        # `tier3 PATH` checks the dataset in its own step before it evaluates anything.
+        if accepted:
+            workflow._prepare_dataset(skill, source_path=skill)
+        else:
+            with pytest.raises(ValueError, match="expected_output must be a non-empty string"):
+                workflow._prepare_dataset(skill, source_path=skill)
+        assert sorted(path.name for path in evals.iterdir()) == [name]
+
+        result = CliRunner().invoke(cli, ["init-harbor-task", str(skill), "--case-id", "case-001"])
+
+        assert (result.exit_code == 0) is accepted, (name, content, result.output)
+        assert (evals / "harbor").exists() is accepted
+
+
+def test_changelog_limits_the_empty_expected_output_rejection_to_the_object_shape() -> None:
+    # The entry is found by its opening words in any section, so a release that
+    # moves Unreleased into a dated section keeps it valid. It must stay out of
+    # 0.9.0 and older released sections.
+    lead = "- The Tier 3 live evaluation guide said that `skillevaluator tier3 ./my-skill`"
+    release = subsection = ""
+    found: list[tuple[str, str, str]] = []
+    changelog = (Path(__file__).resolve().parents[1] / "CHANGELOG.md").read_text(encoding="utf-8")
+    for block in changelog.split("\n\n"):
+        normalized = " ".join(block.split())
+        if normalized.startswith("## "):
+            release, subsection = normalized, ""
+        elif normalized.startswith("### "):
+            subsection = normalized
+        elif normalized.startswith(lead):
+            found.append((release, subsection, normalized))
+    assert len(found) == 1
+    release, subsection, entry = found[0]
+    assert subsection == "### Documentation"
+    version = re.match(r"## (\d+)\.(\d+)\.(\d+)\b", release)
+    assert release == "## Unreleased" or (
+        version is not None and tuple(int(part) for part in version.groups()) > (0, 9, 0)
+    ), release
+    assert 'They reject it only in a `{"skill_name", "evals"}` dataset.' in entry
+    assert (
+        'A flat dataset (a JSON or YAML list, `{"cases": [...]}`, or any `evals.jsonl`) is legacy: there an empty '
+        "or whitespace-only `expected_output` or `ground_truth` is accepted and makes `accuracy` and "
+        "`goal_accuracy` N/A."
+    ) in entry
 
 
 def test_force_late_config_failure_preserves_complete_old_scaffold(

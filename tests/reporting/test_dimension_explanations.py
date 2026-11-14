@@ -150,7 +150,42 @@ def test_missing_and_not_applicable_dimensions_have_reasons(tmp_path: Path) -> N
     assert "Skill Efficiency" in table
     assert "N/A not scored with the skill N/A baseline not scored N/A with-skill unavailable No verdict" in table
     assert "A signal this dimension needs produced no score." in table
-    assert f"{reason} It has no score, so the agent's verdict stays NEUTRAL and cannot PASS." in table
+    assert f"{reason}. It has no score, so the agent cannot PASS." in table
+    assert "NEUTRAL" not in table
+
+
+def test_not_applicable_dimension_row_does_not_contradict_a_failing_verdict() -> None:
+    # A scored dimension below 0.40 fails the agent even when another dimension
+    # is Not applicable, so the row names only the shared outcome.
+    payload = _payload({"agent": _agent(with_scores={"skill_efficiency": 0.1})})
+    assert payload["verdict"] == "fail"
+    agent = payload["agents"]["agent"]
+    agent["dimensions"] = [d for d in agent["dimensions"] if d["id"] != "correctness"]
+    agent["not_applicable_dimensions"] = [{"id": "correctness", "reason": ""}]
+    payload["dimensions"] = deepcopy(agent["dimensions"])
+    payload["not_applicable_dimensions"] = deepcopy(agent["not_applicable_dimensions"])
+
+    _markdown, html = _render(payload)
+
+    assert "Tier 3 quality: Changes required" in re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))
+    table = _dimension_table(html)
+    row = table[table.index("N/A N/A N/A Not applicable") :]
+    assert row.rstrip().endswith(
+        "Not applicable: its signals had nothing to judge in any eval case. It has no score, so the agent cannot PASS."
+    )
+    for verdict in ("NEUTRAL", "FAIL", "INCONCLUSIVE"):
+        assert verdict not in row
+
+
+def test_reports_docs_name_only_the_shared_outcome_of_a_not_applicable_dimension() -> None:
+    docs = " ".join((Path(__file__).resolve().parents[2] / "docs" / "reports.mdx").read_text(encoding="utf-8").split())
+    sentences = [sentence for sentence in docs.split(". ") if "Not applicable" in sentence and "no score" in sentence]
+
+    assert len(sentences) == 2
+    for sentence in sentences:
+        assert sentence.endswith("no score, so the agent cannot PASS")
+        for verdict in ("NEUTRAL", "FAIL", "INCONCLUSIVE"):
+            assert verdict not in sentence
 
 
 def test_html_dimension_table_names_evidence_and_baseline_status() -> None:

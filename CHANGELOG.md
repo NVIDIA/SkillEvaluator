@@ -245,6 +245,20 @@ All notable changes to SkillEvaluator are documented in this file.
   `tier3/dataset_sufficiency.py`, the default quality config and the bundled
   grader suite, so retuning any of them fails CI instead of rotting the page.
 
+- The Tier 3 live evaluation guide said that `skillevaluator tier3 ./my-skill`
+  and `tier3 init-harbor-task` reject an empty `expected_output`. They reject
+  it only in a `{"skill_name", "evals"}` dataset. A flat dataset (a JSON or
+  YAML list, `{"cases": [...]}`, or any `evals.jsonl`) is legacy: there an
+  empty or whitespace-only `expected_output` or `ground_truth` is accepted and
+  makes `accuracy` and `goal_accuracy` N/A.
+
+- Reports & Results said that the HTML report labels a failed Tier 3 run's
+  `neutral` verdict **Changes required**. The `tier3` object of a
+  `validate --tier3` JSON report keeps `neutral` for a failed run, but the HTML
+  report and the full Tier 3 payload it embeds show the verdict as `fail`,
+  labelled **Changes required**. A `neutral` verdict of a successful run reads
+  **Neutral**.
+
 ### Fixed
 
 - Automatic SkillSpector selection now verifies the pinned release on first use
@@ -574,6 +588,26 @@ All notable changes to SkillEvaluator are documented in this file.
   ownership key, for example from containers that each start with a fresh
   home directory. The refusal itself is unchanged, and `docs/reports.mdx`
   explains it.
+
+- Tier 3 coverage notices now name the exception type Harbor recorded under a
+  job whose statistics miss a trial. The collector's job failure then ends with
+  `trial <label> recorded VerifierOutputParseError: <message>`, and the notice's
+  `failure` now reads `verifier output parse error`, live and from a saved run,
+  instead of `null` or the type of a later error.
+
+- The HTML Tier 3 dimension table no longer says that a Not applicable
+  dimension keeps the verdict NEUTRAL, which was wrong when another dimension
+  is below 0.40 and the agent is FAIL. The row now reads `It has no score, so
+  the agent cannot PASS.`, and its reason ends with a period.
+
+- A Tier 3 HTML evaluator card with no lift for a judge metric no longer says
+  that no comparable result remains when its lift basis still records a case
+  scored by matching judge models. A card with no lift says that no
+  comparable result remains when the loaded results show that no attempt fed
+  the lift, and otherwise that the loaded results cannot confirm the
+  comparison, as in `No lift: 1 case was scored by different judge models and
+  the loaded results cannot confirm the comparison; the arm scores include
+  it.`
 
 ## 0.9.0 - 2026-11-13
 

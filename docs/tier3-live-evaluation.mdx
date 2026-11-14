@@ -1520,8 +1520,11 @@ A metric can also be N/A (not applicable) for an eval case. It never counts as
   `expected_output` (legacy `ground_truth`). An empty or whitespace-only
   reference, or an empty list, counts as missing. The verifier does not call
   those judges. `skillevaluator tier3 ./my-skill` and `tier3 init-harbor-task`
-  reject an empty `expected_output`, so with them only legacy cases without
-  `ground_truth` make `accuracy` and `goal_accuracy` N/A.
+  reject an empty `expected_output` only in a `{"skill_name", "evals"}`
+  dataset. A flat dataset (a JSON or YAML list, `{"cases": [...]}`, or any
+  `evals.jsonl`) is legacy: there an empty or whitespace-only
+  `expected_output` or `ground_truth` is accepted and makes `accuracy` and
+  `goal_accuracy` N/A.
 - `skill_execution` and `skill_efficiency` are N/A in a baseline arm that has
   no skill it could activate. A baseline arm that stages a skill the case could
   activate is scored on them, and the case rules below apply to it too.

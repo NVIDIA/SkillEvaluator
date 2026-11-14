@@ -291,7 +291,7 @@ successful agent but produced no with-skill score, the dimension reads `Not
 scored with the skill — baseline 50.0%; uplift unavailable` (or `Not scored — a
 signal this dimension needs produced no score` without a baseline). A dimension
 whose signals had nothing to judge in any eval case reads `Not applicable`; it
-has no score, so the agent's verdict stays NEUTRAL and cannot PASS. A
+has no score, so the agent cannot PASS. A
 baseline-only run shows `Baseline 67.0% — baseline-only run; no with-skill score
 or uplift`.
 
@@ -946,7 +946,7 @@ plain-language meaning and evidence source beside its score. For a successful
 best agent, a standard dimension whose signals were active but produced no score
 is listed as N/A with a **not scored with the skill** note and **No verdict**.
 A dimension whose signals had nothing to judge reads **Not applicable**; it has
-no score, so the agent's verdict stays NEUTRAL and cannot PASS. A
+no score, so the agent cannot PASS. A
 collapsed **What each number means** panel under the Tier 3 overview cards
 separates the verdict, Overall Score, Skill Lift, pass@k, the Tier 1 Quality
 Score, and publication eligibility.
@@ -969,8 +969,10 @@ comparisons. A reported lift can therefore differ from subtracting the two
 displayed arm scores, even reversing their apparent direction. When no complete
 comparison with matching judge models remains, the affected metric, dimension,
 and overall lift are unavailable rather than zero. The HTML report's evaluator
-card says how many cases its lift left out, or, when it has no lift, that no
-comparable result remains, and its per-trial evidence labels those cases
+card says how many cases its lift left out. When it has no lift, the card says
+that no comparable result remains if its `comparison_basis` records
+`contributing_attempts` as 0, and otherwise that the loaded results cannot
+confirm the comparison. Its per-trial evidence labels those cases
 **Left out of lift: different judge models**. In the canonical JSON the
 evaluator records that count in `lift_excluded_cases`. Its card's
 `comparison_basis` lists in `case_ids` the lift's keys for the cases the loaded
@@ -1448,10 +1450,14 @@ score.
   every agent finished.
 
 In a standalone report, the **Tier 3 quality** chip and the **Quality Verdict**
-card follow the run's verdict. A failed run keeps `neutral`, which the HTML
-labels **Changes required**, even when the completed agent's own dimension
-verdict passes. The completed-agent details still describe that agent, and
-the command status in the same hero also reads **Changes required**.
+card follow the run's verdict. The Tier 3 payload of a `validate --tier3` JSON
+report, its `tier3` object, keeps `neutral` for a failed run, but the HTML
+report shows a failed run's verdict as `fail`, labelled **Changes required**,
+even when the completed agent's own dimension verdict passes; the full Tier 3
+payload embedded in the HTML report records `fail` too. A `neutral` verdict of
+a successful run reads **Neutral**. The completed-agent
+details still describe that agent, and the command status in the same hero
+also reads **Changes required**.
 
 The evidence is complete when the agent succeeded with no execution errors, has
 a with-skill score from 0 to 1, and scored every expected attempt of every case
@@ -1467,9 +1473,9 @@ verdict follows the run, so a neutral run still reads
 When the run has a best agent, the HTML report names it as **Best performing
 agent**, and its **Skill Lift** card and the **Best-agent lift** line under
 **Run details & provenance** show that agent's lift when it has one, even when
-its evidence is incomplete. The payload keeps this lift in
-`summary.overall_lift` and records the failed run's `verdict` as `neutral`.
-The lift is diagnostic evidence for one agent, not a whole-run lift.
+its evidence is incomplete. The JSON report's `tier3` object and the payload
+embedded in the HTML report both keep this lift in `summary.overall_lift`. The
+lift is diagnostic evidence for one agent, not a whole-run lift.
 
 To get a whole-run result, fix the failed agent and rerun the evaluation with
 every agent.

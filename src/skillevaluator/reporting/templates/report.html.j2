@@ -2854,7 +2854,8 @@
                         <td>N/A</td><td>N/A</td><td>N/A</td>
                         <td><span class="t3-pill warning">Not applicable</span></td>
                         <td></td>
-                        <td class="t3-reasoning">{{ dim.reason or "Not applicable: its signals had nothing to judge in any eval case." }} It has no score, so the agent's verdict stays NEUTRAL and cannot PASS.</td>
+                        {% set na_reason = dim.reason or "Not applicable: its signals had nothing to judge in any eval case" %}
+                        <td class="t3-reasoning">{{ na_reason }}{{ "" if na_reason.endswith(".") else "." }} It has no score, so the agent cannot PASS.</td>
                     </tr>
                     {% endfor %}
                     </tbody>
@@ -3758,8 +3759,11 @@
                                     {% set lift_excluded_label = lift_excluded_cases ~ (' case' if one_lift_excluded_case else ' cases') %}
                                     {# Only a card with both arm scores can say they include the cases. #}
                                     <div class="t3-dim-hint t3-eval-lift-note">
-                                        {%- if card.lift is none -%}
+                                        {#- Only a complete load with no contributing attempt shows that nothing comparable remains. -#}
+                                        {%- if card.lift is none and card.comparison_basis.contributing_attempts == 0 -%}
                                             No lift: {{ lift_excluded_label }} {{ 'was' if one_lift_excluded_case else 'were' }} scored by different judge models and no comparable result remains
+                                        {%- elif card.lift is none -%}
+                                            No lift: {{ lift_excluded_label }} {{ 'was' if one_lift_excluded_case else 'were' }} scored by different judge models and the loaded results cannot confirm the comparison
                                         {%- else -%}
                                             Lift leaves out {{ lift_excluded_label }} scored by different judge models
                                         {%- endif -%}

@@ -27,7 +27,6 @@ from typing import Any
 
 from skillevaluator.constants import EXECUTABLE_SKILL_DIRS
 from skillevaluator.tier3.case_ids import validate_case_ids
-from skillevaluator.tier3.eval_core.checks import resolve_should_trigger
 from skillevaluator.utils.redaction import redact_printable_text
 
 logger = logging.getLogger(__name__)
@@ -760,7 +759,7 @@ def _prompt_skill_files_re(skill_name: str | None, skill_scripts: tuple[str, ...
 
 @functools.lru_cache(maxsize=64)
 def _skill_use_assertion_re(
-    skill_name: str | None, skill_scripts: tuple[str, ...] = (), *, prompt: bool = False, files_only: bool = False
+    skill_name: str | None, skill_scripts: tuple[str, ...] = (), *, prompt: bool = False
 ) -> re.Pattern[str]:
     """Graded text about using the skill: its files, its name called a skill, "used <name>", or running its scripts.
 
@@ -772,17 +771,15 @@ def _skill_use_assertion_re(
     A skill script counts when a run verb or interpreter comes before its name
     ("ran review.py", "python3 ./review.py"), when "used" does and the name
     ends the clause or CLI arguments follow it, or when the text names it under
-    scripts/ or tools/. With ``files_only``, only the skill's files and scripts
-    count, not wording that names the skill or says it was used.
+    scripts/ or tools/.
     """
     name = re.escape(skill_name or "")
-    alternatives = [_skill_files_re(skill_name)]
-    if not files_only:
-        alternatives.append(
-            rf"\b(?:{_SKILL_USE_VERB_RE}|{_READ_VERB_RE})\s+(?:(?:the|this|its|that)(?:\s+installed)?|installed)\s+skill\b"
-            rf"(?![\w-]|\.\w|\s+(?:levels?|sets?)\b)"
-        )
-    if skill_name and not files_only:
+    alternatives = [
+        _skill_files_re(skill_name),
+        rf"\b(?:{_SKILL_USE_VERB_RE}|{_READ_VERB_RE})\s+(?:(?:the|this|its|that)(?:\s+installed)?|installed)\s+skill\b"
+        rf"(?![\w-]|\.\w|\s+(?:levels?|sets?)\b)",
+    ]
+    if skill_name:
         alternatives.extend(
             [
                 rf"(?<![\w-]){name}(?![\w-])(?:\s+(?:as|is)(?:\s+(?:the|a))?(?:\s+right)?)?"
@@ -792,7 +789,7 @@ def _skill_use_assertion_re(
         )
     # A template may explicitly route with "Use <name> to ...". Naming it as a
     # skill or pointing at its files/scripts requires the unavailable install.
-    if not prompt and not files_only and skill_name:
+    if not prompt and skill_name:
         alternatives.append(rf"\b{_SKILL_USE_VERB_RE}\s+[`'\"]?{name}(?![\w-])[`'\"]?{_SKILL_NAME_END_RE}")
     for script in skill_scripts:
         script = _normalized_match_text(script)
@@ -877,15 +874,12 @@ def _match_skill_text(
     skill_scripts: Sequence[str],
     *,
     prompt: bool,
-    files_only: bool = False,
     prepared_name: tuple[str, str] | None = None,
 ) -> str | None:
     text = _normalized_match_text(text)
     name, folded_name = prepared_name if prepared_name is not None else _prepared_skill_name(skill_name)
     scripts = tuple(skill_scripts)
-    generic_pattern = (
-        _prompt_skill_files_re(None, scripts) if prompt else _skill_use_assertion_re("", scripts, files_only=files_only)
-    )
+    generic_pattern = _prompt_skill_files_re(None, scripts) if prompt else _skill_use_assertion_re("", scripts)
     # Check generic wording first: an identity like "skill" or "read" must
     # not mask the noun or verb in "read SKILL.md" and bypass validation.
     matched = _first_unnegated_match(generic_pattern, text)
@@ -895,7 +889,7 @@ def _match_skill_text(
             pattern = (
                 _prompt_skill_files_re(_SKILL_NAME_MARKER, scripts)
                 if prompt
-                else _skill_use_assertion_re(_SKILL_NAME_MARKER, scripts, files_only=files_only)
+                else _skill_use_assertion_re(_SKILL_NAME_MARKER, scripts)
             )
             matched = _first_unnegated_match(pattern, masked)
     if matched is None:
@@ -991,10 +985,7 @@ def _baseline_fairness_warnings(
     ``entry`` is a normalized dataset entry; ``skill_scripts`` are the file
     names of the skill's own scripts. This is a wording heuristic, so it can
     miss skill use phrased another way and can flag task text that shares the
-    skill's name. The expected output and assertions of a case labelled
-    ``should_trigger: false`` grade the skill going unused, so they are checked
-    only for reading the skill's files or running its scripts, not for wording
-    that names the skill or its use ("the lookup-code skill is not needed").
+    skill's name.
     """
     warnings = []
     prompt = entry.get("question")
@@ -1035,9 +1026,6 @@ def _baseline_fairness_warnings(
                 "skill_execution measures whether the skill was used."
             )
             break
-    # Only an explicit label: an entry whose expected_skill is null is still
-    # checked against the skill's own names.
-    negative = "should_trigger" in entry and resolve_should_trigger(entry) is False
     texts = read(_authored_field(entry, "ground_truth", "expected_output"), entry.get("ground_truth"))
     texts += read(_authored_field(entry, "expected_behavior", "assertions"), entry.get("expected_behavior"))
     for field_name, text in texts:
@@ -1045,11 +1033,7 @@ def _baseline_fairness_warnings(
             (
                 match
                 for name in prepared_names
-                if (
-                    match := _match_skill_text(
-                        text, None, scripts, prompt=False, files_only=negative, prepared_name=name
-                    )
-                )
+                if (match := _match_skill_text(text, None, scripts, prompt=False, prepared_name=name))
             ),
             None,
         )

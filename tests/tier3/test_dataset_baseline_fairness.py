@@ -885,46 +885,33 @@ def test_tier3_validate_strict_fails_an_assertion_that_reads_skill_md_within_a_f
 
 
 @pytest.mark.parametrize(
-    "graded",
+    ("graded", "field"),
     [
-        {"expected_output": "The lookup-code skill should not be triggered for plain arithmetic."},
-        {"expected_output": "17 times 19 is 323; the lookup-code skill is not needed for arithmetic."},
-        {"expected_output": "323", "assertions": ["The lookup-code skill is left unused for plain arithmetic"]},
-        {"expected_output": "Answers 323 rather than using lookup-code."},
-        {"expected_output": "323", "assertions": ["Should not trigger or load the skill"]},
+        ({"expected_output": "The lookup-code skill should not be triggered for plain arithmetic."}, "expected_output"),
+        (
+            {"expected_output": "17 times 19 is 323; the lookup-code skill is not needed for arithmetic."},
+            "expected_output",
+        ),
+        (
+            {"expected_output": "323", "assertions": ["The lookup-code skill is left unused for plain arithmetic"]},
+            "assertions",
+        ),
+        ({"expected_output": "Answers 323 rather than using lookup-code."}, "expected_output"),
+        ({"expected_output": "323", "assertions": ["Should not trigger or load the skill"]}, "assertions"),
     ],
     ids=["not-triggered", "not-needed", "left-unused", "rather-than-using", "not-trigger-or-load"],
 )
-def test_negative_case_that_names_the_skill_does_not_warn(graded):
-    # A should_trigger: false case grades the skill going unused, which the
-    # baseline meets however the text words it. The agentskills loader still
-    # copies the top-level skill_name into the entry.
+def test_negative_case_that_names_the_skill_still_warns(graded, field):
+    # Both arms are scored on a should_trigger: false case's expected output
+    # and assertions, so they are checked in full, as a positive case's are.
     entry = _case("lookup-code", prompt="What is 17 times 19?", should_trigger=False, **graded)
 
-    assert entry["expected_skill"] == "lookup-code"
-    assert _baseline_fairness_warnings(entry) == []
-
-
-@pytest.mark.parametrize(
-    ("graded", "field"),
-    [
-        ({"expected_output": "The agent reads SKILL.md, sees it does not apply, and answers 323."}, "expected_output"),
-        ({"expected_output": "Reads lookup-code/SKILL.md and answers 323."}, "expected_output"),
-        ({"expected_output": "323", "assertions": ["The agent runs scripts/lookup.py and reports 323"]}, "assertions"),
-        ({"expected_output": "323", "assertions": ["Ran lookup.py, then answered 323"]}, "assertions"),
-    ],
-    ids=["reads-skill-md", "reads-name-skill-md", "runs-scripts-path", "ran-script"],
-)
-def test_negative_case_that_reads_the_skill_files_or_runs_its_scripts_still_warns(graded, field):
-    # The baseline has neither the skill's SKILL.md nor its scripts, whatever the label.
-    entry = _case("lookup-code", prompt="What is 17 times 19?", should_trigger=False, **graded)
-
-    (warning,) = _baseline_fairness_warnings(entry, skill_scripts=("lookup.py",))
+    (warning,) = _baseline_fairness_warnings(entry)
 
     assert warning.startswith(f"{field} grades skill use"), warning
 
 
-def test_legacy_negative_case_that_names_the_skill_does_not_warn():
+def test_legacy_negative_case_that_names_the_skill_still_warns():
     entry = _entry(
         expected_skill="lookup-code",
         should_trigger=False,
@@ -932,96 +919,9 @@ def test_legacy_negative_case_that_names_the_skill_does_not_warn():
         ground_truth="323; the lookup-code skill is not needed for arithmetic",
     )
 
-    assert _baseline_fairness_warnings(entry) == []
+    (warning,) = _baseline_fairness_warnings(entry)
 
-
-def test_negative_case_labelled_only_by_a_null_expected_skill_needs_should_trigger_false():
-    # expected_skill: null alone is still checked in full against the skill's
-    # own names; the docs tell authors to add should_trigger: false.
-    text = "17 times 19 is 323; the lookup-code skill is not needed for arithmetic."
-    entry = {"id": "case-1", "expected_skill": None, "question": "What is 17 times 19?", "ground_truth": text}
-
-    (warning,) = _baseline_fairness_warnings(entry, skill_names=("lookup-code",))
     assert warning.startswith("ground_truth grades skill use")
-    assert _baseline_fairness_warnings({**entry, "should_trigger": False}, skill_names=("lookup-code",)) == []
-
-    docs = " ".join((_REPO / "docs" / "eval-datasets.mdx").read_text(encoding="utf-8").split())
-    assert (
-        "A negative case labelled only with `expected_skill: null` is still checked in full; add "
-        "`should_trigger: false` when its expected output or assertions name the skill."
-    ) in docs
-
-
-def test_positive_case_with_the_same_text_still_warns():
-    entry = _case(
-        "lookup-code",
-        prompt="What is 17 times 19?",
-        should_trigger=True,
-        expected_output="17 times 19 is 323; the lookup-code skill is not needed for arithmetic.",
-    )
-
-    (warning,) = _baseline_fairness_warnings(entry)
-
-    assert warning.startswith("expected_output grades skill use")
-
-
-def test_negative_case_prompt_that_points_at_the_skill_files_still_warns():
-    entry = _case("lookup-code", prompt="Read skills/lookup-code/SKILL.md, then add 2 and 2", should_trigger=False)
-
-    (warning,) = _baseline_fairness_warnings(entry)
-
-    assert warning.startswith("prompt points at the skill's files")
-
-
-def test_tier3_validate_strict_passes_a_negative_case_that_names_the_skill(tmp_path: Path):
-    skill = tmp_path / "lookup-code"
-    (skill / "evals").mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: lookup-code\ndescription: Look up codes\n---\n", encoding="utf-8")
-    cases = [
-        {
-            "id": "lookup-code-001",
-            "prompt": "Which country uses the dialing code 351?",
-            "expected_output": "Portugal",
-            "assertions": ["Names Portugal as the country for code 351"],
-        },
-        {
-            "id": "lookup-code-neg-001",
-            "should_trigger": False,
-            "prompt": "What is 17 times 19?",
-            "expected_output": "17 times 19 is 323; the lookup-code skill is not needed for arithmetic.",
-            "assertions": ["Answers 323"],
-        },
-    ]
-    (skill / "evals" / "evals.json").write_text(
-        json.dumps({"skill_name": "lookup-code", "evals": cases}), encoding="utf-8"
-    )
-
-    result = CliRunner().invoke(cli, ["tier3", "validate", str(skill), "--strict", "--json"])
-
-    assert result.exit_code == 0, result.output
-
-
-def test_tier3_validate_strict_fails_a_negative_case_that_runs_a_skill_script(tmp_path: Path):
-    skill = tmp_path / "lookup-code"
-    (skill / "evals").mkdir(parents=True)
-    (skill / "scripts").mkdir()
-    (skill / "scripts" / "lookup.py").write_text("print('lookup')\n", encoding="utf-8")
-    (skill / "SKILL.md").write_text("---\nname: lookup-code\ndescription: Look up codes\n---\n", encoding="utf-8")
-    case = {
-        "id": "lookup-code-neg-001",
-        "should_trigger": False,
-        "prompt": "What is 17 times 19?",
-        "expected_output": "323",
-        "assertions": ["Runs lookup.py, sees it does not apply, and answers 323"],
-    }
-    (skill / "evals" / "evals.json").write_text(
-        json.dumps({"skill_name": "lookup-code", "evals": [case]}), encoding="utf-8"
-    )
-
-    result = CliRunner().invoke(cli, ["tier3", "validate", str(skill), "--strict", "--json"])
-
-    assert result.exit_code == 1, result.output
-    assert "assertions grades skill use" in result.output
 
 
 @pytest.mark.parametrize(

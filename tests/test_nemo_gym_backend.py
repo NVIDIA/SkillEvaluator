@@ -119,6 +119,9 @@ def test_gym_claude_command_configures_model_server_runtime(
     assert f"+policy_api_key=${{oc.env:{MODEL_API_KEY_ENV}}}" in command
     overrides = [
         "++anthropic_api_key=EMPTY",
+        "++claude_code_agent.responses_api_agents.claude_code_agent.model_server="
+        "{type:responses_api_models,name:policy_model}",
+        "++claude_code_agent.responses_api_agents.claude_code_agent.model=${policy_model_name}",
         "++claude_code_agent.responses_api_agents.claude_code_agent.bare=false",
         "++claude_code_agent.responses_api_agents.claude_code_agent.claude_code_version="
         + PINNED_RUNTIME_VERSIONS["claude-code"],

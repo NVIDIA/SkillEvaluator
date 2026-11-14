@@ -249,9 +249,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Native NeMo Gym Claude Code runs now supply the model-server placeholder
-  credential, pin the sandbox runtime and enable project skill discovery in
-  both arms, including when Gym uses a private Claude configuration directory.
+- Native NeMo Gym Claude Code runs now bind the selected policy model server,
+  supply its placeholder credential, pin the sandbox runtime and enable project
+  skill discovery in both arms, including when Gym uses a private Claude
+  configuration directory.
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
   of `harness-check` no longer show internal test notes in their messages.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`

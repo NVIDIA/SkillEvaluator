@@ -396,6 +396,9 @@ def gym_eval_command(
     if agent == "claude-code":
         command += [
             "++anthropic_api_key=EMPTY",
+            "++claude_code_agent.responses_api_agents.claude_code_agent.model_server="
+            "{type:responses_api_models,name:policy_model}",
+            "++claude_code_agent.responses_api_agents.claude_code_agent.model=${policy_model_name}",
             "++claude_code_agent.responses_api_agents.claude_code_agent.bare=false",
             "++claude_code_agent.responses_api_agents.claude_code_agent.claude_code_version="
             + PINNED_RUNTIME_VERSIONS["claude-code"],

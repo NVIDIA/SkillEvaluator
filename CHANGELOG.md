@@ -574,7 +574,6 @@ All notable changes to SkillEvaluator are documented in this file.
   follow the 0.9.0 Fixed entry that starts "The interactive Tier 3 progress
   view (`--progress rich`, or `auto` in a terminal) now keeps one height".
 
-
 ## 0.9.0 - 2026-11-13
 
 ### Fixed

@@ -1877,6 +1877,10 @@ def test_changelog_says_a_stream_can_still_send_refused_output_later() -> None:
     entries = [block for block in blocks if block.startswith(lead)]
 
     assert len(entries) == 1
+    # One blank line, not two, separates the entry from what follows it.
+    raw_entry_start = changelog.index("- When the terminal refuses one of the plan lines printed before the\n")
+    raw_entry_end = changelog.index("\n\n", raw_entry_start)
+    assert not changelog.startswith("\n\n\n", raw_entry_end)
     entry = entries[0]
     assert "no longer keeps its own copy of output the terminal still refuses when the run ends" in entry
     assert (

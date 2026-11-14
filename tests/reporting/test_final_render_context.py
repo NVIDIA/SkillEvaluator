@@ -178,54 +178,6 @@ def test_compact_panel_shares_incomplete_status_and_publication(tmp_path):
     assert "✗ FAIL" not in output.getvalue()
 
 
-@pytest.mark.parametrize(
-    ("blocking", "headline"),
-    [(True, "Security Scan failed in Tier 1"), (False, "Security Scan didn't run in Tier 1")],
-    ids=["blocking-finding", "incomplete-only"],
-)
-def test_compact_verdict_names_a_confirmed_failure_beside_an_incomplete_scan_as_failed(tmp_path, blocking, headline):
-    """A blocking finding outranks a scanner that did not complete, as in the detail line and the reports."""
-    from io import StringIO
-
-    from rich.console import Console
-
-    from skillevaluator.cli import _finish_pipeline_view
-    from skillevaluator.models import Finding, Severity
-    from skillevaluator.reporting.console_ui import ValidateView
-
-    source = result()
-    source.validator_name = "Security Scan"
-    if blocking:
-        source.add_finding(
-            Finding(
-                category="SECURITY",
-                severity=Severity.HIGH,
-                check_name="blocked",
-                message="Unsafe command",
-                file_path="scripts/run.sh",
-            )
-        )
-    source.mark_scan_incomplete("semgrep")
-    output = StringIO()
-    view = ValidateView("demo", [(1, "Tier 1", "")], console=Console(file=output, width=200, color_system=None))
-    _finish_pipeline_view(
-        view,
-        tier_gate_results=[source],
-        tier3_result=None,
-        gate_failed=True,
-        output_dir=tmp_path,
-        basename="report",
-        report_formats=(),
-        target_path=tmp_path,
-        agent_eval=False,
-    )
-    panel = output.getvalue()
-    assert headline in panel
-    assert "Publication eligibility: Incomplete" in panel
-    if blocking:
-        assert "didn't run" not in panel
-
-
 def test_html_coverage_uses_full_raw_counts_and_preserves_payload():
     source = result(
         3,

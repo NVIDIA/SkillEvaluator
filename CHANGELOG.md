@@ -249,12 +249,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- The Tier 1 card and the final box of the compact `validate` view now say
-  that a check with a confirmed failure, such as a blocking finding, failed
-  when one of its scanners did not complete. They said that the check didn't
-  run, beside the box's own detail line and the reports, which say it failed,
-  and the card's "what to fix" gave a scanner setup step instead of the
-  check's own error. A check that is only incomplete still reads "didn't run".
 - Automatic SkillSpector selection now verifies the pinned release on first use
   and falls back to the verified managed wheel for a different or unverifiable
   version. Discovery stays free of subprocesses, version probes omit provider
@@ -479,10 +473,9 @@ All notable changes to SkillEvaluator are documented in this file.
   `Incomplete`), with an error that names only that gap. The check itself is
   reported as `FAIL`, not `INCOMPLETE`, because the Critical and its gate
   failure are a confirmed failure, also when a `--policy` override lowers the
-  Critical, and the final line of the compact `validate` view says that the
-  check failed, not that it didn't run. With SkillSpector v2.13.4, a hook with
-  a `"timeout"` key also gets a `static_parse_limit` row on the manifest, so
-  that scan is recorded as incomplete in the same way.
+  Critical. With SkillSpector v2.13.4, a hook with a `"timeout"` key also gets
+  a `static_parse_limit` row on the manifest, so that scan is recorded as
+  incomplete in the same way.
 
 - `validate` no longer repeats its header box in short terminal windows or
   when a log warning prints mid-run. Only the tier that is still running is

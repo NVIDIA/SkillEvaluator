@@ -1198,9 +1198,11 @@ def _sensitive_write_target(command: str) -> str | None:
 # of=/etc/sudoers.d/x", "curl -o ~/.bashrc URL", "visudo -f
 # /etc/sudoers.d/x", "truncate -s0 /etc/profile", and "sort -o /etc/sudoers",
 # whose -o is read among its first nine words), and interpreters, whose code
-# can write any file ("awk -i inplace").
+# can write any file ("awk -i inplace"). The "*** Begin Patch" and "*** End
+# Patch" lines of an apply_patch envelope run no patch command.
 _OPERAND_WRITE_COMMAND_RE = re.compile(
-    r"(?<![\w.-])(?:cp|mv|install|dd|ln|rsync|scp|curl|wget|tar|unzip|patch|truncate|sponge|ed|ex|visudo"
+    r"(?<![\w.-])(?:cp|mv|install|dd|ln|rsync|scp|curl|wget|tar|unzip|(?<!\*\*\* begin )(?<!\*\*\* end )patch"
+    r"|truncate|sponge|ed|ex|visudo"
     r"|sort(?=(?:[ \t]+[^\s;&|]+){0,8}?[ \t]+(?:-[a-z]*o|--output))|perl|python[0-9.]*|ruby|node|[gmn]?awk)(?![\w.-])"
 )
 

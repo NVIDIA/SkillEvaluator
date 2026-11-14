@@ -287,7 +287,7 @@ Cite the paper and record the SkillEvaluator release or commit; see [CITATION.cf
 
 ## Documentation
 
-See [the documentation](https://docs.nvidia.com/skills/skillevaluator/) for
+[Documentation](https://docs.nvidia.com/skills/skillevaluator/) covers
 setup, tier guides, reports, CI integration, CLI reference, and
 [performance dashboard](docs/reports.mdx#performance-dashboard).
 

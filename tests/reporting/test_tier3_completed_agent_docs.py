@@ -435,12 +435,23 @@ def _changelog_entry(lead: str) -> tuple[str, str, str]:
     return found[0]
 
 
+def _newer_than_0_9_0(release: str) -> bool:
+    """Whether ``release`` is ``## Unreleased`` or the heading of a release after 0.9.0."""
+    if release == "## Unreleased":
+        return True
+    match = re.match(r"## (\d+)\.(\d+)\.(\d+)\b", release)
+    return match is not None and tuple(int(part) for part in match.groups()) > (0, 9, 0)
+
+
 def test_changelog_documents_the_failed_run_verdict_label() -> None:
-    # The docs correction is recorded under Unreleased, not inside a released section.
+    # The entry is found by its opening words in any section, so a release that
+    # moves Unreleased into a dated section keeps it valid. It must stay out of
+    # 0.9.0 and older released sections.
     release, subsection, entry = _changelog_entry(
         "- Reports & Results said that the HTML report labels a failed Tier 3 run's `neutral` verdict"
     )
-    assert (release, subsection) == ("## Unreleased", "### Documentation")
+    assert subsection == "### Documentation"
+    assert _newer_than_0_9_0(release), release
     result = result_with_completed_peer()
     raw = HTMLReporter(report_scope="tier3").render(result)
     report_tier3 = json.loads(JSONReporter().render_all([result]))["tier3"]

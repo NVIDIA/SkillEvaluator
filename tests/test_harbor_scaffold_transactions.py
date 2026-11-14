@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tomllib
 from pathlib import Path
 
@@ -232,7 +233,9 @@ def test_docs_limit_the_empty_expected_output_rejection_to_the_object_shape(tmp_
 
 
 def test_changelog_limits_the_empty_expected_output_rejection_to_the_object_shape() -> None:
-    # The docs correction is recorded under Unreleased, not inside a released section.
+    # The entry is found by its opening words in any section, so a release that
+    # moves Unreleased into a dated section keeps it valid. It must stay out of
+    # 0.9.0 and older released sections.
     lead = "- The Tier 3 live evaluation guide said that `skillevaluator tier3 ./my-skill`"
     release = subsection = ""
     found: list[tuple[str, str, str]] = []
@@ -247,7 +250,11 @@ def test_changelog_limits_the_empty_expected_output_rejection_to_the_object_shap
             found.append((release, subsection, normalized))
     assert len(found) == 1
     release, subsection, entry = found[0]
-    assert (release, subsection) == ("## Unreleased", "### Documentation")
+    assert subsection == "### Documentation"
+    version = re.match(r"## (\d+)\.(\d+)\.(\d+)\b", release)
+    assert release == "## Unreleased" or (
+        version is not None and tuple(int(part) for part in version.groups()) > (0, 9, 0)
+    ), release
     assert 'They reject it only in a `{"skill_name", "evals"}` dataset.' in entry
     assert (
         'A flat dataset (a JSON or YAML list, `{"cases": [...]}`, or any `evals.jsonl`) is legacy: there an empty '

@@ -249,6 +249,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Concurrent Tier 3 budget admission now reserves in-flight attempts using the
+  largest measured per-attempt usage and waits for fresh accounting before
+  admitting more work. Reservation metadata exposes unestimated first-wave
+  admissions and waits. Caps remain admission boundaries, not hard ceilings.
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
   of `harness-check` no longer show internal test notes in their messages.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`

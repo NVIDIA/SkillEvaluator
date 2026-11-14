@@ -990,6 +990,26 @@ logical units of work. Already admitted work can take measured usage above a
 cap, including on the final unit. These are admission boundaries, so a priced
 cost budget does not guarantee a hard dollar cap.
 
+Concurrent admission reserves each in-flight attempt using the largest measured
+per-attempt usage seen so far in this run, separately for agent tokens, judge
+calls, and priced cost. Estimates come only from real telemetry. Before a
+dimension has any measurement, its first wave is admitted without an estimate.
+For each bounded dimension with an estimate, admission checks
+`used + (in-flight attempts + proposed attempts) × estimate` against the cap.
+If that projection exceeds a cap while work is in flight, the worker waits for
+completion and re-checks fresh usage; waiting alone does not mark attempts
+`not_run`. With nothing in flight, the existing rule still applies: admit while
+measured usage is below the cap, even if the next unit's estimated usage would
+exceed it. Attempt-count limits and stopping on unknown bounded usage are unchanged.
+
+Reservation reduces but does not eliminate in-flight overshoot. Estimates can
+grow, first-wave work is unestimated, and an idle runner can admit a unit that
+crosses a cap. Caps remain admission boundaries, not hard ceilings; there is no
+hard currency ceiling. `budget.reservation` records the
+`largest_measured_attempt` policy, `estimate_per_attempt` (or `not measured`),
+`in_flight_attempts`, `waits` (condition waits), and `unestimated_admissions`
+(attempts admitted with at least one bounded usage dimension still unmeasured).
+
 `budget.status` and `exhausted_limit` describe admission decisions;
 `budget.partial` records attempts left not run. Separately,
 `budget.observed_overruns` maps each exceeded limit to its measured `used`,

@@ -395,6 +395,13 @@ def _gitleaks_honoring_config(args: list[str], cwd: Path | None = None, **_kwarg
     return ToolResult(success=True, stdout=json.dumps(findings), stderr="", exit_code=GITLEAKS_FINDINGS_EXIT_CODE)
 
 
+def _write_files(root: Path, files: dict[str, str]) -> None:
+    for relative, text in files.items():
+        path = root.joinpath(*relative.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+
 class TestGitleaksArtifactExclusion:
     def test_config_allowlists_generated_dirs_but_not_authored_evals(self):
         paths = _gitleaks_allowlist_paths()
@@ -441,15 +448,33 @@ class TestGitleaksArtifactExclusion:
             "evals/grader.py": f'API_KEY = "{token}"\n',
             "evals/results/run1/out.json": json.dumps({"stdout": token}),
         }
-        for relative, text in files.items():
-            path = skill.joinpath(*relative.split("/"))
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8")
+        _write_files(skill, files)
 
         result = SecretsValidator().validate(skill)
 
         assert sorted(finding.file_path for finding in result.findings) == ["evals/evals.json", "evals/grader.py"]
         assert all(finding.category == "SECRET" for finding in result.findings)
+        assert result.status == "failed"
+
+    @patch.object(Tools.gitleaks, "_path", "/usr/bin/gitleaks")
+    @patch.object(Tools.gitleaks, "_version", "8.30.0")
+    @patch.object(Tools.gitleaks, "run", side_effect=_gitleaks_honoring_config)
+    def test_plugin_skill_eval_files_are_scanned_per_skill(self, _mock_run, tmp_path):
+        token = "nvapi-" + "B2" * 25
+        plugin = tmp_path / "demo-plugin"
+        _write_files(
+            plugin,
+            {
+                ".claude-plugin/plugin.json": json.dumps({"name": "demo"}),
+                "skills/x/SKILL.md": "---\nname: x\n---\n",
+                "skills/x/evals/grader.py": f'API_KEY = "{token}"\n',
+                "skills/x/evals/results/run1/out.json": json.dumps({"stdout": token}),
+            },
+        )
+
+        result = SecretsValidator().validate(plugin)
+
+        assert [finding.file_path for finding in result.findings] == ["[x] evals/grader.py"]
         assert result.status == "failed"
 
 

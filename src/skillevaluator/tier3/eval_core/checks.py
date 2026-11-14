@@ -3610,20 +3610,25 @@ _FINDING_EVIDENCE_COUNTER_VALUE_RE = re.compile(
 # (auth=HTTPBasicAuth("bob", "..."), auth=requests.auth.HTTPDigestAuth(...)),
 # or one word, which may hold escaped spaces ("correct\ horse"). The arguments
 # of a tuple or call may hold one level of calls
-# (auth=HTTPBasicAuth(getpass.getuser(), "...")). A call is read only when its
-# ")" ends the word, so a word with parentheses in it ("Pa(ss)word") is still
-# read whole.
-_FINDING_EVIDENCE_CALL_ARGUMENTS = r"(?:[^()\r\n]|\([^()\r\n]{0,64}\)){0,256}"
+# (auth=HTTPBasicAuth(getpass.getuser(), "...")), and those of a call may span
+# lines, as a formatter splits a long call. A call is read only when its ")"
+# ends a word or comes before ",", ")", "]" or "}", and only when it runs past
+# the word read from the same start (see _assignment_value_match), so a word
+# with parentheses in it ("Pa(ss)word", "Pa(ss),word") is still read whole.
+_FINDING_EVIDENCE_TUPLE_ARGUMENTS = r"(?:[^()\r\n]|\([^()\r\n]{0,64}\)){0,256}"
+_FINDING_EVIDENCE_CALL_ARGUMENTS = r"(?:[^()]|\([^()]{0,64}\)){0,256}"
+_FINDING_EVIDENCE_WORD_VALUE = r"(?:\\.|[^\s'\"`;|&\\])+"
 _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE = re.compile(
     _FINDING_EVIDENCE_PRIVATE_KEY_MARKER
     + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?"
     + r"|\("
+    + _FINDING_EVIDENCE_TUPLE_ARGUMENTS
+    + r"\)?|(?P<call>[A-Za-z_][\w.]{0,63}\("
     + _FINDING_EVIDENCE_CALL_ARGUMENTS
-    + r"\)?|[A-Za-z_][\w.]{0,63}\("
-    + _FINDING_EVIDENCE_CALL_ARGUMENTS
-    + r"\)(?![^\s'\"`;|&\\),\]}])"
-    + r"|(?:\\.|[^\s'\"`;|&\\])+"
+    + r"\)(?![^\s'\"`;|&\\),\]}]))|"
+    + _FINDING_EVIDENCE_WORD_VALUE
 )
+_FINDING_EVIDENCE_WORD_VALUE_RE = re.compile(_FINDING_EVIDENCE_WORD_VALUE)
 # Inside a quoted string a value that does not open its own quote runs to the
 # string's closing quote ('password: correct horse battery staple'), or to the
 # closing escaped quote when the string itself is JSON-escaped. It also ends at
@@ -3884,10 +3889,13 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
     # The quote state is read forward once, up to each name that needs it.
     scan_pos = 0
     scan_open: int | None = None
-    for match in _assignment_name_matches(text):
+    for match, sed_replacement in _assignment_name_matches(text):
         name, name_quote, separator = match.group(1, 2, 3)
+        # A name inside a masked value is skipped, unless it starts a sed
+        # replacement (see below).
+        overlapped = match.start() < pos
         if (
-            match.start() < pos
+            (overlapped and not sed_replacement)
             or not _FINDING_EVIDENCE_CREDENTIAL_NAME_RE.search(name)
             or (
                 _FINDING_EVIDENCE_LOCATION_NAME_RE.search(name) is not None
@@ -3942,7 +3950,7 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
             else None
         )
         if header_prefix is not None:
-            value = _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE.match(text, header_prefix.start(1))
+            value = _assignment_value_match(text, header_prefix.start(1))
         elif in_quotes and text.startswith(closers, start):
             # The value is empty and the quote after it closes the string that
             # opened before the name ('grep "token=" ...', "printf 'password: '"),
@@ -3961,8 +3969,15 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
             # spaces ('password: correct horse battery staple').
             value = _FINDING_EVIDENCE_QUOTED_REST_RES[("\\" if escaped else "") + opening].match(text, start)
         else:
-            value = _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE.match(text, start)
+            value = _assignment_value_match(text, start)
         if value is None:
+            continue
+        if overlapped:
+            # The value of a name in the sed pattern ran over this name, which
+            # starts the replacement: in a shell command string a value is one
+            # word, so "s/token: .*/token: NEW/" read "token: .*/token:" as a
+            # name and its value. The masked text runs on to the end of NEW.
+            pos = max(pos, value.end())
             continue
         parts.append(text[pos : value.start()])
         replacement = "<redacted>"
@@ -3980,14 +3995,30 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
     return "".join(parts)
 
 
-def _assignment_name_matches(text: str) -> list[re.Match[str]]:
-    """Return, in order, each name that may start an assignment in *text*, also one that starts a sed replacement."""
-    matches = {match.start(): match for match in _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.finditer(text)}
+def _assignment_name_matches(text: str) -> list[tuple[re.Match[str], bool]]:
+    """Return, in order, each name that may start an assignment in *text*, and whether it starts a sed replacement."""
+    matches = {match.start(): (match, False) for match in _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.finditer(text)}
     for sed in _FINDING_EVIDENCE_SED_PATTERN_RE.finditer(text):
-        name = _FINDING_EVIDENCE_SED_REPLACEMENT_NAME_RE.match(text, sed.end())
-        if name is not None and sed.end() not in matches:
-            matches[sed.end()] = name
+        if sed.end() in matches:
+            matches[sed.end()] = (matches[sed.end()][0], True)
+        elif (name := _FINDING_EVIDENCE_SED_REPLACEMENT_NAME_RE.match(text, sed.end())) is not None:
+            matches[sed.end()] = (name, True)
     return [matches[start] for start in sorted(matches)]
+
+
+def _assignment_value_match(text: str, start: int) -> re.Match[str] | None:
+    """Return the value that starts at *start* in *text*, read as a call only when that runs past the word reading.
+
+    A call whose arguments hold a quote or a space (HTTPBasicAuth("bob", "..."))
+    is read to its ")", while a word with parentheses in it ("Pa(ss),word",
+    "f(x))word") is read whole, as a word.
+    """
+    value = _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE.match(text, start)
+    if value is not None and value.group("call") is not None:
+        word = _FINDING_EVIDENCE_WORD_VALUE_RE.match(text, start)
+        if word is not None and word.end() >= value.end():
+            return word
+    return value
 
 
 def _scan_quotes(text: str, pos: int, end: int, opening: int | None) -> tuple[int, int | None]:

@@ -1942,10 +1942,12 @@ saved judge evidence use the same credential masker:
   when the entry spans lines in a here-document or a `printf` string;
 - values assigned to a credential name, such as `_authToken=...`,
   `aws_secret_access_key = ...`, `"password": "..."`, `token := "..."`,
-  `os.environ["API_KEY"] = "..."`, `auth=HTTPBasicAuth("bob", "...")`,
-  `PASS=...`, `DB_PASS=...`, or `MYSQLPWD=...`, also JSON-escaped inside a
-  shell string, and in a `sed` replacement such as
-  `sed -i 's/CHANGEME/password=.../'`. A bare `PASS` is
+  `os.environ["API_KEY"] = "..."`, `auth=HTTPBasicAuth("bob", "...")` (also
+  with its arguments on several lines), `PASS=...`, `DB_PASS=...`, or
+  `MYSQLPWD=...`, also JSON-escaped inside a shell string, and in a `sed`
+  replacement such as `sed -i 's/CHANGEME/password=.../'`, also inside a
+  `sh -c` or `ssh` command string. A word with parentheses in it, such as
+  `password: Pa(ss),word`, is masked whole. A bare `PASS` is
   left alone as test output or a counter, such as `PASS: 3`,
   `--- PASS: TestName`, `PASS=0`, or `"pass": true`, but OpenSSL's `pass:...`
   and a quoted `"pass"` key or value are masked. Inside a quoted string,
@@ -1975,7 +1977,9 @@ password after an unknown flag, an unquoted `PASS: value`, an `npm config set`
 option with a separate value (`--location global`), or all but the first word
 of a value with spaces on an unquoted here-document line or inside a `sh -c`
 or `ssh` command string. Some ordinary words are masked, such as the
-path in `grep -r token: /etc`, the words after a `.netrc`-like
+path in `grep -r token: /etc`, the value of a flag that names a token other
+than `--max-tokens` and `--token-limit` (`--max-new-tokens 256` or
+`--tokenizer_name gpt2`), the words after a `.netrc`-like
 `login NAME password` phrase in prose, or, after an unmatched quote, the rest
 of the line after a credential name. Quotes are read from the start of each
 line, and unlike in a shell, a line break ends a quoted string here, so a

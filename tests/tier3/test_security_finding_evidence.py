@@ -1556,8 +1556,21 @@ def test_token_count_flags_remain_readable_in_saved_findings(copy: str) -> None:
     assert all(finding["evidence"] == command for finding in findings)
 
 
+def test_other_token_flags_are_masked_in_either_spelling() -> None:
+    # Only --max-tokens and --token-limit keep their numbers; other flags that
+    # name a token are masked with "_" between their words as with "-".
+    text = "gen --max-new-tokens 256 --max_new_tokens 256 --tokenizer-name gpt2 --tokenizer_name gpt2"
+
+    assert eval_core_checks._redact_finding_evidence(text) == (
+        "gen --max-new-tokens <redacted> --max_new_tokens <redacted> --tokenizer-name <redacted>"
+        " --tokenizer_name <redacted>"
+    )
+
+
 # A password with parentheses in it, which a call value must not cut short.
 _PAREN_PASSWORD = f"{_BASIC_PASSWORD[:7]}(x){_BASIC_PASSWORD[7:]}"
+# The part of a password after a ")" that a call reading would end at.
+_PAREN_TAIL = _BASIC_PASSWORD[7:]
 
 _MORE_COMMAND_FORM_FINDINGS = [
     pytest.param(
@@ -1635,6 +1648,41 @@ _MORE_COMMAND_FORM_FINDINGS = [
         'git config --global "github.token" <redacted> && rm -rf /srv/app',
         id="git-config-quoted-key",
     ),
+    # A value is one word in a shell command string or a "-e" program, so the
+    # value of the name that starts the sed pattern runs over the name that
+    # starts the replacement; the masked text runs on to the new credential.
+    pytest.param(
+        f"ssh deploy@host \"sed -i 's/token: .*/token: {_BASIC_PASSWORD}/' /etc/app.yml && rm -rf /srv/app/cache\"",
+        "destructive_command",
+        "ssh deploy@host \"sed -i 's/token: <redacted>' /etc/app.yml && rm -rf /srv/app/cache\"",
+        id="sed-replacement-in-ssh-command",
+    ),
+    pytest.param(
+        f"bash -c \"sed -i 's/password = .*/password = {_BASIC_PASSWORD}/' /etc/app.ini && rm -rf /srv/app/cache\"",
+        "destructive_command",
+        "bash -c \"sed -i 's/password = <redacted>' /etc/app.ini && rm -rf /srv/app/cache\"",
+        id="sed-replacement-in-bash-c-string",
+    ),
+    pytest.param(
+        f"eval \"sed -i 's/token: .*/token: {_BASIC_PASSWORD}/' /etc/app.yml\" && rm -rf /srv/app/cache",
+        "destructive_command",
+        "eval \"sed -i 's/token: <redacted>' /etc/app.yml\" && rm -rf /srv/app/cache",
+        id="sed-replacement-in-eval-string",
+    ),
+    pytest.param(
+        f"perl -pe 's/token: .*/token: {_BASIC_PASSWORD}/' /etc/app.yml > /srv/app/app.yml && rm -rf /srv/app/cache",
+        "destructive_command",
+        "perl -pe 's/token: <redacted>' /etc/app.yml > /srv/app/app.yml && rm -rf /srv/app/cache",
+        id="substitution-in-perl-e-program",
+    ),
+    # A formatter splits a long call over lines.
+    pytest.param(
+        "cat > /srv/app/sync.py <<'PY'\nimport requests\nsession.auth = HTTPBasicAuth(\n"
+        f'    "svc", "{_BASIC_PASSWORD}"\n)\nPY\nrm -rf /srv/app/cache',
+        "destructive_command",
+        "cat > /srv/app/sync.py <<'PY'\nimport requests\nsession.auth = <redacted>\nPY\nrm -rf /srv/app/cache",
+        id="call-value-split-over-lines",
+    ),
 ]
 
 
@@ -1648,6 +1696,45 @@ def test_more_command_forms_keep_no_credential_in_findings(
     assert [(finding["type"], finding["evidence"]) for finding in result["findings"]] == [(finding_type, expected)]
     assert _BASIC_PASSWORD not in json.dumps(result)
     assert _API_TOKEN not in json.dumps(result)
+
+
+@pytest.mark.parametrize("copy", ["template", "eval_core"])
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        pytest.param(
+            f"cat > /srv/app/config.yml <<EOF\ndb:\n  password: {_PAREN_PASSWORD[:10]},{_PAREN_TAIL}\nEOF\n"
+            "rm -rf /srv/app/cache",
+            "cat > /srv/app/config.yml <<EOF\ndb:\n  password: <redacted>\nEOF\nrm -rf /srv/app/cache",
+            id="yaml-comma-after-parentheses",
+        ),
+        pytest.param(
+            f"cat > /srv/app/app.ini <<EOF\n[db]\npassword = {_PAREN_PASSWORD[:10]}){_PAREN_TAIL}\nEOF\n"
+            "rm -rf /srv/app/cache",
+            "cat > /srv/app/app.ini <<EOF\n[db]\npassword = <redacted>\nEOF\nrm -rf /srv/app/cache",
+            id="ini-parenthesis-after-parentheses",
+        ),
+        pytest.param(
+            f"cat > /srv/app/.env <<EOF\nDB_PASSWORD={_PAREN_PASSWORD[:10]}]{_PAREN_TAIL}\nEOF\nrm -rf /srv/app/cache",
+            "cat > /srv/app/.env <<EOF\nDB_PASSWORD=<redacted>\nEOF\nrm -rf /srv/app/cache",
+            id="env-bracket-after-parentheses",
+        ),
+        pytest.param(
+            f"cat > /srv/app/.env <<EOF\nPASS={_PAREN_PASSWORD[:10]}}}{_PAREN_TAIL}\nEOF\nrm -rf /srv/app/cache",
+            "cat > /srv/app/.env <<EOF\nPASS=<redacted>\nEOF\nrm -rf /srv/app/cache",
+            id="env-brace-after-parentheses",
+        ),
+    ],
+)
+def test_word_value_with_parentheses_is_masked_whole(copy: str, command: str, expected: str) -> None:
+    # A call reading would end at the ")", before ",", ")", "]" or "}", but
+    # the word runs on past it, so the whole word is the value.
+    result = _security(copy, {"action": "Bash", "action_input": {"command": command}})
+
+    assert [(finding["type"], finding["evidence"]) for finding in result["findings"]] == [
+        ("destructive_command", expected)
+    ]
+    assert _PAREN_TAIL not in json.dumps(result)
 
 
 @pytest.mark.parametrize(
@@ -1674,6 +1761,16 @@ def test_more_command_forms_keep_no_credential_in_findings(
             f"cat > c.yml <<EOF\ndb:\n  password: {_PAREN_PASSWORD}\nEOF",
             "cat > c.yml <<EOF\ndb:\n  password: <redacted>\nEOF",
             id="word-value-with-parentheses",
+        ),
+        pytest.param(
+            f"api_key={_PAREN_PASSWORD[:10]},{_PAREN_TAIL} && password=f(x)){_PAREN_TAIL}",
+            "api_key=<redacted> && password=<redacted>",
+            id="word-values-with-a-comma-or-parenthesis-after-parentheses",
+        ),
+        pytest.param(
+            f"export API_KEY={_PAREN_PASSWORD[:10]}\\{_PAREN_TAIL}",
+            "export API_KEY=<redacted>",
+            id="word-value-with-an-escape-after-parentheses",
         ),
         pytest.param(
             f"sed -i 's/.*api_key.*/api_key: {_API_TOKEN}/' c.yml",

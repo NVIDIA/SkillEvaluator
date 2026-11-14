@@ -110,7 +110,16 @@ LLM prompts ask for outcome checks. It prints a warning for each generated
 case that still grades skill use, and the autopilot starter case leaves such
 text out. `tier3 validate` warns when a prompt points at `skills/<name>`,
 `<name>/SKILL.md`, reading or following `SKILL.md`, the named skill, or one of
-its scripts. It also checks strings in nested prompts, expected outputs and
+its scripts. A `SKILL.md` the prompt places "in", "of", "from", "under" or
+"inside" another place does not warn. Nor does one "at", "within" or "located
+in" a URL, an absolute, `./`, `../` or `~/` path, or a relative path that ends
+in a separator or file name, such as "read the `SKILL.md` at
+/workspace/input/pdf-tools". The skill's own place still warns: "in the skill
+directory", or a path that ends in a directory named after the skill, such as
+`./<name>`. After "at", "within" or "located in", so do a variable such as
+`$CLAUDE_SKILL_DIR`, a path through a `skill` or `skills` directory, and a path
+through the skill's own directory, such as `./<name>/fixtures/x`.
+`tier3 validate` also checks strings in nested prompts, expected outputs and
 assertions for skill use, using the skill's directory and frontmatter names
 as well as the dataset's declared alias. Fields with more than 1,000 values
 or cyclic references warn that checking is incomplete. It is a wording heuristic: it skips

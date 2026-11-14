@@ -249,7 +249,9 @@ All notable changes to SkillEvaluator are documented in this file.
   `my SKILL.md` only when the skill's description reads, opens, loads,
   consults or follows that file without naming another place for it (such as
   `at ./pdf-tools`). They said any `SKILL.md` in the description was renamed,
-  but "Validates `SKILL.md` frontmatter fields" keeps its `SKILL.md`.
+  but "Validates `SKILL.md` frontmatter fields" keeps its `SKILL.md`. They
+  also say which places `tier3 validate` reads as another skill's `SKILL.md`
+  and which still count as the skill's own.
 
 ### Fixed
 

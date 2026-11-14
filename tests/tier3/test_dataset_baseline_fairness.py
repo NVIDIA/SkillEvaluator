@@ -1238,6 +1238,44 @@ def test_docs_say_only_another_place_keeps_a_description_s_skill_md():
         assert "at ./pdf-tools" in text[rule : rule + 70], (where, text[rule : rule + 70])
 
 
+def test_docs_say_which_located_skill_md_prompts_tier3_validate_accepts():
+    docs = " ".join((_REPO / "docs" / "eval-datasets.mdx").read_text(encoding="utf-8").split())
+    for claim in (
+        'A `SKILL.md` the prompt places "in", "of", "from", "under" or "inside" another place does not warn.',
+        'Nor does one "at", "within" or "located in" a URL, an absolute, `./`, `../` or `~/` path, '
+        "or a relative path that ends in a separator or file name, "
+        'such as "read the `SKILL.md` at /workspace/input/pdf-tools".',
+        'The skill\'s own place still warns: "in the skill directory", '
+        "or a path that ends in a directory named after the skill, such as `./<name>`.",
+        'After "at", "within" or "located in", so do a variable such as `$CLAUDE_SKILL_DIR`, '
+        "a path through a `skill` or `skills` directory, and a path through the skill's own directory, "
+        "such as `./<name>/fixtures/x`.",
+    ):
+        assert claim in docs, claim
+
+    # Each place the page names behaves as it says, for the skill release-review.
+    for place, warns in (
+        ("in the docs folder", False),
+        ("under /workspace/skills/pdf-tools", False),
+        ("in ./release-review/fixtures/pdf-tools", False),
+        ("at /workspace/input/pdf-tools", False),
+        ("within https://example.com/pdf-tools", False),
+        ("located in ../pdf-tools", False),
+        ("at ~/fixtures/pdf-tools", False),
+        ("at fixtures/pdf-tools/", False),
+        ("at fixtures/pdf-tools/SKILL.md", False),
+        ("at fixtures/pdf-tools", True),
+        ("in the skill directory", True),
+        ("in ./release-review", True),
+        ("at ./release-review/", True),
+        ("at $CLAUDE_SKILL_DIR", True),
+        ("at /workspace/skills/pdf-tools", True),
+        ("at ./release-review/fixtures/pdf-tools", True),
+    ):
+        warnings = _baseline_fairness_warnings(_case(prompt=f"Read the SKILL.md {place} and list its errors"))
+        assert bool(warnings) is warns, (place, warnings)
+
+
 def test_template_prompt_is_generic_when_the_description_names_the_skill_directory():
     skill = _skill(description="Keeps skills/release-review/SKILL.md in sync with the docs")
 

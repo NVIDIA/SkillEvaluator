@@ -375,18 +375,18 @@ def _template_task(skill: dict[str, Any]) -> tuple[str, str | None]:
     """The task template prompts ask for, and the outcome their graded text quotes.
 
     Both come from the description. When it reads, opens, loads, consults or
-    follows a SKILL.md without naming another place for it (such as "at
+    follows a SKILL.md without naming another place for it (such as "in
     ./pdf-tools"), as a prompt `tier3 validate` flags would, each bare SKILL.md
     in it becomes "my SKILL.md", so the prompt names the user's file rather
-    than the skill's. A description that only
-    names SKILL.md another way ("validates SKILL.md frontmatter", "SKILL.md
-    files") keeps it. A description that still points at the skill's files
-    (skills/<name>, <name>/SKILL.md) gives a generic task. The outcome is None,
-    and graded text generic, when quoting the task would grade skill use or
-    name one of the skill's scripts: "The release-review skill checks
-    manifests" grades skill use, and "Checks manifests with review.py" names a
-    script the no-skill baseline does not have, which is graded on the
-    expected output and assertions too.
+    than the skill's. A description that only names SKILL.md another way
+    ("validates SKILL.md frontmatter", "SKILL.md files") keeps it. A
+    description that still points at the skill's files (skills/<name>,
+    <name>/SKILL.md) gives a generic task. The outcome is None, and graded text
+    generic, when quoting the task would grade skill use or name one of the
+    skill's scripts: "The release-review skill checks manifests" grades skill
+    use, and "Checks manifests with review.py" names a script the no-skill
+    baseline does not have, which is graded on the expected output and
+    assertions too.
     """
     name = skill["name"]
     task = _description_lower(skill)

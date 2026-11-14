@@ -248,10 +248,8 @@ All notable changes to SkillEvaluator are documented in this file.
 - The eval dataset docs now say that a template prompt calls a `SKILL.md`
   `my SKILL.md` only when the skill's description reads, opens, loads,
   consults or follows that file without naming another place for it (such as
-  `at ./pdf-tools`). They said any `SKILL.md` in the description was renamed,
-  but "Validates `SKILL.md` frontmatter fields" keeps its `SKILL.md`. They
-  also say which places `tier3 validate` reads as another skill's `SKILL.md`
-  and which still count as the skill's own.
+  `in ./pdf-tools`). They said any `SKILL.md` in the description was renamed,
+  but "Validates `SKILL.md` frontmatter fields" keeps its `SKILL.md`.
 
 ### Fixed
 
@@ -592,23 +590,6 @@ All notable changes to SkillEvaluator are documented in this file.
   ownership key, for example from containers that each start with a fresh
   home directory. The refusal itself is unchanged, and `docs/reports.mdx`
   explains it.
-
-- `tier3 validate` no longer reads "the `SKILL.md` at
-  /workspace/input/pdf-tools", "within ../pdf-tools" or "located in
-  ./pdf-tools" as the skill's own `SKILL.md`, so a skill that reviews other
-  skills can pass `--strict`. "at", "within" and "located in" now name a
-  location before a path or URL. "Read `SKILL.md` at the start", "within ~2
-  tool calls", a variable such as "at `$CLAUDE_SKILL_DIR`" and a path through
-  a `skill` or `skills` directory such as "at /workspace/skill/SKILL.md" still
-  warn, because they may name the skill's own install. A path that ends in a
-  directory named after the skill, such as "in ./release-review", is the
-  skill's own directory, so reading `SKILL.md` there now warns after every
-  location word. After "at", "within" or "located in", a path through that
-  directory, such as "at ./release-review/fixtures/pdf-tools", still warns.
-  After "in", "of", "from", "under" or "inside", such a path still names
-  another place, so a skill named `pdf` still passes "in
-  /workspace/pdf/fixtures/bad-skill". Extra spaces after the location word, as
-  in "in  the skill directory", no longer hide the skill's own directory.
 
 - Template cases from `create-eval-dataset` and the autopilot starter case no
   longer quote a skill description that names one of the skill's scripts

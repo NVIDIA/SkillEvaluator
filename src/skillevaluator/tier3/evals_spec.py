@@ -709,21 +709,6 @@ _SKILL_NAME_MARKER = "\x00name\x00"
 _MATCH_EXCERPT_CHARS = 80
 _MAX_FIELD_VALUES = 1000
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\[\]\n]+)\]\([^()\n]*\)")
-# The start of a path or URL: /x, ./x, ../x, .dir/x, ~/x, ~user/x, \x,
-# \\server\share, C:\x or C:/x, https://..., or a relative path that ends in
-# a separator (dir/, dir/sub/) or a file name (dir\SKILL.md, dir/sub/SKILL.md).
-# Wording such as "~2 tool calls", ".5 seconds", "...", "$0" or
-# "start/middle/end" is not a path. Nor is a variable such as
-# $CLAUDE_SKILL_DIR, ${SKILL_ROOT} or %USERPROFILE%, which may name the
-# skill's own install.
-_PATH_START_RE = (
-    r"(?:\.{0,2}[\\/]|\.[\w-]+[\\/]|~(?:[A-Za-z_][\w.-]*)?[\\/]"
-    r"|[A-Za-z]:[\\/]|[A-Za-z][\w+.-]*://"
-    r"|[\w-]+(?:[\\/][\w.-]+)*[\\/](?:(?![\w-]|\.\w)|[\w-]+\.[A-Za-z]))"
-)
-# A path through a directory named skill or skills, where agents install
-# skills: /workspace/skill/SKILL.md, ~/.claude/skills/SKILL.md.
-_INSTALL_DIR_PATH_RE = r"(?:[^\s`'\"\\/]*[\\/])*skills?(?:[\\/]|(?![\w-]|\.\w))"
 
 
 def _skill_files_re(skill_name: str | None) -> str:
@@ -736,31 +721,9 @@ def _skill_files_re(skill_name: str | None) -> str:
         qualifier = rf"(?:{_SKILL_MD_QUALIFIER_RE}|{name}(?:['\u2019]s)?)"
         skill_place = rf"(?:skill|{name})"
         alternatives += [rf"\bskills/{name}(?![\w-])", rf"(?<![\w-]){name}/SKILL\.md\b"]
-    # "SKILL.md in ./my-skill" or "located at /workspace/input/pdf-tools" names
-    # another skill's file; "in the skill directory", "from the installed
-    # skill" or a path that ends in a directory named after the skill ("in
-    # ./<name>") is still this skill's own. "at", "within" and "located in"
-    # name a place only before a path or URL that does not pass through a
-    # skill or skills directory, or through a directory named after the skill:
-    # "read SKILL.md at the start", "within its first two tool calls",
-    # "located in $CLAUDE_SKILL_DIR", "at /workspace/skill/SKILL.md" or "at
-    # ./<name>/fixtures/x" is still this skill's own. "in ./<name>/fixtures/x"
-    # names another place, because a generic skill name such as pdf or docs is
-    # often a directory on the way to another skill.
-    path_target = rf"(?=\s+[`'\"]?{_PATH_START_RE})(?!\s+[`'\"]?{_INSTALL_DIR_PATH_RE})"
-    located = r"(?:located\s+(?:in|at|within)|at|within)"
-    own_place = rf"(?:the\s+|its\s+|this\s+)?(?:installed\s+|own\s+)?{skill_place}(?![\w-])"
-    own_place_located = own_place
-    if skill_name:
-        # A sentence's final period still ends the name; release-review.bak does not.
-        path_to_name = rf"[`'\"]?(?:[^\s`'\"\\/]*[\\/])+{name}"
-        own_place_located = rf"(?:{own_place}|{path_to_name}(?![\w-]|\.\w))"
-        own_place = rf"(?:{own_place}|{path_to_name}[\\/]?(?![\w\\/-]|\.\w))"
-    # (?!\s) keeps \s+ from stopping one space short, where own_place cannot match.
-    elsewhere = (
-        rf"\s+(?:(?:in|of|from|under|inside)\s+(?!\s)(?!{own_place})"
-        rf"|{located}{path_target}\s+(?!\s)(?!{own_place_located}))"
-    )
+    # "SKILL.md in ./my-skill" names another skill's file; "in the skill
+    # directory" or "from the installed skill" is still this skill's own.
+    elsewhere = rf"\s+(?:in|of|from|under|inside)\s+(?!(?:the\s+|its\s+|this\s+)?(?:installed\s+|own\s+)?{skill_place}(?![\w-]))"
     alternatives.append(
         rf"\b{_READ_VERB_RE}(?:\s+{qualifier})*\s+(?:(?:the\s+)?contents\s+of\s+)?[`'\"*_\[]*SKILL\.md\b"
         rf"(?![`'\"*_\]]*(?:{elsewhere}|\s+{_SKILL_MD_GENERIC_NOUN_RE}))"

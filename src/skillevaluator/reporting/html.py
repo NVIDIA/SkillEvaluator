@@ -1293,6 +1293,11 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
             key: str(step.get(key) or "")
             for key in ("kind", "target", "problem", "evidence", "action", "check", "strength")
         }
+        | {
+            key: _tier3_display_identifier(step[key])
+            for key in ("agent", "case", "case_id", "condition")
+            if isinstance(step.get(key), str)
+        }
         for step in _dict_list(payload.get("next_steps"))
     ]
     payload["dataset"] = [_sanitize_tier3_dataset_case(item) for item in _dict_list(payload.get("dataset"))]

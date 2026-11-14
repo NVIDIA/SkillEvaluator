@@ -73,7 +73,11 @@ pre { max-width:100%;overflow:auto; } code,td,th,p { overflow-wrap:anywhere; }
  .nav-tabs,.header-controls,.report-searchbar,.skip-link,.filter-group,.view-toggle-section,#backToTop,.t3-subtabs,.t3-agent-tabs,.t3-copy-btn { display:none!important; }
  .dedup-subtab,.tab-content,.t3-page,.t3-agent-panel,.results-view,.skill-content,.validator-content,.top-issues-content,.contributor-content { display:block!important;max-height:none!important;overflow:visible!important; }
  .table-scroll,.table-container,.summary-table-container { overflow:visible!important; }.results-view:not(#results-by-skill),.raw-output { display:none!important; }
- .chart-grid { display:none!important; }details { break-inside:auto; }a { color:inherit; } table { font-size:8pt; }
+ .skill-card,.validator-card,.check-finding,.summary-table tr,.t3-trial-card { display:revert!important; }
+ .chart-grid { display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem; }
+ .chart-card { break-inside:avoid;min-width:0;padding:1rem; }
+ .chart-card canvas { max-width:100%;max-height:260px; }
+ details { break-inside:auto; }a { color:inherit; } table { font-size:8pt; }
 }
 
 /* Long recorded agent identities wrap inside their native tab buttons. */

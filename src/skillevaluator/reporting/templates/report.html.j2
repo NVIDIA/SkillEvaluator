@@ -2213,8 +2213,6 @@
             <button class="nav-tab active" id="dedup-tab-intra" type="button" role="tab" aria-controls="dedup-intra" aria-selected="true" tabindex="0" onclick="showDedupTab('intra')">Intra-Skill</button>
             <button class="nav-tab" id="dedup-tab-inter" type="button" role="tab" aria-controls="dedup-inter" aria-selected="false" tabindex="-1" onclick="showDedupTab('inter')">Inter-Skill</button>
         </div>
-        {% for scope in tier2_scopes %}<a href="#tier2-{{ scope.id }}">{{ scope.label }}</a>{% endfor %}
-        </nav>
         {% for scope in tier2_scopes %}
         {% set dedup_id = 'intra' if scope.id == 'within' else 'inter' %}
         <div id="dedup-{{ dedup_id }}" class="dedup-subtab" style="display:{{ 'block' if loop.first else 'none' }};" role="tabpanel" aria-labelledby="dedup-tab-{{ dedup_id }}" tabindex="0">

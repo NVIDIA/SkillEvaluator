@@ -178,3 +178,41 @@ def test_only_fully_represented_failed_steps_are_suppressed():
     }
     assert html_module._unrepresented_insight_steps(view, failed=True) == steps[1:]
     assert html_module._unrepresented_insight_steps(view, failed=False) == steps
+
+
+def test_failed_next_steps_keep_distinct_agent_case_and_condition_in_rendered_cards():
+    result = _agent_result()
+    payload = result.metadata["agent_eval"]
+    payload.update(execution_status="failed", verdict="fail")
+    common = {
+        "kind": "Restore runner",
+        "target": "evaluation",
+        "problem": "Runner failed",
+        "action": "Restore and rerun",
+        "check": "Every attempt is scored",
+        "evidence": "retained-log",
+        "strength": "supported",
+    }
+    payload["next_steps"] = [
+        {**common, "agent": "agent-one", "case_id": "case-one", "condition": "with_skill"},
+        {**common, "agent": "agent-two", "case": "case-two", "condition": "without_skill"},
+    ]
+    original = deepcopy(payload)
+    result.add_error("Runner failed")
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    for start, end in (("overview", "trials"), ("suggestions", "provenance")):
+        section = html.split(f'id="tier3-page-{start}"', 1)[1].split(f'id="tier3-page-{end}"', 1)[0]
+        text = re.sub(r"<[^>]+>", "", section)
+        assert text.count("Restore and rerun") == 2
+        for association in (
+            "Agent: agent-one",
+            "Agent: agent-two",
+            "Case: case-one",
+            "Case: case-two",
+            "Condition: with_skill",
+            "Condition: without_skill",
+        ):
+            assert association in text
+        assert "Next steps for the run:" not in text
+    assert _embedded_payload(html) == original
+    assert payload == original

@@ -3917,13 +3917,16 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
     # The quote state is read forward once, up to each name that needs it.
     scan_pos = 0
     scan_open: int | None = None
+    # Whether the last masked value is that of a name in a sed expression.
+    sed_value = False
     for match, sed_replacement in _assignment_name_matches(text):
         name, name_quote, separator = match.group(1, 2, 3)
         # A name inside a masked value is skipped, unless it starts a sed
-        # replacement (see below).
+        # replacement or the value is that of a name in a sed expression (see
+        # below).
         overlapped = match.start() < pos
         if (
-            (overlapped and not sed_replacement)
+            (overlapped and not (sed_replacement or sed_value))
             or not _FINDING_EVIDENCE_CREDENTIAL_NAME_RE.search(name)
             or (
                 _FINDING_EVIDENCE_LOCATION_NAME_RE.search(name) is not None
@@ -4005,6 +4008,10 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
             # starts the replacement: in a shell command string a value is one
             # word, so "s/token: .*/token: NEW/" read "token: .*/token:" as a
             # name and its value. The masked text runs on to the end of NEW.
+            # So it does for any other credential name inside the value of a
+            # name in a sed expression, whose own value may run past it, as
+            # in "s/TOKEN=.*/export TOKEN='"NEW"'/", where the pattern name's
+            # value ends at the quote before NEW.
             pos = max(pos, value.end())
             continue
         parts.append(text[pos : value.start()])
@@ -4019,6 +4026,8 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
             replacement = opening + scheme + replacement + closing
         parts.append(replacement)
         pos = value.end()
+        # A name right after "/" was read only as the start of a sed pattern.
+        sed_value = sed_replacement or text[match.start() - 1 : match.start()] == "/"
     parts.append(text[pos:])
     return "".join(parts)
 

@@ -188,6 +188,14 @@ All notable changes to SkillEvaluator are documented in this file.
   extra. pip-audit, used only by the opt-in dependency audit
   (`--check dependency`), stays in the `security` extra. The Bandit install hint
   now says to reinstall SkillEvaluator.
+- Install uv with the base package, so a plain `pip install skillevaluator` on
+  a machine without uv can run the Tier 1 security check. Before, that run
+  ended `INCOMPLETE` with "skillspector not installed", because the pinned,
+  checksum-verified SkillSpector wheel is only run through `uv tool run`. A uv
+  on `PATH` or an installed `skillspector` is still used first, and
+  SkillSpector stays out of SkillEvaluator's own dependencies. The public
+  Docker image gains the same behavior: with network access its Tier 1 run now
+  completes instead of ending `INCOMPLETE`.
 - Root help shows the SkillEvaluator wordmark in more terminals: the
   one-line wordmark still needs 115 columns, 76-114 columns now get the same
   letters stacked (SKILL over EVALUATOR), and 60-75 columns get a two-row

@@ -392,7 +392,11 @@ def collect_audit_inputs(
 
 
 def collect_endpoint_targets(
-    mcp: Iterable[Any], hooks: Iterable[Any], *, allowed_hosts: tuple[str, ...] = ()
+    mcp: Iterable[Any],
+    hooks: Iterable[Any],
+    *,
+    allowed_hosts: tuple[str, ...] = (),
+    hook_allowed_urls: tuple[str, ...] = (),
 ) -> tuple[EndpointTarget, ...]:
     """Preserve every MCP, OAuth metadata, and HTTP hook source attribution."""
     targets = []
@@ -411,9 +415,12 @@ def collect_endpoint_targets(
                         value, "mcp", f"{declaration.name}.{field_name}", declaration.file, allowed_hosts=allowed_hosts
                     )
                 )
+    from skillevaluator.plugin_component_risk import hook_allowlist_hosts
+
+    hook_hosts = tuple(dict.fromkeys((*allowed_hosts, *hook_allowlist_hosts(hook_allowed_urls))))
     for hook in hooks:
         if isinstance(hook.url, str) and hook.url:
-            targets.append(EndpointTarget(hook.url, "hook", hook.id, hook.file, allowed_hosts=allowed_hosts))
+            targets.append(EndpointTarget(hook.url, "hook", hook.id, hook.file, allowed_hosts=hook_hosts))
     return tuple(targets)
 
 

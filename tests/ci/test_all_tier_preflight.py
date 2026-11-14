@@ -162,6 +162,36 @@ def test_actual_workflow_bootstrap_ignores_consumer_pythonpath(tmp_path):
     assert not marker.exists()
 
 
+def test_unsupported_bootstrap_mode_rejects_before_optional_runtime_imports(tmp_path):
+    import os
+
+    probe = """
+import importlib.abc
+import runpy
+import sys
+
+class RejectRuntime(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "skillevaluator.tier3" or fullname.startswith("skillevaluator.tier3."):
+            raise RuntimeError("unsupported mode imported optional runtime: " + fullname)
+
+sys.meta_path.insert(0, RejectRuntime())
+runpy.run_path(sys.argv[1], run_name="__main__")
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", probe, str(ROOT / "ci/bootstrap_tiers.py")],
+        cwd=tmp_path,
+        env={"PATH": os.environ.get("PATH", ""), "SKILL_EVAL_ENV_MODE": "gke"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 2, result.stderr
+    assert "supports docker and local" in result.stdout
+    assert result.stderr == ""
+
+
 def test_bootstrap_doctor_receives_the_configured_ci_provider_and_model(monkeypatch):
     bootstrap = module("bootstrap_tiers")
     calls = []

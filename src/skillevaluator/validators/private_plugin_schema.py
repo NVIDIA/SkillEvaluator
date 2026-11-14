@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
@@ -31,7 +32,7 @@ VALIDATOR_NAME = "Private Manifest and Component Checks"
 MAX_SCHEMA_FINDINGS = 100
 
 
-def validate_inventory_schema(inventory: PluginInventory) -> ValidationResult:
+def validate_inventory_schema(inventory: PluginInventory, *, repo_root: Path | None = None) -> ValidationResult:
     """Validate every declared format and compose its inventory findings.
 
     The additional manifests remain audit sources even when another client is
@@ -191,7 +192,7 @@ def validate_inventory_schema(inventory: PluginInventory) -> ValidationResult:
         "manifest_declarations": declarations,
     }
     inventory_metadata = result.metadata["plugin"]
-    dependencies = dependency_records(inventory)
+    dependencies = dependency_records(inventory, repo_root=repo_root)
     result.merge(dependencies)
     result.metadata["plugin"] = {**inventory_metadata, **dependencies.metadata.get("plugin", {})}
     result.metadata["plugin"]["component_inventory"] = inventory.component_inventory()

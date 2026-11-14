@@ -6,38 +6,21 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from skillevaluator.constants import SIMILARITY_DEFAULT_MAX_ENTRIES, SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS
 from skillevaluator.deduplication.intra_skill.intra_skill_validator import IntraSkillValidator
 from skillevaluator.embedding.limits import validate_max_entries, validate_max_scalar_comparisons
-from skillevaluator.models.result import ValidationResult
-from skillevaluator.publication_evidence import stamp_publication_evidence
-from skillevaluator.publication_identity import finalize_publication_target, publication_target_from_path
 from skillevaluator.tier1.commands import emit_reports
+from skillevaluator.tier2.results import guarded_results
 from skillevaluator.validators.similarity import SimilarityValidator
+
+if TYPE_CHECKING:
+    from skillevaluator.models.result import ValidationResult
 
 
 def _guarded_result(title: str, target_path: Path, callback, *, check_id: str) -> list[ValidationResult]:
-    initial_target = publication_target_from_path(target_path)
-    try:
-        result = callback()
-    except Exception as exc:  # validators convert expected failures; this protects CLI UX
-        result = ValidationResult(validator_name=title, validator_description="Tier 2 check")
-        result.mark_scan_incomplete(title)
-        # SDK exceptions may contain response bodies, request data, or credentials.
-        # Expected provider failures are explained by the validators themselves.
-        result.add_error(
-            f"{title} could not complete because of an unexpected error ({type(exc).__name__}). "
-            "Check the provider configuration and connectivity, then rerun Tier 2. "
-            "If the problem persists, report this error type to the maintainers."
-        )
-    if not result.validator_name:
-        result.validator_name = title
-    if not result.validator_description:
-        result.validator_description = f"Tier 2 check for {target_path}"
-    stamp_publication_evidence([result], tier=2, check_id=check_id)
-    finalize_publication_target([result], target_path, initial_target)
-    return [result]
+    return guarded_results(title, target_path, lambda: [callback()], check_id=check_id)
 
 
 def run_similarity_check(
@@ -53,10 +36,38 @@ def run_similarity_check(
     save_cache: Path | None = None,
     max_entries: int = SIMILARITY_DEFAULT_MAX_ENTRIES,
     max_scalar_comparisons: int = SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
+    llm_verdict: bool = False,
+    llm_model: str | None = None,
 ) -> list[ValidationResult]:
     # Caller option errors have safe diagnostics and should not become provider failures.
     validate_max_entries(max_entries)
     validate_max_scalar_comparisons(max_scalar_comparisons)
+    from skillevaluator.cli_core import resolve_plugin_path
+    from skillevaluator.tier2.plugin_commands import plugin_similarity_results, plugin_target
+
+    if (target := plugin_target(content_path, content_type)) is not None:
+
+        def compare_plugins():
+            if catalog is not None and cache is not None:
+                raise ValueError("--catalog and deprecated --cache cannot be used together")
+            if save_catalog is not None and save_cache is not None:
+                raise ValueError("--save-catalog and deprecated --save-cache cannot be used together")
+            return plugin_similarity_results(
+                target,
+                threshold=threshold,
+                full_body=full_body,
+                model=model,
+                catalog=catalog or cache,
+                save_catalog=save_catalog or save_cache,
+                max_entries=max_entries,
+                max_scalar_comparisons=max_scalar_comparisons,
+                llm_verdict=llm_verdict,
+                llm_model=llm_model,
+            )
+
+        return guarded_results(
+            "Plugin Similarity Check", resolve_plugin_path(target), compare_plugins, check_id="similarity"
+        )
 
     def _run() -> ValidationResult:
         validator = SimilarityValidator(
@@ -82,7 +93,16 @@ def run_context_optimization_check(
     threshold: float = 0.80,
     model: str | None = None,
     llm_model: str | None = None,
+    catalog: Path | None = None,
+    llm_verdict: bool = False,
 ) -> list[ValidationResult]:
+    from skillevaluator.tier2.plugin_commands import plugin_target, run_public_plugin_dedup
+
+    if (target := plugin_target(skill_path)) is not None:
+        return run_public_plugin_dedup(
+            target, threshold=threshold, model=model, llm_model=llm_model, catalog=catalog, llm_verdict=llm_verdict
+        )
+
     def _run() -> ValidationResult:
         validator = IntraSkillValidator(
             threshold=threshold,
@@ -100,12 +120,16 @@ def run_dedup_scan(
     threshold: float = 0.80,
     llm_model: str | None = None,
     model: str | None = None,
+    catalog: Path | None = None,
+    llm_verdict: bool = False,
 ) -> list[ValidationResult]:
     return run_context_optimization_check(
         skill_path,
         threshold=threshold,
         model=model,
         llm_model=llm_model,
+        catalog=catalog,
+        llm_verdict=llm_verdict,
     )
 
 

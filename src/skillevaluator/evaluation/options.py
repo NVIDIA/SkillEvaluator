@@ -93,3 +93,46 @@ class DatasetOptions:
 
     def engine_kwargs(self) -> dict[str, Any]:
         return {f.name: getattr(self, f.name) for f in fields(self) if f.name != "skill_path"}
+
+
+@dataclass(frozen=True)
+class PluginOptions:
+    """Plugin runtime controls; unset values defer to authored configuration."""
+
+    plugin_load: str | None = None
+    lift_mode: str | None = None
+    probe_mcp: bool | None = None
+    probe_mcp_env: tuple[str, ...] = ()
+    trial_retries: int | None = None
+    repo_root: Path | None = None
+    allowed_private_hosts: tuple[str, ...] = ()
+    hook_allowed_urls: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        from skillevaluator.validators.plugin_policy import normalize_plugin_allowlist
+
+        object.__setattr__(
+            self,
+            "allowed_private_hosts",
+            normalize_plugin_allowlist(self.allowed_private_hosts, "mcp.allowed_private_hosts", 255),
+        )
+        object.__setattr__(
+            self, "hook_allowed_urls", normalize_plugin_allowlist(self.hook_allowed_urls, "hooks.allowed_urls", 2048)
+        )
+        for name, choices in (
+            ("plugin_load", {"wrapper", "native", "auto"}),
+            ("lift_mode", {"effectiveness", "integration", "both", "ladder"}),
+        ):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or value not in choices):
+                raise ValueError(f"{name} must be one of: {', '.join(sorted(choices))}")
+        if self.probe_mcp is not None and type(self.probe_mcp) is not bool:
+            raise ValueError("probe_mcp must be a boolean")
+        if self.trial_retries is not None and (type(self.trial_retries) is not int or not 0 <= self.trial_retries <= 5):
+            raise ValueError("trial_retries must be an integer between 0 and 5")
+        if (
+            not isinstance(self.probe_mcp_env, tuple)
+            or len(self.probe_mcp_env) > 64
+            or any(not isinstance(value, str) or len(value) > 512 for value in self.probe_mcp_env)
+        ):
+            raise ValueError("probe_mcp_env must contain at most 64 bounded environment grants")

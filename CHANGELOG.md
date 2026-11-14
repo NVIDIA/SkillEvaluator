@@ -74,6 +74,15 @@ All notable changes to SkillEvaluator are documented in this file.
   codex,claude-code` narrows the harnesses and `--harness-profiles DIR` loads
   profiles from a directory. The first rules flag a skill installed outside the
   folders a harness scans.
+- Complete the public plugin workflow: supported-format detection, bounded component
+  checks and bundled-skill validation, advisory deduplication and compatible local
+  catalogs, shared runtime options and loading adapters, MCP/behavior evidence,
+  multi-arm comparisons, and static/runtime report hooks. Add `tier3 evaluate-plugin`
+  and base-install `tier3 report-plugin` replay of retained snapshots, with setup-only
+  retry controls and published usage documentation. Skill and rule references that
+  Tier 3 does not stage (same-repository, external, unresolved, or not bundled) mark
+  the run incomplete, so a plugin with nothing else to load fails closed.
+
 - A separate four-case synthetic grader pilot adds forbidden-startup-write and
   root-search challenges with quoted/read-only and scoped controls, an independent
   label worksheet, content/source manifest and explicit security/Efficiency
@@ -285,6 +294,40 @@ All notable changes to SkillEvaluator are documented in this file.
   apply to the entire final response, independently of correct values in tool
   output or references. Scoring and thresholds are unchanged; an Accuracy format
   failure alone can still score 0.8 and pass the default threshold.
+
+- Partial scanner results retain their actual diagnostics and recorded versions
+  instead of being described as missing installations; plugin projections
+  preserve incomplete-only status.
+- CI bootstrap rejects unsupported Tier 3 environment modes before importing
+  optional runtime dependencies, preserving the isolated consumer-path check
+  without paying for unnecessary Harbor initialization.
+- NVIDIA Build protocol bridges preserve validated provider-reported token
+  usage instead of discarding it during Anthropic and Responses translation.
+  Responses usage remains unavailable when complete source accounting is
+  absent; no cost estimates are inferred from missing measurements.
+- Local directory downloads disable macOS-generated AppleDouble tar entries
+  so extended attributes do not create nonexistent source-file errors. Real
+  user-authored `._` files and existing containment checks are preserved.
+- Optional plugin catalog comparisons are recorded as skipped when no catalog
+  is supplied, rather than as successful checks. Publication accepts those
+  skips only alongside trustworthy executed semantic analysis; requested
+  catalog failures, contradictory errors and required-tier skips still block.
+  Retained reports preserve the typed optional-skip flag.
+- Plugin context analysis reports work-budget and collection-limit stops as
+  incomplete, rather than advisory passes. Disabled or inapplicable analysis
+  records explicit skips; malformed dependency parsing remains non-green.
+  Aggregate limits are unchanged and reported with their observed counts.
+- Combined native plugin validation records the harness check as advisory N/A;
+  use `harness-check` for native plugin profiles. Ordinary skill checks retain
+  their profiles and record completed evaluation evidence even when they have
+  no findings. Benchmark tier tables share the verified optional-catalog rule
+  used by publication verdicts.
+
+- Plugin CLI preflight uses bounded, no-follow configuration loading for both
+  plugin directories and explicit manifests. Combined validation binds plugin
+  scores and runtime evidence to the returned run, retains partial scores when
+  latest changes, and never borrows another run's scores for missing artifacts.
+
 
 - An author value is no longer rejected for containing a Unicode joiner. The
   character guard matched all of category `C`, so ZWNJ (U+200C) and ZWJ

@@ -2304,22 +2304,35 @@ def test_local_nested_callbacks_run_in_scope_order(tmp_path: Path) -> None:
 def test_local_callback_receives_complete_line_before_process_exit(tmp_path: Path) -> None:
     environment = _initialized_local_environment(tmp_path)
     first_line = asyncio.Event()
+    callback_chunks: list[str] = []
+    release = environment._workspace / "callback-release"
 
     async def on_output(text: str, stream: str) -> None:
-        if text == "first-line\n" and stream == "stdout":
-            first_line.set()
+        if stream == "stdout":
+            callback_chunks.append(text)
+            if "first-line\n" in "".join(callback_chunks):
+                first_line.set()
 
     async def exercise() -> object:
         await environment.start()
         with environment.scoped_output_callback(on_output):
-            task = asyncio.create_task(environment.exec("printf 'first-line\\n'; sleep 1; printf done"))
-            await asyncio.wait_for(first_line.wait(), timeout=0.5)
-            assert not task.done()
-            return await task
+            task = asyncio.create_task(
+                environment.exec(
+                    "printf 'first-line\\n'; while [ ! -f callback-release ]; do sleep 0.01; done; printf done",
+                    timeout_sec=30,
+                )
+            )
+            try:
+                await asyncio.wait_for(first_line.wait(), timeout=10)
+                assert not task.done()
+            finally:
+                release.touch()
+                result = await task
+            return result
 
     result = asyncio.run(exercise())
 
-    assert result.stdout == "first-line\ndone"
+    assert "".join(callback_chunks) == result.stdout == "first-line\ndone"
 
 
 @pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
@@ -2327,6 +2340,7 @@ def test_local_callback_streams_safe_partial_line_before_process_exit(tmp_path: 
     environment = _initialized_local_environment(tmp_path)
     partial_output = asyncio.Event()
     callback_chunks: list[str] = []
+    release = environment._workspace / "callback-release"
 
     async def on_output(text: str, stream: str) -> None:
         if stream == "stdout":
@@ -2337,10 +2351,19 @@ def test_local_callback_streams_safe_partial_line_before_process_exit(tmp_path: 
     async def exercise() -> object:
         await environment.start()
         with environment.scoped_output_callback(on_output):
-            task = asyncio.create_task(environment.exec("printf safe-partial-output; sleep 1; printf done"))
-            await asyncio.wait_for(partial_output.wait(), timeout=0.5)
-            assert not task.done()
-            return await task
+            task = asyncio.create_task(
+                environment.exec(
+                    "printf safe-partial-output; while [ ! -f callback-release ]; do sleep 0.01; done; printf done",
+                    timeout_sec=30,
+                )
+            )
+            try:
+                await asyncio.wait_for(partial_output.wait(), timeout=10)
+                assert not task.done()
+            finally:
+                release.touch()
+                result = await task
+            return result
 
     result = asyncio.run(exercise())
 

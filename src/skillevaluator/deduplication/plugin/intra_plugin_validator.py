@@ -43,8 +43,9 @@ class IntraPluginValidator(ValidatorBase):
             result.metadata["security_failure"] = True
             return result
         if not isinstance(data, dict):
-            result.metadata.update(scan_status="skipped", optional_skip=True)
-            result.add_warning("Manifest could not be parsed; dependency-reference deduplication did not run")
+            result.metadata.update(scan_status="incomplete", optional_skip=False)
+            result.mark_scan_incomplete("plugin-dependency-references")
+            result.add_error("Manifest could not be parsed; dependency-reference deduplication did not run")
             return result
         for section, check in (("skills", "duplicate_skill_ref"), ("rules", "duplicate_rule_ref")):
             value = data.get(section)

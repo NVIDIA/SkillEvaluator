@@ -11,8 +11,7 @@
 
 > 📺 **Livestream:** [Ask the Experts: Evaluating Agent Skills](https://www.youtube.com/watch?v=4rI0zATFxYI)
 
-SkillEvaluator checks AI agent skills and measures their effect on task results:
-start with quality checks, then compare runs with and without a skill.
+SkillEvaluator checks AI agent skills, then compares task results with and without them.
 
 Agent skills are folders of instructions and supporting files defined by the
 [Agent Skills specification](https://agentskills.io/). SkillEvaluator is part of
@@ -20,11 +19,11 @@ the [NVIDIA Verified Skills pipeline](https://github.com/NVIDIA/skills).
 
 ## Get started
 
-Three ways in, one CLI, same results.
+Three ways, one CLI, same results.
 
 <table>
 <tr>
-<th width="33%">1. Run the CLI directly</th>
+<th width="33%">1. Run the CLI</th>
 <th width="33%">2. Add it to your repo via CI</th>
 <th width="33%">3. Wire it to your agent</th>
 </tr>
@@ -80,7 +79,7 @@ Guides: [installation](https://docs.nvidia.com/skills/skillevaluator/installatio
 
 ## Quickstart
 
-Both paths use bundled `text-analyzer`.
+Both use bundled `text-analyzer`.
 
 | Start here | Requires | First result |
 | --- | --- | --- |
@@ -132,12 +131,11 @@ uv run --python 3.13 --extra llm skillevaluator rubric-eval \
   -r cli -r json -o reports/first-build
 ```
 
-The command sends skill documentation to the model and saves feedback in
+It sends skill documentation to the model and saves feedback in
 `reports/first-build/skillevaluator-rubric.json`. No agent runtime or Docker is
 needed. Completed evaluations can still fail rubric thresholds.
 
-The same key supports Tier 2 embeddings and supported Tier 3 agents. See the
-[Build walkthrough](docs/quickstart.mdx#use-nvidia-build) or [provider configuration](docs/configuration.mdx).
+The same key supports Tier 2 and Tier 3. See [provider configuration](docs/configuration.mdx).
 
 ## Three-tier overview
 
@@ -193,8 +191,7 @@ uv run --python 3.13 --extra tier3 skillevaluator tier3 create-eval-dataset ./my
 
 ## Run from a source checkout
 
-Use `uv run --python 3.13` with the relevant extra. See
-[Installation](docs/installation.mdx#choosing-extras) for extras and standalone upgrades.
+See [Installation](docs/installation.mdx#choosing-extras) for extras and standalone upgrades.
 
 ## Research and citation
 
@@ -207,7 +204,7 @@ Cite the paper and record the SkillEvaluator release or commit; see [CITATION.cf
 
 ## Documentation
 
-See [the documentation](https://docs.nvidia.com/skills/skillevaluator/) for
+See [documentation](https://docs.nvidia.com/skills/skillevaluator/) for
 setup, tier guides, reports, CI integration, CLI reference, and
 [performance dashboard](docs/reports.mdx#performance-dashboard).
 
@@ -245,8 +242,14 @@ issue.
 
 ## Releases
 
-Release changes are recorded in [CHANGELOG.md](CHANGELOG.md) and
+Release notes: [CHANGELOG.md](CHANGELOG.md) and
 [GitHub Releases](https://github.com/NVIDIA/SkillEvaluator/releases).
+
+## Assess plugins
+
+Run static checks: `skillevaluator validate ./my-plugin --tiers 1`. Compare runs:
+`skillevaluator tier3 evaluate-plugin ./my-plugin --agents claude-code`. Replay evidence:
+`tier3 report-plugin RUN_DIR`. See [formats and evidence limits](docs/plugin-assessment.mdx).
 
 ## License
 

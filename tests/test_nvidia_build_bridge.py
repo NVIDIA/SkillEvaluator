@@ -21,6 +21,7 @@ from threading import Event, Thread
 
 import pytest
 from anthropic.types import RawMessageStreamEvent
+from openai.types.completion_usage import CompletionUsage
 from openai.types.responses import ResponsesServerEvent
 from pydantic import TypeAdapter
 
@@ -2513,6 +2514,136 @@ def test_build_tool_call_emits_anthropic_tool_use_and_message_stop() -> None:
         "delta": {"type": "input_json_delta", "partial_json": '{"city":"Paris"}'},
     } in events
     assert events[-1] == {"type": "message_stop"}
+
+
+@pytest.mark.parametrize("completion", [CHAT_TEXT_RESPONSE, CHAT_TOOL_RESPONSE])
+def test_reported_backend_usage_reaches_both_protocols_without_cost_estimates(completion) -> None:
+    payload = {
+        **completion,
+        "usage": {
+            "prompt_tokens": 37,
+            "completion_tokens": 11,
+            "total_tokens": 48,
+            "prompt_tokens_details": {"cached_tokens": 9},
+            "completion_tokens_details": {"reasoning_tokens": 4},
+        },
+    }
+
+    responses = list(chat_completion_to_responses_events(payload))
+    anthropic = list(chat_completion_to_anthropic_events(payload))
+
+    assert responses[0]["response"]["usage"] is None
+    assert responses[-1]["response"]["usage"] == {
+        "input_tokens": 37,
+        "input_tokens_details": {"cached_tokens": 9},
+        "output_tokens": 11,
+        "output_tokens_details": {"reasoning_tokens": 4},
+        "total_tokens": 48,
+    }
+    # Anthropic counts cache reads separately; OpenAI includes them in prompt_tokens.
+    expected = {
+        "input_tokens": 28,
+        "output_tokens": 11,
+        "cache_read_input_tokens": 9,
+        "output_tokens_details": {"thinking_tokens": 4},
+    }
+    assert anthropic[0]["message"]["usage"] == expected
+    assert anthropic[-2]["usage"] == expected
+    for event in responses:
+        TypeAdapter(ResponsesServerEvent).validate_python(event)
+    for event in anthropic:
+        TypeAdapter(RawMessageStreamEvent).validate_python(event)
+
+
+def test_anthropic_preserves_reported_totals_without_inventing_usage_details() -> None:
+    payload = {**CHAT_TEXT_RESPONSE, "usage": {"prompt_tokens": 37, "completion_tokens": 11, "total_tokens": 48}}
+
+    events = list(chat_completion_to_anthropic_events(payload))
+
+    assert events[0]["message"]["usage"] == {"input_tokens": 37, "output_tokens": 11}
+    assert events[-2]["usage"] == {"input_tokens": 37, "output_tokens": 11}
+
+
+@pytest.mark.parametrize(
+    ("cached", "reasoning", "expected"),
+    [
+        (None, 4, {"input_tokens": 19, "output_tokens": 4, "output_tokens_details": {"thinking_tokens": 4}}),
+        (6, None, {"input_tokens": 13, "output_tokens": 4, "cache_read_input_tokens": 6}),
+        (None, None, {"input_tokens": 19, "output_tokens": 4}),
+    ],
+)
+def test_nullable_backend_usage_details_preserve_totals_and_only_known_categories(cached, reasoning, expected) -> None:
+    usage = {
+        "prompt_tokens": 19,
+        "completion_tokens": 4,
+        "total_tokens": 23,
+        "prompt_tokens_details": {"cached_tokens": cached},
+        "completion_tokens_details": {"reasoning_tokens": reasoning},
+    }
+    CompletionUsage.model_validate(usage)
+    payload = {**CHAT_TEXT_RESPONSE, "usage": usage}
+
+    anthropic = list(chat_completion_to_anthropic_events(payload))
+    responses = list(chat_completion_to_responses_events(payload))
+
+    assert anthropic[0]["message"]["usage"] == expected
+    assert anthropic[-2]["usage"] == expected
+    assert responses[-1]["response"]["usage"] is None
+    for event in anthropic:
+        TypeAdapter(RawMessageStreamEvent).validate_python(event)
+    for event in responses:
+        TypeAdapter(ResponsesServerEvent).validate_python(event)
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [None, {"prompt_tokens": 37, "completion_tokens": 11, "total_tokens": 48}],
+)
+def test_responses_keep_usage_unknown_when_required_details_were_not_reported(usage) -> None:
+    events = list(chat_completion_to_responses_events({**CHAT_TEXT_RESPONSE, "usage": usage}))
+
+    assert events[-1]["response"]["usage"] is None
+    TypeAdapter(ResponsesServerEvent).validate_python(events[-1])
+
+
+@pytest.mark.parametrize("translator", [chat_completion_to_responses_events, chat_completion_to_anthropic_events])
+@pytest.mark.parametrize(
+    "usage",
+    [
+        True,
+        [],
+        {"prompt_tokens": 37, "completion_tokens": 11},
+        {"prompt_tokens": True, "completion_tokens": 11, "total_tokens": 12},
+        {"prompt_tokens": "37", "completion_tokens": 11, "total_tokens": 48},
+        {"prompt_tokens": 37.0, "completion_tokens": 11, "total_tokens": 48},
+        {"prompt_tokens": -1, "completion_tokens": 11, "total_tokens": 10},
+        {"prompt_tokens": 37, "completion_tokens": 11, "total_tokens": 49},
+        {"prompt_tokens": 37, "completion_tokens": 11, "total_tokens": 48, "prompt_tokens_details": []},
+        {
+            "prompt_tokens": 37,
+            "completion_tokens": 11,
+            "total_tokens": 48,
+            "prompt_tokens_details": {"cached_tokens": 38},
+        },
+        {
+            "prompt_tokens": 37,
+            "completion_tokens": 11,
+            "total_tokens": 48,
+            "completion_tokens_details": {"reasoning_tokens": True},
+        },
+        {
+            "prompt_tokens": 37,
+            "completion_tokens": 11,
+            "total_tokens": 48,
+            "completion_tokens_details": {"reasoning_tokens": 12},
+        },
+    ],
+)
+def test_invalid_backend_usage_is_rejected_before_any_protocol_event(translator, usage) -> None:
+    events = translator({**CHAT_TEXT_RESPONSE, "usage": usage})
+
+    with pytest.raises(BridgePayloadError, match="usage"):
+        next(events)
 
 
 def test_anthropic_tool_arguments_are_validated_before_first_event() -> None:

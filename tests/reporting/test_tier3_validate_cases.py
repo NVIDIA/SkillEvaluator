@@ -133,7 +133,7 @@ def test_fix_section_for_tier1_and_tier2():
     clean = ValidationResult(validator_name="Version Check", passed=True)
     _ok, rows = summarize_tier1([schema, secrets, clean])
     text = _text(rows)
-    assert "1/3 checks passed  ·  1 failed  ·  1 didn't run" in text
+    assert "1/3 checks passed  ·  1 failed  ·  1 incomplete" in text
     assert "Author not specified in metadata\n" + " " * 12 + "→ Add 'metadata.author'" in text
     assert "secrets didn't run: gitleaks not installed\n" + " " * 12 + "→ brew install gitleaks" in text
     assert [r.label for r in rows if r.glyph in {"1", "2"}][1] == "setup"
@@ -432,8 +432,14 @@ def test_llm_scan_that_never_started_gets_the_scanner_fix_not_a_provider_fix(mon
     assert result.incomplete_scans == ["skillspector-llm"]
     assert "skillspector" not in result.scanners
     text = _text(summarize_tier1([result])[1])
-    assert "security didn't run" in text
-    assert "→ or skip it: --skip security" in text
+    if how == "bad-baseline":
+        assert "security incomplete:" in text
+        assert "baseline" in text
+        assert "not installed" not in text
+        assert "--skip security" not in text
+    else:
+        assert "security didn't run" in text
+        assert "→ or skip it: --skip security" in text
     for provider_advice in ("LLM review", "No provider is configured", "provider call failed", "doctor --tier 2"):
         assert provider_advice not in text
 
@@ -553,7 +559,7 @@ def test_tier1_summary_counts_validators_and_their_sub_checks():
     secrets.errors.append("leaked token")
     results.append(secrets)
     _ok, rows = summarize_tier1(results, lineup=["code-integrity", "schema", "security"])
-    assert "2/4 checks passed (13 sub-checks)  ·  1 failed  ·  1 didn't run" in _text(rows)
+    assert "2/4 checks passed (13 sub-checks)  ·  1 failed  ·  1 incomplete" in _text(rows)
 
 
 def test_live_view_draws_the_header_and_finished_tiers_once(monkeypatch):
@@ -597,7 +603,7 @@ def test_tier1_summary_row_agrees_with_the_verdict_line():
     assert (tier.passed, tier.failed, tier.incomplete, tier.skipped, tier.not_applicable) == (1, 1, 1, 1, 1)
     text = _text(summarize_tier1(results, lineup=["schema", "version", "unicode"])[1])
     assert f"{tier.passed}/{tier.executed} checks passed" in text
-    assert f"{tier.failed} failed  ·  {tier.incomplete} didn't run  ·  {tier.skipped} skipped" in text
+    assert f"{tier.failed} failed  ·  {tier.incomplete} incomplete  ·  {tier.skipped} skipped" in text
     assert tier.summary.startswith(f"{tier.passed} of {tier.executed} checks passed; {tier.failed} failed, ")
 
 

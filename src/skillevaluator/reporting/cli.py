@@ -180,6 +180,10 @@ class CLIReporter(ReporterBase):
     def print_all(self, results: list[ValidationResult]) -> None:
         """Print all results directly to console."""
         self._render_all_results(results, self.console)
+        from skillevaluator.reporting.plugin_reports import augment_plugin_report
+
+        if fragment := augment_plugin_report(self, "", results):
+            self.console.print(fragment, markup=False, highlight=False, end="")
 
     def print_summary(self, results: list[ValidationResult]) -> None:
         """Print only the summary table (no failure details, no overall verdict).

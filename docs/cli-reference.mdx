@@ -154,7 +154,7 @@ errors, such as an option the workflow does not accept, exit `2`.
 | `--quality-config PATH` | packaged `quality-default.yaml` | YAML file that adjusts the quality check's expected headings and error-handling rules; settings it omits keep their packaged values. See [Tier 1: Validation](/skills/skillevaluator/tier1-validation#the-checks). |
 | `--pii-waivers PATH` | none | Reviewed, expiring PII waivers applied by the `pii` check. See [PII waivers](/skills/skillevaluator/tier1-validation#pii-waivers). |
 | `--profile TEXT` | `SKILLEVALUATOR_PROFILE`, then `default` | Validation policy: `default` or `registry`. `external` is a compatibility alias for `default`. |
-| `--policy FILE` | none | Explicit policy overlay, including reviewed ownership-contact severity. See [Tier 1 policies](tier1-validation.mdx#validation-profiles-and-policies). |
+| `--policy FILE` | none | Explicit policy overlay, including reviewed ownership-contact severity. See [Tier 1 policies](/skills/skillevaluator/tier1-validation#validation-profiles-and-policies). |
 | `--previous-version TEXT` | `SKILLEVALUATOR_PREVIOUS_VERSION`, else unset | Previous version for version checks |
 | `--skillspector-baseline FILE` | unset | Audited SkillSpector suppression baseline; never discovered from the skill. See [Audited SkillSpector baselines](/skills/skillevaluator/tier1-validation#audited-skillspector-baselines). |
 
@@ -285,7 +285,27 @@ Applies to the whole run: target typing, policy profile, reports, tier selection
 
 The [evaluated source provenance](#evaluated-source-provenance) flags also appear in this panel.
 
-Auto-detection recognizes: a `SKILL.md` for skills, `.mdc` files for rules, `workflow-rules.mdc` for workflows, and — for plugins — a bundle-reference `agent_plugin.yaml`/`.yml` manifest or a contained `.claude-plugin/plugin.json` manifest. Plugins are validated against their public contract; quality, lint, and version checks are skill-only and skipped for plugins.
+Auto-detection recognizes `SKILL.md`, rules and workflows, plus YAML, Claude Code,
+Codex, Cursor, and Agent Plugins v1 plugin manifests. Plugin checks include the
+whole tree and applicable bundled-skill schema, quality, lint, and version checks.
+See [Assess Plugins](/skills/skillevaluator/plugin-assessment) for manifest precedence and evidence limits.
+
+Plugin controls on `validate` and `tier3 evaluate-plugin`:
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--plugin-load wrapper\|native\|auto` | config, then `wrapper` | Select the loading adapter |
+| `--lift-mode effectiveness\|integration\|both\|ladder` | config, then `effectiveness` | Select comparison arms |
+| `--trial-retries 0..5` | config, then `0` | Retry setup failures before task execution |
+| `--probe-mcp` | off | Request bounded host MCP proof |
+| `--probe-mcp-env TEXT` | none | Explicit host environment grant; repeatable and requires probing |
+| `--repo-root PATH` | none | Repository context for dependency resolution |
+
+`validate` additionally accepts `--resolve-endpoints` and `--claude-validate` for
+opt-in endpoint audits and advisory installed-client parity checks.
+`tier3 evaluate-plugin` shares the existing run controls and accepts all six
+report formats. `tier3 report-plugin RUN_DIR` replays a retained snapshot without
+source files or optional runtime dependencies, with `-r` and `-o`.
 
 When auto-detection finds none of these, the type is `unknown`. Tier 1 then records the `schema`, `version`, and `quality` checks as not applicable (N/A) instead of failing them with `No skills found`, and still runs the content scans. Tier 1 passes when those scans pass; Tier 2 still runs on the target unless `--no-dedup` or `--tiers 1`. The JSON report adds a root `tier1_applicability` object, whichever checks the run selects. Auto-detection also reads the directory names in the target's absolute path, so a repository whose path includes a directory named `skills`, `team-skills`, `team-rules`, `workflows`, or `team-workflows` is detected as that type, not `unknown`. A target folder whose own `SKILL.md`, `workflow-rules.mdc`, `agent_plugin.yaml`/`.yml`, or `.claude-plugin/plugin.json` is mis-cased (such as `Skill.md`) or a dangling symlink still runs the manifest checks, and fails them. A mis-cased manifest below the target is not discovered; validate that folder directly. Pass `--type` to validate the target as a given type anyway. See [Content types](/skills/skillevaluator/tier1-validation#content-types).
 

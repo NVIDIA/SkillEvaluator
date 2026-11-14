@@ -798,7 +798,7 @@ def test_public_cli_exposes_both_tier_two_workflows_without_a_service() -> None:
     assert "inter-skill-check" not in root_help.output
     assert "--save-catalog" in similarity_help.output
     assert "--catalog" in similarity_help.output
-    assert "--catalog" not in dedup_help.output
+    assert "--catalog" in dedup_help.output
 
 
 def test_public_docs_show_tier_two_collection_and_catalog_workflows() -> None:

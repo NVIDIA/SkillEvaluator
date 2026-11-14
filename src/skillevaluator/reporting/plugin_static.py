@@ -14,6 +14,7 @@ from pathlib import PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit, urlunsplit
 
+from skillevaluator.reporting.run_status import Status, result_status
 from skillevaluator.utils.redaction import redact_sensitive_text
 from skillevaluator.utils.rich_markup import strip_terminal_controls
 
@@ -296,8 +297,8 @@ def project_plugin_static(results: list[ValidationResult]) -> StaticPluginReport
         block = _mapping(metadata.get("plugin"))
         severities: dict[str, Counter] = {}
         incomplete |= result.is_incomplete or len(result.findings) > MAX_INPUT_ROWS
-        blocked |= bool(result.gate_failures) or (
-            not result.passed and not result.is_incomplete and metadata.get("optional_skip") is not True
+        blocked |= result_status(result) is Status.FAILED and (
+            bool(result.gate_failures) or metadata.get("optional_skip") is not True
         )
         for finding in islice(result.findings, MAX_INPUT_ROWS):
             severity = getattr(finding.severity, "value", finding.severity)

@@ -102,6 +102,18 @@ def detect_content_type(path: Path) -> str:
     A plugin manifest (agent_plugin.yaml/.yml) at the root wins over a nested
     skills tree.
     """
+    from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest, manifest_root_for
+
+    try:
+        located = locate_plugin_manifest(path)
+    except PluginManifestPathError:
+        # A supported but unsafe declaration still belongs to plugin validation.
+        # Its safe readers must report the refusal instead of detecting a skill.
+        if manifest_root_for(path) is not None or (path.is_dir() and not path.is_symlink()):
+            return CONTENT_TYPE_PLUGIN
+    else:
+        if located is not None:
+            return CONTENT_TYPE_PLUGIN
     if path.is_file() and (detected := _detect_from_file(path)):
         return detected
     if path.is_dir() and (detected := _detect_from_directory(path)):
@@ -140,6 +152,10 @@ def resolve_workflows_path(workflows_path: Path) -> Path:
 
 def resolve_plugin_path(path: Path) -> Path:
     """Convert a plugin manifest file path to its plugin root directory."""
+    from skillevaluator.plugin_manifest import manifest_root_for
+
+    if (root := manifest_root_for(path)) is not None and not path.is_dir():
+        return root
     if path.is_file():
         if path.name in PLUGIN_MANIFEST_FILES:
             return path.parent

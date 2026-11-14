@@ -33,8 +33,9 @@ GRADING_MODE_ALIASES = {
 }
 GRADING_MODES = {"default", "default_plus_custom", "custom_only", *GRADING_MODE_ALIASES}
 
-_TOP_LEVEL_KEYS = {"schema_version", "harbor", "skill_workspace", "grading"}
+_TOP_LEVEL_KEYS = {"schema_version", "harbor", "skill_workspace", "grading", "plugin"}
 _HARBOR_KEYS = {
+    "trial_retries",
     "task_source",
     "custom_dockerfile_mode",
     "base_image_mode",
@@ -173,6 +174,21 @@ def _validate_config(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
         raise EvalsConfigError(f"{config_path}: schema_version must be 1")
 
     out: dict[str, Any] = {"schema_version": 1}
+    if "plugin" in raw:
+        plugin_raw = raw["plugin"]
+        if not isinstance(plugin_raw, dict):
+            raise EvalsConfigError(f"{config_path}: plugin must be a mapping")
+        unknown = set(plugin_raw) - {"load", "lift_mode"}
+        if unknown:
+            raise EvalsConfigError(f"{config_path}: unknown plugin key(s): {', '.join(sorted(unknown))}")
+        plugin = {}
+        for key, choices in (
+            ("load", {"wrapper", "native", "auto"}),
+            ("lift_mode", {"effectiveness", "integration", "both", "ladder"}),
+        ):
+            if key in plugin_raw:
+                plugin[key] = _enum(plugin_raw[key], choices, config_path, f"plugin.{key}")
+        out["plugin"] = plugin
     harbor_raw = raw.get("harbor")
     if harbor_raw is not None:
         if not isinstance(harbor_raw, dict):
@@ -183,6 +199,11 @@ def _validate_config(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
             raise EvalsConfigError(f"{config_path}: unknown harbor key(s): {', '.join(sorted(unknown_harbor))}")
 
         harbor: dict[str, Any] = {}
+        if "trial_retries" in harbor_raw:
+            retries = _int_at_least(harbor_raw["trial_retries"], 0, config_path, "harbor.trial_retries")
+            if retries > 5:
+                raise EvalsConfigError(f"{config_path}: harbor.trial_retries must be between 0 and 5")
+            harbor["trial_retries"] = retries
         if "task_source" in harbor_raw:
             harbor["task_source"] = _enum(
                 harbor_raw["task_source"],

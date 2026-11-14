@@ -172,10 +172,12 @@ def test_policy_yaml_wraps_recursion_errors(tmp_path: Path, monkeypatch: pytest.
     policy = tmp_path / "deeply-nested-policy.yaml"
     policy.write_text("severity_overrides: []\n", encoding="utf-8")
 
-    def exhaust_parser(_stream: object) -> object:
+    def exhaust_parser(_stream: object, **_kwargs: object) -> object:
         raise RecursionError("maximum recursion depth exceeded")
 
-    monkeypatch.setattr(policy_module.yaml, "safe_load", exhaust_parser)
+    from skillevaluator.utils import structured_data
+
+    monkeypatch.setattr(structured_data, "load_bounded_yaml", exhaust_parser)
 
     with pytest.raises(ValueError) as exc_info:
         policy_module._load_policy_yaml(policy)

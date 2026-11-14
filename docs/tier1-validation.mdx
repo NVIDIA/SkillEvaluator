@@ -748,7 +748,7 @@ Bandit installs with SkillEvaluator; install `skillevaluator[security]` for pip-
 
 Semgrep uses a policy packaged with the installed distribution, with metrics and version checks disabled; Tier 1 never fetches a registry policy at runtime. The other public Tier 1 configuration also ships inside the package under `skillevaluator/config/`: `pii_patterns.yaml`, `unicode_smuggle_patterns.yaml`, `license_config.yaml`, and `profiles/default.yaml`.
 
-Bundled Python scanners resolve next to the SkillEvaluator interpreter before `PATH`; external Semgrep and SkillSpector installations resolve from `PATH`. Intentional replacements require an auditable absolute executable path in `SKILLEVALUATOR_BANDIT_PATH`, `SKILLEVALUATOR_SEMGREP_PATH`, or `SKILLEVALUATOR_SKILLSPECTOR_PATH`.
+Bundled Python scanners resolve next to the SkillEvaluator interpreter before `PATH`; external Semgrep and SkillSpector installations resolve from `PATH`. Automatically discovered SkillSpector must match the pinned 2.13.4 release; a different or unverifiable version selects the checksum-verified managed release, with a diagnostic explaining the choice. Intentional replacements require an auditable absolute executable path in `SKILLEVALUATOR_BANDIT_PATH`, `SKILLEVALUATOR_SEMGREP_PATH`, or `SKILLEVALUATOR_SKILLSPECTOR_PATH`. An explicit SkillSpector override keeps the chosen executable.
 
 <Warning>
   Scanner path overrides fail closed: a relative, missing, or non-executable override path fails the run rather than silently falling back. Required scanners that are missing or produce malformed output leave the run `INCOMPLETE` and non-green.

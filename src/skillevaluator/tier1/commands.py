@@ -317,6 +317,9 @@ def run_validation(
     harness_profiles: Path | None = None,
     skillspector_baseline: Path | None = None,
     skip: str | None = None,
+    repo_root: Path | None = None,
+    resolve_endpoints: bool = False,
+    claude_validate: bool = False,
 ) -> list[ValidationResult]:
     """Run selected Tier 1 validators and return structured results.
 
@@ -356,6 +359,28 @@ def run_validation(
     missing reference in the skill, because its instructions may name a file
     elsewhere in the folder that its scan did not inspect.
     """
+    if content_type == CONTENT_TYPE_PLUGIN:
+        from skillevaluator.tier1.plugin_public import run_public_plugin_validation
+
+        return run_public_plugin_validation(
+            target_path,
+            checks=checks,
+            skip=skip,
+            use_llm=use_llm,
+            llm_verify=llm_verify,
+            min_score=min_score,
+            quality_config=quality_config,
+            pii_waivers=pii_waivers,
+            previous_version=previous_version,
+            policy=policy,
+            fail_fast=fail_fast,
+            continue_on_failure=continue_on_failure,
+            on_check=on_check,
+            skillspector_baseline=skillspector_baseline,
+            repo_root=repo_root,
+            resolve_endpoints=resolve_endpoints,
+            claude_validate=claude_validate,
+        )
     enabled = _enabled_checks(checks)
     skipped = skipped_checks(skip)
     results: list[ValidationResult] = []

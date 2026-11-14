@@ -61,4 +61,15 @@ class HarnessValidator(ValidatorBase):
                         )
                     )
         result.metadata[HARNESS_METADATA_KEY] = block
+        harnesses = [row["harness"] for row in next(iter(block.values()), [])]
+        if harnesses:
+            evaluations = sum(len(rows) for rows in block.values())
+            result.add_success(
+                "harness_profile_evaluation",
+                f"Completed {evaluations} harness profile evaluation(s) across {len(block)} skill(s).",
+                harnesses=harnesses,
+                profiles_evaluated=len(harnesses),
+                skills_evaluated=len(block),
+                evaluations_performed=evaluations,
+            )
         return result

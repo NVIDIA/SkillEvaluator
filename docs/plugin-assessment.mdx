@@ -1,0 +1,164 @@
+---
+title: "Assess Plugins"
+description: "Validate plugin components, compare agent behavior, and replay retained runtime evidence."
+---
+
+SkillEvaluator assesses a plugin as a collection of components. Reports distinguish
+what was discovered, staged, confirmed loaded, and exercised. Each requires its
+own evidence.
+
+## Start with static checks
+
+```bash
+skillevaluator validate ./my-plugin --tiers 1 -r cli,json,html
+```
+
+The base installation provides manifest and component checks. Complete scanner
+coverage needs the same external scanners as [skill validation](/skills/skillevaluator/tier1-validation).
+A missing scanner remains incomplete.
+
+Automatic detection recognizes these profiles, in selection order:
+
+| Profile | Manifest |
+| --- | --- |
+| Bundle-reference YAML | `agent_plugin.yaml` or `agent_plugin.yml` |
+| Claude Code | `.claude-plugin/plugin.json` |
+| Agent Plugins v1 | `plugin.json` with an Agent Plugins schema declaration |
+| Codex | `.codex-plugin/plugin.json` |
+| Cursor | `.cursor-plugin/plugin.json` |
+| OpenClaw | `openclaw.plugin.json` |
+
+A plugin root takes precedence over nested skills. Additional manifests remain
+audit sources; conflicting names or versions are reported. `--type plugin`
+forces the content type.
+
+OpenClaw uses only its declared skill roots. Portable skill checks do not certify
+its native tools, hooks, channels, providers, or services; those runtime components
+remain explicitly unsupported.
+
+Static checks cover bounded parsing, member paths and dependencies, MCP policy,
+pinning, endpoint safety, hooks, privileges, settings, and supported member types.
+Whole-tree scanners cover security, PII, secrets, code risk, license, hygiene,
+and Unicode. Bundled skills receive applicable schema, quality, lint, and version
+checks. Public quality overrides, suppression baselines, and PII waivers also apply.
+
+The inventory records provided, referenced, missing, external, and unresolved
+dependencies, component support levels, findings, and estimated context. Use
+`--repo-root PATH` for same-repository references. Static context estimates are
+separate from measured runtime usage.
+
+HIGH and CRITICAL findings can block validation. Unsupported or unresolved
+components remain visible. `--checks` replaces the default check list;
+`--skip` records omitted checks as skipped.
+
+DNS and redirect verification require `--resolve-endpoints`. Dependency auditing
+requires `dependency` in the selected checks and uses available Python, npm, and
+container scanners without installing plugin dependencies. `--claude-validate`
+requests advisory parity with the installed `claude plugin validate` command.
+
+An operator-selected `--policy` file can set `mcp.allowed_private_hosts` and
+`hooks.allowed_urls`. The same allowances apply to preparation and MCP proof.
+`endpoints.resolve: true` in that explicit policy also opts into static network
+audits. Allowlists alone never start network requests, and cloud metadata
+endpoints remain denied. Reports retain policy counts and a digest rather than
+raw allowlist values. `tier3 evaluate-plugin` also accepts `--policy` and `--profile`.
+
+## Compare content
+
+```bash
+skillevaluator validate ./my-plugin --tiers 1,2 -r json,html
+skillevaluator tier2 similarity-check ./plugins --type plugin --save-catalog ./catalog.json
+skillevaluator tier2 similarity-check ./my-plugin --catalog ./catalog.json
+```
+
+Tier 2 checks duplicate references, member overlap, and local catalog comparisons
+using [existing comparison machinery](/skills/skillevaluator/tier2-deduplication). Plugin comparisons
+are advisory; unsafe inputs fail closed. Existing v1 skill catalogs remain readable.
+Plugin catalogs compare descriptions; `--full-body` is refused for this path.
+
+## Run supported agents
+
+Plugin runtime assessment requires Harbor (`--backend harbor`, the default).
+
+Install the `tier3` extra and configure [credentials](/skills/skillevaluator/configuration) and a
+[sandbox](/skills/skillevaluator/agents-and-sandboxes). Author and review an `evals/evals.json`,
+JSONL, or YAML dataset under the plugin root, or provide datasets in its member
+skills. A root dataset takes precedence. Authored config and custom graders are
+retained during staging. Native Harbor task directories are currently unsupported
+for plugin runs and are refused explicitly. Tier 3 stages only components bundled
+inside the plugin root; skill and rule references it does not stage (same-repository,
+external, unresolved, or not bundled) stay listed as not staged and make the run
+incomplete.
+
+```bash
+skillevaluator tier3 evaluate-plugin ./my-plugin \
+  --agents claude-code --plugin-load wrapper -r json,html
+```
+
+`validate ./my-plugin --tiers 1,2,3` includes the agent stage in the combined
+pipeline. Plugins use static and deduplication stages by default. Tier 3 becomes
+blocking in `validate` only with `--block-on-agent-eval`.
+
+| Option | Behavior |
+| --- | --- |
+| `--plugin-load wrapper` | Default; generated skill with supported members, rules, and MCP configuration |
+| `--plugin-load native` | Agent's native adapter; unsafe or unsupported requests are refused |
+| `--plugin-load auto` | Native where supported, with recorded wrapper fallbacks |
+| `--lift-mode effectiveness` | Default; full plugin versus baseline |
+| `--lift-mode integration` | Full plugin versus member skills; this difference is Bundle lift |
+| `--lift-mode both` | Baseline and member-skills comparisons |
+| `--lift-mode ladder` | Add loose parts to separate skill, capability, and integration contributions |
+
+Native adapters support Claude Code, Codex, and OpenCode. Claude Code startup
+evidence can confirm loading; Codex and OpenCode components may remain listed
+without harness confirmation. A staged hook does not prove it ran.
+
+Comparisons pair logical cases on commonly scored dimensions. Reports retain
+confidence intervals, exclusions, capability checks, and eligibility reasons.
+True Integration lift compares the full plugin with loose parts. Wrapper effects
+and unsupported comparisons retain explicit labels and reasons. Additional arms
+increase trial count and provider cost.
+
+Routing, activation, tool selection, arguments, ordering, handoffs, and conflicts
+are dataset-driven advisory signals. Missing expectations or traces remain
+unavailable or incomplete. A reference-dependent judge without a reference is N/A.
+
+Host MCP probes are off by default. `--probe-mcp` requests bounded, policy-checked
+`initialize` and `tools/list` calls for supported URL servers. Repeatable
+`--probe-mcp-env` grants permit named host environment variables only with this
+opt-in. Host reachability and agent-observed execution are separate evidence.
+
+`--trial-retries N` accepts 0–5 setup-only retries, defaulting to zero. In-task
+failures are never retried. Retry reasons and counts remain in retained evidence.
+CLI values override `plugin.load`, `plugin.lift_mode`, and `harbor.trial_retries`
+in `evals/config.yml`. Checked-in config cannot enable host probes or grant host
+environment variables.
+
+## Replay saved runtime evidence
+
+```bash
+skillevaluator tier3 report-plugin ./saved-run \
+  -r cli,json,html,markdown,sarif,benchmark -o ./replayed-reports
+```
+
+Replay reads the bounded, versioned `plugin_runtime_report.json`. It needs no
+original source, Harbor jobs, credentials, or optional runtime dependencies.
+It does not execute agents, probe servers, rescan, or recompute scores. Missing
+snapshots are unavailable; invalid or unsafe inputs are refused. Publication
+eligibility is not reassessed from a display snapshot.
+
+File formats use the `plugin-report` basename; the benchmark card is `BENCHMARK.md`.
+JSON uses `plugin_runtime`; SARIF uses `runs[0].properties.pluginRuntime`. Unknown
+usage stays unknown, recorded zero remains zero, and bounded sections retain
+omission counts. See [Reports & Results](/skills/skillevaluator/reports).
+
+## Evidence limits
+
+Inventory coverage does not imply runtime support. Monitors, Codex apps, client
+extensions, LSP, and native configuration have adapter-specific limits. Runtime
+security and canaries use observed tool calls and files; independent hook or MCP
+process actions may be absent from traces.
+
+Deterministic assembled acceptance checks public wiring and retained reports. It
+does not qualify every live agent/provider combination, MCP service, or remote
+sandbox backend. Preserve these run-specific limitations when sharing results.

@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 # These lightweight imports intentionally remain available at runtime so API
 # frameworks and callers can resolve the public method annotations.
-from skillevaluator.evaluation.options import DatasetOptions, EvaluationOptions  # noqa: TC001
+from skillevaluator.evaluation.options import DatasetOptions, EvaluationOptions, PluginOptions
 from skillevaluator.evaluation.results import DatasetGenerationResult  # noqa: TC001
 
 if TYPE_CHECKING:
@@ -39,6 +39,22 @@ class EvaluationService:
 
         reporter = progress_reporter or NullProgressReporter()
         return _evaluate(options.skill_path, progress_reporter=reporter, **options.engine_kwargs())
+
+    def evaluate_plugin(
+        self,
+        options: EvaluationOptions,
+        *,
+        plugin_options: PluginOptions | None = None,
+        progress_reporter: ProgressReporter | None = None,
+    ) -> dict[str, Any]:
+        """Run a plugin through the shared engine and retain its runtime evidence."""
+        from skillevaluator.tier3.plugin_workflow import evaluate_plugin
+
+        return evaluate_plugin(
+            options,
+            plugin_options=plugin_options or PluginOptions(),
+            evaluate=lambda prepared: self.evaluate(prepared, progress_reporter=progress_reporter),
+        )
 
     @staticmethod
     def failure_reason(result: object) -> str | None:
@@ -95,7 +111,12 @@ class EvaluationService:
         shared results-location resolver, so API report discovery does not depend
         on a fixed report filename.
         """
-        from skillevaluator.tier3.results_location import resolve_latest_results
+        from skillevaluator.cli_core import detect_content_type, resolve_plugin_path
+        from skillevaluator.tier3.results_location import plugin_results_directory, resolve_latest_results
+
+        if detect_content_type(skill_path) == "plugin":
+            skill_path = resolve_plugin_path(skill_path)
+            results_dir = plugin_results_directory(skill_path, results_dir)
 
         latest = resolve_latest_results(skill_path, results_dir)
         if not latest.exists():

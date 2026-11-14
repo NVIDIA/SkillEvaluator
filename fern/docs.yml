@@ -56,6 +56,9 @@ navigation:
       - page: "Tier 3: Live Evaluation"
         path: ../docs/tier3-live-evaluation.mdx
         slug: tier3-live-evaluation
+      - page: Assess Plugins
+        path: ../docs/plugin-assessment.mdx
+        slug: plugin-assessment
       - page: Grader Validation
         path: ../docs/grader-validation.mdx
         slug: grader-validation

@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from skillevaluator.evaluation.options import EvaluationOptions
+from skillevaluator.evaluation.options import EvaluationOptions, PluginOptions
 from skillevaluator.evaluation.service import EvaluationService
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.plugin_inventory import plugin_inventory_for_root
@@ -168,12 +168,15 @@ def _offline_engine(monkeypatch, *, missing: str | None = None):
     return launches
 
 
-def _run_private(tmp_path, monkeypatch, *, missing=None, publish=None, comparisons=True):
+def _run_private(
+    tmp_path, monkeypatch, *, missing=None, publish=None, comparisons=True, public=False, default_results=False
+):
     package, validation = _prepared(tmp_path / "plugin")
     launches = _offline_engine(monkeypatch, missing=missing)
     work = tmp_path / "work"
     work.mkdir()
     seen = {}
+    observer_type = plugin_evidence.RuntimeEvidenceObserver
 
     def observer_factory(current_package, wrapper, hooks, options):
         # Configuration belongs to this temporary wrapper; the source and its
@@ -182,7 +185,7 @@ def _run_private(tmp_path, monkeypatch, *, missing=None, publish=None, compariso
             "schema_version: 1\nharbor:\n  base_image_mode: disabled\n", encoding="utf-8"
         )
         seen["wrapper"] = wrapper.path
-        observer = plugin_evidence.RuntimeEvidenceObserver(current_package, wrapper, hooks, options)
+        observer = observer_type(current_package, wrapper, hooks, options)
         seen["observer"] = observer
         return observer
 
@@ -194,30 +197,83 @@ def _run_private(tmp_path, monkeypatch, *, missing=None, publish=None, compariso
         if publish is not None:
             publish(outcome)
 
-    outcome = plugin_execution.evaluate_prepared_plugin(
-        package,
-        EvaluationOptions(
-            skill_path=Path(package.identity.root),
-            agents="claude-code",
-            results_dir=tmp_path / "results",
-            n_attempts=2,
-            n_concurrent=2,
-            max_cases=5,
-            agent_runtime_preflight=False,
-        ),
-        work_dir=work,
-        load="native",
-        comparison_options=ComparisonOptions(loose_parts=True) if comparisons else None,
-        observer_factory=observer_factory,
-        publish=published,
+    options = EvaluationOptions(
+        skill_path=Path(package.identity.root),
+        agents="claude-code",
+        results_dir=None if default_results else tmp_path / "results",
+        n_attempts=2,
+        n_concurrent=2,
+        max_cases=5,
+        agent_runtime_preflight=False,
     )
+    if public:
+        if not default_results:
+            authored = Path(package.identity.root) / "evals"
+            authored.mkdir()
+            (authored / "config.yml").write_text("schema_version: 1\nharbor:\n  base_image_mode: disabled\n")
+        monkeypatch.setattr(plugin_evidence, "RuntimeEvidenceObserver", observer_factory)
+        result = EvaluationService().evaluate_plugin(
+            options,
+            plugin_options=PluginOptions(plugin_load="native", lift_mode="ladder" if comparisons else "effectiveness"),
+        )
+        provenance = result["plugin_provenance"]
+        from skillevaluator.publication_identity import publication_target_from_path
+
+        assert result.get("publication_target") == publication_target_from_path(Path(package.identity.root))
+        assert result["skill_name"] == Path(package.identity.root).name
+        for marker in ("Plugin runtime evidence", "Plugin static evidence"):
+            assert marker in Path(result["report_path"]).read_text()
+        assert "Plugin runtime evidence" in Path(result["benchmark_path"]).read_text()
+        assert EvaluationService().discover_latest_results(Path(package.identity.root), options.results_dir) == Path(
+            result["run_dir"]
+        )
+        from skillevaluator.evaluation.tier3_report import agent_eval_result_from_run
+
+        canonical = agent_eval_result_from_run(
+            Path(package.identity.root),
+            results_dir=options.results_dir or Path(package.identity.root) / "results",
+            engine_result=result,
+            use_llm_judge=False,
+        )
+        assert canonical is not None and canonical.metadata["agent_eval"]["skill_name"] == "plugin"
+        outcome = SimpleNamespace(
+            result=result,
+            status=result["execution_status"],
+            provenance=provenance,
+            publication_error=provenance.get("publication_error"),
+            cleanup_error=provenance.get("cleanup_error"),
+        )
+        seen["payload"] = json.loads((Path(result["run_dir"]) / SNAPSHOT).read_text())
+        assert result["plugin_runtime_report"] == seen["payload"]
+    else:
+        outcome = plugin_execution.evaluate_prepared_plugin(
+            package,
+            options,
+            work_dir=work,
+            load="native",
+            comparison_options=ComparisonOptions(loose_parts=True) if comparisons else None,
+            observer_factory=observer_factory,
+            publish=published,
+        )
     assert plugin_execution.active_runtime() is None
     assert not seen["wrapper"].exists() and list(work.iterdir()) == []
     return outcome, package, validation, launches, seen
 
 
-def test_service_run_retains_one_snapshot_before_cleanup_and_replays_six_formats(tmp_path, monkeypatch):
-    outcome, package, validation, launches, seen = _run_private(tmp_path, monkeypatch)
+def test_public_default_results_do_not_create_an_authored_evals_ancestor(tmp_path, monkeypatch):
+    monkeypatch.delenv("SKILLEVALUATOR_RESULTS_DIR", raising=False)
+    outcome, package, _validation, _launches, _seen = _run_private(
+        tmp_path, monkeypatch, public=True, default_results=True
+    )
+    root = Path(package.identity.root)
+    assert outcome.status == "succeeded"
+    assert not (root / "evals").exists()
+    assert Path(outcome.result["run_dir"]).is_relative_to(root / "results")
+
+
+@pytest.mark.parametrize("public", [False, True], ids=["private", "public-service"])
+def test_service_run_retains_one_snapshot_before_cleanup_and_replays_six_formats(tmp_path, monkeypatch, public):
+    outcome, package, validation, launches, seen = _run_private(tmp_path, monkeypatch, public=public)
     assert outcome.status == "succeeded", outcome.result
     assert outcome.cleanup_error is None and outcome.publication_error is None
     assert {variant for variant, _tasks in launches} == {"with", "without", "sumofparts", "looseparts"}

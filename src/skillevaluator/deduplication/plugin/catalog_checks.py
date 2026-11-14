@@ -29,7 +29,7 @@ def advisory_severity(severity):
     return Severity.MEDIUM if severity in (Severity.HIGH, Severity.CRITICAL) else severity
 
 
-def record_similarity(result, key, *, status, catalog_entries, matches, reason=None):
+def record_similarity(result, key, *, status, catalog_entries, matches, reason=None, optional_skip=False):
     result.metadata.setdefault("plugin", {})[key] = {
         "status": status,
         "catalog_entries": catalog_entries,
@@ -38,13 +38,22 @@ def record_similarity(result, key, *, status, catalog_entries, matches, reason=N
     }
     result.metadata["advisory_tier2"] = True
     if status == "skipped":
-        result.metadata.update(scan_status="skipped", optional_skip=True)
-        result.add_warning(reason or "Comparison did not run")
+        reason = reason or "Comparison did not run"
+        result.metadata.update(scan_status="skipped", skipped=True, skip_reason=reason, optional_skip=optional_skip)
+        result.add_warning(reason)
 
 
-def skipped_result(name, description, key, reason, *, catalog_entries=0):
+def skipped_result(name, description, key, reason, *, catalog_entries=0, optional=True):
     result = ValidationResult(validator_name=name, validator_description=description)
-    record_similarity(result, key, status="skipped", catalog_entries=catalog_entries, matches=[], reason=reason)
+    record_similarity(
+        result,
+        key,
+        status="skipped",
+        catalog_entries=catalog_entries,
+        matches=[],
+        reason=reason,
+        optional_skip=optional,
+    )
     return result
 
 

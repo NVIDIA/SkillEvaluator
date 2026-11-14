@@ -29,6 +29,7 @@ from skillevaluator.reporting.base import (
     AgentDimensionGate,
     PublicationTargetIdentity,
     ReporterBase,
+    _optional_tier2_catalog_skip,
     agent_eval_baseline_not_applicable,
     agent_eval_dimension_breakdown,
     agent_eval_dimension_verdict,
@@ -1152,11 +1153,14 @@ def _assessment_status(assessment: PublicationAssessment) -> str:
 def _is_blocking_publication_skip(
     result: ValidationResult,
     benchmark_policy: dict[str, bool],
+    *,
+    results: list[ValidationResult],
 ) -> bool:
     """Return whether a clean skip blocks this publication policy."""
     return bool(
         is_cleanly_skipped(result)
         and not is_advisory_agent_eval_skip(result)
+        and not _optional_tier2_catalog_skip(result, results)
         and not (_is_tier2(result) and not benchmark_policy["tier2_required"])
         and not (_is_tier3(result) and not benchmark_policy["tier3_required"])
     )
@@ -1985,7 +1989,7 @@ def _tier_status(
         reasons = "; ".join(_skip_reasons(skipped))
         completed = len(publication_results) - len(skipped)
         evidence = f"{completed} completed validator(s); {len(findings)} finding(s); {reasons}"
-        if any(_is_blocking_publication_skip(result, benchmark_policy) for result in skipped):
+        if any(_is_blocking_publication_skip(result, benchmark_policy, results=results) for result in skipped):
             return "INCOMPLETE", evidence
         return "PASSED WITH OBSERVATIONS", evidence
 

@@ -186,11 +186,11 @@ and environment backends.
 <Note>
 Tier 1 provisions the external security scanners in their own environments, so their dependency stacks do not constrain the SkillEvaluator distribution:
 
-- **SkillSpector:** when no executable is found, Tier 1 downloads the 2.13.4 release wheel once into the SkillEvaluator runtime folder, verifies its SHA-256 checksum, and runs it with `uv tool run`. uv is installed with SkillEvaluator as a base dependency, so a plain `pip install` needs nothing else; a uv already on `PATH` is used first. The first run needs network access (GitHub and PyPI); later runs use the uv cache.
+- **SkillSpector:** automatic discovery uses an installed executable only when its version is exactly 2.13.4. If it is missing, differs from the pin, or cannot report a valid version, Tier 1 selects the pinned release wheel, verifies its SHA-256 checksum, and runs it with `uv tool run`. uv is installed with SkillEvaluator as a base dependency; a uv already on `PATH` is used first. The first managed run needs network access (GitHub and PyPI); later runs use the uv cache. A rejected installed version and the selected fallback are reported explicitly.
 - **Semgrep:** optional. When it is installed, Code Risk Analysis adds its rules to Bandit; when it is not, the check notes it was skipped. Set `SKILLEVALUATOR_REQUIRE_SEMGREP=1` to report a missing Semgrep as `INCOMPLETE` (the Tier 1 CI image does).
 - **Gitleaks:** on first use, SkillEvaluator downloads the pinned 8.30.0 release into its runtime folder and verifies its SHA-256 checksum. There is no prompt, so CI runs install it too. Linux and macOS only.
 
-Installed executables take precedence. To use your own, put them on `PATH` or set `SKILLEVALUATOR_SEMGREP_PATH` and `SKILLEVALUATOR_SKILLSPECTOR_PATH`:
+Installed Semgrep and Gitleaks executables retain their normal precedence. A matching SkillSpector installation also avoids managed provisioning. To choose a different SkillSpector executable intentionally, set its absolute path in `SKILLEVALUATOR_SKILLSPECTOR_PATH`; this explicit override is recorded and is not replaced by the automatic version check. `SKILLEVALUATOR_SEMGREP_PATH` selects Semgrep explicitly.
 
 ```bash title="Optional: preinstall the scanners"
 uv tool install semgrep

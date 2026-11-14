@@ -569,7 +569,12 @@ def agent_eval_result_from_directory(
             from skillevaluator.tier3.next_steps import next_steps
 
             payload["next_steps"] = next_steps(source, run_dir=run_dir, fixes=load_case_findings(run_dir))
-    return _validation_result_from_payload(payload)
+    result = _validation_result_from_payload(payload)
+    if result is not None:
+        from skillevaluator.reporting.plugin_reports import attach_saved_plugin_evidence
+
+        attach_saved_plugin_evidence(result, run_dir, engine_result)
+    return result
 
 
 def _persisted_run_result(run_dir: Path) -> dict[str, Any] | None:
@@ -718,7 +723,9 @@ def render_agent_eval_html_report(
 
     reporter = HTMLReporter(
         target_path=str(skill_path),
-        content_label="Skill",
+        content_label="Plugin"
+        if result.metadata.get("plugin") or result.metadata.get("plugin_runtime_report")
+        else "Skill",
         report_scope="tier3",
         tabs=[{"id": "tier3", "label": "Tier 3: Live Agent Evaluation"}],
         # The run records the filesystem entry name, which a lexical alias

@@ -507,6 +507,7 @@ grading:
 | `harbor.timeout_multiplier` | finite number > 0 | Scales task timeouts. Values that would overflow Harbor's mandatory lifecycle timeouts are rejected before execution. |
 | `harbor.agent_runtime_preflight` | boolean | Opt-in extra agent-only execution of the first staged task before the measured evaluation. Default: `false`; the CLI flag overrides this value. |
 | `harbor.tolerate_baseline_timeouts` | boolean | Keep an agent scored on its with-skill arm when only baseline attempts hit the agent execution timeout; its baseline and Skill Lift are not reported (see [Baseline timeouts](/skills/skillevaluator/tier3-live-evaluation#baseline-timeouts)). Default: `false`; the CLI flag overrides this value. |
+| `harbor.trial_retries` | integer 0–5 | Plugin runs only: retries when an agent's setup fails on the network before the task starts; failures inside a task are never retried. Skill runs accept the key and ignore it. Default: `0`; the `--trial-retries` CLI flag overrides this value (see [Plugin assessment](/skills/skillevaluator/plugin-assessment)). |
 | `harbor.agent_workdir` | string | Working directory for the agent inside the container. |
 | `harbor.resources` | `cpus`, `memory_mb`, `storage_mb` | Per-container resource requests. |
 | `harbor.runtime_env` | list or mapping | Non-credential task values passed into the container. Prefer a list of plain names — each expands to `${NAME}` from your shell; a mapping sets explicit templates. Entries that name or reference operator-owned credentials (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, base-URL variables, AWS credential variables) fail with a hard error. Alias: `passthrough_env`. |
@@ -516,6 +517,8 @@ grading:
 | `skill_workspace.include` | list of paths | Extra skills staged into a `group` workspace. |
 | `skill_workspace.decoy_manifest` | path | Optional frozen selection from `tier3 select-decoys`; requires `group` mode. Relative paths resolve against the target skill's parent directory, as with `include`. Selected runtime-content hashes are checked before evaluation; evaluator-only files do not affect them. See [Workspace modes](/skills/skillevaluator/agents-and-sandboxes#select-a-reproducible-decoy-set). |
 | `grading.mode` | `default`, `default_plus_custom`, `custom_only` | Grading pipeline — see [Custom Graders & Tasks](/skills/skillevaluator/custom-graders). Legacy spellings `aces_default` and `aces_plus_custom` are accepted and normalized to `default` and `default_plus_custom`. |
+| `plugin.load` | `wrapper`, `native`, `auto` | Plugin runs only: how the plugin is loaded for the with-plugin arm. Skill runs accept the key and ignore it. Default: `wrapper`; the `--plugin-load` CLI flag overrides this value (see [Plugin assessment](/skills/skillevaluator/plugin-assessment)). |
+| `plugin.lift_mode` | `effectiveness`, `integration`, `both`, `ladder` | Plugin runs only: which comparison arms run. Skill runs accept the key and ignore it. Default: `effectiveness`; the `--lift-mode` CLI flag overrides this value (see [Plugin assessment](/skills/skillevaluator/plugin-assessment)). |
 
 Environment constructor kwargs are deliberately not accepted in this
 skill-owned file. Operators can pass non-secret kwargs for Harbor-native

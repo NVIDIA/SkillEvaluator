@@ -470,6 +470,37 @@ def test_conflicting_source_identity_is_explicit_and_never_a_static_pass():
     assert "conflicting source" in json.dumps(payload).lower()
 
 
+@pytest.mark.parametrize("block", [None, "high", "critical", "medium-policy", "minimum-score"])
+def test_incomplete_only_gates_share_the_canonical_status_without_hiding_real_failures(block):
+    schema = ValidationResult(validator_name="Plugin Schema", metadata={"plugin": {"name": "partial-demo"}})
+    security = ValidationResult(validator_name="Security Scan")
+    security.mark_scan_incomplete("skillspector")
+    security.fail_gate("skillspector reports incomplete analysis: reference_unresolved at SKILL.md:4")
+    security.add_finding(Finding("SECURITY", Severity.MEDIUM, "rug-pull", "Retained advisory", "SKILL.md"))
+    results = [schema, security]
+    if block == "minimum-score":
+        quality = ValidationResult(validator_name="Quality Score")
+        quality.fail_gate("Quality score 50.0/100 is below the required 70/100 in SKILL.md")
+        results.append(quality)
+    elif block is not None:
+        security.add_structured_finding(
+            Finding("SECURITY", "medium" if block == "medium-policy" else block, "known-risk", "Known risk", "run.py"),
+            is_error=True,
+        )
+
+    output = renderers().render_plugin_static_reports(results, reporters=reporters())
+    report = json.loads(output["json"])
+
+    expected = "incomplete" if block is None else "failed"
+    assert report["overall_status"] == expected
+    assert report["plugin_static"]["status"] == expected
+    assert report["results"][1]["findings"][0]["message"] == "Retained advisory"
+    if block == "minimum-score":
+        assert "Quality score 50.0/100 is below the required 70/100" in output["html"]
+    elif block is not None:
+        assert "Known risk" in output["html"]
+
+
 def test_private_metadata_is_read_once_per_result_for_the_six_outputs():
     class CountedMetadata(dict):
         reads = 0

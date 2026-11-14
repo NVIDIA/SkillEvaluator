@@ -59,6 +59,12 @@ def active_runtime() -> PrivateRuntimeHooks | None:
     return _ACTIVE_RUNTIME.get()
 
 
+def runtime_source_path(default: Path) -> Path:
+    """Use the verified authored source when executing its generated package."""
+    resolve = getattr(active_runtime(), "source_path", None)
+    return resolve(default) if callable(resolve) else default
+
+
 @contextmanager
 def private_runtime(hooks: PrivateRuntimeHooks) -> Iterator[PrivateRuntimeHooks]:
     """Activate ``hooks`` for the evaluation run inside the block."""
@@ -132,6 +138,10 @@ class NativeRuntimeHooks:
         from skillevaluator.tier3.plugin_native import private_agent_import_path
 
         return private_agent_import_path(agent, base_import_path)
+
+    def source_path(self, default: Path) -> Path:
+        """A prepared package binds the generated wrapper to this authored source."""
+        return self.source.plugin_root if self.package is not None else default
 
     def stage_with_arm(self, agent: str, task_dirs: Sequence[Path]) -> None:
         decision = self.decisions.get(agent)
@@ -356,8 +366,8 @@ def run_private_evaluation(
     and the run's own status survives a failed publication or cleanup.
     Cancellation (``KeyboardInterrupt``) is never retried and still cleans up.
     """
-    if not 0 <= max_setup_retries <= MAX_SETUP_RETRIES:
-        raise ValueError(f"max_setup_retries must be between 0 and {MAX_SETUP_RETRIES}")
+    if type(max_setup_retries) is not int or not 0 <= max_setup_retries <= 5:
+        raise ValueError("max_setup_retries must be an integer between 0 and 5")
     if evaluate is None:
         from skillevaluator.evaluation.service import EvaluationService
 
@@ -404,6 +414,7 @@ def evaluate_prepared_plugin(
     evidence_options: EvidenceOptions | None = None,
     observer_factory: Callable[..., RuntimeEvidenceObserver] | None = None,
     comparison_options: ComparisonOptions | None = None,
+    max_setup_retries: int = MAX_SETUP_RETRIES,
 ) -> PrivateRunOutcome:
     """Evaluate a prepared plugin through the existing engine and remove the operation-owned staging.
 
@@ -527,6 +538,7 @@ def evaluate_prepared_plugin(
         evaluate=evaluate,
         publish=publish_with_evidence,
         cleanup=cleanup,
+        max_setup_retries=max_setup_retries,
     )
 
 

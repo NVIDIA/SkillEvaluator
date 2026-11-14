@@ -767,7 +767,9 @@ def evaluate(
                 "--agent-model provided for agent(s) not selected by -a/--agents: " + ", ".join(unknown_model_agents)
             )
 
-        output_dir = resolve_results_root(skill_path, results_dir)
+        from skillevaluator.tier3.plugin_execution import runtime_source_path
+
+        output_dir = resolve_results_root(runtime_source_path(skill_path), results_dir)
         if execution_backend == NEMO_GYM_BACKEND:
             from skillevaluator.tier3.nemo_gym.runner import run_nemo_gym_eval
 

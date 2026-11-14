@@ -1632,6 +1632,10 @@ _SKILLSPECTOR_NAME_RUN_RE = re.compile(r"[\w.-]+")
 # A word of a reference's line: text between whitespace and the Markdown or
 # shell delimiters around a path.
 _SKILLSPECTOR_LINE_WORD_RE = re.compile(r"[^\s`()<>|;&]+")
+# A word as a POSIX shell splits it: as above, but an escaped character and a
+# quoted string, which may hold whitespace, are part of it, as in
+# ``setup\\ h*.sh`` or ``setup' 'helper.sh``.
+_SKILLSPECTOR_SHELL_WORD_RE = re.compile(r"""(?:[^\s`()<>|;&'"\\]+|\\.|'[^'`]*'|"(?:\\.|[^"\\`])*"|['"\\])+""")
 # Stands for any text where a shell group or range was read in a line
 # (:func:`_skillspector_shell_groups`); unlike ``*``, a word made of it is
 # never taken for a list marker.
@@ -1666,9 +1670,21 @@ _SKILLSPECTOR_ZSH_FLAGS_RE = re.compile(r"\(#(?:q|[se]\)|c\d*(?:,\d*)?\)|(?:[ilI
 _SKILLSPECTOR_NON_SPACE_RUN_RE = re.compile(r"\S+")
 _SKILLSPECTOR_GLOB_SYNTAX = frozenset("*?[" + _SKILLSPECTOR_ZSH_REPEAT)
 _SKILLSPECTOR_PATH_PART_SEPARATOR_RE = re.compile(r"[=:,]")
+# A leading Markdown list marker ``*``.
+_SKILLSPECTOR_LIST_MARKER_RE = re.compile(r"^[ \t]*\*(?=[ \t])")
+# A bold or italic label in Markdown, such as ``**Note:**``, ``*Tip:*`` or
+# ``**Step 1:**``: one to three ``*`` at the start of the line or after
+# whitespace, text that starts with a letter or digit, holds no ``*`` or
+# backtick and ends with ``:``, and the same ``*`` before whitespace or the
+# end of the line.
+_SKILLSPECTOR_MARKDOWN_LABEL_RE = re.compile(r"(?<!\S)(\*{1,3})([^\W_][^*`]*?:)\1(?!\S)")
+_SKILLSPECTOR_BACKTICK_RUN_RE = re.compile(r"`+")
+# A ``$`` before whitespace or the end of the line, which a shell keeps as
+# written, as in a prompt such as ``$ python run.py``.
+_SKILLSPECTOR_LITERAL_DOLLAR_RE = re.compile(r"\$(?=\s|\Z)")
 # Work that checking the lines of one report's missing references may take, in
 # units of about one character compared: decoding a line and reading its shell
-# groups and words costs 9,000 per character, each search of a decoded line
+# groups and words costs 18,000 per character, each search of a decoded line
 # for a name 100 plus the line's length, and each pattern 20,000 plus 1,000 per
 # character and 300 plus the name's length for each name matched against it.
 # Beyond the budget the lines are not accepted, which bounds the time that a
@@ -2171,10 +2187,56 @@ def _skillspector_zsh_pattern(pattern: str) -> str:
     return "".join(elements)
 
 
+def _skillspector_markdown_labels(text: str) -> tuple[str, list[str]]:
+    """*text* with each bold or italic label outside a code span read as its text, and those labels as written.
+
+    A label (:data:`_SKILLSPECTOR_MARKDOWN_LABEL_RE`), such as ``**Note:**``,
+    is Markdown emphasis. Read as a shell word that is split at its ``:``, its
+    closing ``*`` would be a piece of its own and match every name. A code
+    span, from a run of backticks to the next run of the same length, is read
+    as written, so ``**Run:**`` in one is not a label. The work is linear in
+    the length of *text*.
+    """
+    if "*" not in text:
+        return text, []
+    runs = [match.span() for match in _SKILLSPECTOR_BACKTICK_RUN_RE.finditer(text)]
+    # The next run of the same length after each run, which closes the code span it opens.
+    closes: list[int | None] = [None] * len(runs)
+    latest: dict[int, int] = {}
+    for index in range(len(runs) - 1, -1, -1):
+        size = runs[index][1] - runs[index][0]
+        closes[index] = latest.get(size)
+        latest[size] = index
+    starts: list[int] = []
+    ends: list[int] = []
+    index = 0
+    while index < len(runs):
+        close = closes[index]
+        if close is None:
+            index += 1
+            continue
+        starts.append(runs[index][0])
+        ends.append(runs[close][1])
+        index = close + 1
+    labels: list[str] = []
+
+    def read(match: re.Match[str]) -> str:
+        span = bisect.bisect_right(starts, match.start()) - 1
+        if span >= 0 and match.start() < ends[span]:
+            return match.group()
+        labels.append(match.group())
+        return match.group(2)
+
+    return _SKILLSPECTOR_MARKDOWN_LABEL_RE.sub(read, text), labels
+
+
 def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
     """Glob patterns for the path parts of the words in *texts* that a shell or Windows expands or unquotes.
 
-    A word with ``*``, ``?``, ``[``, ``{``, ``$``, ``%``, ``!``, ``^``, ``#``,
+    The words are split at whitespace and the Markdown or shell delimiters
+    around a path, and also as a POSIX shell splits them, where an escaped or
+    quoted space is part of the word (:data:`_SKILLSPECTOR_SHELL_WORD_RE`). A
+    word with ``*``, ``?``, ``[``, ``{``, ``$``, ``%``, ``!``, ``^``, ``#``,
     ``~``, a quote, a backslash or a group read in the line is read as a POSIX shell and as
     cmd.exe or PowerShell would (:func:`_skillspector_shell_word`). Each part
     between ``/`` is a pattern, and so is each piece of it between ``=``,
@@ -2182,21 +2244,32 @@ def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
     a sentence after it, with what a ``~`` in it may stand for
     (:func:`_skillspector_tilde_forms`), each read with the zsh
     ``EXTENDED_GLOB`` operators (:func:`_skillspector_zsh_pattern`).
+
+    Markdown and a shell prompt are read first: a leading list marker ``*``
+    is skipped, and so is a ``$`` before whitespace or the end of the line,
+    which a shell keeps as written. A bold or italic label outside code, such
+    as ``**Note:**``, is read as its text, and its words with their ``*`` are
+    also read without the split at ``=``, ``:`` and ``,``
+    (:func:`_skillspector_markdown_labels`), so ``**Note:**`` stands only for
+    names that hold ``note:``. Any other wildcard keeps its meaning, so
+    ``bash *`` or ``--include=*`` may name every uninspected file.
     """
-    # Ignore only a leading Markdown bullet. A standalone wildcard elsewhere
-    # (for example ``bash *``) can name every uninspected file.
-    words = {
-        word
-        for text in texts
-        for word in _SKILLSPECTOR_LINE_WORD_RE.findall(re.sub(r"^[ \t]*\*(?=[ \t])", "", text, count=1))
-    }
+    split_words: set[str] = set()
+    label_words: set[str] = set()
+    for text in texts:
+        text = _SKILLSPECTOR_LITERAL_DOLLAR_RE.sub("", _SKILLSPECTOR_LIST_MARKER_RE.sub("", text, count=1))
+        text, labels = _skillspector_markdown_labels(text)
+        split_words.update(_SKILLSPECTOR_LINE_WORD_RE.findall(text))
+        split_words.update(_SKILLSPECTOR_SHELL_WORD_RE.findall(text))
+        label_words.update(word for label in labels for word in _SKILLSPECTOR_LINE_WORD_RE.findall(label))
     patterns: set[str] = set()
-    for word in words:
+    for word in split_words | label_words:
         if _SKILLSPECTOR_SHELL_SYNTAX.isdisjoint(word):
             continue
+        split = word in split_words
         for reading in _skillspector_shell_word(word):
             for index, part in enumerate(reading.split("/")):
-                for piece in {part, *_SKILLSPECTOR_PATH_PART_SEPARATOR_RE.split(part)}:
+                for piece in {part, *_SKILLSPECTOR_PATH_PART_SEPARATOR_RE.split(part)} if split else {part}:
                     patterns.update(
                         _skillspector_zsh_pattern(form)
                         for candidate in (piece, piece.rstrip(".,;:!?"))
@@ -2263,7 +2336,7 @@ def _skillspector_reference_line_avoids(
     if not keys:
         return True
     budget = budget or _SkillspectorMatchBudget()
-    if not budget.spend(len(line) * 9_000):
+    if not budget.spend(len(line) * 18_000):
         return False
     decodings: tuple[Callable[[str], str], ...] = (
         lambda text: _SKILLSPECTOR_MARKDOWN_ESCAPE_RE.sub(r"\1", text),
@@ -2892,11 +2965,11 @@ class SecurityValidator(ValidatorBase):
                 References written relative to it still count as agent
                 references. Defaults to the scanned directory.
                 :func:`_skillspector_missing_reference_notes` accepts missing
-                references only in a scan of this root, or without it, of
-                *target_root* or else the whole target of :meth:`validate` or
-                :meth:`validate_security_only`. A scan outside those methods
-                without this root has no reference root, so that rule accepts
-                none there; a 2.13.3 report that
+                references only in a scan of *target_root* when it is given,
+                else of this root, or else of the whole target of
+                :meth:`validate` or :meth:`validate_security_only`. A scan
+                outside those methods without either root has no reference
+                root, so that rule accepts none there; a 2.13.3 report that
                 :func:`reference_caveat_metadata` accepts still passes as its
                 caveat.
             skillspector_baseline: Audited SkillSpector YAML/JSON suppression
@@ -2906,9 +2979,11 @@ class SecurityValidator(ValidatorBase):
             target_root: Root of the whole target when this validator is given
                 only part of it, such as one skill of a folder that
                 ``validate`` checks skill by skill. It replaces the target of
-                :meth:`validate` or :meth:`validate_security_only` as the root
-                that missing references are judged against, so a skill inside
-                it accepts none. Finding scoping is unchanged.
+                :meth:`validate` or :meth:`validate_security_only`, and
+                *skillspector_reference_root*, as the root that missing
+                references are judged against, so a skill inside it accepts
+                none, also when that skill is a plugin of its own. Finding
+                scoping is unchanged.
         """
         self._pii_patterns: dict | None = None
         self._submitter_override: set[str] | None = (
@@ -3133,11 +3208,12 @@ class SecurityValidator(ValidatorBase):
         directory but not a skill, each skill found in it is scanned on its
         own, and its instructions may name files elsewhere in the folder that
         its scan does not inspect, so their missing references are not
-        accepted. A configured ``target_root`` replaces the target, such as
-        the folder of skills that a skill passed here belongs to. In a scan
-        run outside this walk, :func:`_skillspector_missing_reference_notes`
-        accepts missing references only when the configured
-        ``skillspector_reference_root`` is the scanned root. Otherwise, as for
+        accepted. A configured ``target_root`` replaces the target and the
+        configured ``skillspector_reference_root``, such as the folder of
+        skills that a skill passed here belongs to. In a scan run outside this
+        walk, :func:`_skillspector_missing_reference_notes` accepts missing
+        references only when the configured ``target_root``, or else the
+        configured ``skillspector_reference_root``, is the scanned root. Otherwise, as for
         the per-partition scans of ``tier1/plugin_checks.py``, that rule
         accepts none. Such a scan without a configured root has no known
         target, so a 2.13.3 report that :func:`reference_caveat_metadata`
@@ -3410,7 +3486,9 @@ class SecurityValidator(ValidatorBase):
             result,
             baseline_requested=baseline is not None,
             scanned_root=original_root if original_root is not None else scan_root,
-            reference_root=self.skillspector_reference_root or self._scan_target_root,
+            # The whole target comes first: a skill of a folder that is typed as
+            # a plugin is still only part of the folder.
+            reference_root=self.target_root or self.skillspector_reference_root or self._scan_target_root,
         ):
             result.mark_scan_incomplete(stage_name)
             return result
@@ -3516,7 +3594,7 @@ class SecurityValidator(ValidatorBase):
         inspected or that the scanner reported SAFE. *scanned_root* is the
         directory the report's relative paths start from. *reference_root* is
         the root of the artifact that contains it: the validator's
-        ``skillspector_reference_root``, or else its ``target_root`` or the
+        ``target_root``, or else its ``skillspector_reference_root`` or the
         target of the scan in progress. Missing references are accepted by
         :func:`_skillspector_missing_reference_notes` only when it is
         *scanned_root*. When *reference_root* is given, a caveat that
@@ -6582,7 +6660,9 @@ class SecurityValidator(ValidatorBase):
         Findings the LLM classifies as false_positive with high confidence
         are downgraded to INFO severity and annotated in metadata. Findings of
         checks in :data:`_LLM_VERIFY_EXEMPT_CHECKS` are not sent to the
-        verifier: they keep their severity and get no verdict.
+        verifier: they keep their severity and get no verdict. Errors and
+        warnings that no finding repeats, such as an accepted missing-reference
+        warning, are kept when the result is rebuilt.
         """
         findings = [finding for finding in result.findings if finding.check_name not in _LLM_VERIFY_EXEMPT_CHECKS]
         if not findings:
@@ -6610,6 +6690,9 @@ class SecurityValidator(ValidatorBase):
 
         suppressed = 0
         verified = 0
+        # Read before any change: a mirrored line names the old severity.
+        errors = result.independent_errors()
+        warnings = result.independent_warnings()
         for idx, finding in enumerate(findings):
             verdict_data = verdicts.get(idx)
             if not isinstance(verdict_data, dict) or not verdict_data:
@@ -6642,6 +6725,13 @@ class SecurityValidator(ValidatorBase):
 
         if suppressed:
             result.recalculate_from_findings()
+            # Rebuilding from findings drops every error and warning that no finding repeats.
+            for error in errors:
+                if error not in result.errors:
+                    result.add_error(error)
+            for warning in warnings:
+                if warning not in result.warnings:
+                    result.add_warning(warning)
             target_severity = finding_verification_policy.DOWNGRADE_SEVERITY.value.upper()
             verdict_label = finding_verification_policy.DOWNGRADE_VERDICT.replace("_", " ")
             result.add_message(

@@ -434,6 +434,19 @@ All notable changes to SkillEvaluator are documented in this file.
   evidence; with no other in-range count for that attempt the agent is
   refused as `no_progress_evidence`, where result collection used to stop
   with `browser-unsafe JSON integer` and write no `result.json` or report.
+- The Tier 1 SkillSpector missing-reference check no longer reads a bold or
+  italic label such as `**Note:**`, `*Tip:*` or `**Step 1:**`, or a `$` shell
+  prompt such as `$ python run.py`, as a wildcard for every file left out of
+  the scan, which kept such a line `INCOMPLETE` whenever anything, even `.git`,
+  was left out. A wildcard elsewhere in the line, or a label inside code, still
+  counts. The check now also reads a word as a shell splits it, so
+  `setup' 'helper.sh`, `setup" "helper.sh` and `setup\ h*.sh` name the left-out
+  file `setup helper.sh` and keep the scan `INCOMPLETE`. With
+  `validate --workers` above 1, a skill of a folder that is also a plugin is
+  judged against the folder, as with one worker, so a line naming a file
+  elsewhere in the folder keeps it `INCOMPLETE`. An `--llm-verify` downgrade no longer drops
+  the accepted missing-reference warning, or the error that says why a scan is
+  `INCOMPLETE`.
 
 ## 0.9.0 - 2026-11-13
 

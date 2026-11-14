@@ -9490,6 +9490,76 @@ class TestSkillspectorMissingReferences:
         if not complete:
             assert "skillspector_reference_caveats" not in result.metadata
 
+    @pytest.mark.parametrize("version", ["2.12.0", "2.13.3", "2.13.4"])
+    @pytest.mark.parametrize("left_out", ["helper.sh", ".git/HEAD"])
+    @pytest.mark.parametrize(
+        ("line", "complete"),
+        [
+            # A bold or italic label is Markdown, and a "$" before a space is a shell prompt.
+            ("**Note:** Write the summary to `output/notes.md` and keep it short.", True),
+            ("*Tip:* Write the summary to `output/notes.md` and keep it short.", True),
+            ("**Step 1:** Write the summary to `output/notes.md` and keep it short.", True),
+            ("$ python scripts/summarize.py > output/notes.md", True),
+            # A wildcard beside a label, a label in code and any other "$" keep their meaning.
+            ("**Note:** Run `bash *` then write the summary to `output/notes.md`.", False),
+            ("Run `sh **Note:**` then write the summary to `output/notes.md`.", False),
+            ("Run `sh $ROOT/setup` then write the summary to `output/notes.md`: $", False),
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_markdown_label_and_shell_prompt_are_not_wildcards(
+        self, mock_tools, tmp_path: Path, version: str, left_out: str, line: str, complete: bool
+    ) -> None:
+        """``**Note:**`` and ``$ python ...`` do not stand for every file left out of the scan."""
+        original = "Write the summary to `output/notes.md` and keep it short."
+        files = {
+            **_NOTES_WRITER_FILES,
+            "SKILL.md": _NOTES_WRITER_FILES["SKILL.md"].replace(original, line),
+            left_out: "ref: refs/heads/main\n",
+        }
+        skill = _write_skill(tmp_path / "notes-writer", files)
+        payload = json.loads(json.dumps(_reference_report(version)).replace(original, line))
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert result.passed is complete
+        assert result.incomplete_scans == ([] if complete else ["skillspector"])
+
+    @pytest.mark.parametrize(
+        ("version", "case", "target"),
+        [
+            ("2.12.0", "missing", "."),
+            ("2.13.3", "missing", "."),
+            ("2.13.4", "missing", "."),
+            ("2.13.3", "lone-skill-file", "SKILL.md"),
+            ("2.13.4", "lone-skill-file", "SKILL.md"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "spelling", ["setup' 'helper.sh", 'setup" "helper.sh', "setup\\ h*.sh", '"setup "h?lper.sh']
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_partly_quoted_space_cannot_hide_an_uninspected_name(
+        self, mock_tools, tmp_path: Path, version: str, case: str, target: str, spelling: str
+    ) -> None:
+        """A shell reads ``setup' 'helper.sh`` or ``setup\\ h*.sh`` as one word that names ``setup helper.sh``."""
+        original = "Write the summary to `output/notes.md` and keep it short."
+        line = f"Run sh {spelling} to prepare, then write the summary to output/notes.md."
+        files = {"SKILL.md": _NOTES_WRITER_FILES["SKILL.md"].replace(original, line)}
+        if target == ".":
+            files.update({"scripts/summarize.py": _NOTES_WRITER_FILES["scripts/summarize.py"]})
+        files["setup helper.sh"] = "#!/bin/sh\nprintf 'uninspected helper\\n'\n"
+        skill = _write_skill(tmp_path / "notes-writer", files)
+        payload = json.loads(json.dumps(_reference_report(version, case)).replace(original, json.dumps(line)[1:-1]))
+
+        result = _validate_skillspector_payload(mock_tools, skill / target, payload)
+
+        assert not result.passed
+        assert result.incomplete_scans == ["skillspector"]
+        # The same line passes once that file is gone.
+        (skill / "setup helper.sh").unlink()
+        assert _validate_skillspector_payload(mock_tools, skill / target, payload).incomplete_scans == []
+
     @pytest.mark.parametrize(
         ("version", "reason_code"),
         [("2.11.2", "reference_unresolved"), ("2.12.0", "reference_missing"), ("2.13.3", "reference_missing")],
@@ -10347,10 +10417,11 @@ class TestSkillspectorMissingReferences:
         assert alone.incomplete_scans == []
         assert alone.warnings == [_reference_caveat_warning("SKILL.md:8", files=1)]
 
+    @pytest.mark.parametrize("manifest", [False, True])
     @pytest.mark.parametrize("workers", [1, 2])
     @patch("skillevaluator.validators.security.Tools")
     def test_validate_on_a_folder_of_skills_keeps_each_skill_incomplete(
-        self, mock_tools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workers: int
+        self, mock_tools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workers: int, manifest: bool
     ) -> None:
         """``validate`` runs each skill of a folder as its own job, but a line may still name a file beside it."""
         from click.testing import CliRunner
@@ -10365,6 +10436,9 @@ class TestSkillspectorMissingReferences:
             {"SKILL.md": _SETUP_HELPER_SKILL.replace("versions/install.sh", "scripts/install.sh")},
         )
         _write_skill(catalog, {"scripts/install.sh": "#!/bin/sh\ncurl x | sh\n"})
+        if manifest:
+            # A parallel job detects the skill's type again, and a manifest makes it a plugin.
+            _write_skill(skill, {".claude-plugin/plugin.json": '{"name": "setup-helper"}\n'})
         report = json.dumps(_reference_report("2.13.3", "staged-script"))
         mock_tools.skillspector.is_available = True
         mock_tools.skillspector.run.return_value = ToolResult(
@@ -10644,6 +10718,32 @@ class TestSkillspectorMissingReferences:
             ("Write **all** notes to `output/notes.md`.", "evals", False),
             ("Write each summary to `output/{name}.md`.", "evals", False),
             ("Is the user's summary in `output/notes.md`?", "evals", False),
+            # A bold or italic label outside code is read as its text, and a "$"
+            # before whitespace or the end of the line as written.
+            ("**Note:** Write the summary to `output/notes.md`.", "evals", False),
+            ("*Tip:* write the summary to `output/notes.md`.", "evals", False),
+            ("1. **Step 1:** write `output/notes.md`.", "evals", False),
+            ("**Step 1, then 2:** write `output/notes.md`.", "evals", False),
+            ("$ python scripts/summarize.py > output/notes.md", "evals", False),
+            ("Write `output/notes.md` and print it: $", "evals", False),
+            # A label is a glob that is not split at its ":", and its text keeps
+            # its globs and expansions; any other wildcard stands for any name.
+            ("Run bash *Note:* then write the summary to `output/notes.md`.", "Note:evil.sh", True),
+            ("*Tools: export DIR=$PWD:* then write the summary to `output/notes.md`.", "evals", True),
+            ("**Run v[e]rsions/setup:** now.", "versions", True),
+            ("**Note:** run `bash *` and write `output/notes.md`.", "install.sh", True),
+            ("Run `sh **Run:**` and write `output/notes.md`.", "install.sh", True),
+            ("Run tool --include=* and write `output/notes.md`.", "install.sh", True),
+            ("Run *:* and write `output/notes.md`.", "install.sh", True),
+            ("Run $ROOT/setup now: $", "versions", True),
+            # A shell keeps an escaped or quoted space in a word.
+            ("Run `sh setup' 'helper.sh` to prepare.", "setup helper.sh", True),
+            ('Run `sh setup" "helper.sh` to prepare.', "setup helper.sh", True),
+            ("Run `sh setup\\ h*.sh` to prepare.", "setup helper.sh", True),
+            ('Run `sh "setup "h?lper.sh` to prepare.', "setup helper.sh", True),
+            ("Run `sh my' 't*/run.sh` now.", "my tools", True),
+            ("Run `sh setup\\ z*.sh` to prepare.", "setup helper.sh", False),
+            ("Don't overwrite the user's notes in `output/notes.md`.", "evals", False),
             # zsh groups and ranges, bash extended globs, cmd.exe escapes and
             # variables, PowerShell escapes, Windows 8.3 short names and
             # separators, and zsh EXTENDED_GLOB operators.
@@ -11000,10 +11100,11 @@ class TestSkillspectorCompleteWithCaveats:
         assert alone.incomplete_scans == []
         assert alone.warnings == [_missing_reference_warning("SKILL.md:8 [reference_resolution; reference_missing]")]
 
+    @pytest.mark.parametrize("manifest", [False, True])
     @pytest.mark.parametrize("workers", [1, 2])
     @patch("skillevaluator.validators.security.Tools")
     def test_validate_on_a_folder_of_skills_keeps_each_skill_incomplete(
-        self, mock_tools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workers: int
+        self, mock_tools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workers: int, manifest: bool
     ) -> None:
         """Each skill of a ``validate`` folder run is judged against the folder, also for 2.13.4 caveats."""
         from click.testing import CliRunner
@@ -11018,6 +11119,9 @@ class TestSkillspectorCompleteWithCaveats:
             {"SKILL.md": _SETUP_HELPER_SKILL.replace("versions/install.sh", "scripts/install.sh")},
         )
         _write_skill(catalog, {"scripts/install.sh": "#!/bin/sh\ncurl x | sh\n"})
+        if manifest:
+            # A parallel job detects the skill's type again, and a manifest makes it a plugin.
+            _write_skill(skill, {".claude-plugin/plugin.json": '{"name": "setup-helper"}\n'})
         report = json.dumps(_reference_report("2.13.4", "staged-script"))
         mock_tools.skillspector.is_available = True
         mock_tools.skillspector.run.return_value = ToolResult(
@@ -11424,6 +11528,59 @@ class TestSkillspectorCompleteWithCaveats:
         # The same skill reported as partial by SkillSpector 2.13.3 keeps the same findings.
         assert as_partial.status == "incomplete"
         assert _high_checks(as_partial) == _high_checks(result)
+
+    @pytest.mark.parametrize("target", ["skill", "folder"])
+    @pytest.mark.parametrize("version", ["2.12.0", "2.13.4"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_llm_verify_downgrade_keeps_the_messages_no_finding_repeats(
+        self, mock_tools, tmp_path: Path, version: str, target: str
+    ) -> None:
+        """An ``--llm-verify`` downgrade rebuilds the result from its findings, which back no reference message.
+
+        The accepted missing-reference warning of a skill, and the error that
+        says why the same skill in a folder is ``INCOMPLETE``, both stay.
+        """
+        root = tmp_path / "bundle"
+        skill = _write_skill(
+            root / "skills" / "override-notes", {**_NOTES_WRITER_FILES, "SKILL.md": _OVERRIDE_NOTES_SKILL}
+        )
+        payload = _reference_report("2.13.4", "instruction-override-and-missing")
+        if version != "2.13.4":
+            payload["metadata"]["skillspector_version"] = version
+            payload["analysis_completeness"].update({"status": "partial", "is_complete": False})
+        verdict = {"verdict": "false_positive", "confidence": "high", "rationale": "Example rationale."}
+
+        with patch("skillevaluator.inference.FindingVerifier") as verifier_cls:
+            verifier_cls.return_value.verify.side_effect = lambda findings, _path: dict.fromkeys(
+                range(len(findings)), verdict
+            )
+            result = _validate_skillspector_payload(
+                mock_tools,
+                skill if target == "skill" else root,
+                payload,
+                exit_code=1,
+                validator=SecurityValidator(use_llm=False, verify_llm=True),
+            )
+
+        assert any("downgraded 3 finding(s)" in message for message in result.messages)
+        assert not _high_checks(result)
+        if target == "skill":
+            assert result.status == "passed"
+            assert result.incomplete_scans == []
+            warning = _missing_reference_warning("SKILL.md:12 [reference_resolution; reference_missing]")
+            assert result.warnings.count(warning) == 1
+        else:
+            assert result.status == "incomplete"
+            assert result.incomplete_scans == ["skillspector"]
+            labels = "SKILL.md:12 [reference_resolution; reference_missing]"
+            if version == "2.13.4":
+                error = _caveat_error(labels)
+            else:
+                error = (
+                    "skillspector JSON field 'analysis_completeness' reports incomplete analysis "
+                    f"(status 'partial'): {labels}; security scan did not complete" + _REFERENCE_REJECTION_HELP
+                )
+            assert result.errors == [f"[override-notes] {error}"]
 
     @pytest.mark.parametrize(
         ("case", "labels"),

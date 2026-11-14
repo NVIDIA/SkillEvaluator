@@ -3627,7 +3627,7 @@ def test_html_partial_tier3_payload_removes_unsafe_only_harbor_links() -> None:
     html = reporter.render_all([partial_tier3])
     fallback = reporter._tier3_report_data([partial_tier3])
 
-    visible = re.sub(r"<script\b[^>]*>.*?</script>", "", html, flags=re.DOTALL)
+    visible = re.sub(r"<script\b[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
     assert "javascript:alert" not in visible
     assert "file:///tmp" not in visible
     assert _html_tier3_payload(html) == original

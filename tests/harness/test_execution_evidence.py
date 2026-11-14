@@ -12,7 +12,22 @@ from skillevaluator.reporting.base import assess_publication, result_has_executi
 from skillevaluator.tier1.commands import _as_result, run_validation
 from skillevaluator.validators.harness import HarnessValidator
 
-HARNESSES = ["claude-code", "codex", "copilot-cli", "hermes", "openclaw", "opencode"]
+
+@pytest.fixture
+def clean_profiles(tmp_path: Path) -> Path:
+    profiles = tmp_path / "clean-profiles"
+    profiles.mkdir()
+    (profiles / "clean-fixture.yaml").write_text(
+        "harness: clean-fixture\n"
+        "listing: {cut: 1024}\n"
+        "rules:\n"
+        "  - id: FIXTURE-DESCRIPTION\n"
+        "    when: description_missing\n"
+        "    effect: not_loaded\n"
+        "    message: A description is required.\n",
+        encoding="utf-8",
+    )
+    return profiles
 
 
 def _skill(root: Path) -> Path:
@@ -27,20 +42,20 @@ def _skill(root: Path) -> Path:
     return skill
 
 
-def test_clean_harness_records_completed_profile_evaluations(tmp_path: Path) -> None:
+def test_clean_harness_records_completed_profile_evaluations(tmp_path: Path, clean_profiles: Path) -> None:
     skill = _skill(tmp_path)
 
-    result = HarnessValidator().validate(skill)
+    result = HarnessValidator(profiles_dir=clean_profiles).validate(skill)
 
     assert result.findings == []
     assert result_has_execution_evidence(result)
     detail = result.success_details[0]
     assert detail.check_name == "harness_profile_evaluation"
     assert detail.metadata == {
-        "harnesses": HARNESSES,
-        "profiles_evaluated": 6,
+        "harnesses": ["clean-fixture"],
+        "profiles_evaluated": 1,
         "skills_evaluated": 1,
-        "evaluations_performed": 6,
+        "evaluations_performed": 1,
     }
 
 
@@ -80,7 +95,9 @@ def test_no_profiles_does_not_claim_completed_harness_evaluations(tmp_path: Path
 
 
 @pytest.mark.parametrize("actual_harness", [True, False], ids=["completed-harness", "empty-harness"])
-def test_harness_publication_requires_actual_execution_evidence(tmp_path: Path, actual_harness: bool) -> None:
+def test_harness_publication_requires_actual_execution_evidence(
+    tmp_path: Path, actual_harness: bool, clean_profiles: Path
+) -> None:
     skill = _skill(tmp_path)
 
     def successful(_target: Path) -> ValidationResult:
@@ -97,7 +114,12 @@ def test_harness_publication_requires_actual_execution_evidence(tmp_path: Path, 
     assert assess_publication(required, expected_skill_name="demo").status == "pass"
 
     if actual_harness:
-        harness = run_validation(skill, checks="harness", on_check=lambda _check: None)[0]
+        harness = run_validation(
+            skill, checks="harness", harness_profiles=clean_profiles, on_check=lambda _check: None
+        )[0]
+        assert harness.findings == []
+        assert harness.success_details[0].metadata["harnesses"] == ["clean-fixture"]
+        assert harness.success_details[0].metadata["evaluations_performed"] == 1
     else:
         harness = _as_result(
             "Harness Compatibility",

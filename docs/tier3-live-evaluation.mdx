@@ -1900,11 +1900,12 @@ saved judge evidence use the same credential masker:
   the end of its word, so the rest of the command stays readable;
 - the values of long flags whose name holds a credential word, such as
   `--password`, `--token`, `--client-secret`, `--db-password`, or `--cookie`,
-  and a `curl -b name=value` cookie. A flag that takes a file or nothing, such
-  as `--password-stdin`, `--token-file`, or `--cookie-jar`, and token-count
-  flags `--max-tokens` and `--token-limit`, keep the word after them. A
-  `-b cookies.txt` cookie jar keeps its path too. A shell operator after a flag
-  is no value (`gh auth login --with-token < token.txt`);
+  also with `_` between the words (`--db_password`, `--api_key`), and a
+  `curl -b name=value` cookie. A flag that takes a file or nothing, such as
+  `--password-stdin`, `--token-file`, or `--cookie-jar`, and token-count flags
+  `--max-tokens` and `--token-limit` (or `--max_tokens`), keep the word after
+  them. A `-b cookies.txt` cookie jar keeps its path too. A shell operator
+  after a flag is no value (`gh auth login --with-token < token.txt`);
 - a `-u`, `-U`, `--user`, or `--proxy-user` value that holds a colon, such as
   `user:password` or an API key with an empty password (`KEY:`), also attached
   (`-uuser:password`) or at the end of a flag group (`curl -su user:password`);
@@ -1925,14 +1926,16 @@ saved judge evidence use the same credential masker:
   on its own line;
 - credentials set with `aws configure set`, `npm config set` (or `npm set`),
   `pnpm config set`, `yarn config set`, or `git config`, also after options
-  such as `--location=global` (`_authToken`, `npmAuthToken`, `github.token`);
-  `git config --get` and `--unset` take no value. A `.netrc` `password` value
-  is masked too, also when the entry spans lines in a here-document or a
-  `printf` string;
+  such as `--location=global` or a `--` that ends them, and with a quoted key
+  (`_authToken`, `npmAuthToken`, `"github.token"`); `git config --get` and
+  `--unset` take no value. A `.netrc` `password` value is masked too, also
+  when the entry spans lines in a here-document or a `printf` string;
 - values assigned to a credential name, such as `_authToken=...`,
   `aws_secret_access_key = ...`, `"password": "..."`, `token := "..."`,
-  `os.environ["API_KEY"] = "..."`, `PASS=...`, `DB_PASS=...`, or
-  `MYSQLPWD=...`, also JSON-escaped inside a shell string. A bare `PASS` is
+  `os.environ["API_KEY"] = "..."`, `auth=HTTPBasicAuth("bob", "...")`,
+  `PASS=...`, `DB_PASS=...`, or `MYSQLPWD=...`, also JSON-escaped inside a
+  shell string, and in a `sed` replacement such as
+  `sed -i 's/CHANGEME/password=.../'`. A bare `PASS` is
   left alone as test output or a counter, such as `PASS: 3`,
   `--- PASS: TestName`, `PASS=0`, or `"pass": true`, but OpenSSL's `pass:...`
   and a quoted `"pass"` key or value are masked. Inside a quoted string,

@@ -192,6 +192,17 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 security finding evidence no longer keeps the credential in five
+  more command forms: an `auth=HTTPBasicAuth("bob", "...")` call value, which
+  was masked only up to the class name; a credential name in a `sed`
+  replacement, as in `sed -i 's/password=.*/password=.../'`; a long flag with
+  `_` between its words, such as `--db_password` or `--api_key`; an
+  `npm config set`, `yarn config set`, or `git config` key that is quoted or
+  follows `--`; and a shell `apply_patch` command whose 400-character cut split
+  URL user info before it was masked. The `apply_patch` text is now masked
+  before it is cut. `--max_tokens` and `--token_limit` keep their numbers, as
+  their `-` spellings do. Both the host checker and the bundled Harbor
+  verifier apply the fix.
 - The behavior evidence gate no longer keeps a score for an expectation that
   names an observed artifact but also asks for something only the final answer
   could show. "Writes `report.py` and explains why each column was dropped" was

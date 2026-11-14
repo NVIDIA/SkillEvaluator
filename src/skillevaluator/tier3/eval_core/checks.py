@@ -1441,11 +1441,15 @@ def _apply_patch_protected_entry(patch: str, workdir: str | None) -> str | None:
 
 
 def _apply_patch_command_evidence(command: str) -> str:
-    """Return a shell apply_patch command as evidence: the command before the patch body, secrets masked."""
+    """Return a shell apply_patch command as evidence: the command before the patch body, secrets masked.
+
+    The text before the body is masked before it is cut to 400 characters, so
+    the cut cannot split a credential into a part no pattern recognizes.
+    """
     body = _APPLY_PATCH_BODY_RE.search(command)
     if body is None:
         return _redact_network_evidence(command)
-    return f"{_redact_network_evidence(command[: body.start()].strip())[:400]} [apply_patch body omitted]".lstrip()
+    return f"{_redact_finding_evidence(command[: body.start()].strip(), 400)} [apply_patch body omitted]".lstrip()
 
 
 def _keeps_patch_header(path: str, workdir: str | None) -> bool:
@@ -3360,22 +3364,26 @@ _FINDING_EVIDENCE_FLAG_VALUE = (
     + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?|(?![|&;<>])(?:\\.|[^\s'\"`\\])+)"
 )
 # Any long flag whose name holds a credential word ("--password", "--db-password",
-# "--client-secret", "--github-token", "--oauth2-bearer", "--cookie"), and the
-# short "-password", "-token" and "-secret" forms. A space-separated value that
-# starts with "-" is the next flag. A long flag name is matched as a whole run
-# and checked for a credential word afterwards (see _mask_credential_flags), so
-# a long run is read once. A name that ends in -stdin, -file, -jar, -path or
-# -dir takes a file or none ("--password-stdin", "--token-file", "--cookie-jar"),
-# so the word after it is kept.
-_FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME = r"-(?:password|passwd|(?:access-|auth-)?token|secret|api-?key)|--[a-z0-9-]+"
+# "--client-secret", "--github-token", "--oauth2-bearer", "--cookie"), with "-"
+# or "_" between its words ("--db_password", "--api_key", as gflags and absl
+# tools spell them), and the short "-password", "-token", "-secret" and
+# "-api_key" forms. A space-separated value that starts with "-" is the next
+# flag. A long flag name is matched as a whole run and checked for a
+# credential word afterwards (see _mask_credential_flags), so a long run is
+# read once. A name that ends in -stdin, -file, -jar, -path or -dir (or
+# _stdin, _file, ...) takes a file or none ("--password-stdin",
+# "--token-file", "--cookie-jar"), so the word after it is kept.
+_FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME = (
+    r"-(?:password|passwd|(?:access[-_]|auth[-_])?token|secret|api[-_]?key)|--[a-z0-9_-]+"
+)
 _FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME_RE = re.compile(
     r"(?<![^\s'\"])(" + _FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME + r")(?:[ \t]+(?!-)|=)",
     re.IGNORECASE,
 )
 _FINDING_EVIDENCE_CREDENTIAL_FLAG_WORD_RE = re.compile(
-    r"password|passwd|passphrase|token|secret|api-?key|credential|bearer|cookie", re.IGNORECASE
+    r"password|passwd|passphrase|token|secret|api[-_]?key|credential|bearer|cookie", re.IGNORECASE
 )
-_FINDING_EVIDENCE_FLAG_LOCATION_RE = re.compile(r"-(?:stdin|file|jar|path|dir)$", re.IGNORECASE)
+_FINDING_EVIDENCE_FLAG_LOCATION_RE = re.compile(r"[-_](?:stdin|file|jar|path|dir)$", re.IGNORECASE)
 _FINDING_EVIDENCE_FLAG_VALUE_RE = re.compile(_FINDING_EVIDENCE_FLAG_VALUE)
 # "-u", "-U" and "--user" also name ordinary options (python -u, pip -U, pip
 # --user), so only a value with a colon is masked: "user:password", or an API
@@ -3430,12 +3438,13 @@ _FINDING_EVIDENCE_AWS_CONFIGURE_SET_RE = re.compile(
 # carry its own value ("--location=global"). The value is masked when the last
 # part of NAME names a credential ("//registry.npmjs.org/:_authToken",
 # "npmAuthToken", "github.token"), so "credential.helper store" and
-# "always-auth true" are kept. "git config --get" and "--unset" read or remove
-# a key and take no value.
+# "always-auth true" are kept. NAME may be single- or double-quoted and may
+# follow a "--" that ends the options. "git config --get" and "--unset" read
+# or remove a key and take no value.
 _FINDING_EVIDENCE_CONFIG_SET_RE = re.compile(
     r"(\b(?:(?:npm|pnpm|yarn)[ \t]+config[ \t]+set|(?:npm|pnpm)[ \t]+set|git[ \t]+config)"
-    r"(?:[ \t]+--?(?!-|get|unset)[\w-]{1,32}(?:=[^\s'\"`]{1,64})?){0,3}[ \t]+"
-    r"([^\s'\"`=-][^\s'\"`=]{0,255})[ \t]+(?!-))" + _FINDING_EVIDENCE_FLAG_VALUE
+    r"(?:[ \t]+--?(?!-|get|unset)[\w-]{1,32}(?:=[^\s'\"`]{1,64})?){0,3}(?:[ \t]+--(?=[ \t]))?[ \t]+"
+    r"([\"']?)([^\s'\"`=-][^\s'\"`=]{0,255})\2[ \t]+(?!-))" + _FINDING_EVIDENCE_FLAG_VALUE
 )
 _FINDING_EVIDENCE_CONFIG_KEY_SPLIT_RE = re.compile(r"[./:]")
 _FINDING_EVIDENCE_CONFIG_CREDENTIAL_KEY_RE = re.compile(
@@ -3488,17 +3497,28 @@ _FINDING_EVIDENCE_ARGV_ATTACHED_PASSWORD_RE = re.compile(r"([\"'])-p(?!ath\b|erm
 _FINDING_EVIDENCE_AUTH_SCHEME = r"(?:(?:bearer|basic|token|digest)[ \t]+)?"
 # An assignment's name is matched as a whole word run, and checked for a
 # credential word afterwards, so a long run is read once. A name right after
-# "/" is a URL host or path segment. A name may close a JSON-escaped quote
-# inside a shell string ('\"password\": \"...\"') or a subscript
-# (os.environ["API_KEY"] = ...). "name = value" (INI) and "name: value" (YAML,
-# JSON) may have spaces around the separator, but "=" with no space before it
-# is a shell assignment, whose value starts right after it ("GITHUB_TOKEN= rm
-# ..." assigns nothing). ":=" and "=>" are separators too (token := "...").
+# "/" is a URL host or path segment, unless that "/" is a delimiter of a sed
+# "s/PATTERN/REPLACEMENT/" expression whose "s" starts a word: a name may start
+# the pattern ("s/password=.*/password=NEW/", where it masks the rest of the
+# expression) or the replacement ("s/CHANGEME/password=NEW/",
+# "s/.*api_key.*/api_key: NEW/"; see _assignment_name_matches). A name may
+# close a JSON-escaped quote inside a shell string ('\"password\": \"...\"') or
+# a subscript (os.environ["API_KEY"] = ...). "name = value" (INI) and "name:
+# value" (YAML, JSON) may have spaces around the separator, but "=" with no
+# space before it is a shell assignment, whose value starts right after it
+# ("GITHUB_TOKEN= rm ..." assigns nothing). ":=" and "=>" are separators too
+# (token := "...").
+_FINDING_EVIDENCE_ASSIGNMENT_NAME = (
+    r"([\w.-]+)(\\?[\"']?\]?)([ \t]*(?::=|=>)[ \t]*|[ \t]*:[ \t]*|[ \t]+=[ \t]*|=)" + _FINDING_EVIDENCE_AUTH_SCHEME
+)
 _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE = re.compile(
-    r"(?<![\w./-])([\w.-]+)(\\?[\"']?\]?)([ \t]*(?::=|=>)[ \t]*|[ \t]*:[ \t]*|[ \t]+=[ \t]*|=)"
-    + _FINDING_EVIDENCE_AUTH_SCHEME,
+    r"(?:(?<![\w./-])|(?<=(?<![\w./-])s/))" + _FINDING_EVIDENCE_ASSIGNMENT_NAME,
     re.IGNORECASE,
 )
+# The "s/PATTERN/" of a sed expression; its replacement starts after it. A
+# "/s/" URL path segment is not one.
+_FINDING_EVIDENCE_SED_PATTERN_RE = re.compile(r"(?<![\w./-])s/(?:\\.|[^/\\\r\n]){0,256}/")
+_FINDING_EVIDENCE_SED_REPLACEMENT_NAME_RE = re.compile(_FINDING_EVIDENCE_ASSIGNMENT_NAME, re.IGNORECASE)
 # "auth" also starts author and authority, which name no credential. A name
 # that ends in a "_pass", "_pwd" or "pw" part ("DB_PASS", "MYSQL_PWD", "PW")
 # names a password too, as do "PASS" (not as a test result word or counter,
@@ -3540,11 +3560,22 @@ _FINDING_EVIDENCE_COUNTER_VALUE_RE = re.compile(
     r"[0-9]{1,12}(?![\w.-])|\$\(\(|(?:true|false|null|none)(?![\w.-])", re.IGNORECASE
 )
 # A value: a masked private key, a JSON-escaped or quoted string, a
-# parenthesized tuple (auth=("bob", "...")), or one word, which may hold
-# escaped spaces ("correct\ horse").
+# parenthesized tuple (auth=("bob", "...")), a call
+# (auth=HTTPBasicAuth("bob", "..."), auth=requests.auth.HTTPDigestAuth(...)),
+# or one word, which may hold escaped spaces ("correct\ horse"). The arguments
+# of a tuple or call may hold one level of calls
+# (auth=HTTPBasicAuth(getpass.getuser(), "...")). A call is read only when its
+# ")" ends the word, so a word with parentheses in it ("Pa(ss)word") is still
+# read whole.
+_FINDING_EVIDENCE_CALL_ARGUMENTS = r"(?:[^()\r\n]|\([^()\r\n]{0,64}\)){0,256}"
 _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE = re.compile(
     _FINDING_EVIDENCE_PRIVATE_KEY_MARKER
-    + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?|\([^()\r\n]{0,256}\)?"
+    + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?"
+    + r"|\("
+    + _FINDING_EVIDENCE_CALL_ARGUMENTS
+    + r"\)?|[A-Za-z_][\w.]{0,63}\("
+    + _FINDING_EVIDENCE_CALL_ARGUMENTS
+    + r"\)(?![^\s'\"`;|&\\),\]}])"
     + r"|(?:\\.|[^\s'\"`;|&\\])+"
 )
 # Inside a quoted string a value that does not open its own quote runs to the
@@ -3716,7 +3747,7 @@ def _mask_credential_flags(text: str) -> str:
 
 def _is_credential_flag_name(name: str) -> bool:
     return (
-        name.lower() not in {"--max-tokens", "--token-limit"}
+        name.lower().replace("_", "-") not in {"--max-tokens", "--token-limit"}
         and _FINDING_EVIDENCE_CREDENTIAL_FLAG_WORD_RE.search(name) is not None
         and _FINDING_EVIDENCE_FLAG_LOCATION_RE.search(name) is None
     )
@@ -3778,7 +3809,7 @@ def _mask_attached_argv_values(text: str) -> str:
 
 def _mask_config_set_value(match: re.Match[str]) -> str:
     """Mask the value of a config set command whose key names a credential."""
-    key = _FINDING_EVIDENCE_CONFIG_KEY_SPLIT_RE.split(match.group(2))[-1]
+    key = _FINDING_EVIDENCE_CONFIG_KEY_SPLIT_RE.split(match.group(3))[-1]
     if _FINDING_EVIDENCE_CONFIG_CREDENTIAL_KEY_RE.search(key) is None:
         return match.group()
     return match.group(1) + "<redacted>"
@@ -3807,7 +3838,7 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
     # The quote state is read forward once, up to each name that needs it.
     scan_pos = 0
     scan_open: int | None = None
-    for match in _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.finditer(text):
+    for match in _assignment_name_matches(text):
         name, name_quote, separator = match.group(1, 2, 3)
         if (
             match.start() < pos
@@ -3901,6 +3932,16 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
         pos = value.end()
     parts.append(text[pos:])
     return "".join(parts)
+
+
+def _assignment_name_matches(text: str) -> list[re.Match[str]]:
+    """Return, in order, each name that may start an assignment in *text*, also one that starts a sed replacement."""
+    matches = {match.start(): match for match in _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.finditer(text)}
+    for sed in _FINDING_EVIDENCE_SED_PATTERN_RE.finditer(text):
+        name = _FINDING_EVIDENCE_SED_REPLACEMENT_NAME_RE.match(text, sed.end())
+        if name is not None and sed.end() not in matches:
+            matches[sed.end()] = name
+    return [matches[start] for start in sorted(matches)]
 
 
 def _scan_quotes(text: str, pos: int, end: int, opening: int | None) -> tuple[int, int | None]:

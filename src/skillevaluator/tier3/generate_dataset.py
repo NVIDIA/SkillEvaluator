@@ -386,20 +386,25 @@ def _template_task(skill: dict[str, Any]) -> tuple[str, str | None]:
     frontmatter format"). That other word cannot be and, or, then, but,
     before, after, to, for or with, so "reads SKILL.md for format errors" is
     still renamed but "reads SKILL.md on format errors" is not. Reading also
-    does not count when in, of, from, under or inside another place comes
-    right after SKILL.md ("in ./pdf-tools"). Other place words, such as at or
-    within, do not count: "reads SKILL.md at ./pdf-tools" is still renamed. A
-    description that only names SKILL.md without reading it ("validates
-    SKILL.md frontmatter") keeps it too. When the description still points at
-    the skill's files after the rename (<name>/SKILL.md, skills/<name>, "uses
-    the installed skill") or calls the skill "the <name> skill" ("the
-    release-review skill checks manifests"), the task is the generic "handle a
-    typical request" and the outcome is None. The outcome is also None, and
-    graded text generic, when quoting the task would grade skill use or name
-    one of the skill's scripts: "Uses release-review for manifests" grades
-    skill use, and "Checks manifests with review.py" names a script the
-    no-skill baseline does not have, which is graded on the expected output
-    and assertions too.
+    does not count when in, of, from, under or inside comes right after
+    SKILL.md, unless the skill itself follows (the skill, the installed skill,
+    its own skill or the skill's name), as in "in ./pdf-tools" or "in full".
+    Other place words, such as at or within, do not count: "reads SKILL.md at
+    ./pdf-tools" is still renamed. A description that only names SKILL.md
+    without reading it ("validates SKILL.md frontmatter") keeps it too. Once
+    one SKILL.md counts, every bare SKILL.md in the description is renamed,
+    even one that would not count by itself ("a SKILL.md", "SKILL.md in
+    ./pdf-tools"). When the description still points at the skill's files
+    after the rename (<name>/SKILL.md, skills/<name>, "uses the installed
+    skill"), calls the skill "the <name> skill" ("the release-review skill
+    checks manifests"), or has the skill's name, "the <name> skill's" or "the
+    installed skill's" right before SKILL.md ("reads <name>'s SKILL.md"), the
+    task is the generic "handle a typical request" and the outcome is None.
+    The outcome is also None, and graded text generic, when quoting the task
+    would grade skill use or name one of the skill's scripts: "Uses
+    release-review for manifests" grades skill use, and "Checks manifests with
+    review.py" names a script the no-skill baseline does not have, which is
+    graded on the expected output and assertions too.
     """
     name = skill["name"]
     task = _description_lower(skill)

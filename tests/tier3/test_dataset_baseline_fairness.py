@@ -988,12 +988,21 @@ _STILL_SKILL_FILES = (
     "Keeps skills/release-review in sync with the docs.",
     "Reads SKILL.md and uses the installed skill to report errors.",
 )
-_MY_SKILL_MD_ENTRY = "The eval dataset docs now say that a template prompt calls a `SKILL.md`"
+_MY_SKILL_MD_ENTRY = "The eval dataset docs now say that a template prompt calls every bare `SKILL.md`"
 
 
 def _listed(words: tuple[str, ...]) -> str:
     """Words as the docs list them: "a, b or c"."""
     return f"{', '.join(words[:-1])} or {words[-1]}"
+
+
+# How each says that a word after SKILL.md keeps it unless the skill itself follows.
+_KEEPING_RULE = (
+    f"when {_listed(_KEEPING_PLACES)} comes right after skill.md, unless the skill itself follows "
+    "(the skill, the installed skill, its own skill or the skill's name), as in"
+)
+# How each says that the other bare SKILL.md files are renamed once one counts.
+_RENAMING_ALL = "once one skill.md counts, every bare skill.md in the description is renamed, even one"
 
 
 def _flat(text: str) -> str:
@@ -1051,9 +1060,21 @@ def test_docs_say_which_skill_md_in_a_description_becomes_my_skill_md():
         assert not _renames_skill_md(description), description
     for word in _CONNECTIVES:
         assert _renames_skill_md(f"Reads SKILL.md {word} format errors."), word
-    # A description that still points at the skill's files after the rename
-    # gives the generic task, not "my SKILL.md".
-    for description in _STILL_SKILL_FILES:
+    # Once one SKILL.md counts, every bare one is renamed, even one that would
+    # not count by itself.
+    for description in (
+        "Reads SKILL.md and creates a SKILL.md for a new agent skill.",
+        "Reads SKILL.md and checks the following SKILL.md.",
+        "Reads SKILL.md, then validates SKILL.md frontmatter fields.",
+        "Reads SKILL.md and writes SKILL.md files.",
+        "Reads SKILL.md and compares it with SKILL.md in ./pdf-tools.",
+    ):
+        (case,) = generate_dataset._generate_simple(_skill(description=description))
+        assert case["question"].count("my SKILL.md") == 2, description
+    # A description that still points at the skill's files after the rename,
+    # or that has the skill's name or "the installed skill's" right before
+    # SKILL.md, gives the generic task, not "my SKILL.md".
+    for description in (*_STILL_SKILL_FILES, "Reads release-review's SKILL.md and reports errors."):
         (case,) = generate_dataset._generate_simple(_skill(description=description))
         assert case["question"] == "Use release-review to handle a typical request", description
         assert case["ground_truth"] == "A correct, complete result for the request", description
@@ -1066,9 +1087,11 @@ def test_docs_say_which_skill_md_in_a_description_becomes_my_skill_md():
             sentence = _sentence_at(text, start)
             assert _listed(_RENAMING_VERBS) in sentence, (where, sentence)
             assert _RENAMING_HEDGE in sentence, (where, sentence)
-        # Each names a format noun case and the generic task for <name>/SKILL.md.
+        # Each names a format noun case, the generic task for <name>/SKILL.md,
+        # and that every bare SKILL.md is renamed once one counts.
         assert '"reads skill.md files"' in text, where
         assert "<name>/skill.md" in text and '"handle a typical request"' in text, where
+        assert _RENAMING_ALL in text, where
     for where in ("docs/eval-datasets.mdx", "_template_task"):
         text = wording[where]
         assert f"a format noun such as {_listed(_FORMAT_NOUNS)} right after it or after one other word" in text, where
@@ -1077,11 +1100,14 @@ def test_docs_say_which_skill_md_in_a_description_becomes_my_skill_md():
             'is still renamed but "reads skill.md on format errors" is not.'
         ) in text, where
         assert '"a skill.md", "the following skill.md"' in text, where
-        assert f"reading also does not count when {_listed(_KEEPING_PLACES)} another place" in text, where
+        assert f"reading also does not count {_KEEPING_RULE}" in text, where
         rule = text.find("still points at the skill's files after the rename")
         assert rule >= 0, where
         for example in ("<name>/skill.md", "skills/<name>", "uses the installed skill"):
             assert example in text[rule : rule + 160], (where, text[rule : rule + 160])
+        owner = text.find('the skill\'s name, "the <name> skill\'s" or "the installed skill\'s"', rule)
+        assert 0 <= owner - rule < 260, (where, text[rule : rule + 400])
+        assert '"reads <name>\'s skill.md"' in text[owner : owner + 160], (where, text[owner : owner + 160])
     # The docstring's examples reach the branch it gives them: calling the
     # skill "the <name> skill" gives the generic task, and naming the skill or
     # one of its scripts keeps the task but quotes no outcome.
@@ -1099,27 +1125,37 @@ def test_docs_say_which_skill_md_in_a_description_becomes_my_skill_md():
     assert "the graded text is generic. create-eval-dataset's llm prompts ask for outcome checks." in docs
 
 
-def test_docs_say_only_another_place_keeps_a_description_s_skill_md():
-    # Only in, of, from, under or inside another place right after SKILL.md
-    # keeps it. The skill's own place, other place words and a place word
-    # further on are still renamed.
+def test_docs_say_which_word_after_skill_md_keeps_a_description_s_skill_md():
+    # In, of, from, under or inside right after SKILL.md keeps it, whatever
+    # follows, unless the skill itself does. Other place words and a place
+    # word further on are still renamed.
     for place in _KEEPING_PLACES:
         assert not _renames_skill_md(f"Reads SKILL.md {place} ./pdf-tools and reports errors."), place
+    for description in (
+        "Reads SKILL.md in full and reports errors.",
+        "Follows SKILL.md in order.",
+        "Reads SKILL.md from start to finish.",
+        "Reads SKILL.md from its own directory.",
+    ):
+        assert not _renames_skill_md(description), description
     for place in _OTHER_PLACES:
         assert _renames_skill_md(f"Reads SKILL.md {place} ./pdf-tools and reports errors."), place
     for description in (
         "Reads SKILL.md in the skill directory and reports errors.",
+        "Reads SKILL.md in the installed skill and reports errors.",
+        "Reads SKILL.md from its own skill folder and reports errors.",
+        "Reads SKILL.md in release-review and reports errors.",
         "Reads SKILL.md located in ./pdf-tools and reports errors.",
     ):
         assert _renames_skill_md(description), description
 
-    keeping = f"{_listed(_KEEPING_PLACES)} another place comes right after"
     other = f"other place words, such as {_listed(_OTHER_PLACES)}, do not count"
     for where, text in _my_skill_md_wording().items():
-        rule = text.find(keeping)
+        rule = text.find(_KEEPING_RULE)
         assert rule >= 0, where
-        assert "in ./pdf-tools" in text[rule : rule + 120], (where, text[rule : rule + 120])
-        assert other in text[rule : rule + 200], (where, text[rule : rule + 200])
+        examples = text[rule + len(_KEEPING_RULE) : rule + len(_KEEPING_RULE) + 40]
+        assert "in ./pdf-tools" in examples and "in full" in examples, (where, examples)
+        assert other in text[rule : rule + 260], (where, text[rule : rule + 260])
     docs = _my_skill_md_wording()["docs/eval-datasets.mdx"]
     assert f'{other}: "reads skill.md at ./pdf-tools" is still renamed.' in docs
 

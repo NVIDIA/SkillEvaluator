@@ -247,16 +247,20 @@ All notable changes to SkillEvaluator are documented in this file.
   `tier3/dataset_sufficiency.py`, the default quality config and the bundled
   grader suite, so retuning any of them fails CI instead of rotting the page.
 
-- The eval dataset docs now say that a template prompt calls a `SKILL.md`
-  `my SKILL.md` only when the skill's description reads, opens, loads,
-  consults or follows that file, or otherwise points at the skill's own
-  `SKILL.md` as a prompt `tier3 validate` warns about would. The description
-  keeps its `SKILL.md` when `in`, `of`, `from`, `under` or `inside` another
-  place comes right after it, such as `in ./pdf-tools`. Other place words,
-  such as `at` or `within`, do not count. The docs said any `SKILL.md` in the
-  description was renamed, but "Validates `SKILL.md` frontmatter fields" and
-  "Reads `SKILL.md` files" keep their `SKILL.md`, and "Keeps
-  `<name>/SKILL.md` in sync" gets the generic task "handle a typical
+- The eval dataset docs now say that a template prompt calls every bare
+  `SKILL.md` in the skill's description `my SKILL.md` only when the
+  description reads, opens, loads, consults or follows `SKILL.md`, or
+  otherwise points at the skill's own `SKILL.md` as a prompt `tier3 validate`
+  warns about would. Once one `SKILL.md` counts, every bare `SKILL.md` in the
+  description is renamed, even one after "a" or "the following", one before
+  a format noun or one before `in ./pdf-tools`. Reading does not count when
+  `in`, `of`, `from`, `under` or `inside` comes right after `SKILL.md`,
+  unless the skill itself follows (`the skill`, `the installed skill`,
+  `its own skill` or the skill's name), as in `in ./pdf-tools` or `in full`.
+  Other place words, such as `at` or `within`, do not count. The docs said
+  any `SKILL.md` in the description was renamed, but "Validates `SKILL.md`
+  frontmatter fields" and "Reads `SKILL.md` files" keep their `SKILL.md`, and
+  "Keeps `<name>/SKILL.md` in sync" gets the generic task "handle a typical
   request".
 
 ### Fixed

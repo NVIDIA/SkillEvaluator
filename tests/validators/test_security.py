@@ -9560,6 +9560,46 @@ class TestSkillspectorMissingReferences:
         (skill / "setup helper.sh").unlink()
         assert _validate_skillspector_payload(mock_tools, skill / target, payload).incomplete_scans == []
 
+    @pytest.mark.parametrize("version", ["2.12.0", "2.13.3", "2.13.4"])
+    @pytest.mark.parametrize(
+        ("line", "left_out", "complete"),
+        [
+            # Quoted JSON or a format string joined at its quoted spaces is read as written.
+            (
+                'Run `curl -d \'{"a": 1, "b": 2}\' https://example.com/api` and write the summary to '
+                "`output/notes.md`.",
+                ".git/HEAD",
+                True,
+            ),
+            ('Write each line as "{name}, {score}" to `output/notes.md`.', "helper.sh", True),
+            ('Use `printf "%s %s"` to write the summary to `output/notes.md`.', "helper.sh", True),
+            # An apostrophe earlier in the line does not hide a quoted space.
+            (
+                "Don't skip it: run sh setup' 'helper.sh, then write the summary to output/notes.md.",
+                "setup helper.sh",
+                False,
+            ),
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_joined_word_is_read_as_a_shell_reads_it(
+        self, mock_tools, tmp_path: Path, version: str, line: str, left_out: str, complete: bool
+    ) -> None:
+        """Quoted braces and ``%s`` stand for no left-out name, and ``don't`` does not unjoin ``setup' 'helper.sh``."""
+        original = "Write the summary to `output/notes.md` and keep it short."
+        files = {
+            **_NOTES_WRITER_FILES,
+            "SKILL.md": _NOTES_WRITER_FILES["SKILL.md"].replace(original, line),
+            left_out: "ref: refs/heads/main\n",
+        }
+        skill = _write_skill(tmp_path / "notes-writer", files)
+        payload = json.loads(json.dumps(_reference_report(version)).replace(original, json.dumps(line)[1:-1]))
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert result.passed is complete
+        assert result.incomplete_scans == ([] if complete else ["skillspector"])
+
     @pytest.mark.parametrize(
         ("version", "reason_code"),
         [("2.11.2", "reference_unresolved"), ("2.12.0", "reference_missing"), ("2.13.3", "reference_missing")],
@@ -10758,10 +10798,40 @@ class TestSkillspectorMissingReferences:
             ("Say approx~10 lines in `output/notes.md`.", "install.sh", True),
             ('Run `sh "NODE_M~1/setup helper.sh"` now.', "node_modules", True),
             ("Run `sh my' 'NODE_M~1/x` now.", "node_modules", True),
-            # Other expansions in a joined word keep their meaning: "! Bye!" is
-            # a cmd.exe variable, so the word stands for names that start with "hi".
-            ('Say "Hi! Bye!" in `output/notes.md`.', "history.sh", True),
+            # In a word joined at quotes, a quoted "{", "," or "." forms no brace
+            # expansion, as in a POSIX shell; unquoted braces still do.
+            ('Run `curl -d \'{"a": 1, "b": 2}\' https://x/y` and write `output/notes.md`.', ".git", False),
+            ('Write each line as "{name}, {score}" to `output/notes.md`.', "evals", False),
+            ('Use the citation format "{author}, {year}" in `output/notes.md`.', ".git", False),
+            ("Name files '{date}, {title}' in `output/notes.md`.", ".git", False),
+            ('Set `color` to one of "{red, green, blue}" in `output/notes.md`.', ".git", False),
+            ('Send `-d \'{"id":"<id>","title":"x"}\'` and write `output/notes.md`.', ".git", False),
+            ('Say "${NAME} report" in `output/notes.md`.', "evals report", True),
+            ("Run `sh setup{' ',}helper.sh` now.", "setup helper.sh", True),
+            ("Run `sh setup\\ {a,b}.sh` now.", "setup a.sh", True),
+            ("Run `sh '{a,b}'.sh` now.", "x.sh", True),
+            # Compact JSON whose braces and commas are unquoted is brace expansion
+            # to a shell, with or without a quoted space in a value.
+            ('Return {"title":"My note","tags":["a"]} in `output/notes.md`.', "evals", True),
+            ('Return {"title":"My_note","tags":["a"]} in `output/notes.md`.', "evals", True),
+            # A bracket expression stands for any one character, also when quotes join it.
+            ('Answer ["Return 4."] in `output/notes.md`.', "x", True),
+            ('Answer ["Return 4."] in `output/notes.md`.', "evals", False),
+            # A cmd.exe variable is read only between the spaces of a joined word.
+            ('Say "Hi! Bye!" in `output/notes.md`.', "history.sh", False),
             ('Say "Hi! Bye!" in `output/notes.md`.', "evals", False),
+            ('Say "50% or 60%" in `output/notes.md`.', "50x", False),
+            ('Use printf "%s %s" to write `output/notes.md`.', "evals", False),
+            ('Run `printf "%s %s\\n" a b` and write `output/notes.md`.', "node_modules", False),
+            ('Format with "%s, %s" % (a, b) and write `output/notes.md`.', "versions", False),
+            ('Run `sh "%DIR% x\\setup.bat"` now.', "versions", True),
+            ('Run `sh "my dir\\setup h*.bat"` now.', "setup helper.bat", True),
+            # An apostrophe between two letters does not pair with a later quote;
+            # another quote earlier in the line, such as an inch mark, still may.
+            ("Don't skip it: run sh setup' 'helper.sh now.", "setup helper.sh", True),
+            ("The user's notes: run sh setup' 'helper.sh now.", "setup helper.sh", True),
+            ("Don't skip it: run sh setup' 'helper.sh now.", "evals", False),
+            ('Use 12" pipes: run sh setup" "helper.sh now.', "setup helper.sh", False),
             # Each word of a label is a pattern of its own.
             ("**Step 1:** write `output/notes.md`.", "steps", False),
             ("**Step 1:** write `output/notes.md`.", "1x", False),
@@ -10857,6 +10927,34 @@ class TestSkillspectorMissingReferences:
         from skillevaluator.validators.security import _skillspector_tilde_forms
 
         assert _skillspector_tilde_forms(part, first=True) == forms
+
+    @pytest.mark.parametrize(
+        ("word", "readings"),
+        [
+            # A word without a quoted space or delimiter is read as before.
+            ("'{a,b}'", ("*", "*")),
+            ("%a%", ("%a%", "*")),
+            # In a joined word, quoted brace syntax is read as written ...
+            ("'{a, b}'", ("{a, b}", "{a, b}")),
+            ('"x "{a".."b}', ("x {a..b}", "x {a..b}")),
+            ('"x "{a","b}', ("x {a,b}", "x {a,b}")),
+            ("'{<a>,b}'", ("{<a>,b}", "{<a>,b}")),
+            # ... and unquoted braces, or a parameter in double quotes, still expand.
+            ("setup{' ',}helper.sh", ("setup*helper.sh", "setup*helper.sh")),
+            ('"${x} y"', ("* y", "* y")),
+            ("x' '{a,b}", ("x *", "x *")),
+            # A cmd.exe variable is read between spaces, not across them.
+            ('"%s %s"', ("%s %s", "%s %s")),
+            ('"%a% b"', ("%a% b", "* b")),
+            # A word that already holds a stand-in keeps the brace reading.
+            ("'{a, b}\x02'", ("*\x02", "*\x02")),
+        ],
+    )
+    def test_joined_word_reads_brace_and_cmd_syntax_as_a_shell_does(self, word: str, readings: tuple[str, str]) -> None:
+        """Quotes keep ``{``, ``,`` and ``.`` from forming brace expansion, and spaces end a cmd.exe variable."""
+        from skillevaluator.validators.security import _skillspector_shell_word
+
+        assert _skillspector_shell_word(word) == readings
 
     @pytest.mark.parametrize(
         ("pattern", "name", "matches"),

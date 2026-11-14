@@ -1633,9 +1633,19 @@ _SKILLSPECTOR_NAME_RUN_RE = re.compile(r"[\w.-]+")
 # shell delimiters around a path.
 _SKILLSPECTOR_LINE_WORD_RE = re.compile(r"[^\s`()<>|;&]+")
 # A word as a POSIX shell splits it: as above, but an escaped character and a
-# quoted string, which may hold whitespace, are part of it, as in
-# ``setup\\ h*.sh`` or ``setup' 'helper.sh``.
+# quoted string, which may hold whitespace or a delimiter, are part of it, as
+# in ``setup\\ h*.sh`` or ``setup' 'helper.sh``.
 _SKILLSPECTOR_SHELL_WORD_RE = re.compile(r"""(?:[^\s`()<>|;&'"\\]+|\\.|'[^'`]*'|"(?:\\.|[^"\\`])*"|['"\\])+""")
+# An apostrophe between two letters, as in ``don't`` or ``user's``. The words
+# are also split as above with each one removed, so that it does not pair
+# with a quote later in the line, as in ``don't run sh setup' 'helper.sh``.
+_SKILLSPECTOR_PROSE_APOSTROPHE_RE = re.compile(r"(?<=[^\W\d_])'(?=[^\W\d_])")
+# A quoted string or an escaped character in a word as a POSIX shell splits
+# it; that shell reads no brace expansion in it (:func:`_skillspector_shell_word`).
+_SKILLSPECTOR_SHELL_QUOTED_RE = re.compile(r"""\\.|'[^']*'|"(?:\\.|[^"\\])*\"""")
+# Stand-ins for a quoted ``{``, ``,`` and ``.`` while the brace expansions of
+# a word that holds a quoted or escaped space or delimiter are read.
+_SKILLSPECTOR_QUOTED_BRACE_SYNTAX = "\x02\x03\x04"
 # Stands for any text where a shell group or range was read in a line
 # (:func:`_skillspector_shell_groups`); unlike ``*``, a word made of it is
 # never taken for a list marker.
@@ -2105,11 +2115,32 @@ def _skillspector_shell_word(word: str) -> tuple[str, str]:
 
     ``*``, ``?`` and ``[...]`` keep their meaning, and so does ``~``
     (:func:`_skillspector_tilde_forms`).
+
+    In a word that holds a quoted or escaped space or delimiter, which only a
+    POSIX shell keeps in one word (:data:`_SKILLSPECTOR_SHELL_WORD_RE`), a
+    ``{``, ``,`` or ``.`` inside quotes or after a backslash forms no brace
+    expansion, as in that shell. So ``"{name}, {score}"`` or
+    ``'{"a": 1, "b": 2}'`` is read as written, while ``setup{' ',}helper.sh``
+    still stands for ``setup*helper.sh``. A cmd.exe variable or batch
+    parameter is read only within the text between spaces and delimiters, as
+    in a word that holds neither, so ``"%s %s"`` or ``"Hi! Bye!"`` is read as
+    written.
     """
     word = word.replace(_SKILLSPECTOR_SHELL_ANY, "*")
-    posix = _skillspector_shell_expansions(_SKILLSPECTOR_SHELL_QUOTE_RE.sub("", word))
-    windows = _SKILLSPECTOR_CMD_VARIABLE_RE.sub("*", _SKILLSPECTOR_CMD_QUOTE_RE.sub("", word))
-    windows = _skillspector_shell_expansions(windows).replace("\\", "/")
+    unmask: dict[int, str] = {}
+    if _SKILLSPECTOR_LINE_WORD_RE.fullmatch(word) is None and all(
+        char not in word for char in _SKILLSPECTOR_QUOTED_BRACE_SYNTAX
+    ):
+        mask = str.maketrans("{,.", _SKILLSPECTOR_QUOTED_BRACE_SYNTAX)
+        unmask = str.maketrans(_SKILLSPECTOR_QUOTED_BRACE_SYNTAX, "{,.")
+        word = _SKILLSPECTOR_SHELL_QUOTED_RE.sub(lambda quoted: quoted.group().translate(mask), word)
+        # Parameter expansion, unlike brace expansion, also takes place inside double quotes.
+        word = word.replace("$" + _SKILLSPECTOR_QUOTED_BRACE_SYNTAX[0], "${")
+    posix = _skillspector_shell_expansions(_SKILLSPECTOR_SHELL_QUOTE_RE.sub("", word)).translate(unmask)
+    windows = _SKILLSPECTOR_LINE_WORD_RE.sub(
+        lambda run: _SKILLSPECTOR_CMD_VARIABLE_RE.sub("*", run.group()), _SKILLSPECTOR_CMD_QUOTE_RE.sub("", word)
+    )
+    windows = _skillspector_shell_expansions(windows).translate(unmask).replace("\\", "/")
     return posix, windows
 
 
@@ -2237,7 +2268,10 @@ def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
 
     The words are split at whitespace and the Markdown or shell delimiters
     around a path, and also as a POSIX shell splits them, where an escaped or
-    quoted space is part of the word (:data:`_SKILLSPECTOR_SHELL_WORD_RE`). A
+    quoted space is part of the word (:data:`_SKILLSPECTOR_SHELL_WORD_RE`),
+    once as written and once with each apostrophe between two letters removed
+    (:data:`_SKILLSPECTOR_PROSE_APOSTROPHE_RE`), so that ``don't`` earlier in
+    the line does not pair with the quotes of a command after it. A
     word with ``*``, ``?``, ``[``, ``{``, ``$``, ``%``, ``!``, ``^``, ``#``,
     ``~``, a quote, a backslash or a group read in the line is read as a POSIX shell and as
     cmd.exe or PowerShell would (:func:`_skillspector_shell_word`). Each part
@@ -2264,6 +2298,8 @@ def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
         text, labels = _skillspector_markdown_labels(text)
         split_words.update(_SKILLSPECTOR_LINE_WORD_RE.findall(text))
         split_words.update(_SKILLSPECTOR_SHELL_WORD_RE.findall(text))
+        if "'" in text:
+            split_words.update(_SKILLSPECTOR_SHELL_WORD_RE.findall(_SKILLSPECTOR_PROSE_APOSTROPHE_RE.sub("", text)))
         label_words.update(word for label in labels for word in _SKILLSPECTOR_LINE_WORD_RE.findall(label))
     patterns: set[str] = set()
     for word in split_words | label_words:

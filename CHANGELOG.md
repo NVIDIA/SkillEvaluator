@@ -441,12 +441,14 @@ All notable changes to SkillEvaluator are documented in this file.
   was left out. A wildcard elsewhere in the line, or a label inside code, still
   counts. The check now also reads a word as a shell splits it, so
   `setup' 'helper.sh`, `setup" "helper.sh` and `setup\ h*.sh` name the left-out
-  file `setup helper.sh` and keep the scan `INCOMPLETE`. With
-  `validate --workers` above 1, a skill of a folder that is also a plugin is
-  judged against the folder, as with one worker, so a line naming a file
-  elsewhere in the folder keeps it `INCOMPLETE`. An `--llm-verify` downgrade no
-  longer drops the accepted missing-reference warning, or the error that says
-  why a scan is `INCOMPLETE`.
+  file `setup helper.sh` and keep the scan `INCOMPLETE`, also after an
+  apostrophe such as `don't` earlier in the line. Quoted text in such a word,
+  such as the JSON in `'{"a": 1, "b": 2}'` or `"%s %s"`, is read as written,
+  as before. With `validate --workers` above 1, a skill of a folder that is
+  also a plugin is judged against the folder, as with one worker, so a line
+  naming a file elsewhere in the folder keeps it `INCOMPLETE`. An
+  `--llm-verify` downgrade no longer drops the accepted missing-reference
+  warning, or the error that says why a scan is `INCOMPLETE`.
 
 ## 0.9.0 - 2026-11-13
 

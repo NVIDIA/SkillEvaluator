@@ -3432,11 +3432,11 @@ _FINDING_EVIDENCE_COOKIE_HEADER_RE = re.compile(
 # value, although its marker holds spaces. A word never starts at a shell
 # operator: in "git config --get github.token | curl ..." or "gh auth login
 # --with-token < token.txt" the flag or key has no value on the command line.
-_FINDING_EVIDENCE_FLAG_VALUE = (
-    "(?:"
-    + _FINDING_EVIDENCE_PRIVATE_KEY_MARKER
-    + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?|(?![|&;<>])(?:\\.|[^\s'\"`\\])+)"
+_FINDING_EVIDENCE_QUOTED_FLAG_VALUE = (
+    _FINDING_EVIDENCE_PRIVATE_KEY_MARKER
+    + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?"
 )
+_FINDING_EVIDENCE_FLAG_VALUE = "(?:" + _FINDING_EVIDENCE_QUOTED_FLAG_VALUE + r"|(?![|&;<>])(?:\\.|[^\s'\"`\\])+)"
 # Any long flag whose name holds a credential word ("--password", "--db-password",
 # "--client-secret", "--github-token", "--oauth2-bearer", "--cookie"), with "-"
 # or "_" between its words ("--db_password", "--api_key", as gflags and absl
@@ -3459,6 +3459,14 @@ _FINDING_EVIDENCE_CREDENTIAL_FLAG_WORD_RE = re.compile(
 )
 _FINDING_EVIDENCE_FLAG_LOCATION_RE = re.compile(r"[-_](?:stdin|file|jar|path|dir)$", re.IGNORECASE)
 _FINDING_EVIDENCE_FLAG_VALUE_RE = re.compile(_FINDING_EVIDENCE_FLAG_VALUE)
+# A flag name with "_" was read before only by the rules after the flag rule,
+# so its unquoted value also ends at ";", "|" or "&", where the assignment rule
+# ends a word, and a "NAME=VALUE" right after it is still masked
+# ("--api_key K1;TOKEN=..."). A name with "_" joined to its value by "="
+# ("--api_key=VALUE") is left to the assignment rule (see _mask_credential_flags).
+_FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE_RE = re.compile(
+    "(?:" + _FINDING_EVIDENCE_QUOTED_FLAG_VALUE + r"|(?![|&;<>])(?:\\.|[^\s'\"`\\;|&])+)"
+)
 # "-u", "-U" and "--user" also name ordinary options (python -u, pip -U, pip
 # --user), so only a value with a colon is masked: "user:password", or an API
 # key with an empty password ("-u KEY:"). curl also takes it attached
@@ -3514,11 +3522,12 @@ _FINDING_EVIDENCE_AWS_CONFIGURE_SET_RE = re.compile(
 # "npmAuthToken", "github.token"), so "credential.helper store" and
 # "always-auth true" are kept. NAME may be single- or double-quoted and may
 # follow a "--" that ends the options. "git config --get" and "--unset" read
-# or remove a key and take no value.
+# or remove a key and take no value. A separator word after NAME ("password =
+# VALUE", "token := VALUE") is no value; the assignment rule reads that form.
 _FINDING_EVIDENCE_CONFIG_SET_RE = re.compile(
     r"(\b(?:(?:npm|pnpm|yarn)[ \t]+config[ \t]+set|(?:npm|pnpm)[ \t]+set|git[ \t]+config)"
     r"(?:[ \t]+--?(?!-|get|unset)[\w-]{1,32}(?:=[^\s'\"`]{1,64})?){0,3}(?:[ \t]+--(?=[ \t]))?[ \t]+"
-    r"([\"']?)([^\s'\"`=-][^\s'\"`=]{0,255})\2[ \t]+(?!-))" + _FINDING_EVIDENCE_FLAG_VALUE
+    r"([\"']?)([^\s'\"`=-][^\s'\"`=]{0,255})\2[ \t]+(?!-|(?::=|=>|[=:])(?!\S)))" + _FINDING_EVIDENCE_FLAG_VALUE
 )
 _FINDING_EVIDENCE_CONFIG_KEY_SPLIT_RE = re.compile(r"[./:]")
 _FINDING_EVIDENCE_CONFIG_CREDENTIAL_KEY_RE = re.compile(
@@ -3812,9 +3821,19 @@ def _mask_credential_flags(text: str) -> str:
     parts: list[str] = []
     pos = 0
     for match in _FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME_RE.finditer(text):
-        if match.start() < pos or not _is_credential_flag_name(match.group(1)):
+        if (
+            match.start() < pos
+            or not _is_credential_flag_name(match.group(1))
+            # A name with "_" joined to its value by "=" ("--api_key=VALUE")
+            # is left to the assignment rule, which read it before and reads
+            # a tuple or call value whole.
+            or ("_" in match.group(1) and match.group().endswith("="))
+        ):
             continue
-        value = _FINDING_EVIDENCE_FLAG_VALUE_RE.match(text, match.end())
+        value_re = (
+            _FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE_RE if "_" in match.group(1) else _FINDING_EVIDENCE_FLAG_VALUE_RE
+        )
+        value = value_re.match(text, match.end())
         if value is None:
             continue
         parts.append(text[pos : value.start()])

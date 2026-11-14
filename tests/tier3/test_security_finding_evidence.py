@@ -1873,6 +1873,64 @@ def test_call_sed_underscored_flag_and_config_rules_keep_ordinary_text(text: str
 @pytest.mark.parametrize(
     ("command", "expected"),
     [
+        # A flag with "_" joined to its value by "=" and a config key followed
+        # by a separator are read as assignments, as before "_" flags and "--"
+        # keys were read: a tuple value is masked whole, and a word value ends
+        # at ";", so the assignment after it is masked too.
+        pytest.param(
+            f'./tool --api_key={_API_TOKEN};TOKEN="{_PASSPHRASE}" && rm -rf /srv/app',
+            "./tool --api_key=<redacted>;TOKEN=<redacted> && rm -rf /srv/app",
+            id="attached-underscored-flag-before-a-semicolon",
+        ),
+        pytest.param(
+            f"./tool --auth_token=('bob', '{_BASIC_PASSWORD}') && rm -rf /srv/app",
+            "./tool --auth_token=<redacted> && rm -rf /srv/app",
+            id="attached-underscored-flag-tuple",
+        ),
+        pytest.param(
+            f'./tool -api_key=("u", "{_BASIC_PASSWORD}") && rm -rf /srv/app',
+            "./tool -api_key=<redacted> && rm -rf /srv/app",
+            id="attached-short-underscored-flag-tuple",
+        ),
+        pytest.param(
+            f"npm config set -- password = '{_BASIC_PASSWORD}' && rm -rf /srv/app",
+            "npm config set -- password = <redacted> && rm -rf /srv/app",
+            id="config-set-terminator-spaced-equals",
+        ),
+        pytest.param(
+            f"yarn config set -- GITHUB_TOKEN := {_API_TOKEN} && rm -rf /srv/app",
+            "yarn config set -- GITHUB_TOKEN := <redacted> && rm -rf /srv/app",
+            id="config-set-terminator-walrus",
+        ),
+        # A spaced "_" flag value ends at ";" as an assignment's word does, and
+        # a config key followed by " = " is read as an assignment in the plain
+        # spelling too.
+        pytest.param(
+            f'./tool --api_key {_API_TOKEN};TOKEN="{_PASSPHRASE}" && rm -rf /srv/app',
+            "./tool --api_key <redacted>;TOKEN=<redacted> && rm -rf /srv/app",
+            id="spaced-underscored-flag-before-a-semicolon",
+        ),
+        pytest.param(
+            f"npm config set password = '{_BASIC_PASSWORD}' && rm -rf /srv/app",
+            "npm config set password = <redacted> && rm -rf /srv/app",
+            id="config-set-spaced-equals",
+        ),
+    ],
+)
+def test_underscored_flags_and_config_keys_keep_the_assignment_reading(copy: str, command: str, expected: str) -> None:
+    result = _security(copy, {"action": "Bash", "action_input": {"command": command}})
+
+    assert [(finding["type"], finding["evidence"]) for finding in result["findings"]] == [
+        ("destructive_command", expected)
+    ]
+    for secret in (_API_TOKEN, _BASIC_PASSWORD, _PASSPHRASE_TAIL):
+        assert secret not in json.dumps(result)
+
+
+@pytest.mark.parametrize("copy", ["template", "eval_core"])
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
         pytest.param(
             "tar czf /tmp/k.tgz ~/.ssh ~/.aws/credentials",
             [("sensitive_path_access", "~/.ssh, .aws/credentials")],

@@ -219,6 +219,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- The README's Tier 1 row now covers harness compatibility and links to the
+  `harness` check.
 - `THIRD_PARTY_NOTICES.md` lists Bandit under the base dependencies. It has
   been installed with the base package since it moved out of the `security`
   extra, but the notice still sat in the Security row, which now lists
@@ -247,6 +249,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
+  of `harness-check` no longer show internal test notes in their messages.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`
   calls. Codex passes its patch as a single `input` argument, which the write
   evidence helpers did not read, so a Codex patch contributed no FILE CHANGES

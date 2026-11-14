@@ -1906,7 +1906,9 @@ saved judge evidence use the same credential masker:
   also with `_` between the words (`--db_password`, `--api_key`), and a
   `curl -b name=value` cookie. A `_` flag joined to its value with `=`, or
   followed by a separator (`--api_key = ...`), is read as an assignment, and
-  an unquoted value after a `_` flag and a space ends at `;`, `|`, or `&`. A
+  an unquoted value after a `_` flag and a space ends at `;`, `|`, or `&`.
+  Such a value that holds a credential name, as in
+  `--set_secret API_TOKEN="..."`, is read as an assignment too. A
   flag that takes a file or nothing, such as `--password-stdin`,
   `--token-file`, or `--cookie-jar`, and token-count flags `--max-tokens` and
   `--token-limit` (or `--max_tokens`), keep the word after them. A
@@ -1935,8 +1937,9 @@ saved judge evidence use the same credential masker:
   such as `--location=global` or a `--` that ends them, and with a quoted key
   (`_authToken`, `npmAuthToken`, `"github.token"`); `git config --get` and
   `--unset` take no value. An unquoted value after a quoted key or one after
-  `--` ends at `;`, `|`, or `&`. A `.netrc` `password` value is masked too,
-  also when the entry spans lines in a here-document or a `printf` string;
+  `--` ends at `;`, `|`, or `&`, and is read as an assignment when it holds a
+  credential name. A `.netrc` `password` value is masked too, also when the
+  entry spans lines in a here-document or a `printf` string;
 - values assigned to a credential name, such as `_authToken=...`,
   `aws_secret_access_key = ...`, `"password": "..."`, `token := "..."`,
   `os.environ["API_KEY"] = "..."`, `auth=HTTPBasicAuth("bob", "...")` (also

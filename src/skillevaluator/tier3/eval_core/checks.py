@@ -3390,12 +3390,20 @@ _FINDING_EVIDENCE_FLAG_VALUE_RE = re.compile(_FINDING_EVIDENCE_FLAG_VALUE)
 # ends a word, and a "NAME=VALUE" right after it is still masked
 # ("--api_key K1;TOKEN=..."). A name with "_" joined to its value by "="
 # ("--api_key=VALUE") or followed by a separator ("--api_key = VALUE") is left
-# to the assignment rule (see _mask_credential_flags). So is the value of a
-# quoted config key or one after "--" (see _FINDING_EVIDENCE_CONFIG_SET_RE).
+# to the assignment rule (see _mask_credential_flags), and so is a value
+# that holds a credential name the assignment rule reads, or that such a name
+# follows with no space ("--api_key API_TOKEN=\"...\"", "--api_key
+# K1,TOKEN=\"...\"", "--db_password password: ...", "--api_key
+# 'TOKEN='VALUE"; see _holds_credential_name). The same holds for the value of
+# a quoted config key or one after "--" (see _FINDING_EVIDENCE_CONFIG_SET_RE).
 _FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE = (
     "(?:" + _FINDING_EVIDENCE_QUOTED_FLAG_VALUE + r"|(?![|&;<>])(?:\\.|[^\s'\"`\\;|&])+)"
 )
 _FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE_RE = re.compile(_FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE)
+# What a name that ends a value, or follows it with no space, may hold past
+# the value's end up to its separator: the rest of the name, its closing quote
+# or bracket and spaces (see _FINDING_EVIDENCE_ASSIGNMENT_NAME).
+_FINDING_EVIDENCE_NAME_TAIL_RE = re.compile(r"[\w.-]*\\?[\"']?\]?[ \t]*")
 # "-u", "-U" and "--user" also name ordinary options (python -u, pip -U, pip
 # --user), so only a value with a colon is masked: "user:password", or an API
 # key with an empty password ("-u KEY:"). curl also takes it attached
@@ -3777,11 +3785,13 @@ def _mask_credential_flags(text: str) -> str:
             or ("_" in match.group(1) and (match.group().endswith("=") or text.startswith(("=", ":"), match.end())))
         ):
             continue
-        value_re = (
-            _FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE_RE if "_" in match.group(1) else _FINDING_EVIDENCE_FLAG_VALUE_RE
-        )
+        underscored = "_" in match.group(1)
+        value_re = _FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE_RE if underscored else _FINDING_EVIDENCE_FLAG_VALUE_RE
         value = value_re.match(text, match.end())
-        if value is None:
+        # A value of a name with "_" that holds a credential name is left to
+        # the assignment rule too, which masks the value after that name
+        # ("--api_key API_TOKEN=\"...\"").
+        if value is None or (underscored and _holds_credential_name(text, value.start(), value.end())):
             continue
         parts.append(text[pos : value.start()])
         parts.append("<redacted>")
@@ -3857,7 +3867,30 @@ def _mask_config_set_value(match: re.Match[str]) -> str:
     key = _FINDING_EVIDENCE_CONFIG_KEY_SPLIT_RE.split(match.group(4))[-1]
     if _FINDING_EVIDENCE_CONFIG_CREDENTIAL_KEY_RE.search(key) is None:
         return match.group()
+    # The value of a quoted key or one after "--" that holds a credential
+    # name is left to the assignment rule, as a "_" flag's is.
+    if (match.group(2) or match.group(3)) and _holds_credential_name(match.string, match.end(1), match.end()):
+        return match.group()
     return match.group(1) + "<redacted>"
+
+
+def _holds_credential_name(text: str, start: int, end: int) -> bool:
+    """Return whether the assignment rule reads a credential name that starts in the value *start*:*end*, or at *end*.
+
+    Masking the value as a whole would mask only that name and the part of
+    its value inside the masked text ("API_TOKEN=" in 'API_TOKEN="..."',
+    "K1,TOKEN=" in 'K1,TOKEN="..."', "TOKEN" in "TOKEN = ...", "'TOKEN='" in
+    "'TOKEN='VALUE"), or hide the quote a name right after it is read in
+    ('""pass= VALUE'), so the rest of its value would stay.
+    """
+    # A name that ends the value or follows it is read up to its separator.
+    limit = _FINDING_EVIDENCE_NAME_TAIL_RE.match(text, end).end() + 2
+    for name in _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.finditer(text, start, limit):
+        if name.start() > end:
+            break
+        if _FINDING_EVIDENCE_CREDENTIAL_NAME_RE.search(name.group(1)) is not None:
+            return True
+    return False
 
 
 def _mask_token_prefix(match: re.Match[str]) -> str:

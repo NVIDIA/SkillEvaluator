@@ -2021,6 +2021,44 @@ def test_call_sed_underscored_flag_and_config_rules_keep_ordinary_text(text: str
             "git config --global 'github.token' <redacted>&&GH_TOKEN=<redacted> && rm -rf /srv/app",
             id="config-set-quoted-key-before-an-and",
         ),
+        # An unquoted value after a "_" flag, a quoted config key or one after
+        # "--" that holds a credential name is read as an assignment, so the
+        # value after that name is masked whole, while a plain value after
+        # the next flag or key is still masked.
+        pytest.param(
+            f'./deploy --set_secret API_TOKEN="{_PASSPHRASE}" --db_password {_API_TOKEN} && rm -rf /srv/app',
+            "./deploy --set_secret API_TOKEN=<redacted> --db_password <redacted> && rm -rf /srv/app",
+            id="underscored-flag-value-starts-an-assignment",
+        ),
+        pytest.param(
+            f"./tool --db_password password: '{_PASSPHRASE}' --api_key {_API_TOKEN} && rm -rf /srv/app",
+            "./tool --db_password password: <redacted> --api_key <redacted> && rm -rf /srv/app",
+            id="underscored-flag-value-starts-a-colon-assignment",
+        ),
+        pytest.param(
+            f'./tool --api_key K1,TOKEN="{_PASSPHRASE}" --auth_token {_API_TOKEN} && rm -rf /srv/app',
+            "./tool --api_key K1,TOKEN=<redacted> --auth_token <redacted> && rm -rf /srv/app",
+            id="underscored-flag-value-holds-an-assignment",
+        ),
+        pytest.param(
+            f"./tool --api_key TOKEN = '{_PASSPHRASE}' --auth_token {_API_TOKEN} && rm -rf /srv/app",
+            "./tool --api_key TOKEN = <redacted> --auth_token <redacted> && rm -rf /srv/app",
+            id="underscored-flag-value-is-a-spaced-assignment-name",
+        ),
+        pytest.param(
+            f'yarn config set "npmAuthToken" TOKEN="{_PASSPHRASE}" && npm config set -- _authToken {_API_TOKEN}'
+            " && rm -rf /srv/app",
+            'yarn config set "npmAuthToken" TOKEN=<redacted> && npm config set -- _authToken <redacted>'
+            " && rm -rf /srv/app",
+            id="config-set-quoted-key-value-starts-an-assignment",
+        ),
+        pytest.param(
+            f"npm config set -- _authToken PASSWORD='{_PASSPHRASE}' && git config --global 'github.token' {_API_TOKEN}"
+            " && rm -rf /srv/app",
+            "npm config set -- _authToken PASSWORD=<redacted> && git config --global 'github.token' <redacted>"
+            " && rm -rf /srv/app",
+            id="config-set-terminator-key-value-starts-an-assignment",
+        ),
         pytest.param(
             f"npm config set password = '{_BASIC_PASSWORD}' && rm -rf /srv/app",
             "npm config set password = <redacted> && rm -rf /srv/app",
@@ -2048,6 +2086,28 @@ def test_underscored_flags_and_config_keys_keep_the_assignment_reading(copy: str
         pytest.param(f'yarn config set -- npmAuthToken abc|TOKEN="{_PASSPHRASE}"', id="terminator-key-pipe"),
         pytest.param(f'npm config set "_authToken" abc&&password="{_PASSPHRASE}"', id="quoted-key-and"),
         pytest.param(f'npm config set "password" x;auth=("bob", "{_PASSPHRASE}")', id="quoted-key-tuple"),
+        # So does the value of a credential name that the unquoted value of a
+        # "_" flag, a quoted config key or one after "--" holds.
+        pytest.param(f'./deploy --set_secret API_TOKEN="{_PASSPHRASE}"', id="flag-value-starts-an-assignment"),
+        pytest.param(f"./tool --api_key API_KEY='{_PASSPHRASE}'", id="flag-value-starts-a-quoted-assignment"),
+        pytest.param(f"./tool --db_password password: '{_PASSPHRASE}'", id="flag-value-starts-a-colon-assignment"),
+        pytest.param(f"export --api_key auth = '{_PASSPHRASE}'", id="flag-value-is-a-spaced-assignment-name"),
+        pytest.param(f'./tool --api_key K1,TOKEN="{_PASSPHRASE}"', id="flag-value-holds-an-assignment"),
+        pytest.param(f"echo '--api_key x,password={_PASSPHRASE}' >> cfg", id="flag-value-holds-a-string-assignment"),
+        pytest.param(
+            f'yarn config set "npmAuthToken" TOKEN="{_PASSPHRASE}"', id="quoted-key-value-starts-an-assignment"
+        ),
+        pytest.param(f'npm config set "token" PASS="{_PASSPHRASE}"', id="quoted-key-value-starts-a-pass-assignment"),
+        pytest.param(f"npm config set -- _authToken PASSWORD='{_PASSPHRASE}'", id="terminator-key-value-assignment"),
+        pytest.param(
+            f'yarn config set "npmAuthToken" K1,TOKEN="{_PASSPHRASE}"', id="quoted-key-value-holds-an-assignment"
+        ),
+        # A quoted value that holds a name whose value follows it, and a name
+        # that follows a value with no space, are read as assignments too.
+        pytest.param(f"./tool --api_key 'TOKEN='\"{_PASSPHRASE}\"", id="quoted-flag-value-before-a-stuck-value"),
+        pytest.param(f'./tool --api_key ""pass= {_PASSPHRASE}', id="flag-value-before-a-glued-name"),
+        pytest.param(f'npm config set "token" \'secret:\'"{_PASSPHRASE}"', id="quoted-key-value-before-a-stuck-value"),
+        pytest.param(f'npm config set -- token ""pass= {_PASSPHRASE}', id="terminator-key-value-before-a-glued-name"),
     ],
 )
 def test_a_value_next_to_a_newly_read_value_stays_masked(copy: str, command: str) -> None:

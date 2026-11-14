@@ -4,6 +4,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+## 0.10.0 - 2026-11-14
+
 ### Added
 
 - Canonical `comment-skill-checks.yml` reusable workflow and source template for

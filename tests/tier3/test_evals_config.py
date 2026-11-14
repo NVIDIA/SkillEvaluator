@@ -238,12 +238,41 @@ def test_load_evals_config_reports_unconstructible_value_without_echoing_it(tmp_
     assert value.removeprefix("!!int ") not in str(caught.value)
 
 
-def test_load_evals_config_rejects_documents_over_the_yaml_complexity_limits(tmp_path):
-    nested = "[" * 101 + "]" * 101
-    skill = _skill_with_config(tmp_path, f"schema_version: 1\nharbor:\n  agent_workdir: {nested}\n")
+def _include_list(count):
+    return "schema_version: 1\nskill_workspace:\n  include:\n" + "".join(f"    - f{i}.md\n" for i in range(count))
 
-    with pytest.raises(EvalsConfigError, match=r"invalid YAML: .*nesting depth exceeds 100$"):
+
+@pytest.mark.parametrize(
+    ("document", "limit"),
+    [
+        pytest.param(
+            "schema_version: 1\nharbor:\n  agent_workdir: " + "[" * 101 + "]" * 101 + "\n",
+            "nesting depth exceeds 100",
+            id="nesting",
+        ),
+        pytest.param(_include_list(1025), "sequence size exceeds 1024", id="list-entries"),
+        pytest.param(
+            "schema_version: 1\nharbor:\n  agents:\n    codex:\n      model: " + "m" * 65_537 + "\n",
+            "scalar length exceeds 65536",
+            id="value-length",
+        ),
+    ],
+)
+def test_load_evals_config_rejects_documents_over_the_yaml_complexity_limits(tmp_path, document, limit):
+    skill = _skill_with_config(tmp_path, document)
+
+    with pytest.raises(EvalsConfigError, match=rf"invalid YAML: .*{limit}$") as caught:
         load_evals_config(skill)
+
+    assert "mmmm" not in str(caught.value)
+
+
+def test_load_evals_config_accepts_a_list_at_the_entry_limit(tmp_path):
+    skill = _skill_with_config(tmp_path, _include_list(1024))
+
+    config, _ = load_evals_config(skill)
+
+    assert len(config["skill_workspace"]["include"]) == 1024
 
 
 @pytest.mark.parametrize(

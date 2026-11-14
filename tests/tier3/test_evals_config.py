@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import os
+import re
 
 import pytest
+import yaml
 
 from skillevaluator.tier3.dataset_utils import load_dataset_entries_with_format
 from skillevaluator.tier3.evals_config import (
@@ -13,6 +16,24 @@ from skillevaluator.tier3.evals_config import (
     validate_environment_kwargs,
 )
 from skillevaluator.tier3.evals_spec import validate_skillevaluators as validate_skill_evals
+from skillevaluator.tier3.evals_spec import validate_tier3_source
+
+
+def _skill_with_config(tmp_path, text):
+    skill = tmp_path / "skill"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "evals" / "config.yml").write_text(text, encoding="utf-8")
+    return skill
+
+
+def _link_or_skip(link, target, *, hard=False, target_is_directory=False):
+    try:
+        if hard:
+            link.hardlink_to(target)
+        else:
+            link.symlink_to(target, target_is_directory=target_is_directory)
+    except OSError as exc:
+        pytest.skip(f"link creation is unavailable: {exc}")
 
 
 def test_load_evals_config_valid_harbor_policy(tmp_path):
@@ -141,6 +162,223 @@ harbor:
     )
 
     with pytest.raises(EvalsConfigError, match="unknown harbor key"):
+        load_evals_config(skill)
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        pytest.param("schema_version: 1\nschema_version: 1\n", id="top-level"),
+        pytest.param("schema_version: 1\nharbor:\n  n_attempts: 1\n  n_attempts: 2\n", id="harbor"),
+        pytest.param("schema_version: 1\nharbor:\n  resources:\n    cpus: 1\n    cpus: 2\n", id="nested"),
+        pytest.param(
+            "schema_version: 1\nharbor:\n  <<: {stop_on_pass: true, stop_on_pass: false}\n", id="merge-mapping"
+        ),
+        pytest.param("schema_version: 1\nharbor:\n  <<: [{n_attempts: 1, n_attempts: 2}]\n", id="merge-list"),
+    ],
+)
+def test_load_evals_config_rejects_duplicate_keys(tmp_path, document):
+    skill = _skill_with_config(tmp_path, document)
+
+    with pytest.raises(EvalsConfigError, match=r"invalid YAML: line \d+, column \d+: duplicate mapping key$"):
+        load_evals_config(skill)
+
+
+def test_load_evals_config_names_the_position_of_a_duplicate_key(tmp_path):
+    skill = _skill_with_config(tmp_path, "schema_version: 1\nharbor:\n  n_attempts: 1\n  n_attempts: 2\n")
+
+    with pytest.raises(EvalsConfigError) as caught:
+        load_evals_config(skill)
+
+    assert str(caught.value).endswith("config.yml: invalid YAML: line 4, column 3: duplicate mapping key")
+
+
+def test_load_evals_config_keeps_yaml_merge_overrides(tmp_path):
+    skill = _skill_with_config(
+        tmp_path,
+        "schema_version: 1\nharbor:\n  agents:\n    codex: &defaults\n      model: model-one\n"
+        "    claude-code:\n      <<: *defaults\n      model: model-two\n",
+    )
+
+    config, _ = load_evals_config(skill)
+
+    assert config["harbor"]["agents"] == {"codex": {"model": "model-one"}, "claude-code": {"model": "model-two"}}
+
+
+def test_load_evals_config_rejects_cyclic_yaml_merge(tmp_path):
+    skill = _skill_with_config(tmp_path, "schema_version: 1\nharbor:\n  agents: &agents\n    <<: *agents\n")
+
+    with pytest.raises(EvalsConfigError, match=r"invalid YAML: .*cyclic YAML merge"):
+        load_evals_config(skill)
+
+
+def test_load_evals_config_yaml_errors_give_position_without_source_text(tmp_path):
+    skill = _skill_with_config(tmp_path, 'schema_version: 1\nharbor:\n  agent_workdir: "do-not-echo-this-value\n')
+
+    with pytest.raises(EvalsConfigError) as caught:
+        load_evals_config(skill)
+
+    message = str(caught.value)
+    assert message.endswith("config.yml: invalid YAML: line 4, column 1: found unexpected end of stream")
+    assert "do-not-echo-this-value" not in message
+    assert "agent_workdir" not in message
+    assert isinstance(caught.value.__cause__, yaml.YAMLError)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [pytest.param("!!int not-a-number", id="tagged-int"), pytest.param("2026-13-01", id="invalid-date")],
+)
+def test_load_evals_config_reports_unconstructible_value_without_echoing_it(tmp_path, value):
+    skill = _skill_with_config(tmp_path, f"schema_version: 1\nharbor:\n  agent_workdir: {value}\n")
+
+    with pytest.raises(EvalsConfigError, match=r"invalid YAML: cannot parse a value$") as caught:
+        load_evals_config(skill)
+
+    assert value.removeprefix("!!int ") not in str(caught.value)
+
+
+def _include_list(count):
+    return "schema_version: 1\nskill_workspace:\n  include:\n" + "".join(f"    - f{i}.md\n" for i in range(count))
+
+
+@pytest.mark.parametrize(
+    ("document", "limit"),
+    [
+        pytest.param(
+            "schema_version: 1\nharbor:\n  agent_workdir: " + "[" * 101 + "]" * 101 + "\n",
+            "nesting depth exceeds 100",
+            id="nesting",
+        ),
+        pytest.param(_include_list(1025), "sequence size exceeds 1024", id="list-entries"),
+        pytest.param(
+            "schema_version: 1\nharbor:\n  agents:\n    codex:\n      model: " + "m" * 65_537 + "\n",
+            "scalar length exceeds 65536",
+            id="value-length",
+        ),
+    ],
+)
+def test_load_evals_config_rejects_documents_over_the_yaml_complexity_limits(tmp_path, document, limit):
+    skill = _skill_with_config(tmp_path, document)
+
+    with pytest.raises(EvalsConfigError, match=rf"invalid YAML: .*{limit}$") as caught:
+        load_evals_config(skill)
+
+    assert "mmmm" not in str(caught.value)
+
+
+def test_load_evals_config_accepts_a_list_at_the_entry_limit(tmp_path):
+    skill = _skill_with_config(tmp_path, _include_list(1024))
+
+    config, _ = load_evals_config(skill)
+
+    assert len(config["skill_workspace"]["include"]) == 1024
+
+
+@pytest.mark.parametrize(
+    ("document", "field"),
+    [
+        pytest.param("schema_version: 1\n1: invalid\n", "top-level", id="top-level-int"),
+        pytest.param("schema_version: 1\nyes: invalid\n", "top-level", id="top-level-bool"),
+        pytest.param("schema_version: 1\n~: invalid\n", "top-level", id="top-level-null"),
+        pytest.param("schema_version: 1\nharbor:\n  1: invalid\n", "harbor", id="harbor"),
+        pytest.param(
+            "schema_version: 1\nharbor:\n  resources:\n    1: invalid\n", "harbor.resources", id="harbor-resources"
+        ),
+        pytest.param(
+            "schema_version: 1\nharbor:\n  agents:\n    codex:\n      1: invalid\n",
+            "harbor.agents.codex",
+            id="harbor-agent",
+        ),
+        pytest.param("schema_version: 1\nskill_workspace:\n  on: invalid\n", "skill_workspace", id="skill-workspace"),
+        pytest.param("schema_version: 1\ngrading:\n  2: invalid\n", "grading", id="grading"),
+    ],
+)
+def test_load_evals_config_rejects_non_string_keys(tmp_path, document, field):
+    skill = _skill_with_config(tmp_path, document)
+
+    with pytest.raises(EvalsConfigError, match=rf": {re.escape(field)} keys must be strings$"):
+        load_evals_config(skill)
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        pytest.param(b"schema_version: 1\nharbor:\n  yes: 2\n", "harbor keys must be strings", id="non-string-key"),
+        pytest.param(
+            b"schema_version: 1\n# caf\xe9\n", "cannot read config: not valid UTF-8 at byte 23", id="non-utf8"
+        ),
+    ],
+)
+def test_validate_tier3_source_reports_config_errors_instead_of_crashing(tmp_path, content, message):
+    skill = tmp_path / "skill"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "evals" / "config.yml").write_bytes(content)
+
+    source, results = validate_tier3_source(skill)
+
+    assert source == "invalid"
+    assert [(result.status, result.message.endswith(message)) for result in results] == [("error", True)]
+
+
+def test_load_evals_config_rejects_symlinked_config(tmp_path):
+    outside = tmp_path / "outside.yml"
+    outside.write_text("schema_version: 1\nharbor:\n  n_attempts: 9\n", encoding="utf-8")
+    skill = tmp_path / "skill"
+    (skill / "evals").mkdir(parents=True)
+    _link_or_skip(skill / "evals" / "config.yml", outside)
+
+    with pytest.raises(EvalsConfigError, match=r"cannot read config: .*symlink"):
+        load_evals_config(skill)
+
+
+def test_load_evals_config_rejects_broken_config_symlink(tmp_path):
+    skill = tmp_path / "skill"
+    (skill / "evals").mkdir(parents=True)
+    _link_or_skip(skill / "evals" / "config.yml", tmp_path / "missing.yml")
+
+    with pytest.raises(EvalsConfigError, match=r"cannot read config: .*symlink"):
+        load_evals_config(skill)
+
+
+def test_load_evals_config_rejects_config_in_symlinked_evals_directory(tmp_path):
+    outside = tmp_path / "outside-evals"
+    outside.mkdir()
+    (outside / "config.yml").write_text("schema_version: 1\n", encoding="utf-8")
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    _link_or_skip(skill / "evals", outside, target_is_directory=True)
+
+    with pytest.raises(EvalsConfigError, match=r"cannot read config: .*symlink"):
+        load_evals_config(skill)
+
+
+def test_load_evals_config_rejects_hard_linked_config(tmp_path):
+    outside = tmp_path / "outside.yml"
+    outside.write_text("schema_version: 1\n", encoding="utf-8")
+    skill = tmp_path / "skill"
+    (skill / "evals").mkdir(parents=True)
+    _link_or_skip(skill / "evals" / "config.yml", outside, hard=True)
+
+    with pytest.raises(EvalsConfigError, match=r"cannot read config: .*hard-linked"):
+        load_evals_config(skill)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO creation is unavailable on this platform")
+def test_load_evals_config_rejects_fifo_without_blocking(tmp_path):
+    skill = tmp_path / "skill"
+    (skill / "evals").mkdir(parents=True)
+    os.mkfifo(skill / "evals" / "config.yml")
+
+    with pytest.raises(EvalsConfigError, match=r"cannot read config: .*not a regular file"):
+        load_evals_config(skill)
+
+
+def test_load_evals_config_rejects_config_over_the_size_limit(tmp_path):
+    limit = 4 * 1024 * 1024
+    skill = _skill_with_config(tmp_path, "schema_version: 1\n" + "#" * limit)
+
+    with pytest.raises(EvalsConfigError, match=rf"cannot read config: .*exceeds the {limit}-byte limit"):
         load_evals_config(skill)
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import sys
 from itertools import pairwise
@@ -19,9 +20,19 @@ from typing import Any
 
 import yaml
 
+from skillevaluator.quality_config import _yaml_error_detail
 from skillevaluator.tier3.harbor import canonical_agent_name
+from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
+from skillevaluator.utils.structured_data import (
+    StructuredDataLimitError,
+    StructuredDataSyntaxError,
+    _UniqueKeySafeLoader,
+    load_bounded_yaml,
+)
 
 CONFIG_FILENAMES = ("config.yml", "config.yaml")
+# The one size limit for evals/config.yml, also used by the Harbor run's evaluator projection.
+MAX_EVALS_CONFIG_BYTES = 4 * 1024 * 1024
 HARBOR_CUSTOM_DOCKERFILE_MODES = {"preserve", "rebase"}
 HARBOR_BASE_IMAGE_MODES = {"reuse", "rebuild", "disabled"}
 SKILL_WORKSPACE_MODES = {"isolated", "group"}
@@ -128,11 +139,15 @@ class EvalsConfigError(ValueError):
 
 
 def find_evals_config(skill_path: Path) -> Path | None:
-    """Return the first supported evals config file for a skill, if present."""
+    """Return the first supported evals config file for a skill, if present.
+
+    A broken symlink counts as present, so loading rejects it instead of
+    running as if the skill had no config.
+    """
     evals_dir = skill_path / "evals"
     for name in CONFIG_FILENAMES:
         candidate = evals_dir / name
-        if candidate.exists():
+        if os.path.lexists(candidate):
             return candidate
     return None
 
@@ -148,12 +163,7 @@ def load_evals_config(skill_path: Path) -> tuple[dict[str, Any], Path | None]:
     if config_path is None:
         return {}, None
 
-    try:
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    except yaml.YAMLError as e:
-        raise EvalsConfigError(f"{config_path}: invalid YAML: {e}") from e
-    except OSError as e:
-        raise EvalsConfigError(f"{config_path}: cannot read config: {e}") from e
+    raw = _parse_config_text(_read_config_text(config_path), config_path)
 
     if raw is None:
         raise EvalsConfigError(f"{config_path}: config must not be empty")
@@ -163,8 +173,54 @@ def load_evals_config(skill_path: Path) -> tuple[dict[str, Any], Path | None]:
     return _validate_config(raw, config_path), config_path
 
 
+def _read_config_text(config_path: Path) -> str:
+    """Read the config as one bounded, single-link regular UTF-8 file without following links.
+
+    As on the Harbor run, ``evals/`` and the config file must not be links;
+    links in the skill path itself are resolved.
+    """
+    try:
+        evals_dir = config_path.parent.parent.resolve() / config_path.parent.name
+        with SecureRoot(evals_dir) as root:
+            data, _ = root.read_bytes(Path(config_path.name), MAX_EVALS_CONFIG_BYTES)
+    except (OSError, SecurePathError) as e:
+        raise EvalsConfigError(f"{config_path}: cannot read config: {e}") from e
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise EvalsConfigError(f"{config_path}: cannot read config: not valid UTF-8 at byte {e.start}") from e
+
+
+def _parse_config_text(text: str, config_path: Path) -> Any:
+    """Parse one bounded YAML document whose mappings, merge sources included, repeat no key.
+
+    A YAML error never repeats the source line. A marked error, such as a syntax error or
+    a repeated key, gives the line, column and problem; a cyclic merge or limit error names it.
+    """
+    try:
+        try:
+            return load_bounded_yaml(text)
+        except StructuredDataSyntaxError:
+            # The bounded loader reports no position; the same loader gives a line and column.
+            return yaml.load(text, Loader=_UniqueKeySafeLoader)  # nosec B506
+    except StructuredDataLimitError as e:
+        raise EvalsConfigError(f"{config_path}: invalid YAML: {e}") from e
+    except yaml.YAMLError as e:
+        raise EvalsConfigError(f"{config_path}: invalid YAML: {_yaml_error_detail(e)}") from e
+    except (ValueError, IndexError, KeyError, AttributeError, TypeError) as e:
+        # SafeLoader's scalar constructors raise these for values such as ``!!int abc`` or the date ``2026-13-01``.
+        raise EvalsConfigError(f"{config_path}: invalid YAML: cannot parse a value") from e
+
+
+def _unknown_keys(mapping: dict[Any, Any], allowed: set[str], config_path: Path, field: str) -> set[str]:
+    """Return the keys outside ``allowed``; a non-string key such as ``1``, ``yes`` or ``~`` is an error."""
+    if any(not isinstance(key, str) for key in mapping):
+        raise EvalsConfigError(f"{config_path}: {field} keys must be strings")
+    return set(mapping) - allowed
+
+
 def _validate_config(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
-    unknown_top = set(raw) - _TOP_LEVEL_KEYS
+    unknown_top = _unknown_keys(raw, _TOP_LEVEL_KEYS, config_path, "top-level")
     if unknown_top:
         raise EvalsConfigError(f"{config_path}: unknown top-level key(s): {', '.join(sorted(unknown_top))}")
 
@@ -178,7 +234,7 @@ def _validate_config(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
         if not isinstance(harbor_raw, dict):
             raise EvalsConfigError(f"{config_path}: harbor must be a mapping")
 
-        unknown_harbor = set(harbor_raw) - _HARBOR_KEYS
+        unknown_harbor = _unknown_keys(harbor_raw, _HARBOR_KEYS, config_path, "harbor")
         if unknown_harbor:
             raise EvalsConfigError(f"{config_path}: unknown harbor key(s): {', '.join(sorted(unknown_harbor))}")
 
@@ -380,7 +436,7 @@ def _agents(value: Any, config_path: Path) -> dict[str, dict[str, str]]:
                 f"refer to the same agent ({canonical_name}); use only {canonical_name}"
             )
 
-        unknown_agent = set(agent_cfg) - _AGENT_KEYS
+        unknown_agent = _unknown_keys(agent_cfg, _AGENT_KEYS, config_path, f"harbor.agents.{agent_name}")
         if unknown_agent:
             raise EvalsConfigError(
                 f"{config_path}: unknown key(s) under harbor.agents.{agent_name}: {', '.join(sorted(unknown_agent))}"
@@ -688,7 +744,7 @@ def _resources(value: Any, config_path: Path) -> dict[str, int]:
     if not isinstance(value, dict):
         raise EvalsConfigError(f"{config_path}: harbor.resources must be a mapping")
 
-    unknown = set(value) - _RESOURCE_KEYS
+    unknown = _unknown_keys(value, _RESOURCE_KEYS, config_path, "harbor.resources")
     if unknown:
         raise EvalsConfigError(f"{config_path}: unknown key(s) under harbor.resources: {', '.join(sorted(unknown))}")
 
@@ -759,7 +815,7 @@ def _skill_workspace(value: Any, config_path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise EvalsConfigError(f"{config_path}: skill_workspace must be a mapping")
 
-    unknown = set(value) - _SKILL_WORKSPACE_KEYS
+    unknown = _unknown_keys(value, _SKILL_WORKSPACE_KEYS, config_path, "skill_workspace")
     if unknown:
         raise EvalsConfigError(f"{config_path}: unknown skill_workspace key(s): {', '.join(sorted(unknown))}")
 
@@ -779,7 +835,7 @@ def _grading(value: Any, config_path: Path) -> dict[str, str]:
     if not isinstance(value, dict):
         raise EvalsConfigError(f"{config_path}: grading must be a mapping")
 
-    unknown = set(value) - _GRADING_KEYS
+    unknown = _unknown_keys(value, _GRADING_KEYS, config_path, "grading")
     if unknown:
         raise EvalsConfigError(f"{config_path}: unknown grading key(s): {', '.join(sorted(unknown))}")
 

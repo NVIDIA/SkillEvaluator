@@ -532,6 +532,24 @@ reserved.
   section in [Providers & Credentials](/skills/skillevaluator/configuration).
 </Note>
 
+Validation and evaluation load the config file strictly:
+
+- A repeated key is an error, including inside a YAML merge (`<<`) source. A
+  mapping's own keys still override the keys it merges. A cyclic merge is an
+  error.
+- Keys must be strings. An unquoted `1:`, `yes:`, `on:` or `~:` key is
+  rejected with the name of the block that holds it.
+- The file must be a regular UTF-8 file of at most 4 MiB in a real `evals/`
+  directory. A symlink (even a broken one), a hard link, a FIFO or a symlinked
+  `evals/` directory is rejected instead of being followed or skipped.
+- The document may have at most 100 nesting levels, 20,000 nodes, 1,024 alias
+  references, 1,024 entries in any list or mapping, 65,536 characters in any
+  value and 14,000 bits in any integer.
+- A YAML error never includes the text of the line. Most syntax errors, and
+  every repeated key, give the line, column and problem. An error for a cyclic
+  merge or for one of the limits above names it without a position. A value
+  that cannot be parsed, such as `!!int abc`, gives `cannot parse a value`.
+
 ## Fixtures and custom environments
 
 Two optional directories shape the world the agent works in.

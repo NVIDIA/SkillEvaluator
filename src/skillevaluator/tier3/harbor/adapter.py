@@ -101,7 +101,6 @@ _MAIN_CONTAINER_READINESS_HEALTHCHECK = 'HEALTHCHECK --interval=1s --timeout=5s 
 _MAX_REPO_CONTEXT_FILE_BYTES = 10 * 1024 * 1024
 _MAX_REPO_CONTEXT_TOTAL_BYTES = 200 * 1024 * 1024
 _MAX_EVALUATOR_FILE_BYTES = 64 * 1024 * 1024
-_MAX_EVALS_CONFIG_BYTES = 4 * 1024 * 1024
 _MAX_MCP_CONFIG_BYTES = 1024 * 1024
 _EVALUATOR_DATASET_FILENAMES = (
     "evals.json",
@@ -6512,7 +6511,7 @@ def _evaluator_projection_selection(
     import yaml
 
     from skillevaluator.tier3.dataset_utils import normalize_dataset_entries
-    from skillevaluator.tier3.evals_config import CONFIG_FILENAMES
+    from skillevaluator.tier3.evals_config import CONFIG_FILENAMES, MAX_EVALS_CONFIG_BYTES
 
     evals_dir = skill_path / "evals"
     config_path = next(
@@ -6526,7 +6525,7 @@ def _evaluator_projection_selection(
         config_payload = _read_regular_evals_file(
             config_path,
             label="Eval configuration",
-            max_bytes=_MAX_EVALS_CONFIG_BYTES,
+            max_bytes=MAX_EVALS_CONFIG_BYTES,
             allowed_root=evals_dir,
         )
         config_digest = hashlib.sha256(config_payload).hexdigest()

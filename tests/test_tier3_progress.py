@@ -2040,6 +2040,13 @@ def test_changelog_says_a_stream_can_still_send_refused_output_later() -> None:
         "A stream that keeps what the terminal refused, as standard error does, can still send it later, "
         "and a final table sent then can still erase those lines." in entry
     )
+    # A notice line the stream kept goes out when the run ends, in place of
+    # the late one, as the buffered-stream tests above check.
+    assert (
+        "When the terminal takes the writes before that line and refuses only the line itself, a stream that "
+        "keeps what the terminal refused, as standard error does, sends that line when the run ends in place of "
+        "the later one." in entry
+    )
 
 
 def test_live_evaluation_docs_say_a_stream_can_still_send_refused_output_later() -> None:
@@ -2066,6 +2073,14 @@ def test_live_evaluation_docs_say_a_stream_can_still_send_refused_output_later()
     assert (
         "A stream that keeps what the terminal refused, as standard error does, can still send it later, "
         "and a table sent then can still erase those lines." in paragraph
+    )
+    # Standard error keeps a refused notice line and sends it when the run
+    # ends, so the late line does not follow it, except after a failed first
+    # frame.
+    assert (
+        "If the terminal refused only that line, a stream that keeps what the terminal refused, as standard "
+        "error does, sends that line then instead of the later one, although after a failed first frame both "
+        "can appear." in paragraph
     )
 
 

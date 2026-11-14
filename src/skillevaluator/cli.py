@@ -3159,7 +3159,7 @@ def harness_check(
             "headless": headless,
             "harness_versions": dict(_split_harness_version(v) for v in harness_versions),
         }
-        # Names only: a version may be given for any harness, but only the selected profiles get parsed.
+        # A version may be given for any harness by its ``harness:`` name; a profile that won't parse can't fail this.
         known = set(profile_names(harness_profiles))
         if unknown := sorted(set(config["harness_versions"]) - known):
             raise click.BadParameter(

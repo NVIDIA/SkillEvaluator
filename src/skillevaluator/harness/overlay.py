@@ -103,8 +103,20 @@ class HarnessResult:
 
 
 def profile_names(profiles_dir: Path | None = None) -> list[str]:
-    """Names of the profiles in a directory, without parsing any of them."""
-    return [p.stem for p in sorted((profiles_dir or PROFILES_DIR).glob("*.yaml"))]
+    """Harness names of the profiles in a directory (their ``harness:`` field, which versions are keyed by).
+
+    Each file is read on its own, so one that won't parse (or has no ``harness:``) is listed by its file name instead
+    of failing the rest.
+    """
+    names = []
+    for path in sorted((profiles_dir or PROFILES_DIR).glob("*.yaml")):
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            data = None
+        harness = data.get("harness") if isinstance(data, dict) else None
+        names.append(harness if isinstance(harness, str) and harness else path.stem)
+    return names
 
 
 def load_profiles(names: str | list[str] = "all", profiles_dir: Path | None = None) -> list[dict[str, Any]]:

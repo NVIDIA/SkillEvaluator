@@ -1412,3 +1412,204 @@ def test_compact_behavior_conversation_section_layout_permutations(
     for substr in expected_substrings:
         assert substr in shared_out, f"{case_name}: missing {substr!r}"
 
+
+
+# --- Codex apply_patch evidence (issue #236, requirement 7: retain patch contents) ---
+#
+# Codex decodes its file-edit tool to ``action_input = {"input": "<patch text>"}``.
+# The write-evidence helpers read only ``file_path``-style and ``content``-style
+# keys, so every Codex patch contributed nothing to FILE CHANGES and the patch
+# text survived only in COMPACT TOOL HISTORY -- which is budgeted last, so it is
+# the first evidence dropped under exactly the truncation pressure #236 is about.
+
+_SINGLE_FILE_PATCH = "*** Begin Patch\n*** Update File: src/app.py\n@@\n-old\n+new\n*** End Patch"
+_MULTI_FILE_PATCH = (
+    "*** Begin Patch\n"
+    "*** Update File: src/app.py\n@@\n-old\n+new\n"
+    "*** Add File: src/new_mod.py\n+print('hi')\n"
+    "*** Update File: docs/readme.md\n@@\n-a\n+b\n"
+    "*** End Patch"
+)
+_DELETE_PATCH = "*** Begin Patch\n*** Delete File: src/dead.py\n*** End Patch"
+
+
+def _codex_patch_trajectory(patch: str) -> dict:
+    return {
+        "steps": [
+            {"source": "user", "message": "Fix the bug."},
+            {
+                "source": "agent",
+                "message": "Executed apply_patch",
+                "tool_calls": [
+                    {
+                        "tool_call_id": "patch-1",
+                        "function_name": "apply_patch",
+                        "arguments": {"input": patch},
+                    }
+                ],
+                "observation": {"results": [{"source_call_id": "patch-1", "content": "Success."}]},
+            },
+        ]
+    }
+
+
+def _file_changes_section(evidence: str) -> str:
+    return evidence.split("FINAL RESPONSE", 1)[0].split("COMPACT TOOL HISTORY", 1)[0]
+
+
+@pytest.mark.parametrize(
+    ("patch", "expected_paths"),
+    [
+        pytest.param(_SINGLE_FILE_PATCH, ["src/app.py"], id="single_file"),
+        pytest.param(
+            _MULTI_FILE_PATCH,
+            ["src/app.py", "src/new_mod.py", "docs/readme.md"],
+            id="multi_file",
+        ),
+        pytest.param(_DELETE_PATCH, ["src/dead.py"], id="delete"),
+    ],
+)
+def test_codex_apply_patch_input_reaches_file_changes(patch: str, expected_paths: list[str]) -> None:
+    traj = _codex_patch_trajectory(patch)
+
+    assert len(atif_helpers._collect_file_change_evidence(traj)) == 1
+
+    file_changes = _file_changes_section(build_behavior_evidence(traj, "Fix the bug."))
+    assert "FILE CHANGES" in file_changes
+    assert "Agent called: apply_patch" in file_changes
+    # The patch body itself must survive, not just the fact that a patch happened.
+    assert patch in file_changes
+    for path in expected_paths:
+        assert path in file_changes
+
+
+def test_codex_multi_file_patch_names_every_file_not_just_the_first() -> None:
+    """A single-path helper must not let one file stand for a patch that touched three."""
+    path = atif_helpers._tool_file_path({"input": _MULTI_FILE_PATCH})
+
+    assert path == "src/app.py, src/new_mod.py, docs/readme.md"
+
+
+def test_codex_patch_path_list_is_capped_so_it_cannot_crowd_out_the_budget() -> None:
+    body = "".join(f"*** Update File: src/mod_{idx}.py\n@@\n-a\n+b\n" for idx in range(15))
+    path = atif_helpers._tool_file_path({"input": f"*** Begin Patch\n{body}*** End Patch"})
+
+    assert path.startswith("src/mod_0.py, ")
+    assert path.endswith(" (+5 more)")
+    assert "src/mod_9.py" in path
+    assert "src/mod_10.py" not in path
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param({"input": "this is not a patch at all, just some prose"}, id="headerless_text"),
+        pytest.param({"input": "*** Begin Patch\n*** Update File:   \n@@\n-a\n+b\n"}, id="blank_header_path"),
+        pytest.param({"input": ""}, id="empty_string"),
+        pytest.param({"input": "   \n  "}, id="whitespace_only"),
+        pytest.param({"input": None}, id="none"),
+        pytest.param({"input": {"nested": 1}}, id="non_string"),
+        pytest.param({"input": ["*** Begin Patch"]}, id="list"),
+        pytest.param({}, id="absent"),
+    ],
+)
+def test_malformed_patch_input_degrades_without_raising_or_fabricating_a_path(args: dict) -> None:
+    assert atif_helpers._tool_file_path(args) == ""
+    # A body may legitimately be empty here; what must not happen is a crash.
+    assert isinstance(atif_helpers._tool_write_body(args), str)
+
+
+def test_shell_source_passed_as_input_is_not_mistaken_for_a_patch() -> None:
+    """Codex also passes shell source as ``input``; that is not a file change."""
+    args = {"input": "rg -n 'def main' src/ && ls -la"}
+
+    assert atif_helpers._tool_file_path(args) == ""
+    assert atif_helpers._tool_write_body(args) == ""
+
+
+@pytest.mark.parametrize(
+    ("args", "expected_path", "expected_body"),
+    [
+        pytest.param({"file_path": "/w/a.py", "content": "a"}, "/w/a.py", "content:\na", id="file_path_content"),
+        pytest.param({"path": "/w/b.py", "content": "b"}, "/w/b.py", "content:\nb", id="path"),
+        pytest.param({"filename": "/w/c.py", "content": "c"}, "/w/c.py", "content:\nc", id="filename"),
+        pytest.param(
+            {"target_file": "/w/d.py", "new_string": "d"}, "/w/d.py", "new_string:\nd", id="target_file_new_string"
+        ),
+        pytest.param({"patch": "--- a\n+++ b\n"}, "", "patch:\n--- a\n+++ b\n", id="patch_key"),
+        pytest.param({"file_path": "/w/e.py", "code": "e"}, "/w/e.py", "code:\ne", id="code_key"),
+        pytest.param(
+            {"file_path": "/w/f.py", "edits": [{"new_string": "f1"}]},
+            "/w/f.py",
+            "edit 1 new_string:\nf1",
+            id="edits_list",
+        ),
+        # Precedence between the existing path keys is unchanged.
+        pytest.param({"file_path": "/w/g.py", "path": "/w/ignored.py"}, "/w/g.py", "", id="file_path_wins"),
+        # An explicit path still wins over a patch body, so no existing shape shifts.
+        pytest.param(
+            {"file_path": "/w/h.py", "input": _SINGLE_FILE_PATCH},
+            "/w/h.py",
+            f"input:\n{_SINGLE_FILE_PATCH}",
+            id="explicit_path_wins_over_patch",
+        ),
+    ],
+)
+def test_existing_write_argument_shapes_are_unchanged(args: dict, expected_path: str, expected_body: str) -> None:
+    assert atif_helpers._tool_file_path(args) == expected_path
+    assert atif_helpers._tool_write_body(args) == expected_body
+
+
+def test_harbor_template_retains_codex_patch_contents() -> None:
+    module = _load_harbor_template_module()
+    traj = _codex_patch_trajectory(_MULTI_FILE_PATCH)
+
+    evidence = module.build_behavior_evidence(traj, "Fix the bug.")
+
+    assert module._tool_file_path({"input": _MULTI_FILE_PATCH}) == atif_helpers._tool_file_path(
+        {"input": _MULTI_FILE_PATCH}
+    )
+    assert evidence == build_behavior_evidence(traj, "Fix the bug.")
+    assert _MULTI_FILE_PATCH in _file_changes_section(evidence)
+
+
+def test_codex_patch_survives_the_truncation_pressure_issue_236_is_about() -> None:
+    """FILE CHANGES is budgeted first, the compact tool history last.
+
+    While the patch reached the judge only through the tool history, a long run
+    on a tight budget dropped it entirely -- the exact case #236 raises.
+    """
+    patch = (
+        "*** Begin Patch\n*** Update File: src/payments/refund.py\n@@\n"
+        "-    return None\n+    return Refund(amount=amount, currency=currency)\n*** End Patch"
+    )
+    steps: list[dict] = [{"source": "user", "message": "Implement the refund path."}]
+    for idx in range(30):
+        call_id = f"read-{idx}"
+        steps.append(
+            {
+                "source": "agent",
+                "message": f"Executed Read {call_id}",
+                "tool_calls": [
+                    {"tool_call_id": call_id, "function_name": "Read", "arguments": {"file_path": f"/w/f{idx}.py"}}
+                ],
+                "observation": {"results": [{"source_call_id": call_id, "content": "noise " * 200}]},
+            }
+        )
+    steps.append(
+        {
+            "source": "agent",
+            "message": "Executed apply_patch",
+            "tool_calls": [
+                {"tool_call_id": "patch-1", "function_name": "apply_patch", "arguments": {"input": patch}}
+            ],
+            "observation": {"results": [{"source_call_id": "patch-1", "content": "Success."}]},
+        }
+    )
+    steps.append({"source": "agent", "message": "I implemented the refund path. " + ("Detail. " * 500)})
+
+    evidence = build_behavior_evidence({"steps": steps}, "Implement the refund path.", max_chars=8000)
+
+    assert len(evidence) <= 8000
+    assert "Refund(amount=amount, currency=currency)" in evidence
+    assert "src/payments/refund.py" in _file_changes_section(evidence)

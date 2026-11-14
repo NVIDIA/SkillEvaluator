@@ -30,7 +30,12 @@ def test_release_templates_are_copyable_and_bind_the_actual_caller(tmp_path):
     assert publisher["jobs"]["reports"]["with"]["trusted-caller-blobs"] == blob
     assert publisher["jobs"]["reports"]["with"]["tools-ref"] == "b" * 40
     comments = yaml.load((output / "comment-skill-checks.yml").read_text(), Loader=yaml.BaseLoader)
-    assert comments["permissions"] == {"contents": "read", "actions": "read", "pull-requests": "write"}
+    assert comments["permissions"] == {}
+    assert comments["jobs"]["comment"]["permissions"] == {
+        "contents": "read",
+        "actions": "read",
+        "pull-requests": "write",
+    }
     assert comments["on"]["workflow_run"] == {"workflows": ["Skill checks"], "types": ["completed"]}
     assert set(comments["on"]["workflow_dispatch"]["inputs"]) == {"run-id", "run-attempt"}
     assert all(value["required"] == "true" for value in comments["on"]["workflow_dispatch"]["inputs"].values())

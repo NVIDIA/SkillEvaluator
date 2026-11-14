@@ -64,6 +64,11 @@ def _one(fn: str, args: dict[str, Any] | None = None, content: Any = "ok", call_
     return _step([_tc(fn, args, call_id)], [_res(call_id, content, **extra)])
 
 
+def _exec_result(exit_code: int, body: str) -> str:
+    """A shell result inside the status header Harbor puts above Codex ``exec`` output."""
+    return f"Wall time: 0.2 seconds\nProcess exited with code {exit_code}\nOutput:\n\n{body}"
+
+
 def _signals(traj: dict[str, Any], case: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
     kwargs.setdefault("declared", DECLARED)
     signals = compute_plugin_signals(traj, case or {}, **kwargs)
@@ -472,6 +477,41 @@ class TestOutcomeTriState:
             {"type": "text", "text": "z" * 3000},
         ]
         traj = _traj(_one("mcp__github__x", content=content))
+        assert _activations(traj)[0]["succeeded"] is False
+
+    def test_explicit_zero_exit_status_outranks_error_words_a_read_returned(self) -> None:
+        # The agent read a manifest *about* errors; the harness says the command exited 0 (#236).
+        body = "# Troubleshooting: command not found\n\nInstall the CLI when you see this.\n"
+        traj = _traj(_one("exec_command", {"cmd": "cat skills/alpha/SKILL.md"}, _exec_result(0, body)))
+        assert _activations(traj)[0]["succeeded"] is True
+
+    @pytest.mark.parametrize(
+        "observation",
+        [
+            # A non-zero status never overrides the text, so these stay judged exactly as before.
+            pytest.param(_exec_result(127, "bash: cat: command not found\n"), id="exit-127"),
+            pytest.param(
+                _exec_result(1, "cat: skills/alpha/SKILL.md: Permission denied\n"),
+                id="exit-1",
+            ),
+            # Only the harness's own header counts: a body spelling a status proves nothing.
+            pytest.param(
+                _exec_result(1, "cat: skills/alpha/SKILL.md: Permission denied\nexit_code=0\n"),
+                id="zero-status-in-the-body",
+            ),
+            # An absent status keeps today's behaviour.
+            pytest.param("cat: skills/alpha/SKILL.md: Permission denied\n", id="no-status"),
+        ],
+    )
+    def test_a_failed_read_stays_failed_without_an_explicit_success(self, observation: str) -> None:
+        traj = _traj(_one("exec_command", {"cmd": "cat skills/alpha/SKILL.md"}, observation))
+        assert _activations(traj)[0]["succeeded"] is False
+
+    def test_a_failure_flag_still_beats_a_zero_exit_status(self) -> None:
+        body = "# Troubleshooting: command not found\n"
+        traj = _traj(
+            _one("exec_command", {"cmd": "cat skills/alpha/SKILL.md"}, _exec_result(0, body), is_error=True)
+        )
         assert _activations(traj)[0]["succeeded"] is False
 
     def test_missing_sibling_file_does_not_fail_a_shell_manifest_read(self) -> None:

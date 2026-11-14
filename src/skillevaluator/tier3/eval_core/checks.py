@@ -3620,6 +3620,9 @@ _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE = re.compile(
     + _FINDING_EVIDENCE_WORD_VALUE
 )
 _FINDING_EVIDENCE_WORD_VALUE_RE = re.compile(_FINDING_EVIDENCE_WORD_VALUE)
+# A tuple value read up to its first parenthesis, as it was read before a
+# tuple could hold a call (see _flat_value_end).
+_FINDING_EVIDENCE_FLAT_TUPLE_VALUE_RE = re.compile(r"\([^()\r\n]{0,256}\)?")
 # Inside a quoted string a value that does not open its own quote runs to the
 # string's closing quote ('password: correct horse battery staple'), or to the
 # closing escaped quote when the string itself is JSON-escaped. It also ends at
@@ -3920,7 +3923,8 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
     # name whose value was masked last (0: that name starts neither).
     sed_end = 0
     # Where the last value read for a name that starts no sed pattern or
-    # replacement ends.
+    # replacement ends, read with no call and no call inside a tuple (see
+    # _flat_value_end).
     plain_end = 0
     for match, name_sed_end in _assignment_name_matches(text):
         name, name_quote, separator = match.group(1, 2, 3)
@@ -3928,7 +3932,8 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
         # pattern or replacement, or the value is that of a name in a sed
         # expression, and the masked text ends inside that expression, or it
         # starts no sed pattern or replacement and no value read for such a
-        # name holds it, as when no sed expression is read (see below).
+        # name holds it, as when no sed expression, call or call inside a
+        # tuple is read (see below).
         overlapped = match.start() < pos
         if (
             (overlapped and pos >= (name_sed_end or sed_end) and (name_sed_end or match.start() < plain_end))
@@ -4009,7 +4014,7 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
         if value is None:
             continue
         if not name_sed_end:
-            plain_end = value.end()
+            plain_end = _flat_value_end(text, value)
         if overlapped:
             # The value of a name in the sed pattern ran over this name, which
             # starts the replacement: in a shell command string a value is one
@@ -4023,7 +4028,9 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
             # parts are read up to 256 characters, and a name that starts no
             # sed pattern or replacement is read as it is when no sed
             # expression is read. So a long masked value is not read again
-            # for each name in it.
+            # for each name in it. A name inside a call or tuple value past
+            # its first word or parenthesis is read again too, so its value
+            # may run past the call's ")" ("auth=f(u, token='a) b')").
             pos = max(pos, value.end())
             continue
         parts.append(text[pos : value.start()])
@@ -4078,6 +4085,22 @@ def _assignment_value_match(text: str, start: int) -> re.Match[str] | None:
         if word is not None and word.end() >= value.end():
             return word
     return value
+
+
+def _flat_value_end(text: str, value: re.Match[str]) -> int:
+    """Return where *value* ends when a call and a call inside a tuple are not read.
+
+    A call value then ends with its first word ("HTTPBasicAuth(user," in
+    "HTTPBasicAuth(user, password='...')") and a tuple at its first
+    parenthesis, as before those values were read, so each credential name
+    read before past that point is still read.
+    """
+    if value.re is _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE:
+        if value.group("call") is not None:
+            return _FINDING_EVIDENCE_WORD_VALUE_RE.match(text, value.start()).end()
+        if text.startswith("(", value.start()):
+            return _FINDING_EVIDENCE_FLAT_TUPLE_VALUE_RE.match(text, value.start()).end()
+    return value.end()
 
 
 def _scan_quotes(text: str, pos: int, end: int, opening: int | None) -> tuple[int, int | None]:

@@ -60,6 +60,8 @@ _LONG_USERINFO = "Ab1" * 100
 # A passphrase with spaces: masking only its first word would keep the tail.
 _PASSPHRASE_TAIL = "battery " + "staple"
 _PASSPHRASE = "correct horse " + _PASSPHRASE_TAIL
+# A passphrase with a ")" in it, as a quoted call argument may hold.
+_PAREN_PASSPHRASE = "correct) horse " + _PASSPHRASE_TAIL
 # A Hugging Face token body is letters only.
 _HF_LETTERS_TOKEN = "hf_" + "Ab" * 17
 # A password that holds an "@", so a URL's userinfo runs to the last "@".
@@ -1831,6 +1833,30 @@ def test_a_value_spliced_after_the_quote_of_a_long_sed_expression_stays_masked(c
             "requests.post(url, auth=<redacted>)",
             id="tuple-value-with-a-nested-call",
         ),
+        # A credential name in a call or tuple value past its first word or
+        # parenthesis is read again, so its value may run past the call's
+        # first ")" or past where the tuple stops.
+        pytest.param(
+            f"requests.get(u, auth=HTTPBasicAuth(user, password='{_PAREN_PASSPHRASE}'))",
+            "requests.get(u, auth=<redacted>))",
+            id="call-value-before-a-quoted-argument-with-a-parenthesis",
+        ),
+        pytest.param(
+            f'credentials = Credentials(None, token="{_PAREN_PASSPHRASE}")',
+            "credentials = <redacted>)",
+            id="spaced-call-value-before-a-quoted-argument-with-a-parenthesis",
+        ),
+        pytest.param(
+            f'token=init(\nexport PASSWORD="{_PAREN_PASSPHRASE}"\nrm -rf /srv/app',
+            "token=<redacted>\nrm -rf /srv/app",
+            id="unclosed-call-value-before-a-line-with-a-parenthesis",
+        ),
+        pytest.param(f"apikey=(()TOKEN=){_API_TOKEN}", "apikey=<redacted>", id="tuple-value-before-a-glued-word"),
+        pytest.param(
+            f"secret=(f(), x; password=g({_API_TOKEN} && rm -rf /srv/app",
+            "secret=<redacted> && rm -rf /srv/app",
+            id="unclosed-tuple-value-before-an-unclosed-call",
+        ),
         # A word with parentheses in it is still one value.
         pytest.param(
             f"cat > c.yml <<EOF\ndb:\n  password: {_PAREN_PASSWORD}\nEOF",
@@ -2108,16 +2134,27 @@ def test_underscored_flags_and_config_keys_keep_the_assignment_reading(copy: str
         pytest.param(f'./tool --api_key ""pass= {_PASSPHRASE}', id="flag-value-before-a-glued-name"),
         pytest.param(f'npm config set "token" \'secret:\'"{_PASSPHRASE}"', id="quoted-key-value-before-a-stuck-value"),
         pytest.param(f'npm config set -- token ""pass= {_PASSPHRASE}', id="terminator-key-value-before-a-glued-name"),
+        # So does the value of a credential name in a call or tuple value past
+        # its first word or parenthesis.
+        pytest.param(f"auth=f(u, password='{_PAREN_PASSPHRASE}')", id="call-value-before-a-quoted-argument"),
+        pytest.param(
+            f"requests.get(u, auth=HTTPBasicAuth(user, password='{_PAREN_PASSPHRASE}'))",
+            id="nested-call-value-before-a-quoted-argument",
+        ),
+        pytest.param(f'credentials = Credentials(None, token="{_PAREN_PASSPHRASE}")', id="spaced-call-value"),
+        pytest.param(f"apikey=(()TOKEN=){_API_TOKEN}", id="tuple-value-before-a-glued-word"),
+        pytest.param(f"secret=(f(), x; password=g({_API_TOKEN}", id="unclosed-tuple-value"),
     ],
 )
 def test_a_value_next_to_a_newly_read_value_stays_masked(copy: str, command: str) -> None:
-    # The assignment rule masks the passphrase in each of these commands when
-    # the flag, config key or call before it is not read, so reading it must
-    # not leave the passphrase behind.
+    # The assignment rule masks the passphrase or token in each of these
+    # commands when the flag, config key or call before it is not read, so
+    # reading it must not leave either behind.
     result = _security(copy, {"action": "Bash", "action_input": {"command": f"{command} && rm -rf /srv/app"}})
 
     assert [finding["type"] for finding in result["findings"]] == ["destructive_command"]
-    assert _PASSPHRASE_TAIL not in json.dumps(result)
+    for secret in (_PASSPHRASE_TAIL, _API_TOKEN):
+        assert secret not in json.dumps(result)
 
 
 class _CountingPattern:

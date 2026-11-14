@@ -2537,6 +2537,8 @@
         {# ---------- Overview ---------- #}
         <section class="t3-page active" id="tier3-page-overview" role="tabpanel" aria-labelledby="tier3-tab-overview" tabindex="0">
             {% set t3_effect = (tier3.conclusions or []) | selectattr('title', 'equalto', 'Skill effect') | first %}
+            {# Set when the lead itself says that other failures need attention. #}
+            {% set t3_lead_needs_attention = false %}
             <div class="t3-overview-lead">
                 {% if tier3_is_skipped %}
                 <strong>Live evaluation skipped:</strong> {{ tier3_skip_message }}
@@ -2552,6 +2554,7 @@
                 No with-skill arm was run (<code>--skip-with-skill</code>), so no skill lift was measured.
                 {% else %}
                 {% if completed_agent and completed_agent.needs_attention %}
+                {% set t3_lead_needs_attention = true %}
                 <strong>Completed-agent result: {{ completed_agent.verdict | upper }}.</strong>
                 {{ completed_agent.name }} scored {{ "%.2f" | format(completed_agent.score) }}.
                 Other execution failures need attention. This is not a whole-run or publication PASS.
@@ -2564,9 +2567,12 @@
                 {% endif %}
                 {% endif %}
                 {% endif %}
-                {% if completed_agent %}{% for tolerated in completed_agent.baseline_timeouts_tolerated or [] %}
+                {% if tolerated_baselines and not t3_lead_needs_attention %}
+                <span class="tolerated-baseline"><strong>Needs attention:</strong> baseline timeouts were tolerated.</span>
+                {% endif %}
+                {% for tolerated in tolerated_baselines or [] %}
                 <span class="tolerated-baseline">Baseline incomplete for <strong>{{ tolerated.name }}</strong>{% if tolerated.scored_attempts is not none and tolerated.expected_attempts is not none %} ({{ tolerated.scored_attempts }} of {{ tolerated.expected_attempts }} attempts scored){% endif %}: kept by <code>--tolerate-baseline-timeouts</code>, so its baseline and uplift are not reported.</span>
-                {% endfor %}{% endif %}
+                {% endfor %}
             </div>
             {% if tier3_dataset_sufficiency and tier3_dataset_sufficiency.coverage_summary %}
             <p class="t3-dataset-sufficiency{% if tier3_dataset_sufficiency.status == 'provisional' %} warning{% endif %}"

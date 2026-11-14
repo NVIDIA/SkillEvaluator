@@ -28,6 +28,7 @@ from skillevaluator.constants import (
     SIMILARITY_MAX_ENTRIES,
 )
 from skillevaluator.doctor import DEFAULT_PROBE_TIMEOUT_SEC, MAX_PROBE_TIMEOUT_SEC
+from skillevaluator.harness.report import harness_block, harness_note, harness_panel, write_json_block
 from skillevaluator.logging_config import setup_logging
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.quality_config import QualityConfigError, load_quality_config
@@ -254,7 +255,7 @@ _TOP_LEVEL_COMMAND_HELP_GROUPS = (
     ("Repository CI", ("ci",)),
     (
         "Tier 1 · Static and security",
-        ("quality-check", "rubric-eval", "security-scan", "pii-scan", "lint-scripts"),
+        ("quality-check", "rubric-eval", "security-scan", "pii-scan", "lint-scripts", "harness-check"),
     ),
     (
         "Tier 2 · Deduplication",
@@ -1381,6 +1382,10 @@ def _catalog_child_argv_from_ctx(
         argv.extend(["--skip", str(params["skip"])])
     if params.get("previous_version"):
         argv.extend(["--previous-version", str(params["previous_version"])])
+    if params.get("harness"):
+        argv.extend(["--harness", str(params["harness"])])
+    if params.get("harness_profiles"):
+        argv.extend(["--harness-profiles", str(params["harness_profiles"])])
     if params.get("fail_fast"):
         argv.append("--fail-fast")
     if params.get("continue_on_failure"):
@@ -2084,9 +2089,26 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     cls=GroupedOption,
     help_group=_TIER1_GROUP,
     help="Comma-separated subset of Tier 1 checks to run (default: all applicable). "
-    "Choices: schema, version, security, pii, license, code-integrity, unicode, quality, lint; "
+    "Choices: schema, version, security, pii, license, code-integrity, unicode, quality, lint, harness; "
     "opt-in (not run by default): dependency. "
     "quality/lint/version are skill-only and skipped for rules/workflows.",
+)
+@click.option(
+    "--harness",
+    "harness",
+    default=None,
+    cls=GroupedOption,
+    help_group=_RUN_GROUP,
+    help="Harnesses for the advisory harness check (default: all), e.g. --harness codex,claude-code.",
+)
+@click.option(
+    "--harness-profiles",
+    "harness_profiles",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    default=None,
+    cls=GroupedOption,
+    help_group=_RUN_GROUP,
+    help="Directory of harness profile YAMLs to use instead of the packaged ones.",
 )
 @click.option(
     "--skip",
@@ -2522,6 +2544,8 @@ def validate(
     evaluator_container_revision: str | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
+    harness: str | None = None,
+    harness_profiles: Path | None = None,
 ) -> None:
     """Validate a skill through all three tiers, with automatic dataset preparation.
 
@@ -2540,6 +2564,13 @@ def validate(
     skill-only and skipped for plugins.
     """
     _record_validate_json_report(None)
+    if harness:
+        from skillevaluator.harness import load_profiles
+
+        try:
+            load_profiles(harness, harness_profiles)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="--harness") from exc
     if dedup:
         _reject_linked_tier2_root(target_path)
     target_path = target_path.resolve()
@@ -2732,6 +2763,8 @@ def validate(
         fail_fast=fail_fast,
         continue_on_failure=continue_on_failure,
         on_check=_on_check if quiet else None,
+        harness=harness,
+        harness_profiles=harness_profiles,
         skip=skip,
     )
     # The raw pass/fail signal drives --fail-fast identically in both modes;
@@ -2742,6 +2775,9 @@ def validate(
     if quiet:
         apply_policy(results, policy)
     tier1_ok, tier1_rows = summarize_tier1(results, lineup=check_lineup)
+    harness_rows = harness_block(results)
+    if harness_rows:
+        view.set_harness(harness_panel(harness_rows, width=view.width, verbose=verbose), harness_note(harness_rows))
     view.tier_done(0, failed=not tier1_ok, rows=tier1_rows)
     tier1_gate_results = list(results)
     tier2_gate_results: list[ValidationResult] = []
@@ -2983,6 +3019,8 @@ def validate(
         sarif_repository_root=sarif_repository_root,
     )
     _record_validate_json_report(f"{report_basename_value}.json" if "json" in effective_formats else None)
+    if harness_rows and "json" in effective_formats:
+        write_json_block(output_dir / f"{report_basename_value}.json", harness_rows)
 
     # BENCHMARK.md is generated compulsorily for skills (matches SkillEvaluator), even on
     # failure, so the publication card always reflects the latest evaluation --
@@ -3031,6 +3069,8 @@ def validate(
             agent_eval=agent_eval,
             presentation_context=presentation_context,
         )
+    if harness_rows and not quiet:
+        console.print(harness_panel(harness_rows, verbose=True))
     if gate_failed:
         raise click.ClickException("validation failed")
 
@@ -3042,6 +3082,58 @@ validate.help_group_descriptions = {
     _TIER2_GROUP: _TIER2_GROUP_DESC,
     _TIER3_GROUP: _TIER3_GROUP_DESC,
 }
+
+
+@cli.command("harness-check")
+@_target_argument
+@click.option(
+    "--harness",
+    default="all",
+    show_default=True,
+    help="Comma-separated harnesses to check, e.g. codex,claude-code.",
+)
+@click.option(
+    "--harness-profiles",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    default=None,
+    help="Directory of harness profile YAMLs to use instead of the packaged ones.",
+)
+@click.option("-v", "--verbose", is_flag=True, help="List every harness with its verified version and date.")
+@click.option(
+    "--json",
+    "json_path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Also write the harness_compatibility block to this JSON file.",
+)
+def harness_check(
+    target_path: Path,
+    harness: str,
+    harness_profiles: Path | None,
+    verbose: bool,
+    json_path: Path | None,
+) -> None:
+    """Show whether each agent harness loads, degrades or drops a skill (advisory; exits 0)."""
+    from skillevaluator.harness.report import run_harness_check
+    from skillevaluator.reporting.console_ui import make_view_console
+
+    try:
+        block = run_harness_check(target_path, harness, harness_profiles, console=make_view_console(), verbose=verbose)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="--harness") from exc
+    if not block:
+        raise click.ClickException(f"No skills found in {target_path}")
+    from skillevaluator.validators.schema import SchemaValidator
+
+    for skill in block:
+        schema = SchemaValidator().validate(Path(skill))
+        if not schema.passed and schema.errors:
+            click.echo(
+                f"Tier 1 schema also fails for {Path(skill).name}: {schema.errors[0].split(' in /', 1)[0]}. "
+                "Run `skillevaluator validate --tiers 1` for details."
+            )
+    if json_path is not None:
+        json_path.write_text(json.dumps({"harness_compatibility": block}, indent=2), encoding="utf-8")
 
 
 @cli.command("quality-check")

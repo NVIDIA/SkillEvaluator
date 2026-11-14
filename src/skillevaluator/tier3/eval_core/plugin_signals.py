@@ -137,7 +137,13 @@ from typing import Any, NamedTuple
 
 import regex
 
-from skillevaluator.tier3.eval_core.checks import _APPLY_PATCH_COMMAND_RE, _APPLY_PATCH_HEADER_RE, _FILE_READ_VERBS
+from skillevaluator.tier3.eval_core.checks import (
+    _APPLY_PATCH_COMMAND_RE,
+    _APPLY_PATCH_HEADER_RE,
+    _FILE_READ_VERBS,
+    _STR_REPLACE_EDITORS,
+    _is_editor_view,
+)
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     MAPPED_OUTER_EXEC_OBSERVATION,
     normalize_tool_call,
@@ -255,8 +261,8 @@ _PATCH_TOOLS = frozenset({"apply_patch", "applypatch", "patch"})
 # Where harnesses put that body: Codex ``input``, OpenCode ``patchText``, Hermes
 # ``patch``, and ``raw`` or ``value`` for a tool input that was not a JSON object.
 _PATCH_BODY_KEYS = ("input", "patch", "patchText", "content", "raw", "value")
-# Text editor tools: they write, except for their ``view`` command, which reads.
-_STR_REPLACE_EDITORS = frozenset({"str_replace_editor", "str_replace_based_edit_tool"})
+# Text editor tools (_STR_REPLACE_EDITORS) write, except for their ``view``
+# command, which reads (_is_editor_view).
 _WRITE_TOOLS = (
     _PATCH_TOOLS
     | _STR_REPLACE_EDITORS
@@ -2570,11 +2576,6 @@ def _manifest_operands(command: Sequence[str]) -> list[str]:
     if io.verb not in _FILE_READER_VERBS or _sed_in_place(io):
         return []
     return [*io.operands, *io.inputs]
-
-
-def _is_editor_view(fn_base: str, args: Mapping[str, Any]) -> bool:
-    """A text editor tool call running its ``view`` command (a read)."""
-    return fn_base in _STR_REPLACE_EDITORS and str(args.get("command") or "").casefold() == "view"
 
 
 def _member_manifest_match(path: str, members: Sequence[str]) -> str | None:

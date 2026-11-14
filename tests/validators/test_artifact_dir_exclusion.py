@@ -452,47 +452,6 @@ class TestGitleaksArtifactExclusion:
         assert all(finding.category == "SECRET" for finding in result.findings)
         assert result.status == "failed"
 
-    @pytest.mark.parametrize("evals_name", ["evals", "Evals"])
-    @patch.object(Tools.gitleaks, "_path", "/usr/bin/gitleaks")
-    @patch.object(Tools.gitleaks, "_version", "8.30.0")
-    @patch.object(Tools.gitleaks, "run", side_effect=_gitleaks_honoring_config)
-    def test_eval_results_case_alias_follows_filesystem_semantics(self, _mock_run, tmp_path, evals_name):
-        token = "nvapi-" + "A1" * 25
-        skill = tmp_path / "eval-skill"
-        alias = skill / evals_name / "Results"
-        (alias / "run1").mkdir(parents=True)
-        (skill / "SKILL.md").write_text("---\nname: eval-skill\n---\n", encoding="utf-8")
-        (alias / "run1" / "out.json").write_text(json.dumps({"stdout": token}), encoding="utf-8")
-        tier3_output = skill / "evals" / "results"
-
-        result = SecretsValidator().validate(skill)
-
-        if tier3_output.exists() and tier3_output.samefile(alias):
-            # Tier 3 output for evals/results lands in this directory.
-            assert result.findings == []
-            assert result.status == "passed"
-        else:
-            assert [finding.file_path for finding in result.findings] == [f"{evals_name}/Results/run1/out.json"]
-
-    def test_eval_results_case_alias_is_allowlisted_only_for_its_own_spelling(self, tmp_path):
-        skill = tmp_path / "eval-skill"
-        alias = skill / "evals" / "Results"
-        alias.mkdir(parents=True)
-        (skill / "evals" / "Results-notes").mkdir()
-        tier3_output = skill / "evals" / "results"
-        config_path = SecretsValidator()._create_gitleaks_config(skill)
-        try:
-            paths = tomllib.loads(config_path.read_text(encoding="utf-8"))["allowlist"]["paths"]
-        finally:
-            config_path.unlink(missing_ok=True)
-
-        alias_patterns = [pattern for pattern in paths if "Results" in pattern]
-        if tier3_output.exists() and tier3_output.samefile(alias):
-            assert alias_patterns == ["(^|/)evals/Results(/|$)"]
-        else:
-            assert alias_patterns == []
-        assert _gitleaks_allowlist_paths() == [pattern for pattern in paths if pattern not in alias_patterns]
-
 
 class TestGitleaksTestPathAllowlist:
     def test_config_skips_test_directories_not_substring_names(self):

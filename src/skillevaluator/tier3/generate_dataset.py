@@ -440,7 +440,7 @@ def _skill_owns_skill_md(text: str, name: str) -> bool:
     text = evals_spec._normalized_match_text(text)
     name = re.escape(evals_spec._normalized_match_text(name))
     owner = rf"(?:(?<![\w-]){name}(?:\s+skill)?|\binstalled(?:\s+{name})?\s+skill)" if name else r"\binstalled\s+skill"
-    owned = rf"{owner}(?:['\u2019]s)?(?:\s+own)?\s+['\"*_]*skill\.md\b"
+    owned = rf"{owner}(?:['\u2019]s)?(?:\s+own)?\s+['\"*_\[]*skill\.md\b"
     # Start of the generic wording that ends at each SKILL.md; it explains an owner match it covers.
     generic = {match.end(): match.start() for match in _GENERIC_SKILL_MD_RE.finditer(text)}
     owners = re.finditer(owned, text, re.IGNORECASE)

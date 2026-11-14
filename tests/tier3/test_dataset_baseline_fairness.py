@@ -905,6 +905,7 @@ def test_template_prompt_names_a_skill_md_in_the_description_as_the_users_file(d
         "Follows the release-review SKILL.md to check manifests.",
         "Uses the installed skill's SKILL.md to report errors.",
         "Reads the installed release-review skill's SKILL.md and reports errors.",
+        "Reads release-review's [SKILL.md] and reports errors.",
     ],
 )
 def test_template_task_is_generic_when_the_skill_owns_the_skill_md_it_reads(description):

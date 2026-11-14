@@ -652,12 +652,15 @@ All notable changes to SkillEvaluator are documented in this file.
   Fixed entry that starts "The interactive Tier 3 progress view
   (`--progress rich`, or `auto` in a terminal) now keeps one height".
 
-- Template cases from `create-eval-dataset` and the autopilot starter case no
-  longer quote a skill description that names one of the skill's scripts
-  without running it, such as "Checks release manifests with review.py and
-  reports blockers", in the expected output and first assertion. The no-skill
-  baseline does not have the script. The graded text is now the generic
-  outcome; the prompt still quotes the description.
+- Template cases from `create-eval-dataset` no longer quote a skill
+  description that names one of the skill's scripts without running it, such
+  as "Checks release manifests with review.py and reports blockers", in the
+  expected output and the assertion about the outcome. The no-skill baseline
+  does not have the script. The graded text is now the generic outcome; the
+  prompt still quotes the description. The autopilot starter case uses this
+  outcome text when it has no LLM reply, or when it replaces LLM-written
+  graded text that uses the skill; other LLM-written text that names a script
+  is kept.
 - A skill description that reads `SKILL.md` right after the skill's name,
   "the `<name>` skill's" or "the installed skill's", such as "Reads
   release-review's `SKILL.md`" or "Follows the release-review skill's

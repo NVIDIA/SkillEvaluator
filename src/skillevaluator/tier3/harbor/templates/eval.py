@@ -2888,7 +2888,7 @@ def _mask_judge_evidence_text(text):
     """Mask credentials in *text* read as one piece."""
     # Share finding credential semantics without imposing the finding scanner's
     # 2,000-character input budget on the longer judge prompt and reply budgets.
-    redacted = _shared_checks._mask_finding_evidence_credentials(text, preserve_header_format=True)
+    redacted = _shared_checks._mask_finding_evidence_credentials_as_written(text, preserve_header_format=True)
     redacted = _redact_configured_credentials(_redact_evidence_text(redacted))
     for pattern in _SECRET_PATTERNS:
         redacted = pattern.sub("<redacted>", redacted)
@@ -2897,7 +2897,7 @@ def _mask_judge_evidence_text(text):
 
 def _mask_judge_evidence_line(text):
     """Mask credentials in the text between two escapes, which is not trimmed."""
-    redacted = _shared_checks._mask_finding_evidence_credentials(text, preserve_header_format=True)
+    redacted = _shared_checks._mask_finding_evidence_credentials_as_written(text, preserve_header_format=True)
     redacted = redact_secrets_in_log_line(redacted)
     for pattern in _SECRET_PATTERNS:
         redacted = pattern.sub("<redacted>", redacted)

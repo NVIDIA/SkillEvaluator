@@ -1215,13 +1215,18 @@ def test_html_displays_effective_dimension_verdict(
     assert f"| Tier 3 | Live agent evaluation | **{expected_upper}** |" in benchmark
     assert f'data-publication-status="{expected_status}"' in html_output
     assert re.search(rf'tier-card-verdict">\s*{expected_words}\s*</span>', html_output)
-    assert f"Verdict at a glance:</strong>\n                {expected_words}" in html_output
+    assert f"<strong>Live quality: {expected_words}.</strong>" in html_output
     if with_skill_effect:
-        assert f"{expected_words} · {effect_message}" in html_output
+        assert effect_message in html_output
+        assert (
+            effect_message
+            not in html_output.split('id="tier3-page-overview"', 1)[1].split('id="tier3-page-trials"', 1)[0]
+        )
         overview = html_output.split('class="t3-overview-lead"', 1)[1].split("</div>", 1)[0]
         assert "with an overall score of" not in overview
     else:
-        assert f"{expected_words} with an overall score of" in html_output
+        assert 'data-primary-metric="score"' in html_output
+        assert f">{dimension_score:.2f}<" in html_output
     assert json_payload["publication_status"] == expected_status
     assert f"**Verdict:** {expected_upper}" in markdown
 

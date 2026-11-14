@@ -250,10 +250,8 @@ def test_header_shows_one_verdict_and_skill_name_is_the_only_h1() -> None:
     html = _render(_results())
     header = html.split('<header class="main-header">', 1)[1].split("</header>", 1)[0]
 
-    assert re.findall(r'class="header-status-badge verdict-badge (\w+)" data-verdict="(\w+)"', header) == [
-        ("fail", "fail")
-    ]
-    assert "Changes required" in header
+    assert 'class="header-status-badge' not in header
+    assert 'class="hero-command-status verdict-chip fail">Changes required</p>' in html
     assert "Download JSON" in header
     assert re.findall(r"<h1[^>]*>([^<]+)</h1>", html) == ["demo"]
 
@@ -265,10 +263,7 @@ def _gated(results: list[ValidationResult], tier: int, *, blocking: bool = True)
 
 
 def _header_verdict(html: str) -> list[tuple[str, str]]:
-    header = html.split('<header class="main-header">', 1)[1].split("</header>", 1)[0]
-    return re.findall(
-        r'data-verdict="(\w+)">.*?<span class="sr-only">Verdict: </span>([^<]+)</span>', header, re.DOTALL
-    )
+    return re.findall(r'<p class="hero-command-status verdict-chip (\w+)">([^<]+)</p>', html)
 
 
 def _tier_card_verdicts(html: str) -> list[tuple[str, str]]:

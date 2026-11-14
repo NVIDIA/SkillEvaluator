@@ -53,8 +53,7 @@ def test_report_leads_with_skill_effect_and_goal_not_met_fix(tmp_path) -> None:
     [fix] = json.loads((run / "what_to_fix.json").read_text())
     assert fix["kind"] == "goal not met"
     assert (
-        "· per-case result: skill helps (opencode +100 pp). 1 passing with-skill attempt(s) did not meet the goal"
-        in html
+        "per-case result: skill helps (opencode +100 pp). 1 passing with-skill attempt(s) did not meet the goal" in html
     )
     assert "1 issue to fix, most attempts lost first:" in html
     assert '<span class="t3-sug-cat">goal not met</span>' in html

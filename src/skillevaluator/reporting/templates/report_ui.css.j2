@@ -105,3 +105,56 @@ pre { max-width:100%;overflow:auto; } code,td,th,p { overflow-wrap:anywhere; }
 
 /* Each retained baseline warning remains a separate readable notice. */
 .t3-overview-lead .tolerated-baseline { display:block; margin-top:.5rem; }
+
+/* Keep the native hierarchy compact; routine identity lives in Run Details. */
+.main-header { padding:.7rem 0; }
+.main-header .header-title { font-size:1.4rem; }
+.main-header .header-subtitle { font-size:.8rem; }
+.main-header .header-meta { gap:0; }
+.main-header .header-controls { margin:0; }
+.agent-hero .tier-cards { margin-top:1rem; }
+.agent-hero .tier-card { padding:.75rem 1rem; }
+.agent-hero .tier-card-title { font-size:.95rem; }
+.agent-hero .tier-card-stats { font-size:.8rem; }
+.t3-primary-metrics { grid-template-columns:repeat(3,minmax(0,1fr)); }
+.t3-primary-metrics .dashboard-card { padding:1rem; }
+.t3-primary-metrics .dashboard-card-value { margin:.25rem 0; }
+.t3-primary-metrics .t3-coverage-value { font-size:1.15rem; }
+.t3-quality-unavailable { padding:.75rem 1rem;margin:.75rem 0;border-left:3px solid var(--warning-color);background:var(--bg); }
+.t3-method { margin:.75rem 0;color:var(--text-secondary);font-size:.85rem; }
+.t3-method summary,.publication-reasons summary { cursor:pointer; }
+.publication-reasons ul { text-align:left;padding-left:1.25rem; }
+.tab-content .t3-agent-scorecards-row { grid-template-columns:repeat(2,minmax(0,1fr)); }
+#tier3-next-steps-preview { margin:1rem 0; }
+#tier3-next-steps-preview p { margin:.4rem 0; }
+#tier3-next-steps-preview .t3-link-btn { text-decoration:underline; }
+#tier3-secondary-outcomes { margin:1rem 0; }
+@media(max-width:720px) {
+ .main-header .header-content { flex-wrap:nowrap;gap:.5rem;align-items:center; }
+ .main-header .header-title { font-size:1.05rem; }
+ .main-header .header-subtitle-row { display:none; }
+ .main-header .header-controls { gap:.4rem;flex-wrap:nowrap; }
+ .main-header .theme-control { font-size:0;gap:0; }
+ .main-header .theme-control select { font-size:.8rem;max-width:5.5rem;padding:.3rem; }
+ .main-header .export-btn { font-size:.75rem;padding:.35rem .5rem; }
+ .agent-hero { padding:1rem; }
+ .agent-hero .tier-cards { grid-template-columns:repeat(3,minmax(0,1fr));gap:.5rem; }
+ .agent-hero .tier-card { padding:.5rem; }
+ .agent-hero .tier-card-head { flex-wrap:wrap;gap:.2rem; }
+ .agent-hero .tier-card-title { font-size:.8rem;line-height:1.3; }
+ .agent-hero .tier-card-stats,.agent-hero .tier-card-sev { display:none; }
+ .t3-primary-metrics { grid-template-columns:repeat(3,minmax(0,1fr));gap:.5rem; }
+ .t3-primary-metrics .dashboard-card { padding:.65rem; }
+ .t3-primary-metrics .dashboard-card-value { font-size:1.5rem; }
+ .t3-primary-metrics .t3-coverage-value { font-size:1rem; }
+ .t3-primary-metrics .dashboard-card-subtitle { font-size:.75rem; }
+ .tab-content .t3-agent-scorecards-row { grid-template-columns:minmax(0,1fr); }
+ .workspace-heading { margin:1rem 0; }
+}
+.tier2-scope-summary { display:flex;flex-wrap:wrap;gap:.75rem 1.5rem;margin:.75rem 0; }
+.tier2-scope-summary div { display:flex;gap:.4rem; }
+.tier2-scope-summary dt { color:var(--text-secondary); }
+.tier2-scope-summary dd { font-weight:700; }
+.t3-agent-coverage { display:flex;flex-wrap:wrap;gap:.5rem 1.5rem;margin:.75rem 0; }
+.t3-agent-coverage div { display:flex;gap:.4rem; }
+.t3-agent-coverage dt { color:var(--text-secondary); }

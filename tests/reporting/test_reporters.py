@@ -2458,9 +2458,9 @@ class TestHTMLReporter:
 
         output = HTMLReporter(include_timestamp=False).render_all([result])
 
-        assert "No successfully scored agent is available" in output
+        assert "Quality measurements unavailable" in output
         assert "Default agent is the top performer" not in output
-        assert "Best Performing Agent" in output
+        assert 'data-primary-metric="score"' not in output
         assert ">N/A<" in output
         assert "performing well across evaluated dimensions" not in output
 
@@ -2562,7 +2562,7 @@ class TestHTMLReporter:
         ).read_text(encoding="utf-8")
 
         assert ">N/A<" in output
-        assert "No successfully scored agent" in output
+        assert "Quality measurements unavailable" in output
         assert "Missing reward for case-001" in output
         assert "-1.00" not in output
 
@@ -2880,9 +2880,9 @@ class TestSkillSpectorVersionReporting:
 
         # The version must not depend on the timestamped header line.
         html = HTMLReporter(include_timestamp=False, target_path="skills/example").render_all([first, second])
-        tier1_card = html.split("Security &amp; Static Validation", 1)[1].split("</section>", 1)[0]
+        run_details = html.split('id="run-metadata"', 1)[1].split("</details>", 1)[0]
 
-        assert "SkillSpector <strong>v2.12.0</strong>" in tier1_card
+        assert "SkillSpector <strong>v2.12.0</strong>" in run_details
         assert _html_report_data(html)["skillspector_versions"] == ["2.12.0"]
 
     @pytest.mark.parametrize("raw_version", [None, "", "unknown", "v2.12.0", "2.12.0<script>", 212])

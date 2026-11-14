@@ -81,7 +81,7 @@ def test_displayed_absent_tiers_are_navigable_without_fabricated_checks():
 
 def test_targeted_reports_keep_only_their_tier_navigation():
     doc = Document(HTMLReporter(include_timestamp=False).render_all([static_result()]))
-    assert {element["data-report-tier"] for element in doc.elements if "data-report-tier" in element} == {"tier1"}
+    assert {element["data-target-tab"] for element in doc.elements if "data-target-tab" in element} == {"tier1"}
 
 
 def test_evidence_destination_is_outside_hidden_tier_panels():

@@ -259,6 +259,7 @@ def test_reporters_share_one_environment_and_compile_each_template_once(payload,
         "report.html.j2",
         "report_ui.css.j2",
         "report_ui.js.j2",
+        "telemetry.html.j2",
     ]
 
 

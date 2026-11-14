@@ -363,4 +363,4 @@ def test_html_tolerates_malformed_persisted_activation_summary(activation) -> No
     result = _validation_result_from_payload(payload)
     assert result is not None
     html = HTMLReporter(include_timestamp=False).render_all([result])
-    assert "Agent Scorecards" in html
+    assert "Agent comparisons" in html

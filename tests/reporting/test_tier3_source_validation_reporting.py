@@ -328,23 +328,17 @@ def test_compact_tier3_panel_projects_source_errors_to_one_safe_line(tmp_path: P
 
 
 @pytest.mark.parametrize("error_count", [0, 1, 2, 13, 100])
-def test_html_report_shows_source_errors_in_preview_and_full_insights(tmp_path: Path, error_count: int) -> None:
+def test_html_report_links_source_error_scope_and_preserves_full_insights(tmp_path: Path, error_count: int) -> None:
     result = _source_result(tmp_path, _entry_errors(error_count))
     html = HTMLReporter(include_timestamp=False).render_all([result])
     preview = _html_section(html, "tier3-next-steps-preview")
     insights = _html_section(html, "tier3-page-suggestions")
 
-    assert "Open Full Insights</button>" in preview
+    assert 'href="#tier3-page-suggestions">Open Full Insights</a>' in preview
     assert "Create or fix the Tier 3 source" in preview
     assert "Create or fix the Tier 3 source" in insights
-    if error_count == 1:
-        assert f"Source validation error: entry case-1: {_MESSAGE}" in preview
-    elif error_count > 1:
-        assert f"{error_count} source validation errors found. Open Full Insights to review the details." in preview
-        assert "entry case-" not in preview
-    else:
-        assert "Source validation error" not in preview
-        assert "source validation errors found" not in preview
+    assert "entry case-" not in preview
+    assert "Source validation error:" not in preview
 
     if error_count:
         assert f"Source Validation Errors ({error_count})" in insights
@@ -361,7 +355,8 @@ def test_html_report_escapes_source_errors(tmp_path: Path) -> None:
     insights = _html_section(html, "tier3-page-suggestions")
     error_text = escape("entry <b>&: Expected <script>alert(1)</script>.")
 
-    assert f"Source validation error: {error_text}" in preview
+    assert error_text not in preview
+    assert 'href="#tier3-page-suggestions"' in preview
     assert f"<li>{error_text}</li>" in insights
     assert "<script>alert(1)" not in html
 

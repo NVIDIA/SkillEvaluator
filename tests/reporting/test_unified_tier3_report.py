@@ -1027,7 +1027,8 @@ def test_trial_charts_preserve_token_and_step_counter_semantics() -> None:
     html = _render_agent_payload(payload)
     trials_html = _tier3_page(html, "trials", "agents")
 
-    assert 'id="tier3-token-chart"' in trials_html
+    assert 'id="tier3-recorded-token-chart"' in trials_html
+    assert 'id="tier3-token-chart"' not in trials_html
     assert '{ label: "Prompt (total)"' in html
     assert '{ label: "Cached (included in prompt)"' in html
     steps_chart = re.search(r"function stepsByCaseDatasets\(\) \{.*?var chart = (.*?);\n", html, re.DOTALL)
@@ -3138,7 +3139,7 @@ def test_standalone_failed_tier3_report_shows_error_without_score(tmp_path: Path
     html = report.read_text(encoding="utf-8")
 
     assert "No Harbor job result" in html
-    assert "No successfully scored agent is available" in html
+    assert "Quality measurements unavailable" in html
     assert ">N/A<" in html
     assert "Default agent is the top performer" not in html
     assert 'onclick="tier3CopyText(this, "' not in html

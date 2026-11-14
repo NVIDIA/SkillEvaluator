@@ -72,7 +72,7 @@ def test_ci_report_suppresses_retained_payload_embedding():
     assert "onclick=\"tier3DownloadJson('tier3-full'" not in html
 
 
-def test_overview_and_insights_share_native_severity_cards_and_action_checks():
+def test_overview_links_to_full_insights_severity_cards_and_action_checks():
     result = _agent_result()
     payload = result.metadata["agent_eval"]
     payload.update(execution_status="succeeded", verdict="pass", expected_attempts=1, scored_attempts=1)
@@ -93,7 +93,10 @@ def test_overview_and_insights_share_native_severity_cards_and_action_checks():
     html = HTMLReporter(include_timestamp=False).render_all([result])
     overview = html.split('id="tier3-page-overview"', 1)[1].split('id="tier3-page-trials"', 1)[0]
     insights = html.split('id="tier3-page-suggestions"', 1)[1].split('id="tier3-page-provenance"', 1)[0]
-    for section in (overview, insights):
+    assert 'class="t3-sug-card ' not in overview
+    assert "Retained action" in overview
+    assert 'href="#tier3-page-suggestions"' in overview
+    for section in (insights,):
         assert '<span class="t3-pill ok">pass</span>' in section
         assert '<span class="t3-sug-cat">Document</span>' in section
         assert "Check: Repeat the same case" in section
@@ -132,7 +135,10 @@ def test_failed_execution_actions_do_not_repeat_next_steps_or_expand_long_eviden
     ]
     result.add_error("Runner failed")
     html = HTMLReporter(include_timestamp=False).render_all([result])
-    for name, end in (("overview", "trials"), ("suggestions", "provenance")):
+    overview = html.split('id="tier3-page-overview"', 1)[1].split('id="tier3-page-trials"', 1)[0]
+    assert re.sub(r"<[^>]+>", "", overview).count("Restore the runner and repeat the retained cases") == 1
+    assert payload["next_steps"][0]["evidence"] not in overview
+    for name, end in (("suggestions", "provenance"),):
         section = html.split(f'id="tier3-page-{name}"', 1)[1].split(f'id="tier3-page-{end}"', 1)[0]
         assert re.sub(r"<[^>]+>", "", section).count("Restore the runner and repeat the retained cases") == 1
         assert "Next steps for the run:" not in section
@@ -200,7 +206,9 @@ def test_failed_next_steps_keep_distinct_agent_case_and_condition_in_rendered_ca
     original = deepcopy(payload)
     result.add_error("Runner failed")
     html = HTMLReporter(include_timestamp=False).render_all([result])
-    for start, end in (("overview", "trials"), ("suggestions", "provenance")):
+    overview = html.split('id="tier3-page-overview"', 1)[1].split('id="tier3-page-trials"', 1)[0]
+    assert re.sub(r"<[^>]+>", "", overview).count("Restore and rerun") == 1
+    for start, end in (("suggestions", "provenance"),):
         section = html.split(f'id="tier3-page-{start}"', 1)[1].split(f'id="tier3-page-{end}"', 1)[0]
         text = re.sub(r"<[^>]+>", "", section)
         assert text.count("Restore and rerun") == 2

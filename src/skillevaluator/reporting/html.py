@@ -99,6 +99,7 @@ from skillevaluator.reporting.presentation import (
     success_is_not_applicable,
 )
 from skillevaluator.reporting.run_status import Status, result_status, result_tier
+from skillevaluator.reporting.telemetry_view import build_telemetry_view
 from skillevaluator.reporting.tier2_views import tier2_scope_views
 from skillevaluator.reporting.tier3_scope import (
     completed_agent_result,
@@ -3327,6 +3328,7 @@ class HTMLReporter(ReporterBase):
                 "agents": {},
                 "summary": {},
             }
+        tier3_telemetry = build_telemetry_view(tier3_data)
         tier3_preview, tier3_preview_notice = _bounded_tier3_preview(tier3_data)
         insights_view = build_insights_view(tier3_preview or {})
         insights_case_fix_count = len(insights_view.get("recommendations") or [])
@@ -3713,6 +3715,7 @@ class HTMLReporter(ReporterBase):
             tier3_truncation=tier3_truncation,
             tier3_dataset_sufficiency=tier3_dataset_sufficiency,
             tier3_preview_notice=tier3_preview_notice,
+            tier3_telemetry=tier3_telemetry,
             # Measured, not scored. From the full display payload, with its own
             # per-agent cap: the preview walk can blank strings of late keys.
             tier3_token_usage=token_usage_table(

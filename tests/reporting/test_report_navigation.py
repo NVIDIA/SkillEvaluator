@@ -175,23 +175,12 @@ def test_hero_reason_keeps_advisory_results_separate_within_a_mixed_tier(tier, i
     ]
 
 
-def test_nojs_dark_fallback_mirrors_every_hard_coded_dark_override():
-    import re
-    from pathlib import Path
-
-    templates = Path(__file__).resolve().parents[2] / "src/skillevaluator/reporting/templates"
-    report = (templates / "report.html.j2").read_text(encoding="utf-8")
-    styles = (templates / "report_ui.css.j2").read_text(encoding="utf-8")
-    overrides = re.findall(r'^\s*@media screen \{ \[data-theme="dark"\] (.*\}) \}\s*$', report, re.MULTILINE)
-    assert overrides, "expected hard-coded dark overrides in report.html.j2"
-    fallback = next(
-        block
-        for block in re.findall(r"@media screen and \(prefers-color-scheme:dark\)\{(.*)\}$", styles, re.MULTILINE)
-        if not block.startswith(":root:not([data-theme]){")
-    )
-    for rule in overrides:
-        mirrored = ":root:not([data-theme]) " + rule.replace('[data-theme="dark"]', ":root:not([data-theme])")
-        assert mirrored in fallback, rule
+def test_nojs_reports_have_explicit_native_report_theme():
+    static = HTMLReporter(include_timestamp=False).render_all([static_result()])
+    live = HTMLReporter(include_timestamp=False).render_all([agent_result()])
+    assert 'data-default-theme="light" data-theme="light"' in static
+    assert 'data-default-theme="dark" data-theme="dark"' in live
+    assert '[data-theme="dark"]' in live
 
 
 def test_browser_check_fixtures_render_every_target_the_checks_use(tmp_path):

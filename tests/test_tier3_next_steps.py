@@ -205,7 +205,7 @@ def test_html_report_shows_next_steps_under_the_case_fixes(tmp_path: Path) -> No
     html = render_agent_eval_html_report(tmp_path, run, use_llm_judge=False).read_text(encoding="utf-8")
 
     preview = " ".join(
-        html.split('id="tier3-next-steps-preview"', 1)[1].split("</ol>\n            </div>", 1)[0].split()
+        html.split('id="tier3-next-steps-preview"', 1)[1].split('id="tier3-dimension-lift"', 1)[0].split()
     )
     assert preview.index("Nothing to fix in the available case evidence.") < preview.index("Next steps for the run:")
     assert (

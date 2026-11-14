@@ -57,7 +57,8 @@ def test_report_leads_with_skill_effect_and_goal_not_met_fix(tmp_path) -> None:
         in html
     )
     assert "1 issue to fix, most attempts lost first:" in html
-    assert "[goal not met]: passed on the other metrics but scored goal accuracy 0.00: asked for the data." in html
+    assert '<span class="t3-sug-cat">goal not met</span>' in html
+    assert "passed on the other metrics but scored goal accuracy 0.00: asked for the data." in html
     assert "Evidence: opencode/with-skill/trials/case__1/trajectory.json" in html
     assert "FAIL</span> goal not met (goal accuracy 0.00)" in html
 

@@ -1,0 +1,33 @@
+{# Bounded retained evidence shares the report's native disclosure and table styles. #}
+{% macro render_plugin_evidence(evidence, slot) -%}
+{% for section in evidence[slot] %}
+{% if section.first %}
+<section id="plugin-{{ section.owner }}-evidence" aria-label="{{ section.source_label }}">
+  <h3>{{ section.source_label }}: {{ section.name }}</h3>
+  {% if section.owner == 'runtime' %}
+  <p>Evidence status: {{ section.status }}. Execution status: {{ section.execution_status }}.</p>
+  <p>Run: {{ 'unknown' if section.run_id is none else section.run_id }}</p>
+  <p>Advisory observations do not change scores or validation gates.</p>
+  {% else %}
+  <p>Status: {{ section.status }}. Static evidence does not demonstrate runtime loading or behavior.</p>
+  {% endif %}
+  {% if section.truncated %}<p>Report bounds may omit rows or shorten text. Omitted row counts appear with each section. Values shortened before retention cannot be recovered from this snapshot.</p>{% endif %}
+</section>
+{% endif %}
+<details class="t3-details" id="plugin-{{ section.owner }}-{{ section.key }}" open>
+  <summary>{{ section.title }}</summary>
+  <p>Source: {{ section.source_label }} · {{ section.name }}</p>
+  {% for note in section.notes %}{% if note is not none %}<p>{{ note }}</p>{% endif %}{% endfor %}
+  {% if section.rows %}
+  <div class="table-scroll" tabindex="0" role="region" aria-label="{{ section.title }}">
+    <table class="contributor-table plugin-{{ section.owner }}-table">
+      <thead><tr>{% for column in section.columns %}<th scope="col">{{ column }}</th>{% endfor %}</tr></thead>
+      <tbody>{% for row in section.rows %}<tr>{% for cell in row %}<td>{{ 'unknown' if cell is none else cell }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+    </table>
+  </div>
+  {% endif %}
+  {% if section.omitted %}<p>{{ section.omitted }} more rows omitted ({{ section.total }} total).</p>{% endif %}
+  {% if section.text_shortened %}<p>Some text was shortened for display. The export preserves the retained snapshot; values shortened before retention cannot be recovered.</p>{% endif %}
+</details>
+{% endfor %}
+{%- endmacro %}

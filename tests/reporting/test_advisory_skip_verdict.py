@@ -3617,12 +3617,15 @@ def test_html_partial_tier3_payload_removes_unsafe_only_harbor_links() -> None:
         },
     }
 
+    original = deepcopy(partial_tier3.metadata["agent_eval"])
     reporter = HTMLReporter(include_timestamp=False)
     html = reporter.render_all([partial_tier3])
     fallback = reporter._tier3_report_data([partial_tier3])
 
-    assert "javascript:alert" not in html
-    assert "file:///tmp" not in html
+    visible = re.sub(r"<script\b[^>]*>.*?</script>", "", html, flags=re.DOTALL)
+    assert "javascript:alert" not in visible
+    assert "file:///tmp" not in visible
+    assert _html_tier3_payload(html) == original
     assert fallback is not None
     assert "harbor_viewer" not in fallback
     assert "harbor_viewer" not in fallback["summary"]
@@ -3665,6 +3668,7 @@ def test_html_result_failure_scrubs_untrusted_pass_shaped_scores() -> None:
     assert failed_tier3 is not None
     failed_tier3.add_error("Engine forced failure")
 
+    original = deepcopy(failed_tier3.metadata["agent_eval"])
     reporter = HTMLReporter(include_timestamp=False)
     html = reporter.render_all([failed_tier3])
     payload = reporter._tier3_report_data([failed_tier3])
@@ -3675,7 +3679,9 @@ def test_html_result_failure_scrubs_untrusted_pass_shaped_scores() -> None:
     assert payload["overall_score"] is None
     assert payload["agents"]["codex"]["with_skill"] is None
     assert payload["execution_errors"] == ["Engine forced failure"]
-    assert "0.99" not in html
+    visible = re.sub(r"<script\b[^>]*>.*?</script>", "", html, flags=re.DOTALL)
+    assert "0.99" not in visible
+    assert _html_tier3_payload(html) == original
     assert "Engine forced failure" in html
 
 

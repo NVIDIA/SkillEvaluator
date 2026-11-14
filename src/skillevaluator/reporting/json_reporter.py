@@ -408,6 +408,9 @@ class JSONReporter(ReporterBase):
             },
         }
 
+        if type(result.metadata.get("optional_skip")) is bool:
+            data["optional_skip"] = result.metadata["optional_skip"]
+
         if result.metadata.get("confirmed_failure") is True:
             data["confirmed_failure"] = True
 

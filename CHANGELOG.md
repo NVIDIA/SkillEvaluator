@@ -255,8 +255,13 @@ All notable changes to SkillEvaluator are documented in this file.
 - Reports & Results said that the HTML report labels a failed Tier 3 run's
   `neutral` verdict **Changes required**. The `tier3` object of a
   `validate --tier3` JSON report keeps `neutral` for a failed run, but the HTML
-  report and the full Tier 3 payload it embeds show the verdict as `fail`,
-  labelled **Changes required**. A `neutral` verdict of a successful run reads
+  reports and the full Tier 3 payload they embed show the verdict as `fail`.
+  The standalone Tier 3 `report.html` and the report of a
+  `validate --block-on-agent-eval` run label it **Changes required**; the
+  report of a default `validate --tier3` run, where Tier 3 is advisory, labels
+  it **Failed (advisory)**. Only a `validate --block-on-agent-eval` run without
+  a valid Tier 3 source, which fails before any agent runs, records `fail` in
+  the `tier3` object too. A `neutral` verdict of a successful run reads
   **Neutral**.
 
 ### Fixed

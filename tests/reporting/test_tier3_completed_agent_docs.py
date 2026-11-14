@@ -16,7 +16,7 @@ from tests.reporting.test_tier3_scoped_reports import result_with_completed_peer
 from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
 from skillevaluator.models import ValidationResult
 from skillevaluator.reporting import BenchmarkReporter, HTMLReporter
-from skillevaluator.reporting.html import VERDICT_WORDS
+from skillevaluator.reporting.html import ADVISORY_FAIL_WORD, VERDICT_WORDS
 from skillevaluator.reporting.json_reporter import JSONReporter
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 
@@ -176,8 +176,16 @@ def test_documented_labels_match_a_run_with_a_failed_peer() -> None:
         "The Tier 3 payload of a `validate --tier3` JSON report, its `tier3` object, keeps `neutral` for a failed run"
     ) in section
     assert report_tier3["verdict"] == report_tier3["summary"]["verdict"] == "neutral"
-    assert f"shows a failed run's verdict as `fail`, labelled {VERDICT_WORDS['fail']}" in section
-    assert "the full Tier 3 payload embedded in the HTML report records `fail` too" in section
+    assert (
+        "the HTML reports show a failed run's verdict as `fail`, even when the completed agent's own dimension "
+        "verdict passes; the full Tier 3 payload embedded in an HTML report records `fail` too."
+    ) in section
+    # The standalone label; test_failed_run_label_follows_the_tier3_gate covers validate's combined report.
+    assert (
+        "The standalone Tier 3 `report.html`, which `tier3 evaluate` and a `validate` run both write, and the report "
+        f"of a `validate --block-on-agent-eval` run label that verdict {VERDICT_WORDS['fail']}, and the command "
+        f"status in the same hero also reads {VERDICT_WORDS['fail']}."
+    ) in section
     assert embedded["verdict"] == "fail"
     assert 'data-verdict="fail"' in raw
     assert (
@@ -443,13 +451,14 @@ def _newer_than_0_9_0(release: str) -> bool:
     return match is not None and tuple(int(part) for part in match.groups()) > (0, 9, 0)
 
 
+FAILED_RUN_ENTRY = "- Reports & Results said that the HTML report labels a failed Tier 3 run's `neutral` verdict"
+
+
 def test_changelog_documents_the_failed_run_verdict_label() -> None:
     # The entry is found by its opening words in any section, so a release that
     # moves Unreleased into a dated section keeps it valid. It must stay out of
     # 0.9.0 and older released sections.
-    release, subsection, entry = _changelog_entry(
-        "- Reports & Results said that the HTML report labels a failed Tier 3 run's `neutral` verdict"
-    )
+    release, subsection, entry = _changelog_entry(FAILED_RUN_ENTRY)
     assert subsection == "### Documentation"
     assert _newer_than_0_9_0(release), release
     result = result_with_completed_peer()
@@ -458,8 +467,96 @@ def test_changelog_documents_the_failed_run_verdict_label() -> None:
     assert report_tier3["execution_status"] == "failed"
     assert report_tier3["verdict"] == "neutral"
     assert _embedded_tier3(raw)["verdict"] == "fail"
+    assert f"Tier 3 quality: {VERDICT_WORDS['fail']}" in _plain(raw)
     assert (
         "The `tier3` object of a `validate --tier3` JSON report keeps `neutral` for a failed run, but the HTML "
-        f"report and the full Tier 3 payload it embeds show the verdict as `fail`, labelled {VERDICT_WORDS['fail']}."
+        "reports and the full Tier 3 payload they embed show the verdict as `fail`. The standalone Tier 3 "
+        f"`report.html` and the report of a `validate --block-on-agent-eval` run label it {VERDICT_WORDS['fail']};"
     ) in entry
     assert f"A `neutral` verdict of a successful run reads {VERDICT_WORDS['neutral']}." in entry
+
+
+def _validate_tier3_reports(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, blocking: bool, tier3: ValidationResult | None
+) -> tuple[int, dict, str]:
+    """Run ``validate --tier3`` after a passing Tier 1; return its exit code, JSON ``tier3`` object and HTML report.
+
+    ``tier3`` stands in for the live run. Without it the skill has no valid Tier 3
+    source, so the run ends before any agent runs.
+    """
+    from click.testing import CliRunner
+
+    from skillevaluator import cli as cli_module
+    from skillevaluator.cli import cli
+    from skillevaluator.evaluation import EvaluationService
+
+    for name in ("FORCE_COLOR", "TTY_COMPATIBLE"):
+        monkeypatch.delenv(name, raising=False)
+    skill = tmp_path / "demo"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: demo\ndescription: test\n---\n", encoding="utf-8")
+    entry = {"id": "case-a", "prompt": "Q", "expected_output": "A"}
+    # A flat entry without a prompt is not a valid Tier 3 source.
+    dataset = {"skill_name": "demo", "evals": [entry]} if tier3 is not None else [{"id": "case-a"}]
+    (skill / "evals" / "evals.json").write_text(json.dumps(dataset), encoding="utf-8")
+    tier1 = ValidationResult(validator_name="SCHEMA")
+    tier1.add_success("schema", "ok")
+    monkeypatch.setattr(cli_module, "run_validation", lambda *_args, **_kwargs: [tier1])
+    if tier3 is not None:
+        monkeypatch.setattr(cli_module, "_run_agent_eval_or_skip", lambda *_args, **_kwargs: tier3)
+    monkeypatch.setattr(EvaluationService, "evaluate", lambda *_args, **_kwargs: pytest.fail("no agent may run"))
+    output = tmp_path / "reports"
+    args = ["validate", "--no-autopilot", str(skill), "--no-tier2", "--tier3", "-r", "json,html", "-o", str(output)]
+
+    command = CliRunner().invoke(cli, [*args, "--block-on-agent-eval"] if blocking else args)
+
+    [report_json] = output.glob("*.json")
+    [report_html] = output.glob("*.html")
+    report_tier3 = json.loads(report_json.read_text(encoding="utf-8"))["tier3"]
+    return command.exit_code, report_tier3, report_html.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("blocking", "label", "command_status"),
+    [(False, ADVISORY_FAIL_WORD, "Passed required checks"), (True, VERDICT_WORDS["fail"], VERDICT_WORDS["fail"])],
+)
+def test_failed_run_label_follows_the_tier3_gate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, blocking: bool, label: str, command_status: str
+) -> None:
+    # A default validate --tier3 run keeps Tier 3 advisory, so its report labels the
+    # failed run Failed (advisory) and the command passes on the required tiers.
+    exit_code, report_tier3, raw = _validate_tier3_reports(
+        monkeypatch, tmp_path, blocking=blocking, tier3=result_with_completed_peer()
+    )
+
+    assert exit_code == (1 if blocking else 0)
+    assert (report_tier3["execution_status"], report_tier3["verdict"]) == ("failed", "neutral")
+    assert _embedded_tier3(raw)["verdict"] == "fail"
+    assert f"Tier 3 quality: {label}" in _plain(raw)
+    assert _hero_command_status(raw) == command_status
+    # The docs and the CHANGELOG name the advisory label beside the blocking one.
+    assert (
+        f"The report of a default `validate --tier3` run, where Tier 3 is advisory, labels it {ADVISORY_FAIL_WORD}, "
+        "and its command status follows the required tiers, so it reads Passed required checks when they pass."
+    ) in _section()
+    assert (
+        f"the report of a default `validate --tier3` run, where Tier 3 is advisory, labels it {ADVISORY_FAIL_WORD}."
+    ) in _changelog_entry(FAILED_RUN_ENTRY)[2]
+
+
+def test_blocking_run_without_a_tier3_source_records_fail_in_both_reports(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The run fails before any agent runs, so its JSON payload does not keep neutral.
+    exit_code, report_tier3, raw = _validate_tier3_reports(monkeypatch, tmp_path, blocking=True, tier3=None)
+
+    assert exit_code == 1
+    assert report_tier3["reason_code"] == "eval_dataset_required"
+    assert (report_tier3["execution_status"], report_tier3["verdict"]) == ("failed", "fail")
+    assert report_tier3["summary"]["verdict"] == "fail"
+    assert _embedded_tier3(raw)["verdict"] == "fail"
+    assert f"Tier 3 quality: {VERDICT_WORDS['fail']}" in _plain(raw)
+    assert (
+        "Only a `validate --block-on-agent-eval` run without a valid Tier 3 source, which fails before any agent "
+        "runs, records `fail` in the `tier3` object too."
+    ) in _changelog_entry(FAILED_RUN_ENTRY)[2]

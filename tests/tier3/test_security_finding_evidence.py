@@ -2086,6 +2086,13 @@ def test_call_sed_underscored_flag_and_config_rules_keep_ordinary_text(text: str
             id="config-set-terminator-key-value-starts-an-assignment",
         ),
         pytest.param(
+            f'subprocess.run(["tool", "--db_password", "passwd:""{_PASSPHRASE}", "--api_key", "{_API_TOKEN}"])'
+            " && rm -rf /srv/app",
+            'subprocess.run(["tool", "--db_password", "passwd:"<redacted>, "--api_key", <redacted>])'
+            " && rm -rf /srv/app",
+            id="argv-underscored-flag-element-holds-a-name",
+        ),
+        pytest.param(
             f"npm config set password = '{_BASIC_PASSWORD}' && rm -rf /srv/app",
             "npm config set password = <redacted> && rm -rf /srv/app",
             id="config-set-spaced-equals",
@@ -2146,6 +2153,10 @@ def test_underscored_flags_and_config_keys_keep_the_assignment_reading(copy: str
         pytest.param(f'./tool --api_key ""pass= {_PASSPHRASE}', id="flag-value-before-a-glued-name"),
         pytest.param(f'npm config set "token" \'secret:\'"{_PASSPHRASE}"', id="quoted-key-value-before-a-stuck-value"),
         pytest.param(f'npm config set -- token ""pass= {_PASSPHRASE}', id="terminator-key-value-before-a-glued-name"),
+        pytest.param(
+            f'subprocess.run(["tool", "--db_password", "passwd:""{_PASSPHRASE}"])',
+            id="argv-element-before-a-stuck-value",
+        ),
         # So does the value of a credential name in a call or tuple value past
         # its first word or parenthesis.
         pytest.param(f"auth=f(u, password='{_PAREN_PASSPHRASE}')", id="call-value-before-a-quoted-argument"),

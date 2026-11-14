@@ -3853,7 +3853,12 @@ def _mask_argv_credentials(text: str) -> str:
         elif flag == "-b":
             masked = "=" in value.group()
         else:
-            masked = _is_credential_flag_name(flag)
+            # The element after a name with "_" that holds a credential name
+            # is left to the assignment rule, as a "_" flag's value on the
+            # command line is.
+            masked = _is_credential_flag_name(flag) and not (
+                "_" in flag and _holds_credential_name(text, value.start(), value.end())
+            )
         if not masked:
             continue
         parts.append(text[pos : value.start()])

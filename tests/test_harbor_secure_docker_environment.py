@@ -2977,6 +2977,83 @@ def test_sidecar_retains_structurally_required_nonsecret_host_compose_value(
 @pytest.mark.parametrize(
     ("required_name", "required_value"),
     [
+        ("HELPER_IMAGE", "python:3.13-slim"),
+        ("CUSTOM_HOST_IP", "127.0.0.1"),
+    ],
+)
+def test_sidecar_retains_compose_value_merely_containing_short_sensitive_host_value(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    required_name: str,
+    required_value: str,
+) -> None:
+    environment = _initialized_secure_docker_environment(tmp_path)
+    (environment.environment_dir / "docker-compose.yaml").write_text(
+        f"services:\n  helper:\n    image: ${{{required_name}:?required}}\n",
+        encoding="utf-8",
+    )
+    # A flag such as ``MY_AUTH=1`` has a sensitive-looking name but a value far
+    # below the exact-secret floor; sharing one character with it proves nothing.
+    monkeypatch.setenv("MY_AUTH", "1")
+    monkeypatch.setenv(required_name, required_value)
+    captured_environments: list[dict[str, str]] = []
+
+    async def create_subprocess(*_args: object, **kwargs: object) -> _BufferedComposeProcess:
+        captured_environments.append(dict(kwargs["env"]))
+        return _BufferedComposeProcess(stdout=b"ok")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+
+    result = asyncio.run(environment.service_exec("true", service="helper"))
+
+    assert result.stdout == "ok"
+    assert len(captured_environments) == 1
+    assert captured_environments[0][required_name] == required_value
+    assert "MY_AUTH" not in captured_environments[0]
+
+
+@pytest.mark.parametrize(
+    ("host_value", "required_value"),
+    [
+        # Below the floor: still refused when the Compose value is exactly the host value.
+        ("pin4821", "pin4821"),
+        # At or above the floor: still refused anywhere inside the Compose value.
+        ("8charval", "registry.invalid/helper:8charval"),
+        ("host-only-sensitive-value", "prefix:host-only-sensitive-value:suffix"),
+    ],
+)
+def test_sidecar_rejects_compose_value_carrying_sensitive_host_value(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    host_value: str,
+    required_value: str,
+) -> None:
+    environment = _initialized_secure_docker_environment(tmp_path)
+    (environment.environment_dir / "docker-compose.yaml").write_text(
+        "services:\n  helper:\n    image: ${HELPER_IMAGE:?required}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MY_AUTH", host_value)
+    monkeypatch.setenv("HELPER_IMAGE", required_value)
+    spawned = False
+
+    async def create_subprocess(*_args: object, **_kwargs: object) -> object:
+        nonlocal spawned
+        spawned = True
+        raise AssertionError("sensitive host value must fail before spawn")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+
+    with pytest.raises(RuntimeError, match="requires protected execution state") as caught:
+        asyncio.run(environment.service_exec("true", service="helper"))
+
+    assert host_value not in str(caught.value)
+    assert spawned is False
+
+
+@pytest.mark.parametrize(
+    ("required_name", "required_value"),
+    [
         ("API_TOKEN", "compose-required-api-token-secret"),
         ("SIDECAR_API_KEY", "short7"),
         ("DOCKER_HOST", "tcp://compose-target.invalid:2376"),

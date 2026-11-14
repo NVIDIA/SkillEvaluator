@@ -2300,9 +2300,23 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
                 raise RuntimeError(f"Docker Compose interpolation variable {name!r} requires protected execution state")
             if self._is_compose_client_operational_name(name):
                 raise RuntimeError(f"Docker Compose interpolation variable {name!r} cannot use host client controls")
+            # Host values come from whatever the operator's shell exports, so a
+            # sensitive-looking flag such as SOME_SESSION=1 must not turn every
+            # Compose value containing "1" into protected state. Below the
+            # exact-secret floor they match by equality only, as in
+            # _trusted_compose_client_environment. Sensitive-named values the
+            # task itself declares for main still match as substrings at any
+            # length through _other_main_environment_values.
             if any(
+                value == protected_value
+                or (
+                    len(protected_value) >= _MIN_EXACT_SECRET_LENGTH
+                    and _value_contains_protected_value(value, protected_value)
+                )
+                for protected_value in protected_values
+            ) or any(
                 _value_contains_protected_value(value, protected_value)
-                for protected_value in (protected_values | self._other_main_environment_values(name, value))
+                for protected_value in self._other_main_environment_values(name, value)
                 if protected_value
             ):
                 raise RuntimeError(f"Docker Compose interpolation variable {name!r} requires protected execution state")

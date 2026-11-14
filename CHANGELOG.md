@@ -249,6 +249,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 tasks with Compose sidecars no longer fail with `Docker Compose
+  interpolation variable ... requires protected execution state` because the
+  shell exports a short flag with a sensitive-looking name. A host variable such
+  as `XDG_SESSION_ID=3` or `MY_AUTH=1` made the sidecar check refuse every
+  Compose value containing that character, for example `python:3.13-slim` or
+  `127.0.0.1`. Host values shorter than eight characters now match a Compose
+  value only when the two are identical, as the trusted Compose client check
+  already does. Host values of eight characters or more, and sensitive-named
+  values a task declares for its main container, are still refused anywhere
+  inside a Compose value.
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
   of `harness-check` no longer show internal test notes in their messages.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`

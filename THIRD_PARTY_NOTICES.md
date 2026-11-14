@@ -6,10 +6,10 @@ records the exact resolved dependency set used for this release.
 
 | Dependency group | Packages and licenses |
 | --- | --- |
-| Base | Click (BSD-3-Clause), IDNA (BSD-3-Clause), Jinja2 (BSD-3-Clause), Markdown-It-Py (MIT), Packaging (Apache-2.0 or BSD-2-Clause), Pydantic (MIT), PyYAML (MIT), regex (Apache-2.0 AND CNRI-Python), Rich (MIT) |
+| Base | Bandit (Apache-2.0), Click (BSD-3-Clause), IDNA (BSD-3-Clause), Jinja2 (BSD-3-Clause), Markdown-It-Py (MIT), Packaging (Apache-2.0 or BSD-2-Clause), Pydantic (MIT), PyYAML (MIT), regex (Apache-2.0 AND CNRI-Python), Rich (MIT) |
 | LLM | Anthropic (MIT), Boto3 (Apache-2.0), LiteLLM (MIT), OpenAI (Apache-2.0) |
 | Tier 3 | Harbor (Apache-2.0), MCP (MIT), OAuthLib (BSD-3-Clause), PyJWT (MIT), python-dotenv (BSD-3-Clause) |
-| Security | Bandit (Apache-2.0), pip-audit (Apache-2.0) |
+| Security | pip-audit (Apache-2.0) |
 | Dashboard | Streamlit (Apache-2.0) |
 
 ## Embedded report charts

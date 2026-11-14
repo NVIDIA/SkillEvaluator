@@ -46,7 +46,10 @@ same demonstration, run the command above; `quality.txt` and `regressed.txt`
 retain the terminal output, and `receipt.json` records the version and time.
 Expected scalar values live in
 [`examples/starter/expected.json`](https://github.com/NVIDIA/SkillEvaluator/blob/main/examples/starter/expected.json);
-they are checked against new results, not substituted for them. Historical
+they are checked against new results, not substituted for them. The scores
+in this guide are from the pinned 0.8.0 release. The current source can score
+the same skill differently, so a run with your checkout's own evaluator is
+checked against the `checkout` scores in that file instead. Historical
 benchmark scores are not evidence for this run.
 
 ## Interpret the reports

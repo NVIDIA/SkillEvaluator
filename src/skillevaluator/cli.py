@@ -1953,7 +1953,12 @@ def _finish_pipeline_view(
     from skillevaluator.reporting.console_ui import MUTED, Verdict, _is_skipped, first_fix
     from skillevaluator.reporting.harbor_viewer import harbor_job_links
     from skillevaluator.reporting.presentation import build_final_render_context
-    from skillevaluator.reporting.run_status import Status
+    from skillevaluator.reporting.run_status import Status, result_status
+
+    def did_not_run(result: ValidationResult) -> bool:
+        # A confirmed failure, such as a blocking finding or the hook gate,
+        # outranks an incomplete scan in the same result, as in the reports.
+        return result.is_incomplete and result_status(result) is not Status.FAILED
 
     context = presentation_context or build_final_render_context(
         [
@@ -1993,7 +1998,7 @@ def _finish_pipeline_view(
     if len(failed) == 1:
         only = failed[0]
         tier_no = (only.metadata.get("gating") or {}).get("tier")
-        state = "didn't run" if only.is_incomplete else "failed"
+        state = "didn't run" if did_not_run(only) else "failed"
         headline = f"{only.validator_name or 'validation'} {state}" + (
             f" in Tier {tier_no}" if tier_no is not None else ""
         )
@@ -2003,7 +2008,7 @@ def _finish_pipeline_view(
             by_tier.setdefault((result.metadata.get("gating") or {}).get("tier"), []).append(result)
         parts = []
         for tier_no, results in by_tier.items():
-            broken = sum(1 for r in results if not r.is_incomplete)
+            broken = sum(1 for r in results if not did_not_run(r))
             counts = [
                 f"{broken} failed" if broken else "",
                 f"{len(results) - broken} didn't run" if broken < len(results) else "",

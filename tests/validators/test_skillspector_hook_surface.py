@@ -790,6 +790,79 @@ class TestFolderScans:
         assert (exported["overall_status"], exported["results"][0]["status"]) == ("failed", "failed")
 
 
+def _compact_verdict(results: list[ValidationResult], tmp_path: Path) -> str:
+    """Render the compact ``validate`` view's final box for these Tier 1 results."""
+    from io import StringIO
+
+    from rich.console import Console
+
+    from skillevaluator.cli import _finish_pipeline_view
+    from skillevaluator.reporting.console_ui import ValidateView
+
+    output = StringIO()
+    view = ValidateView("demo", [(1, "Tier 1", "")], console=Console(file=output, width=200, color_system=None))
+    _finish_pipeline_view(
+        view,
+        tier_gate_results=results,
+        tier3_result=None,
+        gate_failed=True,
+        output_dir=tmp_path,
+        basename="report",
+        report_formats=(),
+        target_path=tmp_path,
+        agent_eval=False,
+    )
+    return output.getvalue()
+
+
+class TestCompactValidateVerdict:
+    @pytest.mark.parametrize("policy", [False, True], ids=["no-policy", "hook-check-info"])
+    @pytest.mark.parametrize("case", ["timeout-parse-limit", "folder-job-missing-reference"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_the_verdict_says_the_check_failed_beside_another_gap(
+        self, mock_tools, tmp_path: Path, case: str, policy: bool
+    ) -> None:
+        """The final box names the hook gate failure as a failed check, not as a scan that did not run.
+
+        The scan is recorded as incomplete, so publication eligibility stays
+        Incomplete, but the check's reported status is FAIL.
+        """
+        if case == "timeout-parse-limit":
+            result = _validate(mock_tools, _timeout_plugin(tmp_path), _report(_TIMEOUT_REPORT))
+        else:
+            folder = tmp_path / "folder"
+            root = _settings_missing_reference_skill(folder)
+            validator = SecurityValidator(use_llm=False, content_type="skill", target_root=folder)
+            result = _validate(mock_tools, root, _report(_settings_missing_reference_report("2.13.4")), validator)
+        if policy:
+            overrides = {"SECURITY.skillspector_hook_payload_unverified": Severity.INFO}
+            apply_policy([result], ValidationPolicy(severity_overrides=overrides))
+        # As validate records a Tier 1 check.
+        result.validator_name = "Security Scan"
+        result.metadata["gating"] = {"tier": 1, "blocking": True}
+        _assert_failed_with_incomplete_scan(result)
+
+        panel = _compact_verdict([result], tmp_path)
+
+        assert "Security Scan failed in Tier 1" in panel
+        assert "didn't run" not in panel
+        assert "Publication eligibility: Incomplete" in panel
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_the_verdict_counts_the_check_as_failed_beside_one_that_did_not_run(
+        self, mock_tools, tmp_path: Path
+    ) -> None:
+        result = _validate(mock_tools, _timeout_plugin(tmp_path), _report(_TIMEOUT_REPORT))
+        result.validator_name = "Security Scan"
+        result.metadata["gating"] = {"tier": 1, "blocking": True}
+        missing = ValidationResult(validator_name="Code Risk", metadata={"gating": {"tier": 1, "blocking": True}})
+        missing.mark_scan_incomplete("bandit")
+
+        panel = _compact_verdict([result, missing], tmp_path)
+
+        assert "Tier 1: 1 failed, 1 didn't run" in panel
+
+
 class TestPartlyReadManifests:
     @pytest.mark.parametrize(
         ("version", "case"),

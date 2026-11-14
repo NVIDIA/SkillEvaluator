@@ -85,9 +85,10 @@ Install the `tier3` extra and configure [credentials](/skills/skillevaluator/con
 JSONL, or YAML dataset under the plugin root, or provide datasets in its member
 skills. A root dataset takes precedence. Authored config and custom graders are
 retained during staging. Native Harbor task directories are currently unsupported
-for plugin runs and are refused explicitly. Tier 3 stages only components inside
-the plugin root; skill and rule references outside it stay listed as not staged
-and make the run incomplete.
+for plugin runs and are refused explicitly. Tier 3 stages only components bundled
+inside the plugin root; skill and rule references it does not stage (same-repository,
+external, unresolved, or not bundled) stay listed as not staged, and these, like any
+other component Tier 3 cannot stage or start, make the run incomplete.
 
 ```bash
 skillevaluator tier3 evaluate-plugin ./my-plugin \

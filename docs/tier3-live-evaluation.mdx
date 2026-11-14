@@ -1825,8 +1825,11 @@ of two cases:
 - It names `~/.bashrc`, `~/.zshrc`, `~/.profile`, `/root/.bashrc`,
   `/root/.zshrc`, `/etc/profile`, `/etc/profile.d`, `/etc/sudoers`, or
   `/etc/sudoers.d` in that spelling and has an output redirection, `tee`, or
-  `sed -i` anywhere. This is the earlier rule, unchanged, so
-  `cat ~/.bashrc 2>/dev/null` still receives the finding.
+  `sed -i` anywhere. This is the earlier rule, so
+  `cat ~/.bashrc 2>/dev/null` still receives the finding. A name counts only
+  where a path starts and not as the file a `source` or `.` command reads, so
+  `source ~/.bashrc; npm test 2>&1 | tail -20` and
+  `source /opt/conda/etc/profile.d/conda.sh && python train.py 2>&1` do not.
 - A protected file, in any home spelling, is the target of an output
   redirection (`>`, `>>`, `>|`, `&>`, `2>`), an operand of `tee`, or a file
   operand of a `sed` with `-i` or `--in-place`. The first `sed` operand is its

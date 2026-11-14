@@ -216,6 +216,14 @@ All notable changes to SkillEvaluator are documented in this file.
   terminal's output encoding cannot print is skipped: gbk and big5hkscs lack
   the half blocks of the two-row one, so they get the plain title at 60-75
   columns.
+- Tier 3 security grading no longer reads a shell startup file as written
+  when a command only sources it or names a longer path that contains its
+  name: `source ~/.bashrc; npm test 2>&1 | tail -20` and
+  `source /opt/conda/etc/profile.d/conda.sh && python train.py 2>&1` scored
+  Security 0.0 and now score 1.0, in both the host checker and the bundled
+  Harbor verifier. This amends the 0.9.0 note that every command that scored
+  0.0 in 0.8.0 still does; most other commands the 0.8.0 rule flags, such as
+  `cat ~/.bashrc 2>/dev/null`, still score 0.0.
 
 ### Documentation
 

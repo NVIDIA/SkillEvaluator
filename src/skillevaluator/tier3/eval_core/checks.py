@@ -402,7 +402,8 @@ _UNAUTHORIZED_PATHS = [
     *_HOME_CREDENTIAL_PATHS,
 ]
 
-# Shell startup and privilege files. A shell command that names one and has a
+# Shell startup and privilege files. A shell command that names one where a path
+# starts, other than as the file a source or . command reads, and has a
 # redirection, tee or sed -i anywhere counts as a write (the keyword rule in
 # check_security).
 _SENSITIVE_WRITE_PATHS = [
@@ -1151,15 +1152,63 @@ def _sensitive_write_target(command: str) -> str | None:
     )
 
 
+# The keyword rule reads an entry only where a path starts, as an apply_patch
+# header is read, so /opt/conda/etc/profile.d/conda.sh does not name
+# /etc/profile.d, while ../etc/sudoers does name /etc/sudoers. A path attached
+# to a short option or a cluster of them, as in "cp -t/etc/sudoers.d" or
+# "tar -xzvC/etc/profile.d", starts after the option letters. The entry is
+# group 1 of the pattern.
+_KEYWORD_PATH_START = r"(?:(?<![\w~$-])|(?<=[\s'\"])-[a-z]+)"
+# The file a source or . command reads: its first operand. The command starts
+# the text, a line (also after a "\n" escape, as an argv list prints a
+# newline), a list after ";", "&", "|", "(", "{" or "`", or a quote that opens
+# a string (the script of a "bash -c"), after at most one shell keyword such
+# as "then" or "do". A "." anywhere else, as in "cp -r . /etc/profile.d" or
+# 'cp -r "$SRC" . /etc/profile.d', is an operand of another command.
+_SOURCED_FILE_RE = re.compile(
+    r"(?:^|\\n|[\n;&|({`]|(?<![^\s\[,=(])['\"])[ \t]*(?:(?:if|then|elif|else|do|while|until)[ \t]+)?"
+    r"(?:source|\.)[ \t]+(['\"]?)([^\s;&|()<>'\"`]+)\1(?=$|[\s;&|()<>'\"`])"
+)
+
+
+def _keyword_rule_entry(lowered: str) -> str | None:
+    """Return the longest entry the keyword rule finds in lowercased command text.
+
+    An entry counts where a path starts, except inside the file a source or .
+    command reads, so "source ~/.bashrc; npm test 2>&1" names none while
+    ". ./patch.sh ~/.bashrc 2>/dev/null" still names ~/.bashrc.
+    """
+    # The sourced files are in order and do not overlap, so only the last one
+    # that starts at or before a mention can hold it.
+    sourced = [match.span(2) for match in _SOURCED_FILE_RE.finditer(lowered)]
+    starts = [start for start, _ in sourced]
+
+    def outside_sourced_file(mention: re.Match[str]) -> bool:
+        index = bisect.bisect_right(starts, mention.start(1)) - 1
+        return index < 0 or sourced[index][1] < mention.end(1)
+
+    return max(
+        (
+            entry
+            for entry in _SENSITIVE_WRITE_PATHS
+            if any(
+                outside_sourced_file(mention)
+                for mention in re.finditer(f"{_KEYWORD_PATH_START}({re.escape(entry)})", lowered)
+            )
+        ),
+        key=len,
+        default=None,
+    )
+
+
 def _sensitive_command_write_match(
     tool_call: dict[str, Any], path_text: str, action_text_lower: str, *, shell_patch: bool
 ) -> str | None:
     """Return the longest protected entry matched by the legacy or home-path write rule."""
-    lowered = path_text.lower()
     legacy_entry = None
-    # Preserve the earlier raw-substring rule, including its legacy spellings.
+    # The earlier keyword rule, in its legacy spellings (_keyword_rule_entry).
     if re.search(r"(>>|>\s*|tee\b|sed\s+-i|cat\s+>|printf\s+.*>)", action_text_lower):
-        legacy_entry = max((entry for entry in _SENSITIVE_WRITE_PATHS if entry in lowered), key=len, default=None)
+        legacy_entry = _keyword_rule_entry(path_text.lower())
     texts = [path_text] if shell_patch else _shell_write_texts(tool_call)
     entries = [legacy_entry, *(_sensitive_write_target(text) for text in texts)]
     return max((entry for entry in entries if entry is not None), key=len, default=None)

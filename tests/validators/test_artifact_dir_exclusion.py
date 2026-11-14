@@ -423,12 +423,14 @@ class TestGitleaksArtifactExclusion:
             ("evals/environment/mcp_servers.toml", False),
             (".evals/evals.json", False),
             ("skills/inner/evals/grader.py", False),
+            ("evals/harbor/case-001/instruction.md", False),
             ("evals/results/run1/out.json", True),
             ("evals/.results/run1/out.json", True),
             (".evals/results/run1/out.json", True),
             ("evals/versions/v1/grader.py", True),
             ("results/run1/out.json", True),
             ("evals/tests/test_grader.py", True),
+            ("evals/harbor/case-001/tests/grader.py", True),
         ],
     )
     def test_authored_eval_files_are_scanned_and_generated_output_is_skipped(self, relative, skipped):

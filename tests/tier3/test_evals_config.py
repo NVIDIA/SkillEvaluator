@@ -7,7 +7,9 @@ import re
 
 import pytest
 import yaml
+from click.testing import CliRunner
 
+from skillevaluator.cli import cli
 from skillevaluator.tier3.dataset_utils import load_dataset_entries_with_format
 from skillevaluator.tier3.evals_config import (
     EvalsConfigError,
@@ -339,6 +341,21 @@ def test_load_evals_config_rejects_broken_config_symlink(tmp_path):
 
     with pytest.raises(EvalsConfigError, match=r"cannot read config: .*symlink"):
         load_evals_config(skill)
+
+
+def test_tier3_validate_reports_broken_config_symlink(tmp_path):
+    skill = tmp_path / "skill"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "evals" / "evals.json").write_text('[{"id": "case-1", "question": "q"}]\n', encoding="utf-8")
+    _link_or_skip(skill / "evals" / "config.yml", tmp_path / "missing.yml")
+
+    result = CliRunner().invoke(cli, ["tier3", "validate", str(skill), "--json"])
+
+    assert result.exit_code == 1, result.output
+    errors = [item for item in json.loads(result.output) if item["status"] == "error"]
+    assert len(errors) == 1
+    assert errors[0]["path"].endswith("config.yml")
+    assert re.search(r"Invalid evals config: .*cannot read config: .*symlink", errors[0]["message"])
 
 
 def test_load_evals_config_rejects_config_in_symlinked_evals_directory(tmp_path):

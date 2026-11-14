@@ -36,6 +36,7 @@ COMPONENTS = {
 }
 # Folders a harness can pick up without any manifest (Claude Code inline plugins).
 DEFAULT_DIRS = ("skills", "commands", "agents", "hooks")
+DECLARED_COMPONENT_KEYS = ("skills", "commands", "agents", "hooks", "mcpServers", "lspServers")
 # What a component outcome means for the plugin's status. Outcomes come from canary probes.
 OUTCOME_EFFECT = {
     "delivered": None,
@@ -71,7 +72,7 @@ def is_plugin_root(path: Path) -> bool:
 
 def plugin_facts(root: Path) -> dict[str, Any]:
     """Facts about a plugin folder: manifest formats, manifest validity, name and component counts."""
-    facts: dict[str, Any] = {"plugin_name": root.name, "manifest_invalid": False}
+    facts: dict[str, Any] = {"plugin_name": root.name, "manifest_invalid": False, "declares_components": False}
     for fmt, rel in MANIFESTS.items():
         path = root / rel
         facts[f"fmt_{fmt}"] = path.is_file()
@@ -85,6 +86,8 @@ def plugin_facts(root: Path) -> dict[str, Any]:
             continue
         if isinstance(data, dict) and isinstance(data.get("name"), str) and data["name"]:
             facts["plugin_name"] = data["name"]
+        if isinstance(data, dict) and any(data.get(key) for key in DECLARED_COMPONENT_KEYS):
+            facts["declares_components"] = True
         if fmt == "root_json":
             facts["fmt_agent_v1"] = isinstance(data, dict) and str(data.get("$schema", "")).startswith(
                 AGENT_PLUGINS_SCHEMA
@@ -95,7 +98,7 @@ def plugin_facts(root: Path) -> dict[str, Any]:
     facts["default_dirs"] = any((root / d).is_dir() for d in DEFAULT_DIRS)
     facts["components"] = {kind: count(root) for kind, count in COMPONENTS.items()}
     skills = list((root / "skills").rglob("SKILL.md")) if (root / "skills").is_dir() else []
-    facts["max_skill_bytes"] = max((f.stat().st_size for f in skills), default=0)
+    facts["max_skill_bytes"] = max((f.stat().st_size for f in skills if f.is_file()), default=0)
     return facts
 
 
@@ -117,7 +120,7 @@ def evaluate_plugin(profile: dict[str, Any], facts: dict[str, Any]) -> HarnessRe
         for kind, outcome in (section.get("components") or {}).items():
             n = facts["components"].get(kind, 0)
             effect = OUTCOME_EFFECT[outcome]
-            if not n or effect is None:
+            if not n or effect is None or any(f["id"].endswith(f"-{kind.upper()}") for f in findings):
                 continue
             prefix = str(profile["rules"][0]["id"]).split("-")[0]
             findings.append(
@@ -129,7 +132,7 @@ def evaluate_plugin(profile: dict[str, Any], facts: dict[str, Any]) -> HarnessRe
                 }
             )
             worst = max(worst, _EFFECT_RANK[effect])
-        if facts.get("any_manifest") and not any(facts["components"].values()):
+        if facts.get("any_manifest") and not facts["declares_components"] and not any(facts["components"].values()):
             prefix = str(profile["rules"][0]["id"]).split("-")[0]
             findings.append(
                 {

@@ -1900,6 +1900,49 @@ def test_call_sed_underscored_flag_and_config_rules_keep_ordinary_text(text: str
             "yarn config set -- GITHUB_TOKEN := <redacted> && rm -rf /srv/app",
             id="config-set-terminator-walrus",
         ),
+        # A "_" flag followed by a separator, and a quoted key or one after
+        # "--" whose value starts with a separator, are read as assignments
+        # too, so the separator is not taken for the value.
+        pytest.param(
+            f"./tool --api_key = {_API_TOKEN} && rm -rf /srv/app",
+            "./tool --api_key = <redacted> && rm -rf /srv/app",
+            id="underscored-flag-spaced-equals",
+        ),
+        pytest.param(
+            f"./tool --api_key : {_API_TOKEN} && rm -rf /srv/app",
+            "./tool --api_key : <redacted> && rm -rf /srv/app",
+            id="underscored-flag-spaced-colon",
+        ),
+        pytest.param(
+            f"./tool -access_token := {_API_TOKEN} && rm -rf /srv/app",
+            "./tool -access_token := <redacted> && rm -rf /srv/app",
+            id="short-underscored-flag-spaced-walrus",
+        ),
+        pytest.param(
+            f'./tool --db_password = "{_PASSPHRASE}" && rm -rf /srv/app',
+            "./tool --db_password = <redacted> && rm -rf /srv/app",
+            id="underscored-flag-spaced-equals-quoted-value",
+        ),
+        pytest.param(
+            f"echo '--client_secret = {_API_TOKEN}' >> cfg && rm -rf /srv/app",
+            "echo '--client_secret = <redacted>' >> cfg && rm -rf /srv/app",
+            id="underscored-flag-spaced-equals-in-a-string",
+        ),
+        pytest.param(
+            f"npm config set -- password ='{_PASSPHRASE}' && rm -rf /srv/app",
+            "npm config set -- password =<redacted> && rm -rf /srv/app",
+            id="config-set-terminator-equals-joined-to-the-value",
+        ),
+        pytest.param(
+            f'npm config set "password" ="{_PASSPHRASE}" && rm -rf /srv/app',
+            'npm config set "password" =<redacted> && rm -rf /srv/app',
+            id="config-set-quoted-key-equals-joined-to-the-value",
+        ),
+        pytest.param(
+            f"yarn config set -- GITHUB_TOKEN :'{_PASSPHRASE}' && rm -rf /srv/app",
+            "yarn config set -- GITHUB_TOKEN :<redacted> && rm -rf /srv/app",
+            id="config-set-terminator-colon-joined-to-the-value",
+        ),
         # A spaced "_" flag value ends at ";" as an assignment's word does, and
         # a config key followed by " = " is read as an assignment in the plain
         # spelling too.
@@ -1923,4 +1966,3 @@ def test_underscored_flags_and_config_keys_keep_the_assignment_reading(copy: str
     ]
     for secret in (_API_TOKEN, _BASIC_PASSWORD, _PASSPHRASE_TAIL):
         assert secret not in json.dumps(result)
-

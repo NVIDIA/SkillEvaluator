@@ -1904,13 +1904,14 @@ saved judge evidence use the same credential masker:
 - the values of long flags whose name holds a credential word, such as
   `--password`, `--token`, `--client-secret`, `--db-password`, or `--cookie`,
   also with `_` between the words (`--db_password`, `--api_key`), and a
-  `curl -b name=value` cookie. A `_` flag joined to its value with `=` is
-  read as an assignment, and an unquoted value after a `_` flag and a space
-  ends at `;`, `|`, or `&`. A flag that takes a file or nothing, such as
-  `--password-stdin`, `--token-file`, or `--cookie-jar`, and token-count flags
-  `--max-tokens` and `--token-limit` (or `--max_tokens`), keep the word after
-  them. A `-b cookies.txt` cookie jar keeps its path too. A shell operator
-  after a flag is no value (`gh auth login --with-token < token.txt`);
+  `curl -b name=value` cookie. A `_` flag joined to its value with `=`, or
+  followed by a separator (`--api_key = ...`), is read as an assignment, and
+  an unquoted value after a `_` flag and a space ends at `;`, `|`, or `&`. A
+  flag that takes a file or nothing, such as `--password-stdin`,
+  `--token-file`, or `--cookie-jar`, and token-count flags `--max-tokens` and
+  `--token-limit` (or `--max_tokens`), keep the word after them. A
+  `-b cookies.txt` cookie jar keeps its path too. A shell operator after a
+  flag is no value (`gh auth login --with-token < token.txt`);
 - a `-u`, `-U`, `--user`, or `--proxy-user` value that holds a colon, such as
   `user:password` or an API key with an empty password (`KEY:`), also attached
   (`-uuser:password`) or at the end of a flag group (`curl -su user:password`);

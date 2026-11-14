@@ -3389,7 +3389,8 @@ _FINDING_EVIDENCE_FLAG_VALUE_RE = re.compile(_FINDING_EVIDENCE_FLAG_VALUE)
 # so its unquoted value also ends at ";", "|" or "&", where the assignment rule
 # ends a word, and a "NAME=VALUE" right after it is still masked
 # ("--api_key K1;TOKEN=..."). A name with "_" joined to its value by "="
-# ("--api_key=VALUE") is left to the assignment rule (see _mask_credential_flags).
+# ("--api_key=VALUE") or followed by a separator ("--api_key = VALUE") is left
+# to the assignment rule (see _mask_credential_flags).
 _FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE_RE = re.compile(
     "(?:" + _FINDING_EVIDENCE_QUOTED_FLAG_VALUE + r"|(?![|&;<>])(?:\\.|[^\s'\"`\\;|&])+)"
 )
@@ -3450,10 +3451,14 @@ _FINDING_EVIDENCE_AWS_CONFIGURE_SET_RE = re.compile(
 # follow a "--" that ends the options. "git config --get" and "--unset" read
 # or remove a key and take no value. A separator word after NAME ("password =
 # VALUE", "token := VALUE") is no value; the assignment rule reads that form.
+# The assignment rule also reads a quoted NAME, or one after "--", whose value
+# starts with a separator ('npm config set -- password ="..."'), as it did
+# before this rule read those NAMEs.
 _FINDING_EVIDENCE_CONFIG_SET_RE = re.compile(
     r"(\b(?:(?:npm|pnpm|yarn)[ \t]+config[ \t]+set|(?:npm|pnpm)[ \t]+set|git[ \t]+config)"
-    r"(?:[ \t]+--?(?!-|get|unset)[\w-]{1,32}(?:=[^\s'\"`]{1,64})?){0,3}(?:[ \t]+--(?=[ \t]))?[ \t]+"
-    r"([\"']?)([^\s'\"`=-][^\s'\"`=]{0,255})\2[ \t]+(?!-|(?::=|=>|[=:])(?!\S)))" + _FINDING_EVIDENCE_FLAG_VALUE
+    r"(?:[ \t]+--?(?!-|get|unset)[\w-]{1,32}(?:=[^\s'\"`]{1,64})?){0,3}(?:[ \t]+(--)(?=[ \t]))?[ \t]+"
+    r"([\"'])?([^\s'\"`=-][^\s'\"`=]{0,255})(?(3)\3)[ \t]+(?!-|(?::=|=>|[=:])(?!\S))(?(2)(?![=:]))(?(3)(?![=:])))"
+    + _FINDING_EVIDENCE_FLAG_VALUE
 )
 _FINDING_EVIDENCE_CONFIG_KEY_SPLIT_RE = re.compile(r"[./:]")
 _FINDING_EVIDENCE_CONFIG_CREDENTIAL_KEY_RE = re.compile(
@@ -3751,9 +3756,10 @@ def _mask_credential_flags(text: str) -> str:
             match.start() < pos
             or not _is_credential_flag_name(match.group(1))
             # A name with "_" joined to its value by "=" ("--api_key=VALUE")
-            # is left to the assignment rule, which read it before and reads
-            # a tuple or call value whole.
-            or ("_" in match.group(1) and match.group().endswith("="))
+            # or followed by a separator ("--api_key = VALUE", "-access_token
+            # := VALUE") is left to the assignment rule, which read it before,
+            # reads a tuple or call value whole and reads past the separator.
+            or ("_" in match.group(1) and (match.group().endswith("=") or text.startswith(("=", ":"), match.end())))
         ):
             continue
         value_re = (
@@ -3833,7 +3839,7 @@ def _mask_attached_argv_values(text: str) -> str:
 
 def _mask_config_set_value(match: re.Match[str]) -> str:
     """Mask the value of a config set command whose key names a credential."""
-    key = _FINDING_EVIDENCE_CONFIG_KEY_SPLIT_RE.split(match.group(3))[-1]
+    key = _FINDING_EVIDENCE_CONFIG_KEY_SPLIT_RE.split(match.group(4))[-1]
     if _FINDING_EVIDENCE_CONFIG_CREDENTIAL_KEY_RE.search(key) is None:
         return match.group()
     return match.group(1) + "<redacted>"

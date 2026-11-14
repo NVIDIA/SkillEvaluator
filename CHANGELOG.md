@@ -273,10 +273,12 @@ All notable changes to SkillEvaluator are documented in this file.
   parentheses in it is still masked whole. `--max_tokens` and `--token_limit`
   keep their numbers, as their `-` spellings do, while other flags that name a
   token, such as `--max_new_tokens`, are masked as their `-` spellings are.
-  A `_` flag joined to its value with `=`, as in `--api_key=...`, is still
-  read as an assignment, and an unquoted value after a `_` flag and a space
-  ends at `;`, `|`, or `&`, as an assignment's value does. Both the host
-  checker and the bundled Harbor verifier apply the fix.
+  A `_` flag joined to its value with `=`, as in `--api_key=...`, or followed
+  by a separator, as in `--api_key = ...`, is still read as an assignment, and
+  so is a quoted key or one after `--` whose value starts with a separator, as
+  in `npm config set -- password ='...'`. An unquoted value after a `_` flag
+  and a space ends at `;`, `|`, or `&`, as an assignment's value does. Both
+  the host checker and the bundled Harbor verifier apply the fix.
 - The behavior evidence gate no longer keeps a score for an expectation that
   names an observed artifact but also asks for something only the final answer
   could show. "Writes `report.py` and explains why each column was dropped" was

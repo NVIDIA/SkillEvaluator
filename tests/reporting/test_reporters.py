@@ -1721,6 +1721,7 @@ class TestSARIFReporter:
     def test_physical_location_uri_encodes_a_lone_surrogate_that_is_not_an_escape(self) -> None:
         assert _normalize_artifact_uri("notes/\ud800.md", None) == "notes/%ED%A0%80.md"
 
+    @pytest.mark.skipif(os.name == "nt", reason="Windows collapses '..' before it follows a symlink")
     def test_physical_location_uri_follows_dot_dot_through_a_symlinked_directory(self, tmp_path: Path) -> None:
         skill = tmp_path / "repo" / "skills" / "demo"
         skill.mkdir(parents=True)

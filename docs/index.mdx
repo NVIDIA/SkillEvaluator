@@ -62,13 +62,13 @@ outputs, and the distinction between rubric scores and observed agent behavior.
 Each tier answers one question about your skill.
 
 <CardGroup cols={3}>
-  <Card title="Tier 1: Validation" href="tier1-validation.mdx">
+  <Card title="Tier 1: Validation" href="/skills/skillevaluator/tier1-validation">
     **Is this skill safe and well-formed?** Deterministic schema, quality, security, PII, license, and script checks that run offline — plus optional LLM-as-judge scoring.
   </Card>
-  <Card title="Tier 2: Deduplication" href="tier2-deduplication.mdx">
+  <Card title="Tier 2: Deduplication" href="/skills/skillevaluator/tier2-deduplication">
     **Does it overlap with what exists?** Embedding similarity finds repeated guidance inside one skill and overlapping skills across a collection or catalog.
   </Card>
-  <Card title="Tier 3: Live Evaluation" href="tier3-live-evaluation.mdx">
+  <Card title="Tier 3: Live Evaluation" href="/skills/skillevaluator/tier3-live-evaluation">
     **Does it actually help the agent?** A real agent runs generated tasks with and without the skill, inside a sandbox, and the difference is measured.
   </Card>
 </CardGroup>
@@ -102,19 +102,19 @@ How to read all three, and the on-disk results contract, live in [Reports & Resu
 ## Explore the docs
 
 <CardGroup cols={2}>
-  <Card title="Quickstart" icon="rocket" href="quickstart.mdx">
+  <Card title="Quickstart" icon="rocket" href="/skills/skillevaluator/quickstart">
     Run a bundled quality check without an LLM, or use NVIDIA Build for a rubric review.
   </Card>
-  <Card title="Evaluate from Your Agent" icon="robot" href="agent-skill.mdx">
+  <Card title="Evaluate from Your Agent" icon="robot" href="/skills/skillevaluator/agent-skill">
     Install the SkillEvaluator skill in Codex, Claude Code, OpenCode, or OpenClaw and evaluate skills by asking.
   </Card>
-  <Card title="Gate Your CI" icon="shield" href="ci-integration.mdx">
+  <Card title="Gate Your CI" icon="shield" href="/skills/skillevaluator/ci-integration">
     Make SkillEvaluator a merge gate — exit codes, a GitHub Actions recipe, and progressive adoption.
   </Card>
-  <Card title="CLI Reference" icon="terminal" href="cli-reference.mdx">
+  <Card title="CLI Reference" icon="terminal" href="/skills/skillevaluator/cli-reference">
     Every command, every flag, exact defaults.
   </Card>
-  <Card title="Contributing" icon="book" href="developer-guide.mdx">
+  <Card title="Contributing" icon="book" href="/skills/skillevaluator/developer-guide">
     Dev environment, tests, docs workflow, and how to submit a change.
   </Card>
 </CardGroup>

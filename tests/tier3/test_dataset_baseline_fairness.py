@@ -955,13 +955,6 @@ def test_docs_say_which_skill_md_in_a_description_becomes_my_skill_md():
     assert "keeps it. `create-eval-dataset`'s LLM prompts ask for outcome checks." in docs
 
 
-def _unreleased_changelog() -> str:
-    text = (_REPO / "CHANGELOG.md").read_text(encoding="utf-8")
-    start = text.index("\n## Unreleased\n")
-    end = text.index("\n## ", start + 1)
-    return text[start:end]
-
-
 def test_docs_say_only_another_place_keeps_a_description_s_skill_md():
     # Saying where SKILL.md is does not keep it: the skill's own place is still
     # renamed. Only another place keeps the bare SKILL.md.
@@ -974,7 +967,6 @@ def test_docs_say_only_another_place_keeps_a_description_s_skill_md():
 
     sources = {
         "docs/eval-datasets.mdx": (_REPO / "docs" / "eval-datasets.mdx").read_text(encoding="utf-8"),
-        "CHANGELOG.md Unreleased": _unreleased_changelog(),
         "_template_task": generate_dataset._template_task.__doc__ or "",
     }
     for where, text in sources.items():
@@ -982,6 +974,24 @@ def test_docs_say_only_another_place_keeps_a_description_s_skill_md():
         rule = text.find("without naming another place for it (such as ")
         assert rule >= 0, where
         assert "in ./pdf-tools" in text[rule : rule + 70], (where, text[rule : rule + 70])
+
+
+def _changelog_section(opening: str) -> str:
+    """The heading of the CHANGELOG section that holds the entry starting with these words."""
+    text = (_REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+    entry = re.search(r"^- " + r"\s+".join(map(re.escape, opening.split())), text, re.MULTILINE)
+    assert entry, opening
+    headings = re.findall(r"^## (.+)$", text[: entry.start()], re.MULTILINE)
+    assert headings, opening
+    return headings[-1].strip()
+
+
+def test_changelog_records_the_my_skill_md_docs_correction_after_0_9_0():
+    # The 0.9.0 entry stays as released, so the correction is a later entry.
+    section = _changelog_section("The eval dataset docs now say that a template prompt calls a `SKILL.md`")
+    release = re.match(r"(\d+)\.(\d+)\.(\d+)\b", section)
+    released_after_0_9_0 = release is not None and tuple(map(int, release.groups())) > (0, 9, 0)
+    assert section == "Unreleased" or released_after_0_9_0, section
 
 
 def test_template_prompt_is_generic_when_the_description_names_the_skill_directory():

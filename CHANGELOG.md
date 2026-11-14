@@ -194,6 +194,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The final box of the compact `validate` view now says that a check with a
+  confirmed failure, such as a blocking finding, failed when one of its
+  scanners did not complete. It said that the check didn't run, beside its own
+  detail line, the Tier 1 card and the reports, which all say it failed. A
+  check that is only incomplete still reads "didn't run".
 - The behavior evidence gate no longer keeps a score for an expectation that
   names an observed artifact but also asks for something only the final answer
   could show. "Writes `report.py` and explains why each column was dropped" was

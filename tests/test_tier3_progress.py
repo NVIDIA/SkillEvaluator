@@ -1797,7 +1797,17 @@ def test_changelog_says_a_stream_can_still_send_refused_output_later() -> None:
         "interactive Tier 3 progress view's table first appears"
     )
     changelog = (Path(__file__).resolve().parents[1] / "CHANGELOG.md").read_text(encoding="utf-8")
-    blocks = [" ".join(block.split()) for block in changelog.split("\n\n")]
+    # Read each bullet with its indented continuation lines, so the entry is
+    # found wherever it sits in its subsection.
+    bullets: list[list[str]] = []
+    for line in changelog.splitlines():
+        if line.startswith("- "):
+            bullets.append([line])
+        elif bullets and line.startswith("  ") and line.strip():
+            bullets[-1].append(line)
+        elif not line.strip() and bullets and bullets[-1]:
+            bullets.append([])
+    blocks = [" ".join(" ".join(bullet).split()) for bullet in bullets if bullet]
     entries = [block for block in blocks if block.startswith(lead)]
 
     assert len(entries) == 1

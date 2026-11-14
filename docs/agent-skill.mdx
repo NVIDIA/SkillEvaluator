@@ -48,7 +48,7 @@ pip install --upgrade skillevaluator          # Tier 1 and 2
 pip install --upgrade "skillevaluator[all]"   # adds Tier 3 live evaluation
 ```
 
-See [Installation](installation.mdx) for extras and Python versions.
+See [Installation](/skills/skillevaluator/installation) for extras and Python versions.
 
 ### Add the skill to your agent
 
@@ -100,7 +100,7 @@ export NVIDIA_API_KEY=...
 ```
 
 OpenAI, Anthropic, and any OpenAI-compatible gateway also work; see
-[Providers & Credentials](configuration.mdx). Keys stay in your environment; the
+[Providers & Credentials](/skills/skillevaluator/configuration). Keys stay in your environment; the
 skill tells the agent never to print or store them.
 
 </Steps>
@@ -161,7 +161,7 @@ since been removed.
   <Accordion title="Tier 3: in a sandbox">
     Docker is the default backend; SkillEvaluator drives Harbor for you. For trusted skills,
     `--env-mode local` runs the agent on the host under Bubblewrap (Linux) or Seatbelt (macOS).
-    See [Agents & Sandboxes](agents-and-sandboxes.mdx).
+    See [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes).
   </Accordion>
   <Accordion title="Incomplete runs">
     If an attempt errors or times out, the run is INCOMPLETE and no final score or lift is

@@ -6,7 +6,7 @@ layout: overview
 
 SkillEvaluator is an open-source, multi-tier framework for evaluating AI agent artifacts, starting with agent skills: deterministic quality gates, semantic overlap detection, synthetic eval dataset generation, and live agent evaluation.
 
-Agent skills are folders of instructions and supporting files that extend AI agents, as defined by the [Agent Skills specification](https://agentskills.io/). SkillEvaluator is part of the [NVIDIA Verified Skills pipeline](https://docs.nvidia.com/skills/), published from the [NVIDIA/skills catalog](https://github.com/NVIDIA/skills). Tier 1 integrates [SkillSpector](https://github.com/NVIDIA/SkillSpector) for specialized security scanning; see [Installation](installation.mdx#system-tools) for the security setup.
+Agent skills are folders of instructions and supporting files that extend AI agents, as defined by the [Agent Skills specification](https://agentskills.io/). SkillEvaluator is part of the [NVIDIA Verified Skills pipeline](https://docs.nvidia.com/skills/), published from the [NVIDIA/skills catalog](https://github.com/NVIDIA/skills). Tier 1 integrates [SkillSpector](https://github.com/NVIDIA/SkillSpector) for specialized security scanning; see [Installation](/skills/skillevaluator/installation#system-tools) for the security setup.
 
 <Note>
   SkillEvaluator's support level is **Experimental**: community-supported on a best-effort basis through [GitHub Issues](https://github.com/NVIDIA/SkillEvaluator/issues), with no SLA. See [SUPPORT.md](https://github.com/NVIDIA/SkillEvaluator/blob/main/SUPPORT.md).
@@ -19,7 +19,7 @@ Agent skills are folders of instructions and supporting files that extend AI age
 Choose a deterministic quality check or an LLM-backed rubric review. Both routes
 use the bundled `text-analyzer` skill, so you can run them before preparing your
 own skill. Neither route needs Docker or an agent runtime. Set up your chosen
-agent and sandbox when you move on to [live Tier 3 evaluation](tier3-live-evaluation.mdx).
+agent and sandbox when you move on to [live Tier 3 evaluation](/skills/skillevaluator/tier3-live-evaluation).
 
 ### Run without an LLM
 
@@ -35,11 +35,11 @@ uv run --python 3.13 skillevaluator quality-check src/skillevaluator/tier3/refer
 Read the score, grade, and findings in the terminal, and open
 `reports/first-quality/skillevaluator-quality.json` for the saved result.
 This checks documentation quality; measuring the skill's effect on an agent
-requires a [live evaluation](tier3-live-evaluation.mdx).
+requires a [live evaluation](/skills/skillevaluator/tier3-live-evaluation).
 
-The [keyless Quickstart](quickstart.mdx#run-without-an-llm) explains the result
+The [keyless Quickstart](/skills/skillevaluator/quickstart#run-without-an-llm) explains the result
 and how to check your own skill. The full static security suite has additional
-[scanner requirements](installation.mdx#system-tools), even though it also
+[scanner requirements](/skills/skillevaluator/installation#system-tools), even though it also
 runs without an LLM or API key.
 
 ### Use NVIDIA Build
@@ -54,7 +54,7 @@ uv run --python 3.13 --extra llm skillevaluator rubric-eval src/skillevaluator/t
 ```
 
 The `llm` extra installs the provider clients for this model call. The
-[NVIDIA Build Quickstart](quickstart.mdx#use-nvidia-build) covers access,
+[NVIDIA Build Quickstart](/skills/skillevaluator/quickstart#use-nvidia-build) covers access,
 outputs, and the distinction between rubric scores and observed agent behavior.
 
 ## The three tiers
@@ -77,9 +77,9 @@ Every tier is an independent entry point — run any command directly; nothing r
 
 | Tier | Representative commands | Requires |
 | --- | --- | --- |
-| [Tier 1](tier1-validation.mdx) | `tier1 PATH`, `quality-check`, `security-scan`, `pii-scan`, `lint-scripts`, `rubric-eval` | No API key for deterministic checks; external Semgrep, SkillSpector, and Gitleaks executables for full scanner coverage; a provider key for LLM checks |
-| [Tier 2](tier2-deduplication.mdx) | `context-optimization-check`, `similarity-check` | An embeddings provider; intra-skill analysis also needs a chat LLM — local OpenAI-compatible endpoints work |
-| [Tier 3](tier3-live-evaluation.mdx) | `create-eval-dataset`, `tier3 evaluate`, `compare` | No credential for keyless templates and report inspection; a provider key for LLM generation and grading; live evaluation also needs the agent CLI with its credential and a Docker, local OS, or cloud sandbox |
+| [Tier 1](/skills/skillevaluator/tier1-validation) | `tier1 PATH`, `quality-check`, `security-scan`, `pii-scan`, `lint-scripts`, `rubric-eval` | No API key for deterministic checks; external Semgrep, SkillSpector, and Gitleaks executables for full scanner coverage; a provider key for LLM checks |
+| [Tier 2](/skills/skillevaluator/tier2-deduplication) | `context-optimization-check`, `similarity-check` | An embeddings provider; intra-skill analysis also needs a chat LLM — local OpenAI-compatible endpoints work |
+| [Tier 3](/skills/skillevaluator/tier3-live-evaluation) | `create-eval-dataset`, `tier3 evaluate`, `compare` | No credential for keyless templates and report inspection; a provider key for LLM generation and grading; live evaluation also needs the agent CLI with its credential and a Docker, local OS, or cloud sandbox |
 
 ## How a run flows
 
@@ -89,7 +89,7 @@ Every tier is an independent entry point — run any command directly; nothing r
 
 `skillevaluator validate ./my-skill` runs all three tiers by default, with
 Tier 3 autopilot reusing an existing evaluation source or creating one starter
-case when none exists. Tier 1's deterministic gates run offline. Tier 2 and the optional Tier 1 LLM checks need a provider key, and Tier 3 adds the agent credential and a sandbox. Every run ends in [reports](reports.mdx) — CLI, JSON, HTML, or Markdown.
+case when none exists. Tier 1's deterministic gates run offline. Tier 2 and the optional Tier 1 LLM checks need a provider key, and Tier 3 adds the agent credential and a sandbox. Every run ends in [reports](/skills/skillevaluator/reports) — CLI, JSON, HTML, or Markdown.
 
 ## What Tier 3 measures
 
@@ -97,7 +97,7 @@ case when none exists. Tier 1's deterministic gates run offline. Tier 2 and the 
 - **Skill Lift** — the measured difference between the with-skill and without-skill runs; the number that says whether the skill earns its place.
 - **pass@k** — multi-attempt reliability, reported separately from the dimension scores.
 
-How to read all three, and the on-disk results contract, live in [Reports & Results](reports.mdx).
+How to read all three, and the on-disk results contract, live in [Reports & Results](/skills/skillevaluator/reports).
 
 ## Explore the docs
 

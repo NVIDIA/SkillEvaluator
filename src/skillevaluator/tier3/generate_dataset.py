@@ -401,8 +401,18 @@ def _template_task(skill: dict[str, Any]) -> tuple[str, str | None]:
 
 
 def _names_skill_script(text: str, scripts: Sequence[str]) -> bool:
-    """Whether text names one of the skill's script files, run or not ("checks manifests with review.py")."""
-    return any(re.search(rf"(?<![\w.-]){re.escape(script)}(?![\w-]|\.\w)", text, re.IGNORECASE) for script in scripts)
+    """Whether text names one of the skill's script files, run or not ("checks manifests with review.py").
+
+    The text and names are also checked as `tier3 validate` normalizes them,
+    so a zero-width or fullwidth spelling of a script name counts too.
+    """
+    texts = {text, evals_spec._normalized_match_text(text)}
+    names = {name for script in scripts for name in (script, evals_spec._normalized_match_text(script))}
+    return any(
+        re.search(rf"(?<![\w.-]){re.escape(name)}(?![\w-]|\.\w)", candidate, re.IGNORECASE)
+        for name in names
+        for candidate in texts
+    )
 
 
 def _outcome_ground_truth(outcome: str | None) -> str:

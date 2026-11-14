@@ -24,6 +24,7 @@ from skillevaluator.tier3.dataset_utils import load_dataset_entries_with_format,
 from skillevaluator.tier3.evals_spec import (
     EVALS_SPEC,
     _baseline_fairness_warnings,
+    _normalized_match_text,
     validate_skillevaluators,
     validate_tier3_source,
 )
@@ -902,7 +903,18 @@ _SCRIPT_NAMING_DESCRIPTIONS = [
     "Checks release manifests with the bundled review.sh script.",
     "A wrapper around review.py for release manifests.",
     "Checks release manifests; review.sh does the parsing.",
+    # Spellings `tier3 validate` normalizes: a zero-width space and fullwidth letters.
+    "Checks release manifests with review\u200b.py.",
+    "Checks release manifests with \uff32\uff25\uff36\uff29\uff25\uff37.py.",
+    # A Markdown link target is still quoted in the graded text.
+    "A wrapper around [the release checker](review.py).",
 ]
+
+
+def _graded_names_a_skill_script(*graded) -> bool:
+    """Whether graded text names review.py or review.sh, as written or as `tier3 validate` normalizes it."""
+    text = json.dumps(graded, ensure_ascii=False)
+    return any(re.search(r"review\.(?:py|sh)", t, re.IGNORECASE) for t in (text, _normalized_match_text(text)))
 
 
 @pytest.mark.parametrize("description", _SCRIPT_NAMING_DESCRIPTIONS)
@@ -915,8 +927,7 @@ def test_template_graded_text_does_not_quote_a_description_that_names_a_skill_sc
 
     assert cases[0]["question"] == f"Use release-review to {description.lower().rstrip('.')}"
     for case in cases:
-        graded = json.dumps([case["ground_truth"], case["expected_behavior"]])
-        assert not re.search(r"review\.(?:py|sh)", graded), graded
+        assert not _graded_names_a_skill_script(case["ground_truth"], case["expected_behavior"]), case
 
 
 @pytest.mark.parametrize(
@@ -1038,8 +1049,7 @@ def test_starter_case_does_not_quote_a_description_that_names_a_skill_script(tmp
     output = generate_dataset.generate_one_case(skill, use_llm=False)
 
     (case,) = json.loads(output.read_text(encoding="utf-8"))["evals"]
-    graded = json.dumps([case["expected_output"], case["assertions"]])
-    assert not re.search(r"review\.(?:py|sh)", graded), graded
+    assert not _graded_names_a_skill_script(case["expected_output"], case["assertions"]), case
 
 
 @pytest.fixture
@@ -1504,7 +1514,7 @@ def test_huge_alias_with_many_unmatched_leaves_finishes_with_a_generous_resource
         ("The agent used the installed skill", []),
         ("The agent used installed skill", []),
         ("The agent ran python3 -I -B -q -u -O review.py", ["review.py"]),
-        ("The agent ran python3 review.py", ["\uff52\uff45\uff56\uff49\uff45\uff57.py"]),
+        ("The agent ran python3 review.py", ["\uff32\uff25\uff36\uff29\uff25\uff37.py"]),
         ("The agent ran python3 review.py", ["revie\u200bw.py"]),
         ("The agent used **release-review**.", []),
         ("The agent used [release-review](reference.md).", []),

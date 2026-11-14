@@ -27,7 +27,7 @@ MANIFESTS = {
 }
 AGENT_PLUGINS_SCHEMA = "https://agent-plugins.org/schemas/"
 COMPONENTS = {
-    "skills": lambda r: len({p.parent for p in (r / "skills").rglob("SKILL.md")}) if (r / "skills").is_dir() else 0,
+    "skills": lambda r: len(_skill_sizes(r)),
     "commands": lambda r: len(list((r / "commands").rglob("*.md"))) if (r / "commands").is_dir() else 0,
     "agents": lambda r: len(list((r / "agents").rglob("*.md"))) if (r / "agents").is_dir() else 0,
     "hooks": lambda r: _json_keys(r / "hooks" / "hooks.json", "hooks") or _json_keys(r / "hooks.json", "hooks"),
@@ -53,6 +53,18 @@ OUTCOME_TEXT = {
     "registered": "{n} {kind}: started or registered, but nothing reached the model in canary runs.",
     "not_observed": "{n} {kind}: not registered or delivered in canary runs.",
 }
+
+
+def _skill_sizes(root: Path) -> dict[Path, int]:
+    """Size of each SKILL.md under skills/ that can be read (not a dangling or looping link, not unreadable)."""
+    sizes: dict[Path, int] = {}
+    for path in (root / "skills").rglob("SKILL.md") if (root / "skills").is_dir() else []:
+        try:
+            with path.open("rb"):
+                sizes[path] = path.stat().st_size
+        except OSError:
+            continue
+    return sizes
 
 
 def _json_keys(path: Path, key: str | None = None) -> int:
@@ -97,8 +109,7 @@ def plugin_facts(root: Path) -> dict[str, Any]:
     facts["any_manifest"] = any(v for k, v in facts.items() if k.startswith("fmt_"))
     facts["default_dirs"] = any((root / d).is_dir() for d in DEFAULT_DIRS)
     facts["components"] = {kind: count(root) for kind, count in COMPONENTS.items()}
-    skills = list((root / "skills").rglob("SKILL.md")) if (root / "skills").is_dir() else []
-    facts["max_skill_bytes"] = max((f.stat().st_size for f in skills if f.is_file()), default=0)
+    facts["max_skill_bytes"] = max(_skill_sizes(root).values(), default=0)
     return facts
 
 

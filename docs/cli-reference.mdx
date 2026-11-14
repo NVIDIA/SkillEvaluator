@@ -456,14 +456,14 @@ skillevaluator harness-check ./my-skill --context-tokens 200000 --headless
 | `--harness-profiles DIRECTORY` | packaged profiles | Directory of harness profile YAMLs to use instead of the packaged ones. |
 | `-v, --verbose` | off | List every harness with its verified version and date. |
 | `--json FILE` | unset | Also write the `harness_compatibility` block to this JSON file. |
-| `--context-tokens INTEGER` | `0` | Context window of your model in tokens, for the loader limits that depend on it. `0` means unknown, so the smallest window is assumed. |
-| `--custom-provider` | off | Your model is served through a custom or OpenAI-compatible provider, or is a model the harness ships no metadata for. |
+| `--context-tokens INTEGER` | `0` | Context window of your model in tokens, for the loader limits that depend on it. `0` means unknown, so the smallest window is assumed, except that with `--custom-provider` OpenClaw assumes 128,000 tokens. A value you pass is always used as given. |
+| `--custom-provider` | off | Your model is served through a custom or OpenAI-compatible provider, or is a model the harness ships no metadata for. With an unknown context window, OpenClaw then assumes 128,000 tokens instead of the smallest. |
 | `--explicit-invocation` | off | Skills are activated by an explicit mention (for example Codex `$skill`), not opened by the model. |
 | `--headless` | off | The harness runs non-interactively (for example `claude -p` in CI) with default permissions. |
 
 Without the four model-setup flags (`--context-tokens`, `--custom-provider`, `--explicit-invocation`, `--headless`), the check assumes an unknown context window, a native provider, model-initiated activation and an interactive session.
 
-This command does not take the standard report options; use `--json` for a file. It is advisory: findings never change the exit code. An unknown `--harness` name is a usage error (`2`), and a path with no skills exits `1`.
+This command does not take the standard report options; use `--json` for a file. It is advisory: findings never change the exit code. An unknown `--harness` name is a usage error (`2`), and a path with no skills and no plugin manifest exits `1`. A plugin folder with a recognized manifest still gets its plugin panel and exits `0`, even when it has no skills.
 
 ## context-optimization-check
 

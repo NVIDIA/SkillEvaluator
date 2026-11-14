@@ -129,14 +129,37 @@ def build_plugin_evidence(static: object = None, runtime: object = None) -> dict
 
     The six tab values contain independent display sections. ``static`` and
     ``runtime`` contain canonical snapshots for the existing HTML export
-    envelope; they are never annotated or shortened for presentation.
+    envelope; they are never annotated or shortened for presentation. Footer
+    ``metadata`` contains independent sanitized values even without sections.
     """
     view = {slot: [] for slot in _SLOTS}
+    view["metadata"] = {"static": None, "runtime": None}
     for owner, supplied in (("static", static), ("runtime", runtime)):
         snapshot = _snapshot(supplied, owner)
         view[owner] = snapshot
         if snapshot is None:
             continue
+        metadata = {}
+        metadata_shortened = False
+        fields = ("name", "status", "execution_status", "run_id") if owner == "runtime" else ("name", "status")
+        for field in fields:
+            metadata[field], cut = _clean_text(snapshot[field])
+            metadata_shortened |= cut
+        if owner == "runtime":
+            metadata["source"] = {}
+            for field, value in snapshot["source"].items():
+                metadata["source"][field], cut = _clean_text(value)
+                metadata_shortened |= cut
+        metadata.update(
+            truncated=snapshot["truncated"],
+            text_shortened=metadata_shortened,
+            notice=(
+                "Some metadata text was shortened for display; the export preserves the retained snapshot."
+                if metadata_shortened
+                else None
+            ),
+        )
+        view["metadata"][owner] = metadata
         destinations = _STATIC_SLOTS if owner == "static" else _RUNTIME_SLOTS
         for raw in snapshot["sections"]:
             section = copy.deepcopy(raw)
@@ -163,6 +186,13 @@ def build_plugin_evidence(static: object = None, runtime: object = None) -> dict
                 run_id=clean(snapshot.get("run_id")),
                 execution_status=clean(snapshot.get("execution_status")),
                 text_shortened=shortened,
+                # Only known neutral absences share an empty-state disclosure.
+                # Scope/limitation notes keep their own section summary.
+                empty_observation=(
+                    section["total"] == 0
+                    and not shortened
+                    and all(note in (None, "No retained observations for this section.") for note in raw["notes"])
+                ),
                 first=False,
             )
             destination = destinations.get(section["key"], "tier1" if owner == "static" else "provenance")

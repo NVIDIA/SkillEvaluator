@@ -1787,6 +1787,72 @@ def test_a_plan_line_refused_by_a_buffered_terminal_stream_is_printed_once(
     assert "agent finished" not in output
 
 
+@pytest.mark.parametrize("refused_from", ["first-frame", "update"], ids=["first-frame-refused", "update-refused"])
+def test_late_notice_is_written_when_the_terminal_refuses_the_cursor_as_the_run_closes(
+    monkeypatch: pytest.MonkeyPatch,
+    refused_from: str,
+) -> None:
+    from rich.console import Console
+    from rich.live import Live
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    class Terminal(_WouldBlockTerminal):
+        """Refuses every write while ``refusing`` is set."""
+
+        refusing = False
+
+        def write(self, data: Any) -> int | None:
+            if self.refusing:
+                return None
+            return super().write(data)
+
+    terminal = Terminal(set())
+    # Shaped like standard error: its buffer keeps what the terminal refused.
+    stream = io.TextIOWrapper(io.BufferedWriter(terminal), encoding="utf-8", newline="\n", line_buffering=True)
+
+    class LiveOnAFillingTerminal(Live):
+        def refresh(self) -> None:
+            # The plan lines and Live's hide-cursor write went out; the
+            # terminal fills up from the first frame on.
+            if refused_from == "first-frame":
+                terminal.refusing = True
+            super().refresh()
+
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=60)
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+    rich_reporter._live_factory = LiveOnAFillingTerminal
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    if refused_from == "update":
+        reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+        terminal.refusing = True
+        reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="still evaluating"))
+    assert reporter.is_active is False
+    # The terminal takes writes again while the run goes on, and a warning
+    # printed then sends what the stream kept.
+    terminal.refusing = False
+    stream.write("warning printed after the display stopped\n")
+    # It is full again when the run ends, so close() cannot show the cursor.
+    terminal.refusing = True
+    reporter.close()
+    terminal.refusing = False
+    stream.flush()
+    output = terminal.received.decode("utf-8")
+
+    # The stream keeps the late notice with the refused show-cursor write and
+    # sends both once the terminal takes writes again.
+    _assert_cursor_shown_and_one_stop_notice(output, _LATE_STOP_NOTICE)
+    assert output.endswith(f"{_LATE_STOP_NOTICE}\n")
+
+
 def test_changelog_says_a_stream_can_still_send_refused_output_later() -> None:
     # close() drops only the view's own copy of what the terminal refused. A
     # stream shaped like standard error keeps its copy and sends it with its

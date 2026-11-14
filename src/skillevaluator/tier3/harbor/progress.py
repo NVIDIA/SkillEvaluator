@@ -608,11 +608,18 @@ class RichProgressReporter(PlainProgressReporter):
                 # cursor was just dropped. No frame reached the terminal, so
                 # there is no last line to end.
                 self._console.show_cursor(True)
-            if not failed_stop.notice_shown:
-                self._write_line(_DISPLAY_STOPPED_LATE_NOTICE)
         except Exception:
             # The run's close() then drops what the terminal still refuses.
             logger.debug("Tier 3 progress terminal restore failed", exc_info=True)
+        if failed_stop.notice_shown:
+            return
+        try:
+            # Written even when the terminal refused the cursor just now: a
+            # stream that keeps what the terminal refused, as standard error
+            # does, then sends the notice with it later.
+            self._write_line(_DISPLAY_STOPPED_LATE_NOTICE)
+        except Exception:
+            logger.debug("Tier 3 progress late stop notice failed", exc_info=True)
 
     def _render_plan(self, plan: Tier3RunPlan) -> None:
         self._live_plan = plan

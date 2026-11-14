@@ -784,6 +784,19 @@ def _trajectory_agent_runtime_failure_reason(trajectory: Any) -> str:
     return ""
 
 
+# Docker's errors when every default address pool already backs a network.
+_DOCKER_ADDRESS_POOL_MARKERS = (
+    "all predefined address pools have been fully subnetted",
+    "could not find an available, non-overlapping ipv4 address pool",
+)
+_DOCKER_ADDRESS_POOL_NOTE = (
+    "Docker has no free network address pools. List leftover trial Compose containers and networks "
+    "(`docker ps -a --filter label=com.docker.compose.project`, "
+    "`docker network ls --filter label=com.docker.compose.project`), check their names, and remove "
+    "the containers with `docker rm -f` before the networks with `docker network rm`; or lower --n-concurrent."
+)
+
+
 def _exception_details(exception_info: Any) -> tuple[str, str]:
     """Return one Harbor exception type and bounded display reason."""
     if not isinstance(exception_info, dict):
@@ -791,6 +804,9 @@ def _exception_details(exception_info: Any) -> tuple[str, str]:
 
     exception_type = str(exception_info.get("exception_type") or "").strip()
     exception_message = str(exception_info.get("exception_message") or "").strip()
+    # Docker's own line follows the long Compose command and falls past the cut.
+    if any(marker in exception_message.casefold() for marker in _DOCKER_ADDRESS_POOL_MARKERS):
+        exception_message = f"{_DOCKER_ADDRESS_POOL_NOTE} {exception_message}"
     if exception_type and exception_message:
         return exception_type, f"{exception_type}: {exception_message}"[:600]
     return exception_type, (exception_type or exception_message)[:600]

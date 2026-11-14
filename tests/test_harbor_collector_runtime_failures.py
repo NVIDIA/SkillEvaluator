@@ -2568,3 +2568,113 @@ def test_harbor_verifier_and_environment_failures_are_unscored_not_agent_failure
     assert opencode["num_trials_with"] == 0
     assert opencode["agent_runtime_failures"]["with_skill"] == []
     assert results["execution_status"] == "failed"
+
+
+_ADDRESS_POOL_NOTE_START = "Docker has no free network address pools."
+
+
+def _compose_network_failure(docker_error: str) -> str:
+    """Shape a secure Compose failure: the long command line comes before Docker's own error."""
+    command = " ".join(["docker compose --project-name case-001__attempt__env -f /tmp/task/compose.yaml up"] * 12)
+    return (
+        "Docker compose command failed for environment case-001. "
+        f"Command: {command}. Return code: 1. Stdout: . "
+        f"Stderr: failed to create network case-001__attempt__env_default: Error response from daemon: {docker_error}."
+    )
+
+
+@pytest.mark.parametrize(
+    "docker_error",
+    (
+        "all predefined address pools have been fully subnetted",
+        "could not find an available, non-overlapping IPv4 address pool among the defaults to assign to the network",
+        "ALL PREDEFINED ADDRESS POOLS HAVE BEEN FULLY SUBNETTED",
+    ),
+)
+def test_docker_address_pool_exhaustion_is_named_before_the_reason_cut(docker_error: str) -> None:
+    message = _compose_network_failure(docker_error)
+    assert message.casefold().index("address pool") > 600
+
+    exception_type, reason = collector_module._exception_details(
+        {"exception_type": "RuntimeError", "exception_message": message}
+    )
+
+    assert exception_type == "RuntimeError"
+    assert reason.startswith(f"RuntimeError: {_ADDRESS_POOL_NOTE_START} ")
+    assert "`docker network ls --filter label=com.docker.compose.project`" in reason
+    assert "prune" not in reason
+    assert len(reason) == 600
+
+
+def test_docker_address_pool_note_removes_trial_containers_before_networks() -> None:
+    # A leftover container still attached to its network makes `docker network rm` fail.
+    _, reason = collector_module._exception_details(
+        {
+            "exception_type": "RuntimeError",
+            "exception_message": _compose_network_failure("all predefined address pools have been fully subnetted"),
+        }
+    )
+    note = reason.split("RuntimeError: ", 1)[1].split(" Docker compose command failed", 1)[0]
+
+    assert "`docker ps -a --filter label=com.docker.compose.project`" in note
+    assert "`docker network ls --filter label=com.docker.compose.project`" in note
+    assert "check their names" in note
+    assert note.index("`docker rm -f`") < note.index("`docker network rm`")
+    assert note.endswith("--n-concurrent.")
+    assert "prune" not in note
+
+
+def test_docker_address_pool_note_without_exception_type() -> None:
+    _, reason = collector_module._exception_details(
+        {"exception_message": "Error response from daemon: all predefined address pools have been fully subnetted"}
+    )
+
+    assert reason.startswith(f"{_ADDRESS_POOL_NOTE_START} ")
+    assert reason.endswith("Error response from daemon: all predefined address pools have been fully subnetted")
+
+
+def test_other_docker_network_failures_get_no_address_pool_note() -> None:
+    message = "failed to create network case-001__attempt__env_default: permission denied"
+
+    assert collector_module._exception_details({"exception_type": "RuntimeError", "exception_message": message}) == (
+        "RuntimeError",
+        f"RuntimeError: {message}",
+    )
+
+
+def test_trial_failure_names_docker_address_pool_exhaustion(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_dir = job_dir / "case-001__attempt"
+    trial_dir.mkdir(parents=True)
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "trial_name": trial_dir.name,
+                "exception_info": {
+                    "exception_type": "RuntimeError",
+                    "exception_message": _compose_network_failure(
+                        "all predefined address pools have been fully subnetted"
+                    ),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_complete_job_result(job_dir, [trial_dir.name])
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    assert results["execution_status"] == "failed"
+    [failure] = results["agents"]["opencode"]["trial_failures"]["with_skill"]
+    assert failure["trial"] == "case-001__attempt"
+    assert failure["reason"].startswith(f"RuntimeError: {_ADDRESS_POOL_NOTE_START} ")

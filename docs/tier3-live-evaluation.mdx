@@ -352,12 +352,18 @@ using Harbor 0.25:
   trial environments, and has up to 30 seconds to exit before its POSIX process
   group is killed and reaped. The progress view shows the agents that are
   stopping; a second Ctrl+C skips the wait. On Windows the Harbor task tree is
-  stopped immediately. A skipped or exceeded wait, or a Windows run, can leave
-  trial containers or in-container agent processes running. Harbor's Docker
-  backends name each Compose project after its trial, so
-  `docker ps --filter label=com.docker.compose.project` lists the candidates;
-  check their project names before removing them with `docker rm -f`. The
-  progress view marks unfinished stages as interrupted.
+  stopped immediately. The progress view marks unfinished stages as
+  interrupted.
+- A skipped or exceeded Ctrl+C wait, a Ctrl+C on Windows, or a SkillEvaluator
+  process that is killed rather than interrupted (for example with `kill` or by
+  a cancelled CI job) can leave trial containers or in-container agent
+  processes running, and the trials' Compose networks behind. Each leftover
+  network keeps a subnet from Docker's limited default address pools. Harbor's
+  Docker backends name each Compose project after its trial, so
+  `docker ps -a --filter label=com.docker.compose.project` and
+  `docker network ls --filter label=com.docker.compose.project` list the
+  candidates; check their project names before removing the containers with
+  `docker rm -f` and then the networks with `docker network rm`.
 - Docker accepts Harbor stdin payloads and isolates main-container execution
   from sidecar operations without placing environment values on Compose argv.
   For NVIDIA Build, the credential reaches the trusted parent over stdin; each
@@ -2072,6 +2078,20 @@ machine-readable JSON contract, and how to judge whether a given lift is good.
   <Accordion title="evaluate cannot start the environment">
     Start Docker or configure the selected `--env-mode`, then re-run
     `skillevaluator doctor` with the same agent and environment.
+  </Accordion>
+  <Accordion title="Docker reports that all predefined address pools have been fully subnetted">
+    A trial's Compose project normally creates its own Docker network, and
+    Docker carves each one from a limited set of default address pools.
+    Networks that interrupted or killed runs left behind, or a high
+    `--n-concurrent`, can use them all up. Docker then fails to create the next
+    trial's network with this error, or with `could not find an available,
+    non-overlapping IPv4 address pool`, and the trial's failure reason names
+    the cause ahead of Docker's message. List the leftover trial containers and
+    networks with `docker ps -a --filter label=com.docker.compose.project` and
+    `docker network ls --filter label=com.docker.compose.project`, check their
+    project names, and remove the containers with `docker rm -f` and then the
+    networks with `docker network rm`. Then rerun, with a lower
+    `--n-concurrent` if the pools still run out.
   </Accordion>
   <Accordion title="No eval dataset or native task source found">
     Write task requests and observable outcomes in `eval-guidance.md`, then run

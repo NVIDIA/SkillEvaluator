@@ -369,6 +369,13 @@ _GENERIC_TASK = "handle a typical request"
 _BARE_SKILL_MD_RE = re.compile(
     r"(?:\b(?:the|its|this|that|own|skill['\u2019]s)\s+)*(?<![\w./-])skill\.md\b", re.IGNORECASE
 )
+# Generic wording right before a SKILL.md, which `tier3 validate` checks before
+# the skill's name: a read verb, the/its/this/that/own/skill's, "the contents of".
+_GENERIC_SKILL_MD_RE = re.compile(
+    rf"(?:\b{evals_spec._READ_VERB_RE}\s+)?(?:\b{evals_spec._SKILL_MD_QUALIFIER_RE}\s+)*"
+    r"(?:(?:the\s+)?contents\s+of\s+)?['\"*_\[]*skill\.md\b",
+    re.IGNORECASE,
+)
 
 
 def _template_task(skill: dict[str, Any]) -> tuple[str, str | None]:
@@ -424,11 +431,18 @@ def _skill_owns_skill_md(text: str, name: str) -> bool:
     """Whether the skill's name, "the <name> skill's" or "the installed skill's" comes right before a SKILL.md.
 
     That SKILL.md is the skill's own; renamed, it would read "<name>'s my SKILL.md".
+    As in `tier3 validate`, generic wording comes first: for a skill named
+    read, skill, own or of, "read SKILL.md", "the skill's SKILL.md", "its own
+    SKILL.md" and "the contents of SKILL.md" are not the name.
     """
+    text = evals_spec._normalized_match_text(text)
     name = re.escape(evals_spec._normalized_match_text(name))
     owner = rf"(?:(?<![\w-]){name}(?:\s+skill)?|\binstalled(?:\s+{name})?\s+skill)" if name else r"\binstalled\s+skill"
     owned = rf"{owner}(?:['\u2019]s)?(?:\s+own)?\s+['\"*_]*skill\.md\b"
-    return re.search(owned, evals_spec._normalized_match_text(text), re.IGNORECASE) is not None
+    # Start of the generic wording that ends at each SKILL.md; it explains an owner match it covers.
+    generic = {match.end(): match.start() for match in _GENERIC_SKILL_MD_RE.finditer(text)}
+    owners = re.finditer(owned, text, re.IGNORECASE)
+    return any(generic.get(match.end(), match.end()) > match.start() for match in owners)
 
 
 def _names_skill_script(text: str, scripts: Sequence[str]) -> bool:

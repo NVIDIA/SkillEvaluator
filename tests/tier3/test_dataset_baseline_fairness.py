@@ -930,6 +930,26 @@ def test_template_task_still_quotes_a_skill_md_no_skill_name_owns(description, t
     assert generate_dataset._template_task(_skill(description=description)) == (task, task)
 
 
+@pytest.mark.parametrize(
+    ("name", "description", "task"),
+    [
+        ("read", "Read SKILL.md and report errors.", "read my SKILL.md and report errors"),
+        ("follow", "Follow SKILL.md to check manifests.", "follow my SKILL.md to check manifests"),
+        ("cat", "cat SKILL.md and report errors", "cat my SKILL.md and report errors"),
+        ("skill", "Reads the skill's SKILL.md and reports errors.", "reads my SKILL.md and reports errors"),
+        ("own", "Reads its own SKILL.md and reports errors.", "reads my SKILL.md and reports errors"),
+        ("of", "Reads the contents of SKILL.md.", "reads the contents of my SKILL.md"),
+        ("skill", "Uses the skill's SKILL.md template.", "uses my SKILL.md template"),
+        ("skill", "Read SKILL.md, then skill's SKILL.md.", "read my SKILL.md, then my SKILL.md"),
+    ],
+)
+def test_template_task_renames_a_skill_md_generic_wording_explains_when_the_skill_is_named_after_it(
+    name, description, task
+):
+    # As in `tier3 validate`, "read SKILL.md" is generic wording before it is the name of a skill called read.
+    assert generate_dataset._template_task(_skill(name=name, description=description)) == (task, task)
+
+
 # Descriptions that name one of the skill's scripts without saying it is run.
 _SCRIPT_NAMING_DESCRIPTIONS = [
     "Checks release manifests with review.py and reports blockers.",

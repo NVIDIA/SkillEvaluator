@@ -3016,6 +3016,19 @@ def _mask_judge_evidence_value_sites(text, sites):
 def _redact_judge_evidence(text):
     """Mask credentials in a judge prompt, reply, or problem before it is saved."""
     text = str(text)
+    # A RAGAS prompt or reply holds tool-call arguments escaped twice, so the
+    # passes below also read the text with one and two levels of escapes
+    # removed (see _mask_unescaped_views in checks.py). That reading only adds
+    # markers to their result, so each pass reads the text as it did before:
+    # masking a value earlier could move a later one out of a pattern's window
+    # or hide the name that a later pass reads.
+    return _shared_checks._mask_unescaped_views(
+        text, _redact_judge_evidence_as_written(text), _redact_judge_evidence_as_written
+    )
+
+
+def _redact_judge_evidence_as_written(text):
+    """Mask credentials in a judge prompt, reply, or problem as written."""
     # The whole text is masked first, so a form that runs over an escape (a
     # private key block, a continued or quoted value, a value that holds "\n"
     # or "\u00e4") is masked whole before the text is split at the escapes.

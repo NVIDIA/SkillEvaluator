@@ -947,7 +947,8 @@ _RENAMING_HEDGE = "otherwise points at the skill's own skill.md as a prompt tier
 _KEEPING_PLACES = ("in", "of", "from", "under", "inside")
 _OTHER_PLACES = ("at", "within")
 _FORMAT_NOUNS = ("files", "format", "spec", "template")
-_CONNECTIVES = ("and", "for", "to", "with")
+# The words that cannot stand between SKILL.md and a format noun.
+_CONNECTIVES = ("and", "or", "then", "but", "before", "after", "to", "for", "with")
 _STILL_SKILL_FILES = (
     "Keeps release-review/SKILL.md in sync with the docs.",
     "Keeps skills/release-review in sync with the docs.",
@@ -1005,12 +1006,13 @@ def test_docs_say_which_skill_md_in_a_description_becomes_my_skill_md():
         assert not _renames_skill_md(description), description
     # Reading another SKILL.md or the file format does not count: "a SKILL.md",
     # "the following SKILL.md", or a format noun right after it or after one
-    # other word that is not a connective.
+    # other word that is not one of the connectives.
     for description in (
         *(f"Reads SKILL.md {noun} and reports errors." for noun in _FORMAT_NOUNS),
         "Follows the SKILL.md frontmatter format for new skills.",
         "Reads a SKILL.md and reports errors.",
         "Reads the following SKILL.md and reports errors.",
+        "Reads SKILL.md on format errors.",
     ):
         assert not _renames_skill_md(description), description
     for word in _CONNECTIVES:
@@ -1035,12 +1037,13 @@ def test_docs_say_which_skill_md_in_a_description_becomes_my_skill_md():
         assert "<name>/skill.md" in text and '"handle a typical request"' in text, where
     for where in ("docs/eval-datasets.mdx", "_template_task"):
         text = wording[where]
+        assert f"a format noun such as {_listed(_FORMAT_NOUNS)} right after it or after one other word" in text, where
         assert (
-            f"a format noun such as {_listed(_FORMAT_NOUNS)} right after it or after one other word "
-            f"that is not a connective such as {_listed(_CONNECTIVES)}"
+            f'that other word cannot be {_listed(_CONNECTIVES)}, so "reads skill.md for format errors" '
+            'is still renamed but "reads skill.md on format errors" is not.'
         ) in text, where
-        assert '"reads skill.md for format errors" is still renamed.' in text, where
         assert '"a skill.md", "the following skill.md"' in text, where
+        assert f"reading also does not count when {_listed(_KEEPING_PLACES)} another place" in text, where
         rule = text.find("still points at the skill's files after the rename")
         assert rule >= 0, where
         for example in ("<name>/skill.md", "skills/<name>", "uses the installed skill"):
@@ -1076,7 +1079,7 @@ def test_docs_say_only_another_place_keeps_a_description_s_skill_md():
     ):
         assert _renames_skill_md(description), description
 
-    keeping = f"{_listed(_KEEPING_PLACES)} another place comes right after it"
+    keeping = f"{_listed(_KEEPING_PLACES)} another place comes right after"
     other = f"other place words, such as {_listed(_OTHER_PLACES)}, do not count"
     for where, text in _my_skill_md_wording().items():
         rule = text.find(keeping)

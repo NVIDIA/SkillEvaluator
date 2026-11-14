@@ -109,17 +109,20 @@ skill's `SKILL.md`"), the template prompt calls it `my SKILL.md`. Reading
 `SKILL.md` does not count when the wording means another `SKILL.md` or the
 file format: "a `SKILL.md`", "the following `SKILL.md`", or a format noun such
 as `files`, `format`, `spec` or `template` right after it or after one other
-word that is not a connective such as `and`, `for`, `to` or `with`, as in
-"reads `SKILL.md` files" or "follows the `SKILL.md` frontmatter format".
-"Reads `SKILL.md` for format errors" is still renamed. Nor does it when `in`, `of`, `from`, `under` or `inside` another place comes
-right after it, such as `in ./pdf-tools`. Other place words, such as `at` or
-`within`, do not count: "reads `SKILL.md` at ./pdf-tools" is still renamed. A
-description that only names `SKILL.md` without reading it, such as "validates
-`SKILL.md` frontmatter", keeps it too. When the description still points at
-the skill's files after the rename, such as `<name>/SKILL.md`, `skills/<name>`
-or "uses the installed skill", the template prompt asks for the generic task
-"handle a typical request" and the graded text is generic. `create-eval-dataset`'s
-LLM prompts ask for outcome checks. It prints a warning for each generated
+word, as in "reads `SKILL.md` files" or "follows the `SKILL.md` frontmatter
+format". That other word cannot be `and`, `or`, `then`, `but`, `before`,
+`after`, `to`, `for` or `with`, so "reads `SKILL.md` for format errors" is
+still renamed but "reads `SKILL.md` on format errors" is not. Reading also
+does not count when `in`, `of`, `from`, `under` or `inside` another place
+comes right after `SKILL.md`, such as `in ./pdf-tools`. Other place words,
+such as `at` or `within`, do not count: "reads `SKILL.md` at ./pdf-tools" is
+still renamed. A description that only names `SKILL.md` without reading it,
+such as "validates `SKILL.md` frontmatter", keeps it too. When the
+description still points at the skill's files after the rename, such as
+`<name>/SKILL.md`, `skills/<name>` or "uses the installed skill", the
+template prompt asks for the generic task "handle a typical request" and the
+graded text is generic. `create-eval-dataset`'s LLM prompts ask for outcome
+checks. It prints a warning for each generated
 case that still grades skill use, and the autopilot starter case leaves such
 text out. `tier3 validate` warns when a prompt points at `skills/<name>`,
 `<name>/SKILL.md`, reading or following `SKILL.md`, the named skill, or one of

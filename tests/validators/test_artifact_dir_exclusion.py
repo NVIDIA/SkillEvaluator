@@ -8,7 +8,8 @@ A skill that has been through Tier 3 accumulates hundreds of MB under
 (``iter_scannable_files`` pruning), never hand them to scanners that lack
 exclude flags (skillspector scans a filtered copy), and never report
 findings from them (gitleaks config allowlist, skillspector issue filter).
-SkillSpector retains authored evals/ inputs while pruning their results/.
+Gitleaks and SkillSpector retain authored evals/ inputs while pruning their
+results/.
 Regression source: a real skill dir with 798MB / 53k artifact files took
 ~25 minutes to validate and reported 270 artifact-only secret findings.
 """
@@ -24,7 +25,7 @@ from unittest.mock import patch
 import pytest
 
 from skillevaluator.constants import SCAN_EXCLUDED_DIRS
-from skillevaluator.utils.tool_runner import ToolResult, Tools
+from skillevaluator.utils.tool_runner import GITLEAKS_FINDINGS_EXIT_CODE, ToolResult, Tools
 from skillevaluator.validators.base import iter_scannable_files
 from skillevaluator.validators.secrets import SecretsValidator
 from skillevaluator.validators.security import SecurityValidator
@@ -348,18 +349,133 @@ class TestSkillspectorFilteredCopy:
 # =============================================================================
 
 
-class TestGitleaksArtifactExclusion:
-    def test_config_allowlists_artifact_dir_paths(self):
-        config_path = SecretsValidator()._create_gitleaks_config()
-        try:
-            config = tomllib.loads(config_path.read_text())
-        finally:
-            config_path.unlink(missing_ok=True)
+# Gitleaks keeps eval definition dirs in scope: evals/ holds authored
+# evals.json, graders and task inputs, and .evals/ is scanned the same way, as
+# SkillSpector scans it. Only generated output below them is skipped.
+_AUTHORED_EVAL_DIRS = frozenset({"evals", ".evals"})
 
-        paths = config["allowlist"]["paths"]
-        for name in SCAN_EXCLUDED_DIRS:
+
+def _gitleaks_allowlist_paths() -> list[str]:
+    config_path = SecretsValidator()._create_gitleaks_config()
+    try:
+        return tomllib.loads(config_path.read_text(encoding="utf-8"))["allowlist"]["paths"]
+    finally:
+        config_path.unlink(missing_ok=True)
+
+
+def _gitleaks_honoring_config(args: list[str], cwd: Path | None = None, **_kwargs) -> ToolResult:
+    """Stand in for ``gitleaks detect --no-git``: apply the generated config to *cwd*.
+
+    Only the config's path allowlist and its ``nvidia-api-key`` rule are
+    modeled, which is enough to show which files the real scan would read.
+    """
+    assert cwd is not None and args[args.index("--source") + 1] == "."
+    config = tomllib.loads(Path(args[args.index("--config") + 1]).read_text(encoding="utf-8"))
+    skipped_paths = [re.compile(pattern) for pattern in config["allowlist"]["paths"]]
+    rule = next(rule for rule in config["rules"] if rule["id"] == "nvidia-api-key")
+    secret = re.compile(rule["regex"])
+    findings = []
+    for path in sorted(Path(cwd).rglob("*")):
+        relative = path.relative_to(cwd).as_posix()
+        if not path.is_file() or any(pattern.search(relative) for pattern in skipped_paths):
+            continue
+        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if secret.search(line):
+                findings.append(
+                    {
+                        "RuleID": rule["id"],
+                        "Description": rule["description"],
+                        "File": relative,
+                        "StartLine": line_number,
+                        "Tags": rule["tags"],
+                    }
+                )
+    if not findings:
+        return ToolResult(success=True, stdout="[]", stderr="", exit_code=0)
+    return ToolResult(success=True, stdout=json.dumps(findings), stderr="", exit_code=GITLEAKS_FINDINGS_EXIT_CODE)
+
+
+def _write_files(root: Path, files: dict[str, str]) -> None:
+    for relative, text in files.items():
+        path = root.joinpath(*relative.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+
+class TestGitleaksArtifactExclusion:
+    def test_config_allowlists_generated_dirs_but_not_authored_evals(self):
+        paths = _gitleaks_allowlist_paths()
+
+        for name in SCAN_EXCLUDED_DIRS - _AUTHORED_EVAL_DIRS:
             pattern = f"(^|/){re.escape(name)}(/|$)"
             assert pattern in paths, f"gitleaks allowlist missing artifact dir {name!r}"
+        for name in _AUTHORED_EVAL_DIRS:
+            pattern = f"(^|/){re.escape(name)}(/|$)"
+            assert pattern not in paths, f"gitleaks allowlist skips authored eval dir {name!r}"
+
+    @pytest.mark.parametrize(
+        ("relative", "skipped"),
+        [
+            ("evals/evals.json", False),
+            ("evals/grader.py", False),
+            ("evals/graders/check.py", False),
+            ("evals/files/input.txt", False),
+            ("evals/environment/mcp_servers.toml", False),
+            (".evals/evals.json", False),
+            ("skills/inner/evals/grader.py", False),
+            ("evals/results/run1/out.json", True),
+            ("evals/.results/run1/out.json", True),
+            (".evals/results/run1/out.json", True),
+            ("evals/versions/v1/grader.py", True),
+            ("results/run1/out.json", True),
+            ("evals/tests/test_grader.py", True),
+        ],
+    )
+    def test_authored_eval_files_are_scanned_and_generated_output_is_skipped(self, relative, skipped):
+        compiled = [re.compile(pattern) for pattern in _gitleaks_allowlist_paths()]
+
+        assert any(pattern.search(relative) for pattern in compiled) is skipped
+
+    @patch.object(Tools.gitleaks, "_path", "/usr/bin/gitleaks")
+    @patch.object(Tools.gitleaks, "_version", "8.30.0")
+    @patch.object(Tools.gitleaks, "run", side_effect=_gitleaks_honoring_config)
+    def test_secret_in_authored_evals_is_reported_but_not_in_eval_results(self, _mock_run, tmp_path):
+        token = "nvapi-" + "A1" * 25
+        skill = tmp_path / "eval-skill"
+        files = {
+            "SKILL.md": "---\nname: eval-skill\n---\n",
+            "evals/evals.json": json.dumps({"evals": [{"id": 1, "prompt": f"Call the API with {token}"}]}),
+            "evals/grader.py": f'API_KEY = "{token}"\n',
+            "evals/results/run1/out.json": json.dumps({"stdout": token}),
+        }
+        _write_files(skill, files)
+
+        result = SecretsValidator().validate(skill)
+
+        assert sorted(finding.file_path for finding in result.findings) == ["evals/evals.json", "evals/grader.py"]
+        assert all(finding.category == "SECRET" for finding in result.findings)
+        assert result.status == "failed"
+
+    @patch.object(Tools.gitleaks, "_path", "/usr/bin/gitleaks")
+    @patch.object(Tools.gitleaks, "_version", "8.30.0")
+    @patch.object(Tools.gitleaks, "run", side_effect=_gitleaks_honoring_config)
+    def test_plugin_skill_eval_files_are_scanned_per_skill(self, _mock_run, tmp_path):
+        token = "nvapi-" + "B2" * 25
+        plugin = tmp_path / "demo-plugin"
+        _write_files(
+            plugin,
+            {
+                ".claude-plugin/plugin.json": json.dumps({"name": "demo"}),
+                "skills/x/SKILL.md": "---\nname: x\n---\n",
+                "skills/x/evals/grader.py": f'API_KEY = "{token}"\n',
+                "skills/x/evals/results/run1/out.json": json.dumps({"stdout": token}),
+            },
+        )
+
+        result = SecretsValidator().validate(plugin)
+
+        assert [finding.file_path for finding in result.findings] == ["[x] evals/grader.py"]
+        assert result.status == "failed"
 
 
 class TestGitleaksTestPathAllowlist:

@@ -227,12 +227,14 @@ def publication_paths_skipped_by_scan(
 ) -> list[str]:
     """Return digest-covered paths that a name-based producer scan skips.
 
-    Tier 1 and Tier 2 skip generated-artifact names (``results``, ``versions``,
-    ``evals``, ``BENCHMARK.md``, ...) at any depth, while the v2 digest and the
-    Tier 3 projection exclude most of them only at the target root. A deeper
-    entry with such a name is therefore certified and agent-visible but never
-    scanned. The root ``evals/`` directory holds Tier 3 inputs and is outside
-    the producer scans by design, so it is not reported.
+    The Tier 1 file-walk checks and Tier 2 skip generated-artifact names
+    (``results``, ``versions``, ``evals``, ``BENCHMARK.md``, ...) at any depth,
+    while the v2 digest and the Tier 3 projection exclude most of them only at
+    the target root. A deeper entry with such a name is therefore certified and
+    agent-visible but never read by those checks. The root ``evals/``
+    directory holds Tier 3 inputs that the file-walk scans skip by design, so
+    it is not reported. The Gitleaks secret scan and SkillSpector still read
+    its authored files.
     """
     root = _absolute_lexical(source.expanduser())
     try:

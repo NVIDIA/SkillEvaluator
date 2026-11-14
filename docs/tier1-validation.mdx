@@ -429,7 +429,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     Combines three validation groups:
 
     - **Code risk (Bandit and Semgrep)** — SQL or command injection, hardcoded passwords, insecure cryptography, unsafe deserialization, `shell=True`, `eval()`/`exec()`, CWE patterns, and language-specific anti-patterns.
-    - **Secrets (Gitleaks)** — API keys, tokens, passwords, private keys, database credentials, and other high-confidence secret patterns.
+    - **Secrets (Gitleaks)** — API keys, tokens, passwords, private keys, database credentials, and other high-confidence secret patterns. Authored eval files, including `evals/evals.json`, graders such as `evals/grader.py`, and `evals/files` inputs, are scanned too, while generated Tier 3 output in `evals/results` is skipped; to keep an intentional test token, add a `gitleaks:allow` comment on its line or list the finding in a `.gitleaksignore` file at the skill root.
     - **Hygiene** — dead relative Markdown links, banned or unpinned dependency declarations, and static discovery of conventional Python test filenames.
 
     Default Tier 1 does not import or execute target-controlled Python code. The `test_discovery` result is filename evidence only: it counts regular, in-tree, non-symlink `test_*.py` and `*_test.py` candidates without parsing or importing them. It reports `execution_performed=false` and `coverage_measured=false`; test success and code coverage must be established separately in a trusted project environment or an explicit sandbox.

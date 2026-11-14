@@ -351,13 +351,15 @@ are treated according to the host filesystem, while a case-distinct authored
 name on a case-sensitive filesystem remains covered. A same-named file below
 another authored directory is still included. Tier 3 runtime projection and
 full `--copy-repo` staging omit the same generated inputs so excluded generated
-bytes inside the target cannot affect evaluation evidence. Tier 1 and Tier 2
-skip the generated-artifact names (`results`, `versions`, `evals`, their dot
-variants, `BENCHMARK.md`, `skill-card.md`, and `skill.oms.sig`) at any depth.
-When one of those names appears below the target root, the digest would certify
-content that no scan read, so the Tier 1 run records the path and publication
-stays `INCOMPLETE` until it is renamed. The root `evals/` directory holds Tier 3
-inputs and is outside the Tier 1 scans by design.
+bytes inside the target cannot affect evaluation evidence. The Tier 1
+file-walk checks and Tier 2 skip the generated-artifact names (`results`,
+`versions`, `evals`, their dot variants, `BENCHMARK.md`, `skill-card.md`, and
+`skill.oms.sig`) at any depth. When one of those names appears below the target
+root, the digest would certify content that those checks never read, so the
+Tier 1 run records the path and publication stays `INCOMPLETE` until it is
+renamed. The root `evals/` directory holds Tier 3 inputs. The Tier 1 file-walk
+checks skip it by design, while the Gitleaks secret scan and SkillSpector read
+its authored files. Both still skip generated output such as `evals/results`.
 Split-job results must match this identity exactly. Tier 3 runs that stage any
 linked/full repository context or external reference/workspace skills, or task
 inputs and custom environments that carry `.git`, `.venv`, `__pycache__`, or

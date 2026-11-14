@@ -397,6 +397,12 @@ All notable changes to SkillEvaluator are documented in this file.
   `/bin/bash -lc 'cat skills/x/SKILL.md'`, which some agent harnesses record
   instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL
   config.json'`) are still not counted.
+- The Tier 1 Gitleaks secret scan now reads authored eval files, including
+  `evals/evals.json`, graders such as `evals/grader.py`, and `evals/files`
+  inputs, so a credential committed there is reported; generated Tier 3 output
+  in `evals/results` is still skipped. To keep an intentional test token, add
+  a `gitleaks:allow` comment on its line or list the finding in a
+  `.gitleaksignore` file at the skill root.
 - Tier 3 reads the native Codex wrapper that runs a literal command array
   through `.map`, so a skill read batched that way is graded instead of scoring
   as an unsupported wrapper. The decoder stays a bounded static one: every array

@@ -278,9 +278,10 @@ All notable changes to SkillEvaluator are documented in this file.
   so is a quoted key or one after `--` whose value starts with a separator, as
   in `npm config set -- password ='...'`. An unquoted value after a `_` flag
   and a space, or after a quoted config key or one after `--`, ends at `;`,
-  `|`, or `&`, as an assignment's value does, and is read as an assignment
-  when it holds a credential name, as in `--set_secret API_TOKEN="..."`. Both
-  the host checker and the bundled Harbor verifier apply the fix.
+  `|`, or `&`, as an assignment's value does. A value of such a flag or key
+  that holds a credential name, as in `--set_secret API_TOKEN="..."`, is
+  read as an assignment. Both the host checker and the bundled Harbor
+  verifier apply the fix.
 - The behavior evidence gate no longer keeps a score for an expectation that
   names an observed artifact but also asks for something only the final answer
   could show. "Writes `report.py` and explains why each column was dropped" was

@@ -40,8 +40,10 @@ REUSED_BASELINE_NOTE = (
 )
 #: Where ``validate``'s terminal report, which prints agent rows only, sends readers for case rows.
 VALIDATE_CASE_POINTER = "Token usage per case is in the HTML, Markdown and JSON reports (-r html, markdown or json)."
-#: Where ``tier3 evaluate``'s terminal summary sends readers for case rows.
+#: Where ``tier3 evaluate``'s terminal summary sends readers for case rows when the run wrote both reports.
 EVALUATE_CASE_POINTER = "Token usage per case is in report.html and tier3-benchmark.md in the run directory."
+#: The same pointer for a run that wrote ``report.html`` only, such as a NeMo Gym run.
+EVALUATE_REPORT_CASE_POINTER = "Token usage per case is in report.html in the run directory."
 #: Case rows per agent in the HTML table; the JSON payload keeps the rest.
 HTML_CASE_ROWS_PER_AGENT = 64
 #: Marks a case row whose ID is not one of the evaluation dataset's case IDs.
@@ -194,6 +196,21 @@ def dropped_case_rows_note(usage: object) -> str | None:
     )
 
 
+def dropped_case_rows_pointer(usage: object) -> str | None:
+    """For a terminal summary: say that no report has the case rows the payload dropped, if it dropped any.
+
+    The payload that every report reads drops the case rows of every agent, so
+    a pointer to the reports would send readers to rows that are not there.
+    """
+    count = _count(_mapping(usage).get("case_rows_omitted"))
+    if not count:
+        return None
+    return (
+        f"{count:,} case row(s) were left out of every report to keep the reports within their size limits, "
+        "so no report has token usage per case; the agent sums cover every attempt."
+    )
+
+
 def token_usage_rows(
     usage: object,
     *,
@@ -291,8 +308,10 @@ def render_token_usage_table(
     """Print one row per agent and the all-agent row, then the notes; return whether anything printed.
 
     ``case_pointer`` names the files of the calling command that hold the
-    case rows. ``text`` makes agent names and notes safe for the console, for
-    example by redacting secrets. Cells are plain text, never console markup.
+    case rows, and is empty when the command wrote none; when the payload left
+    the case rows out, the table says that no report has them instead. ``text`` makes agent names and notes safe for the
+    console, for example by redacting secrets. Cells are plain text, never
+    console markup.
     """
     rows, _omitted = token_usage_rows(usage, include_cases=False)
     if not rows:
@@ -319,8 +338,7 @@ def render_token_usage_table(
     pointer = " ".join(
         part
         for part in (
-            case_pointer,
-            dropped_case_rows_note(usage),
+            dropped_case_rows_pointer(usage) or case_pointer,
             unverified_case_ids_note(usage, rows, case_label=text),
         )
         if part

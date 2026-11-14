@@ -357,12 +357,53 @@ def _append_section_with_budget(
     return max(0, max_chars - len(section) - 2)
 
 
+# Codex decodes its native file-edit tool to ``{"input": "<apply_patch body>"}``,
+# so both the paths an ``apply_patch`` call changed and the patch text itself live
+# in that one argument rather than in a ``file_path``/``content`` pair. Kept local
+# rather than imported from ``checks`` so the standalone verifier copy of this
+# module keeps its current, narrow import set.
+_PATCH_BEGIN_MARKER = "*** Begin Patch"
+_PATCH_FILE_HEADER_RE = re.compile(r"^[^\S\n]*\*\*\* (?:Add|Update|Delete) File:[ \t]*([^\n]*)", re.MULTILINE)
+_MAX_PATCH_PATHS = 10
+
+
+def _patch_input_body(args: dict[str, Any]) -> str:
+    """Return the ``apply_patch`` body carried by an ``input`` argument, else ``""``.
+
+    Only a value carrying patch markers is returned: a bare ``input`` string is
+    also how Codex passes shell source, which is not a file change.
+    """
+    value = args.get("input")
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    if _PATCH_BEGIN_MARKER in value or _PATCH_FILE_HEADER_RE.search(value):
+        return value
+    return ""
+
+
+def _patch_header_paths(patch: str) -> list[str]:
+    """Distinct paths the ``Add``/``Update``/``Delete File`` headers name, in patch order."""
+    paths: list[str] = []
+    for match in _PATCH_FILE_HEADER_RE.finditer(patch):
+        path = match.group(1).strip()
+        if path and path not in paths:
+            paths.append(path)
+    return paths
+
+
 def _tool_file_path(args: dict[str, Any]) -> str:
     for key in ("file_path", "path", "filename", "target_file"):
         value = args.get(key)
         if value:
             return str(value)
-    return ""
+    # One patch may touch several files. Name them all: returning only the first
+    # would report a multi-file write as a single-file one. The list is capped so
+    # a sprawling patch cannot crowd out the rest of the evidence budget.
+    paths = _patch_header_paths(_patch_input_body(args))
+    extra = len(paths) - _MAX_PATCH_PATHS
+    if extra > 0:
+        return ", ".join(paths[:_MAX_PATCH_PATHS]) + f" (+{extra} more)"
+    return ", ".join(paths)
 
 
 def _tool_write_body(args: dict[str, Any]) -> str:
@@ -371,6 +412,9 @@ def _tool_write_body(args: dict[str, Any]) -> str:
         value = args.get(key)
         if value:
             snippets.append(f"{key}:\n{value}")
+    patch = _patch_input_body(args)
+    if patch:
+        snippets.append(f"input:\n{patch}")
     edits = args.get("edits")
     if isinstance(edits, list):
         for idx, edit in enumerate(edits[:5], start=1):

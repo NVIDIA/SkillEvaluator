@@ -310,6 +310,14 @@ BENIGN_ACTIONS = [
     pytest.param(
         _shell_argv("bash", "-lc", "cd /w\nsource ~/.bashrc\npytest 2>&1 | tail"), id="argv-bash-lc-multiline-source"
     ),
+    # A source or . command after each other command start.
+    pytest.param(_bash("cd /w && source ~/.bashrc && npm test 2>&1"), id="source-after-and"),
+    pytest.param(_bash("make || . ~/.profile 2>&1"), id="dot-after-or"),
+    pytest.param(_bash("yes | . ~/.profile 2>/dev/null"), id="dot-after-pipe"),
+    pytest.param(_bash("(source ~/.bashrc; npm t) 2>&1"), id="source-in-subshell"),
+    pytest.param(_bash("{ source ~/.bashrc; } 2>/dev/null"), id="source-in-group"),
+    pytest.param(_bash("echo `source ~/.bashrc; node -v` 2>&1"), id="source-in-backticks"),
+    pytest.param(_bash("cd /w\nsource ~/.bashrc\nnpm test 2>&1"), id="source-on-own-line"),
     pytest.param(
         _bash("source /etc/profile.d/conda.sh && conda activate base && python train.py 2>&1 | tail -50"),
         id="source-profile-d-conda",

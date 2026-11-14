@@ -544,6 +544,15 @@ def _path_is_within(candidate: Path, root: Path) -> bool:
         current = parent
 
 
+def _default_report_output_error(directory: Path, cause: BaseException) -> click.ClickException:
+    """Say why the default report directory was refused and how to choose another."""
+    reason = str(cause).removesuffix(f": {directory}").strip() or type(cause).__name__
+    return click.ClickException(
+        f"Cannot safely reserve default report output directory: {directory} ({reason}). "
+        "Choose a report directory with -o/--output-dir."
+    )
+
+
 def _resolve_report_output_location(target_path: Path, output_dir: Path) -> Path:
     """Keep report writes outside the source tree whose identity they describe."""
     if not target_path.is_dir():
@@ -592,7 +601,7 @@ def _resolve_report_output_location(target_path: Path, output_dir: Path) -> Path
             if output_is_real_directory and is_generated_output_root(output_dir):
                 return output_dir
         except (OSError, RuntimeError, ValueError) as exc:
-            raise click.ClickException(f"Cannot safely reserve default report output directory: {output_dir}") from exc
+            raise _default_report_output_error(output_dir, exc) from exc
 
     if output_is_default:
         relocated = target_path.with_name(f"{target_path.name}-reports")
@@ -603,7 +612,7 @@ def _resolve_report_output_location(target_path: Path, output_dir: Path) -> Path
                 mark_generated_output_root(relocated)
                 return relocated
         except (OSError, RuntimeError, ValueError) as exc:
-            raise click.ClickException(f"Cannot safely reserve default report output directory: {relocated}") from exc
+            raise _default_report_output_error(relocated, exc) from exc
     raise click.ClickException(
         f"Report output must be outside the publication target; use an external --output-dir: {output_dir}"
     )

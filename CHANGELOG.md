@@ -197,6 +197,14 @@ All notable changes to SkillEvaluator are documented in this file.
   extra. pip-audit, used only by the opt-in dependency audit
   (`--check dependency`), stays in the `security` extra. The Bandit install hint
   now says to reinstall SkillEvaluator.
+- Install uv with the base package, so a plain `pip install skillevaluator` on
+  a machine without uv can run the Tier 1 security check. Before, that run
+  ended `INCOMPLETE` with "skillspector not installed", because the pinned,
+  checksum-verified SkillSpector wheel is only run through `uv tool run`. A uv
+  on `PATH` or an installed `skillspector` is still used first, and
+  SkillSpector stays out of SkillEvaluator's own dependencies. The public
+  Docker image gains the same behavior: with network access its Tier 1 run now
+  completes instead of ending `INCOMPLETE`.
 - Root help shows the SkillEvaluator wordmark in more terminals: the
   one-line wordmark still needs 115 columns, 76-114 columns now get the same
   letters stacked (SKILL over EVALUATOR), and 60-75 columns get a two-row
@@ -207,6 +215,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- `THIRD_PARTY_NOTICES.md` lists Bandit under the base dependencies. It has
+  been installed with the base package since it moved out of the `security`
+  extra, but the notice still sat in the Security row, which now lists
+  pip-audit only.
 - The README opens with a three-column **Get started** section: run the CLI
   directly (`pip install skillevaluator`, then
   `skillevaluator validate ./my-skill --tiers 1`), add checks to your repository
@@ -231,6 +243,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `health-check --tier 1` (and `doctor --tier 1`) labels a scanner that
+  SkillEvaluator provisions itself: `(uv tool run)` for SkillSpector and
+  `(managed)` for the downloaded Gitleaks binary. Before, the Gitleaks row
+  ended in `(from None)` and the SkillSpector row named
+  `SKILLEVALUATOR_SKILLSPECTOR_PATH` although no override was set.
 - The comments-only consumer template now grants its required read and PR-comment
   permissions only to the comment job, with no workflow-wide token permissions.
 - The behavior evidence gate no longer keeps a score for an expectation that
@@ -527,6 +544,15 @@ All notable changes to SkillEvaluator are documented in this file.
   `LLM_JUDGE_FALLBACK_MODELS`; its Bedrock refusal retry uses it too, adding
   the judge model's geography prefix to a bare name and using a full Bedrock
   ID as given. The reusable CI workflows do not take the variable.
+
+- When the default report directory cannot be claimed, the error now gives
+  the reason and the way out: `Cannot safely reserve default report output
+  directory: <dir> (<reason>). Choose a report directory with
+  -o/--output-dir.` Before, it named only the directory. This happens when
+  both `reports/` and `<skill>-reports/` hold files written under another
+  ownership key, for example from containers that each start with a fresh
+  home directory. The refusal itself is unchanged, and `docs/reports.mdx`
+  explains it.
 
 ## 0.9.0 - 2026-11-13
 

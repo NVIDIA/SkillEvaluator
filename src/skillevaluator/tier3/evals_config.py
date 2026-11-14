@@ -194,7 +194,8 @@ def _read_config_text(config_path: Path) -> str:
 def _parse_config_text(text: str, config_path: Path) -> Any:
     """Parse one bounded YAML document whose mappings, merge sources included, repeat no key.
 
-    A YAML error gives the line, column and problem, never the source line.
+    A YAML error never repeats the source line. A marked error, such as a syntax error or
+    a repeated key, gives the line, column and problem; a cyclic merge or limit error names it.
     """
     try:
         try:

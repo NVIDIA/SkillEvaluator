@@ -545,7 +545,10 @@ Validation and evaluation load the config file strictly:
 - The document may have at most 100 nesting levels, 20,000 nodes, 1,024 alias
   references, 1,024 entries in any list or mapping, 65,536 characters in any
   value and 14,000 bits in any integer.
-- A YAML error gives the line, column and problem, never the text of the line.
+- A YAML error never includes the text of the line. Most syntax errors, and
+  every repeated key, give the line, column and problem. An error for a cyclic
+  merge or for one of the limits above names it without a position. A value
+  that cannot be parsed, such as `!!int abc`, gives `cannot parse a value`.
 
 ## Fixtures and custom environments
 

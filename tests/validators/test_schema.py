@@ -1229,7 +1229,7 @@ class TestMetadataIdContract:
         (skill_dir / "SKILL.md").write_text(
             f"""---
 name: {name}
-description: A skill used by the test suite to check the metadata.id contract
+description: Use when testing the metadata.id contract. A skill used by the test suite to check the contract
 metadata:
   author: Jane Doe <jane@example.com>
 {id_block}---
@@ -1422,7 +1422,7 @@ class TestCollectionAdvisoryIdentity:
         (skill_dir / "SKILL.md").write_text(
             f"""---
 name: {name}
-description: A skill used by the test suite to check collection-level advisory handling
+description: Use when testing collection advisories. A skill used by the test suite to check collection-level advisory handling
 metadata:
   author: {author_line}
 {id_block}---
@@ -1613,6 +1613,105 @@ class TestSchemaPortabilityChecks:
 
         assert result.passed, result.errors
         assert [f.severity for f in _checks(result, "manifest_bom")] == ["medium"]
+
+    def test_symlinked_manifest_is_medium(self, tmp_path: Path):
+        skill_dir = _write_skill(tmp_path, _BASE_FM)
+        target = tmp_path / "real.md"
+        (skill_dir / "SKILL.md").rename(target)
+        (skill_dir / "SKILL.md").symlink_to(target)
+
+        result = SchemaValidator().validate(skill_dir)
+
+        assert result.passed, result.errors
+        assert len(_checks(result, "manifest_symlink")) == 1
+
+    @pytest.mark.parametrize(
+        ("size", "severity"),
+        [(32 * 1024 + 1, "low"), (50 * 1024 + 1, "medium"), (256_001, "high")],
+    )
+    def test_manifest_size_thresholds(self, tmp_path: Path, size: int, severity: str):
+        skill_dir = _write_skill(tmp_path, _BASE_FM)
+        manifest = skill_dir / "SKILL.md"
+        padding = size - len(manifest.read_bytes())
+        manifest.write_text(manifest.read_text() + "x" * padding)
+
+        findings = _checks(SchemaValidator().validate(skill_dir), "manifest_size")
+
+        assert [f.severity for f in findings] == [severity]
+        assert findings[0].metadata["size_bytes"] == size
+
+    def test_manifest_at_low_threshold_has_no_size_finding(self, tmp_path: Path):
+        skill_dir = _write_skill(tmp_path, _BASE_FM)
+        manifest = skill_dir / "SKILL.md"
+        manifest.write_text(manifest.read_text() + "x" * (32 * 1024 - len(manifest.read_bytes())))
+
+        assert not _checks(SchemaValidator().validate(skill_dir), "manifest_size")
+
+    def test_nested_manifest_is_medium(self, tmp_path: Path):
+        skill_dir = _write_skill(tmp_path, _BASE_FM)
+        (skill_dir / "references" / "inner").mkdir(parents=True)
+        (skill_dir / "references" / "inner" / "SKILL.md").write_text("---\nname: inner\n---\n")
+
+        findings = _checks(SchemaValidator().validate(skill_dir), "nested_manifest")
+
+        assert len(findings) == 1
+        assert "references/inner/SKILL.md" in findings[0].message
+
+    def test_nested_manifest_under_evals_is_reported(self, tmp_path: Path):
+        skill_dir = _write_skill(tmp_path, _BASE_FM)
+        (skill_dir / "evals" / "snapshot").mkdir(parents=True)
+        (skill_dir / "evals" / "snapshot" / "SKILL.md").write_text("---\nname: snapshot\n---\n")
+
+        findings = _checks(SchemaValidator().validate(skill_dir), "nested_manifest")
+
+        assert [f.file_path for f in findings] == [str(skill_dir / "evals" / "snapshot" / "SKILL.md")]
+
+    def test_nested_manifest_under_dependency_dir_is_ignored(self, tmp_path: Path):
+        skill_dir = _write_skill(tmp_path, _BASE_FM)
+        (skill_dir / "node_modules" / "pkg").mkdir(parents=True)
+        (skill_dir / "node_modules" / "pkg" / "SKILL.md").write_text("---\nname: pkg\n---\n")
+
+        assert not _checks(SchemaValidator().validate(skill_dir), "nested_manifest")
+
+    def test_description_over_utf16_limit_is_medium(self, tmp_path: Path):
+        description = "Use when testing. " + "\U0001f600" * 600
+        fm = _BASE_FM.replace("Use when checking harness portability of a skill.", description)
+        result = SchemaValidator().validate(_write_skill(tmp_path, fm))
+
+        findings = _checks(result, "description_utf16_length")
+        assert result.passed, result.errors
+        assert [f.metadata["utf16_units"] for f in findings] == [len(description.encode("utf-16-le")) // 2]
+
+    def test_bmp_description_at_limit_has_no_utf16_finding(self, tmp_path: Path):
+        fm = _BASE_FM.replace("Use when checking harness portability of a skill.", "Use when x. " + "a" * 1012)
+        result = SchemaValidator().validate(_write_skill(tmp_path, fm))
+
+        assert not _checks(result, "description_utf16_length")
+
+    @pytest.mark.parametrize(
+        ("description", "expected"),
+        [
+            ("Formats tables. Use when the user asks for a table.", False),
+            ("Use this skill to format tables in reports.", False),
+            ("Formats tables, charts and other structured report content nicely. Use when needed.", True),
+            ("Formats tables in reports.", True),
+            ("Formats tables, charts and structured report sections. Use when needed.", True),
+        ],
+    )
+    def test_description_trigger_window(self, tmp_path: Path, description: str, expected: bool):
+        fm = _BASE_FM.replace("Use when checking harness portability of a skill.", description)
+        findings = _checks(SchemaValidator().validate(_write_skill(tmp_path, fm)), "description_trigger")
+
+        assert bool(findings) is expected
+        assert all(f.severity == "low" for f in findings)
+
+    def test_unknown_top_level_fields_are_low(self, tmp_path: Path):
+        fm = _BASE_FM + "owner: team-x\nversion: 1.0.0\nlicense: MIT\nallowed-tools: Read\n"
+        result = SchemaValidator().validate(_write_skill(tmp_path, fm))
+
+        findings = _checks(result, "unknown_field")
+        assert result.passed, result.errors
+        assert [f.metadata["fields"] for f in findings] == [["owner", "version"]]
 
     def test_portability_severity_can_be_overridden_by_policy(self, tmp_path: Path):
         from skillevaluator.validators.policy import ValidationPolicy

@@ -12,6 +12,49 @@ All notable changes to SkillEvaluator are documented in this file.
   comment helpers, and needs no Pages configuration or history branch. Future
   generated bundles include the template; archived bundles and the released
   onboarding CLI retain their existing hosted publisher setup.
+- Each `harness` rule records a confidence level and, where behaviour changed
+  between releases, the versions it applies to (shown with `-v`). `harness-check
+  --harness-version codex=0.170.0` adds a note when you run a release other than
+  the one a profile was verified on.
+- `harness-check` takes the model setup some limits depend on: `--context-tokens`,
+  `--custom-provider`, `--explicit-invocation` and `--headless` (a Claude Code
+  skill with `allowed-tools` does not load headless).
+- Plugin component rules: skill namespacing, Codex's plugin-skill cap and Agent
+  Plugins hooks, Copilot CLI MCP server names, disabled plugins, and components a
+  harness does not deliver.
+- `harness-check` on a plugin folder shows which plugin formats each harness
+  accepts (`.claude-plugin`, `.codex-plugin`, Copilot, Agent Plugins v1, Hermes
+  `plugin.yaml`) and flags an empty plugin.
+- `harness` rules for harness gates: Hermes `platforms` and OpenClaw
+  `metadata.openclaw.requires`.
+- `harness` rules for invocation fields: `disable-model-invocation`, Codex's
+  `agents/openai.yaml` policy, `allowed-tools`, Claude Code-only fields and Hermes
+  project trust. Tier 1 `schema` now reports fields outside the agentskills.io
+  spec (LOW).
+- `harness` rules for placeholders: price-like `$N` text that Claude Code and
+  OpenCode replace with arguments (with line numbers), and `$ARGUMENTS` and
+  `${CLAUDE_SKILL_DIR}`, which only Claude Code substitutes.
+- `harness` rules for delivery limits: Claude Code's body cap, OpenCode's
+  51,200-byte / 2,000-line reads and long lines, OpenClaw's whole-read and
+  weighted result caps, Hermes's 100,000-character `skill_view` budget and Codex's
+  ~10K-token shell-output cut. Tier 1 `schema` now reports `SKILL.md` size tiers
+  (32 KiB LOW, 50 KiB MEDIUM, 256,000 bytes HIGH).
+- The `harness` check measures a skill together with the skills installed beside
+  it: list budgets (scaled by the context window), duplicate names and which copy
+  each harness uses, and OpenClaw's prompt cap and compact list. A `catalog` line
+  in the panel names the folder measured. Skills in separate folders are measured
+  separately, and Copilot CLI and OpenCode get an advisory reload note.
+- `harness` rules for where `SKILL.md` lives: casing, nested manifests, symlinked
+  manifests and resources, OpenClaw symlink escapes, Codex scan depth, and files
+  Hermes leaves out of its file list. Tier 1 `schema` now reports a symlinked or
+  nested `SKILL.md` (MEDIUM), and the `skill.md` naming finding explains the
+  macOS/Linux difference.
+- `harness` rules for descriptions: missing or empty descriptions, Claude Code and
+  Codex listing cuts, Copilot CLI's 1,024 UTF-16 unit limit, quotes escaped in the
+  Copilot CLI and OpenClaw lists, and Hermes's 60-character listing; `-v` shows
+  the description each harness lists. Tier 1 `schema` now reports a description
+  over 1,024 UTF-16 units (MEDIUM) and no "Use when ..." trigger in its first 60
+  characters (LOW).
 - `harness` rules for frontmatter parsing: duplicate keys and tab indentation
   (strict YAML parsers drop the skill), a UTF-8 BOM (Codex), no front matter
   (Copilot CLI) and long custom frontmatter that never reaches the model. Tier 1
@@ -160,6 +203,14 @@ All notable changes to SkillEvaluator are documented in this file.
   extra. pip-audit, used only by the opt-in dependency audit
   (`--check dependency`), stays in the `security` extra. The Bandit install hint
   now says to reinstall SkillEvaluator.
+- Install uv with the base package, so a plain `pip install skillevaluator` on
+  a machine without uv can run the Tier 1 security check. Before, that run
+  ended `INCOMPLETE` with "skillspector not installed", because the pinned,
+  checksum-verified SkillSpector wheel is only run through `uv tool run`. A uv
+  on `PATH` or an installed `skillspector` matching the pinned release is still
+  used first, and SkillSpector stays out of SkillEvaluator's own dependencies. The public
+  Docker image gains the same behavior: with network access its Tier 1 run now
+  completes instead of ending `INCOMPLETE`.
 - Root help shows the SkillEvaluator wordmark in more terminals: the
   one-line wordmark still needs 115 columns, 76-114 columns now get the same
   letters stacked (SKILL over EVALUATOR), and 60-75 columns get a two-row
@@ -170,6 +221,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- `THIRD_PARTY_NOTICES.md` lists Bandit under the base dependencies. It has
+  been installed with the base package since it moved out of the `security`
+  extra, but the notice still sat in the Security row, which now lists
+  pip-audit only.
 - The README opens with a three-column **Get started** section: run the CLI
   directly (`pip install skillevaluator`, then
   `skillevaluator validate ./my-skill --tiers 1`), add checks to your repository
@@ -200,6 +255,18 @@ All notable changes to SkillEvaluator are documented in this file.
   run, beside the box's own detail line and the reports, which say it failed,
   and the card's "what to fix" gave a scanner setup step instead of the
   check's own error. A check that is only incomplete still reads "didn't run".
+- Automatic SkillSpector selection now verifies the pinned release on first use
+  and falls back to the verified managed wheel for a different or unverifiable
+  version. Discovery stays free of subprocesses, version probes omit provider
+  credentials and respect the caller timeout, and explicit executable overrides
+  remain available. Doctor reports the path and source selected by the probe.
+- `health-check --tier 1` (and `doctor --tier 1`) labels a scanner that
+  SkillEvaluator provisions itself: `(uv tool run)` for SkillSpector and
+  `(managed)` for the downloaded Gitleaks binary. Before, the Gitleaks row
+  ended in `(from None)` and the SkillSpector row named
+  `SKILLEVALUATOR_SKILLSPECTOR_PATH` although no override was set.
+- The comments-only consumer template now grants its required read and PR-comment
+  permissions only to the comment job, with no workflow-wide token permissions.
 - The behavior evidence gate no longer keeps a score for an expectation that
   names an observed artifact but also asks for something only the final answer
   could show. "Writes `report.py` and explains why each column was dropped" was
@@ -207,6 +274,21 @@ All notable changes to SkillEvaluator are documented in this file.
   half was never checked. Every clause of an expectation must now name a
   checkable artifact of its own; one that does not keeps the gate, as a wholly
   prose expectation already did.
+- SARIF `artifactLocation.uri` values percent-encode a `%` in a file name as
+  `%25`. A file such as `a%20b.md` no longer shares the URI of `a b.md`, and
+  `100%.md` no longer produces an invalid URI.
+- Reports no longer fail on Linux when a skill file name is not valid UTF-8
+  (#525). Finding IDs, HTML issue keys, the written HTML, JSON, Markdown and
+  SARIF reports, the CI workflow scripts that re-render retained reports, and
+  generated `evals/evals.json` datasets accept the surrogate-escaped name
+  Python gives such a file. The SARIF `artifactLocation.uri` percent-encodes
+  the name's original bytes (`caf%E9.md`).
+- SARIF `artifactLocation.uri` values stay valid for more paths. A
+  repository-relative path whose first segment contains a colon, such as
+  `notes:v2.md`, gets a `./` prefix so it no longer reads as a URI scheme. A
+  path outside the workspace is written as an absolute `file:` URI instead of
+  a bare file system path, and a symlink in the workspace that points outside
+  it keeps the link's repository-relative path.
 - Accuracy and Behavior judge prompts clarify that explicit final-answer formats
   apply to the entire final response, independently of correct values in tool
   output or references. Scoring and thresholds are unchanged; an Accuracy format
@@ -428,6 +510,22 @@ All notable changes to SkillEvaluator are documented in this file.
   `/root/.bashrc`, or `/etc/sudoers` scored 0.0 in 0.9.0 and now scores 1.0,
   and a view of a credential store such as `~/.netrc` still scores 0.0. Both
   the host checker and the bundled Harbor verifier apply the fix.
+- `BENCHMARK.md` now shows the evidence and the policy that decided its overall
+  verdict. The card used to print `Overall verdict: PASS — Recommended for
+  publication` with nothing behind it, so a reader who saw an agent with no
+  dimension scores and another agent below the documented 40% FAIL boundary had
+  no way to tell why the gate still passed. A "Why This Verdict" block under the
+  callout now names the rule that fired, the Tier 3 evidence state with its
+  publication policy, each blocking reason, and, per agent, what the dimension
+  gate read: which agent passed every dimension, which dimension fell below the
+  FAIL or PASS boundary, and which agent the gate did not count, naming the
+  excluded arm when the run recorded one. A PASS that rests on one agent while
+  another fails a dimension now says so. The block is rendered from the same
+  publication assessment the printed verdict is projected from, and from the
+  per-agent breakdown the Tier 3 dimension verdict folds, so it cannot describe
+  a different decision. Optional or skipped Tier 3 runs are explained using
+  their recorded policy, and threshold-adjacent scores retain enough precision
+  to stay in their actual verdict band. No verdict changes.
 - `--tolerate-baseline-timeouts` (added in 0.9.0) now follows its own rules
   in the printed run verdict, in the notes of both reports and during result
   collection. The `RUN QUALITY VERDICT` line that `tier3 evaluate` prints
@@ -444,6 +542,48 @@ All notable changes to SkillEvaluator are documented in this file.
   evidence; with no other in-range count for that attempt the agent is
   refused as `no_progress_evidence`, where result collection used to stop
   with `browser-unsafe JSON integer` and write no `result.json` or report.
+
+- A native Codex `exec` wrapper that calls the freeform `apply_patch` tool with
+  the patch as a bare string is decoded instead of being discarded. The bounded
+  statement grammar read every argument as an object literal, so
+  `const r1 = await tools.apply_patch("*** Begin Patch\n...");` followed by
+  another call made the whole wrapper
+  `unsupported_native_codex_exec_wrapper`: the patch and its sibling calls went
+  ungraded, although the same wrapper written as
+  `tools.apply_patch({input: "..."})` decoded. A single- or double-quoted
+  string is now read as that tool's `input`. Nothing is interpreted: a template
+  literal, a concatenation, an extra argument, an unterminated string and a
+  bare string passed to any other tool are still rejected, and the object path
+  keeps its character gates unchanged.
+- A tool call the harness reports as exiting 0 is no longer recorded as failed
+  because its output holds error words. An agent that read a document *about*
+  errors, such as a `SKILL.md` headed `# Troubleshooting: command not found`,
+  lost that call's component activation in the plugin component signals. An
+  explicit zero exit status in every correlated result's header now passes the
+  call, as a harness success flag already did. Only the harness's own header
+  lines are read, so a body that spells `exit_code=0` still reports nothing,
+  and a result with no exit status, or a non-zero one, is judged by its text
+  exactly as before.
+- Add `SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL` to set the model that Claude 5.5
+  or later requests name as the server-side refusal fallback, or to turn it off
+  with `none`, `off`, `disabled`, `false` or `0`. The Claude API answers HTTP
+  400 (`'claude-opus-4-8' is not a valid fallback target for
+  'claude-sonnet-5-5'`) when the fixed `claude-opus-4-8` target does not suit
+  the request model, which made such a model unusable for LLM checks and as a
+  Tier 3 judge. A fallback equal to the request model is no longer sent. The
+  default is unchanged. The Harbor verifier receives the variable like
+  `LLM_JUDGE_FALLBACK_MODELS`; its Bedrock refusal retry uses it too, adding
+  the judge model's geography prefix to a bare name and using a full Bedrock
+  ID as given. The reusable CI workflows do not take the variable.
+
+- When the default report directory cannot be claimed, the error now gives
+  the reason and the way out: `Cannot safely reserve default report output
+  directory: <dir> (<reason>). Choose a report directory with
+  -o/--output-dir.` Before, it named only the directory. This happens when
+  both `reports/` and `<skill>-reports/` hold files written under another
+  ownership key, for example from containers that each start with a fresh
+  home directory. The refusal itself is unchanged, and `docs/reports.mdx`
+  explains it.
 
 ## 0.9.0 - 2026-11-13
 

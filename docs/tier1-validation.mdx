@@ -259,6 +259,10 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     - `SKILL.md` should stay at or below 500 lines; larger files receive an advisory finding.
     - Harness portability: patterns the spec allows but common agent harnesses (Claude Code, Codex, OpenCode, OpenClaw, Hermes, Copilot CLI) load differently are reported; override any of them with `SCHEMA.<check_name>` in the validation policy.
       - A duplicate frontmatter key is HIGH (`duplicate_key`; several harnesses drop the skill), and a UTF-8 BOM is MEDIUM (`manifest_bom`).
+      - A description within 1,024 characters but over 1,024 UTF-16 units is MEDIUM (`description_utf16_length`), and no "Use when ..." trigger in the first 60 characters is LOW (`description_trigger`).
+      - A symlinked `SKILL.md` (`manifest_symlink`) or a `SKILL.md` nested inside the skill (`nested_manifest`) is MEDIUM.
+      - `manifest_size` is LOW above 32 KiB, MEDIUM above 50 KiB and HIGH above 256,000 bytes.
+      - Fields outside the spec are LOW (`unknown_field`).
     - `metadata.author` is optional under the `default` profile. Use `Name <email@host>` to include a contact address, or a person, team, or organization name such as `NVIDIA cuOpt Team` or `Jane Doe (@jdoe)`. A value that is malformed or unsafe is a HIGH `author_format` finding: a bare email or an email outside `Name <email@host>`, stray angle brackets, control, private-use, or bidirectional formatting characters (joiners such as ZWNJ and ZWJ, which Persian, Arabic and Devanagari names need, are accepted), no letters or digits, or more than 256 characters. A bare address counts even when its domain has no dot (`root@buildhost`), while a social handle such as `Jane Doe (@jdoe)` does not. The `registry` profile requires the `Name <email@host>` form.
     - `metadata.id` is an optional stable skill ID. When present it must be an exact 1–64 character lowercase ASCII slug (`^[a-z0-9]+(-[a-z0-9]+)*$`, no surrounding whitespace); it may differ from `name`. A collection run reports an ID that more than one discovered skill declares; `validate` on a catalog also lists these in `catalog-summary.json` under `metadata_id_conflicts`. Under `registry` a shared ID blocks: the run exits nonzero, and each sharing skill's entry is `"passed": false` with the conflict repeated under `catalog_findings` and counted in its `severity_counts`. A catalog validates each skill on its own, so that skill's own report was written before the catalog-wide check ran and keeps its single-skill verdict, which the entry carries alongside as `report_verdict` beside `report_scope: "single_skill"`. Uniqueness is checked only across the skills validated together, never against a registry, and a single-skill run does not claim it. The ID does not change local catalog identity, which stays keyed by content type and relative path.
     - `metadata.domain` accepts one category string or a list of them, such as `domain: [backend, ai-ml]`. Values are trimmed and deduplicated in order; a blank or null scalar means no domain. A list with more than 16 entries, or a non-string, blank, or over-128-character entry, is a HIGH `Field 'metadata.domain'` finding. The 128-character limit also applies to a single string.
@@ -276,6 +280,28 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     `validate` also shows a "Harness compatibility" panel after Tier 1, `! harness` in the checks line when a harness drops or degrades the skill, a `harness` line in the Tier 1 summary (kept out of the advisories count) and a note in the result box. `skillevaluator harness-check <skill>` runs only this check and shows the same panel, updated as each harness is checked. It accepts a folder of skills, `--harness`, `-v` and `--json PATH`, always exits 0, and points to `validate --tiers 1` when Tier 1 schema also fails. By default the panel is compact: one line per harness with its most serious finding (not loaded, then degraded, then note; ties go to the rule listed first in the profile) labelled with its outcome (`not found`, `rejected`, `listing shortened`, `delivery truncated` and so on), then `+N more` and the number of notes. `-v` (also on `validate`) lists every finding with its fix and each harness's verified version.
 
     Frontmatter rules: duplicate keys (Codex, Copilot CLI, OpenClaw and OpenCode drop the skill), tab indentation (Codex, Copilot CLI and OpenClaw), a UTF-8 BOM (Codex), no front matter (Copilot CLI), and long custom frontmatter that never reaches the model.
+
+    Description rules: missing or empty descriptions, Claude Code and Codex listing cuts, Copilot CLI's 1,024 UTF-16 unit limit, quotes escaped in the Copilot CLI and OpenClaw lists, and Hermes's 60-character listing. `-v` also shows the description each harness puts in the model's skill list.
+
+    Location rules: `SKILL.md` casing, nested manifests, symlinked manifests and resources, OpenClaw symlink escapes, Codex scan depth, and files Hermes leaves out of its file list (outside `references/`, `templates/`, `assets/` and `scripts/`).
+
+    The check measures the skill together with the skills installed next to it. A single skill under a harness root such as `.claude/skills`, or in a workspace `skills/` folder, is counted with everything in that folder (symlinked skill folders included). Skills in different folders are separate installations, and a folder of skills is its own catalog. That drives the list-budget rules (Claude Code and Codex ~8,000 description chars, Copilot 32 full descriptions, OpenClaw 150 skills or 18,000 chars) and a duplicate-name rule per harness that says which copy wins. A `catalog` line in the panel names the folder. Copilot CLI and OpenCode also get an advisory note on when new or edited skills are picked up.
+
+    Delivery rules: Claude Code's body cap, OpenCode's 51,200-byte / 2,000-line reads and lines over 2,000 characters, OpenClaw's whole-or-nothing read against its result caps, Hermes's 100,000-character `skill_view` budget, and Codex's ~10K-token cut when the model reads `SKILL.md` through the shell.
+
+    Placeholder rules: `$ARGUMENTS` and `${CLAUDE_SKILL_DIR}` are substituted only by Claude Code, and price-like `$N` text is replaced with arguments by Claude Code and OpenCode.
+
+    Invocation rules: `disable-model-invocation` (ignored by Codex, Hermes and OpenCode), Codex's `agents/openai.yaml` implicit-invocation policy (Codex only), `allowed-tools`, Claude Code-only fields, and Hermes project trust.
+
+    Gate rules: Hermes `platforms` and OpenClaw `metadata.openclaw.requires` hide the skill on hosts that don't match.
+
+    `harness-check` on a plugin folder also shows a plugin panel: which plugin formats each harness accepts (`.claude-plugin`, `.codex-plugin`, Copilot, Agent Plugins v1, Hermes `plugin.yaml`), and an empty plugin.
+
+    Plugin component rules cover skill namespacing, Codex's plugin-skill cap and Agent Plugins hooks, Copilot CLI MCP server names, disabled plugins, and components a harness registers but doesn't deliver.
+
+    `harness-check` takes the model setup some limits depend on: `--context-tokens`, `--custom-provider`, `--explicit-invocation` and `--headless`.
+
+    Each rule records a confidence level and, where behaviour changed between releases, the versions it applies to (shown with `-v`). `--harness-version codex=0.170.0` adds a note when you run a release other than the one a profile was verified on.
   </Accordion>
 
   <Accordion title="security — vulnerability scanning">

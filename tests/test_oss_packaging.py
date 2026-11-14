@@ -428,6 +428,25 @@ def test_third_party_notices_do_not_list_removed_safety_dependency() -> None:
     assert "Safety (MIT)" not in notices
 
 
+def test_third_party_notices_list_each_group_with_its_direct_dependencies() -> None:
+    project = _project()["project"]
+    extras = project["optional-dependencies"]
+    groups = {
+        "Base": project["dependencies"],
+        "LLM": extras["llm"],
+        "Tier 3": extras["tier3"],
+        "Security": extras["security"],
+        "Dashboard": extras["dashboard"],
+    }
+    notices = (REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+    rows = dict(re.findall(r"^\| ([^|]+?) \| ([^|]+?) \|$", notices, flags=re.MULTILINE))
+
+    for group, raw_requirements in groups.items():
+        declared = {canonicalize_name(Requirement(raw).name) for raw in raw_requirements} - {"skillevaluator"}
+        listed = {canonicalize_name(name) for name in re.findall(r"([A-Za-z0-9._-]+) \(", rows[group])}
+        assert listed == declared, f"{group} row does not match pyproject.toml"
+
+
 def test_idna_is_a_bounded_direct_dependency_with_a_license_notice() -> None:
     dependencies = [Requirement(raw) for raw in _project()["project"]["dependencies"]]
     idna_requirements = [requirement for requirement in dependencies if canonicalize_name(requirement.name) == "idna"]
@@ -436,6 +455,27 @@ def test_idna_is_a_bounded_direct_dependency_with_a_license_notice() -> None:
     assert len(idna_requirements) == 1
     assert str(idna_requirements[0].specifier) == "<4,>=3.10"
     assert "IDNA (BSD-3-Clause)" in notices
+
+
+def test_uv_is_a_base_dependency_so_plain_pip_can_provision_skillspector() -> None:
+    project = _project()
+    dependencies = [Requirement(raw) for raw in project["project"]["dependencies"]]
+    extras = [Requirement(raw) for values in project["project"]["optional-dependencies"].values() for raw in values]
+    uv_requirements = [requirement for requirement in dependencies if canonicalize_name(requirement.name) == "uv"]
+    lock_names = {package["name"] for package in _lock()["package"]}
+    notices = (REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+    installation = (REPO_ROOT / "docs" / "installation.mdx").read_text(encoding="utf-8")
+
+    assert len(uv_requirements) == 1
+    assert str(uv_requirements[0].specifier) == ">=0.11.27"
+    assert uv_requirements[0].marker is None
+    assert "uv" in lock_names
+    assert "uv (Apache-2.0 or MIT)" in notices
+    # uv runs SkillSpector in its own environment; SkillSpector itself stays out of the dependency set.
+    assert not any(canonicalize_name(requirement.name) == "skillspector" for requirement in [*dependencies, *extras])
+    assert "skillspector" not in lock_names
+    assert "uv is installed with SkillEvaluator" in installation
+    assert "The first run needs uv" not in installation
 
 
 def test_tier3_direct_dependencies_have_complete_license_notices() -> None:

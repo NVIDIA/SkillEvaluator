@@ -182,7 +182,11 @@ harbor:
 def test_load_evals_config_rejects_duplicate_keys(tmp_path, document):
     skill = _skill_with_config(tmp_path, document)
 
-    with pytest.raises(EvalsConfigError, match=r"invalid YAML: line \d+, column \d+: duplicate mapping key$"):
+    with pytest.raises(
+        EvalsConfigError,
+        match=r"invalid YAML: line \d+, column \d+: while constructing a mapping; "
+        r"line \d+, column \d+: duplicate mapping key$",
+    ):
         load_evals_config(skill)
 
 
@@ -192,7 +196,10 @@ def test_load_evals_config_names_the_position_of_a_duplicate_key(tmp_path):
     with pytest.raises(EvalsConfigError) as caught:
         load_evals_config(skill)
 
-    assert str(caught.value).endswith("config.yml: invalid YAML: line 4, column 3: duplicate mapping key")
+    assert str(caught.value).endswith(
+        "config.yml: invalid YAML: line 3, column 3: while constructing a mapping; "
+        "line 4, column 3: duplicate mapping key"
+    )
 
 
 def test_load_evals_config_keeps_yaml_merge_overrides(tmp_path):
@@ -221,10 +228,39 @@ def test_load_evals_config_yaml_errors_give_position_without_source_text(tmp_pat
         load_evals_config(skill)
 
     message = str(caught.value)
-    assert message.endswith("config.yml: invalid YAML: line 4, column 1: found unexpected end of stream")
+    assert message.endswith(
+        "config.yml: invalid YAML: line 3, column 18: while scanning a quoted scalar; "
+        "line 4, column 1: found unexpected end of stream"
+    )
     assert "do-not-echo-this-value" not in message
     assert "agent_workdir" not in message
     assert isinstance(caught.value.__cause__, yaml.YAMLError)
+
+
+@pytest.mark.parametrize(
+    ("document", "detail"),
+    [
+        pytest.param(
+            "schema_version: 1\nharbor:\n  agents:\n    codex: &a {model: model-one}\n"
+            "    claude-code: &a {model: model-two}\n",
+            "line 4, column 12: found duplicate anchor 'a'; first occurrence; line 5, column 18: second occurrence",
+            id="duplicate-anchor",
+        ),
+        pytest.param(
+            "schema_version: 1\n---\nschema_version: 1\n",
+            "line 1, column 1: expected a single document in the stream; line 2, column 1: but found another document",
+            id="second-document",
+        ),
+    ],
+)
+def test_load_evals_config_yaml_errors_keep_the_pyyaml_context(tmp_path, document, detail):
+    skill = _skill_with_config(tmp_path, document)
+
+    with pytest.raises(EvalsConfigError) as caught:
+        load_evals_config(skill)
+
+    assert str(caught.value).endswith(f"config.yml: invalid YAML: {detail}")
+    assert "model-one" not in str(caught.value)
 
 
 @pytest.mark.parametrize(

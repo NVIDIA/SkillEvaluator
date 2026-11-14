@@ -195,7 +195,8 @@ def _parse_config_text(text: str, config_path: Path) -> Any:
     """Parse one bounded YAML document whose mappings, merge sources included, repeat no key.
 
     A YAML error never repeats the source line. A marked error, such as a syntax error or
-    a repeated key, gives the line, column and problem; a cyclic merge or limit error names it.
+    a repeated key, gives the line, column and problem, after PyYAML's context and its position
+    when it has one; a cyclic merge or limit error names it.
     """
     try:
         try:
@@ -206,10 +207,27 @@ def _parse_config_text(text: str, config_path: Path) -> Any:
     except StructuredDataLimitError as e:
         raise EvalsConfigError(f"{config_path}: invalid YAML: {e}") from e
     except yaml.YAMLError as e:
-        raise EvalsConfigError(f"{config_path}: invalid YAML: {_yaml_error_detail(e)}") from e
+        raise EvalsConfigError(f"{config_path}: invalid YAML: {_yaml_error_text(e)}") from e
     except (ValueError, IndexError, KeyError, AttributeError, TypeError) as e:
         # SafeLoader's scalar constructors raise these for values such as ``!!int abc`` or the date ``2026-13-01``.
         raise EvalsConfigError(f"{config_path}: invalid YAML: cannot parse a value") from e
+
+
+def _yaml_error_text(exc: yaml.YAMLError) -> str:
+    """Return PyYAML's context and problem with their positions, but not the source snippet.
+
+    Some errors say what is wrong only in the context, as in a duplicate anchor:
+    ``line 4, column 12: found duplicate anchor 'a'; first occurrence; line 5, column 18: second occurrence``.
+    """
+    detail = _yaml_error_detail(exc)
+    context = getattr(exc, "context", None)
+    problem_mark = getattr(exc, "problem_mark", None)
+    if not context or problem_mark is None or getattr(exc, "problem", None) is None:
+        return detail
+    mark = getattr(exc, "context_mark", None)
+    if mark is None or (mark.line, mark.column) == (problem_mark.line, problem_mark.column):
+        return f"{context}; {detail}"
+    return f"line {mark.line + 1}, column {mark.column + 1}: {context}; {detail}"
 
 
 def _unknown_keys(mapping: dict[Any, Any], allowed: set[str], config_path: Path, field: str) -> set[str]:

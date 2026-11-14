@@ -211,12 +211,12 @@ def run_public_plugin_validation(
             waiver_result.add_message(f"PII waivers suppressed {len(loaded_waivers.applied)} reviewed PII value(s)")
         results.append(waiver_result)
     if "harness" in active:
-        # Packaged profiles describe standalone skill installs; applying their
-        # location rules to a native plugin would invent a compatibility verdict.
+        # Native-plugin profiles are exposed through harness-check; combined
+        # validation does not yet run that separate advisory.
         harness = ValidationResult(validator_name="Harness Compatibility", metadata={"plugin_check": "harness"})
         harness.add_success(
             "harness_applicability",
-            "Not applicable: standalone harness profiles do not assess native plugin loading.",
+            "Not applicable in combined validation; use harness-check to assess native plugin loading.",
             not_applicable=True,
         )
         results.append(harness)

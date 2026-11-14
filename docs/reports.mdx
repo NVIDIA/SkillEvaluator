@@ -55,7 +55,14 @@ layout when the default output is safe to claim: `skillevaluator validate
 ./my-skill` writes to `./reports/` when that directory is absent, empty, or
 already authenticated as SkillEvaluator output. If `./reports/` is nonempty
 and unowned, the default relocates to `./my-skill-reports/` instead of writing
-into unrelated content.
+into unrelated content. If that sibling is nonempty and unowned too, the run
+stops before any check and asks for an explicit `-o`/`--output-dir`.
+
+Ownership is tied to a key stored in your home directory (see
+`SKILLEVALUATOR_OUTPUT_PROVENANCE_KEY_FILE` in
+[Environment Variables](environment-variables.mdx)). Report folders written
+with another key, for example by another account or by a container whose home
+directory was discarded, count as unowned. Pass `-o` in those setups.
 
 For `validate`, that compact default is a pipeline view — a per-check ticker
 plus a summary. Pass `--verbose` to get the full per-check detail stream in

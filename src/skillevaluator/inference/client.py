@@ -46,7 +46,6 @@ from skillevaluator.inference.types import (
 )
 from skillevaluator.logging_config import get_logger
 from skillevaluator.provider_config import (
-    ANTHROPIC_REFUSAL_FALLBACK_MODEL,
     ANTHROPIC_SERVER_SIDE_FALLBACK_BETA,
     CHAT_DEFAULT_MODELS,
     MAX_COMPLETION_TOKENS,
@@ -54,6 +53,7 @@ from skillevaluator.provider_config import (
     ProviderConfig,
     ProviderConfigurationError,
     _supports_custom_temperature,
+    anthropic_refusal_fallback_model,
     completion_token_limit,
     effective_reasoning_effort,
     is_claude_5_5_or_later,
@@ -735,7 +735,12 @@ class LLMClient:
             nonlocal answered_by
             use_schema = response_schema is not None and target_key not in _SCHEMA_UNSUPPORTED_TARGETS
             if config.provider == "anthropic":
-                requests_fallback = is_claude_5_5_or_later(config.model) and _is_native_anthropic_endpoint(config)
+                fallback_model = (
+                    anthropic_refusal_fallback_model(config.model)
+                    if is_claude_5_5_or_later(config.model) and _is_native_anthropic_endpoint(config)
+                    else None
+                )
+                requests_fallback = fallback_model is not None
 
                 def _anthropic_kwargs(include_schema: bool) -> dict[str, Any]:
                     call_kwargs: dict[str, Any] = {
@@ -756,7 +761,7 @@ class LLMClient:
                         # Server-side fallback (beta): a safety-classifier refusal is retried on
                         # the fallback model within the same call. Older SDKs lack typed fields.
                         call_kwargs["extra_headers"] = {"anthropic-beta": ANTHROPIC_SERVER_SIDE_FALLBACK_BETA}
-                        call_kwargs["extra_body"] = {"fallbacks": [{"model": ANTHROPIC_REFUSAL_FALLBACK_MODEL}]}
+                        call_kwargs["extra_body"] = {"fallbacks": [{"model": fallback_model}]}
                     return call_kwargs
 
                 response = _call_with_schema_fallback(

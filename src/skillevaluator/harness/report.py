@@ -18,6 +18,7 @@ from rich.table import Table
 from rich.text import Text
 
 from skillevaluator.harness.overlay import evaluate_profile, facts_for, load_profiles
+from skillevaluator.harness.plugin import evaluate_plugin, is_plugin_root, plugin_facts
 from skillevaluator.reporting.console_ui import AMBER, BRIGHT, FAINT, GREEN, MUTED, RED, SPIN, TEXT, WIDTH
 from skillevaluator.validators.harness import HARNESS_METADATA_KEY, HarnessValidator
 
@@ -110,6 +111,16 @@ def _compact_grid(rows: list[dict[str, Any]]) -> Table | None:
     return grid if grid.row_count else None
 
 
+def _catalog_line(rows: list[dict[str, Any]]) -> Text | None:
+    catalog = next((row["catalog"] for row in rows if row.get("catalog")), None)
+    if not catalog or catalog["size"] < 2:
+        return None
+    folder = catalog["folder"].replace(str(Path.home()), "~", 1) if catalog["folder"] else "this folder"
+    return Text.assemble(
+        ("catalog  ", MUTED), (f"{catalog['size']} skills in {folder} ({catalog['desc_chars']:,} desc chars)", TEXT)
+    )
+
+
 def _detail_grid(rows: list[dict[str, Any]], verbose: bool) -> Table | None:
     """Every finding with its fix, under a line naming the harness, its status and verified version."""
     grid = Table.grid(padding=(0, 2), expand=True)
@@ -133,6 +144,12 @@ def _detail_grid(rows: list[dict[str, Any]], verbose: bool) -> Table | None:
                     (finding["message"], TEXT),
                     (f"  [{finding['id']}]", MUTED),
                     *([("\n→ ", GREEN), (finding["fix"], MUTED)] if finding.get("fix") else []),
+                    *([("\n  applies: ", MUTED), (finding["versions"], MUTED)] if finding.get("versions") else []),
+                    *(
+                        [("\n  confidence: ", MUTED), (finding["confidence"], MUTED)]
+                        if verbose and finding.get("confidence")
+                        else []
+                    ),
                 ),
             )
     return grid if grid.row_count else None
@@ -189,6 +206,9 @@ def harness_panel(
     for skill, rows in block.items():
         if parts:
             parts.append(Text())
+        catalog = _catalog_line(rows)
+        if catalog is not None:
+            parts.extend([catalog, Text()])
         parts.append(_summary_line(rows, f"{Path(skill).name}   " if many else ""))
         grid = _detail_grid(rows, verbose) if verbose else _compact_grid(rows)
         if grid is not None:
@@ -237,6 +257,19 @@ def run_harness_check(
     skills = [target] if finder._is_skill_directory(target) else finder._find_all_skills(target)
     width = max(60, min(WIDTH, console.width))
     block: Block = {}
+    if is_plugin_root(target):
+        facts = plugin_facts(target)
+        rows = [evaluate_plugin(profile, facts, config).to_dict() for profile in profiles]
+        console.print(
+            harness_panel(
+                {str(target): rows},
+                title=f"Plugin compatibility · {facts['plugin_name']}",
+                verbose=verbose,
+                width=width,
+            )
+        )
+        console.print()
+        block[f"{target} (plugin)"] = rows
     all_facts = facts_for(skills)
     for skill in skills:
         rows: list[dict[str, Any]] = [{"harness": p["harness"], "status": "pending"} for p in profiles]

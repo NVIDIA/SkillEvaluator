@@ -85,6 +85,20 @@ def resolve_tool_path(command: str, *, prefer_interpreter_sibling: bool = False)
     return shutil.which(command, path=str(Path(sys.executable).parent))
 
 
+def _packaged_uv() -> str | None:
+    """Return the uv executable installed by SkillEvaluator's ``uv`` dependency.
+
+    A ``pip install --user`` or ``--target`` layout puts it in a scripts
+    directory that is neither on PATH nor next to the interpreter.
+    """
+    try:
+        from uv import find_uv_bin
+
+        return find_uv_bin()
+    except (ImportError, OSError):
+        return None
+
+
 @dataclass
 class ToolResult:
     """Result from running an external tool.
@@ -153,7 +167,8 @@ class ExternalTool:
             managed: Fall back to SkillEvaluator's pinned provisioning when the
                 tool is missing, or automatically discovered SkillSpector is not
                 the pinned release: the verified SkillSpector wheel through
-                ``uv tool run``, or the downloaded Gitleaks binary.
+                ``uv tool run`` (a uv on PATH, else the one installed with
+                SkillEvaluator), or the downloaded Gitleaks binary.
         """
         self.name = name
         self.command = command or name
@@ -225,7 +240,8 @@ class ExternalTool:
 
     def _resolve_managed(self) -> None:
         if self.command == "skillspector":
-            uv = resolve_tool_path("uv")
+            # A uv on PATH keeps precedence; the packaged one covers a plain pip install.
+            uv = resolve_tool_path("uv") or _packaged_uv()
             wheel = managed_skillspector_wheel()
             if uv is not None and wheel is not None:
                 self._path = uv

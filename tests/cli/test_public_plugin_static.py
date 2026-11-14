@@ -135,6 +135,7 @@ def test_default_plugin_retains_real_checks_and_records_harness_applicability(pl
     assert harness.findings == []
     assert "harness_compatibility" not in harness.metadata
     assert "native plugin loading" in harness.success_details[0].message
+    assert "harness-check" in harness.success_details[0].message
     assert all("harness" not in result.metadata["tier1_required_checks"] for result in results)
 
 

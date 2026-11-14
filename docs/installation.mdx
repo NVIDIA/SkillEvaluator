@@ -24,7 +24,7 @@ This project will download and install additional third-party open source softwa
 - Git for installs from the repository and for the bundled-example checkout.
 - Docker, only for the container install and Tier 3 Docker-mode evaluation.
 - No API key is needed for deterministic Tier 1 checks. The base package
-  includes Bandit; Tier 1 provisions SkillSpector and
+  includes Bandit and the uv executable; Tier 1 provisions SkillSpector and
   Gitleaks itself, and Semgrep is optional (see [System tools](#system-tools)). LLM-backed checks and Tiers 2–3 use a configured provider — see
   [Providers & Credentials](configuration.mdx).
 
@@ -154,7 +154,7 @@ The UID override also uses `/tmp` as a writable home for per-user caches. Provid
 credentials and access to external sandbox services still need to be configured
 for the selected runtime user.
 
-The image does not bundle the external Semgrep, SkillSpector, or Gitleaks executables, so their required scanner evidence is incomplete and `validate` exits non-zero — the other checks still run and the report is still produced (see [Troubleshooting](#troubleshooting)). Tier 3 still requires credentials for the selected provider and agent at runtime — pass them into the container as environment variables when you get there.
+The image does not bundle the SkillSpector or Gitleaks executables. Tier 1 downloads the pinned releases on first run, so the container needs network access to GitHub and PyPI, and each new container downloads them again. Without that access their required scanner evidence is incomplete and `validate` exits non-zero — the other checks still run and the report is still produced (see [Troubleshooting](#troubleshooting)). Semgrep is optional and not in the image. Tier 3 still requires credentials for the selected provider and agent at runtime — pass them into the container as environment variables when you get there.
 
 </Tab>
 </Tabs>
@@ -186,7 +186,7 @@ and environment backends.
 <Note>
 Tier 1 provisions the external security scanners in their own environments, so their dependency stacks do not constrain the SkillEvaluator distribution:
 
-- **SkillSpector:** automatic discovery uses an installed executable only when its version is exactly 2.13.4. If it is missing, differs from the pin, or cannot report a valid version, Tier 1 selects the pinned release wheel, verifies its SHA-256 checksum, and runs it with `uv tool run`. The first managed run needs uv and network access; later runs use the uv cache. A rejected installed version and the selected fallback are reported explicitly.
+- **SkillSpector:** automatic discovery uses an installed executable only when its version is exactly 2.13.4. If it is missing, differs from the pin, or cannot report a valid version, Tier 1 selects the pinned release wheel, verifies its SHA-256 checksum, and runs it with `uv tool run`. uv is installed with SkillEvaluator as a base dependency; a uv already on `PATH` is used first. The first managed run needs network access (GitHub and PyPI); later runs use the uv cache. A rejected installed version and the selected fallback are reported explicitly.
 - **Semgrep:** optional. When it is installed, Code Risk Analysis adds its rules to Bandit; when it is not, the check notes it was skipped. Set `SKILLEVALUATOR_REQUIRE_SEMGREP=1` to report a missing Semgrep as `INCOMPLETE` (the Tier 1 CI image does).
 - **Gitleaks:** on first use, SkillEvaluator downloads the pinned 8.30.0 release into its runtime folder and verifies its SHA-256 checksum. There is no prompt, so CI runs install it too. Linux and macOS only.
 
@@ -225,7 +225,7 @@ skillevaluator health-check
 uv installs tools to `~/.local/bin`, which may not be on PATH yet. Run `uv tool update-shell` and open a new terminal.
 </Accordion>
 <Accordion title="Validation reports INCOMPLETE and exits non-zero">
-A required scanner could not run. Check that uv is on `PATH` and GitHub and PyPI are reachable (SkillSpector), or that GitHub is reachable for the Gitleaks download, or install the scanner named in the report. Missing required evidence leaves validation `INCOMPLETE` and non-zero. To run without that scanner, pass `--skip` with the check named in the fix list (e.g. `--skip secrets`); the check is then reported as skipped and the run cannot certify Tier 1.
+A required scanner could not run. Check that GitHub and PyPI are reachable (SkillSpector), or that GitHub is reachable for the Gitleaks download, or install the scanner named in the report. Missing required evidence leaves validation `INCOMPLETE` and non-zero. To run without that scanner, pass `--skip` with the check named in the fix list (e.g. `--skip secrets`); the check is then reported as skipped and the run cannot certify Tier 1.
 </Accordion>
 </AccordionGroup>
 

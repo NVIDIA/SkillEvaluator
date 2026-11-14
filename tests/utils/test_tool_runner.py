@@ -475,6 +475,7 @@ class TestAutomaticSkillSpectorVersion:
         monkeypatch.setattr(sys, "executable", str(bindir / "python"))
         # Provisioning has its own checksum/download tests. Keep selection offline.
         monkeypatch.setattr(tool_runner, "ensure_skillspector_wheel", lambda: None)
+        monkeypatch.setattr(tool_runner, "_packaged_uv", lambda: None)
         uv = bindir / "uv"
         uv.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
         uv.chmod(0o755)
@@ -600,6 +601,22 @@ class TestAutomaticSkillSpectorVersion:
         assert tool.version == "2.13.4"
         assert tool.resolution_source == "automatic"
 
+    def test_stale_scanner_falls_back_to_packaged_uv(self, scanner_bin, monkeypatch):
+        self._scanner(scanner_bin, "SkillSpector v2.11.2")
+        packaged_uv = scanner_bin / "packaged-uv"
+        (scanner_bin / "uv").rename(packaged_uv)
+        monkeypatch.setattr(tool_runner, "_packaged_uv", lambda: str(packaged_uv))
+
+        tool = ExternalTool("SkillSpector", "skillspector", managed=True)
+        result = tool.run(["scan", "target"], log_command=False)
+
+        assert result.success
+        assert result.exit_code == 0
+        assert result.stdout.splitlines()[:4] == ["tool", "run", "--quiet", "--from"]
+        assert result.stdout.splitlines()[4].endswith("/2.13.4/skillspector-2.13.4-py3-none-any.whl")
+        assert tool.path == str(packaged_uv)
+        assert tool.resolution_source == "uv tool run"
+
     def test_explicit_older_override_is_preserved(self, scanner_bin, monkeypatch):
         scanner = self._scanner(scanner_bin, "SkillSpector v2.11.2")
         monkeypatch.setenv("SKILLEVALUATOR_SKILLSPECTOR_PATH", str(scanner))
@@ -688,6 +705,83 @@ def test_version_reports_pinned_release_for_managed_tools(tmp_path, monkeypatch)
     monkeypatch.setenv("PATH", str(tmp_path))
     monkeypatch.setenv("SKILLEVALUATOR_RUNTIME_DIR", str(tmp_path / "rt"))
     assert ExternalTool("Gitleaks", "gitleaks", managed=True).version == GITLEAKS_VERSION
+
+
+class TestPackagedUv:
+    """SkillSpector provisioning after a plain ``pip install``: no uv on PATH."""
+
+    @staticmethod
+    def _skillspector() -> ExternalTool:
+        return ExternalTool("skillspector", "skillspector", managed=True)
+
+    def test_uv_dependency_ships_an_executable(self):
+        """The ``uv`` base dependency installs a binary that the fallback resolves."""
+        path = tool_runner._packaged_uv()
+
+        assert path is not None
+        assert Path(path).name in {"uv", "uv.exe"}
+        assert os.access(path, os.X_OK)
+
+    def test_missing_uv_package_or_binary_is_not_an_error(self, monkeypatch):
+        import uv
+
+        def not_found() -> str:
+            raise uv._find_uv.UvNotFound("no uv binary")
+
+        monkeypatch.setattr(uv, "find_uv_bin", not_found)
+        assert tool_runner._packaged_uv() is None
+
+        monkeypatch.setitem(sys.modules, "uv", None)
+        assert tool_runner._packaged_uv() is None
+
+    def test_skillspector_runs_through_packaged_uv_when_path_has_none(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SKILLEVALUATOR_RUNTIME_DIR", str(tmp_path / "rt"))
+        monkeypatch.setenv("PATH", str(tmp_path))
+        monkeypatch.delenv("SKILLEVALUATOR_SKILLSPECTOR_PATH", raising=False)
+        # The interpreter's own bin dir holds neither tool, as with ``pip install --user``.
+        monkeypatch.setattr(sys, "executable", str(tmp_path / "python"))
+        monkeypatch.setattr(tool_runner, "_packaged_uv", lambda: "/env/bin/uv")
+
+        tool = self._skillspector()
+
+        assert tool.is_available
+        assert tool.path == "/env/bin/uv"
+        assert tool.resolution_source == "uv tool run"
+        assert tool._launch_args()[:2] == ("tool", "run")
+
+    def test_uv_on_path_keeps_precedence_over_packaged_uv(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SKILLEVALUATOR_RUNTIME_DIR", str(tmp_path / "rt"))
+        path_uv = tmp_path / "uv"
+        path_uv.write_text("#!/bin/sh\n")
+        path_uv.chmod(0o755)
+        monkeypatch.setenv("PATH", str(tmp_path))
+        monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python"))
+        monkeypatch.setattr(tool_runner, "_packaged_uv", lambda: "/env/bin/uv")
+
+        assert self._skillspector().path == str(path_uv)
+
+    def test_installed_skillspector_keeps_precedence_over_packaged_uv(self, tmp_path, monkeypatch):
+        installed = tmp_path / "skillspector"
+        installed.write_text("#!/bin/sh\n")
+        installed.chmod(0o755)
+        monkeypatch.setenv("PATH", str(tmp_path))
+        monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python"))
+        monkeypatch.setattr(tool_runner, "_packaged_uv", lambda: "/env/bin/uv")
+
+        tool = self._skillspector()
+
+        assert tool.path == str(installed)
+        assert tool.resolution_source == "automatic"
+
+    def test_unavailable_when_no_uv_exists_anywhere(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PATH", str(tmp_path))
+        monkeypatch.setattr(sys, "executable", str(tmp_path / "python"))
+        monkeypatch.setattr(tool_runner, "_packaged_uv", lambda: None)
+
+        tool = self._skillspector()
+
+        assert not tool.is_available
+        assert tool.get_install_hint().startswith("Install with: uv tool install ")
 
 
 def test_version_parses_tool_output(tmp_path, monkeypatch):

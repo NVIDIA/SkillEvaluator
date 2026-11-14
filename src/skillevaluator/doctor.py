@@ -77,8 +77,11 @@ def _scanner_row(tool: Any, timeout: float) -> Row:
     if result.error_message:
         return (label, "fail", result.error_message)
     location = tool.path
-    if tool.resolution_source != "automatic":
-        location += f" (from {tool.resolution_source.removeprefix('override:')})"
+    if tool.resolution_source.startswith("override:"):
+        location += f" (from {tool.override_env})"
+    elif tool.resolution_source != "automatic":
+        # Managed provisioning: "uv tool run" for SkillSpector, "managed" for Gitleaks.
+        location += f" ({tool.resolution_source})"
     if result.exit_code != 0:
         return (label, "fail", f"version probe exited with status {result.exit_code}; {location}")
     match = _VERSION_RE.search(result.stdout) or _VERSION_RE.search(result.stderr)

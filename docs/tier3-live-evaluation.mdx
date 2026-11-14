@@ -2078,17 +2078,20 @@ machine-readable JSON contract, and how to judge whether a given lift is good.
   </Accordion>
   <Accordion title="Docker reports that all predefined address pools have been fully subnetted">
     A trial's Compose project normally creates its own Docker network, and
-    Docker carves each one from a limited set of default address pools.
-    Networks that interrupted or killed runs left behind, or a high
-    `--n-concurrent`, can use them all up. Docker then fails to create the next
-    trial's network with this error, or with `could not find an available,
-    non-overlapping IPv4 address pool`, and the trial's failure reason names
-    the cause ahead of Docker's message. List the leftover trial containers and
-    networks with `docker ps -a --filter label=com.docker.compose.project` and
+    Docker carves each one from a limited set of default address pools. Each
+    running trial holds a network, so a run holds up to `--n-concurrent`
+    networks for each agent running in parallel, and up to `--max-agents`
+    agents run in parallel, every selected agent by default. Networks that
+    interrupted or killed runs left behind, or too many trials at once, can use
+    the pools up. Docker then fails to create the next trial's network with
+    this error, or with `could not find an available, non-overlapping IPv4
+    address pool`, and the trial's failure reason names the cause ahead of
+    Docker's message. List the leftover trial containers and networks with
+    `docker ps -a --filter label=com.docker.compose.project` and
     `docker network ls --filter label=com.docker.compose.project`, check their
     project names, and remove the containers with `docker rm -f` and then the
     networks with `docker network rm`. Then rerun, with a lower
-    `--n-concurrent` if the pools still run out.
+    `--n-concurrent` or `--max-agents` if the pools still run out.
   </Accordion>
   <Accordion title="No eval dataset or native task source found">
     Write task requests and observable outcomes in `eval-guidance.md`, then run

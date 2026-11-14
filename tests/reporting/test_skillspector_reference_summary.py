@@ -214,6 +214,36 @@ def test_folder_reference_lines_name_their_skill(tmp_path: Path, monkeypatch: py
     } == {"scripts/helper.pl"}
 
 
+def test_plugin_member_reference_lines_name_their_directory(tmp_path: Path) -> None:
+    """A plugin scan puts the declared skill's directory before each reference line, like the finding's own path."""
+    from skillevaluator.tier1.plugin_checks import _attribute_scan_result
+
+    view = tmp_path / "view" / "perl-helper"
+    _write_skill(view)
+    result = ValidationResult(validator_name="Security Scan")
+    report = json.loads(_REPORT.read_text(encoding="utf-8"))
+    SecurityValidator(use_llm=False)._process_skillspector_cli_result(report, result, source_root=view)
+
+    _attribute_scan_result(result, "skills/perl-helper", view, tmp_path / "plugin")
+
+    exported = json.loads(JSONReporter(include_timestamp=False).render(result))
+    located = sorted(
+        (finding["file_path"], finding["line_number"], finding["metadata"]["skillspector_occurrences"])
+        for finding in exported["findings"]
+        if finding["check_name"].endswith("(AE1)")
+    )
+    assert located == [
+        ("skills/perl-helper/SKILL.md", line, [{"file": "skills/perl-helper/SKILL.md", "start_line": line}])
+        for line in (6, 8)
+    ]
+    # The referenced file stays relative to the skill, as in a folder.
+    assert {
+        finding["metadata"]["skillspector_evidence"]["target_path"]
+        for finding in exported["findings"]
+        if finding["check_name"].endswith("(AE1)")
+    } == {"scripts/helper.pl"}
+
+
 def test_a_cut_occurrence_list_is_a_lower_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     result = _validate(tmp_path, monkeypatch, skills=("alpha", "beta"), lines=129)
 

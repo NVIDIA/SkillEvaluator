@@ -191,12 +191,16 @@ def _attribute_scan_result(result: ValidationResult, unit: str, view: Path, root
             location = Path(finding.file_path)
             if finding.file_path and not location.is_absolute() and not finding.file_path.startswith(("<", "[")):
                 finding.file_path = (Path(unit) / location).as_posix()
-            occurrences = finding.metadata.get("occurrences", [])
-            for occurrence in occurrences if isinstance(occurrences, list) else []:
-                if isinstance(occurrence, dict) and isinstance(occurrence.get("file"), str):
-                    file = Path(occurrence["file"])
-                    if not file.is_absolute():
-                        occurrence["file"] = (Path(unit) / file).as_posix()
+            # Grouped repeats (occurrences) and the reference lines of a
+            # SkillSpector AE1 finding (skillspector_occurrences) name files
+            # like file_path, so they get the same member directory.
+            for key in ("occurrences", "skillspector_occurrences"):
+                occurrences = finding.metadata.get(key, [])
+                for occurrence in occurrences if isinstance(occurrences, list) else []:
+                    if isinstance(occurrence, dict) and isinstance(occurrence.get("file"), str):
+                        file = Path(occurrence["file"])
+                        if not file.is_absolute():
+                            occurrence["file"] = (Path(unit) / file).as_posix()
     _rebase(result, view, root / unit)
 
 

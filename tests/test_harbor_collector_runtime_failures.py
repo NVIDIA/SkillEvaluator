@@ -2606,6 +2606,24 @@ def test_docker_address_pool_exhaustion_is_named_before_the_reason_cut(docker_er
     assert len(reason) == 600
 
 
+def test_docker_address_pool_note_removes_trial_containers_before_networks() -> None:
+    # A leftover container still attached to its network makes `docker network rm` fail.
+    _, reason = collector_module._exception_details(
+        {
+            "exception_type": "RuntimeError",
+            "exception_message": _compose_network_failure("all predefined address pools have been fully subnetted"),
+        }
+    )
+    note = reason.split("RuntimeError: ", 1)[1].split(" Docker compose command failed", 1)[0]
+
+    assert "`docker ps -a --filter label=com.docker.compose.project`" in note
+    assert "`docker network ls --filter label=com.docker.compose.project`" in note
+    assert "check their names" in note
+    assert note.index("`docker rm -f`") < note.index("`docker network rm`")
+    assert note.endswith("--n-concurrent.")
+    assert "prune" not in note
+
+
 def test_docker_address_pool_note_without_exception_type() -> None:
     _, reason = collector_module._exception_details(
         {"exception_message": "Error response from daemon: all predefined address pools have been fully subnetted"}

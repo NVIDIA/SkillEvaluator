@@ -790,9 +790,10 @@ _DOCKER_ADDRESS_POOL_MARKERS = (
     "could not find an available, non-overlapping ipv4 address pool",
 )
 _DOCKER_ADDRESS_POOL_NOTE = (
-    "Docker has no free network address pools. Check and remove leftover trial Compose networks "
-    "(`docker network ls --filter label=com.docker.compose.project`, then `docker network rm`) "
-    "or lower --n-concurrent."
+    "Docker has no free network address pools. List leftover trial Compose containers and networks "
+    "(`docker ps -a --filter label=com.docker.compose.project`, "
+    "`docker network ls --filter label=com.docker.compose.project`), check their names, and remove "
+    "the containers with `docker rm -f` before the networks with `docker network rm`; or lower --n-concurrent."
 )
 
 

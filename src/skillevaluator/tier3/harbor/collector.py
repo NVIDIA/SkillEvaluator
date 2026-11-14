@@ -795,7 +795,8 @@ _DOCKER_ADDRESS_POOL_NOTE = (
     "Docker has no free network address pools. List leftover trial Compose containers and networks "
     "(`docker ps -a --filter label=com.docker.compose.project`, "
     "`docker network ls --filter label=com.docker.compose.project`), check their names, and remove "
-    "the containers with `docker rm -f` before the networks with `docker network rm`; or lower --n-concurrent."
+    "the containers with `docker rm -f` before the networks with `docker network rm`; "
+    "or lower --n-concurrent or --max-agents."
 )
 
 

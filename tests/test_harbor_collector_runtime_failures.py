@@ -2620,7 +2620,7 @@ def test_docker_address_pool_note_removes_trial_containers_before_networks() -> 
     assert "`docker network ls --filter label=com.docker.compose.project`" in note
     assert "check their names" in note
     assert note.index("`docker rm -f`") < note.index("`docker network rm`")
-    assert note.endswith("--n-concurrent.")
+    assert note.endswith("; or lower --n-concurrent or --max-agents.")
     assert "prune" not in note
 
 

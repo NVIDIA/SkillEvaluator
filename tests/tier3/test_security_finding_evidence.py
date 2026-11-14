@@ -1567,6 +1567,46 @@ def test_other_token_flags_are_masked_in_either_spelling() -> None:
     )
 
 
+@pytest.mark.parametrize("copy", ["template", "eval_core"])
+@pytest.mark.parametrize(
+    ("command", "underscored", "dashed"),
+    [
+        pytest.param(
+            f"./wrap --skip_token_check mysql -u root -p{_API_TOKEN} db",
+            "--skip_token_check",
+            "--skip-token-check",
+            id="before-mysql",
+        ),
+        pytest.param(
+            f"./wrap --no_password sshpass -p {_API_TOKEN} ssh h", "--no_password", "--no-password", id="before-sshpass"
+        ),
+        pytest.param(
+            f"./wrap --use_token aws configure set aws_secret_access_key {_API_TOKEN}",
+            "--use_token",
+            "--use-token",
+            id="before-aws-configure-set",
+        ),
+        pytest.param(f"./wrap --use_token login bob password {_API_TOKEN}", "--use_token", "--use-token", id="netrc"),
+        pytest.param(f"-api_key npm config set secret {_API_TOKEN}", "-api_key", "-api-key", id="before-npm-config"),
+        pytest.param(
+            f"--api_key git config --global secret {_API_TOKEN}", "--api_key", "--api-key", id="before-git-config"
+        ),
+    ],
+)
+def test_an_underscored_flag_takes_the_next_word_as_its_dashed_spelling_does(
+    copy: str, command: str, underscored: str, dashed: str
+) -> None:
+    # A "_" flag that names a credential is read like its "-" spelling, so
+    # the word after one that takes no value is masked as its value, and the
+    # command that word starts is read as it is after the "-" spelling.
+    def evidence(text: str) -> str:
+        result = _security(copy, {"action": "Bash", "action_input": {"command": f"{text} && rm -rf /srv/app"}})
+        return result["findings"][0]["evidence"]
+
+    assert f"{underscored} <redacted> " in evidence(command)
+    assert evidence(command) == evidence(command.replace(underscored, dashed)).replace(dashed, underscored)
+
+
 # A password with parentheses in it, which a call value must not cut short.
 _PAREN_PASSWORD = f"{_BASIC_PASSWORD[:7]}(x){_BASIC_PASSWORD[7:]}"
 # The part of a password after a ")" that a call reading would end at.

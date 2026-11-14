@@ -21,6 +21,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
+from skillevaluator.tier3.declarative_coverage import agent_declarative_checks
 from skillevaluator.tier3.eval_core.checks import resolve_should_trigger
 from skillevaluator.tier3.harbor import baseline_timeouts
 from skillevaluator.tier3.harbor.metrics import (
@@ -1152,6 +1153,10 @@ def load_agent_data(
                 ),
             }
         )
+
+        coverage = agent_declarative_checks(agent_info.get("rewards") or [], agent_info.get("rewards_baseline") or [])
+        if coverage:
+            agent_info["declarative_checks"] = coverage
 
         condition_quality_fields = {
             "with_skill": (

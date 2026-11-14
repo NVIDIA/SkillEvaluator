@@ -249,6 +249,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 terminal, JSON, HTML, and benchmark reports now retain declarative-check
+  coverage per agent and arm, including passed/failed counts, judgments,
+  not-checked reasons, and the behavior-score denominators.
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
   of `harness-check` no longer show internal test notes in their messages.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`

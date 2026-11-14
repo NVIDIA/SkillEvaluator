@@ -51,6 +51,7 @@ from skillevaluator.evaluation.tier3_findings import (
 from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.source_identity import resolve_evaluated_source
+from skillevaluator.tier3.declarative_coverage import agent_declarative_checks
 from skillevaluator.tier3.evidence_volume import evidence_volume_for_conditions
 
 logger = logging.getLogger(__name__)
@@ -849,6 +850,12 @@ def build_agent_eval_payload(
             CUSTOM_SCORE_POLICY if name in custom_only_agents else policy["score_policy"],
             baseline_only=baseline_only,
         )
+
+        coverage = info.get("declarative_checks") or agent_declarative_checks(
+            info.get("rewards") or [], info.get("rewards_baseline") or []
+        )
+        if coverage:
+            agent_payloads[name]["declarative_checks"] = coverage
 
     if not agent_payloads:
         return None

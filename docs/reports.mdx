@@ -125,6 +125,31 @@ scored totals. Preview limits and physical retry rows do not replace recorded
 attempt counts. These are display projections; canonical JSON and evaluation
 payloads are unchanged.
 
+### Tier 3 declarative-check coverage
+
+Runs with declarative checks include a **Declarative-check coverage** section in
+terminal summaries, HTML reports, and both benchmark Markdown cards. Run
+`result.json` and exported report JSON retain the same structured evidence under
+each agent's `declarative_checks`, separated into `with_skill` and
+`without_skill` arms. Reports without declarative checks add no section.
+
+Each arm shows checked totals (passed and failed), judged requirements, and
+not-checked checks. Evidence entries identify the case, trial, check type,
+expected target, verdict, and reason, including passing checks and checks that
+were not applicable without the skill. Not checked is not a pass or a failure.
+
+The behavior-check denominator for each reward is **checked + judged**;
+not-checked checks are excluded. Reports show both per-reward denominators and
+their sum across an arm. That sum is coverage, not a pooled behavior score:
+existing trial averaging and scoring remain unchanged. A judge error still
+produces no behavior score, even when its recorded denominator is nonzero.
+Missing judgment counts are unavailable rather than assumed to be zero.
+
+Coverage uses the reward artifacts already loaded by reporting, not a new
+evaluation or a fresh judgment. Failed trials without reward evidence do not
+gain invented checks. For retained runs, only available reward evidence can be
+reconstructed; existing report truncation notices still apply.
+
 ### Tier 2 comparison scopes and evidence
 
 The HTML Tier 2 view separates **Within this skill** (redundant content among

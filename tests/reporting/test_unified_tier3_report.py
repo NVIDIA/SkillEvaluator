@@ -850,7 +850,7 @@ def test_no_skill_baseline_dimension_na_explains_why_in_html() -> None:
         cell_end = html.index("</td>", cell_start)
         cell = html[cell_start:cell_end]
         assert "N/A" in cell
-        assert '<div class="t3-dim-hint">baseline not scored</div>' in cell
+        assert '<div class="t3-dim-hint">baseline quality unavailable</div>' in cell
 
 
 def test_trial_report_omits_token_chart_for_incomplete_agent_telemetry() -> None:

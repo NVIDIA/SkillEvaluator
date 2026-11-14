@@ -148,7 +148,9 @@ def test_missing_and_not_applicable_dimensions_have_reasons(tmp_path: Path) -> N
     assert "Discoverability" in table
     assert "N/A N/A N/A Not applicable" in table
     assert "Skill Efficiency" in table
-    assert "N/A not scored with the skill N/A baseline not scored N/A with-skill unavailable No verdict" in table
+    assert (
+        "N/A not scored with the skill N/A baseline quality unavailable N/A with-skill unavailable No verdict" in table
+    )
     assert "A signal this dimension needs produced no score." in table
     assert f"{reason} It has no score, so the agent's verdict stays NEUTRAL and cannot PASS." in table
 

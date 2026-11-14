@@ -133,6 +133,32 @@ def test_tier1_reports_an_explicit_executable_override(scanners, monkeypatch, tm
     assert rows["Bandit"] == ("pass", f"1.9.4 at {executable.resolve()} (from SKILLEVALUATOR_BANDIT_PATH)")
 
 
+def test_tier1_reports_managed_provisioning_without_naming_an_override(scanners, monkeypatch, tmp_path) -> None:
+    """No scanner is installed, so SkillSpector runs through uv and Gitleaks is the managed binary."""
+    monkeypatch.setenv("SKILLEVALUATOR_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        tool_runner, "resolve_tool_path", lambda command, **_kwargs: "/env/bin/uv" if command == "uv" else None
+    )
+    monkeypatch.setattr(tool_runner, "gitleaks_platform", lambda: ("linux", "x64"))
+    skillspector = ExternalTool(
+        "skillspector", "skillspector", override_env="SKILLEVALUATOR_SKILLSPECTOR_PATH", managed=True
+    )
+    gitleaks = ExternalTool("Gitleaks", "gitleaks", managed=True)
+    # The wheel and the binary are already in place, so the probes download nothing.
+    monkeypatch.setattr(skillspector, "_ensure", None)
+    monkeypatch.setattr(gitleaks, "_ensure", None)
+    monkeypatch.setattr(Tools, "skillspector", skillspector)
+    monkeypatch.setattr(Tools, "gitleaks", gitleaks)
+    scanners.output["uv"] = "SkillSpector v2.13.4\n"
+
+    rows = _rows(tier="1", checks="security,code")
+
+    assert rows["SkillSpector"] == ("pass", "2.13.4 at /env/bin/uv (uv tool run)")
+    assert rows["Gitleaks"] == ("pass", f"8.21.2 at {gitleaks.path} (managed)")
+    assert scanners.calls[0][0][:3] == ["/env/bin/uv", "tool", "run"]
+    assert scanners.calls[0][0][-2:] == ["skillspector", "--version"]
+
+
 @pytest.mark.parametrize("failure", ["missing", "malformed override", "timeout", "exit status"])
 def test_tier1_scanner_failure_does_not_hide_other_scanners(scanners, monkeypatch, failure) -> None:
     if failure == "missing":

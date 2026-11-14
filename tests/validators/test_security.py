@@ -2098,6 +2098,45 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         assert not any("fingerprints were ignored" in finding.message for finding in result.findings)
 
     @patch("skillevaluator.validators.security.Tools")
+    def test_llm_verify_downgrade_drops_the_stale_baseline_blocker_error(
+        self, mock_tools, sample_skill_dir: Path, tmp_path: Path
+    ) -> None:
+        """The stale-fingerprint error explains a remaining blocker, so a downgrade of the last one passes the scan."""
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text(
+            'version: 2\nscanner_version: "2.9.0"\nrules: []\nfingerprints:\n'
+            f'  - hash: "sha256:{"0" * 64}"\n    reason: "Reviewed"\n',
+            encoding="utf-8",
+        )
+        issue = {
+            "id": "PI-1",
+            "category": "Prompt Injection",
+            "pattern": "Instruction override",
+            "severity": "HIGH",
+            "finding": "Ignore prior instructions",
+            "location": {"file": "SKILL.md", "start_line": 8},
+        }
+        verdict = {"verdict": "false_positive", "confidence": "high", "rationale": "Example rationale."}
+
+        with patch("skillevaluator.inference.FindingVerifier") as verifier_cls:
+            verifier_cls.return_value.verify.side_effect = lambda findings, _path: dict.fromkeys(
+                range(len(findings)), verdict
+            )
+            result = _validate_skillspector_payload(
+                mock_tools,
+                sample_skill_dir,
+                _skillspector_json_report([issue]),
+                exit_code=1,
+                validator=SecurityValidator(use_llm=False, verify_llm=True, skillspector_baseline=baseline),
+            )
+
+        assert result.metadata["skillspector_baseline"]["status"] == "fingerprint_version_mismatch"
+        assert any("downgraded 1 finding(s)" in message for message in result.messages)
+        assert not any(finding.severity in (Severity.HIGH, Severity.CRITICAL) for finding in result.findings)
+        assert result.status == "passed"
+        assert result.errors == []
+
+    @patch("skillevaluator.validators.security.Tools")
     def test_rule_only_skillspector_baseline_ignores_scanner_version(
         self, mock_tools, sample_skill_dir: Path, tmp_path: Path
     ) -> None:

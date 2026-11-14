@@ -6699,9 +6699,12 @@ class SecurityValidator(ValidatorBase):
         Findings the LLM classifies as false_positive with high confidence
         are downgraded to INFO severity and annotated in metadata. Findings of
         checks in :data:`_LLM_VERIFY_EXEMPT_CHECKS` are not sent to the
-        verifier: they keep their severity and get no verdict. Errors and
-        warnings that no finding repeats, such as an accepted missing-reference
-        warning, are kept when the result is rebuilt.
+        verifier: they keep their severity and get no verdict. Warnings that no
+        finding repeats, such as an accepted missing-reference warning, are
+        kept when the result is rebuilt. Errors that no finding repeats are
+        kept only when the scan is incomplete, where they say why. Otherwise
+        they are dropped: such an error, such as the note on a stale SkillSpector
+        baseline, explains blockers that the downgrade may have removed.
         """
         findings = [finding for finding in result.findings if finding.check_name not in _LLM_VERIFY_EXEMPT_CHECKS]
         if not findings:
@@ -6765,9 +6768,12 @@ class SecurityValidator(ValidatorBase):
         if suppressed:
             result.recalculate_from_findings()
             # Rebuilding from findings drops every error and warning that no finding repeats.
-            for error in errors:
-                if error not in result.errors:
-                    result.add_error(error)
+            # An incomplete scan already fails, and its errors say why. Any other such
+            # error, such as a stale-baseline note, explains blockers that may be gone.
+            if result.is_incomplete:
+                for error in errors:
+                    if error not in result.errors:
+                        result.add_error(error)
             for warning in warnings:
                 if warning not in result.warnings:
                     result.add_warning(warning)

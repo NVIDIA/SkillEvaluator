@@ -2000,10 +2000,77 @@ def test_late_notice_is_written_when_the_terminal_refuses_the_cursor_as_the_run_
     # valid UTF-8.
     output = terminal.received.decode("utf-8", errors="replace")
 
-    # The stream keeps the late notice with the refused show-cursor write and
-    # sends both once the terminal takes writes again.
+    # The warning emptied the stream's buffer, so it keeps the late notice
+    # with the refused show-cursor write and sends both once the terminal
+    # takes writes again.
     _assert_cursor_shown_and_one_stop_notice(output, _LATE_STOP_NOTICE)
     assert output.endswith(f"{_LATE_STOP_NOTICE}\n")
+
+
+def test_late_notice_starts_a_line_when_the_stream_sent_a_cut_refused_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rich.console import Console
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    show_cursor = b"\x1b[?25h"
+
+    class Terminal(_WouldBlockTerminal):
+        """Refuses every write while ``refusing`` is set, and one show-cursor write on its own once armed."""
+
+        refusing = False
+        cursor_armed = False
+        sent_before_cursor = b""
+
+        def write(self, data: Any) -> int | None:
+            if self.refusing:
+                return None
+            if self.cursor_armed and bytes(data) == show_cursor:
+                self.cursor_armed = False
+                self.sent_before_cursor = bytes(self.received)
+                return None
+            return super().write(data)
+
+    terminal = Terminal(set())
+    # Shaped like standard error, with a buffer smaller than a frame: it keeps
+    # only the start of a refused frame, whatever the Python version's default
+    # buffer size.
+    stream = io.TextIOWrapper(
+        io.BufferedWriter(terminal, buffer_size=1024), encoding="utf-8", newline="\n", line_buffering=True
+    )
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=60)
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+    # The terminal refuses the update and Live's stop. The stream keeps the
+    # start of the update frame and has no room left for the stop.
+    terminal.refusing = True
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="still evaluating"))
+    assert reporter.is_active is False
+    # Nothing else is printed before the run ends. The terminal then takes
+    # the part of the frame the stream kept and refuses the write that shows
+    # the cursor again, so the line that ends the frame is not written.
+    terminal.refusing = False
+    terminal.cursor_armed = True
+    reporter.close()
+    stream.flush()
+    assert terminal.cursor_armed is False
+    # What reached the terminal before that write ends inside the frame.
+    assert terminal.sent_before_cursor.endswith(b"\n") is False
+    output = terminal.received.decode("utf-8", errors="replace")
+
+    # The late notice starts a line of its own instead of joining the cut
+    # frame's last line.
+    _assert_cursor_shown_and_one_stop_notice(output, _LATE_STOP_NOTICE)
+    assert output.endswith(f"\n{_LATE_STOP_NOTICE}\n")
 
 
 def test_changelog_says_a_stream_can_still_send_refused_output_later() -> None:

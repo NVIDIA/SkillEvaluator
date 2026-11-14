@@ -625,12 +625,19 @@ class RichProgressReporter(PlainProgressReporter):
         from rich.control import Control
 
         dropped = self._drop_refused_writes()
+        # Whether the frame's last line is ended before the late notice.
+        line_ended = True
         try:
             if failed_stop.stop_refused:
                 # Live hides the cursor while it draws and shows it again when
                 # it stops, then ends the frame's last line.
+                line_ended = not self._console.is_terminal
                 self._console.show_cursor(True)
                 if self._console.is_terminal:
+                    # The console keeps a line the terminal refuses and sends
+                    # it before its next write, so the line ends before the
+                    # notice either way.
+                    line_ended = True
                     self._console.line()
             elif str(Control.show_cursor(True)) in dropped:
                 # Live.start() stops Live itself when its first frame fails,
@@ -656,8 +663,16 @@ class RichProgressReporter(PlainProgressReporter):
         try:
             # Written even when the terminal refused the cursor just now: a
             # stream that keeps what the terminal refused, as standard error
-            # does, then sends the notice with it later.
-            self._write_line(_DISPLAY_STOPPED_LATE_NOTICE)
+            # does, can send the notice with it later if its buffer has room.
+            # A refused cursor write leaves the line above unwritten, and the
+            # stream may have kept only the start of the refused stop, without
+            # its newline, so the notice then starts a new line of its own.
+            # Where the stream kept the whole stop, a blank line comes first,
+            # as it does when the terminal takes the cursor write.
+            if line_ended:
+                self._write_line(_DISPLAY_STOPPED_LATE_NOTICE)
+            else:
+                self._write_line(f"\n{_DISPLAY_STOPPED_LATE_NOTICE}")
         except Exception:
             logger.debug("Tier 3 progress late stop notice failed", exc_info=True)
 

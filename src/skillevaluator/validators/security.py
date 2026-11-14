@@ -5217,6 +5217,11 @@ class SecurityValidator(ValidatorBase):
             result.fail_gate(
                 f"{manifest}: SkillSpector could not model these hooks; this check cannot pass while they are present"
             )
+            # The gate is a confirmed failure, so it outranks another gap that
+            # records the scan as incomplete, also when a --policy override
+            # lowers the Critical. Other gate failures, such as the residual
+            # incomplete-analysis error, do not set this.
+            result.metadata["confirmed_failure"] = True
             manifests.append(manifest)
         return manifests
 

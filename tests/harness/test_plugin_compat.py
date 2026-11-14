@@ -187,3 +187,11 @@ def test_findings_carry_their_rule_confidence(tmp_path: Path):
     block = json.loads(out.read_text(encoding="utf-8"))["harness_compatibility"]
     findings = [f for rows in block.values() for row in rows for f in row["findings"]]
     assert findings and all(f.get("confidence") for f in findings)
+
+
+def test_plugin_rows_flag_an_unverified_release(tmp_path: Path):
+    (tmp_path / ".codex-plugin").mkdir()
+    (tmp_path / ".codex-plugin" / "plugin.json").write_text('{"name": "p"}', encoding="utf-8")
+    codex = next(p for p in load_profiles() if p["harness"] == "codex")
+    result = evaluate_plugin(codex, plugin_facts(tmp_path), {"harness_versions": {"codex": "9.9.9"}})
+    assert "VERSION-UNVERIFIED" in [f["id"] for f in result.findings]

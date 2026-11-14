@@ -259,7 +259,7 @@ def run_harness_check(
     block: Block = {}
     if is_plugin_root(target):
         facts = plugin_facts(target)
-        rows = [evaluate_plugin(profile, facts).to_dict() for profile in profiles]
+        rows = [evaluate_plugin(profile, facts, config).to_dict() for profile in profiles]
         console.print(
             harness_panel(
                 {str(target): rows},

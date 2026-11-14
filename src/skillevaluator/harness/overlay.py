@@ -684,6 +684,19 @@ def listing_budget_chars(profile: dict[str, Any], context_tokens: int) -> int:
     return int(budget.get("desc_chars", 0))
 
 
+def version_finding(profile: dict[str, Any], declared: str) -> dict[str, str] | None:
+    """Advisory for a harness release other than the one the profile was verified on."""
+    checked = str(profile.get("verified", {}).get("version", ""))
+    if not declared or declared == checked or checked.startswith(f"{declared} "):
+        return None
+    return {
+        "id": "VERSION-UNVERIFIED",
+        "effect": "advisory",
+        "message": f"Profile verified on {checked}; you run {declared}, so its rules may not hold.",
+        "fix": "Check the findings on that release, or run the version the profile was verified on.",
+    }
+
+
 def evaluate_profile(
     profile: dict[str, Any], facts: dict[str, Any], config: dict[str, Any] | None = None
 ) -> HarnessResult:
@@ -716,16 +729,8 @@ def evaluate_profile(
         worst = max(worst, _EFFECT_RANK[rule["effect"]])
     status = "not_loaded" if worst == 2 else "degraded" if worst == 1 else "loads"
     verified = profile.get("verified", {})
-    declared, checked = setup["harness_version"], str(verified.get("version", ""))
-    if declared and declared != checked and not checked.startswith(f"{declared} "):
-        findings.append(
-            {
-                "id": "VERSION-UNVERIFIED",
-                "effect": "advisory",
-                "message": f"Profile verified on {checked}; you run {declared}, so its rules may not hold.",
-                "fix": "Check the findings on that release, or run the version the profile was verified on.",
-            }
-        )
+    if drift := version_finding(profile, setup["harness_version"]):
+        findings.append(drift)
     return HarnessResult(
         harness=profile["harness"],
         display_name=profile.get("display_name", profile["harness"]),

@@ -2109,6 +2109,12 @@ def test_call_sed_underscored_flag_and_config_rules_keep_ordinary_text(text: str
             "yarn config set npmAuthToken := <redacted> && rm -rf /srv/app",
             id="config-set-spaced-walrus-before-an-assignment",
         ),
+        # So is a name that an auth scheme word after the separator starts.
+        pytest.param(
+            f'npm config set _authToken = token = "{_PASSPHRASE}" && rm -rf /srv/app',
+            "npm config set _authToken = token <redacted> && rm -rf /srv/app",
+            id="config-set-spaced-equals-before-a-scheme-name",
+        ),
     ],
 )
 def test_underscored_flags_and_config_keys_keep_the_assignment_reading(copy: str, command: str, expected: str) -> None:
@@ -2119,6 +2125,22 @@ def test_underscored_flags_and_config_keys_keep_the_assignment_reading(copy: str
     ]
     for secret in (_API_TOKEN, _BASIC_PASSWORD, _PASSPHRASE_TAIL):
         assert secret not in json.dumps(result)
+
+
+# A config set key, a separator word and a name that an auth scheme word
+# starts, followed by its separator and value. Names after that name are read
+# from it, as when the separator word was masked as the key's value, so the
+# last one here is "TOKEN = basic".
+_CONFIG_SCHEME_NAME_COMMANDS = [
+    pytest.param(f'npm config set _authToken = token = "{_PASSPHRASE}"', id="config-scheme-name-equals"),
+    pytest.param(f"yarn config set npmAuthToken := token := '{_PASSPHRASE}'", id="config-scheme-name-walrus"),
+    pytest.param(f'git config --global github.token = token : "{_PASSPHRASE}"', id="config-scheme-name-colon"),
+    pytest.param(f'npm set _auth := TOKEN => "{_PASSPHRASE}"', id="config-scheme-name-arrow"),
+    pytest.param(
+        f"git config --global github.token = digest := bearer = TOKEN = basic '{_PASSPHRASE}'",
+        id="config-names-after-a-scheme-name",
+    ),
+]
 
 
 @pytest.mark.parametrize("copy", ["template", "eval_core"])
@@ -2171,6 +2193,9 @@ def test_underscored_flags_and_config_keys_keep_the_assignment_reading(copy: str
         # key after a separator word.
         pytest.param(f'npm config set _auth = token="{_PASSPHRASE}"', id="config-value-after-a-separator"),
         pytest.param(f"yarn config set npmAuthToken := password:'{_PASSPHRASE}'", id="config-value-after-a-walrus"),
+        # So does the value of a name that an auth scheme word after that
+        # separator starts.
+        *_CONFIG_SCHEME_NAME_COMMANDS,
     ],
 )
 def test_a_value_next_to_a_newly_read_value_stays_masked(copy: str, command: str) -> None:
@@ -2182,6 +2207,14 @@ def test_a_value_next_to_a_newly_read_value_stays_masked(copy: str, command: str
     assert [finding["type"] for finding in result["findings"]] == ["destructive_command"]
     for secret in (_PASSPHRASE_TAIL, _API_TOKEN):
         assert secret not in json.dumps(result)
+
+
+@pytest.mark.parametrize("command", _CONFIG_SCHEME_NAME_COMMANDS)
+def test_a_scheme_name_after_a_config_separator_stays_masked_in_judge_evidence(command: str) -> None:
+    evidence = eval_template._redact_judge_evidence(f"{command} && rm -rf /srv/app")
+
+    assert _PASSPHRASE_TAIL not in evidence
+    assert evidence.endswith(" <redacted> && rm -rf /srv/app")
 
 
 class _CountingPattern:

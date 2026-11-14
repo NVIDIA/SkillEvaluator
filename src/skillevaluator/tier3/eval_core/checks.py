@@ -3485,11 +3485,13 @@ _FINDING_EVIDENCE_CONFIG_SET_RE = re.compile(
     + _FINDING_EVIDENCE_FLAG_VALUE
     + "))"
 )
-# An unquoted NAME followed by a separator word. The config set rule masked
-# that word as the value before it left this form to the assignment rule,
-# which then read each name after the separator, so the assignment rule reads
-# each name inside the value of NAME again ("npm config set _auth =
-# token=\"...\""; see _mask_credential_assignments).
+# An unquoted NAME followed by a separator word. When NAME names a
+# credential, the config set rule masked that word as the value before it left
+# this form to the assignment rule, which then read each name from the word
+# after the separator, so the assignment rule reads each name inside the value
+# of NAME again, and reads names from that word, also when an auth scheme word
+# starts there ("npm config set _auth = token=\"...\"", "npm config set
+# _authToken = token = \"...\""; see _mask_credential_assignments).
 _FINDING_EVIDENCE_CONFIG_SET_SEPARATOR_RE = re.compile(
     _FINDING_EVIDENCE_CONFIG_SET_NAME + _FINDING_EVIDENCE_CONFIG_SET_SEPARATOR
 )
@@ -3886,10 +3888,17 @@ def _mask_attached_argv_values(text: str) -> str:
     return "".join(parts)
 
 
+def _config_key_names_a_credential(key: str) -> bool:
+    """Return whether the last part of config set key *key* names a credential."""
+    return (
+        _FINDING_EVIDENCE_CONFIG_CREDENTIAL_KEY_RE.search(_FINDING_EVIDENCE_CONFIG_KEY_SPLIT_RE.split(key)[-1])
+        is not None
+    )
+
+
 def _mask_config_set_value(match: re.Match[str]) -> str:
     """Mask the value of a config set command whose key names a credential."""
-    key = _FINDING_EVIDENCE_CONFIG_KEY_SPLIT_RE.split(match.group(4))[-1]
-    if _FINDING_EVIDENCE_CONFIG_CREDENTIAL_KEY_RE.search(key) is None:
+    if not _config_key_names_a_credential(match.group(4)):
         return match.group()
     # The value of a quoted key or one after "--" that holds a credential
     # name is left to the assignment rule, as a "_" flag's is.
@@ -3945,11 +3954,17 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
     sed_end = 0
     # Where the last value read for a name that starts no sed pattern or
     # replacement ends, read with no call and no call inside a tuple (see
-    # _flat_value_end), or where it starts for a config set NAME followed by a
-    # separator word, whose value was not read before.
+    # _flat_value_end), or where its separator ends for a config set NAME that
+    # names a credential and is followed by a separator word, whose value was
+    # not read before (nor the name that an auth scheme word after that
+    # separator starts, see _assignment_name_matches).
     plain_end = 0
-    config_name_ends = {name.end(4) for name in _FINDING_EVIDENCE_CONFIG_SET_SEPARATOR_RE.finditer(text)}
-    for match, name_sed_end in _assignment_name_matches(text):
+    config_name_ends = {
+        name.end(4)
+        for name in _FINDING_EVIDENCE_CONFIG_SET_SEPARATOR_RE.finditer(text)
+        if _config_key_names_a_credential(name.group(4))
+    }
+    for match, name_sed_end in _assignment_name_matches(text, config_name_ends):
         name, name_quote, separator = match.group(1, 2, 3)
         # A name inside a masked value is skipped, unless it starts a sed
         # pattern or replacement, or the value is that of a name in a sed
@@ -4037,7 +4052,7 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
         if value is None:
             continue
         if not name_sed_end:
-            plain_end = value.start() if match.end(1) in config_name_ends else _flat_value_end(text, value)
+            plain_end = match.end(3) if match.end(1) in config_name_ends else _flat_value_end(text, value)
         if overlapped:
             # The value of a name in the sed pattern ran over this name, which
             # starts the replacement: in a shell command string a value is one
@@ -4073,19 +4088,29 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
     return "".join(parts)
 
 
-def _assignment_name_matches(text: str) -> list[tuple[re.Match[str], int]]:
+def _assignment_name_matches(text: str, config_name_ends: set[int]) -> list[tuple[re.Match[str], int]]:
     """Return, in order, each name that may start an assignment in *text*, and where its sed expression ends.
 
     That is the end of the "s/PATTERN/REPLACEMENT/" expression whose pattern
     or replacement the name starts, or 0 when it starts neither.
+    *config_name_ends* holds where each config set NAME that names a
+    credential and is followed by a separator word ends.
     """
     matches: dict[int, tuple[re.Match[str], int]] = {}
-    for match in _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.finditer(text):
+    pos = 0
+    while (match := _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.search(text, pos)) is not None:
         # A name right after "/" was read only as the start of a sed pattern.
         sed_end = 0
         if text[match.start() - 1 : match.start()] == "/":
             sed_end = _FINDING_EVIDENCE_SED_EXPRESSION_RE.match(text, match.start() - 2).end()
         matches[match.start()] = (match, sed_end)
+        # The config set rule masked the separator word after a config set
+        # NAME as its value before it left this form to the assignment rule,
+        # which then read names from the word after that separator. So an
+        # auth scheme word there still starts a name of its own ("npm config
+        # set _authToken = token = VALUE"), and names after it are read as
+        # they were then.
+        pos = match.end(3) if match.end(1) in config_name_ends else match.end()
     for sed in _FINDING_EVIDENCE_SED_PATTERN_RE.finditer(text):
         sed_end = _FINDING_EVIDENCE_SED_EXPRESSION_RE.match(text, sed.start()).end()
         if sed.end() in matches:

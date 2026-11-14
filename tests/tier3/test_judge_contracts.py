@@ -1405,10 +1405,32 @@ def test_judge_evidence_keeps_copies_of_line_values_elsewhere(text: str, kept: l
             'subprocess.run(["mkdir", "-p", "out"]); ["ssh", "-p", "2222", "host"]; ["find", ".", "-path", "x"]'
         ),
         json.dumps('["date", "-u", "+%H:%M"]; ["pip", "install", "-U", "git+https://github.com/org/repo"]'),
+        # A bare "-p" element after a MySQL client or login element, with JSON-escaped quotes.
+        json.dumps('subprocess.run(["mysql", "-e", "CREATE DATABASE app"]); subprocess.run(["mkdir", "-p", "data"])'),
+        json.dumps('subprocess.run(["mysql", "-u", "root", "-p", "appdb"])'),
+        json.dumps('run(["docker", "login", "--password-stdin", "-u", "bot"]); run(["git", "log", "-p"])'),
     ],
 )
 def test_judge_evidence_keeps_ordinary_text(text: str) -> None:
     assert eval_template._redact_judge_evidence(text) == text
+
+
+_PASSPHRASE_WORD = "Zq9" + "Leak"
+
+
+# A bare \"-p\" element keeps its escaped closing quote, so a multi-word
+# credential later in the same JSON string is still masked to its end.
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param('["mysql", "-p"]', id="mysql-prompt"),
+        pytest.param('["docker", "login", "-u", "bot"]); run(["git", "log", "-p"]', id="git-log-after-login"),
+    ],
+)
+def test_judge_evidence_masks_passphrase_after_bare_p_element(argv: str) -> None:
+    text = json.dumps({"command": f"run({argv}); password: correct horse {_PASSPHRASE_WORD} staple"})
+
+    assert eval_template._redact_judge_evidence(text) == json.dumps({"command": f"run({argv}); password: <redacted>"})
 
 
 def test_salvaged_behavior_score_is_saved_as_a_salvage_attempt(tmp_path: Path) -> None:

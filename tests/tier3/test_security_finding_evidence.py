@@ -1143,10 +1143,33 @@ def test_finding_evidence_redaction_masks_credentials(text: str, secrets: tuple[
         'subprocess.run(["date", "-u", "+%H:%M:%S"])',
         "go test ./... | grep -- '--- PASS: TestLogin' && rm -rf /tmp/out",
         'echo \'{"pass": true, "score": 1}\' > result.json && rm -rf /srv/app',
+        # A bare "-p" element after a MySQL client or login element, with
+        # JSON-escaped quotes as in tool-call arguments.
+        json.dumps('subprocess.run(["mysql", "-e", "CREATE DATABASE app"]); subprocess.run(["mkdir", "-p", "data"])'),
+        json.dumps('subprocess.run(["mysql", "-u", "root", "-p", "appdb"])'),
+        json.dumps('run(["docker", "login", "--password-stdin", "-u", "bot"]); run(["git", "log", "-p"])'),
     ],
 )
 def test_finding_evidence_redaction_keeps_ordinary_text(text: str) -> None:
     assert eval_core_checks._redact_finding_evidence(text) == text
+
+
+# A bare \"-p\" element keeps its escaped closing quote, so a multi-word
+# credential later in the same JSON string is still masked to its end.
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param('["mysql", "-p"]', id="mysql-prompt"),
+        pytest.param('["docker", "login", "-u", "bot"]); run(["git", "log", "-p"]', id="git-log-after-login"),
+    ],
+)
+def test_finding_evidence_masks_passphrase_after_bare_p_element(argv: str) -> None:
+    word = "Zq9" + "Leak"
+    text = json.dumps({"command": f"run({argv}); password: correct horse {word} staple"})
+
+    assert eval_core_checks._redact_finding_evidence(text) == json.dumps(
+        {"command": f"run({argv}); password: <redacted>"}
+    )
 
 
 @pytest.mark.parametrize(

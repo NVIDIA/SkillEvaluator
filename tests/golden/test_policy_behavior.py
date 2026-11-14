@@ -33,7 +33,7 @@ def _write_skill(root: Path, name: str, author_line: str | None) -> Path:
     skill.mkdir(parents=True)
     meta = f"metadata:\n  author: {author_line}\n" if author_line else ""
     (skill / "SKILL.md").write_text(
-        f"---\nname: {name}\ndescription: A test skill for policy behavior checks.\n{meta}---\n"
+        f"---\nname: {name}\ndescription: Use when checking policy behavior. A test skill for policy behavior checks.\n{meta}---\n"
         + _BODY.format(name=name),
         encoding="utf-8",
     )

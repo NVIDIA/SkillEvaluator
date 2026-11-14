@@ -2,6 +2,16 @@
 
 > ✅ **Overall verdict: PASS — Recommended for publication**
 
+### Why This Verdict
+
+- Decision: **PASS** — every publication-required tier passed and the Tier 3 dimension gate passed.
+- Tier 3 evidence: **PASS** (publication-complete; required for publication). Dimension gate: an agent passes when every dimension is at or above 50% and fails when any dimension is below 40%.
+
+| Agent | Dimension gate | Evidence the gate read |
+|---|---|---|
+| Claude Code | pass | every dimension at or above the 50% PASS boundary (lowest: Security 92.0%) |
+| Codex | pass | every dimension at or above the 50% PASS boundary (lowest: Security 88.0%) |
+
 ## Publication Recommendation
 
 Recommended for publication based on the completed evaluation evidence in this report.

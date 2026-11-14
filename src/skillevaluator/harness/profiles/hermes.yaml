@@ -7,10 +7,33 @@ roots:
   user: [~/.hermes/skills]
   not_scanned: [~/.agents/skills]
 limits: {listing_desc_chars: 60}
+listing: {cut: 60}
 rules:
-  - {id: HM-ROOT, when: "install_root not in roots", effect: not_loaded, outcome: not found, message: "Hermes reads ~/.hermes/skills, and project .hermes/skills or .agents/skills only when trusted.", fix: "Install it under ~/.hermes/skills, or .hermes/skills or .agents/skills in a trusted repo."}
-  - {id: HM-DUP-KEY, when: "frontmatter_duplicate_keys", effect: advisory, message: "Duplicate keys: last value wins.", fix: "Remove the duplicate frontmatter key."}
+  - {id: HM-ROOT, when: "install_root not in roots", effect: not_loaded, outcome: not found, message: "Hermes reads ~/.hermes/skills, and project .hermes/skills or .agents/skills only when trusted.", fix: "Install it under ~/.hermes/skills, or .hermes/skills or .agents/skills in a trusted repo.", confidence: high}
+  - {id: HM-TRUST, when: "install_root in roots.project", effect: advisory, message: "Project skills are invisible until the repo is trusted (`hermes skills trust`, skills.trusted_project_dirs).", fix: "Install under ~/.hermes/skills, or run `hermes skills trust` only in a repo whose skills you would run as your own (trust admits every project skill).", confidence: high}
+  - {id: HM-DESC-60, when: "trigger_end is None or trigger_end > 60", effect: advisory, outcome: listing shortened, message: "The skill list shows only the first ~60 chars of the description (57 + '...' in 0.16, a word boundary near 59 on main), and the trigger isn't in them.", fix: "Put the trigger (\"Use when …\") in the first 57 characters.", confidence: high}
+  - {id: HM-DESC-MISSING, when: "description_missing or description_empty", effect: degraded, message: "Listed by name with an empty description.", fix: "Add a non-empty string description.", confidence: high}
+  - {id: HM-NESTED, when: "nested_skill_md_exact", effect: degraded, message: "The nested SKILL.md is loaded as a second, separate skill (hidden folders are walked too).", fix: "Move the nested skill to its own folder under the skills root, or rename its SKILL.md.", confidence: high}
+  - {id: HM-SYMLINK-FILE, when: "skill_md_symlink", effect: not_loaded, message: "Symlinked SKILL.md files are not loaded.", fix: "Copy SKILL.md into the folder instead of symlinking the file (a symlinked folder works).", confidence: medium}
+  - {id: HM-DUP-KEY, when: "frontmatter_duplicate_keys", effect: advisory, message: "Duplicate keys: last value wins.", fix: "Remove the duplicate frontmatter key.", confidence: high}
+  - {id: HM-ALLOWED-TOOLS, when: "allowed_tools_shape != 'none'", effect: advisory, message: "allowed-tools is ignored by Hermes.", fix: "Don't rely on allowed-tools to restrict tools; use the harness's permission settings.", confidence: high}
+  - {id: HM-CASING, when: "not manifest_name_exact", effect: not_loaded, message: "Non-canonical name (skill.md/Skill.md): never loaded, on Linux or macOS (3/3 each).", fix: "Rename the file to SKILL.md (exact casing).", confidence: high}
+  - {id: HM-DUP-NAME, when: "duplicate_name", effect: advisory, message: "Another skill is also named '{skill_name}' ({duplicate_paths}); Hermes uses one: project, then ~/.hermes/skills.", fix: "Give each skill a unique name.", confidence: high}
+  - {id: HM-PLATFORMS, when: "platforms_excluded != ''", effect: advisory, message: "Hidden from the skill list on {platforms_excluded} (platforms: {platforms}).", fix: "Add those systems to platforms, or remove platforms if the skill works everywhere.", confidence: high}
+  - {id: HM-RESOURCE-SYMLINK, when: "resource_symlinks > 0", effect: degraded, message: "Symlinked files ({resource_symlink_paths}) are left out of the skill's file list.", fix: "Copy those files into the skill instead of symlinking them.", confidence: medium}
+  - {id: HM-LINKED-LAYOUT, when: "hermes_unlisted_files > 0", effect: advisory, message: "{hermes_unlisted_files} files outside references/, templates/, assets/ and scripts/ ({hermes_unlisted_dirs}) are left out of the skill's file list; the model finds them only if SKILL.md names their paths.", fix: "Move supporting files under references/, templates/, assets/ or scripts/.", confidence: high}
+  - {id: HM-VIEW-BUDGET, when: "hermes_view_chars > 100000", effect: degraded, outcome: instructions not delivered, message: "When the model loads the skill, skill_view returns ~{hermes_view_chars} chars, over the 100,000-char tool-result budget (lower on models under ~167K context): the model gets a 1,500-char preview, not the instructions.", fix: "Keep SKILL.md under ~95,000 characters; move detail into references/ files.", versions: "/name and -s preload still deliver the full body", confidence: high}
+  - {id: HM-DMI-IGNORED, when: "disable_model_invocation", effect: degraded, message: "disable-model-invocation is ignored: the model still sees this skill and can use it on its own.", fix: "No equivalent setting in Hermes; don't rely on it.", confidence: high}
+  - {id: HM-CODEX-POLICY, when: "codex_implicit_disabled and not disable_model_invocation", effect: degraded, message: "agents/openai.yaml implicit-invocation policy is Codex-only: here the model can still use this skill on its own.", fix: "No equivalent setting in Hermes.", confidence: high}
+  - {id: HM-ARGUMENTS, when: "uses_arguments_placeholder", effect: degraded, message: "$ARGUMENTS is not substituted: the model sees the literal text.", fix: "Describe the expected input in words instead of $ARGUMENTS.", confidence: high}
+  - {id: HM-SKILL-DIR, when: "uses_claude_skill_dir", effect: degraded, message: "${CLAUDE_SKILL_DIR} is not substituted: the model sees the literal text.", fix: "Use ${HERMES_SKILL_DIR} or paths relative to SKILL.md.", confidence: high}
+  - {id: HM-CLAUDE-ONLY, when: "claude_only_fields != ''", effect: advisory, message: "Ignored here (Claude Code only): {claude_only_fields}.", fix: "Fine to keep for Claude Code; don't depend on them elsewhere.", confidence: medium}
 notes:
   - "Precedence: project > ~/.hermes/skills > skills.create_dir > external_dirs (project wins, 3/3)."
   - "Large bodies are spilled and paged through in small reads."
   - "Pin the commit: the displayed version string did not match the installed code."
+plugin:
+  rules:
+    - {id: HM-PLUGIN-FORMAT, when: "not (fmt_agent_v1 or fmt_hermes_native)", effect: not_loaded, outcome: rejected, message: "Hermes installs Agent Plugins v1 (plugin.json with the agent-plugins.org $schema) or native plugin.yaml plugins only.", fix: "Add an Agent Plugins v1 plugin.json.", confidence: high}
+    - {id: HM-PLUGIN-DISABLED, when: "fmt_agent_v1", effect: advisory, message: "Portable packages install disabled; nothing loads until `hermes plugins enable {plugin_name}`.", confidence: high}
+  components: {skills: listed, commands: not_observed, agents: not_observed, hooks: not_observed, mcp: not_observed, lsp: not_observed}

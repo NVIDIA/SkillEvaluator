@@ -1640,6 +1640,26 @@ class TestSARIFReporter:
         uri = run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
         assert uri == "skills/demo/SKILL.md"
 
+    def test_physical_location_uri_encodes_percent_signs(self, tmp_path: Path) -> None:
+        names = ["notes/a b.md", "notes/a%20b.md", "notes/100%.md"]
+        result = ValidationResult(validator_name="QUALITY", validator_description="quality")
+        for name in names:
+            result.add_finding(
+                Finding(
+                    category="QUALITY",
+                    severity=Severity.MEDIUM,
+                    check_name="spacing",
+                    message="issue",
+                    file_path=str(tmp_path / name),
+                    line_number=1,
+                )
+            )
+
+        sarif = json.loads(SARIFReporter(include_timestamp=False, workspace_root=tmp_path).render_all([result]))
+        results = sarif["runs"][0]["results"]
+        uris = [item["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] for item in results]
+        assert uris == ["notes/a%20b.md", "notes/a%2520b.md", "notes/100%25.md"]
+
     def test_merge_catalog_sarif_combines_into_single_run(self) -> None:
         child = SARIFReporter(include_timestamp=False)
         documents = []

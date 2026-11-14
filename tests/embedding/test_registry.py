@@ -137,6 +137,42 @@ def test_build_explicit_paths_names_a_skill_without_valid_frontmatter(
     client.embed_chunked.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("frontmatter", "message"),
+    [
+        pytest.param(
+            "name: " + "x" * 16_385 + "\ndescription: Play the game.",
+            "Manifest frontmatter name exceeds the 16384-character limit: game/SKILL.md",
+            id="name-over-length-limit",
+        ),
+        pytest.param(
+            "name: game\ndescription: Play the game.\nextra: " + "[" * 1_500 + "safe" + "]" * 1_500,
+            "Manifest structured-data complexity limit exceeded: game/SKILL.md",
+            id="frontmatter-over-structure-limit",
+        ),
+    ],
+)
+def test_build_explicit_paths_keeps_frontmatter_limit_errors_generic(
+    tmp_path: Path, write_skill, frontmatter: str, message: str
+) -> None:
+    # Callers treat InvalidExplicitSkillError as a frontmatter shape problem;
+    # a limit error stays a plain ValueError with the extractor's message.
+    alpha = write_skill(tmp_path / "skills", "alpha", description="First fixture")
+    game = tmp_path / "skills" / "game"
+    game.mkdir()
+    (game / "SKILL.md").write_bytes(f"---\n{frontmatter}\n---\n\n# Game\n".encode())
+    client = _make_mock_client([[1.0, 0.0], [0.0, 1.0]])
+
+    with pytest.raises(ValueError) as caught:
+        EmbeddingRegistry(client).build_from_paths(tmp_path, [alpha, game])
+
+    assert str(caught.value) == message
+    assert type(caught.value) is ValueError
+    client.embed.assert_not_called()
+    client.embed_single.assert_not_called()
+    client.embed_chunked.assert_not_called()
+
+
 class TestBuildFromDirectory:
     def test_empty_collection_debug_logs_use_label_without_host_path(self, tmp_path: Path, monkeypatch) -> None:
         collection = tmp_path / "nested" / "external-skills"

@@ -993,19 +993,15 @@ def test_no_skill_change_never_excuses_missing_tier1_evidence(consumer, tmp_path
     assert rows[2]["status"] == "skipped"
 
 
-@pytest.mark.parametrize("value", ["name: 2048", "name: yes", "name: [Draft]"])
-def test_skill_without_valid_frontmatter_stops_the_catalog_with_a_frontmatter_reason(
-    consumer, tmp_path, monkeypatch, value
-):
+def _evaluate_tier2_with_unselected_game(consumer, tmp_path, monkeypatch, frontmatter):
+    """Run Tier 2 with only alpha selected and an unselected ``skills/game`` carrying *frontmatter*."""
     import contextlib
-
-    from ci.comment_summary import render_comment_summary
 
     from skillevaluator.embedding.registry import EmbeddingRegistry
 
     game = consumer / "skills" / "game"
     game.mkdir()
-    (game / "SKILL.md").write_bytes(f"---\n{value}\ndescription: Play the game.\n---\nInstructions.\n".encode())
+    (game / "SKILL.md").write_bytes(f"---\n{frontmatter}\n---\nInstructions.\n".encode())
     git = ["git", "-C", str(consumer), "-c", "user.name=CI tests", "-c", "user.email=ci@example.com"]
     subprocess.run([*git, "add", "."], check=True)
     subprocess.run([*git, "commit", "-m", "game"], check=True, capture_output=True)
@@ -1013,7 +1009,7 @@ def test_skill_without_valid_frontmatter_stops_the_catalog_with_a_frontmatter_re
     monkeypatch.setattr(run_tiers, "select_skills", lambda workspace, _env: ([workspace / "skills/alpha"], {}))
 
     def no_embedding(*_args, **_kwargs):
-        raise AssertionError("An invalid catalog skill must be rejected before any embedding request")
+        raise AssertionError("A catalog skill with this frontmatter must be rejected before any embedding request")
 
     monkeypatch.setattr(EmbeddingRegistry, "_build_entries", no_embedding)
     commands = []
@@ -1031,9 +1027,21 @@ def test_skill_without_valid_frontmatter_stops_the_catalog_with_a_frontmatter_re
     assert commands == ["catalog"]
     tier = json.loads((reports / "tier2/ci-tier.json").read_text(encoding="utf-8"))["tiers"][0]
     assert tier["status"] == "incomplete"
+    log = (reports / "tier2/catalog/diagnostics/command.log").read_text(encoding="utf-8")
+    return reports, env, tier, log
+
+
+@pytest.mark.parametrize("value", ["name: 2048", "name: yes", "name: [Draft]"])
+def test_skill_without_valid_frontmatter_stops_the_catalog_with_a_frontmatter_reason(
+    consumer, tmp_path, monkeypatch, value
+):
+    from ci.comment_summary import render_comment_summary
+
+    reports, env, tier, log = _evaluate_tier2_with_unselected_game(
+        consumer, tmp_path, monkeypatch, f"{value}\ndescription: Play the game."
+    )
     reason = "A skill's invalid SKILL.md frontmatter stopped the comparison catalog; its diagnostics name the skill."
     assert tier["reason"] == reason
-    log = (reports / "tier2/catalog/diagnostics/command.log").read_text(encoding="utf-8")
     assert "non-empty string name and description: skills/game" in log
     assert str(consumer) not in log
     # The feedback comment cuts each cell to a fixed length; the whole reason,
@@ -1043,3 +1051,25 @@ def test_skill_without_valid_frontmatter_stops_the_catalog_with_a_frontmatter_re
     body = render_comment_summary(manifest, "https://github.com/example/consumer/actions/runs/123/artifacts/9")
     alpha = next(line for line in body.splitlines() if line.startswith("| skills/alpha |"))
     assert alpha.split(" | ")[2] == f"INCOMPLETE · issues unknown · {reason}"
+
+
+@pytest.mark.parametrize(
+    "frontmatter",
+    [
+        pytest.param("name: " + "x" * 16_385 + "\ndescription: Play the game.", id="name-over-length-limit"),
+        pytest.param(
+            "name: game\ndescription: Play the game.\nextra: " + "[" * 1_500 + "safe" + "]" * 1_500,
+            id="frontmatter-over-structure-limit",
+        ),
+    ],
+)
+def test_frontmatter_over_a_limit_stops_the_catalog_with_the_provider_reason(
+    consumer, tmp_path, monkeypatch, frontmatter
+):
+    # Only the frontmatter rejection gets its own exit status and reason. Any
+    # other catalog failure, including a limit error, keeps the generic ones.
+    _reports, _env, tier, log = _evaluate_tier2_with_unselected_game(consumer, tmp_path, monkeypatch, frontmatter)
+    assert tier["reason"] == (
+        "The complete comparison catalog could not be built; inspect provider and embedding configuration."
+    )
+    assert log.strip() == "CI execution could not complete safely."

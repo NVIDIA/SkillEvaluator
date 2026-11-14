@@ -106,11 +106,12 @@ _CATALOG_ENTRY_FIELDS = frozenset(
 
 
 class InvalidExplicitSkillError(ValueError):
-    """An explicit skill has no root ``SKILL.md`` with valid name and description frontmatter.
+    """Explicit skills have no root ``SKILL.md`` with valid name and description frontmatter.
 
     :meth:`EmbeddingRegistry.build_from_paths` raises it before any embedding
-    request. The message names the skill only by its path under the checkout
-    root, so callers can show it without exposing host directories.
+    request. The message names every such skill, in sorted order, only by its
+    path under the checkout root, so callers can show it without exposing host
+    directories.
     """
 
 
@@ -264,6 +265,9 @@ class EmbeddingRegistry:
         if not unique or len(unique) > self._max_entries:
             raise ValueError("Explicit skill collection exceeds its supported entry count")
         entries = []
+        # Every skill is checked, so one error names all skills whose frontmatter
+        # needs fixing. Limit and link errors still stop at their own skill.
+        invalid = []
         for path in unique:
             try:
                 relative = path.absolute().relative_to(root)
@@ -278,11 +282,14 @@ class EmbeddingRegistry:
                 raise ValueError("An explicit skill is outside the checkout root")
             entry = extract_from_skill(current)
             if entry is None:
-                raise InvalidExplicitSkillError(
-                    "Each explicit skill requires a root SKILL.md whose frontmatter is a valid YAML mapping "
-                    f"with a non-empty string name and description: {relative.as_posix()}"
-                )
-            entries.append(entry)
+                invalid.append(relative.as_posix())
+            else:
+                entries.append(entry)
+        if invalid:
+            raise InvalidExplicitSkillError(
+                "Each explicit skill requires a root SKILL.md whose frontmatter is a valid YAML mapping "
+                f"with a non-empty string name and description: {', '.join(invalid)}"
+            )
         return self._build_entries(root, entries, 1, False)
 
     def _build_entries(

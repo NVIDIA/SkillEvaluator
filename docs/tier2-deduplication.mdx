@@ -30,8 +30,9 @@ did not change. One `SKILL.md` among them whose frontmatter is not a valid YAML
 mapping with a non-empty string `name` and `description`, such as `name: 2048`,
 `name: yes`, or `description: [Draft]`, stops that catalog before any embedding
 request. Tier 2 then checks no skill and is incomplete. Its reason says that a
-skill's frontmatter is the cause, and the retained catalog diagnostics name the
-skill by its path in the repository. Quote such a value, as in `name: "2048"`.
+skill's frontmatter is the cause, and the retained catalog diagnostics name
+every such skill by its path in the repository. Quote such a value, as in
+`name: "2048"`.
 Frontmatter over a [structure or length limit](#defaults-and-safety-limits)
 also stops the catalog, but with the reason that points at provider and
 embedding configuration; run `similarity-check` on the skill root to find that

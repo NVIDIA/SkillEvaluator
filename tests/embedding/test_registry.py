@@ -137,6 +137,33 @@ def test_build_explicit_paths_names_a_skill_without_valid_frontmatter(
     client.embed_chunked.assert_not_called()
 
 
+def test_build_explicit_paths_names_every_skill_without_valid_frontmatter(tmp_path: Path, write_skill) -> None:
+    # One error names every such skill, so CI needs one run to find them all.
+    alpha = write_skill(tmp_path / "skills", "alpha", description="First fixture")
+    skills = [alpha]
+    for name, frontmatter in (
+        ("zeta", "name: zeta\ndescription: [Draft]"),
+        ("game", "name: 2048\ndescription: Play the game."),
+        ("quiz", "name: yes\ndescription: Answer questions."),
+    ):
+        skill = tmp_path / "skills" / name
+        skill.mkdir()
+        (skill / "SKILL.md").write_bytes(f"---\n{frontmatter}\n---\n\n# {name}\n".encode())
+        skills.append(skill)
+    client = _make_mock_client([[1.0, 0.0], [0.0, 1.0]])
+
+    with pytest.raises(registry_module.InvalidExplicitSkillError) as caught:
+        EmbeddingRegistry(client).build_from_paths(tmp_path, skills)
+
+    assert str(caught.value) == (
+        "Each explicit skill requires a root SKILL.md whose frontmatter is a valid YAML mapping "
+        "with a non-empty string name and description: skills/game, skills/quiz, skills/zeta"
+    )
+    client.embed.assert_not_called()
+    client.embed_single.assert_not_called()
+    client.embed_chunked.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("frontmatter", "message"),
     [

@@ -1,0 +1,51 @@
+{# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. #}
+{# SPDX-License-Identifier: Apache-2.0 #}
+{% macro telemetry_table(sections, columns, table_id) -%}
+    <p class="t3-section-hint">Accounting source: {{ sections[0].source }} · schema {{ sections[0].schema_version }}.</p>
+    {% for section in sections %}
+    {% for note in section.notes %}<p class="t3-section-hint">{{ note }}</p>{% endfor %}
+    <h4>{{ section.label }}</h4>
+    <div class="table-scroll">
+    <table class="summary-table"{% if loop.first %} id="{{ table_id }}"{% endif %}>
+        <caption class="sr-only">{{ section.label }} recorded telemetry, by condition and case</caption>
+        <thead><tr><th>Case</th><th>Condition</th>{% for column in columns %}<th>{{ column }}</th>{% endfor %}<th>Coverage / comparison</th></tr></thead>
+        <tbody>
+        {% for row in section.rows %}
+        <tr><td><code>{{ row.case }}</code></td><td>{{ row.condition }}</td>
+            {% for value in row['values'] %}<td>{{ value }}</td>{% endfor %}
+            <td>{{ row.coverage }}{% for note in row.notes %}<div>{{ note }}</div>{% endfor %}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+    {% endfor %}
+{%- endmacro %}
+
+{% macro render_telemetry(view) -%}
+{% if view.has_tokens %}
+<details class="t3-details" id="tier3-token-usage">
+    <summary>Recorded token usage · dataset, agents and cases</summary>
+    <div class="t3-details-body">
+    <p class="t3-section-hint">Measured tokens, not scored. Partial totals cover measured attempts only; missing counters are N/A. Changes retain the recorded comparison status and reasons.</p>
+    {{ telemetry_table(view.token_sections, ['Prompt', 'Cached', 'Uncached prompt', 'Completion', 'Total', 'Efficiency Tokens'], 't3-recorded-token-usage-table') }}
+    {% if view.token_chart %}
+    <div class="t3-chart-box"><canvas id="tier3-recorded-token-chart" role="img" aria-label="Recorded token usage by agent and condition" aria-describedby="tier3-recorded-token-chart-description" hidden></canvas></div>
+    <p id="tier3-recorded-token-chart-description" class="chart-description">Recorded agent totals for both conditions: uncached prompt, cached prompt and completion tokens. Partial groups are labelled; missing components remain unavailable. Long chart labels may be shortened. <a href="#t3-recorded-token-usage-table">View recorded token values and scope labels.</a></p>
+    <p id="tier3-recorded-token-chart-fallback" class="chart-fallback">Token chart unavailable. <a href="#t3-recorded-token-usage-table">Read the recorded token table.</a></p>
+    {% endif %}
+    <details class="t3-details"><summary>Token accounting</summary><div class="t3-details-body">Prompt includes cached reads. Total = Prompt + Completion. Efficiency Tokens = Uncached prompt + Completion. Cached reads are never added to Prompt again. Change = with skill − without skill; percentages require a valid recorded comparison. No missing counters are estimated. Coverage shows measured / expected attempts; observed, partial and unscored attempts and recorded reasons follow when available.</div></details>
+    </div>
+</details>
+{% endif %}
+{% if view.has_latency %}
+<details class="t3-details" id="tier3-latency-metrics">
+    <summary>Recorded model latency · dataset, agents and cases</summary>
+    <div class="t3-details-body">
+    <p class="t3-section-hint">Recorded LLM and tool timing. Missing instrumentation is N/A. Inferred timestamps include queue/harness time; mixed timing sources are not like-for-like.</p>
+    {{ telemetry_table(view.latency_sections, ['LLM (s)', 'Tool (s)', 'LLM ms/token', 'LLM timing', 'Arm runtime (ms)'], 't3-latency-table') }}
+    <details class="t3-details"><summary>Timing methods</summary><div class="t3-details-body">LLM timing comes from native ATIF extras or inferred step timestamps. Tool time comes from tool-call intervals or recorded execution wall time; complete tool totals require every trial in the scope. LLM ms/token uses recorded LLM time and complete token coverage. Arm runtime is whole-arm wall time, shown only for agent totals; it is not model-only time. This report does not recompute timings or comparisons.</div></details>
+    </div>
+</details>
+{% endif %}
+{%- endmacro %}

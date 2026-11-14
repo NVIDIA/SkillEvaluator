@@ -1916,6 +1916,53 @@ def test_call_sed_underscored_flag_and_config_rules_keep_ordinary_text(text: str
             [("sensitive_file_write", "~/.bashrc, /etc/profile")],
             id="mv-beside-a-redirection",
         ),
+        pytest.param(
+            "echo 'agent ALL=(ALL) NOPASSWD: ALL' | sudo EDITOR='tee -a' visudo -f /etc/sudoers.d/agent"
+            " && echo y >> ~/.bashrc",
+            [("sensitive_file_write", "~/.bashrc, /etc/sudoers.d")],
+            id="visudo-beside-a-redirection",
+        ),
+        pytest.param(
+            "printf 'a\\nagent ALL=(ALL) ALL\\n.\\nw\\n' | ed -s /etc/sudoers && echo y >> ~/.bashrc",
+            [("sensitive_file_write", "~/.bashrc, /etc/sudoers")],
+            id="ed-beside-a-redirection",
+        ),
+        pytest.param(
+            "ex -sc 'wq' /etc/profile && echo y >> ~/.zshrc",
+            [("sensitive_file_write", "~/.zshrc, /etc/profile")],
+            id="ex-beside-a-redirection",
+        ),
+        pytest.param(
+            "truncate -s0 /etc/sudoers && echo y >> ~/.bashrc",
+            [("sensitive_file_write", "~/.bashrc, /etc/sudoers")],
+            id="truncate-beside-a-redirection",
+        ),
+        pytest.param(
+            "patch /etc/profile < p.diff && echo y >> ~/.bashrc",
+            [("sensitive_file_write", "~/.bashrc, /etc/profile")],
+            id="patch-beside-a-redirection",
+        ),
+        pytest.param(
+            "grep -v umask /etc/profile | sponge /etc/profile && echo y >> ~/.bashrc",
+            [("sensitive_file_write", "~/.bashrc, /etc/profile")],
+            id="sponge-beside-a-redirection",
+        ),
+        pytest.param(
+            "awk -i inplace '{print}' /etc/sudoers && echo x >> ~/.bashrc",
+            [("sensitive_file_write", "~/.bashrc, /etc/sudoers")],
+            id="awk-in-place-beside-a-redirection",
+        ),
+        pytest.param(
+            "sort -u -o /etc/sudoers /etc/sudoers && echo y >> ~/.bashrc",
+            [("sensitive_file_write", "~/.bashrc, /etc/sudoers")],
+            id="sort-output-beside-a-redirection",
+        ),
+        # Without -o, sort only reads the file it names.
+        pytest.param(
+            "sort -u /etc/profile >> ~/.bashrc",
+            [("sensitive_file_write", "~/.bashrc")],
+            id="sort-reads-without-an-output-option",
+        ),
     ],
 )
 def test_path_findings_list_every_protected_entry(copy: str, command: str, expected: list[tuple[str, str]]) -> None:
@@ -1958,3 +2005,8 @@ def test_baseline_attribution_compares_every_protected_entry() -> None:
     assert _attribution("cp a ~/.bashrc; cp b ~/.zshrc 2>/dev/null", "cp a ~/.bashrc 2>/dev/null") == (
         "ambiguous_with_skill_only"
     )
+    assert _attribution(
+        "echo 'agent ALL=(ALL) NOPASSWD: ALL' | sudo EDITOR='tee -a' visudo -f /etc/sudoers.d/agent"
+        " && echo y >> ~/.bashrc",
+        "echo x >> ~/.bashrc",
+    ) == ("ambiguous_with_skill_only")

@@ -1195,10 +1195,13 @@ def _sensitive_write_target(command: str) -> str | None:
 
 # Commands that write a file named in their arguments rather than through a
 # redirection, tee or sed -i target ("cp evil /etc/sudoers", "dd
-# of=/etc/sudoers.d/x", "curl -o ~/.bashrc URL"), and interpreters, whose code
-# can write any file.
+# of=/etc/sudoers.d/x", "curl -o ~/.bashrc URL", "visudo -f
+# /etc/sudoers.d/x", "truncate -s0 /etc/profile", and "sort -o /etc/sudoers",
+# whose -o is read among its first nine words), and interpreters, whose code
+# can write any file ("awk -i inplace").
 _OPERAND_WRITE_COMMAND_RE = re.compile(
-    r"(?<![\w.-])(?:cp|mv|install|dd|ln|rsync|scp|curl|wget|tar|unzip|perl|python[0-9.]*|ruby|node)(?![\w.-])"
+    r"(?<![\w.-])(?:cp|mv|install|dd|ln|rsync|scp|curl|wget|tar|unzip|patch|truncate|sponge|ed|ex|visudo"
+    r"|sort(?=(?:[ \t]+[^\s;&|]+){0,8}?[ \t]+(?:-[a-z]*o|--output))|perl|python[0-9.]*|ruby|node|[gmn]?awk)(?![\w.-])"
 )
 
 

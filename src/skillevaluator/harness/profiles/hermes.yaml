@@ -1,0 +1,16 @@
+harness: hermes
+display_name: Hermes Agent
+verified: {version: "main @ c419cf7c864a (binary reports 2026.9.24)", source: "NousResearch/hermes-agent c419cf7c864ac0ee511dbd9f7091a8bba0b567ee", date: 2026-11-01, method: proxy-captured canary probes x3 + source, os: linux}
+roots:
+  project: [.hermes/skills, .agents/skills]
+  project_requires_trust: true
+  user: [~/.hermes/skills]
+  not_scanned: [~/.agents/skills]
+limits: {listing_desc_chars: 60}
+rules:
+  - {id: HM-ROOT, when: "install_root not in roots", effect: not_loaded, outcome: not found, message: "Hermes reads ~/.hermes/skills, and project .hermes/skills or .agents/skills only when trusted.", fix: "Install it under ~/.hermes/skills, or .hermes/skills or .agents/skills in a trusted repo."}
+  - {id: HM-DUP-KEY, when: "frontmatter_duplicate_keys", effect: advisory, message: "Duplicate keys: last value wins.", fix: "Remove the duplicate frontmatter key."}
+notes:
+  - "Precedence: project > ~/.hermes/skills > skills.create_dir > external_dirs (project wins, 3/3)."
+  - "Large bodies are spilled and paged through in small reads."
+  - "Pin the commit: the displayed version string did not match the installed code."

@@ -181,6 +181,38 @@ def _display_metadata_id(value: Any) -> str:
     return value
 
 
+_UTF8_BOM = b"\xef\xbb\xbf"
+
+
+def _duplicate_frontmatter_keys(frontmatter_yaml: str) -> list[tuple[str, int]]:
+    """Return ``(dotted_key, line)`` for every repeated mapping key (PyYAML keeps the last silently)."""
+    try:
+        root = yaml.compose(frontmatter_yaml, Loader=yaml.SafeLoader)
+    except yaml.YAMLError:
+        return []
+    duplicates: list[tuple[str, int]] = []
+    stack: list[tuple[yaml.Node, str]] = [(root, "")] if root is not None else []
+    visited: set[int] = set()
+    while stack:
+        node, prefix = stack.pop()
+        if id(node) in visited:
+            continue
+        visited.add(id(node))
+        if isinstance(node, yaml.MappingNode):
+            seen: set[str] = set()
+            for key_node, value_node in node.value:
+                if not isinstance(key_node, yaml.ScalarNode) or key_node.value == "<<":
+                    continue
+                key = f"{prefix}{key_node.value}"
+                if key_node.value in seen:
+                    duplicates.append((key, key_node.start_mark.line + 2))
+                seen.add(key_node.value)
+                stack.append((value_node, f"{key}."))
+        elif isinstance(node, yaml.SequenceNode):
+            stack.extend((item, prefix) for item in node.value)
+    return sorted(duplicates, key=lambda item: item[1])
+
+
 class SchemaValidator(ValidatorBase):
     """Validates skill schema and repository structure per SkillEvaluator spec.
 
@@ -380,6 +412,7 @@ class SchemaValidator(ValidatorBase):
             result.merge(self._validate_name_matches_directory(skill_path, frontmatter))
             result.merge(self._validate_author(frontmatter, str(skill_md)))
             result.merge(self._validate_metadata_id(frontmatter, str(skill_md)))
+            result.merge(self._validate_portability(skill_md))
 
         return result
 
@@ -452,6 +485,23 @@ class SchemaValidator(ValidatorBase):
                 )
             )
             return result
+
+        for key, line_number in _duplicate_frontmatter_keys(frontmatter_yaml):
+            result.add_finding(
+                Finding(
+                    category="SCHEMA",
+                    severity=self.policy.severity_for("SCHEMA", "duplicate_key", default=Severity.HIGH),
+                    check_name="duplicate_key",
+                    message=(
+                        f"Duplicate frontmatter key '{key}': YAML parsers disagree on it "
+                        "(Codex, OpenCode, Copilot CLI and OpenClaw drop the skill; others keep the last value)"
+                    ),
+                    file_path=file_path,
+                    line_number=line_number,
+                    suggestion=f"Keep a single '{key}' entry",
+                    metadata={"key": key},
+                )
+            )
 
         try:
             frontmatter = SkillFrontmatter.model_validate(data)
@@ -641,6 +691,49 @@ class SchemaValidator(ValidatorBase):
                 message=f"Directory name matches frontmatter: '{fm_name}'",
             )
 
+        return result
+
+    def _portability_finding(
+        self,
+        check_name: str,
+        default: Severity,
+        message: str,
+        file_path: str,
+        suggestion: str,
+        **metadata: object,
+    ) -> Finding:
+        return Finding(
+            category="SCHEMA",
+            severity=self.policy.severity_for("SCHEMA", check_name, default=default),
+            check_name=check_name,
+            message=message,
+            file_path=file_path,
+            suggestion=suggestion,
+            metadata=dict(metadata),
+        )
+
+    def _validate_portability(self, skill_md: Path) -> ValidationResult:
+        """Flag spec-valid patterns that common agent harnesses load differently or not at all."""
+        result = ValidationResult()
+        file_path = str(skill_md)
+        findings: list[Finding] = []
+
+        try:
+            raw = skill_md.read_bytes()
+        except OSError:
+            raw = b""
+        if raw.startswith(_UTF8_BOM):
+            findings.append(
+                self._portability_finding(
+                    "manifest_bom",
+                    Severity.MEDIUM,
+                    "SKILL.md starts with a UTF-8 byte-order mark; Codex drops the skill",
+                    file_path,
+                    "Save SKILL.md as UTF-8 without BOM",
+                )
+            )
+        for finding in findings:
+            result.add_finding(finding)
         return result
 
     def _validate_line_count(self, skill_md: Path) -> ValidationResult:

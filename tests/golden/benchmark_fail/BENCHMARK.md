@@ -2,6 +2,17 @@
 
 > ❌ **Overall verdict: FAIL — Publication blocked**
 
+### Why This Verdict
+
+- Decision: **FAIL** — the evidence below blocks publication.
+- Tier 3 evidence: **FAIL** (not publication-complete; required for publication). Dimension gate: an agent passes when every dimension is at or above 50% and fails when any dimension is below 40%.
+- Blocking: A validator failed.
+
+| Agent | Dimension gate | Evidence the gate read |
+|---|---|---|
+| Claude Code | not counted | no complete dimension set was recorded, so the gate read nothing from this agent |
+| Codex | not counted | no complete dimension set was recorded, so the gate read nothing from this agent |
+
 The skill should be reviewed before publication. Address the blocking findings below, then rerun SkillEvaluator.
 
 ## Evaluation Metadata

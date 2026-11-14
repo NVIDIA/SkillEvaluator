@@ -30,6 +30,7 @@ _RECOGNIZED_CHECKS_BY_TIER = {
             "license",
             "code-integrity",
             "dependency",
+            "harness",
             "unicode",
             "quality",
             "lint",

@@ -103,6 +103,7 @@ RUNNING = "running"
 PASS = "pass"
 FAIL = "fail"
 SKIP = "skip"
+WARN = "warn"
 
 
 def _fmt_duration(seconds: float | None) -> str:
@@ -554,6 +555,8 @@ class ValidateView:
         self.verdict: Verdict | None = None
         self.links: list[tuple[str, str]] = []
         self._live: Live | None = None
+        self.harness_panel: Panel | None = None
+        self.harness_note: str | None = None
         self.progress_reporter = None
         self._progress_stage: dict[int, set[str]] = {}
         self._static_printed = 0  # blocks already flushed in non-tty mode
@@ -641,6 +644,12 @@ class ValidateView:
         self._flush_static()
         self._refresh()
 
+    def set_harness(self, panel: Panel, note: str | None) -> None:
+        """Show the advisory harness panel after the Tier 1 block and *note* in the verdict."""
+        self.harness_panel = panel
+        self.harness_note = note
+        self._refresh()
+
     def finish(self, verdict: Verdict, links: list[tuple[str, str]]) -> None:
         if not self.enabled:
             return
@@ -683,10 +692,12 @@ class ValidateView:
         if len(self.blocks) >= 2:
             yield self._gate()
             yield Text()
-        for block in self.blocks:
+        for index, block in enumerate(self.blocks):
             if block.status == PENDING:
                 continue
             yield self._block_panel(block)
+            if index == 0 and self.harness_panel is not None:
+                yield self.harness_panel
         if self.verdict is not None:
             yield self._verdict_panel(self.verdict)
             yield Text()
@@ -807,10 +818,16 @@ class ValidateView:
 
     def _verdict_panel(self, verdict: Verdict) -> Panel:
         headline = strip_terminal_controls(verdict.headline)
+        note = (
+            Text.assemble(("! harness: ", f"bold {AMBER}"), (strip_terminal_controls(self.harness_note), AMBER))
+            if self.harness_note
+            else None
+        )
         if verdict.passed:
             body = Text.assemble(_pill("✓ PASS", GREEN), ("  ", ""), (headline, f"bold {TEXT}"), ("  ·  exit 0", MUTED))
+            details = [Text(strip_terminal_controls(line), style=MUTED) for line in verdict.details]
             return Panel(
-                Group(body, *(Text(strip_terminal_controls(line), style=MUTED) for line in verdict.details)),
+                Group(body, *details, *([Text(), note] if note is not None else [])),
                 box=box.ROUNDED,
                 border_style=GREEN,
                 width=self.width,
@@ -824,6 +841,8 @@ class ValidateView:
             ("  ·  exit 1", MUTED),
         )
         parts: list = [line1, *(Text(strip_terminal_controls(line), style=MUTED) for line in verdict.details)]
+        if note is not None:
+            parts.extend([Text(), note])
         if verdict.fix:
             fix = Text.assemble(("fix     ", f"bold {MUTED}"))
             for chunk, style in verdict.fix:
@@ -853,9 +872,12 @@ class ValidateView:
                 break
             done.append(block)
         # Advance first so the live region drops these blocks as they print above it.
+        first = self._static_printed
         self._static_printed += len(done)
-        for block in done:
+        for index, block in enumerate(done, start=first):
             self.console.print(self._block_panel(block))
+            if index == 0 and self.harness_panel is not None:
+                self.console.print(self.harness_panel)
 
 
 def check_ticker_row(lineup: list[str], done: list[str], current: str | None) -> TierRow:
@@ -1054,6 +1076,7 @@ _VALIDATOR_CHECK_KEYS = (
     ("lint", "lint"),
     ("dependency", "dependency"),
     ("version", "version"),
+    ("harness", "harness"),
 )
 
 
@@ -1078,7 +1101,7 @@ def final_check_ticker_row(lineup: list[str], results: list[ValidationResult]) -
         if not result.passed:
             status[key] = FAIL
         elif status.get(key) != FAIL:
-            status[key] = PASS
+            status[key] = WARN if _harness_flagged(result) else PASS
     segments: list[tuple[str, str]] = []
     for i, name in enumerate(lineup):
         if i:
@@ -1086,6 +1109,8 @@ def final_check_ticker_row(lineup: list[str], results: list[ValidationResult]) -
         state = status.get(name)
         if state == FAIL:
             segments.append((f"✗ {name}", f"bold {RED}"))
+        elif state == WARN:
+            segments.append((f"! {name}", f"bold {AMBER}"))
         elif state == PASS:
             segments.append((f"✓ {name}", GREEN))
         elif name in user_skipped:
@@ -1093,6 +1118,12 @@ def final_check_ticker_row(lineup: list[str], results: list[ValidationResult]) -
         else:
             segments.append((name, FAINT))
     return TierRow("checks", segments)
+
+
+def _harness_flagged(result: ValidationResult) -> bool:
+    """True when the advisory harness check found a harness that drops or degrades a skill."""
+    block = (result.metadata or {}).get("harness_compatibility") or {}
+    return any(row.get("status") != "loads" for rows in block.values() for row in rows)
 
 
 def _short_name(validator_name: str) -> str:
@@ -1108,6 +1139,7 @@ def _short_name(validator_name: str) -> str:
         "Unicode Smuggling Detection": "unicode",
         "QUALITY": "quality",
         "SCRIPT_LINT": "lint",
+        "Harness Compatibility": "harness",
         "Context Deduplication": "context",
         "Inter-Skill Deduplication": "catalog",
     }
@@ -1151,7 +1183,7 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
     warnings = sum(len(r.warnings) for r in failed)
     advisory: dict[str, int] = {}
     for r in results:
-        if r.passed and not _is_skipped(r) and r.findings:
+        if r.passed and not _is_skipped(r) and r.findings and _short_name(r.validator_name) != "harness":
             advisory[_short_name(r.validator_name)] = advisory.get(_short_name(r.validator_name), 0) + len(r.findings)
 
     rows: list[TierRow] = []
@@ -1193,6 +1225,19 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
     if advisory:
         detail = " · ".join(f"{name} {count}" for name, count in sorted(advisory.items(), key=lambda kv: -kv[1]))
         rows.append(TierRow("advisories", [(str(sum(advisory.values())), TEXT), (f"  {detail}", MUTED)]))
+    harness_rows = [
+        row
+        for r in results
+        for rows in ((r.metadata or {}).get("harness_compatibility") or {}).values()
+        for row in rows
+    ]
+    counts = [
+        f"{sum(row.get('status') == status for row in harness_rows)} {label}"
+        for status, label in (("not_loaded", "not loaded"), ("degraded", "degraded"))
+        if any(row.get("status") == status for row in harness_rows)
+    ]
+    if counts:
+        rows.append(TierRow("harness", [(" · ".join(counts), TEXT), ("  (see below)", MUTED)]))
 
     suppressed_security = 0
     for r in results:

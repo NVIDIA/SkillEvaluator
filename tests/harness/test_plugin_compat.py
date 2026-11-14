@@ -211,3 +211,33 @@ def test_component_rule_replaces_the_generic_delivery_finding(tmp_path: Path):
     codex = next(p for p in load_profiles() if p["harness"] == "codex")
     ids = [f["id"] for f in evaluate_plugin(codex, plugin_facts(tmp_path)).findings]
     assert "CX-PLUGIN-AGENT-HOOKS" in ids and "CX-PLUGIN-HOOKS" not in ids
+
+
+def _quoted_skill(tmp_path: Path) -> Path:
+    skill = tmp_path / ".claude" / "skills" / "demo"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        '---\nname: demo\ndescription: Use when testing "quoted" text.\n---\nBody.\n', encoding="utf-8"
+    )
+    return skill
+
+
+def test_findings_carry_their_rule_confidence(tmp_path: Path):
+    out = tmp_path / "h.json"
+    CliRunner().invoke(cli, ["harness-check", str(_quoted_skill(tmp_path)), "--json", str(out)])
+    block = json.loads(out.read_text(encoding="utf-8"))["harness_compatibility"]
+    findings = [f for rows in block.values() for row in rows for f in row["findings"]]
+    assert findings and all(f.get("confidence") for f in findings)
+
+
+def test_plugin_rows_flag_an_unverified_release(tmp_path: Path):
+    (tmp_path / ".codex-plugin").mkdir()
+    (tmp_path / ".codex-plugin" / "plugin.json").write_text('{"name": "p"}', encoding="utf-8")
+    codex = next(p for p in load_profiles() if p["harness"] == "codex")
+    result = evaluate_plugin(codex, plugin_facts(tmp_path), {"harness_versions": {"codex": "9.9.9"}})
+    assert "VERSION-UNVERIFIED" in [f["id"] for f in result.findings]
+
+
+def test_unknown_harness_version_name_is_a_usage_error(tmp_path: Path):
+    result = CliRunner().invoke(cli, ["harness-check", str(_quoted_skill(tmp_path)), "--harness-version", "codeex=1.0"])
+    assert result.exit_code == 2 and "codeex" in result.output

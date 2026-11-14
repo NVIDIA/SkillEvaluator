@@ -144,6 +144,12 @@ def _detail_grid(rows: list[dict[str, Any]], verbose: bool) -> Table | None:
                     (finding["message"], TEXT),
                     (f"  [{finding['id']}]", MUTED),
                     *([("\n→ ", GREEN), (finding["fix"], MUTED)] if finding.get("fix") else []),
+                    *([("\n  applies: ", MUTED), (finding["versions"], MUTED)] if finding.get("versions") else []),
+                    *(
+                        [("\n  confidence: ", MUTED), (finding["confidence"], MUTED)]
+                        if verbose and finding.get("confidence")
+                        else []
+                    ),
                 ),
             )
     return grid if grid.row_count else None
@@ -253,7 +259,7 @@ def run_harness_check(
     block: Block = {}
     if is_plugin_root(target):
         facts = plugin_facts(target)
-        rows = [evaluate_plugin(profile, facts).to_dict() for profile in profiles]
+        rows = [evaluate_plugin(profile, facts, config).to_dict() for profile in profiles]
         console.print(
             harness_panel(
                 {str(target): rows},

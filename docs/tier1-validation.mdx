@@ -300,6 +300,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     Plugin component rules cover skill namespacing, Codex's plugin-skill cap and Agent Plugins hooks, Copilot CLI MCP server names, disabled plugins, and components a harness registers but doesn't deliver.
 
     `harness-check` takes the model setup some limits depend on: `--context-tokens`, `--custom-provider`, `--explicit-invocation` and `--headless`.
+
+    Each rule records a confidence level and, where behaviour changed between releases, the versions it applies to (shown with `-v`). `--harness-version codex=0.170.0` adds a note when you run a release other than the one a profile was verified on.
   </Accordion>
 
   <Accordion title="security — vulnerability scanning">

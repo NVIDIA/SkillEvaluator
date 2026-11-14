@@ -12,6 +12,10 @@ All notable changes to SkillEvaluator are documented in this file.
   comment helpers, and needs no Pages configuration or history branch. Future
   generated bundles include the template; archived bundles and the released
   onboarding CLI retain their existing hosted publisher setup.
+- Each `harness` rule records a confidence level and, where behaviour changed
+  between releases, the versions it applies to (shown with `-v`). `harness-check
+  --harness-version codex=0.170.0` adds a note when you run a release other than
+  the one a profile was verified on.
 - `harness-check` takes the model setup some limits depend on: `--context-tokens`,
   `--custom-provider`, `--explicit-invocation` and `--headless` (a Claude Code
   skill with `allowed-tools` does not load headless).

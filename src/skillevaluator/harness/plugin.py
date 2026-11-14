@@ -15,7 +15,7 @@ import stat
 from pathlib import Path
 from typing import Any
 
-from skillevaluator.harness.overlay import _EFFECT_RANK, HarnessResult, _fill, _Rule
+from skillevaluator.harness.overlay import _EFFECT_RANK, HarnessResult, _fill, _Rule, version_finding
 
 MANIFESTS = {
     "claude": ".claude-plugin/plugin.json",
@@ -121,7 +121,9 @@ def plugin_facts(root: Path) -> dict[str, Any]:
     return facts
 
 
-def evaluate_plugin(profile: dict[str, Any], facts: dict[str, Any]) -> HarnessResult:
+def evaluate_plugin(
+    profile: dict[str, Any], facts: dict[str, Any], config: dict[str, Any] | None = None
+) -> HarnessResult:
     """Apply a profile's plugin rules; components the harness does not deliver become findings."""
     section = profile.get("plugin") or {}
     findings: list[dict[str, str]] = []
@@ -130,7 +132,7 @@ def evaluate_plugin(profile: dict[str, Any], facts: dict[str, Any]) -> HarnessRe
         if not _Rule.evaluate(str(rule["when"]), {**facts, "always": True}):
             continue
         finding = {"id": rule["id"], "effect": rule["effect"], "message": _fill(rule["message"], facts)}
-        for key in ("fix", "outcome"):
+        for key in ("fix", "versions", "outcome", "confidence"):
             if rule.get(key):
                 finding[key] = _fill(rule[key], facts)
         findings.append(finding)
@@ -163,6 +165,9 @@ def evaluate_plugin(profile: dict[str, Any], facts: dict[str, Any]) -> HarnessRe
                 }
             )
             worst = max(worst, _EFFECT_RANK["advisory"])
+    declared = str(((config or {}).get("harness_versions") or {}).get(profile["harness"], ""))
+    if drift := version_finding(profile, declared):
+        findings.append(drift)
     verified = profile.get("verified", {})
     return HarnessResult(
         harness=profile["harness"],

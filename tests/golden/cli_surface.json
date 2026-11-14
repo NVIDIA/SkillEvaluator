@@ -1366,6 +1366,15 @@
           ],
           "param_type": "option",
           "type": "boolean"
+        },
+        {
+          "multiple": true,
+          "name": "harness_versions",
+          "opts": [
+            "--harness-version"
+          ],
+          "param_type": "option",
+          "type": "text"
         }
       ]
     },

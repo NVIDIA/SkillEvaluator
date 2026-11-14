@@ -102,6 +102,23 @@ class HarnessResult:
         }
 
 
+def profile_names(profiles_dir: Path | None = None) -> list[str]:
+    """Harness names of the profiles in a directory (their ``harness:`` field, which versions are keyed by).
+
+    Each file is read on its own, so one that won't parse (or has no ``harness:``) is listed by its file name instead
+    of failing the rest.
+    """
+    names = []
+    for path in sorted((profiles_dir or PROFILES_DIR).glob("*.yaml")):
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            data = None
+        harness = data.get("harness") if isinstance(data, dict) else None
+        names.append(harness if isinstance(harness, str) and harness else path.stem)
+    return names
+
+
 def load_profiles(names: str | list[str] = "all", profiles_dir: Path | None = None) -> list[dict[str, Any]]:
     """Load profiles by name (comma list or ``all``); unknown names raise ``ValueError``."""
     directory = profiles_dir or PROFILES_DIR
@@ -650,7 +667,8 @@ def model_config(profile: dict[str, Any], config: dict[str, Any] | None = None) 
     """Resolve the user's setup for one profile: ``context_tokens`` (0 = unknown), ``custom_provider`` and
     ``explicit_invocation`` (skills are activated by an explicit mention rather than opened by the model) and
     ``headless`` (a non-interactive run, e.g. ``claude -p``, with default permissions) and ``native_root``
-    (evaluate as if installed in each harness's own skills root, so root rules are skipped).
+    (evaluate as if installed in each harness's own skills root, so root rules are skipped). ``harness_versions``
+    maps a harness to the release the user runs; a release other than the profile's verified one adds an advisory.
 
     An unknown window falls back to the profile's ``config_defaults`` for a custom provider when one is set.
     """
@@ -662,7 +680,9 @@ def model_config(profile: dict[str, Any], config: dict[str, Any] | None = None) 
     explicit = bool(config.get("explicit_invocation", False))
     headless = bool(config.get("headless", False))
     native_root = bool(config.get("native_root", False))
+    versions = config.get("harness_versions") or {}
     return {
+        "harness_version": str(versions.get(profile["harness"], "")),
         "context_tokens": tokens,
         "custom_provider": custom,
         "explicit_invocation": explicit,
@@ -679,6 +699,19 @@ def listing_budget_chars(profile: dict[str, Any], context_tokens: int) -> int:
     if per_token and context_tokens:
         return int(context_tokens * per_token)
     return int(budget.get("desc_chars", 0))
+
+
+def version_finding(profile: dict[str, Any], declared: str) -> dict[str, str] | None:
+    """Advisory for a harness release other than the one the profile was verified on."""
+    checked = str(profile.get("verified", {}).get("version", ""))
+    if not declared or declared == checked or checked.startswith(f"{declared} "):
+        return None
+    return {
+        "id": "VERSION-UNVERIFIED",
+        "effect": "advisory",
+        "message": f"Profile verified on {checked}; you run {declared}, so its rules may not hold.",
+        "fix": "Check the findings on that release, or run the version the profile was verified on.",
+    }
 
 
 def evaluate_profile(
@@ -706,13 +739,15 @@ def evaluate_profile(
         if expression != "always" and not _Rule.evaluate(expression, names):
             continue
         finding = {"id": rule["id"], "effect": rule["effect"], "message": _fill(rule["message"], facts)}
-        for key in ("fix", "outcome"):
+        for key in ("fix", "versions", "outcome", "confidence"):
             if rule.get(key):
                 finding[key] = _fill(rule[key], facts)
         findings.append(finding)
         worst = max(worst, _EFFECT_RANK[rule["effect"]])
     status = "not_loaded" if worst == 2 else "degraded" if worst == 1 else "loads"
     verified = profile.get("verified", {})
+    if drift := version_finding(profile, setup["harness_version"]):
+        findings.append(drift)
     return HarnessResult(
         harness=profile["harness"],
         display_name=profile.get("display_name", profile["harness"]),

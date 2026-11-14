@@ -212,8 +212,8 @@ All notable changes to SkillEvaluator are documented in this file.
   a machine without uv can run the Tier 1 security check. Before, that run
   ended `INCOMPLETE` with "skillspector not installed", because the pinned,
   checksum-verified SkillSpector wheel is only run through `uv tool run`. A uv
-  on `PATH` or an installed `skillspector` is still used first, and
-  SkillSpector stays out of SkillEvaluator's own dependencies. The public
+  on `PATH` or an installed `skillspector` matching the pinned release is still
+  used first, and SkillSpector stays out of SkillEvaluator's own dependencies. The public
   Docker image gains the same behavior: with network access its Tier 1 run now
   completes instead of ending `INCOMPLETE`.
 - Root help shows the SkillEvaluator wordmark in more terminals: the
@@ -254,6 +254,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Automatic SkillSpector selection now verifies the pinned release on first use
+  and falls back to the verified managed wheel for a different or unverifiable
+  version. Discovery stays free of subprocesses, version probes omit provider
+  credentials and respect the caller timeout, and explicit executable overrides
+  remain available. Doctor reports the path and source selected by the probe.
 - `health-check --tier 1` (and `doctor --tier 1`) labels a scanner that
   SkillEvaluator provisions itself: `(uv tool run)` for SkillSpector and
   `(managed)` for the downloaded Gitleaks binary. Before, the Gitleaks row
@@ -288,13 +293,9 @@ All notable changes to SkillEvaluator are documented in this file.
   output or references. Scoring and thresholds are unchanged; an Accuracy format
   failure alone can still score 0.8 and pass the default threshold.
 
-- Automatic SkillSpector discovery verifies the pinned release before using an
-  installed executable, selects the verified managed runtime for mismatched or
-  unverifiable versions, and reports the selection. Explicit executable
-  overrides retain the operator's choice. Doctor reports managed and overridden
-  executable sources accurately. Partial scanner results retain their actual
-  diagnostics and recorded versions instead of being described as missing
-  installations; plugin projections preserve incomplete-only status.
+- Partial scanner results retain their actual diagnostics and recorded versions
+  instead of being described as missing installations; plugin projections
+  preserve incomplete-only status.
 - CI bootstrap rejects unsupported Tier 3 environment modes before importing
   optional runtime dependencies, preserving the isolated consumer-path check
   without paying for unnecessary Harbor initialization.

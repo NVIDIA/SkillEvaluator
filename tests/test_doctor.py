@@ -150,22 +150,6 @@ def test_tier1_reports_managed_scanner_source(scanners, monkeypatch, name, label
     assert rows[label] == ("pass", f"{version} at /doctor-tools/{name} ({source})")
 
 
-def test_tier1_reports_source_selected_during_probe(scanners, monkeypatch) -> None:
-    tool = Tools.skillspector
-
-    def run(*args, **kwargs):
-        tool._path = "/doctor-tools/uv"
-        tool.resolution_source = "uv tool run"
-        return tool_runner.ToolResult(True, "SkillSpector v2.13.4", "", 0)
-
-    monkeypatch.setattr(tool, "run", run)
-
-    assert _rows(tier="1", checks="security")["SkillSpector"] == (
-        "pass",
-        "2.13.4 at /doctor-tools/uv (uv tool run)",
-    )
-
-
 def test_tier1_reports_managed_provisioning_without_naming_an_override(scanners, monkeypatch, tmp_path) -> None:
     """No scanner is installed, so SkillSpector runs through uv and Gitleaks is the managed binary."""
     monkeypatch.setenv("SKILLEVALUATOR_RUNTIME_DIR", str(tmp_path))
@@ -190,6 +174,22 @@ def test_tier1_reports_managed_provisioning_without_naming_an_override(scanners,
     assert rows["Gitleaks"] == ("pass", f"8.21.2 at {gitleaks.path} (managed)")
     assert scanners.calls[0][0][:3] == ["/env/bin/uv", "tool", "run"]
     assert scanners.calls[0][0][-2:] == ["skillspector", "--version"]
+
+
+def test_tier1_reports_source_selected_during_probe(scanners, monkeypatch) -> None:
+    tool = Tools.skillspector
+
+    def run(*args, **kwargs):
+        tool._path = "/doctor-tools/uv"
+        tool.resolution_source = "uv tool run"
+        return tool_runner.ToolResult(True, "SkillSpector v2.13.4", "", 0)
+
+    monkeypatch.setattr(tool, "run", run)
+
+    assert _rows(tier="1", checks="security")["SkillSpector"] == (
+        "pass",
+        "2.13.4 at /doctor-tools/uv (uv tool run)",
+    )
 
 
 @pytest.mark.parametrize("failure", ["missing", "malformed override", "timeout", "exit status"])

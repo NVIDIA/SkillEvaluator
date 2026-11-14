@@ -108,9 +108,10 @@ before it, or otherwise points at the skill's own `SKILL.md` as a prompt
 skill's `SKILL.md`"), the template prompt calls it `my SKILL.md`. Reading
 `SKILL.md` does not count when the wording means another `SKILL.md` or the
 file format: "a `SKILL.md`", "the following `SKILL.md`", or a format noun such
-as `files`, `format`, `spec` or `template` right after it or one word later,
-as in "reads `SKILL.md` files" or "follows the `SKILL.md` frontmatter format".
-Nor does it when `in`, `of`, `from`, `under` or `inside` another place comes
+as `files`, `format`, `spec` or `template` right after it or after one other
+word that is not a connective such as `and`, `for`, `to` or `with`, as in
+"reads `SKILL.md` files" or "follows the `SKILL.md` frontmatter format".
+"Reads `SKILL.md` for format errors" is still renamed. Nor does it when `in`, `of`, `from`, `under` or `inside` another place comes
 right after it, such as `in ./pdf-tools`. Other place words, such as `at` or
 `within`, do not count: "reads `SKILL.md` at ./pdf-tools" is still renamed. A
 description that only names `SKILL.md` without reading it, such as "validates

@@ -947,6 +947,7 @@ _RENAMING_HEDGE = "otherwise points at the skill's own skill.md as a prompt tier
 _KEEPING_PLACES = ("in", "of", "from", "under", "inside")
 _OTHER_PLACES = ("at", "within")
 _FORMAT_NOUNS = ("files", "format", "spec", "template")
+_CONNECTIVES = ("and", "for", "to", "with")
 _STILL_SKILL_FILES = (
     "Keeps release-review/SKILL.md in sync with the docs.",
     "Keeps skills/release-review in sync with the docs.",
@@ -1003,7 +1004,8 @@ def test_docs_say_which_skill_md_in_a_description_becomes_my_skill_md():
     for description in ("Validates SKILL.md frontmatter fields.", "Creates a SKILL.md for a new agent skill."):
         assert not _renames_skill_md(description), description
     # Reading another SKILL.md or the file format does not count: "a SKILL.md",
-    # "the following SKILL.md", or a format noun right after it or one word later.
+    # "the following SKILL.md", or a format noun right after it or after one
+    # other word that is not a connective.
     for description in (
         *(f"Reads SKILL.md {noun} and reports errors." for noun in _FORMAT_NOUNS),
         "Follows the SKILL.md frontmatter format for new skills.",
@@ -1011,6 +1013,8 @@ def test_docs_say_which_skill_md_in_a_description_becomes_my_skill_md():
         "Reads the following SKILL.md and reports errors.",
     ):
         assert not _renames_skill_md(description), description
+    for word in _CONNECTIVES:
+        assert _renames_skill_md(f"Reads SKILL.md {word} format errors."), word
     # A description that still points at the skill's files after the rename
     # gives the generic task, not "my SKILL.md".
     for description in _STILL_SKILL_FILES:
@@ -1031,12 +1035,26 @@ def test_docs_say_which_skill_md_in_a_description_becomes_my_skill_md():
         assert "<name>/skill.md" in text and '"handle a typical request"' in text, where
     for where in ("docs/eval-datasets.mdx", "_template_task"):
         text = wording[where]
-        assert f"a format noun such as {_listed(_FORMAT_NOUNS)} right after it or one word later" in text, where
+        assert (
+            f"a format noun such as {_listed(_FORMAT_NOUNS)} right after it or after one other word "
+            f"that is not a connective such as {_listed(_CONNECTIVES)}"
+        ) in text, where
+        assert '"reads skill.md for format errors" is still renamed.' in text, where
         assert '"a skill.md", "the following skill.md"' in text, where
         rule = text.find("still points at the skill's files after the rename")
         assert rule >= 0, where
         for example in ("<name>/skill.md", "skills/<name>", "uses the installed skill"):
             assert example in text[rule : rule + 160], (where, text[rule : rule + 160])
+    # The docstring's examples reach the branch it gives them: calling the
+    # skill "the <name> skill" gives the generic task, and naming the skill or
+    # one of its scripts keeps the task but quotes no outcome.
+    doc = wording["_template_task"]
+    assert '"the <name> skill" ("the release-review skill checks manifests")' in doc
+    named = generate_dataset._template_task(_skill(description="The release-review skill checks manifests"))
+    assert named == ("handle a typical request", None)
+    for example in ("Uses release-review for manifests", "Checks manifests with review.py"):
+        assert f'"{example.lower()}"' in doc, example
+        assert generate_dataset._template_task(_skill(description=example)) == (example.lower(), None), example
     # The docs name the hedge's examples, and the next sentence still names the
     # command whose LLM prompts it means.
     docs = wording["docs/eval-datasets.mdx"]

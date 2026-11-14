@@ -95,7 +95,7 @@ def plugin_facts(root: Path) -> dict[str, Any]:
     facts["default_dirs"] = any((root / d).is_dir() for d in DEFAULT_DIRS)
     facts["components"] = {kind: count(root) for kind, count in COMPONENTS.items()}
     skills = list((root / "skills").rglob("SKILL.md")) if (root / "skills").is_dir() else []
-    facts["max_skill_bytes"] = max((f.stat().st_size for f in skills), default=0)
+    facts["max_skill_bytes"] = max((f.stat().st_size for f in skills if f.is_file()), default=0)
     return facts
 
 

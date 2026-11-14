@@ -144,3 +144,11 @@ def test_manifest_only_plugin_is_flagged_as_adding_nothing(tmp_path: Path):
     result = evaluate_plugin(claude, facts)
     assert result.status == "loads"
     assert [f["id"] for f in result.findings] == ["CC-PLUGIN-NO-COMPONENTS"]
+
+
+def test_dangling_skill_link_does_not_abort_plugin_facts(tmp_path: Path):
+    (tmp_path / ".claude-plugin").mkdir()
+    (tmp_path / ".claude-plugin" / "plugin.json").write_text('{"name": "p"}', encoding="utf-8")
+    (tmp_path / "skills" / "gone").mkdir(parents=True)
+    (tmp_path / "skills" / "gone" / "SKILL.md").symlink_to(tmp_path / "missing.md")
+    assert plugin_facts(tmp_path)["max_skill_bytes"] == 0

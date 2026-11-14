@@ -259,6 +259,29 @@ All notable changes to SkillEvaluator are documented in this file.
   `SKILLEVALUATOR_SKILLSPECTOR_PATH` although no override was set.
 - The comments-only consumer template now grants its required read and PR-comment
   permissions only to the comment job, with no workflow-wide token permissions.
+- Tier 3 security finding evidence no longer keeps the credential in five
+  more command forms: an `auth=HTTPBasicAuth("bob", "...")` call value, also
+  one split over lines, which was masked only up to the class name; a
+  credential name in a `sed` replacement, as in
+  `sed -i 's/password=.*/password=.../'`, also inside an `ssh`, `sh -c`, or
+  `eval` command string; a long flag with `_` between its words, such as
+  `--db_password` or `--api_key`; an `npm config set`, `yarn config set`, or
+  `git config` key that is quoted or follows `--`, or whose value follows
+  ` = `; and a shell `apply_patch` command whose 400-character cut split URL
+  user info before it was masked.
+  The `apply_patch` text is now masked before it is cut. A word with
+  parentheses in it is still masked whole. `--max_tokens` and `--token_limit`
+  keep their numbers, as their `-` spellings do, while other flags that name a
+  token, such as `--max_new_tokens`, are masked as their `-` spellings are.
+  A `_` flag joined to its value with `=`, as in `--api_key=...`, or followed
+  by a separator, as in `--api_key = ...`, is still read as an assignment, and
+  so is a quoted key or one after `--` whose value starts with a separator, as
+  in `npm config set -- password ='...'`. An unquoted value after a `_` flag
+  and a space, or after a quoted config key or one after `--`, ends at `;`,
+  `|`, or `&`, as an assignment's value does. A value of such a flag or key
+  that holds a credential name, as in `--set_secret API_TOKEN="..."`, is
+  read as an assignment. Both the host checker and the bundled Harbor
+  verifier apply the fix.
 - The behavior evidence gate no longer keeps a score for an expectation that
   names an observed artifact but also asks for something only the final answer
   could show. "Writes `report.py` and explains why each column was dropped" was

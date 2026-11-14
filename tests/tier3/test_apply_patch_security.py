@@ -1120,6 +1120,25 @@ def test_shell_patch_evidence_omits_the_patch_body(run):
 
 
 @RUNNERS
+def test_shell_patch_evidence_masks_a_credential_before_the_400_character_cut(run):
+    # The text before the patch body is cut to 400 characters. The cut lands in
+    # the URL's user info, which must be masked before it is cut.
+    password = "hunter2" + "Passw0rdLongSecretValue"
+    url = f"https://admin:{password}@git.example.com/o/r.tar.gz"
+    command = f"cd /srv/app && echo {'x' * 325} && curl -sf {url} -o r.tgz && rm -rf /srv/app/build && apply_patch"
+    patch = "*** Begin Patch\n*** Add File: docs/notes.md\n+notes\n*** End Patch"
+
+    result = run(_traj("exec_command", {"cmd": _heredoc(command, patch)}))
+
+    [finding] = result["findings"]
+    assert finding["type"] == "destructive_command"
+    assert finding["evidence"].endswith(
+        " && curl -sf https://<redacted>@git.example.com/o/r.tar [apply_patch body omitted]"
+    )
+    assert password[:4] not in finding["evidence"]
+
+
+@RUNNERS
 def test_shell_command_naming_apply_patch_without_a_patch_keeps_redacted_evidence(run):
     command = f"GH_TOKEN={_GITHUB_TOKEN} grep -rn apply_patch ~/.ssh && git reset --hard"
 

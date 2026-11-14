@@ -337,6 +337,16 @@ def _budget_number(value: Any, *, cost: bool = False, missing: str = "not measur
     return f"{number:,}"
 
 
+def budget_incomplete_reason(metadata: object) -> str | None:
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("not_run"), list) or not metadata["not_run"]:
+        return None
+    return (
+        f"run budget left {len(metadata['not_run'])} of "
+        f"{_budget_number(metadata.get('planned_attempts'), missing='unknown')} planned attempts not run; "
+        "scores and Skill Lift cover only admitted attempts"
+    )
+
+
 def budget_line(metadata: dict[str, Any]) -> str:
     # Recompute from usage and limits: cached observations may be absent or stale.
     overruns, incomplete, configured = _budget_observations(metadata)

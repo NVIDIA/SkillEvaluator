@@ -640,6 +640,10 @@ def render_case_summary(
     if not case_ids:
         return False
     label, detail = verdict(agents)
+    from skillevaluator.tier3.harbor.run_budget import budget_incomplete_reason
+
+    if reason := budget_incomplete_reason(result.get("budget")):
+        label, detail = "incomplete", reason
     if label:
         style = "bold green" if label == "skill helps" else "bold red" if label == "skill hurts" else "bold yellow"
         line = Text(f"{'✔' if label == 'skill helps' else '✖' if label == 'skill hurts' else '•'} {label}", style=style)

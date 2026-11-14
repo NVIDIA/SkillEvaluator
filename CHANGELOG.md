@@ -249,6 +249,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 reports now use final run-budget accounting, including when rebuilding
+  saved runs with stale configuration snapshots. Terminal, HTML, and benchmark
+  reports show budget exhaustion, not-run attempts, overruns, and unverified
+  usage. Budget-stopped runs have an incomplete summary verdict; admitted
+  scores remain visible and their lift is not a complete-run skill-effect claim.
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
   of `harness-check` no longer show internal test notes in their messages.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`

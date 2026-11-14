@@ -468,7 +468,14 @@ class CLIReporter(ReporterBase):
         composite_style = lift_style(composite) if scored_lift else "dim"
         verdict_text = escape_markup(str(verdict).upper())
         verdict_reason = agent_eval.get("verdict_reason")
-        safe_reason = f" — {escape_markup(str(verdict_reason))}" if verdict == "fail" and verdict_reason else ""
+        safe_reason = (
+            f" — {escape_markup(str(verdict_reason))}" if verdict in {"fail", "incomplete"} and verdict_reason else ""
+        )
+        budget = agent_eval.get("budget")
+        if isinstance(budget, dict):
+            from skillevaluator.tier3.harbor.run_budget import budget_line
+
+            console.print(escape_markup(budget_line(budget)))
         lift_label = (
             "Skill Lift (for reference)" if verdict == "fail" and scored_lift and composite > 0 else "Skill Lift"
         )

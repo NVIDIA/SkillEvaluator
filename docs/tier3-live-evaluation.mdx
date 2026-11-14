@@ -1000,6 +1000,20 @@ including for older saved runs. Missing or partially measured bounded usage
 is reported as unverified, and unconfigured limits are not checked. An observed
 overrun alone does not change scores, execution success, or partial-run status.
 
+After execution, `run_config.json`, `result.json.run_config.budget`, and
+`result.json.budget` contain the same final accounting. Reports also prefer
+the top-level result budget when rebuilding older runs with stale run configs.
+Terminal, HTML, and benchmark reports show the shared budget summary, including
+exhaustion, not-run attempts, measured overruns, and unverified bounded usage.
+
+When `budget.not_run` is non-empty, the run-level summary verdict is
+`incomplete`: the budget left planned work unexecuted, not evaluated failures.
+Admitted attempts keep their per-case and per-agent scores. Any displayed
+Skill Lift covers admitted attempts only; it is not a complete-run verdict
+that the skill helps. An overrun without not-run attempts retains its verdict.
+Budget reporting does not change admission, scoring, execution status, or
+command exit codes.
+
 In a terminal, `--progress auto` uses the `rich` view: one table of the run
 plan and its stages that keeps the same height for the whole run. Each row is
 one line, and a long value ends in an ellipsis instead of wrapping. The agent

@@ -16,7 +16,15 @@ def test_install_argv_pins_release_under_managed_root(tmp_path):
     argv = managed_install_argv("claude-code", runtime_root=tmp_path)
     assert argv[:5] == ["npm", "install", "--global", "--prefix", str(tmp_path.resolve() / "claude-code")]
     assert argv[-1] == "@anthropic-ai/claude-code@2.1.292"
-    assert managed_install_argv("opencode", runtime_root=tmp_path)[-1] == "opencode-ai"
+    assert managed_install_argv("opencode", runtime_root=tmp_path)[-1] == "opencode-ai@1.19.5"
+
+
+def test_every_managed_install_pins_the_release_harbor_installs(tmp_path):
+    from skillevaluator.tier3.harbor import runner
+
+    for agent in local_runtime.LOCAL_RUNTIME_AGENTS:
+        version = runner._harbor_agent_kwargs(agent, None, "docker")["version"]
+        assert managed_install_argv(agent, runtime_root=tmp_path)[-1].endswith(f"@{version}"), agent
 
 
 def test_install_without_npm(monkeypatch, tmp_path):
@@ -52,6 +60,12 @@ def test_install_success_finds_cli(monkeypatch, tmp_path):
     calls = _fake_npm(monkeypatch, 0, create_bin=True)
     assert install_local_runtime("codex", runtime_root=tmp_path) is None
     assert calls[0][0] == "/usr/bin/npm" and calls[0][-1] == "@openai/codex@0.161.0"
+
+
+def test_install_runs_the_pinned_opencode_release(monkeypatch, tmp_path):
+    calls = _fake_npm(monkeypatch, 1, create_bin=False)
+    install_local_runtime("opencode", runtime_root=tmp_path)
+    assert calls[0][0] == "/usr/bin/npm" and calls[0][-1] == "opencode-ai@1.19.5"
 
 
 def test_install_failure_reports_npm_error(monkeypatch, tmp_path):

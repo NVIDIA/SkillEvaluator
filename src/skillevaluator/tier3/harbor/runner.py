@@ -1421,9 +1421,7 @@ _HARBOR_LAUNCH_ENV = MappingProxyType({"HARBOR_TELEMETRY": "0", "PYTHON_DOTENV_D
 # wrappers check a minimum version for the selected model.
 _CODEX_VERSION = PINNED_RUNTIME_VERSIONS["codex"]
 _CLAUDE_CODE_VERSION = PINNED_RUNTIME_VERSIONS["claude-code"]
-# Harbor would otherwise install ``opencode-ai@latest``. CI's managed local
-# bootstrap installs this same release, so every CI mode shares one pin.
-OPENCODE_VERSION = "1.19.5"
+OPENCODE_VERSION = PINNED_RUNTIME_VERSIONS["opencode"]
 # Harbor 0.22's Codex agent ran with ``model_reasoning_effort=high``; later
 # releases defer to Codex's own default. Pin the effort SkillEvaluator was
 # validated with so scores and cost stay comparable across Harbor upgrades.

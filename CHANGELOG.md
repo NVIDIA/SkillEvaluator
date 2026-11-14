@@ -259,6 +259,9 @@ All notable changes to SkillEvaluator are documented in this file.
   `SKILLEVALUATOR_SKILLSPECTOR_PATH` although no override was set.
 - The comments-only consumer template now grants its required read and PR-comment
   permissions only to the comment job, with no workflow-wide token permissions.
+- In local mode, the offered OpenCode install now pins OpenCode 1.19.5, the
+  release Harbor and CI install, instead of whatever npm resolves as latest.
+  Claude Code and Codex installs were already pinned.
 - The behavior evidence gate no longer keeps a score for an expectation that
   names an observed artifact but also asks for something only the final answer
   could show. "Writes `report.py` and explains why each column was dropped" was

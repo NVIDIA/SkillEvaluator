@@ -68,12 +68,12 @@ def test_quickstart_quality_check_matches_documented_result(
     payload = json.loads((reports / "skillevaluator-quality.json").read_text(encoding="utf-8"))
     assert len(payload["results"]) == 1
     quality_result = payload["results"][0]
-    assert quality_result["quality"]["overall_score"] == 84.5
+    assert quality_result["quality"]["overall_score"] == 86.2
     assert quality_result["quality"]["grade"] == "B"
-    assert len(quality_result["findings"]) == 7
+    assert len(quality_result["findings"]) == 6
     assert payload["overall_passed"] is (expected_exit_code == 0)
     assert payload["publication_status"] == ("incomplete" if expected_exit_code == 0 else "fail")
-    assert "84.5/100" in result.output
+    assert "86.2/100" in result.output
 
 
 def test_top_level_help_groups_commands_by_workflow() -> None:

@@ -981,18 +981,6 @@ class QualityScoreValidator(ValidatorBase):
             # as absent metadata rather than indexing into it.
             metadata = {}
 
-        top_level_fields = {
-            "version": 'Semantic version (e.g., "1.0.0")',
-        }
-        for field_name, desc in top_level_fields.items():
-            if field_name not in frontmatter or frontmatter[field_name] is None:
-                qs.correctness.deduct(
-                    5,
-                    "warning",
-                    f"SKILL_SPEC recommended field missing: '{field_name}'",
-                    f"Add '{field_name}' to frontmatter — {desc}",
-                )
-
         nested_fields = {
             "author": "Author name or team (under metadata:)",
             "tags": "Categorization tags (under metadata:, list of 1-5 items)",

@@ -575,6 +575,13 @@ All notable changes to SkillEvaluator are documented in this file.
   home directory. The refusal itself is unchanged, and `docs/reports.mdx`
   explains it.
 
+- Tier 1 quality no longer deducts 5 Correctness points, or reports
+  `SKILL_SPEC recommended field missing: 'version'`, when a skill has no root
+  `version` field. The version check reads only the optional
+  `metadata.version`, so a skill with that field or with no version scores
+  1.75 points higher; the bundled `text-analyzer` example now scores 86.2
+  instead of 84.5.
+
 ## 0.9.0 - 2026-11-13
 
 ### Fixed

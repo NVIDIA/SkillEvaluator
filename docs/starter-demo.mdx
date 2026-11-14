@@ -54,8 +54,8 @@ benchmark scores are not evidence for this run.
 | Question | Fresh output | What it means |
 | --- | --- | --- |
 | Did the script do the task? | `analysis.json`: 4 words, 2 lines, 27 characters, 2 sentences; `hello` appears twice | The direct script agrees with the public fixture. No agent was involved. |
-| Did the quality check pass? | `quality/skillevaluator-quality.json`: `overall_status: passed`, score 84.5, grade B, exit 0 | The original documentation meets the demo's explicit `--min-score 80` gate. Read findings even when it passes. |
-| Did quality regress? | `regressed/skillevaluator-quality.json`: `overall_status: failed`, score 71, grade C, exit 1 | Removing guidance lowered static quality below the same threshold. This seeded example is not a measurement of agent performance. |
+| Did the quality check pass? | `quality/skillevaluator-quality.json`: `overall_status: passed`, score 86.2, grade B, exit 0 | The original documentation meets the demo's explicit `--min-score 80` gate. Read findings even when it passes. |
+| Did quality regress? | `regressed/skillevaluator-quality.json`: `overall_status: failed`, score 72.8, grade C, exit 1 | Removing guidance lowered static quality below the same threshold. This seeded example is not a measurement of agent performance. |
 | Is the passing skill ready to publish? | The passing report has `publication_status: incomplete`, `publication.eligible: false` and `publication.reasons` | No: required security, deduplication and live execution evidence is missing. A successful command does not imply complete evidence. |
 
 In the released CLI, the passing command can print `All validations passed`

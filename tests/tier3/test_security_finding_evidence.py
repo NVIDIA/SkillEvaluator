@@ -1829,6 +1829,11 @@ def test_sed_replacement_value_spliced_after_the_quote_stays_masked(
             id="sed-name-starts-the-pattern",
         ),
         pytest.param(
+            f"sed -i 's/^password=.*/password='\"{_BASIC_PASSWORD}\"'/' app.ini",
+            "sed -i 's/^password=<redacted>'/' app.ini",
+            id="sed-anchored-pattern-and-a-value-spliced-after-the-quote",
+        ),
+        pytest.param(
             f"tool -api_key {_API_TOKEN} && pg_dump --db_password={_BASIC_PASSWORD} app",
             "tool -api_key <redacted> && pg_dump --db_password=<redacted> app",
             id="underscored-short-and-attached-flags",
@@ -1966,3 +1971,44 @@ def test_underscored_flags_and_config_keys_keep_the_assignment_reading(copy: str
     ]
     for secret in (_API_TOKEN, _BASIC_PASSWORD, _PASSPHRASE_TAIL):
         assert secret not in json.dumps(result)
+
+
+class _CountingPattern:
+    """Count the searches of a compiled pattern."""
+
+    def __init__(self, pattern: Any) -> None:
+        self.pattern = pattern
+        self.calls = 0
+
+    def search(self, *args: Any) -> Any:
+        self.calls += 1
+        return self.pattern.search(*args)
+
+
+@pytest.mark.parametrize("copy", ["template", "eval_core"])
+@pytest.mark.parametrize(
+    "make_text",
+    [
+        pytest.param(lambda n: "sed -i 's/password=" + "x,token=y" * n + "/' app.ini", id="quoted-sed-pattern"),
+        pytest.param(lambda n: "sed -i s/password=" + "x,token=y" * n + "/ app.ini", id="unquoted-sed-pattern"),
+        pytest.param(lambda n: "ssh h \"sed -i 's/token: " + "x,token=y" * n + "/' app.yml\"", id="ssh-sed-pattern"),
+        pytest.param(lambda n: "sed -e s/a/token=y/" + ",s/a/token=y/" * n + " app.ini", id="sed-replacements"),
+    ],
+)
+def test_a_long_sed_value_is_not_read_again_for_each_name_in_it(
+    copy: str, make_text: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Judge evidence is masked with no 2,000-character cut. A credential name
+    # inside the masked value of a name in a sed expression is read again only
+    # when it starts inside that expression, so a long value is not read again
+    # for each of the names in it, which made masking take quadratic time.
+    module = eval_template._shared_checks if copy == "template" else eval_core_checks
+    mask = eval_template._redact_judge_evidence if copy == "template" else module._mask_finding_evidence_credentials
+    counts = []
+    for repeats in (100, 1000):
+        names = _CountingPattern(module._FINDING_EVIDENCE_CREDENTIAL_NAME_RE)
+        monkeypatch.setattr(module, "_FINDING_EVIDENCE_CREDENTIAL_NAME_RE", names)
+        mask(make_text(repeats))
+        counts.append(names.calls)
+
+    assert counts[0] == counts[1]

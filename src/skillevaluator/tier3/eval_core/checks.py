@@ -3533,6 +3533,12 @@ _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE = re.compile(
 # "/s/" URL path segment is not one.
 _FINDING_EVIDENCE_SED_PATTERN_RE = re.compile(r"(?<![\w./-])s/(?:\\.|[^/\\\r\n]){0,256}/")
 _FINDING_EVIDENCE_SED_REPLACEMENT_NAME_RE = re.compile(_FINDING_EVIDENCE_ASSIGNMENT_NAME, re.IGNORECASE)
+# A whole "s/PATTERN/REPLACEMENT/" expression, each part read up to 256
+# characters. A name may start the pattern after "S/" too, as the assignment
+# name rule ignores case.
+_FINDING_EVIDENCE_SED_EXPRESSION_RE = re.compile(
+    r"s/(?:\\.|[^/\\\r\n]){0,256}(?:/(?:\\.|[^/\\\r\n]){0,256}/?)?", re.IGNORECASE
+)
 # "auth" also starts author and authority, which name no credential. A name
 # that ends in a "_pass", "_pwd" or "pw" part ("DB_PASS", "MYSQL_PWD", "PW")
 # names a password too, as do "PASS" (not as a test result word or counter,
@@ -3868,16 +3874,18 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
     # The quote state is read forward once, up to each name that needs it.
     scan_pos = 0
     scan_open: int | None = None
-    # Whether the last masked value is that of a name in a sed expression.
-    sed_value = False
-    for match, sed_replacement in _assignment_name_matches(text):
+    # Where the sed expression ends whose pattern or replacement starts the
+    # name whose value was masked last (0: that name starts neither).
+    sed_end = 0
+    for match, name_sed_end in _assignment_name_matches(text):
         name, name_quote, separator = match.group(1, 2, 3)
         # A name inside a masked value is skipped, unless it starts a sed
-        # replacement or the value is that of a name in a sed expression (see
+        # pattern or replacement, or the value is that of a name in a sed
+        # expression, and the masked text ends inside that expression (see
         # below).
         overlapped = match.start() < pos
         if (
-            (overlapped and not (sed_replacement or sed_value))
+            (overlapped and pos >= (name_sed_end or sed_end))
             or not _FINDING_EVIDENCE_CREDENTIAL_NAME_RE.search(name)
             or (
                 _FINDING_EVIDENCE_LOCATION_NAME_RE.search(name) is not None
@@ -3962,7 +3970,10 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
             # So it does for any other credential name inside the value of a
             # name in a sed expression, whose own value may run past it, as
             # in "s/TOKEN=.*/export TOKEN='"NEW"'/", where the pattern name's
-            # value ends at the quote before NEW.
+            # value ends at the quote before NEW. A name is read again only
+            # while the masked text ends inside its sed expression, whose
+            # parts are read up to 256 characters, so a long masked value is
+            # not read again for each name in it.
             pos = max(pos, value.end())
             continue
         parts.append(text[pos : value.start()])
@@ -3977,20 +3988,30 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
             replacement = opening + scheme + replacement + closing
         parts.append(replacement)
         pos = value.end()
-        # A name right after "/" was read only as the start of a sed pattern.
-        sed_value = sed_replacement or text[match.start() - 1 : match.start()] == "/"
+        sed_end = name_sed_end
     parts.append(text[pos:])
     return "".join(parts)
 
 
-def _assignment_name_matches(text: str) -> list[tuple[re.Match[str], bool]]:
-    """Return, in order, each name that may start an assignment in *text*, and whether it starts a sed replacement."""
-    matches = {match.start(): (match, False) for match in _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.finditer(text)}
+def _assignment_name_matches(text: str) -> list[tuple[re.Match[str], int]]:
+    """Return, in order, each name that may start an assignment in *text*, and where its sed expression ends.
+
+    That is the end of the "s/PATTERN/REPLACEMENT/" expression whose pattern
+    or replacement the name starts, or 0 when it starts neither.
+    """
+    matches: dict[int, tuple[re.Match[str], int]] = {}
+    for match in _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.finditer(text):
+        # A name right after "/" was read only as the start of a sed pattern.
+        sed_end = 0
+        if text[match.start() - 1 : match.start()] == "/":
+            sed_end = _FINDING_EVIDENCE_SED_EXPRESSION_RE.match(text, match.start() - 2).end()
+        matches[match.start()] = (match, sed_end)
     for sed in _FINDING_EVIDENCE_SED_PATTERN_RE.finditer(text):
+        sed_end = _FINDING_EVIDENCE_SED_EXPRESSION_RE.match(text, sed.start()).end()
         if sed.end() in matches:
-            matches[sed.end()] = (matches[sed.end()][0], True)
+            matches[sed.end()] = (matches[sed.end()][0], sed_end)
         elif (name := _FINDING_EVIDENCE_SED_REPLACEMENT_NAME_RE.match(text, sed.end())) is not None:
-            matches[sed.end()] = (name, True)
+            matches[sed.end()] = (name, sed_end)
     return [matches[start] for start in sorted(matches)]
 
 

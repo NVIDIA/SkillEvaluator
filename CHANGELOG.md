@@ -570,7 +570,6 @@ All notable changes to SkillEvaluator are documented in this file.
   log under `tier2/catalog/diagnostics/` names every such skill by its path in
   the repository. Quote such a value, as in `name: "2048"`.
 
-
 ## 0.9.0 - 2026-11-13
 
 ### Fixed

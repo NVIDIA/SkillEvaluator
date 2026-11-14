@@ -710,13 +710,15 @@ _SKILL_NAME_MARKER = "\x00name\x00"
 _MATCH_EXCERPT_CHARS = 80
 _MAX_FIELD_VALUES = 1000
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\[\]\n]+)\]\([^()\n]*\)")
-# The start of a path or URL: ./x, ../x, /x, ~/x, $HOME/x, %USERPROFILE%\x,
-# \\server\share, C:\x or C:/x, https://..., or a relative path that ends in a
-# slash (dir/), has a second one (dir/sub/x) or ends in a file name
-# (dir\SKILL.md). Word pairs such as "start/end" or "input/output" are not paths.
+# The start of a path or URL: /x, ./x, ../x, .dir/x, ~/x, ~user/x, $HOME,
+# ${HOME}, %USERPROFILE%, \x, \\server\share, C:\x or C:/x, https://..., or a
+# relative path that ends in a separator (dir/, dir/sub/) or a file name
+# (dir\SKILL.md, dir/sub/SKILL.md). Wording such as "~2 tool calls", ".5
+# seconds", "...", "$0" or "start/middle/end" is not a path.
 _PATH_START_RE = (
-    r"(?:[./~$%\\]|[A-Za-z]:[\\/]|[A-Za-z][\w+.-]*://"
-    r"|[\w-]+[\\/](?:(?![\w-]|\.\w)|[\w.-]+[\\/]|[\w-]+\.\w))"
+    r"(?:\.{0,2}[\\/]|\.[\w-]+[\\/]|~(?:[A-Za-z_][\w.-]*)?[\\/]|\$\{?[A-Za-z_]|%[A-Za-z_]\w*%"
+    r"|[A-Za-z]:[\\/]|[A-Za-z][\w+.-]*://"
+    r"|[\w-]+(?:[\\/][\w.-]+)*[\\/](?:(?![\w-]|\.\w)|[\w-]+\.[A-Za-z]))"
 )
 
 
@@ -741,7 +743,8 @@ def _skill_files_re(skill_name: str | None) -> str:
     if skill_name:
         # A sentence's final period still ends the name; release-review.bak does not.
         own_place = rf"(?:{own_place}|[`'\"]?(?:[^\s`'\"\\/]*[\\/])+{name}(?![\w-]|\.\w))"
-    elsewhere = rf"(?:\s+located)?\s+{preposition}\s+(?!{own_place})"
+    # (?!\s) keeps \s+ from stopping one space short, where own_place cannot match.
+    elsewhere = rf"(?:\s+located)?\s+{preposition}\s+(?!\s)(?!{own_place})"
     alternatives.append(
         rf"\b{_READ_VERB_RE}(?:\s+{qualifier})*\s+(?:(?:the\s+)?contents\s+of\s+)?[`'\"*_\[]*SKILL\.md\b"
         rf"(?![`'\"*_\]]*(?:{elsewhere}|\s+{_SKILL_MD_GENERIC_NOUN_RE}))"

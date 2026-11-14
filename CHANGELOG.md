@@ -452,10 +452,12 @@ All notable changes to SkillEvaluator are documented in this file.
   /workspace/input/pdf-tools", "within ./pdf-tools" or "located in
   ./pdf-tools" as the skill's own `SKILL.md`, so a skill that reviews other
   skills can pass `--strict`. "at" and "within" now name a location before a
-  path or URL, as "in" already did; "read `SKILL.md` at the start" and "at
-  start/end of each phase" still warn. A path that ends in the skill's own
-  name, such as "at ./release-review" or "in ./release-review.", is the
-  skill's own directory, so reading `SKILL.md` there now warns too.
+  path or URL, as "in" already did; "read `SKILL.md` at the start", "at
+  start/end of each phase" and "within ~2 tool calls" still warn. A path that
+  ends in the skill's own name, such as "at ./release-review" or "in
+  ./release-review.", is the skill's own directory, so reading `SKILL.md`
+  there now warns too. Extra spaces after the location word, as in "in  the
+  skill directory", no longer hide the skill's own directory.
 
 - Template cases from `create-eval-dataset` and the autopilot starter case no
   longer quote a skill description that names one of the skill's scripts

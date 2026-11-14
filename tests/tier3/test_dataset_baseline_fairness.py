@@ -731,10 +731,24 @@ def test_format_wording_and_negated_checks_do_not_warn(skill_name, text):
         "Reads SKILL.md within /opt/release-review.",
         "Reads SKILL.md at C:\\agent\\release-review.",
         "Reads SKILL.md in ./release-review.",
-        # Word pairs joined by a slash are not paths.
+        # Words joined by slashes are not paths.
         "Re-read SKILL.md at start/end of each phase",
         "Follow SKILL.md at input/output boundaries",
         "Follow SKILL.md within read/write limits",
+        "Re-reads SKILL.md at start/middle/end of each phase",
+        "Follows SKILL.md at input/output/error boundaries",
+        "Reads SKILL.md within read/write/execute limits",
+        # A leading ~, ., $ or % does not make a path on its own.
+        "The agent read SKILL.md within ~2 tool calls",
+        "Reads SKILL.md within ~2 turns, then checks the manifest",
+        "Reads SKILL.md within ~30 seconds of starting",
+        "Reads SKILL.md within .5 seconds of starting",
+        "Reads SKILL.md at ... the very start",
+        "Reads SKILL.md within ...the first turn",
+        "Reads SKILL.md at $0 extra cost",
+        # Extra spaces do not hide the skill's own directory.
+        "Reads SKILL.md at  ./release-review",
+        "Reads SKILL.md in  the skill directory",
     ],
 )
 def test_skill_md_in_the_skill_itself_still_warns(assertion):
@@ -761,12 +775,34 @@ _LOCATED_SKILL_MD_PROMPTS = [
     "Read the SKILL.md at $HOME/pdf-tools and list its frontmatter errors.",
     "Read the SKILL.md within %USERPROFILE%\\pdf-tools and list its frontmatter errors.",
     "Read the SKILL.md in ./skill-reviewer-fixtures and list its frontmatter errors.",
+    "Read the SKILL.md at ~/pdf-tools and list its frontmatter errors.",
+    "Read the SKILL.md at .fixtures/pdf-tools and list its frontmatter errors.",
+    "Read the SKILL.md at ${HOME}/pdf-tools and list its frontmatter errors.",
+    "Read the SKILL.md at \\\\server\\share\\pdf-tools and list its frontmatter errors.",
+    "Read the SKILL.md at input/fixtures/pdf-tools/SKILL.md and list its frontmatter errors.",
 ]
 
 
 @pytest.mark.parametrize("text", _LOCATED_SKILL_MD_PROMPTS)
 def test_skill_md_the_task_locates_does_not_warn(text):
     entry = _case("skill-reviewer", prompt=text, expected_output=text, assertions=[text])
+
+    assert _baseline_fairness_warnings(entry) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Read SKILL.md at $SKILL_DIR before starting.",
+        "Read SKILL.md in $SKILL_DIR before starting.",
+        "Read the SKILL.md at ${SKILL_ROOT}/SKILL.md first.",
+        "Read SKILL.md within $CLAUDE_SKILL_DIR",
+    ],
+)
+def test_skill_md_at_a_variable_reads_as_another_location_as_it_does_in_one(text):
+    # A variable may name the skill's own install, but "in $SKILL_DIR" was
+    # already read as another location, and "at" and "within" follow "in".
+    entry = _case(prompt="Check manifest.yaml", assertions=[text])
 
     assert _baseline_fairness_warnings(entry) == []
 
@@ -824,6 +860,28 @@ def test_tier3_validate_strict_passes_a_prompt_that_locates_another_skill_md(tmp
     result = CliRunner().invoke(cli, ["tier3", "validate", str(skill), "--strict", "--json"])
 
     assert result.exit_code == 0, result.output
+
+
+def test_tier3_validate_strict_fails_an_assertion_that_reads_skill_md_within_a_few_tool_calls(tmp_path: Path):
+    skill = tmp_path / "release-review"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: release-review\ndescription: Review release manifests\n---\n", encoding="utf-8"
+    )
+    case = {
+        "id": "release-review-001",
+        "prompt": "Check manifest.yaml for release blockers",
+        "expected_output": "Lists each blocker",
+        "assertions": ["The agent reads SKILL.md within ~3 tool calls"],
+    }
+    (skill / "evals" / "evals.json").write_text(
+        json.dumps({"skill_name": "release-review", "evals": [case]}), encoding="utf-8"
+    )
+
+    result = CliRunner().invoke(cli, ["tier3", "validate", str(skill), "--strict", "--json"])
+
+    assert result.exit_code == 1, result.output
+    assert "assertions grades skill use" in result.output
 
 
 @pytest.mark.parametrize(

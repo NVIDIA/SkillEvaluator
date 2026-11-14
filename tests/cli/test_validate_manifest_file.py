@@ -95,6 +95,30 @@ def test_linked_skill_manifest_validates_the_folder_holding_the_link(tmp_path: P
     assert _skill_names(manifest[1]) == ["linked"]
 
 
+def test_manifest_in_linked_skill_folder_is_refused_before_default_tier2_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "real-skill"
+    target.mkdir()
+    (target / "SKILL.md").write_text("---\nname: sample\ndescription: Sample skill\n---\n", encoding="utf-8")
+    linked_target = tmp_path / "linked-skill"
+    try:
+        linked_target.symlink_to(target, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"Directory symlinks are unavailable: {exc}")
+
+    def must_not_run(*_args, **_kwargs):
+        raise AssertionError("Validation must not receive a linked root when Tier 2 is enabled")
+
+    monkeypatch.setattr(cli_module, "run_validation", must_not_run)
+
+    result = CliRunner().invoke(cli_module.cli, ["validate", str(linked_target / "SKILL.md")])
+
+    assert result.exit_code == 2, result.output
+    assert "symlink or reparse point: linked-skill" in result.output
+    assert str(target) not in result.output
+
+
 def test_skill_manifest_file_keeps_default_reports_outside_the_skill(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -13,6 +13,7 @@ import pytest
 from click.testing import CliRunner
 
 from skillevaluator import cli as cli_module
+from skillevaluator.models.result import ValidationResult
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "skills" / "simple"
 
@@ -88,6 +89,29 @@ def test_workflow_manifest_file_validates_like_its_folder(tmp_path: Path, sample
 
     assert folder[0] == 0
     assert manifest == folder
+
+
+def test_workflow_manifest_file_sends_its_folder_to_tier3(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sample_workflow_dir: Path
+) -> None:
+    seen = []
+    monkeypatch.setattr(cli_module, "run_validation", lambda path, **_kw: seen.append(("tier1", path)) or [])
+
+    def evaluate(path, **_kwargs):
+        seen.append(("tier3", path))
+        result = ValidationResult(validator_name="AGENT_EVAL")
+        result.metadata["agent_eval"] = {"agents": {}}
+        return result
+
+    monkeypatch.setattr(cli_module, "_run_agent_eval_or_skip", evaluate)
+
+    manifest = sample_workflow_dir / "workflow-rules.mdc"
+    result = CliRunner().invoke(
+        cli_module.cli, ["validate", str(manifest), "--tiers", "1,3", "-o", str(tmp_path / "reports")]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen == [("tier1", sample_workflow_dir.resolve()), ("tier3", sample_workflow_dir.resolve())]
 
 
 def test_linked_skill_manifest_validates_the_folder_holding_the_link(tmp_path: Path) -> None:

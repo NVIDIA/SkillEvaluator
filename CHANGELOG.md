@@ -588,12 +588,15 @@ All notable changes to SkillEvaluator are documented in this file.
   location before a path or URL. "Read `SKILL.md` at the start", "within ~2
   tool calls", a variable such as "at `$CLAUDE_SKILL_DIR`" and a path through
   a `skill` or `skills` directory such as "at /workspace/skill/SKILL.md" still
-  warn, because they may name the skill's own install. A path that ends in or
-  passes through a directory named after the skill, such as "in
-  ./release-review" or "in ./release-review/fixtures/pdf-tools", is the
+  warn, because they may name the skill's own install. A path that ends in a
+  directory named after the skill, such as "in ./release-review", is the
   skill's own directory, so reading `SKILL.md` there now warns after every
-  location word. Extra spaces after the location word, as in "in  the skill
-  directory", no longer hide the skill's own directory.
+  location word. After "at", "within" or "located in", a path through that
+  directory, such as "at ./release-review/fixtures/pdf-tools", still warns.
+  After "in", "of", "from", "under" or "inside", such a path still names
+  another place, so a skill named `pdf` still passes "in
+  /workspace/pdf/fixtures/bad-skill". Extra spaces after the location word, as
+  in "in  the skill directory", no longer hide the skill's own directory.
 
 - Template cases from `create-eval-dataset` and the autopilot starter case no
   longer quote a skill description that names one of the skill's scripts

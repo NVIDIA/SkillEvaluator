@@ -723,8 +723,12 @@ def test_format_wording_and_negated_checks_do_not_warn(skill_name, text):
         # A path that ends in the skill's name is the skill's own directory.
         "Reads SKILL.md at ./release-review before checking the manifest",
         "Reads SKILL.md in ./release-review before checking the manifest",
-        "Reads SKILL.md in ./release-review/fixtures/pdf-tools",
+        "Reads SKILL.md in ./release-review/ before checking the manifest",
+        "Reads SKILL.md in https://github.com/org/release-review",
         "Reads SKILL.md within /workspace/skills-copy/release-review/",
+        # After "at", "within" or "located in", so does a path through it.
+        "Reads SKILL.md at ./release-review/fixtures/pdf-tools",
+        "Reads the SKILL.md located in /workspace/release-review/fixtures/pdf-tools",
         "Reads SKILL.md at C:\\agent\\release-review before checking the manifest",
         # A sentence's final period ends the skill's name.
         "Reads SKILL.md at ./release-review.",
@@ -798,6 +802,61 @@ def test_skill_md_the_task_locates_does_not_warn(text):
     entry = _case("skill-reviewer", prompt=text, expected_output=text, assertions=[text])
 
     assert _baseline_fairness_warnings(entry) == []
+
+
+# After "in", "of", "from", "under" or "inside", a path that only passes
+# through a directory named after the skill names another place. A generic
+# skill name is often such a directory.
+_SKILL_MD_THROUGH_A_SKILL_NAMED_DIRECTORY = [
+    ("pdf", "Read the SKILL.md in /workspace/pdf/fixtures/bad-skill and list its errors."),
+    ("review", "Read the SKILL.md in ./review/pdf-tools and list its errors."),
+    ("docs", "Read the SKILL.md in ./docs/examples/demo-skill and list its errors."),
+    ("release-review", "Read the SKILL.md in ./release-review/fixtures/pdf-tools and list its errors."),
+    ("release-review", "Read the SKILL.md under ./release-review/fixtures/pdf-tools and list its errors."),
+    ("release-review", "Read the SKILL.md in https://github.com/org/release-review/tree/main/fixtures/pdf-tools"),
+]
+
+
+@pytest.mark.parametrize(("skill_name", "text"), _SKILL_MD_THROUGH_A_SKILL_NAMED_DIRECTORY)
+def test_skill_md_in_a_path_through_a_skill_named_directory_does_not_warn(skill_name, text):
+    entry = _case(skill_name, prompt=text, expected_output=text, assertions=[text])
+
+    assert _baseline_fairness_warnings(entry) == []
+
+
+@pytest.mark.parametrize(("skill_name", "text"), _SKILL_MD_THROUGH_A_SKILL_NAMED_DIRECTORY[:3])
+def test_tier3_validate_strict_passes_skill_md_in_a_path_through_a_skill_named_directory(
+    tmp_path: Path, skill_name, text
+):
+    skill = tmp_path / skill_name
+    (skill / "evals").mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        f"---\nname: {skill_name}\ndescription: Review agent skills\n---\n", encoding="utf-8"
+    )
+    case = {"id": f"{skill_name}-001", "prompt": text, "expected_output": "Lists each frontmatter error"}
+    (skill / "evals" / "evals.json").write_text(
+        json.dumps({"skill_name": skill_name, "evals": [case]}), encoding="utf-8"
+    )
+
+    result = CliRunner().invoke(cli, ["tier3", "validate", str(skill), "--strict", "--json"])
+
+    assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Read the SKILL.md at /workspace/pdf/fixtures/bad-skill and list its errors.",
+        "Read the SKILL.md within ./pdf/fixtures/bad-skill and list its errors.",
+        "Read the SKILL.md located in /workspace/pdf/fixtures/bad-skill and list its errors.",
+    ],
+)
+def test_skill_md_at_a_path_through_a_skill_named_directory_still_warns(text):
+    entry = _case("pdf", prompt=text)
+
+    (warning,) = _baseline_fairness_warnings(entry)
+
+    assert warning.startswith("prompt points at the skill's files"), warning
 
 
 @pytest.mark.parametrize(

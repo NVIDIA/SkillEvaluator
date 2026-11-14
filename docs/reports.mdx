@@ -1110,22 +1110,29 @@ or gate.
 - Attempts that failed before scoring, such as an attempt that hit the agent
   timeout, still used tokens and are counted. So are the scored attempts of an
   arm that failed. `coverage.unscored_attempts` counts the attempts without a
-  score. Such an attempt belongs to the case whose task directory its Harbor
-  `result.json` or `config.json` names, or else to the case its trial name
-  starts with. `resources` keeps its own totals, which need every attempt of an
-  arm scored and measured.
+  score. Such an attempt belongs to the case that its `failure.json` names in
+  `entry_id`, which the collector records from the task the attempt ran with
+  either backend, so a native task whose `[metadata] entry_id` differs from
+  its directory keeps its case. A run without that record gives the case whose
+  task directory its Harbor `result.json` or `config.json` names, or else the
+  case its trial name starts with. `resources` keeps its own totals, which
+  need every attempt of an arm scored and measured.
 - Nothing is estimated. An attempt with a missing or invalid counter adds no
-  tokens. Its arm's `coverage.status` is then `partial` (other attempts were
-  measured) or `unavailable` (none were), and the totals cover only the measured
-  attempts. An arm that did not run is `not_run`, and its `totals` are `null`:
-  a skipped arm, or an arm without attempts that the agent has no record of or
-  that the payload `mode` leaves out (`with_skill_only` or `baseline_only`).
-  The score tables show such a baseline as not run. A sum above
-  9,007,199,254,740,991 (`2^53 - 1`), the largest integer JSON keeps exact, is
-  `unavailable` with `total_out_of_range` and `null` totals.
+  tokens. A report trial whose trajectory recorded an invalid counter names
+  it, never its value, in `invalid_token_counters`, and its `tokens` leave
+  that counter out. Its arm's `coverage.status` is then `partial` (other
+  attempts were measured) or `unavailable` (none were), and the totals cover
+  only the measured attempts. An arm that did not run is `not_run`, and its
+  `totals` are `null`: a skipped arm, or an arm without attempts that the agent
+  has no record of or that the payload `mode` leaves out (`with_skill_only` or
+  `baseline_only`). The score tables show such a baseline as not run. A sum
+  above 9,007,199,254,740,991 (`2^53 - 1`), the largest integer JSON keeps
+  exact, is `unavailable` with `total_out_of_range` and `null` totals.
 - `coverage` also gives `expected_attempts`, `observed_attempts`,
   `measured_attempts`, and `reason_codes` such as `missing_token_counters`,
-  `invalid_token_counters`, and `missing_attempts`.
+  `invalid_token_counters`, and `missing_attempts`. A case expects the
+  attempts its pass@k record planned: attempts skipped after a pass and
+  attempts a run budget did not admit are not expected.
 - `delta.total_tokens` is with skill minus baseline, and
   `delta.total_tokens_change_percent` divides it by the baseline. A change needs
   complete counts in both arms for the same cases and attempts, and both arms
@@ -1180,8 +1187,12 @@ its bounded preview. Each table says how many more case rows are in the JSON
 payload. The full terminal report (`validate --verbose` or `-r cli`) and
 `tier3 evaluate --verbose` print the agent rows only and name the files that
 hold the case rows: the HTML, Markdown and JSON reports for `validate`, and
-`report.html` and `tier3-benchmark.md` in the run directory for
-`tier3 evaluate`.
+for `tier3 evaluate` the reports the run wrote in its run directory:
+`report.html` and `tier3-benchmark.md` for a Harbor run, `report.html` alone
+for a NeMo Gym run, and none when the report step failed. When the payload
+left the case rows out, they say instead that no report has them.
+`tier3 evaluate` also prints the agent rows for a run whose arms all failed,
+after the panel that says the evaluation did not complete.
 
 ### Failure reasons and per-trial rows
 

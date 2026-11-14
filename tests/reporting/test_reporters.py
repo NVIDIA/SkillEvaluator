@@ -5,9 +5,11 @@
 
 import copy
 import json
+import os
 import re
 import tempfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from urllib.parse import unquote, urlsplit
 
 import pytest
 
@@ -27,6 +29,7 @@ from skillevaluator.reporting import (
     MarkdownReporter,
     SARIFReporter,
 )
+from skillevaluator.reporting.sarif_reporter import _file_uri, _normalize_artifact_uri
 from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION
 from skillevaluator.tier1.commands import emit_reports
 
@@ -1660,6 +1663,97 @@ class TestSARIFReporter:
         uris = [item["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] for item in results]
         assert uris == ["notes/a%20b.md", "notes/a%2520b.md", "notes/100%25.md"]
 
+    @staticmethod
+    def _artifact_uris(
+        file_paths: list[str],
+        *,
+        workspace_root: Path | None,
+        scan_root: Path | None = None,
+    ) -> list[str]:
+        result = ValidationResult(validator_name="QUALITY", validator_description="quality")
+        for file_path in file_paths:
+            result.add_finding(
+                Finding(
+                    category="QUALITY",
+                    severity=Severity.MEDIUM,
+                    check_name="spacing",
+                    message="issue",
+                    file_path=file_path,
+                    line_number=1,
+                )
+            )
+        reporter = SARIFReporter(include_timestamp=False, workspace_root=workspace_root, scan_root=scan_root)
+        results = json.loads(reporter.render_all([result]))["runs"][0]["results"]
+        return [item["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] for item in results]
+
+    @pytest.mark.skipif(os.name == "nt", reason="Windows file names cannot contain ':'")
+    def test_physical_location_uri_keeps_a_colon_in_the_first_segment_a_path(self, tmp_path: Path) -> None:
+        names = ["notes:v2.md", "skills/a:b.md"]
+        uris = self._artifact_uris([str(tmp_path / name) for name in names], workspace_root=tmp_path)
+
+        assert uris == ["./notes:v2.md", "skills/a:b.md"]
+        assert [urlsplit(uri).scheme for uri in uris] == ["", ""]
+
+    @pytest.mark.skipif(os.name == "nt", reason="only POSIX file names carry undecodable bytes as surrogate escapes")
+    def test_physical_location_uri_encodes_the_bytes_of_an_undecodable_file_name(self, tmp_path: Path) -> None:
+        uris = self._artifact_uris([str(tmp_path / "notes" / "caf\udce9.md")], workspace_root=tmp_path)
+
+        assert uris == ["notes/caf%E9.md"]
+
+    def test_physical_location_uri_outside_the_workspace_is_a_file_uri(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        outside = tmp_path / "outside" / "x y%.md"
+
+        (uri,) = self._artifact_uris([str(outside)], workspace_root=repo)
+
+        parts = urlsplit(uri)
+        assert parts.scheme == "file"
+        assert unquote(parts.path).endswith("/outside/x y%.md")
+
+    def test_file_uri_for_windows_drive_and_unc_paths(self) -> None:
+        assert _file_uri(PureWindowsPath(r"C:\outside\x y.md")) == "file:///C:/outside/x%20y.md"
+        assert _file_uri(PureWindowsPath(r"\\server\share\x.md")) == "file://server/share/x.md"
+        assert _file_uri(PureWindowsPath(r"\\server@SSL@443\DavWWWRoot\x.md")) == (
+            "file://server%40SSL%40443/DavWWWRoot/x.md"
+        )
+
+    def test_physical_location_uri_encodes_a_lone_surrogate_that_is_not_an_escape(self) -> None:
+        assert _normalize_artifact_uri("notes/\ud800.md", None) == "notes/%ED%A0%80.md"
+
+    @pytest.mark.skipif(os.name == "nt", reason="Windows collapses '..' before it follows a symlink")
+    def test_physical_location_uri_follows_dot_dot_through_a_symlinked_directory(self, tmp_path: Path) -> None:
+        skill = tmp_path / "repo" / "skills" / "demo"
+        skill.mkdir(parents=True)
+        (skill / "x.md").write_text("decoy\n", encoding="utf-8")
+        outside = tmp_path / "outside" / "deep"
+        (outside / "dir").mkdir(parents=True)
+        (outside / "x.md").write_text("real\n", encoding="utf-8")
+        try:
+            (skill / "dl").symlink_to(outside / "dir", target_is_directory=True)
+        except OSError:
+            pytest.skip("symlinks are not available")
+
+        (uri,) = self._artifact_uris(["dl/../x.md"], workspace_root=tmp_path / "repo", scan_root=skill)
+
+        parts = urlsplit(uri)
+        assert parts.scheme == "file"
+        assert unquote(parts.path).endswith("/outside/deep/x.md")
+
+    def test_physical_location_uri_keeps_a_symlink_that_points_outside_the_workspace(self, tmp_path: Path) -> None:
+        skill = tmp_path / "repo" / "skills" / "demo"
+        skill.mkdir(parents=True)
+        target = tmp_path / "outside.md"
+        target.write_text("notes\n", encoding="utf-8")
+        try:
+            (skill / "notes.md").symlink_to(target)
+        except OSError:
+            pytest.skip("symlinks are not available")
+
+        uris = self._artifact_uris(["notes.md"], workspace_root=tmp_path / "repo", scan_root=skill)
+
+        assert uris == ["skills/demo/notes.md"]
+
     def test_merge_catalog_sarif_combines_into_single_run(self) -> None:
         child = SARIFReporter(include_timestamp=False)
         documents = []
@@ -3020,3 +3114,40 @@ def test_cli_harbor_job_labels_remain_neutral_and_literal(colored):
     assert "Job 3 [bad]" in console.export_text()
     if colored:
         assert "\x1b[1mJob 3 [bad]\x1b[0m" in output
+
+
+@pytest.mark.skipif(os.name == "nt", reason="only POSIX file names carry undecodable bytes as surrogate escapes")
+@pytest.mark.parametrize("report_format", ["json", "markdown", "html", "sarif"])
+def test_reports_are_written_for_a_file_name_that_is_not_utf8(tmp_path: Path, report_format: str) -> None:
+    # On Linux, os.listdir returns the name b"caf\xe9.md" as "caf\udce9.md".
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: skill\ndescription: Demo.\n---\n", encoding="utf-8")
+    name = "caf\udce9.md"
+    result = ValidationResult(validator_name="SCHEMA", validator_description="schema")
+    result.add_finding(
+        Finding(
+            category="SCHEMA",
+            severity=Severity.LOW,
+            check_name="unexpected_file",
+            message=f"Unexpected '{name}' in skill root",
+            file_path=str(skill / name),
+        )
+    )
+    output_dir = tmp_path / "reports"
+
+    emit_reports(
+        [result],
+        report_formats=(report_format,),
+        output_dir=output_dir,
+        target_path=str(skill),
+        announce_paths=False,
+        sarif_scan_root=skill,
+        sarif_repository_root=tmp_path,
+    )
+
+    (report,) = [path for path in output_dir.iterdir() if path.name != "BENCHMARK.md"]
+    text = report.read_text(encoding="utf-8")
+    assert "Unexpected" in text
+    if report_format == "sarif":
+        assert "skill/caf%E9.md" in text

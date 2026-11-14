@@ -159,6 +159,22 @@ def test_tier1_reports_managed_provisioning_without_naming_an_override(scanners,
     assert scanners.calls[0][0][-2:] == ["skillspector", "--version"]
 
 
+def test_tier1_reports_source_selected_during_probe(scanners, monkeypatch) -> None:
+    tool = Tools.skillspector
+
+    def run(*args, **kwargs):
+        tool._path = "/doctor-tools/uv"
+        tool.resolution_source = "uv tool run"
+        return tool_runner.ToolResult(True, "SkillSpector v2.13.4", "", 0)
+
+    monkeypatch.setattr(tool, "run", run)
+
+    assert _rows(tier="1", checks="security")["SkillSpector"] == (
+        "pass",
+        "2.13.4 at /doctor-tools/uv (uv tool run)",
+    )
+
+
 @pytest.mark.parametrize("failure", ["missing", "malformed override", "timeout", "exit status"])
 def test_tier1_scanner_failure_does_not_hide_other_scanners(scanners, monkeypatch, failure) -> None:
     if failure == "missing":

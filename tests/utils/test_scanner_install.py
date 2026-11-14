@@ -113,7 +113,7 @@ class TestSkillSpectorWheel:
         found = {"uv": "/opt/uv", "skillspector": "/usr/bin/skillspector"}
         with patch.object(tool_runner, "resolve_tool_path", _resolver(found)):
             tool = ExternalTool("skillspector", "skillspector", managed=True)
-        with patch("subprocess.run", return_value=CompletedProcess([], 0, "", "")) as run:
+        with patch("subprocess.run", return_value=CompletedProcess([], 0, "SkillSpector v2.13.4", "")) as run:
             tool.run(["--version"])
         assert run.call_args.args[0] == ["/usr/bin/skillspector", "--version"]
 

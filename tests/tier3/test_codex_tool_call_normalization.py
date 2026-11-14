@@ -1218,6 +1218,59 @@ def test_extended_codex_apply_patch_string_literal_normalizes(extractor, source)
     assert calls[0]["action_input"] == {"input": "*** Begin Patch\n*** End Patch"}
 
 
+# The bounded statement grammar answers wrappers the extended one declines, such as two
+# bound calls of which only one is rendered. It read every argument as an object literal,
+# so a freeform apply_patch string made the whole wrapper unsupported and its calls went
+# ungraded, although the same patch passed as ``{input: "..."}`` decoded (#236).
+_BOUNDED_PATCH_TAIL = 'const r2=await tools.exec_command({cmd:"cat a.txt"});text(r2);'
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "argument",
+    [
+        pytest.param(r"'*** Begin Patch\n*** End Patch'", id="single-quoted"),
+        pytest.param(r'"*** Begin Patch\n*** End Patch"', id="double-quoted"),
+        pytest.param(r'"*** Begin Patch\n+echo $HOME `date` a\\b\n*** End Patch"', id="shell-characters"),
+    ],
+)
+def test_bounded_codex_apply_patch_string_literal_normalizes(extractor, argument):
+    calls = extractor(_trajectory(f"const r1=await tools.apply_patch({argument});{_BOUNDED_PATCH_TAIL}"))
+
+    assert [call["action"] for call in calls] == ["apply_patch", "exec_command"]
+    assert calls[0]["action_input"]["input"].startswith("*** Begin Patch\n")
+    assert calls[0]["action_input"]["input"].endswith("*** End Patch")
+    assert "normalization_status" not in calls[0]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "argument",
+    [
+        pytest.param(r'"*** Begin Patch\n*** End Patch', id="unterminated-string"),
+        pytest.param("`*** Begin Patch`", id="template-literal"),
+        pytest.param("`${patch}`", id="interpolated-template"),
+        pytest.param('"*** Begin "+patch', id="concatenation"),
+        pytest.param('"*** Begin Patch",options', id="extra-argument"),
+    ],
+)
+def test_bounded_codex_malformed_apply_patch_literal_stays_atomic(extractor, argument):
+    calls = extractor(_trajectory(f"const r1=await tools.apply_patch({argument});{_BOUNDED_PATCH_TAIL}"))
+
+    assert len(calls) == 1
+    assert calls[0]["action"] == "exec"
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_bounded_codex_string_literal_is_only_for_apply_patch(extractor):
+    calls = extractor(_trajectory(f'const r1=await tools.exec_command("pwd");{_BOUNDED_PATCH_TAIL}'))
+
+    assert len(calls) == 1
+    assert calls[0]["action"] == "exec"
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
 @pytest.mark.parametrize("extractor", _EXTRACTORS)
 @pytest.mark.parametrize(
     "source",

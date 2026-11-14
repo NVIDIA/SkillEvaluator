@@ -22,6 +22,15 @@ from typing import Any, ClassVar
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _rich_detects_interactive_terminals(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Rich reads TTY_INTERACTIVE when it builds a console, and
+    # TTY_INTERACTIVE=0 turns off the in-place redraws that the tests with a
+    # forced terminal drive. Clear it so they draw the same frames wherever
+    # they run.
+    monkeypatch.delenv("TTY_INTERACTIVE", raising=False)
+
+
 class _TTYBuffer(io.StringIO):
     def isatty(self) -> bool:
         return True
@@ -403,6 +412,45 @@ def test_rich_progress_uses_manual_refresh_and_recent_event_window(monkeypatch: 
     assert "active again" in text
     assert all(f"completed stage {index}" in text for index in range(2, 7))
     assert "completed stage 1" not in text
+    reporter.close()
+
+
+def test_rich_progress_running_spinner_moves_on_with_each_redraw(monkeypatch: pytest.MonkeyPatch) -> None:
+    import re
+
+    import rich.live
+    from rich.spinner import Spinner
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+    reporter = progress.RichProgressReporter(stream=_TTYBuffer(), refresh_interval=60)
+    reporter.start(_plan(progress))
+    live = _FakeLive.instances[0]
+    frames = Spinner("dots").frames
+
+    def latest_frame() -> int:
+        rendered = _render(live.renderables[-1], width=120)
+        glyph = re.search(r"Agent codex\s*│ (\S) running", rendered)
+        assert glyph is not None, rendered
+        return frames.index(glyph.group(1))
+
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+    assert latest_frame() == 0
+    # Rich no longer redraws on its own timer, so the spinner moves on one
+    # frame with each heartbeat or update that redraws the view, however far
+    # apart they come.
+    reporter.heartbeat()
+    assert latest_frame() == 1
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="attempt 2 of 3"))
+    assert latest_frame() == 2
+    for _ in range(len(frames)):
+        reporter.heartbeat()
+    assert latest_frame() == 2
+    # A stage that runs again after it finished starts from the first frame.
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="complete", detail="attempt 2 of 3"))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="attempt 3 of 3"))
+    assert latest_frame() == 0
     reporter.close()
 
 
@@ -1486,6 +1534,638 @@ def test_refused_first_frame_and_stop_leave_the_cursor_shown(
         # The notice went out with the frame and the stop the terminal had
         # refused just before, so the frame is on screen above it.
         assert "Harbor Run Configuration" in output
+
+
+@pytest.mark.parametrize(
+    ("refused_writes", "notice"),
+    [
+        ({1}, _STOP_NOTICE),
+        ({2}, _STOP_NOTICE),
+        ({3}, _STOP_NOTICE),
+        ({1, 2}, _LATE_STOP_NOTICE),
+    ],
+    ids=["agents-line-refused", "provider-line-refused", "run-plan-line-refused", "agents-line-and-notice-refused"],
+)
+def test_a_refused_plan_line_before_the_frame_turns_progress_off_with_a_notice(
+    monkeypatch: pytest.MonkeyPatch,
+    refused_writes: set[int],
+    notice: str,
+) -> None:
+    from rich.console import Console
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    writes: list[str] = []
+
+    class NonBlockingTerminal(_TTYBuffer):
+        """Refuses some of the first writes, which print the plan lines before Live starts."""
+
+        def write(self, text: str) -> int:
+            # Dropping the console's held output also writes an empty string,
+            # which carries nothing to refuse.
+            if text:
+                writes.append(text)
+                if len(writes) in refused_writes:
+                    raise BlockingIOError(errno.EAGAIN, "write could not complete without blocking", 0)
+            return super().write(text)
+
+    stream = NonBlockingTerminal()
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=60)
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    # The plan line was refused before Live existed, so there is no frame to stop.
+    assert reporter.is_active is False
+    assert rich_reporter._live is None
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="complete", detail="agent finished"))
+    reporter.close()
+    first_run = stream.getvalue()
+
+    # Progress is off for the run, and a line of its own says so: on time when
+    # the terminal took it, or when the run ends.
+    assert "Harbor Run Configuration" not in first_run
+    assert "agent finished" not in first_run
+    assert first_run.count("Tier 3 progress display stopped after a drawing error") == 1
+    assert f"\n{first_run}".endswith(f"\n{notice}\n")
+    assert first_run.count("Agents / models:") <= 1
+
+    # The refused plan line is not sent again with the next run's plan.
+    reporter.start(_plan(progress))
+    reporter.close()
+    second_run = stream.getvalue()[len(first_run) :]
+    assert second_run.count("Agents / models:") == 1
+    assert "display stopped" not in second_run
+
+
+@pytest.mark.parametrize(
+    "refused_from",
+    ["plan-line", "update"],
+    ids=["refused-from-the-plan-line", "refused-from-an-update"],
+)
+def test_writes_refused_until_the_run_closes_are_not_sent_with_the_next_run(
+    monkeypatch: pytest.MonkeyPatch,
+    refused_from: str,
+) -> None:
+    from rich.console import Console
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    class NonBlockingTerminal(_TTYBuffer):
+        """Refuses every write while ``refusing`` is set, and keeps nothing it refused."""
+
+        refusing = False
+
+        def write(self, text: str) -> int:
+            if self.refusing and text:
+                raise BlockingIOError(errno.EAGAIN, "write could not complete without blocking", 0)
+            return super().write(text)
+
+    stream = NonBlockingTerminal()
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=60)
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    stream.refusing = refused_from == "plan-line"
+    reporter.start(_plan(progress))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+    stream.refusing = True
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="still evaluating"))
+    assert reporter.is_active is False
+    # The terminal still refuses what close() writes: the late notice, and
+    # after a refused frame the write that shows the cursor again.
+    reporter.close()
+    stream.refusing = False
+    first_run = stream.getvalue()
+
+    reporter.start(_plan(progress))
+    reporter.close()
+    second_run = stream.getvalue()[len(first_run) :]
+    # Nothing the terminal refused during the failed run comes out first.
+    assert second_run.startswith("Agents / models:")
+    assert second_run.count("Agents / models:") == 1
+    assert "display stopped" not in second_run
+    assert "still evaluating" not in second_run
+
+
+@pytest.mark.parametrize("stage_state", ["complete", "running"], ids=["stage-finished", "stage-still-running"])
+def test_a_final_frame_refused_when_the_run_closes_is_not_sent_with_the_next_run(
+    monkeypatch: pytest.MonkeyPatch,
+    stage_state: str,
+) -> None:
+    from rich.console import Console
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    class NonBlockingTerminal(_TTYBuffer):
+        """Refuses every write while ``refusing`` is set, and keeps nothing it refused."""
+
+        refusing = False
+
+        def write(self, text: str) -> int:
+            if self.refusing and text:
+                raise BlockingIOError(errno.EAGAIN, "write could not complete without blocking", 0)
+            return super().write(text)
+
+    stream = NonBlockingTerminal()
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=60)
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state=stage_state, detail="agent finished"))
+    # Nothing failed while the run went on. The terminal refuses only what the
+    # run's close() writes: the final frame and Live's stop.
+    assert reporter.is_active is True
+    stream.refusing = True
+    reporter.close()
+    stream.refusing = False
+    # The caller prints its results below the frame.
+    stream.write("Result: pass\n")
+    stream.write("Report: report.html\n")
+    first_run = stream.getvalue()
+
+    reporter.start(_plan(progress))
+    reporter.close()
+    second_run = stream.getvalue()[len(first_run) :]
+    # The refused final frame starts by moving the cursor up over the frame on
+    # screen. Sent first in the next run, it would erase the result lines and
+    # draw the old frame over them.
+    assert second_run.startswith("Agents / models:")
+    assert second_run.count("Agents / models:") == 1
+    assert "agent finished" not in second_run
+    assert "interrupted before completion" not in second_run
+
+
+class _WouldBlockTerminal(io.RawIOBase):
+    """A terminal file another process made non-blocking: some writes would block and take nothing."""
+
+    def __init__(self, refused_writes: set[int]) -> None:
+        super().__init__()
+        self.refused_writes = refused_writes
+        self.calls = 0
+        self.received = bytearray()
+
+    def writable(self) -> bool:
+        return True
+
+    def isatty(self) -> bool:
+        return True
+
+    def write(self, data: Any) -> int | None:
+        self.calls += 1
+        if self.calls in self.refused_writes:
+            # What a raw write returns for EAGAIN.
+            return None
+        self.received += bytes(data)
+        return len(data)
+
+
+@pytest.mark.parametrize(
+    ("refused_writes", "plan_line", "notice"),
+    [
+        ({1}, "Agents / models:", _STOP_NOTICE),
+        ({2}, "Provider:", _STOP_NOTICE),
+        ({3}, "Run plan:", _STOP_NOTICE),
+        # The terminal takes the refused line when it is flushed, then
+        # refuses the notice. The stream keeps the notice and sends it when
+        # the run ends, in place of the late one.
+        ({1, 3}, "Agents / models:", _STOP_NOTICE),
+        # The terminal stays full until start() returns: it refuses the plan
+        # line and every flush after it, so the notice waits for close().
+        ({1, 2, 3}, "Agents / models:", _LATE_STOP_NOTICE),
+    ],
+    ids=[
+        "agents-line-refused",
+        "provider-line-refused",
+        "run-plan-line-refused",
+        "agents-line-and-notice-refused",
+        "terminal-full-during-start",
+    ],
+)
+def test_a_plan_line_refused_by_a_buffered_terminal_stream_is_printed_once(
+    monkeypatch: pytest.MonkeyPatch,
+    refused_writes: set[int],
+    plan_line: str,
+    notice: str,
+) -> None:
+    from rich.console import Console
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    terminal = _WouldBlockTerminal(refused_writes)
+    # Shaped like the standard error stream the CLI passes. Its buffer keeps a
+    # line the terminal refused and sends it with the next write.
+    stream = io.TextIOWrapper(io.BufferedWriter(terminal), encoding="utf-8", newline="\n", line_buffering=True)
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=60)
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    assert reporter.is_active is False
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="complete", detail="agent finished"))
+    reporter.close()
+    # The terminal takes whatever the stream still holds once the run is over.
+    terminal.refused_writes = set()
+    stream.flush()
+    output = terminal.received.decode("utf-8")
+
+    # The refused line reaches the terminal once, from the stream's buffer,
+    # and one stop notice ends the run's output. The stream would also keep a
+    # notice the terminal refused and send it before the late one, so the
+    # notice is not written while the terminal still refuses the line, and a
+    # notice the stream kept is not followed by the late one.
+    assert output.count(plan_line) == 1
+    assert output.count("Tier 3 progress display stopped after a drawing error") == 1
+    assert f"\n{output}".endswith(f"\n{notice}\n")
+    assert "Harbor Run Configuration" not in output
+    assert "agent finished" not in output
+
+
+@pytest.mark.parametrize(
+    "full_at_close", [False, True], ids=["terminal-takes-writes-at-close", "terminal-full-at-close"]
+)
+def test_a_stop_notice_kept_by_a_buffered_terminal_stream_is_not_repeated_when_the_run_closes(
+    monkeypatch: pytest.MonkeyPatch,
+    full_at_close: bool,
+) -> None:
+    from rich.console import Console
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    class Terminal(_WouldBlockTerminal):
+        """Refuses the first write after it is armed, and the first write that carries the stop notice."""
+
+        armed = False
+        full = False
+        notice_refused = False
+
+        def write(self, data: Any) -> int | None:
+            if self.full:
+                return None
+            if self.armed:
+                self.armed = False
+                return None
+            if not self.notice_refused and _STOP_NOTICE.encode("utf-8") in bytes(data):
+                self.notice_refused = True
+                return None
+            return super().write(data)
+
+    terminal = Terminal(set())
+    # Shaped like standard error: its buffer keeps what the terminal refused.
+    stream = io.TextIOWrapper(io.BufferedWriter(terminal), encoding="utf-8", newline="\n", line_buffering=True)
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=60)
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+    # The terminal refuses the update and takes Live's stop, then refuses the
+    # notice under the last frame. The stream keeps that notice.
+    terminal.armed = True
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="still evaluating"))
+    assert reporter.is_active is False
+    assert terminal.notice_refused
+    terminal.full = full_at_close
+    reporter.close()
+    # The terminal takes whatever the stream still holds once the run is over.
+    terminal.full = False
+    stream.flush()
+    # How a refused frame splits across the stream's writes depends on the
+    # Python version's buffer, so the bytes need not be valid UTF-8.
+    output = terminal.received.decode("utf-8", errors="replace")
+
+    # The kept notice reaches the terminal, when the run ends or with the
+    # stream's next write, and no late notice repeats it.
+    _assert_cursor_shown_and_one_stop_notice(output, _STOP_NOTICE)
+    assert output.endswith(f"{_STOP_NOTICE}\n")
+
+
+def test_a_stop_notice_refused_after_a_refused_first_frame_is_not_taken_as_kept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rich.console import Console
+    from rich.live import Live
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    class Terminal(_WouldBlockTerminal):
+        """Refuses every write while ``refusing`` is set, and the first write that carries the stop notice."""
+
+        refusing = False
+        notice_refused = False
+
+        def write(self, data: Any) -> int | None:
+            if self.refusing:
+                return None
+            if not self.notice_refused and _STOP_NOTICE.encode("utf-8") in bytes(data):
+                self.notice_refused = True
+                return None
+            return super().write(data)
+
+    terminal = Terminal(set())
+    # Shaped like standard error, with a buffer smaller than the first frame:
+    # it keeps only the start of a refused frame, whatever the Python
+    # version's default buffer size.
+    stream = io.TextIOWrapper(
+        io.BufferedWriter(terminal, buffer_size=1024), encoding="utf-8", newline="\n", line_buffering=True
+    )
+
+    class LiveOnAFullTerminal(Live):
+        def start(self, refresh: bool = False) -> None:
+            try:
+                super().start(refresh=refresh)
+            finally:
+                # The terminal takes writes again once Live gave up.
+                terminal.refusing = False
+
+        def refresh(self) -> None:
+            # The plan lines and Live's hide-cursor write went out. The
+            # terminal refuses the first frame and the stop that Live.start()
+            # runs when that frame fails, so Rich's console holds both.
+            terminal.refusing = True
+            super().refresh()
+
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=60)
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+    rich_reporter._live_factory = LiveOnAFullTerminal
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    # The notice went out after the held frame and stop, in one write larger
+    # than the stream's buffer, and the terminal refused it. The stream kept
+    # only the start of the frame.
+    assert reporter.is_active is False
+    assert terminal.notice_refused
+    reporter.close()
+    stream.flush()
+    output = terminal.received.decode("utf-8", errors="replace")
+
+    # The notice was lost with the rest of that write, so the late notice
+    # takes its place, after the write that shows the cursor again.
+    assert output.count("Tier 3 progress display stopped after a drawing error") == 1
+    assert output.endswith(f"{_LATE_STOP_NOTICE}\n")
+    assert output.rfind("\x1b[?25h") > output.rfind("\x1b[?25l")
+
+
+@pytest.mark.parametrize("refused_from", ["first-frame", "update"], ids=["first-frame-refused", "update-refused"])
+def test_late_notice_is_written_when_the_terminal_refuses_the_cursor_as_the_run_closes(
+    monkeypatch: pytest.MonkeyPatch,
+    refused_from: str,
+) -> None:
+    from rich.console import Console
+    from rich.live import Live
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    class Terminal(_WouldBlockTerminal):
+        """Refuses every write while ``refusing`` is set."""
+
+        refusing = False
+
+        def write(self, data: Any) -> int | None:
+            if self.refusing:
+                return None
+            return super().write(data)
+
+    terminal = Terminal(set())
+    # Shaped like standard error: its buffer keeps what the terminal refused.
+    stream = io.TextIOWrapper(io.BufferedWriter(terminal), encoding="utf-8", newline="\n", line_buffering=True)
+
+    class LiveOnAFillingTerminal(Live):
+        def refresh(self) -> None:
+            # The plan lines and Live's hide-cursor write went out; the
+            # terminal fills up from the first frame on.
+            if refused_from == "first-frame":
+                terminal.refusing = True
+            super().refresh()
+
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=60)
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+    rich_reporter._live_factory = LiveOnAFillingTerminal
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    if refused_from == "update":
+        reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+        terminal.refusing = True
+        reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="still evaluating"))
+    assert reporter.is_active is False
+    # The terminal takes writes again while the run goes on, and a warning
+    # printed then sends what the stream kept.
+    terminal.refusing = False
+    stream.write("warning printed after the display stopped\n")
+    # It is full again when the run ends, so close() cannot show the cursor.
+    terminal.refusing = True
+    reporter.close()
+    terminal.refusing = False
+    stream.flush()
+    # The stream's buffer can keep only the start of a refused frame and send
+    # it with the next write, cut inside a box-drawing character. How much it
+    # keeps depends on the Python version's buffer, so the bytes need not be
+    # valid UTF-8.
+    output = terminal.received.decode("utf-8", errors="replace")
+
+    # The warning emptied the stream's buffer, so it keeps the late notice
+    # with the refused show-cursor write and sends both once the terminal
+    # takes writes again.
+    _assert_cursor_shown_and_one_stop_notice(output, _LATE_STOP_NOTICE)
+    assert output.endswith(f"{_LATE_STOP_NOTICE}\n")
+
+
+def test_late_notice_starts_a_line_when_the_stream_sent_a_cut_refused_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rich.console import Console
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    show_cursor = b"\x1b[?25h"
+
+    class Terminal(_WouldBlockTerminal):
+        """Refuses every write while ``refusing`` is set, and one show-cursor write on its own once armed."""
+
+        refusing = False
+        cursor_armed = False
+        sent_before_cursor = b""
+
+        def write(self, data: Any) -> int | None:
+            if self.refusing:
+                return None
+            if self.cursor_armed and bytes(data) == show_cursor:
+                self.cursor_armed = False
+                self.sent_before_cursor = bytes(self.received)
+                return None
+            return super().write(data)
+
+    terminal = Terminal(set())
+    # Shaped like standard error, with a buffer smaller than a frame: it keeps
+    # only the start of a refused frame, whatever the Python version's default
+    # buffer size.
+    stream = io.TextIOWrapper(
+        io.BufferedWriter(terminal, buffer_size=1024), encoding="utf-8", newline="\n", line_buffering=True
+    )
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=60)
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+    # The terminal refuses the update and Live's stop. The stream keeps the
+    # start of the update frame and has no room left for the stop.
+    terminal.refusing = True
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="still evaluating"))
+    assert reporter.is_active is False
+    # Nothing else is printed before the run ends. The terminal then takes
+    # the part of the frame the stream kept and refuses the write that shows
+    # the cursor again, so the line that ends the frame is not written.
+    terminal.refusing = False
+    terminal.cursor_armed = True
+    reporter.close()
+    stream.flush()
+    assert terminal.cursor_armed is False
+    # What reached the terminal before that write ends inside the frame.
+    assert terminal.sent_before_cursor.endswith(b"\n") is False
+    output = terminal.received.decode("utf-8", errors="replace")
+
+    # The late notice starts a line of its own instead of joining the cut
+    # frame's last line.
+    _assert_cursor_shown_and_one_stop_notice(output, _LATE_STOP_NOTICE)
+    assert output.endswith(f"\n{_LATE_STOP_NOTICE}\n")
+
+
+def test_changelog_says_a_stream_can_still_send_refused_output_later() -> None:
+    # close() drops only the view's own copy of what the terminal refused. A
+    # stream shaped like standard error keeps its copy and sends it with its
+    # next write, and no public API drops it. The entry is found by its
+    # opening words so that a release heading above it can change.
+    lead = (
+        "- When the terminal refuses one of the plan lines printed before the "
+        "interactive Tier 3 progress view's table first appears"
+    )
+    changelog = (Path(__file__).resolve().parents[1] / "CHANGELOG.md").read_text(encoding="utf-8")
+    # Read each bullet with its indented continuation lines, so the entry is
+    # found wherever it sits in its subsection.
+    bullets: list[list[str]] = []
+    for line in changelog.splitlines():
+        if line.startswith("- "):
+            bullets.append([line])
+        elif bullets and line.startswith("  ") and line.strip():
+            bullets[-1].append(line)
+        elif not line.strip() and bullets and bullets[-1]:
+            bullets.append([])
+    blocks = [" ".join(" ".join(bullet).split()) for bullet in bullets if bullet]
+    entries = [block for block in blocks if block.startswith(lead)]
+
+    assert len(entries) == 1
+    # One blank line, not two, separates the entry from what follows it.
+    raw_entry_start = changelog.index("- When the terminal refuses one of the plan lines printed before the\n")
+    raw_entry_end = changelog.index("\n\n", raw_entry_start)
+    assert not changelog.startswith("\n\n\n", raw_entry_end)
+    entry = entries[0]
+    assert "no longer keeps its own copy of output the terminal still refuses when the run ends" in entry
+    assert (
+        "A stream that keeps what the terminal refused, as standard error does, can still send it later, "
+        "and a final table sent then can still erase those lines." in entry
+    )
+    # A notice line the stream kept goes out when the run ends, in place of
+    # the late one, as the buffered-stream tests above check.
+    assert (
+        "When the terminal takes the writes before that line and refuses only the line itself, a stream that "
+        "keeps what the terminal refused, as standard error does, sends that line when the run ends in place of "
+        "the later one." in entry
+    )
+
+
+def test_live_evaluation_docs_say_a_stream_can_still_send_refused_output_later() -> None:
+    # The guide's description of the rich view states the same limit as the
+    # CHANGELOG entry above, instead of saying refused frames can never be
+    # drawn over later output. The paragraph is found by its opening words.
+    # The view drops its copy when every run ends, so the sentence is not
+    # tied to the drawing failure described just before it: after a failure
+    # there is no final table.
+    lead = "In a terminal, `--progress auto` uses the `rich` view"
+    guide = (Path(__file__).resolve().parents[1] / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
+    blocks = [" ".join(block.split()) for block in guide.split("\n\n")]
+    paragraphs = [block for block in blocks if block.startswith(lead)]
+
+    assert len(paragraphs) == 1
+    paragraph = paragraphs[0]
+    assert "never drawn over" not in paragraph
+    assert "The view then drops" not in paragraph
+    assert (
+        "When any run ends, whether or not drawing failed, the view drops its own copy of output the terminal "
+        "still refuses, such as a refused final table, so it does not draw that output over lines printed since."
+        in paragraph
+    )
+    assert (
+        "A stream that keeps what the terminal refused, as standard error does, can still send it later, "
+        "and a table sent then can still erase those lines." in paragraph
+    )
+    # Standard error keeps a refused notice line and sends it when the run
+    # ends, so the late line does not follow it, except after a failed first
+    # frame.
+    assert (
+        "If the terminal refused only that line, a stream that keeps what the terminal refused, as standard "
+        "error does, sends that line then instead of the later one, although after a failed first frame both "
+        "can appear." in paragraph
+    )
+    # The late line and the cursor write are kept only while the stream's
+    # buffer has room: one already full of a refused frame takes neither, and
+    # the terminal never gets them.
+    assert (
+        "If the terminal still refuses writes when the run ends, such a stream sends the later line and the "
+        "write that shows the cursor once the terminal takes writes again, but only if its buffer has room for "
+        "them. A buffer already full of a refused table can drop that line and leave the cursor hidden." in paragraph
+    )
 
 
 class _InterleavingLock:

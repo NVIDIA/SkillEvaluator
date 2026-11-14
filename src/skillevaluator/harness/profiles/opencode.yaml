@@ -1,0 +1,36 @@
+harness: opencode
+display_name: OpenCode
+verified: {version: 1.19.5, source: "v1.19.5 @ 810c0eba1a73", date: 2026-11-01, method: proxy-captured canary probes x3 + source, os: linux}
+roots:
+  project: [.opencode/skills, .opencode/skill, .claude/skills, .agents/skills]
+  user: [~/.config/opencode/skills, ~/.claude/skills, ~/.agents/skills]
+limits: {scan_depth: unlimited, desc_cap: none, list_cap: none, tool_output: "2,000 lines / 50 KB, rest spilled to a file"}
+listing: {}
+rules:
+  - {id: OC-ROOT, when: "install_root not in roots", effect: not_loaded, outcome: not found, message: "OpenCode reads .opencode, .claude and .agents skill folders.", fix: "Install it under .opencode/skills, .claude/skills or .agents/skills.", confidence: high}
+  - {id: OC-NAME-MISSING, when: "name_missing", effect: not_loaded, outcome: rejected, message: "Skill dropped: OpenCode requires a name.", fix: "Add a name field matching the folder name.", confidence: high}
+  - {id: OC-DESC-MISSING, when: "description_missing or description_type != 'str'", effect: not_loaded, message: "Loaded but hidden from the model's skill list (no string description).", fix: "Add a non-empty string description.", confidence: high}
+  - {id: OC-DESC-EMPTY, when: "description_empty", effect: degraded, message: "Listed by name only.", fix: "Add a non-empty string description.", confidence: high}
+  - {id: OC-DUP-KEY, when: "frontmatter_duplicate_keys", effect: not_loaded, outcome: rejected, message: "Skill dropped: duplicate frontmatter keys.", fix: "Remove the duplicate frontmatter key.", confidence: high}
+  - {id: OC-NESTED, when: "nested_skill_md", effect: degraded, message: "The nested SKILL.md is loaded as a second, separate skill.", fix: "Move the nested skill to its own folder under the skills root, or rename its SKILL.md.", confidence: high}
+  - {id: OC-BODY-CUT, when: "opencode_body_output_bytes > 51200 or opencode_body_output_lines > 2000", effect: degraded, outcome: needs paging, message: "OpenCode strips front matter and delivers the body as {opencode_body_output_bytes} bytes / {opencode_body_output_lines} lines; it cuts tool output at 51,200 bytes / 2,000 lines, so the model must page through the rest from a spill file.", fix: "Keep the SKILL.md body under 51,100 bytes and 1,990 lines; move detail into references/ files.", versions: "v2 lets users raise tool_output.max_bytes / max_lines", confidence: high}
+  - {id: OC-DOLLAR-N, when: "dollar_literal_count > 0", effect: degraded, outcome: text rewritten, message: "Run as a /command, every $N is replaced and left blank without that argument: {dollar_literal_count} price-like tokens (lines {dollar_literal_lines}) lose their numbers. The skill tool path is unaffected.", fix: "Reword amounts (e.g. USD 4.00) instead of $4.00.", versions: "1.x; v2 no longer registers skills as commands", confidence: high}
+  - {id: OC-DUP-NAME, when: "duplicate_name", effect: degraded, message: "Another skill is also named '{skill_name}' ({duplicate_paths}); OpenCode picks a random one each run (concurrent loading, last write wins).", fix: "Give each skill a unique name.", confidence: high}
+  - {id: OC-RELOAD, when: "always", effect: advisory, message: "Skill list and text are cached at startup; edits need a restart.", confidence: medium}
+  - {id: OC-ALLOWED-TOOLS, when: "allowed_tools_shape != 'none'", effect: advisory, message: "allowed-tools is ignored by OpenCode.", fix: "Don't rely on allowed-tools to restrict tools; use the harness's permission settings.", confidence: high}
+  - {id: OC-CASING, when: "not manifest_name_exact", effect: degraded, message: "Non-canonical name (skill.md/Skill.md): loaded on case-insensitive filesystems (macOS default APFS, 3/3), ignored on case-sensitive Linux (3/3). Works or breaks depending on the OS.", fix: "Rename the file to SKILL.md (exact casing).", confidence: high}
+  - {id: OC-REF-CUT, when: "files_over_51200 > 0", effect: advisory, outcome: needs paging, message: "{files_over_51200} files are over 51,200 bytes or 2,000 lines ({files_over_51200_paths}); OpenCode's read tool returns at most that per call, so the model must page.", fix: "Split large files into pieces under 51,200 bytes and 2,000 lines.", confidence: high}
+  - {id: OC-LONG-LINES, when: "long_line_count > 0", effect: advisory, outcome: delivery truncated, message: "{long_line_count} lines over 2,000 chars ({long_line_files}) are cut when the model reads them.", fix: "Wrap long lines (tables, minified JSON) under 2,000 characters.", confidence: high}
+  - {id: OC-DMI-IGNORED, when: "disable_model_invocation", effect: degraded, message: "disable-model-invocation is ignored: the model still sees this skill and can use it on its own.", fix: "No equivalent setting in OpenCode; don't rely on it.", confidence: high}
+  - {id: OC-CODEX-POLICY, when: "codex_implicit_disabled and not disable_model_invocation", effect: degraded, message: "agents/openai.yaml implicit-invocation policy is Codex-only: here the model can still use this skill on its own.", fix: "No equivalent setting in OpenCode.", confidence: high}
+  - {id: OC-ARGUMENTS, when: "uses_arguments_placeholder", effect: degraded, message: "Loaded through the skill tool, $ARGUMENTS is not substituted: the model sees the literal text (a /command run substitutes it).", fix: "Describe the expected input in words instead of $ARGUMENTS.", confidence: high}
+  - {id: OC-SKILL-DIR, when: "uses_claude_skill_dir", effect: degraded, message: "${CLAUDE_SKILL_DIR} is not substituted: the model sees the literal text.", fix: "Use paths relative to SKILL.md.", confidence: high}
+  - {id: OC-CLAUDE-ONLY, when: "claude_only_fields != ''", effect: advisory, message: "Ignored here (Claude Code only): {claude_only_fields}.", fix: "Fine to keep for Claude Code; don't depend on them elsewhere.", confidence: high}
+  - {id: OC-FM-STRIPPED, when: "custom_field_chars > 200", effect: advisory, message: "Frontmatter is stripped when the skill is used, so the text in {custom_fields} never reaches the model.", fix: "Move instructions from frontmatter into the SKILL.md body.", confidence: medium}
+notes:
+  - "Docs (V1) say one level deep and a 1-1024 description; runtime matches the V2 docs: recursive, no length cap."
+  - "Tolerant of tabs, bare colons and BOM. Follows all symlinks tested."
+plugin:
+  rules:
+    - {id: OC-PLUGIN-FORMAT, when: "always", effect: not_loaded, outcome: not found, message: "OpenCode does not load manifest plugin bundles; its plugins are JS/TS modules in .opencode/plugin/ or npm packages in opencode.json.", fix: "Install the skills under .opencode/skills, or port the plugin to an OpenCode JS plugin.", confidence: high}
+  components: {}

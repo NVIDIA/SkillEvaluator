@@ -289,6 +289,7 @@ def test_skill_config_cannot_control_evaluator_or_judge_routing(name: str) -> No
         "SKILL_EVAL_JUDGE_CHARACTER_FACTS",
         "LLM_JUDGE_FALLBACK_POLICY",
         "LLM_JUDGE_RETRY_POLICY",
+        "SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL",
     ],
 )
 @pytest.mark.parametrize("provider_name", ["openai", "openai-compatible", "anthropic", "bedrock", "nv_build"])

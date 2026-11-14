@@ -50,6 +50,9 @@ dependencies = [
     # Dataset-authored signal patterns require a per-match timeout.
     "regex>=2024.11.6",
     "rich>=13.5.0",
+    # Runs the pinned SkillSpector wheel in its own environment (uv tool run),
+    # so a plain pip install can complete the Tier 1 security check.
+    "uv>=0.11.27",
 ]
 
 [project.optional-dependencies]
@@ -126,6 +129,7 @@ include = ["skillevaluator*"]
 "skillevaluator.tier3" = ["grader_reference/*.json", "grader_reference/trajectories/*.json"]
 "skillevaluator" = ["ci-release.json", "ci-release-all-tiers.json"]
 "skillevaluator.config" = ["*.yaml", "profiles/*.yaml"]
+"skillevaluator.harness" = ["profiles/*.yaml"]
 "skillevaluator.reporting" = ["templates/*.j2", "assets/*.js", "assets/*.md"]
 "skillevaluator.tier3.harbor" = [
     "templates/*.py",

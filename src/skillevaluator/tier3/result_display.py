@@ -26,6 +26,7 @@ from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, RED, T
 from skillevaluator.tier3.attempt_verdict import required_check_failure_reason
 from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
 from skillevaluator.tier3.evidence_volume import evidence_volume_for_conditions, format_evidence_volume
+from skillevaluator.tier3.harbor.baseline_timeouts import kept_with_failed_baseline
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
@@ -123,6 +124,35 @@ def _condition_status(data: Mapping[str, Any], variant: str) -> str:
 def _never_activated(data: Mapping[str, Any]) -> bool:
     activation = data.get("skill_activation")
     return isinstance(activation, Mapping) and activation.get("status") == "never_activated"
+
+
+def _run_verdict_agents(agents: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Return the agents a multi-agent run verdict reads, as the canonical report picks them.
+
+    An agent kept by --tolerate-baseline-timeouts is set aside whenever an
+    agent with a complete baseline ranks, so it never decides the verdict.
+    """
+    raw_agents = [raw for raw in agents.values() if isinstance(raw, Mapping)]
+    complete = [raw for raw in raw_agents if not kept_with_failed_baseline(raw)]
+    if len(complete) == len(raw_agents):
+        return raw_agents
+    if any(_ranks_like_the_canonical_report(raw) for raw in complete):
+        return complete
+    return raw_agents
+
+
+def _ranks_like_the_canonical_report(raw: Mapping[str, Any]) -> bool:
+    """Return whether the canonical report ranks the raw agent data ``raw``.
+
+    Data the canonical report cannot read, such as a string in place of a
+    score map, does not rank, so the printed summary stays readable.
+    """
+    from skillevaluator.evaluation.tier3_report import _canonical_agent_rank_from_info
+
+    try:
+        return _canonical_agent_rank_from_info(dict(raw)) is not None
+    except (AttributeError, TypeError, ValueError):
+        return False
 
 
 def _condition_usable(data: Mapping[str, Any], variant: str) -> bool:
@@ -1011,6 +1041,30 @@ def _case_first_summary(result: Mapping[str, Any], *, console: Console, skill_pa
     return shown
 
 
+def _render_token_usage(console: Console, result: Mapping[str, Any], safe: Any) -> None:
+    """Print the per-agent token sums that the report step recorded: measured, not scored.
+
+    The pointer to the case rows names only the reports the run recorded
+    writing: a Harbor run records ``tier3-benchmark.md`` in ``benchmark_path``
+    only when the file exists, a NeMo Gym run writes ``report.html`` alone, and
+    a run whose report step failed records neither.
+    """
+    from skillevaluator.reporting.tier3_token_usage import (
+        EVALUATE_CASE_POINTER,
+        EVALUATE_REPORT_CASE_POINTER,
+        render_token_usage_table,
+    )
+
+    pointer = (
+        EVALUATE_CASE_POINTER
+        if result.get("benchmark_path")
+        else EVALUATE_REPORT_CASE_POINTER
+        if result.get("report_path")
+        else ""
+    )
+    render_token_usage_table(console, result.get("token_usage"), case_pointer=pointer, text=safe)
+
+
 def render_evaluation_result(
     result: Mapping[str, Any],
     *,
@@ -1070,9 +1124,7 @@ def render_evaluation_result(
             run_verdict = str(result.get("verdict") or "").casefold()
             if run_verdict not in {"pass", "fail", "neutral", "inconclusive"}:
                 agent_verdicts = []
-                for raw in agents.values():
-                    if not isinstance(raw, Mapping):
-                        continue
+                for raw in _run_verdict_agents(agents):
                     explicit = str(raw.get("verdict") or "").casefold()
                     if explicit in {"pass", "fail", "neutral", "inconclusive"}:
                         agent_verdicts.append(explicit)
@@ -1184,10 +1236,7 @@ def render_evaluation_result(
 
         _render_dimensions(console=console, agents=agents, safe=safe)
 
-        from skillevaluator.reporting.tier3_token_usage import EVALUATE_CASE_POINTER, render_token_usage_table
-
-        # Measured, not scored: per-agent token sums the report step recorded.
-        render_token_usage_table(console, result.get("token_usage"), case_pointer=EVALUATE_CASE_POINTER, text=safe)
+        _render_token_usage(console, result, safe)
 
         # The per-evaluator findings report — evaluator reasonings, evidence
         # pointers, and next-step suggestions — is the feedback surface that
@@ -1211,6 +1260,9 @@ def render_evaluation_result(
             )
         except Exception:  # advisory panel: never break the run summary
             logging.getLogger(__name__).debug("Findings report skipped", exc_info=True)
+    elif incomplete and detailed:
+        # A run whose arms all failed has no scores to show, but its attempts still used tokens.
+        _render_token_usage(console, result, safe)
 
     # A recovered timeout is neither a failure nor a score; say so instead of staying silent.
     for line in _recovered_timeout_lines(agents) if isinstance(agents, Mapping) else []:

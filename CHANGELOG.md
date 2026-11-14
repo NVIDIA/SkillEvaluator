@@ -438,7 +438,10 @@ All notable changes to SkillEvaluator are documented in this file.
   cloud instance metadata endpoint `169.254.169.254` and the ECS credentials
   endpoint `169.254.170.2`, as non-RFC1918 IP addresses; its advice to use a
   private IP cannot apply to them. Other addresses outside the excluded ranges,
-  including `169.25.x.x` and `169.255.x.x`, are still reported.
+  including `169.25.x.x` and `169.255.x.x`, are still reported. A
+  `--pii-waivers` entry that accepted such an address now matches no finding,
+  so it is reported as a LOW `stale-pii-waiver` instead of an INFO
+  `applied-pii-waiver` and can be removed.
 
 ## 0.9.0 - 2026-11-13
 

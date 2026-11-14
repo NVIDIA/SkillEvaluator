@@ -100,3 +100,12 @@ def test_harness_check_prints_plugin_panel(tmp_path: Path):
     result = CliRunner().invoke(cli, ["harness-check", str(root)])
     assert result.exit_code == 0, result.output
     assert "Plugin compatibility" in result.output and "opencode" in result.output
+
+
+def test_unreadable_or_malformed_manifest_is_not_an_accepted_format(tmp_path: Path):
+    from skillevaluator.harness.plugin import plugin_facts
+
+    (tmp_path / ".claude-plugin").mkdir()
+    (tmp_path / ".claude-plugin" / "plugin.json").write_text("{not json", encoding="utf-8")
+    facts = plugin_facts(tmp_path)
+    assert facts["manifest_invalid"] and not facts["fmt_claude"] and not facts["any_manifest"]

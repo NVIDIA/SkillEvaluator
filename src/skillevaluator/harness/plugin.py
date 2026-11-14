@@ -43,8 +43,9 @@ def plugin_facts(root: Path) -> dict[str, Any]:
             continue
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (ValueError, UnicodeDecodeError):
+        except (OSError, ValueError, UnicodeDecodeError):
             facts["manifest_invalid"] = True
+            facts[f"fmt_{fmt}"] = False
             continue
         if isinstance(data, dict) and isinstance(data.get("name"), str) and data["name"]:
             facts["plugin_name"] = data["name"]

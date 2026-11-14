@@ -582,12 +582,19 @@ All notable changes to SkillEvaluator are documented in this file.
   file `setup helper.sh` and keep the scan `INCOMPLETE`, also after an
   apostrophe such as `don't` earlier in the line. Quoted text in such a word,
   such as the JSON in `'{"a": 1, "b": 2}'` or `"%s %s"`, is read as written,
-  as before. With `validate --workers` above 1, a skill of a folder that is
-  also a plugin is judged against the folder, as with one worker, so a line
-  naming a file elsewhere in the folder keeps it `INCOMPLETE`. An
-  `--llm-verify` downgrade no longer drops the accepted missing-reference
-  warning, or the error that says why a scan is `INCOMPLETE`. A severity
-  override from `--policy` or `--profile` no longer drops that error either.
+  as before. Compact JSON outside shell quotes with a space in a quoted value
+  is now such a word too, so a line with `{"title":"My note","tags":[]}`,
+  which stands for any text, as `{a,b}` does, now stays `INCOMPLETE` whenever
+  anything is left out, and `["a b","c"]` stands for any one-character name.
+  The work charged for reading each line has also doubled, so the line check
+  reaches its bound, which keeps the scan `INCOMPLETE`, with about half as
+  many long lines as before. With `validate --workers` above 1, a skill of a
+  folder that is also a plugin is judged against the folder, as with one
+  worker, so a line naming a file elsewhere in the folder keeps it
+  `INCOMPLETE`. An `--llm-verify` downgrade no longer drops the accepted
+  missing-reference warning, or the error that says why a scan is
+  `INCOMPLETE`. A severity override from `--policy` or `--profile` no longer
+  drops that error either.
 
 - A native Codex `exec` wrapper that calls the freeform `apply_patch` tool with
   the patch as a bare string is decoded instead of being discarded. The bounded

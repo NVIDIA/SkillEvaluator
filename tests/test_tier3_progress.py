@@ -2149,6 +2149,14 @@ def test_live_evaluation_docs_say_a_stream_can_still_send_refused_output_later()
         "error does, sends that line then instead of the later one, although after a failed first frame both "
         "can appear." in paragraph
     )
+    # The late line and the cursor write are kept only while the stream's
+    # buffer has room: one already full of a refused frame takes neither, and
+    # the terminal never gets them.
+    assert (
+        "If the terminal still refuses writes when the run ends, such a stream sends the later line and the "
+        "write that shows the cursor once the terminal takes writes again, but only if its buffer has room for "
+        "them. A buffer already full of a refused table can drop that line and leave the cursor hidden." in paragraph
+    )
 
 
 class _InterleavingLock:

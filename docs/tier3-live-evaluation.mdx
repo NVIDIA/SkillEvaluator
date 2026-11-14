@@ -1017,12 +1017,16 @@ refuses that line, or the write that shows the cursor again, a line saying
 that the run went on is printed and the cursor is shown when the run ends. If
 the terminal refused only that line, a stream that keeps what the terminal
 refused, as standard error does, sends that line then instead of the later
-one, although after a failed first frame both can appear. When any run ends,
-whether or not drawing failed, the view drops its own copy of output the
-terminal still refuses, such as a refused final table, so it does not draw
-that output over lines printed since. A stream that keeps what the terminal
-refused, as standard error does, can still send it later, and a table sent
-then can still erase those lines.
+one, although after a failed first frame both can appear. If the terminal
+still refuses writes when the run ends, such a stream sends the later line and
+the write that shows the cursor once the terminal takes writes again, but only
+if its buffer has room for them. A buffer already full of a refused table can
+drop that line and leave the cursor hidden. When any run ends, whether or not
+drawing failed, the view drops its own copy of output the terminal still
+refuses, such as a refused final table, so it does not draw that output over
+lines printed since. A stream that keeps what the terminal refused, as
+standard error does, can still send it later, and a table sent then can still
+erase those lines.
 
 Every `tier3 evaluate` flag, including resource overrides and Dockerfile
 modes, is in the [CLI Reference](/skills/skillevaluator/cli-reference).

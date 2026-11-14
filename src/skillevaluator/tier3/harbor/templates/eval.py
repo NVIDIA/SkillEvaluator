@@ -2872,18 +2872,103 @@ def _mask_judge_evidence_line(text):
     return redacted
 
 
+# The markers the line pass writes in place of a value. The JWT pattern writes
+# "jwt-" before its marker, and markers next to each other are read as one.
+_JUDGE_EVIDENCE_LINE_MARKERS_RE = re.compile(
+    r"(?:(?:jwt-)?<redacted>|" + re.escape(_shared_checks._FINDING_EVIDENCE_PRIVATE_KEY_MARKER) + r")+"
+)
+
+
+def _judge_evidence_line_values(text, masked):
+    """Return the values that the line pass, which wrote *masked*, replaced in *text*.
+
+    The line pass only replaces values with markers, so the text between two
+    markers is found in *text* in order, and what lies between is a value.
+    """
+    # The shared masker reads the text without its shell line continuations.
+    text = _shared_checks._LINE_CONTINUATION_RE.sub("", text)
+    kept = _JUDGE_EVIDENCE_LINE_MARKERS_RE.split(masked)
+    start = len(kept[0])
+    end = len(text) - len(kept[-1])
+    if len(kept) == 1 or start > end or not text.startswith(kept[0]) or not text.endswith(kept[-1]):
+        return []
+    values = []
+    for between in kept[1:-1]:
+        found = text.find(between, start, end)
+        if found < 0:
+            return values
+        values.append(text[start:found])
+        start = found + len(between)
+    values.append(text[start:end])
+    return values
+
+
+def _mask_judge_evidence_values(text, values):
+    """Replace each of the set *values*, none shorter than _MIN_EXACT_SECRET_LENGTH, in *text*, the longest first."""
+    # The text is read once, however many values there are: at each position
+    # its first characters name the lengths of the values that start with them.
+    lengths = {}
+    for value in values:
+        lengths.setdefault(value[:_MIN_EXACT_SECRET_LENGTH], set()).add(len(value))
+    lengths = {start: sorted(found, reverse=True) for start, found in lengths.items()}
+    parts = []
+    pos = index = 0
+    last = len(text) - _MIN_EXACT_SECRET_LENGTH
+    while index <= last:
+        for length in lengths.get(text[index : index + _MIN_EXACT_SECRET_LENGTH], ()):
+            if text[index : index + length] in values:
+                parts.append(text[pos:index])
+                parts.append("<redacted>")
+                index = pos = index + length
+                break
+        else:
+            index += 1
+    parts.append(text[pos:])
+    return "".join(parts)
+
+
 def _redact_judge_evidence(text):
     """Mask credentials in a judge prompt, reply, or problem before it is saved."""
+    text = str(text)
     # The whole text is masked first, so a form that runs over an escape (a
     # private key block, a continued or quoted value, a value that holds "\n"
     # or "\u00e4") is masked whole before the text is split at the escapes.
-    redacted = _mask_judge_evidence_text(str(text))
+    redacted = _mask_judge_evidence_text(text)
+    masked_lines = {}
+
+    def mask_line(line):
+        if line not in masked_lines:
+            masked_lines[line] = _mask_judge_evidence_line(line)
+        return masked_lines[line]
+
     parts = _JUDGE_EVIDENCE_ESCAPE_RE.split(redacted)
-    if len(parts) == 1:
+    if len(parts) > 1:
+        # Text and escapes alternate.
+        parts[::2] = [mask_line(part) if part else part for part in parts[::2]]
+        redacted = "".join(parts)
+    lines = _JUDGE_EVIDENCE_ESCAPE_RE.split(text)[::2]
+    if len(lines) == 1:
         return redacted
-    # Text and escapes alternate.
-    parts[::2] = [_mask_judge_evidence_line(part) if part else part for part in parts[::2]]
-    return "".join(parts)
+    # An unquoted value at the end of a line reads on through the escape, so
+    # the whole pass can mask the name that starts the next line with it:
+    # "--password A\n--token B" becomes "--password <redacted> B", where B no
+    # longer starts a line. The lines of the original text still hold that
+    # name, so each value the line pass masks there is masked wherever it is
+    # left. As with configured credentials, a shorter value is too likely to be
+    # an ordinary word to be masked everywhere. A backslash that ends a value is
+    # left in place, as it is usually half of an escaped backslash: a line break
+    # escaped twice is "\\n", and the line ends before its "\n".
+    values = set()
+    for line in dict.fromkeys(lines):
+        masked = mask_line(line) if line else line
+        if masked != line:
+            values.update(value.rstrip("\\") for value in _judge_evidence_line_values(line, masked))
+    values = {
+        value
+        for value in values
+        if len(value) >= _MIN_EXACT_SECRET_LENGTH and "<redacted" not in value and _ERROR_REDACTION_MARKER not in value
+    }
+    return _mask_judge_evidence_values(redacted, values) if values else redacted
 
 
 def _verifier_output_dir():

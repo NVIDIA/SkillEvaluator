@@ -1310,6 +1310,30 @@ def test_judge_evidence_masks_json_escaped_quoted_values(text: str) -> None:
         assert "<redacted>" in redacted
 
 
+# An unquoted value that ends a line reads on through a JSON-escaped line
+# break, so masking the whole text masks the flag or header name that starts
+# the next line with it. That line's value is masked too, as in plain text.
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("--password aaaaaaaaaaaa\n--token bbbbbbbbbbbb", id="password-then-token"),
+        pytest.param("-u uuuu:aaaaaaaaaaaa\nCookie: session=bbbbbbbbbbbb", id="user-then-cookie"),
+        pytest.param("deploy --token aaaaaaaaaaaa\nAuthorization: Bearer bbbbbbbbbbbb", id="token-then-authorization"),
+        pytest.param("sshpass -p aaaaaaaaaaaa\n--token bbbbbbbbbbbb", id="sshpass-then-token"),
+        pytest.param("docker login -u bot -p aaaaaaaaaaaa\nCookie: session=bbbbbbbbbbbb", id="login-then-cookie"),
+    ],
+)
+def test_judge_evidence_masks_consecutive_credential_lines_in_json_escaped_text(text: str) -> None:
+    text += "\ndone"
+    for form in (text, json.dumps({"command": text}), json.dumps(json.dumps({"command": text}))):
+        redacted = eval_template._redact_judge_evidence(form)
+
+        assert "aaaaaaaaaaaa" not in redacted
+        assert "bbbbbbbbbbbb" not in redacted
+        # Only the value is masked; the rest of the text stays as it was.
+        assert redacted.endswith("<redacted>" + form.split("bbbbbbbbbbbb")[-1])
+
+
 @pytest.mark.parametrize(
     "text",
     [

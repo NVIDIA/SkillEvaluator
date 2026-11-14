@@ -441,6 +441,58 @@ def test_ragas_evidence_masks_credentials_at_json_escaped_line_starts(
         assert secret not in saved
 
 
+def test_ragas_evidence_masks_consecutive_credential_lines_in_tool_calls(
+    verifier: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tool call's arguments reach the RAGAS prompt and reply as JSON in JSON, so their line breaks are escaped twice.
+
+    A flag value that ends one line must not take the next line's flag or
+    header name with it and leave that line's value in clear.
+    """
+    trajectory = {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {
+                        "function_name": "Write",
+                        "arguments": {
+                            "file_path": "deploy.flags",
+                            "content": "--api-key aaaaaaaaaaaa\n--token bbbbbbbbbbbb\n",
+                        },
+                    },
+                    {
+                        "function_name": "Bash",
+                        "arguments": {"command": "docker login -u bot -p cccccccccccc\nCookie: session=dddddddddddd"},
+                    },
+                ],
+            },
+        ]
+    }
+    secrets = ("aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc", "dddddddddddd")
+    agent_text = verifier.build_conversation_summary(trajectory, "Set up the deploy flags.")
+    assert all(secret in agent_text for secret in secrets)
+    prompt = "Judge whether the agent reached the goal.\ninput: " + json.dumps(
+        {"user_input": [{"content": agent_text, "type": "ai"}]}, indent=4
+    )
+    _install_ragas(monkeypatch, messages=[{"role": "user", "content": prompt}])
+    received = _stub_provider(monkeypatch, [_chat_reply(json.dumps({"end_state": agent_text, "verdict": 1}))])
+
+    with _judge_evidence(verifier):
+        result = verifier.judge_goal_accuracy("question", "expected", "agent answer")
+
+    assert (result["score"], result["method"]) == (1.0, "ragas")
+    assert len(received) == 1
+    exchange, outcome = _attempts(verifier)
+    assert [exchange["status"], outcome["status"]] == ["replied", "accepted"]
+    for field in ("prompt", "reply"):
+        assert "deploy.flags" in exchange[field]
+        assert "docker login -u bot -p <redacted>" in exchange[field]
+    saved = (verifier.VERIFIER_DIR / "judge_attempts.json").read_text(encoding="utf-8")
+    for secret in secrets:
+        assert secret not in saved
+
+
 def test_ragas_evidence_masks_private_key_blocks_in_json_prompts_and_replies(
     verifier: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:

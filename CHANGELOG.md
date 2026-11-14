@@ -574,6 +574,27 @@ All notable changes to SkillEvaluator are documented in this file.
   ownership key, for example from containers that each start with a fresh
   home directory. The refusal itself is unchanged, and `docs/reports.mdx`
   explains it.
+- When the terminal refuses one of the plan lines printed before the
+  interactive Tier 3 progress view's table first appears, such as a write that
+  would block, a line now says that the run continues, as when drawing the
+  table fails. When the terminal still refuses writes then, the line saying
+  that the run went on is printed instead, when the run ends, so only one of
+  the two appears. When the terminal takes the writes before that line and
+  refuses only the line itself, a stream that keeps what the terminal refused,
+  as standard error does, sends that line when the run ends in place of the
+  later one. Before, progress turned off with no notice, and the refused line
+  was printed again with the next run's plan. After a refused table update,
+  standard error printed both lines when the terminal then refused the line
+  saying that the run continues. The view also no longer keeps its own copy of
+  output the terminal still refuses when the run ends, such as the final
+  table, and sends it with the next run on the same reporter, where it could
+  erase the lines printed between the runs. A stream that keeps what the
+  terminal refused, as standard error does, can still send it later, and a
+  final table sent then can still erase those lines. A running stage's spinner
+  in that view now moves on one frame with each redraw, at least once a second
+  by default, instead of staying on its first frame. These follow the 0.9.0
+  Fixed entry that starts "The interactive Tier 3 progress view
+  (`--progress rich`, or `auto` in a terminal) now keeps one height".
 
 ## 0.9.0 - 2026-11-13
 

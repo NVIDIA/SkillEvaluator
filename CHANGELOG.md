@@ -209,6 +209,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- `THIRD_PARTY_NOTICES.md` lists Bandit under the base dependencies. It has
+  been installed with the base package since it moved out of the `security`
+  extra, but the notice still sat in the Security row, which now lists
+  pip-audit only.
 - The README opens with a three-column **Get started** section: run the CLI
   directly (`pip install skillevaluator`, then
   `skillevaluator validate ./my-skill --tiers 1`), add checks to your repository

@@ -428,6 +428,25 @@ def test_third_party_notices_do_not_list_removed_safety_dependency() -> None:
     assert "Safety (MIT)" not in notices
 
 
+def test_third_party_notices_list_each_group_with_its_direct_dependencies() -> None:
+    project = _project()["project"]
+    extras = project["optional-dependencies"]
+    groups = {
+        "Base": project["dependencies"],
+        "LLM": extras["llm"],
+        "Tier 3": extras["tier3"],
+        "Security": extras["security"],
+        "Dashboard": extras["dashboard"],
+    }
+    notices = (REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+    rows = dict(re.findall(r"^\| ([^|]+?) \| ([^|]+?) \|$", notices, flags=re.MULTILINE))
+
+    for group, raw_requirements in groups.items():
+        declared = {canonicalize_name(Requirement(raw).name) for raw in raw_requirements} - {"skillevaluator"}
+        listed = {canonicalize_name(name) for name in re.findall(r"([A-Za-z0-9._-]+) \(", rows[group])}
+        assert listed == declared, f"{group} row does not match pyproject.toml"
+
+
 def test_idna_is_a_bounded_direct_dependency_with_a_license_notice() -> None:
     dependencies = [Requirement(raw) for raw in _project()["project"]["dependencies"]]
     idna_requirements = [requirement for requirement in dependencies if canonicalize_name(requirement.name) == "idna"]

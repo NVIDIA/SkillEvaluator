@@ -5,7 +5,8 @@
 
 SkillSpector is not on PyPI, so when it is not installed its pinned release
 wheel is downloaded once into SkillEvaluator's runtime directory and run with
-``uv tool run`` in uv's own cached environment. Gitleaks is a native binary,
+``uv tool run`` in uv's own cached environment. uv is a base dependency, so
+this works after a plain ``pip install``. Gitleaks is a native binary,
 downloaded once from its official release into the same directory.
 """
 

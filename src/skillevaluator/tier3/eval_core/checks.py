@@ -948,7 +948,7 @@ def _sensitive_path_match(text: Any, paths: tuple[str, ...] | list[str]) -> str 
     )
 
 
-def _sensitive_path_matches(text: Any, paths: tuple[str, ...] | list[str]) -> list[str]:
+def _sensitive_path_matches(text: Any, paths: tuple[str, ...] | list[str], *, normalize: bool = True) -> list[str]:
     """Return every entry of *paths* that *text* references, as written or normalized, in list order.
 
     When several entries match, each path word is read on its own, as
@@ -957,10 +957,12 @@ def _sensitive_path_matches(text: Any, paths: tuple[str, ...] | list[str]) -> li
     out, so /etc/profile.d/npm.sh is the /etc/profile.d entry rather than also
     the /etc/profile it contains, and /root/.ssh/id_rsa is /root/.ssh rather
     than also ~/.ssh. The entries of different words are all kept: "tar czf
-    k.tgz ~/.ssh ~/.aws/credentials" is ~/.ssh and .aws/credentials.
+    k.tgz ~/.ssh ~/.aws/credentials" is ~/.ssh and .aws/credentials. With
+    *normalize* false, only the entries *text* holds as written match, as the
+    keyword write rule reads a command.
     """
     raw = str(text).lower()
-    normalized = _normalize_sensitive_path_text(text)
+    normalized = _normalize_sensitive_path_text(text) if normalize else raw
     matched = [entry for entry in paths if _path_entry_in(entry, raw) or _path_entry_in(entry, normalized)]
     if len(matched) < 2:
         return matched
@@ -971,7 +973,7 @@ def _sensitive_path_matches(text: Any, paths: tuple[str, ...] | list[str]) -> li
     for word in _PATH_WORD_RE.findall(raw):
         if not any(tail in word for tail in tails):
             continue
-        word_normalized = _normalize_sensitive_path_text(word)
+        word_normalized = _normalize_sensitive_path_text(word) if normalize else word
         in_word = [entry for entry in matched if _path_entry_in(entry, word) or _path_entry_in(entry, word_normalized)]
         found.update(
             entry
@@ -1189,6 +1191,15 @@ def _sensitive_write_target(command: str) -> str | None:
     return ", ".join(_sensitive_write_entries(command)) or None
 
 
+# Commands that write a file named in their arguments rather than through a
+# redirection, tee or sed -i target ("cp evil /etc/sudoers", "dd
+# of=/etc/sudoers.d/x", "curl -o ~/.bashrc URL"), and interpreters, whose code
+# can write any file.
+_OPERAND_WRITE_COMMAND_RE = re.compile(
+    r"(?<![\w.-])(?:cp|mv|install|dd|ln|rsync|scp|curl|wget|tar|unzip|perl|python[0-9.]*|ruby|node)(?![\w.-])"
+)
+
+
 def _sensitive_command_write_match(
     tool_call: dict[str, Any], path_text: str, action_text_lower: str, *, shell_patch: bool
 ) -> list[str]:
@@ -1196,19 +1207,23 @@ def _sensitive_command_write_match(
 
     The entries its redirection, tee or sed -i targets name are the evidence,
     so a file the command only reads, as in "grep umask /etc/profile >>
-    ~/.bashrc", is left out. Only when no target names one is it the entry the
-    legacy keyword rule found.
+    ~/.bashrc", is left out. The legacy keyword rule cannot tell such a read
+    from a write, so the entries it finds are the evidence when no target
+    names one ("cp a ~/.bashrc; cp b ~/.zshrc 2>/dev/null"), and are listed
+    beside the target entries when the command runs a command that writes a
+    file named in its arguments ("cp evil /etc/sudoers && echo x >>
+    ~/.zprofile").
     """
     lowered = path_text.lower()
-    legacy_entry = None
+    keyword_entries: list[str] = []
     # Preserve the earlier raw-substring rule, including its legacy spellings.
     if re.search(r"(>>|>\s*|tee\b|sed\s+-i|cat\s+>|printf\s+.*>)", action_text_lower):
-        legacy_entry = max((entry for entry in _SENSITIVE_WRITE_PATHS if entry in lowered), key=len, default=None)
+        keyword_entries = _sensitive_path_matches(lowered, _SENSITIVE_WRITE_PATHS, normalize=False)
     texts = [path_text] if shell_patch else _shell_write_texts(tool_call)
     written = {entry for text in texts for entry in _sensitive_write_entries(text)}
-    if written:
-        return [entry for entry in _PROTECTED_WRITE_PATHS if entry in written]
-    return [legacy_entry] if legacy_entry is not None else []
+    if not written or _OPERAND_WRITE_COMMAND_RE.search(lowered):
+        written.update(keyword_entries)
+    return [entry for entry in _PROTECTED_WRITE_PATHS if entry in written]
 
 
 def _is_execution_action(action: str) -> bool:

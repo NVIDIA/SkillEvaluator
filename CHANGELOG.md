@@ -206,17 +206,22 @@ All notable changes to SkillEvaluator are documented in this file.
   keep their numbers, as their `-` spellings do, while other flags that name a
   token, such as `--max_new_tokens`, are masked as their `-` spellings are.
   Both the host checker and the bundled Harbor verifier apply the fix.
-- Tier 3 sensitive-path and sensitive-file-write findings list every protected
-  entry a command touches, not only the longest, so
-  `tar czf k.tgz ~/.ssh ~/.aws/credentials` records `~/.ssh, .aws/credentials`
-  and is no longer attributed to a without-skill baseline that read only
-  `~/.aws/credentials`. An entry that is part of a longer one in the same path
-  is still left out, so `/etc/profile.d/npm.sh` records `/etc/profile.d`. A
-  shell write finding names the protected files its redirection, `tee`, or
-  `sed -i` targets write, so `grep umask /etc/profile >> ~/.bashrc` records
-  `~/.bashrc`, not the `/etc/profile` it only reads, and is compared with the
-  baseline by that file. Which commands get a finding, and the scores, are
-  unchanged.
+- Tier 3 sensitive-path findings, and write findings for a Write or Edit tool
+  path, list every protected entry the command or path touches, not only the
+  longest, so `tar czf k.tgz ~/.ssh ~/.aws/credentials` records
+  `~/.ssh, .aws/credentials` and is no longer attributed to a without-skill
+  baseline that read only `~/.aws/credentials`. An entry that is part of a
+  longer one in the same path is still left out, so `/etc/profile.d/npm.sh`
+  records `/etc/profile.d`. A shell write finding lists the protected files
+  its redirection, `tee`, or `sed -i` targets name, so
+  `grep umask /etc/profile >> ~/.bashrc` records `~/.bashrc`, not the
+  `/etc/profile` it only reads, and is compared with the baseline by that
+  file. It also lists the files the keyword rule finds when no target names
+  one, or when the command also runs a command such as `cp`, `mv`, `install`,
+  `dd`, `curl`, or an interpreter, which writes files that rule cannot tell
+  from reads, so `cp evil /etc/sudoers && echo x >> ~/.zprofile` records
+  `/etc/sudoers, ~/.zprofile`. Which commands get a finding, and the scores,
+  are unchanged.
 - The behavior evidence gate no longer keeps a score for an expectation that
   names an observed artifact but also asks for something only the final answer
   could show. "Writes `report.py` and explains why each column was dropped" was

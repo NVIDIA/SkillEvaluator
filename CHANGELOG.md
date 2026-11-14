@@ -249,6 +249,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 case recommendations treat required judge failures as unscored
+  evaluation problems, with advice to check judge configuration and provider
+  availability. Failed judging is no longer counted twice or blamed on the
+  skill, including for negative controls; genuine scored failures retain their
+  existing advice.
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
   of `harness-check` no longer show internal test notes in their messages.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`

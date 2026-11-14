@@ -166,8 +166,13 @@ def _cases(agent: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     )
     rebuilt = _scored_trials(agent, key)
     for case_id, n in errored.items():
-        rebuilt.setdefault(case_id, {"attempts": []})["attempts_missing"] = n
+        case = rebuilt.setdefault(case_id, {"attempts": []})
+        case["attempts_missing"] = max(n, case.get("attempts_missing", 0))
     return rebuilt
+
+
+def _evaluation_failed(reward: Any) -> bool:
+    return isinstance(reward, Mapping) and str(reward.get("evaluation_status") or "").casefold() in {"error", "failed"}
 
 
 def _scored_trials(agent: Mapping[str, Any], key: str) -> dict[str, dict[str, Any]]:
@@ -187,6 +192,10 @@ def _scored_trials(agent: Mapping[str, Any], key: str) -> dict[str, dict[str, An
     cases: dict[str, dict[str, Any]] = {}
     for trial in sorted(trials.iterdir()):
         reward = _load_json(trial / "reward.json", root=Path(str(output_dir)))
+        if _evaluation_failed(reward):
+            case = cases.setdefault(trial.name.split("__", 1)[0], {"attempts": []})
+            case["attempts_missing"] = case.get("attempts_missing", 0) + 1
+            continue
         score = reward.get("overall") if isinstance(reward, Mapping) else None
         if isinstance(score, int | float) and not isinstance(score, bool):
             attempts = cases.setdefault(trial.name.split("__", 1)[0], {"attempts": []})["attempts"]
@@ -887,11 +896,39 @@ def _diagnose_agent_case(
     wp, wn = _attempt_rate(with_marks)
     bp, bn = _attempt_rate(without_marks)
     errors = with_marks.count(ERROR)
+    judge_trials = []
+    with_trials = run_dir / agent_name / "with-skill" / "trials"
+    if errors and with_trials.is_dir() and _SAFE_TRIAL.fullmatch(agent_name):
+        judge_trials = [
+            d
+            for d in sorted(with_trials.iterdir())
+            if d.name.split("__", 1)[0] == case_id
+            and _trial_dir(run_dir, agent_name, "with-skill", d.name) is not None
+            and _evaluation_failed(_load_json(d / "reward.json", root=run_dir))
+        ]
+    judge_issues = []
+    if judge_trials:
+        judge_errors = min(errors, len(judge_trials))
+        errors -= judge_errors
+        judge_issues.append(
+            {
+                "case": case_id,
+                "agent": agent_name,
+                "kind": "run error",
+                "what": f"{judge_errors} attempt(s) never produced a score: required judge evaluation failed",
+                "attempts_lost": judge_errors,
+                "reasons": [],
+                "env_errors": [],
+                "final_message": "",
+                "evidence": (judge_trials[0].relative_to(run_dir) / "reward.json").as_posix(),
+                "action": "Not a skill problem: check the judge model configuration, credentials and provider availability, then re-run this case.",
+            }
+        )
     # Negative controls must avoid the skill; an agent-wide positive miss does not apply to them.
     if entry is None:
         entry = _dataset_entries(run_dir).get(case_id, {})
     should_trigger = resolve_should_trigger(dict(entry))
-    not_used = should_trigger is not False and _never_activated(agent)
+    not_used = should_trigger is not False and _never_activated(agent) and (wn > 0 or not judge_issues)
     failed_trials = []
     for attempt in with_case.get("attempts", []) if isinstance(with_case, Mapping) else []:
         if isinstance(attempt, Mapping) and attempt.get("passed") is not True:
@@ -918,7 +955,7 @@ def _diagnose_agent_case(
     )
     goal = _goal_not_met(run_dir, agent_name, case_id, with_case)
     if not lost and not hurts and not not_used:
-        return [goal] if goal else []
+        return [*judge_issues, goal] if goal else judge_issues
     rewards = [
         (r, d) for _, d in failed_trials if isinstance(r := _load_json(d / "reward.json", root=run_dir), Mapping)
     ]
@@ -962,7 +999,7 @@ def _diagnose_agent_case(
         "final_message": _final_message(failed_trials[0][1], run_dir) if failed_trials else "",
         "evidence": _evidence(run_dir, evidence_dir, run_error=kind == "run error"),
     }
-    return [failure, goal] if goal else [failure]
+    return [failure, *judge_issues, goal] if goal else [failure, *judge_issues]
 
 
 def _goal_not_met(

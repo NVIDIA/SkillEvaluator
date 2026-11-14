@@ -191,6 +191,57 @@ def test_run_errors_rank_after_skill_issues_and_are_not_blamed_on_the_skill(tmp_
     assert fix["evidence"] == "opencode/with-skill/trials/broken__a/failure.json"
 
 
+@pytest.mark.parametrize("should_trigger", [True, False])
+@pytest.mark.parametrize("status", ["failed", "error"])
+@pytest.mark.parametrize("record_failure", [True, False])
+def test_judge_failures_are_unscored_infrastructure_advice(
+    tmp_path: Path, should_trigger: bool, status: str, record_failure: bool
+) -> None:
+    from skillevaluator.tier3.case_summary import ERROR, _cases, _marks
+
+    _trial(
+        tmp_path,
+        "a",
+        "c__1",
+        {"overall": 0.0, "evaluation_status": status, "evaluation_errors": {"accuracy": "Judge reply was empty"}},
+    )
+    (tmp_path / "dataset_snapshot.json").write_text(
+        json.dumps({"dataset": [{"id": "c", "should_trigger": should_trigger}]})
+    )
+    agent = _agent({}, {})
+    agent["output_dir"] = str(tmp_path / "a")
+    agent["skill_activation"] = {"status": "never_activated"}
+    if record_failure:
+        agent["trial_failures"] = {"with_skill": [{"trial": "c__1", "reason": "Required judge evaluation failed"}]}
+
+    assert _marks(_cases(agent, "with_skill")["c"]) == [ERROR]
+    [fix] = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+    assert fix["kind"] == "run error"
+    assert fix["attempts_lost"] == 1
+    assert "judge" in fix["action"].lower()
+    assert "Not a skill problem" in fix["action"]
+    assert "scored below" not in fix["what"]
+    assert fix["evidence"].endswith("reward.json")
+
+
+def test_judge_failure_does_not_change_genuine_scored_failure_advice(tmp_path: Path) -> None:
+    _trial(
+        tmp_path,
+        "a",
+        "c__1",
+        {"overall": 0.0, "evaluation_status": "failed", "evaluation_errors": {"accuracy": "Judge unavailable"}},
+    )
+    _trial(tmp_path, "a", "c__2", {"overall": 0.2, **_reward(True, "omitted validation")})
+    agent = _agent({}, {})
+    agent["output_dir"] = str(tmp_path / "a")
+    agent["trial_failures"] = {"with_skill": [{"trial": "c__1", "reason": "Required judge evaluation failed"}]}
+
+    fixes = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+    assert [(f["kind"], f["attempts_lost"]) for f in fixes] == [("skill", 1), ("run error", 1)]
+    assert "omitted validation" in fixes[0]["action"]
+    assert "judge" in fixes[1]["action"].lower()
+
+
 def test_multi_agent_issue_scope_names_the_failing_agent(tmp_path: Path) -> None:
     agents = {
         "claude-code": _agent({"c": _case(True, True)}, {}),

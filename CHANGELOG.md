@@ -146,7 +146,7 @@ All notable changes to SkillEvaluator are documented in this file.
   `source /opt/conda/etc/profile.d/conda.sh && python train.py 2>&1` scored
   Security 0.0 and now score 1.0, in both the host checker and the bundled
   Harbor verifier. This amends the 0.9.0 note that every command that scored
-  0.0 in 0.8.0 still does; other commands the 0.8.0 rule flags, such as
+  0.0 in 0.8.0 still does; most other commands the 0.8.0 rule flags, such as
   `cat ~/.bashrc 2>/dev/null`, still score 0.0.
 
 ### Documentation

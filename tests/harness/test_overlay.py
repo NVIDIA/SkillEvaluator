@@ -479,6 +479,35 @@ def test_bundle_files_symlinks_and_large_references(tmp_path: Path):
     assert "OC-REF-CUT" in _ids(rows, "opencode")
 
 
+def test_disable_model_invocation_is_ignored_by_three_harnesses(tmp_path: Path):
+    rows = _rows(_skill(tmp_path, extra="disable-model-invocation: true\n"))
+
+    flagged = {h for h, r in rows.items() if any(f["id"].endswith("DMI-IGNORED") for f in r["findings"])}
+    assert flagged == {"codex", "hermes", "opencode"}
+
+
+def test_codex_policy_makes_disable_model_invocation_effective_in_codex(tmp_path: Path):
+    skill = _skill(tmp_path, extra="disable-model-invocation: true\n")
+    (skill / "agents").mkdir()
+    (skill / "agents" / "openai.yaml").write_text("policy:\n  allow_implicit_invocation: false\n")
+    rows = _rows(skill)
+
+    flagged = {h for h, r in rows.items() if any(f["id"].endswith("DMI-IGNORED") for f in r["findings"])}
+    assert flagged == {"hermes", "opencode"}
+    assert not any(f["id"].endswith("CODEX-POLICY") for r in rows.values() for f in r["findings"])
+    assert rows["codex"]["status"] == "loads"
+
+
+def test_codex_implicit_policy_is_codex_only(tmp_path: Path):
+    skill = _skill(tmp_path)
+    (skill / "agents").mkdir()
+    (skill / "agents" / "openai.yaml").write_text("policy:\n  allow_implicit_invocation: false\n")
+    rows = _rows(skill)
+
+    flagged = {h for h, r in rows.items() if any(f["id"].endswith("CODEX-POLICY") for f in r["findings"])}
+    assert flagged == set(HARNESSES) - {"codex"}
+
+
 def test_claude_placeholders_reach_other_harnesses_literally(tmp_path: Path):
     rows = _rows(_skill(tmp_path, body=BODY + "Run ${CLAUDE_SKILL_DIR}/run.sh $ARGUMENTS\n"))
 
@@ -486,6 +515,19 @@ def test_claude_placeholders_reach_other_harnesses_literally(tmp_path: Path):
         assert any(f["id"].endswith("-ARGUMENTS") for f in rows[harness]["findings"]), harness
         assert any(f["id"].endswith("-SKILL-DIR") for f in rows[harness]["findings"]), harness
     assert not rows["claude-code"]["findings"]
+
+
+def test_gating_and_claude_only_fields(tmp_path: Path):
+    extra = 'argument-hint: "<file>"\nplatforms: [macos]\n'
+    skill = _skill(tmp_path, extra=extra)
+    manifest = skill / "SKILL.md"
+    manifest.write_text(
+        manifest.read_text().replace("  author:", '  openclaw: {"requires": {"bins": ["pdftotext"]}}\n  author:')
+    )
+    rows = _rows(skill)
+
+    assert "OC-CLAUDE-ONLY" in _ids(rows, "opencode")
+    assert not any(f["id"].endswith("CLAUDE-ONLY") for f in rows["claude-code"]["findings"])
 
 
 def test_every_rule_has_a_fix_and_placeholders_are_filled(tmp_path: Path):
@@ -497,6 +539,18 @@ def test_every_rule_has_a_fix_and_placeholders_are_filled(tmp_path: Path):
     messages = [f["message"] + f.get("fix", "") for r in rows.values() for f in r["findings"]]
     assert messages and not any(re.search(r"\{[a-z0-9_]+\}", m) for m in messages)
     assert {"OW-COMPACT", "OW-PROMPT-CAP"} <= _ids(rows, "openclaw")
+
+
+def test_rule_ids_named_in_messages_exist():
+    profiles = load_profiles("all")
+    known = {rule["id"] for profile in profiles for rule in profile["rules"]}
+    prefixes = "|".join(sorted({rule_id.split("-")[0] for rule_id in known}))
+    rule_id_pattern = rf"\b(?:{prefixes})-[A-Z0-9]+(?:-[A-Z0-9]+)*"
+    for profile in profiles:
+        for rule in profile["rules"]:
+            text = f"{rule['message']} {rule.get('fix', '')}"
+            for mentioned in re.findall(rule_id_pattern, text):
+                assert mentioned in known, f"{rule['id']} refers to {mentioned}, which no profile defines"
 
 
 def test_fix_reaches_findings_and_panels(tmp_path: Path):

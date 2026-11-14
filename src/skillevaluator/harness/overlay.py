@@ -237,6 +237,10 @@ def _tab_indent_breaks_yaml(fm_yaml: str) -> bool:
     return False
 
 
+def _is_true(value: Any) -> bool:
+    return value is True or (isinstance(value, str) and value.strip().lower() == "true")
+
+
 def _shipped_paths(skill_path: Path) -> list[Path]:
     """Files and symlinks a skill ships, without descending into VCS or cache folders."""
     found = []
@@ -341,6 +345,16 @@ def _dollar_n(body: str, first_line: int) -> dict[str, Any]:
     return {"dollar_literal_count": prices, "dollar_literal_lines": shown, "dollar_placeholder_count": placeholders}
 
 
+def _codex_implicit_disabled(skill_path: Path) -> bool:
+    policy_file = skill_path / "agents" / "openai.yaml"
+    try:
+        data = yaml.safe_load(policy_file.read_text(encoding="utf-8")) if policy_file.is_file() else None
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return False
+    policy = data.get("policy") if isinstance(data, dict) else None
+    return isinstance(policy, dict) and policy.get("allow_implicit_invocation") is False
+
+
 def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, Any]:
     """Compute the facts profile rules refer to (see profiles README).
 
@@ -349,6 +363,7 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
     """
     manifest, raw, text, fm_yaml, data = _read_manifest(skill_path)
     description = data.get("description")
+    tools = data.get("allowed-tools")
     trigger = _TRIGGER_RE.search(description) if isinstance(description, str) else None
     root, depth = _install_root(skill_path)
     target = "none"
@@ -395,6 +410,12 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         "frontmatter_bom": raw.startswith(b"\xef\xbb\xbf"),
         "frontmatter_duplicate_keys": bool(_duplicate_frontmatter_keys(fm_yaml)),
         "frontmatter_tab_indent": _tab_indent_breaks_yaml(fm_yaml),
+        "allowed_tools_shape": "none"
+        if tools is None
+        else {str: "string", list: "list", dict: "map"}.get(type(tools), "other"),
+        "disable_model_invocation": _is_true(data.get("disable-model-invocation")),
+        "codex_implicit_disabled": _codex_implicit_disabled(skill_path),
+        "claude_only_fields": ", ".join(f for f in _CLAUDE_ONLY_FIELDS if f in data),
         "custom_fields": ", ".join(map(str, custom)),
         "custom_field_chars": sum(len(v) if isinstance(v, str) else len(yaml.safe_dump(v)) for v in custom.values()),
         "skill_md_chars": len(text),

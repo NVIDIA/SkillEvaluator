@@ -62,6 +62,23 @@ def test_saved_run_replays_six_formats_without_the_source(tmp_path, monkeypatch)
     assert "- Skill: `replayed-public`" in card
 
 
+def test_plugin_html_report_is_labelled_as_a_plugin(tmp_path):
+    run_dir = tmp_path / "saved-run"
+    run_dir.mkdir()
+    report = project_plugin_runtime(
+        {"run_dir": str(run_dir), "execution_status": "succeeded"},
+        provenance={"plugin": "replayed-public", "runtime_evidence": {}},
+    )
+    assert report is not None
+    save_plugin_runtime_report(report, run_dir)
+    output = tmp_path / "reports"
+    result = CliRunner().invoke(cli, ["tier3", "report-plugin", str(run_dir), "-r", "html", "-o", str(output)])
+    assert result.exit_code == 0, (result.output, result.exception)
+    html = (output / "plugin-report.html").read_text(encoding="utf-8")
+    assert "Plugin evaluation" in html
+    assert "Skill evaluation" not in html
+
+
 def test_replay_missing_or_invalid_snapshot_fails_before_writing(tmp_path):
     output = tmp_path / "reports"
     for payload in (None, '{"schema_version": 100}'):

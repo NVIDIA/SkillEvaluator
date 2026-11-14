@@ -28,7 +28,12 @@ def _emit_reports(
     from skillevaluator.tier1.commands import REPORTERS
 
     # Without the plugin's name the card is titled with the placeholder "skill".
-    reporters = {**REPORTERS, "benchmark": partial(BenchmarkReporter, skill_name=plugin_name)}
+    # The HTML report labels its content "Skill" unless told it shows a plugin.
+    reporters = {
+        **REPORTERS,
+        "html": partial(REPORTERS["html"], content_label="Plugin"),
+        "benchmark": partial(BenchmarkReporter, skill_name=plugin_name),
+    }
     # Parse and validate everything before the first output file is created.
     selected = [(name, reporters[name]()) for name in dict.fromkeys(formats) if name != "cli"]
     if "cli" in formats:

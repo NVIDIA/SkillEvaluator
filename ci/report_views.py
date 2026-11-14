@@ -300,7 +300,9 @@ def _write(path: Path, content: str) -> None:
         raise ValueError("Refusing to replace a symlink report view.")
     temporary = None
     try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", errors="backslashreplace", dir=path.parent, delete=False
+        ) as handle:
             temporary = Path(handle.name)
             handle.write(content)
         temporary.replace(path)

@@ -2768,7 +2768,9 @@ class ReporterBase(ABC):
         Raises:
             UnsafeReportPathError: If the destination cannot be written safely.
         """
-        payload = self.render_report(results).encode("utf-8")
+        # A file name that is not valid UTF-8 reaches messages as lone
+        # surrogates; write those as escapes instead of failing the report.
+        payload = self.render_report(results).encode("utf-8", "backslashreplace")
         _write_report_atomically(output_path, payload)
 
     def get_file_extension(self) -> str:

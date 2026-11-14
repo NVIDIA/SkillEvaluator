@@ -264,6 +264,18 @@ All notable changes to SkillEvaluator are documented in this file.
 - SARIF `artifactLocation.uri` values percent-encode a `%` in a file name as
   `%25`. A file such as `a%20b.md` no longer shares the URI of `a b.md`, and
   `100%.md` no longer produces an invalid URI.
+- Reports no longer fail on Linux when a skill file name is not valid UTF-8
+  (#525). Finding IDs, HTML issue keys, the written HTML, JSON, Markdown and
+  SARIF reports, the CI workflow scripts that re-render retained reports, and
+  generated `evals/evals.json` datasets accept the surrogate-escaped name
+  Python gives such a file. The SARIF `artifactLocation.uri` percent-encodes
+  the name's original bytes (`caf%E9.md`).
+- SARIF `artifactLocation.uri` values stay valid for more paths. A
+  repository-relative path whose first segment contains a colon, such as
+  `notes:v2.md`, gets a `./` prefix so it no longer reads as a URI scheme. A
+  path outside the workspace is written as an absolute `file:` URI instead of
+  a bare file system path, and a symlink in the workspace that points outside
+  it keeps the link's repository-relative path.
 - Accuracy and Behavior judge prompts clarify that explicit final-answer formats
   apply to the entire final response, independently of correct values in tool
   output or references. Scoring and thresholds are unchanged; an Accuracy format

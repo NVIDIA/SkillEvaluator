@@ -1748,3 +1748,13 @@ def test_adversarial_text_is_scanned_in_bounded_time(text):
     _, elapsed = _timed(lambda: _baseline_fairness_warnings(entry, skill_scripts=["review.py"]))
 
     assert elapsed < _TIME_LIMIT_S
+
+
+def test_dataset_write_keeps_an_undecodable_script_name(tmp_path):
+    # On Linux, os.listdir returns the name b"r\xe9port.py" as "r\udce9port.py".
+    dataset = {"cases": [{"id": "one", "expected_script": "r\udce9port.py"}]}
+    output = tmp_path / "evals" / "evals.json"
+
+    generate_dataset._write_dataset(output, dataset)
+
+    assert json.loads(output.read_text(encoding="utf-8")) == dataset

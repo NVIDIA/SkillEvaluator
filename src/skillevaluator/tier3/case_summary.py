@@ -127,14 +127,7 @@ def _execution_unavailable(agent: Mapping[str, Any]) -> bool:
     conditions = agent.get("conditions")
     return isinstance(conditions, Mapping) and any(
         isinstance(condition := conditions.get(key), Mapping)
-        and (
-            condition.get("execution_status") not in {None, "succeeded", "complete"}
-            or (
-                isinstance(expected := condition.get("expected_attempts"), int)
-                and isinstance(scored := condition.get("scored_attempts"), int)
-                and scored < expected
-            )
-        )
+        and condition.get("execution_status") not in {None, "succeeded", "complete"}
         for key, _ in _VARIANTS
         if not (key == "without_skill" and _baseline_skipped(agent))
     )

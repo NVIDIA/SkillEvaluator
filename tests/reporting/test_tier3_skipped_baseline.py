@@ -65,7 +65,7 @@ def test_skipped_baseline_does_not_hide_with_skill_failure(skipped_agent, tmp_pa
     skipped_agent["execution_status"] = status
     skipped_agent["conditions"]["with_skill"].update(execution_status=status, scored_attempts=0)
     skipped_agent["pass_at_k"]["with_skill"]["cases"]["case"] = _case(missing=1)
-    assert _execution_unavailable(skipped_agent)
+    assert _execution_unavailable(skipped_agent) is (status == "failed")
     assert verdict({"opencode": skipped_agent})[0] == "inconclusive"
     assert any(
         step["kind"] == "incomplete run"

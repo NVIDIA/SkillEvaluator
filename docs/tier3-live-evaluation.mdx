@@ -1960,7 +1960,8 @@ saved judge evidence use the same credential masker:
 - values assigned to a credential name, such as `_authToken=...`,
   `aws_secret_access_key = ...`, `"password": "..."`, `token := "..."`,
   `os.environ["API_KEY"] = "..."`, `auth=HTTPBasicAuth("bob", "...")` (also
-  with its arguments on several lines), `PASS=...`, `DB_PASS=...`, or
+  with its arguments on several lines, or with a `(` or `)` inside a quoted
+  argument, as also in `auth=("bob", "...")`), `PASS=...`, `DB_PASS=...`, or
   `MYSQLPWD=...`, also JSON-escaped inside a shell string, and in a `sed`
   replacement such as `sed -i 's/CHANGEME/password=.../'`, also inside a
   `sh -c` or `ssh` command string. A word with parentheses in it, such as

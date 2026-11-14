@@ -1937,19 +1937,52 @@ def test_a_value_spliced_after_the_quote_of_a_long_sed_expression_stays_masked(c
             "requests.post(url, auth=<redacted>)",
             id="tuple-value-with-a-nested-call",
         ),
-        # A credential name in a call or tuple value past its first word or
-        # parenthesis is read again, so its value may run past the call's
-        # first ")" or past where the tuple stops.
+        # A parenthesis inside a quoted argument is part of that argument.
+        pytest.param(
+            f'requests.get(url, auth=HTTPBasicAuth("bob", "{_BASIC_PASSWORD[:7]}){_PAREN_TAIL}"))',
+            "requests.get(url, auth=<redacted>)",
+            id="call-value-with-a-closing-parenthesis-in-a-quoted-argument",
+        ),
+        pytest.param(
+            f"requests.get(url, auth=HTTPBasicAuth('bob', '{_BASIC_PASSWORD[:7]}:x){_PAREN_TAIL}'), timeout=5)",
+            "requests.get(url, auth=<redacted>, timeout=5)",
+            id="call-value-with-a-parenthesis-in-a-single-quoted-argument",
+        ),
+        pytest.param(
+            f'requests.get(\n    url,\n    auth=HTTPBasicAuth(\n        "bob",\n        "{_BASIC_PASSWORD[:7]}){_PAREN_TAIL}",\n'
+            "    ),\n)",
+            "requests.get(\n    url,\n    auth=<redacted>,\n)",
+            id="split-call-value-with-a-parenthesis-in-a-quoted-argument",
+        ),
+        pytest.param(
+            f'auth=HTTPBasicAuth("bob", "{_BASIC_PASSWORD[:7]}(x{_PAREN_TAIL}")',
+            "auth=<redacted>",
+            id="call-value-with-an-opening-parenthesis-in-a-quoted-argument",
+        ),
+        pytest.param(
+            f'auth=("bob", "{_BASIC_PASSWORD[:7]}){_PAREN_TAIL}")',
+            "auth=<redacted>",
+            id="tuple-value-with-a-closing-parenthesis-in-a-quoted-element",
+        ),
+        pytest.param(
+            f"requests.get(url, auth=('bob', '{_BASIC_PASSWORD[:7]}){_PAREN_TAIL}'), timeout=5)",
+            "requests.get(url, auth=<redacted>, timeout=5)",
+            id="tuple-value-with-a-parenthesis-in-a-single-quoted-element",
+        ),
+        # A quoted argument is read whole, so the call ends at its own ")".
         pytest.param(
             f"requests.get(u, auth=HTTPBasicAuth(user, password='{_PAREN_PASSPHRASE}'))",
-            "requests.get(u, auth=<redacted>))",
+            "requests.get(u, auth=<redacted>)",
             id="call-value-before-a-quoted-argument-with-a-parenthesis",
         ),
         pytest.param(
             f'credentials = Credentials(None, token="{_PAREN_PASSPHRASE}")',
-            "credentials = <redacted>)",
+            "credentials = <redacted>",
             id="spaced-call-value-before-a-quoted-argument-with-a-parenthesis",
         ),
+        # A credential name in a call or tuple value past its first word or
+        # parenthesis is read again, so its value may run past the call's
+        # first ")" or past where the tuple stops.
         pytest.param(
             f'token=init(\nexport PASSWORD="{_PAREN_PASSPHRASE}"\nrm -rf /srv/app',
             "token=<redacted>\nrm -rf /srv/app",

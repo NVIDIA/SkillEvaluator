@@ -3683,6 +3683,22 @@ _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE = re.compile(
     + _FINDING_EVIDENCE_WORD_VALUE
 )
 _FINDING_EVIDENCE_WORD_VALUE_RE = re.compile(_FINDING_EVIDENCE_WORD_VALUE)
+# The same tuple and call values with each quoted argument read whole, a
+# JSON-escaped (\"...\"), double- or single-quoted string closed on its line,
+# so a parenthesis inside one is not read as the end of the value or the start
+# of a nested call (auth=HTTPBasicAuth("bob", "Zq1)x1Kv"), auth=("bob",
+# "pa(ss")). A quote that closes no such string ends this reading, and a
+# value is read this way only when it runs past the reading above (see
+# _assignment_value_match).
+_FINDING_EVIDENCE_QUOTED_ARGUMENT = r"\\\"(?:[^\"\\\r\n]|\\(?!\"))*\\\"|\"(?:\\.|[^\"\\\r\n])*\"|'[^'\r\n]*'"
+_FINDING_EVIDENCE_QUOTED_ARGUMENTS_VALUE_RE = re.compile(
+    r"\((?:"
+    + _FINDING_EVIDENCE_QUOTED_ARGUMENT
+    + r"|\\(?!\")|[^()'\"\\\r\n]|\([^()\r\n]{0,64}\)){0,256}\)"
+    + r"|(?P<call>[A-Za-z_][\w.]{0,63}\((?:"
+    + _FINDING_EVIDENCE_QUOTED_ARGUMENT
+    + r"|\\(?!\")|[^()'\"\\]|\([^()]{0,64}\)){0,256}\)(?![^\s'\"`;|&\\),\]}]))"
+)
 # A tuple value read up to its first parenthesis, as it was read before a
 # tuple could hold a call (see _flat_value_end).
 _FINDING_EVIDENCE_FLAT_TUPLE_VALUE_RE = re.compile(r"\([^()\r\n]{0,256}\)?")
@@ -4170,13 +4186,18 @@ def _assignment_value_match(text: str, start: int) -> re.Match[str] | None:
 
     A call whose arguments hold a quote or a space (HTTPBasicAuth("bob", "..."))
     is read to its ")", while a word with parentheses in it ("Pa(ss),word",
-    "f(x))word") is read whole, as a word.
+    "f(x))word") is read whole, as a word. A tuple or call whose quoted
+    arguments are read whole is read when it runs further, as when a quoted
+    argument holds a parenthesis (HTTPBasicAuth("bob", "Zq1)x1Kv")).
     """
     value = _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE.match(text, start)
     if value is not None and value.group("call") is not None:
         word = _FINDING_EVIDENCE_WORD_VALUE_RE.match(text, start)
         if word is not None and word.end() >= value.end():
-            return word
+            value = word
+    quoted = _FINDING_EVIDENCE_QUOTED_ARGUMENTS_VALUE_RE.match(text, start)
+    if quoted is not None and (value is None or quoted.end() > value.end()):
+        return quoted
     return value
 
 
@@ -4188,7 +4209,7 @@ def _flat_value_end(text: str, value: re.Match[str]) -> int:
     parenthesis, as before those values were read, so each credential name
     read before past that point is still read.
     """
-    if value.re is _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE:
+    if value.re is _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE or value.re is _FINDING_EVIDENCE_QUOTED_ARGUMENTS_VALUE_RE:
         if value.group("call") is not None:
             return _FINDING_EVIDENCE_WORD_VALUE_RE.match(text, value.start()).end()
         if text.startswith("(", value.start()):

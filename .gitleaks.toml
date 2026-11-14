@@ -25,6 +25,13 @@ regexes = ['''^["']admin:quoted-user-password["']$''']
 paths = ['''^tests/tier3/test_judge_contracts\.py$''']
 
 [[allowlists]]
+description = "Synthetic JSON-escaped-quote curl credential placeholder used by judge evidence redaction tests"
+condition = "AND"
+targetRules = ["curl-auth-user"]
+regexes = ['''^"admin:\{_QUOTED_SECRET\}"$''']
+paths = ['''^tests/tier3/test_judge_contracts\.py$''']
+
+[[allowlists]]
 description = "Synthetic NVIDIA Build token used by streaming redaction tests"
 condition = "AND"
 targetRules = ["generic-api-key"]

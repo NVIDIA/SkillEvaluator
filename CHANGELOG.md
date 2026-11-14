@@ -340,6 +340,22 @@ All notable changes to SkillEvaluator are documented in this file.
   user-request section when it is set below 2,000, and that a check budget too
   small to hold the final response beside some tool history is logged as a
   warning rather than quietly raised — lower the final-response limit with it.
+- `judge_attempts.json` now masks `Cookie` header values, credential flag values
+  (`--token`, `--password`, `-u user:password`, `--cookie`) and keys such as
+  `sk-proj-...` that start a line in JSON-escaped text, as in RAGAS prompts and
+  replies. A line break there is the two characters `\n`, and these values were
+  saved in clear after it or after an escaped tab (`\t`). That includes the
+  value on a line whose flag or header name was masked together with an unquoted
+  credential value that ends the line before and reads on through the escape
+  (`--password ...\n--token ...`). Only that value is masked; other copies of it
+  in the text stay as they were. Judge and security finding evidence also masks
+  a double-quoted `-u user:password`, MySQL `-p` or `.netrc` password value, and
+  the value in an argv list such as `["tool", "--password", "..."]`, when JSON
+  escapes the quotes (`\"...\"`), as in the tool-call arguments every judge
+  prompt holds; these were saved in clear.
+  A RAGAS `replied` entry for a reply with no text and no tool call, such as a
+  refusal or a content-filter stop, now saves the whole reply body instead of an
+  empty reply.
 - Code Risk Analysis reports Semgrep file-level parse errors as one partial-scan
   error that names up to 20 unparsed files, relative to the skill and with the
   line of the first error, instead of the first three truncated messages. The

@@ -1107,6 +1107,285 @@ def test_judge_evidence_masks_json_escaped_tool_call_headers(command: str, secre
     assert "<redacted>" in redacted
 
 
+# RAGAS writes the agent's messages into its prompt as JSON, and tool-call
+# arguments are JSON, so a line that starts with a credential follows an
+# escaped "\n" (or "\r\n", or "\n\t") there, once or twice escaped.
+@pytest.mark.parametrize(
+    ("line", "secret", "kept"),
+    [
+        pytest.param(
+            "Authorization: Bearer bbbbbbbbbbbb", "bbbbbbbbbbbb", "Authorization: Bearer <redacted>", id="authorization"
+        ),
+        pytest.param(
+            'Authorization: Digest username="u", response="dddddddddddd"',
+            "dddddddddddd",
+            "Authorization: Digest <redacted>",
+            id="authorization-digest",
+        ),
+        pytest.param("Cookie: session=cccccccccccc", "cccccccccccc", "Cookie: <redacted>", id="cookie"),
+        pytest.param("Api-Key: kkkkkkkkkkkk", "kkkkkkkkkkkk", "Api-Key: <redacted>", id="api-key"),
+        pytest.param("--token tttttttttttt", "tttttttttttt", "--token <redacted>", id="token-flag"),
+        pytest.param("--password pppppppppppp", "pppppppppppp", "--password <redacted>", id="password-flag"),
+        pytest.param("-token tttttttttttt", "tttttttttttt", "-token <redacted>", id="short-token-flag"),
+        pytest.param("-u uuuu:pppppppppppp", "pppppppppppp", "-u <redacted>", id="user-flag"),
+        pytest.param("--cookie session=cccccccccccc", "cccccccccccc", "--cookie <redacted>", id="cookie-flag"),
+        pytest.param("sk-proj-" + "a" * 24, "a" * 24, "sk-<redacted>", id="openai-key"),
+        pytest.param("ghp_" + "g" * 36, "g" * 36, "ghp_<redacted>", id="github-token"),
+    ],
+)
+@pytest.mark.parametrize("line_break", ["\n", "\r\n", "\n\t"], ids=["lf", "crlf", "lf-tab"])
+def test_judge_evidence_masks_credentials_after_json_escaped_line_breaks(
+    line: str, secret: str, kept: str, line_break: str
+) -> None:
+    text = f"HTTP/1.1 200 OK{line_break}{line}{line_break}done"
+    assert secret not in eval_template._redact_judge_evidence(text)
+
+    for escaped in (json.dumps({"reply": text}), json.dumps(json.dumps({"reply": text}))):
+        redacted = eval_template._redact_judge_evidence(escaped)
+
+        assert secret not in redacted
+        assert kept in redacted
+
+
+# json.dumps writes a tab as "\t", so in JSON a credential can follow the letter t.
+@pytest.mark.parametrize(
+    ("text", "secret"),
+    [
+        pytest.param("ok\tCookie: session=cccccccccccc", "cccccccccccc", id="tab-cookie"),
+        pytest.param("ok\t--token tttttttttttt", "tttttttttttt", id="tab-token-flag"),
+        pytest.param("ok\t-u uuuu:pppppppppppp", "pppppppppppp", id="tab-user-flag"),
+    ],
+)
+def test_judge_evidence_masks_credentials_after_json_escaped_tabs(text: str, secret: str) -> None:
+    assert secret not in eval_template._redact_judge_evidence(text)
+
+    for escaped in (json.dumps({"reply": text}), json.dumps(json.dumps({"reply": text}))):
+        assert "\\t" in escaped
+        redacted = eval_template._redact_judge_evidence(escaped)
+
+        assert secret not in redacted
+        assert "<redacted>" in redacted
+
+
+# Split so that no private key header appears in this file as one literal.
+_PRIVATE_KEY = "PRIVATE " + "KEY"
+_KEY_BODY_LINES = ("MIIEbodyLineOne", "MIIEbodyLineTwo")
+
+
+# A private key block spans lines, which JSON writes as "\n" escapes. The block
+# is masked whole, never only its BEGIN line.
+@pytest.mark.parametrize(
+    "label",
+    [
+        pytest.param(f"RSA {_PRIVATE_KEY}", id="rsa"),
+        pytest.param(f"EC {_PRIVATE_KEY}", id="ec"),
+        pytest.param(f"OPENSSH {_PRIVATE_KEY}", id="openssh"),
+        pytest.param(f"PGP {_PRIVATE_KEY} BLOCK", id="pgp"),
+        pytest.param(f"ENCRYPTED {_PRIVATE_KEY}", id="encrypted"),
+        pytest.param(_PRIVATE_KEY, id="pkcs8"),
+    ],
+)
+def test_judge_evidence_masks_private_key_blocks_in_json_escaped_text(label: str) -> None:
+    block = "\n".join((f"-----BEGIN {label}-----", *_KEY_BODY_LINES, f"-----END {label}-----"))
+    prompt = json.dumps({"user_input": [{"content": f"see\n{block}\nok", "type": "ai"}]}, indent=4)
+
+    for escaped in (json.dumps({"content": block}), json.dumps(json.dumps({"content": block})), prompt):
+        redacted = eval_template._redact_judge_evidence(escaped)
+
+        assert "<redacted private key>" in redacted
+        assert "-----END" not in redacted
+        for line in _KEY_BODY_LINES:
+            assert line not in redacted
+
+
+# A value may hold an escape: a quoted value a line break or tab, a password a
+# non-ASCII character (written "\u00e4" by json.dumps), or a path a backslash.
+# The whole value is masked in JSON escaped once or twice, and in plain text
+# too, where only a real line break ends a quoted value.
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param('tool --password "a\n' + "Tail" * 3 + '" -x', id="quoted-line-break"),
+        pytest.param('tool --password "a\t' + "Tail" * 3 + '" -x', id="quoted-tab"),
+        pytest.param("mysql --password p\u00e4ss" + "Tail" * 3 + " -x", id="non-ascii-password"),
+        pytest.param("tool --token tok\u00e9n" + "Tail" * 3 + " -x", id="non-ascii-token"),
+        pytest.param("tool -u admin:p\u00e4ss" + "Tail" * 3 + " -x", id="non-ascii-user"),
+        pytest.param('tool --token "t\u00f6ken' + "Tail" * 3 + '" -x', id="non-ascii-quoted-token"),
+        pytest.param("tool --password ab\\n" + "Tail" * 3 + " -x", id="backslash-n-password"),
+        pytest.param("tool --token C:\\new\\" + "Tail" * 3 + " -x", id="windows-path-token"),
+    ],
+)
+def test_judge_evidence_masks_values_that_hold_escapes(text: str) -> None:
+    forms = [json.dumps({"command": text}), json.dumps(json.dumps({"command": text}))]
+    if "\n" not in text:
+        forms.append(text)
+    for form in forms:
+        redacted = eval_template._redact_judge_evidence(form)
+
+        assert "Tail" not in redacted
+        assert "<redacted> -x" in redacted
+
+
+# A credential flag that starts a JSON-escaped line keeps its whole value
+# masked, also when the value holds a non-ASCII character.
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("--password p\u00e4ss" + "Tail" * 3 + " -h db", id="password"),
+        pytest.param("--token tok\u00e9n" + "Tail" * 3 + " -x", id="token"),
+        pytest.param("-u admin:p\u00e4ss" + "Tail" * 3 + " -x", id="user"),
+        pytest.param('--token "t\u00f6ken' + "Tail" * 3 + '" -x', id="quoted-token"),
+    ],
+)
+def test_judge_evidence_masks_non_ascii_values_at_json_escaped_line_starts(text: str) -> None:
+    for escaped in (json.dumps({"reply": f"ok\n{text}"}), json.dumps(json.dumps({"reply": f"ok\n{text}"}))):
+        redacted = eval_template._redact_judge_evidence(escaped)
+
+        assert "Tail" not in redacted
+        assert "<redacted>" in redacted
+
+
+# Tool-call arguments reach the behavior and goal prompts as json.dumps text,
+# where the line breaks of a written key file and of a continued command are
+# "\n" escapes.
+def test_judge_evidence_masks_multi_line_tool_call_arguments() -> None:
+    block = "\n".join(
+        (f"-----BEGIN OPENSSH {_PRIVATE_KEY}-----", *_KEY_BODY_LINES, f"-----END OPENSSH {_PRIVATE_KEY}-----")
+    )
+    trajectory = {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {"function_name": "Write", "arguments": {"file_path": "id_ed25519", "content": block}},
+                    {"function_name": "Bash", "arguments": {"command": "sshpass -p \\\n" + "Tail" * 3 + " ssh host"}},
+                ],
+            },
+        ]
+    }
+    summary = eval_template.build_conversation_summary(trajectory, "Set up the deploy key.")
+    assert _KEY_BODY_LINES[0] in summary
+    assert "Tail" in summary
+
+    redacted = eval_template._redact_judge_evidence(summary)
+
+    assert "<redacted private key>" in redacted
+    assert "sshpass -p <redacted> ssh host" in redacted
+    assert "Tail" not in redacted
+    for line in _KEY_BODY_LINES:
+        assert line not in redacted
+
+
+_QUOTED_SECRET = "Qx7Quoted" + "Secret9"
+
+
+# Tool-call arguments reach judge prompts as JSON, so a double-quoted shell
+# value or argv element arrives with escaped quotes (\"VALUE\"). Each is masked
+# there as in plain text, mid-line and at a JSON-escaped line start.
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(f'curl -u "admin:{_QUOTED_SECRET}" https://x', id="user-flag"),
+        pytest.param(f'curl --user="admin:{_QUOTED_SECRET}" https://x', id="user-flag-equals"),
+        pytest.param(f'curl --proxy-user "admin:{_QUOTED_SECRET}" https://x', id="proxy-user-flag"),
+        pytest.param(f'mysql -uroot -p"{_QUOTED_SECRET}" app', id="mysql-attached-password"),
+        pytest.param(f'machine db login bot password "{_QUOTED_SECRET}"', id="netrc-password"),
+        pytest.param(f'subprocess.run(["tool", "--password", "{_QUOTED_SECRET}"])', id="argv-password"),
+        pytest.param(f'subprocess.run(["curl", "-u", "admin:{_QUOTED_SECRET}", url])', id="argv-user"),
+        pytest.param(f'subprocess.run(["docker", "login", "-u", "bot", "-p", "{_QUOTED_SECRET}"])', id="argv-login"),
+        pytest.param(f'subprocess.run(["sshpass", "-p", "{_QUOTED_SECRET}", "ssh", "host"])', id="argv-sshpass"),
+        pytest.param(f'subprocess.run(["curl", "-b", "sid={_QUOTED_SECRET}", url])', id="argv-cookie"),
+        pytest.param(f'subprocess.run(["mysql", "-uroot", "-p{_QUOTED_SECRET}"])', id="argv-mysql-attached"),
+        pytest.param(f'subprocess.run([\n    "tool",\n    "--token",\n    "{_QUOTED_SECRET}",\n])', id="argv-per-line"),
+    ],
+)
+def test_judge_evidence_masks_json_escaped_quoted_values(text: str) -> None:
+    assert _QUOTED_SECRET not in eval_template._redact_judge_evidence(text)
+
+    for escaped in (json.dumps({"command": text}), json.dumps({"reply": f"ok\n{text}"})):
+        assert '\\"' in escaped
+        redacted = eval_template._redact_judge_evidence(escaped)
+
+        assert _QUOTED_SECRET not in redacted
+        assert "<redacted>" in redacted
+
+
+# An unquoted value that ends a line reads on through a JSON-escaped line
+# break, so masking the whole text masks the flag or header name that starts
+# the next line with it. That line's value is masked too, as in plain text,
+# however short it is.
+@pytest.mark.parametrize(
+    ("text", "second"),
+    [
+        pytest.param("--password aaaaaaaaaaaa\n--token bbbbbbbbbbbb", "bbbbbbbbbbbb", id="password-then-token"),
+        pytest.param(
+            "-u uuuu:aaaaaaaaaaaa\nCookie: session=bbbbbbbbbbbb", "session=bbbbbbbbbbbb", id="user-then-cookie"
+        ),
+        pytest.param(
+            "deploy --token aaaaaaaaaaaa\nAuthorization: Bearer bbbbbbbbbbbb",
+            "bbbbbbbbbbbb",
+            id="token-then-authorization",
+        ),
+        pytest.param("sshpass -p aaaaaaaaaaaa\n--token bbbbbbbbbbbb", "bbbbbbbbbbbb", id="sshpass-then-token"),
+        pytest.param(
+            "docker login -u bot -p aaaaaaaaaaaa\nCookie: session=bbbbbbbbbbbb",
+            "session=bbbbbbbbbbbb",
+            id="login-then-cookie",
+        ),
+        pytest.param("run --password aaaaaaaaaaaa\nls\n--token bbbbbbbbbbbb", "bbbbbbbbbbbb", id="over-two-lines"),
+        pytest.param("--password aaaaaaaaaaaa\n--token bQ7", "bQ7", id="short-token"),
+        pytest.param("-u uuuu:aaaaaaaaaaaa\nCookie: s=bQ7", "s=bQ7", id="short-cookie"),
+    ],
+)
+def test_judge_evidence_masks_consecutive_credential_lines_in_json_escaped_text(text: str, second: str) -> None:
+    text += "\ndone"
+    for form in (text, json.dumps({"command": text}), json.dumps(json.dumps({"command": text}))):
+        redacted = eval_template._redact_judge_evidence(form)
+
+        assert "aaaaaaaaaaaa" not in redacted
+        assert second not in redacted
+        # Only the value is masked; the rest of the text stays as it was.
+        assert redacted.endswith("<redacted>" + form.split(second)[-1])
+
+
+# A value masked on one line is masked only there and where the whole text
+# pass took its name. Other copies of it are text, such as a model name after
+# a "tokenizer_name:" key, which the shared masker reads as a credential name.
+@pytest.mark.parametrize(
+    ("text", "kept"),
+    [
+        pytest.param(
+            "model_name: meta-llama/Llama-3.1-8B-Instruct\ntokenizer_name: meta-llama/Llama-3.1-8B-Instruct\n"
+            "model_name: meta-llama/Llama-3.1-8B-Instruct\nTask: fine-tune meta-llama/Llama-3.1-8B-Instruct",
+            ["model_name: meta-llama/Llama-3.1-8B-Instruct", "Task: fine-tune meta-llama/Llama-3.1-8B-Instruct"],
+            id="model-name",
+        ),
+        pytest.param(
+            "class Settings:\n    api_key: Optional[str] = None\n    name: Optional[str] = None",
+            ["name: Optional[str] = None"],
+            id="annotation",
+        ),
+        pytest.param(
+            "fields:\n  password: required\n  email: required\nAll required fields are validated.",
+            ["email: required", "All required fields"],
+            id="yaml-word",
+        ),
+        pytest.param(
+            "run --token $GITHUB_TOKEN\necho $GITHUB_TOKEN_FILE\ncat $GITHUB_TOKEN_FILE",
+            ["cat $GITHUB_TOKEN_FILE"],
+            id="variable-name",
+        ),
+        pytest.param("docker run -u 1000:1000 img\nchown 1000:1000 /data", ["chown 1000:1000 /data"], id="user-id"),
+    ],
+)
+def test_judge_evidence_keeps_copies_of_line_values_elsewhere(text: str, kept: list[str]) -> None:
+    redacted = eval_template._redact_judge_evidence(json.dumps({"content": text}))
+
+    assert "<redacted>" in redacted
+    for part in kept:
+        assert part in redacted
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -1115,10 +1394,69 @@ def test_judge_evidence_masks_json_escaped_tool_call_headers(command: str, secre
         "see https://example.com/docs?a=b@c and mailto:user@example.com",
         "Authorization is required for this endpoint.",
         "curl --cookie-jar cookies.txt https://x; see the api-key rotation docs",
+        # JSON-escaped lines, as in RAGAS prompts and tool-call arguments.
+        json.dumps(
+            "Authorization is required.\npython -u script.py\n--token-limit 5\n\tcookie-jar ready\r\nC:\\new\\temp"
+        ),
+        json.dumps("caf\u00e9 --token-limit 5\t\u201cAuthorization is required\u201d\tpython -u script.py"),
+        # JSON-escaped quotes around a URL, a remote path, a date format and ordinary argv flags.
+        json.dumps('pip install -U "git+https://github.com/org/repo" && rsync -u "host:/data" . && date -u "+%H:%M"'),
+        json.dumps(
+            'subprocess.run(["mkdir", "-p", "out"]); ["ssh", "-p", "2222", "host"]; ["find", ".", "-path", "x"]'
+        ),
+        json.dumps('["date", "-u", "+%H:%M"]; ["pip", "install", "-U", "git+https://github.com/org/repo"]'),
+        # A bare "-p" element after a MySQL client or login element, with JSON-escaped quotes.
+        json.dumps('subprocess.run(["mysql", "-e", "CREATE DATABASE app"]); subprocess.run(["mkdir", "-p", "data"])'),
+        json.dumps('subprocess.run(["mysql", "-u", "root", "-p", "appdb"])'),
+        json.dumps('run(["docker", "login", "--password-stdin", "-u", "bot"]); run(["git", "log", "-p"])'),
+        # The same with the quotes escaped twice, after a plain MySQL client element.
+        'run(["mysql", "-e", "x"]); '
+        + json.dumps(json.dumps('run(["mkdir", "-p", "data"]); run(["mysql", "-u", "root", "-p", "appdb"])')),
     ],
 )
 def test_judge_evidence_keeps_ordinary_text(text: str) -> None:
     assert eval_template._redact_judge_evidence(text) == text
+
+
+_PASSPHRASE_WORD = "Zq9" + "Leak"
+
+
+# A bare \"-p\" element keeps its escaped closing quote, so a multi-word
+# credential later in the same JSON string is still masked to its end.
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param('["mysql", "-p"]', id="mysql-prompt"),
+        pytest.param('["docker", "login", "-u", "bot"]); run(["git", "log", "-p"]', id="git-log-after-login"),
+    ],
+)
+def test_judge_evidence_masks_passphrase_after_bare_p_element(argv: str) -> None:
+    text = json.dumps({"command": f"run({argv}); password: correct horse {_PASSPHRASE_WORD} staple"})
+
+    assert eval_template._redact_judge_evidence(text) == json.dumps({"command": f"run({argv}); password: <redacted>"})
+
+
+_MYSQL_ARGUMENTS = json.dumps(
+    {"command": f'python -c \'import subprocess; subprocess.run(["mysql", "-uroot", "-p{_QUOTED_SECRET}"])\''}
+)
+
+
+# A RAGAS request that repeats a tool call writes the call's JSON arguments as
+# JSON again, so an attached "-pVALUE" element there is escaped twice
+# (\\\"-pVALUE\\\"). After a MySQL client element it is masked with its escapes
+# intact.
+@pytest.mark.parametrize(
+    "context",
+    [
+        pytest.param(f'Task: run subprocess.run(["mysql", "-uroot", "-p{_QUOTED_SECRET}"]).', id="plain"),
+        pytest.param(f"Task: run subprocess.run(['mysql', '-uroot', '-p{_QUOTED_SECRET}']).", id="single-quoted"),
+        pytest.param(f"Earlier call: {_MYSQL_ARGUMENTS}", id="json-escaped"),
+    ],
+)
+def test_judge_evidence_masks_twice_escaped_attached_password(context: str) -> None:
+    text = f"{context}\nRepeated: {json.dumps(_MYSQL_ARGUMENTS)}"
+
+    assert eval_template._redact_judge_evidence(text) == text.replace(_QUOTED_SECRET, "<redacted>")
 
 
 def test_salvaged_behavior_score_is_saved_as_a_salvage_attempt(tmp_path: Path) -> None:

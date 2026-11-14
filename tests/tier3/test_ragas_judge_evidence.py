@@ -406,6 +406,166 @@ def test_ragas_evidence_reads_every_request_message_and_tool_call_replies(verifi
     assert verifier._ragas_reply_text(b"not a chat completion") == "not a chat completion"
 
 
+def test_ragas_evidence_masks_credentials_at_json_escaped_line_starts(
+    verifier: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RAGAS writes the agent's messages into its prompt as JSON, and a JSON-mode reply quotes them as JSON too.
+
+    Each line break in the agent's text is therefore saved escaped, as the two
+    characters backslash and n, before the next line's header or flag.
+    """
+    agent_text = (
+        "HTTP/1.1 200 OK\nAuthorization: Bearer bbbbbbbbbbbb\nCookie: session=cccccccccccc\n"
+        "--token tttttttttttt\n-u admin:pppppppppppp"
+    )
+    prompt = "Judge whether the agent reached the goal.\ninput: " + json.dumps(
+        {"user_input": [{"content": agent_text, "type": "ai"}]}, indent=4
+    )
+    _install_ragas(monkeypatch, messages=[{"role": "user", "content": prompt}])
+    received = _stub_provider(monkeypatch, [_chat_reply(json.dumps({"end_state": agent_text, "verdict": 1}))])
+
+    with _judge_evidence(verifier):
+        result = verifier.judge_goal_accuracy("question", "expected", "agent answer")
+
+    assert (result["score"], result["method"]) == (1.0, "ragas")
+    assert len(received) == 1
+    exchange, outcome = _attempts(verifier)
+    assert [exchange["status"], outcome["status"]] == ["replied", "accepted"]
+    for field in ("prompt", "reply"):
+        assert (
+            "\\nAuthorization: Bearer <redacted>\\nCookie: <redacted>\\n--token <redacted>\\n-u <redacted>"
+            in exchange[field]
+        )
+    saved = (verifier.VERIFIER_DIR / "judge_attempts.json").read_text(encoding="utf-8")
+    for secret in ("bbbbbbbbbbbb", "cccccccccccc", "tttttttttttt", "pppppppppppp"):
+        assert secret not in saved
+
+
+def test_ragas_evidence_masks_consecutive_credential_lines_in_tool_calls(
+    verifier: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tool call's arguments reach the RAGAS prompt and reply as JSON in JSON, so their line breaks are escaped twice.
+
+    A flag value that ends one line must not take the next line's flag or
+    header name with it and leave that line's value in clear. Text that only
+    matches a value masked on another line stays.
+    """
+    model = "meta-llama/Llama-3.1-8B-Instruct"
+    trajectory = {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {
+                        "function_name": "Write",
+                        "arguments": {
+                            "file_path": "deploy.flags",
+                            "content": "--api-key aaaaaaaaaaaa\n--token bbbbbbbbbbbb\n",
+                        },
+                    },
+                    {
+                        "function_name": "Bash",
+                        "arguments": {"command": "docker login -u bot -p cccccccccccc\nCookie: session=dddddddddddd"},
+                    },
+                    {
+                        "function_name": "Write",
+                        "arguments": {
+                            "file_path": "config.yaml",
+                            "content": f"tokenizer_name: {model}\nmodel_name: {model}\n",
+                        },
+                    },
+                ],
+            },
+        ]
+    }
+    secrets = ("aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc", "dddddddddddd")
+    agent_text = verifier.build_conversation_summary(trajectory, "Set up the deploy flags.")
+    assert all(secret in agent_text for secret in secrets)
+    prompt = "Judge whether the agent reached the goal.\ninput: " + json.dumps(
+        {"user_input": [{"content": agent_text, "type": "ai"}]}, indent=4
+    )
+    _install_ragas(monkeypatch, messages=[{"role": "user", "content": prompt}])
+    received = _stub_provider(monkeypatch, [_chat_reply(json.dumps({"end_state": agent_text, "verdict": 1}))])
+
+    with _judge_evidence(verifier):
+        result = verifier.judge_goal_accuracy("question", "expected", "agent answer")
+
+    assert (result["score"], result["method"]) == (1.0, "ragas")
+    assert len(received) == 1
+    exchange, outcome = _attempts(verifier)
+    assert [exchange["status"], outcome["status"]] == ["replied", "accepted"]
+    for field in ("prompt", "reply"):
+        assert "deploy.flags" in exchange[field]
+        assert "docker login -u bot -p <redacted>" in exchange[field]
+        assert f"model_name: {model}" in exchange[field]
+    saved = (verifier.VERIFIER_DIR / "judge_attempts.json").read_text(encoding="utf-8")
+    for secret in secrets:
+        assert secret not in saved
+
+
+def test_ragas_evidence_masks_private_key_blocks_in_json_prompts_and_replies(
+    verifier: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A private key block in the agent's text spans "\\n" escapes in the RAGAS prompt and reply, and is masked whole."""
+    label = "RSA PRIVATE " + "KEY"
+    body = ("MIIEbodyLineOne", "MIIEbodyLineTwo")
+    agent_text = "\n".join(("Wrote the key:", f"-----BEGIN {label}-----", *body, f"-----END {label}-----", "done"))
+    prompt = "Judge whether the agent reached the goal.\ninput: " + json.dumps(
+        {"user_input": [{"content": agent_text, "type": "ai"}]}, indent=4
+    )
+    _install_ragas(monkeypatch, messages=[{"role": "user", "content": prompt}])
+    received = _stub_provider(monkeypatch, [_chat_reply(json.dumps({"end_state": agent_text, "verdict": 1}))])
+
+    with _judge_evidence(verifier):
+        result = verifier.judge_goal_accuracy("question", "expected", "agent answer")
+
+    assert (result["score"], result["method"]) == (1.0, "ragas")
+    assert len(received) == 1
+    exchange, outcome = _attempts(verifier)
+    assert [exchange["status"], outcome["status"]] == ["replied", "accepted"]
+    for field in ("prompt", "reply"):
+        assert "Wrote the key:\\n<redacted private key>\\ndone" in exchange[field]
+    saved = (verifier.VERIFIER_DIR / "judge_attempts.json").read_text(encoding="utf-8")
+    assert "-----END" not in saved
+    for line in body:
+        assert line not in saved
+
+
+@pytest.mark.parametrize(
+    ("message", "finish_reason", "kept"),
+    [
+        pytest.param(
+            {"role": "assistant", "content": None, "refusal": "I can't help with that request."},
+            "stop",
+            "I can't help with that request.",
+            id="refusal",
+        ),
+        pytest.param(
+            {"role": "assistant", "content": None},
+            "content_filter",
+            '"finish_reason": "content_filter"',
+            id="content-filter",
+        ),
+        pytest.param({"role": "assistant", "content": ""}, "length", '"finish_reason": "length"', id="empty-text"),
+    ],
+)
+def test_ragas_reply_without_text_or_tool_calls_is_saved_as_the_reply_body(
+    verifier: ModuleType, message: dict[str, Any], finish_reason: str, kept: str
+) -> None:
+    """A refusal or a filtered reply is what makes RAGAS fail, so the entry keeps why there was no answer."""
+    reply = _chat_reply("")
+    reply["choices"][0].update(message=message, finish_reason=finish_reason)
+    request = httpx.Request("POST", _CHAT_URL, json={"model": "gpt-4.1", "messages": _JUDGE_MESSAGES})
+
+    with _judge_evidence(verifier):
+        verifier._record_ragas_exchange(httpx.Response(200, content=json.dumps(reply).encode(), request=request))
+
+    (exchange,) = _attempts(verifier)
+    assert exchange["status"] == "replied"
+    assert kept in exchange["reply"]
+    assert exchange["reply_chars"] == len(exchange["reply"])
+
+
 @pytest.mark.parametrize("broken", ["request-parser", "http-client"])
 def test_ragas_evidence_failure_never_changes_the_score(
     verifier: ModuleType, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, broken: str

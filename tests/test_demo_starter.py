@@ -4,14 +4,20 @@
 import copy
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+from scripts import demo_starter
 from scripts.demo_starter import FIXTURES, check_quality
 
 ROOT = Path(__file__).resolve().parents[1]
+# What the release wheel pinned in the starter guide reports for the starter and its
+# shortened copy. The checkout's evaluator can score them differently until a release
+# includes its scoring changes.
+PINNED_RELEASE_SCORES = {"quality": 84.5, "regressed": 71.0}
 
 
 @pytest.mark.parametrize("page", ["docs/starter-demo.mdx", "examples/starter/README.md"])
@@ -42,7 +48,7 @@ def test_starter_runs_real_cli_and_preserves_sources(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PASS: starter output" in result.stdout
     assert source.read_bytes() == original
-    expected = json.loads((FIXTURES / "expected.json").read_text())
+    expected = demo_starter.load_expected()
     assert json.loads((output / "analysis.json").read_text()) == expected["analysis"]
     for label in ("quality", "regressed"):
         report = json.loads((output / label / "skillevaluator-quality.json").read_text())
@@ -63,12 +69,58 @@ def test_starter_runs_real_cli_and_preserves_sources(tmp_path):
     assert (output / "receipt.json").read_bytes() == before
 
 
+def test_installed_release_is_checked_against_the_pinned_release_scores(tmp_path, monkeypatch):
+    """The documented run checks the pinned release's scores, not the checkout's."""
+    # Demo files outside the evaluator's source tree, as when the release wheel runs them.
+    fixtures = tmp_path / "checkout" / "examples" / "starter"
+    shutil.copytree(FIXTURES, fixtures)
+    monkeypatch.setattr(demo_starter, "FIXTURES", fixtures)
+    expected = json.loads((fixtures / "expected.json").read_text(encoding="utf-8"))
+
+    def release_cli(command, log, expected_exit):
+        if "quality-check" not in command:
+            log.write_text(json.dumps(expected["analysis"]), encoding="utf-8")
+            return
+        reports = Path(command[command.index("-o") + 1])
+        reports.mkdir()
+        report = {
+            "overall_status": expected[log.stem]["status"],
+            "overall_passed": expected_exit == 0,
+            "quality_summary": [
+                {"overall_score": PINNED_RELEASE_SCORES[log.stem], "grade": expected[log.stem]["grade"]}
+            ],
+            "publication_status": expected[log.stem]["publication"],
+            "publication": {"eligible": False, "reasons": ["Live evaluation did not run"]},
+        }
+        (reports / "skillevaluator-quality.json").write_text(json.dumps(report), encoding="utf-8")
+
+    monkeypatch.setattr(demo_starter, "run", release_cli)
+
+    receipt = demo_starter.demo(tmp_path / "starter")
+
+    assert receipt["live_agent_evaluation"] == "not run"
+
+
+@pytest.mark.parametrize(
+    ("page", "template"),
+    [
+        ("docs/starter-demo.mdx", "score {score:g}, grade {grade}"),
+        ("examples/starter/README.md", "scores {score:g}/100 ({grade})"),
+    ],
+)
+def test_starter_docs_show_the_pinned_release_scores(page, template):
+    text = (ROOT / page).read_text(encoding="utf-8")
+    expected = json.loads((FIXTURES / "expected.json").read_text(encoding="utf-8"))
+    for label, score in PINNED_RELEASE_SCORES.items():
+        assert template.format(score=score, grade=expected[label]["grade"]) in text
+
+
 @pytest.fixture
 def quality_report():
     return {
         "overall_status": "passed",
         "overall_passed": True,
-        "quality_summary": [{"overall_score": 86.2, "grade": "B"}],
+        "quality_summary": [{"overall_score": 84.5, "grade": "B"}],
         "publication_status": "incomplete",
         "publication": {"eligible": False, "reasons": ["Live evaluation did not run"]},
     }

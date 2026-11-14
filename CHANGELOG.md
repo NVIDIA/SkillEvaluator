@@ -665,15 +665,19 @@ All notable changes to SkillEvaluator are documented in this file.
   outcome text when it has no LLM reply, or when it replaces LLM-written
   graded text that uses the skill; other LLM-written text that names a script
   is kept.
-- A skill description that reads `SKILL.md` right after the skill's name,
-  "the `<name>` skill's" or "the installed skill's", such as "Reads
-  release-review's `SKILL.md`" or "Follows the release-review skill's
-  `SKILL.md`", now gives template cases the generic task "handle a typical
-  request" and generic graded text, as one that names `<name>/SKILL.md` does.
-  Before, the prompt and the graded text quoted a garbled task such as "reads
-  release-review's my `SKILL.md`". Generic wording comes first, as in
-  `tier3 validate`: for a skill named read or own, "read `SKILL.md`" and "its
-  own `SKILL.md`" are renamed as for any other skill.
+- When a template prompt would call a `SKILL.md` in the skill's description
+  `my SKILL.md` and the skill's name, "the `<name>` skill's" or "the
+  installed skill's" comes right before any `SKILL.md` in it, template cases
+  now get the generic task "handle a typical request" and generic graded
+  text, as for a description that names `<name>/SKILL.md`. This covers
+  "Reads release-review's `SKILL.md`", "Follows the release-review skill's
+  `SKILL.md`" and "Reads `SKILL.md`, then validates release-review's
+  `SKILL.md` frontmatter". Before, the prompt and the graded text quoted a
+  garbled task such as "reads release-review's my `SKILL.md`". A description
+  whose `SKILL.md` is not renamed, such as "Validates release-review's
+  `SKILL.md` frontmatter", is quoted as before. Generic wording comes first,
+  as in `tier3 validate`: for a skill named read or own, "read `SKILL.md`"
+  and "its own `SKILL.md`" are renamed as for any other skill.
 
 ## 0.9.0 - 2026-11-13
 

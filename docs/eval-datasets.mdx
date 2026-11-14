@@ -124,11 +124,14 @@ counts, every bare `SKILL.md` in the description is renamed, even one that
 would not count by itself, such as one after "a" or "the following", one
 before a format noun or one before `in ./pdf-tools`. When the description
 still points at the skill's files after the rename, such as
-`<name>/SKILL.md`, `skills/<name>` or "uses the installed skill", or when the
-description reads `SKILL.md` right after the skill's name, "the `<name>`
-skill's" or "the installed skill's", as in "reads `<name>`'s `SKILL.md`", the
-template prompt asks for the generic task "handle a typical request" and the
-graded text is generic. Generic wording comes first, as in `tier3 validate`:
+`<name>/SKILL.md`, `skills/<name>` or "uses the installed skill", or when one
+`SKILL.md` counts and the skill's name, "the `<name>` skill's" or "the
+installed skill's" comes right before any `SKILL.md` in the description, as
+in "reads `<name>`'s `SKILL.md`" or "reads `SKILL.md`, then validates
+`<name>`'s `SKILL.md` frontmatter", the template prompt asks for the generic
+task "handle a typical request" and the graded text is generic. When no
+`SKILL.md` counts, the description keeps such a `SKILL.md`, as in "validates
+`<name>`'s `SKILL.md` frontmatter". Generic wording comes first, as in `tier3 validate`:
 for a skill named read or own, "read `SKILL.md`" and "its own `SKILL.md`" are
 renamed as for any other skill. `create-eval-dataset`'s LLM prompts ask for
 outcome checks. It

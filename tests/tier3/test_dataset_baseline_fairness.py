@@ -1029,7 +1029,9 @@ _GENERIC_FIRST = (
     'generic wording comes first, as in tier3 validate: for a skill named read or own, "read skill.md" and '
     '"its own skill.md" are renamed as for any other skill.'
 )
-_SKILL_OWNS_SKILL_MD_ENTRY = "A skill description that reads `SKILL.md` right after the skill's name,"
+_SKILL_OWNS_SKILL_MD_ENTRY = "When a template prompt would call a `SKILL.md` in the skill's description"
+# How each says which descriptions with the skill's name right before a SKILL.md get the generic task.
+_OWNER_RULE = 'the skill\'s name, "the <name> skill\'s" or "the installed skill\'s" comes right before any skill.md in'
 
 
 def _flat(text: str) -> str:
@@ -1132,14 +1134,33 @@ def test_docs_say_which_skill_md_in_a_description_becomes_my_skill_md():
         assert rule >= 0, where
         for example in ("<name>/skill.md", "skills/<name>", "uses the installed skill"):
             assert example in text[rule : rule + 160], (where, text[rule : rule + 160])
-        owner = text.find(
-            'reads skill.md right after the skill\'s name, "the <name> skill\'s" or "the installed skill\'s"', rule
-        )
+        owner = text.find(f"one skill.md counts and {_OWNER_RULE} the description", rule)
         assert 0 <= owner - rule < 260, (where, text[rule : rule + 400])
-        assert '"reads <name>\'s skill.md"' in text[owner : owner + 160], (where, text[owner : owner + 160])
-        assert _GENERIC_FIRST in text[owner : owner + 400], (where, text[owner : owner + 400])
-    assert _GENERIC_FIRST in _flat(_changelog_entry(_SKILL_OWNS_SKILL_MD_ENTRY))
-    # Only reading SKILL.md there gives the generic task; naming it there keeps it.
+        for example in (
+            '"reads <name>\'s skill.md"',
+            '"reads skill.md, then validates <name>\'s skill.md frontmatter"',
+        ):
+            assert example in text[owner : owner + 300], (where, example, text[owner : owner + 300])
+        kept = text.find("when no skill.md counts, the description keeps such a skill.md", owner)
+        assert 0 <= kept - owner < 500, (where, text[owner : owner + 600])
+        assert '"validates <name>\'s skill.md frontmatter"' in text[kept : kept + 120], (where, text[kept : kept + 120])
+        assert _GENERIC_FIRST in text[owner : owner + 700], (where, text[owner : owner + 700])
+    entry = _flat(_changelog_entry(_SKILL_OWNS_SKILL_MD_ENTRY))
+    assert f"my skill.md and {_OWNER_RULE} it" in entry
+    assert '"validates release-review\'s skill.md frontmatter", is quoted as before' in entry
+    assert _GENERIC_FIRST in entry
+    # Once one SKILL.md counts, the skill's name right before any SKILL.md in
+    # the description gives the generic task, wherever the reading is.
+    for description in (
+        "Reads release-review's SKILL.md and reports errors.",
+        "Follows the release-review skill's SKILL.md to check manifests.",
+        "Reads SKILL.md, then validates release-review's SKILL.md frontmatter.",
+    ):
+        assert generate_dataset._template_task(_skill(description=description)) == (
+            "handle a typical request",
+            None,
+        ), description
+    # When no SKILL.md counts, the description keeps the one the skill's name comes before.
     for description in (
         "Validates release-review's SKILL.md frontmatter.",
         "Lists release-review's SKILL.md sections.",

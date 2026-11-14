@@ -404,12 +404,15 @@ def _template_task(skill: dict[str, Any]) -> tuple[str, str | None]:
     ./pdf-tools"). When the description still points at the skill's files
     after the rename (<name>/SKILL.md, skills/<name>, "uses the installed
     skill"), calls the skill "the <name> skill" ("the release-review skill
-    checks manifests"), or reads SKILL.md right after the skill's name, "the
-    <name> skill's" or "the installed skill's" ("reads <name>'s SKILL.md"),
-    the task is the generic "handle a typical request" and the outcome is
-    None. Generic wording comes first, as in tier3 validate: for a skill named
-    read or own, "read SKILL.md" and "its own SKILL.md" are renamed as for any
-    other skill. The outcome is also None, and graded text generic, when
+    checks manifests"), or when one SKILL.md counts and the skill's name, "the
+    <name> skill's" or "the installed skill's" comes right before any SKILL.md
+    in the description ("reads <name>'s SKILL.md", "reads SKILL.md, then
+    validates <name>'s SKILL.md frontmatter"), the task is the generic "handle
+    a typical request" and the outcome is None. When no SKILL.md counts, the
+    description keeps such a SKILL.md ("validates <name>'s SKILL.md
+    frontmatter"). Generic wording comes first, as in tier3 validate: for a
+    skill named read or own, "read SKILL.md" and "its own SKILL.md" are
+    renamed as for any other skill. The outcome is also None, and graded text generic, when
     quoting the task would grade skill use or name one of the skill's scripts:
     "Uses release-review for manifests" grades skill use, and "Checks
     manifests with review.py" names a script the no-skill baseline does not

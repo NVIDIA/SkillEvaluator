@@ -548,7 +548,8 @@ Validation and evaluation load the config file strictly:
 - A YAML error never includes the text of the line. Most syntax errors, and
   every repeated key, give the line, column and problem. When PyYAML also
   reports a context, such as `found duplicate anchor 'a'; first occurrence`,
-  the context and its line and column come first. An error for a cyclic merge
+  the context comes first, with its own line and column when they differ from
+  the problem's. An error for a cyclic merge
   or for one of the limits above names it without a position. A value that
   cannot be parsed, such as `!!int abc`, gives `cannot parse a value`.
 

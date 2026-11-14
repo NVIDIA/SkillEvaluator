@@ -157,6 +157,10 @@ All notable changes to SkillEvaluator are documented in this file.
   Overview links to complete Insights instead of repeating its cards; passive
   evidence and routine run provenance stay folded. Recorded native token and
   latency breakdowns are available under Trials without rerunning evaluations.
+  The native header scale and visible tool versions, consolidated baseline
+  comparison with Overall and partial-comparison details, clickable agent
+  scorecards, and Harbor results/analysis actions are retained. Empty primary
+  viewer metadata no longer hides usable recorded summary links.
 
 - The HTTP 404 message for an unavailable LLM model now says the provider's default
   may not be callable with the key and points to `SKILL_EVAL_LLM_MODEL` (`llm-model`

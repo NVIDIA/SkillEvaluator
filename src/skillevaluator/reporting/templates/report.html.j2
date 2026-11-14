@@ -84,6 +84,38 @@
 </ol>
 {% endif %}
 {%- endmacro %}
+{% macro unavailable_lift(score, baseline, activation) -%}
+{%- if activation.get('status') == 'never_activated' -%}inconclusive: skill never activated
+{%- elif score is none and baseline is not none -%}with-skill unavailable
+{%- elif score is none -%}N/A lift
+{%- elif baseline is not none -%}comparison unavailable
+{%- else -%}no baseline lift{%- endif -%}
+{%- endmacro %}
+{% macro other_dimension_cell(dimension, agent) -%}
+    <td>{% if dimension %}
+        {% set other_score = dimension.score if dimension.score is not none else dimension.with_skill %}
+        {% set other_color = 'var(--text-secondary)' if other_score is none else ('var(--success-color)' if other_score >= 0.7 else ('var(--warning-color)' if other_score >= 0.4 else 'var(--danger-color)')) %}
+        <div class="t3-mad-cell">
+            <div class="t3-mad-score-row"><span class="t3-mad-score" style="color:{{ other_color }};">{{ "%.2f" | format(other_score) if other_score is not none else 'N/A' }}</span>{% if other_score is not none %}<div class="t3-mad-bar"><span style="width:{{ (other_score * 100) | round(0) }}%;background:{{ other_color }};"></span></div>{% endif %}</div>
+            <span class="t3-mad-lift">{% if dimension.lift is not none and agent.get('skill_activation', {}).get('status') != 'never_activated' %}{{ "%+.2f" | format(dimension.lift) }} lift{% else %}{{ unavailable_lift(other_score, dimension.baseline, agent.get('skill_activation', {})) }}{% endif %}</span>
+            {% if dimension.partial %}<span class="t3-pill warning">partial</span>{% endif %}
+            {% if dimension.comparison %}<span class="t3-dim-hint">{{ dimension.comparison.label }}{% if dimension.comparison.with_skill is number and dimension.comparison.baseline is number and dimension.comparison.lift is number %}: {{ "%.2f" | format(dimension.comparison.baseline) }} → {{ "%.2f" | format(dimension.comparison.with_skill) }} ({{ "%+.2f" | format(dimension.comparison.lift) }}){% endif %}{% if dimension.comparison.reason %} · {{ dimension.comparison.reason }}{% endif %}</span>{% endif %}
+        </div>
+    {% else %}N/A{% endif %}</td>
+{%- endmacro %}
+{% macro harbor_job_actions(jobs, tile=false) -%}
+<div class="{{ 'tier-card-jobs' if tile else 't3-harbor-jobs' }}"{% if tile %} onclick="event.stopPropagation()"{% endif %}>
+{% for job in jobs %}
+    <div class="{{ 'tier-card-job' if tile else 't3-harbor-job' }}">
+        {% if jobs | length > 1 %}<span class="{{ 'tier-card-job-label' if tile else 't3-harbor-job-label' }}">{{ job.name or ('Job ' ~ loop.index) }}</span>{% endif %}
+        <div class="{{ 'tier-card-links' if tile else 't3-harbor-actions' }}">
+            {% if job.url %}<a class="{{ 'tier-card-link' if tile else 't3-harbor-link' }}" href="{{ job.url }}" target="_blank" rel="noopener noreferrer">Harbor logs</a>{% endif %}
+            {% if job.analysis_url %}<a class="{{ 'tier-card-link' if tile else 't3-harbor-link' }}" href="{{ job.analysis_url }}" target="_blank" rel="noopener noreferrer">Harbor analysis</a>{% endif %}
+        </div>
+    </div>
+{% endfor %}
+</div>
+{%- endmacro %}
 <html lang="en" data-default-theme="{{ 'dark' if tier3 else 'light' }}" data-theme="{{ 'dark' if tier3 else 'light' }}">
 <head>
     <meta charset="UTF-8">
@@ -1681,6 +1713,7 @@
                         <span aria-hidden="true">↓</span><span>Download JSON</span>
                     </button>{% endif %}
                 </div>
+                <p class="header-meta-item report-versions">{% if version %}<span title="HTML report renderer version">SkillEvaluator v{{ version }}</span>{% endif %}{% if skillspector_versions %}<span title="Scanner version recorded by this evaluation">SkillSpector v{{ skillspector_versions | join(', v') }}</span>{% endif %}</p>
             </div>
         </div>
     </header>
@@ -1711,9 +1744,6 @@
             {% endif %}
         {% endfor %}
         {% set hero_metric_count = ((tier3.metric_ids or tier3.evaluators or {}) | length) if has_tier3 else 0 %}
-        {% set hero_harbor = (tier3.get('harbor_viewer') or tier3.get('summary', {}).get('harbor_viewer') or {}) if has_tier3 else {} %}
-        {% set hero_harbor_job_url = hero_harbor.get('job_url') %}
-        {% set hero_harbor_analysis_url = hero_harbor.get('analysis_url') %}
         <section class="agent-hero" aria-labelledby="report-title">
             <div class="agent-hero-top">
                 <div class="agent-hero-title-block">
@@ -1832,7 +1862,7 @@
                      aria-controls="tab-tier3"
                      aria-pressed="{{ 'true' if initial_tab == 'tier3' else 'false' }}"
                      onclick="showTab('tier3')"
-                     onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();showTab('tier3');}"
+                     onkeydown="if(event.target===this&amp;&amp;(event.key==='Enter'||event.key===' ')){event.preventDefault();showTab('tier3');}"
                      aria-label="Open Tier 3: Live Agent Evaluation"
                      title="Open Tier 3: Live Agent Evaluation">
                     <div class="tier-card-head">
@@ -1847,7 +1877,7 @@
                         <span class="trial-coverage">{% if overview_coverage.known %}<strong>{{ overview_coverage.scored }}</strong> of {{ overview_coverage.expected }} attempts scored{% else %}{{ hero_trials }}{% endif %}</span>
                         {% endif %}
                     </div>
-
+                    {% if harbor_jobs %}{{ harbor_job_actions(harbor_jobs, tile=true) }}{% endif %}
                 </div>
                 {% elif presentation.tiers[3].displayed %}{{ absent_tier_tile(3, presentation.tiers[3]) }}
                 {% endif %}
@@ -2658,7 +2688,7 @@
             <div class="t3-overview-lead" role="status">
                 {% if tier3_is_skipped %}<strong>Live evaluation skipped:</strong> {{ tier3_skip_message }}
                 {% elif tier3_verdict == 'inconclusive' %}<strong>Inconclusive: skill never activated.</strong> Scores are diagnostic only; no lift verdict was computed.
-                {% elif tier3.get('mode') == 'baseline_only' %}<strong>Baseline-only calibration.</strong> No with-skill arm; no skill lift measured.
+                {% elif tier3.get('mode') == 'baseline_only' %}<strong>Baseline-only calibration:</strong> No with-skill arm; no skill lift measured.
                 {% elif completed_agent and completed_agent.needs_attention %}
                 <strong>Completed-agent result: {{ completed_agent.verdict | upper }}.</strong> Other execution failures need attention; not a whole-run or publication PASS.
                 {% else %}<strong>Live quality: {{ advisory_fail_word if tier3_advisory_fail else (verdict_words.get(tier3_verdict) or tier3_verdict | title) }}.</strong>{% endif %}
@@ -2667,6 +2697,12 @@
                 <span class="tolerated-baseline">Baseline incomplete for <strong>{{ tolerated.name }}</strong>{% if tolerated.scored_attempts is not none and tolerated.expected_attempts is not none %} ({{ tolerated.scored_attempts }} of {{ tolerated.expected_attempts }} attempts scored){% endif %}: baseline timeouts were tolerated by <code>--tolerate-baseline-timeouts</code>; baseline and uplift unavailable.</span>
                 {% endfor %}
             </div>
+            {% if harbor_jobs %}
+            <div class="t3-harbor-panel" id="tier3-harbor-viewer">
+                <strong>Harbor Viewer</strong>
+                {{ harbor_job_actions(harbor_jobs) }}
+            </div>
+            {% else %}<p class="t3-harbor-unavailable" id="tier3-harbor-unavailable">No Harbor viewer or analysis links were recorded.</p>{% endif %}
             {% if tier3_dataset_sufficiency and tier3_dataset_sufficiency.coverage_summary %}
             <p class="t3-dataset-sufficiency{% if tier3_dataset_sufficiency.status == 'provisional' %} warning{% endif %}"
                {% if tier3_dataset_sufficiency.status == 'provisional' %}style="color:var(--warning-color);font-weight:600"{% endif %}>
@@ -2686,7 +2722,7 @@
             <div class="dashboard t3-primary-metrics">
                 {% if hero_score is not none %}
                 <div class="dashboard-card" data-primary-metric="score">
-                    <h3 class="dashboard-card-title">{{ 'Completed Agent Score' if completed_agent and completed_agent.needs_attention else 'Overall Score' }}</h3>
+                    <h3 class="dashboard-card-title">{{ 'Baseline Score' if tier3.get('mode') == 'baseline_only' else ('Completed Agent Score' if completed_agent and completed_agent.needs_attention else 'Overall Score') }}</h3>
                     <p class="dashboard-card-value">{{ "%.2f" | format(hero_score) }}</p>
                     <p class="dashboard-card-subtitle">{{ completed_agent.name if completed_agent else (t3_best_name or 'Recorded quality') }}{% if tier3.get('mode') == 'baseline_only' %} · Baseline calibration (no with-skill arm){% endif %}</p>
                 </div>
@@ -2738,11 +2774,27 @@
             </details>
 
             {% set t3_na_dimensions = tier3.not_applicable_dimensions or [] %}
-            {% if tier3_display_dimensions or t3_na_dimensions %}
+            {% set t3_dim_by_agent = {} %}
+            {% set t3_other_agents = [] %}
+            {% for name, agent in t3_agents.items() %}
+                {% set dmap = {} %}
+                {% for dim in agent.dimensions or [] %}{% if dim.id %}{% set _ = dmap.update({dim.id: dim}) %}{% endif %}{% endfor %}
+                {% set _ = t3_dim_by_agent.update({name: dmap}) %}
+                {% if name != t3_best_name %}{% set _ = t3_other_agents.append(name) %}{% endif %}
+            {% endfor %}
+            {% set t3_present_dimension_ids = (tier3_display_dimensions | map(attribute='id') | list) + (t3_na_dimensions | map(attribute='id') | list) %}
+            {% set t3_peer_only_dimensions = [] %}
+            {% for name in t3_other_agents %}{% for dimension_id in t3_dim_by_agent[name] %}
+                {% if dimension_id not in t3_present_dimension_ids %}
+                    {% set _ = t3_peer_only_dimensions.append({'id': dimension_id, 'peer_only': true}) %}
+                    {% set _ = t3_present_dimension_ids.append(dimension_id) %}
+                {% endif %}
+            {% endfor %}{% endfor %}
+            {% if tier3_display_dimensions or t3_na_dimensions or t3_peer_only_dimensions %}
             {% set t3_baseline_only = tier3.get('mode') == 'baseline_only' %}
             {% set t3_signal_evidence = tier3.signal_evidence or {} %}
             <details class="t3-details" id="tier3-dimension-lift" open>
-                <summary>Dimension Scores and Skill Lift (Best Performing Agent: {{ t3_best_name or 'N/A' }})</summary>
+                <summary>Dimension Scores and Skill Lift{% if t3_best_name %} (Best Performing Agent: {{ t3_best_name }}){% endif %}</summary>
                 <div class="t3-details-body">
                 <details class="t3-method"><summary>How dimension scores and lift are read</summary><p class="t3-section-hint">
                     Each dimension answers one question about the skill, scored from 0.00 to 1.00.
@@ -2752,12 +2804,15 @@
                     Signals are the evaluator metrics behind each dimension, and Evidence says where they come from.
                     N/A means no measurement, never a score of zero; the note under it says why.
                 </p></details>
-                <div class="table-scroll">
+                {% if t3_other_agents %}<p class="t3-section-hint">Score, Baseline and Skill Lift describe {{ t3_best_name or 'the run result' }}. Other agent columns show that agent's score and lift.</p>{% endif %}
+                <div class="table-scroll" id="tier3-multi-agent-dimension-table">
                 <table class="summary-table" id="tier3-dimension-table">
                     <thead><tr>
                         <th>Dimension</th><th>Score</th>
                         <th>Baseline</th><th>Skill Lift</th>
-                        <th>Verdict</th><th>Signals</th><th>Reasoning</th>
+                        <th>Verdict</th>
+                        {% for name in t3_other_agents %}<th><button class="t3-agent-link" type="button" data-tier3-agent-link="{{ t3_agent_anchor_ids[name] }}" onclick="jumpToTier3Agent('{{ t3_agent_anchor_ids[name] }}')">{{ name }}</button></th>{% endfor %}
+                        <th>Signals</th><th>Reasoning</th>
                     </tr></thead>
                     <tbody>
                     {% set t3_best_agent = t3_agents.get(t3_best_name, {}) %}
@@ -2770,6 +2825,7 @@
                     <tr>
                         <td>
                             <strong>{{ "Skill Efficiency" if dim.id == "efficiency" else (dim.id | title) }}</strong>
+                            {% if dim.partial %}<span class="t3-pill warning" title="A subset of the configured signals was recorded.">partial</span>{% endif %}
                             {% if t3_dim_hints.get(dim.id) %}<div class="t3-dim-hint">{{ t3_dim_hints.get(dim.id) }}</div>{% endif %}
                             {% if dim_evidence %}<div class="t3-dim-hint">Evidence: {{ dim_evidence | join('; ') }}.</div>{% endif %}
                         </td>
@@ -2794,12 +2850,16 @@
                         </td>
                         {% set dim_regressed = dim.verdict == 'PASS' and dim.lift is not none and dim.lift <= tier3_lift_fail_threshold %}
                         <td>{% if dim.verdict %}<span class="t3-pill {{ 'warning' if dim_regressed else ('ok' if dim.verdict == 'PASS' else ('critical' if dim.verdict == 'FAIL' else 'warning')) }}">{{ dim.verdict }}{{ ' · regressed' if dim_regressed else '' }}</span>{% else %}<span class="t3-pill warning">No verdict</span>{% endif %}</td>
+                        {% for name in t3_other_agents %}
+                        {{ other_dimension_cell(t3_dim_by_agent[name].get(dim.id), t3_agents[name]) }}
+                        {% endfor %}
                         <td>
                             {% for metric_id in dim.evaluators or [] %}
                             <span class="metadata-tag" title="{{ t3_signal_evidence.get(metric_id, '') }}">{{ t3_metric_labels.get(metric_id, metric_id | replace("_", " ") | title) }}</span>
                             {% endfor %}
                         </td>
                         <td class="t3-reasoning">
+                            {% if dim.comparison %}<p>{% if dim.comparison.label %}<strong>{{ dim.comparison.label }}</strong>{% endif %}{% if dim.comparison.with_skill is number and dim.comparison.baseline is number and dim.comparison.lift is number %}: {{ "%.2f" | format(dim.comparison.baseline) }} → {{ "%.2f" | format(dim.comparison.with_skill) }} ({{ "%+.2f" | format(dim.comparison.lift) }} lift).{% endif %}{% if dim.comparison.reason %} {{ dim.comparison.reason }}{% endif %}</p>{% endif %}
                             {% if dim.reasoning_bullets %}
                             <ul class="t3-reasoning-list">
                                 {% for bullet in dim.reasoning_bullets %}<li>{{ bullet }}</li>{% endfor %}
@@ -2810,114 +2870,88 @@
                         </td>
                     </tr>
                     {% endfor %}
-                    {% for dim in t3_na_dimensions %}
+                    {% for dim in t3_na_dimensions + t3_peer_only_dimensions %}
                     <tr>
                         <td>
                             <strong>{{ "Skill Efficiency" if dim.id == "efficiency" else (dim.id | title) }}</strong>
                             {% if t3_dim_hints.get(dim.id) %}<div class="t3-dim-hint">{{ t3_dim_hints.get(dim.id) }}</div>{% endif %}
                         </td>
                         <td>N/A</td><td>N/A</td><td>N/A</td>
-                        <td><span class="t3-pill warning">Not applicable</span></td>
+                        <td><span class="t3-pill warning">{{ 'Not measured' if dim.peer_only else 'Not applicable' }}</span></td>
+                        {% for name in t3_other_agents %}{{ other_dimension_cell(t3_dim_by_agent[name].get(dim.id), t3_agents[name]) }}{% endfor %}
                         <td></td>
-                        <td class="t3-reasoning">{{ dim.reason or "Not applicable: its signals had nothing to judge in any eval case." }} It has no score, so the agent's verdict stays NEUTRAL and cannot PASS.</td>
+                        <td class="t3-reasoning">{% if dim.peer_only %}No measurement was recorded for the primary agent; other-agent evidence is shown alongside.{% else %}{{ dim.reason or "Not applicable: its signals had nothing to judge in any eval case." }} It has no score, so the agent's verdict stays NEUTRAL and cannot PASS.{% endif %}</td>
                     </tr>
                     {% endfor %}
+                    {% set best_overall_score = t3_best.with_skill if t3_best else none %}
+                    {% set best_overall_baseline = t3_best.baseline if t3_best else none %}
+                    {% set best_overall_color = 'var(--text-secondary)' if best_overall_score is none else ('var(--success-color)' if best_overall_score >= 0.7 else ('var(--warning-color)' if best_overall_score >= 0.4 else 'var(--danger-color)')) %}
+                    <tr>
+                        <td><strong>Overall</strong><div class="t3-dim-hint">Recorded aggregate; review each agent's scope below.</div></td>
+                        <td>{% if best_overall_score is not none %}<div class="metric-bar-cell"><span class="metric-value" style="color:{{ best_overall_color }};">{{ "%.2f" | format(best_overall_score) }}</span><div class="mini-bar"><span style="width:{{ (best_overall_score * 100) | round(0) }}%;background:{{ best_overall_color }};"></span></div></div>{% else %}<span class="metric-value">N/A</span>{% endif %}</td>
+                        <td>{{ "%.2f" | format(best_overall_baseline) if best_overall_baseline is not none else 'N/A' }}</td>
+                        <td style="color:{{ 'var(--success-color)' if tier3.overall_lift is not none and tier3.overall_lift >= tier3_lift_pass_threshold else ('var(--danger-color)' if tier3.overall_lift is not none and tier3.overall_lift <= tier3_lift_fail_threshold else 'var(--text-secondary)') }};font-weight:600;">{% if tier3.overall_lift is not none %}{{ "%+.2f" | format(tier3.overall_lift) }}{% else %}N/A<div class="t3-dim-hint">{{ unavailable_lift(best_overall_score, best_overall_baseline, t3_best.get('skill_activation', {}) if t3_best else {}) }}</div>{% endif %}</td>
+                        <td class="t3-dim-hint">—</td>
+                        {% for name in t3_other_agents %}{% set other_agent = t3_agents[name] %}{% set other_overall_color = 'var(--text-secondary)' if other_agent.with_skill is none else ('var(--success-color)' if other_agent.with_skill >= 0.7 else ('var(--warning-color)' if other_agent.with_skill >= 0.4 else 'var(--danger-color)')) %}<td><div class="t3-mad-cell"><div class="t3-mad-score-row"><span class="t3-mad-score" style="color:{{ other_overall_color }};">{{ "%.2f" | format(other_agent.with_skill) if other_agent.with_skill is not none else 'N/A' }}</span>{% if other_agent.with_skill is not none %}<div class="t3-mad-bar"><span style="width:{{ (other_agent.with_skill * 100) | round(0) }}%;background:{{ other_overall_color }};"></span></div>{% endif %}</div><span class="t3-mad-lift">{% if other_agent.lift is not none and other_agent.get('skill_activation', {}).get('status') != 'never_activated' %}{{ "%+.2f" | format(other_agent.lift) }} lift{% else %}{{ unavailable_lift(other_agent.with_skill, other_agent.baseline, other_agent.get('skill_activation', {})) }}{% endif %}</span></div></td>{% endfor %}
+                        <td colspan="2" class="t3-dim-hint">Agent Scorecards link to trial counts, coverage and evaluator evidence.</td>
+                    </tr>
                     </tbody>
                 </table>
                 </div>
                 </div>
             </details>
 
-            {% if t3_agents | length > 1 %}
-            <details class="t3-details" open>
-                <summary>Multi-Agent Dimension Lift</summary>
-                <div class="t3-details-body">
-                <p class="t3-section-hint">
-                    Per-dimension comparison across agents. The top number in each cell is the
-                    with-skill score (with a mini-bar); the smaller line below is the skill lift
-                    versus that agent's baseline.
-                </p>
-                {# Build {agent_name: {dim_id: dim_dict}} so each cell is a quick lookup. #}
-                {% set t3_mad_by_agent = {} %}
-                {% for name, agent in t3_agents.items() %}
-                    {% set dmap = {} %}
-                    {% for dim in agent.dimensions or [] %}{% set _ = dmap.update({dim.id: dim}) %}{% endfor %}
-                    {% set _ = t3_mad_by_agent.update({name: dmap}) %}
-                {% endfor %}
-                <div class="table-scroll">
-                <table class="summary-table" id="tier3-multi-agent-dimension-table" style="width:100%;">
-                    <thead><tr>
-                        <th>Dimension</th>
-                        {% for name, _agent in t3_agents.items() %}
-                        <th><button class="t3-agent-link" type="button" data-tier3-agent-link="{{ t3_agent_anchor_ids[name] }}" onclick="jumpToTier3Agent('{{ t3_agent_anchor_ids[name] }}')">{{ name }}</button></th>
-                        {% endfor %}
-                    </tr></thead>
-                    <tbody>
-                    {% for dim_id in t3_dim_ids %}
-                        <tr>
-                            <td>
-                                <strong>{{ dim_id | title }}</strong>
-                                {% if t3_dim_hints.get(dim_id) %}<div class="t3-dim-hint">{{ t3_dim_hints.get(dim_id) }}</div>{% endif %}
-                            </td>
-                            {% for name, _agent in t3_agents.items() %}
-                                {% set d = t3_mad_by_agent[name].get(dim_id) %}
-                                {% if d %}
-                                    {% set d_score = d.score if d.score is not none else d.with_skill %}
-                                    {% set d_lift = d.lift %}
-                                    {% set d_color = 'var(--text-secondary)' if d_score is none else ('var(--success-color)' if d_score >= 0.7 else ('var(--warning-color)' if d_score >= 0.4 else 'var(--danger-color)')) %}
-                                    {% set lift_color = 'var(--success-color)' if d_lift is not none and d_lift >= tier3_lift_pass_threshold else ('var(--danger-color)' if d_lift is not none and d_lift <= tier3_lift_fail_threshold else 'var(--text-secondary)') %}
-                                    <td>
-                                        <div class="t3-mad-cell">
-                                            <div class="t3-mad-score-row">
-                                                <span class="t3-mad-score" style="color:{{ d_color }};">{{ "%.2f" | format(d_score) if d_score is not none else "N/A" }}</span>
-                                                {% if d_score is not none %}<div class="t3-mad-bar"><span style="width:{{ (d_score * 100) | round(0) }}%; background:{{ d_color }};"></span></div>{% endif %}
-                                            </div>
-                                            <span class="t3-mad-lift" style="color:{{ lift_color }};">{% if _agent.get('skill_activation', {}).get('status') == 'never_activated' %}inconclusive: skill never activated{% elif d_lift is not none %}{{ "%+.2f" | format(d_lift) }} lift{% elif d_score is none and d.baseline is not none %}with-skill unavailable{% elif d_score is none %}N/A lift{% elif d.baseline is not none %}comparison unavailable{% else %}no baseline lift{% endif %}</span>
-                                        </div>
-                                    </td>
-                                {% else %}
-                                    <td style="color:var(--text-secondary);">N/A</td>
-                                {% endif %}
-                            {% endfor %}
-                        </tr>
-                    {% endfor %}
-                    <tr>
-                        <td><strong>Overall</strong></td>
-                        {% for name, agent in t3_agents.items() %}
-                            {% set ws = agent.with_skill %}
-                            {% set bl = agent.baseline %}
-                            {% set lf = agent.lift %}
-                            {% set ws_color = 'var(--text-secondary)' if ws is none else ('var(--success-color)' if ws >= 0.7 else ('var(--warning-color)' if ws >= 0.4 else 'var(--danger-color)')) %}
-                            {% set lf_color = 'var(--success-color)' if lf is not none and lf >= tier3_lift_pass_threshold else ('var(--danger-color)' if lf is not none and lf <= tier3_lift_fail_threshold else 'var(--text-secondary)') %}
-                            <td>
-                                <div class="t3-mad-cell">
-                                    <div class="t3-mad-score-row">
-                                        <span class="t3-mad-score" style="color:{{ ws_color }};">{{ "%.2f" | format(ws) if ws is not none else "N/A" }}</span>
-                                        {% if ws is not none %}<div class="t3-mad-bar"><span style="width:{{ (ws * 100) | round(0) }}%; background:{{ ws_color }};"></span></div>{% endif %}
-                                    </div>
-                                    <span class="t3-mad-lift" style="color:{{ lf_color }};">{% if agent.get('skill_activation', {}).get('status') == 'never_activated' %}inconclusive: skill never activated{% elif lf is not none %}{{ "%+.2f" | format(lf) }} lift{% elif ws is none and bl is not none %}with-skill unavailable{% elif ws is none %}N/A lift{% elif bl is not none %}comparison unavailable{% else %}no baseline lift{% endif %}</span>
-                                </div>
-                            </td>
-                        {% endfor %}
-                    </tr>
-                    </tbody>
-                </table>
-                </div>
-                </div>
-            </details>
             {% endif %}
 
+            {% if tier3_metric_comparison_rows %}
+            <details class="t3-details" id="tier3-metric-comparison" open>
+                <summary>Metric Scores and Baseline</summary>
+                <div class="t3-details-body">
+                <p class="t3-section-hint">Recorded evaluator measurements. N/A means unavailable; no missing scores or lift values are estimated.</p>
+                <div class="table-scroll"><table class="summary-table" id="tier3-metric-comparison-table">
+                    <thead><tr><th>Metric</th><th>Score</th><th>Baseline</th><th>Skill Lift</th><th>Reason</th></tr></thead>
+                    <tbody>{% for row in tier3_metric_comparison_rows %}<tr>
+                        <th scope="row">{{ row.label }}</th>
+                        <td>{{ "%.2f" | format(row.score) if row.score is not none else 'N/A' }}</td>
+                        <td>{{ "%.2f" | format(row.baseline) if row.baseline is not none else 'N/A' }}</td>
+                        <td>{{ "%+.2f" | format(row.lift) if row.lift is not none else 'N/A' }}</td>
+                        <td>{{ row.reason }}</td>
+                    </tr>{% endfor %}</tbody>
+                </table></div>
+                {% if tier3_metric_comparison_omitted %}<p class="t3-section-hint">{{ tier3_metric_comparison_omitted }} additional metrics are retained in <a href="#tier3-json-downloads">JSON Downloads</a>.</p>{% endif %}
+                </div>
+            </details>
             {% endif %}
 
             {% if t3_agents %}
-            <details class="t3-details"{% if tier3_display_dimensions %} open{% endif %}>
-                <summary>Agent comparisons</summary>
+            <details class="t3-details" id="tier3-agent-scorecards" open>
+                <summary>Agent Scorecards</summary>
                 <div class="t3-details-body">
-                <div class="t3-agent-scorecards-row">
+                <div class="t3-agent-scorecards-row{{ ' t3-scorecards-only' if not tier3_display_dimensions else '' }}">
+                    <div class="t3-agent-scorecard-list">
+                    {% for name, agent in t3_agents.items() %}
+                        {% set score_color = 'var(--text-secondary)' if agent.with_skill is none else ('var(--success-color)' if agent.with_skill >= 0.7 else ('var(--warning-color)' if agent.with_skill >= 0.4 else 'var(--danger-color)')) %}
+                        <div class="t3-agent-card t3-agent-deeplink"
+                             role="button" tabindex="0" data-tier3-agent-link="{{ t3_agent_anchor_ids[name] }}"
+                             onclick="jumpToTier3Agent('{{ t3_agent_anchor_ids[name] }}')"
+                             onkeydown="tier3MaybeActivateAgentLink(event, '{{ t3_agent_anchor_ids[name] }}')"
+                             aria-label="Open Agent Details for {{ name }}" title="Open Agent Details for {{ name }}">
+                            <div class="t3-agent-name">{{ name }}</div>
+                            <div class="t3-agent-score" style="color:{{ score_color }};">{{ "%.2f" | format(agent.with_skill) if agent.with_skill is not none else 'N/A' }}</div>
+                            <div class="t3-dim-hint">{% if agent.lift is not none and agent.get('skill_activation', {}).get('status') != 'never_activated' %}{{ "%+.2f" | format(agent.lift) }} lift{% else %}{{ unavailable_lift(agent.with_skill, agent.baseline, agent.get('skill_activation', {})) }}{% endif %}</div>
+                            <div class="t3-dim-hint">{{ agent.num_trials or 0 }} trials{% if agent.num_trials_baseline %} · {{ agent.num_trials_baseline }} baseline{% endif %}{% if agent.execution_status %} · {{ agent.execution_status | title }}{% endif %}</div>
+                            {% set card_coverage = presentation.coverage.agents.get(name, {}) %}
+                            {% if card_coverage %}<div class="t3-dim-hint">{% for condition, label in [('with_skill', 'With skill'), ('without_skill', 'Baseline')] %}{% set arm = card_coverage.get(condition) %}{% if arm %}{{ ' · ' if not loop.first else '' }}{{ label }} {{ arm.scored if arm.scored is not none else '?' }}/{{ arm.expected if arm.expected is not none else '?' }} scored{% endif %}{% endfor %}</div>{% endif %}
+                            {% if agent.with_skill is not none %}<div class="t3-mini-bar"><span style="width:{{ (agent.with_skill * 100) | round(0) }}%;background:{{ score_color }};"></span></div>{% endif %}
+                        </div>
+                    {% endfor %}
+                    </div>
                     {% set dimension_reference = ('tier3-multi-agent-dimension-table' if t3_agents | length > 1 else 'tier3-dimension-table') if tier3_display_dimensions else 'tier3-json-downloads' %}
                     {% set dimension_reference_label = 'Read the dimension scores table' if tier3_display_dimensions else 'Read JSON Downloads (dimension scores unavailable)' %}
+                    {% if tier3_display_dimensions %}
                     <div class="chart-card">{{ tier3_chart('tier3-radar', 'Dimension Comparison (Radar)', 'Dimension scores for each agent, on a scale from 0 to 1; missing measurements are gaps.', dimension_reference, dimension_reference_label, 260) }}</div>
                     <div class="chart-card">{{ tier3_chart('tier3-metric-bar', 'Dimension Scores by Agent', 'Dimension scores grouped by dimension and agent, on a scale from 0 to 1; missing measurements are gaps.', dimension_reference, dimension_reference_label, 260) }}</div>
+                    {% endif %}
                 </div>
                 </div>
             </details>
@@ -3599,13 +3633,15 @@
             {% set agent_color = t3_palette[agent_idx % (t3_palette | length)] %}
             {% set agent_score = agent.with_skill %}
             {% set agent_score_color = 'var(--text-secondary)' if agent_score is none else ('var(--success-color)' if agent_score >= 0.7 else ('var(--warning-color)' if agent_score >= 0.4 else 'var(--danger-color)')) %}
-            {% set best_dim = none %}
-            {% set worst_dim = none %}
+            {% set extremes = namespace(best=none, worst=none) %}
             {% for d in agent.dimensions or [] %}
                 {% set dscore = d.score if d.score is not none else d.with_skill %}
-                {% if best_dim is none or dscore > (best_dim.score if best_dim.score is not none else best_dim.with_skill) %}{% set best_dim = d %}{% endif %}
-                {% if worst_dim is none or dscore < (worst_dim.score if worst_dim.score is not none else worst_dim.with_skill) %}{% set worst_dim = d %}{% endif %}
+                {% if dscore is number %}
+                {% if extremes.best is none or dscore > (extremes.best.score if extremes.best.score is not none else extremes.best.with_skill) %}{% set extremes.best = d %}{% endif %}
+                {% if extremes.worst is none or dscore < (extremes.worst.score if extremes.worst.score is not none else extremes.worst.with_skill) %}{% set extremes.worst = d %}{% endif %}
+                {% endif %}
             {% endfor %}
+            {% set best_dim = extremes.best %}{% set worst_dim = extremes.worst %}
             <div class="t3-agent-panel{% if loop.first %} active{% endif %}" id="{{ t3_agent_panel_ids[name] }}" data-tier3-agent="{{ name }}" role="tabpanel" aria-labelledby="tier3-agent-tab-{{ loop.index0 }}" tabindex="0">
                 {# Stable, index-based scroll target for jumpToTier3Agent. Raw agent
                    names can contain characters that are unsafe in CSS/HTML IDs (slashes,
@@ -3655,7 +3691,7 @@
                     <div class="t3-kpi-card">
                         <div class="t3-kpi-label">Best Dimension</div>
                         <div class="t3-kpi-value" style="font-size:1.1rem; color:var(--success-color);">{{ best_dim.id | title }}</div>
-                        <div class="t3-kpi-sub">{{ "%.2f" | format(best_score or 0.0) }}</div>
+                        <div class="t3-kpi-sub">{{ "%.2f" | format(best_score) }}</div>
                     </div>
                     {% endif %}
                     {% if worst_dim and worst_dim.id != (best_dim.id if best_dim else None) %}
@@ -3663,7 +3699,7 @@
                     <div class="t3-kpi-card">
                         <div class="t3-kpi-label">Weakest Dimension</div>
                         <div class="t3-kpi-value" style="font-size:1.1rem; color:var(--danger-color);">{{ worst_dim.id | title }}</div>
-                        <div class="t3-kpi-sub">{{ "%.2f" | format(worst_score or 0.0) }}</div>
+                        <div class="t3-kpi-sub">{{ "%.2f" | format(worst_score) }}</div>
                     </div>
                     {% endif %}
                 </div>
@@ -3829,12 +3865,12 @@
             {% if insights_view.execution_errors %}<p><a href="#tier3-execution-errors">Shared run execution errors are retained once in Diagnostics.</a></p>{% endif %}
             {% if t3_dataset %}
             <div class="t3-dataset-hero">
-                <h2>AgentSkills Dataset</h2>
+                <h2>Evaluation Dataset</h2>
                 <p style="color:var(--text-secondary);font-size:0.9rem;margin:0.25rem 0 0;">
-                    {{ t3_dataset | length }} AgentSkills eval case{{ 's' if t3_dataset | length != 1 else '' }} used for this Tier 3 run.
+                    {{ t3_dataset | length }} eval case{{ 's' if t3_dataset | length != 1 else '' }} used for this Tier 3 run.
                 </p>
                 <div class="t3-ds-meta" style="margin-top:0.75rem;">
-                    <span class="t3-ds-chip">Skill: <b>{{ tier3.skill_name or 'unknown' }}</b></span>
+                    <span class="t3-ds-chip">{{ content_label }}: <b>{{ tier3.skill_name or 'unknown' }}</b></span>
                     <span class="t3-ds-chip">Best Performing Agent: <b>{{ t3_best_name or 'N/A' }}</b></span>
                     {% set t3_env = (tier3.summary.environment if tier3.summary is defined and tier3.summary else None) or tier3.environment %}
                     {% if t3_env %}<span class="t3-ds-chip">Environment: <b>{{ t3_env }}</b></span>{% endif %}
@@ -3969,6 +4005,7 @@
 
             {% if t3_effect %}<p class="t3-next-steps-conclusion">{% if insights_case_fix_count %}{{ insights_case_fix_count }} issue{{ 's' if insights_case_fix_count != 1 else '' }} to fix, most attempts lost first:{% else %}Nothing to fix in the available case evidence.{% endif %}</p>{% endif %}
 
+            <div id="tier3-run-next-steps">
             {% if t3_has_suggestions %}
             <details class="t3-details" open>
                 <summary>Recommendations</summary>
@@ -4014,6 +4051,7 @@
             {% endif %}
 
             {{ insight_next_steps(remaining_insight_steps) }}
+            </div>
             {% if not t3_source_errors and not t3_has_conclusions and not t3_has_suggestions %}
             <p style="color:var(--text-secondary);">No evaluation insights were generated.</p>
             {% endif %}

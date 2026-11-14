@@ -26,7 +26,10 @@
     "Header, hero, tier cards, severity treatment, tables and disclosures",
     "Insights conclusion and recommendation cards with recorded source labels",
     "Tier 2 intra-skill/inter-skill navigation and six Tier 3 sections",
-    "Dimension comparisons, evaluator evidence, trials and resource presentation"
+    "Dimension comparisons, evaluator evidence, trials and resource presentation",
+    "Native header scale and visible renderer/scanner version identification",
+    "Consolidated baseline comparison with Overall, other agents and partial-comparison details",
+    "Clickable agent scorecards and Harbor results/analysis actions in Tier 3 navigation and Overview"
   ],
   "intentional_adaptations": [
     "Public scores, gates, applicability, source identity and publication assessments remain authoritative.",
@@ -38,7 +41,10 @@
     "Recorded token/latency adapters support native-shaped and current public evidence without collection or rescoring.",
     "Accessible active-control contrast, wrapped mobile controls, keyboard navigation, search, deep links, no-JS and print behavior are retained.",
     "Collection similarity counts use public validator identities rather than copying the reference zero-count mapping defect.",
-    "Canonical public product branding is SkillEvaluator."
+    "Canonical public product branding is SkillEvaluator.",
+    "The full-size native header scrolls on narrow screens so it does not obscure report evidence.",
+    "Configured standard metrics remain explicitly unavailable in incomplete comparison tables; custom-only runs use their recorded metric names and values.",
+    "Harbor viewer fallback selects a usable sanitized primary or recorded summary without combining unrelated jobs or inferring URLs."
   ],
   "drift_checks": [
     "tests/reporting/test_report_redesign.py::test_native_presentation_stylesheets_match_pinned_reference",

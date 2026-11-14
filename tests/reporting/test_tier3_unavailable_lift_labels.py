@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import re
 
+from native_comparison_assertions import dimension_lift_labels
+
 from skillevaluator.constants import DIMENSION_MAPPING
 from skillevaluator.evaluation.tier3_report import _validation_result_from_payload, build_agent_eval_payload
 from skillevaluator.reporting import HTMLReporter
@@ -58,11 +60,10 @@ def _text(fragment: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", fragment)).strip()
 
 
-def _matrix_labels(html: str, agents: list[str]) -> dict[str, list[str]]:
-    # The grid interleaves one cell per agent for every dimension, then Overall.
-    labels = [_text(label) for label in re.findall(r'<span class="t3-mad-lift"[^>]*>(.*?)</span>', html, re.DOTALL)]
-    assert len(labels) == len(agents) * (len(DIMENSION_MAPPING) + 1)
-    return {name: labels[index :: len(agents)] for index, name in enumerate(agents)}
+def _matrix_labels(html: str, agents: list[str], best_agent: str) -> dict[str, list[str]]:
+    labels = dimension_lift_labels(html, agents, best_agent)
+    assert all(len(values) == len(DIMENSION_MAPPING) + 1 for values in labels.values())
+    return labels
 
 
 def _lift_kpi_labels(html: str) -> list[str]:
@@ -77,13 +78,13 @@ def test_mixed_judge_comparison_is_unavailable_not_missing_baseline() -> None:
     assert (mixed["baseline"], mixed["lift"]) == (0.5, None)
     assert (correctness["baseline"], correctness["lift"]) == (0.5, None)
 
-    labels = _matrix_labels(html, list(payload["agents"]))
+    labels = _matrix_labels(html, list(payload["agents"]), payload["best_agent"])
     assert all(re.fullmatch(r"[+-]\d+\.\d{2} lift", label) for label in labels["matched"])
     dimension_labels = dict(zip(DIMENSION_MAPPING, labels["mixed"], strict=False))
     assert dimension_labels["correctness"] == "comparison unavailable"
     assert dimension_labels["security"] == "+0.40 lift"
     assert labels["mixed"][-1] == "comparison unavailable"
-    assert 'class="t3-agent-score"' not in html
+    assert re.findall(r'class="t3-agent-score"[^>]*>(.*?)</div>', html) == ["0.90", "0.90"]
     assert _lift_kpi_labels(html) == ["positive", "comparison unavailable"]
     assert "no baseline" not in html
 
@@ -99,7 +100,7 @@ def test_score_policy_mismatch_is_unavailable_not_missing_baseline() -> None:
     payload, html = _html({"codex": agent})
     assert (payload["agents"]["codex"]["baseline"], payload["agents"]["codex"]["lift"]) == (0.5, None)
     assert "baseline 0.50" in html
-    assert 'class="t3-agent-score"' not in html
+    assert re.findall(r'class="t3-agent-score"[^>]*>(.*?)</div>', html) == ["0.90"]
     assert _lift_kpi_labels(html) == ["comparison unavailable"]
     assert "no baseline" not in html
 
@@ -107,8 +108,8 @@ def test_score_policy_mismatch_is_unavailable_not_missing_baseline() -> None:
 def test_skipped_baseline_keeps_no_baseline_labels() -> None:
     payload, html = _html({"compared": _agent(), "skipped": _agent(baseline=False)})
     assert payload["agents"]["skipped"]["baseline"] is None
-    labels = _matrix_labels(html, list(payload["agents"]))
+    labels = _matrix_labels(html, list(payload["agents"]), payload["best_agent"])
     assert labels["skipped"] == ["no baseline lift"] * (len(DIMENSION_MAPPING) + 1)
-    assert 'class="t3-agent-score"' not in html
+    assert re.findall(r'class="t3-agent-score"[^>]*>(.*?)</div>', html) == ["0.90", "0.90"]
     assert _lift_kpi_labels(html) == ["positive", "no baseline"]
     assert "comparison unavailable" not in html

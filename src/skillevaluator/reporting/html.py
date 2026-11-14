@@ -541,7 +541,75 @@ def _tier3_text_mapping(value: object) -> dict[str, str]:
     return labels
 
 
-def _sanitize_tier3_dimension(value: dict[str, Any]) -> dict[str, Any]:
+def _tier3_comparison_block_reason(value: dict[str, Any]) -> str:
+    """Keep cached comparison evidence from restoring an explicitly unavailable skill arm."""
+    summary = value.get("summary") if isinstance(value.get("summary"), dict) else {}
+    if value.get("mode") == "baseline_only" or summary.get("mode") == "baseline_only":
+        return "baseline_only"
+    conditions = value.get("conditions") if isinstance(value.get("conditions"), dict) else {}
+    with_skill = conditions.get("with_skill")
+    if isinstance(with_skill, dict) and any(
+        isinstance(status := with_skill.get(key), str) and status.strip().casefold() == "skipped"
+        for key in ("execution_status", "status")
+    ):
+        return "with_skill_skipped"
+    activation = value.get("skill_activation")
+    if isinstance(activation, dict) and activation.get("status") == "never_activated":
+        return "never_activated"
+    return ""
+
+
+def _sanitize_tier3_dimension_comparison(
+    value: object, *, allow_lift: bool = True, block_reason: str = ""
+) -> dict[str, Any]:
+    """Project recorded native comparisons without recomputing or trusting shaped values."""
+    if not isinstance(value, dict):
+        return {}
+    raw_status = value.get("status")
+    status = raw_status.strip().casefold() if isinstance(raw_status, str) else ""
+    known_status = status in {"comparable", "partial", "not_applicable", "unavailable", "inconclusive"}
+    comparison: dict[str, Any] = {"status": status if known_status else "unavailable"}
+    for key in ("label", "reason", "reason_code"):
+        text = _json_safe_tier3_text(value[key]) if isinstance(value.get(key), str) else ""
+        comparison[key] = (
+            text[:_TIER3_HTML_PREVIEW_STRING_CHARS] + _TIER3_PREVIEW_MARKER
+            if len(text) > _TIER3_HTML_PREVIEW_STRING_CHARS
+            else text
+        )
+    comparison["sources"] = _tier3_identifier_list(value.get("sources"))
+    for key in ("with_skill", "baseline", "lift"):
+        comparison[key] = (
+            _finite_number(value.get(key), minimum=-1.0 if key == "lift" else 0.0, maximum=1.0)
+            if status in {"comparable", "partial"} and allow_lift and not block_reason
+            else None
+        )
+    raw_measured = value.get("measured") if isinstance(value.get("measured"), dict) else {}
+    comparison["measured"] = {}
+    for arm in ("with_skill", "baseline"):
+        measured = raw_measured.get(arm)
+        if isinstance(measured, dict):
+            comparison["measured"][arm] = {
+                "score": _finite_number(measured.get("score"), minimum=0.0, maximum=1.0) if known_status else None,
+                "sources": _tier3_identifier_list(measured.get("sources")),
+            }
+    if block_reason or not allow_lift:
+        reason_code = block_reason or "never_activated"
+        explanations = {
+            "baseline_only": "Baseline-only run; the with-skill arm was not run, so no skill comparison is available.",
+            "with_skill_skipped": "The with-skill arm was explicitly skipped; no skill comparison is available.",
+            "never_activated": "Skill never activated; scores are diagnostic only and no skill comparison is available.",
+        }
+        comparison.update(
+            status="inconclusive" if reason_code == "never_activated" else "unavailable",
+            reason_code=reason_code,
+            reason=explanations[reason_code],
+        )
+    return comparison
+
+
+def _sanitize_tier3_dimension(
+    value: dict[str, Any], *, allow_comparison_lift: bool = True, comparison_block_reason: str = ""
+) -> dict[str, Any]:
     dimension = dict(value)
     for key in ("baseline", "with_skill", "score"):
         dimension[key] = _finite_number(dimension.get(key), minimum=0.0, maximum=1.0)
@@ -556,6 +624,16 @@ def _sanitize_tier3_dimension(value: dict[str, Any]) -> dict[str, Any]:
         dimension["verdict"] = None if raw_verdict is None else _tier3_display_identifier(raw_verdict)
     dimension["evaluators"] = _tier3_identifier_list(dimension.get("evaluators"))
     dimension["reasoning_bullets"] = _string_list(dimension.get("reasoning_bullets"))
+    if "partial" in dimension:
+        dimension["partial"] = dimension["partial"] is True
+    if "comparison" in dimension:
+        comparison = _sanitize_tier3_dimension_comparison(
+            dimension["comparison"], allow_lift=allow_comparison_lift, block_reason=comparison_block_reason
+        )
+        if comparison:
+            dimension["comparison"] = comparison
+        else:
+            dimension.pop("comparison", None)
     return dimension
 
 
@@ -908,7 +986,7 @@ def _sanitize_tier3_evaluator_card(
     return card
 
 
-def _sanitize_tier3_agent(value: dict[str, Any]) -> dict[str, Any]:
+def _sanitize_tier3_agent(value: dict[str, Any], *, comparison_block_reason: str = "") -> dict[str, Any]:
     agent = dict(value)
     activation = agent.get("skill_activation")
     agent["skill_activation"] = dict(activation) if isinstance(activation, dict) else {}
@@ -931,7 +1009,11 @@ def _sanitize_tier3_agent(value: dict[str, Any]) -> dict[str, Any]:
     agent["num_trials_baseline"] = _nonnegative_count(agent.get("num_trials_baseline"))
     agent["expected_attempts"] = _nonnegative_count(agent.get("expected_attempts"))
     agent["scored_attempts"] = _nonnegative_count(agent.get("scored_attempts"))
-    agent["dimensions"] = [_sanitize_tier3_dimension(item) for item in _dict_list(agent.get("dimensions"))]
+    comparison_block_reason = comparison_block_reason or _tier3_comparison_block_reason(agent)
+    agent["dimensions"] = [
+        _sanitize_tier3_dimension(item, comparison_block_reason=comparison_block_reason)
+        for item in _dict_list(agent.get("dimensions"))
+    ]
     agent["evaluator_cards"] = [
         card
         for item in _dict_list(agent.get("evaluator_cards"))
@@ -950,7 +1032,7 @@ def _sanitize_tier3_agent(value: dict[str, Any]) -> dict[str, Any]:
 
 
 def _tier3_html_dimensions(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """Add display-only missing-signal rows for a successful best agent."""
+    """Keep recorded dimensions and configured-but-unmeasured public dimensions visible."""
     if not isinstance(payload, dict):
         return []
     dimensions = [dict(item) for item in _dict_list(payload.get("dimensions"))]
@@ -961,9 +1043,14 @@ def _tier3_html_dimensions(payload: dict[str, Any] | None) -> list[dict[str, Any
     summary = summary if isinstance(summary, dict) else {}
     best_name = payload.get("best_agent") or summary.get("best_agent")
     best = agents.get(best_name) if isinstance(agents, dict) and isinstance(best_name, str) else None
-    if not isinstance(best, dict) or best.get("execution_status") != "succeeded":
+    successful_best = isinstance(best, dict) and best.get("execution_status") == "succeeded"
+    active_metrics = (
+        set(_tier3_identifier_list(best.get("metrics_with_skill")))
+        if successful_best
+        else set(_tier3_configured_metrics(payload))
+    )
+    if payload.get("execution_status") == "skipped":
         return dimensions
-    active_metrics = set(_tier3_identifier_list(best.get("metrics_with_skill")))
     for dimension_id, config in DIMENSION_MAPPING.items():
         if dimension_id in dimension_ids:
             continue
@@ -980,11 +1067,114 @@ def _tier3_html_dimensions(payload: dict[str, Any] | None) -> list[dict[str, Any
                 "lift": None,
                 "verdict": None,
                 "evaluators": active_signals,
-                "reasoning_bullets": ["A signal this dimension needs produced no score."],
+                "reasoning_bullets": [
+                    "A signal this dimension needs produced no score."
+                    if successful_best
+                    else "The evaluation did not complete; no authoritative dimension measurement is available."
+                    if payload.get("execution_status") in {"failed", "incomplete"}
+                    else "No authoritative dimension measurement was recorded."
+                ],
+                "measurement_unavailable": True,
             }
         )
         dimension_ids.add(dimension_id)
     return dimensions
+
+
+def _tier3_configured_metrics(payload: dict[str, Any]) -> list[str]:
+    """Read retained metric identities; never substitute the template's default metric set."""
+    metrics = _tier3_identifier_list(payload.get("metric_ids"))
+    for _name, agent in _tier3_agent_entries(payload.get("agents")):
+        for key in ("metrics_with_skill", "metrics_without_skill"):
+            metrics.extend(_tier3_identifier_list(agent.get(key)))
+    if isinstance(payload.get("evaluators"), dict):
+        metrics.extend(_tier3_identifier_list(list(payload["evaluators"])))
+    return list(dict.fromkeys(metrics))
+
+
+def _tier3_metric_comparison_view(payload: object) -> dict[str, Any]:
+    """Bound a custom-only Overview table to already assessed recorded metric values."""
+    empty: dict[str, Any] = {"rows": [], "omitted": 0}
+    if not isinstance(payload, dict) or payload.get("execution_status") == "skipped":
+        return empty
+    standard_metrics = {
+        metric
+        for config in DIMENSION_MAPPING.values()
+        for key in ("evaluators", "fallback_evaluators")
+        for metric in config.get(key, [])
+    }
+    if any(metric in standard_metrics for metric in _tier3_configured_metrics(payload)) or any(
+        item.get("id") in DIMENSION_MAPPING for item in _dict_list(payload.get("dimensions"))
+    ):
+        return empty
+    labels = _tier3_text_mapping(payload.get("metric_labels"))
+    candidates: dict[str, dict[str, Any]] = {}
+    seen: set[str] = set()
+    evaluators = payload.get("evaluators") if isinstance(payload.get("evaluators"), dict) else {}
+    for raw_id, scores in evaluators.items():
+        identifier = _tier3_display_identifier(raw_id)
+        if not identifier or not isinstance(scores, dict) or identifier.casefold() in seen:
+            return empty
+        seen.add(identifier.casefold())
+        candidates[identifier] = {**scores, "label": labels.get(identifier, identifier)}
+    card_ids: set[str] = set()
+    for card in _dict_list(payload.get("evaluator_cards")):
+        identifier = _tier3_display_identifier(card.get("id") or card.get("evaluator"))
+        identity = identifier.casefold()
+        if not identifier or identity in card_ids:
+            return empty
+        card_ids.add(identity)
+        if identifier not in candidates:
+            if identity in seen:
+                return empty
+            seen.add(identity)
+            candidates[identifier] = card
+    for identifier in _tier3_identifier_list(payload.get("metric_ids")):
+        if identifier not in candidates:
+            if identifier.casefold() in seen:
+                return empty
+            seen.add(identifier.casefold())
+            candidates[identifier] = {}
+    agents = dict(_tier3_agent_entries(payload.get("agents")))
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    best_name = _tier3_display_identifier(payload.get("best_agent") or summary.get("best_agent"))
+    best = agents.get(best_name, {})
+    comparison_block_reason = _tier3_comparison_block_reason(payload) or _tier3_comparison_block_reason(best)
+    incomplete = (
+        payload.get("execution_status") in {"failed", "incomplete"} and best.get("execution_status") != "succeeded"
+    )
+    rows = []
+    for identifier, candidate in candidates.items():
+        score = _finite_number(candidate.get("with_skill"), minimum=0.0, maximum=1.0)
+        baseline = _finite_number(candidate.get("baseline"), minimum=0.0, maximum=1.0)
+        lift = _finite_number(candidate.get("lift"), minimum=-1.0, maximum=1.0)
+        reason = ""
+        if incomplete:
+            score = baseline = lift = None
+            reason = "The evaluation did not complete; no authoritative comparison is available."
+        elif comparison_block_reason == "baseline_only":
+            score = lift = None
+            reason = "Baseline-only run; the with-skill arm was not run."
+        elif comparison_block_reason == "with_skill_skipped":
+            score = lift = None
+            reason = "The with-skill arm was explicitly skipped; no skill comparison is available."
+        elif comparison_block_reason == "never_activated":
+            lift = None
+            reason = "Skill never activated; scores are diagnostic only."
+        elif score is None:
+            lift = None
+            reason = "No with-skill measurement was recorded."
+        elif baseline is None:
+            lift = None
+            reason = "No baseline measurement was recorded."
+        elif lift is None:
+            reason = "No comparable lift was recorded."
+        if len(rows) < _TIER3_HTML_PREVIEW_COLLECTION_ITEMS:
+            label = _tier3_display_identifier(candidate.get("label")) or labels.get(identifier) or identifier
+            rows.append(
+                {"id": identifier, "label": label, "score": score, "baseline": baseline, "lift": lift, "reason": reason}
+            )
+    return {"rows": rows, "omitted": max(0, len(candidates) - len(rows))}
 
 
 def _scrub_untrusted_tier3_agents(value: object) -> dict[str, dict[str, Any]]:
@@ -1179,8 +1369,15 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
     else:
         payload.pop("evidence_volume", None)
     payload["summary"] = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    global_comparison_block = _tier3_comparison_block_reason(payload)
     payload["agents"] = {
-        identifier: _sanitize_tier3_agent(agent) for identifier, agent in _tier3_agent_entries(payload.get("agents"))
+        identifier: _sanitize_tier3_agent(
+            agent,
+            comparison_block_reason=global_comparison_block
+            if global_comparison_block in {"baseline_only", "with_skill_skipped"}
+            else "",
+        )
+        for identifier, agent in _tier3_agent_entries(payload.get("agents"))
     }
     for container in (payload, payload["summary"]):
         for key in ("skill_name", "evaluator_version", "environment"):
@@ -1272,12 +1469,16 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
         if (card := _sanitize_tier3_evaluator_card(item)) is not None
     ]
     payload["cases"] = _dict_list(payload.get("cases"))
+    best_name = _tier3_display_identifier(payload.get("best_agent") or payload["summary"].get("best_agent"))
+    best_agent = payload["agents"].get(best_name, {})
+    comparison_block_reason = global_comparison_block or _tier3_comparison_block_reason(best_agent)
     # Unscored dimensions stay listed so the report can explain them.
     payload["dimensions"] = [
         dimension
         for item in _dict_list(payload.get("dimensions"))
         if any(
-            (dimension := _sanitize_tier3_dimension(item)).get(key) is not None
+            (dimension := _sanitize_tier3_dimension(item, comparison_block_reason=comparison_block_reason)).get(key)
+            is not None
             for key in ("score", "with_skill", "baseline")
         )
     ]
@@ -3330,6 +3531,7 @@ class HTMLReporter(ReporterBase):
             }
         tier3_telemetry = build_telemetry_view(tier3_data)
         tier3_preview, tier3_preview_notice = _bounded_tier3_preview(tier3_data)
+        tier3_metric_comparison = _tier3_metric_comparison_view(tier3_preview)
         insights_view = build_insights_view(tier3_preview or {})
         insights_case_fix_count = len(insights_view.get("recommendations") or [])
         # Older retained source checks and healthy runs may only have suggestions.
@@ -3707,6 +3909,8 @@ class HTMLReporter(ReporterBase):
             insights_case_fix_count=insights_case_fix_count,
             plugin_evidence=plugin_evidence,
             tier3_display_dimensions=_tier3_html_dimensions(tier3_data),
+            tier3_metric_comparison_rows=tier3_metric_comparison["rows"],
+            tier3_metric_comparison_omitted=tier3_metric_comparison["omitted"],
             tier3_dataset_provenance_line=tier3_dataset_provenance_line,
             tier3_dataset_provenance_warning=tier3_dataset_provenance_warning,
             chart_assets=_load_chart_assets,

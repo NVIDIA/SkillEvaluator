@@ -202,7 +202,8 @@ function reportScrollBehavior() {
 function reportMeasureNavigation() {
     [['.main-header', '--report-header-height'], ['.mobile-tier-nav', '--mobile-nav-height'], ['.t3-subtabs', '--tier3-nav-height']].forEach(([selector, property]) => {
         const nav = document.querySelector(selector);
-        const height = nav && nav.getClientRects().length ? nav.getBoundingClientRect().height : 0;
+        const pinned = nav && ['sticky', 'fixed'].includes(getComputedStyle(nav).position);
+        const height = pinned && nav.getClientRects().length ? nav.getBoundingClientRect().height : 0;
         document.documentElement.style.setProperty(property, height + 'px');
     });
 }

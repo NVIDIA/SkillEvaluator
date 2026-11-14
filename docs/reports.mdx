@@ -156,7 +156,14 @@ the recorded job name or `Job N`. Legacy single-job and analysis-only links
 remain usable. Job names alone do not establish agent or condition ownership.
 Links use the existing URL validation and output escaping.
 
-HTML disclosures show recorded scanner versions and LLM provenance, plus
+The HTML header shows the SkillEvaluator renderer version independently of the
+generation timestamp. Recorded SkillSpector scanner versions remain visible
+beside the native header or Tier 1 summary. A regenerated report identifies its
+current renderer; it does not imply the saved evaluation used that version.
+The native header retains its original type scale. On narrow screens it scrolls
+with the page so that report navigation and evidence retain usable space.
+
+HTML disclosures show scanner and LLM provenance, plus
 sanitized model, evaluator, dataset digest, and evaluated source metadata under
 Tier 3 Diagnostics. Missing values remain unavailable. These views use existing
 report data and do not read the source tree or contact providers while rendering.
@@ -168,7 +175,16 @@ cached and uncached prompt tokens without counting cached reads twice.
 ### Insights, diagnostics, and JSON downloads
 
 Overview shows a concise result, scored-attempt coverage and one recorded next
-action. Insights owns the complete conclusion and recommendation cards, with
+action. Its native human-readable comparison table includes dimension scores,
+the no-skill baseline, recorded lift, Overall, other agents and partial-comparison
+explanations. Configured standard dimensions remain visible with unavailable
+cells when an incomplete run has no measurements; custom-only runs show their
+recorded custom metrics. Neither view substitutes zero for a missing score.
+Clickable agent scorecards open the corresponding Agent Details, and recorded
+Harbor results and analysis actions are available in both the Tier 3 tile and
+Overview. Missing viewer URLs stay explicitly unavailable.
+
+Insights owns the complete conclusion and recommendation cards, with
 their original text, source, verification and evidence links. Full execution
 errors remain in Diagnostics. Routine configuration and provenance stay in the
 closed **Run details & provenance** footer; important execution or comparison

@@ -152,6 +152,38 @@ def reports(tmp_path_factory):
         HTMLReporter(include_timestamp=False).render_all([*_tier1_results(), _similarity_result(), agent]),
         encoding="utf-8",
     )
+    native_agent = deepcopy(agent)
+    native_payload = native_agent.metadata["agent_eval"]
+    native_payload["harbor_viewer"] = {
+        "jobs": [
+            {
+                "name": f"{name} / {arm}",
+                "url": f"https://example.test/harbor/{index}/{arm}",
+                "analysis_url": f"https://example.test/harbor/{index}/{arm}/analysis",
+            }
+            for index, name in enumerate(native_payload["agents"], 1)
+            for arm in ("with_skill", "without_skill")
+        ]
+    }
+    for dimension in native_payload["dimensions"]:
+        if dimension["id"] == "efficiency":
+            dimension.update(
+                partial=True,
+                comparison={
+                    "status": "partial",
+                    "label": "Recorded shared-signal comparison",
+                    "reason": "Only the recorded common signal is comparable.",
+                    "with_skill": 0.8,
+                    "baseline": 0.7,
+                    "lift": 0.1,
+                },
+            )
+    native_static = _tier1_results()
+    native_static[0].metadata["skillspector_version"] = "2.13.4"
+    (directory / "native-features.html").write_text(
+        HTMLReporter(include_timestamp=False).render_all([*native_static, _similarity_result(), native_agent]),
+        encoding="utf-8",
+    )
     if external := os.environ.get("SKILLEVALUATOR_BROWSER_REPORTS"):
         for name in ("full.html", "stress.html", "absent.html"):
             shutil.copyfile(Path(external) / name, directory / name)
@@ -453,6 +485,101 @@ def test_theme_defaults_and_explicit_preference_survive_reload(page, reports):
     assert page.locator("html").get_attribute("data-theme") == "light"
     page.reload()
     assert page.locator("html").get_attribute("data-theme") == "light"
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+def test_native_header_versions_and_visible_overview_comparison_are_restored(page, reports, width):
+    from skillevaluator import __version__
+
+    directory, _, _ = reports
+    page.set_viewport_size({"width": width, "height": 1000})
+    _open(page, directory, "native-features")
+    header = page.locator(".main-header")
+    assert header.locator(".header-title").evaluate(
+        "node=>parseFloat(getComputedStyle(node).fontSize)"
+    ) == pytest.approx(32 if width == 1440 else 26.4)
+    assert f"v{__version__}" in header.inner_text()
+    assert "SkillSpector" in page.locator(".agent-hero").inner_text() or "SkillSpector" in header.inner_text()
+    assert page.get_by_text("v2.13.4", exact=False).filter(visible=True).count() > 0
+    _tier(page, "tier3")
+    comparison = page.locator("#tier3-dimension-table")
+    assert comparison.is_visible()
+    assert "baseline" in comparison.locator("thead").inner_text().casefold()
+    assert comparison.locator("tbody tr").filter(has_text="Overall").count() == 1
+    assert comparison.locator("th button[data-tier3-agent-link]").count() == 1
+    assert "Recorded shared-signal comparison" in comparison.inner_text()
+    assert "0.70" in comparison.inner_text() and "0.80" in comparison.inner_text()
+    assert "+0.10" in comparison.inner_text()
+    assert page.locator("#tier3-page-overview .t3-agent-card").count() == 2
+    assert page.locator("#run-metadata").get_attribute("open") is None
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth+1")
+    card = page.locator("#tier3-page-overview .t3-agent-card").last
+    target_id = card.get_attribute("data-tier3-agent-link")
+    card.focus()
+    page.keyboard.press("Enter")
+    assert page.locator("#tier3-page-agents").is_visible()
+    target = page.locator("#" + target_id)
+    assert target.evaluate("node=>node.closest('.t3-agent-panel').classList.contains('active')")
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+def test_harbor_actions_keep_every_job_visible_in_tile_and_overview_and_work_by_keyboard(page, reports, width):
+    directory, _, _ = reports
+    page.context.route(
+        "https://example.test/harbor/**",
+        lambda route: route.fulfill(status=200, content_type="text/html", body="<title>Synthetic Harbor view</title>"),
+    )
+    page.set_viewport_size({"width": width, "height": 1000})
+    _open(page, directory, "native-features")
+    for owner in ('.tier-card[data-target-tab="tier3"]', "#tier3-page-overview"):
+        if owner.startswith("#"):
+            _tier(page, "tier3")
+        links = page.locator(owner + ' a[href^="https://example.test/harbor/"]')
+        assert links.count() == 8
+        assert all(link.is_visible() for link in links.all())
+        expected = links.first.get_attribute("href")
+        links.first.focus()
+        with page.expect_popup() as popup:
+            page.keyboard.press("Enter")
+        popup.value.wait_for_load_state()
+        assert popup.value.url == expected
+        popup.value.close()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth+1")
+
+
+def test_incomplete_run_keeps_the_baseline_table_with_explicit_unavailable_cells(page, reports):
+    directory, _, _ = reports
+    _open(page, directory, "incomplete")
+    _tier(page, "tier3")
+    table = page.locator("#tier3-dimension-table")
+    assert table.is_visible()
+    text = table.inner_text()
+    assert "baseline" in text.casefold() and "N/A" in text
+    assert "0.00" not in text
+    assert "unavailable" in text.lower()
+
+
+def test_custom_only_overview_compares_recorded_metrics_without_inventing_dimensions(page, reports):
+    directory, _, _ = reports
+    _open(page, directory, "custom-only")
+    _tier(page, "tier3")
+    table = page.locator("#tier3-metric-comparison-table")
+    assert table.is_visible()
+    assert "task_quality" in table.inner_text().casefold()
+    assert "0.45" in table.inner_text()
+    assert "baseline" in table.inner_text().casefold()
+    assert page.locator("#tier3-dimension-table").count() == 0
+
+
+def test_static_header_does_not_leave_a_sticky_navigation_offset(page, reports):
+    directory, _, _ = reports
+    _open(page, directory)
+    page.locator(".main-header").evaluate("node=>node.style.position='static'")
+    page.evaluate("reportMeasureNavigation()")
+    assert (
+        page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--report-header-height').trim()")
+        == "0px"
+    )
 
 
 def test_keyboard_navigation_reveals_nested_agent_and_finding_evidence(page, reports):
@@ -875,7 +1002,11 @@ def test_mobile_overview_places_incomplete_result_and_recorded_action_before_met
     assert action.count() == 1
     action_box = action.bounding_box()
     assert action_box is not None and action_box["y"] + action_box["height"] <= 1000
-    assert page.locator(".main-header").bounding_box()["height"] <= 96
+    assert page.locator(".main-header").evaluate("node=>getComputedStyle(node).position") == "static"
+    assert (
+        page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--report-header-height').trim()")
+        == "0px"
+    )
     assert "8" in overview.inner_text() and "36" in overview.inner_text()
     assert page.locator("#run-metadata").get_attribute("open") is None
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
@@ -1036,16 +1167,18 @@ def test_global_search_reveals_dataset_attempt_body_matches_and_preserves_user_d
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
 @pytest.mark.parametrize("width", [1440, 390])
-def test_overview_text_links_and_insights_action_have_readable_contrast(page, reports, theme, width):
+@pytest.mark.parametrize("fixture", ["incomplete", "native-features"])
+def test_overview_text_links_and_insights_action_have_readable_contrast(page, reports, theme, width, fixture):
     directory, _, _ = reports
     page.set_viewport_size({"width": width, "height": 1000})
-    _open(page, directory, "incomplete")
+    _open(page, directory, fixture)
     page.locator("html").evaluate("(node, theme)=>node.dataset.theme=theme", theme)
     _tier(page, "tier3")
     overview = page.locator("#tier3-page-overview")
     links = overview.locator("a:visible")
     assert links.count() >= 3
-    for link in links.all():
+    all_links = links.all() + page.locator('.tier-card[data-target-tab="tier3"] a:visible').all()
+    for link in all_links:
         colors = link.evaluate("""node=>{
             const foreground=getComputedStyle(node).color;
             let parent=node,background;

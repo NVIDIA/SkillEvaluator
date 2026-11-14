@@ -118,7 +118,14 @@ def test_chart_canvases_explain_data_and_keep_visible_failure_fallback(agent_cou
         assert "hidden" not in fallback
     references = re.findall(r'class="chart-description"[^>]*>[^<]*<a href="#([^"]+)"', html)
     assert len(references) == 4
-    assert all(report.elements[reference][0] == "table" for reference in references)
+    for reference in references:
+        if reference == "tier3-multi-agent-dimension-table":
+            assert re.search(
+                r'id="tier3-multi-agent-dimension-table"[^>]*>\s*<table[^>]*id="tier3-dimension-table"',
+                html,
+            )
+        else:
+            assert report.elements[reference][0] == "table"
     assert references[:2] == ["tier3-dimension-table" if agent_count == 1 else "tier3-multi-agent-dimension-table"] * 2
 
 
@@ -225,7 +232,7 @@ process.stdout.write(JSON.stringify({missing, failed, missingContext, released, 
     assert states["theme"] == "dark"
 
 
-def test_charts_without_dimension_scores_link_to_an_openable_download_section() -> None:
+def test_missing_dimension_scores_keep_agent_cards_and_openable_downloads() -> None:
     result = ValidationResult(validator_name="AGENT_EVAL")
     result.metadata["agent_eval"] = build_agent_eval_payload(
         "example",
@@ -234,12 +241,10 @@ def test_charts_without_dimension_scores_link_to_an_openable_download_section() 
     )
     html = HTMLReporter(include_timestamp=False).render_all([result])
     report = _parse(html)
-    links = re.findall(r'class="chart-description"[^>]*>[^<]*<a href="#([^"]+)" onclick="([^"]+)"', html)
-    dimension_links = [link for link in links if link[0] != "t3-trials-table"][:2]
-    assert [target for target, _ in dimension_links] == ["tier3-json-downloads"] * 2
+    assert "tier3-radar" not in report.elements and "tier3-metric-bar" not in report.elements
+    assert 'class="t3-agent-score" style="color:var(--text-secondary);">N/A</div>' in html
     assert report.elements["tier3-json-downloads"][0] == "details"
     # The section sits in the hidden Diagnostics sub-tab; the static handler reveals it.
-    assert all("openTier3Reference" in handler for _, handler in dimension_links)
     assert "function openTier3Reference(id)" in html
 
 

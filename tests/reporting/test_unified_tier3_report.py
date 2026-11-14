@@ -1541,8 +1541,8 @@ def test_canonical_report_prefers_agentskills_dataset_fields() -> None:
 
     dataset_html = _tier3_page(_render_agent_payload(payload), "dataset", "suggestions")
 
-    assert "<h2>AgentSkills Dataset</h2>" in dataset_html
-    assert "1 AgentSkills eval case used for this Tier 3 run." in dataset_html
+    assert "<h2>Evaluation Dataset</h2>" in dataset_html
+    assert "1 eval case used for this Tier 3 run." in dataset_html
     assert '<span class="t3-ds-label">Prompt</span>' in dataset_html
     assert '<span class="t3-ds-label">Expected Output</span>' in dataset_html
     assert '<span class="t3-ds-label">Assertions</span>' in dataset_html
@@ -1578,7 +1578,7 @@ def test_standalone_report_loads_staged_legacy_dataset_with_agentskills_labels(t
     report = render_agent_eval_html_report(skill, run_dir, use_llm_judge=False)
     dataset_html = _tier3_page(report.read_text(encoding="utf-8"), "dataset", "suggestions")
 
-    assert "<h2>AgentSkills Dataset</h2>" in dataset_html
+    assert "<h2>Evaluation Dataset</h2>" in dataset_html
     assert '<span class="t3-ds-label">Prompt</span>' in dataset_html
     assert '<span class="t3-ds-label">Expected Output</span>' in dataset_html
     assert '<span class="t3-ds-label">Assertions</span>' in dataset_html

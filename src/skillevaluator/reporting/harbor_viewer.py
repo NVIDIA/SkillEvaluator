@@ -11,10 +11,15 @@ from urllib.parse import parse_qsl, urlsplit
 
 def normalize_harbor_viewer_for_display(agent_eval: dict[str, Any]) -> dict[str, Any]:
     """Return display-safe Harbor links from a canonical Tier 3 payload."""
-    raw = agent_eval.get("harbor_viewer")
-    if not isinstance(raw, dict):
-        summary = agent_eval.get("summary")
-        raw = summary.get("harbor_viewer") if isinstance(summary, dict) else {}
+    primary = _normalize_harbor_viewer(agent_eval.get("harbor_viewer"))
+    if primary:
+        return primary
+    summary = agent_eval.get("summary")
+    return _normalize_harbor_viewer(summary.get("harbor_viewer") if isinstance(summary, dict) else None)
+
+
+def _normalize_harbor_viewer(raw: object) -> dict[str, Any]:
+    """Normalize one source before choosing primary or legacy summary evidence."""
     if not isinstance(raw, dict):
         return {}
 

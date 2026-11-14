@@ -671,7 +671,9 @@ All notable changes to SkillEvaluator are documented in this file.
   `SKILL.md`", now gives template cases the generic task "handle a typical
   request" and generic graded text, as one that names `<name>/SKILL.md` does.
   Before, the prompt and the graded text quoted a garbled task such as "reads
-  release-review's my `SKILL.md`".
+  release-review's my `SKILL.md`". Generic wording comes first, as in
+  `tier3 validate`: for a skill named read or own, "read `SKILL.md`" and "its
+  own `SKILL.md`" are renamed as for any other skill.
 
 ## 0.9.0 - 2026-11-13
 

@@ -1023,6 +1023,12 @@ _KEEPING_RULE = (
 )
 # How each says that the other bare SKILL.md files are renamed once one counts.
 _RENAMING_ALL = "once one skill.md counts, every bare skill.md in the description is renamed, even one"
+# How each says that wording `tier3 validate` reads first is not the skill's name.
+_GENERIC_FIRST = (
+    'generic wording comes first, as in tier3 validate: for a skill named read or own, "read skill.md" and '
+    '"its own skill.md" are renamed as for any other skill.'
+)
+_SKILL_OWNS_SKILL_MD_ENTRY = "A skill description that reads `SKILL.md` right after the skill's name,"
 
 
 def _flat(text: str) -> str:
@@ -1125,9 +1131,25 @@ def test_docs_say_which_skill_md_in_a_description_becomes_my_skill_md():
         assert rule >= 0, where
         for example in ("<name>/skill.md", "skills/<name>", "uses the installed skill"):
             assert example in text[rule : rule + 160], (where, text[rule : rule + 160])
-        owner = text.find('the skill\'s name, "the <name> skill\'s" or "the installed skill\'s"', rule)
+        owner = text.find(
+            'reads skill.md right after the skill\'s name, "the <name> skill\'s" or "the installed skill\'s"', rule
+        )
         assert 0 <= owner - rule < 260, (where, text[rule : rule + 400])
         assert '"reads <name>\'s skill.md"' in text[owner : owner + 160], (where, text[owner : owner + 160])
+        assert _GENERIC_FIRST in text[owner : owner + 400], (where, text[owner : owner + 400])
+    assert _GENERIC_FIRST in _flat(_changelog_entry(_SKILL_OWNS_SKILL_MD_ENTRY))
+    # Only reading SKILL.md there gives the generic task; naming it there keeps it.
+    for description in (
+        "Validates release-review's SKILL.md frontmatter.",
+        "Lists release-review's SKILL.md sections.",
+        "Checks the installed skill's SKILL.md for errors.",
+    ):
+        task = description.rstrip(".").lower()
+        assert generate_dataset._template_task(_skill(description=description)) == (task, task), description
+    # Generic wording comes first for a skill named after it.
+    for name, description in (("read", "Read SKILL.md and report errors."), ("own", "Reads its own SKILL.md.")):
+        (case,) = generate_dataset._generate_simple(_skill(name=name, description=description))
+        assert "my SKILL.md" in case["question"], (name, case["question"])
     # The docstring's examples reach the branch it gives them: calling the
     # skill "the <name> skill" gives the generic task, and naming the skill or
     # one of its scripts keeps the task but quotes no outcome.
@@ -1142,7 +1164,7 @@ def test_docs_say_which_skill_md_in_a_description_becomes_my_skill_md():
     # command whose LLM prompts it means.
     docs = wording["docs/eval-datasets.mdx"]
     assert '(such as cat skill.md or "uses the skill\'s skill.md")' in docs
-    assert "the graded text is generic. create-eval-dataset's llm prompts ask for outcome checks." in docs
+    assert "as for any other skill. create-eval-dataset's llm prompts ask for outcome checks." in docs
 
 
 def test_docs_say_which_word_after_skill_md_keeps_a_description_s_skill_md():

@@ -125,10 +125,13 @@ would not count by itself, such as one after "a" or "the following", one
 before a format noun or one before `in ./pdf-tools`. When the description
 still points at the skill's files after the rename, such as
 `<name>/SKILL.md`, `skills/<name>` or "uses the installed skill", or when the
-skill's name, "the `<name>` skill's" or "the installed skill's" comes right
-before `SKILL.md`, as in "reads `<name>`'s `SKILL.md`", the template prompt
-asks for the generic task "handle a typical request" and the graded text is
-generic. `create-eval-dataset`'s LLM prompts ask for outcome checks. It
+description reads `SKILL.md` right after the skill's name, "the `<name>`
+skill's" or "the installed skill's", as in "reads `<name>`'s `SKILL.md`", the
+template prompt asks for the generic task "handle a typical request" and the
+graded text is generic. Generic wording comes first, as in `tier3 validate`:
+for a skill named read or own, "read `SKILL.md`" and "its own `SKILL.md`" are
+renamed as for any other skill. `create-eval-dataset`'s LLM prompts ask for
+outcome checks. It
 prints a warning for each generated case that still grades skill use, and
 the autopilot starter case leaves such text out. `tier3 validate` warns when a prompt points at `skills/<name>`,
 `<name>/SKILL.md`, reading or following `SKILL.md`, the named skill, or one of

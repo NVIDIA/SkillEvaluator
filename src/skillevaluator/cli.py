@@ -2623,7 +2623,7 @@ def validate(
     # Only skills own an evals/ task source. Plugins, rules, and workflows can
     # still run Tier 3, but must bypass the skill-directory source preflight.
     preflight_tier3_source = resolved_type == CONTENT_TYPE_SKILL
-    # A SKILL.md or workflow-rules.mdc argument stands for its folder, as it already
+    # A SKILL.md or workflow-rules.mdc argument stands for its folder, as a SKILL.md already
     # does for Tier 3, so every tier, the report names, and the default report location
     # match the directory form. Take the folder from the path as given: resolving first
     # would move a linked manifest to the folder its link points into. That folder is

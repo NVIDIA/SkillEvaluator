@@ -642,7 +642,9 @@ All notable changes to SkillEvaluator are documented in this file.
   `schema`, `version` and `quality` failed with `No skills found` for a skill,
   and `schema` with `No workflow directories found` for a workflow; a run
   narrowed with `--checks` could pass without scanning the skill's other files;
-  and a run from inside the skill wrote its reports into it.
+  and a run from inside the skill wrote its reports into it. Tier 3 also
+  received a `workflow-rules.mdc` file itself; it now receives the workflow
+  folder, as it already did for a `SKILL.md`.
 
 ## 0.9.0 - 2026-11-13
 

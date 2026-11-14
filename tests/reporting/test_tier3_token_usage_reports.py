@@ -41,6 +41,7 @@ from skillevaluator.reporting.base import (
 from skillevaluator.reporting.dashboard_data import comparison_rows, parse_dashboard_report
 from skillevaluator.reporting.tier3_token_usage import (
     EVALUATE_CASE_POINTER,
+    EVALUATE_REPORT_CASE_POINTER,
     REUSED_BASELINE_NOTE,
     UNVERIFIED_CASE_MARK,
     UNVERIFIED_CASE_NOTE,
@@ -51,9 +52,10 @@ from skillevaluator.reporting.tier3_token_usage import (
     unverified_case_ids_note,
 )
 from skillevaluator.tier3 import token_usage as token_usage_module
+from skillevaluator.tier3.harbor.collector import collect_harbor_results
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 from skillevaluator.tier3.harbor.report_data import load_agent_data
-from skillevaluator.tier3.result_display import render_result
+from skillevaluator.tier3.result_display import render_evaluation_result, render_result
 from skillevaluator.tier3.token_usage import drop_token_usage_cases, per_agent_token_usage
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -241,7 +243,118 @@ def test_unscored_attempt_with_invalid_cached_tokens_is_not_measured(tmp_path: P
     baseline = result.metadata["agent_eval"]["token_usage"]["agents"]["claude-code"]["baseline"]
     assert baseline["coverage"]["status"] == "partial"
     assert baseline["coverage"]["measured_attempts"] == 1
+    assert baseline["coverage"]["reason_codes"] == ["invalid_token_counters"]
     assert baseline["totals"]["total_tokens"] == 1650
+
+
+def _set_cached_tokens(run: Path, trial: str, cached: object) -> None:
+    trajectory_path = run / trial / "trajectory.json"
+    trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
+    trajectory["final_metrics"]["total_cached_tokens"] = cached
+    trajectory_path.write_text(json.dumps(trajectory), encoding="utf-8")
+
+
+@pytest.mark.parametrize("cached", [-5, True, "400", 1.5, 2**60])
+def test_a_scored_attempt_whose_arm_failed_with_invalid_cached_tokens_is_not_measured(
+    tmp_path: Path, cached: object
+) -> None:
+    run = _run(tmp_path)
+    # Claude Code's baseline failed, so the loader keeps this scored attempt for usage only.
+    _set_cached_tokens(run, "claude-code/without-skill/trials/case-1__a", cached)
+
+    assert load_agent_data(run)["claude-code"]["usage_only_attempts_baseline"][0] == {
+        "entry_id": "case-1",
+        "trial_id": "case-1__a",
+        "scored": True,
+        "tokens": {"prompt": 1500, "completion": 150},
+        "invalid_token_counters": ["cached_tokens"],
+    }
+    result = agent_eval_result_from_directory(tmp_path, run, use_llm_judge=False)
+
+    assert result is not None
+    baseline = result.metadata["agent_eval"]["token_usage"]["agents"]["claude-code"]["baseline"]
+    assert (baseline["coverage"]["status"], baseline["coverage"]["measured_attempts"]) == ("partial", 1)
+    assert baseline["coverage"]["reason_codes"] == ["invalid_token_counters"]
+    # Only the timed-out attempt is measured.
+    assert baseline["totals"]["total_tokens"] == 48422
+
+
+@pytest.mark.parametrize("cached", [-5, True, "400", 1.5, 2**60])
+def test_a_scored_attempt_with_invalid_cached_tokens_is_not_measured_and_resources_keep_it(
+    tmp_path: Path, cached: object
+) -> None:
+    run = _run(tmp_path)
+    _set_cached_tokens(run, "codex/with-skill/trials/case-1__a", cached)
+
+    result = agent_eval_result_from_directory(tmp_path, run, use_llm_judge=False)
+
+    assert result is not None
+    payload = result.metadata["agent_eval"]
+    codex = payload["token_usage"]["agents"]["codex"]
+    assert (codex["with_skill"]["coverage"]["status"], codex["with_skill"]["coverage"]["measured_attempts"]) == (
+        "partial",
+        1,
+    )
+    assert codex["with_skill"]["coverage"]["reason_codes"] == ["invalid_token_counters"]
+    assert codex["with_skill"]["totals"]["total_tokens"] == 660
+    assert codex["delta"]["reason_codes"] == ["with_skill_tokens_incomplete"]
+    trial = next(trial for trial in payload["agents"]["codex"]["trials"] if trial["entry_id"] == "case-1")
+    assert (trial["tokens"], trial["invalid_token_counters"]) == ({"prompt": 500, "completion": 50}, ["cached_tokens"])
+    # ``resources`` totals prompt plus completion, which stay valid.
+    assert payload["agents"]["codex"]["resources"]["tokens"]["with_skill"]["total"] == 1210
+
+
+@pytest.mark.parametrize("cached", [0, -5], ids=["valid-cache", "invalid-cache"])
+@pytest.mark.parametrize(
+    "names", [[1, "a"], ["cached_tokens"], ["x" * 50]], ids=["mixed-types", "a-counter", "not-a-counter"]
+)
+def test_only_the_trajectory_names_the_invalid_token_counters_of_a_scored_attempt(
+    tmp_path: Path, names: list[Any], cached: int
+) -> None:
+    run = _run(tmp_path)
+    # A scored attempt of Claude Code's failed baseline, kept for usage only, and one of a succeeded arm.
+    for trial in ("claude-code/without-skill/trials/case-1__a", "codex/with-skill/trials/case-1__a"):
+        # The collector writes no ``_`` keys to reward.json, but an edited results directory can hold them.
+        reward_file = run / trial / "reward.json"
+        reward = json.loads(reward_file.read_text(encoding="utf-8"))
+        reward_file.write_text(json.dumps({**reward, "_invalid_token_counters": names}), encoding="utf-8")
+        _set_cached_tokens(run, trial, cached)
+    invalid = ["cached_tokens"] if cached < 0 else []
+
+    usage_row = load_agent_data(run)["claude-code"]["usage_only_attempts_baseline"][0]
+    assert (usage_row["trial_id"], usage_row.get("invalid_token_counters", [])) == ("case-1__a", invalid)
+    result = agent_eval_result_from_directory(tmp_path, run, use_llm_judge=False)
+
+    assert result is not None
+    payload = result.metadata["agent_eval"]
+    trial = next(trial for trial in payload["agents"]["codex"]["trials"] if trial["entry_id"] == "case-1")
+    assert trial.get("invalid_token_counters", []) == invalid
+    usage = payload["token_usage"]["agents"]
+    coverage = [usage["claude-code"]["baseline"]["coverage"], usage["codex"]["with_skill"]["coverage"]]
+    expected = ("partial", ["invalid_token_counters"]) if invalid else ("complete", [])
+    assert [(arm["status"], arm["reason_codes"]) for arm in coverage] == [expected, expected]
+
+
+def test_report_trials_and_usage_only_attempts_name_only_token_counters_in_one_order(tmp_path: Path) -> None:
+    run = _run(tmp_path)
+    for trial in ("claude-code/without-skill/trials/case-1__a", "codex/with-skill/trials/case-1__a"):
+        trajectory_path = run / trial / "trajectory.json"
+        trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
+        trajectory["final_metrics"].update(total_prompt_tokens="1500", total_cached_tokens=-5)
+        trajectory_path.write_text(json.dumps(trajectory), encoding="utf-8")
+    agents = load_agent_data(run)
+    usage_row = agents["claude-code"]["usage_only_attempts_baseline"][0]
+    assert usage_row["invalid_token_counters"] == ["prompt_tokens", "cached_tokens"]
+    reward = next(reward for reward in agents["codex"]["rewards"] if reward["entry_id"] == "case-1")
+    assert reward["_invalid_token_counters"] == ["prompt_tokens", "cached_tokens"]
+    # Agent data that the loader did not build can hold any list.
+    reward["_invalid_token_counters"] = [1, "x" * 50, "cached_tokens", "prompt_tokens"]
+
+    payload = build_agent_eval_payload("demo", agents, use_llm_judge=False)
+
+    assert payload is not None
+    trial = next(trial for trial in payload["agents"]["codex"]["trials"] if trial["entry_id"] == "case-1")
+    assert trial["invalid_token_counters"] == ["prompt_tokens", "cached_tokens"]
 
 
 def test_an_unscored_attempt_of_a_case_id_with_double_underscores_keeps_its_case(tmp_path: Path) -> None:
@@ -286,6 +399,84 @@ def test_a_stop_on_pass_unscored_attempt_takes_its_case_from_its_harbor_files(tm
     assert codex["with_skill"]["coverage"]["unscored_attempts"] == 1
     assert codex["delta"]["status"] == "available"
     assert codex["delta"]["total_tokens"] == 0
+
+
+@pytest.mark.parametrize("harbor_file", ["result.json", "config.json"])
+def test_the_collector_records_the_case_of_an_unscored_native_task_attempt(tmp_path: Path, harbor_file: str) -> None:
+    # A native task's directory (``login-task``) differs from its ``[metadata] entry_id`` (``auth-login``).
+    jobs = tmp_path / "jobs"
+    trial = jobs / "demo-opencode-with" / "login-task__a1b2c3d"
+    (trial / "agent").mkdir(parents=True)
+    task = {"path": "/runs/x/_harbor-tasks/opencode/with/login-task"}
+    timeout = {"exception_type": "AgentTimeoutError", "exception_message": "Agent timed out after 600 seconds"}
+    # A trial that stopped before Harbor wrote its result has only its config.
+    harbor_record = (
+        {"task_id": task, "config": {"task": task}, "exception_info": timeout}
+        if harbor_file == "result.json"
+        else {"task": task}
+    )
+    (trial / harbor_file).write_text(json.dumps(harbor_record), encoding="utf-8")
+    trajectory = {
+        "schema_version": "ATIF-v1.4",
+        "session_id": "session-1",
+        "agent": {"name": "opencode", "version": "1"},
+        "steps": [{"step_id": 1, "source": "user", "message": "Fix the login."}],
+        "final_metrics": {"total_prompt_tokens": 14000, "total_completion_tokens": 100},
+    }
+    (trial / "agent" / "trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+
+    for name, mapping in (("native", {"login-task": "auth-login"}), ("legacy", None)):
+        results = tmp_path / name
+        collect_harbor_results(
+            skill_name="demo",
+            agents=["opencode"],
+            output_dir=results,
+            jobs_dir=jobs,
+            skip_baseline=True,
+            expected_cases=1,
+            expected_case_ids=["auth-login"] if mapping else ["login-task"],
+            case_id_by_task_selector=mapping,
+        )
+        failure_file = results / "opencode" / "with-skill" / "trials" / trial.name / "failure.json"
+        failure = json.loads(failure_file.read_text(encoding="utf-8"))
+        [attempt] = load_agent_data(results)["opencode"]["usage_only_attempts"]
+        if mapping:
+            assert (failure["entry_id"], attempt["entry_id"]) == ("auth-login", "auth-login")
+        else:
+            # Without the mapping nothing is recorded, and the loader keeps the task directory.
+            assert ("entry_id" not in failure, attempt["entry_id"]) == (True, "login-task")
+        assert attempt["tokens"] == {"prompt": 14000, "completion": 100}
+
+
+def test_an_unscored_attempt_takes_the_case_its_failure_record_names(tmp_path: Path) -> None:
+    # Native tasks: ``fix-login-bug`` has entry_id ``auth-001`` and ``add-logout`` has ``auth-002``.
+    run = tmp_path / "run"
+    _arm(
+        run, "codex", "with-skill", [("fix-login-bug__a", (1000, 100, 0), True), ("add-logout__a", (900, 90, 0), True)]
+    )
+    _arm(
+        run,
+        "codex",
+        "without-skill",
+        [("fix-login-bug__b", (1200, 120, 0), True), ("add-logout__b", (40000, 900, 0), False)],
+        status="failed",
+    )
+    for variant, trial in (("with-skill", "fix-login-bug__a"), ("without-skill", "fix-login-bug__b")):
+        _set_reward_case(run, "codex", variant, trial, "auth-001")
+    _set_reward_case(run, "codex", "with-skill", "add-logout__a", "auth-002")
+    timed_out = run / "codex" / "without-skill" / "trials" / "add-logout__b"
+    failure = json.loads((timed_out / "failure.json").read_text(encoding="utf-8"))
+    (timed_out / "failure.json").write_text(json.dumps({**failure, "entry_id": "auth-002"}), encoding="utf-8")
+    task = {"path": "/runs/x/_harbor-tasks/codex/without/add-logout"}
+    (timed_out / "result.json").write_text(json.dumps({"task_id": task}), encoding="utf-8")
+
+    usage = build_agent_eval_payload("demo", load_agent_data(run), use_llm_judge=False)["token_usage"]
+
+    codex = usage["agents"]["codex"]
+    assert [case["entry_id"] for case in codex["cases"]] == ["auth-001", "auth-002"]
+    auth_002 = codex["cases"][1]["baseline"]
+    assert (auth_002["totals"]["total_tokens"], auth_002["coverage"]["unscored_attempts"]) == (40900, 1)
+    assert codex["delta"]["reason_codes"] == ["baseline_failed"]
 
 
 def test_payload_counts_the_failed_attempt_and_keeps_resources_complete_only(run_result: tuple[Path, Any]) -> None:
@@ -655,11 +846,127 @@ def test_tier3_evaluate_terminal_prints_the_agent_sums_the_report_step_recorded(
         "execution_status": "succeeded",
         "agents": {"codex": {"execution_status": "succeeded"}},
         "token_usage": recorded,
+        # As the Harbor runner records the reports it wrote.
+        "report_path": str(run / "report.html"),
+        "benchmark_path": str(run / "tier3-benchmark.md"),
     }
     output = render_result(display)
     assert "Token Usage (measured, not scored)" in output
     assert re.search(r"claude-code\s+│\s+3,300\s+│\s+50,072\s+│\s+N/A", output)
     assert EVALUATE_CASE_POINTER in " ".join(output.split())
+
+
+def test_tier3_evaluate_terminal_prints_the_token_usage_of_a_run_whose_arms_all_failed(tmp_path: Path) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    run = tmp_path / "run"
+    attempts = {
+        "with-skill": [("case-1__a", (1000, 100, 400), False), ("case-2__a", (2000, 200, 0), False)],
+        "without-skill": [("case-1__b", (1500, 150, 0), False), ("case-2__b", (900, 47522, 0), False)],
+    }
+    for variant, trials in attempts.items():
+        _arm(run, "codex", variant, trials, status="failed")
+    conditions = {"with_skill": {"execution_status": "failed"}, "without_skill": {"execution_status": "failed"}}
+    engine_result: dict[str, Any] = {
+        "execution_status": "failed",
+        "run_dir": str(run),
+        "agents": {"codex": {"execution_status": "failed", "conditions": conditions}},
+    }
+
+    report = render_agent_eval_html_report(skill, run, engine_result=engine_result, use_llm_judge=False)
+    # Without ``include_benchmark`` only report.html is written, as in a NeMo Gym run.
+    engine_result["report_path"] = str(report)
+
+    assert "Token usage by case" in report.read_text(encoding="utf-8")
+    assert not report.with_name("tier3-benchmark.md").exists()
+    for verbose in (False, True):
+        stream = io.StringIO()
+        render_evaluation_result(
+            engine_result, console=Console(file=stream, width=220, color_system=None), verbose=verbose
+        )
+        output = stream.getvalue()
+        assert "Evaluation did not complete" in output
+        assert "Token Usage (measured, not scored)" in output
+        assert re.search(r"codex\s+│\s+3,300\s+│\s+50,072\s+│\s+N/A", output)
+        text = " ".join(output.split())
+        assert EVALUATE_REPORT_CASE_POINTER in text
+        assert EVALUATE_CASE_POINTER not in text
+
+
+@pytest.mark.parametrize("written", ["both", "report.html", "none"])
+def test_tier3_evaluate_terminal_names_only_the_reports_the_run_wrote(tmp_path: Path, written: str) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    run = _run(tmp_path)
+    engine_result: dict[str, Any] = {
+        "execution_status": "succeeded",
+        "run_dir": str(run),
+        "agents": {"codex": {"execution_status": "succeeded"}},
+    }
+    # The Harbor runner renders the benchmark too; the NeMo Gym runner renders report.html only.
+    report = render_agent_eval_html_report(
+        skill, run, engine_result=engine_result, use_llm_judge=False, include_benchmark=written == "both"
+    )
+    benchmark = report.with_name("tier3-benchmark.md")
+    assert benchmark.is_file() is (written == "both")
+    # The runners record a path only for a report they wrote; a failed report step records none.
+    if written != "none":
+        engine_result["report_path"] = str(report)
+    if benchmark.is_file():
+        engine_result["benchmark_path"] = str(benchmark)
+
+    text = " ".join(render_result(engine_result).split())
+
+    assert "Token Usage (measured, not scored)" in text
+    named = [pointer for pointer in (EVALUATE_CASE_POINTER, EVALUATE_REPORT_CASE_POINTER) if pointer in text]
+    expected = {"both": [EVALUATE_CASE_POINTER], "report.html": [EVALUATE_REPORT_CASE_POINTER], "none": []}
+    assert named == expected[written]
+    assert ("Token usage per case is in" in text) is (written != "none")
+
+
+def test_terminals_say_no_report_has_the_case_rows_the_payload_left_out(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    run = _cases_run(tmp_path, agents=2, cases=6)
+    full = agent_eval_result_from_directory(
+        skill, run, engine_result=_failed_case_findings("agent-1", 3), use_llm_judge=False
+    )
+    assert full is not None
+    # The case findings that the report step adds leave no room for the token case rows.
+    monkeypatch.setattr(reporting_base, "AGENT_EVAL_REPORT_MAX_NODES", _nodes(full.metadata["agent_eval"]) + 1)
+    engine_result = _failed_case_findings("agent-1", 3)
+    report = render_agent_eval_html_report(
+        skill, run, output_path=tmp_path / "report.html", engine_result=engine_result, use_llm_judge=False
+    )
+    assert "Token usage by case" in report.read_text(encoding="utf-8")
+    recorded = engine_result["token_usage"]
+    assert recorded["case_rows_omitted"] == 12
+    # ``validate`` fits the payload the same way after its applicability fields.
+    payload = copy.deepcopy(full.metadata["agent_eval"])
+    assert drop_token_usage_cases(payload["token_usage"]) == 12
+
+    outputs = {
+        "validate": _cli_output(_validation_result_from_payload(payload)),
+        "tier3 evaluate": render_result(
+            {
+                "execution_status": "succeeded",
+                "agents": {"codex": {"execution_status": "succeeded"}},
+                "token_usage": recorded,
+                "report_path": str(report),
+                "benchmark_path": str(report.with_name("tier3-benchmark.md")),
+            }
+        ),
+    }
+
+    for name, output in outputs.items():
+        text = " ".join(output.split())
+        assert "Token Usage (measured, not scored)" in text, name
+        assert VALIDATE_CASE_POINTER not in text and EVALUATE_CASE_POINTER not in text, name
+        assert EVALUATE_REPORT_CASE_POINTER not in text, name
+        assert "12 case row(s) were left out of every report" in text, name
+        assert "left out of this report" not in text, name
 
 
 def test_terminal_tables_print_agent_names_as_text_not_markup() -> None:
@@ -840,6 +1147,7 @@ def test_docs_and_changelog_describe_the_token_usage_contract() -> None:
         "left out without a record",
     ):
         assert field in section, field
+    assert [line for line in section.splitlines() if len(line) > 80] == []
     changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     added_sections = [
         section.split("### Added\n", 1)[1].split("\n### ", 1)[0]
@@ -847,6 +1155,18 @@ def test_docs_and_changelog_describe_the_token_usage_contract() -> None:
         if "### Added\n" in section
     ]
     assert any("token usage per case" in section for section in added_sections)
+    # The Fixed entry is found in any release section, so a release heading above it can change.
+    fixed_entries = [
+        " ".join(entry.split()).removeprefix("- ")
+        for section in changelog.split("\n## ")[1:]
+        if "### Fixed\n" in section
+        for entry in section.split("### Fixed\n", 1)[1].split("\n### ", 1)[0].split("\n- ")
+    ]
+    (entry,) = [entry for entry in fixed_entries if entry.startswith("Tier 3 token usage per case")]
+    assert "now counts each attempt in the case it belongs to." in entry
+    # The table needs no --verbose: a run whose arms all failed never shows a case summary.
+    assert "`tier3 evaluate` prints the agent token sums for a run whose arms all failed" in entry
+    assert "--verbose" not in entry
 
 
 def test_an_unverified_case_id_is_marked_in_every_table_and_explained() -> None:

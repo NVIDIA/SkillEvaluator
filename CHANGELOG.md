@@ -249,6 +249,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- OpenCode bash tool observations retain recorded shell exit codes in Harbor
+  trajectories. Declarative `command_succeeded` checks can now distinguish
+  successful commands from nonzero exits; missing exit codes remain not checked.
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
   of `harness-check` no longer show internal test notes in their messages.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`

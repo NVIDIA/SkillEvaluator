@@ -24,3 +24,6 @@ notes:
   - "Follows symlinked skill folders and symlinked SKILL.md files, inside or outside the root."
   - "Nested SKILL.md, CRLF, BOM, tabs, uppercase names: no effect observed."
   - "New skills and edited bodies are picked up mid-session without restart."
+plugin:
+  rules:
+    - {id: CC-PLUGIN-EMPTY, when: "not fmt_claude and not default_dirs", effect: not_loaded, outcome: not found, message: "No .claude-plugin/plugin.json and no skills/, commands/, agents/ or hooks/ folder: Claude Code finds nothing to load.", fix: "Add .claude-plugin/plugin.json or put components in the default folders."}

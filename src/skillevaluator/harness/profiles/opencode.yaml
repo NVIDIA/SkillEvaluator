@@ -30,3 +30,6 @@ rules:
 notes:
   - "Docs (V1) say one level deep and a 1-1024 description; runtime matches the V2 docs: recursive, no length cap."
   - "Tolerant of tabs, bare colons and BOM. Follows all symlinks tested."
+plugin:
+  rules:
+    - {id: OC-PLUGIN-FORMAT, when: "always", effect: not_loaded, outcome: not found, message: "OpenCode does not load manifest plugin bundles; its plugins are JS/TS modules in .opencode/plugin/ or npm packages in opencode.json.", fix: "Install the skills under .opencode/skills, or port the plugin to an OpenCode JS plugin."}

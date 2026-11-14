@@ -33,3 +33,6 @@ notes:
   - "Precedence: workspace skills/ > .agents/skills > ~/.agents/skills > managed > bundled > extra dirs (project wins, 3/3)."
   - "Description given as a YAML list is stringified and listed. BOM, CRLF, bare colons tolerated."
   - "New skills listed next turn in `openclaw chat`; files re-read from disk."
+plugin:
+  rules:
+    - {id: OW-PLUGIN-FORMAT, when: "not (fmt_claude or fmt_codex or fmt_cursor or fmt_agent_v1 or fmt_root_json)", effect: not_loaded, outcome: rejected, message: "OpenClaw installs bundles with a JSON plugin manifest (.claude-plugin, .codex-plugin, .cursor-plugin or plugin.json); Hermes plugin.yaml plugins are not found.", fix: "Add .claude-plugin/plugin.json."}

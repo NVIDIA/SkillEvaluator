@@ -12,6 +12,9 @@ All notable changes to SkillEvaluator are documented in this file.
   comment helpers, and needs no Pages configuration or history branch. Future
   generated bundles include the template; archived bundles and the released
   onboarding CLI retain their existing hosted publisher setup.
+- `harness-check` on a plugin folder shows which plugin formats each harness
+  accepts (`.claude-plugin`, `.codex-plugin`, Copilot, Agent Plugins v1, Hermes
+  `plugin.yaml`) and flags an empty plugin.
 - `harness` rules for harness gates: Hermes `platforms` and OpenClaw
   `metadata.openclaw.requires`.
 - `harness` rules for invocation fields: `disable-model-invocation`, Codex's

@@ -222,6 +222,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `health-check --tier 1` (and `doctor --tier 1`) labels a scanner that
+  SkillEvaluator provisions itself: `(uv tool run)` for SkillSpector and
+  `(managed)` for the downloaded Gitleaks binary. Before, the Gitleaks row
+  ended in `(from None)` and the SkillSpector row named
+  `SKILLEVALUATOR_SKILLSPECTOR_PATH` although no override was set.
 - The comments-only consumer template now grants its required read and PR-comment
   permissions only to the comment job, with no workflow-wide token permissions.
 - The behavior evidence gate no longer keeps a score for an expectation that

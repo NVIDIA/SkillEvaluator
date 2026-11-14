@@ -14,7 +14,7 @@ from html import unescape
 from pathlib import Path
 
 import pytest
-from bs4 import BeautifulSoup
+from report_markup_assertions import without_scripts
 from scripts.ci import check_public_benchmarks as benchmark_gate
 
 from skillevaluator.evaluation.tier3_report import _validation_result_from_payload, advisory_skip_result
@@ -3628,10 +3628,7 @@ def test_html_partial_tier3_payload_removes_unsafe_only_harbor_links() -> None:
     html = reporter.render_all([partial_tier3])
     fallback = reporter._tier3_report_data([partial_tier3])
 
-    soup = BeautifulSoup(html, "html.parser")
-    for script in soup.find_all("script"):
-        script.decompose()
-    visible = str(soup)
+    visible = without_scripts(html)
     assert "javascript:alert" not in visible
     assert "file:///tmp" not in visible
     assert _html_tier3_payload(html) == original
@@ -3688,7 +3685,7 @@ def test_html_result_failure_scrubs_untrusted_pass_shaped_scores() -> None:
     assert payload["overall_score"] is None
     assert payload["agents"]["codex"]["with_skill"] is None
     assert payload["execution_errors"] == ["Engine forced failure"]
-    visible = re.sub(r"<script\b[^>]*>.*?</script\b[^>]*>", "", html, flags=re.DOTALL | re.IGNORECASE)
+    visible = without_scripts(html)
     assert "0.99" not in visible
     assert _html_tier3_payload(html) == original
     assert "Engine forced failure" in html

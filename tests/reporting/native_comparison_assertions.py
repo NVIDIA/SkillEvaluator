@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Read agent associations from the consolidated native comparison table."""
 
-import html as html_module
 import re
+
+from report_markup_assertions import text_content
 
 
 def _text(fragment):
-    return re.sub(r"\s+", " ", html_module.unescape(re.sub(r"<[^>]+>", "", fragment))).strip()
+    return re.sub(r"\s+", " ", text_content(fragment)).strip()
 
 
 def dimension_lift_labels(html, agents, best_agent):

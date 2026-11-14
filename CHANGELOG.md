@@ -249,6 +249,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The NVIDIA Build bridge preserves reported input, output and cached token
+  usage in Anthropic Messages and Responses API replies instead of discarding
+  it or reporting synthetic zero counts.
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
   of `harness-check` no longer show internal test notes in their messages.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`

@@ -2515,6 +2515,37 @@ def test_build_tool_call_emits_anthropic_tool_use_and_message_stop() -> None:
     assert events[-1] == {"type": "message_stop"}
 
 
+@pytest.mark.parametrize(
+    ("usage", "anthropic", "responses"),
+    [
+        (None, None, None),
+        ({}, None, None),
+        ({"prompt_tokens": "bad", "completion_tokens": -1}, None, None),
+        ({"completion_tokens": 0}, {"output_tokens": 0}, {"output_tokens": 0}),
+        (
+            {"prompt_tokens": 100, "completion_tokens": 20, "prompt_tokens_details": {"cached_tokens": 30}},
+            {"input_tokens": 70, "output_tokens": 20, "cache_read_input_tokens": 30},
+            {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "total_tokens": 120,
+                "input_tokens_details": {"cached_tokens": 30},
+            },
+        ),
+    ],
+)
+def test_bridge_preserves_reported_usage(usage: object, anthropic: object, responses: object) -> None:
+    completion = {**CHAT_TEXT_RESPONSE, "usage": usage}
+    events = list(chat_completion_to_anthropic_events(completion))
+    assert events[0]["message"]["usage"] == anthropic
+    assert events[-2]["usage"] == anthropic
+    message = bridge._anthropic_message_from_events(events)
+    assert message["usage"] == anthropic
+    assert message["content"][0]["text"] == CHAT_TEXT_RESPONSE["choices"][0]["message"]["content"]
+    response_events = list(chat_completion_to_responses_events(completion))
+    assert response_events[-1]["response"]["usage"] == responses
+
+
 def test_anthropic_tool_arguments_are_validated_before_first_event() -> None:
     malformed_completion = {
         **CHAT_TOOL_RESPONSE,
@@ -2583,7 +2614,18 @@ def test_responses_events_validate_with_openai_sdk_and_have_sequence_numbers(com
 
 @pytest.mark.parametrize("completion", [CHAT_TOOL_RESPONSE, CHAT_TEXT_RESPONSE])
 def test_anthropic_events_validate_with_sdk(completion: dict[str, object]) -> None:
-    events = list(chat_completion_to_anthropic_events(completion))
+    events = list(
+        chat_completion_to_anthropic_events(
+            {
+                **completion,
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 20,
+                    "prompt_tokens_details": {"cached_tokens": 30},
+                },
+            }
+        )
+    )
     validator = TypeAdapter(RawMessageStreamEvent)
 
     for event in events:

@@ -10877,6 +10877,9 @@ class TestSkillspectorMissingReferences:
             ("**Step 1:** write `output/notes.md`.", "nextstep", True),
             ("**Step 1:** write `output/notes.md`.", "1:x", True),
             ("**Run the tests:** write `output/notes.md`.", "xrun", True),
+            # A label word joined at a quoted space is also read as a shell word.
+            ("*a' 'b c:* then write `output/notes.md`.", "xa b", True),
+            ("Run sh *setup' 'h:* now.", "xsetup h:y", True),
             # zsh groups and ranges, bash extended globs, cmd.exe escapes and
             # variables, PowerShell escapes, Windows 8.3 short names and
             # separators, and zsh EXTENDED_GLOB operators.

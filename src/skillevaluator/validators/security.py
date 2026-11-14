@@ -2285,7 +2285,8 @@ def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
     is skipped, and so is a ``$`` before whitespace or the end of the line,
     which a shell keeps as written. A bold or italic label outside code, such
     as ``**Note:**``, is read as its text, and each of its words, with its
-    ``*``, is also a pattern that is not split at ``=``, ``:`` or ``,``
+    ``*``, split at whitespace and as a POSIX shell splits them, is also a
+    pattern that is not split at ``=``, ``:`` or ``,``
     (:func:`_skillspector_markdown_labels`). So ``**Note:**`` stands only for
     names that hold ``note:``, and ``**Step 1:**`` for names that end in
     ``step`` or start with ``1:``. Any other wildcard keeps its meaning, so
@@ -2300,7 +2301,9 @@ def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
         split_words.update(_SKILLSPECTOR_SHELL_WORD_RE.findall(text))
         if "'" in text:
             split_words.update(_SKILLSPECTOR_SHELL_WORD_RE.findall(_SKILLSPECTOR_PROSE_APOSTROPHE_RE.sub("", text)))
-        label_words.update(word for label in labels for word in _SKILLSPECTOR_LINE_WORD_RE.findall(label))
+        for label in labels:
+            label_words.update(_SKILLSPECTOR_LINE_WORD_RE.findall(label))
+            label_words.update(_SKILLSPECTOR_SHELL_WORD_RE.findall(label))
     patterns: set[str] = set()
     for word in split_words | label_words:
         if _SKILLSPECTOR_SHELL_SYNTAX.isdisjoint(word):

@@ -131,7 +131,10 @@ class TestSkillSpectorWheel:
     @pytest.mark.parametrize("managed", [True, False])
     def test_unavailable_without_uv_or_when_unmanaged(self, managed):
         found = {} if managed else {"uv": "/opt/uv"}
-        with patch.object(tool_runner, "resolve_tool_path", _resolver(found)):
+        with (
+            patch.object(tool_runner, "resolve_tool_path", _resolver(found)),
+            patch.object(tool_runner, "_packaged_uv", return_value=None),
+        ):
             assert not ExternalTool("skillspector", "skillspector", managed=managed).is_available
 
     def test_invalid_override_never_falls_back(self, monkeypatch):

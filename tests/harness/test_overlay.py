@@ -3,6 +3,7 @@
 """Tests for the advisory harness check, panel and harness-check command."""
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -472,7 +473,65 @@ def test_bundle_files_symlinks_and_large_references(tmp_path: Path):
     rows = _rows(skill)
 
     assert facts["resource_symlinks"] == facts["resource_symlink_escapes"] == 1
+    assert facts["largest_resource"] == "references/big.md" and facts["largest_resource_lines"] == 20000
     assert "HM-RESOURCE-SYMLINK" in _ids(rows, "hermes")
+    assert "OW-REF-BUDGET" in _ids(rows, "openclaw")
+    assert "OC-REF-CUT" in _ids(rows, "opencode")
+
+
+def test_disable_model_invocation_is_ignored_by_three_harnesses(tmp_path: Path):
+    rows = _rows(_skill(tmp_path, extra="disable-model-invocation: true\n"))
+
+    flagged = {h for h, r in rows.items() if any(f["id"].endswith("DMI-IGNORED") for f in r["findings"])}
+    assert flagged == {"codex", "hermes", "opencode"}
+
+
+def test_codex_policy_makes_disable_model_invocation_effective_in_codex(tmp_path: Path):
+    skill = _skill(tmp_path, extra="disable-model-invocation: true\n")
+    (skill / "agents").mkdir()
+    (skill / "agents" / "openai.yaml").write_text("policy:\n  allow_implicit_invocation: false\n")
+    rows = _rows(skill)
+
+    flagged = {h for h, r in rows.items() if any(f["id"].endswith("DMI-IGNORED") for f in r["findings"])}
+    assert flagged == {"hermes", "opencode"}
+    assert not any(f["id"].endswith("CODEX-POLICY") for r in rows.values() for f in r["findings"])
+    assert rows["codex"]["status"] == "loads"
+
+
+def test_codex_implicit_policy_is_codex_only(tmp_path: Path):
+    skill = _skill(tmp_path)
+    (skill / "agents").mkdir()
+    (skill / "agents" / "openai.yaml").write_text("policy:\n  allow_implicit_invocation: false\n")
+    rows = _rows(skill)
+
+    flagged = {h for h, r in rows.items() if any(f["id"].endswith("CODEX-POLICY") for f in r["findings"])}
+    assert flagged == set(HARNESSES) - {"codex"}
+
+
+def test_claude_placeholders_reach_other_harnesses_literally(tmp_path: Path):
+    rows = _rows(_skill(tmp_path, body=BODY + "Run ${CLAUDE_SKILL_DIR}/run.sh $ARGUMENTS\n"))
+
+    for harness in set(HARNESSES) - {"claude-code"}:
+        assert any(f["id"].endswith("-ARGUMENTS") for f in rows[harness]["findings"]), harness
+        assert any(f["id"].endswith("-SKILL-DIR") for f in rows[harness]["findings"]), harness
+    assert not rows["claude-code"]["findings"]
+
+
+def test_gating_and_claude_only_fields(tmp_path: Path):
+    extra = 'argument-hint: "<file>"\nplatforms: [macos]\n'
+    skill = _skill(tmp_path, extra=extra)
+    manifest = skill / "SKILL.md"
+    manifest.write_text(
+        manifest.read_text().replace("  author:", '  openclaw: {"requires": {"bins": ["pdftotext"]}}\n  author:')
+    )
+    rows = _rows(skill)
+
+    assert "HM-PLATFORMS" in _ids(rows, "hermes")
+    assert "Left out of the skill list unless the host has: bins pdftotext." in {
+        f["message"] for f in rows["openclaw"]["findings"]
+    }
+    assert "OC-CLAUDE-ONLY" in _ids(rows, "opencode")
+    assert not any(f["id"].endswith("CLAUDE-ONLY") for f in rows["claude-code"]["findings"])
 
 
 def test_every_rule_has_a_fix_and_placeholders_are_filled(tmp_path: Path):
@@ -486,6 +545,18 @@ def test_every_rule_has_a_fix_and_placeholders_are_filled(tmp_path: Path):
     assert {"OW-COMPACT", "OW-PROMPT-CAP"} <= _ids(rows, "openclaw")
 
 
+def test_rule_ids_named_in_messages_exist():
+    profiles = load_profiles("all")
+    known = {rule["id"] for profile in profiles for rule in profile["rules"]}
+    prefixes = "|".join(sorted({rule_id.split("-")[0] for rule_id in known}))
+    rule_id_pattern = rf"\b(?:{prefixes})-[A-Z0-9]+(?:-[A-Z0-9]+)*"
+    for profile in profiles:
+        for rule in profile["rules"]:
+            text = f"{rule['message']} {rule.get('fix', '')}"
+            for mentioned in re.findall(rule_id_pattern, text):
+                assert mentioned in known, f"{rule['id']} refers to {mentioned}, which no profile defines"
+
+
 def test_fix_reaches_findings_and_panels(tmp_path: Path):
     skill = _skill(tmp_path, desc="Use when testing emoji. " + "\U0001f600" * 600)
     result = HarnessValidator().validate(skill)
@@ -497,6 +568,40 @@ def test_fix_reaches_findings_and_panels(tmp_path: Path):
     assert "Description in the model's skill list" in out
 
 
+def test_hermes_platforms_listing_every_os_is_not_flagged(tmp_path: Path):
+    everywhere = _rows(_skill(tmp_path / "a", extra="platforms: [linux, macos, windows]\n"))
+    mac_only = _rows(_skill(tmp_path / "b", extra="platforms: macos\n"))
+
+    assert "HM-PLATFORMS" not in _ids(everywhere, "hermes")
+    assert "Hidden from the skill list on linux, windows (platforms: macos)." in {
+        f["message"] for f in mac_only["hermes"]["findings"]
+    }
+
+
+def _sized(root: Path, fact: str, target: int) -> Path:
+    """A skill whose ``fact`` (a body-length measure) is exactly ``target``."""
+    probe = _skill(root / "probe", body="a")
+    padding = target - skill_facts(probe)[fact] + 1
+    skill = _skill(root / str(target), body="a" * padding)
+    assert skill_facts(skill)[fact] == target
+    return skill
+
+
+@pytest.mark.parametrize(
+    ("harness", "rule", "fact", "limit"),
+    [
+        ("hermes", "HM-VIEW-BUDGET", "hermes_view_chars", 100_000),
+        ("openclaw", "OW-READ-BUDGET", "openclaw_read_chars", 16_000),
+        ("openclaw", "OW-READ-REFUSED", "openclaw_read_chars", 64_000),
+        ("codex", "CX-SHELL-READ", "skill_md_bytes", 40_000),
+        ("opencode", "OC-BODY-CUT", "opencode_body_output_bytes", 51_200),
+    ],
+)
+def test_body_limits_fire_just_over_the_limit(tmp_path: Path, harness: str, rule: str, fact: str, limit: int):
+    assert rule not in _ids(_rows(_sized(tmp_path / "at", fact, limit)), harness)
+    assert rule in _ids(_rows(_sized(tmp_path / "over", fact, limit + 1)), harness)
+
+
 @pytest.mark.parametrize(("harness", "rule"), [("codex", "CX-DESC-CUT"), ("copilot-cli", "CP-DESC-LIMIT")])
 def test_description_limit_is_1024(tmp_path: Path, harness: str, rule: str):
     at = _rows(_skill(tmp_path / "at", desc="Use when " + "a" * 1015))
@@ -504,6 +609,117 @@ def test_description_limit_is_1024(tmp_path: Path, harness: str, rule: str):
 
     assert rule not in _ids(at, harness)
     assert any(f["id"] == rule and "1 over" in f["message"] for f in over[harness]["findings"])
+
+
+def test_price_like_dollar_numbers_are_flagged_with_lines(tmp_path: Path):
+    prices = _rows(_skill(tmp_path / "a", body="# Prices\n\nInput $4.00, cache $0.25.\nBatch $4 / $20 per MTok.\n"))
+    safe = _rows(_skill(tmp_path / "b", body="Input USD 4.00, \\$0.25, $10k, $ARGUMENTS.\nRun on $1.\n"))
+
+    finding = next(f for f in prices["claude-code"]["findings"] if f["id"] == "CC-DOLLAR-N")
+    assert finding["message"].startswith("4 price-like $N tokens (lines 9, 10)")
+    assert "OC-DOLLAR-N" in _ids(prices, "opencode")
+    assert "CC-DOLLAR-N" not in _ids(safe, "claude-code") and "OC-DOLLAR-N" not in _ids(safe, "opencode")
+    assert skill_facts(tmp_path / "b" / "skills" / "demo-skill")["dollar_placeholder_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("line", "prices", "placeholders"),
+    [
+        ("Budget is $5.", 1, 0),
+        ("The plan costs $20", 1, 0),
+        ("A $20 plan for the team (about $50).", 2, 0),
+        ("Batch $3 / $15 per MTok, or $5/month.", 3, 0),
+        ("Run $1 /path/to/project", 0, 1),
+        ("cp $1/$2 ~/notes; cd /tmp/$3", 0, 3),
+        ("Copy $5 /tmp/out and $6 ~/notes", 0, 2),
+        ("awk '{print $5}' and \"$9\"", 0, 2),
+        ("Use $0, $1 and $2 as the inputs.", 0, 3),
+    ],
+)
+def test_dollar_n_is_a_price_or_an_argument_not_both(tmp_path: Path, line: str, prices: int, placeholders: int):
+    facts = skill_facts(_skill(tmp_path, body=f"{BODY}{line}\n"))
+
+    assert (facts["dollar_literal_count"], facts["dollar_placeholder_count"]) == (prices, placeholders), line
+
+
+def test_standalone_prices_are_flagged_and_path_arguments_are_not(tmp_path: Path):
+    prices = _rows(_skill(tmp_path / "a", body=BODY + "The plan costs $20, with a $5 credit.\n"))
+    args = _rows(_skill(tmp_path / "b", body=BODY + "Run $1 /path/to/project, then cp $1/$2 out.\n"))
+
+    for harness, rule in (("claude-code", "CC-DOLLAR-N"), ("opencode", "OC-DOLLAR-N")):
+        assert any(f["id"] == rule and "2 price-like" in f["message"] for f in prices[harness]["findings"]), harness
+        assert rule not in _ids(args, harness), harness
+
+
+def test_every_oversized_file_long_line_and_unlisted_folder_is_counted(tmp_path: Path):
+    skill = _skill(tmp_path)
+    for rel, size in {"references/a.md": 51_201, "shared/b.md": 64_001, "shared/c.md": 51_200}.items():
+        (skill / rel).parent.mkdir(parents=True, exist_ok=True)
+        (skill / rel).write_text("x" * size, encoding="utf-8")
+    (skill / "python").mkdir()
+    (skill / "python" / "wide.md").write_text("y" * 2001 + "\n" + "z" * 2000 + "\n", encoding="utf-8")
+    facts = skill_facts(skill)
+    rows = _rows(skill)
+
+    assert (facts["files_over_51200"], facts["files_over_64000"]) == (2, 1)
+    assert (facts["long_line_count"], facts["hermes_unlisted_files"]) == (4, 3)
+    assert facts["hermes_unlisted_dirs"] == "python, shared"
+    assert {"OC-REF-CUT", "OC-LONG-LINES"} <= _ids(rows, "opencode")
+    assert {"HM-LINKED-LAYOUT"} <= _ids(rows, "hermes") and "OW-REF-BUDGET" in _ids(rows, "openclaw")
+
+
+def test_unreadable_resources_are_skipped_not_raised(tmp_path: Path):
+    skill = _skill(tmp_path)
+    refs = skill / "references"
+    refs.mkdir()
+    (refs / "ok.md").write_text("x" * 100)
+    (refs / "locked.md").write_text("secret")
+    (refs / "locked.md").chmod(0)
+    (refs / "dangling.md").symlink_to(tmp_path / "missing.md")
+    (refs / "loop").symlink_to(refs / "loop")
+    os.mkfifo(refs / "pipe")  # reading a pipe would block forever
+
+    facts = skill_facts(skill)
+    result = HarnessValidator().validate(skill)
+
+    assert facts["largest_resource"] == "references/ok.md"
+    assert facts["resource_symlinks"] == 2
+    assert result.metadata["harness_compatibility"][str(skill)]
+
+
+def test_symlinked_reference_outside_the_skill_still_needs_paging(tmp_path: Path):
+    skill = _skill(tmp_path)
+    (skill / "references").mkdir()
+    shared = tmp_path / "shared.md"
+    shared.write_text("line\n" * 20_000 + "w" * 2_001 + "\n")
+    (skill / "references" / "shared.md").symlink_to(shared)
+    (skill / "real").mkdir()
+    (skill / "real" / "big.md").write_text("line\n" * 20_000)
+    (skill / "references" / "big.md").symlink_to(skill / "real" / "big.md")
+    facts = skill_facts(skill)
+    rows = _rows(skill)
+
+    assert facts["resource_symlinks"] == 2 and facts["resource_symlink_escapes"] == 1
+    # The link into the skill is counted once, under its real path; the one leaving it is read through the link.
+    assert facts["files_over_51200_paths"] == "real/big.md, references/shared.md"
+    assert facts["long_line_files"] == "references/shared.md"
+    assert {"OC-REF-CUT", "OC-LONG-LINES"} <= _ids(rows, "opencode")
+    # OpenClaw is not known to read through links, so its multi-read count stays on files inside the skill.
+    assert facts["files_over_64000_paths"] == "real/big.md" and "OW-REF-BUDGET" in _ids(rows, "openclaw")
+
+
+def test_binary_resources_are_not_read_as_text(tmp_path: Path):
+    skill = _skill(tmp_path)
+    (skill / "assets").mkdir()
+    (skill / "assets" / "padded.bin").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 5_000 + bytes(range(256)))
+    (skill / "assets" / "photo.png").write_bytes(bytes(range(256)) * 400)
+    facts = skill_facts(skill)
+    rows = _rows(skill)
+
+    assert (facts["long_line_count"], facts["files_over_51200"], facts["files_over_64000"]) == (0, 0, 0)
+    assert facts["largest_resource"] == ""
+    assert not {"OC-REF-CUT", "OC-LONG-LINES"} & _ids(rows, "opencode")
+    assert "OW-REF-BUDGET" not in _ids(rows, "openclaw")
 
 
 def test_compact_view_shows_worst_finding_per_harness_and_catalog(tmp_path: Path):
@@ -536,6 +752,73 @@ def _rule_ids(skill: Path, harness: str, config: dict | None = None) -> set[str]
     return {f["id"] for r in evaluate_harnesses(skill, harness, config=config) for f in r.findings}
 
 
+def test_openclaw_read_budget_depends_on_model_context(tmp_path: Path):
+    mid = _skill(tmp_path / "mid", body="x" * 20_000)
+    big = _skill(tmp_path / "big", body="x" * 40_000)
+
+    assert "OW-READ-BUDGET" in _rule_ids(mid, "openclaw")
+    assert "OW-READ-BUDGET" not in _rule_ids(mid, "openclaw", {"context_tokens": 150_000})
+    assert "OW-READ-BUDGET" not in _rule_ids(mid, "openclaw", {"custom_provider": True})
+    assert "OW-READ-BUDGET" in _rule_ids(big, "openclaw", {"custom_provider": True})
+    assert "OW-READ-BUDGET" not in _rule_ids(big, "openclaw", {"context_tokens": 200_000})
+
+
+def test_codex_shell_cut_is_lower_for_custom_providers(tmp_path: Path):
+    skill = _skill(tmp_path, body="x" * 12_000)
+
+    assert "CX-SHELL-READ" not in _rule_ids(skill, "codex")
+    assert "CX-SHELL-READ" in _rule_ids(skill, "codex", {"custom_provider": True})
+
+
+def test_codex_explicit_invocation_delivers_whole(tmp_path: Path):
+    skill = _skill(tmp_path, body="x" * 50_000)
+
+    assert "CX-SHELL-READ" in _rule_ids(skill, "codex", {"custom_provider": True})
+    assert "CX-SHELL-READ" not in _rule_ids(skill, "codex", {"custom_provider": True, "explicit_invocation": True})
+
+
+def test_harness_check_accepts_model_config(tmp_path: Path):
+    skill = _skill(tmp_path, body="x" * 20_000)
+    out = tmp_path / "out.json"
+
+    result = CliRunner().invoke(
+        cli, ["harness-check", str(skill), "--harness", "openclaw", "--context-tokens", "150000", "--json", str(out)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "OW-READ-BUDGET" not in out.read_text()
+
+
+def test_openclaw_read_budget_weights_cjk_not_utf8_bytes(tmp_path: Path):
+    kana = _skill(tmp_path / "kana", body="\u3042" * 8_000)
+    cyrillic = _skill(tmp_path / "cyr", body="\u0430" * 20_000)
+
+    assert skill_facts(kana)["skill_md_bytes"] < 32_000 < skill_facts(cyrillic)["skill_md_bytes"]
+    assert "OW-READ-BUDGET" in _rule_ids(kana, "openclaw", {"custom_provider": True})
+    assert "OW-READ-BUDGET" not in _rule_ids(cyrillic, "openclaw", {"custom_provider": True})
+
+
+def test_openclaw_read_chars_counts_code_units(tmp_path: Path):
+    flat = skill_facts(_skill(tmp_path / "flat", body="a" * 1_000))["openclaw_read_chars"]
+    lines = skill_facts(_skill(tmp_path / "lines", body="a\n" * 500))["openclaw_read_chars"]
+    emoji = skill_facts(_skill(tmp_path / "emoji", body="\U0001f600" * 500))["openclaw_read_chars"]
+
+    assert lines == flat == emoji
+
+
+def test_hermes_view_budget_counts_code_points(tmp_path: Path):
+    skill = _skill(tmp_path, body="\u65c5" * 60_000)
+
+    assert "HM-VIEW-BUDGET" not in _rule_ids(skill, "hermes")
+
+
+def test_claude_allowed_tools_blocks_headless_load(tmp_path: Path):
+    skill = _skill(tmp_path, extra="allowed-tools: Read\n")
+
+    assert "CC-ALLOWED-TOOLS-HEADLESS" not in _rule_ids(skill, "claude-code")
+    assert "CC-ALLOWED-TOOLS-HEADLESS" in _rule_ids(skill, "claude-code", {"headless": True})
+
+
 def test_native_root_skips_root_rules(tmp_path):
     skill = tmp_path / ".claude" / "skills" / "demo"
     skill.mkdir(parents=True)
@@ -555,6 +838,91 @@ def test_copilot_drops_skill_without_front_matter(tmp_path: Path):
 
     assert "CP-NO-FRONTMATTER" in _rule_ids(skill, "copilot-cli")
     assert "CP-NO-FRONTMATTER" not in _rule_ids(_skill(tmp_path), "copilot-cli")
+
+
+def test_version_outside_profile_adds_advisory(tmp_path: Path):
+    skill = _skill(tmp_path)
+
+    assert "VERSION-UNVERIFIED" not in _rule_ids(skill, "codex", {"harness_versions": {"codex": "0.166.0"}})
+    assert "VERSION-UNVERIFIED" in _rule_ids(skill, "codex", {"harness_versions": {"codex": "0.170.0"}})
+    assert "VERSION-UNVERIFIED" not in _rule_ids(skill, "codex", {"harness_versions": {"claude-code": "9.9.9"}})
+
+
+def test_cli_harness_version_flag(tmp_path: Path):
+    skill = _skill(tmp_path)
+    result = CliRunner().invoke(
+        cli, ["harness-check", str(skill), "--harness", "codex", "--harness-version", "codex=0.170.0", "-v"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "0.170.0" in result.output
+
+
+def test_harness_check_ignores_a_malformed_profile_for_an_unselected_harness(tmp_path: Path):
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    (profiles / "codex.yaml").write_text((PROFILES_DIR / "codex.yaml").read_text(encoding="utf-8"), encoding="utf-8")
+    (profiles / "custom.yaml").write_text("harness: [unclosed\n", encoding="utf-8")
+    skill = _skill(tmp_path)
+
+    result = CliRunner().invoke(
+        cli,
+        ["harness-check", str(skill), "--harness", "codex", "--harness-profiles", str(profiles)],
+    )
+    assert result.exit_code == 0, result.output
+
+    # A version for the unselected-but-present harness is still accepted; a made-up name is still a usage error.
+    ok = CliRunner().invoke(
+        cli,
+        [
+            "harness-check",
+            str(skill),
+            "--harness",
+            "codex",
+            "--harness-profiles",
+            str(profiles),
+            "--harness-version",
+            "custom=1.0",
+        ],
+    )
+    assert ok.exit_code == 0, ok.output
+    bad = CliRunner().invoke(
+        cli,
+        ["harness-check", str(skill), "--harness", "nope", "--harness-profiles", str(profiles)],
+    )
+    assert bad.exit_code == 2 and "Unknown harness: nope" in bad.output
+
+
+def test_harness_version_uses_the_profiles_harness_name_not_its_file_name(tmp_path: Path):
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    text = (PROFILES_DIR / "codex.yaml").read_text(encoding="utf-8")
+    (profiles / "mine.yaml").write_text(text.replace("harness: codex", "harness: acme", 1), encoding="utf-8")
+    skill = _skill(tmp_path)
+
+    def run(version: str):
+        return CliRunner().invoke(
+            cli,
+            [
+                "harness-check",
+                str(skill),
+                "--harness",
+                "mine",
+                "--harness-profiles",
+                str(profiles),
+                "--harness-version",
+                version,
+                "-v",
+            ],
+        )
+
+    ok = run("acme=9.9.9")
+    assert ok.exit_code == 0, ok.output
+    assert "you run 9.9.9" in ok.output
+    # The file name is not what versions are keyed by, so it is a usage error instead of a version that is ignored.
+    for name in ("mine", "nope"):
+        bad = run(f"{name}=9.9.9")
+        assert bad.exit_code == 2 and f"unknown harness {name}" in bad.output and "acme" in bad.output
 
 
 def test_harness_note_names_the_skill_not_the_harness():

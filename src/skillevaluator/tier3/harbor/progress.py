@@ -10,6 +10,7 @@ or discarded by an API caller.
 
 from __future__ import annotations
 
+import io
 import logging
 import math
 import re
@@ -111,6 +112,9 @@ class _FailedDisplayStop:
 
     stop_refused: bool
     notice_shown: bool
+    # The terminal refused the notice, but the stream kept it to send later,
+    # as standard error's buffer does.
+    notice_kept: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -544,6 +548,11 @@ class RichProgressReporter(PlainProgressReporter):
         lock and records the outcome in the same lock hold, so the run's
         close() either stops Live itself or finds the record.
         """
+        # The console holds no refused output once Live stops here, and the
+        # caller drops it before Live started. Live that stopped itself when
+        # its first frame failed leaves that frame and stop held, and they go
+        # out with the notice.
+        notice_alone = live is None or bool(getattr(live, "is_started", False))
         if live is not None:
             try:
                 live.stop()
@@ -560,14 +569,30 @@ class RichProgressReporter(PlainProgressReporter):
             # still refuses what the stream holds, the notice waits for the
             # run's close().
             self._console.file.flush()
-            # Live keeps the last frame it drew, with its stages still running,
-            # so explain why it no longer updates.
-            self._write_line(_DISPLAY_STOPPED_NOTICE)
         except Exception:
             logger.debug("Tier 3 progress stop notice failed", exc_info=True)
             self._failed_stop = _FailedDisplayStop(stop_refused=False, notice_shown=False)
+            return
+        try:
+            # Live keeps the last frame it drew, with its stages still running,
+            # so explain why it no longer updates.
+            self._write_line(_DISPLAY_STOPPED_NOTICE)
+        except Exception as error:
+            logger.debug("Tier 3 progress stop notice failed", exc_info=True)
+            # The flush above emptied the stream's buffer, so a buffer that
+            # keeps refused writes now holds the whole notice and sends it
+            # later. The run's close() then sends it instead of the late one.
+            notice_kept = notice_alone and isinstance(error, BlockingIOError) and self._stream_keeps_refused_writes()
+            self._failed_stop = _FailedDisplayStop(stop_refused=False, notice_shown=False, notice_kept=notice_kept)
         else:
             self._failed_stop = _FailedDisplayStop(stop_refused=False, notice_shown=True)
+
+    def _stream_keeps_refused_writes(self) -> bool:
+        """Whether the console's stream keeps a write the terminal refused, as standard error's buffer does."""
+        try:
+            return isinstance(getattr(self._console.file, "buffer", None), (io.BufferedWriter, io.BufferedRandom))
+        except Exception:
+            return False
 
     def _drop_refused_writes(self) -> str:
         """Discard the output this thread's Rich console holds from refused writes, and return it.
@@ -612,6 +637,15 @@ class RichProgressReporter(PlainProgressReporter):
             # The run's close() then drops what the terminal still refuses.
             logger.debug("Tier 3 progress terminal restore failed", exc_info=True)
         if failed_stop.notice_shown:
+            return
+        if failed_stop.notice_kept:
+            try:
+                # The stream kept the notice the terminal refused. It goes out
+                # now, or with the stream's next write if the terminal still
+                # refuses it, and a late notice would only repeat it.
+                self._console.file.flush()
+            except Exception:
+                logger.debug("Tier 3 progress kept stop notice could not be sent", exc_info=True)
             return
         try:
             # Written even when the terminal refused the cursor just now: a

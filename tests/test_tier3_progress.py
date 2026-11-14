@@ -1737,11 +1737,21 @@ class _WouldBlockTerminal(io.RawIOBase):
         ({1}, "Agents / models:", _STOP_NOTICE),
         ({2}, "Provider:", _STOP_NOTICE),
         ({3}, "Run plan:", _STOP_NOTICE),
+        # The terminal takes the refused line when it is flushed, then
+        # refuses the notice. The stream keeps the notice and sends it when
+        # the run ends, in place of the late one.
+        ({1, 3}, "Agents / models:", _STOP_NOTICE),
         # The terminal stays full until start() returns: it refuses the plan
         # line and every flush after it, so the notice waits for close().
         ({1, 2, 3}, "Agents / models:", _LATE_STOP_NOTICE),
     ],
-    ids=["agents-line-refused", "provider-line-refused", "run-plan-line-refused", "terminal-full-during-start"],
+    ids=[
+        "agents-line-refused",
+        "provider-line-refused",
+        "run-plan-line-refused",
+        "agents-line-and-notice-refused",
+        "terminal-full-during-start",
+    ],
 )
 def test_a_plan_line_refused_by_a_buffered_terminal_stream_is_printed_once(
     monkeypatch: pytest.MonkeyPatch,
@@ -1779,12 +1789,78 @@ def test_a_plan_line_refused_by_a_buffered_terminal_stream_is_printed_once(
     # The refused line reaches the terminal once, from the stream's buffer,
     # and one stop notice ends the run's output. The stream would also keep a
     # notice the terminal refused and send it before the late one, so the
-    # notice is not written while the terminal still refuses the line.
+    # notice is not written while the terminal still refuses the line, and a
+    # notice the stream kept is not followed by the late one.
     assert output.count(plan_line) == 1
     assert output.count("Tier 3 progress display stopped after a drawing error") == 1
     assert f"\n{output}".endswith(f"\n{notice}\n")
     assert "Harbor Run Configuration" not in output
     assert "agent finished" not in output
+
+
+@pytest.mark.parametrize(
+    "full_at_close", [False, True], ids=["terminal-takes-writes-at-close", "terminal-full-at-close"]
+)
+def test_a_stop_notice_kept_by_a_buffered_terminal_stream_is_not_repeated_when_the_run_closes(
+    monkeypatch: pytest.MonkeyPatch,
+    full_at_close: bool,
+) -> None:
+    from rich.console import Console
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    class Terminal(_WouldBlockTerminal):
+        """Refuses the first write after it is armed, and the first write that carries the stop notice."""
+
+        armed = False
+        full = False
+        notice_refused = False
+
+        def write(self, data: Any) -> int | None:
+            if self.full:
+                return None
+            if self.armed:
+                self.armed = False
+                return None
+            if not self.notice_refused and _STOP_NOTICE.encode("utf-8") in bytes(data):
+                self.notice_refused = True
+                return None
+            return super().write(data)
+
+    terminal = Terminal(set())
+    # Shaped like standard error: its buffer keeps what the terminal refused.
+    stream = io.TextIOWrapper(io.BufferedWriter(terminal), encoding="utf-8", newline="\n", line_buffering=True)
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=60)
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+    # The terminal refuses the update and takes Live's stop, then refuses the
+    # notice under the last frame. The stream keeps that notice.
+    terminal.armed = True
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="still evaluating"))
+    assert reporter.is_active is False
+    assert terminal.notice_refused
+    terminal.full = full_at_close
+    reporter.close()
+    # The terminal takes whatever the stream still holds once the run is over.
+    terminal.full = False
+    stream.flush()
+    # How a refused frame splits across the stream's writes depends on the
+    # Python version's buffer, so the bytes need not be valid UTF-8.
+    output = terminal.received.decode("utf-8", errors="replace")
+
+    # The kept notice reaches the terminal, when the run ends or with the
+    # stream's next write, and no late notice repeats it.
+    _assert_cursor_shown_and_one_stop_notice(output, _STOP_NOTICE)
+    assert output.endswith(f"{_STOP_NOTICE}\n")
 
 
 @pytest.mark.parametrize("refused_from", ["first-frame", "update"], ids=["first-frame-refused", "update-refused"])

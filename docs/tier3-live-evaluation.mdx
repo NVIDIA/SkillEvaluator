@@ -1379,21 +1379,27 @@ the case is judged and scored normally.
   truncated reply, the LLM attempts keep their own status (`rejected`, or
   `error` if the retry failed in transport), and an `accepted` `salvage`
   entry, numbered like the truncated attempt, holds the rebuilt results.
-  When the RAGAS goal scorer runs, each request it sends is saved as a
-  `ragas` entry with its messages as the prompt and the model named in the
-  request: `replied` with the judge's reply, which is the text or the
-  tool-call arguments RAGAS parses, or `error` with the HTTP status and body,
-  or with the reason the reply was not received. A request that fails before
-  any response arrives, such as a refused connection, saves no entry of its
-  own. A last `ragas` entry is `accepted` with the score RAGAS computed, or
-  `error` with the reason the prompt judge ran instead. Only that last entry
-  counts toward `--max-judge-calls`; the request entries do not.
-  Configured credentials, common key shapes, URL userinfo, `Authorization`,
-  API-key, token and `Cookie` header values, and credential flag values
-  (`--token`, `--password`, `curl -u user:password`) are masked, and long
-  prompts and replies are shortened. The prompts contain the task question,
-  expected answer, and agent evidence. Pass `--harbor-keep-jobs` to keep the
-  Harbor trial directories that hold this file.
+  When the RAGAS goal scorer runs, each request it sends is saved as a `ragas`
+  entry with its messages as the prompt and the model named in the request. A
+  `replied` entry holds the judge's reply: the text or the tool-call arguments
+  RAGAS parses, or the whole reply body when it has neither, such as a refusal
+  or a content-filter stop. An `error` entry holds the HTTP status and body,
+  or the reason the reply was not received. A request that fails before any
+  response arrives, such as a refused connection, saves no entry of its own. A
+  last `ragas` entry is `accepted` with the score RAGAS computed, or `error`
+  with the reason the prompt judge ran instead. Only that last entry counts
+  toward `--max-judge-calls`; the request entries do not. Configured
+  credentials, common key shapes, URL userinfo, `Authorization`, API-key,
+  token and `Cookie` header values, and credential flag values (`--token`,
+  `--password`, `curl -u user:password`) are masked, also at the start of a
+  line in JSON-escaped text such as RAGAS prompts, where a line break is the
+  two characters `\n`, and inside JSON-escaped quotes (`-u \"user:password\"`),
+  as in tool-call arguments. That includes a value whose flag or header name
+  was masked together with an unquoted credential value that ends the line
+  before (`--password ...\n--token ...`). Long prompts and replies are
+  shortened. The prompts contain the task question, expected answer, and agent
+  evidence. Pass `--harbor-keep-jobs` to keep the Harbor trial directories that
+  hold this file.
 - **Reasoning models.** GPT-5 and GPT-6 judges get no `temperature` and at
   least 32,768 output tokens, because reasoning tokens count against the
   limit; other judges get 16,384. GPT-6 judges and Claude 5.5 or later judges

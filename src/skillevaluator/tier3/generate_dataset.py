@@ -748,7 +748,8 @@ def generate_one_case(
         cases=cases,
     )
     evals_dir.mkdir(parents=True, exist_ok=True)
-    with output_path.open("x", encoding="utf-8") as output:
+    # backslashreplace writes an undecodable script name as a JSON \u escape.
+    with output_path.open("x", encoding="utf-8", errors="backslashreplace") as output:
         json.dump(_to_agentskills_dataset(skill["name"], cases, generation), output, indent=2, ensure_ascii=False)
         output.write("\n")
     return output_path
@@ -1084,7 +1085,7 @@ def _run_agent_collect_trajectories(
         ),
         skill_path.name,
     )
-    with output_path.open("w", encoding="utf-8") as f:
+    with output_path.open("w", encoding="utf-8", errors="backslashreplace") as f:
         json.dump(_to_agentskills_dataset(str(skill_name), cases), f, indent=2, ensure_ascii=False)
     print(f"  Wrote initial {len(cases)} case(s) to {output_path}")
 
@@ -1482,7 +1483,7 @@ def _write_dataset(output_path: Path, dataset: dict[str, Any]) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         existing_mode = stat.S_IMODE(output_path.stat().st_mode) if output_path.exists() else None
         temporary_path = output_path.with_name(f".{output_path.name}.{secrets.token_hex(16)}.tmp")
-        with temporary_path.open("x", encoding="utf-8") as temporary:
+        with temporary_path.open("x", encoding="utf-8", errors="backslashreplace") as temporary:
             json.dump(dataset, temporary, indent=2, ensure_ascii=False)
             temporary.flush()
             os.fsync(temporary.fileno())

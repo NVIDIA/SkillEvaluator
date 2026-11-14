@@ -10,6 +10,7 @@ or discarded by an API caller.
 
 from __future__ import annotations
 
+import io
 import logging
 import math
 import re
@@ -67,6 +68,11 @@ _DISPLAY_STOPPED_NOTICE = "Tier 3 progress display stopped after a drawing error
 # Printed when the run ends instead, when the terminal refused the line above
 # or Live's stop.
 _DISPLAY_STOPPED_LATE_NOTICE = "Tier 3 progress display stopped after a drawing error; the run went on without it."
+# Frames of a running stage's spinner, as in Rich's "dots". The view redraws
+# only on progress events and heartbeats, so a running stage moves on one frame
+# with each redraw. Rich's own spinner picks its frame from the clock, so it
+# would stand still whenever redraws come a whole number of its cycles apart.
+_RUNNING_FRAMES = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +112,9 @@ class _FailedDisplayStop:
 
     stop_refused: bool
     notice_shown: bool
+    # The terminal refused the notice, but the stream kept it to send later,
+    # as standard error's buffer does.
+    notice_kept: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -433,6 +442,9 @@ class RichProgressReporter(PlainProgressReporter):
         self._live = None
         self._live_plan: Tier3RunPlan | None = None
         self._live_events: dict[str, tuple[ProgressEvent, str | None]] = {}
+        # How many times each running stage has been drawn since it started
+        # running, which picks its spinner frame.
+        self._live_spinner_steps: dict[str, int] = {}
         self._live_event_slots = _LIVE_MIN_EVENT_ROWS
         self._printed_plan_lines: dict[str, str] = {}
         # Set, under the same lock hold that stops Live, when a drawing failure
@@ -461,6 +473,7 @@ class RichProgressReporter(PlainProgressReporter):
                 finished_at = None
             else:
                 self._active.pop(event.stage, None)
+                self._live_spinner_steps.pop(event.stage, None)
                 finished_at = self._elapsed()
             # Move the stage to the end so the recent-event window shows it.
             self._live_events.pop(event.stage, None)
@@ -491,6 +504,22 @@ class RichProgressReporter(PlainProgressReporter):
                                 live.update(self._build_live_table(final=True), refresh=False)
                             finally:
                                 live.stop()
+                    elif (
+                        after_failure
+                        and self._live is None
+                        and self._live_plan is not None
+                        and self._failed_stop is None
+                    ):
+                        # Drawing failed before Live started, for example on a
+                        # plan line printed above where the frame goes. There
+                        # is no frame to stop, but progress is off for the run
+                        # all the same, so the notice is due. A stream that
+                        # refuses a write can still have taken it, as standard
+                        # error's buffer does, and then sends it with the
+                        # notice. Rich's copy of the refused line is dropped
+                        # first so the line is not printed twice.
+                        self._drop_refused_writes()
+                        self._stop_live_after_failure(None)
                 finally:
                     # Reset even when Live never started, so a failed start
                     # leaves no plan or rows behind for the next run.
@@ -498,38 +527,78 @@ class RichProgressReporter(PlainProgressReporter):
                         self._live = None
                     self._live_plan = None
                     self._live_events.clear()
+                    self._live_spinner_steps.clear()
                     self._live_event_slots = _LIVE_MIN_EVENT_ROWS
                     self._printed_plan_lines.clear()
                     if not after_failure:
                         failed_stop, self._failed_stop = self._failed_stop, None
                         if failed_stop is not None:
                             self._finish_failed_stop(failed_stop)
+                        # Whatever the terminal still refuses as the run ends,
+                        # such as the final frame and Live's stop or the late
+                        # notice, belongs to no later run on this reporter.
+                        self._drop_refused_writes()
 
     def _stop_live_after_failure(self, live) -> None:
         """Stop the live view after a drawing failure and say that the run goes on.
 
         The full final frame could fail the same way, so Live keeps the last
-        frame it drew. Runs under the reporter lock and records the outcome in
-        the same lock hold, so the run's close() either stops Live itself or
-        finds the record.
+        frame it drew. ``live`` is ``None`` when drawing failed before Live
+        started, and then only the notice is printed. Runs under the reporter
+        lock and records the outcome in the same lock hold, so the run's
+        close() either stops Live itself or finds the record.
         """
+        # The console holds no refused output once Live stops here, and the
+        # caller drops it before Live started. Live that stopped itself when
+        # its first frame failed leaves that frame and stop held when the
+        # terminal refused that stop too. They then go out with the notice,
+        # and a stream's buffer may keep only part of them. Nothing here
+        # tells whether that stop went out, so after a failed first frame
+        # the run's close() writes the late notice either way, although a
+        # stream that took the stop and kept the notice sends both.
+        notice_alone = live is None or bool(getattr(live, "is_started", False))
+        if live is not None:
+            try:
+                live.stop()
+            except Exception:
+                # A terminal that refused the redraw can refuse Live's stop too,
+                # and with it the write that shows the cursor again.
+                logger.debug("Tier 3 progress display stop failed", exc_info=True)
+                self._failed_stop = _FailedDisplayStop(stop_refused=True, notice_shown=False)
+                return
         try:
-            live.stop()
+            # A stream can keep what the terminal refused, as standard error's
+            # buffer does, and send it later. It would then also keep a refused
+            # notice and send it before the late one, so while the terminal
+            # still refuses what the stream holds, the notice waits for the
+            # run's close().
+            self._console.file.flush()
         except Exception:
-            # A terminal that refused the redraw can refuse Live's stop too,
-            # and with it the write that shows the cursor again.
-            logger.debug("Tier 3 progress display stop failed", exc_info=True)
-            self._failed_stop = _FailedDisplayStop(stop_refused=True, notice_shown=False)
+            logger.debug("Tier 3 progress stop notice failed", exc_info=True)
+            self._failed_stop = _FailedDisplayStop(stop_refused=False, notice_shown=False)
             return
         try:
             # Live keeps the last frame it drew, with its stages still running,
             # so explain why it no longer updates.
             self._write_line(_DISPLAY_STOPPED_NOTICE)
-        except Exception:
+        except Exception as error:
             logger.debug("Tier 3 progress stop notice failed", exc_info=True)
-            self._failed_stop = _FailedDisplayStop(stop_refused=False, notice_shown=False)
+            # The flush above emptied the stream's buffer, so a buffer that
+            # keeps refused writes now holds the notice and sends it later.
+            # The run's close() then sends it instead of the late one. A
+            # buffer smaller than the notice would keep only part of it, but
+            # standard error's buffer is many times the notice's size.
+            notice_kept = notice_alone and isinstance(error, BlockingIOError) and self._stream_keeps_refused_writes()
+            self._failed_stop = _FailedDisplayStop(stop_refused=False, notice_shown=False, notice_kept=notice_kept)
         else:
             self._failed_stop = _FailedDisplayStop(stop_refused=False, notice_shown=True)
+
+    def _stream_keeps_refused_writes(self) -> bool:
+        """Whether the console's stream keeps a write the terminal refused, as standard error's buffer does."""
+        try:
+            return isinstance(getattr(self._console.file, "buffer", None), (io.BufferedWriter, io.BufferedRandom))
+        except Exception:
+            return False
 
     def _drop_refused_writes(self) -> str:
         """Discard the output this thread's Rich console holds from refused writes, and return it.
@@ -556,12 +625,19 @@ class RichProgressReporter(PlainProgressReporter):
         from rich.control import Control
 
         dropped = self._drop_refused_writes()
+        # Whether the frame's last line is ended before the late notice.
+        line_ended = True
         try:
             if failed_stop.stop_refused:
                 # Live hides the cursor while it draws and shows it again when
                 # it stops, then ends the frame's last line.
+                line_ended = not self._console.is_terminal
                 self._console.show_cursor(True)
                 if self._console.is_terminal:
+                    # The console keeps a line the terminal refuses and sends
+                    # it before its next write, so the line ends before the
+                    # notice either way.
+                    line_ended = True
                     self._console.line()
             elif str(Control.show_cursor(True)) in dropped:
                 # Live.start() stops Live itself when its first frame fails,
@@ -570,10 +646,35 @@ class RichProgressReporter(PlainProgressReporter):
                 # cursor was just dropped. No frame reached the terminal, so
                 # there is no last line to end.
                 self._console.show_cursor(True)
-            if not failed_stop.notice_shown:
-                self._write_line(_DISPLAY_STOPPED_LATE_NOTICE)
         except Exception:
+            # The run's close() then drops what the terminal still refuses.
             logger.debug("Tier 3 progress terminal restore failed", exc_info=True)
+        if failed_stop.notice_shown:
+            return
+        if failed_stop.notice_kept:
+            try:
+                # The stream kept the notice the terminal refused. It goes out
+                # now, or with the stream's next write if the terminal still
+                # refuses it, and a late notice would only repeat it.
+                self._console.file.flush()
+            except Exception:
+                logger.debug("Tier 3 progress kept stop notice could not be sent", exc_info=True)
+            return
+        try:
+            # Written even when the terminal refused the cursor just now: a
+            # stream that keeps what the terminal refused, as standard error
+            # does, can send the notice with it later if its buffer has room.
+            # A refused cursor write leaves the line above unwritten, and the
+            # stream may have kept only the start of the refused stop, without
+            # its newline, so the notice then starts a new line of its own.
+            # Where the stream kept the whole stop, a blank line comes first,
+            # as it does when the terminal takes the cursor write.
+            if line_ended:
+                self._write_line(_DISPLAY_STOPPED_LATE_NOTICE)
+            else:
+                self._write_line(f"\n{_DISPLAY_STOPPED_LATE_NOTICE}")
+        except Exception:
+            logger.debug("Tier 3 progress late stop notice failed", exc_info=True)
 
     def _render_plan(self, plan: Tier3RunPlan) -> None:
         self._live_plan = plan
@@ -642,7 +743,6 @@ class RichProgressReporter(PlainProgressReporter):
     def _build_live_table(self, *, final: bool = False):
         from rich import box
         from rich.cells import cell_len
-        from rich.spinner import Spinner
         from rich.table import Table
         from rich.text import Text
 
@@ -708,11 +808,12 @@ class RichProgressReporter(PlainProgressReporter):
                 if stage.startswith("agent:")
                 else stage.replace("-", " ").title()
             )
-            state = (
-                Spinner("dots", text=Text("running", style=TEXT))
-                if event.state == "running"
-                else Text(event.state, style=state_styles.get(event.state, "white"))
-            )
+            if event.state == "running":
+                step = self._live_spinner_steps.get(stage, 0)
+                self._live_spinner_steps[stage] = step + 1
+                state = Text.assemble(_RUNNING_FRAMES[step % len(_RUNNING_FRAMES)], " ", ("running", TEXT))
+            else:
+                state = Text(event.state, style=state_styles.get(event.state, "white"))
             rows.append(
                 (
                     Text(label),

@@ -156,6 +156,22 @@ PLUGIN_CONTAINED_MODE = "contained"
 # Skill manifest file name variants (case-insensitive search)
 SKILL_MANIFEST_VARIANTS = ("SKILL.md", "skill.md")
 
+# Top-level SKILL.md frontmatter fields defined by the agentskills.io spec.
+SPEC_SKILL_FIELDS = frozenset({"name", "description", "license", "compatibility", "metadata", "allowed-tools"})
+
+# SKILL.md size thresholds (bytes) where common agent harnesses start cutting,
+# refusing, or skipping the file: 16,000-64,000 character whole-file reads,
+# 50 KiB tool-output truncation, and a 256,000-byte discovery cap.
+SKILL_MD_SIZE_THRESHOLDS = ((256_000, "high"), (50 * 1024, "medium"), (32 * 1024, "low"))
+
+# Some harnesses show only the first ~60 characters of each description in
+# their skill list, so the "when to use" trigger should appear within it.
+DESCRIPTION_TRIGGER_WINDOW = 60
+DESCRIPTION_TRIGGER_PATTERN = (
+    r"\buse (?:this (?:skill )?|it )?(?:when|for|to|if|whenever)\b"
+    r"|\bwhen (?:the user|a user|you|asked)\b|\btriggers?\b"
+)
+
 # Banned/deprecated packages
 BANNED_PACKAGES = [
     "subprocess32",  # Use subprocess from stdlib
@@ -743,6 +759,10 @@ PLUGIN_COMPONENT_MAX_ITEMS = 256
 PLUGIN_CONFIG_MAX_BYTES = 256 * 1024
 
 SCAN_ARTIFACT_DIRS = frozenset({"evals", ".evals", "results", ".results", "versions", ".versions"})
+
+# Folders no harness reads as part of a skill: VCS data, caches and dependencies. The artifact
+# folders above are not in this set because harnesses scan them like any other folder.
+SKILL_NOT_SHIPPED_DIRS = SCAN_EXCLUDED_DIRS - SCAN_ARTIFACT_DIRS
 
 PLUGIN_TREE_PRUNED_DIRS = SCAN_EXCLUDED_DIRS - {"__pycache__"}
 

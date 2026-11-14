@@ -440,13 +440,13 @@ All notable changes to SkillEvaluator are documented in this file.
   the configured skill roots, including skills that did not change. One
   `SKILL.md` whose frontmatter is not a valid YAML mapping with a non-empty
   string `name` and `description` stops it before any embedding request, and
-  Tier 2 then checks no skill and is incomplete. Since 0.9.0 this includes a
-  value that is not a string, such as `name: 2048`, `name: yes`, or
-  `description: [Draft]`, which 0.8.0 converted to text. The Tier 2 reason
-  pointed at provider and embedding configuration; it now says that a skill's
-  frontmatter is the cause, and the retained catalog log under
-  `tier2/catalog/diagnostics/` names the skill by its path in the repository.
-  Quote such a value, as in `name: "2048"`.
+  Tier 2 then checks no skill and is incomplete. This includes a value that is
+  not a string, such as `name: 2048`, `name: yes`, or `description: [Draft]`,
+  which Tier 2 commands such as `similarity-check` converted to text before
+  0.9.0. The Tier 2 reason pointed at provider and embedding configuration; it
+  now says that a skill's frontmatter is the cause, and the retained catalog
+  log under `tier2/catalog/diagnostics/` names the skill by its path in the
+  repository. Quote such a value, as in `name: "2048"`.
 
 ## 0.9.0 - 2026-11-13
 

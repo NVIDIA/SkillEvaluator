@@ -940,51 +940,101 @@ def test_template_cases_still_quote_a_description_that_names_other_files(descrip
     assert case["ground_truth"] == f"A correct, complete result for: {description.lower().rstrip('.')}"
 
 
-def test_docs_say_which_skill_md_in_a_description_becomes_my_skill_md():
-    # Only a SKILL.md the description reads, opens, loads, consults or follows,
-    # as a prompt `tier3 validate` flags would, is renamed.
-    for verb in ("reads", "opens", "loads", "consults", "follows"):
-        (case,) = generate_dataset._generate_simple(_skill(description=f"{verb.title()} SKILL.md and reports errors."))
-        assert f"{verb} my SKILL.md" in case["question"], case["question"]
-    for description in ("Validates SKILL.md frontmatter fields.", "Creates a SKILL.md for a new agent skill."):
-        (case,) = generate_dataset._generate_simple(_skill(description=description))
-        assert "my SKILL.md" not in case["question"], case["question"]
+# How the docs, the _template_task() docstring and the CHANGELOG entry say
+# which SKILL.md in a description becomes "my SKILL.md".
+_RENAMING_VERBS = ("reads", "opens", "loads", "consults", "follows")
+_RENAMING_HEDGE = "otherwise points at the skill's own skill.md as a prompt tier3 validate"
+_KEEPING_PLACES = ("in", "of", "from", "under", "inside")
+_OTHER_PLACES = ("at", "within")
+_MY_SKILL_MD_ENTRY = "The eval dataset docs now say that a template prompt calls a `SKILL.md`"
 
-    claim = "reads, opens, loads, consults or follows"
-    sources = {
-        "docs/eval-datasets.mdx": (_REPO / "docs" / "eval-datasets.mdx").read_text(encoding="utf-8"),
-        "_template_task": generate_dataset._template_task.__doc__ or "",
+
+def _listed(words: tuple[str, ...]) -> str:
+    """Words as the docs list them: "a, b or c"."""
+    return f"{', '.join(words[:-1])} or {words[-1]}"
+
+
+def _flat(text: str) -> str:
+    """Lowercase text with Markdown code marks dropped and whitespace collapsed."""
+    return " ".join(text.replace("`", "").split()).lower()
+
+
+def _changelog_entry(opening: str) -> str:
+    """The CHANGELOG entry that starts with these words."""
+    text = (_REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+    entry = re.search(r"^- " + r"\s+".join(map(re.escape, opening.split())), text, re.MULTILINE)
+    assert entry, opening
+    end = text.find("\n\n", entry.start())
+    return text[entry.start() : end if end >= 0 else len(text)]
+
+
+def _my_skill_md_wording() -> dict[str, str]:
+    return {
+        "docs/eval-datasets.mdx": _flat((_REPO / "docs" / "eval-datasets.mdx").read_text(encoding="utf-8")),
+        "_template_task": _flat(generate_dataset._template_task.__doc__ or ""),
+        "CHANGELOG.md": _flat(_changelog_entry(_MY_SKILL_MD_ENTRY)),
     }
-    for where, text in sources.items():
-        text = " ".join(text.split())
-        mentions = [match.start() for match in re.finditer(r"my SKILL\.md", text)]
+
+
+def _sentence_at(text: str, index: int) -> str:
+    start = text.rfind(". ", 0, index)
+    end = text.find(". ", index)
+    return text[start + 2 if start >= 0 else 0 : end if end >= 0 else len(text)]
+
+
+def _renames_skill_md(description: str) -> bool:
+    (case,) = generate_dataset._generate_simple(_skill(description=description))
+    return "my SKILL.md" in case["question"]
+
+
+def test_docs_say_which_skill_md_in_a_description_becomes_my_skill_md():
+    # A SKILL.md the description reads, opens, loads, consults or follows, or
+    # otherwise points at as a prompt `tier3 validate` flags would, is renamed.
+    for verb in _RENAMING_VERBS:
+        assert _renames_skill_md(f"{verb.title()} SKILL.md and reports errors."), verb
+    for description in ("Cat SKILL.md and report errors.", "Uses the skill's SKILL.md template."):
+        assert _renames_skill_md(description), description
+    for description in ("Validates SKILL.md frontmatter fields.", "Creates a SKILL.md for a new agent skill."):
+        assert not _renames_skill_md(description), description
+
+    wording = _my_skill_md_wording()
+    for where, text in wording.items():
+        mentions = [match.start() for match in re.finditer(r"my skill\.md", text)]
         assert mentions, where
         for start in mentions:
-            assert claim in text[max(0, start - 200) : start], (where, text[max(0, start - 200) : start])
-    # The next sentence still names the command whose LLM prompts it means.
-    docs = " ".join(sources["docs/eval-datasets.mdx"].split())
-    assert "keeps it. `create-eval-dataset`'s LLM prompts ask for outcome checks." in docs
+            sentence = _sentence_at(text, start)
+            assert _listed(_RENAMING_VERBS) in sentence, (where, sentence)
+            assert _RENAMING_HEDGE in sentence, (where, sentence)
+    # The docs name the hedge's examples, and the next sentence still names the
+    # command whose LLM prompts it means.
+    docs = wording["docs/eval-datasets.mdx"]
+    assert '(such as cat skill.md or "uses the skill\'s skill.md")' in docs
+    assert "keeps it too. create-eval-dataset's llm prompts ask for outcome checks." in docs
 
 
 def test_docs_say_only_another_place_keeps_a_description_s_skill_md():
-    # Saying where SKILL.md is does not keep it: the skill's own place is still
-    # renamed. Only another place keeps the bare SKILL.md.
-    for description, renamed in (
-        ("Reads SKILL.md in the skill directory and reports errors.", True),
-        ("Reads SKILL.md in ./pdf-tools and reports errors.", False),
+    # Only in, of, from, under or inside another place right after SKILL.md
+    # keeps it. The skill's own place, other place words and a place word
+    # further on are still renamed.
+    for place in _KEEPING_PLACES:
+        assert not _renames_skill_md(f"Reads SKILL.md {place} ./pdf-tools and reports errors."), place
+    for place in _OTHER_PLACES:
+        assert _renames_skill_md(f"Reads SKILL.md {place} ./pdf-tools and reports errors."), place
+    for description in (
+        "Reads SKILL.md in the skill directory and reports errors.",
+        "Reads SKILL.md located in ./pdf-tools and reports errors.",
     ):
-        (case,) = generate_dataset._generate_simple(_skill(description=description))
-        assert ("my SKILL.md" in case["question"]) is renamed, case["question"]
+        assert _renames_skill_md(description), description
 
-    sources = {
-        "docs/eval-datasets.mdx": (_REPO / "docs" / "eval-datasets.mdx").read_text(encoding="utf-8"),
-        "_template_task": generate_dataset._template_task.__doc__ or "",
-    }
-    for where, text in sources.items():
-        text = " ".join(text.split())
-        rule = text.find("without naming another place for it (such as ")
+    keeping = f"{_listed(_KEEPING_PLACES)} another place comes right after it"
+    other = f"other place words, such as {_listed(_OTHER_PLACES)}, do not count"
+    for where, text in _my_skill_md_wording().items():
+        rule = text.find(keeping)
         assert rule >= 0, where
-        assert "in ./pdf-tools" in text[rule : rule + 70], (where, text[rule : rule + 70])
+        assert "in ./pdf-tools" in text[rule : rule + 120], (where, text[rule : rule + 120])
+        assert other in text[rule : rule + 200], (where, text[rule : rule + 200])
+    docs = _my_skill_md_wording()["docs/eval-datasets.mdx"]
+    assert f'{other}: "reads skill.md at ./pdf-tools" is still renamed.' in docs
 
 
 def _changelog_section(opening: str) -> str:
@@ -999,7 +1049,7 @@ def _changelog_section(opening: str) -> str:
 
 def test_changelog_records_the_my_skill_md_docs_correction_after_0_9_0():
     # The 0.9.0 entry stays as released, so the correction is a later entry.
-    section = _changelog_section("The eval dataset docs now say that a template prompt calls a `SKILL.md`")
+    section = _changelog_section(_MY_SKILL_MD_ENTRY)
     release = re.match(r"(\d+)\.(\d+)\.(\d+)\b", section)
     released_after_0_9_0 = release is not None and tuple(map(int, release.groups())) > (0, 9, 0)
     assert section == "Unreleased" or released_after_0_9_0, section

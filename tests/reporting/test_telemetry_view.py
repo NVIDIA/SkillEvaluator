@@ -152,6 +152,18 @@ def test_native_tables_keep_all_recorded_columns_scopes_conditions_and_reasons()
     assert "<script" not in html
 
 
+def test_native_telemetry_rows_do_not_enter_the_tier1_summary_filter_scope():
+    html = _render(_view(_payload()))
+    tables = re.findall(r"<table\b[^>]*>", html)
+    assert len(tables) == 4
+    # Tier 1's global .summary-table tbody tr filter hides rows without its
+    # validator status attributes. These are resource measurements instead.
+    assert all('class="contributor-table"' in table for table in tables)
+    assert all("summary-table" not in table for table in tables)
+    assert 'id="t3-recorded-token-usage-table"' in html
+    assert 'id="t3-latency-table"' in html
+
+
 def test_token_chart_uses_both_arms_without_counting_cached_reads_twice():
     chart = _view(_payload())["token_chart"]
     assert chart == {

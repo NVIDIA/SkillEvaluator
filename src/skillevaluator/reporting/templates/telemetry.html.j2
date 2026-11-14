@@ -6,7 +6,7 @@
     {% for note in section.notes %}<p class="t3-section-hint">{{ note }}</p>{% endfor %}
     <h4>{{ section.label }}</h4>
     <div class="table-scroll">
-    <table class="summary-table"{% if loop.first %} id="{{ table_id }}"{% endif %}>
+    <table class="contributor-table"{% if loop.first %} id="{{ table_id }}"{% endif %}>
         <caption class="sr-only">{{ section.label }} recorded telemetry, by condition and case</caption>
         <thead><tr><th>Case</th><th>Condition</th>{% for column in columns %}<th>{{ column }}</th>{% endfor %}<th>Coverage / comparison</th></tr></thead>
         <tbody>

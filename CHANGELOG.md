@@ -249,6 +249,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Onboarding, starter and contributor-guide links use published page paths so
+  readers can navigate between setup, report interpretation and recovery pages.
+
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
   of `harness-check` no longer show internal test notes in their messages.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`

@@ -238,6 +238,10 @@ MAIN_WRITES = [
     pytest.param(_bash("cp /tmp/x //etc/sudoers 2>&1"), id="double-slash-path-start"),
     pytest.param(_bash("cp /tmp/x /tmp/../etc/sudoers.d/agent 2>&1"), id="parent-directory-path-start"),
     pytest.param(_bash("cd / && cp /tmp/x ./etc/sudoers 2>&1"), id="relative-path-start"),
+    # The default word of a ${VAR:-word} or ${VAR-word} starts a path.
+    pytest.param(_bash('cp /tmp/x "${DEST:-/etc/sudoers.d}/agent" 2>&1'), id="default-word-path-start"),
+    pytest.param(_bash('cp profile.sh "${PROFILE_D-/etc/profile.d}/" 2>&1'), id="unset-default-word-path-start"),
+    pytest.param(_bash('cp /tmp/x "${RC:-~/.bashrc}" 2>&1'), id="default-word-home-path-start"),
     # A path attached to a short option starts after the option letters.
     pytest.param(_bash("cp -t/etc/sudoers.d /tmp/agent 2>/dev/null"), id="attached-short-option"),
     pytest.param(_bash("install -Dt/etc/profile.d x.sh 2>&1"), id="attached-short-option-pair"),

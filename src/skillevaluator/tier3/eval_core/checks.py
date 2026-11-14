@@ -958,11 +958,12 @@ def _sensitive_write_target(command: str) -> str | None:
 
 # The keyword rule reads an entry only where a path starts, as an apply_patch
 # header is read, so /opt/conda/etc/profile.d/conda.sh does not name
-# /etc/profile.d, while ../etc/sudoers does name /etc/sudoers. A path attached
-# to a short option or a cluster of them, as in "cp -t/etc/sudoers.d" or
+# /etc/profile.d, while ../etc/sudoers names /etc/sudoers and the default word
+# of "${DEST:-/etc/sudoers.d}" names /etc/sudoers.d. A path attached to a short
+# option or a cluster of them, as in "cp -t/etc/sudoers.d" or
 # "tar -xzvC/etc/profile.d", starts after the option letters. The entry is
 # group 1 of the pattern.
-_KEYWORD_PATH_START = r"(?:(?<![\w~$-])|(?<=[\s'\"])-[a-z]+)"
+_KEYWORD_PATH_START = r"(?:(?<![\w~$])|(?<=[\s'\"])-[a-z]+)"
 # The file a source or . command reads: its first operand. The command starts
 # the text, a line (also after a "\n" escape, as an argv list prints a
 # newline), a list after ";", "&", "|", "(", "{" or "`", or a quote that opens

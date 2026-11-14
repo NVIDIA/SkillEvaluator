@@ -447,8 +447,10 @@ def test_ragas_evidence_masks_consecutive_credential_lines_in_tool_calls(
     """A tool call's arguments reach the RAGAS prompt and reply as JSON in JSON, so their line breaks are escaped twice.
 
     A flag value that ends one line must not take the next line's flag or
-    header name with it and leave that line's value in clear.
+    header name with it and leave that line's value in clear. Text that only
+    matches a value masked on another line stays.
     """
+    model = "meta-llama/Llama-3.1-8B-Instruct"
     trajectory = {
         "steps": [
             {
@@ -464,6 +466,13 @@ def test_ragas_evidence_masks_consecutive_credential_lines_in_tool_calls(
                     {
                         "function_name": "Bash",
                         "arguments": {"command": "docker login -u bot -p cccccccccccc\nCookie: session=dddddddddddd"},
+                    },
+                    {
+                        "function_name": "Write",
+                        "arguments": {
+                            "file_path": "config.yaml",
+                            "content": f"tokenizer_name: {model}\nmodel_name: {model}\n",
+                        },
                     },
                 ],
             },
@@ -488,6 +497,7 @@ def test_ragas_evidence_masks_consecutive_credential_lines_in_tool_calls(
     for field in ("prompt", "reply"):
         assert "deploy.flags" in exchange[field]
         assert "docker login -u bot -p <redacted>" in exchange[field]
+        assert f"model_name: {model}" in exchange[field]
     saved = (verifier.VERIFIER_DIR / "judge_attempts.json").read_text(encoding="utf-8")
     for secret in secrets:
         assert secret not in saved

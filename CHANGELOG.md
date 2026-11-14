@@ -262,15 +262,15 @@ All notable changes to SkillEvaluator are documented in this file.
   (`--token`, `--password`, `-u user:password`, `--cookie`) and keys such as
   `sk-proj-...` that start a line in JSON-escaped text, as in RAGAS prompts and
   replies. A line break there is the two characters `\n`, and these values were
-  saved in clear after it or after an escaped tab (`\t`). That includes a line
-  after one whose unquoted credential value read on through the escape and was
-  masked together with the next line's flag or header name
-  (`--password ...\n--token ...`); there a value shorter than 8 characters is
-  still kept. Judge and security finding evidence also masks a double-quoted
-  `-u user:password`, MySQL `-p` or `.netrc` password value, and the value in an
-  argv list such as `["tool", "--password", "..."]`, when JSON escapes the
-  quotes (`\"...\"`), as in the tool-call arguments every judge prompt holds;
-  these were saved in clear.
+  saved in clear after it or after an escaped tab (`\t`). That includes the
+  value on a line whose flag or header name was masked together with an unquoted
+  credential value that ends the line before and reads on through the escape
+  (`--password ...\n--token ...`). Only that value is masked; other copies of it
+  in the text stay as they were. Judge and security finding evidence also masks
+  a double-quoted `-u user:password`, MySQL `-p` or `.netrc` password value, and
+  the value in an argv list such as `["tool", "--password", "..."]`, when JSON
+  escapes the quotes (`\"...\"`), as in the tool-call arguments every judge
+  prompt holds; these were saved in clear.
   A RAGAS `replied` entry for a reply with no text and no tool call, such as a
   refusal or a content-filter stop, now saves the whole reply body instead of an
   empty reply.

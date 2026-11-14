@@ -1312,26 +1312,78 @@ def test_judge_evidence_masks_json_escaped_quoted_values(text: str) -> None:
 
 # An unquoted value that ends a line reads on through a JSON-escaped line
 # break, so masking the whole text masks the flag or header name that starts
-# the next line with it. That line's value is masked too, as in plain text.
+# the next line with it. That line's value is masked too, as in plain text,
+# however short it is.
 @pytest.mark.parametrize(
-    "text",
+    ("text", "second"),
     [
-        pytest.param("--password aaaaaaaaaaaa\n--token bbbbbbbbbbbb", id="password-then-token"),
-        pytest.param("-u uuuu:aaaaaaaaaaaa\nCookie: session=bbbbbbbbbbbb", id="user-then-cookie"),
-        pytest.param("deploy --token aaaaaaaaaaaa\nAuthorization: Bearer bbbbbbbbbbbb", id="token-then-authorization"),
-        pytest.param("sshpass -p aaaaaaaaaaaa\n--token bbbbbbbbbbbb", id="sshpass-then-token"),
-        pytest.param("docker login -u bot -p aaaaaaaaaaaa\nCookie: session=bbbbbbbbbbbb", id="login-then-cookie"),
+        pytest.param("--password aaaaaaaaaaaa\n--token bbbbbbbbbbbb", "bbbbbbbbbbbb", id="password-then-token"),
+        pytest.param(
+            "-u uuuu:aaaaaaaaaaaa\nCookie: session=bbbbbbbbbbbb", "session=bbbbbbbbbbbb", id="user-then-cookie"
+        ),
+        pytest.param(
+            "deploy --token aaaaaaaaaaaa\nAuthorization: Bearer bbbbbbbbbbbb",
+            "bbbbbbbbbbbb",
+            id="token-then-authorization",
+        ),
+        pytest.param("sshpass -p aaaaaaaaaaaa\n--token bbbbbbbbbbbb", "bbbbbbbbbbbb", id="sshpass-then-token"),
+        pytest.param(
+            "docker login -u bot -p aaaaaaaaaaaa\nCookie: session=bbbbbbbbbbbb",
+            "session=bbbbbbbbbbbb",
+            id="login-then-cookie",
+        ),
+        pytest.param("run --password aaaaaaaaaaaa\nls\n--token bbbbbbbbbbbb", "bbbbbbbbbbbb", id="over-two-lines"),
+        pytest.param("--password aaaaaaaaaaaa\n--token bQ7", "bQ7", id="short-token"),
+        pytest.param("-u uuuu:aaaaaaaaaaaa\nCookie: s=bQ7", "s=bQ7", id="short-cookie"),
     ],
 )
-def test_judge_evidence_masks_consecutive_credential_lines_in_json_escaped_text(text: str) -> None:
+def test_judge_evidence_masks_consecutive_credential_lines_in_json_escaped_text(text: str, second: str) -> None:
     text += "\ndone"
     for form in (text, json.dumps({"command": text}), json.dumps(json.dumps({"command": text}))):
         redacted = eval_template._redact_judge_evidence(form)
 
         assert "aaaaaaaaaaaa" not in redacted
-        assert "bbbbbbbbbbbb" not in redacted
+        assert second not in redacted
         # Only the value is masked; the rest of the text stays as it was.
-        assert redacted.endswith("<redacted>" + form.split("bbbbbbbbbbbb")[-1])
+        assert redacted.endswith("<redacted>" + form.split(second)[-1])
+
+
+# A value masked on one line is masked only there and where the whole text
+# pass took its name. Other copies of it are text, such as a model name after
+# a "tokenizer_name:" key, which the shared masker reads as a credential name.
+@pytest.mark.parametrize(
+    ("text", "kept"),
+    [
+        pytest.param(
+            "model_name: meta-llama/Llama-3.1-8B-Instruct\ntokenizer_name: meta-llama/Llama-3.1-8B-Instruct\n"
+            "model_name: meta-llama/Llama-3.1-8B-Instruct\nTask: fine-tune meta-llama/Llama-3.1-8B-Instruct",
+            ["model_name: meta-llama/Llama-3.1-8B-Instruct", "Task: fine-tune meta-llama/Llama-3.1-8B-Instruct"],
+            id="model-name",
+        ),
+        pytest.param(
+            "class Settings:\n    api_key: Optional[str] = None\n    name: Optional[str] = None",
+            ["name: Optional[str] = None"],
+            id="annotation",
+        ),
+        pytest.param(
+            "fields:\n  password: required\n  email: required\nAll required fields are validated.",
+            ["email: required", "All required fields"],
+            id="yaml-word",
+        ),
+        pytest.param(
+            "run --token $GITHUB_TOKEN\necho $GITHUB_TOKEN_FILE\ncat $GITHUB_TOKEN_FILE",
+            ["cat $GITHUB_TOKEN_FILE"],
+            id="variable-name",
+        ),
+        pytest.param("docker run -u 1000:1000 img\nchown 1000:1000 /data", ["chown 1000:1000 /data"], id="user-id"),
+    ],
+)
+def test_judge_evidence_keeps_copies_of_line_values_elsewhere(text: str, kept: list[str]) -> None:
+    redacted = eval_template._redact_judge_evidence(json.dumps({"content": text}))
+
+    assert "<redacted>" in redacted
+    for part in kept:
+        assert part in redacted
 
 
 @pytest.mark.parametrize(

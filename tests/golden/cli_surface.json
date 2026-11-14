@@ -1327,6 +1327,54 @@
           ],
           "param_type": "option",
           "type": "file"
+        },
+        {
+          "default": "0",
+          "name": "context_tokens",
+          "opts": [
+            "--context-tokens"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "custom_provider",
+          "opts": [
+            "--custom-provider"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "explicit_invocation",
+          "opts": [
+            "--explicit-invocation"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "headless",
+          "opts": [
+            "--headless"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "multiple": true,
+          "name": "harness_versions",
+          "opts": [
+            "--harness-version"
+          ],
+          "param_type": "option",
+          "type": "text"
         }
       ]
     },

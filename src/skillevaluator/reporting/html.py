@@ -2417,7 +2417,7 @@ class HTMLReporter(ReporterBase):
         16 hex chars (~64 bits) is well below collision risk for the few
         dozen unique issue groups a single report ever shows.
         """
-        payload = f"{category}::{group_key}".encode()
+        payload = f"{category}::{group_key}".encode("utf-8", "surrogatepass")
         return hashlib.sha1(payload, usedforsecurity=False).hexdigest()[:16]
 
     @staticmethod

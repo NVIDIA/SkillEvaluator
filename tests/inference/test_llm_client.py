@@ -1117,6 +1117,38 @@ class TestReasoningModelRequests:
         call_kwargs = mock_anthropic.messages.create.call_args.kwargs
         assert {"output_config", "extra_headers", "extra_body"}.isdisjoint(call_kwargs)
 
+    @pytest.mark.parametrize(
+        ("env_value", "expected"),
+        [
+            (None, [{"model": ANTHROPIC_REFUSAL_FALLBACK_MODEL}]),
+            ("", [{"model": ANTHROPIC_REFUSAL_FALLBACK_MODEL}]),
+            (" claude-opus-5 ", [{"model": "claude-opus-5"}]),
+            ("none", None),
+            ("OFF", None),
+            ("disabled", None),
+            ("claude-sonnet-5-5", None),
+        ],
+    )
+    def test_refusal_fallback_model_is_configurable(
+        self, monkeypatch: pytest.MonkeyPatch, env_value: str | None, expected: list[dict[str, str]] | None
+    ) -> None:
+        _use_provider(monkeypatch, "anthropic", "claude-sonnet-5-5")
+        monkeypatch.delenv("SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL", raising=False)
+        if env_value is not None:
+            monkeypatch.setenv("SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL", env_value)
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.return_value = _anthropic_response("Done")
+
+        with patch("anthropic.Anthropic", return_value=mock_anthropic):
+            FindingVerifier().completions("system", "user")
+
+        call_kwargs = mock_anthropic.messages.create.call_args.kwargs
+        if expected is None:
+            assert {"extra_headers", "extra_body"}.isdisjoint(call_kwargs)
+        else:
+            assert call_kwargs["extra_headers"] == {"anthropic-beta": ANTHROPIC_SERVER_SIDE_FALLBACK_BETA}
+            assert call_kwargs["extra_body"] == {"fallbacks": expected}
+
     def test_anthropic_gateway_gets_effort_without_server_side_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _use_provider(monkeypatch, "anthropic", "claude-opus-5-5")
         monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example")

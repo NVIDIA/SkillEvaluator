@@ -174,6 +174,31 @@ def _reject_constant(name: str) -> float:
     raise ValueError(name)
 
 
+def _decode_js_string_literal(source: str, start: int) -> tuple[str, int] | None:
+    """Decode one plain single- or double-quoted string that uses JSON escapes only.
+
+    Returns ``(value, end)``, or None when ``start`` does not open such a
+    string: no template literal, no concatenation and no escape JSON rejects,
+    so the decoded text is the one the wrapper passed and nothing is evaluated.
+    """
+    quote = source[start : start + 1]
+    if quote not in ("'", '"'):
+        return None
+    end = start + 1
+    while end < len(source) and source[end] != quote:
+        end += 2 if source[end] == "\\" else 1
+    if end >= len(source):
+        return None
+    body = source[start + 1 : end]
+    if quote == "'":
+        body = re.sub(r"\\'|\\.|\"", lambda m: {"\\'": "'", '"': '\\"'}.get(m.group(0), m.group(0)), body)
+    try:
+        value = json.loads(f'"{body}"')
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return value, end + 1
+
+
 def _decode_static_js_object(source: str, start: int) -> tuple[dict[str, Any], int] | None:
     """Decode a JSON-compatible object literal, including unquoted property names."""
     rendered: list[str] = []
@@ -739,10 +764,18 @@ def _static_codex_tool_calls(source: str) -> tuple[list[tuple[str, dict[str, Any
             variable, function_name = call.groups()
             if variable in variables:
                 return None
-            decoded = _decode_static_js_object(source, call.end())
-            if decoded is None:
-                return None
-            arguments, end = decoded
+            if function_name == "apply_patch" and source[call.end() : call.end() + 1] in ("'", '"'):
+                # Codex records its freeform apply_patch tool with the patch as a bare string
+                # literal rather than an object; its text is patch data, never code to run.
+                literal = _decode_js_string_literal(source, call.end())
+                if literal is None:
+                    return None
+                arguments, end = {"input": literal[0]}, literal[1]
+            else:
+                decoded = _decode_static_js_object(source, call.end())
+                if decoded is None:
+                    return None
+                arguments, end = decoded
             close = re.match(r"\s*\)\s*;", source[end:])
             if close is None:
                 return None
@@ -909,20 +942,10 @@ class _StaticExecSource:
 
     def string(self) -> str:
         """Decode one plain single- or double-quoted string that uses JSON escapes only."""
-        quote = self.source[self.index]
-        end = self.index + 1
-        while end < len(self.source) and self.source[end] != quote:
-            end += 2 if self.source[end] == "\\" else 1
-        if end >= len(self.source):
+        decoded = _decode_js_string_literal(self.source, self.index)
+        if decoded is None:
             raise _NotStatic("string")
-        body = self.source[self.index + 1 : end]
-        if quote == "'":
-            body = re.sub(r"\\'|\\.|\"", lambda m: {"\\'": "'", '"': '\\"'}.get(m.group(0), m.group(0)), body)
-        try:
-            value = json.loads(f'"{body}"')
-        except (json.JSONDecodeError, ValueError) as exc:
-            raise _NotStatic("string") from exc
-        self.index = end + 1
+        value, self.index = decoded
         return value
 
     def literal(self, depth: int = 0) -> Any:
